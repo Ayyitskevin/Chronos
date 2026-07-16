@@ -3,6 +3,10 @@ from decimal import Decimal
 import pytest
 from pydantic import ValidationError
 
+from chronos.config.limits import (
+    MAX_CANDIDATE_EXPIRATIONS,
+    MAX_CANDIDATE_STRIKES_PER_EXPIRATION,
+)
 from chronos.config.settings import Settings
 from chronos.domain.enums import BrokerMode, IBEnvironment
 
@@ -19,6 +23,46 @@ def test_safe_demo_defaults() -> None:
     assert settings.max_strikes_per_expiration == 12
     assert settings.assignment_near_zero_extrinsic == Decimal("0.05")
     assert settings.market_timezone == "America/New_York"
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"max_expirations": MAX_CANDIDATE_EXPIRATIONS + 1},
+        {"max_strikes_per_expiration": MAX_CANDIDATE_STRIKES_PER_EXPIRATION + 1},
+    ],
+)
+def test_candidate_request_bounds_have_hard_configuration_caps(
+    values: dict[str, int],
+) -> None:
+    with pytest.raises(ValidationError, match="less than or equal"):
+        Settings(_env_file=None, **values)
+
+
+@pytest.mark.parametrize(
+    ("max_expirations", "max_strikes_per_expiration"),
+    [(8, 10), (4, 20)],
+)
+def test_candidate_request_product_accepts_exact_hard_boundary(
+    max_expirations: int,
+    max_strikes_per_expiration: int,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        max_expirations=max_expirations,
+        max_strikes_per_expiration=max_strikes_per_expiration,
+    )
+
+    assert settings.max_expirations * settings.max_strikes_per_expiration == 80
+
+
+def test_candidate_request_product_rejects_within_field_overage() -> None:
+    with pytest.raises(ValidationError, match="must not exceed 80"):
+        Settings(
+            _env_file=None,
+            max_expirations=5,
+            max_strikes_per_expiration=17,
+        )
 
 
 def test_paper_transmission_requires_ibkr_mode() -> None:

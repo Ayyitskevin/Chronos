@@ -15,6 +15,7 @@ from chronos.broker.market_data import (
     MarketDataPermissionError,
     MarketDataUnavailableError,
 )
+from chronos.config.limits import MAX_CANDIDATE_REQUEST_CONTRACTS
 from chronos.domain.enums import DataQuality, OptionRight
 from chronos.domain.models import (
     MarketQuote,
@@ -40,6 +41,7 @@ class FakeMarketDataBroker:
     def __init__(self, clock: MutableClock) -> None:
         self.clock = clock
         self.option_quote_calls: list[tuple[int, ...]] = []
+        self.option_qualification_calls = 0
         self.cancellation_calls: list[tuple[int, ...]] = []
         self.chain_calls = 0
         self.failures: list[Exception] = []
@@ -78,6 +80,7 @@ class FakeMarketDataBroker:
         self,
         specs: tuple[OptionContractSpec, ...],
     ) -> tuple[OptionContract, ...]:
+        self.option_qualification_calls += 1
         return tuple(
             OptionContract(
                 **spec.model_dump(),
@@ -201,6 +204,65 @@ def test_narrowing_selects_target_expirations_and_nearest_strikes() -> None:
     )
     assert all(spec.symbol == "TEST" and spec.right is OptionRight.PUT for spec in specs)
     assert all(spec.underlying_con_id == parameters.underlying_con_id for spec in specs)
+
+
+def test_narrowing_rejects_over_cap_product_before_cartesian_allocation() -> None:
+    parameters = OptionChainParameters(
+        exchange="SMART",
+        underlying_con_id=100,
+        trading_class="TEST",
+        multiplier=Decimal("100"),
+        expirations=(),
+        strikes=(),
+    )
+
+    with pytest.raises(ValueError, match="hard option request bound"):
+        MarketDataManager.narrow_option_specs(
+            parameters,
+            symbol="TEST",
+            spot=Decimal("100"),
+            right=OptionRight.PUT,
+            as_of=date(2026, 1, 1),
+            min_dte=7,
+            target_dte=21,
+            max_dte=45,
+            max_expirations=5,
+            strikes_per_expiration=17,
+        )
+
+
+@pytest.mark.asyncio
+async def test_oversized_option_requests_fail_before_broker_or_subscription_work() -> None:
+    clock = MutableClock()
+    broker = FakeMarketDataBroker(clock)
+    manager = make_manager(broker)
+    specification = OptionContractSpec(
+        symbol="TEST",
+        underlying_con_id=100,
+        expiration=date(2026, 2, 20),
+        strike=Decimal("100"),
+        right=OptionRight.PUT,
+        multiplier=Decimal("100"),
+        trading_class="TEST",
+    )
+    oversized_specs = (specification,) * (MAX_CANDIDATE_REQUEST_CONTRACTS + 1)
+    oversized_contracts = tuple(
+        make_contract(contract_id)
+        for contract_id in range(
+            1_000,
+            1_000 + MAX_CANDIDATE_REQUEST_CONTRACTS + 1,
+        )
+    )
+
+    with pytest.raises(ValueError, match="hard request bound"):
+        await manager.qualify_option_contracts(oversized_specs)
+    with pytest.raises(ValueError, match="hard request bound"):
+        await manager.option_quotes(oversized_contracts)
+
+    assert broker.option_qualification_calls == 0
+    assert broker.option_quote_calls == []
+    assert broker.cancellation_calls == []
+    assert manager.active_subscription_count == 0
 
 
 @pytest.mark.asyncio

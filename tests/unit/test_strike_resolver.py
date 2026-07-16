@@ -28,6 +28,7 @@ from chronos.strategy.strike_resolver import (
     ResolverContext,
     ResolverPolicy,
     StrikeResolver,
+    spot_price,
 )
 from chronos.utils.identifiers import account_fingerprint
 
@@ -88,6 +89,34 @@ def _underlying_quote(
         ask=Decimal("100.10"),
         last=Decimal("100"),
     )
+
+
+def test_spot_price_prefers_a_positive_last_observation() -> None:
+    quote = _underlying_quote().model_copy(
+        update={
+            "bid": Decimal("99"),
+            "ask": Decimal("101"),
+            "last": Decimal("100.5"),
+        }
+    )
+
+    assert spot_price(quote) == Decimal("100.5")
+
+
+def test_spot_price_uses_a_positive_non_crossed_midpoint_without_last() -> None:
+    quote = _underlying_quote().model_copy(
+        update={"bid": Decimal("99"), "ask": Decimal("101"), "last": None}
+    )
+
+    assert spot_price(quote) == Decimal("100")
+
+
+def test_spot_price_rejects_missing_or_invalid_price_evidence() -> None:
+    quote = _underlying_quote().model_copy(
+        update={"bid": Decimal("0"), "ask": Decimal("101"), "last": None}
+    )
+
+    assert spot_price(quote) is None
 
 
 def _contract(

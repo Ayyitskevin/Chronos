@@ -8,6 +8,7 @@ from chronos.domain.models import MarketQuote
 
 
 def quote_ladder_figure(quote: MarketQuote) -> go.Figure:
+    currency = quote.contract.currency.strip().upper()
     labels: list[str] = []
     values: list[float] = []
     colors: list[str] = []
@@ -26,14 +27,14 @@ def quote_ladder_figure(quote: MarketQuote) -> go.Figure:
             y=labels,
             orientation="h",
             marker_color=colors,
-            text=[f"${value:,.2f}" for value in values],
+            text=[f"{value:,.2f} {currency}" for value in values],
             textposition="auto",
-            hovertemplate="%{y}: $%{x:.2f}<extra></extra>",
+            hovertemplate=f"%{{y}}: %{{x:.2f}} {currency}<extra></extra>",
         )
     )
     figure.update_layout(
         title=f"{quote.contract.symbol} quote ladder",
-        xaxis_title="Price",
+        xaxis_title=f"Price ({currency})",
         yaxis_title="Quote field",
         height=300,
         margin={"l": 20, "r": 20, "t": 50, "b": 20},

@@ -83,6 +83,26 @@ def test_structured_formatter_preserves_candidate_summary() -> None:
     assert payload["outcome"] == "ELIGIBLE"
 
 
+def test_structured_formatter_preserves_safe_error_type_without_raw_detail() -> None:
+    record = logging.LogRecord(
+        name="chronos.ui.dashboard",
+        level=logging.WARNING,
+        pathname=__file__,
+        lineno=1,
+        msg="Broker operation failed",
+        args=(),
+        exc_info=None,
+    )
+    record.event = "broker_ui_operation_failed"
+    record.error_type = "BrokerDataError"
+
+    payload = json.loads(StructuredJsonFormatter().format(record))
+
+    assert payload["event"] == "broker_ui_operation_failed"
+    assert payload["error_type"] == "BrokerDataError"
+    assert "exception" not in payload
+
+
 def test_configured_log_file_is_private(tmp_path: Path) -> None:
     log_file = tmp_path / "private" / "chronos.log"
 

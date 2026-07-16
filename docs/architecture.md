@@ -26,6 +26,8 @@ SQLite ledger files and rotating log files are created with owner-only permissio
 Streamlit's rerun model is isolated from broker connection ownership. A cached runtime owns one
 dedicated asyncio loop in one background thread plus one bounded market-data manager. Page reruns
 reuse both resources instead of creating broker sockets or bypassing subscription cleanup.
+Candidate market work is additionally gated by an explicit operator button; unrelated reruns do
+not refresh the option universe.
 
 ## Four operational invariants
 
@@ -34,15 +36,18 @@ reuse both resources instead of creating broker sockets or bypassing subscriptio
 - Brokerage truth: broker positions, open orders, fills, executions, and account values.
 - Chronos truth: wheel-cycle links, candidate evidence, guardrail evidence, notes, and the
   explicitly labeled strategy-adjusted basis.
-- UI state: navigation and draft presentation only. It never determines the Wheel stage.
+- UI state: navigation and one historical, presentation-safe candidate result only. It never
+  determines the Wheel stage or authorizes an action.
 
 ### Where feedback lives
 
-Connection changes, exceptional market-data lifecycle events, and reconciliation capture/read
-failures are logged to the console and a rotating local file. Candidate, guardrail, and basis
-repositories retain their own decision evidence. The current read-only reconciliation coordinator
-returns an in-memory presentation model and deliberately does not write reconciliation or
-application-event rows yet.
+Connection changes, exceptional market-data lifecycle events, reconciliation capture/read
+failures, and successfully completed resolver outcome counts are logged to the console and a
+rotating local file. Locked early returns remain observable in their UI result without logging raw
+broker details.
+Candidate, guardrail, and basis repositories retain evidence only for legitimate persisted Wheel
+cycles. Read-only reconciliation and flat-symbol candidate evaluation return in-memory
+presentation models and deliberately do not manufacture cycles or write audit rows yet.
 
 ### What breaks if a component is removed
 
@@ -61,13 +66,18 @@ planned. For streaming top-of-book data, quote age starts only after a price-bea
 the current subscription is received; it is checked at every decision and must be checked again
 immediately before a future paper submit.
 
+The symbol workspace starts candidate work only when the operator presses the explicit read-only
+evaluation button. It stores at most one sanitized result for historical display, clears it on a
+symbol change or raised refresh error, and never supplies that object to strategy or order
+services.
+
 ## Package boundaries
 
 - `domain`: immutable vocabulary and broker-neutral models.
 - `broker`: protocol, deterministic demo adapter, IBKR adapter, connection ownership, and market
   data lifecycle.
 - `strategy`: Wheel state, resolver, scenarios, assignment pressure, and capital constraints.
-- `services`: portfolio assembly, reconciliation, subscriptions, and guarded order lifecycle.
+- `services`: read-only reconciliation and guarded short-put candidate evaluation.
 - `persistence`: SQLAlchemy schema and repositories for Chronos-only state.
 - `ui`: Streamlit pages and Plotly views; no brokerage truth lives here.
 - `config` and `utils`: validated settings, logging, UTC, and identifiers.
@@ -105,6 +115,34 @@ draft, fill, or basis evidence unresolved. This lets locally empty flat symbols 
 preventing working orders or positions from appearing proven before cycle-scoped fill and stock
 allocation semantics are complete. A richer reader may later clear exact owned orders only after
 that full provenance is implemented and tested.
+
+## Read-only candidate boundary
+
+The short-put candidate service obtains fresh reconciliation itself; a historical UI result cannot
+be supplied as evidence. The first safe capital slice proceeds only when the overall result is
+`RECONCILED`, the target is uniquely `FLAT`, and the stable snapshot contains no positions, open
+orders, or executions. Only that whole-account-empty proof permits zero current Wheel allocation
+and `total_cash` to be labeled uncommitted cash. A flat target symbol alone never proves portfolio
+allocation.
+
+After preflight, one connection-manager coroutine revalidates account scope, capital values, and
+zero exposure around a force-refreshed, configured-bounds put request. The post-reconciliation
+clock sample prevents a snapshot captured during reconciliation from appearing future-dated. A
+new IBKR connection may begin with `UNKNOWN` market quality, but it must finish the quote window
+with rankable quality and every actual quote still passes resolver quality and freshness rules.
+
+The service selects one exact chain identity, requires pairwise equality between each qualified
+contract and quoted contract, removes unverified deliverables before option quote fanout, and uses
+the resolver's public spot rule for both narrowing and final evaluation. Defaults request at most
+6 expirations by 12 strikes. Settings and deterministic narrowing enforce ceilings of 8
+expirations and 20 strikes per expiration, with an 80-contract product cap. Qualification and
+quote ingress independently reject more than 80 contracts before task creation or a broker
+request. The resolver remains the sole ranking authority. Missing or changed
+service-prerequisite evidence, ambiguous routing, incomplete broker responses, pacing failures, or
+cleanup failures withhold resolution and return a sanitized locked `NO_TRADE`. Unverified
+contracts are removed before quoting; the resolver can publish the remaining valid contracts while
+listing stale or otherwise invalid quotes as rejected evidence. It returns overall `NO_TRADE` when
+none pass. Even an `ELIGIBLE` result is read-only and keeps opening actions locked.
 
 Option-position average cost is never used for premium or basis math: IBKR and demo adapters can
 report that field in different units. Only execution price, qualified multiplier, fill quantity,

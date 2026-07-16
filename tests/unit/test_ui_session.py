@@ -10,6 +10,7 @@ from chronos.domain.enums import (
     ConnectionState,
     DataQuality,
     DisplayEnvironment,
+    EligibilityStatus,
 )
 from chronos.domain.models import AccountSummary, ConnectionStatus
 from chronos.ui import session
@@ -106,6 +107,12 @@ def test_runtime_wires_demo_reads_through_one_market_data_manager(
         assert reconciliation.snapshot is not None
         assert reconciliation.snapshot.account.masked_account_id == "DU•••4567"
         assert "DU1234567" not in reconciliation.model_dump_json()
+
+        candidate_evaluation = runtime.short_put_candidates.evaluate("AAPL")
+        assert candidate_evaluation.status is EligibilityStatus.NO_TRADE
+        assert candidate_evaluation.opening_actions_locked is True
+        assert candidate_evaluation.reconciliation is not None
+        assert "DU1234567" not in candidate_evaluation.model_dump_json()
     finally:
         runtime.close()
 

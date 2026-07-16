@@ -398,7 +398,7 @@ class StrikeResolver:
                     explanation="The underlying quote timestamp is not current.",
                 )
             )
-        if _spot_price(underlying) is None:
+        if spot_price(underlying) is None:
             reasons.append(
                 CandidateRejection(
                     code=CandidateRejectionCode.UNDERLYING_DATA,
@@ -605,7 +605,7 @@ class StrikeResolver:
         reasons: list[CandidateRejection] = []
         as_of_date = self._evaluation_date(context)
         dte = (contract.expiration - as_of_date).days
-        spot = _spot_price(context.underlying_quote)
+        spot = spot_price(context.underlying_quote)
 
         if contract.symbol != context.underlying_quote.contract.symbol:
             _reject(
@@ -963,7 +963,9 @@ class StrikeResolver:
         return [item[0] for item in scored]
 
 
-def _spot_price(quote: MarketQuote) -> Decimal | None:
+def spot_price(quote: MarketQuote) -> Decimal | None:
+    """Return the resolver's sole accepted underlying spot observation."""
+
     if quote.last is not None and quote.last > 0:
         return quote.last
     if quote.bid is not None and quote.ask is not None and quote.bid > 0 and quote.ask >= quote.bid:

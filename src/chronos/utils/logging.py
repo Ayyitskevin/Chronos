@@ -109,6 +109,7 @@ class StructuredJsonFormatter(logging.Formatter):
             "contract_id",
             "contract_ids",
             "error_code",
+            "error_type",
             "operation",
             "attempt",
             "delay_seconds",

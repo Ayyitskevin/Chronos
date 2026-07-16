@@ -11,6 +11,11 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import BeforeValidator, Field, PositiveInt, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from chronos.config.limits import (
+    MAX_CANDIDATE_EXPIRATIONS,
+    MAX_CANDIDATE_REQUEST_CONTRACTS,
+    MAX_CANDIDATE_STRIKES_PER_EXPIRATION,
+)
 from chronos.domain.enums import BrokerMode, IBEnvironment
 
 
@@ -51,8 +56,10 @@ class Settings(BaseSettings):
     min_dte: Annotated[int, Field(ge=0)] = 7
     target_dte: Annotated[int, Field(ge=0)] = 21
     max_dte: Annotated[int, Field(ge=0)] = 45
-    max_expirations: PositiveInt = 6
-    max_strikes_per_expiration: PositiveInt = 12
+    max_expirations: Annotated[int, Field(gt=0, le=MAX_CANDIDATE_EXPIRATIONS)] = 6
+    max_strikes_per_expiration: Annotated[
+        int, Field(gt=0, le=MAX_CANDIDATE_STRIKES_PER_EXPIRATION)
+    ] = 12
     min_option_volume: Annotated[int, Field(ge=0)] = 10
     min_open_interest: Annotated[int, Field(ge=0)] = 100
     max_relative_spread: Annotated[Decimal, Field(gt=0)] = Decimal("0.20")
@@ -92,6 +99,11 @@ class Settings(BaseSettings):
             raise ValueError("TARGET_ABS_DELTA must be between MIN_ABS_DELTA and MAX_ABS_DELTA")
         if not self.min_dte <= self.target_dte <= self.max_dte:
             raise ValueError("TARGET_DTE must be between MIN_DTE and MAX_DTE")
+        if self.max_expirations * self.max_strikes_per_expiration > MAX_CANDIDATE_REQUEST_CONTRACTS:
+            raise ValueError(
+                "MAX_EXPIRATIONS * MAX_STRIKES_PER_EXPIRATION must not exceed "
+                f"{MAX_CANDIDATE_REQUEST_CONTRACTS}"
+            )
         if self.ib_environment is IBEnvironment.LIVE and self.allow_order_transmit:
             raise ValueError("Live order transmission is hard-disabled in the Chronos MVP")
         if (

@@ -17,6 +17,25 @@ matching ticker alone is not deliverable or coverage evidence. Missing, stale, d
 inconsistent, or unauthorized data locks opening actions. Chronos never estimates absent broker
 quotes, Greeks, volume, open interest, deliverables, or positions.
 
+The first read-only short-put service treats capital provenance as a hard prerequisite. It will
+not request candidate market data unless fresh reconciliation proves the entire account has no
+positions, open orders, or executions and the target symbol is uniquely flat. It never infers zero
+portfolio allocation from a flat ticker, substitutes buying power for cash, or creates a fake
+Wheel cycle to persist an evaluation. A ranked result is evidence for a person to inspect, not
+authorization to trade; opening actions remain locked even when the resolver says `ELIGIBLE`.
+Candidate work begins only after the operator presses the explicit read-only evaluation button;
+page entry, ordinary reruns, and symbol changes issue no candidate request. The one optional
+session-memory result is labeled historical, is cleared on symbol change or a raised refresh
+error, and is never accepted as service or order evidence.
+
+Candidate narrowing is bounded before broker fanout: settings and narrowing cap the universe at 8
+expirations, 20 strikes per expiration, and an 80-contract product; qualification and quote entry
+points also reject any sequence over 80 contracts. Quote evidence must match its qualified
+contract exactly, not merely share a contract ID, and contracts without a verified standard
+deliverable are removed before quote requests. A new broker session may improve from `UNKNOWN` to
+live or frozen quality during its first request; end-of-window status and each quote must still
+pass the rankable-quality and freshness gates.
+
 ## Order boundary
 
 Paper submission remains off unless all of these are true at the same decision point:
@@ -38,7 +57,8 @@ outcome. The UI cannot skip states.
 A later kill switch must block new Chronos orders and attempt to cancel only orders whose
 Chronos-owned correlation references are known locally. It must record each request and response
 and must never invoke a broker-wide global cancel by default. No kill-switch service is wired in
-the current milestone, and every order method remains locked.
+the current milestone. No UI or application service exposes preview, submission, modification, or
+cancellation in this milestone, and live-money submission remains hard-disabled.
 
 ## Secrets and logs
 
@@ -46,7 +66,9 @@ Chronos never requests IBKR credentials. TWS or IB Gateway performs authenticati
 ignored; `.env.example` contains only non-secret placeholders. Account identifiers are masked in
 the UI and logging filters. The ledger stores a deterministic pseudonymous fingerprint rather than
 the raw account ID; it is a scope check, not encryption or anonymization. SQLite and rotating log
-files are restricted to the local owner. Full technical errors stay local in rotating logs.
+files are restricted to the local owner. Broker errors crossing the UI boundary are reduced to a
+generic operator message and an exception-type event; their raw text is written to neither the UI
+nor the application log.
 
 ## Human responsibility
 

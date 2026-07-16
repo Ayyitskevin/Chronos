@@ -17,6 +17,11 @@ from functools import partial
 from typing import TypeVar
 
 from chronos.broker.base import Broker, BrokerDataError
+from chronos.config.limits import (
+    MAX_CANDIDATE_EXPIRATIONS,
+    MAX_CANDIDATE_REQUEST_CONTRACTS,
+    MAX_CANDIDATE_STRIKES_PER_EXPIRATION,
+)
 from chronos.domain.enums import DataQuality, OptionRight
 from chronos.domain.models import (
     MarketQuote,
@@ -295,6 +300,12 @@ class MarketDataManager:
             raise ValueError("DTE bounds must satisfy 0 <= min <= target <= max")
         if max_expirations <= 0 or strikes_per_expiration <= 0:
             raise ValueError("narrowing limits must be positive")
+        if (
+            max_expirations > MAX_CANDIDATE_EXPIRATIONS
+            or strikes_per_expiration > MAX_CANDIDATE_STRIKES_PER_EXPIRATION
+            or max_expirations * strikes_per_expiration > MAX_CANDIDATE_REQUEST_CONTRACTS
+        ):
+            raise ValueError("narrowing limits exceed the hard option request bound")
 
         eligible_expirations = tuple(
             expiration
@@ -343,6 +354,8 @@ class MarketDataManager:
     ) -> tuple[OptionContract, ...]:
         """Qualify option specifications, caching broker contract metadata."""
 
+        if len(specs) > MAX_CANDIDATE_REQUEST_CONTRACTS:
+            raise ValueError("option qualification exceeds the hard request bound")
         observed_at = self._now()
         self._raise_if_quarantined()
         self._prune_expired_caches(observed_at)
@@ -432,6 +445,8 @@ class MarketDataManager:
     ) -> tuple[ManagedQuote, ...]:
         """Fetch option quotes in bounded batches, preserving caller order."""
 
+        if len(contracts) > MAX_CANDIDATE_REQUEST_CONTRACTS:
+            raise ValueError("option quote request exceeds the hard request bound")
         async with self._quote_operation_lock:
             return await self._option_quotes_locked(contracts, force_refresh=force_refresh)
 
