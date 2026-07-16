@@ -60,6 +60,22 @@ Commission input is capped at 10,000 currency units, four normalized fractional 
 decimal digits, and 32 UI characters; non-finite chart coordinates are withheld. Per-share and
 one-contract total amounts are labeled separately.
 
+The next boundary is a deterministic DEMO what-if rehearsal, not an order authorization. It rejects
+the attempt before fresh-risk or broker calls unless both settings and the concrete adapter are
+DEMO. It reruns the full risk gate, rebinds resolver and capital policy to current settings, limits
+input to one positive tick-aligned contract price inside the refreshed spread, and validates the
+first account/exposure observation before exactly one non-transmitting demo preview. A second
+observation then detects drift. Any identity, capital, exposure, clock, request-echo, commission, or
+margin ambiguity withholds the result.
+
+The successful receipt has rehearsal status `WHAT_IF_PREVIEWED`; this is not an order-lifecycle
+transition. It carries no raw account ID or broker request and replaces broker messages with a
+warning count. It uses the broker's deterministic commission estimate for exact-limit payoff math
+while displaying the operator-assumption variance. The limit input is capped at 1,000,000 currency
+units, four normalized fractional places, 16 decimal digits, and 32 UI characters. Receipt and
+parent evidence live only in session memory. There is no persistence, draft, guardrail decision,
+user-confirmation control, submission control, or IBKR what-if path.
+
 ## Order boundary
 
 Paper submission remains off unless all of these are true at the same decision point:
@@ -81,9 +97,10 @@ outcome. The UI cannot skip states.
 A later kill switch must block new Chronos orders and attempt to cancel only orders whose
 Chronos-owned correlation references are known locally. It must record each request and response
 and must never invoke a broker-wide global cancel by default. No kill-switch service is wired in
-the current milestone. No UI or application service exposes a broker order preview, submission,
-modification, or cancellation in this milestone. The expiration-risk preview is pure decision
-support and does not cross that boundary; live-money submission remains hard-disabled.
+the current milestone. The UI exposes only the deterministic `DemoBroker` rehearsal described
+above. No IBKR preview, submission, modification, or cancellation is exposed, and no confirmation
+state follows the DEMO receipt. The expiration-risk preview and rehearsal remain decision support;
+live-money submission stays hard-disabled.
 
 ## Secrets and logs
 

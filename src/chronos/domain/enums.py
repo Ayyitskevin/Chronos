@@ -8,6 +8,11 @@ class BrokerMode(StrEnum):
     IBKR = "ibkr"
 
 
+class DemoProfile(StrEnum):
+    SAFETY_CASES = "safety_cases"
+    EMPTY_ACCOUNT = "empty_account"
+
+
 class IBEnvironment(StrEnum):
     PAPER = "paper"
     LIVE = "live"

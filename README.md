@@ -10,22 +10,29 @@ substantial losses. Paper fills do not prove live execution quality.
 
 ## Current milestone
 
-Milestone 6 adds a locked short-put expiration-risk preview after the read-only candidate boundary.
-The operator first captures a candidate evaluation, selects one ranked contract, enters an explicit
-total commission estimate, and presses **Refresh evidence & calculate locked risk**. The preview
-service does not trust the historical session result: it runs a fresh candidate evaluation
-internally, requires the selected contract ID to resolve uniquely in the new eligible set, and
-rechecks the exact verified deliverable, chain routing, currency, empty reconciliation scope,
-cash-secured finite capital evidence, quote quality, an exact underlying stock contract, and
-timestamps against the service clock with a hard 30-second ceiling. Reported option age is added
-to elapsed evaluation time at the final decision point. It models one contract from the fresh bid
-at observed spot, strike, effective entry, and zero, deduplicating coincident points. The fresh bid
-and effective entry are labeled per share; premiums, commission, cash, obligation, and payoff are
-labeled as totals. The commission is an operator estimate bounded to 10,000 currency units, four
-fractional decimal places, and a compact decimal representation. The output is an expiration
-payoff—not a forecast, probability, broker what-if, or order authorization. Broker margin remains
-unavailable because no broker order method is called. Every action stays locked, and neither the
-candidate nor risk preview is persisted.
+Milestone 7 adds a deterministic short-put order what-if rehearsal after the locked expiration-risk
+boundary. It is available only when both configuration and the concrete adapter are DEMO. The
+operator must first obtain a current `READY` risk result, then enter an explicit one-contract limit
+credit inside the fresh bid/ask and aligned to the contract tick. Pressing **Refresh evidence & run
+locked DEMO what-if** repeats the complete Milestone 6 risk refresh; no session-memory candidate or
+risk object is accepted as authority.
+
+One serialized broker window then double-reads connection, account, positions, open orders,
+executions, and server time around exactly one deterministic `preview_order` call. Chronos requires
+the account and exposure to remain identical, the echoed non-transmitting request to match exactly,
+and the commission, margin, and timestamp evidence to be complete and finite. The presentation-safe
+receipt stops at `WHAT_IF_PREVIEWED`, replaces broker text with a generic warning count, and uses the
+broker commission estimate to recompute the exact-limit expiration payoff. It contains no raw
+account ID or broker request. No candidate, risk result, receipt, Wheel cycle, order draft, or
+guardrail decision is persisted; there is no confirmation or submit control. The IBKR adapter's
+order methods and every confirmation, submission, modification, or cancellation path exposed by M7
+remain unconditionally locked.
+
+Milestone 6 established the locked short-put expiration-risk preview. It freshly revalidates the
+selected contract, verified deliverable, chain routing, currency, empty reconciliation scope,
+cash-secured finite capital evidence, quote quality, exact underlying stock contract, and bounded
+timestamps before modeling one contract from the fresh bid. Its output remains an expiration
+payoff—not a forecast, probability, broker what-if, or order authorization.
 
 Milestone 5 established read-only short-put evaluation behind the reconciliation boundary. It
 requests no market data unless a fresh portfolio snapshot proves the entire account exposure-free
@@ -44,12 +51,11 @@ on symbol change or a raised refresh error, and never feeds it back into a servi
 Configuration defaults to at most 6 expirations by 12 strikes; hard ingress limits allow no more
 than 8 expirations, 20 strikes per expiration, or 80 requested option contracts in total.
 
-The optional risk result is also presentation-safe and historical. Changing the symbol, selected
-contract, or commission assumption clears it. If a selected contract disappears during the fresh
-refresh, the locked result remains visible until the operator changes a control. A fresh candidate
-evaluation or failed risk refresh clears prior payoff evidence before work begins, so an old payoff
-cannot survive a newer failed request. Ordinary Streamlit reruns perform neither candidate nor risk
-refreshes.
+The optional risk and DEMO what-if results are presentation-safe and historical. Changing the
+symbol, selected contract, commission assumption, limit, or parent evidence generation clears the
+dependent result. A fresh attempt clears older child evidence before work begins, so a failed newer
+request cannot leave an old payoff or receipt looking current. Ordinary Streamlit reruns perform no
+candidate, risk, or what-if refresh.
 
 The portfolio dashboard still obtains its own read-only reconciliation. Each run double-reads
 account values, positions, open orders, and executions, bounds the broker window and full local
@@ -90,6 +96,11 @@ Or use:
 .venv/bin/python scripts/run_demo.py
 ```
 
+The default `DEMO_PROFILE=safety_cases` shows a deliberately conflicted portfolio and keeps the
+opening journey locked. To exercise the complete candidate → risk → what-if decision-support path
+against an explicitly empty local fixture, set `DEMO_PROFILE=empty_account` in the untracked `.env`
+and restart Chronos. This changes only deterministic fixtures; submission remains impossible.
+
 ## Wheel state model
 
 Broker positions, open orders, executions, and the Chronos ledger reconcile into one of:
@@ -127,13 +138,15 @@ reader conservatively marks every persisted cycle, strategy state, draft, fill, 
 unresolved, so only locally empty flat symbols can currently publish `RECONCILED`; positions and
 owned working orders remain locked for manual review until complete allocation provenance exists.
 The symbol workspace invokes the resolver only through the guarded candidate service. The
-default deterministic demo account intentionally contains positions, an order, and an execution,
+default `safety_cases` demo profile intentionally contains positions, an order, and an execution,
 so it demonstrates the whole-account capital-provenance lock rather than publishing an eligible
-AAPL trade; isolated fully flat fixtures exercise the ranking path in tests. Candidate evidence is
+AAPL trade. The supported `empty_account` profile exposes one coherent AAPL path with zero broker
+exposure for the locked M5–M7 journey. Candidate evidence is
 not written to a strategy repository because a flat symbol has no legitimate Wheel cycle, and
 creating one solely for an evaluation would manufacture strategy state. The dashboard activates
-only the one-contract short-put expiration preview; covered-call scenarios, strategy basis,
-arbitrary quantities, broker margin, and order what-if are not wired. Stock allocation valuation
+only the one-contract short-put expiration preview and deterministic DEMO what-if rehearsal;
+covered-call scenarios, strategy basis, arbitrary quantities, real-broker margin, and IBKR order
+what-if are not wired. Stock allocation valuation
 still requires a current underlying quote at the service layer. Dividend, borrow, and
 corporate-action inputs are optional because the broker port does not provide them yet. The IBKR
 adapter records the exact underlying contract ID but does not claim that multiplier metadata

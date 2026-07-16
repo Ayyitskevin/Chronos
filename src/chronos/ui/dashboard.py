@@ -13,6 +13,17 @@ from chronos.domain.enums import EligibilityStatus
 from chronos.domain.models import OptionContract
 from chronos.services.reconciliation import ReconciliationResult
 from chronos.services.short_put_candidates import ShortPutCandidateEvaluation
+from chronos.services.short_put_demo_what_if import (
+    MAX_LIMIT_DECIMAL_DIGITS,
+    MAX_LIMIT_DECIMAL_PLACES,
+    MAX_LIMIT_INPUT_CHARACTERS,
+    MAX_LIMIT_PRICE,
+    DemoWhatIfStatus,
+    ShortPutDemoWhatIfRequest,
+    ShortPutDemoWhatIfResult,
+    limit_price_decimal_places,
+    limit_price_has_bounded_representation,
+)
 from chronos.services.short_put_risk_preview import (
     MAX_COMMISSION_DECIMAL_DIGITS,
     MAX_COMMISSION_DECIMAL_PLACES,
@@ -36,6 +47,8 @@ from chronos.utils.time import as_market_time
 
 _CANDIDATE_EVALUATION_STATE_KEY = "chronos_candidate_evaluation"
 _RISK_PREVIEW_STATE_KEY = "chronos_short_put_risk_preview"
+_DEMO_WHAT_IF_STATE_KEY = "chronos_short_put_demo_what_if"
+_DEMO_WHAT_IF_LIMIT_STATE_KEY = "chronos_demo_what_if_limit"
 
 
 def render_dashboard(runtime: AppRuntime) -> None:
@@ -201,15 +214,15 @@ def _render_symbol_detail(runtime: AppRuntime) -> None:
     )
     if stored is not None and evaluation is None:
         st.session_state.pop(_CANDIDATE_EVALUATION_STATE_KEY, None)
-        st.session_state.pop(_RISK_PREVIEW_STATE_KEY, None)
+        _clear_short_put_risk_preview()
     if st.button("Run read-only evaluation", type="primary"):
         st.session_state.pop(_CANDIDATE_EVALUATION_STATE_KEY, None)
-        st.session_state.pop(_RISK_PREVIEW_STATE_KEY, None)
+        _clear_short_put_risk_preview()
         evaluation = runtime.short_put_candidates.evaluate(symbol)
         st.session_state[_CANDIDATE_EVALUATION_STATE_KEY] = evaluation
 
     if evaluation is None:
-        st.session_state.pop(_RISK_PREVIEW_STATE_KEY, None)
+        _clear_short_put_risk_preview()
 
     if evaluation is not None and evaluation.reconciliation is not None:
         render_reconciliation_status(evaluation.reconciliation)
@@ -220,8 +233,8 @@ def _render_symbol_detail(runtime: AppRuntime) -> None:
     )
     status_columns[1].metric("Candidate actions", "LOCKED")
     st.error(
-        "Opening actions are locked. Candidate evidence is read-only and cannot preview or "
-        "submit an order."
+        "Opening actions are locked. Candidate evidence cannot authorize or submit an order; "
+        "only a later deterministic DEMO what-if rehearsal is available."
     )
     if evaluation is None:
         st.info(
@@ -254,12 +267,9 @@ def _render_symbol_detail(runtime: AppRuntime) -> None:
     else:
         _render_short_put_evaluation(evaluation)
     st.subheader("Scenario analysis")
-    _render_short_put_risk_preview(runtime, symbol, evaluation)
+    risk_result = _render_short_put_risk_preview(runtime, symbol, evaluation)
     st.subheader("Order preview")
-    st.error(
-        "Locked: no order can be previewed or submitted from this milestone; "
-        "the application boundary does not expose an action path."
-    )
+    _render_short_put_demo_what_if(runtime, symbol, risk_result)
 
 
 def _render_short_put_evaluation(evaluation: ShortPutCandidateEvaluation) -> None:
@@ -385,7 +395,7 @@ def _render_short_put_risk_preview(
     runtime: AppRuntime,
     symbol: str,
     evaluation: ShortPutCandidateEvaluation | None,
-) -> None:
+) -> ShortPutRiskPreviewResult | None:
     stored = st.session_state.get(_RISK_PREVIEW_STATE_KEY)
     result = (
         stored
@@ -415,7 +425,7 @@ def _render_short_put_risk_preview(
                 "A freshly eligible ranked candidate is required before risk assumptions can "
                 "be entered."
             )
-        return
+        return result
 
     candidate_by_id = {candidate.contract.con_id: candidate for candidate in candidates}
     selected_contract_id = st.selectbox(
@@ -472,13 +482,14 @@ def _render_short_put_risk_preview(
     ):
         if commission is None:
             st.error("Commission validation failed; no risk refresh was requested.")
-            return
+            return result
         request = ShortPutRiskPreviewRequest(
             symbol=symbol,
             selected_contract_id=selected_contract_id,
             total_commission_estimate=commission,
         )
         st.session_state.pop(_RISK_PREVIEW_STATE_KEY, None)
+        _clear_short_put_demo_what_if()
         st.session_state.pop(_CANDIDATE_EVALUATION_STATE_KEY, None)
         result = runtime.short_put_risk_preview.preview(request)
         st.session_state[_RISK_PREVIEW_STATE_KEY] = result
@@ -488,6 +499,7 @@ def _render_short_put_risk_preview(
 
     if result is not None:
         _render_short_put_risk_result(result)
+    return result
 
 
 def _risk_candidate_label(candidates: tuple[RankedCandidate, ...], contract_id: int) -> str:
@@ -535,6 +547,286 @@ def _parse_commission_estimate(value: str) -> tuple[Decimal | None, str | None]:
 
 def _clear_short_put_risk_preview() -> None:
     st.session_state.pop(_RISK_PREVIEW_STATE_KEY, None)
+    _clear_short_put_demo_what_if()
+
+
+def _render_short_put_demo_what_if(
+    runtime: AppRuntime,
+    symbol: str,
+    risk_result: ShortPutRiskPreviewResult | None,
+) -> None:
+    stored = st.session_state.get(_DEMO_WHAT_IF_STATE_KEY)
+    result = (
+        stored
+        if isinstance(stored, ShortPutDemoWhatIfResult) and stored.request.symbol == symbol
+        else None
+    )
+    if stored is not None and result is None:
+        st.session_state.pop(_DEMO_WHAT_IF_STATE_KEY, None)
+
+    if not isinstance(runtime.broker, DemoBroker):
+        _clear_short_put_demo_what_if()
+        st.error(
+            "Locked: real IBKR what-if and every submission method remain disabled. "
+            "This milestone exposes no order-channel action outside deterministic DEMO mode."
+        )
+        return
+
+    st.error(
+        "DEMO rehearsal only. A successful result stops at WHAT_IF_PREVIEWED; it cannot confirm, "
+        "persist, transmit, or submit an order."
+    )
+    ready_risk = (
+        risk_result
+        if risk_result is not None
+        and risk_result.status is RiskPreviewStatus.READY
+        and risk_result.preview is not None
+        and risk_result.candidate_refresh is not None
+        else None
+    )
+    if ready_risk is None:
+        if result is not None and result.status is DemoWhatIfStatus.WITHHELD:
+            _render_short_put_demo_what_if_result(result)
+        else:
+            _clear_short_put_demo_what_if()
+            st.info(
+                "A current READY expiration-risk result is required before exact DEMO limit "
+                "terms can be rehearsed."
+            )
+        return
+
+    risk_preview = ready_risk.preview
+    assert risk_preview is not None
+    refresh = ready_risk.candidate_refresh
+    assert refresh is not None
+    resolution = refresh.resolution
+    selected_candidate = (
+        next(
+            (
+                candidate
+                for candidate in resolution.candidates
+                if candidate.contract.con_id == risk_preview.selected_contract.con_id
+            ),
+            None,
+        )
+        if resolution is not None
+        else None
+    )
+    if selected_candidate is None:
+        _clear_short_put_demo_what_if()
+        st.warning("The risk selection is not present in its fresh candidate evidence.")
+        return
+
+    if result is not None:
+        parent = result.risk_refresh
+        if (
+            result.request.selected_contract_id != risk_preview.selected_contract.con_id
+            or result.request.total_commission_estimate
+            != ready_risk.request.total_commission_estimate
+            or parent is None
+            or parent != ready_risk
+        ):
+            _clear_short_put_demo_what_if()
+            result = None
+
+    limit_text = st.text_input(
+        f"Exact DEMO limit credit per share ({risk_preview.currency})",
+        value="",
+        placeholder=f"Fresh spread {selected_candidate.bid} - {selected_candidate.ask}",
+        key=_DEMO_WHAT_IF_LIMIT_STATE_KEY,
+        on_change=_clear_short_put_demo_what_if_result,
+        help=(
+            "Enter an explicit one-contract limit inside the displayed fresh spread and aligned "
+            "to the contract minimum tick. No default is supplied."
+        ),
+    )
+    limit_price, limit_error = _parse_demo_limit_price(limit_text)
+    if limit_error is None and limit_price is not None:
+        limit_error = _demo_limit_market_error(limit_price, selected_candidate)
+    if limit_error is not None:
+        st.warning(limit_error)
+    elif limit_price is None:
+        st.info("Enter an explicit limit credit to enable the deterministic what-if rehearsal.")
+
+    if result is not None and (limit_price is None or result.request.limit_price != limit_price):
+        st.session_state.pop(_DEMO_WHAT_IF_STATE_KEY, None)
+        result = None
+
+    if st.button(
+        "Refresh evidence & run locked DEMO what-if",
+        disabled=limit_price is None or limit_error is not None,
+    ):
+        if limit_price is None or limit_error is not None:
+            st.error("Limit validation failed; no DEMO what-if was requested.")
+            return
+        request = ShortPutDemoWhatIfRequest(
+            symbol=symbol,
+            selected_contract_id=risk_preview.selected_contract.con_id,
+            total_commission_estimate=ready_risk.request.total_commission_estimate,
+            limit_price=limit_price,
+        )
+        st.session_state.pop(_DEMO_WHAT_IF_STATE_KEY, None)
+        st.session_state.pop(_RISK_PREVIEW_STATE_KEY, None)
+        st.session_state.pop(_CANDIDATE_EVALUATION_STATE_KEY, None)
+        result = runtime.short_put_demo_what_if.preview(request)
+        st.session_state[_DEMO_WHAT_IF_STATE_KEY] = result
+        if result.risk_refresh is not None:
+            st.session_state[_RISK_PREVIEW_STATE_KEY] = result.risk_refresh
+            if result.risk_refresh.candidate_refresh is not None:
+                st.session_state[_CANDIDATE_EVALUATION_STATE_KEY] = (
+                    result.risk_refresh.candidate_refresh
+                )
+            st.rerun()
+
+    if result is not None:
+        _render_short_put_demo_what_if_result(result)
+
+
+def _parse_demo_limit_price(value: str) -> tuple[Decimal | None, str | None]:
+    normalized = value.strip()
+    if not normalized:
+        return None, None
+    if len(normalized) > MAX_LIMIT_INPUT_CHARACTERS:
+        return None, "The DEMO limit input is too long."
+    try:
+        limit_price = Decimal(normalized)
+    except InvalidOperation:
+        return None, "The DEMO limit must be a valid decimal amount."
+    if not limit_price.is_finite() or limit_price <= 0:
+        return None, "The DEMO limit must be finite and positive."
+    if limit_price > MAX_LIMIT_PRICE:
+        return None, f"The DEMO limit cannot exceed {MAX_LIMIT_PRICE}."
+    if not limit_price_has_bounded_representation(limit_price):
+        return None, f"The DEMO limit supports at most {MAX_LIMIT_DECIMAL_DIGITS} decimal digits."
+    if limit_price_decimal_places(limit_price) > MAX_LIMIT_DECIMAL_PLACES:
+        return (
+            None,
+            "The DEMO limit supports at most "
+            f"{MAX_LIMIT_DECIMAL_PLACES} fractional decimal places.",
+        )
+    return limit_price, None
+
+
+def _demo_limit_market_error(limit_price: Decimal, candidate: RankedCandidate) -> str | None:
+    if limit_price < candidate.bid or limit_price > candidate.ask:
+        return "The DEMO limit must stay inside the displayed fresh bid/ask spread."
+    try:
+        if limit_price % candidate.contract.min_tick != 0:
+            return (
+                "The DEMO limit must align to the contract minimum tick of "
+                f"{candidate.contract.min_tick}."
+            )
+    except InvalidOperation:
+        return "The DEMO limit could not be checked safely against the contract minimum tick."
+    return None
+
+
+def _clear_short_put_demo_what_if() -> None:
+    _clear_short_put_demo_what_if_result()
+    st.session_state.pop(_DEMO_WHAT_IF_LIMIT_STATE_KEY, None)
+
+
+def _clear_short_put_demo_what_if_result() -> None:
+    st.session_state.pop(_DEMO_WHAT_IF_STATE_KEY, None)
+
+
+def _render_short_put_demo_what_if_result(result: ShortPutDemoWhatIfResult) -> None:
+    evaluated_at = as_market_time(result.evaluated_at)
+    columns = st.columns(3)
+    columns[0].metric("DEMO what-if", result.status.value)
+    columns[1].metric("Progression", "STOPPED")
+    columns[2].metric("Submission", "LOCKED")
+    st.caption(
+        f"DEMO rehearsal completed {evaluated_at:%Y-%m-%d %H:%M:%S %Z} — "
+        "historical display only; no authority is retained."
+    )
+    if result.reasons:
+        st.warning("\n".join(f"- {reason}" for reason in result.reasons))
+    preview = result.preview
+    if result.status is not DemoWhatIfStatus.WHAT_IF_PREVIEWED or preview is None:
+        st.caption("Broker what-if evidence was withheld; confirmation and submission stay locked.")
+        return
+
+    currency = preview.currency
+    terms = st.columns(6)
+    terms[0].metric("Exact limit / share", format_money(preview.limit_price, currency))
+    terms[1].metric("Fresh bid / share", format_money(preview.fresh_bid, currency))
+    terms[2].metric("Fresh ask / share", format_money(preview.fresh_ask, currency))
+    terms[3].metric(
+        "Broker commission estimate",
+        format_money(preview.broker_estimated_commission, currency),
+    )
+    terms[4].metric(
+        "Operator commission assumption",
+        format_money(preview.operator_commission_estimate, currency),
+    )
+    terms[5].metric(
+        "Commission variance",
+        format_money(preview.commission_variance, currency),
+    )
+    margin = st.columns(3)
+    margin[0].metric(
+        "Initial margin change",
+        format_money(preview.initial_margin_change, currency),
+    )
+    margin[1].metric(
+        "Maintenance margin change",
+        format_money(preview.maintenance_margin_change, currency),
+    )
+    margin[2].metric(
+        "Equity-with-loan change",
+        format_money(preview.equity_with_loan_change, currency),
+    )
+    exact_risk = st.columns(5)
+    exact_risk[0].metric("Exact-limit gross premium", format_money(preview.gross_premium, currency))
+    exact_risk[1].metric("Exact-limit net premium", format_money(preview.net_premium, currency))
+    exact_risk[2].metric(
+        "Exact-limit effective entry / share",
+        format_money(preview.effective_entry_price, currency),
+    )
+    exact_risk[3].metric(
+        "Total assignment obligation",
+        format_money(preview.gross_assignment_obligation, currency),
+    )
+    exact_risk[4].metric(
+        "Cash-secured allocation",
+        _format_ratio(preview.cash_secured_notional_pct),
+    )
+    if preview.broker_warning_notice is not None:
+        st.warning(preview.broker_warning_notice)
+    st.write(
+        {
+            "Rehearsal reference": preview.correlation_id,
+            "Contract": preview.selected_contract.con_id,
+            "Intent": preview.intent.value,
+            "Side": preview.side.value,
+            "Quantity": preview.quantity,
+            "Transmit": "NO",
+            "Outside RTH": "NO",
+            "Environment": "DEMO REHEARSAL ONLY",
+            "User confirmation": "UNAVAILABLE",
+            "Submission": "LOCKED",
+        }
+    )
+    st.dataframe(
+        [
+            {
+                "What-if reference point": " / ".join(
+                    label.value.replace("_", " ").title() for label in point.labels
+                ),
+                "Underlying at expiration": format_money(point.underlying_price, currency),
+                "Exact-limit expiration P&L": format_money(point.expiration_pnl, currency),
+                "Submission": "LOCKED",
+            }
+            for point in preview.scenario_points
+        ],
+        width="stretch",
+        hide_index=True,
+    )
+    st.error(
+        "No confirmation or submit control exists. Real IBKR preview, submission, modification, "
+        "and cancellation remain hard-disabled."
+    )
 
 
 def _render_short_put_risk_result(result: ShortPutRiskPreviewResult) -> None:

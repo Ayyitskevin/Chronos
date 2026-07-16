@@ -8,13 +8,14 @@ from chronos.config.limits import (
     MAX_CANDIDATE_STRIKES_PER_EXPIRATION,
 )
 from chronos.config.settings import Settings
-from chronos.domain.enums import BrokerMode, IBEnvironment
+from chronos.domain.enums import BrokerMode, DemoProfile, IBEnvironment
 
 
 def test_safe_demo_defaults() -> None:
     settings = Settings(_env_file=None)
 
     assert settings.broker_mode is BrokerMode.DEMO
+    assert settings.demo_profile is DemoProfile.SAFETY_CASES
     assert settings.ib_environment is IBEnvironment.PAPER
     assert settings.allow_order_transmit is False
     assert settings.allow_live_trading is False
@@ -23,6 +24,21 @@ def test_safe_demo_defaults() -> None:
     assert settings.max_strikes_per_expiration == 12
     assert settings.assignment_near_zero_extrinsic == Decimal("0.05")
     assert settings.market_timezone == "America/New_York"
+
+
+def test_empty_account_demo_profile_parses_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DEMO_PROFILE", "empty_account")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.demo_profile is DemoProfile.EMPTY_ACCOUNT
+
+
+def test_unknown_demo_profile_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="demo_profile"):
+        Settings(_env_file=None, demo_profile="unknown")
 
 
 @pytest.mark.parametrize(

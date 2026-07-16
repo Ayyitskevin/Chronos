@@ -5,6 +5,10 @@ read-only: it can verify connectivity, portfolio summary access, contract discov
 bounded underlying quote. It does not call any order preview, submission, modification,
 order-cancellation, exercise, or global-cancel method.
 
+Milestone 7 does not change that network boundary. Its what-if rehearsal requires the concrete
+`DemoBroker`; `IBKRBroker.preview_order`, submission, modification, and cancellation remain
+unconditional fail-closed stubs and are not exercised by the smoke test.
+
 IBKR configuration and error-code details change independently of Chronos. Verify them against
 the [official TWS API documentation](https://ibkrcampus.com/campus/ibkr-api-page/twsapi-doc/).
 
@@ -92,8 +96,8 @@ The test performs, in order:
 8. Disconnect and verify the adapter is disconnected.
 
 The market-data manager owns quote cancellation, and a `finally` block always attempts disconnect
-even when a read fails. No automated test calls `preview_order`, `submit_order`, `modify_order`, or
-`cancel_order`. A passing smoke test proves only that the configured read path works; it does not
+even when a read fails. The smoke test never calls `preview_order`, `submit_order`, `modify_order`,
+or `cancel_order`. A passing smoke test proves only that the configured read path works; it does not
 prove order safety, fill quality, or live execution quality.
 
 ## Data quality

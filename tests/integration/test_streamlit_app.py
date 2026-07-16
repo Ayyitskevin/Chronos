@@ -2,12 +2,21 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from sqlalchemy import func, select
 from streamlit.testing.v1 import AppTest
 
 from chronos.broker.base import BrokerDataError
 from chronos.broker.demo import DemoBroker
 from chronos.config.settings import get_settings
 from chronos.domain.enums import DataQuality
+from chronos.domain.models import OrderPreview, OrderRequest
+from chronos.persistence.schema import (
+    GuardrailDecisionRow,
+    OrderDraftRow,
+    OrderPreviewRow,
+    SubmittedOrderRow,
+    WheelCycleRow,
+)
 from chronos.services.short_put_candidates import ShortPutCandidateService
 from chronos.services.short_put_risk_preview import ShortPutRiskPreviewService
 from chronos.strategy.strike_resolver import (
@@ -17,6 +26,7 @@ from chronos.strategy.strike_resolver import (
 )
 from chronos.ui.dashboard import (
     _CANDIDATE_EVALUATION_STATE_KEY,
+    _DEMO_WHAT_IF_STATE_KEY,
     _RISK_PREVIEW_STATE_KEY,
 )
 from chronos.ui.session import get_runtime
@@ -344,6 +354,164 @@ def test_explicit_risk_preview_refreshes_evidence_and_invalidates_stale_output(
         finally:
             get_runtime.clear()
             get_settings.cache_clear()
+
+
+def test_demo_what_if_rehearsal_refreshes_terms_without_persistence_or_submission(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("BROKER_MODE", "demo")
+    monkeypatch.setenv("DEMO_PROFILE", "empty_account")
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'chronos.db'}")
+    monkeypatch.setenv("LOG_FILE", str(tmp_path / "chronos.log"))
+    evaluate_calls: list[str] = []
+    preview_calls: list[OrderRequest] = []
+    unexpected_order_calls: list[str] = []
+    original_evaluate = ShortPutCandidateService.evaluate
+    original_preview = DemoBroker.preview_order
+
+    def controlled_evaluation(service: ShortPutCandidateService, symbol: str):
+        evaluate_calls.append(symbol)
+        return original_evaluate(service, symbol)
+
+    async def track_preview(broker: DemoBroker, request: OrderRequest) -> OrderPreview:
+        preview_calls.append(request)
+        return await original_preview(broker, request)
+
+    async def reject_submit(_broker: DemoBroker, _request: object) -> None:
+        unexpected_order_calls.append("submit")
+        raise AssertionError("DEMO what-if unexpectedly called submit_order")
+
+    async def reject_modify(_broker: DemoBroker, _request: object) -> None:
+        unexpected_order_calls.append("modify")
+        raise AssertionError("DEMO what-if unexpectedly called modify_order")
+
+    async def reject_cancel(_broker: DemoBroker, _broker_order_id: int) -> None:
+        unexpected_order_calls.append("cancel")
+        raise AssertionError("DEMO what-if unexpectedly called cancel_order")
+
+    monkeypatch.setattr(ShortPutCandidateService, "evaluate", controlled_evaluation)
+    monkeypatch.setattr(DemoBroker, "preview_order", track_preview)
+    monkeypatch.setattr(DemoBroker, "submit_order", reject_submit)
+    monkeypatch.setattr(DemoBroker, "modify_order", reject_modify)
+    monkeypatch.setattr(DemoBroker, "cancel_order", reject_cancel)
+
+    try:
+        app = AppTest.from_file("src/chronos/app.py").run(timeout=10)
+        app.radio[0].set_value("Symbol Detail & Order Workspace").run(timeout=10)
+        app.button[0].click().run(timeout=10)
+
+        assert not app.exception
+        assert evaluate_calls == ["AAPL"]
+        app.text_input[0].set_value("0.65").run(timeout=10)
+        app.button[1].click().run(timeout=10)
+
+        assert not app.exception
+        assert evaluate_calls == ["AAPL", "AAPL"]
+        assert preview_calls == []
+        assert len(app.text_input) == 2
+        assert app.button[2].label == "Refresh evidence & run locked DEMO what-if"
+        assert app.button[2].disabled is True
+        assert _DEMO_WHAT_IF_STATE_KEY not in app.session_state
+
+        app.text_input[1].set_value("1e400").run(timeout=10)
+        assert app.button[2].disabled is True
+        assert evaluate_calls == ["AAPL", "AAPL"]
+        assert preview_calls == []
+
+        app.text_input[1].set_value("3.20").run(timeout=10)
+        assert app.button[2].disabled is False
+        assert evaluate_calls == ["AAPL", "AAPL"]
+        assert preview_calls == []
+        app.button[2].click().run(timeout=10)
+
+        assert not app.exception
+        assert evaluate_calls == ["AAPL", "AAPL", "AAPL"]
+        assert len(preview_calls) == 1
+        broker_request = preview_calls[0]
+        assert broker_request.quantity == 1
+        assert broker_request.limit_price == Decimal("3.20")
+        assert broker_request.transmit is False
+        assert broker_request.outside_rth is False
+        assert _CANDIDATE_EVALUATION_STATE_KEY in app.session_state
+        assert _RISK_PREVIEW_STATE_KEY in app.session_state
+        assert _DEMO_WHAT_IF_STATE_KEY in app.session_state
+        metrics = {metric.label: metric.value for metric in app.metric}
+        assert metrics["DEMO what-if"] == "WHAT_IF_PREVIEWED"
+        assert metrics["Progression"] == "STOPPED"
+        assert metrics["Submission"] == "LOCKED"
+        assert metrics["Exact limit / share"] == "3.20 USD"
+        assert metrics["Broker commission estimate"] == "0.65 USD"
+        assert metrics["Initial margin change"] == "0.00 USD"
+        assert metrics["Exact-limit gross premium"] == "320.00 USD"
+        assert metrics["Exact-limit net premium"] == "319.35 USD"
+        what_if_table = next(
+            dataframe.value
+            for dataframe in app.dataframe
+            if "What-if reference point" in dataframe.value.columns
+        )
+        assert set(what_if_table["Submission"]) == {"LOCKED"}
+        assert all("$" not in dataframe.value.to_string() for dataframe in app.dataframe)
+        assert "DU1234567" not in str(app)
+        assert "DU1234567" not in str(app.session_state.filtered_state)
+        assert not any(
+            "confirm" in button.label.lower() or "submit" in button.label.lower()
+            for button in app.button
+        )
+        assert unexpected_order_calls == []
+
+        runtime = get_runtime()
+        with runtime.database.sessions() as session:
+            for row_type in (
+                WheelCycleRow,
+                OrderDraftRow,
+                OrderPreviewRow,
+                SubmittedOrderRow,
+                GuardrailDecisionRow,
+            ):
+                assert session.scalar(select(func.count()).select_from(row_type)) == 0
+
+        app.run(timeout=10)
+        assert evaluate_calls == ["AAPL", "AAPL", "AAPL"]
+        assert len(preview_calls) == 1
+        assert _DEMO_WHAT_IF_STATE_KEY in app.session_state
+
+        app.text_input[1].set_value("3.21").run(timeout=10)
+        assert evaluate_calls == ["AAPL", "AAPL", "AAPL"]
+        assert len(preview_calls) == 1
+        assert _DEMO_WHAT_IF_STATE_KEY not in app.session_state
+        assert "DEMO what-if" not in {metric.label for metric in app.metric}
+
+        app.text_input[0].set_value("0.66").run(timeout=10)
+        app.button[1].click().run(timeout=10)
+        assert evaluate_calls == ["AAPL", "AAPL", "AAPL", "AAPL"]
+        assert len(preview_calls) == 1
+        assert len(app.text_input) == 2
+        assert app.text_input[1].value == ""
+        assert app.button[2].disabled is True
+        assert unexpected_order_calls == []
+    finally:
+        try:
+            get_runtime().close()
+        finally:
+            get_runtime.clear()
+            get_settings.cache_clear()
+
+
+def test_non_demo_what_if_panel_exposes_no_action_control() -> None:
+    app = AppTest.from_string(
+        """
+from types import SimpleNamespace
+
+from chronos.ui.dashboard import _render_short_put_demo_what_if
+
+_render_short_put_demo_what_if(SimpleNamespace(broker=object()), "AAPL", None)
+"""
+    ).run(timeout=10)
+
+    assert not app.exception
+    assert any("real IBKR what-if" in message.value for message in app.error)
+    assert not app.button
 
 
 def test_risk_preview_rejects_unbounded_or_overprecise_commission_without_refresh(

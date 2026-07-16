@@ -22,6 +22,7 @@ from chronos.persistence.database import Database
 from chronos.persistence.repositories import LocalReconciliationRepository
 from chronos.services.reconciliation import ReconciliationCoordinator
 from chronos.services.short_put_candidates import ShortPutCandidateService
+from chronos.services.short_put_demo_what_if import ShortPutDemoWhatIfService
 from chronos.services.short_put_risk_preview import ShortPutRiskPreviewService
 from chronos.utils.identifiers import account_fingerprint
 from chronos.utils.logging import configure_logging
@@ -37,6 +38,7 @@ class AppRuntime:
     reconciliation: ReconciliationCoordinator
     short_put_candidates: ShortPutCandidateService
     short_put_risk_preview: ShortPutRiskPreviewService
+    short_put_demo_what_if: ShortPutDemoWhatIfService
 
     def close(self) -> None:
         try:
@@ -71,7 +73,7 @@ def _build_runtime() -> AppRuntime:
         database.initialize()
         broker: Broker
         if settings.broker_mode is BrokerMode.DEMO:
-            broker = DemoBroker()
+            broker = DemoBroker(profile=settings.demo_profile)
         else:
             from chronos.broker.ibkr import IBKRBroker
 
@@ -108,6 +110,13 @@ def _build_runtime() -> AppRuntime:
             short_put_candidates,
             clock=demo_now if isinstance(broker, DemoBroker) else None,
         )
+        short_put_demo_what_if = ShortPutDemoWhatIfService(
+            short_put_risk_preview,
+            connection,
+            settings,
+            account_fingerprint(account.account_id),
+            clock=demo_now if isinstance(broker, DemoBroker) else None,
+        )
     except BaseException:
         if connection is not None:
             try:
@@ -134,6 +143,7 @@ def _build_runtime() -> AppRuntime:
         reconciliation=reconciliation,
         short_put_candidates=short_put_candidates,
         short_put_risk_preview=short_put_risk_preview,
+        short_put_demo_what_if=short_put_demo_what_if,
     )
     atexit.register(runtime.close)
     return runtime

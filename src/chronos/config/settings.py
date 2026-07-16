@@ -16,7 +16,7 @@ from chronos.config.limits import (
     MAX_CANDIDATE_REQUEST_CONTRACTS,
     MAX_CANDIDATE_STRIKES_PER_EXPIRATION,
 )
-from chronos.domain.enums import BrokerMode, IBEnvironment
+from chronos.domain.enums import BrokerMode, DemoProfile, IBEnvironment
 
 
 def _parse_symbol_allowlist(value: object) -> object:
@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     )
 
     broker_mode: BrokerMode = BrokerMode.DEMO
+    demo_profile: DemoProfile = DemoProfile.SAFETY_CASES
     ib_environment: IBEnvironment = IBEnvironment.PAPER
     ib_host: str = "127.0.0.1"
     ib_port: PositiveInt = 7497

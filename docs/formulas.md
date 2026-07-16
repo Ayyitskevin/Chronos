@@ -41,6 +41,20 @@ early assignment, exercise behavior, volatility path, or the probability of reac
 preview is recomputed only after a fresh candidate evaluation uniquely revalidates the selected
 contract; it never authorizes an order.
 
+### Deterministic DEMO exact-limit rehearsal
+
+The DEMO rehearsal fixes `q = 1`, uses the operator's explicit tick-aligned limit as `p`, and uses
+the deterministic broker preview commission as `c`. It recomputes the same four expiration points
+and totals from those exact terms. The earlier operator commission assumption remains visible only
+for comparison:
+
+- Commission variance: `broker estimated commission - operator commission assumption`
+
+Initial-margin, maintenance-margin, and equity-with-loan changes are displayed separately from the
+cash-secured allocation. They are DEMO broker outputs, not ingredients in the expiration-payoff
+formula and not proof that an order is affordable or authorized. The receipt is neither persisted
+nor an order-lifecycle transition; its terminal rehearsal status is `WHAT_IF_PREVIEWED`.
+
 ## Covered call
 
 For stock quantity covered `d * q`:

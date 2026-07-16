@@ -9,6 +9,7 @@ from chronos.broker.demo import DEMO_ACCOUNT_ID, DEMO_NOW, DemoBroker
 from chronos.domain.enums import (
     DataQuality,
     DemoCase,
+    DemoProfile,
     OptionRight,
     OrderIntent,
     OrderSide,
@@ -59,6 +60,40 @@ async def test_default_demo_clock_is_stable_across_brokers() -> None:
 
     assert await first.snapshot() == await second.snapshot()
     assert await first.server_time() == DEMO_NOW
+
+
+@pytest.mark.asyncio
+async def test_empty_account_profile_has_honest_fixture_and_reachable_aapl_chain() -> None:
+    broker = DemoBroker(clock=lambda: FIXED_NOW, profile=DemoProfile.EMPTY_ACCOUNT)
+    await broker.connect()
+
+    snapshot = await broker.snapshot()
+    underlying = await broker.qualify_underlying("AAPL")
+    chain = (await broker.option_chain_parameters(underlying))[0]
+    requested = OptionContractSpec(
+        symbol="AAPL",
+        underlying_con_id=underlying.con_id,
+        expiration=chain.expirations[0],
+        strike=chain.strikes[0],
+        right=OptionRight.PUT,
+        multiplier=chain.multiplier,
+        trading_class=chain.trading_class,
+    )
+    qualified = await broker.qualify_option_contracts((requested,))
+    quotes = await broker.request_option_quotes(qualified)
+
+    assert broker.profile is DemoProfile.EMPTY_ACCOUNT
+    assert snapshot.positions == ()
+    assert snapshot.open_orders == ()
+    assert snapshot.executions == ()
+    assert [(case.symbol, case.case) for case in broker.fixture_cases] == [
+        ("AAPL", DemoCase.FLAT_PUT)
+    ]
+    assert "whole account is empty" in broker.fixture_cases[0].explanation
+    assert chain.expirations == (qualified[0].expiration,)
+    assert chain.strikes == (Decimal("185"),)
+    assert qualified[0].con_id == 2002
+    assert quotes[0].greeks is not None
 
 
 @pytest.mark.asyncio

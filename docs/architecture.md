@@ -29,6 +29,11 @@ reuse both resources instead of creating broker sockets or bypassing subscriptio
 Candidate market work is additionally gated by an explicit operator button; unrelated reruns do
 not refresh the option universe.
 
+The deterministic adapter has two explicit profiles. `safety_cases` remains the default conflicted
+portfolio for reconciliation locks; `empty_account` supplies one honest AAPL path with no positions,
+orders, or executions so the locked candidate, risk, and what-if journey is reachable without test
+mutation. Neither profile can submit an order.
+
 ## Four operational invariants
 
 ### Where state lives
@@ -36,15 +41,16 @@ not refresh the option universe.
 - Brokerage truth: broker positions, open orders, fills, executions, and account values.
 - Chronos truth: wheel-cycle links, candidate evidence, guardrail evidence, notes, and the
   explicitly labeled strategy-adjusted basis.
-- UI state: navigation plus at most one historical, presentation-safe candidate result and one
-  matching risk-preview attempt. Neither determines the Wheel stage or authorizes an action.
+- UI state: navigation plus at most one historical, presentation-safe candidate result, matching
+  risk attempt, and matching DEMO what-if attempt. None determines the Wheel stage or authorizes an
+  action.
 
 ### Where feedback lives
 
 Connection changes, exceptional market-data lifecycle events, reconciliation capture/read
-failures, successfully completed resolver outcome counts, and risk-preview outcomes are logged to
-the console and a rotating local file. Locked early returns remain observable in their UI result
-without logging raw broker details.
+failures, successfully completed resolver outcome counts, risk-preview outcomes, and sanitized DEMO
+what-if outcomes are logged to the console and a rotating local file. Locked early returns remain
+observable in their UI result without logging raw broker details.
 Candidate, guardrail, and basis repositories retain evidence only for legitimate persisted Wheel
 cycles. Read-only reconciliation and flat-symbol candidate evaluation return in-memory
 presentation models and deliberately do not manufacture cycles or write audit rows yet.
@@ -77,14 +83,19 @@ evaluation internally. Ordinary reruns and assumption changes make no broker req
 risk output is historical display only and is cleared when its symbol, selected contract,
 commission assumption, or parent candidate generation changes.
 
+DEMO what-if work starts only after a third explicit button and a current `READY` risk result. The
+service accepts only the selected ID, commission assumption, and exact limit, then independently
+reruns the risk boundary. A limit or parent-generation change invalidates the stored receipt;
+ordinary reruns make no preview request.
+
 ## Package boundaries
 
 - `domain`: immutable vocabulary and broker-neutral models.
 - `broker`: protocol, deterministic demo adapter, IBKR adapter, connection ownership, and market
   data lifecycle.
 - `strategy`: Wheel state, resolver, scenarios, assignment pressure, and capital constraints.
-- `services`: read-only reconciliation, guarded short-put candidate evaluation, and fresh-evidence
-  expiration-risk preview.
+- `services`: read-only reconciliation, guarded short-put candidate evaluation, fresh-evidence
+  expiration-risk preview, and a deterministic DEMO-only what-if rehearsal.
 - `persistence`: SQLAlchemy schema and repositories for Chronos-only state.
 - `ui`: Streamlit pages and Plotly views; no brokerage truth lives here.
 - `config` and `utils`: validated settings, logging, UTC, and identifiers.
@@ -175,6 +186,30 @@ decimal places, 16 decimal digits, and 32 UI characters; chart coordinates must 
 finite display values. Broker margin is unavailable because the service never invokes broker
 what-if, preview, submission, modification, or cancellation. The result is not persisted, creates
 no Wheel cycle or order draft, and always keeps opening actions locked.
+
+## Deterministic DEMO what-if boundary
+
+The what-if service is gated twice before fresh-risk or broker work: validated settings must select
+DEMO and the concrete adapter must be `DemoBroker`. Its untrusted request fixes only symbol,
+positive contract ID, bounded operator commission assumption, and bounded positive limit. Quantity,
+side, intent, account, order reference, transmission, and outside-hours behavior are internal. The
+limit must lie inside the newly refreshed bid/ask and divide exactly by the verified contract tick.
+
+The service invokes the risk boundary again and revalidates the returned model copy, identity,
+capital, reconciliation, quote age, and timestamps. It then runs one serialized coroutine that
+reads connection status, account, positions, open orders, executions, and server time before and
+after exactly one `DemoBroker.preview_order` call. The first observation is validated before that
+call, and the second detects drift afterward. The window must remain connected, DEMO-quality,
+account-bound, empty, exposure-stable, capital-stable, and monotonic. The echoed request must match
+the internally created `SELL`, one-contract request with `transmit=False` and `outside_rth=False`;
+the response must be accepted and supply finite commission and margin changes.
+
+Only a sanitized receipt crosses back to the UI. It includes a generated rehearsal reference,
+generic warning count, and exact-limit scenario math recomputed with the broker commission estimate;
+it omits the raw account-bearing request and all broker text. The rehearsal-specific status is
+`WHAT_IF_PREVIEWED`; it is not an order-lifecycle transition. Nothing is persisted or promoted to a
+draft, confirmation, guardrail decision, cycle, or submission. The IBKR adapter remains an
+unconditional fail-closed order boundary.
 
 Option-position average cost is never used for premium or basis math: IBKR and demo adapters can
 report that field in different units. Only execution price, qualified multiplier, fill quantity,

@@ -16,6 +16,7 @@ from chronos.domain.enums import (
     ConnectionState,
     DataQuality,
     DemoCase,
+    DemoProfile,
     DisplayEnvironment,
     OptionRight,
     OrderLifecycle,
@@ -44,6 +45,7 @@ from chronos.domain.models import (
 
 DEMO_ACCOUNT_ID = "DU1234567"
 DEMO_NOW = datetime(2026, 7, 15, 15, 30, tzinfo=UTC)
+_EMPTY_ACCOUNT_OPTION_ID = 2002
 
 
 def demo_now() -> datetime:
@@ -55,8 +57,14 @@ def demo_now() -> datetime:
 class DemoBroker:
     """In-memory fixtures with no randomness, sockets, credentials, or order transmission."""
 
-    def __init__(self, *, clock: Callable[[], datetime] = demo_now) -> None:
+    def __init__(
+        self,
+        *,
+        clock: Callable[[], datetime] = demo_now,
+        profile: DemoProfile = DemoProfile.SAFETY_CASES,
+    ) -> None:
         self._clock = clock
+        self._profile = DemoProfile(profile)
         self._connected = False
         self._last_sync: datetime | None = None
         self._underlyings = self._make_underlyings()
@@ -69,7 +77,24 @@ class DemoBroker:
         self._logger = logging.getLogger("chronos.broker.demo")
 
     @property
+    def profile(self) -> DemoProfile:
+        """Return the deterministic fixture profile selected for this broker."""
+
+        return self._profile
+
+    @property
     def fixture_cases(self) -> tuple[DemoFixtureCase, ...]:
+        if self._profile is DemoProfile.EMPTY_ACCOUNT:
+            return (
+                DemoFixtureCase(
+                    symbol="AAPL",
+                    case=DemoCase.FLAT_PUT,
+                    explanation=(
+                        "The whole account is empty so the locked candidate, risk-preview, "
+                        "and what-if journey can be demonstrated."
+                    ),
+                ),
+            )
         return (
             DemoFixtureCase(
                 symbol="AAPL",
@@ -177,6 +202,10 @@ class DemoBroker:
             for contract in self._option_contracts.values()
             if contract.symbol == underlying.symbol
         ]
+        if self._profile is DemoProfile.EMPTY_ACCOUNT:
+            contracts = [
+                contract for contract in contracts if contract.con_id == _EMPTY_ACCOUNT_OPTION_ID
+            ]
         if not contracts:
             raise BrokerDataError(f"No deterministic option chain for {underlying.symbol}")
         return (
@@ -437,6 +466,12 @@ class DemoBroker:
                     else None
                 ),
             )
+
+        if self._profile is DemoProfile.EMPTY_ACCOUNT:
+            self._positions = ()
+            self._orders = ()
+            self._executions = ()
+            return
 
         self._positions = (
             self._stock_position("MSFT", "200", "390.00", "421.80"),
