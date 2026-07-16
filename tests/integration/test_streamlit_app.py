@@ -9,14 +9,18 @@ from chronos.broker.base import BrokerDataError
 from chronos.broker.demo import DemoBroker
 from chronos.config.settings import get_settings
 from chronos.domain.enums import BrokerMode, DataQuality
-from chronos.domain.models import OrderPreview, OrderRequest
+from chronos.domain.models import OrderModification, OrderPreview, OrderRequest
+from chronos.persistence.repositories import LocalReconciliationRepository
 from chronos.persistence.schema import (
+    ApplicationEventRow,
     GuardrailDecisionRow,
     OrderDraftRow,
     OrderPreviewRow,
+    ReconciliationRunRow,
     SubmittedOrderRow,
     WheelCycleRow,
 )
+from chronos.services.reconciliation import ReconciliationCoordinator
 from chronos.services.short_put_candidates import ShortPutCandidateService
 from chronos.services.short_put_demo_approval import (
     ShortPutDemoApprovalRequest,
@@ -36,8 +40,10 @@ from chronos.ui.dashboard import (
     _DEMO_APPROVAL_FEEDBACK_STATE_KEY,
     _DEMO_APPROVAL_STATE_KEY,
     _DEMO_WHAT_IF_STATE_KEY,
+    _PORTFOLIO_OBSERVATION_STATE_KEY,
     _RISK_PREVIEW_STATE_KEY,
 )
+from chronos.ui.portfolio_state import PortfolioObservationSessionRecord
 from chronos.ui.rehearsal_state import (
     DemoApprovalDisposition,
     DemoApprovalSessionRecord,
@@ -53,26 +59,95 @@ def test_demo_portfolio_and_symbol_pages_render_without_exceptions(
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'chronos.db'}")
     monkeypatch.setenv("LOG_FILE", str(tmp_path / "chronos.log"))
     evaluate_calls: list[str] = []
-    scope_source_calls = {"account_summary": 0, "connection_status": 0}
+    broker_calls = {
+        "account_summary": 0,
+        "connection_status": 0,
+        "server_time": 0,
+        "positions": 0,
+        "open_orders": 0,
+        "executions": 0,
+        "preview_order": 0,
+        "submit_order": 0,
+        "modify_order": 0,
+        "cancel_order": 0,
+    }
+    local_read_calls: list[str] = []
     original_evaluate = ShortPutCandidateService.evaluate
     original_account_summary = DemoBroker.account_summary
     original_connection_status = DemoBroker.connection_status
+    original_server_time = DemoBroker.server_time
+    original_positions = DemoBroker.positions
+    original_open_orders = DemoBroker.open_orders
+    original_executions = DemoBroker.executions
+    original_preview_order = DemoBroker.preview_order
+    original_submit_order = DemoBroker.submit_order
+    original_modify_order = DemoBroker.modify_order
+    original_cancel_order = DemoBroker.cancel_order
+    original_local_read = LocalReconciliationRepository.read
 
     def track_evaluation(service: ShortPutCandidateService, symbol: str):
         evaluate_calls.append(symbol)
         return original_evaluate(service, symbol)
 
     async def track_account_summary(broker: DemoBroker):
-        scope_source_calls["account_summary"] += 1
+        broker_calls["account_summary"] += 1
         return await original_account_summary(broker)
 
     async def track_connection_status(broker: DemoBroker):
-        scope_source_calls["connection_status"] += 1
+        broker_calls["connection_status"] += 1
         return await original_connection_status(broker)
+
+    async def track_server_time(broker: DemoBroker):
+        broker_calls["server_time"] += 1
+        return await original_server_time(broker)
+
+    async def track_positions(broker: DemoBroker):
+        broker_calls["positions"] += 1
+        return await original_positions(broker)
+
+    async def track_open_orders(broker: DemoBroker):
+        broker_calls["open_orders"] += 1
+        return await original_open_orders(broker)
+
+    async def track_executions(broker: DemoBroker, since=None):
+        broker_calls["executions"] += 1
+        return await original_executions(broker, since)
+
+    async def track_preview_order(broker: DemoBroker, request: OrderRequest):
+        broker_calls["preview_order"] += 1
+        return await original_preview_order(broker, request)
+
+    async def track_submit_order(broker: DemoBroker, request: OrderRequest):
+        broker_calls["submit_order"] += 1
+        return await original_submit_order(broker, request)
+
+    async def track_modify_order(broker: DemoBroker, request: OrderModification):
+        broker_calls["modify_order"] += 1
+        return await original_modify_order(broker, request)
+
+    async def track_cancel_order(broker: DemoBroker, broker_order_id: int):
+        broker_calls["cancel_order"] += 1
+        return await original_cancel_order(broker, broker_order_id)
+
+    def track_local_read(
+        repository: LocalReconciliationRepository,
+        current_account_id: str,
+    ):
+        local_read_calls.append(current_account_id)
+        return original_local_read(repository, current_account_id)
 
     monkeypatch.setattr(ShortPutCandidateService, "evaluate", track_evaluation)
     monkeypatch.setattr(DemoBroker, "account_summary", track_account_summary)
     monkeypatch.setattr(DemoBroker, "connection_status", track_connection_status)
+    monkeypatch.setattr(DemoBroker, "server_time", track_server_time)
+    monkeypatch.setattr(DemoBroker, "positions", track_positions)
+    monkeypatch.setattr(DemoBroker, "open_orders", track_open_orders)
+    monkeypatch.setattr(DemoBroker, "executions", track_executions)
+    monkeypatch.setattr(DemoBroker, "preview_order", track_preview_order)
+    monkeypatch.setattr(DemoBroker, "submit_order", track_submit_order)
+    monkeypatch.setattr(DemoBroker, "modify_order", track_modify_order)
+    monkeypatch.setattr(DemoBroker, "cancel_order", track_cancel_order)
+    monkeypatch.setattr(LocalReconciliationRepository, "read", track_local_read)
 
     try:
         app = AppTest.from_file("src/chronos/app.py").run(timeout=10)
@@ -87,6 +162,50 @@ def test_demo_portfolio_and_symbol_pages_render_without_exceptions(
         assert metrics["Startup broker"] == "CONNECTED"
         assert metrics["Startup masked account"] == "DU•••4567"
         assert metrics["Order path"] == "CODE LOCKED"
+        assert metrics["Portfolio observation"] == "NOT_OBSERVED"
+        assert metrics["Opening actions"] == "LOCKED"
+        assert "Reconciliation" not in metrics
+        assert not app.dataframe
+        assert app.button[0].label == "Run read-only portfolio observation"
+        assert broker_calls == {
+            "account_summary": 1,
+            "connection_status": 1,
+            "server_time": 0,
+            "positions": 0,
+            "open_orders": 0,
+            "executions": 0,
+            "preview_order": 0,
+            "submit_order": 0,
+            "modify_order": 0,
+            "cancel_order": 0,
+        }
+        assert local_read_calls == []
+        assert any("Passive reruns do not refresh it" in item.value for item in app.caption)
+
+        app.run(timeout=10)
+
+        assert not app.exception
+        assert broker_calls["account_summary"] == 1
+        assert broker_calls["connection_status"] == 1
+        assert all(
+            broker_calls[name] == 0
+            for name in (
+                "server_time",
+                "positions",
+                "open_orders",
+                "executions",
+                "preview_order",
+                "submit_order",
+                "modify_order",
+                "cancel_order",
+            )
+        )
+        assert local_read_calls == []
+
+        app.button[0].click().run(timeout=10)
+
+        assert not app.exception
+        metrics = {metric.label: metric.value for metric in app.metric}
         assert metrics["Reconciliation"] == "MANUAL_REVIEW"
         assert metrics["Opening actions"] == "LOCKED"
         assert metrics["Account"] == "DU•••4567"
@@ -105,8 +224,38 @@ def test_demo_portfolio_and_symbol_pages_render_without_exceptions(
         assert {"RECONCILED", "MANUAL_REVIEW"} <= set(reconciliation_table["Status"])
         assert app.expander
         assert "DU1234567" not in str(app)
-        assert scope_source_calls == {"account_summary": 3, "connection_status": 3}
+        observation = app.session_state[_PORTFOLIO_OBSERVATION_STATE_KEY]
+        assert isinstance(observation, PortfolioObservationSessionRecord)
+        assert observation.historical_display_only is True
+        assert observation.authority_created is False
+        assert observation.persistence_recorded is False
+        assert observation.opening_actions_locked is True
+        assert "DU1234567" not in str(app.session_state.filtered_state)
+        assert broker_calls == {
+            "account_summary": 3,
+            "connection_status": 3,
+            "server_time": 2,
+            "positions": 2,
+            "open_orders": 2,
+            "executions": 2,
+            "preview_order": 0,
+            "submit_order": 0,
+            "modify_order": 0,
+            "cancel_order": 0,
+        }
+        assert local_read_calls == ["DU1234567"]
         assert any("Historical startup identity only" in caption.value for caption in app.caption)
+        assert any("historical display only" in caption.value for caption in app.caption)
+
+        app.run(timeout=10)
+
+        assert broker_calls["account_summary"] == 3
+        assert broker_calls["connection_status"] == 3
+        assert broker_calls["server_time"] == 2
+        assert broker_calls["positions"] == 2
+        assert broker_calls["open_orders"] == 2
+        assert broker_calls["executions"] == 2
+        assert local_read_calls == ["DU1234567"]
 
         app.radio[0].set_value("Symbol Detail & Order Workspace").run(timeout=10)
 
@@ -124,7 +273,43 @@ def test_demo_portfolio_and_symbol_pages_render_without_exceptions(
         assert app.button[0].label == "Run read-only evaluation"
         app.run(timeout=10)
         assert evaluate_calls == []
-        assert scope_source_calls == {"account_summary": 3, "connection_status": 3}
+        assert broker_calls["account_summary"] == 3
+        assert broker_calls["connection_status"] == 3
+        assert broker_calls["server_time"] == 2
+        assert broker_calls["positions"] == 2
+        assert broker_calls["open_orders"] == 2
+        assert broker_calls["executions"] == 2
+        assert local_read_calls == ["DU1234567"]
+
+        app.radio[0].set_value("Portfolio Dashboard").run(timeout=10)
+
+        assert not app.exception
+        assert broker_calls["account_summary"] == 3
+        assert broker_calls["connection_status"] == 3
+        assert broker_calls["server_time"] == 2
+        assert broker_calls["positions"] == 2
+        assert broker_calls["open_orders"] == 2
+        assert broker_calls["executions"] == 2
+        assert local_read_calls == ["DU1234567"]
+
+        app.button[0].click().run(timeout=10)
+
+        assert not app.exception
+        assert broker_calls == {
+            "account_summary": 5,
+            "connection_status": 5,
+            "server_time": 4,
+            "positions": 4,
+            "open_orders": 4,
+            "executions": 4,
+            "preview_order": 0,
+            "submit_order": 0,
+            "modify_order": 0,
+            "cancel_order": 0,
+        }
+        assert local_read_calls == ["DU1234567", "DU1234567"]
+
+        app.radio[0].set_value("Symbol Detail & Order Workspace").run(timeout=10)
 
         app.button[0].click().run(timeout=10)
 
@@ -144,6 +329,135 @@ def test_demo_portfolio_and_symbol_pages_render_without_exceptions(
         assert any("EDT" in caption.value for caption in app.caption)
         app.run(timeout=10)
         assert evaluate_calls == ["AAPL"]
+        assert all(
+            broker_calls[name] == 0
+            for name in ("preview_order", "submit_order", "modify_order", "cancel_order")
+        )
+        with get_runtime().database.sessions() as session:
+            for row_type in (
+                ReconciliationRunRow,
+                OrderDraftRow,
+                OrderPreviewRow,
+                SubmittedOrderRow,
+                GuardrailDecisionRow,
+                ApplicationEventRow,
+            ):
+                assert session.scalar(select(func.count()).select_from(row_type)) == 0
+        assert "DU1234567" not in (tmp_path / "chronos.log").read_text()
+    finally:
+        try:
+            get_runtime().close()
+        finally:
+            get_runtime.clear()
+            get_settings.cache_clear()
+
+
+def test_portfolio_observation_failure_and_invalid_state_clear_prior_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("BROKER_MODE", "demo")
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'chronos.db'}")
+    monkeypatch.setenv("LOG_FILE", str(tmp_path / "chronos.log"))
+    reconcile_calls = 0
+    fail_next = False
+    invalid_next = False
+    original_reconcile = ReconciliationCoordinator.reconcile
+
+    def controlled_reconcile(coordinator: ReconciliationCoordinator):
+        nonlocal reconcile_calls
+        reconcile_calls += 1
+        if fail_next:
+            raise BrokerDataError("DU1234567 sensitive broker failure")
+        result = original_reconcile(coordinator)
+        if not invalid_next:
+            return result
+        assert result.snapshot is not None
+        snapshot = result.snapshot.model_copy(
+            update={"account": result.snapshot.account.model_copy(update={"currency": " "})}
+        )
+        return result.model_copy(update={"snapshot": snapshot})
+
+    monkeypatch.setattr(ReconciliationCoordinator, "reconcile", controlled_reconcile)
+
+    try:
+        app = AppTest.from_file("src/chronos/app.py").run(timeout=10)
+
+        assert not app.exception
+        assert reconcile_calls == 0
+        app.button[0].click().run(timeout=10)
+
+        assert not app.exception
+        assert reconcile_calls == 1
+        valid_record = app.session_state[_PORTFOLIO_OBSERVATION_STATE_KEY]
+        assert isinstance(valid_record, PortfolioObservationSessionRecord)
+        assert any("historical display only" in item.value for item in app.caption)
+
+        fail_next = True
+        app.button[0].click().run(timeout=10)
+
+        assert not app.exception
+        assert reconcile_calls == 2
+        metrics = {metric.label: metric.value for metric in app.metric}
+        assert metrics["Portfolio observation"] == "NOT_OBSERVED"
+        assert metrics["Opening actions"] == "LOCKED"
+        assert "Reconciliation" not in metrics
+        assert not app.dataframe
+        assert _PORTFOLIO_OBSERVATION_STATE_KEY not in app.session_state.filtered_state
+        assert any(
+            "read-only portfolio observation could not complete safely" in item.value
+            for item in app.error
+        )
+        assert "DU1234567" not in str(app)
+
+        forged_result = valid_record.result.model_copy(
+            update={
+                "reasons": (
+                    *valid_record.result.reasons,
+                    "Account DU1234567 escaped into presentation state.",
+                )
+            }
+        )
+        app.session_state[_PORTFOLIO_OBSERVATION_STATE_KEY] = valid_record.model_copy(
+            update={"result": forged_result}
+        )
+        app.run(timeout=10)
+
+        assert not app.exception
+        assert reconcile_calls == 2
+        metrics = {metric.label: metric.value for metric in app.metric}
+        assert metrics["Portfolio observation"] == "NOT_OBSERVED"
+        assert "Reconciliation" not in metrics
+        assert not app.dataframe
+        assert _PORTFOLIO_OBSERVATION_STATE_KEY not in app.session_state.filtered_state
+        assert "DU1234567" not in str(app)
+        assert "DU1234567" not in str(app.session_state.filtered_state)
+
+        fail_next = False
+        invalid_next = True
+        app.button[0].click().run(timeout=10)
+
+        assert not app.exception
+        assert reconcile_calls == 3
+        metrics = {metric.label: metric.value for metric in app.metric}
+        assert metrics["Portfolio observation"] == "NOT_OBSERVED"
+        assert metrics["Opening actions"] == "LOCKED"
+        assert "Reconciliation" not in metrics
+        assert not app.dataframe
+        assert _PORTFOLIO_OBSERVATION_STATE_KEY not in app.session_state.filtered_state
+        assert any(
+            "read-only portfolio observation could not be retained safely" in item.value
+            for item in app.error
+        )
+
+        app.run(timeout=10)
+
+        assert not app.exception
+        assert reconcile_calls == 3
+        assert _PORTFOLIO_OBSERVATION_STATE_KEY not in app.session_state.filtered_state
+        assert "DU1234567" not in (tmp_path / "chronos.log").read_text()
+        with get_runtime().database.sessions() as session:
+            assert session.scalar(select(func.count()).select_from(ReconciliationRunRow)) == 0
     finally:
         try:
             get_runtime().close()

@@ -125,6 +125,20 @@ for current broker health, fresh reconciliation, current market evidence, or ord
 Mode-aware DEMO, IBKR PAPER, and IBKR LIVE labels never enable an order path, and live-money
 transmission remains hard-disabled.
 
+Milestone 11 makes portfolio reconciliation opt-in at the UI boundary. Initial page entry,
+navigation, and passive reruns make no portfolio broker or local-evidence read. The explicit
+read-only observation button clears any older presentation record before invoking one existing
+bounded coordinator run. A raised failure cannot leave stale evidence; a returned `PENDING` result
+may be displayed only as historical locked evidence.
+
+The session-only record is digested against sanitized startup scope and exact-revalidated before
+every display. Its result must preserve coherent aggregate and symbol statuses, unique symbols,
+bounded account-sanitized reasons, safe time, and snapshot environment/masked-account agreement.
+Malformed or cross-scope state is discarded without a broker call or raw diagnostic. Literal flags
+state that the record is historical, creates no authority, records no persistence, and keeps
+opening actions locked. It is never accepted by any financial or order service, never written to a
+reconciliation or audit table, and never invokes preview, submit, modify, or cancel.
+
 ## Order boundary
 
 Paper submission remains off unless all of these are true at the same decision point:

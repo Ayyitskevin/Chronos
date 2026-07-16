@@ -54,6 +54,11 @@ from chronos.ui.components import (
     render_runtime_status,
     render_safety_notice,
 )
+from chronos.ui.portfolio_state import (
+    PortfolioObservationSessionRecord,
+    retain_portfolio_observation,
+    validate_portfolio_observation_record,
+)
 from chronos.ui.rehearsal_state import (
     DemoApprovalDisposition,
     DemoApprovalSessionRecord,
@@ -62,7 +67,7 @@ from chronos.ui.rehearsal_state import (
     retain_demo_approval_receipt,
     supersede_demo_approval_record,
 )
-from chronos.ui.runtime_scope import validate_runtime_scope
+from chronos.ui.runtime_scope import RuntimeScopeView, validate_runtime_scope
 from chronos.ui.session import AppRuntime
 from chronos.utils.logging import mask_account_identifiers
 from chronos.utils.time import as_market_time
@@ -76,6 +81,7 @@ _DEMO_APPROVAL_SYMBOL_STATE_KEY = "chronos_demo_approval_symbol"
 _DEMO_APPROVAL_QUANTITY_STATE_KEY = "chronos_demo_approval_quantity"
 _DEMO_APPROVAL_ACK_STATE_KEY = "chronos_demo_approval_risk_ack"
 _DEMO_APPROVAL_FEEDBACK_STATE_KEY = "chronos_demo_approval_feedback"
+_PORTFOLIO_OBSERVATION_STATE_KEY = "chronos_portfolio_observation"
 _MAX_DEMO_APPROVAL_FEEDBACK_REASONS = 4
 _MAX_DEMO_APPROVAL_FEEDBACK_REASON_CHARACTERS = 300
 
@@ -110,7 +116,7 @@ def render_dashboard(runtime: AppRuntime) -> None:
             ("Portfolio Dashboard", "Symbol Detail & Order Workspace"),
         )
         if page == "Portfolio Dashboard":
-            _render_portfolio(runtime.reconciliation.reconcile())
+            _render_portfolio(runtime, runtime_scope)
         else:
             _render_symbol_detail(runtime)
     except BrokerError as error:
@@ -130,15 +136,83 @@ def render_dashboard(runtime: AppRuntime) -> None:
         st.error("The dashboard could not complete this request safely. See the local log.")
 
 
-def _render_portfolio(result: ReconciliationResult) -> None:
+def _stored_portfolio_observation(
+    runtime_scope: RuntimeScopeView,
+) -> PortfolioObservationSessionRecord | None:
+    value = st.session_state.get(_PORTFOLIO_OBSERVATION_STATE_KEY)
+    if value is None:
+        return None
+    try:
+        return validate_portfolio_observation_record(value, runtime_scope)
+    except ValueError:
+        st.session_state.pop(_PORTFOLIO_OBSERVATION_STATE_KEY, None)
+        logging.getLogger("chronos.ui.dashboard").warning(
+            "Stored portfolio observation was rejected before display",
+            extra={"event": "portfolio_observation_state_rejected"},
+        )
+        return None
+
+
+def _render_portfolio(runtime: AppRuntime, runtime_scope: RuntimeScopeView) -> None:
     st.header("Portfolio Dashboard")
+    observation = _stored_portfolio_observation(runtime_scope)
+    if st.button("Run read-only portfolio observation", type="primary"):
+        st.session_state.pop(_PORTFOLIO_OBSERVATION_STATE_KEY, None)
+        observation = None
+        try:
+            result = runtime.reconciliation.reconcile()
+            observation = retain_portfolio_observation(runtime_scope, result)
+            st.session_state[_PORTFOLIO_OBSERVATION_STATE_KEY] = observation
+        except BrokerError as error:
+            logging.getLogger("chronos.ui.dashboard").warning(
+                "Explicit portfolio observation could not complete safely",
+                extra={
+                    "event": "portfolio_observation_failed",
+                    "error_type": type(error).__name__,
+                },
+            )
+            st.error("The read-only portfolio observation could not complete safely.")
+        except Exception as error:
+            logging.getLogger("chronos.ui.dashboard").warning(
+                "Explicit portfolio observation was rejected safely",
+                extra={
+                    "event": "portfolio_observation_rejected",
+                    "error_type": type(error).__name__,
+                },
+            )
+            st.error("The read-only portfolio observation could not be retained safely.")
+
+    if observation is None:
+        columns = st.columns(2)
+        columns[0].metric("Portfolio observation", "NOT_OBSERVED")
+        columns[1].metric("Opening actions", "LOCKED")
+        st.error(
+            "Opening actions are locked. A portfolio observation is historical "
+            "decision-support evidence and can never authorize candidates or orders."
+        )
+        st.caption(
+            "No portfolio observation has been requested in this session. Run the explicit "
+            "read-only observation to capture one bounded broker and local-evidence window. "
+            "Passive reruns do not refresh it."
+        )
+        return
+
+    st.caption(
+        "Last explicit portfolio observation — historical display only. It remains unchanged "
+        "until another explicit observation or the session ends and is never reused as service "
+        "authority."
+    )
+    _render_portfolio_result(observation.result)
+
+
+def _render_portfolio_result(result: ReconciliationResult) -> None:
     render_reconciliation_status(result)
     st.error(
-        "Opening actions are locked. This milestone publishes read-only reconciliation "
-        "evidence; it does not activate candidates or orders."
+        "Opening actions are locked. A portfolio observation is historical decision-support "
+        "evidence and can never authorize candidates or orders."
     )
     if result.reasons:
-        st.warning("\n".join(f"- {reason}" for reason in result.reasons))
+        st.warning("\n".join(f"- {mask_account_identifiers(reason)}" for reason in result.reasons))
 
     snapshot = result.snapshot
     if snapshot is None:
@@ -231,9 +305,10 @@ def _render_symbol_reconciliation(result: ReconciliationResult) -> None:
         hide_index=True,
     )
     for symbol in result.symbols:
-        with st.expander(f"{symbol.symbol} reconciliation reasoning"):
+        safe_symbol = mask_account_identifiers(symbol.symbol)
+        with st.expander(f"{safe_symbol} reconciliation reasoning"):
             for reason in symbol.reasons:
-                st.write(f"- {reason}")
+                st.write(f"- {mask_account_identifiers(reason)}")
 
 
 def _render_near_term_focus() -> None:

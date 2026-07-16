@@ -44,10 +44,12 @@ reachable without test mutation. Neither profile can submit an order.
 - Process-runtime display state: one immutable, sanitized startup-scope view built only after
   startup observations are validated and database account-scope binding succeeds. It is not
   persisted and cannot determine the Wheel stage or authorize an action.
-- UI state: navigation plus either one historical, presentation-safe candidate lineage with its
-  matching risk and DEMO what-if attempts, or one process-memory approval-rehearsal envelope. The
-  envelope contains a scalar receipt only while retained and otherwise only a term-free terminal
-  tombstone. None determines the Wheel stage or authorizes an action.
+- Portfolio UI state: at most one exact, startup-scope-bound historical observation record in
+  process memory. It is display-only, never persisted, and never supplied to a service.
+- Strategy UI state: navigation plus either one historical, presentation-safe candidate lineage
+  with its matching risk and DEMO what-if attempts, or one process-memory approval-rehearsal
+  envelope. The envelope contains a scalar receipt only while retained and otherwise only a
+  term-free terminal tombstone. None determines the Wheel stage or authorizes an action.
 
 ### Where feedback lives
 
@@ -70,12 +72,13 @@ presentation models and deliberately do not manufacture cycles or write audit ro
 
 ### When timing works
 
-The broker service serializes adapter work on its event loop. A portfolio render submits one
-coordinator coroutine containing the complete double-read observation window, so another Chronos
-broker call cannot interleave. Reconciliation on startup, reconnect, order/fill events, and a
-periodic schedule remains planned. For streaming top-of-book data, quote age starts only after a
-price-bearing update from the current subscription is received; it is checked at every decision and
-must be checked again
+The broker service serializes adapter work on its event loop. For the portfolio page, only the
+explicit observation button submits one coordinator coroutine containing the complete double-read
+observation window, so another Chronos broker call cannot interleave. Initial portfolio render,
+navigation, and ordinary portfolio reruns submit none. Reconciliation on startup, reconnect,
+order/fill events, and a periodic schedule remains planned. For streaming top-of-book data, quote
+age starts only after a price-bearing update from the current subscription is received; it is
+checked at every decision and must be checked again
 immediately before a future paper submit.
 
 The symbol workspace starts candidate work only when the operator presses the explicit read-only
@@ -302,3 +305,21 @@ interactive workspace. Rendering a valid banner performs no broker call or datab
 labels and mode-aware notice describe historical startup identity—not current connection health,
 fresh reconciliation, current market-data evidence, or order authority. An IBKR LIVE source label
 does not alter the code lock; live-money transmission remains hard-disabled.
+
+## Explicit portfolio-observation boundary
+
+Milestone 11 removes portfolio reconciliation from passive rendering. Before an operator request,
+the portfolio page renders only `NOT_OBSERVED` and locked copy; it does not call the coordinator,
+broker evidence methods, or local reconciliation reader. Pressing **Run read-only portfolio
+observation** clears any prior record first and invokes one unchanged coordinator run. A returned
+`PENDING` result is valid historical evidence and remains locked; a raised failure leaves no prior
+result visible.
+
+The UI retains only an immutable session record containing the presentation-safe result, a digest
+of the exact validated runtime-scope view, and literal historical, non-authoritative,
+nonpersistent, and locked flags. Every display revalidates exact model storage, typed canonical
+form, aggregate/per-symbol status coherence, bounded sanitized reasons, unique symbols, safe display
+time, and any snapshot's environment and masked account against startup scope. Invalid state is
+discarded with generic feedback and no broker call. The record is never passed to strategy,
+candidate, risk, rehearsal, or order services; no reconciliation run, audit evidence, cycle, draft,
+or order state is written. Session end drops it.

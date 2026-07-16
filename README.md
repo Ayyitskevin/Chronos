@@ -10,6 +10,22 @@ substantial losses. Paper fills do not prove live execution quality.
 
 ## Current milestone
 
+Milestone 11 makes the portfolio observation an explicit operator action. Startup, initial page
+entry, navigation, and ordinary Streamlit reruns perform no portfolio reconciliation or local
+evidence read. Pressing **Run read-only portfolio observation** invokes exactly one existing
+bounded reconciliation attempt. After a stable broker double-read passes, the coordinator performs
+one atomic local read. The result remains locked whether it is `RECONCILED`, `MANUAL_REVIEW`, or
+`PENDING`.
+
+Chronos retains at most one exact, presentation-safe record in session memory. The record is bound
+to the validated startup scope by a digest of sanitized facts, revalidates aggregate and per-symbol
+status coherence plus any snapshot's environment and masked account, and carries literal
+historical/non-authoritative/nonpersistent/locked flags. A newer attempt clears the prior record
+before work begins; a raised failure or invalid result leaves no stale evidence. Passive reruns
+display the retained record unchanged until another explicit observation or the session ends. It
+is never supplied to a candidate, risk, rehearsal, strategy, or order service, writes no
+reconciliation or audit row, and calls no order method.
+
 Milestone 10 retains one immutable, presentation-only runtime-scope view from the account summary
 and connection status that startup already reads. Chronos first preflights account, capture time,
 environment, connection, and data quality into sanitized facts that make no persistence claim.
@@ -110,10 +126,12 @@ supersedes its terms. A fresh failed attempt retains only bounded, sanitized fee
 reopen the tombstone. Ordinary Streamlit reruns perform no candidate, risk, what-if, or approval
 refresh and issue no related broker call.
 
-The portfolio dashboard still obtains its own read-only reconciliation. Each run double-reads
-account values, positions, open orders, and executions, bounds the broker window and full local
-evidence read with independent clocks, and compares them with one atomic local transaction.
-Unstable or incomplete evidence returns `PENDING`; unresolved exposure returns `MANUAL_REVIEW`.
+The portfolio dashboard obtains its read-only reconciliation only after the operator presses its
+explicit observation button. That one action attempts a bounded double-read of account values,
+positions, open orders, and executions. If stable broker evidence passes, the independently bounded
+window continues through one atomic local transaction. Unstable or incomplete evidence returns
+`PENDING`; unresolved exposure returns `MANUAL_REVIEW`. Page entry and passive reruns perform none
+of those reads.
 
 ## Safety posture
 
@@ -186,9 +204,9 @@ configuration.
 
 ## Current limitations
 
-Chronos is pre-release software. The portfolio page triggers its observation when it renders, and
-explicit symbol workflows refresh reconciliation internally. Reconciliation on startup, reconnect,
-order/fill events, and a periodic schedule is not implemented yet. The concrete local
+Chronos is pre-release software. The portfolio page observes only after its explicit button, while
+explicit symbol workflows refresh reconciliation internally. Automatic reconciliation on startup,
+reconnect, order/fill events, and a periodic schedule is not implemented yet. The concrete local
 reader conservatively marks every persisted cycle, strategy state, draft, fill, or basis symbol
 unresolved, so only locally empty flat symbols can currently publish `RECONCILED`; positions and
 owned working orders remain locked for manual review until complete allocation provenance exists.
@@ -196,7 +214,7 @@ The symbol workspace invokes the resolver only through the guarded candidate ser
 default `safety_cases` demo profile intentionally contains positions, an order, and an execution,
 so it demonstrates the whole-account capital-provenance lock rather than publishing an eligible
 AAPL trade. The supported `empty_account` profile exposes one coherent AAPL path with zero broker
-exposure for the locked M5–M10 journey. Candidate evidence is
+exposure for the locked M5–M11 journey. Candidate evidence is
 not written to a strategy repository because a flat symbol has no legitimate Wheel cycle, and
 creating one solely for an evaluation would manufacture strategy state. The dashboard activates
 only the one-contract short-put expiration preview, deterministic DEMO what-if, and ephemeral DEMO

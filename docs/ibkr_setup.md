@@ -9,6 +9,12 @@ Milestone 7 does not change that network boundary. Its what-if rehearsal require
 `DemoBroker`; `IBKRBroker.preview_order`, submission, modification, and cancellation remain
 unconditional fail-closed stubs and are not exercised by the smoke test.
 
+Milestone 11 also does not expand the IBKR boundary. Opening or passively rerunning the portfolio
+page performs no portfolio request. Its explicit read-only observation uses only the existing
+connection-status, server-time, account-summary, positions, open-orders, and executions reads; it
+does not call preview, submit, modify, cancel, exercise, or global cancel. The retained observation
+is session-only historical display state and is not order authority.
+
 IBKR configuration and error-code details change independently of Chronos. Verify them against
 the [official TWS API documentation](https://ibkrcampus.com/campus/ibkr-api-page/twsapi-doc/).
 
