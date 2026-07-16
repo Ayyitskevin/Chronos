@@ -105,6 +105,22 @@ def derive_wheel_state(evidence: WheelStateInput) -> WheelStateDecision:
     reasons: list[str] = []
     manual_reasons: list[str] = []
 
+    position_key_counts: dict[tuple[str, int], int] = {}
+    for position in positions:
+        if position.account_id != evidence.expected_account_id:
+            continue
+        position_key = (position.account_id, position.contract.con_id)
+        position_key_counts[position_key] = position_key_counts.get(position_key, 0) + 1
+    duplicate_position_keys = frozenset(
+        position_key for position_key, count in position_key_counts.items() if count > 1
+    )
+    if duplicate_position_keys:
+        duplicate_con_ids = sorted(con_id for _, con_id in duplicate_position_keys)
+        manual_reasons.append(
+            "Broker snapshot contains duplicate position rows for the expected account and "
+            f"contract conIds {duplicate_con_ids}; quantities cannot be safely aggregated."
+        )
+
     if any(position.account_id != evidence.expected_account_id for position in positions) or any(
         order.account_id != evidence.expected_account_id for order in orders
     ):
@@ -158,6 +174,8 @@ def derive_wheel_state(evidence: WheelStateInput) -> WheelStateDecision:
     call_coverage_known = True
 
     for position in positions:
+        if (position.account_id, position.contract.con_id) in duplicate_position_keys:
+            continue
         if isinstance(position.contract, UnderlyingContract):
             stock_shares += position.quantity
             stock_key = (position.contract.con_id, position.contract.currency)

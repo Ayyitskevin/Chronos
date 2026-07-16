@@ -63,6 +63,24 @@ class UnderlyingContract(ChronosModel):
     primary_exchange: str | None = None
     currency: str = "USD"
 
+    @field_validator("symbol", "exchange", "currency")
+    @classmethod
+    def normalize_required_code(cls, value: str) -> str:
+        normalized = value.strip().upper()
+        if not normalized:
+            raise ValueError("Instrument code fields must not be blank")
+        return normalized
+
+    @field_validator("primary_exchange")
+    @classmethod
+    def normalize_primary_exchange(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip().upper()
+        if not normalized:
+            raise ValueError("primary_exchange must not be blank when supplied")
+        return normalized
+
 
 class OptionContractSpec(ChronosModel):
     symbol: str
@@ -74,6 +92,14 @@ class OptionContractSpec(ChronosModel):
     currency: str = "USD"
     multiplier: Decimal = Field(gt=0)
     trading_class: str
+
+    @field_validator("symbol", "exchange", "currency", "trading_class")
+    @classmethod
+    def normalize_required_code(cls, value: str) -> str:
+        normalized = value.strip().upper()
+        if not normalized:
+            raise ValueError("Option code fields must not be blank")
+        return normalized
 
 
 class OptionContract(OptionContractSpec):
@@ -89,6 +115,14 @@ class OptionContract(OptionContractSpec):
         ),
     )
     deliverable_verified: bool = False
+
+    @field_validator("local_symbol")
+    @classmethod
+    def normalize_local_symbol(cls, value: str) -> str:
+        normalized = value.strip().upper()
+        if not normalized:
+            raise ValueError("local_symbol must not be blank")
+        return normalized
 
     @model_validator(mode="after")
     def validate_deliverable_evidence(self) -> OptionContract:
@@ -151,6 +185,14 @@ class OptionChainParameters(ChronosModel):
     expirations: tuple[date, ...]
     strikes: tuple[Decimal, ...]
 
+    @field_validator("exchange", "trading_class")
+    @classmethod
+    def normalize_required_code(cls, value: str) -> str:
+        normalized = value.strip().upper()
+        if not normalized:
+            raise ValueError("Option-chain code fields must not be blank")
+        return normalized
+
 
 class StockAvailability(ChronosModel):
     """Unencumbered shares bound to one exact Wheel cycle and stock instrument."""
@@ -191,6 +233,14 @@ class BrokerPosition(ChronosModel):
     average_cost: Decimal
     market_price: Decimal | None = Field(default=None, ge=0)
     unrealized_pnl: Decimal | None = None
+
+    @field_validator("account_id")
+    @classmethod
+    def validate_account_id(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("account_id must not be blank")
+        return normalized
 
 
 class BrokerExecution(ChronosModel):

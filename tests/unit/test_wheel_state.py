@@ -89,6 +89,7 @@ def option_position(
     *,
     multiplier: str = "100",
     account_id: str = ACCOUNT_ID,
+    symbol: str = SYMBOL,
     con_id: int | None = None,
     underlying_con_id: int | None = STOCK_CON_ID,
     currency: str = "USD",
@@ -100,6 +101,7 @@ def option_position(
         contract=option_contract(
             right,
             multiplier=multiplier,
+            symbol=symbol,
             con_id=con_id,
             underlying_con_id=underlying_con_id,
             currency=currency,
@@ -250,7 +252,7 @@ def test_long_stock_threshold_uses_the_qualified_multiplier(
     assert decision.stage is expected_stage
 
 
-def test_fungible_stock_lots_aggregate_for_long_stock() -> None:
+def test_duplicate_stock_position_rows_require_manual_review_without_double_counting() -> None:
     decision = derive(
         positions=(
             stock_position("40"),
@@ -258,8 +260,22 @@ def test_fungible_stock_lots_aggregate_for_long_stock() -> None:
         )
     )
 
-    assert decision.stage is WheelStage.LONG_STOCK
-    assert decision.stock_shares == Decimal("100")
+    assert decision.stage is WheelStage.MANUAL_REVIEW
+    assert decision.stock_shares == Decimal("0")
+    assert any("duplicate position rows" in reason for reason in decision.reasons)
+
+
+def test_duplicate_option_position_rows_require_manual_review_without_double_counting() -> None:
+    decision = derive(
+        positions=(
+            option_position(OptionRight.PUT, "-1"),
+            option_position(OptionRight.PUT, "-1"),
+        )
+    )
+
+    assert decision.stage is WheelStage.MANUAL_REVIEW
+    assert decision.short_put_contracts == Decimal("0")
+    assert any("duplicate position rows" in reason for reason in decision.reasons)
 
 
 def test_multiple_stock_instruments_cannot_create_long_stock() -> None:
@@ -539,7 +555,7 @@ def test_call_coverage_never_pools_nonfungible_stock() -> None:
     assert any("full coverage" in reason for reason in decision.reasons)
 
 
-def test_call_coverage_can_pool_lots_of_the_same_stock_instrument() -> None:
+def test_call_coverage_rejects_duplicate_rows_of_the_same_stock_instrument() -> None:
     decision = derive(
         positions=(
             stock_position("40"),
@@ -548,8 +564,44 @@ def test_call_coverage_can_pool_lots_of_the_same_stock_instrument() -> None:
         )
     )
 
-    assert decision.stage is WheelStage.SHORT_CALL_OPEN
+    assert decision.stage is WheelStage.MANUAL_REVIEW
     assert decision.unencumbered_shares == Decimal("0")
+    assert any("duplicate position rows" in reason for reason in decision.reasons)
+
+
+def test_instrument_and_account_codes_normalize_before_reconciliation() -> None:
+    stock = stock_position(
+        "100",
+        account_id=f"  {ACCOUNT_ID}  ",
+        symbol=" test ",
+        currency=" usd ",
+    )
+    call = option_position(
+        OptionRight.CALL,
+        "-1",
+        account_id=f"  {ACCOUNT_ID}  ",
+        symbol=" test ",
+        currency=" usd ",
+    )
+
+    decision = derive(
+        positions=(stock, call),
+        expected_account_id=f"  {ACCOUNT_ID}  ",
+    )
+
+    assert stock.account_id == ACCOUNT_ID
+    assert stock.contract.symbol == SYMBOL
+    assert stock.contract.currency == "USD"
+    assert call.account_id == ACCOUNT_ID
+    assert call.contract.symbol == SYMBOL
+    assert call.contract.currency == "USD"
+    assert call.contract.trading_class == SYMBOL
+    assert decision.stage is WheelStage.SHORT_CALL_OPEN
+
+
+def test_broker_position_rejects_a_blank_account_id() -> None:
+    with pytest.raises(ValueError, match="account_id must not be blank"):
+        stock_position("100", account_id="   ")
 
 
 def test_buy_to_close_against_an_active_short_option_is_closing() -> None:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from collections import Counter
 from collections.abc import Mapping, Sequence
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import select
@@ -13,10 +14,13 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from chronos.domain.enums import (
     BasisEntryType,
+    OrderIntent,
+    OrderLifecycle,
     OrderSide,
     ReconciliationStatus,
     SecurityType,
 )
+from chronos.domain.models import BrokerOrderIdentity
 from chronos.persistence.schema import (
     ApplicationEventRow,
     BasisEntryRow,
@@ -24,11 +28,14 @@ from chronos.persistence.schema import (
     CommissionRow,
     DatabaseScopeRow,
     FillRow,
+    OrderDraftRow,
     RejectedCandidateReasonRow,
+    SubmittedOrderRow,
     WheelCycleRow,
 )
 from chronos.strategy.basis import BasisLedgerEntry
 from chronos.strategy.strike_resolver import ResolverContext, StrikeResolution
+from chronos.utils.identifiers import account_fingerprint
 
 _RAW_ACCOUNT_ID_PATTERN = re.compile(r"\bD?[UF]\d{4,}\b", flags=re.IGNORECASE)
 _RAW_ACCOUNT_EVENT_KEYS = frozenset(
@@ -43,6 +50,20 @@ _RAW_ACCOUNT_EVENT_KEYS = frozenset(
     }
 )
 type _CandidateRejectionEvidence = tuple[str, str, str]
+
+_ACTIVE_SUBMITTED_ORDER_LIFECYCLES = frozenset(
+    {
+        OrderLifecycle.SUBMITTED,
+        OrderLifecycle.PARTIALLY_FILLED,
+    }
+)
+_TERMINAL_SUBMITTED_ORDER_LIFECYCLES = frozenset(
+    {
+        OrderLifecycle.FILLED,
+        OrderLifecycle.CANCELLED,
+        OrderLifecycle.REJECTED,
+    }
+)
 
 
 class ApplicationEventRepository:
@@ -229,6 +250,129 @@ class CandidateEvaluationRepository:
                         )
                     )
             return True
+
+
+class OrderOwnershipRepository:
+    """Read exact active Chronos order identities from persisted evidence."""
+
+    def __init__(self, sessions: sessionmaker[Session]) -> None:
+        self._sessions = sessions
+
+    def active_identities(self, current_account_id: str) -> frozenset[BrokerOrderIdentity]:
+        """Return active identities only when the caller matches the bound account scope."""
+
+        current_fingerprint = account_fingerprint(current_account_id)
+        with self._sessions() as session:
+            scope = _require_scope(session)
+            if current_fingerprint != scope.account_fingerprint:
+                raise ValueError(
+                    "Current broker account does not match the bound pseudonymous database scope"
+                )
+
+            statement = select(SubmittedOrderRow, OrderDraftRow).outerjoin(
+                OrderDraftRow,
+                SubmittedOrderRow.correlation_id == OrderDraftRow.correlation_id,
+            )
+            identities: set[BrokerOrderIdentity] = set()
+            for submitted, draft in session.execute(statement):
+                if draft is None:
+                    raise ValueError("Persisted submitted order has no draft owner")
+                lifecycle = _submitted_order_lifecycle(submitted.lifecycle)
+                identity = _persisted_order_identity(
+                    session,
+                    current_account_id=current_account_id,
+                    submitted_lifecycle=lifecycle,
+                    submitted=submitted,
+                    draft=draft,
+                )
+                if lifecycle in _ACTIVE_SUBMITTED_ORDER_LIFECYCLES:
+                    identities.add(identity)
+            return frozenset(identities)
+
+
+def _submitted_order_lifecycle(value: str) -> OrderLifecycle:
+    try:
+        lifecycle = OrderLifecycle(value)
+    except (TypeError, ValueError):
+        raise ValueError("Persisted submitted order has an unknown lifecycle") from None
+    if lifecycle not in (_ACTIVE_SUBMITTED_ORDER_LIFECYCLES | _TERMINAL_SUBMITTED_ORDER_LIFECYCLES):
+        raise ValueError("Persisted submitted order has an invalid pre-submission lifecycle")
+    return lifecycle
+
+
+def _persisted_order_identity(
+    session: Session,
+    *,
+    current_account_id: str,
+    submitted_lifecycle: OrderLifecycle,
+    submitted: SubmittedOrderRow,
+    draft: OrderDraftRow,
+) -> BrokerOrderIdentity:
+    try:
+        draft_lifecycle = OrderLifecycle(draft.lifecycle)
+    except (TypeError, ValueError):
+        raise ValueError("Persisted order draft has an unknown lifecycle") from None
+    if draft_lifecycle is not submitted_lifecycle:
+        raise ValueError("Persisted order draft and submitted lifecycles do not agree")
+
+    try:
+        intent = OrderIntent(draft.intent)
+    except (TypeError, ValueError):
+        raise ValueError("Persisted order draft has an unknown intent") from None
+    side = _side_for_order_intent(intent)
+
+    cycle_id = draft.wheel_cycle_id
+    if not isinstance(cycle_id, str) or not cycle_id.strip():
+        raise ValueError("Persisted order draft has no Wheel cycle owner")
+    cycle = session.get(WheelCycleRow, cycle_id)
+    if cycle is None:
+        raise ValueError("Persisted order draft has no valid Wheel cycle owner")
+    if cycle.symbol != draft.symbol:
+        raise ValueError("Persisted order draft symbol does not match its Wheel cycle owner")
+    if submitted_lifecycle in _ACTIVE_SUBMITTED_ORDER_LIFECYCLES and cycle.status != "OPEN":
+        raise ValueError("Persisted active order does not belong to an open Wheel cycle")
+
+    normalized_account_id = current_account_id.strip()
+    masked_account_id = draft.account_id_masked
+    if (
+        not isinstance(masked_account_id, str)
+        or not masked_account_id.strip()
+        or masked_account_id.strip() == normalized_account_id
+    ):
+        raise ValueError("Persisted order draft has invalid masked account ownership")
+    if not isinstance(draft.symbol, str) or draft.symbol != draft.symbol.strip().upper():
+        raise ValueError("Persisted order draft has a malformed symbol")
+    if (
+        not isinstance(submitted.order_ref, str)
+        or submitted.order_ref != submitted.order_ref.strip()
+    ):
+        raise ValueError("Persisted submitted order has a malformed order reference")
+    if not submitted.order_ref:
+        raise ValueError("Persisted submitted order has a malformed order reference")
+
+    try:
+        quantity = Decimal(draft.quantity)
+        return BrokerOrderIdentity(
+            account_id=current_account_id,
+            client_id=submitted.client_id,
+            broker_order_id=submitted.broker_order_id,
+            permanent_id=submitted.permanent_id,
+            order_ref=submitted.order_ref,
+            symbol=draft.symbol,
+            contract_id=draft.contract_id,
+            side=side,
+            quantity=quantity,
+        )
+    except (TypeError, ValueError):
+        raise ValueError("Persisted order ownership evidence is malformed") from None
+
+
+def _side_for_order_intent(intent: OrderIntent) -> OrderSide:
+    if intent in {OrderIntent.OPEN_SHORT_PUT, OrderIntent.OPEN_COVERED_CALL}:
+        return OrderSide.SELL
+    if intent is OrderIntent.CLOSE_SHORT_OPTION:
+        return OrderSide.BUY
+    raise ValueError("Persisted order draft has an unsupported intent")
 
 
 def _basis_row_to_model(row: BasisEntryRow) -> BasisLedgerEntry:
