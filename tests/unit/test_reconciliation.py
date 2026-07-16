@@ -30,6 +30,7 @@ from chronos.domain.models import (
 from chronos.services.reconciliation import (
     LocalReconciliationEvidence,
     ReconciliationCoordinator,
+    ReconciliationResult,
 )
 
 _T = TypeVar("_T")
@@ -258,6 +259,7 @@ def _coordinator(
     broker: _ScriptedBroker,
     evidence: LocalReconciliationEvidence | None = None,
     *,
+    allowlisted_symbols: tuple[str, ...] = ("AAPL",),
     failure: Exception | None = None,
     monotonic: Any | None = None,
     max_observation_seconds: float = 30.0,
@@ -272,7 +274,7 @@ def _coordinator(
         ReconciliationCoordinator(
             runner,
             reader,
-            ("AAPL",),
+            allowlisted_symbols,
             max_observation_seconds=max_observation_seconds,
             **({"monotonic": monotonic} if monotonic is not None else {}),
         ),
@@ -307,6 +309,177 @@ def test_flat_reconciliation_uses_one_manager_call_and_double_reads() -> None:
     assert result.snapshot is not None
     assert result.snapshot.account.masked_account_id != ACCOUNT_ID
     assert ACCOUNT_ID not in result.model_dump_json()
+
+
+@pytest.mark.parametrize(
+    (
+        "case",
+        "expected_status",
+        "expected_snapshot",
+        "expected_symbol_count",
+        "expected_pending",
+        "expected_manual_review",
+        "expected_reason_count",
+        "expected_local_reads",
+    ),
+    (
+        ("reconciled", ReconciliationStatus.RECONCILED, True, 1, 0, 0, 0, 1),
+        ("manual_review", ReconciliationStatus.MANUAL_REVIEW, True, 2, 0, 1, 1, 1),
+        ("broker_failure", ReconciliationStatus.PENDING, False, 1, 1, 0, 1, 0),
+        ("broker_evidence_rejected", ReconciliationStatus.PENDING, False, 1, 1, 0, 1, 0),
+        ("local_failure", ReconciliationStatus.PENDING, True, 1, 1, 0, 1, 1),
+        ("elapsed_window", ReconciliationStatus.PENDING, False, 1, 1, 0, 1, 1),
+    ),
+)
+def test_each_reconciliation_exit_emits_one_aggregate_terminal_event(
+    case: str,
+    expected_status: ReconciliationStatus,
+    expected_snapshot: bool,
+    expected_symbol_count: int,
+    expected_pending: int,
+    expected_manual_review: int,
+    expected_reason_count: int,
+    expected_local_reads: int,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    broker = _ScriptedBroker()
+    evidence: LocalReconciliationEvidence | None = None
+    failure: Exception | None = None
+    monotonic: Any | None = None
+    allowlisted_symbols = ("AAPL",)
+    if case == "manual_review":
+        allowlisted_symbols = ("AAPL", "MSFT")
+        positions = (_stock(),)
+        broker = _ScriptedBroker(positions=(positions, positions))
+        evidence = LocalReconciliationEvidence(
+            complete=True,
+            unresolved_symbols=frozenset({"AAPL"}),
+        )
+    elif case == "broker_failure":
+        broker = _ScriptedBroker(
+            server_time_failure=RuntimeError(f"disconnected from {ACCOUNT_ID}"),
+        )
+    elif case == "broker_evidence_rejected":
+        broker = _ScriptedBroker(positions=((), (_stock(),)))
+    elif case == "local_failure":
+        failure = RuntimeError(f"database failed for {ACCOUNT_ID}")
+    elif case == "elapsed_window":
+        monotonic_values = iter((100.0, 101.0, 131.0))
+
+        def elapsed_monotonic() -> float:
+            return next(monotonic_values)
+
+        monotonic = elapsed_monotonic
+
+    coordinator, _, reader = _coordinator(
+        broker,
+        evidence,
+        allowlisted_symbols=allowlisted_symbols,
+        failure=failure,
+        monotonic=monotonic,
+        max_observation_seconds=30.0,
+    )
+    reconciliation_logger = logging.getLogger("chronos.services.reconciliation")
+    previous_propagate = reconciliation_logger.propagate
+    reconciliation_logger.propagate = False
+    reconciliation_logger.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(logging.INFO, logger="chronos.services.reconciliation"):
+            result = coordinator.reconcile()
+    finally:
+        reconciliation_logger.removeHandler(caplog.handler)
+        reconciliation_logger.propagate = previous_propagate
+
+    terminal_records = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "reconciliation_completed"
+    ]
+    assert len(terminal_records) == 1
+    terminal = terminal_records[0]
+    assert terminal.levelno == logging.INFO
+    assert terminal.reconciliation_status == expected_status.value
+    assert terminal.snapshot_published is expected_snapshot
+    assert terminal.symbol_count == expected_symbol_count
+    assert terminal.pending_symbol_count == expected_pending
+    assert terminal.manual_review_symbol_count == expected_manual_review
+    assert terminal.result_reason_count == expected_reason_count
+    assert result.status is expected_status
+    assert (result.snapshot is not None) is expected_snapshot
+    assert len(reader.calls) == expected_local_reads
+    assert ACCOUNT_ID not in terminal.getMessage()
+    assert all(reason not in terminal.getMessage() for reason in result.reasons)
+    for forbidden_field in (
+        "account_id",
+        "net_liquidation",
+        "total_cash",
+        "buying_power",
+        "reasons",
+        "symbols",
+    ):
+        assert not hasattr(terminal, forbidden_field)
+
+
+def test_terminal_diagnostic_failure_returns_the_locked_result_without_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RaisingHandler(logging.Handler):
+        def __init__(self) -> None:
+            super().__init__()
+            self.emit_calls = 0
+
+        def emit(self, record: logging.LogRecord) -> None:
+            self.emit_calls += 1
+            raise RuntimeError("diagnostic sink unavailable")
+
+    broker = _ScriptedBroker()
+    coordinator, runner, reader = _coordinator(broker)
+    original_derive = coordinator._derive_result
+    derived_results: list[ReconciliationResult] = []
+
+    def capture_derived_result(*args: Any, **kwargs: Any) -> ReconciliationResult:
+        result = original_derive(*args, **kwargs)
+        derived_results.append(result)
+        return result
+
+    monkeypatch.setattr(coordinator, "_derive_result", capture_derived_result)
+    handler = RaisingHandler()
+    reconciliation_logger = logging.getLogger("chronos.services.reconciliation")
+    previous_level = reconciliation_logger.level
+    previous_propagate = reconciliation_logger.propagate
+    previous_disabled = reconciliation_logger.disabled
+    previous_handlers = tuple(reconciliation_logger.handlers)
+    for existing_handler in previous_handlers:
+        reconciliation_logger.removeHandler(existing_handler)
+    reconciliation_logger.setLevel(logging.INFO)
+    reconciliation_logger.propagate = False
+    reconciliation_logger.disabled = False
+    reconciliation_logger.addHandler(handler)
+    try:
+        result = coordinator.reconcile()
+    finally:
+        reconciliation_logger.removeHandler(handler)
+        for existing_handler in previous_handlers:
+            reconciliation_logger.addHandler(existing_handler)
+        reconciliation_logger.setLevel(previous_level)
+        reconciliation_logger.propagate = previous_propagate
+        reconciliation_logger.disabled = previous_disabled
+
+    assert derived_results == [result]
+    assert result is derived_results[0]
+    assert result.status is ReconciliationStatus.RECONCILED
+    assert handler.emit_calls == 1
+    assert runner.run_calls == 1
+    assert runner.timeouts == [30.0]
+    assert reader.calls == [ACCOUNT_ID]
+    assert broker.calls == {
+        "status": 2,
+        "time": 2,
+        "account": 2,
+        "positions": 2,
+        "orders": 2,
+        "executions": 2,
+    }
 
 
 @pytest.mark.parametrize(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Coroutine, Iterable
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -199,8 +200,10 @@ class ReconciliationCoordinator:
                 "Broker reconciliation observation failed; evidence remains locked",
                 extra={"event": "reconciliation_broker_observation_failed"},
             )
-            return self._pending_without_snapshot(
-                "Broker evidence could not be captured; reconciliation remains locked."
+            return self._complete(
+                self._pending_without_snapshot(
+                    "Broker evidence could not be captured; reconciliation remains locked."
+                )
             )
 
         broker_reasons = _observation_reasons(
@@ -214,7 +217,7 @@ class ReconciliationCoordinator:
                 "Broker reconciliation evidence was rejected; evidence remains locked",
                 extra={"event": "reconciliation_broker_evidence_rejected"},
             )
-            return self._pending_without_snapshot(*broker_reasons)
+            return self._complete(self._pending_without_snapshot(*broker_reasons))
 
         local_evidence: LocalReconciliationEvidence | None = None
         local_read_failed = False
@@ -241,13 +244,40 @@ class ReconciliationCoordinator:
                 "Reconciliation evidence window expired; evidence remains locked",
                 extra={"event": "reconciliation_evidence_window_expired"},
             )
-            return self._pending_without_snapshot(elapsed_reason)
-        return self._derive_result(
-            observation,
-            elapsed_seconds=evidence_elapsed_seconds,
-            local_evidence=local_evidence,
-            local_read_failed=local_read_failed,
+            return self._complete(self._pending_without_snapshot(elapsed_reason))
+        return self._complete(
+            self._derive_result(
+                observation,
+                elapsed_seconds=evidence_elapsed_seconds,
+                local_evidence=local_evidence,
+                local_read_failed=local_read_failed,
+            )
         )
+
+    @staticmethod
+    def _complete(result: ReconciliationResult) -> ReconciliationResult:
+        """Emit one aggregate-only terminal event without changing the result."""
+
+        # Non-authoritative diagnostics must never replace a locked reconciliation result.
+        with suppress(Exception):
+            _LOGGER.info(
+                "Reconciliation completed with opening actions locked",
+                extra={
+                    "event": "reconciliation_completed",
+                    "reconciliation_status": result.status.value,
+                    "snapshot_published": result.snapshot is not None,
+                    "symbol_count": len(result.symbols),
+                    "pending_symbol_count": sum(
+                        symbol.status is ReconciliationStatus.PENDING for symbol in result.symbols
+                    ),
+                    "manual_review_symbol_count": sum(
+                        symbol.status is ReconciliationStatus.MANUAL_REVIEW
+                        for symbol in result.symbols
+                    ),
+                    "result_reason_count": len(result.reasons),
+                },
+            )
+        return result
 
     async def _observe_broker(self) -> _BrokerObservation:
         status_start = await self._broker.connection_status()

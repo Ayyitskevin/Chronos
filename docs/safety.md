@@ -160,7 +160,11 @@ the UI and logging filters. The ledger stores a deterministic pseudonymous finge
 the raw account ID; it is a scope check, not encryption or anonymization. SQLite and rotating log
 files are restricted to the local owner. Broker errors crossing the UI boundary are reduced to a
 generic operator message and an exception-type event; their raw text is written to neither the UI
-nor the application log.
+nor the application log. Reconciliation terminal events are aggregate-only: they include status,
+snapshot presence, symbol-status counts, and a top-level result-reason count, never reason prose,
+symbols, account data, balances, positions, contracts, or order fields. An attempted diagnostic
+that fails is not retried and cannot replace the locked result. It does not trigger another read,
+persist state, or unlock an action.
 
 ## Human responsibility
 

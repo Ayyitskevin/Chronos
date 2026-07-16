@@ -55,7 +55,11 @@ Connection changes, exceptional market-data lifecycle events, reconciliation cap
 failures, successfully completed resolver outcome counts, risk-preview outcomes, and sanitized DEMO
 what-if outcomes are logged to the console and a rotating local file. Approval-rehearsal outcomes
 remain observable in their presentation-safe UI result. Locked early returns do not log raw broker
-details.
+details. Every returned reconciliation result also attempts exactly one terminal event containing
+only its returned status, snapshot-presence flag, aggregate symbol-status counts, and top-level
+result-reason count. That event contains no symbols, reason text, account data, financial values,
+contracts, or order state. A diagnostic-handler failure is not retried and cannot replace the
+already-derived locked result.
 Candidate, guardrail, and basis repositories retain evidence only for legitimate persisted Wheel
 cycles. Read-only reconciliation and flat-symbol candidate evaluation return in-memory
 presentation models and deliberately do not manufacture cycles or write audit rows yet.

@@ -13,6 +13,14 @@ from pathlib import Path
 from typing import Any
 
 _ACCOUNT_PATTERN = re.compile(r"\b(?:DU|U)\d{4,}\b", flags=re.IGNORECASE)
+_RECONCILIATION_STATUSES = frozenset({"PENDING", "RECONCILED", "MANUAL_REVIEW"})
+_RECONCILIATION_COUNT_FIELDS = (
+    "symbol_count",
+    "pending_symbol_count",
+    "manual_review_symbol_count",
+    "result_reason_count",
+)
+_MAX_AGGREGATE_DIAGNOSTIC_COUNT = 1_000_000
 
 
 def _secure_existing_log(path: Path) -> None:
@@ -117,13 +125,23 @@ class StructuredJsonFormatter(logging.Formatter):
             "rejected_count",
             "outcome",
             "wheel_stage",
-            "reconciliation_status",
             "guardrail",
             "passed",
             "basis_entry_type",
         ):
             if (value := getattr(record, name, None)) is not None:
                 payload[name] = value
+        if getattr(record, "event", None) == "reconciliation_completed":
+            status = getattr(record, "reconciliation_status", None)
+            if type(status) is str and status in _RECONCILIATION_STATUSES:
+                payload["reconciliation_status"] = status
+            snapshot_published = getattr(record, "snapshot_published", None)
+            if type(snapshot_published) is bool:
+                payload["snapshot_published"] = snapshot_published
+            for name in _RECONCILIATION_COUNT_FIELDS:
+                value = getattr(record, name, None)
+                if type(value) is int and 0 <= value <= _MAX_AGGREGATE_DIAGNOSTIC_COUNT:
+                    payload[name] = value
         if record.exc_info:
             payload["exception"] = mask_account_identifiers(self.formatException(record.exc_info))
         return json.dumps(payload, default=str, separators=(",", ":"))

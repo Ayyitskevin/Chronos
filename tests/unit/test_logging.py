@@ -83,6 +83,81 @@ def test_structured_formatter_preserves_candidate_summary() -> None:
     assert payload["outcome"] == "ELIGIBLE"
 
 
+def test_structured_formatter_preserves_aggregate_reconciliation_summary() -> None:
+    record = logging.LogRecord(
+        name="chronos.services.reconciliation",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=1,
+        msg="Reconciliation completed with opening actions locked",
+        args=(),
+        exc_info=None,
+    )
+    record.event = "reconciliation_completed"
+    record.reconciliation_status = "MANUAL_REVIEW"
+    record.snapshot_published = True
+    record.symbol_count = 3
+    record.pending_symbol_count = 0
+    record.manual_review_symbol_count = 1
+    record.result_reason_count = 1
+    record.raw_reason = "Account DU1234567 has a sensitive balance of 250000."
+
+    payload = json.loads(StructuredJsonFormatter().format(record))
+
+    assert payload == {
+        "timestamp": payload["timestamp"],
+        "level": "INFO",
+        "logger": "chronos.services.reconciliation",
+        "message": "Reconciliation completed with opening actions locked",
+        "event": "reconciliation_completed",
+        "reconciliation_status": "MANUAL_REVIEW",
+        "snapshot_published": True,
+        "symbol_count": 3,
+        "pending_symbol_count": 0,
+        "manual_review_symbol_count": 1,
+        "result_reason_count": 1,
+    }
+    assert "raw_reason" not in payload
+    assert "DU1234567" not in json.dumps(payload)
+    assert "250000" not in json.dumps(payload)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("reconciliation_status", "Account DU1234567 balance 250000"),
+        ("snapshot_published", "Account DU1234567 balance 250000"),
+        ("symbol_count", "Account DU1234567 balance 250000"),
+        ("pending_symbol_count", True),
+        ("manual_review_symbol_count", -1),
+        ("result_reason_count", "Account DU1234567 balance 250000"),
+        ("symbol_count", 1_000_001),
+    ),
+)
+def test_structured_formatter_rejects_poisoned_reconciliation_fields(
+    field: str,
+    value: object,
+) -> None:
+    record = logging.LogRecord(
+        name="chronos.services.reconciliation",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=1,
+        msg="Reconciliation completed with opening actions locked",
+        args=(),
+        exc_info=None,
+    )
+    record.event = "reconciliation_completed"
+    setattr(record, field, value)
+
+    payload = json.loads(StructuredJsonFormatter().format(record))
+    serialized = json.dumps(payload)
+
+    assert field not in payload
+    assert "DU1234567" not in serialized
+    assert "250000" not in serialized
+
+
 def test_structured_formatter_preserves_safe_error_type_without_raw_detail() -> None:
     record = logging.LogRecord(
         name="chronos.ui.dashboard",

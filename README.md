@@ -10,6 +10,15 @@ substantial losses. Paper fills do not prove live execution quality.
 
 ## Current milestone
 
+Reconciliation terminal diagnostics attempt exactly one structured completion event for every
+returned coordinator result, including broker-capture rejection, unstable evidence, expired
+windows, local read failure, `PENDING`, `MANUAL_REVIEW`, and `RECONCILED` outcomes. The event carries
+only the returned status, whether a snapshot was published, aggregate symbol-status counts, and the
+top-level result-reason count. It contains no symbol names, reason prose, account data, balances,
+positions, contracts, or order fields. A diagnostic-handler failure is not retried and cannot
+replace the locked result. This is local observability only: results, broker/local read counts,
+persistence, and action locks are unchanged.
+
 Milestone 10 retains one immutable, presentation-only runtime-scope view from the account summary
 and connection status that startup already reads. Chronos first preflights account, capture time,
 environment, connection, and data quality into sanitized facts that make no persistence claim.
