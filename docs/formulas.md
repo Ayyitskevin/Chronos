@@ -55,6 +55,25 @@ cash-secured allocation. They are DEMO broker outputs, not ingredients in the ex
 formula and not proof that an order is affordable or authorized. The receipt is neither persisted
 nor an order-lifecycle transition; its terminal rehearsal status is `WHAT_IF_PREVIEWED`.
 
+### Ephemeral DEMO approval rehearsal
+
+Milestone 8 introduces no new payoff, capital, or margin formula. The operator must affirm the
+fresh receipt's exact one-contract terms, including:
+
+- Quantity: `q = 1`
+- Exact option contract ID
+- Exact limit credit: `p`
+- Gross assignment obligation: `k * d * 1`
+
+The typed canonical symbol and explicit risk acknowledgement are additional approval-rehearsal
+inputs, not financial variables. The service treats every input as a scalar hint, reruns the full
+Milestone 7 boundary, and requires exact agreement with the refreshed result. The resulting
+`APPROVAL_REHEARSED` status records only an ephemeral DEMO rehearsal; it is not
+`OrderLifecycle.USER_CONFIRMED`, an authorization, or a lifecycle transition. It changes none of
+the receipt math and remains `STOPPED` and `LOCKED`. Only the affirmed scalar contract terms
+cross the Milestone 8 result boundary; the refreshed payoff, margin output, full option contract,
+and all parent results are discarded after validation.
+
 ## Covered call
 
 For stock quantity covered `d * q`:

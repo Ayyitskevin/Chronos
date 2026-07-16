@@ -10,23 +10,41 @@ substantial losses. Paper fills do not prove live execution quality.
 
 ## Current milestone
 
-Milestone 7 adds a deterministic short-put order what-if rehearsal after the locked expiration-risk
-boundary. It is available only when both configuration and the concrete adapter are DEMO. The
-operator must first obtain a current `READY` risk result, then enter an explicit one-contract limit
-credit inside the fresh bid/ask and aligned to the contract tick. Pressing **Refresh evidence & run
-locked DEMO what-if** repeats the complete Milestone 6 risk refresh; no session-memory candidate or
-risk object is accepted as authority.
+Milestone 8 adds a fresh-evidence, ephemeral DEMO approval rehearsal after the locked what-if
+boundary. It is a fourth explicit operator action, available only after a current Milestone 7
+receipt. The operator must type the exact canonical symbol and quantity `1`, then affirm the exact
+option contract ID, limit credit, and gross assignment obligation shown by the current receipt,
+together with a risk acknowledgement. Pressing **Refresh evidence & rehearse locked DEMO
+approval** supplies only those scalar hints to the service; the service reruns the complete
+Milestone 7 boundary rather than treating any candidate, risk, what-if, or UI session object as
+authority.
+
+A successful result stops at the rehearsal-specific status `APPROVAL_REHEARSED`. It is explicitly
+not `OrderLifecycle.USER_CONFIRMED`, confirmation authority, or permission to submit. The workspace
+continues to display `Progression: STOPPED` and keeps actions `LOCKED`. On success, the workspace
+discards the candidate, risk, what-if, and typed-approval widgets and retains only a strict scalar
+receipt in process memory. That receipt carries no full option contract, broker descriptive text,
+or parent result. It persists no evidence, creates no Wheel cycle, draft, guardrail decision, or
+lifecycle transition, and calls no submit, modify, or cancel method. There is no IBKR approval path.
+Live trading remains hard-disabled.
+
+Milestone 7 established the deterministic short-put order what-if rehearsal. It is available only
+when both configuration and the concrete adapter are DEMO. The operator first obtains a current
+`READY` risk result, then enters an explicit one-contract limit credit inside the fresh bid/ask and
+aligned to the contract tick. Pressing **Refresh evidence & run locked DEMO what-if** repeats the
+complete Milestone 6 risk refresh; no session-memory candidate or risk object is accepted as
+authority.
 
 One serialized broker window then double-reads connection, account, positions, open orders,
 executions, and server time around exactly one deterministic `preview_order` call. Chronos requires
 the account and exposure to remain identical, the echoed non-transmitting request to match exactly,
-and the commission, margin, and timestamp evidence to be complete and finite. The presentation-safe
-receipt stops at `WHAT_IF_PREVIEWED`, replaces broker text with a generic warning count, and uses the
-broker commission estimate to recompute the exact-limit expiration payoff. It contains no raw
-account ID or broker request. No candidate, risk result, receipt, Wheel cycle, order draft, or
-guardrail decision is persisted; there is no confirmation or submit control. The IBKR adapter's
-order methods and every confirmation, submission, modification, or cancellation path exposed by M7
-remain unconditionally locked.
+and the commission, margin, and timestamp evidence to be complete and finite. The
+presentation-safe receipt stops at `WHAT_IF_PREVIEWED`, replaces broker text with a generic warning
+count, and uses the broker commission estimate to recompute the exact-limit expiration payoff. It
+contains no raw account ID or broker request. No candidate, risk result, receipt, Wheel cycle,
+order draft, or guardrail decision is persisted; there is no confirmation or submit control. The
+IBKR adapter's order methods and every submission, modification, or cancellation path remain
+unconditionally locked.
 
 Milestone 6 established the locked short-put expiration-risk preview. It freshly revalidates the
 selected contract, verified deliverable, chain routing, currency, empty reconciliation scope,
@@ -51,11 +69,14 @@ on symbol change or a raised refresh error, and never feeds it back into a servi
 Configuration defaults to at most 6 expirations by 12 strikes; hard ingress limits allow no more
 than 8 expirations, 20 strikes per expiration, or 80 requested option contracts in total.
 
-The optional risk and DEMO what-if results are presentation-safe and historical. Changing the
-symbol, selected contract, commission assumption, limit, or parent evidence generation clears the
-dependent result. A fresh attempt clears older child evidence before work begins, so a failed newer
-request cannot leave an old payoff or receipt looking current. Ordinary Streamlit reruns perform no
-candidate, risk, or what-if refresh.
+The optional risk and DEMO what-if results are presentation-safe historical evidence. Changing any
+parent input or evidence generation clears every dependent child; changing the selected contract,
+commission assumption, or limit also clears its descendants. A successful approval rehearsal
+replaces that lineage and its typed widgets with only the standalone scalar receipt described
+above. Starting a new ancestor attempt or changing the workspace symbol clears that receipt. A
+fresh failed attempt retains only bounded, sanitized feedback, so older evidence cannot continue
+looking current. Ordinary Streamlit reruns perform no candidate, risk, what-if, or approval refresh
+and issue no related broker call.
 
 The portfolio dashboard still obtains its own read-only reconciliation. Each run double-reads
 account values, positions, open orders, and executions, bounds the broker window and full local
@@ -97,9 +118,10 @@ Or use:
 ```
 
 The default `DEMO_PROFILE=safety_cases` shows a deliberately conflicted portfolio and keeps the
-opening journey locked. To exercise the complete candidate → risk → what-if decision-support path
-against an explicitly empty local fixture, set `DEMO_PROFILE=empty_account` in the untracked `.env`
-and restart Chronos. This changes only deterministic fixtures; submission remains impossible.
+opening journey locked. To exercise the complete candidate → risk → what-if →
+approval-rehearsal decision-support path against an explicitly empty local fixture, set
+`DEMO_PROFILE=empty_account` in the untracked `.env` and restart Chronos. This changes only
+deterministic fixtures; submission remains impossible.
 
 ## Wheel state model
 
@@ -141,12 +163,13 @@ The symbol workspace invokes the resolver only through the guarded candidate ser
 default `safety_cases` demo profile intentionally contains positions, an order, and an execution,
 so it demonstrates the whole-account capital-provenance lock rather than publishing an eligible
 AAPL trade. The supported `empty_account` profile exposes one coherent AAPL path with zero broker
-exposure for the locked M5–M7 journey. Candidate evidence is
+exposure for the locked M5–M8 journey. Candidate evidence is
 not written to a strategy repository because a flat symbol has no legitimate Wheel cycle, and
 creating one solely for an evaluation would manufacture strategy state. The dashboard activates
-only the one-contract short-put expiration preview and deterministic DEMO what-if rehearsal;
-covered-call scenarios, strategy basis, arbitrary quantities, real-broker margin, and IBKR order
-what-if are not wired. Stock allocation valuation
+only the one-contract short-put expiration preview, deterministic DEMO what-if, and ephemeral DEMO
+approval rehearsal; covered-call scenarios remain blocked on complete stock-allocation provenance,
+and strategy basis, arbitrary quantities, real-broker margin, IBKR order what-if, and IBKR approval
+are not wired. Stock allocation valuation
 still requires a current underlying quote at the service layer. Dividend, borrow, and
 corporate-action inputs are optional because the broker port does not provide them yet. The IBKR
 adapter records the exact underlying contract ID but does not claim that multiplier metadata

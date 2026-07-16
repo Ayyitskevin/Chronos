@@ -31,8 +31,8 @@ not refresh the option universe.
 
 The deterministic adapter has two explicit profiles. `safety_cases` remains the default conflicted
 portfolio for reconciliation locks; `empty_account` supplies one honest AAPL path with no positions,
-orders, or executions so the locked candidate, risk, and what-if journey is reachable without test
-mutation. Neither profile can submit an order.
+orders, or executions so the locked candidate, risk, what-if, and approval-rehearsal journey is
+reachable without test mutation. Neither profile can submit an order.
 
 ## Four operational invariants
 
@@ -41,16 +41,17 @@ mutation. Neither profile can submit an order.
 - Brokerage truth: broker positions, open orders, fills, executions, and account values.
 - Chronos truth: wheel-cycle links, candidate evidence, guardrail evidence, notes, and the
   explicitly labeled strategy-adjusted basis.
-- UI state: navigation plus at most one historical, presentation-safe candidate result, matching
-  risk attempt, and matching DEMO what-if attempt. None determines the Wheel stage or authorizes an
-  action.
+- UI state: navigation plus either one historical, presentation-safe candidate lineage with its
+  matching risk and DEMO what-if attempts, or one standalone scalar DEMO approval-rehearsal
+  receipt after success. None determines the Wheel stage or authorizes an action.
 
 ### Where feedback lives
 
 Connection changes, exceptional market-data lifecycle events, reconciliation capture/read
 failures, successfully completed resolver outcome counts, risk-preview outcomes, and sanitized DEMO
-what-if outcomes are logged to the console and a rotating local file. Locked early returns remain
-observable in their UI result without logging raw broker details.
+what-if outcomes are logged to the console and a rotating local file. Approval-rehearsal outcomes
+remain observable in their presentation-safe UI result. Locked early returns do not log raw broker
+details.
 Candidate, guardrail, and basis repositories retain evidence only for legitimate persisted Wheel
 cycles. Read-only reconciliation and flat-symbol candidate evaluation return in-memory
 presentation models and deliberately do not manufacture cycles or write audit rows yet.
@@ -88,6 +89,15 @@ service accepts only the selected ID, commission assumption, and exact limit, th
 reruns the risk boundary. A limit or parent-generation change invalidates the stored receipt;
 ordinary reruns make no preview request.
 
+DEMO approval rehearsal starts only after a fourth explicit action and a current
+`WHAT_IF_PREVIEWED` receipt. The operator must type the exact canonical symbol and strict quantity
+one, affirm the exact contract ID, limit, and gross assignment obligation, and make an explicit risk
+acknowledgement. The service accepts those values only as scalar hints and reruns the complete
+what-if boundary. On success, the UI discards the parent lineage and typed widgets and retains only
+a standalone scalar receipt; a new ancestor attempt or workspace-symbol change clears it. Failed
+attempts retain only sanitized feedback. Ordinary reruns perform no approval work and make no
+related broker request.
+
 ## Package boundaries
 
 - `domain`: immutable vocabulary and broker-neutral models.
@@ -95,7 +105,8 @@ ordinary reruns make no preview request.
   data lifecycle.
 - `strategy`: Wheel state, resolver, scenarios, assignment pressure, and capital constraints.
 - `services`: read-only reconciliation, guarded short-put candidate evaluation, fresh-evidence
-  expiration-risk preview, and a deterministic DEMO-only what-if rehearsal.
+  expiration-risk preview, deterministic DEMO-only what-if rehearsal, and ephemeral DEMO-only
+  approval rehearsal.
 - `persistence`: SQLAlchemy schema and repositories for Chronos-only state.
 - `ui`: Streamlit pages and Plotly views; no brokerage truth lives here.
 - `config` and `utils`: validated settings, logging, UTC, and identifiers.
@@ -210,6 +221,33 @@ it omits the raw account-bearing request and all broker text. The rehearsal-spec
 `WHAT_IF_PREVIEWED`; it is not an order-lifecycle transition. Nothing is persisted or promoted to a
 draft, confirmation, guardrail decision, cycle, or submission. The IBKR adapter remains an
 unconditional fail-closed order boundary.
+
+## Ephemeral DEMO approval-rehearsal boundary
+
+Milestone 8 adds a rehearsal after, and entirely outside, the order lifecycle. It is gated to DEMO
+configuration and the concrete `DemoBroker`, then requires a current Milestone 7 receipt before the
+UI exposes the fourth explicit action. Its request carries only scalar hints: canonical symbol,
+strict quantity one, exact option contract ID, exact limit, exact gross assignment obligation, and
+affirmative acknowledgements of those terms and risk. It cannot carry an account, order draft,
+guardrail decision, lifecycle state, or permission to trade.
+
+The approval service treats every request value as untrusted. It invokes the complete DEMO what-if
+service again and accepts the attempt only when the refreshed contract, limit, obligation, and
+other parent evidence still agree exactly with the affirmations. Thus the UI-held receipt is a
+display prerequisite, not authority. A successful result is a presentation-safe, ephemeral
+rehearsal with status `APPROVAL_REHEARSED`; that vocabulary is intentionally separate from
+`OrderLifecycle.USER_CONFIRMED` and grants no confirmation authority. The full refreshed parent
+is used only inside the service and never crosses the Milestone 8 result boundary. The result
+contains a strict scalar contract summary and omits the full option contract, broker descriptive
+text, raw account identity, broker margin output, and every M5-M7 parent object.
+
+The UI displays `Progression: STOPPED` and keeps order actions `LOCKED` after success. Nothing from
+the attempt is persisted, and no Wheel cycle, order draft, guardrail decision, lifecycle
+transition, submission, modification, or cancellation is created or invoked. Success removes the
+typed inputs and parent evidence from session state, leaving only the standalone scalar receipt.
+An explicit new ancestor attempt or workspace-symbol change clears that historical receipt, while
+ordinary Streamlit reruns do not repeat the service. No corresponding IBKR approval path exists;
+its order boundary remains hardlocked.
 
 Option-position average cost is never used for premium or basis math: IBKR and demo adapters can
 report that field in different units. Only execution price, qualified multiplier, fill quantity,

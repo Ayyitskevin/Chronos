@@ -219,6 +219,81 @@ def _service(
     )
 
 
+def test_demo_boundary_attestation_accepts_same_objects_and_equal_settings_clone(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(tmp_path)
+    service = _service(harness, _RiskPreviewer(harness.risk_result))
+    try:
+        assert service.is_bound_to_demo_boundary(harness.connection, harness.settings)
+        assert service.is_bound_to_demo_boundary(
+            harness.connection,
+            harness.settings.model_copy(deep=True),
+        )
+    finally:
+        harness.close()
+
+
+def test_demo_boundary_attestation_rejects_changed_or_malformed_settings(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(tmp_path)
+    service = _service(harness, _RiskPreviewer(harness.risk_result))
+    changed = harness.settings.model_copy(update={"max_quote_age_seconds": 4})
+    non_demo = harness.settings.model_copy(update={"broker_mode": BrokerMode.IBKR})
+    try:
+        assert not service.is_bound_to_demo_boundary(harness.connection, changed)
+        assert not service.is_bound_to_demo_boundary(harness.connection, non_demo)
+        assert not service.is_bound_to_demo_boundary(harness.connection, object())
+        assert not service.is_bound_to_demo_boundary(object(), harness.settings)
+    finally:
+        harness.close()
+
+
+def test_demo_boundary_attestation_rejects_invalid_captured_settings(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(tmp_path)
+    invalid = harness.settings.model_copy(update={"max_quote_age_seconds": 0})
+    service = _service(
+        harness,
+        _RiskPreviewer(harness.risk_result),
+        settings=invalid,
+    )
+    try:
+        assert not service.is_bound_to_demo_boundary(harness.connection, invalid)
+    finally:
+        harness.close()
+
+
+def test_demo_boundary_attestation_rejects_connection_or_broker_identity_drift(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(tmp_path)
+    service = _service(harness, _RiskPreviewer(harness.risk_result))
+    other_connection = BrokerConnectionManager(harness.broker)
+    replacement = DemoBroker(clock=demo_now, profile=DemoProfile.EMPTY_ACCOUNT)
+    try:
+        assert not service.is_bound_to_demo_boundary(other_connection, harness.settings)
+
+        harness.connection.broker = replacement
+        assert not service.is_bound_to_demo_boundary(harness.connection, harness.settings)
+    finally:
+        harness.connection.broker = harness.broker
+        other_connection.close()
+        harness.close()
+
+
+def test_demo_boundary_attestation_accepts_demo_broker_subclass(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    service = _service(harness, _RiskPreviewer(harness.risk_result))
+    try:
+        assert isinstance(harness.broker, DemoBroker)
+        assert service.is_bound_to_demo_boundary(harness.connection, harness.settings)
+    finally:
+        harness.close()
+
+
 @pytest.mark.parametrize(
     "timeout",
     [False, 0, -1, float("nan"), float("inf"), 30.01, 1_000_000],

@@ -374,6 +374,35 @@ class ShortPutDemoWhatIfService:
         )
         self._observation_timeout_seconds = observation_timeout_seconds
 
+    def is_bound_to_demo_boundary(self, connection: object, settings: object) -> bool:
+        """Attest that callers share this service's validated DEMO boundary.
+
+        The check is intentionally observational: it performs no broker calls and
+        fails closed for malformed collaborators or settings.
+        """
+
+        if connection is not self._connection:
+            return False
+        try:
+            current_broker = connection.broker
+            if (
+                current_broker is not self._broker
+                or not isinstance(self._broker, DemoBroker)
+                or not isinstance(current_broker, DemoBroker)
+                or not isinstance(settings, Settings)
+            ):
+                return False
+            captured_settings = Settings.model_validate(self._settings.model_dump(mode="python"))
+            supplied_settings = Settings.model_validate(settings.model_dump(mode="python"))
+        except Exception:
+            return False
+        return (
+            captured_settings.broker_mode is BrokerMode.DEMO
+            and supplied_settings.broker_mode is BrokerMode.DEMO
+            and supplied_settings.model_dump(mode="python")
+            == captured_settings.model_dump(mode="python")
+        )
+
     def preview(self, request: ShortPutDemoWhatIfRequest) -> ShortPutDemoWhatIfResult:
         """Run a fresh DEMO rehearsal; never accept UI evidence or an account identifier."""
 

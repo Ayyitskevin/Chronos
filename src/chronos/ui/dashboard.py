@@ -3,16 +3,25 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
+from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 
 import streamlit as st
 
 from chronos.broker.base import BrokerError
 from chronos.broker.demo import DemoBroker
-from chronos.domain.enums import EligibilityStatus
+from chronos.domain.enums import BrokerMode, EligibilityStatus
 from chronos.domain.models import OptionContract
 from chronos.services.reconciliation import ReconciliationResult
 from chronos.services.short_put_candidates import ShortPutCandidateEvaluation
+from chronos.services.short_put_demo_approval import (
+    MAX_CONFIRMATION_INTEGER_INPUT_CHARACTERS,
+    MAX_TYPED_SYMBOL_CHARACTERS,
+    DemoApprovalStatus,
+    ShortPutDemoApprovalRequest,
+    ShortPutDemoApprovalResult,
+)
 from chronos.services.short_put_demo_what_if import (
     MAX_LIMIT_DECIMAL_DIGITS,
     MAX_LIMIT_DECIMAL_PLACES,
@@ -43,12 +52,29 @@ from chronos.ui.components import (
     render_safety_notice,
 )
 from chronos.ui.session import AppRuntime
+from chronos.utils.logging import mask_account_identifiers
 from chronos.utils.time import as_market_time
 
 _CANDIDATE_EVALUATION_STATE_KEY = "chronos_candidate_evaluation"
 _RISK_PREVIEW_STATE_KEY = "chronos_short_put_risk_preview"
 _DEMO_WHAT_IF_STATE_KEY = "chronos_short_put_demo_what_if"
 _DEMO_WHAT_IF_LIMIT_STATE_KEY = "chronos_demo_what_if_limit"
+_DEMO_APPROVAL_STATE_KEY = "chronos_short_put_demo_approval"
+_DEMO_APPROVAL_SYMBOL_STATE_KEY = "chronos_demo_approval_symbol"
+_DEMO_APPROVAL_QUANTITY_STATE_KEY = "chronos_demo_approval_quantity"
+_DEMO_APPROVAL_ACK_STATE_KEY = "chronos_demo_approval_risk_ack"
+_DEMO_APPROVAL_FEEDBACK_STATE_KEY = "chronos_demo_approval_feedback"
+_MAX_DEMO_APPROVAL_FEEDBACK_REASONS = 4
+_MAX_DEMO_APPROVAL_FEEDBACK_REASON_CHARACTERS = 300
+
+
+@dataclass(frozen=True, slots=True)
+class _DemoApprovalFeedback:
+    """Parent-independent, process-memory-only feedback for one withheld attempt."""
+
+    symbol: str
+    status: DemoApprovalStatus
+    reasons: tuple[str, ...]
 
 
 def render_dashboard(runtime: AppRuntime) -> None:
@@ -222,7 +248,7 @@ def _render_symbol_detail(runtime: AppRuntime) -> None:
         st.session_state[_CANDIDATE_EVALUATION_STATE_KEY] = evaluation
 
     if evaluation is None:
-        _clear_short_put_risk_preview()
+        _clear_stale_evidence_without_candidate(symbol)
 
     if evaluation is not None and evaluation.reconciliation is not None:
         render_reconciliation_status(evaluation.reconciliation)
@@ -234,7 +260,7 @@ def _render_symbol_detail(runtime: AppRuntime) -> None:
     status_columns[1].metric("Candidate actions", "LOCKED")
     st.error(
         "Opening actions are locked. Candidate evidence cannot authorize or submit an order; "
-        "only a later deterministic DEMO what-if rehearsal is available."
+        "only later deterministic DEMO what-if and approval rehearsals are available."
     )
     if evaluation is None:
         st.info(
@@ -266,10 +292,32 @@ def _render_symbol_detail(runtime: AppRuntime) -> None:
         st.caption("No historical candidate evaluation is stored for this symbol.")
     else:
         _render_short_put_evaluation(evaluation)
-    st.subheader("Scenario analysis")
-    risk_result = _render_short_put_risk_preview(runtime, symbol, evaluation)
-    st.subheader("Order preview")
-    _render_short_put_demo_what_if(runtime, symbol, risk_result)
+    evidence_panel = st.empty()
+
+    def clear_evidence_panel() -> None:
+        evidence_panel.empty()
+
+    with evidence_panel.container():
+        st.subheader("Scenario analysis")
+        risk_result = _render_short_put_risk_preview(
+            runtime,
+            symbol,
+            evaluation,
+            clear_rendered_evidence=clear_evidence_panel,
+        )
+        st.subheader("Order preview")
+        what_if_result = _render_short_put_demo_what_if(
+            runtime,
+            symbol,
+            risk_result,
+            clear_rendered_evidence=clear_evidence_panel,
+        )
+        _render_short_put_demo_approval(
+            runtime,
+            symbol,
+            what_if_result,
+            clear_rendered_evidence=clear_evidence_panel,
+        )
 
 
 def _render_short_put_evaluation(evaluation: ShortPutCandidateEvaluation) -> None:
@@ -395,6 +443,8 @@ def _render_short_put_risk_preview(
     runtime: AppRuntime,
     symbol: str,
     evaluation: ShortPutCandidateEvaluation | None,
+    *,
+    clear_rendered_evidence: Callable[[], None],
 ) -> ShortPutRiskPreviewResult | None:
     stored = st.session_state.get(_RISK_PREVIEW_STATE_KEY)
     result = (
@@ -491,11 +541,12 @@ def _render_short_put_risk_preview(
         st.session_state.pop(_RISK_PREVIEW_STATE_KEY, None)
         _clear_short_put_demo_what_if()
         st.session_state.pop(_CANDIDATE_EVALUATION_STATE_KEY, None)
+        clear_rendered_evidence()
         result = runtime.short_put_risk_preview.preview(request)
         st.session_state[_RISK_PREVIEW_STATE_KEY] = result
         if result.candidate_refresh is not None:
             st.session_state[_CANDIDATE_EVALUATION_STATE_KEY] = result.candidate_refresh
-            st.rerun()
+        st.rerun()
 
     if result is not None:
         _render_short_put_risk_result(result)
@@ -550,11 +601,43 @@ def _clear_short_put_risk_preview() -> None:
     _clear_short_put_demo_what_if()
 
 
+def _clear_stale_evidence_without_candidate(symbol: str) -> None:
+    stored_risk = st.session_state.get(_RISK_PREVIEW_STATE_KEY)
+    preserve_risk_attempt = (
+        isinstance(stored_risk, ShortPutRiskPreviewResult)
+        and stored_risk.request.symbol == symbol
+        and stored_risk.status is RiskPreviewStatus.WITHHELD
+        and stored_risk.candidate_refresh is None
+    )
+    if not preserve_risk_attempt:
+        st.session_state.pop(_RISK_PREVIEW_STATE_KEY, None)
+
+    stored_what_if = st.session_state.get(_DEMO_WHAT_IF_STATE_KEY)
+    preserve_what_if_attempt = (
+        isinstance(stored_what_if, ShortPutDemoWhatIfResult)
+        and stored_what_if.request.symbol == symbol
+        and stored_what_if.status is DemoWhatIfStatus.WITHHELD
+        and stored_what_if.risk_refresh is None
+    )
+    preserve_approval_receipt = _has_standalone_demo_approval_receipt(symbol)
+    if preserve_what_if_attempt:
+        st.session_state.pop(_DEMO_WHAT_IF_LIMIT_STATE_KEY, None)
+        _clear_short_put_demo_approval()
+    elif preserve_approval_receipt:
+        st.session_state.pop(_DEMO_WHAT_IF_STATE_KEY, None)
+        st.session_state.pop(_DEMO_WHAT_IF_LIMIT_STATE_KEY, None)
+        _clear_short_put_demo_approval_inputs()
+    else:
+        _clear_short_put_demo_what_if()
+
+
 def _render_short_put_demo_what_if(
     runtime: AppRuntime,
     symbol: str,
     risk_result: ShortPutRiskPreviewResult | None,
-) -> None:
+    *,
+    clear_rendered_evidence: Callable[[], None],
+) -> ShortPutDemoWhatIfResult | None:
     stored = st.session_state.get(_DEMO_WHAT_IF_STATE_KEY)
     result = (
         stored
@@ -564,13 +647,13 @@ def _render_short_put_demo_what_if(
     if stored is not None and result is None:
         st.session_state.pop(_DEMO_WHAT_IF_STATE_KEY, None)
 
-    if not isinstance(runtime.broker, DemoBroker):
-        _clear_short_put_demo_what_if()
+    if not _has_exact_demo_rehearsal_boundary(runtime):
+        _clear_short_put_demo_what_if_without_current_parent(symbol)
         st.error(
             "Locked: real IBKR what-if and every submission method remain disabled. "
             "This milestone exposes no order-channel action outside deterministic DEMO mode."
         )
-        return
+        return None
 
     st.error(
         "DEMO rehearsal only. A successful result stops at WHAT_IF_PREVIEWED; it cannot confirm, "
@@ -588,12 +671,12 @@ def _render_short_put_demo_what_if(
         if result is not None and result.status is DemoWhatIfStatus.WITHHELD:
             _render_short_put_demo_what_if_result(result)
         else:
-            _clear_short_put_demo_what_if()
+            _clear_short_put_demo_what_if_without_current_parent(symbol)
             st.info(
                 "A current READY expiration-risk result is required before exact DEMO limit "
                 "terms can be rehearsed."
             )
-        return
+        return result
 
     risk_preview = ready_risk.preview
     assert risk_preview is not None
@@ -615,7 +698,7 @@ def _render_short_put_demo_what_if(
     if selected_candidate is None:
         _clear_short_put_demo_what_if()
         st.warning("The risk selection is not present in its fresh candidate evidence.")
-        return
+        return None
 
     if result is not None:
         parent = result.risk_refresh
@@ -658,7 +741,7 @@ def _render_short_put_demo_what_if(
     ):
         if limit_price is None or limit_error is not None:
             st.error("Limit validation failed; no DEMO what-if was requested.")
-            return
+            return result
         request = ShortPutDemoWhatIfRequest(
             symbol=symbol,
             selected_contract_id=risk_preview.selected_contract.con_id,
@@ -668,6 +751,7 @@ def _render_short_put_demo_what_if(
         st.session_state.pop(_DEMO_WHAT_IF_STATE_KEY, None)
         st.session_state.pop(_RISK_PREVIEW_STATE_KEY, None)
         st.session_state.pop(_CANDIDATE_EVALUATION_STATE_KEY, None)
+        clear_rendered_evidence()
         result = runtime.short_put_demo_what_if.preview(request)
         st.session_state[_DEMO_WHAT_IF_STATE_KEY] = result
         if result.risk_refresh is not None:
@@ -676,10 +760,11 @@ def _render_short_put_demo_what_if(
                 st.session_state[_CANDIDATE_EVALUATION_STATE_KEY] = (
                     result.risk_refresh.candidate_refresh
                 )
-            st.rerun()
+        st.rerun()
 
     if result is not None:
         _render_short_put_demo_what_if_result(result)
+    return result
 
 
 def _parse_demo_limit_price(value: str) -> tuple[Decimal | None, str | None]:
@@ -726,8 +811,28 @@ def _clear_short_put_demo_what_if() -> None:
     st.session_state.pop(_DEMO_WHAT_IF_LIMIT_STATE_KEY, None)
 
 
+def _clear_short_put_demo_what_if_without_current_parent(symbol: str) -> None:
+    st.session_state.pop(_DEMO_WHAT_IF_STATE_KEY, None)
+    st.session_state.pop(_DEMO_WHAT_IF_LIMIT_STATE_KEY, None)
+    if _has_standalone_demo_approval_receipt(symbol):
+        _clear_short_put_demo_approval_inputs()
+    else:
+        _clear_short_put_demo_approval()
+
+
+def _has_standalone_demo_approval_receipt(symbol: str) -> bool:
+    stored = st.session_state.get(_DEMO_APPROVAL_STATE_KEY)
+    return (
+        isinstance(stored, ShortPutDemoApprovalResult)
+        and stored.request.symbol == symbol
+        and stored.status is DemoApprovalStatus.APPROVAL_REHEARSED
+        and stored.receipt is not None
+    )
+
+
 def _clear_short_put_demo_what_if_result() -> None:
     st.session_state.pop(_DEMO_WHAT_IF_STATE_KEY, None)
+    _clear_short_put_demo_approval()
 
 
 def _render_short_put_demo_what_if_result(result: ShortPutDemoWhatIfResult) -> None:
@@ -826,6 +931,308 @@ def _render_short_put_demo_what_if_result(result: ShortPutDemoWhatIfResult) -> N
     st.error(
         "No confirmation or submit control exists. Real IBKR preview, submission, modification, "
         "and cancellation remain hard-disabled."
+    )
+
+
+def _render_short_put_demo_approval(
+    runtime: AppRuntime,
+    symbol: str,
+    what_if_result: ShortPutDemoWhatIfResult | None,
+    *,
+    clear_rendered_evidence: Callable[[], None],
+) -> None:
+    stored = st.session_state.get(_DEMO_APPROVAL_STATE_KEY)
+    result = (
+        stored
+        if isinstance(stored, ShortPutDemoApprovalResult) and stored.request.symbol == symbol
+        else None
+    )
+    if stored is not None and result is None:
+        _clear_short_put_demo_approval()
+
+    current_what_if = (
+        what_if_result
+        if _has_exact_demo_rehearsal_boundary(runtime)
+        and what_if_result is not None
+        and what_if_result.status is DemoWhatIfStatus.WHAT_IF_PREVIEWED
+        and what_if_result.preview is not None
+        and what_if_result.risk_refresh is not None
+        else None
+    )
+    if current_what_if is None:
+        if (
+            result is not None
+            and result.status is DemoApprovalStatus.APPROVAL_REHEARSED
+            and result.receipt is not None
+        ):
+            _clear_short_put_demo_approval_inputs()
+            _render_short_put_demo_approval_result(result)
+            return
+        _clear_short_put_demo_approval()
+        _render_short_put_demo_approval_feedback(symbol)
+        return
+
+    st.session_state.pop(_DEMO_APPROVAL_FEEDBACK_STATE_KEY, None)
+
+    preview = current_what_if.preview
+    assert preview is not None
+    st.subheader("Approval rehearsal")
+    st.error(
+        "DEMO-only acknowledgment rehearsal. It creates no approval authority, persistence, "
+        "order lifecycle, transmission, or broker submission."
+    )
+    typed_symbol = st.text_input(
+        "Type the exact displayed symbol for the DEMO rehearsal",
+        value="",
+        placeholder=preview.symbol,
+        key=_DEMO_APPROVAL_SYMBOL_STATE_KEY,
+        on_change=_clear_short_put_demo_approval_result,
+        help="Enter the uppercase symbol exactly as displayed. Chronos supplies no default.",
+    )
+    acknowledged_quantity_text = st.text_input(
+        "Type the exact displayed contract quantity for the DEMO rehearsal",
+        value="",
+        placeholder=str(preview.quantity),
+        key=_DEMO_APPROVAL_QUANTITY_STATE_KEY,
+        on_change=_clear_short_put_demo_approval_result,
+        help="Enter the one-contract quantity exactly as displayed. Chronos supplies no default.",
+    )
+    risk_terms_acknowledged = st.checkbox(
+        "I acknowledge the exact DEMO rehearsal terms and assignment risk: "
+        f"conId {preview.selected_contract.con_id}, exact limit "
+        f"{format_money(preview.limit_price, preview.currency)} per share, and gross assignment "
+        f"obligation {format_money(preview.gross_assignment_obligation, preview.currency)}.",
+        value=False,
+        key=_DEMO_APPROVAL_ACK_STATE_KEY,
+        on_change=_clear_short_put_demo_approval_result,
+        help=(
+            "This is a deliberate, memoryless rehearsal acknowledgment only. It does not "
+            "authorize an order."
+        ),
+    )
+
+    symbol_error = _demo_approval_symbol_error(typed_symbol, preview.symbol)
+    acknowledged_quantity, quantity_error = _parse_demo_approval_quantity(
+        acknowledged_quantity_text,
+        preview.quantity,
+    )
+    if symbol_error is not None:
+        st.warning(symbol_error)
+    elif not typed_symbol:
+        st.info("Type the exact uppercase symbol to continue the DEMO approval rehearsal.")
+    if quantity_error is not None:
+        st.warning(quantity_error)
+    elif acknowledged_quantity is None:
+        st.info("Type the exact displayed quantity to continue the DEMO approval rehearsal.")
+    if not risk_terms_acknowledged:
+        st.info("Explicit acknowledgment of the displayed DEMO terms and risk is required.")
+
+    request_matches_controls = (
+        result is not None
+        and result.status is DemoApprovalStatus.APPROVAL_REHEARSED
+        and result.receipt is not None
+        and result.request.typed_symbol == typed_symbol
+        and result.request.acknowledged_quantity == acknowledged_quantity
+        and result.request.risk_terms_acknowledged is risk_terms_acknowledged
+        and result.request.selected_contract_id == preview.selected_contract.con_id
+        and result.request.acknowledged_contract_id == preview.selected_contract.con_id
+        and result.request.limit_price == preview.limit_price
+        and result.request.acknowledged_limit_price == preview.limit_price
+        and result.request.gross_assignment_obligation == preview.gross_assignment_obligation
+        and result.request.acknowledged_gross_assignment_obligation
+        == preview.gross_assignment_obligation
+        and result.request.total_commission_estimate
+        == current_what_if.request.total_commission_estimate
+        and result.receipt.symbol == preview.symbol
+        and result.receipt.selected_contract.con_id == preview.selected_contract.con_id
+        and result.receipt.limit_price == preview.limit_price
+        and result.receipt.gross_assignment_obligation == preview.gross_assignment_obligation
+    )
+    if result is not None and not request_matches_controls:
+        st.session_state.pop(_DEMO_APPROVAL_STATE_KEY, None)
+        result = None
+
+    inputs_ready = (
+        symbol_error is None
+        and typed_symbol == preview.symbol
+        and quantity_error is None
+        and acknowledged_quantity == preview.quantity
+        and risk_terms_acknowledged
+    )
+    if st.button(
+        "Refresh evidence & rehearse locked DEMO approval",
+        disabled=not inputs_ready,
+    ):
+        if not inputs_ready or acknowledged_quantity is None:
+            st.error("Approval-rehearsal validation failed; no refresh was requested.")
+            return
+        request = ShortPutDemoApprovalRequest(
+            symbol=preview.symbol,
+            selected_contract_id=preview.selected_contract.con_id,
+            total_commission_estimate=current_what_if.request.total_commission_estimate,
+            limit_price=preview.limit_price,
+            gross_assignment_obligation=preview.gross_assignment_obligation,
+            typed_symbol=typed_symbol,
+            acknowledged_quantity=acknowledged_quantity,
+            acknowledged_contract_id=preview.selected_contract.con_id,
+            acknowledged_limit_price=preview.limit_price,
+            acknowledged_gross_assignment_obligation=preview.gross_assignment_obligation,
+            risk_terms_acknowledged=risk_terms_acknowledged,
+        )
+        st.session_state.pop(_DEMO_APPROVAL_STATE_KEY, None)
+        st.session_state.pop(_DEMO_WHAT_IF_STATE_KEY, None)
+        st.session_state.pop(_RISK_PREVIEW_STATE_KEY, None)
+        st.session_state.pop(_CANDIDATE_EVALUATION_STATE_KEY, None)
+        clear_rendered_evidence()
+        result = runtime.short_put_demo_approval.rehearse(request)
+        if result.status is DemoApprovalStatus.APPROVAL_REHEARSED and result.receipt is not None:
+            st.session_state[_DEMO_APPROVAL_STATE_KEY] = result
+            st.session_state.pop(_DEMO_APPROVAL_FEEDBACK_STATE_KEY, None)
+        else:
+            st.session_state[_DEMO_APPROVAL_FEEDBACK_STATE_KEY] = _demo_approval_feedback(result)
+        st.rerun()
+
+    if result is not None:
+        _render_short_put_demo_approval_result(result)
+
+
+def _demo_approval_symbol_error(value: str, expected_symbol: str) -> str | None:
+    if not value:
+        return None
+    if len(value) > MAX_TYPED_SYMBOL_CHARACTERS:
+        return "The DEMO approval symbol input is too long."
+    if value != expected_symbol:
+        return f"The DEMO approval symbol must exactly match {expected_symbol}."
+    return None
+
+
+def _parse_demo_approval_quantity(
+    value: str,
+    expected_quantity: int,
+) -> tuple[int | None, str | None]:
+    if not value:
+        return None, None
+    if len(value) > MAX_CONFIRMATION_INTEGER_INPUT_CHARACTERS:
+        return None, "The DEMO approval quantity input is too long."
+    if not value.isascii() or not value.isdecimal():
+        return None, "The DEMO approval quantity must be an unsigned whole number."
+    if value != str(expected_quantity):
+        return None, f"The DEMO approval quantity must exactly match {expected_quantity}."
+    return expected_quantity, None
+
+
+def _clear_short_put_demo_approval() -> None:
+    _clear_short_put_demo_approval_result()
+    _clear_short_put_demo_approval_inputs()
+
+
+def _clear_short_put_demo_approval_inputs() -> None:
+    st.session_state.pop(_DEMO_APPROVAL_SYMBOL_STATE_KEY, None)
+    st.session_state.pop(_DEMO_APPROVAL_QUANTITY_STATE_KEY, None)
+    st.session_state.pop(_DEMO_APPROVAL_ACK_STATE_KEY, None)
+
+
+def _clear_short_put_demo_approval_result() -> None:
+    st.session_state.pop(_DEMO_APPROVAL_STATE_KEY, None)
+
+
+def _has_exact_demo_rehearsal_boundary(runtime: AppRuntime) -> bool:
+    """Fail closed unless every UI-facing DEMO boundary names one exact adapter."""
+
+    broker = getattr(runtime, "broker", None)
+    settings = getattr(runtime, "settings", None)
+    connection = getattr(runtime, "connection", None)
+    return (
+        getattr(settings, "broker_mode", None) is BrokerMode.DEMO
+        and type(broker) is DemoBroker
+        and getattr(connection, "broker", None) is broker
+    )
+
+
+def _demo_approval_feedback(result: ShortPutDemoApprovalResult) -> _DemoApprovalFeedback:
+    reasons = tuple(
+        mask_account_identifiers(reason)
+        for reason in result.reasons[:_MAX_DEMO_APPROVAL_FEEDBACK_REASONS]
+        if reason
+        and reason.isprintable()
+        and len(reason) <= _MAX_DEMO_APPROVAL_FEEDBACK_REASON_CHARACTERS
+    )
+    if not reasons:
+        reasons = (
+            "Fresh DEMO approval evidence was withheld safely; stale parent evidence was cleared.",
+        )
+    return _DemoApprovalFeedback(
+        symbol=result.request.symbol,
+        status=DemoApprovalStatus.WITHHELD,
+        reasons=reasons,
+    )
+
+
+def _render_short_put_demo_approval_feedback(symbol: str) -> None:
+    stored = st.session_state.get(_DEMO_APPROVAL_FEEDBACK_STATE_KEY)
+    feedback = (
+        stored
+        if isinstance(stored, _DemoApprovalFeedback)
+        and stored.symbol == symbol
+        and stored.status is DemoApprovalStatus.WITHHELD
+        else None
+    )
+    if stored is not None and feedback is None:
+        st.session_state.pop(_DEMO_APPROVAL_FEEDBACK_STATE_KEY, None)
+    if feedback is None:
+        return
+
+    st.subheader("Approval rehearsal attempt")
+    columns = st.columns(3)
+    columns[0].metric("DEMO approval rehearsal", feedback.status.value)
+    columns[1].metric("Progression", "STOPPED")
+    columns[2].metric("Submission", "LOCKED")
+    st.warning("\n".join(f"- {reason}" for reason in feedback.reasons))
+    st.caption(
+        "In-memory attempt feedback only. Candidate, risk, and what-if evidence from the "
+        "failed refresh was cleared; no approval authority is retained."
+    )
+
+
+def _render_short_put_demo_approval_result(result: ShortPutDemoApprovalResult) -> None:
+    evaluated_at = as_market_time(result.evaluated_at)
+    columns = st.columns(3)
+    columns[0].metric("DEMO approval rehearsal", result.status.value)
+    columns[1].metric("Progression", "STOPPED")
+    columns[2].metric("Submission", "LOCKED")
+    st.caption(
+        f"DEMO approval rehearsal completed {evaluated_at:%Y-%m-%d %H:%M:%S %Z} — "
+        "historical display only; no authority is retained."
+    )
+    if result.reasons:
+        st.warning("\n".join(f"- {reason}" for reason in result.reasons))
+    receipt = result.receipt
+    if result.status is not DemoApprovalStatus.APPROVAL_REHEARSED or receipt is None:
+        st.caption("Approval evidence was withheld; progression and submission stay locked.")
+        return
+
+    currency = receipt.currency
+    terms = st.columns(3)
+    terms[0].metric("Rehearsed contract", str(receipt.selected_contract.con_id))
+    terms[1].metric("Rehearsed quantity", str(receipt.quantity))
+    terms[2].metric("Rehearsed exact limit / share", format_money(receipt.limit_price, currency))
+    st.metric(
+        "Rehearsed gross assignment obligation",
+        format_money(receipt.gross_assignment_obligation, currency),
+    )
+    st.write(
+        {
+            "Approval rehearsal reference": receipt.approval_reference,
+            "Environment": "DEMO REHEARSAL ONLY",
+            "Approval authority": "NONE",
+            "Persistence": "NONE",
+            "Order lifecycle": "NOT CREATED",
+            "Submission": "LOCKED",
+        }
+    )
+    st.error(
+        "The acknowledgment was rehearsed in memory only. It cannot authorize, persist, "
+        "transmit, submit, modify, or cancel an order."
     )
 
 

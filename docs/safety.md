@@ -76,6 +76,24 @@ units, four normalized fractional places, 16 decimal digits, and 32 UI character
 parent evidence live only in session memory. There is no persistence, draft, guardrail decision,
 user-confirmation control, submission control, or IBKR what-if path.
 
+Milestone 8 adds one more DEMO rehearsal, not a user-confirmation boundary. A fourth explicit action
+requires the operator to type the exact canonical symbol and strict quantity one, affirm the exact
+contract ID, limit, and gross assignment obligation from the current receipt, and make an explicit
+risk acknowledgement. The request carries only those scalar hints. The service reruns the complete
+Milestone 7 what-if boundary and compares the fresh result with every affirmation; it does not
+accept the UI-held receipt as evidence.
+
+A successful approval rehearsal ends at `APPROVAL_REHEARSED`, a rehearsal-specific status that is
+never `OrderLifecycle.USER_CONFIRMED`. It grants no confirmation authority and leaves the UI at
+`Progression: STOPPED` with actions `LOCKED`. It persists nothing, creates no cycle, draft,
+guardrail decision, or lifecycle transition, and invokes no submit, modify, or cancel method. There
+is no IBKR approval path. On success, the UI discards all M5-M7 parent evidence and typed approval
+widgets, retaining only a standalone scalar receipt with no full option contract, broker
+descriptive text, raw account identity, or broker-margin output. A new ancestor attempt or
+workspace-symbol change clears that receipt. Ordinary reruns perform no approval refresh or related
+broker call, and a failed newer attempt retains only sanitized feedback rather than leaving older
+evidence looking current.
+
 ## Order boundary
 
 Paper submission remains off unless all of these are true at the same decision point:
@@ -90,17 +108,18 @@ Paper submission remains off unless all of these are true at the same decision p
 
 Any ambiguity fails closed. The lifecycle is append-only:
 `DRAFT -> VALIDATED -> WHAT_IF_PREVIEWED -> USER_CONFIRMED -> SUBMITTED`, followed by a broker
-outcome. The UI cannot skip states.
+outcome. The UI cannot skip states. This is the contract for a later PAPER submission path; the
+current DEMO rehearsal neither enters nor advances this lifecycle.
 
 ## Planned kill-switch contract
 
 A later kill switch must block new Chronos orders and attempt to cancel only orders whose
 Chronos-owned correlation references are known locally. It must record each request and response
 and must never invoke a broker-wide global cancel by default. No kill-switch service is wired in
-the current milestone. The UI exposes only the deterministic `DemoBroker` rehearsal described
-above. No IBKR preview, submission, modification, or cancellation is exposed, and no confirmation
-state follows the DEMO receipt. The expiration-risk preview and rehearsal remain decision support;
-live-money submission stays hard-disabled.
+the current milestone. The UI exposes only the deterministic `DemoBroker` what-if and approval
+rehearsals described above. No IBKR preview, approval, submission, modification, or cancellation is
+exposed, and no order-lifecycle confirmation state follows either DEMO result. The expiration-risk
+preview and rehearsals remain decision support; live-money submission stays hard-disabled.
 
 ## Secrets and logs
 

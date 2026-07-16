@@ -8,7 +8,7 @@ from streamlit.testing.v1 import AppTest
 from chronos.broker.base import BrokerDataError
 from chronos.broker.demo import DemoBroker
 from chronos.config.settings import get_settings
-from chronos.domain.enums import DataQuality
+from chronos.domain.enums import BrokerMode, DataQuality
 from chronos.domain.models import OrderPreview, OrderRequest
 from chronos.persistence.schema import (
     GuardrailDecisionRow,
@@ -18,7 +18,14 @@ from chronos.persistence.schema import (
     WheelCycleRow,
 )
 from chronos.services.short_put_candidates import ShortPutCandidateService
-from chronos.services.short_put_risk_preview import ShortPutRiskPreviewService
+from chronos.services.short_put_demo_approval import (
+    ShortPutDemoApprovalRequest,
+    ShortPutDemoApprovalService,
+)
+from chronos.services.short_put_risk_preview import (
+    ShortPutRiskPreviewRequest,
+    ShortPutRiskPreviewService,
+)
 from chronos.strategy.strike_resolver import (
     CandidateRejection,
     CandidateRejectionCode,
@@ -26,6 +33,8 @@ from chronos.strategy.strike_resolver import (
 )
 from chronos.ui.dashboard import (
     _CANDIDATE_EVALUATION_STATE_KEY,
+    _DEMO_APPROVAL_FEEDBACK_STATE_KEY,
+    _DEMO_APPROVAL_STATE_KEY,
     _DEMO_WHAT_IF_STATE_KEY,
     _RISK_PREVIEW_STATE_KEY,
 )
@@ -233,6 +242,7 @@ def test_explicit_risk_preview_refreshes_evidence_and_invalidates_stale_output(
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'chronos.db'}")
     monkeypatch.setenv("LOG_FILE", str(tmp_path / "chronos.log"))
     evaluate_calls: list[str] = []
+    unexpected_order_calls: list[str] = []
     fail_next = False
     original_evaluate = ShortPutCandidateService.evaluate
 
@@ -251,7 +261,27 @@ def test_explicit_risk_preview_refreshes_evidence_and_invalidates_stale_output(
         )
         return original_evaluate(service, symbol)
 
+    async def reject_preview(_broker: DemoBroker, _request: OrderRequest) -> OrderPreview:
+        unexpected_order_calls.append("preview")
+        raise AssertionError("Risk refresh unexpectedly called preview_order")
+
+    async def reject_submit(_broker: DemoBroker, _request: object) -> None:
+        unexpected_order_calls.append("submit")
+        raise AssertionError("Risk refresh unexpectedly called submit_order")
+
+    async def reject_modify(_broker: DemoBroker, _request: object) -> None:
+        unexpected_order_calls.append("modify")
+        raise AssertionError("Risk refresh unexpectedly called modify_order")
+
+    async def reject_cancel(_broker: DemoBroker, _broker_order_id: int) -> None:
+        unexpected_order_calls.append("cancel")
+        raise AssertionError("Risk refresh unexpectedly called cancel_order")
+
     monkeypatch.setattr(ShortPutCandidateService, "evaluate", controlled_evaluation)
+    monkeypatch.setattr(DemoBroker, "preview_order", reject_preview)
+    monkeypatch.setattr(DemoBroker, "submit_order", reject_submit)
+    monkeypatch.setattr(DemoBroker, "modify_order", reject_modify)
+    monkeypatch.setattr(DemoBroker, "cancel_order", reject_cancel)
 
     try:
         app = AppTest.from_file("src/chronos/app.py").run(timeout=10)
@@ -333,7 +363,23 @@ def test_explicit_risk_preview_refreshes_evidence_and_invalidates_stale_output(
         assert evaluate_calls == ["AAPL", "AAPL", "AAPL", "AAPL"]
         assert _CANDIDATE_EVALUATION_STATE_KEY not in app.session_state
         assert _RISK_PREVIEW_STATE_KEY in app.session_state
-        assert {metric.label: metric.value for metric in app.metric}["Risk preview"] == "WITHHELD"
+        metrics = {metric.label: metric.value for metric in app.metric}
+        assert metrics["Candidate result"] == "NOT_EVALUATED"
+        assert metrics["Risk preview"] == "WITHHELD"
+        assert "Fresh-bid credit / share" not in metrics
+        assert "DEMO what-if" not in metrics
+        assert _DEMO_WHAT_IF_STATE_KEY not in app.session_state
+        assert _DEMO_APPROVAL_STATE_KEY not in app.session_state
+        assert not any(
+            button.label
+            in {
+                "Refresh evidence & calculate locked risk",
+                "Refresh evidence & run locked DEMO what-if",
+                "Refresh evidence & rehearse locked DEMO approval",
+            }
+            for button in app.button
+        )
+        assert unexpected_order_calls == []
         assert any(
             "Fresh candidate evidence could not be obtained safely" in warning.value
             for warning in app.warning
@@ -347,7 +393,10 @@ def test_explicit_risk_preview_refreshes_evidence_and_invalidates_stale_output(
 
         app.run(timeout=10)
         assert _CANDIDATE_EVALUATION_STATE_KEY not in app.session_state
-        assert _RISK_PREVIEW_STATE_KEY not in app.session_state
+        assert _RISK_PREVIEW_STATE_KEY in app.session_state
+        assert {metric.label: metric.value for metric in app.metric}["Risk preview"] == "WITHHELD"
+        assert evaluate_calls == ["AAPL", "AAPL", "AAPL", "AAPL"]
+        assert unexpected_order_calls == []
     finally:
         try:
             get_runtime().close()
@@ -454,6 +503,7 @@ def test_demo_what_if_rehearsal_refreshes_terms_without_persistence_or_submissio
         assert all("$" not in dataframe.value.to_string() for dataframe in app.dataframe)
         assert "DU1234567" not in str(app)
         assert "DU1234567" not in str(app.session_state.filtered_state)
+        assert "DU1234567" not in (tmp_path / "chronos.log").read_text(encoding="utf-8")
         assert not any(
             "confirm" in button.label.lower() or "submit" in button.label.lower()
             for button in app.button
@@ -498,14 +548,484 @@ def test_demo_what_if_rehearsal_refreshes_terms_without_persistence_or_submissio
             get_settings.cache_clear()
 
 
-def test_non_demo_what_if_panel_exposes_no_action_control() -> None:
+def test_withheld_demo_what_if_rerun_clears_parent_panels_and_retains_result(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("BROKER_MODE", "demo")
+    monkeypatch.setenv("DEMO_PROFILE", "empty_account")
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'chronos.db'}")
+    monkeypatch.setenv("LOG_FILE", str(tmp_path / "chronos.log"))
+    evaluate_calls: list[str] = []
+    risk_preview_calls: list[ShortPutRiskPreviewRequest] = []
+    broker_preview_calls: list[OrderRequest] = []
+    unexpected_order_calls: list[str] = []
+    fail_risk_refresh = False
+    original_evaluate = ShortPutCandidateService.evaluate
+    original_risk_preview = ShortPutRiskPreviewService.preview
+    original_broker_preview = DemoBroker.preview_order
+
+    def track_evaluation(service: ShortPutCandidateService, symbol: str):
+        evaluate_calls.append(symbol)
+        return original_evaluate(service, symbol)
+
+    def controlled_risk_preview(
+        service: ShortPutRiskPreviewService,
+        request: ShortPutRiskPreviewRequest,
+    ):
+        risk_preview_calls.append(request)
+        if fail_risk_refresh:
+            raise BrokerDataError("DU1234567 sensitive what-if risk-refresh detail")
+        return original_risk_preview(service, request)
+
+    async def track_broker_preview(
+        broker: DemoBroker,
+        request: OrderRequest,
+    ) -> OrderPreview:
+        broker_preview_calls.append(request)
+        return await original_broker_preview(broker, request)
+
+    async def reject_submit(_broker: DemoBroker, _request: object) -> None:
+        unexpected_order_calls.append("submit")
+        raise AssertionError("Withheld what-if unexpectedly called submit_order")
+
+    async def reject_modify(_broker: DemoBroker, _request: object) -> None:
+        unexpected_order_calls.append("modify")
+        raise AssertionError("Withheld what-if unexpectedly called modify_order")
+
+    async def reject_cancel(_broker: DemoBroker, _broker_order_id: int) -> None:
+        unexpected_order_calls.append("cancel")
+        raise AssertionError("Withheld what-if unexpectedly called cancel_order")
+
+    monkeypatch.setattr(ShortPutCandidateService, "evaluate", track_evaluation)
+    monkeypatch.setattr(ShortPutRiskPreviewService, "preview", controlled_risk_preview)
+    monkeypatch.setattr(DemoBroker, "preview_order", track_broker_preview)
+    monkeypatch.setattr(DemoBroker, "submit_order", reject_submit)
+    monkeypatch.setattr(DemoBroker, "modify_order", reject_modify)
+    monkeypatch.setattr(DemoBroker, "cancel_order", reject_cancel)
+
+    try:
+        app = AppTest.from_file("src/chronos/app.py").run(timeout=10)
+        app.radio[0].set_value("Symbol Detail & Order Workspace").run(timeout=10)
+        app.button[0].click().run(timeout=10)
+        app.text_input[0].set_value("0.65").run(timeout=10)
+        app.button[1].click().run(timeout=10)
+        app.text_input[1].set_value("3.20").run(timeout=10)
+
+        assert not app.exception
+        assert evaluate_calls == ["AAPL", "AAPL"]
+        assert len(risk_preview_calls) == 1
+        assert broker_preview_calls == []
+        before_metrics = {metric.label: metric.value for metric in app.metric}
+        assert before_metrics["Risk preview"] == "READY"
+        assert app.button[2].label == "Refresh evidence & run locked DEMO what-if"
+
+        fail_risk_refresh = True
+        app.button[2].click().run(timeout=10)
+
+        assert not app.exception
+        assert evaluate_calls == ["AAPL", "AAPL"]
+        assert len(risk_preview_calls) == 2
+        assert broker_preview_calls == []
+        assert unexpected_order_calls == []
+        assert _CANDIDATE_EVALUATION_STATE_KEY not in app.session_state
+        assert _RISK_PREVIEW_STATE_KEY not in app.session_state
+        assert _DEMO_WHAT_IF_STATE_KEY in app.session_state
+        assert _DEMO_APPROVAL_STATE_KEY not in app.session_state
+        result = app.session_state[_DEMO_WHAT_IF_STATE_KEY]
+        assert result.risk_refresh is None
+        metrics = {metric.label: metric.value for metric in app.metric}
+        assert metrics["Candidate result"] == "NOT_EVALUATED"
+        assert "Risk preview" not in metrics
+        assert metrics["DEMO what-if"] == "WITHHELD"
+        assert "Exact limit / share" not in metrics
+        assert not any(
+            button.label
+            in {
+                "Refresh evidence & calculate locked risk",
+                "Refresh evidence & run locked DEMO what-if",
+                "Refresh evidence & rehearse locked DEMO approval",
+            }
+            for button in app.button
+        )
+        assert not app.text_input
+        assert not app.checkbox
+        assert any(
+            "Fresh risk evidence could not be obtained safely" in warning.value
+            for warning in app.warning
+        )
+        assert "sensitive what-if risk-refresh detail" not in str(app)
+        assert "DU1234567" not in str(app)
+        log_text = (tmp_path / "chronos.log").read_text(encoding="utf-8")
+        assert '"error_type":"BrokerDataError"' in log_text
+        assert "sensitive what-if risk-refresh detail" not in log_text
+        assert "DU1234567" not in log_text
+
+        app.run(timeout=10)
+        assert evaluate_calls == ["AAPL", "AAPL"]
+        assert len(risk_preview_calls) == 2
+        assert broker_preview_calls == []
+        assert _DEMO_WHAT_IF_STATE_KEY in app.session_state
+        assert {metric.label: metric.value for metric in app.metric}["DEMO what-if"] == "WITHHELD"
+        assert unexpected_order_calls == []
+    finally:
+        try:
+            get_runtime().close()
+        finally:
+            get_runtime.clear()
+            get_settings.cache_clear()
+
+
+def test_demo_approval_rehearsal_is_memoryless_lineage_bound_and_nontransmitting(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("BROKER_MODE", "demo")
+    monkeypatch.setenv("DEMO_PROFILE", "empty_account")
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'chronos.db'}")
+    monkeypatch.setenv("LOG_FILE", str(tmp_path / "chronos.log"))
+    evaluate_calls: list[str] = []
+    preview_calls: list[OrderRequest] = []
+    approval_calls: list[ShortPutDemoApprovalRequest] = []
+    unexpected_order_calls: list[str] = []
+    original_evaluate = ShortPutCandidateService.evaluate
+    original_preview = DemoBroker.preview_order
+    original_rehearse = ShortPutDemoApprovalService.rehearse
+
+    def track_evaluation(service: ShortPutCandidateService, symbol: str):
+        evaluate_calls.append(symbol)
+        return original_evaluate(service, symbol)
+
+    async def track_preview(broker: DemoBroker, request: OrderRequest) -> OrderPreview:
+        preview_calls.append(request)
+        return await original_preview(broker, request)
+
+    def track_approval(
+        service: ShortPutDemoApprovalService,
+        request: ShortPutDemoApprovalRequest,
+    ):
+        approval_calls.append(request)
+        return original_rehearse(service, request)
+
+    async def reject_submit(_broker: DemoBroker, _request: object) -> None:
+        unexpected_order_calls.append("submit")
+        raise AssertionError("DEMO approval rehearsal unexpectedly called submit_order")
+
+    async def reject_modify(_broker: DemoBroker, _request: object) -> None:
+        unexpected_order_calls.append("modify")
+        raise AssertionError("DEMO approval rehearsal unexpectedly called modify_order")
+
+    async def reject_cancel(_broker: DemoBroker, _broker_order_id: int) -> None:
+        unexpected_order_calls.append("cancel")
+        raise AssertionError("DEMO approval rehearsal unexpectedly called cancel_order")
+
+    monkeypatch.setattr(ShortPutCandidateService, "evaluate", track_evaluation)
+    monkeypatch.setattr(DemoBroker, "preview_order", track_preview)
+    monkeypatch.setattr(ShortPutDemoApprovalService, "rehearse", track_approval)
+    monkeypatch.setattr(DemoBroker, "submit_order", reject_submit)
+    monkeypatch.setattr(DemoBroker, "modify_order", reject_modify)
+    monkeypatch.setattr(DemoBroker, "cancel_order", reject_cancel)
+
+    try:
+        app = AppTest.from_file("src/chronos/app.py").run(timeout=10)
+        app.radio[0].set_value("Symbol Detail & Order Workspace").run(timeout=10)
+        app.button[0].click().run(timeout=10)
+        app.text_input[0].set_value("0.65").run(timeout=10)
+        app.button[1].click().run(timeout=10)
+        app.text_input[1].set_value("3.20").run(timeout=10)
+        app.button[2].click().run(timeout=10)
+
+        assert not app.exception
+        assert evaluate_calls == ["AAPL", "AAPL", "AAPL"]
+        assert len(preview_calls) == 1
+        assert approval_calls == []
+        assert len(app.text_input) == 4
+        assert app.text_input[2].value == ""
+        assert app.text_input[3].value == ""
+        assert len(app.checkbox) == 1
+        assert app.checkbox[0].value is False
+        assert "conId 2002" in app.checkbox[0].label
+        assert "3.20 USD" in app.checkbox[0].label
+        assert "18,500.00 USD" in app.checkbox[0].label
+        assert app.button[3].label == "Refresh evidence & rehearse locked DEMO approval"
+        assert app.button[3].disabled is True
+        assert _DEMO_APPROVAL_STATE_KEY not in app.session_state
+
+        app.text_input[2].set_value("aapl").run(timeout=10)
+        app.text_input[3].set_value("999999999999999999999999999999999").run(timeout=10)
+        assert app.button[3].disabled is True
+        assert approval_calls == []
+        assert len(preview_calls) == 1
+
+        app.text_input[2].set_value("AAPL").run(timeout=10)
+        app.text_input[3].set_value("01").run(timeout=10)
+        assert app.button[3].disabled is True
+        assert approval_calls == []
+        app.text_input[3].set_value("1").run(timeout=10)
+        app.checkbox[0].set_value(True).run(timeout=10)
+        assert app.button[3].disabled is False
+        assert approval_calls == []
+        app.button[3].click().run(timeout=10)
+
+        assert not app.exception
+        assert evaluate_calls == ["AAPL", "AAPL", "AAPL", "AAPL"]
+        assert len(preview_calls) == 2
+        assert len(approval_calls) == 1
+        approval_request = approval_calls[0]
+        assert approval_request.symbol == "AAPL"
+        assert approval_request.typed_symbol == "AAPL"
+        assert approval_request.selected_contract_id == 2002
+        assert approval_request.acknowledged_contract_id == 2002
+        assert approval_request.acknowledged_quantity == 1
+        assert approval_request.limit_price == Decimal("3.20")
+        assert approval_request.acknowledged_limit_price == Decimal("3.20")
+        assert approval_request.gross_assignment_obligation == Decimal("18500")
+        assert approval_request.acknowledged_gross_assignment_obligation == Decimal("18500")
+        assert approval_request.risk_terms_acknowledged is True
+        assert _CANDIDATE_EVALUATION_STATE_KEY not in app.session_state
+        assert _RISK_PREVIEW_STATE_KEY not in app.session_state
+        assert _DEMO_WHAT_IF_STATE_KEY not in app.session_state
+        assert _DEMO_APPROVAL_STATE_KEY in app.session_state
+        approval_result = app.session_state[_DEMO_APPROVAL_STATE_KEY]
+        serialized_approval = approval_result.model_dump_json()
+        assert '"what_if_refresh"' not in serialized_approval
+        assert '"risk_refresh"' not in serialized_approval
+        assert '"broker_warning"' not in serialized_approval
+        assert '"assumptions"' not in serialized_approval
+        assert '"local_symbol"' not in serialized_approval
+        assert '"trading_class"' not in serialized_approval
+        assert "DU1234567" not in serialized_approval
+        metrics = {metric.label: metric.value for metric in app.metric}
+        assert metrics["Candidate result"] == "NOT_EVALUATED"
+        assert "Risk preview" not in metrics
+        assert "DEMO what-if" not in metrics
+        assert metrics["DEMO approval rehearsal"] == "APPROVAL_REHEARSED"
+        assert metrics["Progression"] == "STOPPED"
+        assert metrics["Submission"] == "LOCKED"
+        assert metrics["Rehearsed contract"] == "2002"
+        assert metrics["Rehearsed quantity"] == "1"
+        assert metrics["Rehearsed exact limit / share"] == "3.20 USD"
+        assert metrics["Rehearsed gross assignment obligation"] == "18,500.00 USD"
+        assert unexpected_order_calls == []
+        assert not app.text_input
+        assert not app.checkbox
+        assert "DU1234567" not in str(app)
+        assert "DU1234567" not in str(app.session_state.filtered_state)
+        assert "DU1234567" not in (tmp_path / "chronos.log").read_text(encoding="utf-8")
+        assert not any(
+            "confirm" in button.label.lower() or "submit" in button.label.lower()
+            for button in app.button
+        )
+
+        runtime = get_runtime()
+        assert isinstance(runtime.short_put_demo_approval, ShortPutDemoApprovalService)
+        with runtime.database.sessions() as session:
+            for row_type in (
+                WheelCycleRow,
+                OrderDraftRow,
+                OrderPreviewRow,
+                SubmittedOrderRow,
+                GuardrailDecisionRow,
+            ):
+                assert session.scalar(select(func.count()).select_from(row_type)) == 0
+
+        app.run(timeout=10)
+        assert evaluate_calls == ["AAPL", "AAPL", "AAPL", "AAPL"]
+        assert len(preview_calls) == 2
+        assert len(approval_calls) == 1
+        assert _DEMO_APPROVAL_STATE_KEY in app.session_state
+        assert app.session_state[_DEMO_APPROVAL_STATE_KEY] == approval_result
+        assert _CANDIDATE_EVALUATION_STATE_KEY not in app.session_state
+        assert _RISK_PREVIEW_STATE_KEY not in app.session_state
+        assert _DEMO_WHAT_IF_STATE_KEY not in app.session_state
+        assert {metric.label: metric.value for metric in app.metric}[
+            "DEMO approval rehearsal"
+        ] == "APPROVAL_REHEARSED"
+
+        app.button[0].click().run(timeout=10)
+        assert _DEMO_APPROVAL_STATE_KEY not in app.session_state
+        assert evaluate_calls == ["AAPL", "AAPL", "AAPL", "AAPL", "AAPL"]
+        assert len(approval_calls) == 1
+        assert len(preview_calls) == 2
+        assert unexpected_order_calls == []
+    finally:
+        try:
+            get_runtime().close()
+        finally:
+            get_runtime.clear()
+            get_settings.cache_clear()
+
+
+def test_withheld_demo_approval_rerun_clears_parent_panels_and_retains_safe_feedback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("BROKER_MODE", "demo")
+    monkeypatch.setenv("DEMO_PROFILE", "empty_account")
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'chronos.db'}")
+    monkeypatch.setenv("LOG_FILE", str(tmp_path / "chronos.log"))
+    evaluate_calls: list[str] = []
+    preview_calls: list[OrderRequest] = []
+    approval_calls: list[ShortPutDemoApprovalRequest] = []
+    unexpected_order_calls: list[str] = []
+    original_evaluate = ShortPutCandidateService.evaluate
+    original_preview = DemoBroker.preview_order
+    original_rehearse = ShortPutDemoApprovalService.rehearse
+
+    def track_evaluation(service: ShortPutCandidateService, symbol: str):
+        evaluate_calls.append(symbol)
+        return original_evaluate(service, symbol)
+
+    async def track_preview(broker: DemoBroker, request: OrderRequest) -> OrderPreview:
+        preview_calls.append(request)
+        return await original_preview(broker, request)
+
+    def track_approval(
+        service: ShortPutDemoApprovalService,
+        request: ShortPutDemoApprovalRequest,
+    ):
+        approval_calls.append(request)
+        return original_rehearse(service, request)
+
+    async def reject_submit(_broker: DemoBroker, _request: object) -> None:
+        unexpected_order_calls.append("submit")
+        raise AssertionError("Withheld DEMO approval unexpectedly called submit_order")
+
+    async def reject_modify(_broker: DemoBroker, _request: object) -> None:
+        unexpected_order_calls.append("modify")
+        raise AssertionError("Withheld DEMO approval unexpectedly called modify_order")
+
+    async def reject_cancel(_broker: DemoBroker, _broker_order_id: int) -> None:
+        unexpected_order_calls.append("cancel")
+        raise AssertionError("Withheld DEMO approval unexpectedly called cancel_order")
+
+    monkeypatch.setattr(ShortPutCandidateService, "evaluate", track_evaluation)
+    monkeypatch.setattr(DemoBroker, "preview_order", track_preview)
+    monkeypatch.setattr(ShortPutDemoApprovalService, "rehearse", track_approval)
+    monkeypatch.setattr(DemoBroker, "submit_order", reject_submit)
+    monkeypatch.setattr(DemoBroker, "modify_order", reject_modify)
+    monkeypatch.setattr(DemoBroker, "cancel_order", reject_cancel)
+
+    try:
+        app = AppTest.from_file("src/chronos/app.py").run(timeout=10)
+        app.radio[0].set_value("Symbol Detail & Order Workspace").run(timeout=10)
+        app.button[0].click().run(timeout=10)
+        app.text_input[0].set_value("0.65").run(timeout=10)
+        app.button[1].click().run(timeout=10)
+        app.text_input[1].set_value("3.20").run(timeout=10)
+        app.button[2].click().run(timeout=10)
+        app.text_input[2].set_value("AAPL").run(timeout=10)
+        app.text_input[3].set_value("1").run(timeout=10)
+        app.checkbox[0].set_value(True).run(timeout=10)
+
+        assert not app.exception
+        assert evaluate_calls == ["AAPL", "AAPL", "AAPL"]
+        assert len(preview_calls) == 1
+        assert approval_calls == []
+        pre_attempt_metrics = {metric.label: metric.value for metric in app.metric}
+        assert pre_attempt_metrics["Risk preview"] == "READY"
+        assert pre_attempt_metrics["DEMO what-if"] == "WHAT_IF_PREVIEWED"
+        assert app.button[3].label == "Refresh evidence & rehearse locked DEMO approval"
+        assert app.button[3].disabled is False
+
+        runtime = get_runtime()
+        runtime.short_put_demo_approval._settings = runtime.settings.model_copy(
+            update={"broker_mode": BrokerMode.IBKR}
+        )
+        app.button[3].click().run(timeout=10)
+
+        assert not app.exception
+        assert evaluate_calls == ["AAPL", "AAPL", "AAPL"]
+        assert len(preview_calls) == 1
+        assert len(approval_calls) == 1
+        assert unexpected_order_calls == []
+        assert _CANDIDATE_EVALUATION_STATE_KEY not in app.session_state
+        assert _RISK_PREVIEW_STATE_KEY not in app.session_state
+        assert _DEMO_WHAT_IF_STATE_KEY not in app.session_state
+        assert _DEMO_APPROVAL_STATE_KEY not in app.session_state
+        assert _DEMO_APPROVAL_FEEDBACK_STATE_KEY in app.session_state
+        post_attempt_metrics = {metric.label: metric.value for metric in app.metric}
+        assert "Risk preview" not in post_attempt_metrics
+        assert "DEMO what-if" not in post_attempt_metrics
+        assert post_attempt_metrics["DEMO approval rehearsal"] == "WITHHELD"
+        assert not any(
+            button.label == "Refresh evidence & rehearse locked DEMO approval"
+            for button in app.button
+        )
+        assert not app.checkbox
+        assert any(
+            "bound DEMO adapter" in warning.value or "withheld safely" in warning.value
+            for warning in app.warning
+        )
+        assert any("failed refresh was cleared" in caption.value for caption in app.caption)
+        assert "DU1234567" not in str(app)
+        assert "DU1234567" not in str(app.session_state.filtered_state)
+
+        app.run(timeout=10)
+        assert evaluate_calls == ["AAPL", "AAPL", "AAPL"]
+        assert len(preview_calls) == 1
+        assert len(approval_calls) == 1
+        assert _DEMO_APPROVAL_FEEDBACK_STATE_KEY in app.session_state
+        assert unexpected_order_calls == []
+    finally:
+        try:
+            get_runtime().close()
+        finally:
+            get_runtime.clear()
+            get_settings.cache_clear()
+
+
+def test_invalid_demo_boundaries_expose_no_what_if_or_approval_action_control() -> None:
     app = AppTest.from_string(
         """
 from types import SimpleNamespace
 
-from chronos.ui.dashboard import _render_short_put_demo_what_if
+from chronos.broker.demo import DemoBroker
+from chronos.domain.enums import BrokerMode
+from chronos.services.short_put_demo_what_if import DemoWhatIfStatus
+from chronos.ui.dashboard import _render_short_put_demo_approval, _render_short_put_demo_what_if
 
-_render_short_put_demo_what_if(SimpleNamespace(broker=object()), "AAPL", None)
+nominal_success = SimpleNamespace(
+    status=DemoWhatIfStatus.WHAT_IF_PREVIEWED,
+    preview=object(),
+    risk_refresh=object(),
+)
+
+class DemoBrokerSubclass(DemoBroker):
+    pass
+
+demo_broker = DemoBroker()
+subclass_broker = DemoBrokerSubclass()
+runtimes = (
+    SimpleNamespace(
+        settings=SimpleNamespace(broker_mode=BrokerMode.IBKR),
+        broker=demo_broker,
+        connection=SimpleNamespace(broker=demo_broker),
+    ),
+    SimpleNamespace(
+        settings=SimpleNamespace(broker_mode=BrokerMode.DEMO),
+        broker=demo_broker,
+        connection=SimpleNamespace(broker=DemoBroker()),
+    ),
+    SimpleNamespace(
+        settings=SimpleNamespace(broker_mode=BrokerMode.DEMO),
+        broker=subclass_broker,
+        connection=SimpleNamespace(broker=subclass_broker),
+    ),
+)
+for runtime in runtimes:
+    _render_short_put_demo_what_if(
+        runtime,
+        "AAPL",
+        None,
+        clear_rendered_evidence=lambda: None,
+    )
+    _render_short_put_demo_approval(
+        runtime,
+        "AAPL",
+        nominal_success,
+        clear_rendered_evidence=lambda: None,
+    )
 """
     ).run(timeout=10)
 
