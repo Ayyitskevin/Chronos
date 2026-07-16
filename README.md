@@ -10,12 +10,14 @@ substantial losses. Paper fills do not prove live execution quality.
 
 ## Current milestone
 
-Milestone 3 adds the pure Wheel state engine, transparent option resolver, capital checks,
-Decimal scenario calculations, assignment-pressure heuristic, and append-only
-Strategy-Adjusted Basis ledger. Candidate decisions have stable rejection codes and return
-typed `NO_TRADE`; unsafe state or basis ambiguity returns `MANUAL_REVIEW`. The dashboard wiring,
-startup reconciliation coordinator, and paper-order workflow remain locked for later guarded
-milestones.
+Milestone 4 wires a read-only reconciliation coordinator into the portfolio dashboard. One
+serialized run captures two observations of positions, open orders, and executions, bounds the
+window with broker and monotonic clocks, and compares them with one atomic local-evidence read.
+Unstable or incomplete evidence returns `PENDING`; unresolved exposure returns `MANUAL_REVIEW`.
+The existing Wheel state, option resolver, capital, scenario, assignment-pressure, and
+Strategy-Adjusted Basis engines remain pure and tested. Every candidate and order action is still
+locked while startup/reconnect scheduling, allocation provenance, and paper-order workflow are
+built as later guarded milestones.
 
 ## Safety posture
 
@@ -82,16 +84,20 @@ configuration.
 
 ## Current limitations
 
-Chronos is pre-release software. The current strategy engines are tested but are not yet wired
-into the dashboard or a complete startup/reconnect reconciliation coordinator. Stock allocation
-valuation still requires a current underlying quote at the service layer. Dividend, borrow, and
-corporate-action inputs are optional because the broker port does not provide them yet. The
-IBKR adapter records the exact underlying contract ID but does not claim that multiplier metadata
-proves an option's complete share-only deliverable. It therefore fails closed on every new IBKR
-short-option candidate until a trustworthy deliverable source verifies a standard contract;
-deterministic demo contracts carry explicit verified deliverables. The real-network smoke path
-was not run without a configured TWS or IB Gateway, and no order can be submitted from this
-milestone.
+Chronos is pre-release software. Reconciliation runs when the portfolio page renders; startup,
+reconnect, order/fill-event, and periodic scheduling are not implemented yet. The concrete local
+reader conservatively marks every persisted cycle, strategy state, draft, fill, or basis symbol
+unresolved, so only locally empty flat symbols can currently publish `RECONCILED`; positions and
+owned working orders remain locked for manual review until complete allocation provenance exists.
+The tested resolver, scenarios, and basis are not yet activated from the dashboard. Stock
+allocation valuation still requires a current underlying quote at the service layer. Dividend,
+borrow, and corporate-action inputs are optional because the broker port does not provide them
+yet. The IBKR adapter records the exact underlying contract ID but does not claim that multiplier
+metadata proves an option's complete share-only deliverable. It therefore fails closed on every
+new IBKR short-option candidate until a trustworthy deliverable source verifies a standard
+contract; deterministic demo contracts carry explicit verified deliverables. The real-network
+smoke path was not run without a configured TWS or IB Gateway, and no order can be submitted from
+this milestone.
 
 Schema v2 will not silently adopt account-specific rows from an unscoped database, heal a drifted
 schema, or fabricate provenance for legacy strategy-basis rows. Startup never upgrades v1 in

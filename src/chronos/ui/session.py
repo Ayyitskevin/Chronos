@@ -19,6 +19,8 @@ from chronos.config.settings import Settings, get_settings
 from chronos.domain.enums import BrokerMode, ConnectionState
 from chronos.domain.models import AccountSummary, ConnectionStatus
 from chronos.persistence.database import Database
+from chronos.persistence.repositories import LocalReconciliationRepository
+from chronos.services.reconciliation import ReconciliationCoordinator
 from chronos.utils.logging import configure_logging
 
 
@@ -29,6 +31,7 @@ class AppRuntime:
     connection: BrokerConnectionManager
     market_data: MarketDataManager
     database: Database
+    reconciliation: ReconciliationCoordinator
 
     def close(self) -> None:
         try:
@@ -83,6 +86,11 @@ def _build_runtime() -> AppRuntime:
             environment=status.environment.value,
             account_id=account.account_id,
         )
+        reconciliation = ReconciliationCoordinator(
+            connection,
+            LocalReconciliationRepository(database.sessions),
+            settings.symbol_allowlist,
+        )
     except BaseException:
         if connection is not None:
             try:
@@ -106,6 +114,7 @@ def _build_runtime() -> AppRuntime:
         connection=connection,
         market_data=market_data,
         database=database,
+        reconciliation=reconciliation,
     )
     atexit.register(runtime.close)
     return runtime

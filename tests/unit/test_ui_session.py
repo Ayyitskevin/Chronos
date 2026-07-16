@@ -100,6 +100,12 @@ def test_runtime_wires_demo_reads_through_one_market_data_manager(
         assert first.from_cache is False
         assert second.from_cache is True
         assert runtime.market_data.active_subscription_count == 0
+
+        reconciliation = runtime.reconciliation.reconcile()
+        assert reconciliation.opening_actions_locked is True
+        assert reconciliation.snapshot is not None
+        assert reconciliation.snapshot.account.masked_account_id == "DU•••4567"
+        assert "DU1234567" not in reconciliation.model_dump_json()
     finally:
         runtime.close()
 

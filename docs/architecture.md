@@ -38,9 +38,11 @@ reuse both resources instead of creating broker sockets or bypassing subscriptio
 
 ### Where feedback lives
 
-Connection changes, exceptional market-data lifecycle events, candidate decisions, guardrails,
-reconciliation, and order events are logged to the console and a rotating local file. Material
-decisions also become append-only application-event rows so the dashboard can explain them.
+Connection changes, exceptional market-data lifecycle events, and reconciliation capture/read
+failures are logged to the console and a rotating local file. Candidate, guardrail, and basis
+repositories retain their own decision evidence. The current read-only reconciliation coordinator
+returns an in-memory presentation model and deliberately does not write reconciliation or
+application-event rows yet.
 
 ### What breaks if a component is removed
 
@@ -52,11 +54,12 @@ decisions also become append-only application-event rows so the dashboard can ex
 
 ### When timing works
 
-The broker service serializes adapter work on its event loop. The planned reconciliation
-coordinator must run at startup, after reconnect, after every order/fill event, and periodically
-while connected. For streaming top-of-book data, quote age starts only after a price-bearing
-update from the current subscription is received; it is checked at every decision and again
-immediately before paper submit.
+The broker service serializes adapter work on its event loop. A portfolio render submits one
+coordinator coroutine containing the complete double-read observation window, so another Chronos
+broker call cannot interleave. Startup, reconnect, order/fill-event, and periodic triggers remain
+planned. For streaming top-of-book data, quote age starts only after a price-bearing update from
+the current subscription is received; it is checked at every decision and must be checked again
+immediately before a future paper submit.
 
 ## Package boundaries
 
@@ -71,23 +74,36 @@ immediately before paper submit.
 
 ## Reconciliation boundary
 
-Reconciliation is the only path that publishes a usable Wheel stage. It compares a fresh broker
-snapshot with persisted Chronos metadata. Safe, deterministic differences are recorded; unsafe
-differences return `MANUAL_REVIEW`. Order actions stay locked until a successful run completes.
+Reconciliation is the only path that publishes a Wheel stage. The coordinator double-reads fresh
+broker positions, open orders, and executions inside one serialized, bounded observation window,
+then compares that stable snapshot with one account-scoped local transaction. Broker instability
+returns `PENDING` without publishing a snapshot. Incomplete local evidence returns `PENDING` with
+only the sanitized stable broker view; unresolved exposure returns `MANUAL_REVIEW`. The dashboard
+never receives raw account IDs or order references, and every order action remains locked even
+after a successful read-only run.
 
-The Milestone 3 engines are pure and accept an explicit reconciled snapshot, policy, clock, and
-allocation context. A later service coordinator owns the serialized broker reads and invokes
-them. This separation makes the calculations repeatable without a network connection while
-preventing Streamlit session state from becoming strategy truth.
+The strategy engines remain pure and accept an explicit reconciled snapshot, policy, clock, and
+allocation context. The service coordinator owns serialized broker reads and invokes the Wheel
+state engine; Streamlit renders only its immutable presentation model. This separation makes the
+calculations repeatable without a network connection while preventing UI session state from
+becoming strategy truth.
 
-Wheel reconciliation matches positions, fills, and closing orders by exact option contract ID.
-Active orders must also have an affirmative full-identity Chronos ownership match in the expected
-account. Every short option requires an explicitly verified standard share-only deliverable;
+The pure Wheel state engine matches broker positions and closing orders by exact option contract
+ID. Active orders must also have an affirmative full-identity Chronos ownership match in the
+expected account. The current coordinator treats every broker execution and persisted fill as
+unresolved until cycle-scoped allocation is implemented; it does not infer ownership from an
+execution. Every short option requires an explicitly verified standard share-only deliverable;
 covered-call coverage additionally requires stock with the exact underlying contract ID,
 currency, and pseudonymous account scope. Symbol text, trading class, or multiplier alone cannot
 pool nonfungible stock or bless an adjusted contract. The current IBKR adapter preserves
 underlying identity but intentionally leaves the share deliverable unverified; demo fixtures mark
 their standard deliverables explicitly.
+
+The current local repository intentionally marks every symbol with persisted cycle, strategy,
+draft, fill, or basis evidence unresolved. This lets locally empty flat symbols reconcile while
+preventing working orders or positions from appearing proven before cycle-scoped fill and stock
+allocation semantics are complete. A richer reader may later clear exact owned orders only after
+that full provenance is implemented and tested.
 
 Option-position average cost is never used for premium or basis math: IBKR and demo adapters can
 report that field in different units. Only execution price, qualified multiplier, fill quantity,

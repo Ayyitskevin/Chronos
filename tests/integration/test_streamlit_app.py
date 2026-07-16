@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 from streamlit.testing.v1 import AppTest
 
+from chronos.config.settings import get_settings
 from chronos.ui.session import get_runtime
 
 
@@ -20,6 +21,22 @@ def test_demo_portfolio_and_symbol_pages_render_without_exceptions(
         assert not app.exception
         assert [title.value for title in app.title] == ["Chronos"]
         assert app.radio[0].value == "Portfolio Dashboard"
+        metrics = {metric.label: metric.value for metric in app.metric}
+        assert metrics["Reconciliation"] == "MANUAL_REVIEW"
+        assert metrics["Opening actions"] == "LOCKED"
+        assert metrics["Account"] == "DU•••4567"
+        assert metrics["Open account orders"] == "1"
+        assert metrics["Observed executions"] == "1"
+
+        reconciliation_table = next(
+            dataframe.value
+            for dataframe in app.dataframe
+            if "Wheel stage" in dataframe.value.columns
+        )
+        assert set(reconciliation_table["Opening actions"]) == {"LOCKED"}
+        assert {"RECONCILED", "MANUAL_REVIEW"} <= set(reconciliation_table["Status"])
+        assert app.expander
+        assert "DU1234567" not in str(app)
 
         app.radio[0].set_value("Symbol Detail & Order Workspace").run(timeout=10)
 
@@ -28,4 +45,8 @@ def test_demo_portfolio_and_symbol_pages_render_without_exceptions(
         assert {"Last", "Bid", "Ask", "Data quality"} <= metric_labels
         assert app.selectbox[0].value == "AAPL"
     finally:
-        get_runtime().close()
+        try:
+            get_runtime().close()
+        finally:
+            get_runtime.clear()
+            get_settings.cache_clear()

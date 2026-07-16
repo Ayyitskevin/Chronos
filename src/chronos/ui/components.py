@@ -8,6 +8,7 @@ import streamlit as st
 
 from chronos.config.settings import Settings
 from chronos.domain.models import ConnectionStatus
+from chronos.services.reconciliation import ReconciliationResult
 from chronos.utils.logging import mask_account_id
 from chronos.utils.time import as_market_time
 
@@ -33,6 +34,37 @@ def render_runtime_status(status: ConnectionStatus, settings: Settings) -> None:
     else:
         local_time = as_market_time(status.last_successful_sync)
         st.caption(f"Last successful broker synchronization: {local_time:%Y-%m-%d %H:%M:%S %Z}")
+
+
+def render_reconciliation_status(result: ReconciliationResult) -> None:
+    """Render only the presentation-safe status produced by reconciliation."""
+
+    snapshot = result.snapshot
+    columns = st.columns(5)
+    columns[0].metric(
+        "Environment",
+        snapshot.environment.value if snapshot is not None else "Unavailable",
+    )
+    columns[1].metric(
+        "Data",
+        snapshot.data_quality.value if snapshot is not None else "Unavailable",
+    )
+    columns[2].metric("Reconciliation", result.status.value)
+    columns[3].metric(
+        "Account",
+        snapshot.account.masked_account_id if snapshot is not None else "Unavailable",
+    )
+    columns[4].metric("Opening actions", "LOCKED")
+    if snapshot is None:
+        st.caption("No stable broker observation was published for this reconciliation run.")
+        return
+    captured_at = as_market_time(snapshot.captured_at)
+    st.caption(
+        f"Stable observation ended: {captured_at:%Y-%m-%d %H:%M:%S %Z} · "
+        f"real window {snapshot.window_seconds:.3f}s · "
+        f"broker clock window {snapshot.server_window_seconds:.3f}s · "
+        f"{snapshot.execution_count} execution(s) observed"
+    )
 
 
 def render_safety_notice() -> None:

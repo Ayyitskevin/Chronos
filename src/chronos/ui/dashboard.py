@@ -8,8 +8,14 @@ import streamlit as st
 
 from chronos.broker.base import BrokerDataError, BrokerError
 from chronos.broker.demo import DemoBroker
+from chronos.services.reconciliation import ReconciliationResult
 from chronos.ui.charts import quote_ladder_figure
-from chronos.ui.components import format_money, render_runtime_status, render_safety_notice
+from chronos.ui.components import (
+    format_money,
+    render_reconciliation_status,
+    render_runtime_status,
+    render_safety_notice,
+)
 from chronos.ui.session import AppRuntime
 
 
@@ -18,15 +24,15 @@ def render_dashboard(runtime: AppRuntime) -> None:
     st.caption("Local-first Wheel Strategy workspace")
     render_safety_notice()
     try:
-        status = runtime.connection.run(runtime.broker.connection_status())
-        render_runtime_status(status, runtime.settings)
         page = st.sidebar.radio(
             "Workspace",
             ("Portfolio Dashboard", "Symbol Detail & Order Workspace"),
         )
         if page == "Portfolio Dashboard":
-            _render_portfolio(runtime)
+            _render_portfolio(runtime.reconciliation.reconcile())
         else:
+            status = runtime.connection.run(runtime.broker.connection_status())
+            render_runtime_status(status, runtime.settings)
             _render_symbol_detail(runtime)
     except BrokerError as error:
         logging.getLogger("chronos.ui.dashboard").exception(
@@ -42,17 +48,30 @@ def render_dashboard(runtime: AppRuntime) -> None:
         st.error("The dashboard could not complete this request safely. See the local log.")
 
 
-def _render_portfolio(runtime: AppRuntime) -> None:
-    account = runtime.connection.run(runtime.broker.account_summary())
-    positions = runtime.connection.run(runtime.broker.positions())
-    open_orders = runtime.connection.run(runtime.broker.open_orders())
-
+def _render_portfolio(result: ReconciliationResult) -> None:
     st.header("Portfolio Dashboard")
-    columns = st.columns(4)
+    render_reconciliation_status(result)
+    st.error(
+        "Opening actions are locked. This milestone publishes read-only reconciliation "
+        "evidence; it does not activate candidates or orders."
+    )
+    if result.reasons:
+        st.warning("\n".join(f"- {reason}" for reason in result.reasons))
+
+    snapshot = result.snapshot
+    if snapshot is None:
+        st.error("Chronos withheld account values and exposures because no stable snapshot passed.")
+        _render_symbol_reconciliation(result)
+        _render_near_term_focus()
+        return
+
+    account = snapshot.account
+    columns = st.columns(5)
     columns[0].metric("Net liquidation", format_money(account.net_liquidation))
     columns[1].metric("Cash", format_money(account.total_cash))
     columns[2].metric("Buying power", format_money(account.buying_power))
-    columns[3].metric("Open account orders", str(len(open_orders)))
+    columns[3].metric("Open account orders", str(len(snapshot.open_orders)))
+    columns[4].metric("Observed executions", str(snapshot.execution_count))
 
     st.subheader("Broker positions")
     rows = [
@@ -64,29 +83,66 @@ def _render_portfolio(runtime: AppRuntime) -> None:
             "Market price": format_money(position.market_price),
             "Unrealized P&L": format_money(position.unrealized_pnl),
         }
-        for position in positions
+        for position in snapshot.positions
     ]
-    st.dataframe(rows, use_container_width=True, hide_index=True)
-    st.caption(
-        "Wheel stage and Strategy-Adjusted Basis — not tax basis remain locked until "
-        "the reconciliation milestone publishes them."
+    if rows:
+        st.dataframe(rows, use_container_width=True, hide_index=True)
+    else:
+        st.caption("No broker positions were present in the stable observation.")
+
+    st.subheader("Open broker orders")
+    order_rows = [
+        {
+            "Broker order": order.broker_order_id,
+            "Symbol": order.contract.symbol,
+            "Type": order.contract.security_type.value,
+            "Side": order.side.value,
+            "Quantity": str(order.quantity),
+            "Filled": str(order.filled_quantity),
+            "Remaining": str(order.remaining_quantity),
+            "Limit": format_money(order.limit_price),
+            "Lifecycle": order.lifecycle.value,
+            "Transmit": "YES" if order.transmit else "NO",
+        }
+        for order in snapshot.open_orders
+    ]
+    if order_rows:
+        st.dataframe(order_rows, use_container_width=True, hide_index=True)
+    else:
+        st.caption("No open broker orders were present in the stable observation.")
+
+    _render_symbol_reconciliation(result)
+    _render_near_term_focus()
+
+
+def _render_symbol_reconciliation(result: ReconciliationResult) -> None:
+    st.subheader("Wheel reconciliation")
+    st.dataframe(
+        [
+            {
+                "Symbol": symbol.symbol,
+                "Status": symbol.status.value,
+                "Wheel stage": symbol.stage.value,
+                "Stock shares": str(symbol.stock_shares),
+                "Short puts": str(symbol.short_put_contracts),
+                "Short calls": str(symbol.short_call_contracts),
+                "Pending puts": str(symbol.pending_put_contracts),
+                "Pending calls": str(symbol.pending_call_contracts),
+                "Manual review": "YES" if symbol.manual_review_required else "NO",
+                "Opening actions": "LOCKED",
+            }
+            for symbol in result.symbols
+        ],
+        use_container_width=True,
+        hide_index=True,
     )
+    for symbol in result.symbols:
+        with st.expander(f"{symbol.symbol} reconciliation reasoning"):
+            for reason in symbol.reasons:
+                st.write(f"- {reason}")
 
-    if isinstance(runtime.broker, DemoBroker):
-        st.subheader("Deterministic demo cases")
-        st.dataframe(
-            [
-                {
-                    "Symbol": fixture.symbol,
-                    "Case": fixture.case.value,
-                    "Purpose": fixture.explanation,
-                }
-                for fixture in runtime.broker.fixture_cases
-            ],
-            use_container_width=True,
-            hide_index=True,
-        )
 
+def _render_near_term_focus() -> None:
     st.subheader("Near-Term / Weekly Focus")
     st.warning(
         "Candidate resolution is not enabled yet. Chronos will use contract metadata before "
