@@ -36,6 +36,30 @@ deliverable are removed before quote requests. A new broker session may improve 
 live or frozen quality during its first request; end-of-window status and each quote must still
 pass the rankable-quality and freshness gates.
 
+The expiration-risk preview does not trust the candidate stored in UI session memory. A request
+contains only a symbol, contract-ID selection hint, and explicit finite nonnegative total
+commission estimate. The service obtains a fresh candidate evaluation internally and withholds the
+preview unless that ID resolves uniquely to a newly eligible one-contract short put with coherent
+contract and exact chain routing, verified deliverable, currency, quote quality, and quote age. It
+also bounds candidate, underlying, reconciliation, and account timestamps against its service
+clock and a hard 30-second ceiling, adds reported option age to elapsed evaluation time, requires
+the underlying evidence to be an exact stock contract, and re-proves the whole account empty and
+the target uniquely reconciled and flat. Finite cash must be at least the gross obligation, and the
+capital totals and allocation percentages must be internally consistent. Changing the symbol,
+selected contract, commission assumption, or candidate generation clears the stored risk result.
+If the contract disappears during refresh, its locked reason remains visible until a control
+changes. A refresh failure clears the prior candidate and payoff evidence before it can be shown as
+current.
+
+Risk output uses the fresh bid only as a labeled hypothetical credit and models expiration points
+at observed spot, strike, effective entry, and zero. The commission is visibly an operator
+estimate; explicit zero is visibly fees-excluded. The model is not a forecast, probability,
+broker-margin estimate, order what-if, or authorization. It fixes quantity at one, persists
+nothing, creates no cycle or draft, calls no broker order method, and keeps opening actions locked.
+Commission input is capped at 10,000 currency units, four normalized fractional decimal places, 16
+decimal digits, and 32 UI characters; non-finite chart coordinates are withheld. Per-share and
+one-contract total amounts are labeled separately.
+
 ## Order boundary
 
 Paper submission remains off unless all of these are true at the same decision point:
@@ -57,8 +81,9 @@ outcome. The UI cannot skip states.
 A later kill switch must block new Chronos orders and attempt to cancel only orders whose
 Chronos-owned correlation references are known locally. It must record each request and response
 and must never invoke a broker-wide global cancel by default. No kill-switch service is wired in
-the current milestone. No UI or application service exposes preview, submission, modification, or
-cancellation in this milestone, and live-money submission remains hard-disabled.
+the current milestone. No UI or application service exposes a broker order preview, submission,
+modification, or cancellation in this milestone. The expiration-risk preview is pure decision
+support and does not cross that boundary; live-money submission remains hard-disabled.
 
 ## Secrets and logs
 

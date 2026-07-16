@@ -24,6 +24,23 @@ commission `c`, and scenario underlying price `s`:
 
 Cash-secured allocation is not broker margin. Broker what-if margin is displayed separately.
 
+### Locked expiration-risk preview
+
+The current dashboard preview fixes `q = 1`, uses the newly refreshed candidate bid for `p`, and
+requires the operator to supply the total commission estimate `c`. The bid is labeled a
+hypothetical credit, not a fill or limit-price guarantee. A zero estimate is permitted only as a
+visibly fees-excluded assumption. The estimate is limited to 10,000 currency units, four normalized
+fractional decimal places, and a compact bounded decimal representation. Chronos evaluates the
+formula at four objective prices: observed spot, strike, effective entry, and zero. Equal prices
+are combined into one labeled point.
+Bid, underlying price, and effective entry are per-share values. Gross/net premium, commission,
+assignment cash, obligation, and expiration P&L are one-contract totals.
+
+These points describe expiration payoff only. They do not estimate broker margin, slippage, taxes,
+early assignment, exercise behavior, volatility path, or the probability of reaching a price. The
+preview is recomputed only after a fresh candidate evaluation uniquely revalidates the selected
+contract; it never authorizes an order.
+
 ## Covered call
 
 For stock quantity covered `d * q`:

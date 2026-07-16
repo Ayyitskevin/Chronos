@@ -3,16 +3,29 @@
 from __future__ import annotations
 
 import logging
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 import streamlit as st
 
 from chronos.broker.base import BrokerError
 from chronos.broker.demo import DemoBroker
+from chronos.domain.enums import EligibilityStatus
 from chronos.domain.models import OptionContract
 from chronos.services.reconciliation import ReconciliationResult
 from chronos.services.short_put_candidates import ShortPutCandidateEvaluation
-from chronos.ui.charts import quote_ladder_figure
+from chronos.services.short_put_risk_preview import (
+    MAX_COMMISSION_DECIMAL_DIGITS,
+    MAX_COMMISSION_DECIMAL_PLACES,
+    MAX_COMMISSION_INPUT_CHARACTERS,
+    MAX_TOTAL_COMMISSION_ESTIMATE,
+    RiskPreviewStatus,
+    ShortPutRiskPreviewRequest,
+    ShortPutRiskPreviewResult,
+    commission_estimate_decimal_places,
+    commission_estimate_has_bounded_representation,
+)
+from chronos.strategy.strike_resolver import RankedCandidate
+from chronos.ui.charts import quote_ladder_figure, short_put_expiration_risk_figure
 from chronos.ui.components import (
     format_money,
     render_reconciliation_status,
@@ -22,6 +35,7 @@ from chronos.ui.session import AppRuntime
 from chronos.utils.time import as_market_time
 
 _CANDIDATE_EVALUATION_STATE_KEY = "chronos_candidate_evaluation"
+_RISK_PREVIEW_STATE_KEY = "chronos_short_put_risk_preview"
 
 
 def render_dashboard(runtime: AppRuntime) -> None:
@@ -187,10 +201,15 @@ def _render_symbol_detail(runtime: AppRuntime) -> None:
     )
     if stored is not None and evaluation is None:
         st.session_state.pop(_CANDIDATE_EVALUATION_STATE_KEY, None)
+        st.session_state.pop(_RISK_PREVIEW_STATE_KEY, None)
     if st.button("Run read-only evaluation", type="primary"):
         st.session_state.pop(_CANDIDATE_EVALUATION_STATE_KEY, None)
+        st.session_state.pop(_RISK_PREVIEW_STATE_KEY, None)
         evaluation = runtime.short_put_candidates.evaluate(symbol)
         st.session_state[_CANDIDATE_EVALUATION_STATE_KEY] = evaluation
+
+    if evaluation is None:
+        st.session_state.pop(_RISK_PREVIEW_STATE_KEY, None)
 
     if evaluation is not None and evaluation.reconciliation is not None:
         render_reconciliation_status(evaluation.reconciliation)
@@ -235,9 +254,7 @@ def _render_symbol_detail(runtime: AppRuntime) -> None:
     else:
         _render_short_put_evaluation(evaluation)
     st.subheader("Scenario analysis")
-    st.warning(
-        "Locked: the tested scenario engine is not wired to reconciled positions and candidates."
-    )
+    _render_short_put_risk_preview(runtime, symbol, evaluation)
     st.subheader("Order preview")
     st.error(
         "Locked: no order can be previewed or submitted from this milestone; "
@@ -362,6 +379,272 @@ def _render_short_put_evaluation(evaluation: ShortPutCandidateEvaluation) -> Non
     if rejected_rows:
         st.subheader("Rejected contracts")
         st.dataframe(rejected_rows, width="stretch", hide_index=True)
+
+
+def _render_short_put_risk_preview(
+    runtime: AppRuntime,
+    symbol: str,
+    evaluation: ShortPutCandidateEvaluation | None,
+) -> None:
+    stored = st.session_state.get(_RISK_PREVIEW_STATE_KEY)
+    result = (
+        stored
+        if isinstance(stored, ShortPutRiskPreviewResult) and stored.request.symbol == symbol
+        else None
+    )
+    if stored is not None and result is None:
+        st.session_state.pop(_RISK_PREVIEW_STATE_KEY, None)
+
+    st.error(
+        "Opening actions remain locked. This is an expiration payoff model, not a broker "
+        "what-if preview, order draft, forecast, or authorization."
+    )
+    resolution = evaluation.resolution if evaluation is not None else None
+    candidates = (
+        resolution.candidates
+        if evaluation is not None
+        and evaluation.status is EligibilityStatus.ELIGIBLE
+        and resolution is not None
+        else ()
+    )
+    if not candidates:
+        if result is not None:
+            _render_short_put_risk_result(result)
+        else:
+            st.info(
+                "A freshly eligible ranked candidate is required before risk assumptions can "
+                "be entered."
+            )
+        return
+
+    candidate_by_id = {candidate.contract.con_id: candidate for candidate in candidates}
+    selected_contract_id = st.selectbox(
+        "Candidate for fresh risk preview",
+        list(candidate_by_id),
+        format_func=lambda contract_id: _risk_candidate_label(
+            candidates,
+            contract_id,
+        ),
+        key="chronos_risk_candidate_contract",
+        on_change=_clear_short_put_risk_preview,
+    )
+    selected = candidate_by_id[selected_contract_id]
+    commission_text = st.text_input(
+        f"Estimated total commission for one contract ({selected.contract.currency})",
+        value="",
+        placeholder="Required, for example 0.65",
+        key="chronos_risk_total_commission",
+        on_change=_clear_short_put_risk_preview,
+        help=(
+            "Enter an explicit total estimate. Zero is allowed only when you intentionally want "
+            "a fees-excluded model. Chronos never supplies a default."
+        ),
+    )
+    commission, commission_error = _parse_commission_estimate(commission_text)
+    if commission_error is not None:
+        st.warning(commission_error)
+    elif commission is None:
+        st.info("Enter an explicit nonnegative commission estimate to enable the fresh preview.")
+
+    if result is not None:
+        current_request = result.request
+        refresh = result.candidate_refresh
+        selected_contract_disappeared = current_request.selected_contract_id not in candidate_by_id
+        if (
+            (
+                current_request.selected_contract_id != selected_contract_id
+                and not selected_contract_disappeared
+            )
+            or commission is None
+            or current_request.total_commission_estimate != commission
+            or (
+                refresh is not None
+                and evaluation is not None
+                and refresh.evaluated_at != evaluation.evaluated_at
+            )
+        ):
+            st.session_state.pop(_RISK_PREVIEW_STATE_KEY, None)
+            result = None
+
+    if st.button(
+        "Refresh evidence & calculate locked risk",
+        disabled=commission is None,
+    ):
+        if commission is None:
+            st.error("Commission validation failed; no risk refresh was requested.")
+            return
+        request = ShortPutRiskPreviewRequest(
+            symbol=symbol,
+            selected_contract_id=selected_contract_id,
+            total_commission_estimate=commission,
+        )
+        st.session_state.pop(_RISK_PREVIEW_STATE_KEY, None)
+        st.session_state.pop(_CANDIDATE_EVALUATION_STATE_KEY, None)
+        result = runtime.short_put_risk_preview.preview(request)
+        st.session_state[_RISK_PREVIEW_STATE_KEY] = result
+        if result.candidate_refresh is not None:
+            st.session_state[_CANDIDATE_EVALUATION_STATE_KEY] = result.candidate_refresh
+            st.rerun()
+
+    if result is not None:
+        _render_short_put_risk_result(result)
+
+
+def _risk_candidate_label(candidates: tuple[RankedCandidate, ...], contract_id: int) -> str:
+    for rank, candidate in enumerate(candidates, start=1):
+        if candidate.contract.con_id != contract_id:
+            continue
+        return (
+            f"Rank {rank} · {candidate.expiration.isoformat()} · "
+            f"{candidate.strike:.2f} {candidate.contract.currency} PUT · conId {contract_id}"
+        )
+    return f"Unavailable contract {contract_id}"
+
+
+def _parse_commission_estimate(value: str) -> tuple[Decimal | None, str | None]:
+    normalized = value.strip()
+    if not normalized:
+        return None, None
+    if len(normalized) > MAX_COMMISSION_INPUT_CHARACTERS:
+        return None, "The commission estimate input is too long."
+    try:
+        estimate = Decimal(normalized)
+    except InvalidOperation:
+        return None, "The commission estimate must be a valid decimal amount."
+    if not estimate.is_finite() or estimate < 0:
+        return None, "The commission estimate must be finite and nonnegative."
+    if estimate > MAX_TOTAL_COMMISSION_ESTIMATE:
+        return (
+            None,
+            f"The commission estimate cannot exceed {MAX_TOTAL_COMMISSION_ESTIMATE}.",
+        )
+    if not commission_estimate_has_bounded_representation(estimate):
+        return (
+            None,
+            f"The commission estimate supports at most {MAX_COMMISSION_DECIMAL_DIGITS} "
+            "decimal digits.",
+        )
+    if commission_estimate_decimal_places(estimate) > MAX_COMMISSION_DECIMAL_PLACES:
+        return (
+            None,
+            f"The commission estimate supports at most {MAX_COMMISSION_DECIMAL_PLACES} "
+            "fractional decimal places.",
+        )
+    return estimate, None
+
+
+def _clear_short_put_risk_preview() -> None:
+    st.session_state.pop(_RISK_PREVIEW_STATE_KEY, None)
+
+
+def _render_short_put_risk_result(result: ShortPutRiskPreviewResult) -> None:
+    evaluated_at = as_market_time(result.evaluated_at)
+    status_columns = st.columns(2)
+    status_columns[0].metric("Risk preview", result.status.value)
+    status_columns[1].metric("Opening actions", "LOCKED")
+    st.caption(
+        f"Fresh preview attempt completed {evaluated_at:%Y-%m-%d %H:%M:%S %Z} — "
+        "historical display only."
+    )
+    if result.reasons:
+        st.warning("\n".join(f"- {reason}" for reason in result.reasons))
+    preview = result.preview
+    if result.status is not RiskPreviewStatus.READY or preview is None:
+        st.caption("Expiration payoff evidence was withheld; no modeled outcome is available.")
+        return
+
+    evidence_at = as_market_time(preview.evidence_evaluated_at)
+    underlying_at = as_market_time(preview.underlying_observed_at)
+    st.caption(
+        f"Candidate evidence evaluated {evidence_at:%Y-%m-%d %H:%M:%S %Z} · "
+        f"underlying observed {underlying_at:%Y-%m-%d %H:%M:%S %Z} · "
+        f"option quality {preview.option_data_quality.value} · "
+        f"option quote age {preview.option_quote_age_seconds}s"
+    )
+    currency = preview.currency
+    columns = st.columns(6)
+    columns[0].metric(
+        "Fresh-bid credit / share",
+        format_money(preview.hypothetical_credit_per_share, currency),
+    )
+    columns[1].metric(
+        "Total gross premium",
+        format_money(preview.gross_premium, currency),
+    )
+    columns[2].metric(
+        "Total commission estimate",
+        format_money(preview.total_commission_estimate, currency),
+    )
+    columns[3].metric(
+        "Total net premium",
+        format_money(preview.net_premium, currency),
+    )
+    columns[4].metric(
+        "Effective entry / share",
+        format_money(preview.effective_entry_price, currency),
+    )
+    columns[5].metric(
+        "Total assignment obligation",
+        format_money(preview.gross_assignment_obligation, currency),
+    )
+    detail_columns = st.columns(5)
+    detail_columns[0].metric("Assigned shares", str(preview.assigned_shares))
+    detail_columns[1].metric(
+        "Total net cash if assigned",
+        format_money(preview.net_cash_deployed_if_assigned, currency),
+    )
+    detail_columns[2].metric(
+        "Cash-secured allocation",
+        _format_ratio(preview.cash_secured_notional_pct),
+    )
+    detail_columns[3].metric("Broker margin", "Unavailable — not requested")
+    detail_columns[4].metric("Contracts modeled", str(preview.contracts))
+    if preview.fees_excluded:
+        st.warning("The operator entered zero commission; this model explicitly excludes fees.")
+    st.write(
+        {
+            "Selected contract": preview.selected_contract.con_id,
+            "Candidate rank after fresh refresh": preview.candidate_rank,
+            "Expiration": preview.selected_contract.expiration.isoformat(),
+            "Strike": format_money(preview.selected_contract.strike, currency),
+            "Premium source": "Fresh bid; hypothetical and not a fill guarantee",
+            "Commission source": "Explicit operator estimate",
+            "Opening actions": "LOCKED",
+        }
+    )
+    st.dataframe(
+        [
+            {
+                "Reference point": " / ".join(
+                    label.value.replace("_", " ").title() for label in point.labels
+                ),
+                "Underlying at expiration": format_money(point.underlying_price, currency),
+                "Put intrinsic / share": format_money(
+                    point.put_intrinsic_value_per_share,
+                    currency,
+                ),
+                "Modeled expiration P&L": format_money(point.expiration_pnl, currency),
+                "Opening actions": "LOCKED",
+            }
+            for point in preview.scenario_points
+        ],
+        width="stretch",
+        hide_index=True,
+    )
+    try:
+        risk_figure = short_put_expiration_risk_figure(preview)
+    except ValueError as error:
+        logging.getLogger("chronos.ui.dashboard").warning(
+            "Risk-preview chart was withheld",
+            extra={
+                "event": "short_put_risk_chart_withheld",
+                "error_type": type(error).__name__,
+            },
+        )
+        st.warning("The payoff chart was withheld because its coordinates were not display-safe.")
+    else:
+        st.plotly_chart(risk_figure, width="stretch")
+    st.info("\n".join(f"- {assumption}" for assumption in preview.assumptions))
 
 
 def _format_ratio(value: Decimal | None) -> str:

@@ -36,15 +36,15 @@ not refresh the option universe.
 - Brokerage truth: broker positions, open orders, fills, executions, and account values.
 - Chronos truth: wheel-cycle links, candidate evidence, guardrail evidence, notes, and the
   explicitly labeled strategy-adjusted basis.
-- UI state: navigation and one historical, presentation-safe candidate result only. It never
-  determines the Wheel stage or authorizes an action.
+- UI state: navigation plus at most one historical, presentation-safe candidate result and one
+  matching risk-preview attempt. Neither determines the Wheel stage or authorizes an action.
 
 ### Where feedback lives
 
 Connection changes, exceptional market-data lifecycle events, reconciliation capture/read
-failures, and successfully completed resolver outcome counts are logged to the console and a
-rotating local file. Locked early returns remain observable in their UI result without logging raw
-broker details.
+failures, successfully completed resolver outcome counts, and risk-preview outcomes are logged to
+the console and a rotating local file. Locked early returns remain observable in their UI result
+without logging raw broker details.
 Candidate, guardrail, and basis repositories retain evidence only for legitimate persisted Wheel
 cycles. Read-only reconciliation and flat-symbol candidate evaluation return in-memory
 presentation models and deliberately do not manufacture cycles or write audit rows yet.
@@ -71,13 +71,20 @@ evaluation button. It stores at most one sanitized result for historical display
 symbol change or raised refresh error, and never supplies that object to strategy or order
 services.
 
+Risk work starts only after a separate explicit button. The risk service accepts a contract ID as
+an untrusted selection hint and an explicit commission assumption, then obtains a new candidate
+evaluation internally. Ordinary reruns and assumption changes make no broker request. The stored
+risk output is historical display only and is cleared when its symbol, selected contract,
+commission assumption, or parent candidate generation changes.
+
 ## Package boundaries
 
 - `domain`: immutable vocabulary and broker-neutral models.
 - `broker`: protocol, deterministic demo adapter, IBKR adapter, connection ownership, and market
   data lifecycle.
 - `strategy`: Wheel state, resolver, scenarios, assignment pressure, and capital constraints.
-- `services`: read-only reconciliation and guarded short-put candidate evaluation.
+- `services`: read-only reconciliation, guarded short-put candidate evaluation, and fresh-evidence
+  expiration-risk preview.
 - `persistence`: SQLAlchemy schema and repositories for Chronos-only state.
 - `ui`: Streamlit pages and Plotly views; no brokerage truth lives here.
 - `config` and `utils`: validated settings, logging, UTC, and identifiers.
@@ -143,6 +150,31 @@ cleanup failures withhold resolution and return a sanitized locked `NO_TRADE`. U
 contracts are removed before quoting; the resolver can publish the remaining valid contracts while
 listing stale or otherwise invalid quotes as rejected evidence. It returns overall `NO_TRADE` when
 none pass. Even an `ELIGIBLE` result is read-only and keeps opening actions locked.
+
+## Read-only risk-preview boundary
+
+The short-put risk-preview service never accepts the historical candidate object held by
+Streamlit. Its request contains only a canonical symbol, a strict positive contract ID, and an
+explicit finite nonnegative total commission estimate. The service invokes the candidate service
+again, which repeats reconciliation and the serialized market observation. The selected ID must
+resolve uniquely among the newly eligible contracts. The attempt independently bounds candidate,
+underlying, reconciliation, and account timestamps against its own service clock and a hard
+30-second maximum. It adds the option's reported age at evaluation to time elapsed before the risk
+decision, re-proves the whole account empty and the target uniquely reconciled and flat, requires
+an exact underlying stock contract, and checks finite account cash, capital totals and percentages,
+exact chain exchange/trading-class routing, verified standard deliverable, currency, data quality,
+and quote age. A disappeared, duplicated, changed, stale, underfunded, internally inconsistent, or
+otherwise ineligible contract withholds the preview.
+
+The first risk slice fixes quantity at one contract and uses the newly observed bid as a clearly
+labeled hypothetical credit. It calls the existing Decimal scenario engine with the operator's
+total commission estimate and produces deduplicated expiration points at observed spot, strike,
+effective entry, and zero. Explicit zero commission is allowed only as a visibly fees-excluded
+operator assumption. The input is capped at 10,000 currency units, four normalized fractional
+decimal places, 16 decimal digits, and 32 UI characters; chart coordinates must also convert to
+finite display values. Broker margin is unavailable because the service never invokes broker
+what-if, preview, submission, modification, or cancellation. The result is not persisted, creates
+no Wheel cycle or order draft, and always keeps opening actions locked.
 
 Option-position average cost is never used for premium or basis math: IBKR and demo adapters can
 report that field in different units. Only execution price, qualified multiplier, fill quantity,

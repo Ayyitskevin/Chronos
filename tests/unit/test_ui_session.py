@@ -13,6 +13,7 @@ from chronos.domain.enums import (
     EligibilityStatus,
 )
 from chronos.domain.models import AccountSummary, ConnectionStatus
+from chronos.services.short_put_risk_preview import ShortPutRiskPreviewRequest
 from chronos.ui import session
 from chronos.ui.session import _validate_scope_observations
 
@@ -113,6 +114,18 @@ def test_runtime_wires_demo_reads_through_one_market_data_manager(
         assert candidate_evaluation.opening_actions_locked is True
         assert candidate_evaluation.reconciliation is not None
         assert "DU1234567" not in candidate_evaluation.model_dump_json()
+
+        risk_result = runtime.short_put_risk_preview.preview(
+            ShortPutRiskPreviewRequest(
+                symbol="AAPL",
+                selected_contract_id=2001,
+                total_commission_estimate=Decimal("0.65"),
+            )
+        )
+        assert risk_result.opening_actions_locked is True
+        assert risk_result.preview is None
+        assert risk_result.candidate_refresh is not None
+        assert "DU1234567" not in risk_result.model_dump_json()
     finally:
         runtime.close()
 

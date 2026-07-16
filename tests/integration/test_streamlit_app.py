@@ -9,12 +9,16 @@ from chronos.broker.demo import DemoBroker
 from chronos.config.settings import get_settings
 from chronos.domain.enums import DataQuality
 from chronos.services.short_put_candidates import ShortPutCandidateService
+from chronos.services.short_put_risk_preview import ShortPutRiskPreviewService
 from chronos.strategy.strike_resolver import (
     CandidateRejection,
     CandidateRejectionCode,
     RejectedCandidate,
 )
-from chronos.ui.dashboard import _CANDIDATE_EVALUATION_STATE_KEY
+from chronos.ui.dashboard import (
+    _CANDIDATE_EVALUATION_STATE_KEY,
+    _RISK_PREVIEW_STATE_KEY,
+)
 from chronos.ui.session import get_runtime
 
 
@@ -203,6 +207,306 @@ def test_explicit_candidate_evaluation_renders_locked_eligible_and_clears_stale_
         assert '"error_type":"BrokerDataError"' in log_text
         assert "sensitive broker detail" not in log_text
         assert "DU1234567" not in log_text
+    finally:
+        try:
+            get_runtime().close()
+        finally:
+            get_runtime.clear()
+            get_settings.cache_clear()
+
+
+def test_explicit_risk_preview_refreshes_evidence_and_invalidates_stale_output(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("BROKER_MODE", "demo")
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'chronos.db'}")
+    monkeypatch.setenv("LOG_FILE", str(tmp_path / "chronos.log"))
+    evaluate_calls: list[str] = []
+    fail_next = False
+    original_evaluate = ShortPutCandidateService.evaluate
+
+    def controlled_evaluation(service: ShortPutCandidateService, symbol: str):
+        nonlocal fail_next
+        evaluate_calls.append(symbol)
+        if fail_next:
+            raise BrokerDataError("DU1234567 sensitive risk-refresh detail")
+        broker = service._broker
+        assert isinstance(broker, DemoBroker)
+        broker._positions = ()
+        broker._orders = ()
+        broker._executions = ()
+        service._settings = service._settings.model_copy(
+            update={"max_expirations": 1, "max_strikes_per_expiration": 1}
+        )
+        return original_evaluate(service, symbol)
+
+    monkeypatch.setattr(ShortPutCandidateService, "evaluate", controlled_evaluation)
+
+    try:
+        app = AppTest.from_file("src/chronos/app.py").run(timeout=10)
+        app.radio[0].set_value("Symbol Detail & Order Workspace").run(timeout=10)
+
+        assert not app.exception
+        assert evaluate_calls == []
+        assert len(app.text_input) == 0
+        assert len(app.button) == 1
+
+        app.button[0].click().run(timeout=10)
+
+        assert not app.exception
+        assert evaluate_calls == ["AAPL"]
+        assert len(app.selectbox) == 2
+        assert len(app.text_input) == 1
+        assert len(app.button) == 2
+        assert app.button[1].label == "Refresh evidence & calculate locked risk"
+        assert app.button[1].disabled is True
+        assert _RISK_PREVIEW_STATE_KEY not in app.session_state
+
+        app.text_input[0].set_value("0.65").run(timeout=10)
+
+        assert not app.exception
+        assert evaluate_calls == ["AAPL"]
+        assert app.button[1].disabled is False
+        assert _RISK_PREVIEW_STATE_KEY not in app.session_state
+
+        app.button[1].click().run(timeout=10)
+
+        assert not app.exception
+        assert evaluate_calls == ["AAPL", "AAPL"]
+        assert _CANDIDATE_EVALUATION_STATE_KEY in app.session_state
+        assert _RISK_PREVIEW_STATE_KEY in app.session_state
+        metrics = {metric.label: metric.value for metric in app.metric}
+        assert metrics["Risk preview"] == "READY"
+        assert metrics["Opening actions"] == "LOCKED"
+        assert metrics["Fresh-bid credit / share"].endswith(" USD")
+        assert metrics["Effective entry / share"].endswith(" USD")
+        assert metrics["Total commission estimate"] == "0.65 USD"
+        assert metrics["Total gross premium"].endswith(" USD")
+        assert metrics["Total net premium"].endswith(" USD")
+        assert metrics["Total assignment obligation"].endswith(" USD")
+        assert metrics["Broker margin"] == "Unavailable — not requested"
+        scenario_table = next(
+            dataframe.value
+            for dataframe in app.dataframe
+            if "Reference point" in dataframe.value.columns
+        )
+        assert set(scenario_table["Opening actions"]) == {"LOCKED"}
+        assert {
+            "Observed Spot",
+            "Strike",
+            "Effective Entry",
+            "Underlying Zero",
+        } == set(scenario_table["Reference point"])
+        assert all("USD" in value for value in scenario_table["Modeled expiration P&L"])
+        assert all("$" not in dataframe.value.to_string() for dataframe in app.dataframe)
+        assert "DU1234567" not in str(app)
+        assert "DU1234567" not in str(app.session_state.filtered_state)
+        assert any("historical display only" in caption.value for caption in app.caption)
+        assert any("EDT" in caption.value for caption in app.caption)
+
+        app.run(timeout=10)
+        assert evaluate_calls == ["AAPL", "AAPL"]
+
+        app.text_input[0].set_value("0.66").run(timeout=10)
+        assert evaluate_calls == ["AAPL", "AAPL"]
+        assert _RISK_PREVIEW_STATE_KEY not in app.session_state
+        assert "Risk preview" not in {metric.label for metric in app.metric}
+
+        app.text_input[0].set_value("0.65").run(timeout=10)
+        app.button[1].click().run(timeout=10)
+        assert evaluate_calls == ["AAPL", "AAPL", "AAPL"]
+        assert _RISK_PREVIEW_STATE_KEY in app.session_state
+
+        fail_next = True
+        app.button[1].click().run(timeout=10)
+        assert evaluate_calls == ["AAPL", "AAPL", "AAPL", "AAPL"]
+        assert _CANDIDATE_EVALUATION_STATE_KEY not in app.session_state
+        assert _RISK_PREVIEW_STATE_KEY in app.session_state
+        assert {metric.label: metric.value for metric in app.metric}["Risk preview"] == "WITHHELD"
+        assert any(
+            "Fresh candidate evidence could not be obtained safely" in warning.value
+            for warning in app.warning
+        )
+        assert "sensitive risk-refresh detail" not in str(app)
+        assert "DU1234567" not in str(app)
+        log_text = (tmp_path / "chronos.log").read_text(encoding="utf-8")
+        assert '"error_type":"BrokerDataError"' in log_text
+        assert "sensitive risk-refresh detail" not in log_text
+        assert "DU1234567" not in log_text
+
+        app.run(timeout=10)
+        assert _CANDIDATE_EVALUATION_STATE_KEY not in app.session_state
+        assert _RISK_PREVIEW_STATE_KEY not in app.session_state
+    finally:
+        try:
+            get_runtime().close()
+        finally:
+            get_runtime.clear()
+            get_settings.cache_clear()
+
+
+def test_risk_preview_rejects_unbounded_or_overprecise_commission_without_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("BROKER_MODE", "demo")
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'chronos.db'}")
+    monkeypatch.setenv("LOG_FILE", str(tmp_path / "chronos.log"))
+    evaluate_calls: list[str] = []
+    preview_calls: list[object] = []
+    original_evaluate = ShortPutCandidateService.evaluate
+
+    def controlled_evaluation(service: ShortPutCandidateService, symbol: str):
+        evaluate_calls.append(symbol)
+        broker = service._broker
+        assert isinstance(broker, DemoBroker)
+        broker._positions = ()
+        broker._orders = ()
+        broker._executions = ()
+        service._settings = service._settings.model_copy(
+            update={"max_expirations": 1, "max_strikes_per_expiration": 1}
+        )
+        return original_evaluate(service, symbol)
+
+    def track_preview(_service: ShortPutRiskPreviewService, request: object):
+        preview_calls.append(request)
+        raise AssertionError("Invalid commission unexpectedly reached the preview service")
+
+    monkeypatch.setattr(ShortPutCandidateService, "evaluate", controlled_evaluation)
+    monkeypatch.setattr(ShortPutRiskPreviewService, "preview", track_preview)
+
+    try:
+        app = AppTest.from_file("src/chronos/app.py").run(timeout=10)
+        app.radio[0].set_value("Symbol Detail & Order Workspace").run(timeout=10)
+        app.button[0].click().run(timeout=10)
+
+        assert not app.exception
+        assert evaluate_calls == ["AAPL"]
+        assert preview_calls == []
+
+        for invalid_value in (
+            "1e400",
+            "10000.01",
+            "0.00001",
+            "1e-999999999999999999",
+            "1.23000000000000000000",
+            "000000000000000000000000000000001",
+        ):
+            app.text_input[0].set_value(invalid_value).run(timeout=10)
+
+            assert not app.exception
+            assert app.button[1].disabled is True
+            assert evaluate_calls == ["AAPL"]
+            assert preview_calls == []
+            assert _RISK_PREVIEW_STATE_KEY not in app.session_state
+
+        app.text_input[0].set_value("1.23000").run(timeout=10)
+        assert not app.exception
+        assert app.button[1].disabled is False
+        assert evaluate_calls == ["AAPL"]
+        assert preview_calls == []
+    finally:
+        try:
+            get_runtime().close()
+        finally:
+            get_runtime.clear()
+            get_settings.cache_clear()
+
+
+def test_disappeared_risk_contract_remains_visible_until_operator_changes_selection(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("BROKER_MODE", "demo")
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'chronos.db'}")
+    monkeypatch.setenv("LOG_FILE", str(tmp_path / "chronos.log"))
+    evaluate_calls: list[str] = []
+    selected_contract_id: int | None = None
+    original_evaluate = ShortPutCandidateService.evaluate
+
+    def controlled_evaluation(service: ShortPutCandidateService, symbol: str):
+        nonlocal selected_contract_id
+        evaluate_calls.append(symbol)
+        broker = service._broker
+        assert isinstance(broker, DemoBroker)
+        broker._positions = ()
+        broker._orders = ()
+        broker._executions = ()
+        service._settings = service._settings.model_copy(
+            update={"max_expirations": 1, "max_strikes_per_expiration": 1}
+        )
+        result = original_evaluate(service, symbol)
+        assert result.resolution is not None
+        assert len(result.resolution.candidates) == 1
+        candidate = result.resolution.candidates[0]
+        replacements = tuple(
+            candidate.model_copy(
+                update={
+                    "contract": candidate.contract.model_copy(
+                        update={
+                            "con_id": candidate.contract.con_id + offset,
+                            "local_symbol": f"{candidate.contract.local_symbol} R{offset}",
+                        }
+                    )
+                }
+            )
+            for offset in (100, 200)
+        )
+        if selected_contract_id is None:
+            selected_contract_id = candidate.contract.con_id
+            initial_candidates = (candidate, *replacements)
+            return result.model_copy(
+                update={
+                    "resolution": result.resolution.model_copy(
+                        update={"candidates": initial_candidates}
+                    )
+                }
+            )
+
+        return result.model_copy(
+            update={"resolution": result.resolution.model_copy(update={"candidates": replacements})}
+        )
+
+    monkeypatch.setattr(ShortPutCandidateService, "evaluate", controlled_evaluation)
+
+    try:
+        app = AppTest.from_file("src/chronos/app.py").run(timeout=10)
+        app.radio[0].set_value("Symbol Detail & Order Workspace").run(timeout=10)
+        app.button[0].click().run(timeout=10)
+
+        assert not app.exception
+        assert selected_contract_id is not None
+        assert app.selectbox[1].value == selected_contract_id
+        app.text_input[0].set_value("0.65").run(timeout=10)
+        app.button[1].click().run(timeout=10)
+
+        assert not app.exception
+        assert evaluate_calls == ["AAPL", "AAPL"]
+        assert _CANDIDATE_EVALUATION_STATE_KEY in app.session_state
+        assert _RISK_PREVIEW_STATE_KEY in app.session_state
+        assert {metric.label: metric.value for metric in app.metric}["Risk preview"] == ("WITHHELD")
+        assert any(
+            "selected contract is no longer uniquely eligible" in warning.value.lower()
+            for warning in app.warning
+        )
+        assert app.selectbox[1].value != selected_contract_id
+
+        app.run(timeout=10)
+        assert evaluate_calls == ["AAPL", "AAPL"]
+        assert _RISK_PREVIEW_STATE_KEY in app.session_state
+        assert {metric.label: metric.value for metric in app.metric}["Risk preview"] == ("WITHHELD")
+
+        assert len(app.selectbox[1].options) >= 2
+        current_replacement = app.selectbox[1].value
+        new_replacement = selected_contract_id + 200
+        assert new_replacement != current_replacement
+        app.selectbox[1].set_value(new_replacement).run(timeout=10)
+
+        assert not app.exception
+        assert evaluate_calls == ["AAPL", "AAPL"]
+        assert _RISK_PREVIEW_STATE_KEY not in app.session_state
+        assert "Risk preview" not in {metric.label for metric in app.metric}
     finally:
         try:
             get_runtime().close()
