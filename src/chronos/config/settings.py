@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     ib_account_id: str = ""
 
     allow_order_transmit: bool = False
-    allow_live_trading: Literal[False] = False
+    allow_live_trading: bool = False
     allow_outside_rth: bool = False
 
     symbol_allowlist: SymbolAllowlist = ("AAPL", "MSFT", "SPY")
@@ -80,6 +80,8 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_safety_and_ranges(self) -> Settings:
+        if self.allow_live_trading:
+            raise ValueError("Live trading is hard-disabled in the Chronos MVP")
         if not self.symbol_allowlist:
             raise ValueError("SYMBOL_ALLOWLIST must contain at least one symbol")
         if len(set(self.symbol_allowlist)) != len(self.symbol_allowlist):

@@ -56,8 +56,19 @@ def test_live_transmission_is_rejected() -> None:
 
 
 def test_live_trading_flag_cannot_be_enabled() -> None:
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError, match="Live trading is hard-disabled"):
         Settings(_env_file=None, allow_live_trading=True)
+
+
+def test_live_trading_environment_flag_parses_false_and_rejects_true(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ALLOW_LIVE_TRADING", "false")
+    assert Settings(_env_file=None).allow_live_trading is False
+
+    monkeypatch.setenv("ALLOW_LIVE_TRADING", "true")
+    with pytest.raises(ValidationError, match="Live trading is hard-disabled"):
+        Settings(_env_file=None)
 
 
 @pytest.mark.parametrize(
