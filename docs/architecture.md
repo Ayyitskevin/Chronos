@@ -42,8 +42,9 @@ reachable without test mutation. Neither profile can submit an order.
 - Chronos truth: wheel-cycle links, candidate evidence, guardrail evidence, notes, and the
   explicitly labeled strategy-adjusted basis.
 - UI state: navigation plus either one historical, presentation-safe candidate lineage with its
-  matching risk and DEMO what-if attempts, or one standalone scalar DEMO approval-rehearsal
-  receipt after success. None determines the Wheel stage or authorizes an action.
+  matching risk and DEMO what-if attempts, or one process-memory approval-rehearsal envelope. The
+  envelope contains a scalar receipt only while retained and otherwise only a term-free terminal
+  tombstone. None determines the Wheel stage or authorizes an action.
 
 ### Where feedback lives
 
@@ -94,8 +95,9 @@ DEMO approval rehearsal starts only after a fourth explicit action and a current
 one, affirm the exact contract ID, limit, and gross assignment obligation, and make an explicit risk
 acknowledgement. The service accepts those values only as scalar hints and reruns the complete
 what-if boundary. On success, the UI discards the parent lineage and typed widgets and retains only
-a standalone scalar receipt; a new ancestor attempt or workspace-symbol change clears it. Failed
-attempts retain only sanitized feedback. Ordinary reruns perform no approval work and make no
+a standalone scalar receipt envelope. A new ancestor attempt or workspace-symbol change
+terminally supersedes its terms before newer work starts. Failed attempts retain only sanitized
+feedback and cannot restore an old receipt. Ordinary reruns perform no approval work and make no
 related broker request.
 
 ## Package boundaries
@@ -244,10 +246,32 @@ text, raw account identity, broker margin output, and every M5-M7 parent object.
 The UI displays `Progression: STOPPED` and keeps order actions `LOCKED` after success. Nothing from
 the attempt is persisted, and no Wheel cycle, order draft, guardrail decision, lifecycle
 transition, submission, modification, or cancellation is created or invoked. Success removes the
-typed inputs and parent evidence from session state, leaving only the standalone scalar receipt.
-An explicit new ancestor attempt or workspace-symbol change clears that historical receipt, while
-ordinary Streamlit reruns do not repeat the service. No corresponding IBKR approval path exists;
-its order boundary remains hardlocked.
+typed inputs and parent evidence from session state, leaving only the standalone scalar receipt
+that Milestone 9 wraps in a display-disposition envelope. An explicit new ancestor attempt or
+workspace-symbol change terminally supersedes its terms, while ordinary Streamlit reruns do not
+repeat the service. No corresponding IBKR approval path exists; its order boundary remains
+hardlocked.
+
+## Process-memory receipt-disposition boundary
+
+Milestone 9 wraps the scalar Milestone 8 receipt in an immutable UI-state record. `RETAINED`,
+`EXPIRED`, `ABANDONED`, and `SUPERSEDED` are presentation dispositions, not members or aliases of
+`OrderLifecycle`. A retained record carries the already-sanitized receipt plus a fixed display
+deadline. The deadline is 15 minutes after retention and uses `time.monotonic()`, so it is
+independent of the fixed DEMO market clock and cannot be mistaken for quote validity.
+
+The first render at or after the exact deadline changes the record to `EXPIRED`. An explicit
+operator button changes it to `ABANDONED`; starting newer ancestor evidence changes it to
+`SUPERSEDED` before any service call. Clock regression fails closed as `EXPIRED`. The first
+terminal disposition is immutable and idempotent. Every terminal record sets the receipt to
+`None`, retaining no business or evidence fields beyond canonical reference and symbol, monotonic
+timing, a closed reason enum, and literal false/locked safety flags.
+
+All transitions are pure in-process replacements. They call no candidate, risk, what-if, approval,
+submission, modification, or cancellation service; write no database row; create no cycle, draft,
+guardrail decision, lifecycle state, or authority; and disappear on session restart. Ordinary
+Streamlit reruns can only retain or expire the display record. `Progression: STOPPED` and
+submission `LOCKED` remain invariant.
 
 Option-position average cost is never used for premium or basis math: IBKR and demo adapters can
 report that field in different units. Only execution price, qualified multiplier, fill quantity,

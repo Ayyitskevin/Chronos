@@ -74,6 +74,10 @@ the receipt math and remains `STOPPED` and `LOCKED`. Only the affirmed scalar co
 cross the Milestone 8 result boundary; the refreshed payoff, margin output, full option contract,
 and all parent results are discarded after validation.
 
+Milestone 9 adds no financial formula. Its 15-minute monotonic display lease governs only
+process-memory presentation. Once the receipt is expired, abandoned, or superseded, the terminal
+tombstone retains no contract, price, obligation, payoff, capital, or margin term.
+
 ## Covered call
 
 For stock quantity covered `d * q`:

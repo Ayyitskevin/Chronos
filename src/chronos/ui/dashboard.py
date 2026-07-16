@@ -6,6 +6,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+from time import monotonic
 
 import streamlit as st
 
@@ -51,6 +52,14 @@ from chronos.ui.components import (
     render_reconciliation_status,
     render_safety_notice,
 )
+from chronos.ui.rehearsal_state import (
+    DemoApprovalDisposition,
+    DemoApprovalSessionRecord,
+    abandon_demo_approval_record,
+    refresh_demo_approval_record,
+    retain_demo_approval_receipt,
+    supersede_demo_approval_record,
+)
 from chronos.ui.session import AppRuntime
 from chronos.utils.logging import mask_account_identifiers
 from chronos.utils.time import as_market_time
@@ -81,6 +90,7 @@ def render_dashboard(runtime: AppRuntime) -> None:
     st.title("Chronos")
     st.caption("Local-first Wheel Strategy workspace")
     render_safety_notice()
+    _stored_demo_approval_record()
     try:
         page = st.sidebar.radio(
             "Workspace",
@@ -229,7 +239,11 @@ def _render_symbol_detail(runtime: AppRuntime) -> None:
         if isinstance(runtime.broker, DemoBroker)
         else "Allowlisted symbol"
     )
-    symbol = st.selectbox(label, symbols)
+    symbol = st.selectbox(
+        label,
+        symbols,
+        on_change=_clear_short_put_demo_approval_result,
+    )
     st.subheader(symbol)
 
     stored = st.session_state.get(_CANDIDATE_EVALUATION_STATE_KEY)
@@ -748,6 +762,7 @@ def _render_short_put_demo_what_if(
             total_commission_estimate=ready_risk.request.total_commission_estimate,
             limit_price=limit_price,
         )
+        _clear_short_put_demo_approval()
         st.session_state.pop(_DEMO_WHAT_IF_STATE_KEY, None)
         st.session_state.pop(_RISK_PREVIEW_STATE_KEY, None)
         st.session_state.pop(_CANDIDATE_EVALUATION_STATE_KEY, None)
@@ -821,13 +836,38 @@ def _clear_short_put_demo_what_if_without_current_parent(symbol: str) -> None:
 
 
 def _has_standalone_demo_approval_receipt(symbol: str) -> bool:
-    stored = st.session_state.get(_DEMO_APPROVAL_STATE_KEY)
+    stored = _stored_demo_approval_record()
     return (
-        isinstance(stored, ShortPutDemoApprovalResult)
-        and stored.request.symbol == symbol
-        and stored.status is DemoApprovalStatus.APPROVAL_REHEARSED
+        stored is not None
+        and stored.symbol == symbol
+        and stored.disposition is DemoApprovalDisposition.RETAINED
         and stored.receipt is not None
     )
+
+
+def _stored_demo_approval_record() -> DemoApprovalSessionRecord | None:
+    """Return current session presentation state after applying its display lease."""
+
+    stored = st.session_state.get(_DEMO_APPROVAL_STATE_KEY)
+    if not isinstance(stored, DemoApprovalSessionRecord):
+        if stored is not None:
+            st.session_state.pop(_DEMO_APPROVAL_STATE_KEY, None)
+        return None
+    try:
+        refreshed = refresh_demo_approval_record(
+            stored,
+            now_monotonic=monotonic(),
+        )
+    except (TypeError, ValueError):
+        st.session_state.pop(_DEMO_APPROVAL_STATE_KEY, None)
+        logging.getLogger("chronos.ui.dashboard").warning(
+            "Malformed DEMO approval session record discarded",
+            extra={"event": "demo_approval_session_record_discarded"},
+        )
+        return None
+    if refreshed != stored:
+        st.session_state[_DEMO_APPROVAL_STATE_KEY] = refreshed
+    return refreshed
 
 
 def _clear_short_put_demo_what_if_result() -> None:
@@ -941,14 +981,18 @@ def _render_short_put_demo_approval(
     *,
     clear_rendered_evidence: Callable[[], None],
 ) -> None:
-    stored = st.session_state.get(_DEMO_APPROVAL_STATE_KEY)
-    result = (
-        stored
-        if isinstance(stored, ShortPutDemoApprovalResult) and stored.request.symbol == symbol
-        else None
-    )
-    if stored is not None and result is None:
-        _clear_short_put_demo_approval()
+    record = _stored_demo_approval_record()
+    if (
+        record is not None
+        and record.symbol != symbol
+        and record.disposition is DemoApprovalDisposition.RETAINED
+    ):
+        st.session_state[_DEMO_APPROVAL_STATE_KEY] = supersede_demo_approval_record(
+            record,
+            now_monotonic=monotonic(),
+        )
+        record = None
+    matching_record = record if record is not None and record.symbol == symbol else None
 
     current_what_if = (
         what_if_result
@@ -960,18 +1004,21 @@ def _render_short_put_demo_approval(
         else None
     )
     if current_what_if is None:
-        if (
-            result is not None
-            and result.status is DemoApprovalStatus.APPROVAL_REHEARSED
-            and result.receipt is not None
-        ):
-            _clear_short_put_demo_approval_inputs()
-            _render_short_put_demo_approval_result(result)
-            return
-        _clear_short_put_demo_approval()
+        _clear_short_put_demo_approval_inputs()
+        if matching_record is not None:
+            _render_short_put_demo_approval_record(matching_record)
         _render_short_put_demo_approval_feedback(symbol)
         return
 
+    if (
+        matching_record is not None
+        and matching_record.disposition is DemoApprovalDisposition.RETAINED
+    ):
+        matching_record = supersede_demo_approval_record(
+            matching_record,
+            now_monotonic=monotonic(),
+        )
+        st.session_state[_DEMO_APPROVAL_STATE_KEY] = matching_record
     st.session_state.pop(_DEMO_APPROVAL_FEEDBACK_STATE_KEY, None)
 
     preview = current_what_if.preview
@@ -1027,31 +1074,6 @@ def _render_short_put_demo_approval(
     if not risk_terms_acknowledged:
         st.info("Explicit acknowledgment of the displayed DEMO terms and risk is required.")
 
-    request_matches_controls = (
-        result is not None
-        and result.status is DemoApprovalStatus.APPROVAL_REHEARSED
-        and result.receipt is not None
-        and result.request.typed_symbol == typed_symbol
-        and result.request.acknowledged_quantity == acknowledged_quantity
-        and result.request.risk_terms_acknowledged is risk_terms_acknowledged
-        and result.request.selected_contract_id == preview.selected_contract.con_id
-        and result.request.acknowledged_contract_id == preview.selected_contract.con_id
-        and result.request.limit_price == preview.limit_price
-        and result.request.acknowledged_limit_price == preview.limit_price
-        and result.request.gross_assignment_obligation == preview.gross_assignment_obligation
-        and result.request.acknowledged_gross_assignment_obligation
-        == preview.gross_assignment_obligation
-        and result.request.total_commission_estimate
-        == current_what_if.request.total_commission_estimate
-        and result.receipt.symbol == preview.symbol
-        and result.receipt.selected_contract.con_id == preview.selected_contract.con_id
-        and result.receipt.limit_price == preview.limit_price
-        and result.receipt.gross_assignment_obligation == preview.gross_assignment_obligation
-    )
-    if result is not None and not request_matches_controls:
-        st.session_state.pop(_DEMO_APPROVAL_STATE_KEY, None)
-        result = None
-
     inputs_ready = (
         symbol_error is None
         and typed_symbol == preview.symbol
@@ -1079,21 +1101,29 @@ def _render_short_put_demo_approval(
             acknowledged_gross_assignment_obligation=preview.gross_assignment_obligation,
             risk_terms_acknowledged=risk_terms_acknowledged,
         )
-        st.session_state.pop(_DEMO_APPROVAL_STATE_KEY, None)
+        previous_record = _stored_demo_approval_record()
+        if previous_record is not None and previous_record.symbol != preview.symbol:
+            previous_record = None
         st.session_state.pop(_DEMO_WHAT_IF_STATE_KEY, None)
         st.session_state.pop(_RISK_PREVIEW_STATE_KEY, None)
         st.session_state.pop(_CANDIDATE_EVALUATION_STATE_KEY, None)
         clear_rendered_evidence()
-        result = runtime.short_put_demo_approval.rehearse(request)
-        if result.status is DemoApprovalStatus.APPROVAL_REHEARSED and result.receipt is not None:
-            st.session_state[_DEMO_APPROVAL_STATE_KEY] = result
+        attempt_result = runtime.short_put_demo_approval.rehearse(request)
+        if (
+            attempt_result.status is DemoApprovalStatus.APPROVAL_REHEARSED
+            and attempt_result.receipt is not None
+        ):
+            st.session_state[_DEMO_APPROVAL_STATE_KEY] = retain_demo_approval_receipt(
+                attempt_result.receipt,
+                now_monotonic=monotonic(),
+                previous=previous_record,
+            )
             st.session_state.pop(_DEMO_APPROVAL_FEEDBACK_STATE_KEY, None)
         else:
-            st.session_state[_DEMO_APPROVAL_FEEDBACK_STATE_KEY] = _demo_approval_feedback(result)
+            st.session_state[_DEMO_APPROVAL_FEEDBACK_STATE_KEY] = _demo_approval_feedback(
+                attempt_result
+            )
         st.rerun()
-
-    if result is not None:
-        _render_short_put_demo_approval_result(result)
 
 
 def _demo_approval_symbol_error(value: str, expected_symbol: str) -> str | None:
@@ -1133,7 +1163,14 @@ def _clear_short_put_demo_approval_inputs() -> None:
 
 
 def _clear_short_put_demo_approval_result() -> None:
-    st.session_state.pop(_DEMO_APPROVAL_STATE_KEY, None)
+    stored = _stored_demo_approval_record()
+    if stored is None:
+        st.session_state.pop(_DEMO_APPROVAL_STATE_KEY, None)
+        return
+    st.session_state[_DEMO_APPROVAL_STATE_KEY] = supersede_demo_approval_record(
+        stored,
+        now_monotonic=monotonic(),
+    )
 
 
 def _has_exact_demo_rehearsal_boundary(runtime: AppRuntime) -> bool:
@@ -1194,22 +1231,70 @@ def _render_short_put_demo_approval_feedback(symbol: str) -> None:
     )
 
 
-def _render_short_put_demo_approval_result(result: ShortPutDemoApprovalResult) -> None:
-    evaluated_at = as_market_time(result.evaluated_at)
-    columns = st.columns(3)
-    columns[0].metric("DEMO approval rehearsal", result.status.value)
-    columns[1].metric("Progression", "STOPPED")
-    columns[2].metric("Submission", "LOCKED")
+def _render_short_put_demo_approval_record(record: DemoApprovalSessionRecord) -> None:
+    now_monotonic = monotonic()
+    refreshed = refresh_demo_approval_record(
+        record,
+        now_monotonic=now_monotonic,
+    )
+    if refreshed != record:
+        st.session_state[_DEMO_APPROVAL_STATE_KEY] = refreshed
+    record = refreshed
+
+    st.subheader("Approval rehearsal receipt")
+    columns = st.columns(4)
+    columns[0].metric(
+        "DEMO approval rehearsal",
+        (
+            DemoApprovalStatus.APPROVAL_REHEARSED.value
+            if record.disposition is DemoApprovalDisposition.RETAINED
+            else record.disposition.value
+        ),
+    )
+    columns[1].metric("Receipt disposition", record.disposition.value)
+    columns[2].metric("Progression", "STOPPED")
+    columns[3].metric("Submission", "LOCKED")
+
+    receipt = record.receipt
+    if record.disposition is not DemoApprovalDisposition.RETAINED or receipt is None:
+        disposition_copy = {
+            DemoApprovalDisposition.EXPIRED: (
+                "The process-memory display lease ended. Receipt terms were discarded."
+            ),
+            DemoApprovalDisposition.ABANDONED: (
+                "The operator abandoned the historical rehearsal. Receipt terms were discarded."
+            ),
+            DemoApprovalDisposition.SUPERSEDED: (
+                "A newer evidence attempt superseded this rehearsal. Receipt terms were discarded."
+            ),
+        }
+        st.caption(disposition_copy[record.disposition])
+        st.write(
+            {
+                "Approval rehearsal reference": record.approval_reference,
+                "Symbol": record.symbol,
+                "Presentation disposition": record.disposition.value,
+                "Approval authority": "NONE",
+                "Persistence": "NONE",
+                "Submission": "LOCKED",
+            }
+        )
+        st.error(
+            "This is a term-free session tombstone. It cannot restore evidence, authorize, "
+            "persist, transmit, submit, modify, or cancel an order."
+        )
+        return
+
+    evaluated_at = as_market_time(receipt.approval_rehearsed_at)
+    remaining_seconds = max(
+        0.0,
+        record.display_expires_at_monotonic - now_monotonic,
+    )
     st.caption(
         f"DEMO approval rehearsal completed {evaluated_at:%Y-%m-%d %H:%M:%S %Z} — "
-        "historical display only; no authority is retained."
+        f"historical display only; terms expire from session display in "
+        f"{remaining_seconds:.0f} seconds and create no authority."
     )
-    if result.reasons:
-        st.warning("\n".join(f"- {reason}" for reason in result.reasons))
-    receipt = result.receipt
-    if result.status is not DemoApprovalStatus.APPROVAL_REHEARSED or receipt is None:
-        st.caption("Approval evidence was withheld; progression and submission stay locked.")
-        return
 
     currency = receipt.currency
     terms = st.columns(3)
@@ -1234,6 +1319,12 @@ def _render_short_put_demo_approval_result(result: ShortPutDemoApprovalResult) -
         "The acknowledgment was rehearsed in memory only. It cannot authorize, persist, "
         "transmit, submit, modify, or cancel an order."
     )
+    if st.button("Abandon historical DEMO rehearsal receipt"):
+        st.session_state[_DEMO_APPROVAL_STATE_KEY] = abandon_demo_approval_record(
+            record,
+            now_monotonic=monotonic(),
+        )
+        st.rerun()
 
 
 def _render_short_put_risk_result(result: ShortPutRiskPreviewResult) -> None:

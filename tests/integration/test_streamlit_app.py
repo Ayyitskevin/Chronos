@@ -38,6 +38,10 @@ from chronos.ui.dashboard import (
     _DEMO_WHAT_IF_STATE_KEY,
     _RISK_PREVIEW_STATE_KEY,
 )
+from chronos.ui.rehearsal_state import (
+    DemoApprovalDisposition,
+    DemoApprovalSessionRecord,
+)
 from chronos.ui.session import get_runtime
 
 
@@ -786,8 +790,11 @@ def test_demo_approval_rehearsal_is_memoryless_lineage_bound_and_nontransmitting
         assert _RISK_PREVIEW_STATE_KEY not in app.session_state
         assert _DEMO_WHAT_IF_STATE_KEY not in app.session_state
         assert _DEMO_APPROVAL_STATE_KEY in app.session_state
-        approval_result = app.session_state[_DEMO_APPROVAL_STATE_KEY]
-        serialized_approval = approval_result.model_dump_json()
+        approval_record = app.session_state[_DEMO_APPROVAL_STATE_KEY]
+        assert isinstance(approval_record, DemoApprovalSessionRecord)
+        assert approval_record.disposition is DemoApprovalDisposition.RETAINED
+        assert approval_record.receipt is not None
+        serialized_approval = approval_record.model_dump_json()
         assert '"what_if_refresh"' not in serialized_approval
         assert '"risk_refresh"' not in serialized_approval
         assert '"broker_warning"' not in serialized_approval
@@ -800,6 +807,7 @@ def test_demo_approval_rehearsal_is_memoryless_lineage_bound_and_nontransmitting
         assert "Risk preview" not in metrics
         assert "DEMO what-if" not in metrics
         assert metrics["DEMO approval rehearsal"] == "APPROVAL_REHEARSED"
+        assert metrics["Receipt disposition"] == "RETAINED"
         assert metrics["Progression"] == "STOPPED"
         assert metrics["Submission"] == "LOCKED"
         assert metrics["Rehearsed contract"] == "2002"
@@ -815,6 +823,9 @@ def test_demo_approval_rehearsal_is_memoryless_lineage_bound_and_nontransmitting
         assert not any(
             "confirm" in button.label.lower() or "submit" in button.label.lower()
             for button in app.button
+        )
+        assert any(
+            button.label == "Abandon historical DEMO rehearsal receipt" for button in app.button
         )
 
         runtime = get_runtime()
@@ -834,7 +845,15 @@ def test_demo_approval_rehearsal_is_memoryless_lineage_bound_and_nontransmitting
         assert len(preview_calls) == 2
         assert len(approval_calls) == 1
         assert _DEMO_APPROVAL_STATE_KEY in app.session_state
-        assert app.session_state[_DEMO_APPROVAL_STATE_KEY] == approval_result
+        rerun_record = app.session_state[_DEMO_APPROVAL_STATE_KEY]
+        assert isinstance(rerun_record, DemoApprovalSessionRecord)
+        assert rerun_record.approval_reference == approval_record.approval_reference
+        assert rerun_record.receipt == approval_record.receipt
+        assert (
+            rerun_record.display_expires_at_monotonic
+            == approval_record.display_expires_at_monotonic
+        )
+        assert rerun_record.last_observed_at_monotonic >= approval_record.last_observed_at_monotonic
         assert _CANDIDATE_EVALUATION_STATE_KEY not in app.session_state
         assert _RISK_PREVIEW_STATE_KEY not in app.session_state
         assert _DEMO_WHAT_IF_STATE_KEY not in app.session_state
@@ -842,8 +861,145 @@ def test_demo_approval_rehearsal_is_memoryless_lineage_bound_and_nontransmitting
             "DEMO approval rehearsal"
         ] == "APPROVAL_REHEARSED"
 
-        app.button[0].click().run(timeout=10)
+        forged_session_record = approval_record.model_copy(update={"authority_created": True})
+        app.session_state[_DEMO_APPROVAL_STATE_KEY] = forged_session_record
+        app.run(timeout=10)
+        assert not app.exception
         assert _DEMO_APPROVAL_STATE_KEY not in app.session_state
+        assert "Rehearsed contract" not in {metric.label: metric.value for metric in app.metric}
+        assert evaluate_calls == ["AAPL", "AAPL", "AAPL", "AAPL"]
+        assert len(approval_calls) == 1
+        assert len(preview_calls) == 2
+        assert unexpected_order_calls == []
+
+        portfolio_expiring_record = DemoApprovalSessionRecord.model_validate(
+            {
+                **approval_record.model_dump(),
+                "retained_at_monotonic": 0.0,
+                "last_observed_at_monotonic": 0.0,
+                "display_expires_at_monotonic": 1.0,
+            }
+        )
+        app.session_state[_DEMO_APPROVAL_STATE_KEY] = portfolio_expiring_record
+        app.radio[0].set_value("Portfolio Dashboard").run(timeout=10)
+        portfolio_expired_record = app.session_state[_DEMO_APPROVAL_STATE_KEY]
+        assert isinstance(portfolio_expired_record, DemoApprovalSessionRecord)
+        assert portfolio_expired_record.disposition is DemoApprovalDisposition.EXPIRED
+        assert portfolio_expired_record.receipt is None
+        assert "selected_contract" not in portfolio_expired_record.model_dump_json()
+        assert evaluate_calls == ["AAPL", "AAPL", "AAPL", "AAPL"]
+        assert len(approval_calls) == 1
+        assert len(preview_calls) == 2
+        assert unexpected_order_calls == []
+
+        app.radio[0].set_value("Symbol Detail & Order Workspace").run(timeout=10)
+        app.session_state[_DEMO_APPROVAL_STATE_KEY] = approval_record
+        app.run(timeout=10)
+        app.selectbox[0].set_value("MSFT").run(timeout=10)
+        symbol_superseded_record = app.session_state[_DEMO_APPROVAL_STATE_KEY]
+        assert isinstance(symbol_superseded_record, DemoApprovalSessionRecord)
+        assert symbol_superseded_record.disposition is DemoApprovalDisposition.SUPERSEDED
+        assert symbol_superseded_record.receipt is None
+        assert evaluate_calls == ["AAPL", "AAPL", "AAPL", "AAPL"]
+        assert len(approval_calls) == 1
+        assert len(preview_calls) == 2
+        assert unexpected_order_calls == []
+
+        app.selectbox[0].set_value("AAPL").run(timeout=10)
+        app.session_state[_DEMO_APPROVAL_STATE_KEY] = approval_record
+        app.run(timeout=10)
+        boundary_record = DemoApprovalSessionRecord.model_validate(
+            {
+                **approval_record.model_dump(),
+                "retained_at_monotonic": 100.0,
+                "last_observed_at_monotonic": 100.0,
+                "display_expires_at_monotonic": 101.0,
+            }
+        )
+        boundary_values = iter((100.999, 100.999, 100.999, 100.999, 101.0))
+        boundary_calls: list[float] = []
+
+        def boundary_clock() -> float:
+            value = next(boundary_values, 101.0)
+            boundary_calls.append(value)
+            return value
+
+        app.session_state[_DEMO_APPROVAL_STATE_KEY] = boundary_record
+        with monkeypatch.context() as boundary_patch:
+            boundary_patch.setattr("chronos.ui.dashboard.monotonic", boundary_clock)
+            app.run(timeout=10)
+        exact_deadline_record = app.session_state[_DEMO_APPROVAL_STATE_KEY]
+        assert isinstance(exact_deadline_record, DemoApprovalSessionRecord)
+        assert exact_deadline_record.disposition is DemoApprovalDisposition.EXPIRED
+        assert exact_deadline_record.receipt is None
+        assert len(boundary_calls) >= 5
+        assert boundary_calls[:5] == [100.999, 100.999, 100.999, 100.999, 101.0]
+        exact_deadline_metrics = {metric.label: metric.value for metric in app.metric}
+        assert exact_deadline_metrics["DEMO approval rehearsal"] == "EXPIRED"
+        assert exact_deadline_metrics["Receipt disposition"] == "EXPIRED"
+        assert "Rehearsed contract" not in exact_deadline_metrics
+        assert evaluate_calls == ["AAPL", "AAPL", "AAPL", "AAPL"]
+        assert len(approval_calls) == 1
+        assert len(preview_calls) == 2
+        assert unexpected_order_calls == []
+
+        app.session_state[_DEMO_APPROVAL_STATE_KEY] = approval_record
+        app.run(timeout=10)
+        abandon_button = next(
+            button
+            for button in app.button
+            if button.label == "Abandon historical DEMO rehearsal receipt"
+        )
+        abandon_button.click().run(timeout=10)
+        abandoned_record = app.session_state[_DEMO_APPROVAL_STATE_KEY]
+        assert isinstance(abandoned_record, DemoApprovalSessionRecord)
+        assert abandoned_record.disposition is DemoApprovalDisposition.ABANDONED
+        assert abandoned_record.receipt is None
+        assert "selected_contract" not in abandoned_record.model_dump_json()
+        abandoned_metrics = {metric.label: metric.value for metric in app.metric}
+        assert abandoned_metrics["DEMO approval rehearsal"] == "ABANDONED"
+        assert abandoned_metrics["Receipt disposition"] == "ABANDONED"
+        assert "Rehearsed contract" not in abandoned_metrics
+        assert evaluate_calls == ["AAPL", "AAPL", "AAPL", "AAPL"]
+        assert len(approval_calls) == 1
+        assert len(preview_calls) == 2
+        assert unexpected_order_calls == []
+
+        app.session_state[_DEMO_APPROVAL_STATE_KEY] = approval_record
+        app.button[0].click().run(timeout=10)
+        superseded_record = app.session_state[_DEMO_APPROVAL_STATE_KEY]
+        assert isinstance(superseded_record, DemoApprovalSessionRecord)
+        assert superseded_record.disposition is DemoApprovalDisposition.SUPERSEDED
+        assert superseded_record.receipt is None
+        assert "selected_contract" not in superseded_record.model_dump_json()
+        assert evaluate_calls == ["AAPL", "AAPL", "AAPL", "AAPL", "AAPL"]
+        assert len(approval_calls) == 1
+        assert len(preview_calls) == 2
+        assert unexpected_order_calls == []
+        superseded_metrics = {metric.label: metric.value for metric in app.metric}
+        assert superseded_metrics["DEMO approval rehearsal"] == "SUPERSEDED"
+        assert superseded_metrics["Receipt disposition"] == "SUPERSEDED"
+        assert "Rehearsed contract" not in superseded_metrics
+
+        expiring_record = DemoApprovalSessionRecord.model_validate(
+            {
+                **approval_record.model_dump(),
+                "retained_at_monotonic": 0.0,
+                "last_observed_at_monotonic": 0.0,
+                "display_expires_at_monotonic": 1.0,
+            }
+        )
+        app.session_state[_DEMO_APPROVAL_STATE_KEY] = expiring_record
+        app.run(timeout=10)
+        expired_record = app.session_state[_DEMO_APPROVAL_STATE_KEY]
+        assert isinstance(expired_record, DemoApprovalSessionRecord)
+        assert expired_record.disposition is DemoApprovalDisposition.EXPIRED
+        assert expired_record.receipt is None
+        assert "selected_contract" not in expired_record.model_dump_json()
+        expired_metrics = {metric.label: metric.value for metric in app.metric}
+        assert expired_metrics["DEMO approval rehearsal"] == "EXPIRED"
+        assert expired_metrics["Receipt disposition"] == "EXPIRED"
+        assert "Rehearsed contract" not in expired_metrics
         assert evaluate_calls == ["AAPL", "AAPL", "AAPL", "AAPL", "AAPL"]
         assert len(approval_calls) == 1
         assert len(preview_calls) == 2

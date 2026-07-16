@@ -89,10 +89,25 @@ never `OrderLifecycle.USER_CONFIRMED`. It grants no confirmation authority and l
 guardrail decision, or lifecycle transition, and invokes no submit, modify, or cancel method. There
 is no IBKR approval path. On success, the UI discards all M5-M7 parent evidence and typed approval
 widgets, retaining only a standalone scalar receipt with no full option contract, broker
-descriptive text, raw account identity, or broker-margin output. A new ancestor attempt or
-workspace-symbol change clears that receipt. Ordinary reruns perform no approval refresh or related
-broker call, and a failed newer attempt retains only sanitized feedback rather than leaving older
-evidence looking current.
+descriptive text, raw account identity, or broker-margin output. Milestone 9 wraps that receipt in
+the session-only envelope below. A new ancestor attempt or workspace-symbol change terminally
+supersedes its terms. Ordinary reruns perform no approval refresh or related broker call, and a
+failed newer attempt retains only sanitized feedback rather than leaving older evidence looking
+current.
+
+Milestone 9 bounds how long that scalar receipt can remain visible in one process session. The
+default display lease is exactly 15 minutes on a monotonic process clock; it is not evidence
+freshness and never extends approval authority. Expiry, explicit operator abandonment, or a newer
+ancestor evidence attempt produces `EXPIRED`, `ABANDONED`, or `SUPERSEDED`, respectively. Those are
+presentation dispositions, never order-lifecycle transitions.
+
+Every terminal transition drops the receipt itself. Its tombstone retains no business or evidence
+fields beyond the canonical approval reference, symbol, monotonic timing, a bounded reason enum,
+and literal false/locked safety flags—no option contract, limit, obligation, broker text, account
+identity, or parent evidence. Clock regression fails closed to expiry, the first terminal
+disposition cannot be reopened or changed, and an exact replay cannot extend the lease. These
+transitions invoke no broker or financial service and write no persistent state. Session restart
+clears all records.
 
 ## Order boundary
 

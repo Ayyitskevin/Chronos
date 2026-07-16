@@ -10,7 +10,23 @@ substantial losses. Paper fills do not prove live execution quality.
 
 ## Current milestone
 
-Milestone 8 adds a fresh-evidence, ephemeral DEMO approval rehearsal after the locked what-if
+Milestone 9 adds an immutable, process-memory-only disposition envelope around the scalar DEMO
+approval receipt. A retained receipt has a fixed 15-minute display lease measured with the process
+monotonic clock; this lease is presentation hygiene, not market-evidence freshness or approval
+authority. At the exact deadline, the envelope becomes `EXPIRED`. The operator can instead choose
+**Abandon historical DEMO rehearsal receipt**, which produces `ABANDONED`, and any newer ancestor
+evidence attempt produces `SUPERSEDED` before that work begins.
+
+Each terminal disposition replaces the receipt with a tombstone containing no business or evidence
+fields beyond its canonical reference, symbol, bounded timing, disposition reason, and literal
+false/locked safety flags. Contract identity, limit, obligation, and every other receipt term are
+physically dropped. The first terminal disposition wins,
+ordinary reruns only apply the pure display lease, and a failed newer attempt cannot restore the
+old receipt. These presentation statuses are not `OrderLifecycle` values. They create no authority,
+persistence, broker request, cycle, draft, guardrail decision, lifecycle transition, or order
+control; restarting the session loses them.
+
+Milestone 8 established a fresh-evidence, ephemeral DEMO approval rehearsal after the locked what-if
 boundary. It is a fourth explicit operator action, available only after a current Milestone 7
 receipt. The operator must type the exact canonical symbol and quantity `1`, then affirm the exact
 option contract ID, limit credit, and gross assignment obligation shown by the current receipt,
@@ -72,11 +88,11 @@ than 8 expirations, 20 strikes per expiration, or 80 requested option contracts 
 The optional risk and DEMO what-if results are presentation-safe historical evidence. Changing any
 parent input or evidence generation clears every dependent child; changing the selected contract,
 commission assumption, or limit also clears its descendants. A successful approval rehearsal
-replaces that lineage and its typed widgets with only the standalone scalar receipt described
-above. Starting a new ancestor attempt or changing the workspace symbol clears that receipt. A
-fresh failed attempt retains only bounded, sanitized feedback, so older evidence cannot continue
-looking current. Ordinary Streamlit reruns perform no candidate, risk, what-if, or approval refresh
-and issue no related broker call.
+replaces that lineage and its typed widgets with only the retained scalar receipt envelope
+described above. Starting a new ancestor attempt or changing the workspace symbol terminally
+supersedes its terms. A fresh failed attempt retains only bounded, sanitized feedback and cannot
+reopen the tombstone. Ordinary Streamlit reruns perform no candidate, risk, what-if, or approval
+refresh and issue no related broker call.
 
 The portfolio dashboard still obtains its own read-only reconciliation. Each run double-reads
 account values, positions, open orders, and executions, bounds the broker window and full local
@@ -163,7 +179,7 @@ The symbol workspace invokes the resolver only through the guarded candidate ser
 default `safety_cases` demo profile intentionally contains positions, an order, and an execution,
 so it demonstrates the whole-account capital-provenance lock rather than publishing an eligible
 AAPL trade. The supported `empty_account` profile exposes one coherent AAPL path with zero broker
-exposure for the locked M5–M8 journey. Candidate evidence is
+exposure for the locked M5–M9 journey. Candidate evidence is
 not written to a strategy repository because a flat symbol has no legitimate Wheel cycle, and
 creating one solely for an evaluation would manufacture strategy state. The dashboard activates
 only the one-contract short-put expiration preview, deterministic DEMO what-if, and ephemeral DEMO
