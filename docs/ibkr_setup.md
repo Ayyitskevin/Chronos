@@ -31,6 +31,12 @@ data, option Greeks, volume, and open interest depend on the account's subscript
 permissions. Missing permissions produce an explicit missing-data state rather than fabricated
 values.
 
+IBKR contract details used by this milestone prove the option and underlying contract IDs, but
+the adapter does not treat multiplier metadata as proof of a complete standard share deliverable.
+Every new short-put and covered-call candidate therefore remains `NO_TRADE` until a later evidence
+source verifies a share-only deliverable equal to the premium multiplier and tied to the exact
+underlying. Chronos does not guess that any contract delivers 100 shares after a corporate action.
+
 Start from `.env.example` and keep these safety settings unchanged:
 
 ```dotenv

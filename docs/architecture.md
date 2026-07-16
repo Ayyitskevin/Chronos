@@ -9,11 +9,19 @@ future official IB API adapter from requiring strategy or UI rewrites.
 
 Money, premium, fees, strikes, basis, and allocation calculations use `Decimal`. UTC-aware
 timestamps are stored internally; the UI converts them to `America/New_York` for display.
+Safety comparisons run in explicit local Decimal contexts instead of inheriting mutable process
+precision. Option DTE uses the configured exchange-calendar timezone, which defaults to
+`America/New_York`.
 
 SQLite stores the Chronos ledger and decision evidence. It does not override broker positions,
 orders, executions, or account values. SQLAlchemy provides explicit schema initialization and
-repository seams. Schema changes will use additive, versioned migrations before persisted user
-data exists.
+repository seams. Schema version 2 enables SQLite foreign keys and binds each database file to one
+broker mode, environment, and pseudonymous account fingerprint. Chronos never mutates an older
+schema during application startup; an existing v1 database must be preserved and replaced with a
+fresh v2 `DATABASE_URL` until an explicit, operator-reviewed import exists. Likewise, the first
+account binding refuses any pre-existing account-scoped rows. A different or ambiguous account
+must use a different database file; demo metadata cannot silently become paper-account metadata.
+SQLite ledger files and rotating log files are created with owner-only permissions.
 
 Streamlit's rerun model is isolated from broker connection ownership. A cached runtime owns one
 dedicated asyncio loop in one background thread plus one bounded market-data manager. Page reruns
@@ -44,10 +52,11 @@ decisions also become append-only application-event rows so the dashboard can ex
 
 ### When timing works
 
-The broker service serializes adapter work on its event loop. Reconciliation runs at startup,
-after reconnect, after every order/fill event, and periodically while connected. For streaming
-top-of-book data, quote age starts only after a price-bearing update from the current subscription
-is received; it is checked at every decision and again immediately before paper submit.
+The broker service serializes adapter work on its event loop. The planned reconciliation
+coordinator must run at startup, after reconnect, after every order/fill event, and periodically
+while connected. For streaming top-of-book data, quote age starts only after a price-bearing
+update from the current subscription is received; it is checked at every decision and again
+immediately before paper submit.
 
 ## Package boundaries
 
@@ -65,3 +74,23 @@ is received; it is checked at every decision and again immediately before paper 
 Reconciliation is the only path that publishes a usable Wheel stage. It compares a fresh broker
 snapshot with persisted Chronos metadata. Safe, deterministic differences are recorded; unsafe
 differences return `MANUAL_REVIEW`. Order actions stay locked until a successful run completes.
+
+The Milestone 3 engines are pure and accept an explicit reconciled snapshot, policy, clock, and
+allocation context. A later service coordinator owns the serialized broker reads and invokes
+them. This separation makes the calculations repeatable without a network connection while
+preventing Streamlit session state from becoming strategy truth.
+
+Wheel reconciliation matches positions, fills, and closing orders by exact option contract ID.
+Active orders must also have an affirmative full-identity Chronos ownership match in the expected
+account. Every short option requires an explicitly verified standard share-only deliverable;
+covered-call coverage additionally requires stock with the exact underlying contract ID,
+currency, and pseudonymous account scope. Symbol text, trading class, or multiplier alone cannot
+pool nonfungible stock or bless an adjusted contract. The current IBKR adapter preserves
+underlying identity but intentionally leaves the share deliverable unverified; demo fixtures mark
+their standard deliverables explicitly.
+
+Option-position average cost is never used for premium or basis math: IBKR and demo adapters can
+report that field in different units. Only execution price, qualified multiplier, fill quantity,
+commission evidence, exact contract identity, and pseudonymous account scope enter the strategy
+ledger. A premium without either an estimated or actual commission remains `PENDING`; it is not
+treated as a final zero-fee fill.

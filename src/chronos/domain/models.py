@@ -4,8 +4,17 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
+from typing import Literal
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, PositiveInt, model_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    PositiveInt,
+    field_validator,
+    model_validator,
+)
 
 from chronos.domain.enums import (
     ConnectionState,
@@ -18,6 +27,7 @@ from chronos.domain.enums import (
     OrderSide,
     SecurityType,
 )
+from chronos.utils.identifiers import normalize_account_fingerprint
 
 
 class ChronosModel(BaseModel):
@@ -48,7 +58,7 @@ class AccountSummary(ChronosModel):
 class UnderlyingContract(ChronosModel):
     con_id: PositiveInt
     symbol: str
-    security_type: SecurityType = SecurityType.STOCK
+    security_type: Literal[SecurityType.STOCK] = SecurityType.STOCK
     exchange: str = "SMART"
     primary_exchange: str | None = None
     currency: str = "USD"
@@ -56,6 +66,7 @@ class UnderlyingContract(ChronosModel):
 
 class OptionContractSpec(ChronosModel):
     symbol: str
+    underlying_con_id: PositiveInt | None = None
     expiration: date
     strike: Decimal = Field(gt=0)
     right: OptionRight
@@ -67,9 +78,40 @@ class OptionContractSpec(ChronosModel):
 
 class OptionContract(OptionContractSpec):
     con_id: PositiveInt
-    security_type: SecurityType = SecurityType.OPTION
+    security_type: Literal[SecurityType.OPTION] = SecurityType.OPTION
     local_symbol: str
     min_tick: Decimal = Field(gt=0, default=Decimal("0.01"))
+    deliverable_shares: Decimal | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Complete share-only deliverable for the exact underlying; no cash or other assets"
+        ),
+    )
+    deliverable_verified: bool = False
+
+    @model_validator(mode="after")
+    def validate_deliverable_evidence(self) -> OptionContract:
+        if self.deliverable_verified and (
+            self.underlying_con_id is None or self.deliverable_shares is None
+        ):
+            raise ValueError(
+                "Verified option deliverables require an underlying contract ID and share quantity"
+            )
+        if self.deliverable_shares is not None and not self.deliverable_verified:
+            raise ValueError("Option deliverable shares cannot be trusted without verification")
+        return self
+
+    @property
+    def has_verified_standard_deliverable(self) -> bool:
+        """Whether MVP assignment math can safely treat multiplier as delivered shares."""
+
+        return (
+            self.deliverable_verified
+            and self.underlying_con_id is not None
+            and self.deliverable_shares is not None
+            and self.deliverable_shares == self.multiplier
+        )
 
 
 Instrument = UnderlyingContract | OptionContract
@@ -110,6 +152,38 @@ class OptionChainParameters(ChronosModel):
     strikes: tuple[Decimal, ...]
 
 
+class StockAvailability(ChronosModel):
+    """Unencumbered shares bound to one exact Wheel cycle and stock instrument."""
+
+    wheel_cycle_id: str
+    symbol: str
+    account_fingerprint: str
+    underlying_con_id: PositiveInt
+    currency: str
+    shares: Decimal = Field(ge=0)
+
+    @field_validator("wheel_cycle_id")
+    @classmethod
+    def normalize_wheel_cycle_id(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("wheel_cycle_id must not be blank")
+        return normalized
+
+    @field_validator("account_fingerprint")
+    @classmethod
+    def validate_account_fingerprint(cls, value: str) -> str:
+        return normalize_account_fingerprint(value)
+
+    @field_validator("symbol", "currency")
+    @classmethod
+    def normalize_code(cls, value: str) -> str:
+        normalized = value.strip().upper()
+        if not normalized:
+            raise ValueError("symbol and currency must not be blank")
+        return normalized
+
+
 class BrokerPosition(ChronosModel):
     account_id: str
     contract: Instrument
@@ -124,7 +198,7 @@ class BrokerExecution(ChronosModel):
     account_id: str
     broker_order_id: int
     permanent_id: int | None = None
-    client_id: int
+    client_id: int = Field(ge=0)
     order_ref: str | None = None
     contract: Instrument
     side: OrderSide
@@ -132,12 +206,83 @@ class BrokerExecution(ChronosModel):
     price: Decimal = Field(gt=0)
     timestamp: AwareDatetime
     commission: Decimal | None = Field(default=None, ge=0)
+    commission_currency: str | None = None
+
+    @field_validator("account_id")
+    @classmethod
+    def validate_account_id(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("account_id must not be blank")
+        return normalized
+
+    @field_validator("order_ref")
+    @classmethod
+    def normalize_order_ref(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+    @field_validator("commission_currency")
+    @classmethod
+    def normalize_commission_currency(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip().upper()
+        if not normalized:
+            raise ValueError("commission_currency must not be blank")
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_commission_evidence(self) -> BrokerExecution:
+        if (self.commission is None) != (self.commission_currency is None):
+            raise ValueError("Commission amount and currency must be supplied together")
+        return self
+
+
+class BrokerOrderIdentity(ChronosModel):
+    """Composite broker identity used for affirmative order ownership."""
+
+    account_id: str
+    client_id: int = Field(ge=0)
+    broker_order_id: int
+    permanent_id: int | None = None
+    order_ref: str | None = None
+    symbol: str
+    contract_id: PositiveInt
+    side: OrderSide
+    quantity: Decimal = Field(gt=0)
+
+    @field_validator("account_id")
+    @classmethod
+    def validate_account_id(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("account_id must not be blank")
+        return normalized
+
+    @field_validator("symbol")
+    @classmethod
+    def normalize_symbol(cls, value: str) -> str:
+        normalized = value.strip().upper()
+        if not normalized:
+            raise ValueError("symbol must not be blank")
+        return normalized
+
+    @field_validator("order_ref")
+    @classmethod
+    def normalize_order_ref(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
 
 
 class BrokerOrder(ChronosModel):
     broker_order_id: int
     permanent_id: int | None = None
-    client_id: int
+    client_id: int = Field(ge=0)
     account_id: str
     order_ref: str | None = None
     contract: Instrument
@@ -150,11 +295,43 @@ class BrokerOrder(ChronosModel):
     transmit: bool = False
     outside_rth: bool = False
 
+    @field_validator("account_id")
+    @classmethod
+    def validate_account_id(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("account_id must not be blank")
+        return normalized
+
+    @field_validator("order_ref")
+    @classmethod
+    def normalize_order_ref(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
     @model_validator(mode="after")
     def validate_quantities(self) -> BrokerOrder:
         if self.filled_quantity + self.remaining_quantity != self.quantity:
             raise ValueError("Filled and remaining quantities must equal order quantity")
         return self
+
+    @property
+    def identity(self) -> BrokerOrderIdentity:
+        """Return the immutable identity used by reconciliation evidence."""
+
+        return BrokerOrderIdentity(
+            account_id=self.account_id,
+            client_id=self.client_id,
+            broker_order_id=self.broker_order_id,
+            permanent_id=self.permanent_id,
+            order_ref=self.order_ref,
+            symbol=self.contract.symbol,
+            contract_id=self.contract.con_id,
+            side=self.side,
+            quantity=self.quantity,
+        )
 
 
 class OrderRequest(ChronosModel):

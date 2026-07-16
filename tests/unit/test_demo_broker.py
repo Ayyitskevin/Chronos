@@ -80,6 +80,7 @@ async def test_option_contracts_are_qualified_from_chain_metadata(
     chain = (await demo_broker.option_chain_parameters(underlying))[0]
     requested = OptionContractSpec(
         symbol="AAPL",
+        underlying_con_id=underlying.con_id,
         expiration=chain.expirations[1],
         strike=Decimal("185"),
         right=OptionRight.PUT,
@@ -91,6 +92,9 @@ async def test_option_contracts_are_qualified_from_chain_metadata(
     quotes = await demo_broker.request_option_quotes(qualified)
 
     assert qualified[0].con_id == 2002
+    assert qualified[0].underlying_con_id == underlying.con_id
+    assert qualified[0].deliverable_verified is True
+    assert qualified[0].deliverable_shares == Decimal("100")
     assert quotes[0].greeks is not None
     assert quotes[0].greeks.delta == Decimal("-0.34")
 
@@ -107,6 +111,7 @@ async def test_demo_preview_is_non_transmitting_and_submit_is_blocked(
             (
                 OptionContractSpec(
                     symbol="AAPL",
+                    underlying_con_id=underlying.con_id,
                     expiration=chain.expirations[1],
                     strike=Decimal("185"),
                     right=OptionRight.PUT,

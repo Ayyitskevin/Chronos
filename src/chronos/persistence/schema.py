@@ -63,6 +63,22 @@ class SchemaVersionRow(Base):
     )
 
 
+class DatabaseScopeRow(Base):
+    """Bind one ledger file to one broker environment and pseudonymous account."""
+
+    __tablename__ = "database_scope"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    broker_mode: Mapped[str] = mapped_column(String(16), nullable=False)
+    environment: Mapped[str] = mapped_column(String(16), nullable=False)
+    account_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    bound_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(),
+        default=utc_now,
+        nullable=False,
+    )
+
+
 class WheelCycleRow(Base):
     __tablename__ = "wheel_cycles"
 
@@ -102,7 +118,7 @@ class CandidateEvaluationRow(Base):
     outcome: Mapped[str] = mapped_column(String(32), nullable=False)
     selected_contract_id: Mapped[int | None] = mapped_column(Integer)
     input_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
-    ranking_snapshot: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False)
+    ranking_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         UTCDateTime(),
         default=utc_now,
@@ -193,9 +209,13 @@ class FillRow(Base):
     wheel_cycle_id: Mapped[str | None] = mapped_column(ForeignKey("wheel_cycles.id"))
     symbol: Mapped[str] = mapped_column(String(32), index=True, nullable=False)
     contract_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    security_type: Mapped[str] = mapped_column(String(8), nullable=False)
     side: Mapped[str] = mapped_column(String(8), nullable=False)
     quantity: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
     price: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
+    multiplier: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
+    currency: Mapped[str] = mapped_column(String(8), nullable=False)
+    account_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     occurred_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
 
 
@@ -215,6 +235,14 @@ class CommissionRow(Base):
 
 class BasisEntryRow(Base):
     __tablename__ = "strategy_basis_entries"
+    __table_args__ = (
+        UniqueConstraint(
+            "wheel_cycle_id",
+            "entry_type",
+            "source_execution_id",
+            name="uq_basis_cycle_type_execution",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     wheel_cycle_id: Mapped[str] = mapped_column(
@@ -225,6 +253,19 @@ class BasisEntryRow(Base):
     symbol: Mapped[str] = mapped_column(String(32), index=True, nullable=False)
     entry_type: Mapped[str] = mapped_column(String(48), nullable=False)
     amount: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
+    account_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    contract_id: Mapped[int | None] = mapped_column(Integer)
+    security_type: Mapped[str | None] = mapped_column(String(8))
+    source_side: Mapped[str | None] = mapped_column(String(8))
+    quantity: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
+    unit_price: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
+    multiplier: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
+    currency: Mapped[str] = mapped_column(String(8), default="USD", nullable=False)
+    provisional: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    reconciliation_status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+    )
     source_execution_id: Mapped[str | None] = mapped_column(ForeignKey("fills.execution_id"))
     source_note: Mapped[str | None] = mapped_column(Text)
     occurred_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)

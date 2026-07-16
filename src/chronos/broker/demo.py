@@ -205,6 +205,12 @@ class DemoBroker:
                     and contract.expiration == requested.expiration
                     and contract.strike == requested.strike
                     and contract.right is requested.right
+                    and (
+                        requested.underlying_con_id is None
+                        or contract.underlying_con_id == requested.underlying_con_id
+                    )
+                    and contract.exchange == requested.exchange
+                    and contract.currency == requested.currency
                     and contract.multiplier == requested.multiplier
                     and contract.trading_class == requested.trading_class
                 ),
@@ -468,11 +474,12 @@ class DemoBroker:
                 price=Decimal("4.75"),
                 timestamp=as_of - timedelta(minutes=3),
                 commission=Decimal("0.65"),
+                commission_currency="USD",
             ),
         )
 
-    @staticmethod
     def _option(
+        self,
         con_id: int,
         symbol: str,
         expiration: date,
@@ -484,12 +491,15 @@ class DemoBroker:
         return OptionContract(
             con_id=con_id,
             symbol=symbol,
+            underlying_con_id=self._underlyings[symbol].con_id,
             expiration=expiration,
             strike=Decimal(strike),
             right=right,
             multiplier=Decimal("100"),
             trading_class=symbol,
             local_symbol=local_symbol,
+            deliverable_shares=Decimal("100"),
+            deliverable_verified=True,
         )
 
     def _stock_position(

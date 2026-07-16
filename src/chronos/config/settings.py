@@ -6,6 +6,7 @@ from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BeforeValidator, Field, PositiveInt, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -51,10 +52,12 @@ class Settings(BaseSettings):
     target_dte: Annotated[int, Field(ge=0)] = 21
     max_dte: Annotated[int, Field(ge=0)] = 45
     max_expirations: PositiveInt = 6
+    max_strikes_per_expiration: PositiveInt = 12
     min_option_volume: Annotated[int, Field(ge=0)] = 10
     min_open_interest: Annotated[int, Field(ge=0)] = 100
     max_relative_spread: Annotated[Decimal, Field(gt=0)] = Decimal("0.20")
     max_quote_age_seconds: PositiveInt = 5
+    market_timezone: str = "America/New_York"
     max_contracts_per_order: PositiveInt = 1
     max_symbol_allocation_pct: Annotated[Decimal, Field(gt=0, le=1)] = Decimal("0.25")
     max_total_wheel_allocation_pct: Annotated[Decimal, Field(gt=0, le=1)] = Decimal("0.60")
@@ -63,6 +66,13 @@ class Settings(BaseSettings):
     spread_weight: Annotated[Decimal, Field(ge=0)] = Decimal("0.30")
     dte_weight: Annotated[Decimal, Field(ge=0)] = Decimal("0.15")
     liquidity_weight: Annotated[Decimal, Field(ge=0)] = Decimal("0.10")
+
+    assignment_near_zero_extrinsic: Annotated[Decimal, Field(ge=0)] = Decimal("0.05")
+    assignment_meaningful_extrinsic: Annotated[Decimal, Field(ge=0)] = Decimal("0.10")
+    assignment_elevated_abs_delta: Annotated[Decimal, Field(gt=0, le=1)] = Decimal("0.50")
+    assignment_high_dte: Annotated[int, Field(ge=0)] = 3
+    assignment_elevated_dte: Annotated[int, Field(ge=0)] = 5
+    assignment_ex_dividend_window_days: Annotated[int, Field(ge=0)] = 5
 
     database_url: str = "sqlite:///data/chronos.db"
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
@@ -94,6 +104,16 @@ class Settings(BaseSettings):
         )
         if weight_total <= 0:
             raise ValueError("At least one resolver weight must be positive")
+        if self.assignment_near_zero_extrinsic > self.assignment_meaningful_extrinsic:
+            raise ValueError(
+                "ASSIGNMENT_NEAR_ZERO_EXTRINSIC must not exceed ASSIGNMENT_MEANINGFUL_EXTRINSIC"
+            )
+        if self.assignment_high_dte > self.assignment_elevated_dte:
+            raise ValueError("ASSIGNMENT_HIGH_DTE must not exceed ASSIGNMENT_ELEVATED_DTE")
+        try:
+            ZoneInfo(self.market_timezone)
+        except ZoneInfoNotFoundError as error:
+            raise ValueError("MARKET_TIMEZONE must name an installed IANA timezone") from error
         return self
 
     @property

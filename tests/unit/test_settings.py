@@ -16,6 +16,9 @@ def test_safe_demo_defaults() -> None:
     assert settings.allow_live_trading is False
     assert settings.transmission_possible is False
     assert settings.target_abs_delta == Decimal("0.30")
+    assert settings.max_strikes_per_expiration == 12
+    assert settings.assignment_near_zero_extrinsic == Decimal("0.05")
+    assert settings.market_timezone == "America/New_York"
 
 
 def test_paper_transmission_requires_ibkr_mode() -> None:
@@ -66,6 +69,18 @@ def test_live_trading_flag_cannot_be_enabled() -> None:
         ),
         ({"target_dte": 50, "max_dte": 45}, "TARGET_DTE"),
         ({"symbol_allowlist": ""}, "SYMBOL_ALLOWLIST"),
+        (
+            {
+                "assignment_near_zero_extrinsic": "0.20",
+                "assignment_meaningful_extrinsic": "0.10",
+            },
+            "ASSIGNMENT_NEAR_ZERO_EXTRINSIC",
+        ),
+        (
+            {"assignment_high_dte": 6, "assignment_elevated_dte": 5},
+            "ASSIGNMENT_HIGH_DTE",
+        ),
+        ({"market_timezone": "Mars/Olympus_Mons"}, "MARKET_TIMEZONE"),
     ],
 )
 def test_inconsistent_resolver_settings_are_rejected(

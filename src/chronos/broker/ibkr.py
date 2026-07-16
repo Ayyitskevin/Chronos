@@ -373,6 +373,7 @@ class IBKRBroker:
                 continue
             if not execution.execId:
                 raise BrokerDataError("IBKR execution is missing its execution identifier")
+            commission = self._commission(fill)
             mapped.append(
                 BrokerExecution(
                     execution_id=execution.execId,
@@ -388,7 +389,8 @@ class IBKRBroker:
                     ),
                     price=self._required_positive_decimal(execution.price, "execution price"),
                     timestamp=timestamp,
-                    commission=self._commission(fill),
+                    commission=commission[0] if commission is not None else None,
+                    commission_currency=commission[1] if commission is not None else None,
                 )
             )
         self._last_sync = self._now()
@@ -445,7 +447,12 @@ class IBKRBroker:
             raise BrokerSafetyError("Underlying symbol is not in SYMBOL_ALLOWLIST")
         requested = Stock(normalized_symbol, "SMART", "USD")
         contract = (await self._qualify((requested,)))[0]
-        if contract.secType != SecurityType.STOCK.value or contract.symbol != normalized_symbol:
+        if (
+            contract.secType != SecurityType.STOCK.value
+            or contract.symbol != normalized_symbol
+            or contract.exchange != requested.exchange
+            or contract.currency != requested.currency
+        ):
             raise BrokerDataError("IBKR qualified an unexpected underlying contract")
         mapped = self._underlying_from_ib(contract)
         self._cache_contract(contract, mapped)
@@ -514,13 +521,23 @@ class IBKRBroker:
         qualified = await self._qualify(requested)
         mapped: list[OptionContract] = []
         for specification, contract in zip(contracts, qualified, strict=True):
-            min_tick = await self._option_min_tick(contract)
-            option = self._option_from_ib(contract, min_tick=min_tick)
+            min_tick, underlying_con_id = await self._option_details(contract)
+            option = self._option_from_ib(
+                contract,
+                min_tick=min_tick,
+                underlying_con_id=underlying_con_id,
+            )
             if (
                 option.symbol != specification.symbol
+                or (
+                    specification.underlying_con_id is not None
+                    and option.underlying_con_id != specification.underlying_con_id
+                )
                 or option.expiration != specification.expiration
                 or option.strike != specification.strike
                 or option.right is not specification.right
+                or option.exchange != specification.exchange
+                or option.currency != specification.currency
                 or option.multiplier != specification.multiplier
                 or option.trading_class != specification.trading_class
             ):
@@ -720,9 +737,11 @@ class IBKRBroker:
         if contract.secType == SecurityType.STOCK.value:
             mapped: Instrument = self._underlying_from_ib(contract)
         elif contract.secType == SecurityType.OPTION.value:
+            min_tick, underlying_con_id = await self._option_details(contract)
             mapped = self._option_from_ib(
                 contract,
-                min_tick=await self._option_min_tick(contract),
+                min_tick=min_tick,
+                underlying_con_id=underlying_con_id,
             )
         else:
             raise BrokerDataError(
@@ -744,7 +763,7 @@ class IBKRBroker:
             tradingClass=specification.trading_class,
         )
 
-    async def _option_min_tick(self, contract: Contract) -> Decimal:
+    async def _option_details(self, contract: Contract) -> tuple[Decimal, int]:
         try:
             details = await self._client.reqContractDetailsAsync(contract)
         except Exception as error:
@@ -756,10 +775,24 @@ class IBKRBroker:
         ]
         if len(exact) != 1:
             raise BrokerDataError("IBKR option contract details are missing or ambiguous")
-        return self._required_positive_decimal(exact[0].minTick, "option minimum tick")
+        underlying_con_id = exact[0].underConId
+        if underlying_con_id <= 0:
+            raise BrokerDataError(
+                "IBKR option contract details are missing the underlying contract identifier"
+            )
+        return (
+            self._required_positive_decimal(exact[0].minTick, "option minimum tick"),
+            underlying_con_id,
+        )
 
     @classmethod
-    def _option_from_ib(cls, contract: Contract, *, min_tick: Decimal) -> OptionContract:
+    def _option_from_ib(
+        cls,
+        contract: Contract,
+        *,
+        min_tick: Decimal,
+        underlying_con_id: int,
+    ) -> OptionContract:
         if contract.conId <= 0 or contract.secType != SecurityType.OPTION.value:
             raise BrokerDataError("IBKR option contract is incomplete or unsupported")
         if not contract.symbol or not contract.localSymbol or not contract.tradingClass:
@@ -771,6 +804,7 @@ class IBKRBroker:
         return OptionContract(
             con_id=contract.conId,
             symbol=contract.symbol,
+            underlying_con_id=underlying_con_id,
             expiration=cls._expiration(contract.lastTradeDateOrContractMonth),
             strike=cls._required_positive_decimal(contract.strike, "option strike"),
             right=right,
@@ -1142,11 +1176,17 @@ class IBKRBroker:
         return max(values, key=priority.__getitem__) if values else DataQuality.UNKNOWN
 
     @classmethod
-    def _commission(cls, fill: Fill) -> Decimal | None:
+    def _commission(cls, fill: Fill) -> tuple[Decimal, str] | None:
         report = fill.commissionReport
         if not report.execId or report.execId != fill.execution.execId:
             return None
-        return cls._optional_decimal(report.commission, nonnegative=True)
+        amount = cls._optional_decimal(report.commission, nonnegative=True)
+        if amount is None:
+            return None
+        currency = report.currency.strip().upper()
+        if not currency:
+            raise BrokerDataError("IBKR commission report is missing its currency")
+        return amount, currency
 
     @classmethod
     def _execution_timestamp(cls, fill: Fill) -> datetime:

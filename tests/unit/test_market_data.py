@@ -200,6 +200,7 @@ def test_narrowing_selects_target_expirations_and_nearest_strikes() -> None:
         Decimal("105"),
     )
     assert all(spec.symbol == "TEST" and spec.right is OptionRight.PUT for spec in specs)
+    assert all(spec.underlying_con_id == parameters.underlying_con_id for spec in specs)
 
 
 @pytest.mark.asyncio

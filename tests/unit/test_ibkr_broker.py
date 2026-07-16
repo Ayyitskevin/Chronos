@@ -105,6 +105,7 @@ def domain_option() -> OptionContract:
     return OptionContract(
         con_id=202,
         symbol="AAPL",
+        underlying_con_id=101,
         expiration=date(2026, 8, 21),
         strike=Decimal("185"),
         right=OptionRight.PUT,
@@ -128,6 +129,11 @@ class FakeIB:
         self.position_account = ""
         self.execution_filter: ExecutionFilter | None = None
         self.min_tick = 0.05
+        self.stock_currency = "USD"
+        self.stock_exchange = "SMART"
+        self.option_underlying_con_id = 101
+        self.option_currency = "USD"
+        self.option_exchange = "SMART"
         self.account_values = [
             AccountValue(ACCOUNT_ID, "NetLiquidation", "250000.25", "USD", ""),
             AccountValue(ACCOUNT_ID, "TotalCashValue", "125000.50", "USD", ""),
@@ -206,15 +212,27 @@ class FakeIB:
         qualified: list[Contract | list[Contract | None] | None] = []
         for contract in contracts:
             if contract.secType == "STK":
-                qualified.append(ib_stock())
+                stock = ib_stock()
+                stock.currency = self.stock_currency
+                stock.exchange = self.stock_exchange
+                qualified.append(stock)
             elif contract.secType == "OPT":
-                qualified.append(ib_option())
+                option = ib_option()
+                option.currency = self.option_currency
+                option.exchange = self.option_exchange
+                qualified.append(option)
             else:
                 qualified.append(None)
         return qualified
 
     async def reqContractDetailsAsync(self, contract: Contract) -> list[ContractDetails]:
-        return [ContractDetails(contract=contract, minTick=self.min_tick)]
+        return [
+            ContractDetails(
+                contract=contract,
+                minTick=self.min_tick,
+                underConId=self.option_underlying_con_id,
+            )
+        ]
 
     async def reqSecDefOptParamsAsync(
         self,
@@ -511,6 +529,7 @@ async def test_qualification_chain_and_contract_details_are_authoritative() -> N
         (
             OptionContractSpec(
                 symbol="AAPL",
+                underlying_con_id=101,
                 expiration=date(2026, 8, 21),
                 strike=Decimal("185"),
                 right=OptionRight.PUT,
@@ -526,7 +545,9 @@ async def test_qualification_chain_and_contract_details_are_authoritative() -> N
     assert chains[0].expirations == (date(2026, 8, 14), date(2026, 8, 21))
     assert chains[0].strikes == (Decimal("185.0"), Decimal("190.0"))
     assert options[0].con_id == 202
+    assert options[0].underlying_con_id == underlying.con_id
     assert options[0].min_tick == Decimal("0.05")
+    assert options[0].deliverable_verified is False
 
     client.min_tick = 0
     with pytest.raises(BrokerDataError, match="minimum tick"):
@@ -545,6 +566,42 @@ async def test_qualification_chain_and_contract_details_are_authoritative() -> N
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("attribute", "value"),
+    [
+        ("option_underlying_con_id", 999),
+        ("option_currency", "EUR"),
+        ("option_exchange", "CBOE"),
+    ],
+)
+async def test_option_qualification_rejects_identity_mismatch(
+    attribute: str,
+    value: object,
+) -> None:
+    client = FakeIB()
+    setattr(client, attribute, value)
+    broker = make_broker(client)
+    await broker.connect()
+
+    with pytest.raises(BrokerDataError, match="different from the request"):
+        await broker.qualify_option_contracts(
+            (
+                OptionContractSpec(
+                    symbol="AAPL",
+                    underlying_con_id=101,
+                    expiration=date(2026, 8, 21),
+                    strike=Decimal("185"),
+                    right=OptionRight.PUT,
+                    exchange="SMART",
+                    currency="USD",
+                    multiplier=Decimal("100"),
+                    trading_class="AAPL",
+                ),
+            )
+        )
+
+
+@pytest.mark.asyncio
 async def test_underlying_qualification_enforces_symbol_allowlist() -> None:
     client = FakeIB()
     broker = make_broker(client)
@@ -552,6 +609,24 @@ async def test_underlying_qualification_enforces_symbol_allowlist() -> None:
 
     with pytest.raises(BrokerSafetyError, match="SYMBOL_ALLOWLIST"):
         await broker.qualify_underlying("TSLA")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("attribute", "value"),
+    [("stock_currency", "EUR"), ("stock_exchange", "EUREX")],
+)
+async def test_underlying_qualification_rejects_identity_mismatch(
+    attribute: str,
+    value: str,
+) -> None:
+    client = FakeIB()
+    setattr(client, attribute, value)
+    broker = make_broker(client)
+    await broker.connect()
+
+    with pytest.raises(BrokerDataError, match="unexpected underlying"):
+        await broker.qualify_underlying("AAPL")
 
 
 @pytest.mark.asyncio

@@ -16,7 +16,8 @@ from chronos.broker.connection import BrokerConnectionManager
 from chronos.broker.demo import DemoBroker, demo_now
 from chronos.broker.market_data import MarketDataManager
 from chronos.config.settings import Settings, get_settings
-from chronos.domain.enums import BrokerMode
+from chronos.domain.enums import BrokerMode, ConnectionState
+from chronos.domain.models import AccountSummary, ConnectionStatus
 from chronos.persistence.database import Database
 from chronos.utils.logging import configure_logging
 
@@ -35,6 +36,22 @@ class AppRuntime:
         finally:
             self.market_data.clear_cache()
             self.database.dispose()
+
+
+def _validate_scope_observations(
+    account: AccountSummary,
+    status: ConnectionStatus,
+) -> None:
+    """Fail closed unless both broker reads identify one connected account."""
+
+    if not status.connected or status.state is not ConnectionState.CONNECTED:
+        raise RuntimeError("Broker scope cannot bind while the connection is not healthy")
+    if (
+        not account.account_id
+        or account.account_id != account.account_id.strip()
+        or status.account_id != account.account_id
+    ):
+        raise RuntimeError("Broker scope observations do not identify the same account")
 
 
 def _build_runtime() -> AppRuntime:
@@ -58,6 +75,14 @@ def _build_runtime() -> AppRuntime:
         )
         connection = BrokerConnectionManager(broker)
         connection.connect()
+        account = connection.run(broker.account_summary())
+        status = connection.run(broker.connection_status())
+        _validate_scope_observations(account, status)
+        database.bind_scope(
+            broker_mode=settings.broker_mode.value,
+            environment=status.environment.value,
+            account_id=account.account_id,
+        )
     except BaseException:
         if connection is not None:
             try:

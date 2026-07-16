@@ -4,13 +4,77 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import stat
 from datetime import UTC, datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
 _ACCOUNT_PATTERN = re.compile(r"\b(?:DU|U)\d{4,}\b", flags=re.IGNORECASE)
+
+
+def _secure_existing_log(path: Path) -> None:
+    """Make an owned regular log private without following links."""
+
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return
+    if not stat.S_ISREG(metadata.st_mode):
+        raise ValueError(f"Chronos log path must be a regular file: {path}")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or opened.st_uid != os.geteuid():
+            raise ValueError(f"Chronos log must be an owned regular file: {path}")
+        os.fchmod(descriptor, 0o600)
+    finally:
+        os.close(descriptor)
+
+
+def _secure_log_family(base_path: Path, backup_count: int) -> None:
+    _secure_existing_log(base_path)
+    for index in range(1, backup_count + 1):
+        _secure_existing_log(Path(f"{base_path}.{index}"))
+
+
+class _SecureRotatingFileHandler(RotatingFileHandler):
+    """Keep the active log private, including after rotation creates a new file."""
+
+    def _open(self) -> Any:
+        def private_opener(path: str, flags: int) -> int:
+            descriptor = os.open(
+                path,
+                flags | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
+            try:
+                metadata = os.fstat(descriptor)
+                if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid():
+                    raise ValueError("Chronos log must be an owned regular file")
+                os.fchmod(descriptor, 0o600)
+                return descriptor
+            except BaseException:
+                os.close(descriptor)
+                raise
+
+        stream = open(  # noqa: SIM115
+            self.baseFilename,
+            self.mode,
+            encoding=self.encoding,
+            errors=self.errors,
+            opener=private_opener,
+        )
+        return stream
+
+    def doRollover(self) -> None:
+        base_path = Path(self.baseFilename)
+        _secure_log_family(base_path, self.backupCount)
+        super().doRollover()
+        _secure_log_family(base_path, self.backupCount)
 
 
 def mask_account_id(account_id: str) -> str:
@@ -48,6 +112,14 @@ class StructuredJsonFormatter(logging.Formatter):
             "operation",
             "attempt",
             "delay_seconds",
+            "candidate_count",
+            "rejected_count",
+            "outcome",
+            "wheel_stage",
+            "reconciliation_status",
+            "guardrail",
+            "passed",
+            "basis_entry_type",
         ):
             if (value := getattr(record, name, None)) is not None:
                 payload[name] = value
@@ -75,8 +147,9 @@ def configure_logging(
     console.setFormatter(formatter)
     console._chronos_handler = True  # type: ignore[attr-defined]
 
-    log_file.parent.mkdir(parents=True, exist_ok=True)
-    rotating = RotatingFileHandler(
+    log_file.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    _secure_log_family(log_file, 5)
+    rotating = _SecureRotatingFileHandler(
         log_file,
         maxBytes=5 * 1024 * 1024,
         backupCount=5,

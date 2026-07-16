@@ -8,7 +8,6 @@ import streamlit as st
 
 from chronos.broker.base import BrokerDataError, BrokerError
 from chronos.broker.demo import DemoBroker
-from chronos.domain.enums import SecurityType
 from chronos.ui.charts import quote_ladder_figure
 from chronos.ui.components import format_money, render_runtime_status, render_safety_notice
 from chronos.ui.session import AppRuntime
@@ -53,7 +52,7 @@ def _render_portfolio(runtime: AppRuntime) -> None:
     columns[0].metric("Net liquidation", format_money(account.net_liquidation))
     columns[1].metric("Cash", format_money(account.total_cash))
     columns[2].metric("Buying power", format_money(account.buying_power))
-    columns[3].metric("Open Chronos orders", str(len(open_orders)))
+    columns[3].metric("Open account orders", str(len(open_orders)))
 
     st.subheader("Broker positions")
     rows = [
@@ -142,13 +141,16 @@ def _render_symbol_detail(runtime: AppRuntime) -> None:
     )
 
     st.subheader("Candidate ranking")
-    st.warning("Locked: strike resolution and reconciliation are not enabled in Milestone 2.")
+    st.warning(
+        "Locked: the Milestone 3 resolver is not available here until the reconciliation "
+        "coordinator supplies account-scoped evidence."
+    )
     st.subheader("Scenario analysis")
-    st.warning("Locked: scenario calculations are introduced with the tested strategy engine.")
+    st.warning(
+        "Locked: the tested scenario engine is not wired to reconciled positions and candidates."
+    )
     st.subheader("Order preview")
     st.error(
         "Locked: no order can be submitted from this milestone. "
         "DemoBroker rejects submission at its boundary."
     )
-    if underlying.security_type is not SecurityType.STOCK:
-        st.error("Unexpected demo contract type; order controls remain locked.")

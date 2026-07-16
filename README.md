@@ -10,11 +10,12 @@ substantial losses. Paper fills do not prove live execution quality.
 
 ## Current milestone
 
-Milestone 2 provides the validated configuration and domain layers, deterministic demo broker,
-SQLite initialization, structured rotating logs, Streamlit shell, and a strictly read-only
-`ib_async` adapter for account, position, execution, open-order, contract, option-chain, and
-bounded market-data access. Candidate resolution, complete scenario analysis, and paper-order
-transmission remain disabled until their guarded milestones are implemented.
+Milestone 3 adds the pure Wheel state engine, transparent option resolver, capital checks,
+Decimal scenario calculations, assignment-pressure heuristic, and append-only
+Strategy-Adjusted Basis ledger. Candidate decisions have stable rejection codes and return
+typed `NO_TRADE`; unsafe state or basis ambiguity returns `MANUAL_REVIEW`. The dashboard wiring,
+startup reconciliation coordinator, and paper-order workflow remain locked for later guarded
+milestones.
 
 ## Safety posture
 
@@ -81,8 +82,18 @@ configuration.
 
 ## Current limitations
 
-Chronos is pre-release software. The current milestone can read IBKR state and market data, but
-the real-network smoke path was not run without a configured TWS or IB Gateway. Chronos does not
-yet rank option candidates, calculate a strategy-adjusted basis, reconcile restart state, or
-submit any order. Those capabilities are introduced only alongside their reconciliation and
-guardrail tests.
+Chronos is pre-release software. The current strategy engines are tested but are not yet wired
+into the dashboard or a complete startup/reconnect reconciliation coordinator. Stock allocation
+valuation still requires a current underlying quote at the service layer. Dividend, borrow, and
+corporate-action inputs are optional because the broker port does not provide them yet. The
+IBKR adapter records the exact underlying contract ID but does not claim that multiplier metadata
+proves an option's complete share-only deliverable. It therefore fails closed on every new IBKR
+short-option candidate until a trustworthy deliverable source verifies a standard contract;
+deterministic demo contracts carry explicit verified deliverables. The real-network smoke path
+was not run without a configured TWS or IB Gateway, and no order can be submitted from this
+milestone.
+
+Schema v2 will not silently adopt account-specific rows from an unscoped database, heal a drifted
+schema, or fabricate provenance for legacy strategy-basis rows. Startup never upgrades v1 in
+place. Preserve and back up any existing v1 file, then configure a fresh `DATABASE_URL` until an
+explicit operator-reviewed import exists.

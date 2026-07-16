@@ -10,10 +10,12 @@ new tests, documentation, and explicit human authorization; an environment varia
 insufficient. Market orders are rejected. Automated rolling, exercise, assignment handling,
 unattended execution, and broker-wide global cancellation are not implemented.
 
-Every short call must be covered by currently held, unencumbered shares using the qualified
-contract multiplier. Missing, stale, delayed, crossed, inconsistent, or unauthorized data locks
-opening actions. Chronos never estimates absent broker quotes, Greeks, volume, open interest, or
-positions.
+Every new short option requires a verified standard share-only deliverable tied to the exact
+underlying contract ID and currency; every short call must additionally be covered by currently
+held, unencumbered shares in the same pseudonymous account scope. A qualified multiplier or
+matching ticker alone is not deliverable or coverage evidence. Missing, stale, delayed, crossed,
+inconsistent, or unauthorized data locks opening actions. Chronos never estimates absent broker
+quotes, Greeks, volume, open interest, deliverables, or positions.
 
 ## Order boundary
 
@@ -31,17 +33,20 @@ Any ambiguity fails closed. The lifecycle is append-only:
 `DRAFT -> VALIDATED -> WHAT_IF_PREVIEWED -> USER_CONFIRMED -> SUBMITTED`, followed by a broker
 outcome. The UI cannot skip states.
 
-## Kill switch
+## Planned kill-switch contract
 
-The kill switch blocks new Chronos orders and attempts to cancel only orders whose Chronos-owned
-correlation references are known locally. It records each request and response. It never invokes
-a broker-wide global cancel by default.
+A later kill switch must block new Chronos orders and attempt to cancel only orders whose
+Chronos-owned correlation references are known locally. It must record each request and response
+and must never invoke a broker-wide global cancel by default. No kill-switch service is wired in
+the current milestone, and every order method remains locked.
 
 ## Secrets and logs
 
 Chronos never requests IBKR credentials. TWS or IB Gateway performs authentication. `.env` is
 ignored; `.env.example` contains only non-secret placeholders. Account identifiers are masked in
-the UI and logging filters. Full technical errors stay local in rotating logs.
+the UI and logging filters. The ledger stores a deterministic pseudonymous fingerprint rather than
+the raw account ID; it is a scope check, not encryption or anonymization. SQLite and rotating log
+files are restricted to the local owner. Full technical errors stay local in rotating logs.
 
 ## Human responsibility
 

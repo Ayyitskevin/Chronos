@@ -25,8 +25,8 @@ def render_runtime_status(status: ConnectionStatus, settings: Settings) -> None:
     columns[2].metric("Broker", status.state.value)
     columns[3].metric("Account", mask_account_id(status.account_id or ""))
     columns[4].metric(
-        "Transmit",
-        "ENABLED" if settings.transmission_possible else "BLOCKED",
+        "Paper-order config",
+        "CONFIGURED / CODE LOCKED" if settings.transmission_possible else "BLOCKED",
     )
     if status.last_successful_sync is None:
         st.caption("Last successful broker synchronization: never")

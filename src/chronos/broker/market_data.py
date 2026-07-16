@@ -322,6 +322,7 @@ class MarketDataManager:
         return tuple(
             OptionContractSpec(
                 symbol=symbol.upper(),
+                underlying_con_id=parameters.underlying_con_id,
                 expiration=expiration,
                 strike=strike,
                 right=right,
@@ -691,6 +692,7 @@ class MarketDataManager:
     def _spec_key(spec: OptionContractSpec) -> tuple[object, ...]:
         return (
             spec.symbol,
+            spec.underlying_con_id,
             spec.expiration,
             spec.strike,
             spec.right,
