@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import logging
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, date
-from decimal import Decimal, localcontext
+from decimal import ROUND_HALF_EVEN, Context, Decimal, localcontext
 from enum import StrEnum
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -35,8 +36,19 @@ from chronos.strategy.capital import (
     evaluate_short_put_capital,
 )
 
-_DECIMAL_PRECISION = 64
 _ALGORITHM_VERSION = "strike-resolver-v1"
+
+
+def _calculation_context(*values: Decimal | int) -> AbstractContextManager[Context]:
+    precision = max(
+        64,
+        sum(
+            len(value.as_tuple().digits) if isinstance(value, Decimal) else len(str(abs(value)))
+            for value in values
+        )
+        + 16,
+    )
+    return localcontext(Context(prec=precision, rounding=ROUND_HALF_EVEN))
 
 
 class CandidateRejectionCode(StrEnum):
@@ -692,11 +704,17 @@ class StrikeResolver:
                     "Ask is below bid.",
                 )
             if bid > 0 and ask >= bid:
-                with localcontext() as decimal_context:
-                    decimal_context.prec = _DECIMAL_PRECISION
+                with _calculation_context(
+                    bid,
+                    ask,
+                    self._policy.max_relative_spread,
+                ):
                     midpoint = (bid + ask) / Decimal("2")
                     relative_spread = (ask - bid) / midpoint
-                if relative_spread > self._policy.max_relative_spread:
+                    spread_exceeds_limit = Decimal("2") * (
+                        ask - bid
+                    ) > self._policy.max_relative_spread * (ask + bid)
+                if spread_exceeds_limit:
                     _reject(
                         reasons,
                         CandidateRejectionCode.SPREAD_TOO_WIDE,
@@ -786,8 +804,7 @@ class StrikeResolver:
         ):
             return reasons, None
         assert bid is not None and ask is not None
-        with localcontext() as decimal_context:
-            decimal_context.prec = _DECIMAL_PRECISION
+        with _calculation_context(delta, self._policy.target_abs_delta):
             delta_error = abs(abs(delta) - self._policy.target_abs_delta)
         return reasons, _PreparedCandidate(
             quote=quote,
@@ -851,8 +868,14 @@ class StrikeResolver:
             ),
             default=Decimal("0"),
         )
-        with localcontext() as decimal_context:
-            decimal_context.prec = _DECIMAL_PRECISION
+        with _calculation_context(
+            self._policy.target_abs_delta,
+            self._policy.min_abs_delta,
+            self._policy.max_abs_delta,
+            self._policy.target_dte,
+            self._policy.min_dte,
+            self._policy.max_dte,
+        ):
             delta_span = max(
                 self._policy.target_abs_delta - self._policy.min_abs_delta,
                 self._policy.max_abs_delta - self._policy.target_abs_delta,
@@ -871,8 +894,19 @@ class StrikeResolver:
                 max_volume_log=max_volume_log,
                 max_oi_log=max_oi_log,
             )
-            with localcontext() as decimal_context:
-                decimal_context.prec = _DECIMAL_PRECISION
+            with _calculation_context(
+                candidate.delta_error,
+                delta_span,
+                candidate.relative_spread,
+                self._policy.max_relative_spread,
+                candidate.dte_error,
+                dte_span,
+                liquidity_bonus,
+                self._policy.delta_weight,
+                self._policy.spread_weight,
+                self._policy.dte_weight,
+                self._policy.liquidity_weight,
+            ):
                 normalized_delta = candidate.delta_error / delta_span
                 normalized_spread = candidate.relative_spread / self._policy.max_relative_spread
                 normalized_dte = candidate.dte_error / dte_span
@@ -933,8 +967,7 @@ def _spot_price(quote: MarketQuote) -> Decimal | None:
     if quote.last is not None and quote.last > 0:
         return quote.last
     if quote.bid is not None and quote.ask is not None and quote.bid > 0 and quote.ask >= quote.bid:
-        with localcontext() as decimal_context:
-            decimal_context.prec = _DECIMAL_PRECISION
+        with _calculation_context(quote.bid, quote.ask):
             return (quote.bid + quote.ask) / Decimal("2")
     return None
 
@@ -971,8 +1004,7 @@ def _unique_rejections(
 def _log1p(value: int | None) -> Decimal:
     if value is None or value <= 0:
         return Decimal("0")
-    with localcontext() as decimal_context:
-        decimal_context.prec = _DECIMAL_PRECISION
+    with _calculation_context(value):
         return Decimal(value + 1).ln()
 
 
@@ -983,8 +1015,12 @@ def _liquidity_bonus(
     max_volume_log: Decimal,
     max_oi_log: Decimal,
 ) -> Decimal:
-    with localcontext() as decimal_context:
-        decimal_context.prec = _DECIMAL_PRECISION
+    with _calculation_context(
+        volume or 0,
+        open_interest or 0,
+        max_volume_log,
+        max_oi_log,
+    ):
         volume_log = _log1p(volume)
         open_interest_log = _log1p(open_interest)
         volume_component = volume_log / max_volume_log if max_volume_log > 0 else Decimal("0")

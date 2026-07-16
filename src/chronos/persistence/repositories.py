@@ -61,7 +61,16 @@ class ApplicationEventRepository:
     ) -> int:
         with self._sessions.begin() as session:
             _require_scope(session)
-            _reject_raw_account_event_data(message=message, event_data=event_data)
+            _reject_raw_account_event_data(
+                persisted_values=(
+                    event_type,
+                    severity,
+                    correlation_id,
+                    symbol,
+                    message,
+                    event_data or {},
+                )
+            )
             row = ApplicationEventRow(
                 event_type=event_type,
                 severity=severity,
@@ -416,12 +425,9 @@ def _candidate_row_matches(
 
 def _reject_raw_account_event_data(
     *,
-    message: str,
-    event_data: dict[str, Any] | None,
+    persisted_values: Sequence[object],
 ) -> None:
-    if _contains_raw_account_identifier(message) or _contains_raw_account_identifier(
-        event_data or {}
-    ):
+    if _contains_raw_account_identifier(persisted_values):
         raise ValueError("Application events must not contain raw broker account IDs")
 
 

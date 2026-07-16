@@ -806,6 +806,21 @@ def test_hard_spread_filter_is_independent_of_ambient_decimal_precision() -> Non
     assert CandidateRejectionCode.SPREAD_TOO_WIDE in _codes(resolution)
 
 
+def test_hard_spread_filter_rejects_one_unit_beyond_64_digit_boundary() -> None:
+    contract = _contract(142)
+    just_above_limit = Decimal("1." + "2" * 69 + "3")
+    quote = _option_quote(
+        contract,
+        bid=Decimal("1"),
+        ask=just_above_limit,
+    )
+
+    resolution = StrikeResolver(_policy()).resolve(_context((quote,)))
+
+    assert resolution.status is EligibilityStatus.NO_TRADE
+    assert CandidateRejectionCode.SPREAD_TOO_WIDE in _codes(resolution)
+
+
 def test_hard_delta_filter_is_independent_of_ambient_decimal_precision() -> None:
     quote = _option_quote(_contract(141), delta=Decimal("-0.3500004"))
 

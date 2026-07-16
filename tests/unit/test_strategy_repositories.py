@@ -260,6 +260,33 @@ def test_application_event_repository_rejects_raw_account_identifiers() -> None:
     assert [event.id for event in events] == [event_id]
 
 
+@pytest.mark.parametrize(
+    "unsafe_field",
+    ["event_type", "severity", "correlation_id", "symbol"],
+)
+def test_application_event_repository_screens_every_persisted_string_field(
+    unsafe_field: str,
+) -> None:
+    database = Database("sqlite+pysqlite:///:memory:")
+    try:
+        database.initialize()
+        database.bind_scope(broker_mode="demo", environment="DEMO", account_id=ACCOUNT_ID)
+        repository = ApplicationEventRepository(database.sessions)
+        values: dict[str, object] = {
+            "event_type": "safe_event",
+            "message": "Safe pseudonymous event",
+            "severity": "INFO",
+            "correlation_id": "CORRELATION-1",
+            "symbol": "AAPL",
+        }
+        values[unsafe_field] = ACCOUNT_ID
+
+        with pytest.raises(ValueError, match="raw broker account IDs"):
+            repository.append(**values)  # type: ignore[arg-type]
+    finally:
+        database.dispose()
+
+
 def test_application_event_repository_rejects_unsafe_read_limits() -> None:
     database = Database("sqlite+pysqlite:///:memory:")
     try:
