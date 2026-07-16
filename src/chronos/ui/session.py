@@ -25,6 +25,7 @@ from chronos.services.short_put_candidates import ShortPutCandidateService
 from chronos.services.short_put_demo_approval import ShortPutDemoApprovalService
 from chronos.services.short_put_demo_what_if import ShortPutDemoWhatIfService
 from chronos.services.short_put_risk_preview import ShortPutRiskPreviewService
+from chronos.ui.runtime_scope import RuntimeScopeView, build_bound_runtime_scope
 from chronos.utils.identifiers import account_fingerprint
 from chronos.utils.logging import configure_logging
 
@@ -32,6 +33,7 @@ from chronos.utils.logging import configure_logging
 @dataclass(slots=True)
 class AppRuntime:
     settings: Settings
+    runtime_scope: RuntimeScopeView
     broker: Broker
     connection: BrokerConnectionManager
     market_data: MarketDataManager
@@ -90,11 +92,7 @@ def _build_runtime() -> AppRuntime:
         account = connection.run(broker.account_summary())
         status = connection.run(broker.connection_status())
         _validate_scope_observations(account, status)
-        database.bind_scope(
-            broker_mode=settings.broker_mode.value,
-            environment=status.environment.value,
-            account_id=account.account_id,
-        )
+        runtime_scope = build_bound_runtime_scope(database, settings, account, status)
         reconciliation = ReconciliationCoordinator(
             connection,
             LocalReconciliationRepository(database.sessions),
@@ -144,6 +142,7 @@ def _build_runtime() -> AppRuntime:
         raise
     runtime = AppRuntime(
         settings=settings,
+        runtime_scope=runtime_scope,
         broker=broker,
         connection=connection,
         market_data=market_data,

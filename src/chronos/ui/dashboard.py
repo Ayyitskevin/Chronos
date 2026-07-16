@@ -50,6 +50,8 @@ from chronos.ui.charts import quote_ladder_figure, short_put_expiration_risk_fig
 from chronos.ui.components import (
     format_money,
     render_reconciliation_status,
+    render_runtime_scope_unavailable,
+    render_runtime_status,
     render_safety_notice,
 )
 from chronos.ui.rehearsal_state import (
@@ -60,6 +62,7 @@ from chronos.ui.rehearsal_state import (
     retain_demo_approval_receipt,
     supersede_demo_approval_record,
 )
+from chronos.ui.runtime_scope import validate_runtime_scope
 from chronos.ui.session import AppRuntime
 from chronos.utils.logging import mask_account_identifiers
 from chronos.utils.time import as_market_time
@@ -89,7 +92,17 @@ class _DemoApprovalFeedback:
 def render_dashboard(runtime: AppRuntime) -> None:
     st.title("Chronos")
     st.caption("Local-first Wheel Strategy workspace")
-    render_safety_notice()
+    try:
+        runtime_scope = validate_runtime_scope(getattr(runtime, "runtime_scope", None))
+    except ValueError:
+        logging.getLogger("chronos.ui.dashboard").warning(
+            "Runtime scope was rejected before rendering interactive workspace",
+            extra={"event": "runtime_scope_rejected"},
+        )
+        render_runtime_scope_unavailable()
+        return
+    render_safety_notice(runtime_scope)
+    render_runtime_status(runtime_scope)
     _stored_demo_approval_record()
     try:
         page = st.sidebar.radio(

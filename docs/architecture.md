@@ -41,6 +41,9 @@ reachable without test mutation. Neither profile can submit an order.
 - Brokerage truth: broker positions, open orders, fills, executions, and account values.
 - Chronos truth: wheel-cycle links, candidate evidence, guardrail evidence, notes, and the
   explicitly labeled strategy-adjusted basis.
+- Process-runtime display state: one immutable, sanitized startup-scope view built only after
+  startup observations are validated and database account-scope binding succeeds. It is not
+  persisted and cannot determine the Wheel stage or authorize an action.
 - UI state: navigation plus either one historical, presentation-safe candidate lineage with its
   matching risk and DEMO what-if attempts, or one process-memory approval-rehearsal envelope. The
   envelope contains a scalar receipt only while retained and otherwise only a term-free terminal
@@ -69,9 +72,10 @@ presentation models and deliberately do not manufacture cycles or write audit ro
 
 The broker service serializes adapter work on its event loop. A portfolio render submits one
 coordinator coroutine containing the complete double-read observation window, so another Chronos
-broker call cannot interleave. Startup, reconnect, order/fill-event, and periodic triggers remain
-planned. For streaming top-of-book data, quote age starts only after a price-bearing update from
-the current subscription is received; it is checked at every decision and must be checked again
+broker call cannot interleave. Reconciliation on startup, reconnect, order/fill events, and a
+periodic schedule remains planned. For streaming top-of-book data, quote age starts only after a
+price-bearing update from the current subscription is received; it is checked at every decision and
+must be checked again
 immediately before a future paper submit.
 
 The symbol workspace starts candidate work only when the operator presses the explicit read-only
@@ -278,3 +282,23 @@ report that field in different units. Only execution price, qualified multiplier
 commission evidence, exact contract identity, and pseudonymous account scope enter the strategy
 ledger. A premium without either an estimated or actual commission remains `PENDING`; it is not
 treated as a final zero-fee fill.
+
+## Startup-bound runtime-scope boundary
+
+Milestone 10 builds one immutable presentation view from the account-summary and connection-status
+observations startup already performs. Chronos first exact-revalidates the inputs and prepares
+sanitized facts only after account and capture-time agreement plus connected-state and
+environment/data-quality coherence. Invalid facts cannot reach `Database.bind_scope(...)`; after a
+successful binding, Chronos materializes the bound view. The view copies only broker source and
+optional DEMO profile, startup environment, data quality, connected state, a bounded masked
+account ID, the UTC account observation time, and literal historical/bound/locked flags. It
+excludes raw account identity,
+financial values, broker status text, connection coordinates, credentials, and service objects,
+and is never persisted.
+
+The common dashboard revalidates the exact view before rendering either page. Missing or malformed
+state emits only a generic rejection event, renders a locked `UNAVAILABLE` banner, and withholds the
+interactive workspace. Rendering a valid banner performs no broker call or database write. Its
+labels and mode-aware notice describe historical startup identity—not current connection health,
+fresh reconciliation, current market-data evidence, or order authority. An IBKR LIVE source label
+does not alter the code lock; live-money transmission remains hard-disabled.

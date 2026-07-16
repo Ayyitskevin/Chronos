@@ -7,12 +7,15 @@ import pytest
 from chronos.broker.demo import DEMO_NOW, DemoBroker
 from chronos.config.settings import Settings
 from chronos.domain.enums import (
+    BrokerMode,
     ConnectionState,
     DataQuality,
     DisplayEnvironment,
     EligibilityStatus,
 )
 from chronos.domain.models import AccountSummary, ConnectionStatus
+from chronos.persistence.database import Database
+from chronos.persistence.schema import DatabaseScopeRow
 from chronos.services.short_put_risk_preview import ShortPutRiskPreviewRequest
 from chronos.ui import session
 from chronos.ui.session import _validate_scope_observations
@@ -82,6 +85,18 @@ def test_runtime_wires_demo_reads_through_one_market_data_manager(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    startup_calls = {"account_summary": 0, "connection_status": 0}
+    original_account_summary = DemoBroker.account_summary
+    original_connection_status = DemoBroker.connection_status
+
+    async def track_account_summary(broker: DemoBroker) -> AccountSummary:
+        startup_calls["account_summary"] += 1
+        return await original_account_summary(broker)
+
+    async def track_connection_status(broker: DemoBroker) -> ConnectionStatus:
+        startup_calls["connection_status"] += 1
+        return await original_connection_status(broker)
+
     settings = Settings.model_validate(
         {
             "database_url": f"sqlite:///{tmp_path / 'chronos.db'}",
@@ -89,10 +104,19 @@ def test_runtime_wires_demo_reads_through_one_market_data_manager(
         }
     )
     monkeypatch.setattr(session, "get_settings", lambda: settings)
+    monkeypatch.setattr(DemoBroker, "account_summary", track_account_summary)
+    monkeypatch.setattr(DemoBroker, "connection_status", track_connection_status)
 
     runtime = session._build_runtime()
     try:
+        assert startup_calls == {"account_summary": 1, "connection_status": 1}
         assert isinstance(runtime.broker, DemoBroker)
+        assert runtime.runtime_scope.broker_mode is BrokerMode.DEMO
+        assert runtime.runtime_scope.masked_account_id == "DU•••4567"
+        assert runtime.runtime_scope.account_observed_at == DEMO_NOW
+        assert runtime.runtime_scope.runtime_view_persisted is False
+        assert runtime.runtime_scope.submission_locked is True
+        assert "DU1234567" not in runtime.runtime_scope.model_dump_json()
         underlying = runtime.connection.run(runtime.broker.qualify_underlying("AAPL"))
         first = runtime.connection.run(runtime.market_data.underlying_quote(underlying))
         second = runtime.connection.run(runtime.market_data.underlying_quote(underlying))
@@ -130,3 +154,80 @@ def test_runtime_wires_demo_reads_through_one_market_data_manager(
         runtime.close()
 
     assert runtime.connection.running is False
+
+
+def test_runtime_scope_binding_failure_closes_broker_and_database(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    settings = Settings.model_validate(
+        {
+            "database_url": f"sqlite:///{tmp_path / 'chronos.db'}",
+            "log_file": tmp_path / "chronos.log",
+        }
+    )
+    events: list[str] = []
+    original_disconnect = DemoBroker.disconnect
+    original_dispose = Database.dispose
+
+    def reject_scope_binding(_database: Database, **_kwargs: object) -> None:
+        events.append("scope_binding_attempted")
+        raise ValueError("fixed test rejection")
+
+    async def track_disconnect(broker: DemoBroker) -> None:
+        events.append("broker_disconnected")
+        await original_disconnect(broker)
+
+    def track_dispose(database: Database) -> None:
+        events.append("database_disposed")
+        original_dispose(database)
+
+    monkeypatch.setattr(session, "get_settings", lambda: settings)
+    monkeypatch.setattr(Database, "bind_scope", reject_scope_binding)
+    monkeypatch.setattr(DemoBroker, "disconnect", track_disconnect)
+    monkeypatch.setattr(Database, "dispose", track_dispose)
+
+    with pytest.raises(ValueError, match="fixed test rejection"):
+        session._build_runtime()
+
+    assert events == [
+        "scope_binding_attempted",
+        "broker_disconnected",
+        "database_disposed",
+    ]
+
+
+def test_runtime_scope_preflight_rejects_before_database_binding(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    settings = Settings.model_validate(
+        {
+            "database_url": f"sqlite:///{tmp_path / 'chronos.db'}",
+            "log_file": tmp_path / "chronos.log",
+        }
+    )
+    original_status = DemoBroker.connection_status
+
+    async def mismatched_status(broker: DemoBroker) -> ConnectionStatus:
+        status = await original_status(broker)
+        return status.model_copy(
+            update={
+                "environment": DisplayEnvironment.PAPER,
+                "data_quality": DataQuality.UNKNOWN,
+            }
+        )
+
+    monkeypatch.setattr(session, "get_settings", lambda: settings)
+    monkeypatch.setattr(DemoBroker, "connection_status", mismatched_status)
+
+    with pytest.raises(ValueError, match="environment does not match"):
+        session._build_runtime()
+
+    verification = Database(settings.database_url)
+    try:
+        verification.initialize()
+        with verification.sessions() as database_session:
+            assert database_session.get(DatabaseScopeRow, 1) is None
+    finally:
+        verification.dispose()

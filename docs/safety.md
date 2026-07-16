@@ -109,6 +109,22 @@ disposition cannot be reopened or changed, and an exact replay cannot extend the
 transitions invoke no broker or financial service and write no persistent state. Session restart
 clears all records.
 
+Milestone 10 treats startup identity display as a fail-closed boundary. It derives one immutable
+runtime-scope view from the account and connection observations startup already makes. It fully
+preflights those facts before persistent account-scope binding, so an invalid observation cannot
+bind a fresh database. The bound view is materialized only after binding succeeds. The view
+retains a bounded masked account ID and nonfinancial source, environment, data-quality, timing, and
+literal lock fields. It excludes the raw account ID, account balances, broker status text,
+connection coordinates, credentials, and service objects. The view itself is not persisted, and
+rendering it issues no broker request.
+
+Every render revalidates the exact view before exposing either interactive page. Missing or
+malformed state produces only generic logged feedback, displays `UNAVAILABLE`, and withholds the
+workspace. A valid view is explicitly labeled historical startup identity; it cannot substitute
+for current broker health, fresh reconciliation, current market evidence, or order authority.
+Mode-aware DEMO, IBKR PAPER, and IBKR LIVE labels never enable an order path, and live-money
+transmission remains hard-disabled.
+
 ## Order boundary
 
 Paper submission remains off unless all of these are true at the same decision point:

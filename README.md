@@ -10,6 +10,22 @@ substantial losses. Paper fills do not prove live execution quality.
 
 ## Current milestone
 
+Milestone 10 retains one immutable, presentation-only runtime-scope view from the account summary
+and connection status that startup already reads. Chronos first preflights account, capture time,
+environment, connection, and data quality into sanitized facts that make no persistence claim.
+Only after that succeeds does it bind the database account scope and construct the bound view. The
+view carries only the broker source, optional DEMO profile, startup environment, data quality,
+connected state, a bounded masked account ID, the account observation time, and literal
+historical/bound/locked safety flags. Raw account identity,
+financial values, broker status text, connection coordinates, and service objects are omitted.
+
+The common dashboard revalidates this view before rendering either page. If it is missing or
+malformed, Chronos shows a locked `UNAVAILABLE` banner and withholds the interactive workspace.
+Rendering a valid view makes no additional broker request, and the view is not persisted. It is
+historical startup identity only—not current broker health, fresh reconciliation, current
+market-data evidence, or order authority. Mode-aware copy distinguishes deterministic DEMO,
+read-only IBKR PAPER, and read-only IBKR LIVE while live-money transmission remains hard-disabled.
+
 Milestone 9 adds an immutable, process-memory-only disposition envelope around the scalar DEMO
 approval receipt. A retained receipt has a fixed 15-minute display lease measured with the process
 monotonic clock; this lease is presentation hygiene, not market-evidence freshness or approval
@@ -170,8 +186,9 @@ configuration.
 
 ## Current limitations
 
-Chronos is pre-release software. Reconciliation runs when the portfolio page renders; startup,
-reconnect, order/fill-event, and periodic scheduling are not implemented yet. The concrete local
+Chronos is pre-release software. The portfolio page triggers its observation when it renders, and
+explicit symbol workflows refresh reconciliation internally. Reconciliation on startup, reconnect,
+order/fill events, and a periodic schedule is not implemented yet. The concrete local
 reader conservatively marks every persisted cycle, strategy state, draft, fill, or basis symbol
 unresolved, so only locally empty flat symbols can currently publish `RECONCILED`; positions and
 owned working orders remain locked for manual review until complete allocation provenance exists.
@@ -179,7 +196,7 @@ The symbol workspace invokes the resolver only through the guarded candidate ser
 default `safety_cases` demo profile intentionally contains positions, an order, and an execution,
 so it demonstrates the whole-account capital-provenance lock rather than publishing an eligible
 AAPL trade. The supported `empty_account` profile exposes one coherent AAPL path with zero broker
-exposure for the locked M5–M9 journey. Candidate evidence is
+exposure for the locked M5–M10 journey. Candidate evidence is
 not written to a strategy repository because a flat symbol has no legitimate Wheel cycle, and
 creating one solely for an evaluation would manufacture strategy state. The dashboard activates
 only the one-contract short-put expiration preview, deterministic DEMO what-if, and ephemeral DEMO

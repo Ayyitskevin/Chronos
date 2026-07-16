@@ -53,13 +53,26 @@ def test_demo_portfolio_and_symbol_pages_render_without_exceptions(
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'chronos.db'}")
     monkeypatch.setenv("LOG_FILE", str(tmp_path / "chronos.log"))
     evaluate_calls: list[str] = []
+    scope_source_calls = {"account_summary": 0, "connection_status": 0}
     original_evaluate = ShortPutCandidateService.evaluate
+    original_account_summary = DemoBroker.account_summary
+    original_connection_status = DemoBroker.connection_status
 
     def track_evaluation(service: ShortPutCandidateService, symbol: str):
         evaluate_calls.append(symbol)
         return original_evaluate(service, symbol)
 
+    async def track_account_summary(broker: DemoBroker):
+        scope_source_calls["account_summary"] += 1
+        return await original_account_summary(broker)
+
+    async def track_connection_status(broker: DemoBroker):
+        scope_source_calls["connection_status"] += 1
+        return await original_connection_status(broker)
+
     monkeypatch.setattr(ShortPutCandidateService, "evaluate", track_evaluation)
+    monkeypatch.setattr(DemoBroker, "account_summary", track_account_summary)
+    monkeypatch.setattr(DemoBroker, "connection_status", track_connection_status)
 
     try:
         app = AppTest.from_file("src/chronos/app.py").run(timeout=10)
@@ -68,6 +81,12 @@ def test_demo_portfolio_and_symbol_pages_render_without_exceptions(
         assert [title.value for title in app.title] == ["Chronos"]
         assert app.radio[0].value == "Portfolio Dashboard"
         metrics = {metric.label: metric.value for metric in app.metric}
+        assert metrics["Broker source"] == "DEMO"
+        assert metrics["Startup environment"] == "DEMO"
+        assert metrics["Startup data"] == "DEMO"
+        assert metrics["Startup broker"] == "CONNECTED"
+        assert metrics["Startup masked account"] == "DU•••4567"
+        assert metrics["Order path"] == "CODE LOCKED"
         assert metrics["Reconciliation"] == "MANUAL_REVIEW"
         assert metrics["Opening actions"] == "LOCKED"
         assert metrics["Account"] == "DU•••4567"
@@ -86,12 +105,17 @@ def test_demo_portfolio_and_symbol_pages_render_without_exceptions(
         assert {"RECONCILED", "MANUAL_REVIEW"} <= set(reconciliation_table["Status"])
         assert app.expander
         assert "DU1234567" not in str(app)
+        assert scope_source_calls == {"account_summary": 3, "connection_status": 3}
+        assert any("Historical startup identity only" in caption.value for caption in app.caption)
 
         app.radio[0].set_value("Symbol Detail & Order Workspace").run(timeout=10)
 
         assert not app.exception
         assert evaluate_calls == []
         detail_metrics = {metric.label: metric.value for metric in app.metric}
+        assert detail_metrics["Broker source"] == "DEMO"
+        assert detail_metrics["Startup masked account"] == "DU•••4567"
+        assert detail_metrics["Order path"] == "CODE LOCKED"
         assert "Reconciliation" not in detail_metrics
         assert detail_metrics["Candidate result"] == "NOT_EVALUATED"
         assert detail_metrics["Candidate actions"] == "LOCKED"
@@ -100,6 +124,7 @@ def test_demo_portfolio_and_symbol_pages_render_without_exceptions(
         assert app.button[0].label == "Run read-only evaluation"
         app.run(timeout=10)
         assert evaluate_calls == []
+        assert scope_source_calls == {"account_summary": 3, "connection_status": 3}
 
         app.button[0].click().run(timeout=10)
 
