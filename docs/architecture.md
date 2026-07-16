@@ -75,8 +75,9 @@ immediately before a future paper submit.
 ## Reconciliation boundary
 
 Reconciliation is the only path that publishes a Wheel stage. The coordinator double-reads fresh
-broker positions, open orders, and executions inside one serialized, bounded observation window,
-then compares that stable snapshot with one account-scoped local transaction. Broker instability
+account values, broker positions, open orders, and executions inside one serialized, bounded
+observation window, then compares that stable snapshot with one account-scoped local transaction.
+The independent real-time bound covers that local read too. Broker or account-value instability
 returns `PENDING` without publishing a snapshot. Incomplete local evidence returns `PENDING` with
 only the sanitized stable broker view; unresolved exposure returns `MANUAL_REVIEW`. The dashboard
 never receives raw account IDs or order references, and every order action remains locked even

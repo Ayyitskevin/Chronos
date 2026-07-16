@@ -67,9 +67,12 @@ def _render_portfolio(result: ReconciliationResult) -> None:
 
     account = snapshot.account
     columns = st.columns(5)
-    columns[0].metric("Net liquidation", format_money(account.net_liquidation))
-    columns[1].metric("Cash", format_money(account.total_cash))
-    columns[2].metric("Buying power", format_money(account.buying_power))
+    columns[0].metric(
+        "Net liquidation",
+        format_money(account.net_liquidation, account.currency),
+    )
+    columns[1].metric("Cash", format_money(account.total_cash, account.currency))
+    columns[2].metric("Buying power", format_money(account.buying_power, account.currency))
     columns[3].metric("Open account orders", str(len(snapshot.open_orders)))
     columns[4].metric("Observed executions", str(snapshot.execution_count))
 
@@ -79,9 +82,18 @@ def _render_portfolio(result: ReconciliationResult) -> None:
             "Symbol": position.contract.symbol,
             "Type": position.contract.security_type.value,
             "Quantity": str(position.quantity),
-            "Broker average cost": format_money(position.average_cost),
-            "Market price": format_money(position.market_price),
-            "Unrealized P&L": format_money(position.unrealized_pnl),
+            "Broker average cost": format_money(
+                position.average_cost,
+                position.contract.currency,
+            ),
+            "Market price": format_money(
+                position.market_price,
+                position.contract.currency,
+            ),
+            "Unrealized P&L": format_money(
+                position.unrealized_pnl,
+                position.contract.currency,
+            ),
         }
         for position in snapshot.positions
     ]
@@ -100,7 +112,7 @@ def _render_portfolio(result: ReconciliationResult) -> None:
             "Quantity": str(order.quantity),
             "Filled": str(order.filled_quantity),
             "Remaining": str(order.remaining_quantity),
-            "Limit": format_money(order.limit_price),
+            "Limit": format_money(order.limit_price, order.contract.currency),
             "Lifecycle": order.lifecycle.value,
             "Transmit": "YES" if order.transmit else "NO",
         }
@@ -169,9 +181,9 @@ def _render_symbol_detail(runtime: AppRuntime) -> None:
 
     st.subheader(symbol)
     columns = st.columns(4)
-    columns[0].metric("Last", format_money(quote.last))
-    columns[1].metric("Bid", format_money(quote.bid))
-    columns[2].metric("Ask", format_money(quote.ask))
+    columns[0].metric("Last", format_money(quote.last, quote.contract.currency))
+    columns[1].metric("Bid", format_money(quote.bid, quote.contract.currency))
+    columns[2].metric("Ask", format_money(quote.ask, quote.contract.currency))
     columns[3].metric("Data quality", managed_quote.effective_data_quality.value)
     st.caption(
         f"Quote age: {managed_quote.source_age_seconds:.1f} seconds · "

@@ -147,13 +147,14 @@ class ReconciliationResult(ChronosModel):
 class _BrokerObservation:
     status_start: ConnectionStatus
     server_time_start: datetime
-    account: AccountSummary
+    account_first: AccountSummary
     positions_first: tuple[BrokerPosition, ...]
     orders_first: tuple[BrokerOrder, ...]
     executions_first: tuple[BrokerExecution, ...]
     positions_second: tuple[BrokerPosition, ...]
     orders_second: tuple[BrokerOrder, ...]
     executions_second: tuple[BrokerExecution, ...]
+    account_second: AccountSummary
     server_time_end: datetime
     status_end: ConnectionStatus
 
@@ -188,8 +189,11 @@ class ReconciliationCoordinator:
 
         try:
             started_at = self._monotonic()
-            observation = self._connection.run(self._observe_broker())
-            elapsed_seconds = self._monotonic() - started_at
+            observation = self._connection.run(
+                self._observe_broker(),
+                timeout=self._max_observation_seconds,
+            )
+            broker_elapsed_seconds = self._monotonic() - started_at
         except Exception:
             _LOGGER.warning(
                 "Broker reconciliation observation failed; evidence remains locked",
@@ -202,7 +206,7 @@ class ReconciliationCoordinator:
         broker_reasons = _observation_reasons(
             observation,
             self._max_observation_window,
-            elapsed_seconds=elapsed_seconds,
+            elapsed_seconds=broker_elapsed_seconds,
             max_elapsed_seconds=self._max_observation_seconds,
         )
         if broker_reasons:
@@ -214,7 +218,7 @@ class ReconciliationCoordinator:
 
         local_evidence: LocalReconciliationEvidence | None = None
         local_read_failed = False
-        account_id = observation.account.account_id
+        account_id = observation.account_second.account_id
         if _is_well_formed_account_id(account_id):
             try:
                 local_evidence = self._local_reader.read(account_id)
@@ -226,9 +230,21 @@ class ReconciliationCoordinator:
                 )
         else:
             local_read_failed = True
+
+        evidence_elapsed_seconds = self._monotonic() - started_at
+        elapsed_reason = _real_time_window_reason(
+            evidence_elapsed_seconds,
+            max_elapsed_seconds=self._max_observation_seconds,
+        )
+        if elapsed_reason is not None:
+            _LOGGER.warning(
+                "Reconciliation evidence window expired; evidence remains locked",
+                extra={"event": "reconciliation_evidence_window_expired"},
+            )
+            return self._pending_without_snapshot(elapsed_reason)
         return self._derive_result(
             observation,
-            elapsed_seconds=elapsed_seconds,
+            elapsed_seconds=evidence_elapsed_seconds,
             local_evidence=local_evidence,
             local_read_failed=local_read_failed,
         )
@@ -236,25 +252,27 @@ class ReconciliationCoordinator:
     async def _observe_broker(self) -> _BrokerObservation:
         status_start = await self._broker.connection_status()
         server_time_start = await self._broker.server_time()
-        account = await self._broker.account_summary()
+        account_first = await self._broker.account_summary()
         positions_first = await self._broker.positions()
         orders_first = await self._broker.open_orders()
         executions_first = await self._broker.executions()
         positions_second = await self._broker.positions()
         orders_second = await self._broker.open_orders()
         executions_second = await self._broker.executions()
+        account_second = await self._broker.account_summary()
         server_time_end = await self._broker.server_time()
         status_end = await self._broker.connection_status()
         return _BrokerObservation(
             status_start=status_start,
             server_time_start=server_time_start,
-            account=account,
+            account_first=account_first,
             positions_first=positions_first,
             orders_first=orders_first,
             executions_first=executions_first,
             positions_second=positions_second,
             orders_second=orders_second,
             executions_second=executions_second,
+            account_second=account_second,
             server_time_end=server_time_end,
             status_end=status_end,
         )
@@ -280,7 +298,9 @@ class ReconciliationCoordinator:
                 "Local strategy evidence is incomplete; reconciliation remains locked."
             )
         else:
-            global_reasons.extend(_identity_reasons(identities, observation.account.account_id))
+            global_reasons.extend(
+                _identity_reasons(identities, observation.account_second.account_id)
+            )
 
         globally_pending = bool(global_reasons)
         unresolved_symbols = (
@@ -391,7 +411,7 @@ class ReconciliationCoordinator:
         decision = derive_wheel_state(
             WheelStateInput(
                 symbol=symbol,
-                expected_account_id=observation.account.account_id,
+                expected_account_id=observation.account_second.account_id,
                 positions=positions,
                 open_orders=orders,
                 matched_order_identities=matched_identities,
@@ -466,7 +486,7 @@ def _observation_reasons(
     max_elapsed_seconds: float,
 ) -> list[str]:
     reasons: list[str] = []
-    expected_account = observation.account.account_id
+    expected_account = observation.account_second.account_id
     if (
         observation.status_start.state is not ConnectionState.CONNECTED
         or observation.status_end.state is not ConnectionState.CONNECTED
@@ -482,11 +502,18 @@ def _observation_reasons(
     if not _is_well_formed_account_id(expected_account) or any(
         not _is_well_formed_account_id(value) or value != expected_account
         for value in (
+            observation.account_first.account_id,
             observation.status_start.account_id,
             observation.status_end.account_id,
         )
     ):
         reasons.append("Broker account scope did not remain consistent during reconciliation.")
+    if (
+        not _is_aware(observation.account_first.as_of)
+        or not _is_aware(observation.account_second.as_of)
+        or observation.account_second.as_of < observation.account_first.as_of
+    ):
+        reasons.append("Broker account observation times were invalid or moved backward.")
 
     if any(
         item.account_id != expected_account
@@ -508,15 +535,17 @@ def _observation_reasons(
         elapsed = observation.server_time_end - observation.server_time_start
         if elapsed < timedelta(0) or elapsed > max_window:
             reasons.append("Broker observation exceeded its bounded server-time window.")
-    if (
-        not isfinite(elapsed_seconds)
-        or elapsed_seconds < 0
-        or elapsed_seconds > max_elapsed_seconds
-    ):
-        reasons.append("Broker observation exceeded its bounded real-time window.")
+    elapsed_reason = _real_time_window_reason(
+        elapsed_seconds,
+        max_elapsed_seconds=max_elapsed_seconds,
+    )
+    if elapsed_reason is not None:
+        reasons.append(elapsed_reason)
 
     if (
-        _position_signatures(observation.positions_first)
+        _account_signature(observation.account_first)
+        != _account_signature(observation.account_second)
+        or _position_signatures(observation.positions_first)
         != _position_signatures(observation.positions_second)
         or _order_signatures(observation.orders_first)
         != _order_signatures(observation.orders_second)
@@ -658,6 +687,32 @@ def _position_signatures(
     )
 
 
+def _account_signature(account: AccountSummary) -> tuple[str, Decimal, Decimal, Decimal, str]:
+    """Compare state-sensitive account values while allowing a refreshed observation time."""
+
+    return (
+        account.account_id,
+        account.net_liquidation,
+        account.total_cash,
+        account.buying_power,
+        account.currency,
+    )
+
+
+def _real_time_window_reason(
+    elapsed_seconds: float,
+    *,
+    max_elapsed_seconds: float,
+) -> str | None:
+    if (
+        not isfinite(elapsed_seconds)
+        or elapsed_seconds < 0
+        or elapsed_seconds > max_elapsed_seconds
+    ):
+        return "Reconciliation evidence exceeded its bounded real-time window."
+    return None
+
+
 def _order_signatures(orders: tuple[BrokerOrder, ...]) -> frozenset[str]:
     return frozenset(item.model_dump_json() for item in orders)
 
@@ -678,9 +733,9 @@ def _snapshot_view(
     captured_at = (
         observation.server_time_end
         if _is_aware(observation.server_time_end)
-        else observation.account.as_of
+        else observation.account_second.as_of
     )
-    account = observation.account
+    account = observation.account_second
     return ReconciliationSnapshotView(
         environment=observation.status_end.environment,
         data_quality=observation.status_end.data_quality,

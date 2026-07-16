@@ -52,16 +52,18 @@ class _ScriptedBroker:
             tuple[BrokerExecution, ...],
             tuple[BrokerExecution, ...],
         ] = ((), ()),
+        accounts: tuple[AccountSummary, AccountSummary] | None = None,
         status_end_account_id: str = ACCOUNT_ID,
         server_time_failure: Exception | None = None,
     ) -> None:
-        self.account = AccountSummary(
+        account = AccountSummary(
             account_id=ACCOUNT_ID,
             net_liquidation=Decimal("250000"),
             total_cash=Decimal("125000"),
             buying_power=Decimal("240000"),
             as_of=NOW,
         )
+        self.account_snapshots = accounts or (account, account)
         self.statuses = (
             _status(ACCOUNT_ID),
             _status(status_end_account_id),
@@ -93,8 +95,9 @@ class _ScriptedBroker:
         return self.server_times[index]
 
     async def account_summary(self) -> AccountSummary:
+        index = self.calls["account"]
         self.calls["account"] += 1
-        return self.account
+        return self.account_snapshots[index]
 
     async def positions(self) -> tuple[BrokerPosition, ...]:
         index = self.calls["positions"]
@@ -117,6 +120,7 @@ class _CountingRunner:
     def __init__(self, broker: _ScriptedBroker) -> None:
         self.broker = cast(Broker, broker)
         self.run_calls = 0
+        self.timeouts: list[float | None] = []
         self.inside_run = False
         self.failure: Exception | None = None
 
@@ -126,8 +130,8 @@ class _CountingRunner:
         *,
         timeout: float | None = None,
     ) -> _T:
-        del timeout
         self.run_calls += 1
+        self.timeouts.append(timeout)
         if self.failure is not None:
             coroutine.close()
             raise self.failure
@@ -284,11 +288,12 @@ def test_flat_reconciliation_uses_one_manager_call_and_double_reads() -> None:
     result = coordinator.reconcile()
 
     assert runner.run_calls == 1
+    assert runner.timeouts == [30.0]
     assert reader.calls == [ACCOUNT_ID]
     assert broker.calls == {
         "status": 2,
         "time": 2,
-        "account": 1,
+        "account": 2,
         "positions": 2,
         "orders": 2,
         "executions": 2,
@@ -302,6 +307,80 @@ def test_flat_reconciliation_uses_one_manager_call_and_double_reads() -> None:
     assert result.snapshot is not None
     assert result.snapshot.account.masked_account_id != ACCOUNT_ID
     assert ACCOUNT_ID not in result.model_dump_json()
+
+
+@pytest.mark.parametrize(
+    ("field", "changed_value"),
+    (
+        ("net_liquidation", Decimal("249999")),
+        ("total_cash", Decimal("124999")),
+        ("buying_power", Decimal("239999")),
+        ("currency", "EUR"),
+    ),
+)
+def test_changed_account_values_reject_otherwise_stable_broker_evidence(
+    field: str,
+    changed_value: object,
+) -> None:
+    account_first = AccountSummary(
+        account_id=ACCOUNT_ID,
+        net_liquidation=Decimal("250000"),
+        total_cash=Decimal("125000"),
+        buying_power=Decimal("240000"),
+        as_of=NOW,
+    )
+    account_second = account_first.model_copy(
+        update={field: changed_value, "as_of": NOW + timedelta(seconds=1)}
+    )
+    broker = _ScriptedBroker(accounts=(account_first, account_second))
+    coordinator, _, reader = _coordinator(broker)
+
+    result = coordinator.reconcile()
+
+    assert reader.calls == []
+    assert result.status is ReconciliationStatus.PENDING
+    assert result.snapshot is None
+    assert any("changed" in reason for reason in result.reasons)
+    assert ACCOUNT_ID not in result.model_dump_json()
+
+
+def test_account_observation_time_can_refresh_when_values_are_stable() -> None:
+    account_first = AccountSummary(
+        account_id=ACCOUNT_ID,
+        net_liquidation=Decimal("250000"),
+        total_cash=Decimal("125000"),
+        buying_power=Decimal("240000"),
+        as_of=NOW,
+    )
+    account_second = account_first.model_copy(update={"as_of": NOW + timedelta(seconds=1)})
+    broker = _ScriptedBroker(accounts=(account_first, account_second))
+    coordinator, _, _ = _coordinator(broker)
+
+    result = coordinator.reconcile()
+
+    assert result.status is ReconciliationStatus.RECONCILED
+    assert result.snapshot is not None
+    assert result.snapshot.account.as_of == account_second.as_of
+
+
+def test_account_observation_time_cannot_move_backward() -> None:
+    account_second = AccountSummary(
+        account_id=ACCOUNT_ID,
+        net_liquidation=Decimal("250000"),
+        total_cash=Decimal("125000"),
+        buying_power=Decimal("240000"),
+        as_of=NOW - timedelta(seconds=1),
+    )
+    account_first = account_second.model_copy(update={"as_of": NOW})
+    broker = _ScriptedBroker(accounts=(account_first, account_second))
+    coordinator, _, reader = _coordinator(broker)
+
+    result = coordinator.reconcile()
+
+    assert reader.calls == []
+    assert result.status is ReconciliationStatus.PENDING
+    assert result.snapshot is None
+    assert any("moved backward" in reason for reason in result.reasons)
 
 
 def test_incomplete_local_evidence_keeps_portfolio_pending() -> None:
@@ -536,6 +615,58 @@ def test_slow_real_elapsed_window_is_pending_even_with_bounded_server_time() -> 
     result = coordinator.reconcile()
 
     assert reader.calls == []
+    assert result.status is ReconciliationStatus.PENDING
+    assert result.snapshot is None
+    assert any("real-time" in reason for reason in result.reasons)
+
+
+@pytest.mark.parametrize("finished_at", (131.0, 99.0, float("nan"), float("inf")))
+def test_invalid_end_to_end_evidence_window_is_pending(finished_at: float) -> None:
+    broker = _ScriptedBroker()
+    monotonic_values = iter((100.0, 101.0, finished_at))
+    coordinator, _, reader = _coordinator(
+        broker,
+        monotonic=lambda: next(monotonic_values),
+        max_observation_seconds=30.0,
+    )
+
+    result = coordinator.reconcile()
+
+    assert reader.calls == [ACCOUNT_ID]
+    assert result.status is ReconciliationStatus.PENDING
+    assert result.snapshot is None
+    assert any("real-time" in reason for reason in result.reasons)
+
+
+def test_end_to_end_evidence_window_accepts_exact_boundary() -> None:
+    broker = _ScriptedBroker()
+    monotonic_values = iter((100.0, 101.0, 130.0))
+    coordinator, _, _ = _coordinator(
+        broker,
+        monotonic=lambda: next(monotonic_values),
+        max_observation_seconds=30.0,
+    )
+
+    result = coordinator.reconcile()
+
+    assert result.status is ReconciliationStatus.RECONCILED
+    assert result.snapshot is not None
+    assert result.snapshot.window_seconds == 30.0
+
+
+def test_slow_failed_local_read_cannot_publish_stale_broker_snapshot() -> None:
+    broker = _ScriptedBroker()
+    monotonic_values = iter((100.0, 101.0, 131.0))
+    coordinator, _, reader = _coordinator(
+        broker,
+        failure=RuntimeError("local read failed"),
+        monotonic=lambda: next(monotonic_values),
+        max_observation_seconds=30.0,
+    )
+
+    result = coordinator.reconcile()
+
+    assert reader.calls == [ACCOUNT_ID]
     assert result.status is ReconciliationStatus.PENDING
     assert result.snapshot is None
     assert any("real-time" in reason for reason in result.reasons)

@@ -27,6 +27,9 @@ def test_demo_portfolio_and_symbol_pages_render_without_exceptions(
         assert metrics["Account"] == "DU•••4567"
         assert metrics["Open account orders"] == "1"
         assert metrics["Observed executions"] == "1"
+        assert metrics["Net liquidation"] == "250,000.00 USD"
+        assert all("$" not in str(metric.value) for metric in app.metric)
+        assert all("$" not in dataframe.value.to_string() for dataframe in app.dataframe)
 
         reconciliation_table = next(
             dataframe.value
@@ -43,6 +46,7 @@ def test_demo_portfolio_and_symbol_pages_render_without_exceptions(
         assert not app.exception
         metric_labels = {metric.label for metric in app.metric}
         assert {"Last", "Bid", "Ask", "Data quality"} <= metric_labels
+        assert all("$" not in str(metric.value) for metric in app.metric)
         assert app.selectbox[0].value == "AAPL"
     finally:
         try:

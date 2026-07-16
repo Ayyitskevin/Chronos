@@ -11,8 +11,9 @@ substantial losses. Paper fills do not prove live execution quality.
 ## Current milestone
 
 Milestone 4 wires a read-only reconciliation coordinator into the portfolio dashboard. One
-serialized run captures two observations of positions, open orders, and executions, bounds the
-window with broker and monotonic clocks, and compares them with one atomic local-evidence read.
+serialized run captures two observations of account values, positions, open orders, and
+executions, bounds the broker window and the full local-evidence read with independent clocks,
+and compares them with one atomic local transaction.
 Unstable or incomplete evidence returns `PENDING`; unresolved exposure returns `MANUAL_REVIEW`.
 The existing Wheel state, option resolver, capital, scenario, assignment-pressure, and
 Strategy-Adjusted Basis engines remain pure and tested. Every candidate and order action is still

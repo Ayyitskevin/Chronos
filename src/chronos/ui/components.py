@@ -13,10 +13,13 @@ from chronos.utils.logging import mask_account_id
 from chronos.utils.time import as_market_time
 
 
-def format_money(value: Decimal | None) -> str:
+def format_money(value: Decimal | None, currency: str) -> str:
     if value is None:
         return "Unavailable"
-    return f"${value:,.2f}"
+    normalized_currency = currency.strip().upper()
+    if not normalized_currency:
+        raise ValueError("currency must not be blank")
+    return f"{value:,.2f} {normalized_currency}"
 
 
 def render_runtime_status(status: ConnectionStatus, settings: Settings) -> None:
@@ -60,8 +63,8 @@ def render_reconciliation_status(result: ReconciliationResult) -> None:
         return
     captured_at = as_market_time(snapshot.captured_at)
     st.caption(
-        f"Stable observation ended: {captured_at:%Y-%m-%d %H:%M:%S %Z} · "
-        f"real window {snapshot.window_seconds:.3f}s · "
+        f"Broker observation ended: {captured_at:%Y-%m-%d %H:%M:%S %Z} · "
+        f"end-to-end evidence window {snapshot.window_seconds:.3f}s · "
         f"broker clock window {snapshot.server_window_seconds:.3f}s · "
         f"{snapshot.execution_count} execution(s) observed"
     )
