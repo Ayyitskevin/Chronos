@@ -329,6 +329,23 @@ class BrokerOrderIdentity(ChronosModel):
         return normalized or None
 
 
+class LocalReconciliationEvidence(ChronosModel):
+    """One atomic local read used to prove or withhold broker reconciliation."""
+
+    active_order_identities: frozenset[BrokerOrderIdentity] = frozenset()
+    unresolved_symbols: frozenset[str] = frozenset()
+    complete: bool = False
+    reasons: tuple[str, ...] = ()
+
+    @field_validator("unresolved_symbols")
+    @classmethod
+    def normalize_unresolved_symbols(cls, values: frozenset[str]) -> frozenset[str]:
+        normalized = frozenset(value.strip().upper() for value in values)
+        if any(not value for value in normalized):
+            raise ValueError("unresolved_symbols must not contain blank symbols")
+        return normalized
+
+
 class BrokerOrder(ChronosModel):
     broker_order_id: int
     permanent_id: int | None = None

@@ -5,7 +5,9 @@ from __future__ import annotations
 import re
 from collections import Counter
 from collections.abc import Mapping, Sequence
+from datetime import datetime
 from decimal import Decimal
+from enum import StrEnum
 from typing import Any
 
 from sqlalchemy import select
@@ -19,8 +21,9 @@ from chronos.domain.enums import (
     OrderSide,
     ReconciliationStatus,
     SecurityType,
+    WheelStage,
 )
-from chronos.domain.models import BrokerOrderIdentity
+from chronos.domain.models import BrokerOrderIdentity, LocalReconciliationEvidence
 from chronos.persistence.schema import (
     ApplicationEventRow,
     BasisEntryRow,
@@ -30,12 +33,13 @@ from chronos.persistence.schema import (
     FillRow,
     OrderDraftRow,
     RejectedCandidateReasonRow,
+    StrategyStateRow,
     SubmittedOrderRow,
     WheelCycleRow,
 )
 from chronos.strategy.basis import BasisLedgerEntry
 from chronos.strategy.strike_resolver import ResolverContext, StrikeResolution
-from chronos.utils.identifiers import account_fingerprint
+from chronos.utils.identifiers import account_fingerprint, normalize_account_fingerprint
 
 _RAW_ACCOUNT_ID_PATTERN = re.compile(r"\bD?[UF]\d{4,}\b", flags=re.IGNORECASE)
 _RAW_ACCOUNT_EVENT_KEYS = frozenset(
@@ -63,6 +67,24 @@ _TERMINAL_SUBMITTED_ORDER_LIFECYCLES = frozenset(
         OrderLifecycle.CANCELLED,
         OrderLifecycle.REJECTED,
     }
+)
+_PRE_SUBMISSION_ORDER_LIFECYCLES = frozenset(
+    {
+        OrderLifecycle.DRAFT,
+        OrderLifecycle.VALIDATED,
+        OrderLifecycle.WHAT_IF_PREVIEWED,
+        OrderLifecycle.USER_CONFIRMED,
+    }
+)
+_VALID_WHEEL_CYCLE_STATUSES = frozenset({"OPEN", "CLOSED"})
+
+_LOCAL_CYCLE_ISSUE = "Persisted Wheel-cycle evidence is incomplete or malformed."
+_LOCAL_STRATEGY_ISSUE = "Persisted strategy-state evidence is incomplete or malformed."
+_LOCAL_ORDER_ISSUE = "Persisted order evidence is incomplete or malformed."
+_LOCAL_FILL_ISSUE = "Persisted fill evidence is incomplete or malformed."
+_LOCAL_BASIS_ISSUE = "Persisted strategy-basis evidence is incomplete or malformed."
+_LOCAL_UNRESOLVED = (
+    "Local strategy evidence exists but is conservatively unresolved by this reader."
 )
 
 
@@ -261,33 +283,239 @@ class OrderOwnershipRepository:
     def active_identities(self, current_account_id: str) -> frozenset[BrokerOrderIdentity]:
         """Return active identities only when the caller matches the bound account scope."""
 
-        current_fingerprint = account_fingerprint(current_account_id)
-        with self._sessions() as session:
-            scope = _require_scope(session)
-            if current_fingerprint != scope.account_fingerprint:
-                raise ValueError(
-                    "Current broker account does not match the bound pseudonymous database scope"
-                )
+        with self._sessions.begin() as session:
+            _require_matching_account_scope(session, current_account_id)
+            return _active_identities_in_session(session, current_account_id)
 
-            statement = select(SubmittedOrderRow, OrderDraftRow).outerjoin(
-                OrderDraftRow,
-                SubmittedOrderRow.correlation_id == OrderDraftRow.correlation_id,
-            )
-            identities: set[BrokerOrderIdentity] = set()
-            for submitted, draft in session.execute(statement):
-                if draft is None:
-                    raise ValueError("Persisted submitted order has no draft owner")
-                lifecycle = _submitted_order_lifecycle(submitted.lifecycle)
-                identity = _persisted_order_identity(
-                    session,
-                    current_account_id=current_account_id,
-                    submitted_lifecycle=lifecycle,
-                    submitted=submitted,
-                    draft=draft,
+
+class LocalReconciliationRepository:
+    """Read every local ownership-bearing table in one database transaction."""
+
+    def __init__(self, sessions: sessionmaker[Session]) -> None:
+        self._sessions = sessions
+
+    def read(self, current_account_id: str) -> LocalReconciliationEvidence:
+        """Return exact active orders and conservative per-symbol local provenance."""
+
+        with self._sessions.begin() as session:
+            scope = _require_matching_account_scope(session, current_account_id)
+            cycles = tuple(session.scalars(select(WheelCycleRow)))
+            strategy_states = tuple(session.scalars(select(StrategyStateRow)))
+            drafts = tuple(session.scalars(select(OrderDraftRow)))
+            submitted_orders = tuple(session.scalars(select(SubmittedOrderRow)))
+            fills = tuple(session.scalars(select(FillRow)))
+            basis_entries = tuple(session.scalars(select(BasisEntryRow)))
+
+            unresolved_symbols: set[str] = set()
+            issues: list[str] = []
+
+            cycles_by_id = {cycle.id: cycle for cycle in cycles}
+            drafts_by_id = {draft.correlation_id: draft for draft in drafts}
+            submitted_by_id = {
+                submitted.correlation_id: submitted for submitted in submitted_orders
+            }
+            fills_by_id = {fill.execution_id: fill for fill in fills}
+
+            for cycle in cycles:
+                _collect_local_symbol(
+                    cycle.symbol,
+                    unresolved_symbols=unresolved_symbols,
+                    issues=issues,
+                    issue=_LOCAL_CYCLE_ISSUE,
                 )
-                if lifecycle in _ACTIVE_SUBMITTED_ORDER_LIFECYCLES:
-                    identities.add(identity)
-            return frozenset(identities)
+                if (
+                    not _is_nonblank_string(cycle.id)
+                    or cycle.status not in _VALID_WHEEL_CYCLE_STATUSES
+                    or not _is_aware_datetime(cycle.opened_at)
+                    or (cycle.status == "OPEN" and cycle.closed_at is not None)
+                    or (
+                        cycle.status == "CLOSED"
+                        and (
+                            cycle.closed_at is None
+                            or not _is_aware_datetime(cycle.closed_at)
+                            or cycle.closed_at < cycle.opened_at
+                        )
+                    )
+                ):
+                    _append_issue(issues, _LOCAL_CYCLE_ISSUE)
+
+            for state in strategy_states:
+                _collect_local_symbol(
+                    state.symbol,
+                    unresolved_symbols=unresolved_symbols,
+                    issues=issues,
+                    issue=_LOCAL_STRATEGY_ISSUE,
+                )
+                if not _is_enum_value(WheelStage, state.wheel_stage) or not _is_enum_value(
+                    ReconciliationStatus, state.reconciliation_status
+                ):
+                    _append_issue(issues, _LOCAL_STRATEGY_ISSUE)
+                if state.wheel_cycle_id is not None:
+                    state_cycle = cycles_by_id.get(state.wheel_cycle_id)
+                    if (
+                        not _is_nonblank_string(state.wheel_cycle_id)
+                        or state_cycle is None
+                        or state_cycle.symbol != state.symbol
+                    ):
+                        _append_issue(issues, _LOCAL_STRATEGY_ISSUE)
+
+            for draft in drafts:
+                _collect_local_symbol(
+                    draft.symbol,
+                    unresolved_symbols=unresolved_symbols,
+                    issues=issues,
+                    issue=_LOCAL_ORDER_ISSUE,
+                )
+                lifecycle = _optional_enum_value(OrderLifecycle, draft.lifecycle)
+                if (
+                    not _is_nonblank_string(draft.correlation_id)
+                    or lifecycle is None
+                    or not _is_enum_value(OrderIntent, draft.intent)
+                    or not _is_safe_masked_account(draft.account_id_masked, current_account_id)
+                    or draft.contract_id <= 0
+                    or draft.quantity <= 0
+                    or draft.limit_price <= 0
+                ):
+                    _append_issue(issues, _LOCAL_ORDER_ISSUE)
+                if draft.wheel_cycle_id is not None:
+                    draft_cycle = cycles_by_id.get(draft.wheel_cycle_id)
+                    if (
+                        not _is_nonblank_string(draft.wheel_cycle_id)
+                        or draft_cycle is None
+                        or draft_cycle.symbol != draft.symbol
+                    ):
+                        _append_issue(issues, _LOCAL_ORDER_ISSUE)
+                if (
+                    lifecycle is not None
+                    and lifecycle not in _PRE_SUBMISSION_ORDER_LIFECYCLES
+                    and draft.correlation_id not in submitted_by_id
+                ):
+                    _append_issue(issues, _LOCAL_ORDER_ISSUE)
+
+            for submitted in submitted_orders:
+                submitted_draft = drafts_by_id.get(submitted.correlation_id)
+                lifecycle = _optional_enum_value(OrderLifecycle, submitted.lifecycle)
+                if (
+                    not _is_nonblank_string(submitted.correlation_id)
+                    or submitted_draft is None
+                    or lifecycle
+                    not in (
+                        _ACTIVE_SUBMITTED_ORDER_LIFECYCLES | _TERMINAL_SUBMITTED_ORDER_LIFECYCLES
+                    )
+                    or (
+                        submitted_draft is not None
+                        and submitted_draft.lifecycle != submitted.lifecycle
+                    )
+                ):
+                    _append_issue(issues, _LOCAL_ORDER_ISSUE)
+
+            for fill in fills:
+                _collect_local_symbol(
+                    fill.symbol,
+                    unresolved_symbols=unresolved_symbols,
+                    issues=issues,
+                    issue=_LOCAL_FILL_ISSUE,
+                )
+                if (
+                    not _is_nonblank_string(fill.execution_id)
+                    or not _is_enum_value(SecurityType, fill.security_type)
+                    or not _is_enum_value(OrderSide, fill.side)
+                    or not _is_canonical_code(fill.currency)
+                    or fill.contract_id <= 0
+                    or fill.quantity <= 0
+                    or fill.price <= 0
+                    or fill.multiplier <= 0
+                    or not _fingerprint_matches(fill.account_fingerprint, scope)
+                ):
+                    _append_issue(issues, _LOCAL_FILL_ISSUE)
+                fill_draft: OrderDraftRow | None = None
+                if fill.correlation_id is not None:
+                    fill_draft = drafts_by_id.get(fill.correlation_id)
+                    fill_submitted = submitted_by_id.get(fill.correlation_id)
+                    if (
+                        not _is_nonblank_string(fill.correlation_id)
+                        or fill_draft is None
+                        or fill_submitted is None
+                        or fill_draft.symbol != fill.symbol
+                        or fill_submitted.broker_order_id != fill.broker_order_id
+                    ):
+                        _append_issue(issues, _LOCAL_FILL_ISSUE)
+                if fill.wheel_cycle_id is not None:
+                    fill_cycle = cycles_by_id.get(fill.wheel_cycle_id)
+                    if (
+                        not _is_nonblank_string(fill.wheel_cycle_id)
+                        or fill_cycle is None
+                        or fill_cycle.symbol != fill.symbol
+                        or (
+                            fill_draft is not None
+                            and fill_draft.wheel_cycle_id is not None
+                            and fill_draft.wheel_cycle_id != fill.wheel_cycle_id
+                        )
+                    ):
+                        _append_issue(issues, _LOCAL_FILL_ISSUE)
+
+            for entry in basis_entries:
+                _collect_local_symbol(
+                    entry.symbol,
+                    unresolved_symbols=unresolved_symbols,
+                    issues=issues,
+                    issue=_LOCAL_BASIS_ISSUE,
+                )
+                try:
+                    if not _is_canonical_code(entry.currency) or not _fingerprint_matches(
+                        entry.account_fingerprint, scope
+                    ):
+                        raise ValueError
+                    model = _basis_row_to_model(entry)
+                    _validate_basis_source(session, scope, model)
+                    if (
+                        model.source_execution_id is not None
+                        and model.source_execution_id not in fills_by_id
+                    ):
+                        raise ValueError
+                except (TypeError, ValueError):
+                    _append_issue(issues, _LOCAL_BASIS_ISSUE)
+
+            try:
+                identities = _active_identities_in_session(session, current_account_id)
+            except ValueError:
+                identities = frozenset()
+                _append_issue(issues, _LOCAL_ORDER_ISSUE)
+
+            reasons = [*issues]
+            if unresolved_symbols:
+                reasons.append(_LOCAL_UNRESOLVED)
+            return LocalReconciliationEvidence(
+                active_order_identities=identities,
+                unresolved_symbols=frozenset(unresolved_symbols),
+                complete=not issues,
+                reasons=tuple(reasons),
+            )
+
+
+def _active_identities_in_session(
+    session: Session,
+    current_account_id: str,
+) -> frozenset[BrokerOrderIdentity]:
+    statement = select(SubmittedOrderRow, OrderDraftRow).outerjoin(
+        OrderDraftRow,
+        SubmittedOrderRow.correlation_id == OrderDraftRow.correlation_id,
+    )
+    identities: set[BrokerOrderIdentity] = set()
+    for submitted, draft in session.execute(statement):
+        if draft is None:
+            raise ValueError("Persisted submitted order has no draft owner")
+        lifecycle = _submitted_order_lifecycle(submitted.lifecycle)
+        identity = _persisted_order_identity(
+            session,
+            current_account_id=current_account_id,
+            submitted_lifecycle=lifecycle,
+            submitted=submitted,
+            draft=draft,
+        )
+        if lifecycle in _ACTIVE_SUBMITTED_ORDER_LIFECYCLES:
+            identities.add(identity)
+    return frozenset(identities)
 
 
 def _submitted_order_lifecycle(value: str) -> OrderLifecycle:
@@ -441,6 +669,95 @@ def _require_scope(session: Session) -> DatabaseScopeRow:
             "Chronos database must be bound to a broker scope before account-specific access"
         )
     return scope
+
+
+def _require_matching_account_scope(
+    session: Session,
+    current_account_id: str,
+) -> DatabaseScopeRow:
+    scope = _require_scope(session)
+    scopes = tuple(session.scalars(select(DatabaseScopeRow).limit(2)))
+    if len(scopes) != 1 or scopes[0].id != 1:
+        raise RuntimeError("Chronos database must contain exactly one bound broker scope")
+    try:
+        normalized_scope_fingerprint = normalize_account_fingerprint(scope.account_fingerprint)
+    except (AttributeError, TypeError, ValueError):
+        raise RuntimeError("Chronos database has a malformed pseudonymous account scope") from None
+    if normalized_scope_fingerprint != scope.account_fingerprint:
+        raise RuntimeError("Chronos database has a malformed pseudonymous account scope")
+    if account_fingerprint(current_account_id) != scope.account_fingerprint:
+        raise ValueError(
+            "Current broker account does not match the bound pseudonymous database scope"
+        )
+    return scope
+
+
+def _collect_local_symbol(
+    value: object,
+    *,
+    unresolved_symbols: set[str],
+    issues: list[str],
+    issue: str,
+) -> None:
+    if not _is_canonical_code(value):
+        _append_issue(issues, issue)
+        return
+    assert isinstance(value, str)
+    unresolved_symbols.add(value)
+
+
+def _is_nonblank_string(value: object) -> bool:
+    return isinstance(value, str) and bool(value.strip()) and value == value.strip()
+
+
+def _is_canonical_code(value: object) -> bool:
+    return (
+        isinstance(value, str) and bool(value) and value == value.strip() and value == value.upper()
+    )
+
+
+def _is_aware_datetime(value: object) -> bool:
+    return (
+        isinstance(value, datetime) and value.tzinfo is not None and value.utcoffset() is not None
+    )
+
+
+def _optional_enum_value[EnumT: StrEnum](
+    enum_type: type[EnumT],
+    value: object,
+) -> EnumT | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return enum_type(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_enum_value(enum_type: type[StrEnum], value: object) -> bool:
+    return _optional_enum_value(enum_type, value) is not None
+
+
+def _is_safe_masked_account(value: object, current_account_id: str) -> bool:
+    if not _is_nonblank_string(value):
+        return False
+    assert isinstance(value, str)
+    return value != current_account_id.strip() and _RAW_ACCOUNT_ID_PATTERN.search(value) is None
+
+
+def _fingerprint_matches(value: object, scope: DatabaseScopeRow) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        normalized = normalize_account_fingerprint(value)
+    except ValueError:
+        return False
+    return value == normalized == scope.account_fingerprint
+
+
+def _append_issue(issues: list[str], issue: str) -> None:
+    if issue not in issues:
+        issues.append(issue)
 
 
 def _validate_basis_source(
