@@ -37,8 +37,19 @@ class StructuredJsonFormatter(logging.Formatter):
             "logger": record.name,
             "message": mask_account_identifiers(record.getMessage()),
         }
-        for name in ("event", "correlation_id", "symbol", "broker_order_id"):
-            if value := getattr(record, name, None):
+        for name in (
+            "event",
+            "correlation_id",
+            "symbol",
+            "broker_order_id",
+            "contract_id",
+            "contract_ids",
+            "error_code",
+            "operation",
+            "attempt",
+            "delay_seconds",
+        ):
+            if (value := getattr(record, name, None)) is not None:
                 payload[name] = value
         if record.exc_info:
             payload["exception"] = mask_account_identifiers(self.formatException(record.exc_info))

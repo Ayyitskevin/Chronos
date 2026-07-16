@@ -10,10 +10,11 @@ substantial losses. Paper fills do not prove live execution quality.
 
 ## Current milestone
 
-Milestone 1 provides the validated configuration layer, typed domain and broker boundaries,
-deterministic demo broker, SQLite schema initialization, structured rotating logs, and a
-Streamlit shell. IBKR integration, candidate resolution, complete scenario analysis, and paper
-order transmission are intentionally disabled until their guarded milestones are implemented.
+Milestone 2 provides the validated configuration and domain layers, deterministic demo broker,
+SQLite initialization, structured rotating logs, Streamlit shell, and a strictly read-only
+`ib_async` adapter for account, position, execution, open-order, contract, option-chain, and
+bounded market-data access. Candidate resolution, complete scenario analysis, and paper-order
+transmission remain disabled until their guarded milestones are implemented.
 
 ## Safety posture
 
@@ -67,8 +68,9 @@ trade, or an unexplained mismatch makes the state ambiguous.
 .venv/bin/mypy src/chronos
 ```
 
-The separately marked IBKR smoke test will be skipped by default and must remain read-only.
-See [docs/ibkr_setup.md](docs/ibkr_setup.md).
+The separately marked IBKR smoke test is skipped by default and remains strictly read-only.
+See [docs/ibkr_setup.md](docs/ibkr_setup.md) for the opt-in wrapper and required TWS/Gateway
+configuration.
 
 ## Documentation
 
@@ -79,6 +81,8 @@ See [docs/ibkr_setup.md](docs/ibkr_setup.md).
 
 ## Current limitations
 
-Chronos is pre-release software. The current milestone does not connect to IBKR, resolve an
-option chain, calculate a strategy-adjusted basis, or submit any order. Those capabilities are
-introduced only alongside their reconciliation and guardrail tests.
+Chronos is pre-release software. The current milestone can read IBKR state and market data, but
+the real-network smoke path was not run without a configured TWS or IB Gateway. Chronos does not
+yet rank option candidates, calculate a strategy-adjusted basis, reconcile restart state, or
+submit any order. Those capabilities are introduced only alongside their reconciliation and
+guardrail tests.

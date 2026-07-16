@@ -1,11 +1,13 @@
-"""Two-page Streamlit shell backed entirely by the deterministic broker."""
+"""Two-page Streamlit shell backed by the configured broker boundary."""
 
 from __future__ import annotations
 
-from datetime import UTC
+import logging
 
 import streamlit as st
 
+from chronos.broker.base import BrokerDataError, BrokerError
+from chronos.broker.demo import DemoBroker
 from chronos.domain.enums import SecurityType
 from chronos.ui.charts import quote_ladder_figure
 from chronos.ui.components import format_money, render_runtime_status, render_safety_notice
@@ -13,20 +15,32 @@ from chronos.ui.session import AppRuntime
 
 
 def render_dashboard(runtime: AppRuntime) -> None:
-    status = runtime.connection.run(runtime.broker.connection_status())
     st.title("Chronos")
     st.caption("Local-first Wheel Strategy workspace")
     render_safety_notice()
-    render_runtime_status(status, runtime.settings)
-
-    page = st.sidebar.radio(
-        "Workspace",
-        ("Portfolio Dashboard", "Symbol Detail & Order Workspace"),
-    )
-    if page == "Portfolio Dashboard":
-        _render_portfolio(runtime)
-    else:
-        _render_symbol_detail(runtime)
+    try:
+        status = runtime.connection.run(runtime.broker.connection_status())
+        render_runtime_status(status, runtime.settings)
+        page = st.sidebar.radio(
+            "Workspace",
+            ("Portfolio Dashboard", "Symbol Detail & Order Workspace"),
+        )
+        if page == "Portfolio Dashboard":
+            _render_portfolio(runtime)
+        else:
+            _render_symbol_detail(runtime)
+    except BrokerError as error:
+        logging.getLogger("chronos.ui.dashboard").exception(
+            "Broker operation failed",
+            extra={"event": "broker_ui_operation_failed"},
+        )
+        st.error(str(error))
+    except Exception:
+        logging.getLogger("chronos.ui.dashboard").exception(
+            "Unexpected dashboard operation failure",
+            extra={"event": "dashboard_operation_failed"},
+        )
+        st.error("The dashboard could not complete this request safely. See the local log.")
 
 
 def _render_portfolio(runtime: AppRuntime) -> None:
@@ -59,19 +73,20 @@ def _render_portfolio(runtime: AppRuntime) -> None:
         "the reconciliation milestone publishes them."
     )
 
-    st.subheader("Deterministic demo cases")
-    st.dataframe(
-        [
-            {
-                "Symbol": fixture.symbol,
-                "Case": fixture.case.value,
-                "Purpose": fixture.explanation,
-            }
-            for fixture in runtime.broker.fixture_cases
-        ],
-        use_container_width=True,
-        hide_index=True,
-    )
+    if isinstance(runtime.broker, DemoBroker):
+        st.subheader("Deterministic demo cases")
+        st.dataframe(
+            [
+                {
+                    "Symbol": fixture.symbol,
+                    "Case": fixture.case.value,
+                    "Purpose": fixture.explanation,
+                }
+                for fixture in runtime.broker.fixture_cases
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
 
     st.subheader("Near-Term / Weekly Focus")
     st.warning(
@@ -82,30 +97,41 @@ def _render_portfolio(runtime: AppRuntime) -> None:
 
 def _render_symbol_detail(runtime: AppRuntime) -> None:
     st.header("Symbol Detail & Order Workspace")
-    symbols = [fixture.symbol for fixture in runtime.broker.fixture_cases]
-    symbol = st.selectbox("Demo symbol", symbols)
+    if isinstance(runtime.broker, DemoBroker):
+        symbols = [fixture.symbol for fixture in runtime.broker.fixture_cases]
+        label = "Demo symbol"
+    else:
+        symbols = list(runtime.settings.symbol_allowlist)
+        label = "Allowlisted symbol"
+    symbol = st.selectbox(label, symbols)
     underlying = runtime.connection.run(runtime.broker.qualify_underlying(symbol))
-    quote = runtime.connection.run(runtime.broker.request_underlying_quote(underlying))
-    chain = runtime.connection.run(runtime.broker.option_chain_parameters(underlying))[0]
-    broker_time = runtime.connection.run(runtime.broker.server_time())
+    managed_quote = runtime.connection.run(runtime.market_data.underlying_quote(underlying))
+    quote = managed_quote.quote
+    chain_snapshot = runtime.connection.run(runtime.market_data.option_chain_parameters(underlying))
+    if not chain_snapshot.parameters:
+        raise BrokerDataError(f"No option-chain metadata is available for {symbol}")
+    chain = chain_snapshot.parameters[0]
 
     st.subheader(symbol)
     columns = st.columns(4)
     columns[0].metric("Last", format_money(quote.last))
     columns[1].metric("Bid", format_money(quote.bid))
     columns[2].metric("Ask", format_money(quote.ask))
-    columns[3].metric("Data quality", quote.data_quality.value)
-    age_seconds = max(
-        (broker_time.astimezone(UTC) - quote.timestamp).total_seconds(),
-        0,
+    columns[3].metric("Data quality", managed_quote.effective_data_quality.value)
+    st.caption(
+        f"Quote age: {managed_quote.source_age_seconds:.1f} seconds · "
+        f"{'cached' if managed_quote.from_cache else 'broker'} · "
+        f"{'temporally fresh' if managed_quote.fresh else 'stale'}"
     )
-    st.caption(f"Quote age: {age_seconds:.1f} seconds")
+    if not isinstance(runtime.broker, DemoBroker) and not managed_quote.transmission_eligible:
+        st.warning("Order transmission is locked: this quote is not a fresh, valid market.")
     st.plotly_chart(quote_ladder_figure(quote), use_container_width=True)
 
-    matching_case = next(
-        fixture for fixture in runtime.broker.fixture_cases if fixture.symbol == symbol
-    )
-    st.info(f"{matching_case.case.value}: {matching_case.explanation}")
+    if isinstance(runtime.broker, DemoBroker):
+        matching_case = next(
+            fixture for fixture in runtime.broker.fixture_cases if fixture.symbol == symbol
+        )
+        st.info(f"{matching_case.case.value}: {matching_case.explanation}")
     st.write(
         {
             "Trading class": chain.trading_class,
@@ -116,7 +142,7 @@ def _render_symbol_detail(runtime: AppRuntime) -> None:
     )
 
     st.subheader("Candidate ranking")
-    st.warning("Locked: strike resolution and reconciliation are not enabled in Milestone 1.")
+    st.warning("Locked: strike resolution and reconciliation are not enabled in Milestone 2.")
     st.subheader("Scenario analysis")
     st.warning("Locked: scenario calculations are introduced with the tested strategy engine.")
     st.subheader("Order preview")

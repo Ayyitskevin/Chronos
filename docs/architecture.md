@@ -4,8 +4,8 @@
 
 Chronos uses a ports-and-adapters boundary around brokerage access. Strategy and UI code depend
 on the typed `Broker` protocol, never directly on `ib_async`. `DemoBroker` is a deterministic
-adapter; `IBKRBroker` will be the networked adapter. This keeps a future official IB API adapter
-from requiring strategy or UI rewrites.
+adapter; `IBKRBroker` is the strictly read-only networked adapter in Milestone 2. This keeps a
+future official IB API adapter from requiring strategy or UI rewrites.
 
 Money, premium, fees, strikes, basis, and allocation calculations use `Decimal`. UTC-aware
 timestamps are stored internally; the UI converts them to `America/New_York` for display.
@@ -15,9 +15,9 @@ orders, executions, or account values. SQLAlchemy provides explicit schema initi
 repository seams. Schema changes will use additive, versioned migrations before persisted user
 data exists.
 
-Streamlit's rerun model is isolated from broker connection ownership. A cached connection
-service owns one dedicated asyncio loop in one background thread, exposes thread-safe calls,
-and shuts down explicitly. A page rerun reuses that service instead of creating a broker socket.
+Streamlit's rerun model is isolated from broker connection ownership. A cached runtime owns one
+dedicated asyncio loop in one background thread plus one bounded market-data manager. Page reruns
+reuse both resources instead of creating broker sockets or bypassing subscription cleanup.
 
 ## Four operational invariants
 
@@ -30,9 +30,9 @@ and shuts down explicitly. A page rerun reuses that service instead of creating 
 
 ### Where feedback lives
 
-Connection changes, market-data lifecycle, candidate decisions, guardrails, reconciliation, and
-order events are logged to the console and a rotating local file. Material decisions also become
-append-only application-event rows so the dashboard can explain them.
+Connection changes, exceptional market-data lifecycle events, candidate decisions, guardrails,
+reconciliation, and order events are logged to the console and a rotating local file. Material
+decisions also become append-only application-event rows so the dashboard can explain them.
 
 ### What breaks if a component is removed
 
@@ -45,8 +45,9 @@ append-only application-event rows so the dashboard can explain them.
 ### When timing works
 
 The broker service serializes adapter work on its event loop. Reconciliation runs at startup,
-after reconnect, after every order/fill event, and periodically while connected. Quote age is
-computed from broker timestamps at every decision and again immediately before paper submit.
+after reconnect, after every order/fill event, and periodically while connected. For streaming
+top-of-book data, quote age starts only after a price-bearing update from the current subscription
+is received; it is checked at every decision and again immediately before paper submit.
 
 ## Package boundaries
 
