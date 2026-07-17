@@ -417,3 +417,21 @@ autonomy is the post-M7 extension seam reserved in that spec.
    use paper and requires an owner-performed minimal-size live acceptance.
 7. Stock trading (owner-directed, §6b): whole shares, limit DAY, long-only
    in the MVP — confirm this matches intent. *(Assumed yes.)*
+
+## STATUS NOTE (2026-07-17, end of session window)
+
+Milestones 0-3 are COMPLETE and pushed on `feat/live-wheel-dashboard`
+(through commit aea3234). **Milestone 4 is IN PROGRESS**: httpx was promoted
+to a runtime dependency (this commit) and a five-agent implementation
+workflow was authored but hit the session usage limit before executing —
+zero M4 files were written. The next session should re-run the M4 workflow
+script preserved at the session workflows directory
+(`m4-dashboard-cutover-*.js`, resumable via its recorded runId) or simply
+re-implement M4 per §4's Milestone 4 spec and the endpoint contract embedded
+in that script: GET /strategy/regime/{symbol}, POST /strategy/risk-preview,
+POST /strategy/demo-what-if, POST /strategy/demo-approval; ui/api_client.py;
+ui/pages/{portfolio,symbol_detail,order_workspace,activity,settings_page};
+ui/backend_app.py; no-broker import guard tests; AppTest smokes. The
+IBKR MCP connector is authorized and verified (account: USD 110 cash, no
+positions — options wheeling requires further funding; stock/crypto
+families are the executable ones at this size).
