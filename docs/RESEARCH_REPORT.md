@@ -1,38 +1,71 @@
-# Quantitative Research Report (Phase 6)
+# Quantitative Research Report (Phase 6, re-run on a broadened universe)
 
 ## Verdict up front
 
 **No strategy met the frozen validation criteria. Zero candidates are
-selected for promotion beyond research.** The brief explicitly allows — and
-prefers — this outcome over manufactured confidence. The platform, data
-pipeline, and research harness are sound and reusable; the two derived
-strategy cores, as specified from the corpus defaults, did not demonstrate a
-defensible edge on the available data under the criteria frozen in
+selected for promotion beyond research.** This verdict is unchanged after
+broadening the data universe from two symbols to five (SPY, QQQ, IWM, GLD,
+TLT). The single binding failure is the same for every candidate on every
+symbol: **C4's floor of ≥ 20 closed trades on the validation window is never
+met** — the largest closed-trade count for any candidate on any symbol is 18
+(regime_trend_v1 on QQQ). The brief explicitly allows — and prefers — this
+outcome over manufactured confidence. The platform, data pipeline, and
+research harness are sound and reusable; the two derived strategy cores, as
+specified from the corpus defaults, did not demonstrate a defensible edge on
+the available data under the criteria frozen in
 `research/selection_manifest.json` **before** validation results were
-computed.
+computed (and re-frozen, again before new results, when the three symbols
+were added).
+
+## What the broadened data changed, and what it did not
+
+- **Did not change:** the top-line verdict (zero selected) or the binding
+  reason (the ≥ 20-trade sample floor, which fails universally).
+- **Did change, and is reported honestly:** `mean_reversion_v1`, which in the
+  two-symbol run failed C1 outright (net-negative on both SPY and QQQ), is
+  **net-positive on IWM (+16.2%, PF 3.35, Sharpe 0.95) and marginally on TLT
+  (+2.9%)** in the 2019–2021 window. That is the single strongest-looking
+  cell in the entire study. It is **not** evidence of an edge: it rests on 12
+  closed trades, on one small-cap symbol, in a dividend-adjusted, favorable,
+  three-year window, and it is the best of ten (5 symbols × 2 candidates)
+  cells — exactly where noise is expected to peak. The frozen
+  `multiple_testing_guard` requires reading it as a re-test hypothesis, not a
+  result.
 
 ## Method
 
 - **Engine**: every run goes through the production path (portfolio sizing →
   independent risk engine → execution engine → simulated broker), not a
-  vectorized shortcut. Determinism is test-asserted.
+  vectorized shortcut. Determinism is test-asserted, and the SPY/QQQ numbers
+  reproduced to the digit against the prior two-symbol run.
 - **Costs**: USD 0.005/share with USD 1.00 minimum per order (IBKR Pro fixed
   assumption) + 2 bps/side slippage baseline. On a USD 3,000 account the
   commission floor alone is ≈ 3.3 bps/side — material, and included.
 - **Partitions** (chronological, frozen): development ≤ 2017-12-31;
-  validation 2018-01-01..2021-12-31; final test 2022-01-01.. reserved.
+  validation 2018-01-01..2021-12-31; final test 2022-01-01.. reserved. The
+  three new symbols cover 2019–2021 only, so they contribute to the
+  **validation window exclusively** — no development, no final test.
 - **Criteria**: C1–C6 frozen and committed before any validation-window
-  computation (`research/selection_manifest.json`, commit history proves
-  ordering).
+  computation, then **re-frozen unchanged** (only the data inventory and
+  disclosures were updated) before the three-symbol results were computed —
+  commit order proves both.
 - **Baselines**: buy-and-hold-with-49%-disaster-stop; SMA 50/200 trend; a
   deterministic random-entry twin (fixed-seed LCG, ~5%/bar entry
   probability, 10-bar hold) carrying identical costs.
-- **Data**: SPY 2000-01..2019-11 (unadjusted), QQQ 1999-11..2024-01
-  (unadjusted OHLC + adjusted close), both integrity-validated and
-  cross-checked to the penny against an independent dataset lineage
-  (`research/data/raw/MANIFEST.json`). IWM/DIA/GLD/TLT could not be
-  trustworthily acquired in this environment and were excluded rather than
-  fabricated.
+- **Data (five symbols, heterogeneous provenance — this matters)**:
+  - SPY 2000-01..2019-11 — **unadjusted**, byte-exact.
+  - QQQ 1999-11..2024-01 — unadjusted OHLC + adjusted close, byte-exact.
+  - IWM 2019-01..2021-12 — **dividend-ADJUSTED**, markdown-transcribed
+    (2-decimal), independently cross-checked.
+  - GLD 2019-01..2021-12 — **effectively nominal** (no distributions),
+    markdown-transcribed, cross-check penny-exact.
+  - TLT 2019-01..2021-12 — **dividend-ADJUSTED (heavily)**,
+    markdown-transcribed, cross-checked.
+  - DIA — **not acquired** (confirmed absent from the source panel), excluded
+    rather than fabricated.
+  All five pass the project data-quality validator with zero blocking issues.
+  Full provenance, adjustment status, and fidelity caveats are in
+  `research/data/raw/MANIFEST.json`.
 
 ### Metric conventions
 
@@ -40,9 +73,12 @@ computed.
 includes marked open positions. The "buy & hold" baseline carries the
 platform's mandatory protective stop (at the 49% cap), so in crash windows
 it becomes stop-out-and-reenter; its returns are reported with that caveat
-rather than pretending the platform can express a stopless position.
+rather than pretending the platform can express a stopless position. Every
+validation cell in this run is flagged `low_sample` by the metrics module —
+the trade counts are small enough that point metrics are noisy by
+construction.
 
-## Results — development window (exploration; ≤ 2017)
+## Results — development window (exploration; ≤ 2017; SPY/QQQ only)
 
 | Strategy | Sym | Trades | Net ret | MaxDD | PF | Sharpe | Exposure |
 |---|---|---|---|---|---|---|---|
@@ -55,107 +91,158 @@ rather than pretending the platform can express a stopless position.
 | baseline_random_entries | SPY | 141 | +71.8% | 20.3% | 1.55 | 0.37 | 31% |
 | baseline_random_entries | QQQ | 142 | +96.5% | 54.5% | 1.50 | 0.34 | 30% |
 
-Already in development, both candidates trail the trivial SMA baseline by a
+The new symbols have no bars before 2019 and so do not appear in
+development. As before, both candidates trail the trivial SMA baseline by a
 wide margin and roughly match or trail their random twin at comparable
-exposure — i.e., most of their profit is market drift captured while long,
-not signal skill.
+exposure — most of their profit is market drift captured while long, not
+signal skill.
 
-## Results — validation window (2018–2021; SPY truncates 2019-11)
+## Results — validation window (2018–2021; new symbols 2019–2021 only)
 
 | Strategy | Sym | Trades | Net ret | MaxDD | PF | Sharpe |
 |---|---|---|---|---|---|---|
 | regime_trend_v1 | SPY | 5 | −2.5% | 8.5% | 0.42 | −0.27 |
-| **regime_trend_v1** | **QQQ** | **18** | **+33.0%** | **11.7%** | **2.64** | **0.74** |
+| regime_trend_v1 | QQQ | 18 | +33.0% | 11.7% | 2.64 | 0.74 |
+| regime_trend_v1 | IWM | 10 | +11.0% | 11.3% | 1.70 | 0.38 |
+| regime_trend_v1 | GLD | 11 | −3.8% | 10.4% | 0.73 | −0.15 |
+| regime_trend_v1 | TLT | 9 | +1.2% | 14.9% | 1.25 | 0.09 |
 | mean_reversion_v1 | SPY | 8 | −7.0% | 7.5% | 0.20 | −1.20 |
 | mean_reversion_v1 | QQQ | 15 | −9.8% | 13.1% | 0.36 | −0.67 |
-| baseline_buy_hold | QQQ | 0 | +135.5% | 26.6% | — | 1.07 |
-| baseline_sma_trend | QQQ | 2 | +84.1% | 26.6% | 2.79 | 0.86 |
-| baseline_random_entries | QQQ | 30 | +6.9% | 17.8% | 1.08 | 0.19 |
+| mean_reversion_v1 | IWM | 12 | +16.2% | 4.7% | 3.35 | 0.95 |
+| mean_reversion_v1 | GLD | 9 | −3.9% | 6.5% | 0.55 | −0.43 |
+| mean_reversion_v1 | TLT | 12 | +2.9% | 5.8% | 1.52 | 0.36 |
+| baseline_buy_hold | IWM | 0 | +67.6% | 39.0% | — | 0.78 |
+| baseline_buy_hold | GLD | 0 | +38.0% | 17.9% | — | 0.81 |
+| baseline_buy_hold | TLT | 0 | +25.6% | 20.2% | — | 0.57 |
+| baseline_sma_trend | IWM | 4 | +10.5% | 32.0% | 0.08 | 0.28 |
+| baseline_random_entries | IWM | 19 | +2.6% | 17.8% | 1.11 | 0.13 |
+| baseline_random_entries | GLD | 20 | +1.2% | 12.8% | 1.05 | 0.09 |
 
-Cost stress (QQQ, regime_trend_v1): +31.6% at 2× commissions; +29.9% at
-10 bps slippage; +22.6% at 25 bps — cost-robust. Sensitivity: all ten
-predefined variants remain positive (+31.9%..+50.6%) — no knife-edge.
-Candidate daily-return correlation: SPY 0.38, QQQ 0.20.
+Cost/parameter robustness on the cells that were net-positive:
+
+- regime_trend_v1 QQQ: +31.6% at 2× commissions; +29.9% at 10 bps; +22.6% at
+  25 bps; all ten sensitivity variants positive.
+- regime_trend_v1 IWM: +10.3% at 2× commissions; +9.5% at 10 bps; **10/10**
+  sensitivity variants positive.
+- mean_reversion_v1 IWM: +15.4% at 2× commissions; +14.0% at 10 bps; **7/8**
+  sensitivity variants positive.
+- regime_trend_v1 TLT and mean_reversion_v1 TLT are barely positive and
+  cost-fragile (TLT regime ≈ 0% at 10 bps). GLD is net-negative for both
+  candidates and mostly negative under sensitivity.
+
+Candidate daily-return correlation (validation): SPY 0.38, QQQ 0.20, IWM
+0.23, GLD 0.03, TLT 0.003.
+
+**Buy-and-hold dominates total return on every symbol in this window** (QQQ
++135.5%, IWM +67.6%, GLD +38.0%, TLT +25.6%, SPY +13.5% on its truncated
+slice) — the 2019–2021 window was kind to simply holding, which is the
+backdrop against which every candidate number should be read.
 
 ## Criteria application (frozen order)
 
-**mean_reversion_v1 — FAILS C1** (net-negative on both symbols). Sensitivity
-confirms the failure is structural, not parametric: 14 of 16 variants are
-negative. The derived daily RSI-2/EMA-20 core (which deliberately omits the
-study's intraday VWAP-stretch component) has no demonstrated edge here.
-Status: `not_eligible` (research prototype).
+The binding gate is **C4: profit factor ≥ 1.1 with ≥ 20 closed trades on the
+validation window**. No candidate reaches 20 closed trades on any single
+symbol — the maximum is 18 (regime_trend_v1, QQQ); the new symbols top out at
+12. **Both candidates therefore fail C4 on every symbol, and per the manifest,
+failing any of C1–C5 → `not_eligible`.** We do not bend a frozen criterion
+after seeing results — that is exactly the selection bias the floor exists to
+prevent. Detail:
 
-**regime_trend_v1 — passes C1, C2, C3 on QQQ; FAILS C4**: 18 closed trades
-< the frozen floor of 20. C4's cost legs would have passed; C5 would have
-passed. Per the manifest, failing any of C1–C5 → `not_eligible`. We do not
-bend a frozen criterion after seeing the results — that is precisely the
-selection bias the floor exists to prevent.
+- **regime_trend_v1** — passes C1–C3 on **QQQ** (+33.0%, beats the random twin
+  on return and Sharpe, far lower drawdown than baselines) and now also on
+  **IWM** (+11.0%, PF 1.70, beats IWM's random twin +2.6%/0.13, drawdown 11.3%
+  vs the SMA baseline's 32%, 10/10 sensitivity). It is net-negative on GLD and
+  SPY and barely/cost-fragile on TLT. **FAILS C4** on every symbol (18, 10, 11,
+  9, 5 trades). Status: `not_eligible`.
+- **mean_reversion_v1** — in the two-symbol run it failed C1 outright; the
+  broadened data flips that: it passes C1–C3 on **IWM** (+16.2%, PF 3.35,
+  beats IWM's random twin, drawdown 4.7% vs SMA's 32%, 7/8 sensitivity). It is
+  net-negative on SPY, QQQ, GLD and only marginally positive on TLT. **FAILS
+  C4** on every symbol (max 12 trades). Status: `not_eligible`.
 
-**Disclosure — the "18 trades" figure is cap-dependent (raised by an
-independent review).** The research risk policy in `scripts/run_research.py`
-uses deliberately wide caps (bot capital / notional / aggregate exposure set
-to USD 10M, per-trade risk 0.50) so that a fixed USD 3,000 notional ceiling
-does not become binding as equity compounds over a multi-year backtest and
-silently suppress trades. This choice was made in the same commit that froze
-the selection criteria and was **not originally disclosed here** — a
-transparency gap this paragraph now closes. It matters because the trade
-count is sensitive to it: re-running QQQ validation under the codebase's
-*original* USD 3,000 / 0.25 caps yields **7 trades, not 18** (the tight
-notional cap rejects entries once equity grows). So the honest framing is not
-"missed the floor by 2" — under tight caps it misses by 13. **The pass/fail
-outcome is identical either way** (C4 fails under both), and zero candidates
-are selected regardless; but readers should not infer that 18 trades is an
-intrinsic, cap-independent property of the strategy. The wide-cap number is
-the right one for *measuring* the strategy's natural trade frequency
-unclipped; the tight-cap number is the right one for a USD 3,000 account's
-*actual* capacity. Neither clears the floor. The near-miss language has been
-removed accordingly.
+**Multiple-testing discount (frozen guard applied).** The universe grew from 2
+to 5 symbols, so C1 ("net-positive on at least one symbol") is mechanically
+easier to satisfy, and both candidates now have at least one net-positive
+symbol. Read against ten (symbol × candidate) cells in a favorable window —
+where even the random-entry twin posts PF 1.05–1.11 on some symbols — a lone
+strong cell (mean_reversion_v1 on IWM) is weak evidence, not validation. The
+short, dividend-adjusted 2019–2021 windows for the new symbols make a
+≥ 20-trade sample structurally unreachable, so their role is corroboration,
+not a fresh chance to manufacture a pass.
+
+**Disclosure — the trade counts are cap-dependent (raised by an independent
+review, retained here).** The research risk policy in
+`scripts/run_research.py` uses deliberately wide caps (bot capital / notional
+/ aggregate exposure at USD 10M, per-trade risk 0.50) so a fixed USD 3,000
+notional ceiling does not become binding as equity compounds and silently
+suppress trades. This was set in the same commit that froze the criteria. The
+wide-cap number measures the strategy's natural trade frequency unclipped; a
+tight USD 3,000 / 0.25 cap would yield fewer trades still (QQQ regime: 7, not
+18). **The C4 pass/fail outcome is identical either way** — no candidate
+clears 20 under either cap — and zero candidates are selected regardless.
 
 **C6 / final test**: with zero candidates passing C1–C5, the final window
-(2022-01-01..) was **not consumed** and remains pristine for future research
-with broader data.
+(2022-01-01..) was **not consumed** and remains pristine. Note the new
+symbols cannot reach it (their data ends 2021-12), so a future final test on
+them requires extending their history first.
 
 ## Honest interpretation
 
-1. The BULL+ derived core shows a *plausible but unproven* regime-gated
-   profile on QQQ: materially lower drawdown than baselines with respectable
-   return, robust to costs and parameter perturbation — but with a thin
-   trade sample, on one symbol, over one four-year window that was
-   exceptionally kind to anything long tech. Its SPY result is negative.
-   That is not evidence of a durable edge; it is grounds for a longer,
-   broader re-test.
-2. The mean-reversion derivation is not viable as a daily-bar system on
-   these ETFs. The corpus study it derives from is an intraday flag tool;
-   the daily reduction loses whatever made it interesting.
-3. Simple baselines are hard to beat. The corpus's own doctrine ("the gate
-   is the strategy"; "backtest is the autopilot floor, not a promise") is
-   consistent with what we measured.
-4. USD 3,000 + IBKR minimum commissions is a hostile cost environment:
-   every marginal edge must clear ≈ 6.6 bps round-trip in commissions alone
-   plus slippage.
+1. The ≥ 20-trade sample floor, not a lack of positive cells, is what stops
+   every candidate. The broadened data confirms this is **structural** (low
+   trade frequency of both derived daily cores), not a QQQ-specific artifact.
+2. `regime_trend_v1` remains the cleanest re-test hypothesis: net-positive and
+   cost/parameter-robust on the two liquid equity indices where it fired
+   enough (QQQ, IWM), lower drawdown than baselines — but negative on GLD/SPY,
+   fragile on TLT, and always sample-starved.
+3. `mean_reversion_v1`'s IWM result is the most eye-catching number in the
+   study and the most likely to be noise: best-of-ten cell, 12 trades,
+   small-cap, adjusted prices, favorable window. It is a hypothesis for a
+   longer small-cap re-test, nothing more.
+4. Simple baselines are hard to beat. Buy-and-hold outperformed every
+   candidate on total return on every symbol in this window; the corpus's own
+   doctrine ("the gate is the strategy"; "backtest is the autopilot floor,
+   not a promise") is consistent with what we measured.
+5. USD 3,000 + IBKR minimum commissions is a hostile cost environment: every
+   marginal edge must clear ≈ 6.6 bps round-trip in commissions alone plus
+   slippage.
 
 ## Confidence limitations
 
-- Data: public mirrors (integrity-validated but research-grade); SPY ends
-  2019-11; unadjusted prices understate long-side total return by the
-  dividend yield; two symbols only. Re-run against IBKR historical data
-  before any promotion (RISK_REGISTER R-08).
-- Parameters came from the corpus author's defaults — they may embed that
-  author's look at overlapping history (recorded, uncontrollable here).
-- No intraday validation was possible; intraday corpus scripts are
-  unassessed on merit (A-31).
-- Single-path backtest per configuration; no bootstrap confidence intervals
-  were computed for the thin validation samples (the thin samples are
-  themselves the reason C4 failed).
+- **Heterogeneous provenance**: SPY/QQQ unadjusted and byte-exact; IWM/TLT
+  dividend-adjusted (TLT heavily); GLD nominal. Adjusted and unadjusted series
+  differ in level and total return, so cross-symbol comparisons of absolute
+  return are not apples-to-apples. Each symbol is judged against its own
+  baselines on its own series (comparable within-symbol); cross-symbol reading
+  carries this caveat.
+- **Fidelity**: IWM/GLD/TLT were transcribed from a markdown parquet preview
+  and rounded to 2 decimals — research-grade, independently cross-checked, but
+  lower-fidelity than the SPY/QQQ byte-exact series.
+- **Window**: the new symbols span 2019–2021 only (validation-window-only, no
+  development, no final test), a period unusually favorable to long equity,
+  gold, and long-duration bonds until the 2022 turn that this window excludes.
+- **SPY ends 2019-11**: SPY contributes dev + partial validation only, no
+  final test. Unadjusted SPY understates buy-side total return by ~ the
+  dividend yield.
+- Parameters came from the corpus author's defaults, which may embed a look at
+  overlapping history (recorded, uncontrollable here).
+- No intraday validation was possible; intraday corpus scripts are unassessed
+  on merit (A-31). Single-path backtest per configuration; no bootstrap
+  confidence intervals were computed for the thin samples (the thin samples
+  are themselves why C4 fails). Re-run against IBKR historical data before any
+  promotion (RISK_REGISTER R-08).
 
 ## Recommended next research iteration (owner decisions)
 
-1. Source IBKR historical daily data for 6–10 liquid ETFs (or provide
-   another trusted feed) covering 2000–present, dividend-adjusted.
+1. Source **IBKR historical daily data** (or another trusted, uniformly
+   adjusted feed) for 6–10 liquid ETFs covering 2000–present, so the whole
+   universe shares one adjustment convention and reaches the reserved final
+   window. This replaces the current heterogeneous, transcribed 2019–2021
+   patch.
 2. Re-run this harness unchanged; the final window is still unconsumed.
-3. If regime_trend_v1 then clears all criteria including a ≥20-trade sample
-   on ≥2 symbols, proceed to the shadow-mode gate in
-   docs/GO_LIVE_CHECKLIST.md.
-4. Consider retiring the daily mean-reversion derivation or re-deriving it
-   as the intraday study it actually is (blocked on intraday data + PDT
-   constraints for this account size).
+3. Prioritize the two hypotheses this run surfaced: `regime_trend_v1` on
+   liquid equity indices, and `mean_reversion_v1` on **small-caps** (IWM), the
+   only place its daily reduction looked alive. A candidate is promotable only
+   if it then clears all of C1–C5 including a ≥ 20-trade sample on ≥ 2 symbols.
+4. Extend IWM/GLD/TLT to full history from a byte-exact source before treating
+   any of their 2019–2021 numbers as more than a hypothesis.

@@ -11,9 +11,17 @@ details (hashes, row counts, per-file validation) are in `MANIFEST.json`.
   direct `huggingface.co` HTTPS. The only working channel to external data
   was the server-side Hugging Face MCP connector (`hf_fs` tools).
 - `hf_fs cat` is a **text** transport with an 80,000-byte-per-call cap.
-  Practical consequence: only plain CSV/JSONL files could be retrieved.
-  Parquet, zip, and gated datasets were out of reach, which excluded the
-  richest ETF datasets on the Hub (see "What could not be obtained").
+  Practical consequence: only plain CSV/JSONL files could be retrieved
+  byte-exactly. `hf_fs cat` **refuses binary files** (parquet/zip).
+- **Second pass (same date):** a *different* MCP path — `hub_repo_details`
+  with `operations=["dataset_preview"]` — reads Dataset-Viewer-converted
+  **parquet** rows as markdown tables (config+split, offset+limit≤100).
+  This unlocked adjusted ETF OHLCV that the text transport could not reach
+  (IWM, GLD, TLT below). It is **not** byte-exact: rows are transcribed from
+  the returned markdown and rounded to 2 decimals; fidelity is defended by
+  per-page OHLC-invariant + monotonic-weekday-date checks and an independent
+  close cross-check. This is a lower-fidelity transport than the byte-exact
+  `cat` used for SPY/QQQ, and the manifest labels it as such.
 - Files were downloaded in 80 KB chunks and reassembled **byte-exactly**:
   each assembly was verified by (a) exact match of total byte count against
   the repo-reported file size and (b) `cmp`-identical overlap regions
@@ -62,6 +70,52 @@ details (hashes, row counts, per-file validation) are in `MANIFEST.json`.
 - Caveats: ends 2024-01-10; `adj_close` anchored to that download date;
   volume not independently cross-checked.
 
+### IWM.csv / GLD.csv / TLT.csv — 757 rows each, 2019-01-02 → 2021-12-31
+
+- Source: `https://huggingface.co/datasets/P2SAMAPA/p2-etf-trendfolios-replication-data`,
+  config **`ohlcv`** (`ohlcv/train-00000-of-00001.parquet`, 9.1 MB, 221,500
+  rows, 38 ETF tickers, columns `date,ticker,open,high,low,close,volume`,
+  sorted by ticker then date). Read via `dataset_preview` markdown paging,
+  filtered to each ticker.
+- **Adjusted status** (verified by spot values + cross-check):
+  - **GLD — effectively NOMINAL.** GLD pays no distribution, so its adjusted
+    series equals as-traded prices. Matches known nominal values to the penny
+    (2019-01-02 close 121.33; Aug-2020 record high 193.89; 2021-12-31 170.96).
+  - **IWM — dividend-ADJUSTED** (back-adjusted to a ~2026 anchor). ~4–8% below
+    nominal (2019-12-31 close 152.97 vs nominal ~165.8).
+  - **TLT — heavily dividend-ADJUSTED.** ~15% below nominal (2019-01-02 close
+    98.69 vs nominal ~122; 2021-12-31 126.28 vs nominal ~149). Still genuine
+    internally-consistent OHLCV (open/high/low/close on the same scale) — **not**
+    a close-only series.
+- Transform: filter ticker + 2019-01-02…2021-12-31; drop ticker column; round
+  OHLC to 2 dp and volume to integer; sort ascending.
+- Validation: all three have **zero** OHLC-invariant / duplicate / out-of-order /
+  weekend violations, and per-year trading-day counts **exactly** match the NYSE
+  calendar (2019=252, 2020=253, 2021=252). Each captures the Feb–Mar 2020 COVID
+  crash correctly (IWM low 88.87, GLD liquidation low 136.12, TLT flight-to-quality
+  spike high 149.07).
+- Cross-check: closes compared against the **independent** adjusted-close panel
+  `P2SAMAPA/etf_trend_data/market_data.csv` (read byte-exact via `cat`). On
+  2019-09-11/12: **GLD matches penny-exact** (141.03/141.32 both sides); IWM and
+  TLT agree to a *constant* small scale factor (IWM ratio 1.0024, TLT 1.0039) —
+  the exact signature of two dividend-adjusted series anchored to different
+  download dates, confirming transcription correctness and adjusted status.
+- **Known shortfalls**: (1) 2019–2021 window only — the source holds FULL history
+  (IWM 2000→, GLD 2004→, TLT 2002→, all to 2026) extractable with the same method,
+  not completed this session due to markdown-transport volume; (2) prices are
+  ADJUSTED (except GLD which is nominal) and rounded to 2 dp — do NOT mix the IWM/TLT
+  files with nominal series; (3) reconstructed by transcription, so bounded sub-cent
+  O/H/L/V noise is possible (unlike the byte-exact SPY/QQQ files).
+
+### DIA — still not acquired (confirmed ABSENT from the panel)
+
+DIA sorts between AGG and EEM, but the `ohlcv` panel jumps straight from AGG to
+EEM (no B/C/D tickers), so **DIA is not present**. It exists in
+`paperswithbacktest/ETFs-Daily-Price` (gated: 404 to this account) and in
+`siddharthmb/stocks-ohlcv` (unadjusted, but a 1.2 GB **date-major** single CSV —
+one symbol is scattered across the whole file, so `cat` extraction would need
+~15,000 chunks; impractical). No usable DIA OHLCV over this transport.
+
 ## Cross-check reference (not shipped as data)
 
 `https://huggingface.co/datasets/zexianli/nasdaq_data`
@@ -72,13 +126,15 @@ independently verify our rows, never as a data source.
 
 ## What could NOT be obtained (and why)
 
-| Symbol | Status | Best leads found (all unusable over text-only transport) |
-|--------|--------|----------------------------------------------------------|
-| IWM    | ✗ no OHLCV | `P2SAMAPA/etf_trend_data` `market_data.csv` has **adjusted close only** 2008→2026; OHLCV exists only in parquet (`P2SAMAPA/*`, `younginpiniti/us-stocks-daily-all`) or gated (`paperswithbacktest/ETFs-Daily-Price`, gated: manual) |
-| DIA    | ✗ no OHLCV | Not even in the adjusted-close panels found; open/close-only history likely in `zexianli/nasdaq_data` |
-| GLD    | ✗ no OHLCV | Adjusted close only, 2008→2026, in `P2SAMAPA/etf_trend_data`; otherwise parquet/gated as above |
-| TLT    | ✗ no OHLCV | Same as GLD |
-| SPY 2019-11→2024 | ✗ | Open/close-only continuation to 2023-12-28 in `zexianli/nasdaq_data`; full OHLCV only in parquet/gated datasets |
+Updated after the second (parquet-preview) pass:
+
+| Symbol | Status | Notes |
+|--------|--------|-------|
+| IWM    | ◑ 2019–2021 adjusted OHLCV delivered | `IWM.csv` (757 rows). Full 2000→ history extractable from the same `ohlcv` parquet via `dataset_preview`; not completed this session |
+| GLD    | ◑ 2019–2021 (effectively nominal) OHLCV delivered | `GLD.csv` (757 rows); cross-check penny-exact. Full 2004→ extractable |
+| TLT    | ◑ 2019–2021 adjusted OHLCV delivered | `TLT.csv` (757 rows). Full 2002→ extractable |
+| DIA    | ✗ not acquired | **Confirmed absent** from the `ohlcv` panel (AGG→EEM directly). Present only in gated `paperswithbacktest/ETFs-Daily-Price` (404) and in date-major 1.2 GB `siddharthmb/stocks-ohlcv` (not per-symbol extractable via `cat`) |
+| SPY 2019-11→2024 | ✗ (unadjusted) | An **adjusted** SPY 1999→2026 exists in the `ohlcv` parquet and is extractable via `dataset_preview`, but was not delivered to avoid conflicting with the existing UNADJUSTED `SPY.csv`; would need a separate clearly-named file |
 
 Datasets that would close every gap if a binary-capable transport (or gate
 approval) ever becomes available:

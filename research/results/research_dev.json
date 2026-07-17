@@ -65,10 +65,28 @@
       "end": "2024-01-10",
       "quality_issues_nonblocking": 1
     },
-    "IWM": "MISSING \u2014 not acquired; symbol excluded",
+    "IWM": {
+      "sha256": "314126e4abeeeea1eea1be1582ce072eaa13ac574d4b1eb0ff71d7d13db09c00",
+      "bars": 757,
+      "start": "2019-01-02",
+      "end": "2021-12-31",
+      "quality_issues_nonblocking": 0
+    },
     "DIA": "MISSING \u2014 not acquired; symbol excluded",
-    "GLD": "MISSING \u2014 not acquired; symbol excluded",
-    "TLT": "MISSING \u2014 not acquired; symbol excluded"
+    "GLD": {
+      "sha256": "76ed80439ca27a07c288f3291a5e714a509edbc49deb74e91af5e99b0c6b38ef",
+      "bars": 757,
+      "start": "2019-01-02",
+      "end": "2021-12-31",
+      "quality_issues_nonblocking": 0
+    },
+    "TLT": {
+      "sha256": "b493d1ecb791cac1fda56f358dbd732b0d96d730b8fdcb426aac9b96352cec8d",
+      "bars": 757,
+      "start": "2019-01-02",
+      "end": "2021-12-31",
+      "quality_issues_nonblocking": 0
+    }
   },
   "candidate_return_correlation_validation": {},
   "run_count": 10,

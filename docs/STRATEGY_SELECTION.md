@@ -1,26 +1,31 @@
-# Strategy Selection (Phase 6 outcome)
+# Strategy Selection (Phase 6 outcome, broadened-universe re-run)
 
 Selection criteria were frozen in `research/selection_manifest.json` before
-validation results existed; full evidence in `docs/RESEARCH_REPORT.md`.
+validation results existed, then **re-frozen unchanged** (only data inventory
+and disclosures updated) before the three added symbols were computed. Full
+evidence in `docs/RESEARCH_REPORT.md`; results in `research/results/`.
 
 ## Selected candidates: NONE
 
-| Candidate | Derived from | Validation outcome | Frozen-criteria result | Status |
+| Candidate | Derived from | Validation outcome (5 symbols) | Frozen-criteria result | Status |
 |---|---|---|---|---|
-| `regime_trend_v1` | Pine 01 BULL+ v1.1 core (regime engine + Markov stay gate + ATR stop) | QQQ: +33.0%, PF 2.64, maxDD 11.7%, cost-robust, all sensitivity variants positive — but 18 trades < 20 floor; SPY: −2.5% | Passes C1–C3, **fails C4 sample floor** | `not_eligible` (research prototype; strongest re-test candidate) |
-| `mean_reversion_v1` | Pine 11 MR Extremes Study v1.1 (daily reduction) | Net-negative both symbols; 14/16 sensitivity variants negative | **Fails C1** | `not_eligible` (recommend retiring the daily derivation) |
+| `regime_trend_v1` | Pine 01 BULL+ v1.1 core (regime engine + Markov stay gate + ATR stop) | Net-positive & cost/param-robust on QQQ (+33.0%, PF 2.64) and IWM (+11.0%, PF 1.70, 10/10 sensitivity); negative on SPY/GLD, fragile on TLT | Passes C1–C3 on QQQ & IWM, **fails C4 sample floor on every symbol** (max 18 trades) | `not_eligible` (research prototype; strongest re-test candidate) |
+| `mean_reversion_v1` | Pine 11 MR Extremes Study v1.1 (daily reduction) | Was net-negative on SPY/QQQ; now net-positive on IWM (+16.2%, PF 3.35, 7/8 sensitivity) and marginally TLT (+2.9%); negative on SPY/QQQ/GLD | Passes C1–C3 on IWM, **fails C4 sample floor on every symbol** (max 12 trades) | `not_eligible` (small-cap re-test hypothesis only) |
 
 ## Why zero is the right answer
 
 - The brief's own standard: "It is acceptable — and preferable — to conclude
   that none of the strategies is currently suitable for live trading rather
   than inventing confidence that the evidence does not support."
-- Bending the frozen 20-trade floor by two trades after seeing a favorable
-  result would be textbook selection bias; the floor exists exactly for
-  this moment.
-- The favorable QQQ window (2018–2021) rewarded anything long tech; a
-  regime gate showing PF 2.64 over 18 trades in that window is promising,
-  not proven.
+- The binding gate is C4's ≥ 20-closed-trade floor, and **no candidate reaches
+  20 trades on any symbol** (max 18). Broadening from 2 to 5 symbols confirmed
+  this is a structural low-trade-frequency property, not a QQQ artifact.
+- Bending a frozen criterion after seeing a favorable result would be textbook
+  selection bias; the floor exists exactly for this moment.
+- `mean_reversion_v1`'s IWM result (+16.2%, PF 3.35) is the single strongest
+  cell in the study and the most likely to be noise: 12 trades, one small-cap,
+  a dividend-adjusted favorable window, best-of-ten cells. The frozen
+  multiple-testing guard requires reading it as a hypothesis, not a result.
 
 ## What was NOT selected and why (corpus-wide)
 
@@ -37,13 +42,17 @@ docs/PINE_AUDIT.md per-script feasibility notes).
 
 ## Portfolio conclusion
 
-No portfolio is proposed: the only net-positive candidate stands alone, and
-its correlation partner is net-negative. Voting correlated indicators
-together was explicitly avoided.
+No portfolio is proposed. No candidate is even individually eligible, and the
+candidate daily-return correlations, while low (IWM 0.23, GLD 0.03, TLT 0.003,
+QQQ 0.20, SPY 0.38), only matter once at least one leg is validated — which
+none is. Voting correlated indicators together was explicitly avoided.
 
 ## Current operating eligibility
 
 - Platform: **shadow-capable engineering** (gates in
-  docs/GO_LIVE_CHECKLIST.md; shadow-scan CLI exists).
+  docs/GO_LIVE_CHECKLIST.md; shadow-scan and monitor CLIs exist).
 - Strategies: `research_prototype` only. Nothing is backtest-validated,
-  shadow-eligible, paper-eligible, or live-eligible.
+  shadow-eligible, paper-eligible, or live-eligible. The broadened data
+  surfaced two re-test hypotheses (regime_trend on liquid equity indices,
+  mean_reversion on small-caps) for a future run against uniformly-adjusted,
+  full-history data — not promotions.

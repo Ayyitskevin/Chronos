@@ -1,11 +1,14 @@
 {
   "purpose": "Candidate-selection criteria FROZEN before validation-stage results were computed or inspected. The final test window (2022-01-01..) is run exactly once, after this file was committed, and its outcome cannot amend these criteria retroactively.",
   "frozen_at_utc": "2026-07-17T13:05:00Z",
+  "re_frozen_at_utc": "2026-07-17T18:30:00Z",
+  "re_freeze_note": "Three additional symbols (IWM, GLD, TLT) were acquired after the original freeze and are now available. Per the build brief, the criteria are RE-FROZEN and committed BEFORE the new validation-window results are computed, in the same discipline as the original freeze. The pass/fail criteria C1-C6 are DELIBERATELY UNCHANGED — altering a threshold after new data exists would be the selection bias the freeze exists to prevent. Only the data inventory, biases, and an explicit multiple-testing guard are added. The new symbols cover 2019-2021 only, so they contribute to the VALIDATION window exclusively (no development, no final test).",
   "information_available_when_frozen": {
     "corpus": "42-script registry + forensic audit in progress; derived-core parameters taken verbatim from Pine sources (Daily presets), NOT tuned on the research data by this project",
-    "data": "SPY 2000-01..2019-11 unadjusted; QQQ 1999-11..2024-01 with adj_close; provenance research/data/raw/MANIFEST.json",
-    "results_seen_so_far": "development window (..2017-12-31) only: both candidates net-positive but below the SMA 50/200 baseline and roughly at/below the deterministic random-entry twin at comparable exposure",
-    "results_not_yet_seen": "validation window 2018-2021, all stress/sensitivity runs, final test window"
+    "data_original": "SPY 2000-01..2019-11 unadjusted; QQQ 1999-11..2024-01 with adj_close; provenance research/data/raw/MANIFEST.json",
+    "data_added_at_re_freeze": "IWM 2019-01..2021-12 dividend-ADJUSTED; GLD 2019-01..2021-12 effectively nominal (no distributions); TLT 2019-01..2021-12 dividend-ADJUSTED (heavily). All three are markdown-transcribed from a Dataset-Viewer parquet preview (2-decimal rounded, NOT byte-exact), independently cross-checked, and pass the project data-quality validator with zero blocking issues. DIA remains NOT acquired (confirmed absent from the source panel). Provenance: research/data/raw/MANIFEST.json.",
+    "results_seen_so_far": "development window (..2017-12-31) only, and only for SPY/QQQ: both candidates net-positive but below the SMA 50/200 baseline and roughly at/below the deterministic random-entry twin at comparable exposure. No results on IWM/GLD/TLT had been computed or inspected when this re-freeze was committed.",
+    "results_not_yet_seen": "validation window 2018-2021 for the three new symbols, all stress/sensitivity runs on them, and the final test window (which the new symbols cannot reach anyway)"
   },
   "candidates": ["regime_trend_v1", "mean_reversion_v1"],
   "baselines": ["baseline_buy_hold (49%-disaster-stop variant)", "baseline_sma_trend (50/200)", "baseline_random_entries (fixed-seed LCG, 5%/bar entry, 10-bar hold)"],
@@ -17,6 +20,7 @@
     "C5: parameter sensitivity: a majority of the predefined +/- variants (scripts/run_research.py SENSITIVITY) remain net-positive on the validation window (no knife-edge dependence)",
     "C6: final test window (run once): net-positive and directionally consistent with the validation conclusion; a final-test failure rejects the candidate rather than triggering re-tuning"
   ],
+  "multiple_testing_guard": "The candidate universe grew from 2 symbols to 5. C1 ('net-positive on at least one symbol') mechanically becomes easier to satisfy as symbols are added, so a lone single-symbol C1 pass among 5 symbols is WEAKER evidence than among 2. The re-freeze does not tighten C1 (that would be post-hoc), but the interpretation MUST apply this discount: a candidate is not treated as validated on the strength of one symbol among many, and any pass is read against how many independent symbols were tried. The full C1-C5 conjunction (notably C4's >= 20-closed-trade floor on the validation window) remains the binding gate; the new symbols' short 2019-2021 windows make a >= 20-trade sample unlikely, so they function primarily as corroborating out-of-sample robustness checks, not as fresh chances to manufacture a pass.",
   "portfolio_criterion": "The two candidates are only proposed as a combined portfolio if their validation-window daily-return correlation < 0.5 and the combination improves return/drawdown over the better single candidate.",
   "eligibility_semantics": {
     "meets C1-C5": "backtest_validated (shadow eligible per docs/GO_LIVE_CHECKLIST.md gates)",
@@ -25,9 +29,12 @@
   },
   "known_biases_and_limits": [
     "Parameters originate from the corpus author's defaults, which may themselves have been informed by overlapping history (uncontrollable here; recorded).",
-    "Two liquid ETFs only; survivorship not applicable to index ETFs, but breadth is minimal.",
+    "Universe is 5 liquid ETFs (SPY, QQQ, IWM, GLD, TLT); DIA could not be acquired. Survivorship is not applicable to index/sector/commodity/bond ETFs, but breadth is still minimal and asset-class-mixed.",
+    "PROVENANCE IS HETEROGENEOUS: SPY/QQQ are unadjusted and byte-exact; IWM and TLT are dividend-ADJUSTED (TLT heavily); GLD is effectively nominal. Adjusted vs unadjusted series differ in both price level and total return, so cross-symbol comparisons of absolute return are NOT apples-to-apples. Each symbol is judged against its OWN baselines on its OWN series, which is comparable within-symbol; cross-symbol conclusions carry this caveat.",
+    "FIDELITY: IWM/GLD/TLT were transcribed from a markdown parquet preview and rounded to 2 decimals; they are research-grade and lower-fidelity than the SPY/QQQ byte-exact series, though independently cross-checked and validator-clean.",
+    "WINDOW: the three new symbols cover 2019-2021 only. They contribute to the validation window exclusively (no development window, no final test), and that window was exceptionally favorable to long equity/gold and to long duration until the 2022 turn the window excludes.",
     "SPY series ends 2019-11: SPY contributes dev + partial validation only, no final test.",
     "Unadjusted prices for SPY (dividend drag omitted from signals and returns understates buy-side total return by roughly the dividend yield).",
-    "Multiple-testing: 2 candidates x 2 symbols x frozen criteria; no parameter search was run before freezing; sensitivity grid is reported, not used for selection."
+    "Multiple-testing: 2 candidates x up to 5 symbols x frozen criteria; no parameter search was run before freezing; sensitivity grid is reported, not used for selection. See multiple_testing_guard."
   ]
 }

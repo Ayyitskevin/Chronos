@@ -4,7 +4,8 @@
   "transport": {
     "method": "Hugging Face MCP connector (server-side), hf_fs cat with --offset/--max-bytes chunked reads (80,000-byte max per call)",
     "integrity": "Each source file reassembled byte-exactly from chunks; final chunk fetched with a deliberate overlap region that was byte-compared (cmp) against the preceding chunk; assembled byte count matched the repo-reported file size exactly.",
-    "note": "Direct HTTPS to huggingface.co and all finance sites is blocked by the egress proxy (403); only the server-side MCP connector was reachable. This restricted acquisition to plain-text (CSV/JSONL) files; parquet/zip datasets were not retrievable."
+    "note": "Direct HTTPS to huggingface.co and all finance sites is blocked by the egress proxy (403); only the server-side MCP connector was reachable. This restricted acquisition to plain-text (CSV/JSONL) files; parquet/zip datasets were not retrievable.",
+    "method_2_parquet_preview": "Hugging Face MCP hub_repo_details operations=[dataset_preview] paging the Dataset-Viewer-converted parquet (config+split, offset+limit<=100). Rows read as markdown tables, filtered to the target ticker, and reconstructed into per-symbol CSV. This is NOT a byte-exact transport: values were transcribed from the returned rows and rounded to 2 decimals (prices) / integer (volume). Fidelity was defended by per-page OHLC-invariant + strictly-increasing-weekday-date validation and an independent close cross-check (see each file's cross_check)."
   },
   "files": {
     "SPY.csv": {
@@ -21,8 +22,18 @@
       "output_sha256": "c533cf2db5758dce6d02cd88f85edf48e5e2f383edf1f215557934dc095961e5",
       "output_bytes": 242332,
       "row_count": 5000,
-      "date_range": ["2000-01-03", "2019-11-14"],
-      "columns": ["date", "open", "high", "low", "close", "volume"],
+      "date_range": [
+        "2000-01-03",
+        "2019-11-14"
+      ],
+      "columns": [
+        "date",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume"
+      ],
       "adjusted": "UNADJUSTED prices (as-traded). No adjusted close available in source. SPY has had no splits in this window, so prices are split-consistent; they are NOT dividend-adjusted.",
       "validation": {
         "parseable_csv": true,
@@ -43,8 +54,20 @@
       "cross_check": {
         "against": "hf://datasets/zexianli/nasdaq_data price_movement/SPY.csv (FNSPID-derived, yfinance lineage - independent of Investing.com)",
         "rows_compared": 8,
-        "fields": ["open", "close"],
-        "dates": ["2019-11-14", "2019-11-13", "2019-11-12", "2019-11-11", "2019-11-08", "2019-06-14", "2019-03-11", "2019-02-08"],
+        "fields": [
+          "open",
+          "close"
+        ],
+        "dates": [
+          "2019-11-14",
+          "2019-11-13",
+          "2019-11-12",
+          "2019-11-11",
+          "2019-11-08",
+          "2019-06-14",
+          "2019-03-11",
+          "2019-02-08"
+        ],
         "max_abs_deviation": 1.3e-05,
         "verdict": "Penny-exact agreement (deviations are float32 representation noise in the reference)."
       },
@@ -68,8 +91,19 @@
       "output_sha256": "e5149b24a5c518252395bab1ff5df290d51bc74700a63ea1083bc63621f1e272",
       "output_bytes": 385774,
       "row_count": 6087,
-      "date_range": ["1999-11-01", "2024-01-10"],
-      "columns": ["date", "open", "high", "low", "close", "volume", "adj_close"],
+      "date_range": [
+        "1999-11-01",
+        "2024-01-10"
+      ],
+      "columns": [
+        "date",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "adj_close"
+      ],
       "adjusted": "open/high/low/close are UNADJUSTED (as-traded). adj_close is split- AND dividend-adjusted (Alpha Vantage convention, anchored so adj_close == close on the final row, 2024-01-10). Volume is as-reported (not split-adjusted).",
       "validation": {
         "parseable_csv": true,
@@ -81,7 +115,12 @@
         "negative_volumes": 0,
         "adj_close_gt_close_rows": 0,
         "dividend_rows": 78,
-        "splits_detected": [["2000-03-20", 2.0]],
+        "splits_detected": [
+          [
+            "2000-03-20",
+            2.0
+          ]
+        ],
         "split_consistency": "Raw close 221.60 (2000-03-17) -> 107.70 (2000-03-20) across the historical 2:1 split, while adj_close is continuous (94.73 -> 92.08). Correct.",
         "calendar_gaps": "Only multi-day gap is 2001-09-10 -> 2001-09-17 (post-9/11 closure). Rows/year 248-253, consistent with exchange calendar.",
         "spot_checks": {
@@ -94,8 +133,19 @@
       "cross_check": {
         "against": "hf://datasets/zexianli/nasdaq_data price_movement/QQQ.csv (FNSPID-derived, yfinance lineage - independent of Alpha Vantage)",
         "rows_compared": 7,
-        "fields": ["open", "close"],
-        "dates": ["2023-12-28", "2023-12-27", "2023-12-26", "2023-12-22", "2023-12-21", "2023-12-20", "2023-12-19"],
+        "fields": [
+          "open",
+          "close"
+        ],
+        "dates": [
+          "2023-12-28",
+          "2023-12-27",
+          "2023-12-26",
+          "2023-12-22",
+          "2023-12-21",
+          "2023-12-20",
+          "2023-12-19"
+        ],
         "max_abs_deviation": 1.3e-05,
         "verdict": "Penny-exact agreement (deviations are float32 representation noise in the reference)."
       },
@@ -104,15 +154,201 @@
         "adj_close is anchored to the 2024-01-10 download date; re-anchoring is needed if merging with newer data.",
         "Volume not independently cross-checked."
       ]
+    },
+    "IWM.csv": {
+      "symbol": "IWM",
+      "description": "iShares Russell 2000 ETF, daily OHLCV (dividend-adjusted), 2019-2021 window",
+      "source_dataset": "hf://datasets/P2SAMAPA/p2-etf-trendfolios-replication-data (config 'ohlcv', split 'train', file ohlcv/train-00000-of-00001.parquet, 9,099,469 bytes, 221,500 rows, 38 ETF tickers)",
+      "source_url": "https://huggingface.co/datasets/P2SAMAPA/p2-etf-trendfolios-replication-data",
+      "source_format": "Parquet long-format panel: columns date, ticker, open, high, low, close, volume (float64). Rows sorted by ticker then date ascending. Read via MCP dataset_preview (markdown), NOT byte-exact.",
+      "license_note": "Dataset card declares license: mit for the repo's rough-path results sibling; the trendfolios repo itself carries no explicit per-file license. yfinance-style adjusted OHLCV lineage. Treat as research-use only; redistribution rights unclear.",
+      "retrieval": "dataset_preview paged offsets 52360..53126 (limit 100), filtered ticker=='IWM'; the IWM block in-source spans offset 47692 (2000-05-26) to ~54240, i.e. FULL history 2000-2026 is available at source but only the 2019-01-02..2021-12-31 window was extracted this session.",
+      "transform": "Kept rows with ticker=='IWM' and 2019-01-02<=date<=2021-12-31; dropped ticker column; rounded O/H/L/C to 2 decimals and volume to integer; sorted ascending by date.",
+      "output_sha256": "314126e4abeeeea1eea1be1582ce072eaa13ac574d4b1eb0ff71d7d13db09c00",
+      "output_bytes": 36325,
+      "row_count": 757,
+      "date_range": [
+        "2019-01-02",
+        "2021-12-31"
+      ],
+      "columns": [
+        "date",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume"
+      ],
+      "adjusted": "ADJUSTED. All of open/high/low/close are dividend-back-adjusted (internally consistent; not close-only). NOT nominal: e.g. 2019-12-31 close 152.97 vs nominal ~165.8, 2021-12-31 close 210.30 vs nominal ~219.5. Volume is as-reported (not adjusted).",
+      "validation": {
+        "parseable_csv": true,
+        "duplicate_dates": 0,
+        "non_increasing_dates": 0,
+        "weekend_dates": 0,
+        "ohlc_invariant_violations": 0,
+        "non_positive_prices": 0,
+        "negative_volumes": 0,
+        "rows_per_year": {
+          "2019": 252,
+          "2020": 253,
+          "2021": 252
+        },
+        "calendar_note": "Per-year trading-day counts equal the NYSE calendar exactly (2019=252, 2020=253, 2021=252); no missing or extra weekdays. All daily gaps are weekends/holidays."
+      },
+      "cross_check": {
+        "against": "hf://datasets/P2SAMAPA/etf_trend_data market_data.csv (independent adjusted-close panel, plain CSV read byte-exact via hf_fs cat)",
+        "dates_compared": [
+          "2019-09-11",
+          "2019-09-12"
+        ],
+        "field": "close",
+        "result": "IWM close 143.93 vs 144.27 (ratio 1.00236) and 143.96 vs 144.31 (ratio 1.00243). The two independent sources agree to a CONSTANT ~0.24% scale factor, which is exactly the signature of two dividend-adjusted series anchored to different download dates (this panel is adjusted to a later, higher-cumulative-dividend anchor -> marginally lower historical values). Not random error; confirms transcription correctness and adjusted status."
+      },
+      "spot_checks": {
+        "2020-03-18 low": "88.87 (COVID crash bottom; nominal IWM low was ~95, this series is adjusted ~7% lower - consistent)",
+        "2020-11-09 open->high": "165.20 -> 166.27 (Pfizer vaccine-day small-cap surge, matches the known ~+9% gap up)",
+        "2021-11-08 high": "230.41 (Nov-2021 all-time-high region; nominal IWM peaked ~244, adjusted ~6% lower - consistent)"
+      },
+      "caveats": [
+        "ADJUSTED prices (dividend-back-adjusted to a ~2026 anchor); do NOT mix with nominal/unadjusted IWM series.",
+        "Reconstructed by transcription from dataset_preview markdown (NOT byte-exact like SPY/QQQ); values rounded to 2 decimals. Residual sub-cent transcription noise in O/H/L/V is possible but bounded (every row passes OHLC invariants; closes cross-check to a constant factor against an independent source).",
+        "Coverage is 2019-2021 only. The source parquet holds FULL IWM history 2000-05-26 onward (~6540 rows) which can be extracted with the same method in a follow-up; not done here due to markdown-transport volume."
+      ]
+    },
+    "GLD.csv": {
+      "symbol": "GLD",
+      "description": "SPDR Gold Shares ETF, daily OHLCV (effectively nominal; GLD pays no dividend), 2019-2021 window",
+      "source_dataset": "hf://datasets/P2SAMAPA/p2-etf-trendfolios-replication-data (config 'ohlcv', split 'train', file ohlcv/train-00000-of-00001.parquet, 9,099,469 bytes, 221,500 rows, 38 ETF tickers)",
+      "source_url": "https://huggingface.co/datasets/P2SAMAPA/p2-etf-trendfolios-replication-data",
+      "source_format": "Parquet long-format panel: columns date, ticker, open, high, low, close, volume (float64). Rows sorted by ticker then date ascending. Read via MCP dataset_preview (markdown), NOT byte-exact.",
+      "license_note": "Dataset card declares license: mit for the repo's rough-path results sibling; the trendfolios repo itself carries no explicit per-file license. yfinance-style adjusted OHLCV lineage. Treat as research-use only; redistribution rights unclear.",
+      "retrieval": "dataset_preview paged offsets 27860..28627 (limit 100), filtered ticker=='GLD'; the GLD block in-source spans offset ~24314 (2004-11 inception) to ~29714, i.e. FULL history 2004-2026 is available at source but only 2019-01-02..2021-12-31 was extracted this session.",
+      "transform": "Kept rows with ticker=='GLD' and 2019-01-02<=date<=2021-12-31; dropped ticker column; rounded O/H/L/C to 2 decimals (source values are already ~2dp) and volume to integer; sorted ascending by date.",
+      "output_sha256": "76ed80439ca27a07c288f3291a5e714a509edbc49deb74e91af5e99b0c6b38ef",
+      "output_bytes": 35881,
+      "row_count": 757,
+      "date_range": [
+        "2019-01-02",
+        "2021-12-31"
+      ],
+      "columns": [
+        "date",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume"
+      ],
+      "adjusted": "EFFECTIVELY NOMINAL. GLD pays no distributions, so its dividend-adjusted series equals as-traded prices. Spot values match widely-known nominal GLD to the penny (2019-01-02 close 121.33; 2020-08-06 high 193.89 near the Aug-2020 record; 2021-12-31 close 170.96).",
+      "validation": {
+        "parseable_csv": true,
+        "duplicate_dates": 0,
+        "non_increasing_dates": 0,
+        "weekend_dates": 0,
+        "ohlc_invariant_violations": 0,
+        "non_positive_prices": 0,
+        "negative_volumes": 0,
+        "rows_per_year": {
+          "2019": 252,
+          "2020": 253,
+          "2021": 252
+        },
+        "calendar_note": "Per-year trading-day counts equal the NYSE calendar exactly (2019=252, 2020=253, 2021=252); no missing or extra weekdays. All daily gaps are weekends/holidays."
+      },
+      "cross_check": {
+        "against": "hf://datasets/P2SAMAPA/etf_trend_data market_data.csv (independent adjusted-close panel, plain CSV read byte-exact via hf_fs cat)",
+        "dates_compared": [
+          "2019-09-11",
+          "2019-09-12"
+        ],
+        "field": "close",
+        "result": "GLD close 141.03 vs 141.03 and 141.32 vs 141.32 -- PENNY-EXACT match with the independent source (max_abs_deviation 0.00). Confirms transcription accuracy and that GLD is effectively nominal in both."
+      },
+      "spot_checks": {
+        "2019-01-02 close": "121.33 (matches known nominal GLD close ~121.3)",
+        "2020-03-16 low": "136.12 (COVID liquidation low, matches known ~136)",
+        "2020-08-06 high": "193.89 (Aug-2020 gold record; matches GLD all-time-high region ~194)",
+        "2021-12-31 close": "170.96 (matches known year-end 2021 value ~170.9)"
+      },
+      "caveats": [
+        "Reconstructed by transcription from dataset_preview markdown (NOT byte-exact); rounded to 2 decimals. GLD source values were already ~2dp, and the independent cross-check is penny-exact, so fidelity here is high.",
+        "Coverage is 2019-2021 only. Source parquet holds FULL GLD history from 2004-11 (~5400 rows); extendable with the same method."
+      ]
+    },
+    "TLT.csv": {
+      "symbol": "TLT",
+      "description": "iShares 20+ Year Treasury Bond ETF, daily OHLCV (dividend-adjusted), 2019-2021 window",
+      "source_dataset": "hf://datasets/P2SAMAPA/p2-etf-trendfolios-replication-data (config 'ohlcv', split 'train', file ohlcv/train-00000-of-00001.parquet, 9,099,469 bytes, 221,500 rows, 38 ETF tickers)",
+      "source_url": "https://huggingface.co/datasets/P2SAMAPA/p2-etf-trendfolios-replication-data",
+      "source_format": "Parquet long-format panel: columns date, ticker, open, high, low, close, volume (float64). Rows sorted by ticker then date ascending. Read via MCP dataset_preview (markdown), NOT byte-exact.",
+      "license_note": "Dataset card declares license: mit for the repo's rough-path results sibling; the trendfolios repo itself carries no explicit per-file license. yfinance-style adjusted OHLCV lineage. Treat as research-use only; redistribution rights unclear.",
+      "retrieval": "dataset_preview paged offsets 111620..112382 (limit 100), filtered ticker=='TLT'; the TLT block in-source spans offset ~107480 (2002-07 inception) to ~113470, i.e. FULL history 2002-2026 is available at source but only 2019-01-02..2021-12-31 was extracted this session.",
+      "transform": "Kept rows with ticker=='TLT' and 2019-01-02<=date<=2021-12-31; dropped ticker column; rounded O/H/L/C to 2 decimals and volume to integer; sorted ascending by date.",
+      "output_sha256": "b493d1ecb791cac1fda56f358dbd732b0d96d730b8fdcb426aac9b96352cec8d",
+      "output_bytes": 35787,
+      "row_count": 757,
+      "date_range": [
+        "2019-01-02",
+        "2021-12-31"
+      ],
+      "columns": [
+        "date",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume"
+      ],
+      "adjusted": "ADJUSTED (heavily). All of open/high/low/close are dividend-back-adjusted. TLT distributes monthly, so the adjustment is large: 2019-01-02 close 98.69 vs nominal ~122; 2021-12-31 close 126.28 vs nominal ~149 (~15% below nominal). This is INTERNALLY-CONSISTENT adjusted OHLCV (not close-only). The task's plausibility note 'TLT ~95-100 end-2023 unadjusted' does NOT apply here because this series is adjusted and ends 2021.",
+      "validation": {
+        "parseable_csv": true,
+        "duplicate_dates": 0,
+        "non_increasing_dates": 0,
+        "weekend_dates": 0,
+        "ohlc_invariant_violations": 0,
+        "non_positive_prices": 0,
+        "negative_volumes": 0,
+        "rows_per_year": {
+          "2019": 252,
+          "2020": 253,
+          "2021": 252
+        },
+        "calendar_note": "Per-year trading-day counts equal the NYSE calendar exactly (2019=252, 2020=253, 2021=252); no missing or extra weekdays. All daily gaps are weekends/holidays."
+      },
+      "cross_check": {
+        "against": "hf://datasets/P2SAMAPA/etf_trend_data market_data.csv (independent adjusted-close panel, plain CSV read byte-exact via hf_fs cat)",
+        "dates_compared": [
+          "2019-09-11"
+        ],
+        "field": "close",
+        "result": "TLT close 115.35 vs 115.80 (ratio 1.0039). Agrees to a small constant scale factor, consistent with the two sources using different dividend-adjustment anchor dates (same signature as IWM). Confirms transcription correctness and adjusted status."
+      },
+      "spot_checks": {
+        "2020-03-09 high": "149.07 (COVID flight-to-quality Treasury spike; nominal TLT spiked ~180, adjusted ~15% lower - consistent)",
+        "2020-08-06 area": "~143 (mid-2020 low-yield peak region)",
+        "2021-03-18 low": "112.04 (2021 rate-selloff trough for long bonds - consistent with the sharp Q1-2021 yield rise)"
+      },
+      "caveats": [
+        "ADJUSTED prices (dividend-back-adjusted to a ~2026 anchor), ~15% below nominal; do NOT mix with nominal/unadjusted TLT.",
+        "Reconstructed by transcription from dataset_preview markdown (NOT byte-exact); rounded to 2 decimals. Residual sub-cent O/H/L/V noise possible but bounded by invariant + cross-check validation.",
+        "Coverage is 2019-2021 only. Source parquet holds FULL TLT history from 2002-07 (~5990 rows); extendable with the same method."
+      ]
     }
   },
   "gaps": {
-    "IWM": "NOT ACQUIRED. No non-gated plain-text (CSV/JSONL) daily OHLCV source found on Hugging Face Hub. Adjusted-CLOSE-only series (2008-2026) exists in hf://datasets/P2SAMAPA/etf_trend_data (market_data.csv), and full OHLCV exists only in parquet (P2SAMAPA repos, younginpiniti/us-stocks-daily-all) or gated form (paperswithbacktest/ETFs-Daily-Price) - none retrievable over the text-only MCP transport.",
-    "DIA": "NOT ACQUIRED. No text OHLCV source found; DIA is absent even from the adjusted-close panels found (P2SAMAPA market_data.csv does not include it). Open/close-only (no high/low/volume) history to 2023-12 exists in zexianli/nasdaq_data price_movement/DIA.csv (assumed present; per-symbol layout confirmed for SPY/QQQ).",
-    "GLD": "NOT ACQUIRED (same reasons as IWM; adjusted close 2008-2026 available in P2SAMAPA market_data.csv only).",
-    "TLT": "NOT ACQUIRED (same reasons as IWM; adjusted close 2008-2026 available in P2SAMAPA market_data.csv only).",
-    "SPY_2019_2024": "SPY OHLCV after 2019-11-14 not acquired in trustworthy text form (open/close-only continuation to 2023-12-28 exists in zexianli/nasdaq_data).",
-    "policy": "No synthetic, interpolated, or spliced data was written. Every row in the delivered CSVs is a byte-exact transform of a single upstream source."
+    "IWM": "PARTIALLY ACQUIRED. IWM.csv delivers dividend-ADJUSTED daily OHLCV for 2019-01-02..2021-12-31 (757 rows) from P2SAMAPA/p2-etf-trendfolios-replication-data (ohlcv config). Full 2000-2026 history exists at that source and is extractable with the same dataset_preview method; not completed this session due to markdown-transport volume.",
+    "DIA": "STILL NOT ACQUIRED (and confirmed ABSENT from the best available OHLCV panel). P2SAMAPA/p2-etf-trendfolios-replication-data ohlcv config jumps directly from AGG to EEM with no B/C/D tickers, so DIA is not present. No non-gated plain-text or preview-readable OHLCV source for DIA was found. paperswithbacktest/ETFs-Daily-Price (gated) and siddharthmb/stocks-ohlcv (unadjusted, but a 1.2 GB DATE-major single CSV -> not per-symbol extractable via cat) would contain DIA but are not usable over this transport.",
+    "GLD": "PARTIALLY ACQUIRED. GLD.csv delivers effectively-nominal daily OHLCV for 2019-01-02..2021-12-31 (757 rows) from the same source (GLD pays no dividend so adjusted==nominal; cross-check is penny-exact). Full 2004-2026 history extractable with the same method.",
+    "TLT": "PARTIALLY ACQUIRED. TLT.csv delivers dividend-ADJUSTED daily OHLCV for 2019-01-02..2021-12-31 (757 rows) from the same source. Full 2002-2026 history extractable with the same method.",
+    "SPY_2019_2024": "STILL NOT ACQUIRED as unadjusted OHLCV. Note: P2SAMAPA/p2-etf-trendfolios-replication-data ohlcv config DOES contain SPY 1999-2026 in ADJUSTED form (offset ~88000-100000+), extractable via dataset_preview; not delivered here to avoid conflicting bases with the existing UNADJUSTED SPY.csv (2000-2019). If an adjusted SPY continuation is wanted it should be written as a separate clearly-named file.",
+    "policy": "No synthetic, interpolated, or spliced data was written. Every delivered row is a transcription of a single upstream dataset_preview row (rounded to 2 decimals). Rows that could not be verified were not written; honest gaps recorded above.",
+    "new_leads_evaluated": {
+      "younginpiniti/us-stocks-daily-all": "Parquet, 799k rows, Ticker/Date/OHLCV, viewer-readable. BUT it only contains tickers A..AIRG (a partial upload despite the name); none of IWM/DIA/GLD/TLT/SPY are present. Unusable for these targets.",
+      "siddharthmb/stocks-ohlcv": "1.2 GB single CSV, header date,act_symbol,open,high,low,close,volume, UNADJUSTED (AAPL 2011 ~325 = pre-split nominal), includes ETFs, 2011-2020. BUT it is DATE-major sorted, so a single symbol is scattered across the whole 1.2 GB file -> per-symbol extraction via hf_fs cat would require scanning ~15,000 chunks. Impractical over this transport; recorded as a lead.",
+      "no-ry/world-stock-prices-daily-updating": "45 MB CSV but brand/large-cap tickers only (AAPL, AMZN, PTON, CROX...); no GLD/TLT/IWM/DIA. Not usable.",
+      "paperswithbacktest/ETFs-Daily-Price": "3000+ US ETFs incl. all targets, parquet with adj_close. GATED (manual approval); Dataset Viewer returns 404 to this account -> neither dataset_preview nor cat can read it.",
+      "P2SAMAPA/P2-ETF-DQN-ENGINE-DATASET": "Has data/etf_prices.parquet (ETF OHLCV incl. GLD/TLT/IWM) but the Dataset Viewer failed to convert it (500 / failed parquet job), and hf_fs cat refuses binary parquet, so it is not readable over this transport."
+    }
   },
   "intraday_probe": {
     "finding": "Real US-equity intraday data DOES exist on the Hub in plain CSV.",
