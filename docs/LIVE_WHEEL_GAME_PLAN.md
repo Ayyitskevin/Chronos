@@ -418,20 +418,32 @@ autonomy is the post-M7 extension seam reserved in that spec.
 7. Stock trading (owner-directed, §6b): whole shares, limit DAY, long-only
    in the MVP — confirm this matches intent. *(Assumed yes.)*
 
-## STATUS NOTE (2026-07-17, end of session window)
+## STATUS NOTE (2026-07-17)
 
-Milestones 0-3 are COMPLETE and pushed on `feat/live-wheel-dashboard`
-(through commit aea3234). **Milestone 4 is IN PROGRESS**: httpx was promoted
-to a runtime dependency (this commit) and a five-agent implementation
-workflow was authored but hit the session usage limit before executing —
-zero M4 files were written. The next session should re-run the M4 workflow
-script preserved at the session workflows directory
-(`m4-dashboard-cutover-*.js`, resumable via its recorded runId) or simply
-re-implement M4 per §4's Milestone 4 spec and the endpoint contract embedded
-in that script: GET /strategy/regime/{symbol}, POST /strategy/risk-preview,
-POST /strategy/demo-what-if, POST /strategy/demo-approval; ui/api_client.py;
-ui/pages/{portfolio,symbol_detail,order_workspace,activity,settings_page};
-ui/backend_app.py; no-broker import guard tests; AppTest smokes. The
-IBKR MCP connector is authorized and verified (account: USD 110 cash, no
-positions — options wheeling requires further funding; stock/crypto
-families are the executable ones at this size).
+Milestones 0-4 are COMPLETE. Work is consolidated on the designated branch
+`claude/chronos-trading-system-rrzroq` (a clean fast-forward of the prior
+`feat/live-wheel-dashboard` line; no history was rewritten and no commits
+were lost). All future milestones push there.
+
+**Milestone 4 delivered** the dashboard cutover onto the loopback backend:
+the strategy endpoints (GET /strategy/reconciliation, POST
+/strategy/candidates/{symbol}, GET /strategy/regime/{symbol}, POST
+/strategy/risk-preview, POST /strategy/demo-what-if, POST
+/strategy/demo-approval — all allowlist-gated), the regime-context service
+(`services/regime_context.py`, a Pine-derived EMA/RSI-2/vol-percentile
+heuristic that is labeled "not a validated signal" and is never an order
+gate), the thin `ui/api_client.py`, the page renderers
+(`ui/pages/{portfolio,symbol_detail,order_workspace,activity,settings_page}`),
+and the new default entrypoint `ui/backend_app.py`. Two structural guarantees
+are enforced by tests: the UI reaches no broker module (AST walk + subprocess
+sys.modules probe) and no page exposes a submit/transmit control. Gates green:
+full pytest suite passing, mypy --strict clean, ruff clean.
+
+The IBKR MCP connector is authorized and verified (account: USD 110 cash, no
+positions — options wheeling requires further funding; stock/crypto families
+are the executable ones at this size).
+
+**Next: Milestone 5** — paper order management (order intent, risk engine,
+what-if preview, paper submission, order tracker, buy-to-close, modification,
+cancellation, partial fills, restart reconciliation, paper validation report;
+wire liquidHours into trading_hours `broker_confirms_open`).

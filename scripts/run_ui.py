@@ -1,4 +1,8 @@
-"""Run the Chronos Streamlit UI.
+"""Run the Chronos Streamlit UI (the backend-driven client).
+
+Start the backend first (scripts/run_backend.py); this UI talks to it over
+loopback HTTP. The legacy in-process app remains at src/chronos/app.py until
+Milestone 5 removes it.
 
 Usage:
 
@@ -21,7 +25,7 @@ def main() -> int:
             "-m",
             "streamlit",
             "run",
-            str(ROOT / "src" / "chronos" / "app.py"),
+            str(ROOT / "src" / "chronos" / "ui" / "backend_app.py"),
         ]
     )
 
