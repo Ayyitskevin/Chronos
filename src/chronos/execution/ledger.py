@@ -12,6 +12,16 @@ from decimal import Decimal
 
 from chronos.execution.intents import IntentStatus, OrderIntent
 
+_WORKING_STATUSES = frozenset(
+    {
+        IntentStatus.SUBMITTED,
+        IntentStatus.PRE_SUBMITTED,
+        IntentStatus.ACKNOWLEDGED,
+        IntentStatus.PARTIALLY_FILLED,
+        IntentStatus.PENDING_CANCEL,
+    }
+)
+
 
 @dataclass(frozen=True, slots=True)
 class LedgerFill:
@@ -82,3 +92,20 @@ class MemoryLedger:
                 at_utc=at_utc,
             )
         )
+
+    def working_intent_ids(self) -> tuple[str, ...]:
+        return tuple(
+            intent_id for intent_id, status in self.statuses.items() if status in _WORKING_STATUSES
+        )
+
+    def working_order_snapshots(self) -> dict[str, tuple[IntentStatus, int]]:
+        """Latest (status, cumulative filled) for each working intent."""
+
+        filled: dict[str, int] = {}
+        for fill in self.fills:
+            filled[fill.intent_id] = max(filled.get(fill.intent_id, 0), fill.cumulative_quantity)
+        return {
+            intent_id: (status, filled.get(intent_id, 0))
+            for intent_id, status in self.statuses.items()
+            if status in _WORKING_STATUSES
+        }

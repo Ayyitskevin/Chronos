@@ -91,16 +91,22 @@ this is a single-operator local system (ASSUMPTIONS.md A-42).
 `mypy src/chronos` (strict mode per `pyproject.toml`), and `pytest -q`, on Python 3.12 with safety
 env pins (`BROKER_MODE=demo`, `ALLOW_ORDER_TRANSMIT=false`, `ALLOW_LIVE_TRADING=false`).
 
-### Dependency pinning — current status, honestly
+### Dependency pinning — current status
 
 - `pyproject.toml` uses bounded ranges (e.g. `ib_async>=2.0,<3`, `pydantic>=2.9,<3`), which
-  prevents major-version surprises but does NOT give reproducible installs.
-- **There is no lockfile in this repository.** `requirements.txt` is just `-e .`. Two installs a
-  month apart can resolve different transitive versions.
-- Recommended future work (owner action): adopt `uv lock`/`uv sync` or `pip-tools`
-  (`pip-compile`) to produce a committed lockfile with hashes, and review dependency diffs on
-  update. Until then, record `pip freeze` output at deployment time
-  (docs/DEPLOYMENT.md).
+  express intent but do NOT by themselves give reproducible installs.
+- **A hash-verified lockfile is committed:** `requirements-dev.lock` pins every runtime and
+  development dependency (the full transitive closure) to an exact version and SHA-256 hash. It
+  is generated from `pyproject.toml` with
+  `uv pip compile pyproject.toml --extra dev --generate-hashes --python-version 3.12 -o requirements-dev.lock`.
+- **CI installs from the lock, not from the ranges:** the workflow runs
+  `pip install --require-hashes -r requirements-dev.lock` (which refuses any package or version
+  not pinned with a matching hash) and then `pip install -e . --no-deps` for the project itself.
+  A tampered or substituted dependency fails the hash check rather than installing silently.
+- Maintenance (owner action): regenerate the lock with the command above when bumping a bound,
+  and review the diff before committing. `requirements.txt` remains `-e .` for a quick editable
+  dev install; the lock is the reproducible, verified path used by CI and recommended for
+  deployment.
 
 ### Log and notification redaction posture
 

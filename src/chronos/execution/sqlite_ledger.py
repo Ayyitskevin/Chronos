@@ -164,3 +164,31 @@ class SqliteLedger:
             IntentStatus.PENDING_CANCEL.value,
         }
         return tuple(intent_id for intent_id, status in rows if status in working)
+
+    def working_order_snapshots(self) -> dict[str, tuple[IntentStatus, int]]:
+        """Latest (status, cumulative filled) for each working intent."""
+
+        status_rows = self._connection.execute(
+            """
+            SELECT t.intent_id, t.status FROM transitions t
+            INNER JOIN (
+                SELECT intent_id, MAX(id) AS max_id FROM transitions GROUP BY intent_id
+            ) latest ON latest.max_id = t.id
+            """
+        ).fetchall()
+        fill_rows = self._connection.execute(
+            "SELECT intent_id, MAX(cumulative_quantity) FROM fills GROUP BY intent_id"
+        ).fetchall()
+        filled = {intent_id: int(qty) for intent_id, qty in fill_rows if qty is not None}
+        working = {
+            IntentStatus.SUBMITTED.value,
+            IntentStatus.PRE_SUBMITTED.value,
+            IntentStatus.ACKNOWLEDGED.value,
+            IntentStatus.PARTIALLY_FILLED.value,
+            IntentStatus.PENDING_CANCEL.value,
+        }
+        return {
+            intent_id: (IntentStatus(status), filled.get(intent_id, 0))
+            for intent_id, status in status_rows
+            if status in working
+        }

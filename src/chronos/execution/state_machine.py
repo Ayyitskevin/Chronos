@@ -125,6 +125,23 @@ class OrderStateMachine:
     filled_quantity: int = 0
     history: list[Transition] = field(default_factory=list)
 
+    @classmethod
+    def rehydrated(
+        cls, intent_id: str, *, status: IntentStatus, filled_quantity: int
+    ) -> OrderStateMachine:
+        """Reconstruct a machine at a persisted status without replaying history.
+
+        Used at startup to restore in-flight orders from the durable ledger
+        (which is the authoritative history), so a post-restart broker event
+        applies to a real machine instead of triggering an UNKNOWN_ORDER halt.
+        The persisted state is trusted; subsequent transitions are still
+        validated against the legal transition table.
+        """
+
+        if filled_quantity < 0:
+            raise OrderTransitionError("rehydrated filled_quantity cannot be negative")
+        return cls(intent_id=intent_id, status=status, filled_quantity=filled_quantity)
+
     def apply(self, to_status: IntentStatus, *, at_utc: datetime, evidence: str) -> bool:
         """Apply a transition. Returns False for an idempotent duplicate.
 

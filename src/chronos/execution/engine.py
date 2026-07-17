@@ -215,6 +215,22 @@ class ExecutionEngine:
         del now_utc
         return events
 
+    def hydrate_from_ledger(self, snapshots: dict[str, tuple[IntentStatus, int]]) -> int:
+        """Restore in-flight orders from durable ledger snapshots (startup).
+
+        Rebuilds ``_orders`` so a post-restart broker event for a previously
+        working order applies to a real state machine instead of triggering an
+        UNKNOWN_ORDER halt (closes the R-23 evidence-loss gap). Only called
+        during the non-trading reconciliation phase; never mid-session.
+        Returns the number of orders hydrated.
+        """
+
+        for intent_id, (status, filled) in snapshots.items():
+            self._orders[intent_id] = OrderStateMachine.rehydrated(
+                intent_id, status=status, filled_quantity=filled
+            )
+        return len(snapshots)
+
     def order_status(self, intent_id: str) -> IntentStatus | None:
         machine = self._orders.get(intent_id)
         return machine.status if machine else None
