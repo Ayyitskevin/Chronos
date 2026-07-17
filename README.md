@@ -1,8 +1,26 @@
 # Chronos
 
-Chronos is a local-first, semi-automated dashboard for managing the Wheel Strategy with
-Interactive Brokers. It reconciles broker state, explains option candidates, previews risk,
-and requires a person to approve every paper order.
+Chronos is a local-first trading research and decision-support system for Interactive
+Brokers, containing two subsystems:
+
+1. **Wheel dashboard** (below) — a Streamlit decision-support tool for the options Wheel
+   with hard-disabled order transmission.
+2. **Deterministic strategy platform** — research, backtesting, replay, shadow, and
+   (future, gated) paper execution built from the owner's Pine Quant Library corpus.
+   See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/STRATEGY_CATALOG.md](docs/STRATEGY_CATALOG.md),
+   and [docs/RISK_POLICY.md](docs/RISK_POLICY.md). Quick start:
+
+   ```bash
+   .venv/bin/python -m chronos.cli status        # mode banner, halt state, audit chain
+   .venv/bin/python -m chronos.cli backtest --strategy regime_trend_v1 --symbol SPY
+   .venv/bin/python -m chronos.cli shadow-scan   # would-be intents; nothing can submit
+   .venv/bin/python -m chronos.cli halt --reason "manual stop"
+   .venv/bin/python -m chronos.cli rearm --note "reviewed"
+   ```
+
+   The platform starts **halted** on a fresh deployment, every live-capable mode is
+   refused in code, and paper submission requires six simultaneous independently
+   verified conditions. No command enables live trading.
 
 Chronos is decision-support software. It is not an autonomous trading bot, investment adviser,
 performance-prediction engine, or promise of profitable trading. Options can produce rapid and
