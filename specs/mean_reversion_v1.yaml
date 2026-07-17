@@ -58,7 +58,7 @@ prohibited_conditions:
 pine_references:
   - catalog_number: "11"
     filename: research/pine/11_mean_reversion_extremes_study.pine
-    sha256: PLACEHOLDER_SET_BY_REGISTRY  # verified via research/strategy_registry.yaml
+    sha256: 1cfbd657b0cf09b6bbb9652f85479d390c371add597a7a5f8df95b4553e9532d
     notes: study defines flags and outcome scoring, not orders
 translation_notes:
   - "Omitted: session-VWAP sigma stretch (impossible on daily bars), short-side flags, VWAP-touch outcome scoring, HUD/alerts."

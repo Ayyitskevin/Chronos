@@ -121,6 +121,35 @@ def cmd_verify_audit(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def cmd_shadow_scan(args: argparse.Namespace) -> int:
+    store = HaltStore(args.halt_file)
+    _banner(TradingMode.SHADOW, store)
+    from chronos.auditlog.log import AuditLog
+    from chronos.research.runner import STRATEGY_FACTORIES
+    from chronos.research.shadow import shadow_scan
+
+    strategies = {
+        name: STRATEGY_FACTORIES[name]()
+        for name in args.strategies.split(",")
+        if name in STRATEGY_FACTORIES
+    }
+    if not strategies:
+        print(f"no known strategies in {args.strategies!r}")
+        return 1
+    reports = shadow_scan(
+        strategies=strategies,
+        symbols=tuple(s.strip().upper() for s in args.symbols.split(",") if s.strip()),
+        data_dir=args.data_dir,
+        risk_policy=load_risk_policy(args.policy),
+        halt_store=store,
+        audit_log=AuditLog(args.audit_file),
+        equity_usd=args.equity,
+    )
+    print(json.dumps(reports, indent=2, default=str))
+    print("SHADOW MODE: nothing was or can be submitted (capability NO_ORDERS).")
+    return 0
+
+
 def cmd_backtest(args: argparse.Namespace) -> int:
     store = HaltStore(args.halt_file)
     _banner(TradingMode.BACKTEST, store)
@@ -169,6 +198,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     audit = sub.add_parser("verify-audit-log", help="verify the audit log hash chain")
     audit.set_defaults(func=cmd_verify_audit)
+
+    shadow = sub.add_parser(
+        "shadow-scan", help="evaluate latest closed bars; report would-be intents (no orders)"
+    )
+    shadow.add_argument("--strategies", default="regime_trend_v1,mean_reversion_v1")
+    shadow.add_argument("--symbols", default="SPY,QQQ,IWM,DIA,GLD,TLT")
+    shadow.add_argument("--data-dir", type=Path, default=Path("research/data/raw"))
+    shadow.add_argument("--policy", type=Path, default=Path("config/risk.example.yaml"))
+    shadow.add_argument("--equity", type=float, default=3000.0)
+    shadow.set_defaults(func=cmd_shadow_scan)
 
     backtest = sub.add_parser("backtest", help="run a deterministic backtest")
     backtest.add_argument("--strategy", required=True)

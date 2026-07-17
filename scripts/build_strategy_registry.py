@@ -113,9 +113,7 @@ def analyze(path: Path) -> dict[str, object]:
         "uses_barstate_isconfirmed": _flag(source, r"barstate\.isconfirmed"),
         "uses_barstate_isrealtime": _flag(source, r"barstate\.isrealtime"),
         "uses_calc_on_every_tick_true": _flag(source, r"calc_on_every_tick\s*=\s*true"),
-        "uses_process_orders_on_close_true": _flag(
-            source, r"process_orders_on_close\s*=\s*true"
-        ),
+        "uses_process_orders_on_close_true": _flag(source, r"process_orders_on_close\s*=\s*true"),
         "uses_bar_magnifier": _flag(source, r"use_bar_magnifier\s*=\s*true"),
         "uses_varip": _flag(source, r"\bvarip\b"),
         "uses_arrays": _flag(source, r"\barray\.\w+"),
