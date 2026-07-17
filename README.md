@@ -14,6 +14,8 @@ Brokers, containing two subsystems:
    .venv/bin/python -m chronos.cli status        # mode banner, halt state, audit chain
    .venv/bin/python -m chronos.cli backtest --strategy regime_trend_v1 --symbol SPY
    .venv/bin/python -m chronos.cli shadow-scan   # would-be intents; nothing can submit
+   .venv/bin/python -m chronos.cli monitor       # read-only platform monitor
+   .venv/bin/python -m chronos.service           # supervised shadow service (one cycle)
    .venv/bin/python -m chronos.cli halt --reason "manual stop"
    .venv/bin/python -m chronos.cli rearm --note "reviewed"
    ```

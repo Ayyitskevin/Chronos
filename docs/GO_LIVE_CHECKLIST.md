@@ -45,33 +45,42 @@ remain refused in code regardless.
   `REPAINTING` or `LOOKAHEAD_CONTAMINATED` findings; every `request.security`
   call across the corpus uses the safe `[1]`-offset + `lookahead_on` idiom.
 - [DONE] Independent adversarial review across seven dimensions, with all CRITICAL/HIGH findings
-  remediated and regression-tested (docs/INDEPENDENT_REVIEW.md, docs/REMEDIATION_REPORT.md). Two
-  MEDIUM findings (state-level reconciliation, restart order hydration) are accepted as go-live
-  prerequisites blocked on the unbuilt service loop, not silently deferred.
+  remediated and regression-tested (docs/INDEPENDENT_REVIEW.md, docs/REMEDIATION_REPORT.md). The
+  two MEDIUM findings it deferred (state-level reconciliation, restart order hydration) were
+  closed by the M2 service loop (RISK_REGISTER R-22/R-23, `tests/platform_unit/test_reconciliation.py`,
+  `test_hydration.py`).
+- [DONE] Second independent adversarial review after the continuation milestones (M1–M4), seven
+  fresh dimensions, all findings remediated or explicitly accepted with rationale
+  (docs/INDEPENDENT_REVIEW_M5.md).
 
 ## Gate 1 — Research/backtest exit (into REPLAY, then SHADOW)
 
 - [PARTIAL] Historical daily OHLCV with provenance manifest in `research/data/raw/` — SPY
-  (2000-01..2019-11, unadjusted) and QQQ (1999-11..2024-01, adjusted) acquired, integrity-
-  validated, and cross-checked to the penny against an independent source
-  (`research/data/raw/MANIFEST.json`, `DATA_SOURCES.md`). IWM/DIA/GLD/TLT could **not** be
-  trustworthily acquired in this environment and were excluded, not fabricated.
+  (2000-01..2019-11, unadjusted) and QQQ (1999-11..2024-01, adjusted) byte-exact and
+  cross-checked to the penny; IWM/GLD/TLT (2019-01..2021-12) added later via a transcribed
+  parquet-preview transport — validator-clean and independently cross-checked, but
+  dividend-adjusted (IWM/TLT), 2-decimal, and validation-window-only, so the universe is
+  provenance-heterogeneous (`research/data/raw/MANIFEST.json`, `DATA_SOURCES.md`). DIA could
+  **not** be acquired (confirmed absent from the source panel) and was excluded, not fabricated.
+  Still PARTIAL: a uniform, full-history, trusted feed remains the owner action below.
 - [DONE] Quantitative validation: chronological partitions (dev/validation/frozen-final-test),
   cost stress (2x commission) and slippage stress (5/10/25 bps), parameter sensitivity,
   baseline comparisons (buy-hold, SMA trend, deterministic random-entry twin), published in
   docs/RESEARCH_REPORT.md with data hashes and policy hash. Selection criteria were frozen
   (`research/selection_manifest.json`) **before** validation results were computed.
-- [DONE] Strategy selection record (docs/STRATEGY_SELECTION.md): **zero candidates selected.**
-  `mean_reversion_v1` fails the frozen net-positive criterion; `regime_trend_v1` passes three of
-  five frozen criteria on QQQ but fails the frozen minimum-trade-count floor by two trades — the
-  criterion was applied as written, not relaxed post hoc. This record requires owner review, not
-  owner invention of new criteria after the fact.
+- [DONE] Strategy selection record (docs/STRATEGY_SELECTION.md): **zero candidates selected —
+  confirmed on the broadened 5-symbol universe.** The binding failure is the frozen ≥20-closed-
+  trade floor (C4), which no candidate reaches on any symbol (max 18); criteria were frozen
+  before results, re-frozen unchanged before the added symbols were computed, and applied as
+  written. This record requires owner review, not owner invention of new criteria after the fact.
 - [DONE] Backtest reproducibility: identical inputs produce identical outputs; every run stamps
   code commit, data SHA-256, policy hash (`src/chronos/research/runner.py`).
-- [OWNER] Re-run research from IBKR historical data (or another trusted source covering
-  IWM/DIA/GLD/TLT and a longer SPY history) before trusting mirror-sourced conclusions
-  (ASSUMPTIONS.md A-30 caveat). The frozen final-test window (2022-01-01..) was **never consumed**
-  and remains available for that re-run.
+- [OWNER] Re-run research from IBKR historical data (or another trusted, uniformly-adjusted
+  source covering DIA and full histories) before trusting mirror-sourced conclusions
+  (ASSUMPTIONS.md A-30 caveat). **Holdout status, honestly:** QQQ's reserved final window
+  (2022–2024) was consumed by the M1 re-run and is now seen data (disclosure in
+  docs/RESEARCH_REPORT.md §C6); a re-test must reserve a fresh untouched window. The harness now
+  requires an explicit `--stage final` to touch any holdout.
 - [NOT APPLICABLE] Promotion record RESEARCH→…→REPLAY→SHADOW: with zero candidates passing
   selection, there is nothing eligible to promote. A promotion record would be manufactured
   confidence; none was written.
@@ -81,13 +90,16 @@ remain refused in code regardless.
 SHADOW means: live or replayed data, real intent generation, `NO_ORDERS` capability — nothing can
 be submitted anywhere (`src/chronos/control/modes.py`).
 
-- [PARTIAL] Shadow operation. A one-shot shadow scan exists
-  (`python -m chronos.cli shadow-scan`, `src/chronos/research/shadow.py`): it runs the production
-  decision path over the latest closed bars, reports would-be intents and risk decisions, appends
-  every report to the audit log, and cannot submit (SHADOW lock = `NO_ORDERS`, no broker adapter
-  constructed). **No long-running service exists** — nothing wires live bar ingestion,
-  reconciliation evidence gathering, and notifications into a daemon (docs/DEPLOYMENT.md "Future
-  work"). Shadow today means running the scan manually after each close.
+- [PARTIAL] Shadow operation. Both a one-shot shadow scan
+  (`python -m chronos.cli shadow-scan`) and a supervised service loop
+  (`python -m chronos.service`, M2) exist: the service performs ordered startup (halt → hydrate →
+  broker evidence → state-level reconciliation → arm), runs the production decision path each
+  cycle, audits every decision, and cannot submit in SHADOW (`NO_ORDERS`; null broker raises;
+  risk engine denies; capability gate). A read-only monitoring plane (M3:
+  `python -m chronos.cli monitor` + a localhost Streamlit page) surfaces halt/reconciliation/
+  audit/data state. Still PARTIAL because live bar ingestion is file-based (the operator supplies
+  fresh CSVs; no market-data connection exists in this build) and no notification channel is
+  wired.
 - [NOT DONE] Defined shadow exit criteria (e.g. N consecutive sessions with zero unexplained
   halts, zero illegal transitions, intents matching backtest expectations, data-quality clean).
   Must be written into the promotion record's gate checks before the shadow run starts, not
@@ -96,11 +108,13 @@ be submitted anywhere (`src/chronos/control/modes.py`).
   (`scripts/smoke_test_ibkr.py`) — first proof this code has ever touched a real gateway.
 - [OWNER] Operational discipline rehearsed: halt/rearm, backup/restore, reconnect procedure
   (docs/IBKR_RUNBOOK.md, docs/BACKUP_AND_RECOVERY.md) executed at least once each, for real.
-- [DONE] Independent adversarial review completed and all critical/high findings remediated
-  (docs/INDEPENDENT_REVIEW.md, docs/REMEDIATION_REPORT.md). Note: two MEDIUM findings specific to
-  this gate (M4 state-level reconciliation, M5 restart order hydration) remain open because they
-  require the not-yet-built shadow/paper service loop — they must be closed before a real shadow
-  run, not before merging this research build.
+- [DONE] Independent adversarial reviews completed (rounds 1 and 2) and all critical/high
+  findings remediated (docs/INDEPENDENT_REVIEW.md, docs/REMEDIATION_REPORT.md,
+  docs/INDEPENDENT_REVIEW_M5.md). The two MEDIUM findings previously deferred to this gate
+  (state-level reconciliation, restart order hydration) were closed by the M2 service loop
+  (R-22/R-23 MITIGATED). One accepted pre-PAPER item remains recorded: position reconciliation
+  must be hardened from symbol-membership to signed-share comparison before real broker
+  positions are wired in (INDEPENDENT_REVIEW_M5.md #13).
 
 ## Gate 3 — Paper gate (PAPER operation)
 
@@ -108,7 +122,10 @@ be submitted anywhere (`src/chronos/control/modes.py`).
   {7497, 4002}, account pattern `D[UF]\d{4,}`, exact managed-accounts verification before every
   submission, DAY-limit-only orders, `orderRef` idempotency, reconciliation gate with no
   auto-flatten (docs/IBKR_INTEGRATION.md).
-- [NOT DONE] The service loop that would actually run PAPER mode (same gap as Gate 2).
+- [PARTIAL] The service loop exists (M2) and gates submission on capability AND reconciliation;
+  what remains for PAPER is wiring real broker evidence sources (positions/order states from the
+  gateway) in place of the SHADOW null sources, plus the signed-share position comparison noted
+  above.
 - [OWNER] First supervised paper submissions against the owner's paper account: verify ack/fill
   event translation, commission reports, ledger and audit records, and reconciliation against
   real broker state. The adapter has never run against a real gateway

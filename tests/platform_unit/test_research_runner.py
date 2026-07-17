@@ -100,6 +100,13 @@ def test_run_named_backtest_emits_reproducibility_manifest(tmp_path: Path) -> No
     assert summary["bars"] == 60
     assert len(str(summary["data_sha256"])) == 64  # sha256 hex digest
     assert summary["config"] == {"initial_cash_usd": 3000.0, "slippage_bps_per_side": 2.0}
+    # Identity fields must be real values, not empty placeholders: the
+    # manifest is the reproducibility seam (M5 review).
+    assert summary["strategy_version"]
+    assert summary["policy_version"] == "test-1"
+    policy_hash = str(summary["policy_hash"])
+    assert len(policy_hash) == 16 and all(c in "0123456789abcdef" for c in policy_hash)
+    assert summary["code_commit"]  # a hash in-repo; "unknown" only if git is absent
 
 
 def test_run_named_backtest_is_deterministic(tmp_path: Path) -> None:

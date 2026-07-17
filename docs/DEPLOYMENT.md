@@ -14,11 +14,18 @@ component for the trading path.
 
 ```bash
 git clone <your-remote> Chronos && cd Chronos
-python3 -m venv .venv
-.venv/bin/python -m pip install -e '.[dev]'     # editable install + dev tools
+python3 -m venv .venv                                        # python 3.12+
+.venv/bin/python -m pip install --require-hashes -r requirements-dev.lock
+.venv/bin/python -m pip install -e . --no-deps               # the project itself
 ```
 
-Verify the toolchain the same way CI does (`.github/workflows/ci.yml`):
+This is the same pinned, hash-verified path CI uses (`.github/workflows/ci.yml`):
+`requirements-dev.lock` pins the full runtime+dev transitive closure to exact versions and
+SHA-256 hashes (docs/SECURITY.md). A quick unpinned dev install
+(`pip install -e '.[dev]'`) also works but is not reproducible — prefer the lock for
+anything you intend to keep running.
+
+Verify the toolchain the same way CI does:
 
 ```bash
 .venv/bin/ruff check .
@@ -27,8 +34,8 @@ Verify the toolchain the same way CI does (`.github/workflows/ci.yml`):
 .venv/bin/pytest -q
 ```
 
-Reproducibility caveat: dependencies are bounded ranges, and there is no lockfile in this
-repository (see docs/SECURITY.md). Record the resolved environment at deployment time:
+Reproducibility record: even with the lock, record the resolved environment at deployment
+time (the build backend and pip itself are outside the hash gate — docs/SECURITY.md):
 
 ```bash
 .venv/bin/pip freeze > deploy-freeze-$(date +%F).txt   # keep with your backups

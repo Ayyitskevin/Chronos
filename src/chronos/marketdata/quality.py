@@ -7,6 +7,7 @@ record the report next to their results.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import timedelta
 from enum import StrEnum
@@ -16,6 +17,7 @@ from chronos.marketdata.bars import BarSeries, BarStatus
 
 class IssueKind(StrEnum):
     NON_POSITIVE_PRICE = "NON_POSITIVE_PRICE"
+    NON_FINITE_VALUE = "NON_FINITE_VALUE"
     IMPOSSIBLE_OHLC = "IMPOSSIBLE_OHLC"
     NEGATIVE_VOLUME = "NEGATIVE_VOLUME"
     DUPLICATE_BAR = "DUPLICATE_BAR"
@@ -73,7 +75,14 @@ def validate_series(series: BarSeries) -> DataQualityReport:
         if bar.sequence_id in seen_ids:
             issues.append(DataQualityIssue(IssueKind.DUPLICATE_BAR, blocking=True, detail=label))
         seen_ids.add(bar.sequence_id)
-        if min(bar.open, bar.high, bar.low, bar.close) <= 0:
+        # inf passes both the positivity and OHLC-range comparisons, and NaN
+        # volume fails no ordered comparison — check finiteness explicitly
+        # (independent review M5: silent-pass corruption classes).
+        if not all(
+            math.isfinite(value) for value in (bar.open, bar.high, bar.low, bar.close, bar.volume)
+        ):
+            issues.append(DataQualityIssue(IssueKind.NON_FINITE_VALUE, blocking=True, detail=label))
+        elif min(bar.open, bar.high, bar.low, bar.close) <= 0:
             issues.append(
                 DataQualityIssue(IssueKind.NON_POSITIVE_PRICE, blocking=True, detail=label)
             )

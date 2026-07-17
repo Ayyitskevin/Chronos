@@ -17,6 +17,9 @@ recorded research risk policy.
 Outputs: research/results/<name>.json + research/results/SUMMARY.json.
 
 Usage: .venv/bin/python scripts/run_research.py [--stage dev|val|final|all]
+
+``--stage all`` runs dev + val only. The reserved final window is consumed
+exclusively by an explicit ``--stage final`` (one-shot discipline).
 """
 
 from __future__ import annotations
@@ -216,6 +219,10 @@ def _int_fields(name: str, variant: dict[str, float]) -> dict[str, float]:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
+    # "all" deliberately EXCLUDES the final stage: the reserved holdout must
+    # only ever be computed by an explicit `--stage final`, so it cannot be
+    # consumed as a side effect of a routine re-run (M5 review finding — this
+    # is exactly how QQQ's 2022-2024 holdout got burned).
     parser.add_argument("--stage", choices=["dev", "val", "final", "all"], default="all")
     args = parser.parse_args()
 
@@ -249,7 +256,7 @@ def main() -> int:
         stages.append(("dev", None, DEV_END))
     if args.stage in ("val", "all"):
         stages.append(("val", VAL_START, VAL_END))
-    if args.stage in ("final", "all"):
+    if args.stage == "final":  # never implied by "all"; explicit consumption only
         stages.append(("final", FINAL_START, None))
 
     runs: list[dict[str, object]] = []

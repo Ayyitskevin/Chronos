@@ -102,7 +102,12 @@ env pins (`BROKER_MODE=demo`, `ALLOW_ORDER_TRANSMIT=false`, `ALLOW_LIVE_TRADING=
 - **CI installs from the lock, not from the ranges:** the workflow runs
   `pip install --require-hashes -r requirements-dev.lock` (which refuses any package or version
   not pinned with a matching hash) and then `pip install -e . --no-deps` for the project itself.
-  A tampered or substituted dependency fails the hash check rather than installing silently.
+  A tampered or substituted runtime/dev dependency fails the hash check rather than installing
+  silently. **Known residual (M5 review):** the hash gate covers the runtime+dev closure, not the
+  PEP 517 *build backend* — `pip install -e .` still fetches `setuptools`/`wheel` unpinned inside
+  pip's isolated build environment. Note also the lock's `aeventkit` entry is legitimate, not a
+  typosquat: it is the dependency `ib_async` itself declares (the ib-api-reloaded republication of
+  `eventkit`; same maintainer org, provides the `eventkit` module).
 - Maintenance (owner action): regenerate the lock with the command above when bumping a bound,
   and review the diff before committing. `requirements.txt` remains `-e .` for a quick editable
   dev install; the lock is the reproducible, verified path used by CI and recommended for

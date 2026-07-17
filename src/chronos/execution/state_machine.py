@@ -179,12 +179,15 @@ class OrderStateMachine:
                 f"intent {self.intent_id}: cumulative fill decreased "
                 f"({self.filled_quantity} -> {cumulative_quantity})"
             )
-        self.filled_quantity = cumulative_quantity
+        # Validate the transition BEFORE recording the new fill count: if the
+        # machine is already terminal, apply() raises and filled_quantity must
+        # not have been smeared to a value the machine never accepted.
         self.apply(
             IntentStatus.PARTIALLY_FILLED,
             at_utc=at_utc,
             evidence=f"cumulative fill {cumulative_quantity}",
         )
+        self.filled_quantity = cumulative_quantity
 
     @property
     def is_terminal(self) -> bool:
