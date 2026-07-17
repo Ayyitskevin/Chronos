@@ -16,7 +16,7 @@ from chronos.config.limits import (
     MAX_CANDIDATE_REQUEST_CONTRACTS,
     MAX_CANDIDATE_STRIKES_PER_EXPIRATION,
 )
-from chronos.domain.enums import BrokerMode, DemoProfile, IBEnvironment
+from chronos.domain.enums import BrokerAdapter, BrokerMode, DemoProfile, IBEnvironment
 
 
 def _parse_symbol_allowlist(value: object) -> object:
@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     )
 
     broker_mode: BrokerMode = BrokerMode.DEMO
+    broker_adapter: BrokerAdapter = BrokerAdapter.OFFICIAL_IBKR
     demo_profile: DemoProfile = DemoProfile.SAFETY_CASES
     ib_environment: IBEnvironment = IBEnvironment.PAPER
     ib_host: str = "127.0.0.1"
@@ -119,7 +120,12 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_safety_and_ranges(self) -> Settings:
         if self.allow_live_trading:
-            raise ValueError("Live trading is hard-disabled in the Chronos MVP")
+            raise ValueError(
+                "Live trading is a committed deliverable that ships with the Milestone 6-7 "
+                "gate stack (docs/LIVE_WHEEL_GAME_PLAN.md); this build does not yet contain "
+                "the live submission path, so the flag refuses rather than pretend. It will "
+                "be honored once arming, confirmation, and the live gates exist."
+            )
         if not self.symbol_allowlist:
             raise ValueError("SYMBOL_ALLOWLIST must contain at least one symbol")
         if len(set(self.symbol_allowlist)) != len(self.symbol_allowlist):
@@ -136,7 +142,11 @@ class Settings(BaseSettings):
                 f"{MAX_CANDIDATE_REQUEST_CONTRACTS}"
             )
         if self.ib_environment is IBEnvironment.LIVE and self.allow_order_transmit:
-            raise ValueError("Live order transmission is hard-disabled in the Chronos MVP")
+            raise ValueError(
+                "Live order transmission arrives with the Milestone 6-7 live gate stack; "
+                "this build has no live submission path yet, so the combination refuses "
+                "rather than pretend (docs/LIVE_WHEEL_GAME_PLAN.md)."
+            )
         if (
             self.broker_mode is BrokerMode.IBKR
             and self.ib_environment is IBEnvironment.PAPER

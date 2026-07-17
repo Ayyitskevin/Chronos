@@ -18,7 +18,7 @@ from chronos.broker.connection import BrokerConnectionManager
 from chronos.broker.demo import DemoBroker, demo_now
 from chronos.broker.market_data import MarketDataManager
 from chronos.config.settings import Settings, get_settings
-from chronos.domain.enums import BrokerMode, ConnectionState
+from chronos.domain.enums import BrokerAdapter, BrokerMode, ConnectionState
 from chronos.domain.models import AccountSummary, ConnectionStatus
 from chronos.persistence.database import Database
 from chronos.persistence.repositories import LocalReconciliationRepository
@@ -87,10 +87,16 @@ def build_runtime(*, register_atexit: bool = True) -> AppRuntime:
         broker: Broker
         if settings.broker_mode is BrokerMode.DEMO:
             broker = DemoBroker(profile=settings.demo_profile)
-        else:
+        elif settings.broker_adapter is BrokerAdapter.IB_ASYNC:
             from chronos.broker.ibkr import IBKRBroker
 
             broker = IBKRBroker(settings)
+        else:
+            # Production default: the official TWS API adapter (lazy import;
+            # raises with install guidance when the package is absent).
+            from chronos.broker.official_ibkr import OfficialIBKRBroker
+
+            broker = OfficialIBKRBroker(settings)
         market_data = MarketDataManager(
             broker,
             max_quote_age=timedelta(seconds=settings.max_quote_age_seconds),

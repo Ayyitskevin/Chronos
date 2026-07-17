@@ -385,11 +385,19 @@ options+stocks. **M7C** implements crypto qualification, fractional
 quantities, session calendar, risk checks, demo fixtures, spy validation.
 M8 hardening covers all three families.
 
-**Sequencing amendment (safety):** Milestone 1 *adds* the new configuration
-keys but **keeps** the existing hard-raise validators on
-`allow_live_trading`/live-transmission untouched; those convert to the
-gated model only in Milestone 6 when the full gate stack exists to replace
-them. Fail-closed at every intermediate commit.
+**Sequencing amendment:** Milestone 1 *adds* the new configuration keys;
+the `allow_live_trading` validator keeps refusing **only because the live
+submission path is not built yet** — a flag must not pretend to enable code
+that does not exist. Milestone 6 replaces that refusal with the real gate
+stack, and Milestone 7 assigns `transmit=True` at the authorized boundary.
+
+**LIVE TRADING IS A COMMITTED DELIVERABLE (owner directive, restated
+2026-07-17: "non-negotiable").** No milestone may introduce language,
+config, or tests that frame live execution as permanently disabled; interim
+refusals must state they are awaiting the M6-7 implementation, nothing more.
+The MVP live model remains owner-armed + per-order-confirmed exactly per the
+owner's spec (`ALLOW_AUTOMATED_TRANSMISSION=false`); fully unattended
+autonomy is the post-M7 extension seam reserved in that spec.
 
 ## 7. Open owner decisions (blocking only where marked)
 

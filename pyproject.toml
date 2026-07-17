@@ -76,5 +76,5 @@ pretty = true
 show_error_codes = true
 
 [[tool.mypy.overrides]]
-module = ["ib_async.*", "plotly.*", "streamlit.*"]
+module = ["ib_async.*", "ibapi.*", "plotly.*", "streamlit.*"]
 ignore_missing_imports = true

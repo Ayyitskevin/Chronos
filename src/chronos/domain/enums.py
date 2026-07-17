@@ -24,10 +24,19 @@ class DisplayEnvironment(StrEnum):
     LIVE = "LIVE"
 
 
+class BrokerAdapter(StrEnum):
+    """Which broker implementation serves BrokerMode.IBKR."""
+
+    DEMO = "demo"
+    OFFICIAL_IBKR = "official_ibkr"
+    IB_ASYNC = "ib_async"
+
+
 class DataQuality(StrEnum):
     LIVE = "LIVE"
     FROZEN = "FROZEN"
     DELAYED = "DELAYED"
+    DELAYED_FROZEN = "DELAYED_FROZEN"
     DEMO = "DEMO"
     STALE = "STALE"
     UNKNOWN = "UNKNOWN"
