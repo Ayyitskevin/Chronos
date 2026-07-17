@@ -1,0 +1,390 @@
+//@version=6
+// =============================================================================
+// Markov Property Regime Persistence Gauge v1.0 (5T Pine Suite · Desk Kit)
+//
+// WHAT THIS IS.
+// The Markov property assumes MEMORYLESSNESS: the probability that a regime
+// ends is independent of how old it is, which forces a geometric dwell
+// distribution. Real regimes may instead AGE — duration dependence. This
+// gauge measures whether THIS chart's regimes violate memorylessness: it
+// collects completed bull and bear spell lengths, estimates the hazard of a
+// spell ending inside each age bucket (given survival to that bucket), and
+// compares young-age hazard against old-age hazard per side. That is the
+// honest answer to every backtest that assumes fixed transition
+// probabilities — the framing owes to the Quant Guild channel's
+// backtest-realism thesis.
+//
+// WHERE IT SITS IN THE SUITE.
+// This is the evidence-side companion to the suite's dwell doctrine — the
+// youth/dwell gates that ship primary on BEAR+ and optional-OFF on BULL+.
+// If bear spells age (hazard rises with age) and bull spells do not, that
+// asymmetry is exactly what would justify those defaults. THE GAUGE GATES
+// NOTHING ITSELF. It measures the assumption; the engines own the gates.
+//
+// HONESTY, stated plainly.
+//   · Hazards are counted history on this chart, with Wilson 95% lower
+//     bounds and survivor counts shown; buckets with n < 10 are flagged.
+//   · The verdict is a labeled HEURISTIC (relative comparison with a margin,
+//     width-normalized to per-bar rates), not a statistical test.
+//   · The currently-running spell is not in the sample (it has not ended),
+//     so the estimate lags reality by construction.
+//
+// Non-repaint: classification, spell recording, and verdicts advance on
+// confirmed bars only. Decision support only — a human places every trade.
+// Risk controls outrank all signals.
+//
+// v1.0 changelog (2026-07-17):
+//   Initial release. Regime source = external link (strict -1/0/+1
+//   validation, per-bar) with internal z-classifier fallback (window log
+//   return / vol-normalized, ±0.85, confirmed bars) — HUD names the live
+//   source. Completed-spell ring arrays per side (cap 200); hazard-by-age
+//   buckets 1-5 / 6-10 / 11-20 / 21-40 / 41+ with Wilson lower bounds,
+//   geometric (memoryless) reference hazards, and thin-bucket flags;
+//   young-vs-old verdict per side on width-normalized per-bar rates with
+//   the unbounded 41+ bucket excluded from the verdict (it ends every
+//   surviving spell by construction); current-age + age-percentile plots;
+//   Data-Window exports; verdict-change alerts per side with optional JSON
+//   payloads (default OFF). Neutral-spell tracking default OFF. Gates
+//   nothing. Evidence label: needs user run.
+// =============================================================================
+indicator("Markov Property Regime Persistence Gauge v1.0", shorttitle = "MKV Persist v1",
+     overlay = false)
+
+grp_mode = "0 · Mode"
+grp_src  = "1 · Regime Source"
+grp_sp   = "2 · Spell Tracking"
+grp_vd   = "3 · Verdict Heuristic"
+grp_dsp  = "4 · Display"
+
+variant_tag = input.string("v1.0-base", "Variant tag (freeze-the-config discipline)", group = grp_mode,
+     tooltip = "Label this exact settings set. Any settings change = new tag = new variant with its own validation cycle. The tag prints on the HUD and in alerts so screenshots self-document.")
+
+regime_src = input.source(close, "Regime link (wire to a REGIME_EXPORT)", group = grp_src,
+     tooltip = "Wire to any suite script's REGIME_EXPORT. Valid only when the bar's value is exactly -1, 0, or +1; on any other value the bar falls back to the internal classifier below. The HUD names which source is live.")
+use_link = input.bool(true, "Use regime link when valid (OFF = force internal)", group = grp_src,
+     tooltip = "Default ON changes nothing while the link is unwired (close is never a valid -1/0/+1 stream, so the internal classifier runs). Turn OFF to force the internal classifier even with a wire attached.")
+cls_lookback = input.int(20, "Internal classifier lookback (bars)", minval = 5, maxval = 250, group = grp_src,
+     tooltip = "Internal fallback: window log-return divided by (stdev of one-bar log returns × √n) — the suite's core z observation. z > +0.85 → bull, z < -0.85 → bear, else neutral, confirmed bars.")
+
+track_neutral = input.bool(false, "Track neutral spells too", group = grp_sp,
+     tooltip = "Default OFF: only directional (bull / bear) spells are collected — those are what the dwell doctrine is about. ON adds neutral spell lengths to the dwell readout (no hazard verdict for neutral).")
+
+verdict_margin = input.float(0.25, "Verdict margin (relative, heuristic)", minval = 0.05, maxval = 1.00, step = 0.05, group = grp_vd,
+     tooltip = "The old-age per-bar hazard must differ from the young-age per-bar hazard by more than this relative margin before the verdict calls age-dependence. A labeled heuristic, not a significance test — read the Wilson bounds alongside it.")
+
+hud_mode = input.string("Full", "HUD mode", options = ["Off", "Micro", "Full"], group = grp_dsp)
+hud_pos_in = input.string("top_right", "HUD position", options = ["top_left", "top_center", "top_right", "bottom_left", "bottom_center", "bottom_right"], group = grp_dsp)
+show_age_plot = input.bool(true, "Plot current spell age", group = grp_dsp)
+show_pct_plot = input.bool(true, "Plot age percentile", group = grp_dsp)
+use_json_alerts = input.bool(false, "JSON alert payloads (webhook)", group = grp_dsp,
+     tooltip = "OFF: human-readable alert text. ON: machine-readable JSON for webhook automation. Display-layer only.")
+
+// =============================================================================
+// Palette & helpers (suite standard)
+// =============================================================================
+c_bull  = color.rgb(89, 159, 125)
+c_bear  = color.rgb(190, 96, 111)
+c_neut  = color.rgb(112, 126, 148)
+c_gold  = color.rgb(214, 162, 82)
+c_panel = color.new(#0E1316, 5)
+c_cell  = color.new(#151D22, 7)
+c_cell2 = color.new(#10171B, 9)
+c_frame = color.new(#5BD6B0, 88)
+c_text  = color.white
+c_dim   = color.new(color.white, 45)
+c_faint = color.new(color.white, 68)
+
+f_pos(_s) =>
+    switch _s
+        "top_left"      => position.top_left
+        "top_center"    => position.top_center
+        "top_right"     => position.top_right
+        "bottom_left"   => position.bottom_left
+        "bottom_center" => position.bottom_center
+        "bottom_right"  => position.bottom_right
+        => position.top_right
+f_fmt(_x, _d) =>
+    _m = math.pow(10.0, _d)
+    na(_x) ? "n/a" : str.tostring(math.round(_x * _m) / _m)
+f_tcell(_tbl, _c, _r, _txt, _col, _bg) =>
+    table.cell(_tbl, _c, _r, _txt, text_color = _col, bgcolor = _bg, text_size = size.tiny, text_halign = text.align_center)
+// Wilson score lower bound (z = 1.96), suite-standard honesty for counted rates.
+f_wilson_lo(_p, _n) =>
+    _n <= 0 or na(_p) ? float(na) :
+         (_p + 1.96 * 1.96 / (2 * _n) - 1.96 * math.sqrt((_p * (1 - _p) + 1.96 * 1.96 / (4 * _n)) / _n)) / (1 + 1.96 * 1.96 / _n)
+f_rname(_s) =>
+    _s == 1 ? "BULL" : _s == -1 ? "BEAR" : "NEUTRAL"
+f_rcol(_s) =>
+    _s == 1 ? c_bull : _s == -1 ? c_bear : c_neut
+f_blab(_b) =>
+    _b == 0 ? "1-5" : _b == 1 ? "6-10" : _b == 2 ? "11-20" : _b == 3 ? "21-40" : "41+"
+f_bwidth(_b) =>
+    _b <= 1 ? 5.0 : _b == 2 ? 10.0 : 20.0
+f_vtxt(_c) =>
+    _c == 1 ? "AGE-DEPENDENT (hazard rises)" : _c == -1 ? "AGE-DEPENDENT (hazard falls)" : _c == 0 ? "≈ MEMORYLESS" : "INSUFFICIENT SAMPLE"
+f_vshort(_c) =>
+    _c == 1 ? "rises" : _c == -1 ? "falls" : _c == 0 ? "memoryless" : "insufficient"
+f_vcol(_c) =>
+    _c == 1 ? c_gold : _c == 2 ? c_faint : c_dim
+f_arr_mean(_arr) =>
+    int _sz = array.size(_arr)
+    float _s = 0.0
+    if _sz > 0
+        for _i = 0 to _sz - 1
+            _s += array.get(_arr, _i)
+    _sz > 0 ? _s / _sz : float(na)
+
+// Hazard-by-age machinery. Buckets on completed spell length L (bars):
+//   ended-in bucket b  = spells whose final length lies inside b
+//   survived-to bucket = spells with L >= bucket start (1, 6, 11, 21, 41)
+//   hazard(b)          = ended / survived  (n = survivors, Wilson-bounded)
+// Verdict compares the FIRST and LAST bounded buckets with n >= 10, on
+// width-normalized per-bar rates (1 - (1-h)^(1/width)) so a 20-bar bucket
+// is not mechanically "riskier" than a 5-bar one. The 41+ bucket is display
+// only: every spell surviving to it ends inside it, so its raw hazard is
+// 100% by construction (the geometric reference agrees — both print 100).
+f_verdict(_arr) =>
+    int _sz = array.size(_arr)
+    array<int> _ended = array.new_int(5, 0)
+    array<int> _surv = array.new_int(5, 0)
+    if _sz > 0
+        for _i = 0 to _sz - 1
+            int _L = array.get(_arr, _i)
+            int _b = _L <= 5 ? 0 : _L <= 10 ? 1 : _L <= 20 ? 2 : _L <= 40 ? 3 : 4
+            array.set(_ended, _b, array.get(_ended, _b) + 1)
+            array.set(_surv, 0, array.get(_surv, 0) + 1)
+            if _L >= 6
+                array.set(_surv, 1, array.get(_surv, 1) + 1)
+            if _L >= 11
+                array.set(_surv, 2, array.get(_surv, 2) + 1)
+            if _L >= 21
+                array.set(_surv, 3, array.get(_surv, 3) + 1)
+            if _L >= 41
+                array.set(_surv, 4, array.get(_surv, 4) + 1)
+    float _mean = f_arr_mean(_arr)
+    float _pend = not na(_mean) and _mean > 0 ? 1.0 / _mean : float(na)
+    int _yi = -1
+    int _oi = -1
+    for _b = 0 to 3
+        if array.get(_surv, _b) >= 10
+            if _yi < 0
+                _yi := _b
+            _oi := _b
+    float _yhz = na
+    float _ohz = na
+    float _ywlo = na
+    float _owlo = na
+    int _yn = 0
+    int _on = 0
+    int _code = 2
+    if _yi >= 0 and _oi > _yi
+        _yn := array.get(_surv, _yi)
+        _on := array.get(_surv, _oi)
+        _yhz := array.get(_ended, _yi) * 1.0 / _yn
+        _ohz := array.get(_ended, _oi) * 1.0 / _on
+        _ywlo := f_wilson_lo(_yhz, _yn)
+        _owlo := f_wilson_lo(_ohz, _on)
+        float _yr = 1.0 - math.pow(1.0 - math.min(_yhz, 0.999999), 1.0 / f_bwidth(_yi))
+        float _or = 1.0 - math.pow(1.0 - math.min(_ohz, 0.999999), 1.0 / f_bwidth(_oi))
+        _code := _or > _yr * (1.0 + verdict_margin) ? 1 : _or < _yr * (1.0 - verdict_margin) ? -1 : 0
+    string _row = ""
+    for _b = 0 to 4
+        int _nb = array.get(_surv, _b)
+        float _hz = _nb > 0 ? array.get(_ended, _b) * 100.0 / _nb : float(na)
+        float _geo = _b == 4 ? 100.0 : na(_pend) ? float(na) : (1.0 - math.pow(1.0 - _pend, f_bwidth(_b))) * 100.0
+        _row := _row + (_b > 0 ? "  " : "") + f_fmt(_hz, 0) + (_nb < 10 ? " !" : "") + "/" + f_fmt(_geo, 0)
+    [_code, _yhz, _ohz, _ywlo, _owlo, _yn, _on, _yi < 0 ? "—" : f_blab(_yi), _oi < 0 ? "—" : f_blab(_oi), _row, _mean, _sz]
+
+// =============================================================================
+// Regime source: link (strict, per-bar) with internal z-classifier fallback
+// =============================================================================
+one_bar_ret = not na(close[1]) and close > 0 and close[1] > 0 ? math.log(close / close[1]) : float(na)
+win_ret = not na(close[cls_lookback]) and close > 0 and close[cls_lookback] > 0 ? math.log(close / close[cls_lookback]) : float(na)
+win_vol = ta.stdev(one_bar_ret, cls_lookback) * math.sqrt(cls_lookback)
+obs_z = not na(win_ret) and not na(win_vol) and win_vol > 0 ? win_ret / win_vol : float(na)
+
+_lv = regime_src
+link_ok = use_link and not na(_lv) and (_lv == -1.0 or _lv == 0.0 or _lv == 1.0)
+int int_raw = na(obs_z) ? 0 : obs_z > 0.85 ? 1 : obs_z < -0.85 ? -1 : 0
+live_ready = link_ok or not na(obs_z)
+int live_state = link_ok ? int(_lv) : int_raw
+var string src_live = "INTERNAL"
+if barstate.isconfirmed
+    src_live := link_ok ? "LINK" : "INTERNAL"
+
+// =============================================================================
+// Spell machine (confirmed bars): current regime + age; completed spells to
+// per-side ring arrays (cap 200 — a rolling evidence window, oldest age out)
+// =============================================================================
+var array<int> bull_spells = array.new_int()
+var array<int> bear_spells = array.new_int()
+var array<int> neut_spells = array.new_int()
+var int cur_reg = 0
+var int cur_age = 0
+var bool seeded = false
+
+// Per-side verdict state (sentinel code 2 = insufficient; exports map 2 → na)
+var int bull_code = 2
+var float bull_yhz = na
+var float bull_ohz = na
+var float bull_ywlo = na
+var float bull_owlo = na
+var int bull_yn = 0
+var int bull_on = 0
+var string bull_ylab = "—"
+var string bull_olab = "—"
+var string bull_row = "n/a"
+var float bull_mean = na
+var int bull_nsp = 0
+var int bear_code = 2
+var float bear_yhz = na
+var float bear_ohz = na
+var float bear_ywlo = na
+var float bear_owlo = na
+var int bear_yn = 0
+var int bear_on = 0
+var string bear_ylab = "—"
+var string bear_olab = "—"
+var string bear_row = "n/a"
+var float bear_mean = na
+var int bear_nsp = 0
+
+bool bull_flip = false
+bool bear_flip = false
+if barstate.isconfirmed and live_ready
+    int _s = live_state
+    if not seeded
+        cur_reg := _s
+        cur_age := 1
+        seeded := true
+    else if _s == cur_reg
+        cur_age += 1
+    else
+        int _end_side = cur_reg
+        int _end_len = cur_age
+        if _end_side == 1
+            array.push(bull_spells, _end_len)
+            if array.size(bull_spells) > 200
+                array.shift(bull_spells)
+            [_c, _yh, _oh, _yw, _ow, _yn2, _on2, _yl, _ol, _rw, _mn, _ns] = f_verdict(bull_spells)
+            bull_flip := _c != bull_code
+            bull_code := _c
+            bull_yhz := _yh
+            bull_ohz := _oh
+            bull_ywlo := _yw
+            bull_owlo := _ow
+            bull_yn := _yn2
+            bull_on := _on2
+            bull_ylab := _yl
+            bull_olab := _ol
+            bull_row := _rw
+            bull_mean := _mn
+            bull_nsp := _ns
+        else if _end_side == -1
+            array.push(bear_spells, _end_len)
+            if array.size(bear_spells) > 200
+                array.shift(bear_spells)
+            [_c, _yh, _oh, _yw, _ow, _yn2, _on2, _yl, _ol, _rw, _mn, _ns] = f_verdict(bear_spells)
+            bear_flip := _c != bear_code
+            bear_code := _c
+            bear_yhz := _yh
+            bear_ohz := _oh
+            bear_ywlo := _yw
+            bear_owlo := _ow
+            bear_yn := _yn2
+            bear_on := _on2
+            bear_ylab := _yl
+            bear_olab := _ol
+            bear_row := _rw
+            bear_mean := _mn
+            bear_nsp := _ns
+        else if track_neutral
+            array.push(neut_spells, _end_len)
+            if array.size(neut_spells) > 200
+                array.shift(neut_spells)
+        cur_reg := _s
+        cur_age := 1
+
+// Age percentile of the RUNNING spell vs its own side's completed history
+// (na below 5 completed spells — too thin to rank against)
+var float age_pct = na
+if barstate.isconfirmed and seeded
+    array<int> _hist = bull_spells
+    if cur_reg == -1
+        _hist := bear_spells
+    if cur_reg == 0
+        _hist := neut_spells
+    int _hsz = array.size(_hist)
+    if cur_reg == 0 and not track_neutral
+        age_pct := na
+    else if _hsz >= 5
+        int _le = 0
+        for _i = 0 to _hsz - 1
+            _le += array.get(_hist, _i) <= cur_age ? 1 : 0
+        age_pct := _le * 100.0 / _hsz
+    else
+        age_pct := na
+
+// =============================================================================
+// Plots & exports
+// =============================================================================
+plot(show_age_plot and seeded ? float(cur_age) : na, "Current spell age (bars)", color = f_rcol(cur_reg), linewidth = 2)
+plot(show_pct_plot ? age_pct : na, "Age percentile (vs own history)", color = color.new(c_gold, 25), linewidth = 1)
+
+plot(seeded ? float(cur_age) : na, "PERSIST_CUR_AGE_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(age_pct, "PERSIST_AGE_PCTILE_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(bull_code == 2 ? float(na) : float(bull_code), "PERSIST_BULL_VERDICT_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(bear_code == 2 ? float(na) : float(bear_code), "PERSIST_BEAR_VERDICT_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(bull_mean, "PERSIST_BULL_MEAN_DWELL_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(bear_mean, "PERSIST_BEAR_MEAN_DWELL_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+
+// =============================================================================
+// HUD
+// =============================================================================
+var table hud = table.new(f_pos(hud_pos_in), 2, 11, bgcolor = c_panel, frame_color = c_frame,
+     frame_width = 1, border_color = color.new(color.white, 92), border_width = 1)
+if barstate.islast and hud_mode != "Off"
+    _hdr_txt = not seeded ? "WARMING · no valid regime yet" : f_rname(cur_reg) + " · " + str.tostring(cur_age) + "b · " + src_live
+    _hdr_bg = not seeded ? c_cell : color.new(f_rcol(cur_reg), 45)
+    f_tcell(hud, 0, 0, "MKV Persist " + variant_tag, c_text, c_frame)
+    f_tcell(hud, 1, 0, _hdr_txt, c_text, _hdr_bg)
+    if hud_mode == "Full"
+        f_tcell(hud, 0, 1, "Source", c_dim, c_panel)
+        f_tcell(hud, 1, 1, src_live == "LINK" ? "LINK · external -1/0/+1 wire" : "INTERNAL · z " + f_fmt(obs_z, 2) + " (±0.85, lb " + str.tostring(cls_lookback) + ")", src_live == "LINK" ? c_gold : c_dim, c_cell)
+        f_tcell(hud, 0, 2, "Regime · age · age pct", c_dim, c_panel)
+        f_tcell(hud, 1, 2, not seeded ? "n/a" : f_rname(cur_reg) + " · " + str.tostring(cur_age) + " bars · " + (na(age_pct) ? "pct n/a (<5 spells)" : "pct " + f_fmt(age_pct, 0) + "%"), seeded ? f_rcol(cur_reg) : c_faint, c_cell)
+        f_tcell(hud, 0, 3, "Bull hazard young→old", c_dim, c_panel)
+        f_tcell(hud, 1, 3, bull_code == 2 ? "n/a — need two bounded buckets n≥10" : bull_ylab + " " + f_fmt(bull_yhz * 100.0, 0) + "% Wlo " + f_fmt(bull_ywlo * 100.0, 0) + " (n" + str.tostring(bull_yn) + ") → " + bull_olab + " " + f_fmt(bull_ohz * 100.0, 0) + "% Wlo " + f_fmt(bull_owlo * 100.0, 0) + " (n" + str.tostring(bull_on) + ")", bull_code == 2 ? c_faint : c_dim, c_cell)
+        f_tcell(hud, 0, 4, "Bull verdict*", c_dim, c_panel)
+        f_tcell(hud, 1, 4, f_vtxt(bull_code), f_vcol(bull_code), c_cell)
+        f_tcell(hud, 0, 5, "Bear hazard young→old", c_dim, c_panel)
+        f_tcell(hud, 1, 5, bear_code == 2 ? "n/a — need two bounded buckets n≥10" : bear_ylab + " " + f_fmt(bear_yhz * 100.0, 0) + "% Wlo " + f_fmt(bear_ywlo * 100.0, 0) + " (n" + str.tostring(bear_yn) + ") → " + bear_olab + " " + f_fmt(bear_ohz * 100.0, 0) + "% Wlo " + f_fmt(bear_owlo * 100.0, 0) + " (n" + str.tostring(bear_on) + ")", bear_code == 2 ? c_faint : c_dim, c_cell)
+        f_tcell(hud, 0, 6, "Bear verdict*", c_dim, c_panel)
+        f_tcell(hud, 1, 6, f_vtxt(bear_code), f_vcol(bear_code), c_cell)
+        f_tcell(hud, 0, 7, "Mean dwell (completed)", c_dim, c_panel)
+        f_tcell(hud, 1, 7, "bull ~" + f_fmt(bull_mean, 1) + " (n" + str.tostring(bull_nsp) + ") · bear ~" + f_fmt(bear_mean, 1) + " (n" + str.tostring(bear_nsp) + ")" + (track_neutral ? " · neut ~" + f_fmt(f_arr_mean(neut_spells), 1) : ""), c_dim, c_cell)
+        f_tcell(hud, 0, 8, "Bull hz/geo 1-5→41+", c_dim, c_panel)
+        f_tcell(hud, 1, 8, bull_row, c_faint, c_cell2)
+        f_tcell(hud, 0, 9, "Bear hz/geo 1-5→41+", c_dim, c_panel)
+        f_tcell(hud, 1, 9, bear_row, c_faint, c_cell2)
+        f_tcell(hud, 0, 10, "*measures the assumption backtests make", c_faint, c_panel)
+        f_tcell(hud, 1, 10, "not a signal · not advice", c_faint, c_panel)
+
+// =============================================================================
+// Alerts (confirmed-bar verdict changes; rare by construction)
+// =============================================================================
+alertcondition(bull_flip, "Bull persistence verdict changed", "Persistence Gauge: bull-spell age-dependence verdict changed")
+alertcondition(bear_flip, "Bear persistence verdict changed", "Persistence Gauge: bear-spell age-dependence verdict changed")
+if bull_flip or bear_flip
+    _side = bull_flip ? "bull" : "bear"
+    _vc = bull_flip ? bull_code : bear_code
+    _yh = bull_flip ? bull_yhz : bear_yhz
+    _oh = bull_flip ? bull_ohz : bear_ohz
+    _ns = bull_flip ? bull_nsp : bear_nsp
+    if use_json_alerts
+        alert('{"ev":"persistence","sym":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","side":"' + _side + '","verdict":"' + f_vshort(_vc) + '","young_hz":' + (na(_yh) ? "null" : f_fmt(_yh, 3)) + ',"old_hz":' + (na(_oh) ? "null" : f_fmt(_oh, 3)) + ',"spells_n":' + str.tostring(_ns) + ',"source":"' + src_live + '","variant":"' + variant_tag + '","t":' + str.tostring(time) + '}', alert.freq_once_per_bar_close)
+    else
+        alert("Persistence Gauge [" + variant_tag + "]: " + syminfo.ticker + " " + _side + "-spell verdict → " + f_vtxt(_vc) + " · young hz " + f_fmt(_yh * 100.0, 0) + "% vs old hz " + f_fmt(_oh * 100.0, 0) + "% · spells n" + str.tostring(_ns), alert.freq_once_per_bar_close)
+
+// =============================================================================
+// End of file · Markov Property Regime Persistence Gauge v1.0

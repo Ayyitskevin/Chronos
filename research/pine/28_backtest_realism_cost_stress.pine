@@ -1,0 +1,248 @@
+//@version=6
+// =============================================================================
+// Backtest Realism Simulator — Cost Stress v1.0 (5T Pine Suite · Desk Kit)
+//
+// WHAT THIS IS.
+// A strategy-shell GRAFT in the Expectancy Journal pattern. Section A below is
+// a THROWAWAY demo strategy so this file compiles standalone — replace it with
+// your strategy, or copy Section B to the bottom of any suite strategy. The
+// suite's validation gate 3 doubles slippage ONCE, by hand, per variant. This
+// graft makes cost stress CONTINUOUS and visible: every closed trade in the
+// host strategy is re-scored under added friction, side by side — Reported vs
+// Stressed vs Doubled-stress (the gate-3 sweep) — so a fragile edge is caught
+// the day it gets fragile, not at the next manual audit.
+//
+// HONESTY, stated before the mechanics (and repeated in the table footer).
+// This panel re-scores P&L ARITHMETIC ONLY. Real slippage also changes WHICH
+// trades exist — fills you would have missed, stops that would have been hit
+// earlier, partial fills you never got. A drag re-score therefore shows the
+// OPTIMISTIC bound on the damage, not a re-simulation. If a strategy fails
+// even this optimistic bound, it fails, full stop; passing it proves less.
+// Second honesty point: the stress drag here is ADDED ON TOP of whatever
+// commission and slippage the host strategy() declaration already models.
+// All P/L is in strategy CURRENCY, per the journal's $-vs-R convention.
+// Closed trades only (non-repaint). Decision support only — a human places
+// every trade. Risk controls outrank all signals.
+//
+// v1.0 changelog (2026-07-17):
+//   Initial release. Cached closed-trade scan (re-runs only when
+//   strategy.closedtrades changes); per-trade drag = 2 sides of commission
+//   (bps on entry notional) + 2 sides of slippage (ticks × mintick × size);
+//   Reported / Stressed / Doubled-stress columns for net, PF, win rate,
+//   expectancy per trade; survival verdict row (stressed PF > 1?, doubled
+//   PF > 1? = the gate-3 pass/fail, live); merge-guarded table with the
+//   optimistic-bound honesty footer; data-window exports; alertcondition on
+//   the doubled-stress PF falling below 1.0 (confirmed) + optional JSON
+//   alert (default OFF).
+//   Evidence label: needs user run.
+// =============================================================================
+strategy("Backtest Realism Simulator — Cost Stress v1.0", shorttitle = "Cost Stress v1", overlay = true,
+     initial_capital = 100000, commission_type = strategy.commission.percent, commission_value = 0.03,
+     slippage = 2, calc_on_every_tick = false, process_orders_on_close = false)
+
+// =============================================================================
+// SECTION A · DEMO STRATEGY — REPLACE ME (exists only so the panel has trades)
+// =============================================================================
+demo_fast = ta.ema(close, 9)
+demo_slow = ta.ema(close, 21)
+if barstate.isconfirmed and ta.crossover(demo_fast, demo_slow)
+    strategy.entry("L1D", strategy.long, comment = "L1D · demo")
+if barstate.isconfirmed and ta.crossunder(demo_fast, demo_slow)
+    strategy.close("L1D", comment = "demo exit")
+// ======================= END SECTION A · DEMO ================================
+
+// =============================================================================
+// SECTION B · THE COST STRESS PANEL — copy from here down into your strategy
+// =============================================================================
+grp_cs = "9 · Cost Stress"
+cs_variant_tag = input.string("v1.0-base", "Variant tag (freeze-the-config discipline)", group = grp_cs,
+     tooltip = "Label this exact settings set. Any settings change = new tag = new variant with its own validation cycle. The tag prints on the table and in alerts so screenshots self-document.")
+cs_slip_ticks = input.float(2.0, "Stress slippage (ticks per side)", minval = 0.0, maxval = 100.0, step = 0.5, group = grp_cs,
+     tooltip = "Added slippage per SIDE, in ticks (× syminfo.mintick × shares). Applied twice per round trip, ON TOP of whatever slippage the host strategy() already models.")
+cs_comm_bps = input.float(3.0, "Stress commission (bps per side)", minval = 0.0, maxval = 100.0, step = 0.5, group = grp_cs,
+     tooltip = "Added commission per SIDE, in basis points of entry notional. Applied twice per round trip, ON TOP of the host's modeled commission.")
+cs_max_report_trades = input.int(3000, "Max closed trades to scan", minval = 100, maxval = 9000, group = grp_cs)
+cs_pos_in = input.string("top_right", "Table position", options = ["top_left", "top_center", "top_right", "bottom_left", "bottom_center", "bottom_right"], group = grp_cs)
+cs_use_json_alerts = input.bool(false, "JSON alert payloads (webhook)", group = grp_cs,
+     tooltip = "OFF: human-readable alert text. ON: machine-readable JSON for webhook automation. Display-layer only.")
+
+// Palette (suite standard values, CS-namespaced so the graft never collides)
+cCS_bull  = color.rgb(89, 159, 125)
+cCS_bear  = color.rgb(190, 96, 111)
+cCS_neut  = color.rgb(112, 126, 148)
+cCS_gold  = color.rgb(214, 162, 82)
+cCS_panel = color.new(#0E1316, 5)
+cCS_cell  = color.new(#151D22, 7)
+cCS_cell2 = color.new(#10171B, 9)
+cCS_frame = color.new(#5BD6B0, 88)
+cCS_text  = color.white
+cCS_dim   = color.new(color.white, 45)
+cCS_faint = color.new(color.white, 68)
+
+fCS_pos(_s) =>
+    switch _s
+        "top_left"      => position.top_left
+        "top_center"    => position.top_center
+        "top_right"     => position.top_right
+        "bottom_left"   => position.bottom_left
+        "bottom_center" => position.bottom_center
+        "bottom_right"  => position.bottom_right
+        => position.top_right
+fCS_fmt(_x, _d) =>
+    _m = math.pow(10.0, _d)
+    na(_x) ? "n/a" : str.tostring(math.round(_x * _m) / _m)
+fCS_money(_v) =>
+    na(_v) ? "n/a" : (_v < 0 ? "-$" : "$") + str.tostring(math.abs(_v), "#,###.##")
+fCS_pf_txt(_gp, _gl) =>
+    _gl > 0 ? str.tostring(_gp / _gl, "#.##") : _gp > 0 ? "inf" : "n/a"
+fCS_jnum(_x, _d) =>
+    na(_x) ? "null" : fCS_fmt(_x, _d)
+
+// Cached statistics — the scan below re-runs ONLY when strategy.closedtrades
+// changes; exports and alerts read these persistent values.
+var int cs_n = 0
+var float cs_net_rep = na
+var float cs_net_str = na
+var float cs_net_dbl = na
+var float cs_pf_rep = na
+var float cs_pf_str = na
+var float cs_pf_dbl = na
+var float cs_wr_rep = na
+var float cs_wr_str = na
+var float cs_wr_dbl = na
+var float cs_exp_rep = na
+var float cs_exp_str = na
+var float cs_exp_dbl = na
+var float cs_drag_avg = na
+var int cs_pass_str = -1
+var int cs_pass_dbl = -1
+var int cs_last_scanned = -1
+
+var table cs_tbl = table.new(fCS_pos(cs_pos_in), 4, 9, bgcolor = cCS_panel, frame_color = cCS_frame,
+     frame_width = 1, border_color = color.new(color.white, 92), border_width = 1)
+var bool cs_merged = false
+fCS_cell(_c, _r, _txt, _tc, _bg) =>
+    table.cell(cs_tbl, _c, _r, _txt, text_color = _tc, bgcolor = _bg, text_size = size.small)
+
+if barstate.islast and strategy.closedtrades != cs_last_scanned
+    cs_last_scanned := strategy.closedtrades
+    int _tot = strategy.closedtrades
+    int _first = math.max(0, _tot - cs_max_report_trades)
+    int _n = 0
+    float _drag_sum = 0.0
+    float _net_r = 0.0
+    float _net_s = 0.0
+    float _net_d = 0.0
+    float _gp_r = 0.0
+    float _gl_r = 0.0
+    float _gp_s = 0.0
+    float _gl_s = 0.0
+    float _gp_d = 0.0
+    float _gl_d = 0.0
+    int _w_r = 0
+    int _w_s = 0
+    int _w_d = 0
+    if _tot > 0
+        for i = _first to _tot - 1
+            float _p = strategy.closedtrades.profit(i)
+            float _sz = math.abs(strategy.closedtrades.size(i))
+            float _ep = strategy.closedtrades.entry_price(i)
+            float _notional = _sz * _ep
+            // drag per round trip: 2 sides of commission + 2 sides of slippage
+            float _drag = 2.0 * (cs_comm_bps / 10000.0 * _notional) + 2.0 * (cs_slip_ticks * syminfo.mintick * _sz)
+            float _ps = _p - _drag
+            float _pd = _p - 2.0 * _drag
+            _n += 1
+            _drag_sum += _drag
+            _net_r += _p
+            _net_s += _ps
+            _net_d += _pd
+            if _p > 0
+                _w_r += 1
+                _gp_r += _p
+            else if _p < 0
+                _gl_r += math.abs(_p)
+            if _ps > 0
+                _w_s += 1
+                _gp_s += _ps
+            else if _ps < 0
+                _gl_s += math.abs(_ps)
+            if _pd > 0
+                _w_d += 1
+                _gp_d += _pd
+            else if _pd < 0
+                _gl_d += math.abs(_pd)
+    cs_n := _n
+    cs_net_rep := _n > 0 ? _net_r : float(na)
+    cs_net_str := _n > 0 ? _net_s : float(na)
+    cs_net_dbl := _n > 0 ? _net_d : float(na)
+    cs_pf_rep := _gl_r > 0 ? _gp_r / _gl_r : float(na)
+    cs_pf_str := _gl_s > 0 ? _gp_s / _gl_s : float(na)
+    cs_pf_dbl := _gl_d > 0 ? _gp_d / _gl_d : float(na)
+    cs_wr_rep := _n > 0 ? _w_r * 100.0 / _n : float(na)
+    cs_wr_str := _n > 0 ? _w_s * 100.0 / _n : float(na)
+    cs_wr_dbl := _n > 0 ? _w_d * 100.0 / _n : float(na)
+    cs_exp_rep := _n > 0 ? _net_r / _n : float(na)
+    cs_exp_str := _n > 0 ? _net_s / _n : float(na)
+    cs_exp_dbl := _n > 0 ? _net_d / _n : float(na)
+    cs_drag_avg := _n > 0 ? _drag_sum / _n : float(na)
+    cs_pass_str := _n > 0 ? ((_gl_s > 0 ? _gp_s / _gl_s > 1.0 : _gp_s > 0) ? 1 : 0) : -1
+    cs_pass_dbl := _n > 0 ? ((_gl_d > 0 ? _gp_d / _gl_d > 1.0 : _gp_d > 0) ? 1 : 0) : -1
+    // ---- table (drawn only on scan; persists between scans) ----
+    fCS_cell(0, 0, "Cost Stress " + cs_variant_tag + " · n " + str.tostring(_n) + " · +" + fCS_fmt(cs_slip_ticks, 1) + "t / " + fCS_fmt(cs_comm_bps, 1) + "bps per side (Doubled = 2× both, the gate-3 sweep)", cCS_text, cCS_frame)
+    fCS_cell(0, 1, "", cCS_dim, cCS_panel)
+    fCS_cell(1, 1, "Reported", cCS_text, cCS_cell)
+    fCS_cell(2, 1, "Stressed", cCS_gold, cCS_cell)
+    fCS_cell(3, 1, "Doubled (gate 3)", cCS_gold, cCS_cell)
+    fCS_cell(0, 2, "Net", cCS_dim, cCS_panel)
+    fCS_cell(1, 2, fCS_money(cs_net_rep), na(cs_net_rep) ? cCS_faint : cs_net_rep >= 0 ? cCS_bull : cCS_bear, cCS_cell)
+    fCS_cell(2, 2, fCS_money(cs_net_str), na(cs_net_str) ? cCS_faint : cs_net_str >= 0 ? cCS_bull : cCS_bear, cCS_cell2)
+    fCS_cell(3, 2, fCS_money(cs_net_dbl), na(cs_net_dbl) ? cCS_faint : cs_net_dbl >= 0 ? cCS_bull : cCS_bear, cCS_cell2)
+    fCS_cell(0, 3, "Profit factor", cCS_dim, cCS_panel)
+    fCS_cell(1, 3, fCS_fmt(cs_pf_rep, 2), cCS_dim, cCS_cell)
+    fCS_cell(2, 3, fCS_fmt(cs_pf_str, 2), cCS_dim, cCS_cell2)
+    fCS_cell(3, 3, fCS_fmt(cs_pf_dbl, 2), cCS_dim, cCS_cell2)
+    fCS_cell(0, 4, "Win rate", cCS_dim, cCS_panel)
+    fCS_cell(1, 4, fCS_fmt(cs_wr_rep, 1) + "%", cCS_dim, cCS_cell)
+    fCS_cell(2, 4, fCS_fmt(cs_wr_str, 1) + "%", cCS_dim, cCS_cell2)
+    fCS_cell(3, 4, fCS_fmt(cs_wr_dbl, 1) + "%", cCS_dim, cCS_cell2)
+    fCS_cell(0, 5, "Expectancy / trade", cCS_dim, cCS_panel)
+    fCS_cell(1, 5, fCS_money(cs_exp_rep), cCS_dim, cCS_cell)
+    fCS_cell(2, 5, fCS_money(cs_exp_str), cCS_dim, cCS_cell2)
+    fCS_cell(3, 5, fCS_money(cs_exp_dbl), cCS_dim, cCS_cell2)
+    fCS_cell(0, 6, "Survives PF > 1?", cCS_text, cCS_panel)
+    fCS_cell(1, 6, "— (baseline)", cCS_faint, cCS_cell)
+    fCS_cell(2, 6, cs_pass_str == -1 ? "n/a" : (cs_pass_str == 1 ? "✓ PF " : "✗ PF ") + fCS_fmt(cs_pf_str, 2), cs_pass_str == 1 ? cCS_bull : cs_pass_str == 0 ? cCS_bear : cCS_faint, cs_pass_str == 1 ? color.new(cCS_bull, 78) : cs_pass_str == 0 ? color.new(cCS_bear, 78) : cCS_cell)
+    fCS_cell(3, 6, cs_pass_dbl == -1 ? "n/a" : (cs_pass_dbl == 1 ? "✓ gate 3 PASS · PF " : "✗ gate 3 FAIL · PF ") + fCS_fmt(cs_pf_dbl, 2), cs_pass_dbl == 1 ? cCS_bull : cs_pass_dbl == 0 ? cCS_bear : cCS_faint, cs_pass_dbl == 1 ? color.new(cCS_bull, 78) : cs_pass_dbl == 0 ? color.new(cCS_bear, 78) : cCS_cell)
+    fCS_cell(0, 7, "*P&L re-score only — real friction also changes WHICH trades exist (missed fills, earlier stops); this is the OPTIMISTIC bound on damage, NOT a re-simulation", cCS_faint, cCS_panel)
+    fCS_cell(0, 8, "*drag ~" + fCS_money(cs_drag_avg) + " / trade, added ON TOP of host commission/slippage · $ units (R via suite grafting) · verdicts are heuristics", cCS_faint, cCS_panel)
+    if not cs_merged
+        table.merge_cells(cs_tbl, 0, 0, 3, 0)
+        table.merge_cells(cs_tbl, 0, 7, 3, 7)
+        table.merge_cells(cs_tbl, 0, 8, 3, 8)
+        cs_merged := true
+
+// Exports (data-window only; na until the first scan on the last bar)
+plot(cs_pf_str, "CS_STRESSED_PF_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(cs_pf_dbl, "CS_DOUBLED_PF_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(cs_net_str, "CS_STRESSED_NET_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(cs_drag_avg, "CS_DRAG_PER_TRADE_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(cs_pass_dbl == 1 ? 1.0 : cs_pass_dbl == 0 ? 0.0 : na, "CS_GATE3_PASS_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+
+// Alert: doubled-stress survival flipping to FAIL (PF crossing below 1.0),
+// confirmed bars; both states must be known before an event can fire.
+var int cs_prev_pass_dbl = -1
+cs_gate3_fail = barstate.isconfirmed and cs_prev_pass_dbl == 1 and cs_pass_dbl == 0
+if barstate.isconfirmed
+    cs_prev_pass_dbl := cs_pass_dbl
+alertcondition(cs_gate3_fail, "Cost Stress: doubled-stress PF fell below 1.0", "Cost Stress: the doubled-stress profit factor crossed below 1.0 — the live gate-3 sweep now FAILS")
+if cs_gate3_fail
+    if cs_use_json_alerts
+        alert('{"ev":"cost_stress","sym":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","event":"doubled_pf_below_1","pf_reported":' + fCS_jnum(cs_pf_rep, 3) + ',"pf_stressed":' + fCS_jnum(cs_pf_str, 3) + ',"pf_doubled":' + fCS_jnum(cs_pf_dbl, 3) + ',"drag_per_trade":' + fCS_jnum(cs_drag_avg, 2) + ',"n":' + str.tostring(cs_n) + ',"variant":"' + cs_variant_tag + '","t":' + str.tostring(time) + '}', alert.freq_once_per_bar_close)
+    else
+        alert("Cost Stress [" + cs_variant_tag + "]: " + syminfo.ticker + " doubled-stress PF crossed below 1.0 — live gate-3 sweep FAILS" +
+             " · PF reported " + fCS_fmt(cs_pf_rep, 2) + " / stressed " + fCS_fmt(cs_pf_str, 2) + " / doubled " + fCS_fmt(cs_pf_dbl, 2) +
+             " · drag ~" + fCS_money(cs_drag_avg) + " per trade · n " + str.tostring(cs_n), alert.freq_once_per_bar_close)
+// ======================= END SECTION B · COST STRESS =========================
+// =============================================================================
+// End of file · Backtest Realism Simulator — Cost Stress v1.0

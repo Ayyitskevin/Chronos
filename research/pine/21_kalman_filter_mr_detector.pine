@@ -1,0 +1,332 @@
+//@version=6
+// =============================================================================
+// Kalman Filter Mean Reversion Regime Detector v1.0 (5T Pine Suite · Desk Kit)
+//
+// WHAT THIS IS.
+// A one-dimensional Kalman filter with a CONSTANT-LEVEL state model, advanced
+// on confirmed bars only. Each bar it maintains a recursive estimate of a
+// local "fair level" and of that estimate's variance, then standardizes the
+// new close against the model's own predictive uncertainty — the innovation
+// z-score. When price stretches beyond the flag threshold the study flags a
+// mean-reversion STRETCH EVENT (long-side = stretched below the level,
+// short-side = stretched above) and then scores the episode honestly on this
+// chart: did price touch the Kalman level within the horizon before an
+// ATR-sized adverse move? Flags are study events, never signals. This tool
+// COMPLEMENTS — never replaces — the Mean-Reversion Extremes module (RSI-2 /
+// VWAP-stretch lineage): the same desk question through a state-space lens.
+//
+// RESEARCH BASIS, stated plainly.
+// Kalman (1960, Trans. ASME, J. Basic Engineering) — recursive state
+// estimation for linear-Gaussian systems. Educational framing inspired by
+// the Quant Guild channel's Kalman filter episodes. Honesty points:
+//   1. The Kalman filter is OPTIMAL only under linear-Gaussian assumptions
+//      markets routinely violate (fat tails, jumps, volatility clustering).
+//      Treat the output as a disciplined adaptive level with an uncertainty
+//      estimate — nothing more. A level model, not a value model.
+//   2. Process noise Q and measurement noise R are CHOSEN (inputs), not
+//      fitted. Both are expressed as fractions of ATR² so one setting
+//      transfers across symbols, but the q/r choice IS the model: a fast
+//      filter (high q) chases price and never registers stretch; a slow one
+//      (low q) lags and measures stretch from a stale level. There is no
+//      neutral setting, only a disclosed one.
+//   3. The innovation z-score divides by the model's OWN predictive
+//      uncertainty, sqrt(P_pred + R) — a self-referential standardization
+//      under the assumed model, not an external truth.
+// The self-scoring panel (Wilson lower bounds, suite convention) tracks how
+// flags actually resolved on THIS chart — believe that panel, not the
+// elegance of the math.
+//
+// Non-repaint: filter state, flags, and scoring advance on confirmed bars
+// only; intrabar display holds the last confirmed state. Decision support
+// only — a human places every trade. Risk controls outrank all signals.
+//
+// v1.0 changelog (2026-07-17):
+//   Initial release. 1-D constant-level Kalman filter (predict / update with
+//   ATR²-scaled Q and R; state initialized level = close, P = R on the first
+//   valid bar); innovation z-score against the model's own predictive
+//   uncertainty; one-shot stretch flags per episode (re-arm once |z| < 0.5);
+//   episode self-scoring per the MR Extremes v1.1 pattern — fail / timeout
+//   checked BEFORE the level-touch win check (same-bar collisions score
+//   conservatively), fail distance snapshotted at flag time, intraday pending
+//   episodes EXPIRE UNSCORED at session rollover (faint "exp" tally);
+//   per-side hit rates with Wilson 95% lower bounds and thin-sample flags;
+//   optional external-regime context tag on each flag (display + alert text
+//   only, no gating); flag-threshold band; tiered HUD; data-window exports;
+//   JSON alerts (default OFF). Every behavior-adjacent option ships at its
+//   conservative default.
+//   Evidence label: needs user run.
+// =============================================================================
+indicator("Kalman Filter Mean Reversion Regime Detector v1.0", shorttitle = "Kalman MR v1", overlay = true)
+
+grp_mode = "0 · Mode"
+grp_kf   = "1 · Kalman Filter"
+grp_flag = "2 · Stretch Flags"
+grp_link = "3 · Integration Links"
+grp_sc   = "4 · Outcome Scoring"
+grp_dsp  = "5 · Display"
+
+variant_tag = input.string("v1.0-base", "Variant tag (freeze-the-config discipline)", group = grp_mode,
+     tooltip = "Label this exact settings set. Any settings change = new tag = new variant with its own validation cycle. The tag prints on the HUD and in alerts so screenshots self-document.")
+
+q_scale = input.float(0.05, "Process noise q (fraction of ATR²)", minval = 0.001, maxval = 2.0, step = 0.005, group = grp_kf,
+     tooltip = "Q = q × ATR². How far the fair level is allowed to drift per bar. Higher = a fast filter that chases price (stretch never registers); lower = a slow filter that lags (stretch measured from a stale level). The q/r choice IS the model — there is no neutral setting.")
+r_scale = input.float(1.0, "Measurement noise r (fraction of ATR²)", minval = 0.05, maxval = 10.0, step = 0.05, group = grp_kf,
+     tooltip = "R = r × ATR². How noisy a single close is assumed to be. Only the ratio q/r sets the gain; both are ATR-scaled so parameters transfer across symbols and volatility regimes.")
+atr_len = input.int(14, "ATR length (noise scale + fail distance)", minval = 1, maxval = 200, group = grp_kf)
+warm_bars = input.int(50, "Warm-up bars before flagging", minval = 10, maxval = 500, group = grp_kf,
+     tooltip = "The estimate variance needs bars to converge from its P = R start. Below this count the HUD reads WARMING, no flags fire, and the band is hidden.")
+
+flag_z = input.float(2.0, "Stretch flag threshold (|innovation z|)", minval = 0.5, maxval = 6.0, step = 0.25, group = grp_flag,
+     tooltip = "Flag when the close sits this many MODEL standard deviations from the predicted level: z <= -threshold flags LONG-side stretch (price below level), z >= +threshold flags SHORT-side. One shot per episode; re-arms once |z| < 0.5. Flags are study events, never signals.")
+
+use_regime_link = input.bool(false, "Tag flags with external regime context", group = grp_link)
+regime_src = input.source(close, "Regime link (wire to a REGIME_EXPORT)", group = grp_link,
+     tooltip = "Optional. Wire to a suite REGIME_EXPORT emitting strictly -1 / 0 / +1. Each flag is tagged: stretch in the regime's direction = 'with-regime stretch · bounce risk'; stretch against it = 'counter-trend stretch' (the classic pullback context). Display and alert text only — nothing is gated.")
+
+horizon_bars = input.int(30, "Outcome horizon (bars)", minval = 5, maxval = 200, group = grp_sc)
+fail_atr = input.float(1.5, "Adverse move = fail (ATR at flag)", minval = 0.5, maxval = 5.0, step = 0.25, group = grp_sc,
+     tooltip = "An episode FAILS if price moves this many ATRs (ATR snapshotted at flag time) against the reversion before touching the level, or if the horizon expires. Fail / timeout is checked BEFORE the touch each bar, so same-bar collisions score conservatively.")
+min_n = input.int(20, "Thin-sample warning (n)", minval = 5, maxval = 500, group = grp_sc,
+     tooltip = "Below this count the hit-rate rows carry the suite's thin-sample flag. Wilson lower bounds do the honesty work either way.")
+
+hud_mode = input.string("Full", "HUD mode", options = ["Off", "Micro", "Full"], group = grp_dsp)
+hud_pos_in = input.string("top_right", "HUD position", options = ["top_left", "top_center", "top_right", "bottom_left", "bottom_center", "bottom_right"], group = grp_dsp)
+show_marks = input.bool(true, "Mark stretch flags", group = grp_dsp)
+show_band = input.bool(true, "Show flag-threshold band", group = grp_dsp)
+use_json_alerts = input.bool(false, "JSON alert payloads (webhook)", group = grp_dsp,
+     tooltip = "OFF: human-readable alert text. ON: machine-readable JSON for webhook automation. Display-layer only.")
+
+// =============================================================================
+// Palette & helpers (suite standard)
+// =============================================================================
+c_bull  = color.rgb(89, 159, 125)
+c_bear  = color.rgb(190, 96, 111)
+c_neut  = color.rgb(112, 126, 148)
+c_gold  = color.rgb(214, 162, 82)
+c_panel = color.new(#0E1316, 5)
+c_cell  = color.new(#151D22, 7)
+c_cell2 = color.new(#10171B, 9)
+c_frame = color.new(#5BD6B0, 88)
+c_text  = color.white
+c_dim   = color.new(color.white, 45)
+c_faint = color.new(color.white, 68)
+
+f_pos(_s) =>
+    switch _s
+        "top_left"      => position.top_left
+        "top_center"    => position.top_center
+        "top_right"     => position.top_right
+        "bottom_left"   => position.bottom_left
+        "bottom_center" => position.bottom_center
+        "bottom_right"  => position.bottom_right
+        => position.top_right
+f_fmt(_x, _d) =>
+    _m = math.pow(10.0, _d)
+    na(_x) ? "n/a" : str.tostring(math.round(_x * _m) / _m)
+f_tcell(_tbl, _c, _r, _txt, _col, _bg) =>
+    table.cell(_tbl, _c, _r, _txt, text_color = _col, bgcolor = _bg, text_size = size.tiny, text_halign = text.align_center)
+// Wilson score lower bound (z = 1.96), suite-standard honesty for hit rates.
+f_wilson_lo(_p, _n) =>
+    _n <= 0 or na(_p) ? float(na) :
+         (_p + 1.96 * 1.96 / (2 * _n) - 1.96 * math.sqrt((_p * (1 - _p) + 1.96 * 1.96 / (4 * _n)) / _n)) / (1 + 1.96 * 1.96 / _n)
+
+// =============================================================================
+// Kalman core: 1-D constant-level model, confirmed bars only
+//   predict:  level_pred = level (constant-level model) ; P_pred = P + Q
+//   update:   K = P_pred / (P_pred + R) ; level += K·innovation ; P = (1-K)·P_pred
+//   innovation z = (close - level_pred) / sqrt(P_pred + R)
+//   — the model's OWN standardization, not an external truth.
+// =============================================================================
+atr_val = ta.atr(atr_len)
+rearm_z = 0.5  // fixed re-arm threshold: the episode ends once the stretch has substantially unwound
+
+var float kf_level = na    // state estimate ("fair level" under the model)
+var float kf_P = na        // estimate variance
+var int kf_bars = 0
+var float innov_c = na     // last confirmed innovation (close - level_pred)
+var float innov_z_c = na   // last confirmed innovation z
+var float band_sd_c = na   // last confirmed sqrt(P + R) for the display band
+bool kf_stepped = false    // true only on bars where a full predict/update ran
+
+if barstate.isconfirmed and not na(close) and not na(atr_val) and atr_val > 0
+    float _atr2 = atr_val * atr_val
+    float _Q = q_scale * _atr2
+    float _R = r_scale * _atr2
+    if na(kf_level) or na(kf_P)
+        kf_level := close  // state initialized on first valid bar: level = close, P = R
+        kf_P := _R
+        kf_bars := 1
+    else
+        float _P_pred = kf_P + _Q
+        float _S = _P_pred + _R
+        innov_c := close - kf_level
+        innov_z_c := _S > 0 ? innov_c / math.sqrt(_S) : float(na)
+        float _K = _S > 0 ? _P_pred / _S : 0.0
+        kf_level := kf_level + _K * innov_c
+        kf_P := (1.0 - _K) * _P_pred
+        kf_bars += 1
+        kf_stepped := true
+    band_sd_c := math.sqrt(math.max(kf_P + _R, 0.0))
+
+warmed = kf_bars >= warm_bars
+
+// =============================================================================
+// Regime link (optional, strict {-1, 0, +1} validation — context only)
+// =============================================================================
+_rv = regime_src
+link_valid = use_regime_link and not na(_rv) and (_rv == -1.0 or _rv == 0.0 or _rv == 1.0)
+// _dir: -1 = down-stretch (long-side flag), +1 = up-stretch (short-side flag)
+f_regime_tag(_dir) =>
+    not use_regime_link ? "link off" :
+         not link_valid ? "LINK?" :
+         _rv == 0.0 ? "regime neutral" :
+         (_rv > 0 ? 1 : -1) == _dir ? "with-regime stretch · bounce risk" : "counter-trend stretch"
+
+// =============================================================================
+// Stretch flags: one shot per episode, confirmed bars, warm-gated
+// =============================================================================
+var bool armed_long = true
+var bool armed_short = true
+var string last_flag_tag = "no flags yet"
+bool flag_long = false
+bool flag_short = false
+if barstate.isconfirmed and kf_stepped and not na(innov_z_c)
+    if math.abs(innov_z_c) < rearm_z
+        armed_long := true
+        armed_short := true
+    if warmed and armed_long and innov_z_c <= -flag_z
+        flag_long := true
+        armed_long := false
+        last_flag_tag := f_regime_tag(-1)
+    if warmed and armed_short and innov_z_c >= flag_z
+        flag_short := true
+        armed_short := false
+        last_flag_tag := f_regime_tag(1)
+var int state_code = 0  // 0 ARMED · 1 FLAG LONG · 2 FLAG SHORT · 3 COOLING
+if barstate.isconfirmed
+    state_code := flag_long ? 1 : flag_short ? 2 : not armed_long or not armed_short ? 3 : 0
+
+// =============================================================================
+// Episode self-scoring (MR Extremes v1.1 pattern — conservative ordering)
+//   WIN  = price touches the Kalman level within the horizon
+//   FAIL = adverse move beyond fail_atr × ATR-at-flag, or horizon expiry
+//   Fail / timeout is checked FIRST each bar; intraday pending episodes
+//   EXPIRE UNSCORED at session rollover (an unresolved overnight episode is
+//   not evidence either way) — tallied in the faint "exp" counter.
+// =============================================================================
+new_day = ta.change(time("D")) != 0
+var bool pl_on = false
+var float pl_fail_lvl = na
+var int pl_age = 0
+var bool ps_on = false
+var float ps_fail_lvl = na
+var int ps_age = 0
+var int l_n = 0
+var int l_w = 0
+var int s_n = 0
+var int s_w = 0
+var int l_exp = 0
+var int s_exp = 0
+if barstate.isconfirmed
+    if timeframe.isintraday and new_day
+        if pl_on
+            pl_on := false
+            l_n -= 1
+            l_exp += 1
+        if ps_on
+            ps_on := false
+            s_n -= 1
+            s_exp += 1
+    if pl_on
+        pl_age += 1
+        if low <= pl_fail_lvl or pl_age >= horizon_bars
+            pl_on := false
+        else if not na(kf_level) and high >= kf_level
+            l_w += 1
+            pl_on := false
+    if ps_on
+        ps_age += 1
+        if high >= ps_fail_lvl or ps_age >= horizon_bars
+            ps_on := false
+        else if not na(kf_level) and low <= kf_level
+            s_w += 1
+            ps_on := false
+    if flag_long and not pl_on
+        pl_on := true
+        pl_fail_lvl := close - fail_atr * atr_val  // snapshotted at flag time
+        pl_age := 0
+        l_n += 1
+    if flag_short and not ps_on
+        ps_on := true
+        ps_fail_lvl := close + fail_atr * atr_val  // snapshotted at flag time
+        ps_age := 0
+        s_n += 1
+l_hr = l_n > 0 ? l_w * 1.0 / l_n : float(na)
+s_hr = s_n > 0 ? s_w * 1.0 / s_n : float(na)
+l_wlo = l_n > 0 ? f_wilson_lo(l_hr, l_n) * 100.0 : float(na)
+s_wlo = s_n > 0 ? f_wilson_lo(s_hr, s_n) * 100.0 : float(na)
+
+// =============================================================================
+// Plots, band, exports
+// Band per spec: level ± flag_z · sqrt(P + R) (post-update). The flag itself
+// standardizes by predictive sqrt(P_pred + R) — the band is a close visual
+// proxy for the trigger distance, not the exact trigger line.
+// =============================================================================
+band_up = show_band and warmed and not na(kf_level) and not na(band_sd_c) ? kf_level + flag_z * band_sd_c : float(na)
+band_dn = show_band and warmed and not na(kf_level) and not na(band_sd_c) ? kf_level - flag_z * band_sd_c : float(na)
+plot(kf_level, "Kalman level", color = c_gold, linewidth = 2)
+p_bu = plot(band_up, "Flag band upper", color = color.new(c_neut, 70), linewidth = 1)
+p_bd = plot(band_dn, "Flag band lower", color = color.new(c_neut, 70), linewidth = 1)
+fill(p_bu, p_bd, color = color.new(c_neut, 94), title = "Flag band fill")
+plotshape(show_marks and flag_long, "KMR long-side stretch flag", style = shape.circle, location = location.belowbar, color = c_bull, size = size.tiny)
+plotshape(show_marks and flag_short, "KMR short-side stretch flag", style = shape.circle, location = location.abovebar, color = c_bear, size = size.tiny)
+
+plot(kf_level, "KALMAN_LEVEL_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(innov_z_c, "KALMAN_INNOV_Z_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(flag_long ? 1.0 : 0.0, "KMR_LONG_FLAG_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(flag_short ? 1.0 : 0.0, "KMR_SHORT_FLAG_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(l_wlo, "KMR_LONG_WLO_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(s_wlo, "KMR_SHORT_WLO_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+
+// =============================================================================
+// HUD
+// =============================================================================
+var table hud = table.new(f_pos(hud_pos_in), 2, 7, bgcolor = c_panel, frame_color = c_frame,
+     frame_width = 1, border_color = color.new(color.white, 92), border_width = 1)
+if barstate.islast and hud_mode != "Off"
+    _state_txt = not warmed ? "WARMING · " + str.tostring(math.min(kf_bars, warm_bars)) + "/" + str.tostring(warm_bars) :
+         state_code == 1 ? "FLAG LONG" :
+         state_code == 2 ? "FLAG SHORT" :
+         state_code == 3 ? "COOLING (re-arms |z| < " + f_fmt(rearm_z, 1) + ")" : "ARMED"
+    _state_bg = not warmed ? c_cell : state_code == 1 ? color.new(c_bull, 45) : state_code == 2 ? color.new(c_bear, 45) : c_cell
+    f_tcell(hud, 0, 0, "Kalman MR " + variant_tag, c_text, c_frame)
+    f_tcell(hud, 1, 0, _state_txt, c_text, _state_bg)
+    if hud_mode == "Full"
+        f_tcell(hud, 0, 1, "Level · distance", c_dim, c_panel)
+        f_tcell(hud, 1, 1, (na(kf_level) ? "n/a" : str.tostring(kf_level, format.mintick)) + " · " + f_fmt(innov_z_c, 2) + "z", math.abs(nz(innov_z_c)) >= flag_z ? c_text : c_dim, c_cell)
+        f_tcell(hud, 0, 2, "Long flags", c_dim, c_panel)
+        f_tcell(hud, 1, 2, "n" + str.tostring(l_n) + " · hit " + f_fmt(l_hr * 100.0, 0) + "% · Wlo " + f_fmt(l_wlo, 0) + "%" + (l_exp > 0 ? " · exp " + str.tostring(l_exp) : "") + (pl_on ? " · pend " + str.tostring(pl_age) + "/" + str.tostring(horizon_bars) : "") + (l_n < min_n ? " !" : ""), l_n < min_n ? c_faint : c_dim, c_cell)
+        f_tcell(hud, 0, 3, "Short flags", c_dim, c_panel)
+        f_tcell(hud, 1, 3, "n" + str.tostring(s_n) + " · hit " + f_fmt(s_hr * 100.0, 0) + "% · Wlo " + f_fmt(s_wlo, 0) + "%" + (s_exp > 0 ? " · exp " + str.tostring(s_exp) : "") + (ps_on ? " · pend " + str.tostring(ps_age) + "/" + str.tostring(horizon_bars) : "") + (s_n < min_n ? " !" : ""), s_n < min_n ? c_faint : c_dim, c_cell)
+        f_tcell(hud, 0, 4, "q / r (× ATR²)", c_dim, c_panel)
+        f_tcell(hud, 1, 4, f_fmt(q_scale, 3) + " / " + f_fmt(r_scale, 2) + " · ATR " + str.tostring(atr_len) + " · flag " + f_fmt(flag_z, 2) + "z", c_dim, c_cell2)
+        f_tcell(hud, 0, 5, "Regime tag (last flag)", c_dim, c_panel)
+        _tag_col = use_regime_link and not link_valid ? c_bear : last_flag_tag == "with-regime stretch · bounce risk" ? c_bear : last_flag_tag == "counter-trend stretch" ? c_bull : c_dim
+        f_tcell(hud, 1, 5, use_regime_link and not link_valid ? "LINK? (wire a REGIME_EXPORT)" : last_flag_tag, _tag_col, c_cell)
+        f_tcell(hud, 0, 6, "*level model, not value", c_faint, c_panel)
+        f_tcell(hud, 1, 6, "flags are study events, never signals", c_faint, c_panel)
+
+// =============================================================================
+// Alerts (confirmed-bar events; formal wording per suite convention)
+// =============================================================================
+alertcondition(flag_long, "Kalman MR long-side stretch", "Kalman MR Detector: long-side stretch flagged (study event, not a signal)")
+alertcondition(flag_short, "Kalman MR short-side stretch", "Kalman MR Detector: short-side stretch flagged (study event, not a signal)")
+if flag_long or flag_short
+    _side = flag_long ? "long" : "short"
+    if use_json_alerts
+        alert('{"ev":"kalman_mr","sym":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","side":"' + _side + '","innov_z":' + (na(innov_z_c) ? "null" : f_fmt(innov_z_c, 3)) + ',"level":' + (na(kf_level) ? "null" : str.tostring(kf_level, format.mintick)) + ',"variant":"' + variant_tag + '","t":' + str.tostring(time) + '}', alert.freq_once_per_bar_close)
+    else
+        alert("Kalman MR Detector [" + variant_tag + "]: " + syminfo.ticker + " " + _side + "-side stretch flag (study event, not a signal) · z " + f_fmt(innov_z_c, 2) + " · level " + str.tostring(kf_level, format.mintick) + (link_valid ? " · " + last_flag_tag : ""), alert.freq_once_per_bar_close)
+
+// =============================================================================
+// End of file · Kalman Filter Mean Reversion Regime Detector v1.0

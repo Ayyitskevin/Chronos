@@ -1,0 +1,215 @@
+//@version=6
+// =============================================================================
+// Drawdown-Controlled Regime Exit Engine v1.0 (5T Pine Suite · Desk Kit)
+//
+// WHAT THIS IS — and the loud part first.
+// A BEHAVIOR MODULE that ships with its master toggle OFF. In observer mode
+// (the default) it computes and DISPLAYS what it would do without touching a
+// single order — the suite's default-OFF discipline made visible on a panel.
+// Turning it ON is a behavior change: treat active mode as its OWN VARIANT
+// with its own validation cycle before any live use.
+//
+// WHAT IT GOVERNS.
+// The suite already halts ENTRIES on drawdown (the protection rules). This
+// module governs EXITS under drawdown: as equity pain deepens, it tightens
+// what counts as a reason to stay in a trade. A strategy-shell GRAFT in the
+// Expectancy Journal pattern — Section A is a THROWAWAY demo strategy so the
+// file compiles standalone and active mode is demonstrable; Section B is the
+// graft.
+//
+// MECHANICS, stated plainly. Rolling equity peak over a window → drawdown %.
+// Three states: NORMAL (below caution) → host exit rules govern, this module
+// does nothing. CAUTION → tighten: a chandelier trailing stop at a TIGHTENED
+// multiplier (ch_mult × caution factor) is laid under open trades. DEFENSE →
+// get out at breakeven: winners keep a floor at max(entry, trail); underwater
+// trades exit on recovery to entry (limit) while the tightened trail still
+// guards below; and if drawdown worsens a further step beyond the DEFENSE
+// threshold, open positions are closed at market. Thresholds are HEURISTIC
+// INPUTS about operator endurance, not statistical claims — validate them as
+// their own variant. State advances on confirmed bars only (non-repaint).
+// Decision support discipline throughout: % language, no account linkage
+// beyond the backtest's own strategy.equity, a human owns every decision.
+//
+// v1.0 changelog (2026-07-17):
+//   Initial release. Rolling-peak drawdown (window input); NORMAL / CAUTION /
+//   DEFENSE states with confirmed-bar transitions; master toggle DEFAULT OFF
+//   (observer mode computes + displays intentions, touches nothing); active
+//   mode implements CAUTION tightened chandelier trail and DEFENSE breakeven
+//   exit + worsening-step market close via strategy.exit / strategy.close_all
+//   on the demo's "L1D" id, with a grafting note for mirroring host entry
+//   IDs; tiered HUD with observer/active tag and would-do/doing row;
+//   data-window exports; state-escalation alertcondition + optional JSON
+//   alert (default OFF).
+//   Evidence label: needs user run.
+// =============================================================================
+strategy("Drawdown-Controlled Regime Exit Engine v1.0", shorttitle = "DD Exit v1", overlay = true,
+     initial_capital = 100000, commission_type = strategy.commission.percent, commission_value = 0.03,
+     slippage = 2, calc_on_every_tick = false, process_orders_on_close = false)
+
+// =============================================================================
+// SECTION A · DEMO STRATEGY — REPLACE ME (exists so active mode is demonstrable)
+// =============================================================================
+demo_fast = ta.ema(close, 9)
+demo_slow = ta.ema(close, 21)
+if barstate.isconfirmed and ta.crossover(demo_fast, demo_slow)
+    strategy.entry("L1D", strategy.long, comment = "L1D · demo")
+if barstate.isconfirmed and ta.crossunder(demo_fast, demo_slow)
+    strategy.close("L1D", comment = "demo exit")
+// ======================= END SECTION A · DEMO ================================
+
+// =============================================================================
+// SECTION B · THE DD EXIT ENGINE — copy from here down into your strategy
+// =============================================================================
+grp_ddx = "9 · DD Exit Engine"
+ddx_variant_tag = input.string("v1.0-base", "Variant tag (freeze-the-config discipline)", group = grp_ddx,
+     tooltip = "Label this exact settings set. Any settings change = new tag = new variant with its own validation cycle. Flipping the master toggle ON is itself a new variant. The tag prints on the HUD and in alerts.")
+ddx_enable = input.bool(false, "ENABLE exit control (master toggle — ships OFF)", group = grp_ddx,
+     tooltip = "OFF (default) = OBSERVER MODE: the engine computes its state and the exact actions it WOULD take, displays and exports them, and touches no orders. ON = ACTIVE MODE: strategy.exit / close_all calls run. Behavior change — validate as its own variant before any live use.")
+ddx_peak_win = input.int(252, "Equity peak window (bars)", minval = 20, maxval = 2000, group = grp_ddx,
+     tooltip = "Drawdown is measured from the highest strategy.equity over this rolling window, not the all-time peak — old scars age out.")
+ddx_caution_dd = input.float(8.0, "CAUTION drawdown threshold %", minval = 1.0, maxval = 50.0, step = 0.5, group = grp_ddx)
+ddx_defense_dd = input.float(15.0, "DEFENSE drawdown threshold %", minval = 2.0, maxval = 80.0, step = 0.5, group = grp_ddx,
+     tooltip = "Keep DEFENSE above CAUTION. Heuristic endurance thresholds — inputs you chose, not statistical claims.")
+ddx_defense_step = input.float(1.0, "DEFENSE worsening step % (market close)", minval = 0.1, maxval = 10.0, step = 0.1, group = grp_ddx,
+     tooltip = "In DEFENSE, if drawdown worsens this much beyond the DEFENSE threshold, active mode closes open positions at market (stop-the-bleeding rule).")
+ddx_ch_len = input.int(22, "Chandelier length (highest / ATR)", minval = 5, maxval = 200, group = grp_ddx)
+ddx_ch_mult = input.float(3.0, "Chandelier base multiplier", minval = 0.5, maxval = 10.0, step = 0.25, group = grp_ddx)
+ddx_caution_factor = input.float(0.7, "CAUTION tighten factor (× multiplier)", minval = 0.1, maxval = 1.0, step = 0.05, group = grp_ddx,
+     tooltip = "CAUTION trail = chandelier at base multiplier × this factor. 0.70 turns a 3.0× trail into a 2.10× trail — the same exit logic, less rope.")
+ddx_hud_mode = input.string("Full", "HUD mode", options = ["Off", "Micro", "Full"], group = grp_ddx)
+ddx_pos_in = input.string("bottom_right", "HUD position", options = ["top_left", "top_center", "top_right", "bottom_left", "bottom_center", "bottom_right"], group = grp_ddx)
+ddx_use_json_alerts = input.bool(false, "JSON alert payloads (webhook)", group = grp_ddx,
+     tooltip = "OFF: human-readable alert text. ON: machine-readable JSON for webhook automation. Display-layer only.")
+
+// Palette (suite standard values, DX-namespaced so the graft never collides)
+cDX_bull  = color.rgb(89, 159, 125)
+cDX_bear  = color.rgb(190, 96, 111)
+cDX_neut  = color.rgb(112, 126, 148)
+cDX_gold  = color.rgb(214, 162, 82)
+cDX_panel = color.new(#0E1316, 5)
+cDX_cell  = color.new(#151D22, 7)
+cDX_cell2 = color.new(#10171B, 9)
+cDX_frame = color.new(#5BD6B0, 88)
+cDX_text  = color.white
+cDX_dim   = color.new(color.white, 45)
+cDX_faint = color.new(color.white, 68)
+
+fDX_pos(_s) =>
+    switch _s
+        "top_left"      => position.top_left
+        "top_center"    => position.top_center
+        "top_right"     => position.top_right
+        "bottom_left"   => position.bottom_left
+        "bottom_center" => position.bottom_center
+        "bottom_right"  => position.bottom_right
+        => position.bottom_right
+fDX_fmt(_x, _d) =>
+    _m = math.pow(10.0, _d)
+    na(_x) ? "n/a" : str.tostring(math.round(_x * _m) / _m)
+fDX_cell(_tbl, _c, _r, _txt, _col, _bg) =>
+    table.cell(_tbl, _c, _r, _txt, text_color = _col, bgcolor = _bg, text_size = size.tiny, text_halign = text.align_center)
+fDX_jnum(_x, _d) =>
+    na(_x) ? "null" : fDX_fmt(_x, _d)
+
+// =============================================================================
+// Drawdown state machine (confirmed-bar transitions; display value is live)
+// =============================================================================
+ddx_eq_peak = ta.highest(strategy.equity, ddx_peak_win)
+ddx_dd_live = ddx_eq_peak > 0 ? (ddx_eq_peak - strategy.equity) / ddx_eq_peak * 100.0 : float(na)
+var int ddx_state = 0   // 0 NORMAL · 1 CAUTION · 2 DEFENSE
+var int ddx_prev_state = 0
+if barstate.isconfirmed and not na(ddx_dd_live)
+    ddx_state := ddx_dd_live >= ddx_defense_dd ? 2 : ddx_dd_live >= ddx_caution_dd ? 1 : 0
+ddx_escalated = barstate.isconfirmed and ddx_state > ddx_prev_state
+if barstate.isconfirmed
+    ddx_prev_state := ddx_state
+
+// Tightened chandelier trail (long side — the demo is long-only; see the
+// grafting note below for shorts). ta.* calls stay global and unconditional.
+ddx_atr = ta.atr(ddx_ch_len)
+ddx_trail_long = ta.highest(high, ddx_ch_len) - ddx_ch_mult * ddx_caution_factor * ddx_atr
+ddx_close_line = ddx_defense_dd + ddx_defense_step
+
+// What the engine WOULD do right now (computed in BOTH modes; observer mode
+// stops here — display + export only, no order calls)
+ddx_pos_open = strategy.position_size != 0
+ddx_would_tighten = ddx_state >= 1 and ddx_pos_open
+ddx_would_close = ddx_state == 2 and ddx_pos_open and not na(ddx_dd_live) and ddx_dd_live >= ddx_close_line
+string ddx_act_core = ddx_state == 0 ? "no exit action — host exit rules govern" :
+     ddx_state == 1 ? "tighten trail ×" + fDX_fmt(ddx_caution_factor, 2) + " (chandelier " + fDX_fmt(ddx_ch_mult * ddx_caution_factor, 2) + "×ATR)" :
+     "breakeven exit + market close if dd ≥ " + fDX_fmt(ddx_close_line, 1) + "%"
+string ddx_act_txt = ddx_state == 0 ? ddx_act_core :
+     (ddx_enable ? "doing: " : "would: ") + ddx_act_core + (ddx_pos_open ? "" : " — no open trade") + (ddx_would_close ? " · CLOSE LINE HIT" : "")
+
+// -----------------------------------------------------------------------------
+// Active-mode order management — runs ONLY when the master toggle is ON.
+// GRAFTING NOTE (mirror your host entry IDs, like the journal's note):
+//   · The demo trades ONE id, "L1D". In your host, repeat the strategy.exit
+//     call below once per live entry id (L1P/L1R/... and S1F/S1B/S1R/S1X),
+//     with from_entry set to each id.
+//   · SHORT entries mirror the geometry: trail = ta.lowest(low, len) +
+//     mult × factor × ATR; breakeven floor = math.min(entry, trail); the
+//     underwater recovery exit is a limit BUY back at entry (close > entry).
+//   · strategy.exit stops are stop-MARKET orders; DEFENSE's worsening-step
+//     close uses strategy.close_all — conservative, no re-entry logic here.
+// -----------------------------------------------------------------------------
+if ddx_enable and barstate.isconfirmed
+    if ddx_state == 0
+        strategy.cancel("DDX")
+    else if strategy.position_size > 0
+        if ddx_state == 1
+            strategy.exit("DDX", from_entry = "L1D", stop = ddx_trail_long, comment = "DDX caution trail")
+        else
+            float _be = strategy.position_avg_price
+            if close >= _be
+                strategy.exit("DDX", from_entry = "L1D", stop = math.max(_be, ddx_trail_long), comment = "DDX defense BE floor")
+            else
+                strategy.exit("DDX", from_entry = "L1D", stop = ddx_trail_long, limit = _be, comment = "DDX defense BE recover")
+    if ddx_would_close
+        strategy.close_all(comment = "DDX defense close (dd worsened)")
+
+// Exports (data-window only)
+plot(ddx_state, "DDX_STATE_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(ddx_dd_live, "DDX_DD_PCT_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(ddx_enable ? 1.0 : 0.0, "DDX_ACTIVE_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(ddx_would_tighten ? 1.0 : 0.0, "DDX_WOULD_TIGHTEN_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+
+// =============================================================================
+// HUD
+// =============================================================================
+var table ddx_hud = table.new(fDX_pos(ddx_pos_in), 2, 6, bgcolor = cDX_panel, frame_color = cDX_frame,
+     frame_width = 1, border_color = color.new(color.white, 92), border_width = 1)
+if barstate.islast and ddx_hud_mode != "Off"
+    string _st_txt = ddx_state == 2 ? "DEFENSE" : ddx_state == 1 ? "CAUTION" : "NORMAL"
+    string _mode_txt = ddx_enable ? "ACTIVE — exit control ON" : "OBSERVER (ships OFF)"
+    color _st_bg = ddx_state == 2 ? color.new(cDX_bear, 40) : ddx_state == 1 ? color.new(cDX_gold, 45) : color.new(cDX_bull, 60)
+    fDX_cell(ddx_hud, 0, 0, "DD Exit " + ddx_variant_tag, cDX_text, cDX_frame)
+    fDX_cell(ddx_hud, 1, 0, _st_txt + " · " + _mode_txt, cDX_text, _st_bg)
+    if ddx_hud_mode == "Full"
+        fDX_cell(ddx_hud, 0, 1, "Drawdown now", cDX_dim, cDX_panel)
+        fDX_cell(ddx_hud, 1, 1, fDX_fmt(ddx_dd_live, 2) + "% from rolling peak · window " + str.tostring(ddx_peak_win) + " bars", cDX_dim, cDX_cell)
+        fDX_cell(ddx_hud, 0, 2, ddx_enable ? "Doing" : "Would do", ddx_enable ? cDX_bear : cDX_gold, cDX_panel)
+        fDX_cell(ddx_hud, 1, 2, ddx_act_txt, ddx_state == 0 ? cDX_dim : ddx_enable ? cDX_bear : cDX_gold, cDX_cell2)
+        fDX_cell(ddx_hud, 0, 3, "Thresholds", cDX_dim, cDX_panel)
+        fDX_cell(ddx_hud, 1, 3, "CAUTION ≥ " + fDX_fmt(ddx_caution_dd, 1) + "% · DEFENSE ≥ " + fDX_fmt(ddx_defense_dd, 1) + "% · close ≥ " + fDX_fmt(ddx_close_line, 1) + "%", cDX_dim, cDX_cell)
+        fDX_cell(ddx_hud, 0, 4, "Trail config", cDX_dim, cDX_panel)
+        fDX_cell(ddx_hud, 1, 4, "chandelier " + str.tostring(ddx_ch_len) + " · " + fDX_fmt(ddx_ch_mult, 2) + "× → caution " + fDX_fmt(ddx_ch_mult * ddx_caution_factor, 2) + "×", cDX_dim, cDX_cell2)
+        fDX_cell(ddx_hud, 0, 5, "*exit governor · ships OFF", cDX_faint, cDX_panel)
+        fDX_cell(ddx_hud, 1, 5, "observer mode shows intentions · validate as its own variant", cDX_faint, cDX_panel)
+
+// =============================================================================
+// Alert: state escalation (confirmed bars; formal wording per suite convention)
+// =============================================================================
+alertcondition(ddx_escalated, "DD Exit: drawdown state escalated", "DD Exit Engine: the drawdown state escalated (NORMAL→CAUTION, CAUTION→DEFENSE, or NORMAL→DEFENSE)")
+if ddx_escalated
+    string _st_a = ddx_state == 2 ? "DEFENSE" : ddx_state == 1 ? "CAUTION" : "NORMAL"
+    string _would_a = ddx_state == 2 ? "be_exit_and_close_arm" : ddx_state == 1 ? "tighten_trail" : "none"
+    if ddx_use_json_alerts
+        alert('{"ev":"dd_exit","sym":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","state":"' + _st_a + '","state_i":' + str.tostring(ddx_state) + ',"dd_pct":' + fDX_jnum(ddx_dd_live, 2) + ',"active":' + (ddx_enable ? "1" : "0") + ',"would":"' + _would_a + '","variant":"' + ddx_variant_tag + '","t":' + str.tostring(time) + '}', alert.freq_once_per_bar_close)
+    else
+        alert("DD Exit Engine [" + ddx_variant_tag + "]: " + syminfo.ticker + " drawdown state escalated → " + _st_a +
+             " · dd " + fDX_fmt(ddx_dd_live, 2) + "% · mode " + (ddx_enable ? "ACTIVE" : "OBSERVER — no orders touched") +
+             " · " + ddx_act_txt, alert.freq_once_per_bar_close)
+// ======================= END SECTION B · DD EXIT ENGINE ======================
+// =============================================================================
+// End of file · Drawdown-Controlled Regime Exit Engine v1.0

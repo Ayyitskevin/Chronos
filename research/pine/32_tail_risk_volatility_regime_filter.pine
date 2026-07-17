@@ -1,0 +1,233 @@
+//@version=6
+// =============================================================================
+// Tail-Risk Volatility Regime Filter v1.0 (5T Pine Suite · Desk Kit)
+//
+// WHAT THIS IS.
+// A higher-moment lens on this chart's log returns: over a rolling window it
+// computes mean, standard deviation, skewness, EXCESS kurtosis, the downside
+// semideviation / total-sd ratio, and the worst single-bar loss in ATR units
+// — then names a tail state from labeled heuristic thresholds.
+//
+// RESEARCH BASIS, both halves stated plainly.
+//   1. Return tails are fatter than Gaussian. Mandelbrot (1963, J. Business,
+//      cotton prices) and everything since: real markets deliver far more
+//      extreme moves than a normal distribution predicts. Excess kurtosis
+//      above zero is the norm, not the exception — risk sized to Gaussian
+//      assumptions understates tail exposure.
+//   2. AND: sample moments at chart-window sizes are NOISY. Skewness and
+//      especially kurtosis estimates are dominated by a handful of extreme
+//      observations; one shock bar can swing the kurtosis reading for the
+//      whole window, and the estimator's own sampling error at n=100 is
+//      large. Both statements are true at once: tails are real, and this
+//      window's measurement of them is rough. Treat the state as CONTEXT —
+//      never a signal, never a forecast, never advice.
+//
+// Tail state (LABELED HEURISTIC): ORDINARY / ELEVATED (excess kurtosis > 1)
+// / FAT-TAILED (excess kurtosis > 3 or skewness < -1). Thresholds are desk
+// conventions. Semidev ratio note: for a symmetric distribution the ratio is
+// about 0.71 (1/sqrt(2)); readings above that mark downside-heavy variance.
+// Worst-bar figure divides the window's worst close-to-close drop by the
+// CURRENT ATR — an approximation, labeled (not the ATR at event time).
+//
+// Non-repaint: moments recompute on confirmed bars only from a ring buffer
+// of completed returns; the intrabar display holds the last confirmed
+// values. Decision support only — a human places every trade.
+//
+// v1.0 changelog (2026-07-17):
+//   Initial release. Ring-buffer moment engine (window input, warm-gated),
+//   mean/sd/skew/excess-kurtosis, downside semidev ratio, worst 1-bar loss
+//   in current-ATR units, ORDINARY/ELEVATED/FAT-TAILED heuristic state with
+//   escalation-only alerts, optional strict regime-link context row, tiered
+//   HUD with honesty footer, data-window exports, JSON alerts (default OFF).
+//   Evidence label: needs user run.
+// =============================================================================
+indicator("Tail-Risk Volatility Regime Filter v1.0", shorttitle = "Tail Risk v1", overlay = false)
+
+grp_mode = "0 · Mode"
+grp_win  = "1 · Moment Window"
+grp_st   = "2 · Tail State Heuristic"
+grp_link = "3 · Integration Links"
+grp_dsp  = "4 · Display"
+
+variant_tag = input.string("v1.0-base", "Variant tag (freeze-the-config discipline)", group = grp_mode,
+     tooltip = "Label this exact settings set. Any settings change = new tag = new variant with its own validation cycle. The tag prints on the HUD and in alerts so screenshots self-document.")
+
+win = input.int(100, "Moment window (bars)", minval = 20, maxval = 500, group = grp_win,
+     tooltip = "Rolling window of completed log returns. Larger windows steady the estimates but lag regime change; smaller windows track faster but the moments get noisier. Sample skew/kurtosis at any chart window carry large estimation error — the HUD footer says so on purpose.")
+atr_len = input.int(14, "ATR length (worst-bar units)", minval = 1, maxval = 100, group = grp_win)
+
+kurt_elev = input.float(1.0, "ELEVATED above excess kurtosis", minval = 0.1, maxval = 10.0, step = 0.1, group = grp_st)
+kurt_fat = input.float(3.0, "FAT-TAILED above excess kurtosis", minval = 0.5, maxval = 20.0, step = 0.1, group = grp_st)
+skew_fat = input.float(-1.0, "FAT-TAILED below skewness", minval = -5.0, maxval = -0.1, step = 0.1, group = grp_st,
+     tooltip = "Heuristic desk thresholds, honestly labeled — not fitted, not universal. Excess kurtosis 0 = Gaussian tails; equity-index daily returns typically run well above 0.")
+
+use_regime_link = input.bool(false, "Show external regime link (context row)", group = grp_link)
+regime_src = input.source(close, "Regime link (wire to a REGIME_EXPORT)", group = grp_link,
+     tooltip = "Optional. Wire to the flagship engine's REGIME_EXPORT (-1/0/+1) to see the suite regime next to the tail state. Context only — neither source gates the other here.")
+
+hud_mode = input.string("Full", "HUD mode", options = ["Off", "Micro", "Full"], group = grp_dsp)
+hud_pos_in = input.string("top_right", "HUD position", options = ["top_left", "top_center", "top_right", "bottom_left", "bottom_center", "bottom_right"], group = grp_dsp)
+show_state_tint = input.bool(true, "State background tint (ELEVATED/FAT)", group = grp_dsp)
+use_json_alerts = input.bool(false, "JSON alert payloads (webhook)", group = grp_dsp,
+     tooltip = "OFF: human-readable alert text. ON: machine-readable JSON for webhook automation. Display-layer only.")
+
+// =============================================================================
+// Palette & helpers (suite standard)
+// =============================================================================
+c_bull  = color.rgb(89, 159, 125)
+c_bear  = color.rgb(190, 96, 111)
+c_neut  = color.rgb(112, 126, 148)
+c_gold  = color.rgb(214, 162, 82)
+c_panel = color.new(#0E1316, 5)
+c_cell  = color.new(#151D22, 7)
+c_frame = color.new(#5BD6B0, 88)
+c_text  = color.white
+c_dim   = color.new(color.white, 45)
+c_faint = color.new(color.white, 68)
+
+f_pos(_s) =>
+    switch _s
+        "top_left"      => position.top_left
+        "top_center"    => position.top_center
+        "top_right"     => position.top_right
+        "bottom_left"   => position.bottom_left
+        "bottom_center" => position.bottom_center
+        "bottom_right"  => position.bottom_right
+        => position.top_right
+f_fmt(_x, _d) =>
+    _m = math.pow(10.0, _d)
+    na(_x) ? "n/a" : str.tostring(math.round(_x * _m) / _m)
+f_tcell(_tbl, _c, _r, _txt, _col, _bg) =>
+    table.cell(_tbl, _c, _r, _txt, text_color = _col, bgcolor = _bg, text_size = size.tiny, text_halign = text.align_center)
+f_state_txt(_s) =>
+    _s == 0 ? "ORDINARY" : _s == 1 ? "ELEVATED" : "FAT-TAILED"
+f_state_col(_s) =>
+    _s == 0 ? c_neut : _s == 1 ? c_gold : c_bear
+
+// =============================================================================
+// Ring buffers of completed returns / price changes (confirmed bars only)
+// =============================================================================
+atr_v = ta.atr(atr_len)
+var array<float> rets = array.new_float()
+var array<float> chgs = array.new_float()
+if barstate.isconfirmed and not na(close[1]) and close > 0 and close[1] > 0
+    array.push(rets, math.log(close / close[1]))
+    array.push(chgs, close - close[1])
+    if array.size(rets) > win
+        array.shift(rets)
+        array.shift(chgs)
+n_obs = array.size(rets)
+warmed = n_obs >= win
+
+// =============================================================================
+// Moment engine (two bounded passes over the ring; confirmed bars only)
+// =============================================================================
+var float m_mean = na
+var float m_sd = na
+var float m_skew = na
+var float m_kurt = na
+var float m_semir = na
+var float m_worst_atr = na
+if barstate.isconfirmed and warmed
+    float _s1 = 0.0
+    for _i = 0 to n_obs - 1
+        _s1 += array.get(rets, _i)
+    float _mu = _s1 / n_obs
+    float _s2 = 0.0
+    float _s3 = 0.0
+    float _s4 = 0.0
+    float _sdn = 0.0
+    float _wchg = 0.0
+    for _i = 0 to n_obs - 1
+        float _d = array.get(rets, _i) - _mu
+        float _d2 = _d * _d
+        _s2 += _d2
+        _s3 += _d2 * _d
+        _s4 += _d2 * _d2
+        if _d < 0
+            _sdn += _d2
+        float _c = array.get(chgs, _i)
+        if _c < _wchg
+            _wchg := _c
+    float _sd = math.sqrt(_s2 / n_obs)
+    if _sd > 0
+        m_mean := _mu
+        m_sd := _sd
+        m_skew := (_s3 / n_obs) / math.pow(_sd, 3.0)
+        m_kurt := (_s4 / n_obs) / math.pow(_sd, 4.0) - 3.0
+        m_semir := math.sqrt(_sdn / n_obs) / _sd
+    m_worst_atr := not na(atr_v) and atr_v > 0 ? _wchg / atr_v : float(na)
+
+// Tail state (labeled heuristic; FAT test first)
+int tr_state = na(m_kurt) or na(m_skew) ? int(na) :
+     m_kurt > kurt_fat or m_skew < skew_fat ? 2 : m_kurt > kurt_elev ? 1 : 0
+
+// State escalation (confirmed only; de-escalation is not alerted)
+var int prev_state = na
+bool esc_ev = barstate.isconfirmed and not na(tr_state) and not na(prev_state) and tr_state > prev_state
+if barstate.isconfirmed and not na(tr_state)
+    prev_state := tr_state
+
+// Regime link (context row only; strict {-1,0,+1} validation)
+_rv = regime_src
+link_valid = use_regime_link and not na(_rv) and (_rv == -1.0 or _rv == 0.0 or _rv == 1.0)
+link_txt = not use_regime_link ? "link off" : not link_valid ? "LINK?" : _rv == 1.0 ? "BULL" : _rv == -1.0 ? "BEAR" : "NEUTRAL"
+
+// =============================================================================
+// Plots, tint, exports
+// =============================================================================
+plot(m_kurt, "Excess kurtosis", color = c_gold, linewidth = 2)
+plot(m_skew, "Skewness", color = color.new(c_neut, 20), linewidth = 1)
+hline(0.0, "Gaussian tails (excess 0)", color = color.new(color.white, 85), linestyle = hline.style_dotted)
+hline(kurt_elev, "ELEVATED cut", color = color.new(color.white, 80), linestyle = hline.style_dotted)
+hline(kurt_fat, "FAT cut", color = color.new(color.white, 70), linestyle = hline.style_dashed)
+bgcolor(show_state_tint and not na(tr_state) and tr_state == 2 ? color.new(c_bear, 85) :
+     show_state_tint and not na(tr_state) and tr_state == 1 ? color.new(c_gold, 90) : na, title = "Tail state tint")
+
+plot(na(tr_state) ? na : float(tr_state), "TR_STATE_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(m_kurt, "TR_KURT_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(m_skew, "TR_SKEW_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(m_semir, "TR_SEMIDEV_RATIO_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(m_worst_atr, "TR_WORST_ATR_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+
+// =============================================================================
+// HUD
+// =============================================================================
+var table hud = table.new(f_pos(hud_pos_in), 2, 7, bgcolor = c_panel, frame_color = c_frame,
+     frame_width = 1, border_color = color.new(color.white, 92), border_width = 1)
+if barstate.islast and hud_mode != "Off"
+    _state_txt = not warmed ? "WARMING · " + str.tostring(n_obs) + "/" + str.tostring(win) :
+         na(tr_state) ? "n/a" : f_state_txt(tr_state)
+    _state_bg = not warmed or na(tr_state) ? c_cell : color.new(f_state_col(tr_state), 45)
+    f_tcell(hud, 0, 0, "Tail Risk " + variant_tag, c_text, c_frame)
+    f_tcell(hud, 1, 0, _state_txt, c_text, _state_bg)
+    if hud_mode == "Full"
+        f_tcell(hud, 0, 1, "Excess kurt · skew", c_dim, c_panel)
+        f_tcell(hud, 1, 1, f_fmt(m_kurt, 2) + " · " + f_fmt(m_skew, 2) + " (n" + str.tostring(n_obs) + ")", c_dim, c_cell)
+        f_tcell(hud, 0, 2, "Semidev / sd", c_dim, c_panel)
+        f_tcell(hud, 1, 2, f_fmt(m_semir, 2) + " (symmetric ≈ 0.71; above = downside-heavy)", not na(m_semir) and m_semir > 0.71 ? c_gold : c_dim, c_cell)
+        f_tcell(hud, 0, 3, "Worst bar in window", c_dim, c_panel)
+        f_tcell(hud, 1, 3, f_fmt(m_worst_atr, 2) + " ATR (current-ATR approx)", not na(m_worst_atr) and m_worst_atr < -2 ? c_bear : c_dim, c_cell)
+        f_tcell(hud, 0, 4, "Suite regime (context)", c_dim, c_panel)
+        f_tcell(hud, 1, 4, link_txt, use_regime_link and not link_valid ? c_bear : c_dim, c_cell)
+        f_tcell(hud, 0, 5, "*sample moments are noisy", c_faint, c_panel)
+        f_tcell(hud, 1, 5, "one shock bar can swing the window's kurtosis", c_faint, c_panel)
+        f_tcell(hud, 0, 6, "*heuristic thresholds", c_faint, c_panel)
+        f_tcell(hud, 1, 6, "context never signal · not advice", c_faint, c_panel)
+
+// =============================================================================
+// Alerts (confirmed-bar events; formal wording per suite convention)
+// =============================================================================
+alertcondition(esc_ev, "Tail state escalation", "Tail Risk Filter: tail state escalated (confirmed bar)")
+if esc_ev
+    _st = f_state_txt(tr_state)
+    if use_json_alerts
+        alert('{"ev":"tail_risk","sym":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","state":"' + _st + '","kurt":' + (na(m_kurt) ? "null" : f_fmt(m_kurt, 3)) + ',"skew":' + (na(m_skew) ? "null" : f_fmt(m_skew, 3)) + ',"semidev_ratio":' + (na(m_semir) ? "null" : f_fmt(m_semir, 3)) + ',"worst_atr":' + (na(m_worst_atr) ? "null" : f_fmt(m_worst_atr, 2)) + ',"n":' + str.tostring(n_obs) + ',"variant":"' + variant_tag + '","t":' + str.tostring(time) + '}', alert.freq_once_per_bar_close)
+    else
+        alert("Tail Risk Filter [" + variant_tag + "]: " + syminfo.ticker + " tail state escalated to " + _st +
+             " · excess kurt " + f_fmt(m_kurt, 2) + " · skew " + f_fmt(m_skew, 2) +
+             " · worst bar " + f_fmt(m_worst_atr, 2) + " ATR · sample moments are noisy — context, not a signal", alert.freq_once_per_bar_close)
+
+// =============================================================================
+// End of file · Tail-Risk Volatility Regime Filter v1.0
+// =============================================================================

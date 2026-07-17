@@ -1,0 +1,343 @@
+//@version=6
+// =============================================================================
+// Fibonacci Confluence Mapper v1.0 (5T Pine Suite · Desk Kit)
+//
+// WHAT THIS IS — and what it is not.
+// Fibonacci levels are drawn here as ATTENTION ZONES, not magic ratios. The
+// published tests are blunt: Batchelor & Ramyar (City University London,
+// "Magic numbers in the Dow") found retracement ratios occurred in the DJIA
+// no more often than chance; a 2021 three-market algorithmic evaluation
+// (Expert Systems with Applications) attempted systematic identification and
+// found nothing that validates the ratios as standalone edges. What fib
+// levels demonstrably ARE is watched — by enough participants that reactions
+// cluster near them the way they cluster near round numbers.
+//
+// So this tool scores CONFLUENCE, not fibonacci: a fib level only earns
+// attention where INDEPENDENTLY defensible levels agree — anchored VWAP,
+// session VWAP, prior-day levels, the swing origin, round numbers. A 0.618
+// alone is a story; a 0.618 sitting on AVWAP under the prior-day low is a
+// location worth planning around (with the regime's permission).
+//
+// Non-repaint: swing legs come from CONFIRMED pivots only (pivot lag is the
+// price of honesty — levels appear pivot-right bars after the extreme).
+// Levels never move once drawn for a leg; a new confirmed pivot starts a new
+// leg. Decision support only — describes structure, predicts nothing.
+// Evidence label: needs user run.
+// =============================================================================
+indicator("Fibonacci Confluence Mapper v1.0", shorttitle = "Fib Confluence v1",
+     overlay = true, max_lines_count = 100, max_labels_count = 60)
+
+grp_swing = "1 · Swing Detection"
+grp_fib   = "2 · Fibonacci Levels"
+grp_conf  = "3 · Confluence Sources"
+grp_dsp   = "4 · Display"
+
+piv_left  = input.int(10, "Pivot left bars", minval = 2, maxval = 50, group = grp_swing)
+piv_right = input.int(10, "Pivot right bars", minval = 2, maxval = 50, group = grp_swing,
+     tooltip = "Larger = cleaner swings, later confirmation. The leg only updates when a pivot CONFIRMS (non-repaint), so every level arrives pivot-right bars after the extreme. That lag is honesty, not a defect.")
+min_leg_atr = input.float(3.0, "Min leg size (ATR)", minval = 0.5, maxval = 20.0, step = 0.5, group = grp_swing,
+     tooltip = "Legs smaller than this are noise — no levels drawn.")
+atr_len = input.int(14, "ATR length", minval = 1, maxval = 100, group = grp_swing)
+
+show_236 = input.bool(false, "0.236", group = grp_fib, inline = "r1")
+show_382 = input.bool(true, "0.382", group = grp_fib, inline = "r1")
+show_500 = input.bool(true, "0.500", group = grp_fib, inline = "r1")
+show_618 = input.bool(true, "0.618", group = grp_fib, inline = "r1")
+show_786 = input.bool(true, "0.786", group = grp_fib, inline = "r1")
+show_ext_1272 = input.bool(true, "1.272 ext", group = grp_fib, inline = "r2")
+show_ext_1618 = input.bool(true, "1.618 ext", group = grp_fib, inline = "r2")
+show_ext_2000 = input.bool(false, "2.000 ext", group = grp_fib, inline = "r2",
+     tooltip = "Retracements measure pullbacks inside the leg; extensions project beyond it. Both are attention zones only — the score column is what matters.")
+
+conf_tol_atr = input.float(0.30, "Confluence tolerance (ATR)", minval = 0.05, maxval = 2.0, step = 0.05, group = grp_conf,
+     tooltip = "How close an independent level must sit to a fib level to count as confluence.")
+use_avwap_link = input.bool(true, "Use external AVWAP link", group = grp_conf)
+avwap_src = input.source(close, "AVWAP link (wire to AVWAP_EXPORT)", group = grp_conf,
+     tooltip = "Wire to the AIO or BULL+/BEAR+ AVWAP_EXPORT via Indicator-on-indicator. Unwired (= chart close) it is ignored automatically.")
+use_session_vwap = input.bool(true, "Session VWAP", group = grp_conf)
+use_prior_day = input.bool(true, "Prior-day H/L/C", group = grp_conf)
+use_round_numbers = input.bool(true, "Round numbers", group = grp_conf,
+     tooltip = "Whole and half dollars scaled by price magnitude — the ORIGINAL attention levels; fib zones near them inherit real order flow.")
+use_regime_link = input.bool(false, "Use external regime link", group = grp_conf)
+regime_src = input.source(close, "Regime link (wire to REGIME_EXPORT)", group = grp_conf,
+     tooltip = "Optional -1/0/+1 from any suite script. Adds a with-regime/against-regime tag to the top cluster. Invalid values read n/a.")
+
+hud_mode = input.string("Full", "HUD mode", options = ["Off", "Micro", "Full"], group = grp_dsp)
+hud_pos_in = input.string("top_right", "HUD position", options = ["top_left", "top_center", "top_right", "bottom_left", "bottom_center", "bottom_right"], group = grp_dsp)
+show_levels = input.bool(true, "Draw fib levels", group = grp_dsp)
+show_zone_fill = input.bool(true, "Highlight top confluence zone", group = grp_dsp)
+use_json_alerts = input.bool(false, "JSON alert payloads (webhook)", group = grp_dsp,
+     tooltip = "OFF: human-readable alert text. ON: machine-readable JSON for webhook automation. Display-layer only.")
+
+// =============================================================================
+// Palette & helpers
+// =============================================================================
+c_bull  = color.rgb(89, 159, 125)
+c_bear  = color.rgb(190, 96, 111)
+c_gold  = color.rgb(214, 162, 82)
+c_panel = color.new(#0E1316, 5)
+c_cell  = color.new(#151D22, 7)
+c_cell2 = color.new(#10171B, 9)
+c_frame = color.new(#5BD6B0, 88)
+c_text  = color.white
+c_dim   = color.new(color.white, 45)
+c_faint = color.new(color.white, 68)
+
+f_pos(_s) =>
+    switch _s
+        "top_left"      => position.top_left
+        "top_center"    => position.top_center
+        "top_right"     => position.top_right
+        "bottom_left"   => position.bottom_left
+        "bottom_center" => position.bottom_center
+        "bottom_right"  => position.bottom_right
+        => position.top_right
+f_fmt(_x, _d) =>
+    _m = math.pow(10.0, _d)
+    na(_x) ? "n/a" : str.tostring(math.round(_x * _m) / _m)
+f_price(_x) =>
+    na(_x) ? "n/a" : str.tostring(_x, format.mintick)
+f_trimtag(_s) =>
+    _n = str.length(_s)
+    _n > 0 and str.substring(_s, _n - 1) == " " ? str.substring(_s, 0, _n - 1) : _s
+f_tcell(_tbl, _c, _r, _txt, _col, _bg) =>
+    table.cell(_tbl, _c, _r, _txt, text_color = _col, bgcolor = _bg, text_size = size.tiny, text_halign = text.align_center)
+
+atr_val = ta.atr(atr_len)
+
+// =============================================================================
+// Confirmed swing legs (non-repaint)
+// =============================================================================
+ph = ta.pivothigh(high, piv_left, piv_right)
+pl = ta.pivotlow(low, piv_left, piv_right)
+
+var float swing_hi = na
+var int   swing_hi_bar = na
+var float swing_lo = na
+var int   swing_lo_bar = na
+// Leg: -1 = down leg (high -> low, most recent pivot is a LOW)
+//      +1 = up leg (low -> high, most recent pivot is a HIGH)
+var int   leg_dir = 0
+var float leg_start = na
+var float leg_end = na
+var int   leg_end_bar = na
+
+if barstate.isconfirmed and not na(ph)
+    swing_hi := ph
+    swing_hi_bar := bar_index - piv_right
+    if not na(swing_lo) and swing_lo_bar < swing_hi_bar
+        leg_dir := 1
+        leg_start := swing_lo
+        leg_end := swing_hi
+        leg_end_bar := swing_hi_bar
+if barstate.isconfirmed and not na(pl)
+    swing_lo := pl
+    swing_lo_bar := bar_index - piv_right
+    if not na(swing_hi) and swing_hi_bar < swing_lo_bar
+        leg_dir := -1
+        leg_start := swing_hi
+        leg_end := swing_lo
+        leg_end_bar := swing_lo_bar
+
+leg_size = not na(leg_start) and not na(leg_end) ? math.abs(leg_end - leg_start) : float(na)
+leg_valid = leg_dir != 0 and not na(leg_size) and not na(atr_val) and atr_val > 0 and leg_size >= min_leg_atr * atr_val
+leg_age = not na(leg_end_bar) ? bar_index - leg_end_bar : int(na)
+
+// Retracement price for ratio r: pull back INTO the leg from its end.
+f_retr(_r) =>
+    leg_valid ? (leg_dir == 1 ? leg_end - leg_size * _r : leg_end + leg_size * _r) : float(na)
+// Extension price for ratio r beyond the leg end.
+f_ext(_r) =>
+    leg_valid ? (leg_dir == 1 ? leg_start + leg_size * _r : leg_start - leg_size * _r) : float(na)
+
+// =============================================================================
+// Independent confluence sources
+// =============================================================================
+// Session VWAP (resets daily; volume-guarded)
+new_day = ta.change(time("D")) != 0
+var float sv_pv = 0.0
+var float sv_v  = 0.0
+if new_day
+    sv_pv := 0.0
+    sv_v := 0.0
+sv_pv += nz(volume) * hlc3
+sv_v  += nz(volume)
+svwap = sv_v > 0 ? sv_pv / sv_v : float(na)
+
+// Prior-day levels (completed days only — non-repaint)
+[pd_h, pd_l, pd_c] = request.security(syminfo.tickerid, "D", [high[1], low[1], close[1]],
+     gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+
+// External AVWAP link: ignored when it just mirrors chart close (unwired).
+avwap_wired = use_avwap_link and math.abs(avwap_src - close) > syminfo.mintick * 0.5
+avwap_lvl = avwap_wired ? avwap_src : float(na)
+
+// Regime link with strict validation ({-1,0,+1} exactly)
+_rv = regime_src
+regime_valid = use_regime_link and not na(_rv) and (_rv == -1.0 or _rv == 0.0 or _rv == 1.0)
+regime_val = regime_valid ? int(_rv) : int(na)
+
+// Round-number grid scaled by price magnitude
+round_step = close >= 500 ? 10.0 : close >= 100 ? 5.0 : close >= 20 ? 1.0 : close >= 5 ? 0.5 : 0.1
+f_nearest_round(_p) =>
+    na(_p) ? float(na) : math.round(_p / round_step) * round_step
+
+// Confluence score for one fib level: counts INDEPENDENT agreements.
+f_score(_lvl) =>
+    float _s = 0.0
+    string _tags = ""
+    if not na(_lvl) and not na(atr_val) and atr_val > 0
+        _tol = conf_tol_atr * atr_val
+        if not na(avwap_lvl) and math.abs(_lvl - avwap_lvl) <= _tol
+            _s += 30.0
+            _tags += "AVWAP "
+        if use_session_vwap and not na(svwap) and math.abs(_lvl - svwap) <= _tol
+            _s += 20.0
+            _tags += "sVWAP "
+        if use_prior_day
+            if not na(pd_h) and math.abs(_lvl - pd_h) <= _tol
+                _s += 15.0
+                _tags += "PDH "
+            if not na(pd_l) and math.abs(_lvl - pd_l) <= _tol
+                _s += 15.0
+                _tags += "PDL "
+            if not na(pd_c) and math.abs(_lvl - pd_c) <= _tol
+                _s += 10.0
+                _tags += "PDC "
+        if use_round_numbers and math.abs(_lvl - f_nearest_round(_lvl)) <= _tol * 0.5
+            _s += 10.0
+            _tags += "Round "
+        // Leg origin: a full 0.786+ retrace sits near where the leg began.
+        if not na(leg_start) and math.abs(_lvl - leg_start) <= _tol
+            _s += 10.0
+            _tags += "Origin "
+    [_s, _tags]
+
+// =============================================================================
+// Level set + top cluster
+// =============================================================================
+var array<float>  lv_price = array.new_float()
+var array<string> lv_name  = array.new_string()
+var array<float>  lv_score = array.new_float()
+var array<string> lv_tags  = array.new_string()
+
+array.clear(lv_price)
+array.clear(lv_name)
+array.clear(lv_score)
+array.clear(lv_tags)
+
+f_add_level(_on, _p, _n) =>
+    if _on and not na(_p)
+        [_s, _t] = f_score(_p)
+        array.push(lv_price, _p)
+        array.push(lv_name, _n)
+        array.push(lv_score, _s)
+        array.push(lv_tags, _t)
+
+if leg_valid
+    f_add_level(show_236, f_retr(0.236), "R 0.236")
+    f_add_level(show_382, f_retr(0.382), "R 0.382")
+    f_add_level(show_500, f_retr(0.500), "R 0.500")
+    f_add_level(show_618, f_retr(0.618), "R 0.618")
+    f_add_level(show_786, f_retr(0.786), "R 0.786")
+    f_add_level(show_ext_1272, f_ext(1.272), "X 1.272")
+    f_add_level(show_ext_1618, f_ext(1.618), "X 1.618")
+    f_add_level(show_ext_2000, f_ext(2.000), "X 2.000")
+
+float top_price = na
+float top_score = 0.0
+string top_name = ""
+string top_tags = ""
+if array.size(lv_score) > 0
+    for i = 0 to array.size(lv_score) - 1
+        if array.get(lv_score, i) > top_score
+            top_score := array.get(lv_score, i)
+            top_price := array.get(lv_price, i)
+            top_name  := array.get(lv_name, i)
+            top_tags  := array.get(lv_tags, i)
+has_cluster = not na(top_price) and top_score > 0
+
+// With/against-regime tag: retracements in an up leg are potential support
+// (long interest) — aligned when regime is bull; mirrored for down legs.
+regime_tag =
+     na(regime_val) ? "" :
+     leg_dir == 1 and regime_val == 1 ? "with-regime" :
+     leg_dir == -1 and regime_val == -1 ? "with-regime" :
+     regime_val == 0 ? "neutral-regime" :
+     "against-regime"
+
+// Price entering the top cluster zone (confirmed close inside tolerance)
+in_top_zone = has_cluster and not na(atr_val) and math.abs(close - top_price) <= conf_tol_atr * atr_val
+enter_top_zone = barstate.isconfirmed and in_top_zone and not in_top_zone[1]
+
+// =============================================================================
+// Drawing (cosmetic layer — state above is already final)
+// =============================================================================
+var array<line>  fib_lines  = array.new_line()
+var array<label> fib_labels = array.new_label()
+if barstate.islast
+    while array.size(fib_lines) > 0
+        line.delete(array.pop(fib_lines))
+    while array.size(fib_labels) > 0
+        label.delete(array.pop(fib_labels))
+    if show_levels and leg_valid and array.size(lv_price) > 0
+        _x1 = not na(leg_end_bar) ? leg_end_bar : bar_index - 10
+        for i = 0 to array.size(lv_price) - 1
+            _p = array.get(lv_price, i)
+            _sc = array.get(lv_score, i)
+            _is_top = has_cluster and _p == top_price
+            _col = _is_top ? c_gold : _sc > 0 ? color.new(c_gold, 40) : c_faint
+            array.push(fib_lines, line.new(_x1, _p, bar_index + 5, _p,
+                 color = _col, width = _is_top ? 2 : 1,
+                 style = _sc > 0 ? line.style_solid : line.style_dotted))
+            array.push(fib_labels, label.new(bar_index + 5, _p,
+                 array.get(lv_name, i) + (_sc > 0 ? " · " + f_fmt(_sc, 0) + (array.get(lv_tags, i) != "" ? " [" + f_trimtag(array.get(lv_tags, i)) + "]" : "") : ""),
+                 style = label.style_label_left, textcolor = _is_top ? c_text : c_dim,
+                 color = color.new(c_panel, 30), size = size.small))
+bgcolor(show_zone_fill and in_top_zone ? color.new(c_gold, 88) : na, title = "Top confluence zone")
+
+// =============================================================================
+// HUD
+// =============================================================================
+var table hud = table.new(f_pos(hud_pos_in), 2, 6, bgcolor = c_panel, frame_color = c_frame,
+     frame_width = 1, border_color = color.new(color.white, 92), border_width = 1)
+if barstate.islast and hud_mode != "Off"
+    _leg_txt = not leg_valid ? "NO VALID LEG" : (leg_dir == 1 ? "UP LEG" : "DOWN LEG") + " · " + f_fmt(leg_size / atr_val, 1) + " ATR · age " + str.tostring(leg_age)
+    f_tcell(hud, 0, 0, "Fib Confluence", c_text, c_frame)
+    f_tcell(hud, 1, 0, _leg_txt, leg_valid ? c_text : c_faint, c_cell)
+    if hud_mode == "Full"
+        f_tcell(hud, 0, 1, "Top zone", c_dim, c_panel)
+        f_tcell(hud, 1, 1, has_cluster ? top_name + " @ " + f_price(top_price) + " · score " + f_fmt(top_score, 0) : "none scored", has_cluster ? c_gold : c_faint, c_cell)
+        f_tcell(hud, 0, 2, "Agrees with", c_dim, c_panel)
+        f_tcell(hud, 1, 2, has_cluster and top_tags != "" ? f_trimtag(top_tags) : "—", c_dim, c_cell)
+        f_tcell(hud, 0, 3, "Regime link", c_dim, c_panel)
+        f_tcell(hud, 1, 3, not use_regime_link ? "off" : na(regime_val) ? "LINK?" : (regime_val == 1 ? "Bull" : regime_val == -1 ? "Bear" : "Neutral") + (regime_tag != "" ? " · " + regime_tag : ""), na(regime_val) and use_regime_link ? c_bear : c_dim, c_cell)
+        f_tcell(hud, 0, 4, "AVWAP link", c_dim, c_panel)
+        f_tcell(hud, 1, 4, not use_avwap_link ? "off" : avwap_wired ? f_price(avwap_lvl) : "unwired (ignored)", c_dim, c_cell)
+        f_tcell(hud, 0, 5, "*attention zones", c_faint, c_panel)
+        f_tcell(hud, 1, 5, "not magic ratios · predicts nothing", c_faint, c_panel)
+
+// =============================================================================
+// Data Window exports
+// =============================================================================
+plot(float(leg_dir), "FIB_LEG_DIR_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(f_retr(0.618), "FIB_618_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(top_price, "TOP_CLUSTER_PRICE_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(top_score, "TOP_CLUSTER_SCORE_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(in_top_zone ? 1.0 : 0.0, "IN_TOP_ZONE_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+
+// =============================================================================
+// Alerts
+// =============================================================================
+alertcondition(enter_top_zone, "Price entered top confluence zone", "Fib Confluence: price entered the highest-scored zone")
+if enter_top_zone
+    if use_json_alerts
+        alert('{"ev":"fib_zone","sym":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","level":"' + top_name + '","price":' + (na(top_price) ? "null" : f_fmt(top_price, 4)) + ',"score":' + f_fmt(top_score, 0) + ',"tags":"' + f_trimtag(top_tags) + '","regime":"' + regime_tag + '","t":' + str.tostring(time) + '}', alert.freq_once_per_bar_close)
+    else
+        alert("Fib Confluence: " + syminfo.ticker + " entered " + top_name + " zone @ " + f_price(top_price) +
+             " · score " + f_fmt(top_score, 0) + (top_tags != "" ? " · [" + f_trimtag(top_tags) + "]" : "") +
+             (regime_tag != "" ? " · " + regime_tag : ""), alert.freq_once_per_bar_close)
+
+// =============================================================================
+// End of file · Fibonacci Confluence Mapper v1.0
+// =============================================================================

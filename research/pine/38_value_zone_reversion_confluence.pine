@@ -1,0 +1,420 @@
+//@version=6
+// =============================================================================
+// Value Zone Reversion Confluence Scanner v1.0 (5T Pine Suite · Desk Kit)
+//
+// WHAT THIS IS.
+// A scanner that keeps THREE independent definitions of "value" on the chart
+// and counts how many of them currently contain price:
+//   (a) an external anchored VWAP wired in through a source link,
+//   (b) the session VWAP with a ±1 sigma volume-weighted band, and
+//   (c) a compact session volume-profile VALUE AREA (POC + 70% band).
+// Confluence count 0..3 = how many wired/valid references price sits INSIDE.
+// When price is OUTSIDE every valid reference AND RSI is at an extreme, the
+// scanner raises a one-shot reversion-watch flag toward value, then scores
+// the episode honestly on this chart. Value here means nothing more than
+// "where the references agree" — agreement is a description, not an edge
+// claim. The ledger is the evidence.
+//
+// RESEARCH BASIS, stated plainly.
+// Value-area and POC concepts descend from Steidlmayer's Market Profile
+// work (CBOT, 1980s); VWAP is the standard institutional execution
+// benchmark (Berkowitz et al., 1988); RSI is Wilder (1978). Educational
+// framing inspired by the Quant Guild channel's treatment of value and
+// reversion. Honesty points:
+//   1. The volume profile is a BAR-BASED APPROXIMATION (VP Lite
+//      conventions): each confirmed bar's full volume is binned at its
+//      HL midpoint across 30 bins spanning the day's range so far. Real
+//      tick-level distribution is not available to a chart study. Session
+//      scope only; on non-intraday charts references (b) and (c) read n/a.
+//   2. An anchored VWAP is a LINE; the scanner needs a ZONE, so reference
+//      (a) uses a disclosed ATR-multiple half-width around the link.
+//   3. Confluence counting weights all references equally — a heuristic,
+//      not a fitted model.
+//   4. The unwired-link rule: a source left at its default is detected by
+//      |src − close| <= mintick × 0.5 and IGNORED until it first deviates.
+//
+// Non-repaint: binning, confluence snapshots, flags, and scoring advance on
+// confirmed bars only; intrabar display holds the last confirmed state.
+// Decision support only — a human places every trade. Risk controls outrank
+// all signals.
+//
+// v1.0 changelog (2026-07-17):
+//   Initial release. Three value references — external AVWAP link
+//   (unwired-ignored pattern, latched once wired, ATR-multiple zone
+//   half-width), session VWAP ±1 sigma (volume-weighted, day reset,
+//   volume-guarded), compact session value area (30 bins over the day's
+//   range so far, confirmed-bar volume binning, POC + 70% area expanded
+//   from POC toward the larger neighbor); confluence count 0..3 of valid
+//   references containing price; one-shot reversion-watch flags (price
+//   outside ALL valid references on one side + RSI extreme, re-arm at RSI
+//   50); episode self-scoring per MR conventions — fail / timeout checked
+//   BEFORE the target-touch win, target = nearest valid reference edge
+//   SNAPSHOTTED at flag time, fail distance ATR-snapshotted, intraday
+//   pendings EXPIRE UNSCORED at session rollover; per-side hit rates with
+//   Wilson 95% lower bounds; tiered HUD; data-window exports; JSON alerts
+//   (default OFF). Every behavior-adjacent option ships at its conservative
+//   default.
+//   Evidence label: needs user run.
+// =============================================================================
+indicator("Value Zone Reversion Confluence Scanner v1.0", shorttitle = "Value Scan v1", overlay = true)
+
+grp_mode = "0 · Mode"
+grp_ref  = "1 · Value References"
+grp_flag = "2 · Reversion Flags"
+grp_sc   = "3 · Outcome Scoring"
+grp_dsp  = "4 · Display"
+
+variant_tag = input.string("v1.0-base", "Variant tag (freeze-the-config discipline)", group = grp_mode,
+     tooltip = "Label this exact settings set. Any settings change = new tag = new variant with its own validation cycle. The tag prints on the HUD and in alerts so screenshots self-document.")
+
+avwap_src = input.source(close, "AVWAP link (wire to an anchored-VWAP plot)", group = grp_ref,
+     tooltip = "Optional reference (a). Wire to any anchored-VWAP study's plotted line. Unwired-ignored pattern: while the source tracks the chart close within half a tick it is treated as UNWIRED and excluded; once it first deviates it is latched as wired for the session. No toggle needed.")
+avwap_tol_atr = input.float(0.5, "AVWAP zone half-width (× ATR)", minval = 0.05, maxval = 3.0, step = 0.05, group = grp_ref,
+     tooltip = "An anchored VWAP is a line; inside/outside needs a zone. This disclosed heuristic half-width turns the line into reference (a)'s band.")
+vwap_sigma_mult = input.float(1.0, "Session VWAP band (× sigma)", minval = 0.25, maxval = 3.0, step = 0.25, group = grp_ref,
+     tooltip = "Reference (b): session VWAP ± this many volume-weighted standard deviations. Computed on confirmed bars, resets each session day, requires intraday bars and volume data.")
+va_pct = input.float(70.0, "Value area volume %", minval = 50.0, maxval = 95.0, step = 5.0, group = grp_ref,
+     tooltip = "Reference (c): the value area holds this share of the day's binned volume, expanded outward from the POC toward the larger neighboring bin. Bar-based approximation, VP Lite conventions; session-only.")
+va_bins = input.int(30, "Value area price bins", minval = 10, maxval = 50, group = grp_ref,
+     tooltip = "Bins spanning the day's range so far. Each confirmed bar's volume lands in the bin holding its HL midpoint — an approximation, disclosed.")
+
+rsi_len = input.int(14, "RSI length", minval = 2, maxval = 100, group = grp_flag)
+rsi_lo = input.float(25.0, "RSI oversold extreme", minval = 5.0, maxval = 40.0, step = 1.0, group = grp_flag)
+rsi_hi = input.float(75.0, "RSI overbought extreme", minval = 60.0, maxval = 95.0, step = 1.0, group = grp_flag,
+     tooltip = "A reversion-watch flag needs BOTH conditions: price outside every valid reference on one side AND RSI beyond the extreme. One shot per episode; re-arms once RSI returns to 50 (MR conventions). Flags are study events, never signals.")
+
+horizon_bars = input.int(30, "Outcome horizon (bars)", minval = 5, maxval = 200, group = grp_sc)
+fail_atr = input.float(1.5, "Adverse move = fail (ATR at flag)", minval = 0.5, maxval = 5.0, step = 0.25, group = grp_sc,
+     tooltip = "An episode FAILS if price moves this many ATRs (ATR snapshotted at flag time) against the reversion before touching the snapshotted target, or if the horizon expires. Fail / timeout is checked BEFORE the touch each bar, so same-bar collisions score conservatively.")
+atr_len = input.int(14, "ATR length (zone width + fail distance)", minval = 1, maxval = 200, group = grp_sc)
+min_n = input.int(20, "Thin-sample warning (n)", minval = 5, maxval = 500, group = grp_sc,
+     tooltip = "Below this count the hit-rate rows carry the suite's thin-sample flag. Wilson lower bounds do the honesty work either way.")
+
+hud_mode = input.string("Full", "HUD mode", options = ["Off", "Micro", "Full"], group = grp_dsp)
+hud_pos_in = input.string("top_right", "HUD position", options = ["top_left", "top_center", "top_right", "bottom_left", "bottom_center", "bottom_right"], group = grp_dsp)
+show_refs = input.bool(true, "Draw reference lines/bands", group = grp_dsp)
+show_marks = input.bool(true, "Mark reversion-watch flags", group = grp_dsp)
+use_json_alerts = input.bool(false, "JSON alert payloads (webhook)", group = grp_dsp,
+     tooltip = "OFF: human-readable alert text. ON: machine-readable JSON for webhook automation. Display-layer only.")
+
+// =============================================================================
+// Palette & helpers (suite standard)
+// =============================================================================
+c_bull  = color.rgb(89, 159, 125)
+c_bear  = color.rgb(190, 96, 111)
+c_neut  = color.rgb(112, 126, 148)
+c_gold  = color.rgb(214, 162, 82)
+c_panel = color.new(#0E1316, 5)
+c_cell  = color.new(#151D22, 7)
+c_cell2 = color.new(#10171B, 9)
+c_frame = color.new(#5BD6B0, 88)
+c_text  = color.white
+c_dim   = color.new(color.white, 45)
+c_faint = color.new(color.white, 68)
+
+f_pos(_s) =>
+    switch _s
+        "top_left"      => position.top_left
+        "top_center"    => position.top_center
+        "top_right"     => position.top_right
+        "bottom_left"   => position.bottom_left
+        "bottom_center" => position.bottom_center
+        "bottom_right"  => position.bottom_right
+        => position.top_right
+f_fmt(_x, _d) =>
+    _m = math.pow(10.0, _d)
+    na(_x) ? "n/a" : str.tostring(math.round(_x * _m) / _m)
+f_tcell(_tbl, _c, _r, _txt, _col, _bg) =>
+    table.cell(_tbl, _c, _r, _txt, text_color = _col, bgcolor = _bg, text_size = size.tiny, text_halign = text.align_center)
+// Wilson score lower bound (z = 1.96), suite-standard honesty for hit rates.
+f_wilson_lo(_p, _n) =>
+    _n <= 0 or na(_p) ? float(na) :
+         (_p + 1.96 * 1.96 / (2 * _n) - 1.96 * math.sqrt((_p * (1 - _p) + 1.96 * 1.96 / (4 * _n)) / _n)) / (1 + 1.96 * 1.96 / _n)
+
+// =============================================================================
+// Shared series
+// =============================================================================
+atr_val = ta.atr(atr_len)
+rsi_v = ta.rsi(close, rsi_len)
+new_day = ta.change(time("D")) != 0
+
+// =============================================================================
+// Reference (a): external AVWAP link — unwired-ignored, latched once wired
+// =============================================================================
+var bool avwap_wired = false
+if barstate.isconfirmed and not na(avwap_src) and math.abs(avwap_src - close) > syminfo.mintick * 0.5
+    avwap_wired := true
+a_valid = avwap_wired and not na(avwap_src) and not na(atr_val)
+a_lo = a_valid ? avwap_src - avwap_tol_atr * atr_val : float(na)
+a_hi = a_valid ? avwap_src + avwap_tol_atr * atr_val : float(na)
+
+// =============================================================================
+// Reference (b): session VWAP ± sigma (confirmed bars, day reset, volume-
+// guarded, intraday-only)
+// =============================================================================
+var float cum_pv = 0.0
+var float cum_v = 0.0
+var float cum_p2v = 0.0
+if barstate.isconfirmed and timeframe.isintraday
+    if new_day
+        cum_pv := 0.0
+        cum_v := 0.0
+        cum_p2v := 0.0
+    if not na(volume) and volume > 0 and not na(hlc3)
+        cum_pv += hlc3 * volume
+        cum_v += volume
+        cum_p2v += hlc3 * hlc3 * volume
+vwap_val = cum_v > 0 ? cum_pv / cum_v : float(na)
+vwap_sd = cum_v > 0 ? math.sqrt(math.max(cum_p2v / cum_v - (cum_pv / cum_v) * (cum_pv / cum_v), 0.0)) : float(na)
+b_valid = timeframe.isintraday and not na(vwap_val) and not na(vwap_sd) and vwap_sd > 0
+b_lo = b_valid ? vwap_val - vwap_sigma_mult * vwap_sd : float(na)
+b_hi = b_valid ? vwap_val + vwap_sigma_mult * vwap_sd : float(na)
+
+// =============================================================================
+// Reference (c): compact session value area — 30 bins over the day's range
+// so far, confirmed-bar volume at the HL midpoint, POC + va_pct% expansion.
+// Bar-based approximation, VP Lite conventions; session-only.
+// =============================================================================
+var array<float> day_p = array.new_float()
+var array<float> day_v = array.new_float()
+var float day_hi = na
+var float day_lo = na
+var float poc_val = na
+var float va_hi = na
+var float va_lo = na
+if barstate.isconfirmed and timeframe.isintraday
+    if new_day
+        array.clear(day_p)
+        array.clear(day_v)
+        day_hi := na
+        day_lo := na
+        poc_val := na
+        va_hi := na
+        va_lo := na
+    if not na(volume) and volume > 0 and not na(hl2)
+        array.push(day_p, hl2)
+        array.push(day_v, volume)
+        if array.size(day_p) > 2000  // memory bound; oldest bar dropped (disclosed approximation)
+            array.shift(day_p)
+            array.shift(day_v)
+    day_hi := na(day_hi) ? high : math.max(day_hi, high)
+    day_lo := na(day_lo) ? low : math.min(day_lo, low)
+    int _sz = array.size(day_p)
+    if _sz > 0 and not na(day_hi) and not na(day_lo) and day_hi > day_lo
+        float _rng = day_hi - day_lo
+        array<float> _bins = array.new_float(va_bins, 0.0)
+        for _i = 0 to _sz - 1
+            int _bi = int(math.floor((array.get(day_p, _i) - day_lo) / _rng * va_bins))
+            _bi := math.max(0, math.min(va_bins - 1, _bi))
+            array.set(_bins, _bi, array.get(_bins, _bi) + array.get(day_v, _i))
+        int _poc_i = 0
+        float _best = -1.0
+        for _i = 0 to va_bins - 1
+            if array.get(_bins, _i) > _best
+                _best := array.get(_bins, _i)
+                _poc_i := _i
+        float _total = array.sum(_bins)
+        float _acc = array.get(_bins, _poc_i)
+        int _lo_i = _poc_i
+        int _hi_i = _poc_i
+        while _acc < va_pct / 100.0 * _total and (_lo_i > 0 or _hi_i < va_bins - 1)
+            float _up_v = _hi_i < va_bins - 1 ? array.get(_bins, _hi_i + 1) : -1.0
+            float _dn_v = _lo_i > 0 ? array.get(_bins, _lo_i - 1) : -1.0
+            if _up_v >= _dn_v
+                _hi_i += 1
+                _acc += _up_v
+            else
+                _lo_i -= 1
+                _acc += _dn_v
+        poc_val := day_lo + (_poc_i + 0.5) * _rng / va_bins
+        va_lo := day_lo + _lo_i * _rng / va_bins
+        va_hi := day_lo + (_hi_i + 1.0) * _rng / va_bins
+c_valid = timeframe.isintraday and not na(poc_val) and not na(va_hi) and not na(va_lo)
+
+// =============================================================================
+// Confluence count and outside-all-references geometry
+// =============================================================================
+in_a = a_valid and close >= a_lo and close <= a_hi
+in_b = b_valid and close >= b_lo and close <= b_hi
+in_c = c_valid and close >= va_lo and close <= va_hi
+int n_valid = (a_valid ? 1 : 0) + (b_valid ? 1 : 0) + (c_valid ? 1 : 0)
+int confluence_n = (in_a ? 1 : 0) + (in_b ? 1 : 0) + (in_c ? 1 : 0)
+
+bool below_all = n_valid > 0
+bool above_all = n_valid > 0
+float tgt_long = na   // nearest valid lower edge when below all (min of lower bounds)
+float tgt_short = na  // nearest valid upper edge when above all (max of upper bounds)
+if a_valid
+    below_all := below_all and close < a_lo
+    above_all := above_all and close > a_hi
+    tgt_long := na(tgt_long) ? a_lo : math.min(tgt_long, a_lo)
+    tgt_short := na(tgt_short) ? a_hi : math.max(tgt_short, a_hi)
+if b_valid
+    below_all := below_all and close < b_lo
+    above_all := above_all and close > b_hi
+    tgt_long := na(tgt_long) ? b_lo : math.min(tgt_long, b_lo)
+    tgt_short := na(tgt_short) ? b_hi : math.max(tgt_short, b_hi)
+if c_valid
+    below_all := below_all and close < va_lo
+    above_all := above_all and close > va_hi
+    tgt_long := na(tgt_long) ? va_lo : math.min(tgt_long, va_lo)
+    tgt_short := na(tgt_short) ? va_hi : math.max(tgt_short, va_hi)
+
+// =============================================================================
+// Reversion-watch flags: one shot per episode, confirmed bars, re-arm at
+// RSI 50 (MR conventions). Long-side = below every valid reference AND RSI
+// oversold; short-side mirrored. Target = nearest reference edge, snapshotted.
+// =============================================================================
+var bool armed_long = true
+var bool armed_short = true
+var float last_tgt = na
+bool flag_long = false
+bool flag_short = false
+if barstate.isconfirmed and not na(rsi_v) and not na(atr_val)
+    if rsi_v >= 50
+        armed_long := true
+    if rsi_v <= 50
+        armed_short := true
+    if armed_long and below_all and rsi_v < rsi_lo and not na(tgt_long)
+        flag_long := true
+        armed_long := false
+        last_tgt := tgt_long
+    if armed_short and above_all and rsi_v > rsi_hi and not na(tgt_short)
+        flag_short := true
+        armed_short := false
+        last_tgt := tgt_short
+var int state_code = 0  // 0 ARMED · 1 FLAG LONG · 2 FLAG SHORT · 3 COOLING
+if barstate.isconfirmed
+    state_code := flag_long ? 1 : flag_short ? 2 : not armed_long or not armed_short ? 3 : 0
+
+// =============================================================================
+// Episode self-scoring (MR conventions — conservative ordering)
+//   WIN  = price touches the SNAPSHOTTED nearest-reference target within the
+//          horizon (references move and reset; the snapshot keeps the test
+//          deterministic)
+//   FAIL = adverse move beyond fail_atr × ATR-at-flag, or horizon expiry
+//   Fail / timeout is checked FIRST each bar; intraday pending episodes
+//   EXPIRE UNSCORED at session rollover — tallied in the faint "exp" counter.
+// =============================================================================
+var bool pl_on = false
+var float pl_tgt = na
+var float pl_fail = na
+var int pl_age = 0
+var bool ps_on = false
+var float ps_tgt = na
+var float ps_fail = na
+var int ps_age = 0
+var int l_n = 0
+var int l_w = 0
+var int s_n = 0
+var int s_w = 0
+var int l_exp = 0
+var int s_exp = 0
+if barstate.isconfirmed
+    if timeframe.isintraday and new_day
+        if pl_on
+            pl_on := false
+            l_n -= 1
+            l_exp += 1
+        if ps_on
+            ps_on := false
+            s_n -= 1
+            s_exp += 1
+    if pl_on
+        pl_age += 1
+        if low <= pl_fail or pl_age >= horizon_bars
+            pl_on := false
+        else if high >= pl_tgt
+            l_w += 1
+            pl_on := false
+    if ps_on
+        ps_age += 1
+        if high >= ps_fail or ps_age >= horizon_bars
+            ps_on := false
+        else if low <= ps_tgt
+            s_w += 1
+            ps_on := false
+    if flag_long and not pl_on
+        pl_on := true
+        pl_tgt := last_tgt                      // snapshotted at flag time
+        pl_fail := close - fail_atr * atr_val   // snapshotted at flag time
+        pl_age := 0
+        l_n += 1
+    if flag_short and not ps_on
+        ps_on := true
+        ps_tgt := last_tgt                      // snapshotted at flag time
+        ps_fail := close + fail_atr * atr_val   // snapshotted at flag time
+        ps_age := 0
+        s_n += 1
+l_hr = l_n > 0 ? l_w * 1.0 / l_n : float(na)
+s_hr = s_n > 0 ? s_w * 1.0 / s_n : float(na)
+l_wlo = l_n > 0 ? f_wilson_lo(l_hr, l_n) * 100.0 : float(na)
+s_wlo = s_n > 0 ? f_wilson_lo(s_hr, s_n) * 100.0 : float(na)
+
+// =============================================================================
+// Plots & exports
+// =============================================================================
+plot(show_refs and a_valid ? avwap_src : na, "AVWAP (linked)", color = c_gold, linewidth = 2, style = plot.style_linebr)
+plot(show_refs and b_valid ? vwap_val : na, "Session VWAP", color = color.new(c_neut, 20), linewidth = 2, style = plot.style_linebr)
+p_bu = plot(show_refs and b_valid ? b_hi : na, "VWAP band upper", color = color.new(c_neut, 65), linewidth = 1, style = plot.style_linebr)
+p_bd = plot(show_refs and b_valid ? b_lo : na, "VWAP band lower", color = color.new(c_neut, 65), linewidth = 1, style = plot.style_linebr)
+fill(p_bu, p_bd, color = color.new(c_neut, 94), title = "VWAP band fill")
+plot(show_refs and c_valid ? poc_val : na, "Value area POC", color = color.new(c_bull, 30), linewidth = 2, style = plot.style_linebr)
+p_vh = plot(show_refs and c_valid ? va_hi : na, "Value area high", color = color.new(c_bull, 70), linewidth = 1, style = plot.style_linebr)
+p_vl = plot(show_refs and c_valid ? va_lo : na, "Value area low", color = color.new(c_bull, 70), linewidth = 1, style = plot.style_linebr)
+fill(p_vh, p_vl, color = color.new(c_bull, 95), title = "Value area fill")
+plotshape(show_marks and flag_long, "VRS long-side reversion watch", style = shape.triangleup, location = location.belowbar, color = c_bull, size = size.tiny)
+plotshape(show_marks and flag_short, "VRS short-side reversion watch", style = shape.triangledown, location = location.abovebar, color = c_bear, size = size.tiny)
+
+plot(confluence_n, "VRS_CONFLUENCE_N_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(flag_long ? 1.0 : 0.0, "VRS_FLAG_LONG_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(flag_short ? 1.0 : 0.0, "VRS_FLAG_SHORT_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(l_wlo, "VRS_LONG_WLO_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(s_wlo, "VRS_SHORT_WLO_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+
+// =============================================================================
+// HUD
+// =============================================================================
+f_io(_in) =>
+    _in ? "INSIDE" : "outside"
+var table hud = table.new(f_pos(hud_pos_in), 2, 8, bgcolor = c_panel, frame_color = c_frame,
+     frame_width = 1, border_color = color.new(color.white, 92), border_width = 1)
+if barstate.islast and hud_mode != "Off"
+    _state_txt = state_code == 1 ? "FLAG LONG (toward value)" :
+         state_code == 2 ? "FLAG SHORT (toward value)" :
+         state_code == 3 ? "COOLING (re-arms at RSI 50)" :
+         n_valid == 0 ? "NO VALID REFERENCES" : "SCANNING · " + str.tostring(confluence_n) + "/" + str.tostring(n_valid) + " inside"
+    _state_bg = state_code == 1 ? color.new(c_bull, 45) : state_code == 2 ? color.new(c_bear, 45) : c_cell
+    f_tcell(hud, 0, 0, "Value Scan " + variant_tag, c_text, c_frame)
+    f_tcell(hud, 1, 0, _state_txt, c_text, _state_bg)
+    if hud_mode == "Full"
+        f_tcell(hud, 0, 1, "(a) AVWAP link", c_dim, c_panel)
+        f_tcell(hud, 1, 1, a_valid ? str.tostring(avwap_src, format.mintick) + " ±" + f_fmt(avwap_tol_atr, 2) + "ATR · " + f_io(in_a) : "unwired (ignored)", a_valid ? c_dim : c_faint, c_cell)
+        f_tcell(hud, 0, 2, "(b) Session VWAP ±" + f_fmt(vwap_sigma_mult, 2) + "σ", c_dim, c_panel)
+        f_tcell(hud, 1, 2, b_valid ? str.tostring(vwap_val, format.mintick) + " [" + str.tostring(b_lo, format.mintick) + " – " + str.tostring(b_hi, format.mintick) + "] · " + f_io(in_b) : (timeframe.isintraday ? "no volume data" : "intraday only"), b_valid ? c_dim : c_faint, c_cell)
+        f_tcell(hud, 0, 3, "(c) Value area " + f_fmt(va_pct, 0) + "%", c_dim, c_panel)
+        f_tcell(hud, 1, 3, c_valid ? "POC " + str.tostring(poc_val, format.mintick) + " [" + str.tostring(va_lo, format.mintick) + " – " + str.tostring(va_hi, format.mintick) + "] · " + f_io(in_c) : (timeframe.isintraday ? "no volume data" : "intraday only"), c_valid ? c_dim : c_faint, c_cell)
+        f_tcell(hud, 0, 4, "Confluence · RSI", c_dim, c_panel)
+        f_tcell(hud, 1, 4, str.tostring(confluence_n) + " of " + str.tostring(n_valid) + " valid refs contain price · RSI " + f_fmt(rsi_v, 0), confluence_n >= 2 ? c_text : c_dim, c_cell2)
+        f_tcell(hud, 0, 5, "Long flags", c_dim, c_panel)
+        f_tcell(hud, 1, 5, "n" + str.tostring(l_n) + " · hit " + f_fmt(l_hr * 100.0, 0) + "% · Wlo " + f_fmt(l_wlo, 0) + "%" + (l_exp > 0 ? " · exp " + str.tostring(l_exp) : "") + (pl_on ? " · pend " + str.tostring(pl_age) + "/" + str.tostring(horizon_bars) : "") + (l_n < min_n ? " !" : ""), l_n < min_n ? c_faint : c_dim, c_cell)
+        f_tcell(hud, 0, 6, "Short flags", c_dim, c_panel)
+        f_tcell(hud, 1, 6, "n" + str.tostring(s_n) + " · hit " + f_fmt(s_hr * 100.0, 0) + "% · Wlo " + f_fmt(s_wlo, 0) + "%" + (s_exp > 0 ? " · exp " + str.tostring(s_exp) : "") + (ps_on ? " · pend " + str.tostring(ps_age) + "/" + str.tostring(horizon_bars) : "") + (s_n < min_n ? " !" : ""), s_n < min_n ? c_faint : c_dim, c_cell)
+        f_tcell(hud, 0, 7, "*value = where references agree", c_faint, c_panel)
+        f_tcell(hud, 1, 7, "flags are study events, never signals", c_faint, c_panel)
+
+// =============================================================================
+// Alerts (confirmed-bar events; formal wording per suite convention)
+// =============================================================================
+alertcondition(flag_long, "Value Scan long-side reversion watch", "Value Scan: long-side reversion-watch flag toward value (study event, not a signal)")
+alertcondition(flag_short, "Value Scan short-side reversion watch", "Value Scan: short-side reversion-watch flag toward value (study event, not a signal)")
+if flag_long or flag_short
+    _side = flag_long ? "long" : "short"
+    if use_json_alerts
+        alert('{"ev":"value_scan","sym":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","side":"' + _side + '","confluence":' + str.tostring(confluence_n) + ',"refs_valid":' + str.tostring(n_valid) + ',"rsi":' + (na(rsi_v) ? "null" : f_fmt(rsi_v, 1)) + ',"target":' + (na(last_tgt) ? "null" : str.tostring(last_tgt, format.mintick)) + ',"variant":"' + variant_tag + '","t":' + str.tostring(time) + '}', alert.freq_once_per_bar_close)
+    else
+        alert("Value Scan [" + variant_tag + "]: " + syminfo.ticker + " " + _side + "-side reversion-watch flag toward value (study event, not a signal) · outside all " + str.tostring(n_valid) + " valid refs · RSI " + f_fmt(rsi_v, 0) + " · target " + str.tostring(last_tgt, format.mintick), alert.freq_once_per_bar_close)
+
+// =============================================================================
+// End of file · Value Zone Reversion Confluence Scanner v1.0
+// =============================================================================

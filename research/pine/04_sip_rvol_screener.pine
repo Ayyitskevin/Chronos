@@ -1,0 +1,337 @@
+//@version=6
+// =============================================================================
+// Stocks in Play — RVOL Screener v1.1 (5T Pine Suite · Tranche 1)
+//
+// v1.1 (2026-07-11) — polish/parity pass. Evidence label: needs user run.
+//   + Basket RVOL proration now defaults to a STYLIZED U-SHAPE session
+//     volume curve (research-tuned default, sanctioned by the batch plan);
+//     v1.0's linear clock fraction remains selectable. Linear proration
+//     overstated early-session RVOL ~2x at 10:00 — exactly when this
+//     screener is used. The U-curve is an approximation and says so.
+//   + Exact time-of-day RVOL now warm-gated in the HUD (needs 5 prior
+//     days before it stops saying "warming").
+//   + Tiered HUD (Off/Micro/Full) + separate screener-table toggle.
+//   + Basket In-Play count: alert on increase + INPLAY_COUNT_EXPORT.
+//   + JSON alert payloads (default OFF) beside human-readable alerts.
+//   FIX: request.security barmerge args are now keyword-form (v1.0 passed
+//     lookahead positionally into the ignore_invalid_symbol slot — the
+//     suite's known first-compile bug class).
+//   FIX: D-Trend column shows n/a on symbols with no daily data (was
+//     silently printing "Down").
+//   Also: alertcondition confirm-gated; time-of-day matrix writes
+//     confirm-gated (consistency with Noise-Area); merge_cells guarded.
+//
+// The selection engine. Research basis: Zarattini/Barbon/Aziz (2024) — ORB
+// expectancy scaled with relative volume; the edge concentrated in "Stocks in
+// Play" (abnormal activity), not in the entry technique. This screener ranks
+// a 10-symbol basket by relative volume and flags in-play candidates.
+//
+// Two RVOL forms, honestly labeled:
+//   - Basket rows: PRORATED RVOL = today's cum volume / (20d avg daily volume
+//     x fraction of RTH elapsed). Approximation — cheap across symbols.
+//   - Chart symbol: EXACT time-of-day RVOL = cum volume vs average cum volume
+//     at this same bar-of-day over the prior N days (matrix-based).
+//
+// Non-repaint: daily context uses [1]-offset with lookahead_on (fixed history);
+// today's daily open is fixed once the session starts. No forward peeking.
+// Decision support only. Not advice. Selection ranks candidates; you decide.
+// =============================================================================
+indicator("Stocks in Play — RVOL Screener v1.1", shorttitle = "SIP Screener v1.1", overlay = true)
+
+// =============================================================================
+// Groups
+// =============================================================================
+grp_sym = "1 · Basket"
+grp_thr = "2 · In-Play Thresholds"
+grp_rv  = "3 · RVOL Settings"
+grp_dsp = "4 · Display"
+
+// =============================================================================
+// Inputs
+// =============================================================================
+s01 = input.symbol("AMEX:SPY", "Symbol 1", group = grp_sym)
+s02 = input.symbol("NASDAQ:QQQ", "Symbol 2", group = grp_sym)
+s03 = input.symbol("NASDAQ:NVDA", "Symbol 3", group = grp_sym)
+s04 = input.symbol("NASDAQ:TSLA", "Symbol 4", group = grp_sym)
+s05 = input.symbol("NASDAQ:AMD", "Symbol 5", group = grp_sym)
+s06 = input.symbol("NASDAQ:AAPL", "Symbol 6", group = grp_sym)
+s07 = input.symbol("NASDAQ:META", "Symbol 7", group = grp_sym)
+s08 = input.symbol("NASDAQ:AMZN", "Symbol 8", group = grp_sym)
+s09 = input.symbol("NASDAQ:MSFT", "Symbol 9", group = grp_sym)
+s10 = input.symbol("NASDAQ:COIN", "Symbol 10", group = grp_sym)
+
+inplay_min_rvol = input.float(1.50, "Min RVOL for In-Play", minval = 0.5, maxval = 30.0, step = 0.1, group = grp_thr,
+     tooltip = "Research: expectancy was negative below ~1.0x and scaled up with RVOL. 1.5x is a floor, not a target — the fat tail (3x+) is where the study's edge concentrated.")
+rvol_proration = input.string("U-shape (stylized)", "Basket RVOL proration", options = ["U-shape (stylized)", "Linear (v1.0)"], group = grp_thr,
+     tooltip = "How much of a normal day's volume should have printed by now. U-shape (default, v1.1): stylized US-equity intraday volume curve — front- and back-loaded, an approximation and labeled as such. Linear (v1.0): clock-time fraction; overstates RVOL early in the session (~2x at 10:00). Basket rows only — the chart HUD's exact time-of-day RVOL never uses proration.")
+inplay_min_avg_dollar_vol = input.float(20.0, "Min 20d avg dollar volume ($M)", minval = 0.0, step = 5.0, group = grp_thr,
+     tooltip = "Liquidity floor. Cost drag is the apex predator intraday.")
+inplay_min_gap_atr = input.float(0.0, "Min |gap| in ATRs (0 = off)", minval = 0.0, maxval = 5.0, step = 0.25, group = grp_thr,
+     tooltip = "Optional: require an overnight gap as the in-play catalyst proxy.")
+
+rvol_days = input.int(20, "RVOL lookback (days)", minval = 3, maxval = 60, group = grp_rv)
+tod_max_bars = input.int(400, "Max bars per day stored (chart-symbol exact RVOL)", minval = 50, maxval = 500, group = grp_rv,
+     tooltip = "390 one-minute RTH bars; 400 covers padding. Lower on higher timeframes is fine.")
+
+tbl_pos_in = input.string("top_right", "Screener position", options = ["top_left", "top_center", "top_right", "bottom_left", "bottom_center", "bottom_right"], group = grp_dsp)
+tbl_size = input.string("small", "Text size", options = ["tiny", "small", "normal"], group = grp_dsp)
+show_table = input.bool(true, "Show screener table", group = grp_dsp)
+hud_mode = input.string("Full", "Chart-symbol HUD", options = ["Off", "Micro", "Full"], group = grp_dsp,
+     tooltip = "Micro: ticker + In-Play state only. Full: adds exact time-of-day RVOL and gap/liquidity context.")
+use_json_alerts = input.bool(false, "JSON alert payloads (webhook)", group = grp_dsp,
+     tooltip = "OFF: human-readable alert text (v1.0 behavior). ON: alerts fire machine-readable JSON for webhook automation. Display-layer only.")
+hud_pos_in = input.string("bottom_right", "HUD position", options = ["top_left", "top_center", "top_right", "bottom_left", "bottom_center", "bottom_right"], group = grp_dsp)
+
+// =============================================================================
+// Palette & helpers
+// =============================================================================
+c_panel = color.new(#141a22, 0)
+c_cell = color.new(#1b2430, 0)
+c_cell2 = color.new(#20293a, 0)
+c_frame = color.new(#2e4a66, 0)
+c_text = color.new(#e8edf2, 0)
+c_dim = color.new(#9fb0c0, 0)
+c_faint = color.new(#5a6572, 0)
+c_bull = color.new(#1e9e6a, 0)
+c_bear = color.new(#e5484d, 0)
+c_hot = color.new(#f5a623, 0)
+
+f_pos(_s) =>
+    _s == "top_left" ? position.top_left : _s == "top_center" ? position.top_center :
+     _s == "top_right" ? position.top_right : _s == "bottom_left" ? position.bottom_left :
+     _s == "bottom_center" ? position.bottom_center : position.bottom_right
+
+f_tsize(_s) =>
+    _s == "tiny" ? size.tiny : _s == "small" ? size.small : size.normal
+
+f_fmt(_v, _dp) =>
+    na(_v) ? "n/a" : str.tostring(_v, _dp == 0 ? "#" : _dp == 1 ? "#.#" : "#.##")
+
+f_new_day() =>
+    ta.change(time("D")) != 0
+
+f_rth_fraction() =>
+    _mins = hour * 60 + minute
+    math.max(0.02, math.min(1.0, (_mins - (9 * 60 + 30)) / (6.5 * 60)))
+
+// v1.1: stylized U-shape cumulative-volume fraction (30-min knots, linear
+// interpolation). Typical large-cap US-equity profile — an approximation,
+// honestly labeled; symbol-specific curves belong to the exact tod form.
+f_u_fraction() =>
+    var array<float> _kf = array.from(0.04, 0.16, 0.24, 0.31, 0.37, 0.43, 0.48, 0.53, 0.59, 0.65, 0.72, 0.80, 0.89, 1.00)
+    _m = math.max(0.0, math.min(390.0, (hour * 60 + minute) - (9 * 60 + 30)))
+    _seg = int(math.floor(_m / 30.0))
+    _lo = array.get(_kf, math.min(_seg, 13))
+    _hi = array.get(_kf, math.min(_seg + 1, 13))
+    _t = (_m - _seg * 30.0) / 30.0
+    math.max(0.04, _lo + (_hi - _lo) * _t)
+
+// Runs inside request.security per symbol: cumulative session volume.
+f_day_cum_vol() =>
+    var float cv = 0.0
+    cv := f_new_day() ? nz(volume) : cv + nz(volume)
+    cv
+
+// =============================================================================
+// Per-symbol metric fetch (2 security calls per symbol, 20 total)
+// =============================================================================
+f_intraday(simple string _sym) =>
+    request.security(_sym, timeframe.period, [f_day_cum_vol(), ta.vwap, close],
+         gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+
+f_daily(simple string _sym) =>
+    request.security(_sym, "D",
+         [close[1], ta.sma(volume, 20)[1], ta.atr(14)[1], close[1] > ta.ema(close, 20)[1] ? 1.0 : 0.0, open],
+         gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)  // [1]-offset history + immutable daily open ONLY — adding un-offset series here would repaint
+
+f_metrics(simple string _sym) =>
+    [_cumv, _vwap, _px] = f_intraday(_sym)
+    [_pc, _avgvol, _atr, _trend, _dopen] = f_daily(_sym)
+    _frac = rvol_proration == "Linear (v1.0)" ? f_rth_fraction() : f_u_fraction()
+    _rvol = not na(_cumv) and not na(_avgvol) and _avgvol > 0 ? _cumv / (_avgvol * _frac) : float(na)
+    _gap_pct = not na(_dopen) and not na(_pc) and _pc > 0 ? (_dopen - _pc) / _pc * 100.0 : float(na)
+    _gap_atr = not na(_dopen) and not na(_pc) and not na(_atr) and _atr > 0 ? (_dopen - _pc) / _atr : float(na)
+    _dvol_m = not na(_cumv) and not na(_px) ? _cumv * _px / 1e6 : float(na)
+    _avg_dvol_m = not na(_avgvol) and not na(_px) ? _avgvol * _px / 1e6 : float(na)
+    _atr_pct = not na(_atr) and not na(_px) and _px > 0 ? _atr / _px * 100.0 : float(na)
+    _above_vwap = not na(_px) and not na(_vwap) ? (_px > _vwap ? 1.0 : 0.0) : float(na)
+    [_rvol, _gap_pct, _gap_atr, _dvol_m, _avg_dvol_m, _atr_pct, _above_vwap, _trend]
+
+[rv1, gp1, ga1, dv1, av1, ap1, vw1, tr1] = f_metrics(s01)
+[rv2, gp2, ga2, dv2, av2, ap2, vw2, tr2] = f_metrics(s02)
+[rv3, gp3, ga3, dv3, av3, ap3, vw3, tr3] = f_metrics(s03)
+[rv4, gp4, ga4, dv4, av4, ap4, vw4, tr4] = f_metrics(s04)
+[rv5, gp5, ga5, dv5, av5, ap5, vw5, tr5] = f_metrics(s05)
+[rv6, gp6, ga6, dv6, av6, ap6, vw6, tr6] = f_metrics(s06)
+[rv7, gp7, ga7, dv7, av7, ap7, vw7, tr7] = f_metrics(s07)
+[rv8, gp8, ga8, dv8, av8, ap8, vw8, tr8] = f_metrics(s08)
+[rv9, gp9, ga9, dv9, av9, ap9, vw9, tr9] = f_metrics(s09)
+[rv10, gp10, ga10, dv10, av10, ap10, vw10, tr10] = f_metrics(s10)
+
+f_symname(simple string _s) =>
+    _i = str.pos(_s, ":")
+    na(_i) ? _s : str.substring(_s, _i + 1)
+
+// =============================================================================
+// In-play evaluation + ranking
+// =============================================================================
+f_inplay(float _rvol, float _avg_dvol_m, float _gap_atr) =>
+    _rv_ok = not na(_rvol) and _rvol >= inplay_min_rvol
+    _lq_ok = na(_avg_dvol_m) ? false : _avg_dvol_m >= inplay_min_avg_dollar_vol
+    _gp_ok = inplay_min_gap_atr <= 0.0 or (not na(_gap_atr) and math.abs(_gap_atr) >= inplay_min_gap_atr)
+    _rv_ok and _lq_ok and _gp_ok
+
+// =============================================================================
+// Chart symbol: EXACT time-of-day RVOL (matrix machinery, per KLQuant)
+// =============================================================================
+var matrix<float> tod_m = matrix.new<float>(60, 500, na)
+var int tod_row = 0
+var int day_b = -1
+var float chart_cum = 0.0
+day_b := f_new_day() ? 0 : day_b + 1
+chart_cum := f_new_day() ? nz(volume) : chart_cum + nz(volume)
+_days_eff = math.min(rvol_days, 60)
+_bars_eff = math.min(tod_max_bars, 500)
+if f_new_day()
+    tod_row := (tod_row + 1) % _days_eff
+    for c = 0 to _bars_eff - 1
+        matrix.set(tod_m, tod_row, c, na)
+if barstate.isconfirmed and day_b >= 0 and day_b < _bars_eff
+    matrix.set(tod_m, tod_row, day_b, chart_cum)
+float tod_sum = 0.0
+int tod_n = 0
+if day_b >= 0 and day_b < _bars_eff
+    for r = 0 to _days_eff - 1
+        if r != tod_row
+            _v = matrix.get(tod_m, r, day_b)
+            if not na(_v)
+                tod_sum += _v
+                tod_n += 1
+chart_rvol_tod = tod_n > 0 and tod_sum > 0 ? chart_cum / (tod_sum / tod_n) : float(na)
+// chart in-play evaluated against the chart symbol's own daily context
+[c_pc, c_avgvol, c_atr, c_trend, c_dopen] = request.security(syminfo.tickerid, "D",
+     [close[1], ta.sma(volume, 20)[1], ta.atr(14)[1], close[1] > ta.ema(close, 20)[1] ? 1.0 : 0.0, open],
+     gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)  // [1]-offset history + immutable daily open ONLY
+c_gap_atr = not na(c_dopen) and not na(c_pc) and not na(c_atr) and c_atr > 0 ? (c_dopen - c_pc) / c_atr : float(na)
+c_avg_dvol_m = not na(c_avgvol) ? c_avgvol * close / 1e6 : float(na)
+chart_inplay = f_inplay(chart_rvol_tod, c_avg_dvol_m, c_gap_atr)
+
+// =============================================================================
+// Screener table (sorted by RVOL, descending)
+// =============================================================================
+var table scr = table.new(f_pos(tbl_pos_in), 9, 12, bgcolor = c_panel, frame_color = c_frame,
+     frame_width = 1, border_color = color.new(color.white, 92), border_width = 1)
+
+f_cell(_t, _c, _r, _txt, _tc, _bg) =>
+    table.cell(_t, _c, _r, _txt, text_color = _tc, bgcolor = _bg, text_size = f_tsize(tbl_size))
+
+if barstate.islast and show_table
+    names = array.from(f_symname(s01), f_symname(s02), f_symname(s03), f_symname(s04), f_symname(s05),
+         f_symname(s06), f_symname(s07), f_symname(s08), f_symname(s09), f_symname(s10))
+    rvs = array.from(rv1, rv2, rv3, rv4, rv5, rv6, rv7, rv8, rv9, rv10)
+    gps = array.from(gp1, gp2, gp3, gp4, gp5, gp6, gp7, gp8, gp9, gp10)
+    gas = array.from(ga1, ga2, ga3, ga4, ga5, ga6, ga7, ga8, ga9, ga10)
+    dvs = array.from(dv1, dv2, dv3, dv4, dv5, dv6, dv7, dv8, dv9, dv10)
+    avs = array.from(av1, av2, av3, av4, av5, av6, av7, av8, av9, av10)
+    aps = array.from(ap1, ap2, ap3, ap4, ap5, ap6, ap7, ap8, ap9, ap10)
+    vws = array.from(vw1, vw2, vw3, vw4, vw5, vw6, vw7, vw8, vw9, vw10)
+    trs = array.from(tr1, tr2, tr3, tr4, tr5, tr6, tr7, tr8, tr9, tr10)
+    idx = array.from(0, 1, 2, 3, 4, 5, 6, 7, 8, 9)
+    // insertion sort idx by rvol desc (na sinks)
+    for i = 1 to 9
+        _key = array.get(idx, i)
+        _kv = array.get(rvs, _key)
+        j = i - 1
+        while j >= 0 and (na(array.get(rvs, array.get(idx, j))) or (not na(_kv) and array.get(rvs, array.get(idx, j)) < _kv))
+            array.set(idx, j + 1, array.get(idx, j))
+            j -= 1
+        array.set(idx, j + 1, _key)
+    f_cell(scr, 0, 0, "SIP Screener", c_text, c_frame)
+    f_cell(scr, 1, 0, "RVOL*", c_text, c_frame)
+    f_cell(scr, 2, 0, "Gap %", c_text, c_frame)
+    f_cell(scr, 3, 0, "Gap/ATR", c_text, c_frame)
+    f_cell(scr, 4, 0, "$Vol M", c_text, c_frame)
+    f_cell(scr, 5, 0, "ATR %", c_text, c_frame)
+    f_cell(scr, 6, 0, "VWAP", c_text, c_frame)
+    f_cell(scr, 7, 0, "D-Trend", c_text, c_frame)
+    f_cell(scr, 8, 0, "Play?", c_text, c_frame)
+    for r = 0 to 9
+        _k = array.get(idx, r)
+        _rv = array.get(rvs, _k)
+        _ip = f_inplay(_rv, array.get(avs, _k), array.get(gas, _k))
+        _row = r + 1
+        _bg = _ip ? color.new(c_hot, 75) : r % 2 == 0 ? c_cell : c_cell2
+        _rvc = na(_rv) ? c_faint : _rv >= 3.0 ? c_hot : _rv >= inplay_min_rvol ? c_bull : c_dim
+        _gp = array.get(gps, _k)
+        f_cell(scr, 0, _row, array.get(names, _k), _ip ? c_text : c_dim, _bg)
+        f_cell(scr, 1, _row, f_fmt(_rv, 2) + "x", _rvc, _bg)
+        f_cell(scr, 2, _row, (na(_gp) ? "" : _gp >= 0 ? "+" : "") + f_fmt(_gp, 1), na(_gp) ? c_faint : _gp >= 0 ? c_bull : c_bear, _bg)
+        f_cell(scr, 3, _row, f_fmt(array.get(gas, _k), 2), c_dim, _bg)
+        f_cell(scr, 4, _row, f_fmt(array.get(dvs, _k), 0), c_dim, _bg)
+        f_cell(scr, 5, _row, f_fmt(array.get(aps, _k), 1), c_dim, _bg)
+        f_cell(scr, 6, _row, array.get(vws, _k) == 1.0 ? "Above" : na(array.get(vws, _k)) ? "n/a" : "Below", array.get(vws, _k) == 1.0 ? c_bull : c_bear, _bg)
+        f_cell(scr, 7, _row, na(array.get(trs, _k)) ? "n/a" : array.get(trs, _k) == 1.0 ? "Up" : "Down", na(array.get(trs, _k)) ? c_faint : array.get(trs, _k) == 1.0 ? c_bull : c_bear, _bg)
+        f_cell(scr, 8, _row, _ip ? "IN PLAY" : "-", _ip ? c_hot : c_faint, _bg)
+    f_cell(scr, 0, 11, "*Prorated RVOL: cum vol / (20d avg x " + (rvol_proration == "Linear (v1.0)" ? "linear RTH fraction — overstates early-session RVOL" : "stylized U-shape session fraction — an approximation") + "). Chart HUD shows exact time-of-day RVOL — when they disagree, trust the exact one. RVOL selects candidates; it does not predict direction.", c_faint, c_panel)
+    var bool scr_merged = false
+    if not scr_merged
+        table.merge_cells(scr, 0, 11, 8, 11)
+        scr_merged := true
+
+// =============================================================================
+// Chart-symbol HUD (exact time-of-day RVOL)
+// =============================================================================
+var table hud = table.new(f_pos(hud_pos_in), 2, 3, bgcolor = c_panel, frame_color = c_frame, frame_width = 1,
+     border_color = color.new(color.white, 92), border_width = 1)
+if barstate.islast and hud_mode != "Off"
+    f_cell(hud, 0, 0, syminfo.ticker, c_text, c_frame)
+    f_cell(hud, 1, 0, chart_inplay ? "IN PLAY" : "Standby", chart_inplay ? c_hot : c_faint, chart_inplay ? color.new(c_hot, 70) : c_cell)
+    if hud_mode == "Full"
+        _warm = tod_n >= 5
+        f_cell(hud, 0, 1, "RVOL (tod, exact)", c_dim, c_panel)
+        f_cell(hud, 1, 1, f_fmt(chart_rvol_tod, 2) + "x · n" + str.tostring(tod_n) + (_warm ? "" : " · warming"), na(chart_rvol_tod) or not _warm ? c_faint : chart_rvol_tod >= inplay_min_rvol ? c_bull : c_dim, c_cell)
+        f_cell(hud, 0, 2, "Gap/ATR · $Vol20d", c_dim, c_panel)
+        f_cell(hud, 1, 2, f_fmt(c_gap_atr, 2) + " · $" + f_fmt(c_avg_dvol_m, 0) + "M", c_dim, c_cell)
+
+// =============================================================================
+// Alerts (chart symbol)
+// =============================================================================
+inplay_new = chart_inplay and not chart_inplay[1]
+alertcondition(inplay_new and barstate.isconfirmed, "Chart symbol IN PLAY", "SIP Screener: chart symbol crossed into In-Play")
+if barstate.isconfirmed and inplay_new
+    if use_json_alerts
+        alert('{"ev":"inplay","sym":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","rvol_tod":' + (na(chart_rvol_tod) ? "null" : f_fmt(chart_rvol_tod, 2)) + ',"gap_atr":' + (na(c_gap_atr) ? "null" : f_fmt(c_gap_atr, 2)) + ',"avg_dvol_m":' + (na(c_avg_dvol_m) ? "null" : f_fmt(c_avg_dvol_m, 0)) + ',"t":' + str.tostring(time) + '}', alert.freq_once_per_bar_close)
+    else
+        alert("SIP Screener: " + syminfo.ticker + " IN PLAY · RVOL(tod) " + f_fmt(chart_rvol_tod, 2) +
+             "x · gap " + f_fmt(c_gap_atr, 2) + " ATR", alert.freq_once_per_bar_close)
+
+// v1.1: basket In-Play count — selection breadth at a glance.
+int basket_inplay_count = 0
+basket_inplay_count += f_inplay(rv1, av1, ga1) ? 1 : 0
+basket_inplay_count += f_inplay(rv2, av2, ga2) ? 1 : 0
+basket_inplay_count += f_inplay(rv3, av3, ga3) ? 1 : 0
+basket_inplay_count += f_inplay(rv4, av4, ga4) ? 1 : 0
+basket_inplay_count += f_inplay(rv5, av5, ga5) ? 1 : 0
+basket_inplay_count += f_inplay(rv6, av6, ga6) ? 1 : 0
+basket_inplay_count += f_inplay(rv7, av7, ga7) ? 1 : 0
+basket_inplay_count += f_inplay(rv8, av8, ga8) ? 1 : 0
+basket_inplay_count += f_inplay(rv9, av9, ga9) ? 1 : 0
+basket_inplay_count += f_inplay(rv10, av10, ga10) ? 1 : 0
+basket_count_up = basket_inplay_count > nz(basket_inplay_count[1])
+alertcondition(basket_count_up and barstate.isconfirmed, "Basket In-Play count increased", "SIP Screener: a basket symbol crossed into In-Play")
+if barstate.isconfirmed and basket_count_up
+    alert("SIP Screener: basket In-Play count → " + str.tostring(basket_inplay_count), alert.freq_once_per_bar_close)
+
+// =============================================================================
+// Data Window exports (chart symbol)
+// =============================================================================
+plot(chart_rvol_tod, "RVOL_TOD_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(chart_cum, "DAY_CUM_VOL_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(c_gap_atr, "GAP_ATR_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(c_avg_dvol_m, "AVG_DOLLARVOL_M_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(chart_inplay ? 1.0 : 0.0, "IN_PLAY_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(float(basket_inplay_count), "INPLAY_COUNT_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+
+// =============================================================================
+// End of file · Stocks in Play — RVOL Screener v1.1
+// =============================================================================

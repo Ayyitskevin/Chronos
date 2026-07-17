@@ -12,6 +12,9 @@ build/
 dist/
 data/*.db
 data/*.db-*
+data/*.json
+data/*.jsonl
+data/*.tmp
 logs/*.log
 logs/*.log.*
 .streamlit/secrets.toml

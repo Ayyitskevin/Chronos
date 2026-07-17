@@ -1,0 +1,240 @@
+//@version=6
+// =============================================================================
+// Noise-Area Intraday Momentum Bands v1.1 (5T Pine Suite · Tranche 1)
+//
+// v1.1 (2026-07-11) — polish/parity pass. Evidence label: needs user run.
+//   + Timeframe-alignment guard: the half-hour check protocol silently
+//     never fired on TFs that don't divide 30 (7m, 4m, ...) and the study
+//     produced meaningless bands on non-intraday charts — both now warn
+//     loudly on the HUD instead of failing silently.
+//   + Sigma ring is now N+1 rows, so the average truly covers N prior
+//     days as the tooltip promised (v1.0 effectively averaged N-1).
+//     Warm-up display also fixed — v1.0 printed "WARMING · 14/14d" for a
+//     full extra day; it now counts to the real requirement.
+//   + Exports warm-gated (plots already were); new exports: DAY_OPEN,
+//     ESCAPE_UP, ESCAPE_DN.
+//   + JSON alert payloads (default OFF) beside human-readable alerts.
+//   FIX: request.security barmerge args keyword-form.
+//   NOTE (extended-hours charts): the day open anchors to the chart's
+//     first bar of the calendar day — on ETH charts that is the premarket
+//     open, while the paper's sigma is RTH-premised. Prefer RTH charts.
+//
+// Research basis: Zarattini/Aziz/Barbon (2024), "Beat the Market" (SFI 24-97).
+// The day's open is surrounded by a Noise Area sized by how far price has
+// TYPICALLY traveled by this time of day over the prior N sessions:
+//   sigma(t) = avg over N prior days of |close_t / day_open - 1| at same time
+//   UB = Open*(1+sigma) + max(PrevClose-Open, 0)   [gap-down widens upside]
+//   LB = Open*(1-sigma) - max(Open-PrevClose, 0)   [gap-up widens downside]
+// Inside the area = unpredictable noise: do nothing. A confirmed escape =
+// abnormal demand/supply imbalance. The paper evaluates on half-hour marks
+// and trails with the bands and session VWAP.
+//
+// This is a STUDY, not a strategy — learn it, replay it, journal it before
+// any strategy version exists (mentor-loop doctrine). Philosophically this is
+// the Markov gate at intraday scale: refuse to trade noise, act only on
+// confirmed imbalance. Published results are backtest-world; reviewers note
+// execution-cost sensitivity. Non-repaint: matrix rows store confirmed bars;
+// state changes on confirmed closes only. Decision support — not advice.
+// =============================================================================
+indicator("Noise-Area Intraday Momentum Bands v1.1", shorttitle = "Noise Area v1.1", overlay = true)
+
+// =============================================================================
+// Groups
+// =============================================================================
+grp_na  = "1 · Noise Area"
+grp_chk = "2 · Evaluation"
+grp_dsp = "3 · Display"
+
+// =============================================================================
+// Inputs
+// =============================================================================
+na_days = input.int(14, "Sigma lookback (days)", minval = 3, maxval = 45, group = grp_na,
+     tooltip = "14 per the paper: average absolute move from the open at this same time of day.")
+max_day_bars = input.int(400, "Max bars per day stored", minval = 50, maxval = 500, group = grp_na)
+half_hour_checks = input.bool(true, "Evaluate on half-hour marks (paper protocol)", group = grp_chk,
+     tooltip = "ON: escape signals register only on confirmed bars closing at HH:00 / HH:30. OFF: any confirmed close outside the area registers.")
+one_shot_per_side = input.bool(true, "One escape signal per side per day", group = grp_chk)
+show_vwap = input.bool(true, "Session VWAP (trailing reference)", group = grp_dsp)
+show_fill = input.bool(true, "Shade the noise area", group = grp_dsp)
+show_marks = input.bool(true, "Mark escape signals", group = grp_dsp)
+hud_mode = input.string("Full", "HUD mode", options = ["Off", "Micro", "Full"], group = grp_dsp)
+use_json_alerts = input.bool(false, "JSON alert payloads (webhook)", group = grp_dsp,
+     tooltip = "OFF: human-readable alert text (v1.0 behavior). ON: escape alerts fire machine-readable JSON for webhook automation. Display-layer only.")
+hud_pos_in = input.string("bottom_right", "HUD position", options = ["top_left", "top_center", "top_right", "bottom_left", "bottom_center", "bottom_right"], group = grp_dsp)
+
+// =============================================================================
+// Palette & helpers
+// =============================================================================
+c_panel = color.new(#141a22, 0)
+c_cell = color.new(#1b2430, 0)
+c_frame = color.new(#2e4a66, 0)
+c_text = color.new(#e8edf2, 0)
+c_dim = color.new(#9fb0c0, 0)
+c_faint = color.new(#5a6572, 0)
+c_bull = color.new(#1e9e6a, 0)
+c_bear = color.new(#e5484d, 0)
+c_band = color.new(#f5a623, 0)
+c_vw = color.new(#7aa2f7, 0)
+
+f_pos(_s) =>
+    _s == "top_left" ? position.top_left : _s == "top_center" ? position.top_center :
+     _s == "top_right" ? position.top_right : _s == "bottom_left" ? position.bottom_left :
+     _s == "bottom_center" ? position.bottom_center : position.bottom_right
+
+f_fmt(_v, _dp) =>
+    na(_v) ? "n/a" : str.tostring(_v, _dp == 0 ? "#" : _dp == 1 ? "#.#" : "#.##")
+
+f_tcell(_t, _c, _r, _txt, _tc, _bg) =>
+    table.cell(_t, _c, _r, _txt, text_color = _tc, bgcolor = _bg, text_size = size.small)
+
+// =============================================================================
+// Day context
+// =============================================================================
+new_day = ta.change(time("D")) != 0
+var float day_open = na
+day_open := new_day ? open : day_open
+pd_close = request.security(syminfo.tickerid, "D", close[1], gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+
+// =============================================================================
+// Time-of-day sigma (matrix machinery — confirmed bars only)
+// =============================================================================
+var matrix<float> mv = matrix.new<float>(46, 500, na)  // v1.1: N+1 rows — today excluded, N PRIOR days averaged
+var int mrow = 0
+var int day_b = -1
+var int days_seen = 0
+day_b := new_day ? 0 : day_b + 1
+_days_eff = math.min(na_days, 45)
+_bars_eff = math.min(max_day_bars, 500)
+if new_day
+    mrow := (mrow + 1) % (_days_eff + 1)
+    days_seen += 1
+    for c = 0 to _bars_eff - 1
+        matrix.set(mv, mrow, c, na)
+abs_move = not na(day_open) and day_open != 0 ? math.abs(close / day_open - 1.0) : float(na)
+if barstate.isconfirmed and day_b >= 0 and day_b < _bars_eff and not na(abs_move)
+    matrix.set(mv, mrow, day_b, abs_move)
+float sig_sum = 0.0
+int sig_n = 0
+if day_b >= 0 and day_b < _bars_eff
+    for r = 0 to _days_eff - 1
+        if r != mrow
+            _v = matrix.get(mv, r, day_b)
+            if not na(_v)
+                sig_sum += _v
+                sig_n += 1
+sigma = sig_n > 0 ? sig_sum / sig_n : float(na)
+warmed = days_seen > _days_eff
+
+// =============================================================================
+// Noise boundaries (gap-adjusted per the paper)
+// =============================================================================
+gap_dn = na(pd_close) or na(day_open) ? 0.0 : math.max(pd_close - day_open, 0.0)
+gap_up = na(pd_close) or na(day_open) ? 0.0 : math.max(day_open - pd_close, 0.0)
+ub = not na(sigma) and not na(day_open) ? day_open * (1.0 + sigma) + gap_dn : float(na)
+lb = not na(sigma) and not na(day_open) ? day_open * (1.0 - sigma) - gap_up : float(na)
+
+// =============================================================================
+// State machine (confirmed closes; optional half-hour protocol)
+// =============================================================================
+is_check_bar = not half_hour_checks or minute(time_close) % 30 == 0
+// v1.1: alignment guard — half-hour checks need a TF that lands on :00/:30.
+tf_min = timeframe.in_seconds(timeframe.period) / 60.0
+check_misaligned = not timeframe.isintraday or (half_hour_checks and (tf_min > 30 or 30 % math.max(int(tf_min), 1) != 0))
+var int na_state = 0
+var bool up_fired = false
+var bool dn_fired = false
+if new_day
+    na_state := 0
+    up_fired := false
+    dn_fired := false
+raw_above = barstate.isconfirmed and warmed and not na(ub) and close > ub
+raw_below = barstate.isconfirmed and warmed and not na(lb) and close < lb
+if barstate.isconfirmed and warmed and not na(ub) and not na(lb)
+    na_state := close > ub ? 1 : close < lb ? -1 : 0
+escape_up = raw_above and is_check_bar and (not one_shot_per_side or not up_fired)
+escape_dn = raw_below and is_check_bar and (not one_shot_per_side or not dn_fired)
+if escape_up
+    up_fired := true
+if escape_dn
+    dn_fired := true
+
+// Occupancy: % of today's confirmed bars spent inside the area (chop gauge)
+var int in_bars = 0
+var int tot_bars = 0
+if new_day
+    in_bars := 0
+    tot_bars := 0
+if barstate.isconfirmed and warmed and not na(ub) and not na(lb)
+    tot_bars += 1
+    in_bars += close <= ub and close >= lb ? 1 : 0
+occupancy = tot_bars > 0 ? in_bars * 100.0 / tot_bars : float(na)
+
+svwap = ta.vwap
+
+// =============================================================================
+// Plots
+// =============================================================================
+p_ub = plot(warmed ? ub : na, "Noise Upper", color = c_band, linewidth = 2, style = plot.style_linebr)
+p_lb = plot(warmed ? lb : na, "Noise Lower", color = c_band, linewidth = 2, style = plot.style_linebr)
+fill(p_ub, p_lb, color = show_fill and warmed ? color.new(c_band, 92) : na, title = "Noise Area")
+plot(warmed ? day_open : na, "Day Open", color = color.new(c_faint, 30), style = plot.style_linebr)
+plot(show_vwap ? svwap : na, "Session VWAP", color = c_vw, linewidth = 1, style = plot.style_linebr)
+plotshape(show_marks and escape_up, "Escape Up", style = shape.triangleup, location = location.belowbar, color = c_bull, size = size.small)
+plotshape(show_marks and escape_dn, "Escape Down", style = shape.triangledown, location = location.abovebar, color = c_bear, size = size.small)
+bgcolor(warmed and na_state == 1 ? color.new(c_bull, 94) : warmed and na_state == -1 ? color.new(c_bear, 94) : na, title = "Imbalance tint")
+
+// =============================================================================
+// Data Window exports
+// =============================================================================
+plot(warmed ? ub : na, "NOISE_UB_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(warmed ? lb : na, "NOISE_LB_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(warmed ? sigma * 100.0 : na, "SIGMA_PCT_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(float(na_state), "NA_STATE_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(occupancy, "OCCUPANCY_PCT_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(day_open, "DAY_OPEN_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(escape_up ? 1.0 : 0.0, "ESCAPE_UP_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(escape_dn ? 1.0 : 0.0, "ESCAPE_DN_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+
+// =============================================================================
+// HUD
+// =============================================================================
+var table hud = table.new(f_pos(hud_pos_in), 2, hud_mode == "Full" ? 6 : 1, bgcolor = c_panel,
+     frame_color = c_frame, frame_width = 1, border_color = color.new(color.white, 92), border_width = 1)
+if barstate.islast and hud_mode != "Off"
+    _state_txt = not timeframe.isintraday ? "NOT INTRADAY — bands n/a" :
+         not warmed ? "WARMING · " + str.tostring(math.min(days_seen, _days_eff + 1)) + "/" + str.tostring(_days_eff + 1) + "d" :
+         na_state == 1 ? "ABOVE · IMBALANCE ↑" : na_state == -1 ? "BELOW · IMBALANCE ↓" : "INSIDE · NOISE"
+    _sbg = na_state == 1 ? color.new(c_bull, 55) : na_state == -1 ? color.new(c_bear, 55) : c_cell
+    f_tcell(hud, 0, 0, "Noise Area", c_text, c_frame)
+    f_tcell(hud, 1, 0, _state_txt, c_text, not warmed ? c_cell : _sbg)
+    if hud_mode == "Full"
+        f_tcell(hud, 0, 1, "Sigma (tod)", c_dim, c_panel)
+        f_tcell(hud, 1, 1, f_fmt(sigma * 100.0, 2) + "% · n" + str.tostring(sig_n), c_dim, c_cell)
+        f_tcell(hud, 0, 2, "Bounds", c_dim, c_panel)
+        f_tcell(hud, 1, 2, f_fmt(lb, 2) + " – " + f_fmt(ub, 2), c_dim, c_cell)
+        f_tcell(hud, 0, 3, "Occupancy", c_dim, c_panel)
+        f_tcell(hud, 1, 3, f_fmt(occupancy, 0) + "% inside", na(occupancy) ? c_faint : occupancy >= 80 ? c_faint : c_band, c_cell)
+        f_tcell(hud, 0, 4, "Fired", c_dim, c_panel)
+        f_tcell(hud, 1, 4, (up_fired ? "Up ✓" : "Up –") + " · " + (dn_fired ? "Dn ✓" : "Dn –"), c_dim, c_cell)
+        f_tcell(hud, 0, 5, "Protocol", c_dim, c_panel)
+        f_tcell(hud, 1, 5, not timeframe.isintraday ? "NOT INTRADAY — bands n/a" : check_misaligned ? "MISALIGNED: " + f_fmt(tf_min, 0) + "m TF never lands on :00/:30" : half_hour_checks ? "HH:00/HH:30 checks" : "Every confirmed bar", check_misaligned ? c_bear : c_faint, c_cell)
+
+// =============================================================================
+// Alerts
+// =============================================================================
+alertcondition(escape_up, "Noise escape UP", "Noise Area: confirmed escape above the upper boundary")
+alertcondition(escape_dn, "Noise escape DOWN", "Noise Area: confirmed escape below the lower boundary")
+if escape_up
+    if use_json_alerts
+        alert('{"ev":"noise_escape","dir":"up","sym":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","sigma_pct":' + (na(sigma) ? "null" : f_fmt(sigma * 100.0, 2)) + ',"ub":' + (na(ub) ? "null" : f_fmt(ub, 4)) + ',"lb":' + (na(lb) ? "null" : f_fmt(lb, 4)) + ',"occupancy":' + (na(occupancy) ? "null" : f_fmt(occupancy, 0)) + ',"t":' + str.tostring(time) + '}', alert.freq_once_per_bar_close)
+    else
+        alert("Noise Area: " + syminfo.ticker + " ESCAPE UP · sigma " + f_fmt(sigma * 100.0, 2) + "% · UB " + f_fmt(ub, 2), alert.freq_once_per_bar_close)
+if escape_dn
+    if use_json_alerts
+        alert('{"ev":"noise_escape","dir":"dn","sym":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","sigma_pct":' + (na(sigma) ? "null" : f_fmt(sigma * 100.0, 2)) + ',"ub":' + (na(ub) ? "null" : f_fmt(ub, 4)) + ',"lb":' + (na(lb) ? "null" : f_fmt(lb, 4)) + ',"occupancy":' + (na(occupancy) ? "null" : f_fmt(occupancy, 0)) + ',"t":' + str.tostring(time) + '}', alert.freq_once_per_bar_close)
+    else
+        alert("Noise Area: " + syminfo.ticker + " ESCAPE DOWN · sigma " + f_fmt(sigma * 100.0, 2) + "% · LB " + f_fmt(lb, 2), alert.freq_once_per_bar_close)
+
+// =============================================================================
+// End of file · Noise-Area Intraday Momentum Bands v1.1
+// =============================================================================

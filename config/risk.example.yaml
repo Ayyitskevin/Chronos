@@ -1,0 +1,47 @@
+# Chronos platform risk policy — EXAMPLE ONLY.
+#
+# Every value below is deny-by-default in the schema; a missing key means
+# "denied" / "zero". Copy to config/risk.yaml (gitignored) and edit
+# deliberately. Unknown keys are rejected. This example shows a conservative
+# BACKTEST/SHADOW research profile for a ~USD 3,000 account; it is NOT an
+# endorsement of any particular limit for paper or live use.
+
+policy_version: "example-1"
+
+# Nothing trades unless its symbol AND strategy id are listed.
+allowed_symbols: []          # e.g. ["SPY"]
+allowed_strategy_ids: []     # e.g. ["markov_regime_bull_v1"]
+allow_long_entries: false    # must be explicitly enabled
+allow_short_entries: false   # unsupported in this build; leave false
+
+# Capital and exposure. All zero => nothing can be approved.
+max_bot_capital_usd: 0
+max_position_notional_usd: 0
+max_aggregate_exposure_usd: 0
+max_symbol_exposure_fraction: 0
+max_risk_per_trade_fraction: 0
+max_simultaneous_positions: 0
+max_open_orders: 0
+
+# Loss limits: reaching any of these blocks new entries (and the halt monitor
+# raises a persistent halt).
+max_daily_loss_usd: 0
+max_weekly_loss_usd: 0
+max_drawdown_fraction: 0
+max_consecutive_losses: 0
+
+# Data freshness. Zero denies everything (deliberately).
+max_quote_age_seconds: 0
+max_bar_age_seconds: 0
+max_price_deviation_fraction: 0
+
+max_order_rejections_per_day: 0
+cooldown_bars_after_loss_halt: 0
+
+# Behavioral prohibitions. Leave false unless the owner explicitly approves.
+allow_market_orders: false
+allow_margin: false
+allow_overnight_positions: false   # daily-bar strategies need true; enable knowingly
+allow_averaging_down: false
+allow_pyramiding: false
+allow_options: false

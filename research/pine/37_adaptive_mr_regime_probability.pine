@@ -1,0 +1,387 @@
+//@version=6
+// =============================================================================
+// Adaptive Mean Reversion with Regime Probability v1.0 (5T Pine Suite · Desk Kit)
+//
+// WHAT THIS IS.
+// A mean-reversion stretch study whose CONTEXT WEIGHT is a regime
+// probability. Each bar it measures how far price sits from a value anchor
+// (session VWAP by default) in normalized units, then multiplies that
+// stretch by the probability that the market is in its NEUTRAL state —
+// taken from the suite's HMM Regime Probability Filter through three
+// probability links, or from a compact internal copy of the same forward
+// recursion when the links are not wired. Flags fire only when both the raw
+// stretch and the probability-weighted score clear their bars.
+//
+// THE THESIS, stated honestly. Suite doctrine holds that reversion context
+// is strongest when NO directional state is committed — stretch during
+// chop tends to snap back; stretch inside a committed trend tends to keep
+// going. This tool does not assume the doctrine: every flag is BUCKETED by
+// the P(neutral) tercile in force at flag time, and each bucket keeps its
+// own touch-back ledger with Wilson 95% lower bounds. If high-P(neutral)
+// flags do not outperform low ones on THIS chart, the thesis fails HERE and
+// the panel says so. That bucketed comparison is the product.
+//
+// RESEARCH BASIS, stated plainly.
+// Regime-switching probability filters descend from Hamilton (1989,
+// Econometrica) and the forward-algorithm machinery of Baum et al.; the
+// educational framing is inspired by the Quant Guild channel's regime and
+// mean-reversion treatments. Honesty points:
+//   1. The probabilities are FILTERED (causal) — P(state | data up to now)
+//      under an ASSUMED model with user-set (not fitted) parameters. The
+//      internal fallback hard-codes the HMM filter's shipped defaults
+//      (sticky prior 0.92; emissions mu +1/0/-1, sd 0.75/0.60/0.75; z
+//      lookback 20). Wire the links to control the model.
+//   2. The score (|stretch z| × P(neutral)) is a HEURISTIC composition —
+//      an attention weight, not a probability of anything.
+//   3. Tercile buckets are fixed probability bands (thirds of 0..1), not
+//      empirical terciles of this chart's history — deterministic and
+//      comparable across charts, disclosed here.
+//   4. Three buckets slice one flag stream — samples get thin. Thin-sample
+//      marks and Wilson bounds are the defense.
+//
+// Non-repaint: recursion, links snapshot, flags, and scoring advance on
+// confirmed bars only; intrabar display holds the last confirmed state.
+// Decision support only — a human places every trade. Risk controls outrank
+// all signals.
+//
+// v1.0 changelog (2026-07-17):
+//   Initial release. Stretch z from a session-VWAP (volume-guarded; EMA
+//   fallback off-intraday or without volume) or EMA anchor, normalized by
+//   stdev-of-distance or ATR; probability source = three input.source links
+//   validated per bar (each in [0,100], sum within 100 ± 3, not one series
+//   wired thrice) with automatic internal fallback = compact 3-state
+//   forward recursion matching the HMM filter's shipped math; adaptive
+//   score = |stretch z| × P(neutral); one-shot flags (score >= threshold
+//   AND |stretch z| >= minimum, re-arm once |stretch z| < 0.5); episode
+//   self-scoring per MR conventions — fail / timeout checked BEFORE the
+//   anchor-touch win, fail distance snapshotted at flag time (ATR),
+//   intraday pendings EXPIRE UNSCORED at session rollover — bucketed by
+//   P(neutral) tercile at flag with Wilson 95% lower bounds; tiered HUD;
+//   data-window exports; JSON alerts (default OFF). Every behavior-adjacent
+//   option ships at its conservative default.
+//   Evidence label: needs user run.
+// =============================================================================
+indicator("Adaptive Mean Reversion with Regime Probability v1.0", shorttitle = "Adaptive MR v1", overlay = false)
+
+grp_mode = "0 · Mode"
+grp_lnk  = "1 · Probability Links"
+grp_str  = "2 · Stretch Measurement"
+grp_flag = "3 · Flags"
+grp_sc   = "4 · Outcome Scoring"
+grp_dsp  = "5 · Display"
+
+variant_tag = input.string("v1.0-base", "Variant tag (freeze-the-config discipline)", group = grp_mode,
+     tooltip = "Label this exact settings set. Any settings change = new tag = new variant with its own validation cycle. The tag prints on the HUD and in alerts so screenshots self-document.")
+
+use_prob_link = input.bool(false, "Use HMM probability links (wire all three)", group = grp_lnk,
+     tooltip = "OFF (default): probabilities come from the compact internal recursion (HMM filter defaults, fixed). ON: wire the three sources below to the HMM filter's HMM_P_BULL_EXPORT / HMM_P_NEUT_EXPORT / HMM_P_BEAR_EXPORT. Validation per bar: each value in [0,100], the three sum to 100 ± 3, and the three series are not identical. Any failure = automatic internal fallback; the HUD names the source in use.")
+p_bull_src = input.source(close, "P(Bull) link (wire to HMM_P_BULL_EXPORT)", group = grp_lnk)
+p_neut_src = input.source(close, "P(Neutral) link (wire to HMM_P_NEUT_EXPORT)", group = grp_lnk)
+p_bear_src = input.source(close, "P(Bear) link (wire to HMM_P_BEAR_EXPORT)", group = grp_lnk)
+
+anchor_mode = input.string("Session VWAP", "Stretch anchor", options = ["Session VWAP", "EMA"], group = grp_str,
+     tooltip = "The value reference stretch is measured from. Session VWAP (default) resets each day and is volume-weighted — it needs intraday bars AND volume data; where either is missing the study falls back to the EMA anchor and the HUD says so. EMA: plain exponential average of close.")
+ema_len = input.int(50, "EMA anchor length", minval = 2, maxval = 500, group = grp_str)
+norm_mode = input.string("Stdev of distance", "Stretch normalization", options = ["Stdev of distance", "ATR"], group = grp_str,
+     tooltip = "Stdev of distance (default): stretch z = (close − anchor) / stdev(close − anchor, lookback) — a z-score of the distance itself around zero. ATR: distance / ATR — an ATR-multiple, not a true z-score. Both are disclosed approximations of 'how stretched'.")
+norm_len = input.int(50, "Stdev-of-distance lookback", minval = 10, maxval = 500, group = grp_str)
+atr_len = input.int(14, "ATR length (normalization + fail distance)", minval = 1, maxval = 200, group = grp_str)
+warm_bars = input.int(60, "Warm-up bars before flagging", minval = 20, maxval = 1000, group = grp_str,
+     tooltip = "The internal recursion and the stretch normalization both need history before their numbers mean anything. Below this count the HUD reads WARMING and no flags fire.")
+
+score_th = input.float(1.2, "Adaptive score threshold (|stretch z| × P(neutral))", minval = 0.1, maxval = 5.0, step = 0.05, group = grp_flag,
+     tooltip = "Flag only when the probability-weighted score clears this bar AND the raw stretch clears its own minimum below. Example: |z| = 2.0 with P(neutral) = 0.60 scores 1.20. A heuristic composition, honestly labeled.")
+stretch_th = input.float(2.0, "Raw |stretch z| minimum", minval = 0.5, maxval = 6.0, step = 0.25, group = grp_flag,
+     tooltip = "The probability weight must never substitute for actual stretch. One shot per episode; re-arms once |stretch z| < 0.5. Flags are study events, never signals.")
+
+horizon_bars = input.int(30, "Outcome horizon (bars)", minval = 5, maxval = 200, group = grp_sc)
+fail_atr = input.float(1.5, "Adverse move = fail (ATR at flag)", minval = 0.5, maxval = 5.0, step = 0.25, group = grp_sc,
+     tooltip = "An episode FAILS if price moves this many ATRs (ATR snapshotted at flag time) against the reversion before touching the anchor, or if the horizon expires. Fail / timeout is checked BEFORE the touch each bar, so same-bar collisions score conservatively.")
+min_n = input.int(10, "Thin-sample mark (n, per bucket)", minval = 3, maxval = 500, group = grp_sc,
+     tooltip = "Three buckets slice the flag stream thin. Below this count a bucket row carries the ! mark and reads faint. Wilson lower bounds do the honesty work either way.")
+
+hud_mode = input.string("Full", "HUD mode", options = ["Off", "Micro", "Full"], group = grp_dsp)
+hud_pos_in = input.string("top_right", "HUD position", options = ["top_left", "top_center", "top_right", "bottom_left", "bottom_center", "bottom_right"], group = grp_dsp)
+show_marks = input.bool(true, "Mark flags on the pane", group = grp_dsp)
+use_json_alerts = input.bool(false, "JSON alert payloads (webhook)", group = grp_dsp,
+     tooltip = "OFF: human-readable alert text. ON: machine-readable JSON for webhook automation. Display-layer only.")
+
+// =============================================================================
+// Palette & helpers (suite standard)
+// =============================================================================
+c_bull  = color.rgb(89, 159, 125)
+c_bear  = color.rgb(190, 96, 111)
+c_neut  = color.rgb(112, 126, 148)
+c_gold  = color.rgb(214, 162, 82)
+c_panel = color.new(#0E1316, 5)
+c_cell  = color.new(#151D22, 7)
+c_cell2 = color.new(#10171B, 9)
+c_frame = color.new(#5BD6B0, 88)
+c_text  = color.white
+c_dim   = color.new(color.white, 45)
+c_faint = color.new(color.white, 68)
+
+f_pos(_s) =>
+    switch _s
+        "top_left"      => position.top_left
+        "top_center"    => position.top_center
+        "top_right"     => position.top_right
+        "bottom_left"   => position.bottom_left
+        "bottom_center" => position.bottom_center
+        "bottom_right"  => position.bottom_right
+        => position.top_right
+f_fmt(_x, _d) =>
+    _m = math.pow(10.0, _d)
+    na(_x) ? "n/a" : str.tostring(math.round(_x * _m) / _m)
+f_tcell(_tbl, _c, _r, _txt, _col, _bg) =>
+    table.cell(_tbl, _c, _r, _txt, text_color = _col, bgcolor = _bg, text_size = size.tiny, text_halign = text.align_center)
+// Wilson score lower bound (z = 1.96), suite-standard honesty for hit rates.
+f_wilson_lo(_p, _n) =>
+    _n <= 0 or na(_p) ? float(na) :
+         (_p + 1.96 * 1.96 / (2 * _n) - 1.96 * math.sqrt((_p * (1 - _p) + 1.96 * 1.96 / (4 * _n)) / _n)) / (1 + 1.96 * 1.96 / _n)
+// Gaussian probability density (unnormalized constant is fine — the forward
+// step renormalizes, so only relative likelihoods matter).
+f_gauss(_x, _mu, _sd) =>
+    _sd <= 0 or na(_x) ? float(na) : math.exp(-0.5 * math.pow((_x - _mu) / _sd, 2.0)) / _sd
+
+// =============================================================================
+// Internal probability fallback: compact 3-state forward recursion — the HMM
+// Regime Probability Filter's exact shipped math with its defaults FIXED
+// (sticky prior 0.92; emissions mu +1/0/-1, sd 0.75/0.60/0.75; z lookback
+// 20). Wire the links for a configurable model. Runs every bar either way so
+// the fallback is always warm.
+// =============================================================================
+i_lb = 20
+one_bar_ret = not na(close[1]) and close > 0 and close[1] > 0 ? math.log(close / close[1]) : float(na)
+win_ret = not na(close[i_lb]) and close > 0 and close[i_lb] > 0 ? math.log(close / close[i_lb]) : float(na)
+win_vol = ta.stdev(one_bar_ret, i_lb) * math.sqrt(i_lb)
+obs_z = not na(win_ret) and not na(win_vol) and win_vol > 0 ? win_ret / win_vol : float(na)
+
+var float i_pb = 1.0 / 3.0
+var float i_pn = 1.0 / 3.0
+var float i_pr = 1.0 / 3.0
+if barstate.isconfirmed and not na(obs_z)
+    float _eb = f_gauss(obs_z, 1.0, 0.75)
+    float _en = f_gauss(obs_z, 0.0, 0.60)
+    float _er = f_gauss(obs_z, -1.0, 0.75)
+    if not na(_eb) and not na(_en) and not na(_er)
+        float _off = (1.0 - 0.92) / 2.0
+        float _prb = i_pb * 0.92 + i_pn * _off + i_pr * _off
+        float _prn = i_pb * _off + i_pn * 0.92 + i_pr * _off
+        float _prr = i_pb * _off + i_pn * _off + i_pr * 0.92
+        float _ab = math.max(_prb * _eb, 1e-10)
+        float _an = math.max(_prn * _en, 1e-10)
+        float _ar = math.max(_prr * _er, 1e-10)
+        float _sum = _ab + _an + _ar
+        if _sum > 0
+            i_pb := _ab / _sum
+            i_pn := _an / _sum
+            i_pr := _ar / _sum
+
+// =============================================================================
+// Link validation (per bar): each in [0,100], sum within 100 ± 3, and not
+// one identical series wired three times. Any failure = internal fallback.
+// =============================================================================
+_lb_raw = p_bull_src
+_ln_raw = p_neut_src
+_lr_raw = p_bear_src
+_lsum = _lb_raw + _ln_raw + _lr_raw
+link_range_ok = not na(_lb_raw) and not na(_ln_raw) and not na(_lr_raw) and
+     _lb_raw >= 0 and _lb_raw <= 100 and _ln_raw >= 0 and _ln_raw <= 100 and _lr_raw >= 0 and _lr_raw <= 100
+link_distinct = not (_lb_raw == _ln_raw and _ln_raw == _lr_raw)
+link_ok = use_prob_link and link_range_ok and link_distinct and _lsum >= 97.0 and _lsum <= 103.0
+p_bull_eff = link_ok ? _lb_raw / _lsum : i_pb
+p_neut_eff = link_ok ? _ln_raw / _lsum : i_pn
+p_bear_eff = link_ok ? _lr_raw / _lsum : i_pr
+prob_src_txt = link_ok ? "LINKED" : use_prob_link ? "LINK? → INTERNAL" : "INTERNAL"
+
+// =============================================================================
+// Stretch measurement: anchor (session VWAP with volume guard / EMA) and
+// normalized distance. Session VWAP is computed on confirmed bars, resets on
+// the session day; off-intraday or without volume the anchor falls back to
+// the EMA and the HUD names the substitution.
+// =============================================================================
+new_day = ta.change(time("D")) != 0
+var float cum_pv = 0.0
+var float cum_v = 0.0
+if barstate.isconfirmed and timeframe.isintraday
+    if new_day
+        cum_pv := 0.0
+        cum_v := 0.0
+    if not na(volume) and volume > 0 and not na(hlc3)
+        cum_pv += hlc3 * volume
+        cum_v += volume
+vwap_val = cum_v > 0 ? cum_pv / cum_v : float(na)
+vwap_ok = timeframe.isintraday and cum_v > 0
+ema_val = ta.ema(close, ema_len)
+anchor = anchor_mode == "Session VWAP" and vwap_ok ? vwap_val : ema_val
+anchor_txt = anchor_mode == "Session VWAP" ? (vwap_ok ? "VWAP" : "VWAP→EMA (" + (timeframe.isintraday ? "no volume" : "intraday only") + ")") : "EMA " + str.tostring(ema_len)
+
+dist = not na(anchor) ? close - anchor : float(na)
+dist_sd = ta.stdev(dist, norm_len)
+atr_val = ta.atr(atr_len)
+norm = norm_mode == "ATR" ? atr_val : dist_sd
+stretch_z = not na(dist) and not na(norm) and norm > 0 ? dist / norm : float(na)
+score = not na(stretch_z) ? math.abs(stretch_z) * p_neut_eff : float(na)
+
+var int warm_seen = 0
+if barstate.isconfirmed and not na(stretch_z) and not na(obs_z)
+    warm_seen += 1
+warmed = warm_seen >= warm_bars
+
+// =============================================================================
+// Flags: one shot per episode, confirmed bars, warm-gated. Direction is
+// toward the anchor: stretched BELOW value flags long-side, ABOVE flags
+// short-side. Tercile of P(neutral) is SNAPSHOTTED at flag time.
+// =============================================================================
+rearm_th = 0.5  // fixed re-arm: the episode ends once the stretch has substantially unwound
+f_terc(_p) =>
+    _p < 1.0 / 3.0 ? 0 : _p < 2.0 / 3.0 ? 1 : 2
+f_terc_name(_t) =>
+    _t == 0 ? "low" : _t == 1 ? "mid" : "high"
+var bool armed = true
+var int last_flag_terc = 0
+bool flag_long = false
+bool flag_short = false
+if barstate.isconfirmed and not na(stretch_z) and not na(score)
+    if math.abs(stretch_z) < rearm_th
+        armed := true
+    if warmed and armed and score >= score_th and math.abs(stretch_z) >= stretch_th
+        if stretch_z <= -stretch_th
+            flag_long := true
+        else
+            flag_short := true
+        armed := false
+        last_flag_terc := f_terc(p_neut_eff)
+var int state_code = 0  // 0 ARMED · 1 FLAG LONG · 2 FLAG SHORT · 3 COOLING
+if barstate.isconfirmed
+    state_code := flag_long ? 1 : flag_short ? 2 : not armed ? 3 : 0
+
+// =============================================================================
+// Bucketed episode self-scoring (MR conventions — conservative ordering)
+//   Bucket = P(neutral) tercile at flag (0 low / 1 mid / 2 high), sides
+//   pooled per bucket (the thesis is about the probability, not the side).
+//   WIN  = price touches the CURRENT anchor within the horizon
+//   FAIL = adverse move beyond fail_atr × ATR-at-flag, or horizon expiry
+//   Fail / timeout is checked FIRST each bar; intraday pending episodes
+//   EXPIRE UNSCORED at session rollover — tallied in the faint "e" counter.
+// =============================================================================
+var array<int> bk_n = array.new_int(3, 0)
+var array<int> bk_w = array.new_int(3, 0)
+var array<int> bk_x = array.new_int(3, 0)
+var bool pl_on = false
+var float pl_fail = na
+var int pl_age = 0
+var int pl_bk = 0
+var bool ps_on = false
+var float ps_fail = na
+var int ps_age = 0
+var int ps_bk = 0
+if barstate.isconfirmed
+    if timeframe.isintraday and new_day
+        if pl_on
+            pl_on := false
+            array.set(bk_n, pl_bk, array.get(bk_n, pl_bk) - 1)
+            array.set(bk_x, pl_bk, array.get(bk_x, pl_bk) + 1)
+        if ps_on
+            ps_on := false
+            array.set(bk_n, ps_bk, array.get(bk_n, ps_bk) - 1)
+            array.set(bk_x, ps_bk, array.get(bk_x, ps_bk) + 1)
+    if pl_on
+        pl_age += 1
+        if low <= pl_fail or pl_age >= horizon_bars
+            pl_on := false
+        else if not na(anchor) and high >= anchor
+            array.set(bk_w, pl_bk, array.get(bk_w, pl_bk) + 1)
+            pl_on := false
+    if ps_on
+        ps_age += 1
+        if high >= ps_fail or ps_age >= horizon_bars
+            ps_on := false
+        else if not na(anchor) and low <= anchor
+            array.set(bk_w, ps_bk, array.get(bk_w, ps_bk) + 1)
+            ps_on := false
+    if flag_long and not pl_on
+        pl_on := true
+        pl_fail := close - fail_atr * atr_val  // snapshotted at flag time
+        pl_age := 0
+        pl_bk := last_flag_terc
+        array.set(bk_n, pl_bk, array.get(bk_n, pl_bk) + 1)
+    if flag_short and not ps_on
+        ps_on := true
+        ps_fail := close + fail_atr * atr_val  // snapshotted at flag time
+        ps_age := 0
+        ps_bk := last_flag_terc
+        array.set(bk_n, ps_bk, array.get(bk_n, ps_bk) + 1)
+
+f_bk_hr(_i) =>
+    _n = array.get(bk_n, _i)
+    _n > 0 ? array.get(bk_w, _i) * 1.0 / _n : float(na)
+f_bk_wlo(_i) =>
+    f_wilson_lo(f_bk_hr(_i), array.get(bk_n, _i)) * 100.0
+f_bk_txt(_i) =>
+    int _n = array.get(bk_n, _i)
+    int _x = array.get(bk_x, _i)
+    "hit " + f_fmt(f_bk_hr(_i) * 100.0, 0) + "% · Wlo " + f_fmt(f_bk_wlo(_i), 0) + "% · n" + str.tostring(_n) + (_n < min_n ? " !" : "") + (_x > 0 ? " · e" + str.tostring(_x) : "")
+
+// =============================================================================
+// Plots & exports (pane: score is the headline series)
+// =============================================================================
+plot(score, "Adaptive score (|z| × P(neutral))", color = c_gold, linewidth = 2)
+plot(stretch_z, "Stretch z (signed)", color = color.new(c_neut, 40), linewidth = 1)
+plot(p_neut_eff, "P(neutral) (0..1)", color = color.new(c_bull, 55), linewidth = 1)
+hline(score_th, "Score threshold", color = color.new(color.white, 80), linestyle = hline.style_dotted)
+hline(0, "Zero", color = color.new(color.white, 88), linestyle = hline.style_dotted)
+plotshape(show_marks and flag_long, "AMR long-side flag", style = shape.triangleup, location = location.bottom, color = c_bull, size = size.tiny)
+plotshape(show_marks and flag_short, "AMR short-side flag", style = shape.triangledown, location = location.top, color = c_bear, size = size.tiny)
+
+plot(score, "AMR_SCORE_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(flag_long ? 1.0 : flag_short ? -1.0 : 0.0, "AMR_FLAG_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(p_neut_eff * 100.0, "AMR_PNEUT_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(f_bk_wlo(2), "AMR_HI_TERCILE_WLO_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(f_bk_wlo(0), "AMR_LO_TERCILE_WLO_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+
+// =============================================================================
+// HUD
+// =============================================================================
+var table hud = table.new(f_pos(hud_pos_in), 2, 7, bgcolor = c_panel, frame_color = c_frame,
+     frame_width = 1, border_color = color.new(color.white, 92), border_width = 1)
+if barstate.islast and hud_mode != "Off"
+    _state_txt = not warmed ? "WARMING · " + str.tostring(math.min(warm_seen, warm_bars)) + "/" + str.tostring(warm_bars) :
+         state_code == 1 ? "FLAG LONG · P(n) " + f_terc_name(last_flag_terc) :
+         state_code == 2 ? "FLAG SHORT · P(n) " + f_terc_name(last_flag_terc) :
+         state_code == 3 ? "COOLING (re-arms |z| < " + f_fmt(rearm_th, 1) + ")" : "ARMED"
+    _state_bg = not warmed ? c_cell : state_code == 1 ? color.new(c_bull, 45) : state_code == 2 ? color.new(c_bear, 45) : c_cell
+    f_tcell(hud, 0, 0, "Adaptive MR " + variant_tag, c_text, c_frame)
+    f_tcell(hud, 1, 0, _state_txt, c_text, _state_bg)
+    if hud_mode == "Full"
+        f_tcell(hud, 0, 1, "P(B/N/Br) · source", use_prob_link and not link_ok ? c_bear : c_dim, c_panel)
+        f_tcell(hud, 1, 1, f_fmt(p_bull_eff * 100.0, 0) + " / " + f_fmt(p_neut_eff * 100.0, 0) + " / " + f_fmt(p_bear_eff * 100.0, 0) + " % · " + prob_src_txt, use_prob_link and not link_ok ? c_bear : c_dim, c_cell)
+        f_tcell(hud, 0, 2, "Stretch · score", c_dim, c_panel)
+        f_tcell(hud, 1, 2, f_fmt(stretch_z, 2) + "z (" + anchor_txt + ") · score " + f_fmt(score, 2) + " / " + f_fmt(score_th, 2), not na(score) and score >= score_th ? c_text : c_dim, c_cell)
+        f_tcell(hud, 0, 3, "P(n) < 33% bucket", c_dim, c_panel)
+        f_tcell(hud, 1, 3, f_bk_txt(0), array.get(bk_n, 0) < min_n ? c_faint : c_dim, c_cell)
+        f_tcell(hud, 0, 4, "P(n) 33–67% bucket", c_dim, c_panel)
+        f_tcell(hud, 1, 4, f_bk_txt(1), array.get(bk_n, 1) < min_n ? c_faint : c_dim, c_cell)
+        f_tcell(hud, 0, 5, "P(n) > 67% bucket", c_dim, c_panel)
+        f_tcell(hud, 1, 5, f_bk_txt(2), array.get(bk_n, 2) < min_n ? c_faint : c_dim, c_cell)
+        f_tcell(hud, 0, 6, "*probability-weighted context", c_faint, c_panel)
+        f_tcell(hud, 1, 6, "buckets test the thesis · never signals", c_faint, c_panel)
+
+// =============================================================================
+// Alerts (confirmed-bar events; formal wording per suite convention)
+// =============================================================================
+alertcondition(flag_long, "Adaptive MR long-side flag", "Adaptive MR: long-side reversion flag (study event, not a signal)")
+alertcondition(flag_short, "Adaptive MR short-side flag", "Adaptive MR: short-side reversion flag (study event, not a signal)")
+if flag_long or flag_short
+    _side = flag_long ? "long" : "short"
+    _terc = f_terc_name(last_flag_terc)
+    _srcj = link_ok ? "linked" : "internal"
+    if use_json_alerts
+        alert('{"ev":"adaptive_mr","sym":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","side":"' + _side + '","stretch_z":' + (na(stretch_z) ? "null" : f_fmt(stretch_z, 3)) + ',"score":' + (na(score) ? "null" : f_fmt(score, 3)) + ',"p_neut":' + f_fmt(p_neut_eff, 3) + ',"tercile":"' + _terc + '","src":"' + _srcj + '","variant":"' + variant_tag + '","t":' + str.tostring(time) + '}', alert.freq_once_per_bar_close)
+    else
+        alert("Adaptive MR [" + variant_tag + "]: " + syminfo.ticker + " " + _side + "-side reversion flag (study event, not a signal) · z " + f_fmt(stretch_z, 2) + " · score " + f_fmt(score, 2) + " · P(neutral) " + f_fmt(p_neut_eff * 100.0, 0) + "% (" + _terc + " bucket, " + _srcj + ")", alert.freq_once_per_bar_close)
+
+// =============================================================================
+// End of file · Adaptive Mean Reversion with Regime Probability v1.0
+// =============================================================================

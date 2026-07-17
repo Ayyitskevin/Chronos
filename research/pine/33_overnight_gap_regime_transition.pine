@@ -1,0 +1,270 @@
+//@version=6
+// =============================================================================
+// Overnight Gap Regime Transition Detector v1.0 (5T Pine Suite · Desk Kit)
+//
+// THE ONE QUESTION THIS ANSWERS — counted, never forecast:
+// on THIS chart, did large overnight gaps precede regime flips more often
+// than the base rate? Each new session's gap is classed in DAILY-ATR units
+// (Gap Classifier v1.1 conventions: none / small / significant / shock at
+// 0.25 / 0.75 / 1.5). Each gap day opens a watch: did the regime label flip
+// within N bars (the gap day-start bar counts as bar one)? Per class the HUD
+// reports n, flip rate, Wilson lower bound, and a verdict against the
+// baseline — the flip rate of ANY N-bar window on this chart, counted with
+// an honest (overlapping-window) denominator and labeled as such.
+//
+// Verdict heuristic, labeled: "elevated" only when the class's Wilson LOWER
+// bound clears baseline + 5 points with n >= 10; below n 10 it reads "thin";
+// otherwise "no signal". These are counted day outcomes on this chart —
+// history, not a probability for today's gap.
+//
+// RELATION TO THE SUITE'S GAP-GUARD. The regime engines already distrust
+// fresh flips that print ON shock bars (guarding against gap-artifact
+// classification). This tool measures the OTHER direction: whether gaps
+// tend to be FOLLOWED by genuine flips. The two are complementary, not
+// redundant.
+//
+// Regime source: wire the External Regime link to a suite REGIME_EXPORT
+// (strict -1/0/+1 validation) or fall back to the internal shadow
+// z-classifier (the HMM/flagship observation: volatility-normalized window
+// return, lookback 20, ±0.85 z hard threshold). The HUD names which source
+// is in force. A "flip" is any change of the classified label (including
+// into/out of neutral), counted on confirmed bars.
+//
+// Non-repaint: daily context is [1]-offset completed-day history via one
+// keyword security call; gaps fix at day start; watches and counts advance
+// on confirmed bars only. Decision support only — a human places every
+// trade. Not advice.
+//
+// v1.0 changelog (2026-07-17):
+//   Initial release. Daily-ATR gap classing (one security call), external
+//   regime link with internal z-classifier fallback (source named on HUD),
+//   N-bar flip watches per gap class with overlapping-window baseline and
+//   honest denominators, Wilson lower bounds, per-class delta verdicts
+//   (elevated / no signal / thin), shock-watch alert, tiered HUD with
+//   honesty footer, data-window exports, JSON alerts (default OFF).
+//   Evidence label: needs user run.
+// =============================================================================
+indicator("Overnight Gap Regime Transition Detector v1.0", shorttitle = "Gap Transition v1", overlay = false)
+
+grp_mode = "0 · Mode"
+grp_gap  = "1 · Gap Classing"
+grp_reg  = "2 · Regime Source"
+grp_meas = "3 · Flip Measurement"
+grp_dsp  = "4 · Display"
+
+variant_tag = input.string("v1.0-base", "Variant tag (freeze-the-config discipline)", group = grp_mode,
+     tooltip = "Label this exact settings set. Any settings change = new tag = new variant with its own validation cycle. The tag prints on the HUD and in alerts so screenshots self-document.")
+
+atr_len = input.int(14, "Daily ATR length", minval = 1, maxval = 100, group = grp_gap,
+     tooltip = "Gap = (today's session open − yesterday's completed daily close) / completed daily ATR. Classes at 0.25 / 0.75 / 1.5 ATR per Gap Classifier v1.1 conventions. Day boundaries follow the chart's session; extended-hours charts anchor the day open to the premarket open.")
+
+use_regime_link = input.bool(false, "Use external regime link", group = grp_reg)
+regime_src = input.source(close, "Regime link (wire to a REGIME_EXPORT)", group = grp_reg,
+     tooltip = "Wire to the flagship engine's REGIME_EXPORT (-1/0/+1). Strictly validated; invalid values suspend counting and the HUD reads LINK?. When OFF, the internal shadow z-classifier below is the regime source — the HUD names whichever is in force.")
+z_lookback = input.int(20, "Internal classifier: z lookback", minval = 5, maxval = 250, group = grp_reg)
+z_enter = input.float(0.85, "Internal classifier: |z| threshold", minval = 0.10, maxval = 3.00, step = 0.05, group = grp_reg,
+     tooltip = "Fallback shadow classifier (suite observation): volatility-normalized window return; label = Bull above +threshold, Bear below −threshold, else Neutral. A hard-threshold approximation of the flagship engine — close kin, not a clone.")
+warm_bars = input.int(60, "Internal classifier warm-up (bars)", minval = 20, maxval = 500, group = grp_reg)
+
+watch_n = input.int(10, "Flip watch window N (chart bars)", minval = 2, maxval = 100, group = grp_meas,
+     tooltip = "A gap day opens a watch: did the regime label change within N confirmed bars, counting the gap day-start bar itself? The baseline row counts how often ANY N-bar window on this chart contained a flip — overlapping windows, honestly labeled.")
+min_class_n = input.int(10, "Verdict requires n ≥", minval = 3, maxval = 100, group = grp_meas)
+delta_pts = input.float(5.0, "Elevated: Wilson LB above baseline by (pts)", minval = 1.0, maxval = 30.0, step = 0.5, group = grp_meas,
+     tooltip = "Verdict heuristic, labeled: 'elevated' only when the class's Wilson lower bound clears baseline + this margin with n at or above the floor. Counted history — not a forecast.")
+
+hud_mode = input.string("Full", "HUD mode", options = ["Off", "Micro", "Full"], group = grp_dsp)
+hud_pos_in = input.string("top_right", "HUD position", options = ["top_left", "top_center", "top_right", "bottom_left", "bottom_center", "bottom_right"], group = grp_dsp)
+use_json_alerts = input.bool(false, "JSON alert payloads (webhook)", group = grp_dsp,
+     tooltip = "OFF: human-readable alert text. ON: machine-readable JSON for webhook automation. Display-layer only.")
+
+// =============================================================================
+// Palette & helpers (suite standard)
+// =============================================================================
+c_bull  = color.rgb(89, 159, 125)
+c_bear  = color.rgb(190, 96, 111)
+c_neut  = color.rgb(112, 126, 148)
+c_gold  = color.rgb(214, 162, 82)
+c_panel = color.new(#0E1316, 5)
+c_cell  = color.new(#151D22, 7)
+c_frame = color.new(#5BD6B0, 88)
+c_text  = color.white
+c_dim   = color.new(color.white, 45)
+c_faint = color.new(color.white, 68)
+
+f_pos(_s) =>
+    switch _s
+        "top_left"      => position.top_left
+        "top_center"    => position.top_center
+        "top_right"     => position.top_right
+        "bottom_left"   => position.bottom_left
+        "bottom_center" => position.bottom_center
+        "bottom_right"  => position.bottom_right
+        => position.top_right
+f_fmt(_x, _d) =>
+    _m = math.pow(10.0, _d)
+    na(_x) ? "n/a" : str.tostring(math.round(_x * _m) / _m)
+f_tcell(_tbl, _c, _r, _txt, _col, _bg) =>
+    table.cell(_tbl, _c, _r, _txt, text_color = _col, bgcolor = _bg, text_size = size.tiny, text_halign = text.align_center)
+f_wilson_lo(_p, _n) =>
+    _n <= 0 or na(_p) ? float(na) :
+         (_p + 1.96 * 1.96 / (2 * _n) - 1.96 * math.sqrt((_p * (1 - _p) + 1.96 * 1.96 / (4 * _n)) / _n)) / (1 + 1.96 * 1.96 / _n)
+f_class_txt(_c) =>
+    _c == 0 ? "None" : _c == 1 ? "Small" : _c == 2 ? "Signif" : "SHOCK"
+
+// =============================================================================
+// Daily gap in DAILY-ATR units (one keyword security call, fixed history)
+// =============================================================================
+[pd_close, d_atr] = request.security(syminfo.tickerid, "D", [close[1], ta.atr(atr_len)[1]],
+     gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+new_day = ta.change(time("D")) != 0
+var float day_open = na
+day_open := new_day ? open : day_open
+gap_atr = not na(day_open) and not na(pd_close) and not na(d_atr) and d_atr > 0 ? (day_open - pd_close) / d_atr : float(na)
+abs_ga = math.abs(nz(gap_atr))
+int gap_class = na(gap_atr) ? int(na) : abs_ga < 0.25 ? 0 : abs_ga < 0.75 ? 1 : abs_ga < 1.5 ? 2 : 3
+
+// =============================================================================
+// Regime source: external link (strict) or internal shadow z-classifier
+// =============================================================================
+_rv = regime_src
+link_valid = not na(_rv) and (_rv == -1.0 or _rv == 0.0 or _rv == 1.0)
+one_bar_ret = not na(close[1]) and close > 0 and close[1] > 0 ? math.log(close / close[1]) : float(na)
+win_ret = not na(close[z_lookback]) and close > 0 and close[z_lookback] > 0 ? math.log(close / close[z_lookback]) : float(na)
+win_vol = ta.stdev(one_bar_ret, z_lookback) * math.sqrt(z_lookback)
+obs_z = not na(win_ret) and not na(win_vol) and win_vol > 0 ? win_ret / win_vol : float(na)
+var int z_seen = 0
+if barstate.isconfirmed and not na(obs_z)
+    z_seen += 1
+int iz_state = na(obs_z) or z_seen < warm_bars ? int(na) : obs_z > z_enter ? 1 : obs_z < -z_enter ? -1 : 0
+int src_state_now = use_regime_link ? (link_valid ? int(_rv) : int(na)) : iz_state
+src_name = use_regime_link ? "external link" : "internal z(" + str.tostring(z_lookback) + ")"
+
+// Flip = any change of the classified label on a confirmed bar (both known)
+var int reg_state = na
+bool flip_now = barstate.isconfirmed and not na(src_state_now) and not na(reg_state) and src_state_now != reg_state
+float flip01 = flip_now ? 1.0 : 0.0
+float flips_in_win = math.sum(flip01, watch_n)
+var int known_streak = 0
+
+// =============================================================================
+// Watches (per gap class) + overlapping-window baseline — confirmed bars only
+// =============================================================================
+var array<int> pend_cls = array.new_int()
+var array<int> pend_left = array.new_int()
+var array<int> cls_n = array.new_int(4, 0)
+var array<int> cls_flip = array.new_int(4, 0)
+var int base_n = 0
+var int base_hits = 0
+bool shock_watch_ev = false
+if barstate.isconfirmed
+    // open today's watch first, so a flip on the gap bar itself counts
+    if new_day and not na(gap_class) and not na(src_state_now)
+        array.push(pend_cls, gap_class)
+        array.push(pend_left, watch_n)
+        if gap_class == 3
+            shock_watch_ev := true
+    // resolve / age pending watches (ascending rebuild — no mid-loop removal)
+    int _np = array.size(pend_cls)
+    if _np > 0
+        array<int> _keep_c = array.new_int()
+        array<int> _keep_l = array.new_int()
+        for _i = 0 to _np - 1
+            int _c = array.get(pend_cls, _i)
+            int _l = array.get(pend_left, _i)
+            if flip_now
+                array.set(cls_flip, _c, array.get(cls_flip, _c) + 1)
+                array.set(cls_n, _c, array.get(cls_n, _c) + 1)
+            else
+                _l -= 1
+                if _l <= 0
+                    array.set(cls_n, _c, array.get(cls_n, _c) + 1)
+                else
+                    array.push(_keep_c, _c)
+                    array.push(_keep_l, _l)
+        pend_cls := _keep_c
+        pend_left := _keep_l
+    // baseline: any trailing N-bar window fully inside known-regime history
+    if known_streak >= watch_n
+        base_n += 1
+        base_hits += flips_in_win > 0 ? 1 : 0
+    // advance regime memory last, so flip detection above used the prior label
+    known_streak := not na(src_state_now) ? known_streak + 1 : 0
+    if not na(src_state_now)
+        reg_state := src_state_now
+
+base_rate = base_n > 0 ? base_hits * 1.0 / base_n : float(na)
+f_cls_rate(_c) =>
+    _n = array.get(cls_n, _c)
+    _n > 0 ? array.get(cls_flip, _c) * 1.0 / _n : float(na)
+f_verdict(_c) =>
+    _n = array.get(cls_n, _c)
+    _wlo = f_wilson_lo(f_cls_rate(_c), _n)
+    _n < min_class_n ? "thin" :
+         na(base_rate) or na(_wlo) ? "n/a" :
+         _wlo * 100.0 > base_rate * 100.0 + delta_pts ? "ELEVATED" : "no signal"
+pending_ct = array.size(pend_cls)
+regime_ready = not na(src_state_now)
+
+// =============================================================================
+// Plot & exports
+// =============================================================================
+plot(gap_atr, "Gap (daily-ATR units)", color = na(gap_class) ? c_neut : gap_class == 3 ? c_bear : gap_class == 2 ? c_gold : gap_class == 1 ? c_neut : color.new(c_neut, 60), style = plot.style_columns)
+hline(1.5, "Shock cut +", color = color.new(color.white, 75), linestyle = hline.style_dashed)
+hline(-1.5, "Shock cut −", color = color.new(color.white, 75), linestyle = hline.style_dashed)
+hline(0.0, "Zero", color = color.new(color.white, 88), linestyle = hline.style_dotted)
+
+plot(gap_atr, "GRT_GAP_ATR_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(na(gap_class) ? na : float(gap_class), "GRT_GAP_CLASS_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(f_cls_rate(3) * 100.0, "GRT_SHOCK_FLIPRATE_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(base_rate * 100.0, "GRT_BASELINE_FLIPRATE_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(float(pending_ct), "GRT_PENDING_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+
+// =============================================================================
+// HUD
+// =============================================================================
+var table hud = table.new(f_pos(hud_pos_in), 2, 10, bgcolor = c_panel, frame_color = c_frame,
+     frame_width = 1, border_color = color.new(color.white, 92), border_width = 1)
+if barstate.islast and hud_mode != "Off"
+    _state_txt = na(gap_class) ? "gap n/a" : "gap " + f_fmt(gap_atr, 2) + " ATR · " + f_class_txt(gap_class) + " · " + str.tostring(pending_ct) + " watch open"
+    _state_bg = na(gap_class) ? c_cell : gap_class == 3 ? color.new(c_bear, 45) : gap_class == 2 ? color.new(c_gold, 55) : c_cell
+    f_tcell(hud, 0, 0, "Gap Transition " + variant_tag, c_text, c_frame)
+    f_tcell(hud, 1, 0, _state_txt, c_text, _state_bg)
+    if hud_mode == "Full"
+        _reg_txt = not regime_ready ? (use_regime_link ? "LINK?" : "WARMING · " + str.tostring(math.min(z_seen, warm_bars)) + "/" + str.tostring(warm_bars)) :
+             src_state_now == 1 ? "BULL" : src_state_now == -1 ? "BEAR" : "NEUTRAL"
+        f_tcell(hud, 0, 1, "Regime source", c_dim, c_panel)
+        f_tcell(hud, 1, 1, src_name + " · " + _reg_txt, use_regime_link and not link_valid ? c_bear : c_dim, c_cell)
+        for _c = 0 to 3
+            _n = array.get(cls_n, _c)
+            _fr = f_cls_rate(_c)
+            _wlo = f_wilson_lo(_fr, _n)
+            _v = f_verdict(_c)
+            f_tcell(hud, 0, 2 + _c, f_class_txt(_c) + " → flip ≤" + str.tostring(watch_n) + "b", _c == 3 ? c_bear : c_dim, c_panel)
+            f_tcell(hud, 1, 2 + _c, _n == 0 ? "n0 — no cases yet" :
+                 f_fmt(_fr * 100.0, 0) + "% · Wlo " + f_fmt(_wlo * 100.0, 0) + "% · n" + str.tostring(_n) + (_n < min_class_n ? " !" : "") + " · " + _v,
+                 _v == "ELEVATED" ? c_gold : _n < min_class_n ? c_faint : c_dim, c_cell)
+        f_tcell(hud, 0, 6, "Baseline (any " + str.tostring(watch_n) + "-bar window)", c_dim, c_panel)
+        f_tcell(hud, 1, 6, na(base_rate) ? "warming" : f_fmt(base_rate * 100.0, 0) + "% · n" + str.tostring(base_n) + " (overlapping)", c_dim, c_cell)
+        f_tcell(hud, 0, 7, "*counted history on THIS chart", c_faint, c_panel)
+        f_tcell(hud, 1, 7, "not a probability for today's gap · not advice", c_faint, c_panel)
+        f_tcell(hud, 0, 8, "*complements the gap-guard", c_faint, c_panel)
+        f_tcell(hud, 1, 8, "engines distrust flips ON shock bars; this counts gaps → flips", c_faint, c_panel)
+        f_tcell(hud, 0, 9, "*verdict heuristic", c_faint, c_panel)
+        f_tcell(hud, 1, 9, "ELEVATED = Wlo > base+" + f_fmt(delta_pts, 0) + "pts, n≥" + str.tostring(min_class_n), c_faint, c_panel)
+
+// =============================================================================
+// Alerts (confirmed-bar events; formal wording per suite convention)
+// =============================================================================
+alertcondition(shock_watch_ev, "Shock gap — flip watch opened", "Gap Transition: shock gap printed; regime flip watch opened (counted history context)")
+if shock_watch_ev
+    if use_json_alerts
+        alert('{"ev":"gap_transition","sym":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","gap_atr":' + (na(gap_atr) ? "null" : f_fmt(gap_atr, 2)) + ',"class":"SHOCK","shock_fliprate":' + (na(f_cls_rate(3)) ? "null" : f_fmt(f_cls_rate(3) * 100.0, 1)) + ',"baseline":' + (na(base_rate) ? "null" : f_fmt(base_rate * 100.0, 1)) + ',"shock_n":' + str.tostring(array.get(cls_n, 3)) + ',"pending":' + str.tostring(pending_ct) + ',"variant":"' + variant_tag + '","t":' + str.tostring(time) + '}', alert.freq_once_per_bar_close)
+    else
+        alert("Gap Transition [" + variant_tag + "]: " + syminfo.ticker + " SHOCK gap " + f_fmt(gap_atr, 2) +
+             " ATR — flip watch opened (" + str.tostring(watch_n) + " bars). Shock history: flip " +
+             f_fmt(f_cls_rate(3) * 100.0, 0) + "% (n" + str.tostring(array.get(cls_n, 3)) + ") vs baseline " +
+             f_fmt(base_rate * 100.0, 0) + "% — counted history, not a forecast", alert.freq_once_per_bar_close)
+
+// =============================================================================
+// End of file · Overnight Gap Regime Transition Detector v1.0
+// =============================================================================

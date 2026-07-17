@@ -1,0 +1,288 @@
+//@version=6
+// =============================================================================
+// KLQuant v1.1 — Shared Quant Library (5T Pine Suite Foundation)
+//
+// The mathematical core of the suite, written once. Exports:
+//   Session/time-of-day machinery (matrix-based), time-of-day RVOL,
+//   Concretum-style noise bands, Markov stay-probability tracking,
+//   gate-probability estimators (Wilson lower bound / Laplace smoothed),
+//   dwell-time percentile machinery, Wilson confidence intervals,
+//   gap classification, squeeze detection, and formatting helpers.
+//
+// Publish this privately on TradingView, then import in future scripts:
+//   import <your_username>/KLQuant/2 as kq
+//
+// Doctrine: non-repaint (confirmed-bar state), honest approximations labeled,
+// no forecast claims — Markov math is an empirical stickiness readout.
+//
+// v1.1 changelog (2026-07-11) — evidence label: needs user run:
+//   + stay_wilson_lb / stay_laplace / stay_gate_prob — count-based
+//     gate-probability estimators matching the AIO v3.6 "Statistician's Cut"
+//     semantics (selector strings identical to the v3.6 input options).
+//   + dwell_push / dwell_percentile — completed-spell ring machinery for
+//     regime dwell-age percentiles (caller owns the arrays; no hidden state).
+//   FIX markov_stay: na regime now RESETS the transition chain instead of
+//     bridging across the gap (Bull→na→Bear no longer counts Bull→Bear),
+//     matching the BULL+/BEAR+ inline engines.
+//   FIX gap_class: unknown ATR now returns class na instead of class 0
+//     ("none") — unknown is not "no gap". Contract change made while the
+//     library has zero importers; downstream must na-check the class.
+//   FIX squeeze_on: removed redundant ×2 on both sides of the comparison
+//     (no behavior change).
+//   DOC fmt now supports 0–4 decimals as documented (was silently capped
+//     at 2); stateful exports now carry call-discipline warnings.
+// =============================================================================
+library("KLQuant", overlay = true)
+
+// =============================================================================
+// Formatting
+// =============================================================================
+// @function Formats a float with fixed decimals (0–4), "n/a" on na.
+export fmt(float v, int dp) =>
+    na(v) ? "n/a" :
+         str.tostring(v, dp <= 0 ? "#" : dp == 1 ? "#.#" : dp == 2 ? "#.##" : dp == 3 ? "#.###" : "#.####")
+
+// @function Profit-factor text with infinity handling.
+export pf_text(float gross_profit, float gross_loss) =>
+    gross_loss > 0 ? str.tostring(gross_profit / gross_loss, "#.##") : gross_profit > 0 ? "inf" : "n/a"
+
+// @function Profit factor as a number (na when undefined, 999 cap for inf).
+export pf_num(float gross_profit, float gross_loss) =>
+    gross_loss > 0 ? gross_profit / gross_loss : gross_profit > 0 ? 999.0 : float(na)
+
+// =============================================================================
+// Wilson confidence interval — the honest way to read a win rate at small n
+// =============================================================================
+// @function Wilson score interval lower bound for a proportion.
+// @param p observed proportion (0..1)  @param n sample size  @param z z-score (1.96 = 95%)
+export wilson_lo(float p, int n, float z) =>
+    n <= 0 or na(p) ? float(na) :
+         (p + z * z / (2 * n) - z * math.sqrt((p * (1 - p) + z * z / (4 * n)) / n)) / (1 + z * z / n)
+
+// @function Wilson score interval upper bound for a proportion.
+export wilson_hi(float p, int n, float z) =>
+    n <= 0 or na(p) ? float(na) :
+         (p + z * z / (2 * n) + z * math.sqrt((p * (1 - p) + z * z / (4 * n)) / n)) / (1 + z * z / n)
+
+// =============================================================================
+// Gate-probability estimators (v1.1) — count-based, for regime gate math.
+// Raw frequency flatters small samples; these are the honest alternatives.
+// Selector strings match the AIO v3.6 input options exactly so strategy
+// inputs can be passed straight through.
+// =============================================================================
+// @function Wilson lower bound of a stay probability from transition counts.
+// @param stay_ct times the regime stayed  @param row_n row sample size  @param z z-score (1.96 = 95%)
+export stay_wilson_lb(int stay_ct, int row_n, float z) =>
+    row_n <= 0 ? float(na) : wilson_lo(stay_ct * 1.0 / row_n, row_n, z)
+
+// @function Laplace-smoothed stay probability: (ct + alpha) / (n + 3*alpha).
+// The 3 in the denominator is the number of regime states (Bull/Neutral/Bear).
+// @param stay_ct stay count  @param row_n row sample size  @param alpha pseudo-count (1.0 typical)
+export stay_laplace(int stay_ct, int row_n, float alpha) =>
+    _den = row_n + 3.0 * alpha
+    _den > 0 ? (stay_ct + alpha) / _den : float(na)
+
+// @function Selectable stay-probability estimator for gate math.
+// @param estimator "Raw" | "Wilson lower bound" | "Laplace smoothed" (v3.6 strings)
+// @param alpha Laplace pseudo-count  @param z Wilson z-score
+// @returns estimator-adjusted probability (0..1), na when undefined
+export stay_gate_prob(int stay_ct, int row_n, string estimator, float alpha, float z) =>
+    estimator == "Wilson lower bound" ? stay_wilson_lb(stay_ct, row_n, z) :
+         estimator == "Laplace smoothed" ? stay_laplace(stay_ct, row_n, alpha) :
+         row_n > 0 ? stay_ct * 1.0 / row_n : float(na)
+
+// =============================================================================
+// Dwell-time machinery (v1.1) — completed regime spell lengths → age percentile.
+// The CALLER owns the spell array (one per regime state) and pushes on the
+// confirmed flip bar with the just-ended spell length. No hidden state here,
+// so any script (strategy or indicator) can wire it without call-order traps.
+// =============================================================================
+// @function Pushes a completed spell length into a ring array, capped at `cap`
+// (oldest dropped). Call ONCE per completed spell, on the confirmed flip bar.
+// @param spells caller-owned array for one regime state  @param completed_len bars the spell lasted  @param cap ring size (120 matches AIO v3.6)
+export dwell_push(array<int> spells, int completed_len, simple int cap) =>
+    if completed_len > 0
+        array.push(spells, completed_len)
+        if array.size(spells) > cap
+            array.shift(spells)
+    array.size(spells)
+
+// @function Percentile rank of the current regime age within the recorded
+// completed spells of that regime (0–100). Returns na below 5 recorded spells
+// — thin history must not masquerade as a distribution.
+// @param spells completed-spell array for the CURRENT regime state  @param current_age bars the live regime has lasted
+export dwell_percentile(array<int> spells, int current_age) =>
+    int _n = array.size(spells)
+    if _n < 5
+        float(na)
+    else
+        int _below = 0
+        for _i = 0 to _n - 1
+            _below += array.get(spells, _i) <= current_age ? 1 : 0
+        _below * 100.0 / _n
+
+// =============================================================================
+// Session / time-of-day machinery
+// Assumes a fixed intraday timeframe so bar-in-day aligns across days.
+// Uses calendar-day change as the session boundary (RTH data feeds align).
+// CALL DISCIPLINE: every export below that holds var state must be called
+// unconditionally on every bar (never inside `if`), or its state and ta.*
+// warmup will skew silently.
+// =============================================================================
+// @function True on the first bar of a new calendar day.
+export new_day() =>
+    ta.change(time("D")) != 0
+
+// @function Zero-based bar index within the current day. Stateful — call every bar.
+export day_bar() =>
+    var int db = -1
+    db := ta.change(time("D")) != 0 ? 0 : db + 1
+    db
+
+// @function Fraction of a standard 6.5h US equity RTH session elapsed (0..1).
+// Approximation: LINEAR clock-time fraction, clamped outside RTH — real volume
+// is U-shaped, so linear proration overstates early-session baselines; prefer
+// tod_baseline/rvol_tod (matrix form) where possible. Other venues: supply your own.
+export rth_fraction() =>
+    _mins = hour * 60 + minute
+    _open = 9 * 60 + 30
+    _close = 16 * 60
+    math.max(0.0, math.min(1.0, (_mins - _open) / (_close - _open)))
+
+// @function Time-of-day baseline: average of `value` at this same bar-of-day
+// over the prior `days` days (excludes today). Matrix state per call site.
+// Stateful — call every bar.
+// @param value series to profile  @param days lookback days  @param max_bars max bars per day stored
+export tod_baseline(float value, simple int days, simple int max_bars) =>
+    var matrix<float> m = matrix.new<float>(days, max_bars, na)
+    var int row = 0
+    _db = day_bar()
+    if new_day()
+        row := (row + 1) % days
+        for c = 0 to max_bars - 1
+            matrix.set(m, row, c, na)
+    if _db >= 0 and _db < max_bars
+        matrix.set(m, row, _db, value)
+    float _sum = 0.0
+    int _n = 0
+    if _db >= 0 and _db < max_bars
+        for r = 0 to days - 1
+            if r != row
+                _v = matrix.get(m, r, _db)
+                if not na(_v)
+                    _sum += _v
+                    _n += 1
+    _n > 0 ? _sum / _n : float(na)
+
+// @function Cumulative session volume (resets each day). Stateful — call every bar.
+export day_cum_volume() =>
+    var float cv = 0.0
+    cv := new_day() ? volume : cv + volume
+    cv
+
+// @function Time-of-day Relative Volume: today's cumulative volume vs the
+// average cumulative volume at this same time over the prior `days` days.
+// The exact form of the Stocks-in-Play metric (not the flat-average shortcut).
+// Stateful — call every bar.
+export rvol_tod(simple int days, simple int max_bars) =>
+    _cum = day_cum_volume()
+    _base = tod_baseline(_cum, days, max_bars)
+    not na(_base) and _base > 0 ? _cum / _base : float(na)
+
+// =============================================================================
+// Noise-Area bands (Concretum-style, Zarattini/Aziz/Barbon 2024 formulation)
+// sigma(t) = average over N prior days of |close_t / day_open − 1| at the same
+// time of day. Boundaries anchored at today's open, widened by overnight gap:
+//   UB = Open*(1+sigma) + max(PrevClose − Open, 0)
+//   LB = Open*(1−sigma) − max(Open − PrevClose, 0)
+// Inside the band = noise; escapes = abnormal demand/supply imbalance.
+// =============================================================================
+// @function Returns [upper, lower, sigma] noise boundaries for today.
+// Stateful — call every bar.
+// @param prev_close prior day close  @param days lookback days  @param max_bars bars/day stored
+export noise_bands(float prev_close, simple int days, simple int max_bars) =>
+    var float d_open = na
+    d_open := new_day() ? open : d_open
+    _move = na(d_open) or d_open == 0 ? float(na) : math.abs(close / d_open - 1.0)
+    _sigma = tod_baseline(_move, days, max_bars)
+    float _ub = na
+    float _lb = na
+    if not na(_sigma) and not na(d_open)
+        _gap_dn = na(prev_close) ? 0.0 : math.max(prev_close - d_open, 0.0)
+        _gap_up = na(prev_close) ? 0.0 : math.max(d_open - prev_close, 0.0)
+        _ub := d_open * (1.0 + _sigma) + _gap_dn
+        _lb := d_open * (1.0 - _sigma) - _gap_up
+    [_ub, _lb, _sigma]
+
+// =============================================================================
+// Markov stay-probability tracking (empirical stickiness readout, not forecast)
+// Feed a confirmed-bar regime series in {-1, 0, 1}. Maintains a 3x3 transition
+// count and returns the current row's stay probability and sample size.
+// =============================================================================
+// Private: regime {-1,0,1} to row index {2,1,0}.
+_ridx(int r) =>
+    r == 1 ? 0 : r == 0 ? 1 : 2
+
+// @function Returns [p_stay, row_n, stay_count] for the current regime row.
+// Stateful — call every bar. v1.1: an na regime RESETS the chain (a gap is a
+// gap, not a transition); the next valid regime starts a fresh pair.
+export markov_stay(int regime) =>
+    var array<int> counts = array.new_int(9, 0)
+    var array<int> rows = array.new_int(3, 0)
+    var int prev = -99
+    if barstate.isconfirmed
+        if na(regime)
+            prev := -99
+        else
+            if prev != -99
+                _fr = _ridx(prev)
+                _to = _ridx(regime)
+                array.set(counts, _fr * 3 + _to, array.get(counts, _fr * 3 + _to) + 1)
+                array.set(rows, _fr, array.get(rows, _fr) + 1)
+            prev := regime
+    _r = na(regime) ? -99 : _ridx(regime)
+    int _rn = _r == -99 ? 0 : array.get(rows, _r)
+    int _sc = _r == -99 ? 0 : array.get(counts, _r * 3 + _r)
+    float _p = _rn > 0 ? _sc * 1.0 / _rn : float(na)
+    [_p, _rn, _sc]
+
+// =============================================================================
+// Gap classification
+// =============================================================================
+// @function Classifies the overnight gap. Returns [gap_pct, gap_atr, class]
+// class: 0 none (<0.25 ATR) · 1 small (0.25–0.75) · 2 significant (0.75–1.5) · 3 shock (>1.5)
+// v1.1: class is na when gap-vs-ATR cannot be computed (unknown ≠ "none").
+// Stateful — call every bar.
+export gap_class(float prev_close, float atr_val) =>
+    var float d_open = na
+    d_open := new_day() ? open : d_open
+    float _gp = na
+    float _ga = na
+    int _cl = na
+    if not na(d_open) and not na(prev_close) and prev_close > 0
+        _gp := (d_open - prev_close) / prev_close * 100.0
+        _ga := not na(atr_val) and atr_val > 0 ? (d_open - prev_close) / atr_val : float(na)
+        if not na(_ga)
+            _aga = math.abs(_ga)
+            _cl := _aga < 0.25 ? 0 : _aga < 0.75 ? 1 : _aga < 1.5 ? 2 : 3
+    [_gp, _ga, _cl]
+
+// =============================================================================
+// Volatility compression (TTM-style squeeze: Bollinger inside Keltner)
+// =============================================================================
+// @function True while Bollinger Bands sit inside Keltner Channels.
+export squeeze_on(simple int len, float bb_mult, float kc_mult) =>
+    _basis = ta.sma(close, len)
+    _dev = ta.stdev(close, len) * bb_mult
+    _kc = ta.atr(len) * kc_mult
+    _dev < _kc and _dev > 0
+
+// @function Consecutive bars the squeeze has been on. Stateful — call every bar.
+export squeeze_bars(simple int len, float bb_mult, float kc_mult) =>
+    var int n = 0
+    n := squeeze_on(len, bb_mult, kc_mult) ? n + 1 : 0
+    n
+
+// =============================================================================
+// End of file · KLQuant v1.1
+// =============================================================================

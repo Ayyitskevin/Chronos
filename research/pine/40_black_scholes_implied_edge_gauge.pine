@@ -1,0 +1,246 @@
+//@version=6
+// =============================================================================
+// Black-Scholes Regime-Adjusted Implied Edge Gauge v1.0 (5T Pine Suite · Desk Kit)
+//
+// WHAT THIS IS — AN EDUCATIONAL CALCULATOR, NOTHING MORE.
+// This is a teaching instrument: it prices a European option under
+// Black-Scholes-Merton from numbers YOU type in, then compares your typed
+// implied volatility against this chart's realized volatility. It has no
+// options data feed, models no skew, no early exercise, no dividends unless
+// you enter a yield, and gives no options advice. TradingView standard feeds
+// carry no option chains — every options number on this panel started life
+// in the settings dialog. Your IV in, arithmetic out.
+//
+// "REGIME-ADJUSTED" means exactly this and no more: the HUD carries a
+// regime-context row (external strict -1/0/+1 link) so the IV-vs-RV reading
+// is seen next to the suite's regime call. The regime NEVER enters the
+// arithmetic. The option priced here is a ROLLING HYPOTHETICAL — strike
+// offset and DTE are fixed inputs re-applied to each bar's close, not a
+// live contract.
+//
+// RESEARCH BASIS, stated plainly.
+// Black & Scholes (1973, JPE); Merton (1973, Bell J.) for the dividend-yield
+// form. Normal CDF via the Abramowitz & Stegun (1964) 7.1.26 erf
+// approximation — max absolute error about 1.5e-7, labeled. Educational
+// framing inspired by the Quant Guild channel's option-pricing episodes.
+// Honesty points:
+//   1. IV vs RV is NOT free money in either direction. Index and equity IV
+//      typically trades ABOVE subsequent realized vol on average — the
+//      variance risk premium (Carr & Wu 2009) — so "IV rich" is the normal
+//      resting state, not automatically an edge. The gauge cuts (1.2 / 0.8)
+//      are disclosed heuristics, nothing else.
+//   2. Realized vol here is close-to-close stdev of log returns annualized
+//      by a bars-per-year APPROXIMATION (252 sessions × your session-hours
+//      input intraday; 252/52/12 for D/W/M) — labeled on the HUD.
+//   3. T uses calendar days / 365. Real desks argue about day counts;
+//      a teaching gauge discloses one and moves on.
+//   4. Delta and breakeven are the textbook quantities (breakeven =
+//      strike ± premium at EXPIRY, financing ignored).
+//
+// Non-repaint: the gauge state and alerts advance on confirmed bars only;
+// per-bar arithmetic is a pure function of inputs and that bar's close.
+// Decision support only — a human makes every decision. This tool gives no
+// options advice. Risk controls outrank all signals.
+//
+// v1.0 changelog (2026-07-17):
+//   Initial release. BSM European pricer (call/put, dividend-yield form,
+//   d1/d2, A&S-7.1.26 normal CDF, delta, expiry breakeven) on user-typed
+//   strike offset / DTE / IV / rate / yield; chart realized vol (stdev of
+//   log returns, disclosed annualization approximation) with 252-bar RV
+//   percentile; IV/RV ratio gauge with disclosed heuristic cuts (rich >=
+//   1.2, cheap <= 0.8) emitting -1/0/+1; optional strict regime-link
+//   context row (display only, never in the math); tiered HUD with inputs
+//   echo; gauge-change alerts; data-window exports; JSON alerts (default
+//   OFF). Chart-local by design — no higher-timeframe requests anywhere.
+//   Every behavior-adjacent option ships at its conservative default.
+//   Evidence label: needs user run.
+// =============================================================================
+indicator("Black-Scholes Regime-Adjusted Implied Edge Gauge v1.0", shorttitle = "BS Gauge v1", overlay = false)
+
+grp_mode = "0 · Mode"
+grp_opt  = "1 · Option Contract (your numbers)"
+grp_rv   = "2 · Realized Vol Comparison"
+grp_link = "3 · Integration Links"
+grp_dsp  = "4 · Display"
+
+variant_tag = input.string("v1.0-base", "Variant tag (freeze-the-config discipline)", group = grp_mode,
+     tooltip = "Label this exact settings set. Any settings change = new tag = new variant with its own validation cycle. The tag prints on the HUD and in alerts so screenshots self-document.")
+
+opt_type_in = input.string("Call", "Option type", options = ["Call", "Put"], group = grp_opt)
+strike_off = input.float(5.0, "Strike offset from spot (%)", minval = -50.0, maxval = 100.0, step = 0.5, group = grp_opt,
+     tooltip = "Strike = this bar's close × (1 + offset%). Re-derived from each bar's close — a rolling constant-moneyness hypothetical, not a live contract.")
+dte_days = input.int(30, "Days to expiry (calendar)", minval = 1, maxval = 1095, group = grp_opt,
+     tooltip = "T = DTE / 365 (calendar-day convention, disclosed). Fixed input — the hypothetical never decays; each bar prices a fresh contract.")
+user_iv = input.float(25.0, "Implied volatility % (type your broker's quote)", minval = 0.5, maxval = 500.0, step = 0.5, group = grp_opt,
+     tooltip = "Type your broker's quoted IV for the strike/expiry you care about; TradingView standard feeds have none. Everything downstream of this number is arithmetic on YOUR input.")
+rf_rate = input.float(4.0, "Risk-free rate %", minval = 0.0, maxval = 25.0, step = 0.25, group = grp_opt)
+div_yield = input.float(0.0, "Dividend yield % (0 = none modeled)", minval = 0.0, maxval = 25.0, step = 0.25, group = grp_opt)
+
+rv_len = input.int(20, "Realized vol lookback (bars)", minval = 5, maxval = 250, group = grp_rv,
+     tooltip = "Close-to-close stdev of log returns over this window, annualized by the disclosed bars-per-year approximation. The comparison leg for your typed IV.")
+sess_hours = input.float(6.5, "Session hours per day (annualization approx)", minval = 0.5, maxval = 24.0, step = 0.5, group = grp_rv,
+     tooltip = "Bars-per-year approximation: 252 sessions × this many hours intraday; 252/52/12 for D/W/M charts. 24h markets: set 24. An approximation, labeled as such on the HUD.")
+rich_cut = input.float(1.2, "Gauge cut: IV rich above (IV/RV)", minval = 1.0, maxval = 3.0, step = 0.05, group = grp_rv)
+cheap_cut = input.float(0.8, "Gauge cut: IV cheap below (IV/RV)", minval = 0.1, maxval = 1.0, step = 0.05, group = grp_rv,
+     tooltip = "Disclosed heuristic cuts. Remember the variance risk premium: IV normally sits somewhat above subsequent RV, so 'rich' is the resting state of the world, not automatically an edge.")
+
+use_regime_link = input.bool(false, "Show regime context row (wire a REGIME_EXPORT)", group = grp_link,
+     tooltip = "Optional. Wire the source to a suite REGIME_EXPORT emitting strictly -1 / 0 / +1. Context row and alert text only — the regime NEVER enters the option arithmetic.")
+regime_src = input.source(close, "Regime link (wire to a REGIME_EXPORT)", group = grp_link)
+
+hud_mode = input.string("Full", "HUD mode", options = ["Off", "Micro", "Full"], group = grp_dsp)
+hud_pos_in = input.string("top_right", "HUD position", options = ["top_left", "top_center", "top_right", "bottom_left", "bottom_center", "bottom_right"], group = grp_dsp)
+use_json_alerts = input.bool(false, "JSON alert payloads (webhook)", group = grp_dsp,
+     tooltip = "OFF: human-readable alert text. ON: machine-readable JSON for webhook automation. Display-layer only.")
+
+// =============================================================================
+// Palette & helpers (suite standard)
+// =============================================================================
+c_bull  = color.rgb(89, 159, 125)
+c_bear  = color.rgb(190, 96, 111)
+c_neut  = color.rgb(112, 126, 148)
+c_gold  = color.rgb(214, 162, 82)
+c_panel = color.new(#0E1316, 5)
+c_cell  = color.new(#151D22, 7)
+c_cell2 = color.new(#10171B, 9)
+c_frame = color.new(#5BD6B0, 88)
+c_text  = color.white
+c_dim   = color.new(color.white, 45)
+c_faint = color.new(color.white, 68)
+
+f_pos(_s) =>
+    switch _s
+        "top_left"      => position.top_left
+        "top_center"    => position.top_center
+        "top_right"     => position.top_right
+        "bottom_left"   => position.bottom_left
+        "bottom_center" => position.bottom_center
+        "bottom_right"  => position.bottom_right
+        => position.top_right
+f_fmt(_x, _d) =>
+    _m = math.pow(10.0, _d)
+    na(_x) ? "n/a" : str.tostring(math.round(_x * _m) / _m)
+f_tcell(_tbl, _c, _r, _txt, _col, _bg) =>
+    table.cell(_tbl, _c, _r, _txt, text_color = _col, bgcolor = _bg, text_size = size.tiny, text_halign = text.align_center)
+// erf via Abramowitz & Stegun 7.1.26 (max abs error ≈ 1.5e-7), odd extension.
+f_erf(_x) =>
+    _ax = math.abs(_x)
+    _t = 1.0 / (1.0 + 0.3275911 * _ax)
+    _poly = ((((1.061405429 * _t - 1.453152027) * _t + 1.421413741) * _t - 0.284496736) * _t + 0.254829592) * _t
+    _y = 1.0 - _poly * math.exp(-_ax * _ax)
+    _x >= 0 ? _y : -_y
+f_ncdf(_x) =>
+    0.5 * (1.0 + f_erf(_x / math.sqrt(2.0)))
+// Bars-per-year approximation for RV annualization (disclosed).
+f_bpy() =>
+    float _sec = timeframe.in_seconds(timeframe.period)
+    timeframe.isintraday ? 252.0 * (sess_hours * 3600.0) / _sec :
+         timeframe.isdaily ? 252.0 / timeframe.multiplier :
+         timeframe.isweekly ? 52.0 / timeframe.multiplier :
+         timeframe.ismonthly ? 12.0 / timeframe.multiplier : 252.0
+
+// =============================================================================
+// Black-Scholes-Merton arithmetic (pure function of inputs + this bar's close)
+// =============================================================================
+is_call = opt_type_in == "Call"
+T_yrs = dte_days / 365.0
+K_strike = close * (1.0 + strike_off / 100.0)
+sig_iv = user_iv / 100.0
+r_c = rf_rate / 100.0
+q_c = div_yield / 100.0
+sqT = math.sqrt(T_yrs)
+bs_ok = not na(close) and close > 0 and K_strike > 0 and sig_iv > 0 and T_yrs > 0
+d1 = bs_ok ? (math.log(close / K_strike) + (r_c - q_c + 0.5 * sig_iv * sig_iv) * T_yrs) / (sig_iv * sqT) : float(na)
+d2 = bs_ok ? d1 - sig_iv * sqT : float(na)
+df_r = math.exp(-r_c * T_yrs)
+df_q = math.exp(-q_c * T_yrs)
+call_px = bs_ok ? close * df_q * f_ncdf(d1) - K_strike * df_r * f_ncdf(d2) : float(na)
+put_px = bs_ok ? K_strike * df_r * f_ncdf(-d2) - close * df_q * f_ncdf(-d1) : float(na)
+opt_px = is_call ? call_px : put_px
+opt_delta = bs_ok ? (is_call ? df_q * f_ncdf(d1) : -df_q * f_ncdf(-d1)) : float(na)
+breakeven = not na(opt_px) ? (is_call ? K_strike + opt_px : K_strike - opt_px) : float(na)
+
+// =============================================================================
+// Realized vol comparison (chart-local by design — no higher-TF requests)
+// =============================================================================
+one_bar_ret = not na(close[1]) and close > 0 and close[1] > 0 ? math.log(close / close[1]) : float(na)
+rv_bar = ta.stdev(one_bar_ret, rv_len)
+rv_ann_pct = not na(rv_bar) ? rv_bar * math.sqrt(f_bpy()) * 100.0 : float(na)
+rv_pctile = ta.percentrank(rv_ann_pct, 252)
+iv_rv_ratio = not na(rv_ann_pct) and rv_ann_pct > 0 ? user_iv / rv_ann_pct : float(na)
+int gauge_now = na(iv_rv_ratio) ? 0 : iv_rv_ratio >= rich_cut ? 1 : iv_rv_ratio <= cheap_cut ? -1 : 0
+f_gauge_name(_g) =>
+    _g == 1 ? "IV RICH vs RV" : _g == -1 ? "IV CHEAP vs RV" : "IV NEAR RV"
+
+var int gauge_state = 0
+bool gauge_changed = false
+if barstate.isconfirmed and not na(iv_rv_ratio)
+    if gauge_now != gauge_state
+        gauge_changed := true
+        gauge_state := gauge_now
+bool to_rich = gauge_changed and gauge_state == 1
+bool to_cheap = gauge_changed and gauge_state == -1
+bool to_near = gauge_changed and gauge_state == 0
+
+// =============================================================================
+// Regime link (optional, strict {-1, 0, +1} validation — context only,
+// never in the arithmetic)
+// =============================================================================
+_rv_link = regime_src
+link_valid = use_regime_link and not na(_rv_link) and (_rv_link == -1.0 or _rv_link == 0.0 or _rv_link == 1.0)
+regime_txt = not use_regime_link ? "link off" : not link_valid ? "LINK? (wire a REGIME_EXPORT)" : _rv_link == 1.0 ? "BULL" : _rv_link == -1.0 ? "BEAR" : "NEUTRAL"
+
+// =============================================================================
+// Plots & exports (pane: IV/RV ratio with the heuristic cuts)
+// =============================================================================
+plot(iv_rv_ratio, "IV / RV ratio", color = c_gold, linewidth = 2)
+hline(1.0, "Parity", color = color.new(color.white, 80), linestyle = hline.style_dotted)
+hline(rich_cut, "Rich cut", color = color.new(#BE606F, 70), linestyle = hline.style_dotted)
+hline(cheap_cut, "Cheap cut", color = color.new(#599F7D, 70), linestyle = hline.style_dotted)
+
+plot(opt_px, "BSG_PRICE_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(opt_delta, "BSG_DELTA_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(iv_rv_ratio, "BSG_IV_RV_RATIO_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(rv_pctile, "BSG_RV_PCTILE_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(gauge_now, "BSG_GAUGE_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+
+// =============================================================================
+// HUD
+// =============================================================================
+var table hud = table.new(f_pos(hud_pos_in), 2, 7, bgcolor = c_panel, frame_color = c_frame,
+     frame_width = 1, border_color = color.new(color.white, 92), border_width = 1)
+if barstate.islast and hud_mode != "Off"
+    _g_txt = na(iv_rv_ratio) ? "WARMING (RV window)" : f_gauge_name(gauge_now) + " (" + f_fmt(iv_rv_ratio, 2) + ")"
+    _g_bg = na(iv_rv_ratio) ? c_cell : gauge_now != 0 ? color.new(c_gold, 55) : c_cell
+    f_tcell(hud, 0, 0, "BS Gauge " + variant_tag, c_text, c_frame)
+    f_tcell(hud, 1, 0, _g_txt, c_text, _g_bg)
+    if hud_mode == "Full"
+        f_tcell(hud, 0, 1, "Your inputs", c_dim, c_panel)
+        f_tcell(hud, 1, 1, opt_type_in + " · K " + (strike_off >= 0 ? "+" : "") + f_fmt(strike_off, 1) + "% (" + str.tostring(K_strike, format.mintick) + ") · " + str.tostring(dte_days) + "d · IV " + f_fmt(user_iv, 1) + "% · r " + f_fmt(rf_rate, 2) + "% · q " + f_fmt(div_yield, 2) + "%", c_dim, c_cell)
+        f_tcell(hud, 0, 2, "BSM price · delta · breakeven", c_dim, c_panel)
+        f_tcell(hud, 1, 2, (na(opt_px) ? "n/a" : str.tostring(opt_px, format.mintick)) + " · Δ " + f_fmt(opt_delta, 3) + " · BE " + (na(breakeven) ? "n/a" : str.tostring(breakeven, format.mintick)) + " (expiry, premium-only)", c_dim, c_cell)
+        f_tcell(hud, 0, 3, "IV vs RV(" + str.tostring(rv_len) + ")", c_dim, c_panel)
+        f_tcell(hud, 1, 3, "IV " + f_fmt(user_iv, 1) + "% vs RV " + f_fmt(rv_ann_pct, 1) + "% (ann approx*) · ratio " + f_fmt(iv_rv_ratio, 2) + " · cuts " + f_fmt(rich_cut, 2) + "/" + f_fmt(cheap_cut, 2), gauge_now != 0 ? c_text : c_dim, c_cell)
+        f_tcell(hud, 0, 4, "RV percentile (252 bars)", c_dim, c_panel)
+        f_tcell(hud, 1, 4, f_fmt(rv_pctile, 0) + (na(rv_pctile) ? "" : "th") + " · variance risk premium: rich is the resting state", c_dim, c_cell2)
+        f_tcell(hud, 0, 5, "Regime context", use_regime_link and not link_valid ? c_bear : c_dim, c_panel)
+        f_tcell(hud, 1, 5, regime_txt + " · context only, never in the math", use_regime_link and not link_valid ? c_bear : c_dim, c_cell)
+        f_tcell(hud, 0, 6, "*Black-Scholes teaching gauge · your IV in, arithmetic out", c_faint, c_panel)
+        f_tcell(hud, 1, 6, "European, no skew, no advice", c_faint, c_panel)
+
+// =============================================================================
+// Alerts (confirmed-bar events; formal wording per suite convention)
+// =============================================================================
+alertcondition(to_rich, "Gauge → IV RICH", "BS Gauge: IV/RV ratio crossed the rich cut (teaching gauge, not options advice)")
+alertcondition(to_cheap, "Gauge → IV CHEAP", "BS Gauge: IV/RV ratio crossed the cheap cut (teaching gauge, not options advice)")
+alertcondition(to_near, "Gauge → NEAR", "BS Gauge: IV/RV ratio returned between the cuts (teaching gauge, not options advice)")
+if gauge_changed
+    _gj = gauge_state == 1 ? "rich" : gauge_state == -1 ? "cheap" : "near"
+    if use_json_alerts
+        alert('{"ev":"bs_gauge","sym":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","gauge":"' + _gj + '","ratio":' + (na(iv_rv_ratio) ? "null" : f_fmt(iv_rv_ratio, 3)) + ',"iv_pct":' + f_fmt(user_iv, 2) + ',"rv_pct":' + (na(rv_ann_pct) ? "null" : f_fmt(rv_ann_pct, 2)) + ',"rv_pctile":' + (na(rv_pctile) ? "null" : f_fmt(rv_pctile, 1)) + ',"price":' + (na(opt_px) ? "null" : str.tostring(opt_px, format.mintick)) + ',"delta":' + (na(opt_delta) ? "null" : f_fmt(opt_delta, 3)) + ',"regime":"' + regime_txt + '","variant":"' + variant_tag + '","t":' + str.tostring(time) + '}', alert.freq_once_per_bar_close)
+    else
+        alert("BS Gauge [" + variant_tag + "]: " + syminfo.ticker + " gauge state → " + f_gauge_name(gauge_state) + " · ratio " + f_fmt(iv_rv_ratio, 2) + " (IV " + f_fmt(user_iv, 1) + "% vs RV " + f_fmt(rv_ann_pct, 1) + "%) · RV pctile " + f_fmt(rv_pctile, 0) + " · regime " + regime_txt + " · teaching gauge, not options advice", alert.freq_once_per_bar_close)
+
+// =============================================================================
+// End of file · Black-Scholes Regime-Adjusted Implied Edge Gauge v1.0
+// =============================================================================

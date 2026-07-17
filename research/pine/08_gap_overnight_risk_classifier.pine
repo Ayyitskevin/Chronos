@@ -1,0 +1,222 @@
+//@version=6
+// =============================================================================
+// Gap & Overnight Risk Classifier v1.1 (5T Pine Suite · Tranche 2)
+// Classifies the overnight gap (size vs ATR, direction, inside/breakaway) and
+// builds SELF-MEASURED fill statistics per bucket from completed sessions on
+// this chart. Gap-fill folklore is heavily conditional; this measures YOURS.
+// Non-repaint: daily context is [1]-offset fixed history; today's open fixed
+// at session start; stats finalize only on completed days. Not advice.
+// -----------------------------------------------------------------------------
+// v1.1 changelog (2026-07-11):
+//   - request.security(): positional barmerge args -> keyword form
+//     (gaps = ..., lookahead = ...) — compile-blocking class.
+//   - table.merge_cells() once-guarded (var stt_merged) inside the islast block.
+//   - Wilson upper bound added (f_wilson_hi); HUD + stats table now show the
+//     full "lo–hi" band instead of the lower bound alone. n-faintness unchanged.
+//   - New exports BUCKET_WLO_EXPORT / BUCKET_WHI_EXPORT (current bucket band ×100).
+//   - Per-bucket bars-to-fill medians ("~Nb") added to stats table and HUD,
+//     accumulated on each fill event (a fill is final once it happens).
+//   - Avg |gap| fix: a day's gap now enters the average only when the day
+//     completes (was added at the open, letting the in-progress day leak in).
+//   - Session-boundary note (tooltip): day boundaries follow the chart's session;
+//     extended-hours charts anchor the day open (and gap) to the premarket open.
+//   - Optional JSON alert payloads for webhooks (default OFF; display layer only).
+//   Evidence label: needs user run.
+// =============================================================================
+indicator("Gap & Overnight Risk Classifier v1.1", shorttitle = "Gap Class v1.1", overlay = true)
+
+grp_g = "1 · Classification"
+grp_dsp = "2 · Display"
+
+atr_len = input.int(14, "ATR length (daily)", minval = 1, maxval = 100, group = grp_g, tooltip = "Day boundaries follow the chart's session: extended-hours charts anchor the day open (and the gap) to the premarket open; RTH charts use the regular 09:30 open.")
+show_stats = input.bool(true, "Show self-measured fill stats table", group = grp_dsp)
+hud_pos_in = input.string("bottom_right", "HUD position", options = ["top_left", "top_center", "top_right", "bottom_left", "bottom_center", "bottom_right"], group = grp_dsp)
+stats_pos_in = input.string("top_right", "Stats table position", options = ["top_left", "top_center", "top_right", "bottom_left", "bottom_center", "bottom_right"], group = grp_dsp)
+use_json_alerts = input.bool(false, "JSON alert payloads (webhook)", group = grp_dsp, tooltip = "OFF: human-readable alert text (v1.0 behavior). ON: machine-readable JSON for webhook automation. Display-layer only.")
+
+c_panel = color.new(#141a22, 0)
+c_cell = color.new(#1b2430, 0)
+c_cell2 = color.new(#20293a, 0)
+c_frame = color.new(#2e4a66, 0)
+c_text = color.new(#e8edf2, 0)
+c_dim = color.new(#9fb0c0, 0)
+c_faint = color.new(#5a6572, 0)
+c_bull = color.new(#1e9e6a, 0)
+c_bear = color.new(#e5484d, 0)
+c_hot = color.new(#f5a623, 0)
+
+f_pos(_s) =>
+    _s == "top_left" ? position.top_left : _s == "top_center" ? position.top_center :
+     _s == "top_right" ? position.top_right : _s == "bottom_left" ? position.bottom_left :
+     _s == "bottom_center" ? position.bottom_center : position.bottom_right
+
+f_fmt(_v, _dp) =>
+    na(_v) ? "n/a" : str.tostring(_v, _dp == 0 ? "#" : _dp == 1 ? "#.#" : "#.##")
+
+f_tcell(_t, _c, _r, _txt, _tc, _bg) =>
+    table.cell(_t, _c, _r, _txt, text_color = _tc, bgcolor = _bg, text_size = size.small)
+
+f_wilson_lo(_p, _n) =>
+    _n <= 0 or na(_p) ? float(na) :
+     (_p + 1.96 * 1.96 / (2 * _n) - 1.96 * math.sqrt((_p * (1 - _p) + 1.96 * 1.96 / (4 * _n)) / _n)) / (1 + 1.96 * 1.96 / _n)
+
+f_wilson_hi(_p, _n) =>
+    _n <= 0 or na(_p) ? float(na) :
+     (_p + 1.96 * 1.96 / (2 * _n) + 1.96 * math.sqrt((_p * (1 - _p) + 1.96 * 1.96 / (4 * _n)) / _n)) / (1 + 1.96 * 1.96 / _n)
+
+// ---- Daily context (fixed history) ----
+[pd_close, pd_high, pd_low, d_atr] = request.security(syminfo.tickerid, "D",
+     [close[1], high[1], low[1], ta.atr(atr_len)[1]], gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+
+new_day = ta.change(time("D")) != 0
+var float day_open = na
+day_open := new_day ? open : day_open
+
+gap_pct = not na(day_open) and not na(pd_close) and pd_close > 0 ? (day_open - pd_close) / pd_close * 100.0 : float(na)
+gap_atr = not na(day_open) and not na(pd_close) and not na(d_atr) and d_atr > 0 ? (day_open - pd_close) / d_atr : float(na)
+gap_dir = na(gap_atr) ? 0 : gap_atr > 0 ? 1 : gap_atr < 0 ? -1 : 0
+abs_ga = math.abs(nz(gap_atr))
+gap_class = na(gap_atr) ? 0 : abs_ga < 0.25 ? 0 : abs_ga < 0.75 ? 1 : abs_ga < 1.5 ? 2 : 3
+gap_class_txt = gap_class == 0 ? "None" : gap_class == 1 ? "Small" : gap_class == 2 ? "Significant" : "SHOCK"
+breakaway = gap_dir == 1 ? (not na(pd_high) and day_open > pd_high) : gap_dir == -1 ? (not na(pd_low) and day_open < pd_low) : false
+
+// ---- Live fill tracking (today) ----
+var bool filled = false
+var int fill_bar = na
+var int day_bars = 0
+if new_day
+    filled := false
+    fill_bar := na
+    day_bars := 0
+day_bars += 1
+if barstate.isconfirmed and not filled and gap_class > 0 and not na(pd_close)
+    _touched = gap_dir == 1 ? low <= pd_close : gap_dir == -1 ? high >= pd_close : false
+    if _touched
+        filled := true
+        fill_bar := day_bars
+        if gap_dir != 0
+            array.push(btf_bkt, (gap_class - 1) * 2 + (gap_dir == 1 ? 0 : 1))
+            array.push(btf_val, day_bars)
+
+// ---- Self-measured stats: 8 buckets (class 1-3 x dir, class 0 pooled) ----
+// Bucket index: (class-1)*2 + (dir==1 ? 0 : 1) for classes 1..3 → 0..5
+var array<int> b_n = array.new_int(6, 0)
+var array<int> b_fill = array.new_int(6, 0)
+// bars-to-fill per fill event, bucket-tagged (a fill is final once it happens)
+var array<int> btf_bkt = array.new_int()
+var array<int> btf_val = array.new_int()
+
+f_btf_median(_b) =>
+    _tmp = array.new_int()
+    _sz = array.size(btf_bkt)
+    if _sz > 0
+        for _i = 0 to _sz - 1
+            if array.get(btf_bkt, _i) == _b
+                array.push(_tmp, array.get(btf_val, _i))
+    array.size(_tmp) > 0 ? float(array.median(_tmp)) : float(na)
+var float sum_abs_ga = 0.0
+var int n_days = 0
+// finalize YESTERDAY on the first bar of a new day using latched values
+var int y_class = 0
+var int y_dir = 0
+var bool y_filled = false
+var float y_abs_ga = na
+if new_day
+    if y_class > 0 and y_dir != 0
+        _b = (y_class - 1) * 2 + (y_dir == 1 ? 0 : 1)
+        array.set(b_n, _b, array.get(b_n, _b) + 1)
+        if y_filled
+            array.set(b_fill, _b, array.get(b_fill, _b) + 1)
+    if not na(y_abs_ga)
+        sum_abs_ga += y_abs_ga
+        n_days += 1
+    y_class := gap_class
+    y_dir := gap_dir
+    y_filled := false
+    y_abs_ga := na(gap_atr) ? float(na) : abs_ga
+if barstate.isconfirmed and filled
+    y_filled := true
+avg_abs_gap = n_days > 0 ? sum_abs_ga / n_days : float(na)
+
+_bkt = gap_class > 0 and gap_dir != 0 ? (gap_class - 1) * 2 + (gap_dir == 1 ? 0 : 1) : -1
+bkt_n = _bkt >= 0 ? array.get(b_n, _bkt) : 0
+bkt_f = _bkt >= 0 ? array.get(b_fill, _bkt) : 0
+bkt_pct = bkt_n > 0 ? bkt_f * 100.0 / bkt_n : float(na)
+bkt_wlo = bkt_n > 0 ? f_wilson_lo(bkt_f * 1.0 / bkt_n, bkt_n) * 100.0 : float(na)
+bkt_whi = bkt_n > 0 ? f_wilson_hi(bkt_f * 1.0 / bkt_n, bkt_n) * 100.0 : float(na)
+
+// ---- Visuals ----
+plot(gap_class > 0 ? pd_close : na, "Gap fill level (prior close)", color = c_hot, linewidth = 1, style = plot.style_linebr)
+bgcolor(new_day and gap_class == 3 ? color.new(c_bear, 85) : na, title = "Shock gap tint")
+
+// ---- Exports ----
+plot(gap_atr, "GAP_ATR_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(float(gap_class), "GAP_CLASS_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(float(gap_dir), "GAP_DIR_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(filled ? 1.0 : 0.0, "GAP_FILLED_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(na(fill_bar) ? na : float(fill_bar), "BARS_TO_FILL_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(bkt_pct, "BUCKET_FILL_PCT_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(bkt_wlo, "BUCKET_WLO_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(bkt_whi, "BUCKET_WHI_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+
+// ---- HUD ----
+var table hud = table.new(f_pos(hud_pos_in), 2, 5, bgcolor = c_panel, frame_color = c_frame,
+     frame_width = 1, border_color = color.new(color.white, 92), border_width = 1)
+if barstate.islast
+    _sbg = gap_class == 3 ? color.new(c_bear, 55) : gap_class == 2 ? color.new(c_hot, 65) : c_cell
+    _hud_med = _bkt >= 0 ? f_btf_median(_bkt) : float(na)
+    f_tcell(hud, 0, 0, "Gap Class", c_text, c_frame)
+    f_tcell(hud, 1, 0, gap_class_txt + (gap_dir == 1 ? " ↑" : gap_dir == -1 ? " ↓" : "") + (breakaway ? " · BREAKAWAY" : gap_class > 0 ? " · into range" : ""), c_text, _sbg)
+    f_tcell(hud, 0, 1, "Size", c_dim, c_panel)
+    f_tcell(hud, 1, 1, f_fmt(gap_pct, 2) + "% · " + f_fmt(gap_atr, 2) + " ATR", c_dim, c_cell)
+    f_tcell(hud, 0, 2, "Fill (today)", c_dim, c_panel)
+    f_tcell(hud, 1, 2, gap_class == 0 ? "—" : filled ? "FILLED · bar " + str.tostring(fill_bar) : "Open · target " + f_fmt(pd_close, 2), filled ? c_bull : c_dim, c_cell)
+    f_tcell(hud, 0, 3, "This bucket", c_dim, c_panel)
+    f_tcell(hud, 1, 3, _bkt < 0 ? "—" : "fills " + f_fmt(bkt_pct, 0) + "% · n" + str.tostring(bkt_n) + " · W " + f_fmt(bkt_wlo, 0) + "–" + f_fmt(bkt_whi, 0) + "%" + (na(_hud_med) ? "" : " · ~" + f_fmt(_hud_med, 0) + "b"), bkt_n < 20 ? c_faint : c_dim, c_cell)
+    f_tcell(hud, 0, 4, "Avg |gap|", c_dim, c_panel)
+    f_tcell(hud, 1, 4, f_fmt(avg_abs_gap, 2) + " ATR · " + str.tostring(n_days) + "d", c_faint, c_cell)
+
+// ---- Stats table (self-measured; small n shown faint on purpose) ----
+var table stt = table.new(f_pos(stats_pos_in), 4, 5, bgcolor = c_panel, frame_color = c_frame,
+     frame_width = 1, border_color = color.new(color.white, 92), border_width = 1)
+var bool stt_merged = false
+if barstate.islast and show_stats
+    f_tcell(stt, 0, 0, "Fill Stats*", c_text, c_frame)
+    f_tcell(stt, 1, 0, "Up n·fill%", c_text, c_frame)
+    f_tcell(stt, 2, 0, "Dn n·fill%", c_text, c_frame)
+    f_tcell(stt, 3, 0, "W band U/D", c_text, c_frame)
+    _names = array.from("Small", "Signif", "Shock")
+    for k = 0 to 2
+        _bu = k * 2
+        _bd = k * 2 + 1
+        _nu = array.get(b_n, _bu)
+        _nd = array.get(b_n, _bd)
+        _pu = _nu > 0 ? array.get(b_fill, _bu) * 100.0 / _nu : float(na)
+        _pd2 = _nd > 0 ? array.get(b_fill, _bd) * 100.0 / _nd : float(na)
+        _wu = _nu > 0 ? f_wilson_lo(array.get(b_fill, _bu) * 1.0 / _nu, _nu) * 100.0 : float(na)
+        _wd = _nd > 0 ? f_wilson_lo(array.get(b_fill, _bd) * 1.0 / _nd, _nd) * 100.0 : float(na)
+        _wuh = _nu > 0 ? f_wilson_hi(array.get(b_fill, _bu) * 1.0 / _nu, _nu) * 100.0 : float(na)
+        _wdh = _nd > 0 ? f_wilson_hi(array.get(b_fill, _bd) * 1.0 / _nd, _nd) * 100.0 : float(na)
+        _mu = f_btf_median(_bu)
+        _md = f_btf_median(_bd)
+        _r = k + 1
+        _bg = k % 2 == 0 ? c_cell : c_cell2
+        f_tcell(stt, 0, _r, array.get(_names, k), c_dim, _bg)
+        f_tcell(stt, 1, _r, str.tostring(_nu) + " · " + f_fmt(_pu, 0) + "%" + (na(_mu) ? "" : " · ~" + f_fmt(_mu, 0) + "b"), _nu < 20 ? c_faint : c_bull, _bg)
+        f_tcell(stt, 2, _r, str.tostring(_nd) + " · " + f_fmt(_pd2, 0) + "%" + (na(_md) ? "" : " · ~" + f_fmt(_md, 0) + "b"), _nd < 20 ? c_faint : c_bear, _bg)
+        f_tcell(stt, 3, _r, f_fmt(_wu, 0) + "–" + f_fmt(_wuh, 0) + " / " + f_fmt(_wd, 0) + "–" + f_fmt(_wdh, 0), c_faint, _bg)
+    f_tcell(stt, 0, 4, "*this chart's completed days only — small n is faint for a reason", c_faint, c_panel)
+    if not stt_merged
+        table.merge_cells(stt, 0, 4, 3, 4)
+        stt_merged := true
+
+// ---- Alerts ----
+alertcondition(new_day and gap_class == 3, "Shock gap at open", "Gap Classifier: shock gap (>1.5 ATR) at the open")
+alertcondition(filled and not filled[1], "Gap filled", "Gap Classifier: today's gap filled (prior close touched)")
+if barstate.isconfirmed and filled and not filled[1]
+    if use_json_alerts
+        alert('{"ev":"gap_filled","sym":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","gap_atr":' + (na(gap_atr) ? "null" : f_fmt(gap_atr, 2)) + ',"gap_class":"' + gap_class_txt + '","bars_to_fill":' + (na(fill_bar) ? "null" : str.tostring(fill_bar)) + ',"t":' + str.tostring(time) + '}', alert.freq_once_per_bar_close)
+    else
+        alert("Gap Classifier: " + syminfo.ticker + " gap FILLED · " + gap_class_txt + " " + f_fmt(gap_atr, 2) + " ATR · bar " + str.tostring(fill_bar), alert.freq_once_per_bar_close)
+// =============================================================================
+// End of file — Gap & Overnight Risk Classifier v1.1

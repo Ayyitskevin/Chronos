@@ -1,0 +1,292 @@
+//@version=6
+// =============================================================================
+// Time-of-Day RVOL Regime Filter v1.0 (5T Pine Suite · Desk Kit)
+//
+// WHAT THIS IS.
+// The suite's documented selection edge is relative volume (Zarattini /
+// Barbon / Aziz 2024 — expectancy scaled with RVOL; the edge concentrated
+// in Stocks in Play). This filter measures the JOINT condition on THIS
+// chart: exact time-of-day RVOL elevation × regime — and counts whether
+// elevated-RVOL bars in each directional regime showed next-bar follow-
+// through (continuation in the regime's direction), Wilson-bounded, AGAINST
+// that same regime's non-elevated baseline. The DELTA is the point: does
+// elevation tilt follow-through beyond the regime's base rate here, or not?
+// Intraday only — the time-of-day machinery is meaningless on dailies and
+// the HUD says so instead of pretending.
+//
+// RESEARCH BASIS, stated plainly.
+// Zarattini/Barbon/Aziz (2024): ORB expectancy scaled with relative volume;
+// negative below ~1x, concentrated in the high-RVOL tail. RVOL is a
+// SELECTION statistic, not an entry signal — suite doctrine. Session volume
+// follows a U-shape (0935–1530 framing): the first 30–60 minutes dominate,
+// so elevation is easiest and noisiest at the open — the HUD carries that
+// warning permanently. Exact time-of-day RVOL machinery is copied from the
+// SIP RVOL Screener v1.1 (KLQuant matrix method): cum volume vs the average
+// cum volume at this same bar-of-day over the prior N days, confirmed
+// writes, current day excluded from its own average, warm after 5 prior days.
+//
+// HONESTY, stated plainly.
+//   1. Follow-through is counted history on this chart — next-bar
+//      continuation, nothing longer, nothing predictive.
+//   2. The tilt verdict (Wilson lower bound of the elevated rate above the
+//      baseline rate by a margin, with a minimum n) is a labeled heuristic.
+//   3. Day-boundary bars are excluded from counting — overnight gaps would
+//      contaminate a "next-bar" measurement.
+//
+// Non-repaint: matrix writes, counters, and all statistics advance on
+// confirmed bars only; the live bar's RVOL updates intrabar as cum volume
+// grows (that is the nature of the statistic) and settles at the close.
+// Alerts fire on confirmed bars. Decision support only — a human places
+// every trade. Risk controls outrank all signals.
+//
+// v1.0 changelog (2026-07-17):
+//   Initial release. Exact time-of-day RVOL (SIP v1.1 matrix machinery:
+//   days×bars matrix, confirmed writes, current-day exclusion, warm gate
+//   5 prior days); elevation threshold (default 1.5x per the research
+//   floor); per-regime next-bar continuation counts, elevated vs baseline,
+//   with Wilson lower bounds and thin flags; tilt verdict per side
+//   (labeled heuristic: Wlo(elev) > base + 2pts with n>=30); regime source
+//   = external link (strict -1/0/+1 validation) with internal hard-
+//   threshold z fallback, HUD names the live source; intraday-only guard
+//   (Noise-Area pattern); RVOL plot + threshold line + elevated tint;
+//   session U-shape warning row; tiered HUD; Data-Window exports;
+//   elevated-in-directional-regime alert with optional JSON payloads
+//   (default OFF). Behavior-adjacent options ship at conservative
+//   defaults. Evidence label: needs user run.
+// =============================================================================
+indicator("Time-of-Day RVOL Regime Filter v1.0", shorttitle = "TOD RVOL v1",
+     overlay = false)
+
+grp_mode = "0 · Mode"
+grp_rv   = "1 · Time-of-Day RVOL"
+grp_link = "2 · Regime Source"
+grp_meas = "3 · Follow-Through Measurement"
+grp_dsp  = "4 · Display"
+
+variant_tag = input.string("v1.0-base", "Variant tag (freeze-the-config discipline)", group = grp_mode,
+     tooltip = "Label this exact settings set. Any settings change = new tag = new variant with its own validation cycle. The tag prints on the HUD and in alerts so screenshots self-document.")
+
+rvol_days = input.int(20, "RVOL lookback (days)", minval = 3, maxval = 60, group = grp_rv,
+     tooltip = "How many prior days feed the same-time-of-day average. Matches the SIP screener convention.")
+tod_max_bars = input.int(400, "Max bars per day stored", minval = 50, maxval = 500, group = grp_rv,
+     tooltip = "390 one-minute RTH bars; 400 covers padding. Lower on higher intraday timeframes is fine.")
+elev_thr = input.float(1.5, "Elevated at RVOL >=", minval = 0.5, maxval = 30.0, step = 0.1, group = grp_rv,
+     tooltip = "Research floor, not a target: expectancy was negative below ~1x and scaled with RVOL — the fat tail (3x+) is where the edge concentrated. Elevation selects; it never signals.")
+
+use_regime_link = input.bool(false, "Use external regime link", group = grp_link)
+regime_src = input.source(close, "Regime link (wire to a REGIME_EXPORT)", group = grp_link,
+     tooltip = "Wire to any suite script's REGIME_EXPORT. Validated STRICTLY: only exact -1 / 0 / +1 values count. Anything else falls back to the internal classifier and the HUD flags LINK?.")
+z_lookback = input.int(20, "Internal fallback: z lookback (bars)", minval = 5, maxval = 250, group = grp_link,
+     tooltip = "The fallback classifier is the suite observation — volatility-normalized window return z-score — with hard thresholds and no hysteresis. A convenience stand-in, not a substitute for the flagship engine.")
+z_enter = input.float(0.85, "Internal fallback: z threshold", minval = 0.10, maxval = 3.00, step = 0.05, group = grp_link)
+
+min_side_n = input.int(30, "Thin-sample warning (elevated n)", minval = 5, maxval = 1000, group = grp_meas,
+     tooltip = "Below this many elevated samples on a side, the row carries the suite's thin-sample flag and the tilt verdict reads 'thin'. Wilson lower bounds do the honesty work either way.")
+tilt_margin = input.float(2.0, "Tilt verdict margin (pts)", minval = 0.0, maxval = 20.0, step = 0.5, group = grp_meas,
+     tooltip = "Verdict 'tilts' requires Wlo(elevated continuation) to exceed the baseline continuation rate by this many percentage points, with the minimum n met. A labeled heuristic, not a significance test.")
+
+hud_mode = input.string("Full", "HUD mode", options = ["Off", "Micro", "Full"], group = grp_dsp)
+hud_pos_in = input.string("top_right", "HUD position", options = ["top_left", "top_center", "top_right", "bottom_left", "bottom_center", "bottom_right"], group = grp_dsp)
+show_rvol_plot = input.bool(true, "Plot time-of-day RVOL", group = grp_dsp)
+show_elev_tint = input.bool(true, "Elevated background tint", group = grp_dsp)
+use_json_alerts = input.bool(false, "JSON alert payloads (webhook)", group = grp_dsp,
+     tooltip = "OFF: human-readable alert text. ON: machine-readable JSON for webhook automation. Display-layer only.")
+
+// =============================================================================
+// Palette & helpers (suite standard)
+// =============================================================================
+c_bull  = color.rgb(89, 159, 125)
+c_bear  = color.rgb(190, 96, 111)
+c_neut  = color.rgb(112, 126, 148)
+c_gold  = color.rgb(214, 162, 82)
+c_panel = color.new(#0E1316, 5)
+c_cell  = color.new(#151D22, 7)
+c_cell2 = color.new(#10171B, 9)
+c_frame = color.new(#5BD6B0, 88)
+c_text  = color.white
+c_dim   = color.new(color.white, 45)
+c_faint = color.new(color.white, 68)
+
+f_pos(_s) =>
+    switch _s
+        "top_left"      => position.top_left
+        "top_center"    => position.top_center
+        "top_right"     => position.top_right
+        "bottom_left"   => position.bottom_left
+        "bottom_center" => position.bottom_center
+        "bottom_right"  => position.bottom_right
+        => position.top_right
+f_fmt(_x, _d) =>
+    _m = math.pow(10.0, _d)
+    na(_x) ? "n/a" : str.tostring(math.round(_x * _m) / _m)
+f_tcell(_tbl, _c, _r, _txt, _col, _bg) =>
+    table.cell(_tbl, _c, _r, _txt, text_color = _col, bgcolor = _bg, text_size = size.tiny, text_halign = text.align_center)
+// Wilson score lower bound (z = 1.96), suite-standard honesty for counted rates.
+f_wilson_lo(_p, _n) =>
+    _n <= 0 or na(_p) ? float(na) :
+         (_p + 1.96 * 1.96 / (2 * _n) - 1.96 * math.sqrt((_p * (1 - _p) + 1.96 * 1.96 / (4 * _n)) / _n)) / (1 + 1.96 * 1.96 / _n)
+f_rname(_s) =>
+    _s == 1 ? "Bull" : _s == -1 ? "Bear" : "Neutral"
+f_rcol(_s) =>
+    _s == 1 ? c_bull : _s == -1 ? c_bear : c_neut
+f_new_day() =>
+    ta.change(time("D")) != 0
+
+// =============================================================================
+// Regime source: external link (strict -1/0/+1) with internal z fallback.
+// The HUD names whichever source is live; an enabled-but-invalid link reads
+// LINK? and the internal classifier takes over rather than polluting counts.
+// =============================================================================
+one_bar_ret = not na(close[1]) and close > 0 and close[1] > 0 ? math.log(close / close[1]) : float(na)
+win_ret = not na(close[z_lookback]) and close > 0 and close[z_lookback] > 0 ? math.log(close / close[z_lookback]) : float(na)
+win_vol = ta.stdev(one_bar_ret, z_lookback) * math.sqrt(z_lookback)
+obs_z = not na(win_ret) and not na(win_vol) and win_vol > 0 ? win_ret / win_vol : float(na)
+int z_state = na(obs_z) ? 0 : obs_z > z_enter ? 1 : obs_z < -z_enter ? -1 : 0
+_rvl = regime_src
+link_valid = use_regime_link and not na(_rvl) and (_rvl == -1.0 or _rvl == 0.0 or _rvl == 1.0)
+int regime_now = link_valid ? int(_rvl) : z_state
+regime_ready = link_valid or not na(obs_z)
+regime_src_txt = link_valid ? "external link" : use_regime_link ? "LINK? → internal z" : "internal z"
+
+// =============================================================================
+// Exact time-of-day RVOL (matrix machinery copied from SIP v1.1, per KLQuant):
+// days×bars matrix of cum volume, confirmed writes, current day excluded from
+// its own average. is_newday is hoisted to a single call site so the ta.change
+// inside evaluates unconditionally every bar.
+// =============================================================================
+bool is_newday = f_new_day()
+var matrix<float> tod_m = matrix.new<float>(60, 500, na)
+var int tod_row = 0
+var int day_b = -1
+var float chart_cum = 0.0
+day_b := is_newday ? 0 : day_b + 1
+chart_cum := is_newday ? nz(volume) : chart_cum + nz(volume)
+_days_eff = math.min(rvol_days, 60)
+_bars_eff = math.min(tod_max_bars, 500)
+if is_newday
+    tod_row := (tod_row + 1) % _days_eff
+    for c = 0 to _bars_eff - 1
+        matrix.set(tod_m, tod_row, c, na)
+if barstate.isconfirmed and day_b >= 0 and day_b < _bars_eff
+    matrix.set(tod_m, tod_row, day_b, chart_cum)
+float tod_sum = 0.0
+int tod_n = 0
+if day_b >= 0 and day_b < _bars_eff
+    for r = 0 to _days_eff - 1
+        if r != tod_row
+            _v = matrix.get(tod_m, r, day_b)
+            if not na(_v)
+                tod_sum += _v
+                tod_n += 1
+rvol_tod = timeframe.isintraday and tod_n > 0 and tod_sum > 0 ? chart_cum / (tod_sum / tod_n) : float(na)
+bool tod_warm = timeframe.isintraday and tod_n >= 5
+bool elevated = tod_warm and not na(rvol_tod) and rvol_tod >= elev_thr
+
+// =============================================================================
+// Joint measurement (confirmed, warmed, intraday): condition read on the PRIOR
+// confirmed bar, outcome = this bar's close vs close[1] in the regime's
+// direction. First bar of a day never scores — overnight gaps would
+// contaminate a next-bar measurement. Baseline = same regime, NOT elevated.
+// =============================================================================
+var int bull_e_n = 0
+var int bull_e_h = 0
+var int bull_b_n = 0
+var int bull_b_h = 0
+var int bear_e_n = 0
+var int bear_e_h = 0
+var int bear_b_n = 0
+var int bear_b_h = 0
+if barstate.isconfirmed and timeframe.isintraday and not is_newday and not na(close[1])
+    int _r1 = regime_now[1]
+    bool _w1 = tod_warm[1]
+    float _rv1 = rvol_tod[1]
+    if _w1 and not na(_rv1) and _r1 != 0
+        bool _elev1 = _rv1 >= elev_thr
+        bool _cont = _r1 == 1 ? close > close[1] : close < close[1]
+        if _r1 == 1
+            if _elev1
+                bull_e_n += 1
+                bull_e_h += _cont ? 1 : 0
+            else
+                bull_b_n += 1
+                bull_b_h += _cont ? 1 : 0
+        else
+            if _elev1
+                bear_e_n += 1
+                bear_e_h += _cont ? 1 : 0
+            else
+                bear_b_n += 1
+                bear_b_h += _cont ? 1 : 0
+
+float bull_e_r = bull_e_n > 0 ? bull_e_h * 1.0 / bull_e_n : float(na)
+float bull_b_r = bull_b_n > 0 ? bull_b_h * 1.0 / bull_b_n : float(na)
+float bear_e_r = bear_e_n > 0 ? bear_e_h * 1.0 / bear_e_n : float(na)
+float bear_b_r = bear_b_n > 0 ? bear_b_h * 1.0 / bear_b_n : float(na)
+float bull_e_wlo = f_wilson_lo(bull_e_r, bull_e_n)
+float bear_e_wlo = f_wilson_lo(bear_e_r, bear_e_n)
+// Tilt verdict per side: +1 tilts / 0 no tilt / na thin (labeled heuristic)
+float bull_tilt = bull_e_n < min_side_n or na(bull_b_r) or na(bull_e_wlo) ? float(na) :
+     bull_e_wlo > bull_b_r + tilt_margin / 100.0 ? 1.0 : 0.0
+float bear_tilt = bear_e_n < min_side_n or na(bear_b_r) or na(bear_e_wlo) ? float(na) :
+     bear_e_wlo > bear_b_r + tilt_margin / 100.0 ? 1.0 : 0.0
+f_tiltname(_t) =>
+    na(_t) ? "thin" : _t == 1.0 ? "tilts" : "no tilt"
+
+// =============================================================================
+// Plots, tint, exports
+// =============================================================================
+plot(show_rvol_plot ? rvol_tod : na, "RVOL (time-of-day, exact)", color = elevated ? c_gold : color.new(c_neut, 25), linewidth = 2)
+hline(1.0, "Parity", color = color.new(color.white, 88), linestyle = hline.style_dotted)
+hline(elev_thr, "Elevated threshold", color = color.new(color.white, 80), linestyle = hline.style_dotted)
+bgcolor(show_elev_tint and elevated ? color.new(c_gold, 85) : na, title = "Elevated tint")
+
+plot(rvol_tod, "TRF_RVOL_TOD_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(elevated ? 1.0 : 0.0, "TRF_ELEVATED_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(bull_tilt, "TRF_BULL_TILT_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(bear_tilt, "TRF_BEAR_TILT_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(tod_warm ? 1.0 : 0.0, "TRF_WARM_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+
+// =============================================================================
+// HUD
+// =============================================================================
+var table hud = table.new(f_pos(hud_pos_in), 2, 8, bgcolor = c_panel, frame_color = c_frame,
+     frame_width = 1, border_color = color.new(color.white, 92), border_width = 1)
+if barstate.islast and hud_mode != "Off"
+    _state_txt = not timeframe.isintraday ? "INTRADAY ONLY — load an intraday chart" :
+         not tod_warm ? "WARMING · " + str.tostring(math.min(tod_n, 5)) + "/5 prior days" :
+         elevated ? f_fmt(rvol_tod, 2) + "x · ELEVATED · " + f_rname(regime_now) : f_fmt(rvol_tod, 2) + "x · quiet"
+    _state_bg = not timeframe.isintraday ? color.new(c_bear, 35) : not tod_warm ? c_cell :
+         elevated ? color.new(c_gold, 55) : c_cell
+    f_tcell(hud, 0, 0, "TOD RVOL " + variant_tag, c_text, c_frame)
+    f_tcell(hud, 1, 0, _state_txt, c_text, _state_bg)
+    if hud_mode == "Full" and timeframe.isintraday
+        f_tcell(hud, 0, 1, "RVOL (tod, exact)", c_dim, c_panel)
+        f_tcell(hud, 1, 1, f_fmt(rvol_tod, 2) + "x · thr " + f_fmt(elev_thr, 1) + "x · slot n" + str.tostring(tod_n) + (tod_warm ? "" : " · warming"), not tod_warm ? c_faint : elevated ? c_gold : c_dim, c_cell)
+        f_tcell(hud, 0, 2, "Regime · source", c_dim, c_panel)
+        f_tcell(hud, 1, 2, f_rname(regime_now) + " · " + regime_src_txt, use_regime_link and not link_valid ? c_bear : c_dim, c_cell)
+        f_tcell(hud, 0, 3, "Bull: elev vs base", c_dim, c_panel)
+        f_tcell(hud, 1, 3, "cont " + f_fmt(bull_e_r * 100.0, 0) + "% (Wlo " + f_fmt(bull_e_wlo * 100.0, 0) + ", n" + str.tostring(bull_e_n) + (bull_e_n < min_side_n ? " !" : "") + ") vs " + f_fmt(bull_b_r * 100.0, 0) + "% (n" + str.tostring(bull_b_n) + ")", bull_e_n < min_side_n ? c_faint : c_bull, c_cell)
+        f_tcell(hud, 0, 4, "Bear: elev vs base", c_dim, c_panel)
+        f_tcell(hud, 1, 4, "cont " + f_fmt(bear_e_r * 100.0, 0) + "% (Wlo " + f_fmt(bear_e_wlo * 100.0, 0) + ", n" + str.tostring(bear_e_n) + (bear_e_n < min_side_n ? " !" : "") + ") vs " + f_fmt(bear_b_r * 100.0, 0) + "% (n" + str.tostring(bear_b_n) + ")", bear_e_n < min_side_n ? c_faint : c_bear, c_cell)
+        f_tcell(hud, 0, 5, "Tilt verdict (labeled heuristic)", c_dim, c_panel)
+        f_tcell(hud, 1, 5, "Bull: " + f_tiltname(bull_tilt) + " · Bear: " + f_tiltname(bear_tilt), bull_tilt == 1.0 or bear_tilt == 1.0 ? c_gold : c_dim, c_cell)
+        f_tcell(hud, 0, 6, "Session note", c_dim, c_panel)
+        f_tcell(hud, 1, 6, "first 30–60 min dominate volume — elevation is easiest and noisiest at the open", c_faint, c_cell)
+        f_tcell(hud, 0, 7, "*selection context on this chart", c_faint, c_panel)
+        f_tcell(hud, 1, 7, "never a signal · not advice", c_faint, c_panel)
+
+// =============================================================================
+// Alerts (confirmed-bar onset of elevated-in-directional-regime)
+// =============================================================================
+bool hot_now = timeframe.isintraday and elevated and regime_now != 0
+bool hot_new = hot_now and not hot_now[1]
+alertcondition(hot_new and barstate.isconfirmed, "Elevated RVOL in directional regime (confirmed)", "TOD RVOL Filter: time-of-day RVOL elevated while the regime is directional — selection context only")
+if barstate.isconfirmed and hot_new
+    if use_json_alerts
+        alert('{"ev":"tod_rvol","sym":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","rvol":' + (na(rvol_tod) ? "null" : f_fmt(rvol_tod, 2)) + ',"regime":"' + f_rname(regime_now) + '","slot_n":' + str.tostring(tod_n) + ',"variant":"' + variant_tag + '","t":' + str.tostring(time) + '}', alert.freq_once_per_bar_close)
+    else
+        alert("TOD RVOL [" + variant_tag + "]: " + syminfo.ticker + " elevated " + f_fmt(rvol_tod, 2) +
+             "x (thr " + f_fmt(elev_thr, 1) + "x) in " + f_rname(regime_now) + " regime · selection context only", alert.freq_once_per_bar_close)
+
+// =============================================================================
+// End of file · Time-of-Day RVOL Regime Filter v1.0

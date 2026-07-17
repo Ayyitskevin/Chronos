@@ -1,0 +1,218 @@
+//@version=6
+// =============================================================================
+// Kelly Criterion Position Sizing Overlay v1.0 (5T Pine Suite · Desk Kit)
+//
+// WHAT THIS IS.
+// A deterministic CALCULATOR with a display panel — nothing else. You type in
+// the win / loss counts and average R multiples your Expectancy Journal
+// reports for ONE setup family; it computes the Kelly fraction, the
+// practitioner fractions, and the star row: Kelly evaluated at the WILSON
+// LOWER-BOUND win rate — sizing math from PROVEN stats, not lucky stats.
+// It computes nothing from the account, reads no balance, places no orders,
+// and never will. Decision support only. The suite's risk layer (fixed
+// %-of-equity risk with hard caps) OUTRANKS anything this panel says. A human
+// sizes every trade.
+//
+// RESEARCH BASIS, stated plainly.
+// Kelly (1956, Bell System Technical Journal) — the growth-optimal betting
+// fraction; Thorp's practitioner treatments carried it from blackjack to
+// markets. The well-documented catch this panel is built around:
+//   1. Full Kelly maximizes long-run log growth ONLY when the edge is known
+//      EXACTLY. A journal gives an ESTIMATED edge. Under estimation error the
+//      full-Kelly bettor systematically overbets, and betting beyond true
+//      Kelly both cuts growth AND deepens drawdowns — catastrophically so at
+//      realistic sample sizes. Hence the half- / quarter-Kelly convention.
+//   2. The two-outcome formula (W, b) is itself an approximation: real trade
+//      outcomes are a distribution, not two points. Treat every number here
+//      as a rough reference ceiling, never a target.
+//   3. Blended statistics across different setup families produce a
+//      meaningless Kelly. One setup family per reading.
+// The star row prices honesty directly: the Wilson 95% lower bound of the
+// measured win rate is what the sample has PROVEN; Kelly at that W is the
+// desk's honest reference — and it is a reference, not an instruction.
+// Framing inspired by the Quant Guild channel's Kelly content.
+//
+// Deterministic: same inputs, same numbers, every bar, every symbol. No
+// request.security, no strategy calls, no account linkage. Position sizing
+// language is percent-of-equity ONLY. The HUD is the tool — no chart plots
+// except data-window exports, which publish the RAW math (unclamped, may be
+// negative); the risk-cap clamp is display policy, applied so this panel can
+// never appear to authorize more than the risk layer allows.
+//
+// v1.0 changelog (2026-07-17):
+//   Initial release. Full / Half / Quarter Kelly from journal statistics
+//   (guarded divisions; W = wins/n; payoff b = avg win R / avg loss R);
+//   Wilson-LB Kelly — the same formula at the Wilson 95% lower-bound win
+//   rate — with its half, highlighted gold as the recommended honest
+//   reference; EVERY display row clamped at the suite risk cap with a
+//   "capped by risk policy" tag when the clamp bites; "NO PROVEN EDGE —
+//   size 0" state for non-positive Kelly or empty samples; thin-sample
+//   framing (faint + " !" + too-thin-to-trust) below min n; tiered HUD;
+//   data-window exports (raw, unclamped); edge-flip alertcondition + optional
+//   JSON alert (default OFF). Deterministic display layer only.
+//   Evidence label: needs user run.
+// =============================================================================
+indicator("Kelly Criterion Position Sizing Overlay v1.0", shorttitle = "Kelly Lens v1", overlay = true)
+
+grp_mode  = "0 · Mode"
+grp_stats = "1 · Your measured statistics (from the Expectancy Journal)"
+grp_risk  = "2 · Risk framing"
+grp_dsp   = "3 · Display"
+
+variant_tag = input.string("v1.0-base", "Variant tag (freeze-the-config discipline)", group = grp_mode,
+     tooltip = "Label this exact settings set. Any settings change = new tag = new variant with its own validation cycle. The tag prints on the HUD and in alerts so screenshots self-document.")
+
+wins = input.int(0, "Wins (count, ONE setup family)", minval = 0, group = grp_stats,
+     tooltip = "Enter the numbers your Expectancy Journal reports for ONE setup family. Blended stats across setups produce a meaningless Kelly.")
+losses = input.int(0, "Losses (count, same setup family)", minval = 0, group = grp_stats,
+     tooltip = "Same setup family as the wins count. Handle scratches per your journal convention — just be consistent, and re-tag the variant when the convention changes.")
+avg_win_r = input.float(1.5, "Average win (R multiples)", minval = 0.05, maxval = 50.0, step = 0.05, group = grp_stats,
+     tooltip = "Average winning trade in R multiples, from the journal's per-setup stats.")
+avg_loss_r = input.float(1.0, "Average loss (R multiples, positive)", minval = 0.05, maxval = 50.0, step = 0.05, group = grp_stats,
+     tooltip = "Average losing trade in R multiples, entered as a POSITIVE number. Disciplined 1R stops keep this near 1.0; slippage pushes it above.")
+
+max_risk_pct = input.float(2.0, "Suite risk cap (% of equity)", minval = 0.1, maxval = 10.0, step = 0.1, group = grp_risk,
+     tooltip = "The suite risk layer's fixed %-of-equity cap. Every Kelly row is CLAMPED to this for display and tagged when the clamp bites. The risk layer OUTRANKS this panel — the cap is displayed so the panel can never appear to authorize more.")
+min_n = input.int(30, "Thin-sample warning (n)", minval = 1, maxval = 1000, group = grp_risk,
+     tooltip = "Below this trade count every row shows faint with the suite's ' !' flag — sample too thin to trust. The Wilson row does the same honesty work continuously.")
+show_full_row = input.bool(true, "Show Full Kelly row", group = grp_risk)
+show_half_row = input.bool(true, "Show Half Kelly row", group = grp_risk)
+show_quarter_row = input.bool(true, "Show Quarter Kelly row", group = grp_risk,
+     tooltip = "Display toggles only — the math always runs and the exports always publish.")
+
+hud_mode = input.string("Full", "HUD mode", options = ["Off", "Micro", "Full"], group = grp_dsp)
+hud_pos_in = input.string("top_right", "HUD position", options = ["top_left", "top_center", "top_right", "bottom_left", "bottom_center", "bottom_right"], group = grp_dsp)
+use_json_alerts = input.bool(false, "JSON alert payloads (webhook)", group = grp_dsp,
+     tooltip = "OFF: human-readable alert text. ON: machine-readable JSON for webhook automation. Display-layer only.")
+
+// =============================================================================
+// Palette & helpers (suite standard)
+// =============================================================================
+c_bull  = color.rgb(89, 159, 125)
+c_bear  = color.rgb(190, 96, 111)
+c_neut  = color.rgb(112, 126, 148)
+c_gold  = color.rgb(214, 162, 82)
+c_panel = color.new(#0E1316, 5)
+c_cell  = color.new(#151D22, 7)
+c_cell2 = color.new(#10171B, 9)
+c_frame = color.new(#5BD6B0, 88)
+c_text  = color.white
+c_dim   = color.new(color.white, 45)
+c_faint = color.new(color.white, 68)
+
+f_pos(_s) =>
+    switch _s
+        "top_left"      => position.top_left
+        "top_center"    => position.top_center
+        "top_right"     => position.top_right
+        "bottom_left"   => position.bottom_left
+        "bottom_center" => position.bottom_center
+        "bottom_right"  => position.bottom_right
+        => position.top_right
+f_fmt(_x, _d) =>
+    _m = math.pow(10.0, _d)
+    na(_x) ? "n/a" : str.tostring(math.round(_x * _m) / _m)
+f_tcell(_tbl, _c, _r, _txt, _col, _bg) =>
+    table.cell(_tbl, _c, _r, _txt, text_color = _col, bgcolor = _bg, text_size = size.tiny, text_halign = text.align_center)
+// Wilson score lower bound (z = 1.96), suite-standard honesty for hit rates.
+f_wilson_lo(_p, _n) =>
+    _n <= 0 or na(_p) ? float(na) :
+         (_p + 1.96 * 1.96 / (2 * _n) - 1.96 * math.sqrt((_p * (1 - _p) + 1.96 * 1.96 / (4 * _n)) / _n)) / (1 + 1.96 * 1.96 / _n)
+
+// =============================================================================
+// Kelly math (every division guarded; deterministic — no account linkage)
+//   f* = W - (1 - W) / b   · fraction of equity to risk · negative = no edge
+//   Wilson-LB Kelly = the same formula at the Wilson 95% lower-bound W:
+//   what the sample has PROVEN, not what it got lucky with.
+// =============================================================================
+n_tot = wins + losses
+w_rate = n_tot > 0 ? wins * 1.0 / n_tot : float(na)
+b_payoff = avg_loss_r > 0 ? avg_win_r / avg_loss_r : float(na)
+w_lb = n_tot > 0 ? f_wilson_lo(w_rate, n_tot) : float(na)
+f_kelly(_w, _b) =>
+    na(_w) or na(_b) or _b <= 0 ? float(na) : _w - (1.0 - _w) / _b
+kelly_full_pct = f_kelly(w_rate, b_payoff) * 100.0
+kelly_half_pct = kelly_full_pct / 2.0
+kelly_quarter_pct = kelly_full_pct / 4.0
+kelly_wlb_pct = f_kelly(w_lb, b_payoff) * 100.0
+kelly_wlb_half_pct = kelly_wlb_pct / 2.0
+breakeven_w_pct = na(b_payoff) or b_payoff <= 0 ? float(na) : 100.0 / (1.0 + b_payoff)
+thin = n_tot < min_n
+edge_positive = n_tot > 0 and not na(kelly_wlb_pct) and kelly_wlb_pct > 0
+
+// Display policy: exports stay raw; DISPLAY is clamped at the suite risk cap
+// and tagged when the clamp bites. Non-positive or empty = size 0, period.
+f_row_txt(_pct) =>
+    na(_pct) or n_tot == 0 or _pct <= 0 ? "NO PROVEN EDGE — size 0" :
+         _pct > max_risk_pct ? f_fmt(max_risk_pct, 2) + "% — capped by risk policy (raw " + f_fmt(_pct, 2) + "%)" :
+         f_fmt(_pct, 2) + "% of equity"
+f_row_col(_pct, _pos_col) =>
+    na(_pct) or n_tot == 0 or _pct <= 0 ? c_bear : thin ? c_faint : _pos_col
+_thin_sfx = thin and n_tot > 0 ? " !" : ""
+
+// =============================================================================
+// Exports (data-window only — RAW math: unclamped, may be negative, na if n=0)
+// =============================================================================
+plot(kelly_full_pct, "KELLY_FULL_PCT_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(kelly_half_pct, "KELLY_HALF_PCT_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(kelly_wlb_pct, "KELLY_WLB_PCT_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(edge_positive ? 1.0 : 0.0, "KELLY_EDGE_POSITIVE_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(n_tot, "KELLY_N_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+
+// =============================================================================
+// HUD (this IS the tool)
+// =============================================================================
+var table hud = table.new(f_pos(hud_pos_in), 2, 10, bgcolor = c_panel, frame_color = c_frame,
+     frame_width = 1, border_color = color.new(color.white, 92), border_width = 1)
+if barstate.islast and hud_mode != "Off"
+    _status_txt = n_tot == 0 ? "NO PROVEN EDGE — size 0 (no data)" :
+         not edge_positive ? "NO PROVEN EDGE at Wilson LB — size 0" :
+         thin ? "THIN SAMPLE ! — too thin to trust" :
+         "reference only — a human sizes every trade"
+    _status_bg = n_tot == 0 or not edge_positive ? color.new(c_bear, 45) : thin ? c_cell : color.new(c_gold, 55)
+    f_tcell(hud, 0, 0, "Kelly Lens " + variant_tag, c_text, c_frame)
+    f_tcell(hud, 1, 0, _status_txt, c_text, _status_bg)
+    if hud_mode == "Full"
+        f_tcell(hud, 0, 1, "Sample (journal)", c_dim, c_panel)
+        f_tcell(hud, 1, 1, "n " + str.tostring(n_tot) + " · W " + f_fmt(w_rate * 100.0, 1) + "% · Wlo " + f_fmt(w_lb * 100.0, 1) + "%" + _thin_sfx, thin ? c_faint : c_dim, c_cell)
+        f_tcell(hud, 0, 2, "Payoff b · breakeven W", c_dim, c_panel)
+        f_tcell(hud, 1, 2, f_fmt(b_payoff, 2) + " · " + f_fmt(breakeven_w_pct, 1) + "%", c_dim, c_cell)
+        if show_full_row
+            f_tcell(hud, 0, 3, "Full Kelly", c_dim, c_panel)
+            f_tcell(hud, 1, 3, f_row_txt(kelly_full_pct) + _thin_sfx, f_row_col(kelly_full_pct, c_text), c_cell)
+        if show_half_row
+            f_tcell(hud, 0, 4, "Half Kelly (practitioner)", c_dim, c_panel)
+            f_tcell(hud, 1, 4, f_row_txt(kelly_half_pct) + _thin_sfx, f_row_col(kelly_half_pct, c_text), c_cell2)
+        if show_quarter_row
+            f_tcell(hud, 0, 5, "Quarter Kelly (conservative)", c_dim, c_panel)
+            f_tcell(hud, 1, 5, f_row_txt(kelly_quarter_pct) + _thin_sfx, f_row_col(kelly_quarter_pct, c_text), c_cell)
+        f_tcell(hud, 0, 6, "Wilson-LB Kelly ★", c_gold, c_panel)
+        f_tcell(hud, 1, 6, f_row_txt(kelly_wlb_pct) + _thin_sfx + " — reference, not instruction", f_row_col(kelly_wlb_pct, c_gold), c_cell2)
+        f_tcell(hud, 0, 7, "Wilson-LB Half", c_gold, c_panel)
+        f_tcell(hud, 1, 7, f_row_txt(kelly_wlb_half_pct) + _thin_sfx, f_row_col(kelly_wlb_half_pct, c_gold), c_cell2)
+        f_tcell(hud, 0, 8, "Suite risk cap", c_dim, c_panel)
+        f_tcell(hud, 1, 8, "suite risk cap: " + f_fmt(max_risk_pct, 2) + "% — risk layer outranks this panel", c_text, c_cell)
+        f_tcell(hud, 0, 9, "*growth math, not advice", c_faint, c_panel)
+        f_tcell(hud, 1, 9, "estimation error punishes full Kelly · % of equity only", c_faint, c_panel)
+
+// =============================================================================
+// Alert (confirmed-bar edge-state change; formal wording per suite convention)
+// NOTE: wins/losses are settings, static per chart load — within one saved
+// alert instance this fires only when a NEW settings revision crosses the
+// boundary. TradingView snapshots settings at alert creation, so recreate the
+// alert after each journal update; this hook exists for exactly that flow.
+// =============================================================================
+var int prev_edge = -1
+edge_now = edge_positive ? 1 : 0
+edge_lost = barstate.isconfirmed and prev_edge == 1 and edge_now == 0
+if barstate.isconfirmed
+    prev_edge := edge_now
+alertcondition(edge_lost, "Kelly: edge turned non-positive at Wilson LB", "Kelly Lens: the Wilson lower-bound Kelly fraction is no longer positive — NO PROVEN EDGE, size-0 reference")
+if edge_lost
+    if use_json_alerts
+        alert('{"ev":"kelly","sym":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","event":"edge_non_positive","n":' + str.tostring(n_tot) + ',"w":' + (na(w_rate) ? "null" : f_fmt(w_rate, 4)) + ',"w_lb":' + (na(w_lb) ? "null" : f_fmt(w_lb, 4)) + ',"kelly_wlb_pct":' + (na(kelly_wlb_pct) ? "null" : f_fmt(kelly_wlb_pct, 3)) + ',"variant":"' + variant_tag + '","t":' + str.tostring(time) + '}', alert.freq_once_per_bar_close)
+    else
+        alert("Kelly Lens [" + variant_tag + "]: Wilson-LB Kelly is no longer positive — NO PROVEN EDGE, size-0 reference · n " + str.tostring(n_tot) + " · Wlo " + f_fmt(w_lb * 100.0, 1) + "%", alert.freq_once_per_bar_close)
+
+// =============================================================================
+// End of file · Kelly Criterion Position Sizing Overlay v1.0

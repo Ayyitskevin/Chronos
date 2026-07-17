@@ -1,0 +1,154 @@
+//@version=6
+// =============================================================================
+// Squeeze & Exhaustion Sentinel v1.1 (5T Pine Suite · Tranche 2)
+// Volatility clustering is a robust stylized fact: compression precedes
+// expansion, DIRECTION UNKNOWN. This tool flags compression (BB-in-KC squeeze,
+// prior-day NR7, inside day) and exhaustion risk (both directions).
+// Flags are context, never signals. Non-repaint: confirmed-bar states;
+// daily flags use completed days only. Decision support — not advice.
+// -----------------------------------------------------------------------------
+// v1.1 changelog (2026-07-11):
+//   - request.security(): positional barmerge args -> keyword form
+//     (gaps = ..., lookahead = ...) on both daily calls — compile-blocking class.
+//   - Exhaustion alertconditions confirm-gated (barstate.isconfirmed) so they
+//     no longer flicker intrabar; plots were already gated.
+//   - Explicit na-guard on RSI inside both exhaustion conditions.
+//   - HUD squeeze status hardened to "SQUEEZE ON · HARD BLOCK — no entries"
+//     (research: squeeze is a hard entry block, not a soft caution).
+//   - New alertcondition "Squeeze started" (confirmed bar).
+//   - New export SQZ_BLOCK_EXPORT (aliases SQZ_ON for gate consumers; both kept).
+//   - Optional JSON alert payloads for webhooks (default OFF; display layer only).
+//   Evidence label: needs user run.
+// =============================================================================
+indicator("Squeeze & Exhaustion Sentinel v1.1", shorttitle = "SQZ Sentinel v1.1", overlay = true)
+
+grp_sq = "1 · Squeeze"
+grp_ex = "2 · Exhaustion"
+grp_dsp = "3 · Display"
+
+sq_len = input.int(20, "Squeeze length", minval = 5, maxval = 100, group = grp_sq)
+bb_mult = input.float(2.0, "Bollinger mult", minval = 0.5, maxval = 5.0, step = 0.1, group = grp_sq)
+kc_mult = input.float(1.5, "Keltner mult", minval = 0.5, maxval = 5.0, step = 0.1, group = grp_sq)
+sq_min_bars = input.int(6, "Min squeeze bars before release counts", minval = 1, maxval = 100, group = grp_sq)
+show_daily_flags = input.bool(true, "Prior-day NR7 / inside-day flags", group = grp_sq)
+
+exh_consec = input.int(4, "Exhaustion: consecutive closes", minval = 2, maxval = 10, group = grp_ex)
+exh_spike_atr = input.float(1.75, "Exhaustion: bar range ATR spike", minval = 0.5, maxval = 5.0, step = 0.25, group = grp_ex)
+exh_rsi_len = input.int(14, "RSI length", minval = 2, maxval = 100, group = grp_ex)
+exh_rsi_ob = input.float(72.0, "RSI overbought", minval = 50.0, maxval = 99.0, group = grp_ex)
+exh_rsi_os = input.float(28.0, "RSI oversold", minval = 1.0, maxval = 50.0, group = grp_ex)
+exh_stretch_atr = input.float(3.0, "Stretch from EMA20 (ATR)", minval = 0.5, maxval = 10.0, step = 0.25, group = grp_ex)
+atr_len = input.int(14, "ATR length", minval = 1, maxval = 100, group = grp_ex)
+
+hud_mode = input.string("Full", "HUD mode", options = ["Off", "Micro", "Full"], group = grp_dsp)
+hud_pos_in = input.string("bottom_right", "HUD position", options = ["top_left", "top_center", "top_right", "bottom_left", "bottom_center", "bottom_right"], group = grp_dsp)
+show_marks = input.bool(true, "Mark squeeze releases", group = grp_dsp)
+show_tint = input.bool(true, "Tint background during squeeze", group = grp_dsp)
+use_json_alerts = input.bool(false, "JSON alert payloads (webhook)", group = grp_dsp, tooltip = "OFF: human-readable alert text (v1.0 behavior). ON: machine-readable JSON for webhook automation. Display-layer only.")
+
+c_panel = color.new(#141a22, 0)
+c_cell = color.new(#1b2430, 0)
+c_frame = color.new(#2e4a66, 0)
+c_text = color.new(#e8edf2, 0)
+c_dim = color.new(#9fb0c0, 0)
+c_faint = color.new(#5a6572, 0)
+c_bull = color.new(#1e9e6a, 0)
+c_bear = color.new(#e5484d, 0)
+c_sq = color.new(#f5a623, 0)
+
+f_pos(_s) =>
+    _s == "top_left" ? position.top_left : _s == "top_center" ? position.top_center :
+     _s == "top_right" ? position.top_right : _s == "bottom_left" ? position.bottom_left :
+     _s == "bottom_center" ? position.bottom_center : position.bottom_right
+
+f_fmt(_v, _dp) =>
+    na(_v) ? "n/a" : str.tostring(_v, _dp == 0 ? "#" : _dp == 1 ? "#.#" : "#.##")
+
+f_tcell(_t, _c, _r, _txt, _tc, _bg) =>
+    table.cell(_t, _c, _r, _txt, text_color = _tc, bgcolor = _bg, text_size = size.small)
+
+atr_val = ta.atr(atr_len)
+
+// ---- Squeeze (BB inside KC) + TTM-style momentum for release context ----
+basis = ta.sma(close, sq_len)
+dev = ta.stdev(close, sq_len) * bb_mult
+kc = ta.atr(sq_len) * kc_mult
+sq_on = dev > 0 and dev < kc
+var int sq_bars = 0
+sq_bars := sq_on ? sq_bars + 1 : 0
+sq_release = barstate.isconfirmed and not sq_on and sq_on[1] and sq_bars[1] >= sq_min_bars
+mid_hl = math.avg(ta.highest(high, sq_len), ta.lowest(low, sq_len))
+sq_mom = ta.linreg(close - math.avg(mid_hl, basis), sq_len, 0)
+release_up = sq_release and sq_mom > 0
+release_dn = sq_release and sq_mom < 0
+
+// ---- Prior-day NR7 / inside day (completed days only — non-repaint) ----
+[d_r1, d_r2, d_r3, d_r4, d_r5, d_r6, d_r7] = request.security(syminfo.tickerid, "D",
+     [high[1] - low[1], high[2] - low[2], high[3] - low[3], high[4] - low[4], high[5] - low[5], high[6] - low[6], high[7] - low[7]],
+     gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+[d_h1, d_l1, d_h2, d_l2] = request.security(syminfo.tickerid, "D", [high[1], low[1], high[2], low[2]],
+     gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+nr7_prior = show_daily_flags and not na(d_r7) and d_r1 < d_r2 and d_r1 < d_r3 and d_r1 < d_r4 and d_r1 < d_r5 and d_r1 < d_r6 and d_r1 < d_r7
+inside_prior = show_daily_flags and not na(d_h2) and d_h1 < d_h2 and d_l1 > d_l2
+
+// ---- Exhaustion risk (both directions; flags, not signals) ----
+var int up_run = 0
+var int dn_run = 0
+if barstate.isconfirmed
+    up_run := close > close[1] ? up_run + 1 : 0
+    dn_run := close < close[1] ? dn_run + 1 : 0
+rsi_v = ta.rsi(close, exh_rsi_len)
+ema20 = ta.ema(close, 20)
+stretch_atr = not na(atr_val) and atr_val > 0 ? (close - ema20) / atr_val : float(na)
+range_spike = not na(atr_val) and atr_val > 0 and (high - low) / atr_val >= exh_spike_atr
+exh_up = up_run >= exh_consec and (range_spike or (not na(rsi_v) and rsi_v >= exh_rsi_ob) or nz(stretch_atr) >= exh_stretch_atr)
+exh_dn = dn_run >= exh_consec and (range_spike or (not na(rsi_v) and rsi_v <= exh_rsi_os) or nz(stretch_atr) <= -exh_stretch_atr)
+
+// ---- Visuals ----
+bgcolor(show_tint and sq_on ? color.new(c_sq, 92) : na, title = "Squeeze tint")
+plotshape(show_marks and release_up, "Release Up", style = shape.triangleup, location = location.belowbar, color = c_bull, size = size.small)
+plotshape(show_marks and release_dn, "Release Down", style = shape.triangledown, location = location.abovebar, color = c_bear, size = size.small)
+plotchar(exh_up and barstate.isconfirmed, "Exhaustion Up Risk", "!", location.abovebar, c_bear, size = size.tiny)
+plotchar(exh_dn and barstate.isconfirmed, "Exhaustion Down Risk", "!", location.belowbar, c_bull, size = size.tiny)
+
+// ---- Exports ----
+plot(sq_on ? 1.0 : 0.0, "SQZ_ON_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(sq_on ? 1.0 : 0.0, "SQZ_BLOCK_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(float(sq_bars), "SQZ_BARS_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(sq_mom, "SQZ_MOM_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(nr7_prior ? 1.0 : 0.0, "NR7_PRIOR_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(inside_prior ? 1.0 : 0.0, "INSIDE_PRIOR_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(exh_up ? 1.0 : 0.0, "EXH_UP_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(exh_dn ? 1.0 : 0.0, "EXH_DN_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(stretch_atr, "STRETCH_ATR_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+
+// ---- HUD ----
+var table hud = table.new(f_pos(hud_pos_in), 2, hud_mode == "Full" ? 5 : 1, bgcolor = c_panel,
+     frame_color = c_frame, frame_width = 1, border_color = color.new(color.white, 92), border_width = 1)
+if barstate.islast and hud_mode != "Off"
+    _st = sq_on ? "SQUEEZE ON · HARD BLOCK — no entries · " + str.tostring(sq_bars) + " bars" : release_up[0] or release_up[1] ? "RELEASED ↑" : release_dn[0] or release_dn[1] ? "RELEASED ↓" : "NO SQUEEZE"
+    f_tcell(hud, 0, 0, "SQZ Sentinel", c_text, c_frame)
+    f_tcell(hud, 1, 0, _st, sq_on ? c_sq : c_dim, sq_on ? color.new(c_sq, 70) : c_cell)
+    if hud_mode == "Full"
+        f_tcell(hud, 0, 1, "Momentum", c_dim, c_panel)
+        f_tcell(hud, 1, 1, f_fmt(sq_mom, 2) + (sq_mom > 0 ? " ↑" : sq_mom < 0 ? " ↓" : ""), sq_mom > 0 ? c_bull : c_bear, c_cell)
+        f_tcell(hud, 0, 2, "Daily Flags", c_dim, c_panel)
+        f_tcell(hud, 1, 2, (nr7_prior ? "NR7 ✓" : "NR7 –") + " · " + (inside_prior ? "Inside ✓" : "Inside –"), nr7_prior or inside_prior ? c_sq : c_faint, c_cell)
+        f_tcell(hud, 0, 3, "Exhaustion", c_dim, c_panel)
+        f_tcell(hud, 1, 3, exh_up ? "UP-MOVE EXHAUSTION RISK" : exh_dn ? "DOWN-MOVE EXHAUSTION RISK" : "None", exh_up or exh_dn ? c_bear : c_faint, c_cell)
+        f_tcell(hud, 0, 4, "Stretch", c_dim, c_panel)
+        f_tcell(hud, 1, 4, f_fmt(stretch_atr, 2) + " ATR vs EMA20 · RSI " + f_fmt(rsi_v, 0), math.abs(nz(stretch_atr)) >= exh_stretch_atr ? c_bear : c_dim, c_cell)
+
+// ---- Alerts ----
+alertcondition(release_up, "Squeeze release UP", "SQZ Sentinel: squeeze released with positive momentum")
+alertcondition(release_dn, "Squeeze release DOWN", "SQZ Sentinel: squeeze released with negative momentum")
+alertcondition(exh_up and not exh_up[1] and barstate.isconfirmed, "Exhaustion risk (up-move)", "SQZ Sentinel: up-move exhaustion conditions met")
+alertcondition(exh_dn and not exh_dn[1] and barstate.isconfirmed, "Exhaustion risk (down-move)", "SQZ Sentinel: down-move exhaustion conditions met")
+alertcondition(sq_on and not sq_on[1] and barstate.isconfirmed, "Squeeze started", "SQZ Sentinel: squeeze started — hard block on new entries while squeeze is on")
+if release_up or release_dn
+    if use_json_alerts
+        alert('{"ev":"sqz_release","sym":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","dir":"' + (release_up ? "up" : "dn") + '","sqz_bars":' + str.tostring(sq_bars[1]) + ',"mom":' + (na(sq_mom) ? "null" : sq_mom > 0 ? "1" : sq_mom < 0 ? "-1" : "0") + ',"t":' + str.tostring(time) + '}', alert.freq_once_per_bar_close)
+    else
+        alert("SQZ Sentinel: " + syminfo.ticker + " squeeze RELEASE " + (release_up ? "UP" : "DOWN") + " after " + str.tostring(sq_bars[1]) + " bars · mom " + f_fmt(sq_mom, 2), alert.freq_once_per_bar_close)
+// =============================================================================
+// End of file — Squeeze & Exhaustion Sentinel v1.1
