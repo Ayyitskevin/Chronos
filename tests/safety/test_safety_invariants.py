@@ -11,9 +11,10 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
+import pydantic
 import pytest
 
-from chronos.control.halt import HaltReason, HaltState, HaltStore
+from chronos.control.halt import HaltReason, HaltStore
 from chronos.control.modes import (
     ExecutionCapability,
     TradingMode,
@@ -22,7 +23,7 @@ from chronos.control.modes import (
 from chronos.domain.enums import OrderSide
 from chronos.execution.brokers.simulated import SimulatedExecutionBroker
 from chronos.execution.engine import ExecutionEngine, SubmissionRefused
-from chronos.execution.intents import IntentStatus, OrderIntent, TimeInForce
+from chronos.execution.intents import OrderIntent, TimeInForce
 from chronos.execution.ledger import MemoryLedger
 from chronos.risk.engine import (
     AccountView,
@@ -412,7 +413,7 @@ class TestExecutionGate:
 
     def test_approval_for_other_intent_refused(self, tmp_path: Path) -> None:
         engine, risk_engine = build_engine(tmp_path)
-        intent_a, approval_a = self.approved(risk_engine, tmp_path)
+        _intent_a, approval_a = self.approved(risk_engine, tmp_path)
         other = make_intent(quantity=6)
         result = engine.submit_approved(other, approval_a, now_utc=NOW)  # type: ignore[arg-type]
         assert not result.submitted
@@ -481,5 +482,5 @@ class TestStrategyIsolation:
 
     def test_risk_policy_is_frozen(self) -> None:
         policy = permissive_policy()
-        with pytest.raises(Exception):  # pydantic frozen -> ValidationError
+        with pytest.raises(pydantic.ValidationError):
             policy.max_bot_capital_usd = 1_000_000  # type: ignore[misc]
