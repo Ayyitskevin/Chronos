@@ -134,8 +134,6 @@ def derive_wheel_state(evidence: WheelStateInput) -> WheelStateDecision:
         )
     if evidence.reconciliation_status is not ReconciliationStatus.RECONCILED:
         manual_reasons.append(f"Reconciliation status is {evidence.reconciliation_status.value}.")
-    if evidence.partial_assignment:
-        manual_reasons.append("A partial assignment prevents deterministic state resolution.")
     if evidence.corporate_action_warning:
         manual_reasons.append("A corporate-action warning requires contract review.")
     if evidence.unexplained_mismatch:
@@ -395,9 +393,36 @@ def derive_wheel_state(evidence: WheelStateInput) -> WheelStateDecision:
             reasons=manual_reasons,
         )
 
+    if evidence.partial_assignment:
+        return _decision(
+            evidence=evidence,
+            stage=WheelStage.ASSIGNMENT_RECONCILING,
+            eligible_action=None,
+            stock_shares=stock_shares,
+            unencumbered_shares=unencumbered_shares,
+            short_put_contracts=short_put_contracts,
+            short_call_contracts=short_call_contracts,
+            pending_put_contracts=pending_put_contracts,
+            pending_call_contracts=pending_call_contracts,
+            reasons=[
+                "Position changes suggest assignment, exercise, or expiration activity; "
+                "opening actions stay locked until reconciliation explains them.",
+            ],
+        )
+
     if closing_in_progress:
-        stage = WheelStage.CLOSING
-        reasons.append("A broker buy order is working against an active short option.")
+        closing_rights = {
+            short_right_by_con_id.get(con_id) for con_id in closing_contracts_by_con_id
+        }
+        if closing_rights == {OptionRight.PUT}:
+            stage = WheelStage.PUT_CLOSE_PENDING
+            reasons.append("A buy-to-close order is working against the short put.")
+        elif closing_rights == {OptionRight.CALL}:
+            stage = WheelStage.CALL_CLOSE_PENDING
+            reasons.append("A buy-to-close order is working against the short call.")
+        else:
+            stage = WheelStage.CLOSING
+            reasons.append("A broker buy order is working against an active short option.")
     elif pending_put_contracts > 0:
         stage = WheelStage.SHORT_PUT_PENDING
         reasons.append("An opening short-put order has unfilled contracts.")
