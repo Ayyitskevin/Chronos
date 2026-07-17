@@ -71,11 +71,13 @@ RESEARCH_POLICY = RiskPolicy(
         "baseline_random_entries",
     ),
     allow_long_entries=True,
-    max_bot_capital_usd=3000,
-    max_position_notional_usd=3000,
-    max_aggregate_exposure_usd=3000,
+    # Research latitude: caps must not distort long-horizon compounding
+    # measurement; production policies re-impose real caps.
+    max_bot_capital_usd=10_000_000,
+    max_position_notional_usd=10_000_000,
+    max_aggregate_exposure_usd=10_000_000,
     max_symbol_exposure_fraction=1.0,
-    max_risk_per_trade_fraction=0.25,
+    max_risk_per_trade_fraction=0.50,
     max_simultaneous_positions=1,
     max_open_orders=1,
     max_daily_loss_usd=3000,
