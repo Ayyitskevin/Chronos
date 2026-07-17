@@ -83,9 +83,7 @@ class TestIdempotency:
             IntentStatus.PARTIALLY_FILLED,
         )
         history_length = len(machine.history)
-        assert (
-            machine.apply(IntentStatus.PARTIALLY_FILLED, at_utc=NOW, evidence="more") is True
-        )
+        assert machine.apply(IntentStatus.PARTIALLY_FILLED, at_utc=NOW, evidence="more") is True
         assert len(machine.history) == history_length + 1
 
 
@@ -187,7 +185,6 @@ class TestTimestampsAndUnknown:
             with pytest.raises(OrderTransitionError):
                 machine.apply(target, at_utc=NOW, evidence="from unknown")
         assert (
-            machine.apply(IntentStatus.RECONCILIATION_REQUIRED, at_utc=NOW, evidence="ok")
-            is True
+            machine.apply(IntentStatus.RECONCILIATION_REQUIRED, at_utc=NOW, evidence="ok") is True
         )
         assert machine.status is IntentStatus.RECONCILIATION_REQUIRED

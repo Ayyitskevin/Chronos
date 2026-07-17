@@ -116,9 +116,7 @@ class TestRegimeTrendParity:
                 assert strategy._ema is not None
                 assert close_enough(strategy._ema, batch_ema), f"EMA mismatch at {i}"
             if i in vol_probes:
-                log_rets = [
-                    math.log(closes[j] / closes[j - 1]) for j in range(1, i + 1)
-                ]
+                log_rets = [math.log(closes[j] / closes[j - 1]) for j in range(1, i + 1)]
                 batch_sd = stdev(log_rets, 20)[-1]
                 assert batch_sd is not None
                 batch_vol = batch_sd * math.sqrt(20)

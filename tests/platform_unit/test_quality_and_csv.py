@@ -138,10 +138,8 @@ class TestCsvProvider:
 
     def test_missing_required_column_raises(self, tmp_path: Path) -> None:
         path = tmp_path / "spy.csv"
-        path.write_text(
-            "date,open,high,low,close\n2024-06-03,100,101,99,100.5\n", encoding="utf-8"
-        )
-        with pytest.raises(ValueError, match="missing required columns.*volume"):
+        path.write_text("date,open,high,low,close\n2024-06-03,100,101,99,100.5\n", encoding="utf-8")
+        with pytest.raises(ValueError, match=r"missing required columns.*volume"):
             load_daily_csv(path, symbol="SPY", source="test")
 
     def test_unparseable_row_raises_with_line_number(self, tmp_path: Path) -> None:

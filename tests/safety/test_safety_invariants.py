@@ -349,7 +349,9 @@ class TestRiskEngineDenyByDefault:
     def test_risk_engine_internal_error_fails_closed(self, tmp_path: Path) -> None:
         engine = RiskEngine(permissive_policy())
         broken_market = MarketViewEntry(
-            last_price=500.0, bar_close_utc=NOW, quote_utc=None  # type: ignore[arg-type]
+            last_price=500.0,
+            bar_close_utc=NOW,
+            quote_utc=None,  # type: ignore[arg-type]
         )
         decision = engine.validate(
             make_intent(),
