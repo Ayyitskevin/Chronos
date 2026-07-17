@@ -104,10 +104,11 @@ Should be impossible: the risk engine denies on stale evidence — `STALE_MARKET
 or bar age exceeds the policy limit, and a zero (default) limit denies everything; missing
 snapshots deny as `MARKET_STATE_MISSING`/`ACCOUNT_STATE_MISSING` (`src/chronos/risk/engine.py`).
 
-1. If you suspect an order was generated on stale data, check the decision trail: risk rejections
-   are recorded with machine-readable codes. In a backtest summary, `risk_rejections` counts
-   them; at runtime, look for the rejection codes in the ledger transitions' `evidence` text and
-   the audit log.
+1. If you suspect an order was generated on stale data, check the decision trail. Shadow scans
+   append the full risk decision — codes such as `STALE_MARKET_DATA` plus explanations — to the
+   audit log as `shadow_scan` records. Backtest summaries count rejections in `risk_rejections`.
+   Note the ledger only ever contains intents that passed risk and reached submission; a rejected
+   intent leaves no ledger row, so its absence there is expected.
 2. Verify the policy actually in force: `python -m chronos.cli risk-show --policy <path>` (check
    `max_quote_age_seconds` / `max_bar_age_seconds` are the values you intended — zero means deny
    everything, not "no limit").

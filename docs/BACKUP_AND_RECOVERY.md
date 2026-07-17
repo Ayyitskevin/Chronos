@@ -12,7 +12,7 @@ passes again (`src/chronos/execution/engine.py`).
 | `data/platform_ledger.db` | Platform order ledger (intents, transitions, fills) | Lose the platform's own order history; reconciliation can no longer explain broker state |
 | `data/platform_halt.json` | Persistent halt state | Low (missing file fails closed to HALTED), but back it up to preserve the recorded reason/note |
 | `data/platform_audit.jsonl` | Hash-chained audit trail | Lose the tamper-evident record of decisions and operator actions |
-| `config/` | Risk policies (`risk.example.yaml` plus your gitignored `risk.yaml`) | Lose the exact limits runs were made under; policy hashes in results become unverifiable |
+| `config/` | Risk policies (`risk.example.yaml` plus your local `risk.yaml`) | Lose the exact limits runs were made under; policy hashes in results become unverifiable |
 | `specs/` | Canonical strategy specifications | Versioned in git, but back up local edits |
 | `research/strategy_registry.yaml`, `research/strategy_catalog.*` | Pine corpus registry with pinned SHA-256 hashes | Lose corpus integrity verification (`verify-corpus`) |
 | `research/pine/` | The audited Pine sources | Lose the audited corpus itself |

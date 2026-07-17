@@ -2,10 +2,11 @@
 
 Every command prints the mode banner first. There is no command that enables
 live trading, no ``--force`` flag, and nothing here can bypass the risk
-engine, the halt store, or the mode lock. Paper-capable operation requires
-running the (separate, deliberately differently named) service entry point
-with a verified paper account; this CLI only inspects, researches, halts,
-and rearms.
+engine, the halt store, or the mode lock. This CLI only inspects, researches,
+runs shadow scans, halts, and rearms. No paper-submitting service entry point
+exists in this build; when one is added it must be a deliberately
+differently-named command wired through the same mode lock, reconciliation
+gate, and risk engine (docs/GO_LIVE_CHECKLIST.md).
 """
 
 from __future__ import annotations

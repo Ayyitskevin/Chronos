@@ -13,8 +13,10 @@
    (`INTERNAL_ERROR_FAIL_CLOSED`), and the execution engine accepts only
    approval tokens minted by the wired engine instance for the exact intent.
 3. **Complete explanations.** Every rejection carries all failed checks as
-   machine-readable codes plus human-readable text, recorded in the ledger
-   and audit log.
+   machine-readable codes plus human-readable text. Shadow scans persist the
+   full decision to the audit log; backtests count rejections in their
+   results. Rejected intents never reach the order ledger — only submitted
+   intents do.
 4. **Halts outrank everything.** A persistent halt (operator or automatic)
    denies all intents regardless of policy generosity, survives restart, and
    clears only via an explicit operator rearm with a note.

@@ -52,10 +52,13 @@ Promotion is single-step and evidence-based (`src/chronos/control/promotion.py`)
 SHADOW means: live or replayed data, real intent generation, `NO_ORDERS` capability — nothing can
 be submitted anywhere (`src/chronos/control/modes.py`).
 
-- [NOT DONE] A runnable shadow service. **No long-running service entry point exists in this
-  build** — nothing wires bar ingestion, strategy, risk, execution, reconciliation evidence
-  gathering, and notifications into a daemon (docs/DEPLOYMENT.md "Future work"). This is the
-  single largest gap between today's build and a shadow gate.
+- [PARTIAL] Shadow operation. A one-shot shadow scan exists
+  (`python -m chronos.cli shadow-scan`, `src/chronos/research/shadow.py`): it runs the production
+  decision path over the latest closed bars, reports would-be intents and risk decisions, appends
+  every report to the audit log, and cannot submit (SHADOW lock = `NO_ORDERS`, no broker adapter
+  constructed). **No long-running service exists** — nothing wires live bar ingestion,
+  reconciliation evidence gathering, and notifications into a daemon (docs/DEPLOYMENT.md "Future
+  work"). Shadow today means running the scan manually after each close.
 - [NOT DONE] Defined shadow exit criteria (e.g. N consecutive sessions with zero unexplained
   halts, zero illegal transitions, intents matching backtest expectations, data-quality clean).
   Must be written into the promotion record's gate checks before the shadow run starts, not
@@ -84,7 +87,8 @@ be submitted anywhere (`src/chronos/control/modes.py`).
   discrepancies, fills consistent with the backtest fill model net of costs, no SEV-1/SEV-2
   incidents) recorded in a promotion record before the run.
 - [NOT DONE] Risk policy for paper (`config/risk.yaml`) written and reviewed by the owner — the
-  example file denies everything by design (`config/risk.example.yaml`).
+  example file denies everything by design (`config/risk.example.yaml`; note that file's
+  "gitignored" comment is currently inaccurate — see docs/OPERATIONS.md).
 
 ## Gate 4 — Canary eligibility (CANARY_LIVE)
 

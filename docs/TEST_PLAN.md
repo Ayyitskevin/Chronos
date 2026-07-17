@@ -53,22 +53,24 @@ prove:
 
 ### 3. Platform unit / parity / chaos suites — `tests/platform_unit/`, `tests/parity/`, `tests/chaos/`
 
-Being authored in parallel by another workstream; at the time of writing the directories exist
-with package markers only. Intended coverage:
+Being authored in parallel by another workstream; files are landing while this plan is written.
+Coverage:
 
-- `tests/platform_unit/` — per-module platform tests: indicator math, bar/series validation and
-  the CSV provider, portfolio sizing, order state machine transitions, SQLite ledger round-trips,
-  audit-log chain construction/verification, promotion evaluation, IBKR paper adapter behavior
-  against a fake `IBLike` object (construction gates, account verification, order shape, event
+- `tests/platform_unit/` — per-module platform tests. Current files: `test_auditlog.py`,
+  `test_ledgers.py`, `test_metrics.py`, `test_notifier.py`, `test_portfolio_sizer.py`,
+  `test_promotion.py`, `test_quality_and_csv.py`, `test_sim_broker.py`, `test_specs.py`,
+  `test_state_machine.py`. Intended scope also includes IBKR paper adapter behavior against a
+  fake `IBLike` object (construction gates, account verification, order shape, event
   translation).
-- `tests/parity/` — strategy implementations against their canonical specs
-  (`specs/*.yaml`) and Pine-semantics indicator parity. Note the honest limit: no TradingView
-  exports exist (ASSUMPTIONS.md A-03), so parity is verified against specifications, never
-  against TradingView output.
-- `tests/chaos/` — fault-injection runs through the simulated broker's `FaultPlan`
-  (`src/chronos/execution/brokers/simulated.py`): rejections, partial fills, duplicated events,
-  dropped acks, silent acceptance — asserting the engine halts/reconciles rather than trading
-  through ambiguity, and that backtests remain deterministic under identical fault plans.
+- `tests/parity/` — indicator/strategy parity: `test_indicator_reference.py` (Pine-semantics
+  indicator values against references), `test_incremental_vs_batch.py` (incremental computation
+  equals batch recomputation). Honest limit: no TradingView exports exist (ASSUMPTIONS.md A-03),
+  so parity is verified against specifications and references, never against TradingView output.
+- `tests/chaos/` — fault injection through the simulated broker's `FaultPlan`
+  (`src/chronos/execution/brokers/simulated.py`): `test_execution_faults.py`,
+  `test_backtest_faults.py` — rejections, partial fills, duplicated events, dropped acks —
+  asserting the engine halts/reconciles rather than trading through ambiguity, and that
+  backtests remain deterministic under identical fault plans.
 
 Final shape and counts: docs/TEST_RESULTS.md once that work lands.
 

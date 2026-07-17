@@ -68,8 +68,10 @@ Notes:
 - The backtest uses its own throwaway halt file, `data/backtest_halt_<strategy>_<symbol>.json`,
   which it arms itself. It never touches `data/platform_halt.json`.
 - The example policy denies everything by design; a backtest under it reports rejections rather
-  than trades. Copy `config/risk.example.yaml` to `config/risk.yaml` (gitignored) and grant limits
-  deliberately for research runs.
+  than trades. Copy `config/risk.example.yaml` to `config/risk.yaml` and grant limits deliberately
+  for research runs. Note: the example file's comment says `config/risk.yaml` is gitignored, but
+  `.gitignore` does not actually list it — add it yourself if you do not want your local limits
+  committed (a policy holds no secrets, only limits).
 
 ## Reading the platform ledger
 

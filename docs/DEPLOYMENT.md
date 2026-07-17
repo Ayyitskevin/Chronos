@@ -92,7 +92,13 @@ Research / backtest CLI (no broker, no network):
 
 Requires `research/data/raw/SPY.csv` (the data-acquisition pipeline populates this directory with
 a provenance `MANIFEST.json`; as of this writing it is being produced — an absent file fails with
-a clear error). Full command list: docs/IBKR_RUNBOOK.md section 8.
+a clear error). A one-shot shadow evaluation of the latest closed bars (no orders possible):
+
+```bash
+.venv/bin/python -m chronos.cli shadow-scan
+```
+
+Full command list: docs/IBKR_RUNBOOK.md section 8.
 
 Wheel dashboard (existing README):
 
@@ -117,13 +123,15 @@ No Dockerfile or compose file is provided for the trading path, on purpose:
 If you containerize the research-only path yourself someday, never mount the same `data/`
 directory into more than one running instance (SQLite + halt-file semantics assume one process).
 
-## Future work — shadow service (NOT IMPLEMENTED)
+## Future work — shadow/paper service (NOT IMPLEMENTED)
 
-There is currently no long-running service entry point: nothing wires the event loop, a broker
-adapter, reconciliation evidence gathering, and the mode lock into a daemon. The CLI docstring
-references a separate service entry point; it does not exist in this build. The components exist
-and are tested individually. When such a service is written and reviewed, a systemd user unit like
-the following would be the shape of it — do not create this unit today, it has nothing to run:
+There is currently no long-running service entry point: nothing wires live bar ingestion, a broker
+adapter, reconciliation evidence gathering, and the mode lock into a daemon. What exists today is
+the one-shot `shadow-scan` CLI command above (run manually after the close). The CLI docstring
+references a separate paper-capable service entry point; it does not exist in this build. The
+components exist and are tested individually. When such a service is written and reviewed, a
+systemd user unit like the following would be the shape of it — do not create this unit today, it
+has nothing to run:
 
 ```ini
 # FUTURE WORK — no such entry point exists in this build.

@@ -15,6 +15,7 @@ data/*.db-*
 data/*.json
 data/*.jsonl
 data/*.tmp
+config/risk.yaml
 logs/*.log
 logs/*.log.*
 .streamlit/secrets.toml

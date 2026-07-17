@@ -114,7 +114,7 @@ order. Resolution is manual (docs/INCIDENT_RESPONSE.md).
 
 Note: `reconcile()` is a pure comparison function. The evidence-gathering caller that queries a
 real gateway for open orders/positions and feeds it is part of the not-yet-implemented shadow/paper
-service loop (see docs/DEPLOYMENT.md, "What is not implemented").
+service loop (see docs/DEPLOYMENT.md, "Future work — shadow/paper service (NOT IMPLEMENTED)").
 
 ## Cancels
 
