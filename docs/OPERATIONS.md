@@ -48,6 +48,37 @@ constructs a broker adapter. Every report is appended to the audit log as a `sha
 so the scan history is part of the tamper-evident trail. Symbols without a data file, or with
 blocking data-quality issues, are reported as skipped rather than silently ignored.
 
+## Platform monitor (read-only)
+
+The monitor is a read-only view over persisted platform state — halt store, audit log, risk
+policy, market-data files, and (optionally) the execution ledger. It **imports no broker adapter,
+opens no market-data connection, and exposes no control that can arm, halt, or submit** (a unit
+test asserts the no-broker-import guarantee). It is exactly as trustworthy as the files on disk.
+
+Terminal render (`cmd_monitor` in `src/chronos/cli/main.py`):
+
+```bash
+python -m chronos.cli monitor --mode shadow \
+  --policy config/risk.example.yaml --data-dir research/data/raw --symbols SPY,QQQ \
+  --ledger data/platform_ledger.db      # --ledger is optional
+```
+
+Localhost Streamlit page (`src/chronos/monitoring/streamlit_app.py`), configured by environment
+variables so the page stays a pure function of files on disk:
+
+```bash
+CHRONOS_MONITOR_MODE=shadow CHRONOS_LEDGER_FILE=data/platform_ledger.db \
+  streamlit run src/chronos/monitoring/streamlit_app.py
+```
+
+It surfaces: operating mode and live-lock capability (the paper/live distinction is shown by an
+explicit text banner and a boolean `live_capable`, **never by colour alone**), halt reason,
+reconciliation outcome (from the last `service_startup` audit record), audit-chain integrity,
+market-data freshness, the active risk limits, code commit, and — when a ledger is supplied —
+open orders, fill-derived net positions, and recent fills. Realized/unrealized P&L is **not**
+reconstructed here: this build runs SHADOW with a flat account and submits nothing, so those rows
+are empty by construction and the monitor says so rather than printing a fabricated zero.
+
 ## Running a backtest reproducibly
 
 ```bash

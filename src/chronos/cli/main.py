@@ -158,6 +158,22 @@ def cmd_shadow_scan(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_monitor(args: argparse.Namespace) -> int:
+    from chronos.monitoring.snapshot import build_snapshot, render_text
+
+    snapshot = build_snapshot(
+        mode=TradingMode(args.mode),
+        halt_file=args.halt_file,
+        audit_file=args.audit_file,
+        risk_policy_path=args.policy,
+        data_dir=args.data_dir,
+        symbols=tuple(s.strip().upper() for s in args.symbols.split(",") if s.strip()),
+        ledger_path=args.ledger,
+    )
+    print(render_text(snapshot))
+    return 0
+
+
 def cmd_backtest(args: argparse.Namespace) -> int:
     store = HaltStore(args.halt_file)
     _banner(TradingMode.BACKTEST, store)
@@ -216,6 +232,21 @@ def build_parser() -> argparse.ArgumentParser:
     shadow.add_argument("--policy", type=Path, default=Path("config/risk.example.yaml"))
     shadow.add_argument("--equity", type=float, default=3000.0)
     shadow.set_defaults(func=cmd_shadow_scan)
+
+    monitor = sub.add_parser(
+        "monitor", help="read-only platform monitor (mode, halt, reconciliation, audit, data)"
+    )
+    monitor.add_argument("--mode", default="shadow")
+    monitor.add_argument("--policy", type=Path, default=Path("config/risk.example.yaml"))
+    monitor.add_argument("--data-dir", type=Path, default=Path("research/data/raw"))
+    monitor.add_argument("--symbols", default="SPY,QQQ")
+    monitor.add_argument(
+        "--ledger",
+        type=Path,
+        default=None,
+        help="optional path to the SQLite execution ledger (read-only)",
+    )
+    monitor.set_defaults(func=cmd_monitor)
 
     backtest = sub.add_parser("backtest", help="run a deterministic backtest")
     backtest.add_argument("--strategy", required=True)
