@@ -1,0 +1,331 @@
+# Chronos Live Wheel — Game Plan (start → completion)
+
+**Status:** Milestone 0 (this document). Branch: `feat/live-wheel-dashboard`.
+**Audience:** the owner, and any Claude session (Opus/Sonnet) continuing this
+work mid-stream. Read this before writing code. The owner's full mission
+prompt (recorded 2026-07-17) governs; this plan adapts it to what already
+exists in the repository.
+
+---
+
+## 0. Why this mission, and the strategy answer it encodes
+
+The completed research program (docs/RESEARCH_REPORT.md, twice adversarially
+reviewed) reached an honest verdict: **no autonomous strategy derived from
+the Pine corpus demonstrated a defensible edge** on the available data. Zero
+candidates are backtest-validated; the autonomous platform is deliberately
+not live-capable.
+
+**Given that, the best strategy this system can actually operate is the
+Wheel** (cash-secured short puts → assignment → covered calls → called away),
+because:
+
+1. Its income source (the volatility risk premium on liquid, large-cap
+   underlyings) is structural rather than a fitted directional signal — it
+   does not depend on the kind of backtested edge the research failed to
+   find, and it degrades gracefully rather than catastrophically when the
+   premium thins.
+2. Its dominant risks (assignment, concentration, cash security, uncovered
+   calls, fat-finger orders) are exactly the risks the existing guardrail
+   architecture was built to manage — deterministic checks, reconciliation,
+   typed confirmation, kill switches.
+3. It is human-supervised by design, which matches the honest capability of
+   this system today: decision support with hard safety rails, not
+   autonomous alpha.
+
+**Role of the Pine corpus (42 scripts, mostly indicators/studies):** not
+autonomous signals — *decision-support context* for Wheel timing:
+
+- The **regime engine** (BULL+ core → `regime_trend_v1`'s Markov/EMA regime
+  machinery, already implemented and tested in
+  `src/chronos/strategies/regime_trend.py`) becomes a per-underlying
+  **regime context panel**: label the daily regime (bullish / bearish /
+  choppy, vol percentile). Heuristic use: prefer opening new short puts when
+  the regime is not bearish-trending; prefer more conservative call strikes
+  in strong bull regimes (upside forfeiture is expensive) and more
+  aggressive premium capture in chop.
+- The **RSI-2 mean-reversion core** (`mean_reversion_v1`) becomes a
+  **put-entry timing hint**: short-term oversold days in a non-bearish
+  regime are historically where put premium is richest for the same delta.
+- Both are surfaced as **labeled heuristics** ("regime context — not a
+  validated signal, not an assignment probability"), never as gates that
+  auto-transmit and never as numbers that override the risk engine. This is
+  the only honest use of the corpus the research supports, and it is
+  genuinely useful in a Wheel workflow (it answers "is now a reasonable day
+  to sell this put?" with evidence the operator can weigh).
+
+This is recorded here so no future session re-litigates "which strategy":
+**the product is a live-capable, human-confirmed Wheel dashboard with
+Pine-derived regime context as decision support.**
+
+---
+
+## 1. The one big posture change (owner-authorized)
+
+Until now every document and test asserted "live trading is impossible in
+this build; no override exists." **The owner has now explicitly changed the
+mission:** Chronos must be *capable* of transmitting real-money orders,
+disabled by default, armed deliberately, behind eight fail-closed gates.
+
+The safety keystone that preserves everything already built:
+
+> **Live capability exists ONLY in the human-in-the-loop Wheel order path
+> (new `chronos/api` backend → OrderService). The autonomous strategy
+> platform (`chronos.service`, `chronos.execution.engine`, mode locks)
+> remains structurally live-incapable — unchanged — because no autonomous
+> strategy earned promotion.**
+
+Concretely:
+
+- `chronos.control.modes.resolve_mode_lock` keeps hard-denying
+  CANARY_LIVE/LIVE for the platform. Do not touch it.
+- The Wheel path gets its own, separate live gate stack (`execution/live_gate`
+  etc. below) that never feeds the autonomous engine.
+- Every doc/test that says "live impossible" must be consciously migrated to
+  "live impossible in the autonomous platform; live gated and
+  human-confirmed in the Wheel path" — as part of Milestone 6, not silently.
+  Known assertion sites: `README.md`, `HANDOFF.md`, `docs/safety.md`,
+  `docs/SECURITY.md`, `docs/GO_LIVE_CHECKLIST.md`, settings validators
+  (`config/settings.py:91,108` currently hard-raise on
+  `allow_live_trading`), wheel `IBKRBroker` order methods (raise
+  `BrokerSafetyError` unconditionally), `tests/safety/` live-denial tests,
+  `tests/unit` settings tests.
+
+Non-negotiables carried forward from the owner prompt: no auto-transmit on
+candidate match; no unattended trading; no market orders; no naked calls;
+puts genuinely cash-secured; no automatic retry of uncertain submissions; no
+order placed by any test/CI/dev workflow, ever; every live order is armed +
+typed-confirmed; `transmit=True` assigned in exactly one authorized method.
+
+---
+
+## 2. Repository audit — what exists vs. what the spec asks for
+
+The repo is NOT empty. Two mature subsystems (1255 tests, ruff/mypy-strict
+clean, CI green). **Evolve, don't greenfield.** Map of spec-structure →
+existing assets:
+
+| Spec module | Existing asset | Gap |
+|---|---|---|
+| `broker/base.py` (Broker protocol) | `src/chronos/broker/base.py` — typed protocol: connect/status, account_summary, positions, open_orders, executions, qualify contracts, option chains, quotes, preview/submit/modify/cancel signatures | Extend with `server_time`, `managed_accounts`, `completed_orders`, `market_rule`, market-data-type control |
+| `broker/demo.py` | `DemoBroker` with deterministic fixture cases (safety cases, empty account) | Add fixtures for the new chaos scenarios (§ Milestone 1) |
+| `broker/official_ibkr.py` | **Missing** — current `broker/ibkr.py` uses `ib_async`, read-only, order methods raise | New adapter on the official TWS API; keep `ibkr.py` as the optional `ib_async` adapter behind the same interface |
+| `api/` (FastAPI backend) | **Missing** — UI currently calls broker via in-process runtime | New; the single biggest structural addition |
+| `domain/` | `enums.py`, `models.py` (contracts, orders, positions, quotes), `money.py` (Decimal) | Add OrderIntent/lifecycle enums for the wheel path |
+| `strategy/wheel_state.py` | `strategy/wheel_state.py` exists (reconciliation-driven stages) | Extend to the full spec state machine incl. `*_PENDING`, `ASSIGNMENT_RECONCILING`, `MANUAL_REVIEW` (partially present) |
+| `strategy/strike_resolver.py` | Exists — ranked candidates, hard filters, rejection reasons, NO_TRADE | Verify scoring weights vs. spec env keys; add config plumbing |
+| `strategy/scenarios.py` | `services/short_put_risk_preview.py` + `short_put_demo_what_if.py` (expiration P&L, obligations, commission handling — tested) | Refactor into `strategy/scenarios.py` shape; add covered-call scenario fields |
+| `execution/` (order service, live gate, confirmation, kill switch, idempotency) | **Precursors exist**: `services/short_put_demo_approval.py` is a full typed-confirmation *rehearsal* (phrase match, TTL, invalidation on quote/position change) built explicitly as the forerunner of real confirmation. The autonomous platform's `execution/intents.py` + `state_machine.py` are the proven idempotency/lifecycle patterns to imitate (not import) | New package for the wheel path implementing the spec lifecycle |
+| `risk/` (pretrade, cash security, coverage, concentration, breakers) | `services/` risk preview implements cash-secured math; platform `risk/engine.py` is the pattern for structured RiskDecision with per-check explanations | New wheel-path risk package per spec check list |
+| `persistence/` + Alembic | SQLAlchemy schema exists (`persistence/schema.py`: order drafts, previews, submitted orders, guardrail decisions, wheel cycles) | Add intent/confirmation/arming/kill-switch/reservation tables + Alembic migrations (currently none) |
+| `ui/` | Streamlit dashboard + components + charts + rehearsal state (tested via AppTest) | Split into pages/, convert to backend `api_client` (currently in-process) |
+| `cli/` | Platform CLI (`chronos.cli.main`) — status/halt/rearm/monitor/backtest | Add `chronos live arm`, kill-switch, nuclear-cancel commands (separate `live_commands.py`) |
+| `utils/locking.py` (single writer) | **Missing** | New durable lease |
+| Chaos tests | `tests/chaos/` harness exists (platform) | Add wheel-path chaos: disconnect-during-submission, duplicate callbacks, partial-fill reconnect, unknown submission |
+| CI | `.github/workflows/ci.yml`, hash-locked installs | Keep; official IBKR API must remain un-imported unless selected |
+
+Preserved untouched: the entire research/backtest/shadow platform, its docs,
+data, and 1255-test suite. Nothing is deleted or reset.
+
+---
+
+## 3. Architecture decisions (final unless the owner objects)
+
+1. **Two processes.** FastAPI backend (`chronos.api`, binds 127.0.0.1:8765)
+   owns the single broker connection, all mutable trading state, order IDs,
+   arming state, risk checks, persistence. Streamlit UI becomes a thin
+   client through `ui/api_client.py`. During migration, demo mode may run
+   the old in-process path until Milestone 4 cuts over; the cutover removes
+   direct broker access from the UI.
+2. **Official TWS API is the production adapter** (`broker/official_ibkr.py`)
+   with a thread-safe callback→event bridge (`broker/callbacks.py`,
+   `request_registry.py`, `order_ids.py`). Installed from the official
+   distribution per `docs/ibkr_setup.md`; **never** added to requirements;
+   imported lazily only when `BROKER_ADAPTER=official_ibkr`. The existing
+   `ib_async` adapter stays as an optional secondary behind the same
+   protocol. Demo mode runs with neither installed.
+3. **Wheel-path OrderIntent + lifecycle** exactly per spec
+   (DRAFT→…→SUBMISSION_UNKNOWN/SUBMITTED→…), persisted before `placeOrder`,
+   idempotency key with DB uniqueness, submission serialized by mutex,
+   SUBMISSION_UNKNOWN reconciled never retried. Modeled on (not shared with)
+   the platform's tested state machine.
+4. **`transmit=True` in exactly one place**: the final centralized
+   submission method in `execution/order_service.py`, after all gates pass,
+   re-validated server-side immediately before the broker call. Everything
+   upstream constructs orders with `transmit=False` (what-ifs) or no order
+   at all.
+5. **Live arming is backend-memory only**, scoped to one account, TTL'd,
+   revoked on disconnect/account-change/restart/kill-switch/critical error.
+   Typed per-order confirmation with the spec's phrase format, TTL,
+   invalidation set, and hash-only storage — extending the proven rehearsal
+   machinery in `short_put_demo_approval.py`.
+6. **Single-writer lease** in SQLite (`utils/locking.py`): heartbeat row +
+   process token; second instance starts read-only with a banner.
+7. **Kill switch** disarms + blocks new/modified orders + cancels
+   Chronos-owned orders individually (no account-wide cancel); nuclear
+   cancel is a separate, deliberately hard CLI path.
+8. **Regime context (Pine value-add)** is a read-only decision-support
+   service reusing `strategies/regime_trend.py` / `mean_reversion.py` over
+   the owner's daily bars; displayed with explicit "heuristic, not a
+   validated signal" labels; never an order gate. Ships in Milestone 4.
+9. **Decimal everywhere** on the money path (already the wheel convention);
+   minimum-tick from market rules, never naive rounding.
+10. **The autonomous platform keeps its live hard-denial.** Its tests are
+    untouched. New wheel-path tests assert the *gated* model.
+
+---
+
+## 4. Milestones (each ends with: gates green + milestone report + pause)
+
+Quality gates for every milestone: `pytest` (full suite), `ruff check .`,
+`ruff format --check .`, `mypy src/chronos` — all clean, no skips beyond the
+existing credential-gated smoke. No test may transmit any order to any
+broker environment, ever.
+
+### Milestone 0 — Audit, architecture, game plan *(this document — DONE)*
+Deliverables: repo audit (§2), architecture decisions (§3), this plan,
+branch `feat/live-wheel-dashboard`. No code changes.
+
+### Milestone 1 — Backend scaffold + config + single-writer (demo-only)
+- `chronos/api/`: FastAPI app factory, `/health`, `/account`, `/positions`,
+  `/candidates`, read endpoints backed by DemoBroker through the existing
+  runtime; localhost bind; local API token (`api/auth.py`, random,
+  file-permission-restricted, never logged).
+- `config/settings.py`: add the spec's new keys (BROKER_ADAPTER,
+  IB_ACCOUNT_ALLOWLIST, ENABLE_/REQUIRE_ flags, LIVE_ARM_TTL_MINUTES,
+  confirmation TTLs, risk limits, resolver weights, BACKEND_HOST/PORT) with
+  validation; **replace** the current "live ⇒ hard-raise" validators with
+  "live ⇒ every live limit present and finite, else refuse startup"
+  (documented as the posture change, tests updated in the same commit).
+- `utils/locking.py` single-writer lease + read-only fallback mode.
+- `persistence`: Alembic init + first migration capturing current schema +
+  new tables (order_intents, confirmations, live_arm_events,
+  kill_switch_events, cash_reservations, share_reservations,
+  reconciliation_runs, event_log append-only).
+- `scripts/run_backend.py`, `scripts/run_ui.py`, Makefile targets.
+- Tests: API demo round-trips, settings validation matrix, lease contention,
+  migration up/down.
+
+### Milestone 2 — Official IBKR read-only adapter
+- `broker/official_ibkr.py` + `connection.py` upgrades + `callbacks.py`
+  (thread-safe queue bridge), `request_registry.py`, `order_ids.py`
+  (central, monotonic, crash-safe), `market_data.py` (type classification
+  LIVE/FROZEN/DELAYED/STALE…, pacing, bounded subscriptions, backoff).
+- Read paths: server_time, managed_accounts (exact allowlist match),
+  account_summary, positions, executions, commissions, open/completed
+  orders, qualify underlying/options, chain params, market rules, quotes.
+- Read-only smoke test extended (`scripts/smoke_test_ibkr.py`) — opt-in,
+  never transmits. CI never imports the official package (lazy import +
+  adapter-selection test with the package absent).
+- Exit: demo unaffected; smoke test documented for the owner to run.
+
+### Milestone 3 — Wheel engine + resolver + scenarios (backend services)
+- `strategy/wheel_state.py` → full spec state machine, reconciliation-driven
+  (startup/reconnect/event/periodic), MANUAL_REVIEW semantics.
+- `strategy/strike_resolver.py` → confirm spec filters/scoring, wire the new
+  config weights, paced chain workflow, typed NO_TRADE.
+- `strategy/scenarios.py` + `assignment_pressure.py` + `capital.py` +
+  `basis.py` (strategy-adjusted basis ledger vs broker average cost — never
+  overwrite broker cost; MANUAL_REVIEW on unexplained mismatch).
+- Reservations: conservative cash/share reservation engine (existing +
+  pending + proposed + buffer).
+- Tests: the full resolver/scenario/risk matrices from the owner prompt's
+  testing section (most already exist for puts; add calls + reservations).
+
+### Milestone 4 — Dashboard on the backend (UI cutover) + regime context
+- `ui/pages/{portfolio,symbol_detail,order_workspace,activity,settings}.py`
+  driven by `ui/api_client.py` (polling first; SSE later if needed).
+- Portfolio cards/table, Near-Term Focus, symbol detail with Plotly strike
+  ladder (shape+label differentiation, hover details), lock reasons always
+  displayed with explanations.
+- **Regime context panel** (§0): daily regime label + RSI-2 stretch for each
+  allowlisted symbol, marked "heuristic context — not a validated signal".
+- Cutover: UI loses all direct broker imports (enforced by an import test
+  like the monitoring plane's `sys.modules` probe).
+
+### Milestone 5 — Paper order management (end-to-end, still no live)
+- `execution/`: `order_builder` (limit-only, MID/NATURAL/CUSTOM with market
+  rules), `order_preview` (what-if), `order_service` (single submission
+  boundary; paper only at this milestone), `order_tracker` (spec lifecycle +
+  duplicate-callback idempotency), `idempotency`, `modification`,
+  `confirmation` (real typed confirmations grown from the rehearsal code),
+  cancellation with CANCEL_PENDING semantics.
+- `risk/`: structured RiskDecision with per-check pass/fail/unknown
+  (unknown⇒fail), the full spec check list, decision expiry.
+- Buy-to-close, partial fills, restart reconciliation, SUBMISSION_UNKNOWN
+  recovery (reconcile via orderRef/permId/executions; never auto-retry).
+- Paper validation session per spec + `scripts/paper_soak_report.py`.
+- Exit: owner runs the documented paper flows against their paper account.
+
+### Milestone 6 — Live safety layer
+- `execution/live_gate.py`: the eight-gate stack (config, connection,
+  reconciliation, data, risk, preview, session-arming, per-order
+  confirmation), all fail-closed, each gate a typed check with explanation.
+- Live arming (backend memory, TTL, revocation set), `cli/live_commands.py`
+  (`chronos live arm` with typed phrase, masked logging).
+- Session-drawdown circuit breaker (persisted session NLV baseline).
+- `execution/kill_switch.py` (+ optional nuclear-cancel CLI, separately
+  confirmed, documented as emergency-only).
+- **Posture migration:** every "live impossible" claim updated to the split
+  model (§1 list); safety tests updated in the same commits; new tests
+  assert each gate independently blocks.
+- Docs: `live_trading_runbook.md`, `incident_response.md` updates,
+  `order_lifecycle.md`, `paper_validation.md`.
+
+### Milestone 7 — Live execution capability (validated without trading)
+- `transmit=True` at the single authorized boundary; live order object built
+  from the qualified contract, valid tick, confirmed account, DAY limit,
+  `outsideRth=false`.
+- Validation with a **recording spy broker**: full gate walk, wrong-account
+  rejection, arming expiry, confirmation mismatch, final server-side
+  re-validation, kill-switch interruption — proving the live path emits a
+  correct order object **without any order reaching a broker**.
+- No live trade is placed during development; the owner performs any
+  eventual live acceptance manually through the finished app.
+
+### Milestone 8 — Hardening, chaos, CI, docs, PR
+- Wheel-path chaos tests: disconnect during submission, duplicate callbacks,
+  partial-fill reconnect, unknown submission state, backend restart with
+  working orders.
+- Alembic verification in CI; README rewrite per spec (risk disclosures,
+  setup for demo/paper/live, runbooks); `docs/limitations.md`.
+- Full-suite soak, adversarial self-review pass (reuse the M5 seven-dimension
+  method), draft PR into `feat/wheel-dashboard-mvp`.
+
+---
+
+## 5. Definition of done
+
+The owner prompt's 25-point Definition of Done applies verbatim. Additions
+from this plan: (26) the autonomous platform's live hard-denial is
+unchanged and still tested; (27) the regime-context panel is present,
+labeled heuristic, and has no pathway into order transmission; (28) every
+milestone shipped with the standard gates green and a milestone report.
+
+## 6. Working agreements for continuing sessions
+
+- Follow the milestone order; do not start milestone N+1 before N's gates
+  are green and reported. Small commits, descriptive messages, this branch
+  only, never push to the default branch.
+- Never claim an untested result; paste actual gate output in milestone
+  reports. Never place any order from tests/CI/dev. Never commit secrets or
+  account IDs (mask suffixes). `.env` never committed.
+- When the official IBKR package is unavailable in the environment (it is
+  not on PyPI), develop the adapter against the recorded-interface fakes in
+  tests and mark gateway verification as an owner action — exactly as the
+  existing `ibkr_paper` adapter did.
+- If the repo state diverges from this plan (e.g. the owner merged other
+  work), re-audit before coding; update §2 rather than assuming.
+
+## 7. Open owner decisions (blocking only where marked)
+
+1. **Confirm the split posture** (§1): platform stays live-incapable; only
+   the wheel path becomes gated-live. *(Assumed yes; cheap to reverse.)*
+2. `IB_ACCOUNT_ALLOWLIST` values and the live account suffix — needed at
+   Milestone 6, never committed.
+3. Symbol allowlist for live MVP (default AAPL,MSFT,SPY per spec).
+4. Whether the `ib_async` wheel adapter should be retired after the official
+   adapter lands, or kept as the documented optional secondary. *(Plan
+   assumes: kept, optional.)*
+5. GTC orders, margin-secured puts, automatic rolling: all out of scope for
+   MVP per spec; revisit only by explicit owner request.
