@@ -1,0 +1,529 @@
+//@version=6
+// =============================================================================
+// Confluence Swing Strategy v1.0 — Regime · RS · Divergence · AVWAP · R-Risk
+// The apex script of the Regime Label v6.2 ecosystem.
+// =============================================================================
+//
+// WHAT THIS IS
+// One strategy that runs the five tools in their designed order:
+//
+//   1. REGIME  (whether)  — Regime Label v6.2 via REGIME_EXPORT link. The gate.
+//                           No valid bull regime, no long. Ever.
+//   2. RS      (which)    — Mansfield relative strength vs a benchmark
+//                           (Weinstein). Longs want leaders, never laggards.
+//   3. DIVERGENCE (when)  — RSI/MFI divergence off confirmed pivots
+//                           (non-repainting). In a bull regime the ALIGNED tool
+//                           is HIDDEN bullish divergence (continuation);
+//                           regular bullish is only used as pullback confluence.
+//   4. AVWAP   (where)    — an anchored VWAP dropped at each confirmed regime
+//                           flip. "Bull regime AND above the flip AVWAP" is the
+//                           read the pairing was built for.
+//   5. R-RISK  (how much) — fixed-fractional sizing: risk% of equity divided by
+//                           ATR stop distance (Van Tharp / Wilder / LeBeau).
+//                           Targets in R. Chandelier trail. Hard leverage cap.
+//
+// WIRING (required — same convention as every companion script)
+//   1. Add "Regime Label v6.2" to the chart.
+//   2. Add this strategy to the SAME chart.
+//   3. Settings -> "1 · Regime Link" -> set "REGIME_EXPORT link" to
+//      Regime Label v6.2's REGIME_EXPORT plot (+1 bull / 0 neutral / -1 bear).
+//      Optionally wire REGIME_STRENGTH_EXPORT (0-100) as well.
+//   Until wired, the strategy is INERT: it takes no trades and the HUD shows
+//   LINK?. It will never mistake raw price for a regime code (strict {-1,0,1}
+//   validation, the strictest of the validators used across the companions).
+//
+// DEFICIENCIES FOUND IN THE COMPANIONS, CORRECTED HERE
+//   a. Stop detection: the R-Planner detects stop hits with close-crosses,
+//      which misses gaps through the stop. Here stops are real strategy.exit
+//      stop orders — gap fills are modeled by the broker emulator.
+//   b. Leverage: the planner only FLAGS size > 100% equity. Here position
+//      value is hard-capped (default 100% = cash account, no leverage).
+//   c. Link validation: the four companions each validate REGIME_EXPORT
+//      differently (|x|>1.5, |x|<=1.1+rounding, exact set). Unified here to
+//      the strictest form; one bad tick of an unwired source cannot trade.
+//   d. Divergence-in-trend failure mode: the grader's own header warns that
+//      regular (reversal) divergence bleeds money against strong trends. This
+//      strategy resolves it structurally: hidden (continuation) divergence is
+//      the primary trigger; regular bullish counts only inside the AVWAP
+//      value zone as pullback confluence; regular bearish never shorts a bull.
+//   e. Mansfield baseline: RS Leader defaults to 50; Weinstein's book values
+//      are 200 SMA daily / 52 weekly. Default here: 200 (tooltip explains).
+//   f. Execution realism: commission + slippage are non-zero by default —
+//      per the edge-strategy-reviewer discipline (execution realism scoring).
+//
+// HONESTY (unchanged from the ecosystem, and it applies double here)
+//   Stacking five filters does not create a validated edge — it creates a
+//   SELECTIVE strategy whose backtest sample will be small. Below ~30 closed
+//   trades, every statistic the tester shows you is an anecdote (the HUD
+//   prints n so you cannot miss it). Divergence is a heuristic. "Leading" is
+//   a tilt, not a promise. VWAP is a factual level, not a signal. Backtest
+//   fills are simulations. This script places SIMULATED orders in
+//   TradingView's tester only; it has no broker connection. Size for being
+//   wrong.
+//
+// NON-REPAINT
+//   Signals are computed from confirmed values only (confirmed regime export,
+//   confirmed oscillator pivots, cumulative-forward AVWAP), evaluated at bar
+//   close, filled at next bar open. Nothing here uses lookahead.
+// =============================================================================
+
+strategy(
+     "Confluence Swing Strategy v1.0 — Regime · RS · Div · AVWAP · R",
+     shorttitle = "Confluence Swing v1.0",
+     overlay = true,
+     initial_capital = 100000,
+     commission_type = strategy.commission.percent,
+     commission_value = 0.03,
+     slippage = 2,
+     pyramiding = 0,
+     calc_on_every_tick = false,
+     max_labels_count = 200,
+     max_lines_count = 100)
+
+// =============================================================================
+// Groups
+// =============================================================================
+grp_reg   = "1 · Regime Link (REQUIRED)"
+grp_rs    = "2 · Relative Strength (which)"
+grp_div   = "3 · Divergence (when)"
+grp_vwap  = "4 · Flip AVWAP (where)"
+grp_entry = "5 · Entry Confluence"
+grp_risk  = "6 · Risk & Exits (how much)"
+grp_disp  = "7 · Display"
+
+// =============================================================================
+// Inputs — 1 · Regime link
+// =============================================================================
+regime_src = input.source(close, "REGIME_EXPORT link", group = grp_reg,
+     tooltip = "WIRE THIS to Regime Label v6.2 -> REGIME_EXPORT (+1/0/-1). Left on close, the strategy stays INERT (no trades) and the HUD shows LINK?.")
+strength_src = input.source(close, "REGIME_STRENGTH_EXPORT link (optional)", group = grp_reg,
+     tooltip = "Optional 0-100 strength export. Used to scale risk down in weak regimes when the toggle below is on.")
+use_strength = input.bool(false, "Scale risk by regime strength", group = grp_reg,
+     tooltip = "Below the threshold, per-trade risk is multiplied by the restrict factor — the 'restrict' posture in code form.")
+strength_full = input.float(60.0, "  Full-risk strength threshold", minval = 0, maxval = 100, group = grp_reg)
+restrict_factor = input.float(0.6, "  Restricted-risk multiplier", minval = 0.1, maxval = 1.0, step = 0.05, group = grp_reg)
+allow_shorts = input.bool(false, "Allow shorts in bear regime", group = grp_reg,
+     tooltip = "OFF by default. The RS/divergence toolkit is long-biased by design; shorts mirror the logic (bear regime + RS laggard + bearish divergence below the flip AVWAP) but are the less-validated half.")
+exit_on_neutral = input.bool(false, "Also exit when regime turns neutral", group = grp_reg,
+     tooltip = "Default: positions exit when the regime flips AGAINST them (-1 for longs). Turn this on to also flatten on neutral (0).")
+
+// =============================================================================
+// Inputs — 2 · Relative strength
+// =============================================================================
+rs_mode = input.string("Above zero", "RS requirement for entries", options = ["Off", "Above zero", "Leader (above + rising)"], group = grp_rs,
+     tooltip = "Mansfield RS = (RS-line / MA(RS-line, n) - 1) * 100. 'Above zero' = outperforming its own baseline (Weinstein). 'Leader' additionally requires it to be rising.")
+veto_laggard = input.bool(true, "Always veto entries on RS Laggard", group = grp_rs,
+     tooltip = "Even with RS requirement Off: a name that is below baseline AND deteriorating is skipped — the 'SKIP (LAG)' verdict from RS Leader v1.0.")
+bench_sym = input.symbol("AMEX:SPY", "Benchmark", group = grp_rs)
+mans_len = input.int(200, "Mansfield MA length", minval = 5, maxval = 300, group = grp_rs,
+     tooltip = "Weinstein's classic baselines: 200 SMA on DAILY, 52 on WEEKLY. (RS Leader v1.0 defaults to 50 — a swing-shortened variant; the textbook value is used here.)")
+rs_slope_len = input.int(3, "Slope lookback (bars)", minval = 1, maxval = 20, group = grp_rs)
+nh_len = input.int(50, "RS new-high lookback (confluence bonus)", minval = 5, maxval = 260, group = grp_rs)
+
+// =============================================================================
+// Inputs — 3 · Divergence
+// =============================================================================
+osc_type = input.string("RSI", "Oscillator", options = ["RSI", "MFI"], group = grp_div,
+     tooltip = "MFI needs real volume; on symbols without it, divergence triggers simply never fire (visible in HUD as OSC n/a).")
+osc_len = input.int(14, "Oscillator length", minval = 2, maxval = 100, group = grp_div)
+piv_l = input.int(5, "Pivot left bars", minval = 1, maxval = 50, group = grp_div)
+piv_r = input.int(5, "Pivot right bars (confirmation lag)", minval = 1, maxval = 50, group = grp_div,
+     tooltip = "Signals appear this many bars after the oscillator pivot. That lag is the price of not repainting.")
+min_gap = input.int(5, "Min bars between pivots", minval = 1, maxval = 200, group = grp_div)
+max_gap = input.int(60, "Max bars between pivots", minval = 5, maxval = 400, group = grp_div)
+
+// =============================================================================
+// Inputs — 4 · Flip AVWAP
+// =============================================================================
+vwap_src = input.source(hlc3, "AVWAP price source", group = grp_vwap)
+use_value_zone = input.bool(true, "Regular-divergence entries need the value zone", group = grp_vwap,
+     tooltip = "The value zone is between the flip AVWAP and 1 sigma below it (volume-weighted). Regular bullish divergence only counts as an entry there — buying a pullback toward cost basis, not catching a falling knife far below it.")
+
+// =============================================================================
+// Inputs — 5 · Entry confluence
+// =============================================================================
+trig_flip = input.bool(true, "Trigger: confirmed regime flip to bull", group = grp_entry,
+     tooltip = "The regime-native entry: the flip bar itself, if RS allows it.")
+trig_hidden = input.bool(true, "Trigger: hidden (continuation) divergence", group = grp_entry)
+trig_regular = input.bool(true, "Trigger: regular divergence in the value zone", group = grp_entry)
+trig_reclaim = input.bool(true, "Trigger: AVWAP reclaim with RS Leader", group = grp_entry)
+min_score = input.int(55, "Minimum confluence score (0-100)", minval = 0, maxval = 100, group = grp_entry,
+     tooltip = "Transparent additive score, printed in the HUD — a checklist tally, NOT a probability. Components: trigger 15-25, RS state up to 25, AVWAP side up to 15, RS new high 10, regime strength 10.")
+
+// =============================================================================
+// Inputs — 6 · Risk & exits
+// =============================================================================
+risk_pct = input.float(1.0, "Risk per trade (% of equity)", minval = 0.05, maxval = 5.0, step = 0.05, group = grp_risk,
+     tooltip = "This IS 1R in equity terms (Van Tharp). Sizing = risk% / stop-distance%. Uses the tester's simulated equity; your real balance is never entered anywhere.")
+atr_len = input.int(14, "ATR length (Wilder)", minval = 1, maxval = 100, group = grp_risk)
+atr_mult = input.float(2.0, "ATR stop multiple", minval = 0.5, maxval = 10.0, step = 0.1, group = grp_risk)
+cap_pct = input.float(100.0, "Max position value (% of equity)", minval = 10.0, maxval = 200.0, step = 5.0, group = grp_risk,
+     tooltip = "Hard cap, enforced (not just flagged). 100 = cash account, no leverage.")
+t1_r = input.float(1.0, "Target 1 (R) — sells 1/3", minval = 0.5, maxval = 10.0, step = 0.5, group = grp_risk)
+t2_r = input.float(2.0, "Target 2 (R) — sells 1/3", minval = 0.5, maxval = 20.0, step = 0.5, group = grp_risk)
+be_after_t1 = input.bool(true, "Move stop to breakeven after T1 fills", group = grp_risk)
+use_trail = input.bool(true, "Chandelier trail on the runner", group = grp_risk)
+ch_len = input.int(22, "  Chandelier lookback", minval = 1, maxval = 300, group = grp_risk)
+ch_mult = input.float(3.0, "  Chandelier ATR multiple", minval = 0.5, maxval = 10.0, step = 0.1, group = grp_risk)
+trail_after_r = input.float(1.0, "  Activate trail after (R in profit)", minval = 0.0, maxval = 10.0, step = 0.5, group = grp_risk)
+
+// =============================================================================
+// Inputs — 7 · Display
+// =============================================================================
+hud_mode = input.string("Micro", "HUD mode", options = ["Off", "Micro", "Full"], group = grp_disp)
+hud_pos_in = input.string("top_right", "HUD position", options = ["top_left", "top_center", "top_right", "bottom_left", "bottom_center", "bottom_right"], group = grp_disp)
+show_avwap_plot = input.bool(true, "Plot flip AVWAP + value zone", group = grp_disp)
+show_trig_marks = input.bool(true, "Mark entry triggers", group = grp_disp)
+
+// =============================================================================
+// Palette (ecosystem house style)
+// =============================================================================
+c_bull    = color.rgb(89, 159, 125)
+c_bear    = color.rgb(190, 96, 111)
+c_neutral = color.rgb(112, 126, 148)
+c_rf      = color.rgb(255, 213, 79)
+c_trail   = color.rgb(214, 162, 82)
+c_panel   = color.new(#0E1316, 16)
+c_cell    = color.new(#151D22, 18)
+c_cell2   = color.new(#10171B, 22)
+c_frame   = color.new(#5BD6B0, 88)
+c_text    = color.white
+c_dim     = color.new(color.white, 45)
+c_faint   = color.new(color.white, 68)
+
+// =============================================================================
+// Helpers
+// =============================================================================
+f_pos(_s) =>
+    switch _s
+        "top_left"      => position.top_left
+        "top_center"    => position.top_center
+        "top_right"     => position.top_right
+        "bottom_left"   => position.bottom_left
+        "bottom_center" => position.bottom_center
+        "bottom_right"  => position.bottom_right
+        => position.top_right
+
+f_fmt(_x, _d) =>
+    _m = math.pow(10.0, _d)
+    na(_x) ? "n/a" : str.tostring(math.round(_x * _m) / _m)
+
+f_price(_x) =>
+    na(_x) ? "n/a" : str.tostring(_x, format.mintick)
+
+// Anchored VWAP with volume-weighted sigma (port of AVWAP v1.0's f_avwap;
+// var state is per call site). Active only after its first anchor fires.
+f_avwap(_src, _anchor, _enabled) =>
+    var float _pv  = na
+    var float _vol = na
+    var float _p2v = na
+    var bool  _on  = false
+    if _enabled
+        if _anchor
+            _pv  := 0.0
+            _vol := 0.0
+            _p2v := 0.0
+            _on  := true
+        if _on
+            _v = na(volume) ? 0.0 : volume
+            if not na(_src)
+                _pv  := _pv + _src * _v
+                _vol := _vol + _v
+                _p2v := _p2v + _src * _src * _v
+    else
+        _on := false
+    _vw = _on and not na(_vol) and _vol > 0 ? _pv / _vol : na
+    _vr = _on and not na(_vw) and _vol > 0 ? math.max(_p2v / _vol - _vw * _vw, 0.0) : na
+    _sd = na(_vr) ? na : math.sqrt(_vr)
+    [_vw, _sd, _on]
+
+// =============================================================================
+// 1 · Regime read (strict {-1, 0, +1} validation — unified, strictest form)
+// =============================================================================
+_rv = regime_src
+reg_valid      = not na(_rv)    and (_rv == 1.0    or _rv == 0.0    or _rv == -1.0)
+reg_prev_valid = not na(_rv[1]) and (_rv[1] == 1.0 or _rv[1] == 0.0 or _rv[1] == -1.0)
+regime = reg_valid ? int(_rv) : int(na)
+regime_flip = reg_valid and reg_prev_valid and _rv != _rv[1]
+flip_to_bull = regime_flip and regime == 1
+flip_to_bear = regime_flip and regime == -1
+linked = reg_valid
+
+strength_raw = strength_src
+strength_valid = use_strength and not na(strength_raw) and strength_raw >= 0.0 and strength_raw <= 100.0
+risk_scale = strength_valid ? (strength_raw >= strength_full ? 1.0 : restrict_factor) : 1.0
+
+// =============================================================================
+// 2 · Mansfield relative strength (Weinstein)
+// =============================================================================
+bench_close = request.security(bench_sym, timeframe.period, close,
+     gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+
+rs_ok_data = not na(close) and not na(bench_close) and bench_close > 0 and close > 0
+rs_ratio = rs_ok_data ? close / bench_close : float(na)
+rs_ma = ta.sma(rs_ratio, mans_len)
+mans = not na(rs_ratio) and not na(rs_ma) and rs_ma != 0 ? (rs_ratio / rs_ma - 1.0) * 100.0 : float(na)
+
+mans_rising = not na(mans) and not na(mans[rs_slope_len]) and mans > mans[rs_slope_len]
+rs_leader  = not na(mans) and mans > 0 and mans_rising
+rs_laggard = not na(mans) and mans < 0 and not mans_rising
+
+rs_high_prev = ta.highest(rs_ratio, nh_len)[1]
+rs_new_high = not na(rs_ratio) and not na(rs_high_prev) and rs_ratio > rs_high_prev
+
+rs_long_ok = rs_mode == "Off" ? true : rs_mode == "Above zero" ? (not na(mans) and mans > 0) : rs_leader
+rs_long_ok := rs_long_ok and not (veto_laggard and rs_laggard)
+rs_short_ok = rs_mode == "Off" ? true : (not na(mans) and mans < 0)
+
+// =============================================================================
+// 3 · Divergence off confirmed oscillator pivots (grader port)
+// =============================================================================
+osc_rsi = ta.rsi(close, osc_len)
+osc_mfi = ta.mfi(hlc3, osc_len)
+osc = osc_type == "MFI" ? osc_mfi : osc_rsi
+
+ph = ta.pivothigh(osc, piv_l, piv_r)
+pl = ta.pivotlow(osc, piv_l, piv_r)
+phF = not na(ph)
+plF = not na(pl)
+
+prev_osc_pl = ta.valuewhen(plF, osc[piv_r], 1)
+prev_osc_ph = ta.valuewhen(phF, osc[piv_r], 1)
+prev_lo_pl  = ta.valuewhen(plF, low[piv_r], 1)
+prev_hi_ph  = ta.valuewhen(phF, high[piv_r], 1)
+
+bars_since_pl = ta.barssince(plF[1])
+bars_since_ph = ta.barssince(phF[1])
+in_range_low  = bars_since_pl >= min_gap and bars_since_pl <= max_gap
+in_range_high = bars_since_ph >= min_gap and bars_since_ph <= max_gap
+
+regBull = plF and low[piv_r] < prev_lo_pl and osc[piv_r] > prev_osc_pl and in_range_low
+hidBull = plF and low[piv_r] > prev_lo_pl and osc[piv_r] < prev_osc_pl and in_range_low
+regBear = phF and high[piv_r] > prev_hi_ph and osc[piv_r] < prev_osc_ph and in_range_high
+hidBear = phF and high[piv_r] < prev_hi_ph and osc[piv_r] > prev_osc_ph and in_range_high
+
+// =============================================================================
+// 4 · Flip AVWAP — cost basis of the current regime
+// =============================================================================
+[flip_vw, flip_sd, flip_on] = f_avwap(vwap_src, regime_flip, linked)
+
+above_avwap = flip_on and not na(flip_vw) and close > flip_vw
+below_avwap = flip_on and not na(flip_vw) and close < flip_vw
+value_zone_long = flip_on and not na(flip_vw) and not na(flip_sd) and close <= flip_vw and close >= flip_vw - flip_sd
+value_zone_short = flip_on and not na(flip_vw) and not na(flip_sd) and close >= flip_vw and close <= flip_vw + flip_sd
+reclaim_up = flip_on and not na(flip_vw) and not na(flip_vw[1]) and close > flip_vw and close[1] <= flip_vw[1]
+reclaim_dn = flip_on and not na(flip_vw) and not na(flip_vw[1]) and close < flip_vw and close[1] >= flip_vw[1]
+
+// =============================================================================
+// 5 · Confluence score + entry signals (confirmed-bar only)
+// =============================================================================
+confirmed = barstate.isconfirmed
+
+// Long triggers — each is a discrete event on this bar.
+long_trig_flip    = trig_flip and flip_to_bull
+long_trig_hidden  = trig_hidden and hidBull and above_avwap
+long_trig_regular = trig_regular and regBull and (not use_value_zone or value_zone_long)
+long_trig_reclaim = trig_reclaim and reclaim_up and rs_leader
+
+long_trigger = long_trig_flip or long_trig_hidden or long_trig_regular or long_trig_reclaim
+
+// Short triggers (mirror; only used when shorts are allowed).
+short_trig_flip    = trig_flip and flip_to_bear
+short_trig_hidden  = trig_hidden and hidBear and below_avwap
+short_trig_regular = trig_regular and regBear and (not use_value_zone or value_zone_short)
+short_trig_reclaim = trig_reclaim and reclaim_dn and rs_laggard
+short_trigger = short_trig_flip or short_trig_hidden or short_trig_regular or short_trig_reclaim
+
+// Transparent additive score — a checklist tally, not a probability.
+f_score(_dir) =>
+    _trig = _dir > 0 ?
+         (long_trig_flip ? 25.0 : long_trig_hidden ? 25.0 : long_trig_regular ? 20.0 : long_trig_reclaim ? 15.0 : 0.0) :
+         (short_trig_flip ? 25.0 : short_trig_hidden ? 25.0 : short_trig_regular ? 20.0 : short_trig_reclaim ? 15.0 : 0.0)
+    _rs = _dir > 0 ?
+         (rs_leader ? 25.0 : not na(mans) and mans > 0 ? 15.0 : not na(mans) and mans_rising ? 10.0 : 0.0) :
+         (rs_laggard ? 25.0 : not na(mans) and mans < 0 ? 15.0 : 0.0)
+    _loc = _dir > 0 ?
+         (above_avwap ? 15.0 : value_zone_long ? 10.0 : 0.0) :
+         (below_avwap ? 15.0 : value_zone_short ? 10.0 : 0.0)
+    _nh = _dir > 0 and rs_new_high ? 10.0 : 0.0
+    _st = strength_valid and strength_raw >= strength_full ? 10.0 : 0.0
+    math.min(100.0, _trig + _rs + _loc + _nh + _st)
+
+long_score = f_score(1)
+short_score = f_score(-1)
+
+can_long = confirmed and linked and regime == 1 and rs_long_ok and long_trigger and long_score >= min_score and strategy.position_size == 0
+can_short = confirmed and allow_shorts and linked and regime == -1 and rs_short_ok and short_trigger and short_score >= min_score and strategy.position_size == 0
+
+// =============================================================================
+// 6 · Sizing (fixed-fractional, hard-capped) and orders
+// =============================================================================
+atr_val = ta.atr(atr_len)
+ch_long_raw  = ta.highest(high, ch_len) - atr_val * ch_mult
+ch_short_raw = ta.lowest(low, ch_len) + atr_val * ch_mult
+
+// Per-position plan, frozen at signal time.
+var float plan_rdist = na     // 1R in price terms
+var int   plan_q  = 0
+var int   plan_q1 = 0
+var int   plan_q2 = 0
+var int   plan_dir = 0
+var float run_stop = na       // ratcheting stop for all remaining legs
+
+f_plan_qty(_stop_dist) =>
+    _risk_frac = risk_pct / 100.0 * risk_scale
+    _q_risk = _stop_dist > 0 ? (strategy.equity * _risk_frac) / _stop_dist : 0.0
+    _q_cap = close > 0 ? (strategy.equity * cap_pct / 100.0) / close : 0.0
+    int(math.floor(math.min(_q_risk, _q_cap)))
+
+if can_long
+    _dist = atr_val * atr_mult
+    _q = f_plan_qty(_dist)
+    if _q >= 1
+        plan_rdist := _dist
+        plan_q  := _q
+        plan_q1 := math.max(1, int(math.floor(_q / 3.0)))
+        plan_q2 := math.max(1, int(math.floor(_q / 3.0)))
+        plan_dir := 1
+        run_stop := na
+        _why = long_trig_flip ? "flip" : long_trig_hidden ? "hidDiv" : long_trig_regular ? "regDiv" : "reclaim"
+        strategy.entry("L", strategy.long, qty = _q, comment = "L·" + _why + "·" + f_fmt(long_score, 0))
+        // Protective exits attach on the SAME bar as the entry (estimated off
+        // the signal close), so the position is never unprotected. The manage
+        // block re-issues the same ids with fill-accurate levels next bar.
+        _q3e = _q - plan_q1 - plan_q2
+        strategy.exit("T1", from_entry = "L", qty = plan_q1, limit = close + t1_r * _dist, stop = close - _dist)
+        strategy.exit("T2", from_entry = "L", qty = plan_q2, limit = close + t2_r * _dist, stop = close - _dist)
+        if _q3e >= 1
+            strategy.exit("RUN", from_entry = "L", qty = _q3e, stop = close - _dist)
+
+if can_short
+    _dist = atr_val * atr_mult
+    _q = f_plan_qty(_dist)
+    if _q >= 1
+        plan_rdist := _dist
+        plan_q  := _q
+        plan_q1 := math.max(1, int(math.floor(_q / 3.0)))
+        plan_q2 := math.max(1, int(math.floor(_q / 3.0)))
+        plan_dir := -1
+        run_stop := na
+        _why = short_trig_flip ? "flip" : short_trig_hidden ? "hidDiv" : short_trig_regular ? "regDiv" : "reclaim"
+        strategy.entry("S", strategy.short, qty = _q, comment = "S·" + _why + "·" + f_fmt(short_score, 0))
+        _q3e = _q - plan_q1 - plan_q2
+        strategy.exit("T1", from_entry = "S", qty = plan_q1, limit = close - t1_r * _dist, stop = close + _dist)
+        strategy.exit("T2", from_entry = "S", qty = plan_q2, limit = close - t2_r * _dist, stop = close + _dist)
+        if _q3e >= 1
+            strategy.exit("RUN", from_entry = "S", qty = _q3e, stop = close + _dist)
+
+in_long = strategy.position_size > 0
+in_short = strategy.position_size < 0
+avg = strategy.position_avg_price
+
+// Manage the open position: stop for every leg, T1/T2 limits, runner trail.
+if (in_long or in_short) and not na(plan_rdist) and plan_rdist > 0
+    _sgn = in_long ? 1.0 : -1.0
+    _stop0 = avg - _sgn * plan_rdist
+    _t1 = avg + _sgn * t1_r * plan_rdist
+    _t2 = avg + _sgn * t2_r * plan_rdist
+
+    if na(run_stop)
+        run_stop := _stop0
+
+    // T1 filled? position has shrunk below the full planned size.
+    _t1_filled = math.abs(strategy.position_size) < plan_q
+    if be_after_t1 and _t1_filled
+        run_stop := in_long ? math.max(run_stop, avg) : math.min(run_stop, avg)
+
+    // Chandelier trail once beyond the activation R (LeBeau; ratchets only).
+    _profit_r = _sgn * (close - avg) / plan_rdist
+    if use_trail and _profit_r >= trail_after_r
+        run_stop := in_long ? math.max(run_stop, ch_long_raw) : math.min(run_stop, ch_short_raw)
+
+    _from = in_long ? "L" : "S"
+    _q3 = plan_q - plan_q1 - plan_q2
+    strategy.exit("T1", from_entry = _from, qty = plan_q1, limit = _t1, stop = run_stop)
+    strategy.exit("T2", from_entry = _from, qty = plan_q2, limit = _t2, stop = run_stop)
+    if _q3 >= 1
+        strategy.exit("RUN", from_entry = _from, qty = _q3, stop = run_stop)
+
+// Regime exit trumps everything: flat when the state turns against you.
+regime_against_long = linked and (regime == -1 or (exit_on_neutral and regime == 0))
+regime_against_short = linked and (regime == 1 or (exit_on_neutral and regime == 0))
+if confirmed and in_long and regime_against_long
+    strategy.close("L", comment = "regime exit")
+if confirmed and in_short and regime_against_short
+    strategy.close("S", comment = "regime exit")
+
+// =============================================================================
+// 7 · Visuals
+// =============================================================================
+plot(show_avwap_plot and flip_on ? flip_vw : na, "Flip AVWAP", color = color.new(c_rf, 0), linewidth = 2, style = plot.style_linebr)
+p_vz_lo = plot(show_avwap_plot and flip_on and not na(flip_sd) ? flip_vw - flip_sd : na, "Value zone low", color = color.new(c_rf, 75), linewidth = 1, style = plot.style_linebr)
+p_vz_hi = plot(show_avwap_plot and flip_on ? flip_vw : na, "Value zone top", color = na, style = plot.style_linebr, display = display.none)
+fill(p_vz_hi, p_vz_lo, color = show_avwap_plot ? color.new(c_rf, 92) : na, title = "Long value zone")
+
+plotshape(show_trig_marks and can_long, title = "Long entry signal", style = shape.triangleup, location = location.belowbar, color = color.new(c_bull, 0), size = size.small)
+plotshape(show_trig_marks and can_short, title = "Short entry signal", style = shape.triangledown, location = location.abovebar, color = color.new(c_bear, 0), size = size.small)
+plot(strategy.position_size != 0 ? run_stop : na, "Active stop", color = color.new(c_trail, 20), linewidth = 1, style = plot.style_linebr)
+
+// =============================================================================
+// HUD
+// =============================================================================
+var table dash = table.new(f_pos(hud_pos_in), 4, hud_mode == "Full" ? 5 : 1,
+     bgcolor = hud_mode == "Off" ? color.new(c_panel, 100) : c_panel,
+     frame_color = hud_mode == "Off" ? color.new(c_frame, 100) : c_frame,
+     frame_width = 1, border_color = color.new(color.white, 92), border_width = 1)
+
+f_cell(_c, _r, _txt, _col, _bg) =>
+    table.cell(dash, _c, _r, _txt, text_color = _col, bgcolor = _bg, text_size = size.tiny, text_halign = text.align_center)
+
+if barstate.islast and hud_mode != "Off"
+    _reg_txt = not linked ? "LINK?" : regime == 1 ? "BULL" : regime == -1 ? "BEAR" : "NEUT"
+    _reg_col = not linked ? c_bear : regime == 1 ? c_bull : regime == -1 ? c_bear : c_neutral
+    _rs_txt = na(mans) ? "RS n/a" : rs_leader ? "LEAD" : rs_laggard ? "LAG" : mans > 0 ? "RS+" : "RS-"
+    _pos_txt = in_long ? "LONG " + f_fmt(plan_dir == 1 and plan_rdist > 0 ? (close - avg) / plan_rdist : na, 1) + "R" :
+         in_short ? "SHORT " + f_fmt(plan_dir == -1 and plan_rdist > 0 ? (avg - close) / plan_rdist : na, 1) + "R" : "FLAT"
+    _n = strategy.closedtrades
+    _n_txt = "n=" + str.tostring(_n) + (_n < 30 ? " (anecdote)" : "")
+
+    f_cell(0, 0, _reg_txt, c_text, color.new(_reg_col, 40))
+    f_cell(1, 0, _rs_txt, c_text, c_cell)
+    f_cell(2, 0, _pos_txt, c_text, c_cell2)
+    f_cell(3, 0, _n_txt, _n < 30 ? c_dim : c_text, c_cell)
+
+    if hud_mode == "Full"
+        f_cell(0, 1, "score L " + f_fmt(long_score, 0), c_dim, c_panel)
+        f_cell(1, 1, "min " + str.tostring(min_score), c_faint, c_panel)
+        f_cell(2, 1, "AVWAP " + (flip_on ? f_price(flip_vw) : "n/a"), c_dim, c_panel)
+        f_cell(3, 1, above_avwap ? "above" : below_avwap ? "below" : "-", c_dim, c_panel)
+        f_cell(0, 2, "Mans " + f_fmt(mans, 2) + "%", c_dim, c_panel)
+        f_cell(1, 2, "NH " + (rs_new_high ? "Y" : "-"), rs_new_high ? c_text : c_faint, c_panel)
+        f_cell(2, 2, "risk " + f_fmt(risk_pct * risk_scale, 2) + "%", c_dim, c_panel)
+        f_cell(3, 2, "stop ATRx" + f_fmt(atr_mult, 1), c_dim, c_panel)
+        f_cell(0, 3, "strength", c_faint, c_panel)
+        f_cell(1, 3, strength_valid ? f_fmt(strength_raw, 0) : "off", c_dim, c_panel)
+        f_cell(2, 3, "shorts", c_faint, c_panel)
+        f_cell(3, 3, allow_shorts ? "on" : "off", c_dim, c_panel)
+        f_cell(0, 4, "NOTE", c_faint, c_cell2)
+        f_cell(1, 4, "5 filters stacked", c_faint, c_cell2)
+        f_cell(2, 4, "= small sample", c_faint, c_cell2)
+        f_cell(3, 4, "sim only, no broker", c_faint, c_cell2)
+
+// =============================================================================
+// Alerts (fire on the signal bar close; orders fill next open)
+// =============================================================================
+alertcondition(can_long, title = "Confluence long signal", message = "Confluence Swing: long signal confirmed.")
+alertcondition(can_short, title = "Confluence short signal", message = "Confluence Swing: short signal confirmed.")
+alertcondition(regime_against_long and strategy.position_size > 0, title = "Regime exit (long)", message = "Regime turned against the open long.")
+
+if can_long
+    alert("Confluence Swing LONG signal | score=" + f_fmt(long_score, 0) +
+         " | RS=" + (rs_leader ? "LEAD" : f_fmt(mans, 2) + "%") +
+         " | AVWAP=" + f_price(flip_vw) + " | risk=" + f_fmt(risk_pct * risk_scale, 2) + "%",
+         alert.freq_once_per_bar_close)
+if can_short
+    alert("Confluence Swing SHORT signal | score=" + f_fmt(short_score, 0), alert.freq_once_per_bar_close)
+
+// =============================================================================
+// End of file
+// =============================================================================

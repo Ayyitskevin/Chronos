@@ -1,0 +1,127 @@
+{
+  "generated_at": "2026-07-17",
+  "generated_by": "Chronos data-engineering agent (Claude Code)",
+  "transport": {
+    "method": "Hugging Face MCP connector (server-side), hf_fs cat with --offset/--max-bytes chunked reads (80,000-byte max per call)",
+    "integrity": "Each source file reassembled byte-exactly from chunks; final chunk fetched with a deliberate overlap region that was byte-compared (cmp) against the preceding chunk; assembled byte count matched the repo-reported file size exactly.",
+    "note": "Direct HTTPS to huggingface.co and all finance sites is blocked by the egress proxy (403); only the server-side MCP connector was reachable. This restricted acquisition to plain-text (CSV/JSONL) files; parquet/zip datasets were not retrievable."
+  },
+  "files": {
+    "SPY.csv": {
+      "symbol": "SPY",
+      "description": "SPDR S&P 500 ETF Trust, daily OHLCV",
+      "source_dataset": "hf://datasets/mmirmomeni/spy_daily (file: train.jsonl)",
+      "source_url": "https://huggingface.co/datasets/mmirmomeni/spy_daily",
+      "source_file_bytes": 629596,
+      "source_file_sha256": "e20cd9764743799d39259dffa54286fc4a9cd5eefd5af7feca0cc6a595b930fa",
+      "source_format": "JSONL with fields Date, Price (close), Open, High, Low, Vol. (string, millions, 2 decimal places), Change % - Investing.com-style export",
+      "license_note": "No license declared on the dataset card (repo has no README). Upstream provenance appears to be an Investing.com historical-data export. Treat as research-use only; redistribution rights unclear.",
+      "retrieval": "hf_fs cat in 8 chunks of <=80,000 bytes (offsets 0..480000 step 80000, final chunk at 549596), reassembled byte-exactly; 10,404-byte overlap verified identical; total 629,596 bytes matched source size.",
+      "transform": "Parsed JSONL; renamed Price->close; volume converted from 'NN.NNM' millions-string to integer shares (x1,000,000); sorted ascending by date; wrote CSV.",
+      "output_sha256": "c533cf2db5758dce6d02cd88f85edf48e5e2f383edf1f215557934dc095961e5",
+      "output_bytes": 242332,
+      "row_count": 5000,
+      "date_range": ["2000-01-03", "2019-11-14"],
+      "columns": ["date", "open", "high", "low", "close", "volume"],
+      "adjusted": "UNADJUSTED prices (as-traded). No adjusted close available in source. SPY has had no splits in this window, so prices are split-consistent; they are NOT dividend-adjusted.",
+      "validation": {
+        "parseable_csv": true,
+        "duplicate_dates": 0,
+        "non_increasing_dates": 0,
+        "weekend_dates": 0,
+        "ohlc_invariant_violations": 0,
+        "non_positive_prices": 0,
+        "negative_volumes": 0,
+        "calendar_gaps": "Only multi-day gap is 2001-09-10 -> 2001-09-17 (post-9/11 market closure, historically correct). Rows/year 248-253, consistent with NYSE calendar (2012=250, Hurricane Sandy).",
+        "spot_checks": {
+          "2009-03-09 close": "68.11 (matches widely known GFC-bottom close of 68.11)",
+          "2009-03-06 low": "67.10 (matches known intraday low ~67.10)",
+          "2010-01-04 close": "113.33 (matches known value)",
+          "2013-01-02 close": "146.06 (matches known value)"
+        }
+      },
+      "cross_check": {
+        "against": "hf://datasets/zexianli/nasdaq_data price_movement/SPY.csv (FNSPID-derived, yfinance lineage - independent of Investing.com)",
+        "rows_compared": 8,
+        "fields": ["open", "close"],
+        "dates": ["2019-11-14", "2019-11-13", "2019-11-12", "2019-11-11", "2019-11-08", "2019-06-14", "2019-03-11", "2019-02-08"],
+        "max_abs_deviation": 1.3e-05,
+        "verdict": "Penny-exact agreement (deviations are float32 representation noise in the reference)."
+      },
+      "caveats": [
+        "Coverage ENDS 2019-11-14 (exactly 5,000 rows - the uploader appears to have hit an Investing.com 5,000-row export cap). 2019-11-15 through 2024 could NOT be obtained in trustworthy OHLCV text form; see DATA_SOURCES.md.",
+        "Volume is quantized to 10,000-share precision (source reports millions with 2 decimals); volume was not independently cross-checked (the cross-check source drops volume), and vendors differ in consolidated-vs-primary volume conventions.",
+        "No adj_close column; dividends are not reflected in prices."
+      ]
+    },
+    "QQQ.csv": {
+      "symbol": "QQQ",
+      "description": "Invesco QQQ Trust (Nasdaq-100 ETF), daily OHLCV plus adjusted close",
+      "source_dataset": "hf://datasets/Maxim37/timeseries-QQQ-1d-25yr (file: QQQ_data.csv)",
+      "source_url": "https://huggingface.co/datasets/Maxim37/timeseries-QQQ-1d-25yr",
+      "source_file_bytes": 446687,
+      "source_file_sha256": "b583e11bd0a6997dd295e3cf2466a239023a93fd6847c83b762055d6167105a2",
+      "source_format": "CSV: timestamp,open,high,low,close,adjusted_close,volume,dividend_amount,split_coefficient (Alpha Vantage TIME_SERIES_DAILY_ADJUSTED layout), reverse-chronological",
+      "license_note": "No license declared on the dataset card. Layout matches an Alpha Vantage daily-adjusted export re-uploaded to HF. Treat as research-use only; redistribution rights unclear.",
+      "retrieval": "hf_fs cat in 6 chunks of <=80,000 bytes (offsets 0..320000 step 80000, final chunk at 366687), reassembled byte-exactly; 33,313-byte overlap verified identical; total 446,687 bytes matched source size.",
+      "transform": "Parsed CSV; sorted ascending by date; kept open/high/low/close/volume and adjusted_close (renamed adj_close); dropped dividend_amount/split_coefficient columns after using them for validation.",
+      "output_sha256": "e5149b24a5c518252395bab1ff5df290d51bc74700a63ea1083bc63621f1e272",
+      "output_bytes": 385774,
+      "row_count": 6087,
+      "date_range": ["1999-11-01", "2024-01-10"],
+      "columns": ["date", "open", "high", "low", "close", "volume", "adj_close"],
+      "adjusted": "open/high/low/close are UNADJUSTED (as-traded). adj_close is split- AND dividend-adjusted (Alpha Vantage convention, anchored so adj_close == close on the final row, 2024-01-10). Volume is as-reported (not split-adjusted).",
+      "validation": {
+        "parseable_csv": true,
+        "duplicate_dates": 0,
+        "non_increasing_dates": 0,
+        "weekend_dates": 0,
+        "ohlc_invariant_violations": 0,
+        "non_positive_prices": 0,
+        "negative_volumes": 0,
+        "adj_close_gt_close_rows": 0,
+        "dividend_rows": 78,
+        "splits_detected": [["2000-03-20", 2.0]],
+        "split_consistency": "Raw close 221.60 (2000-03-17) -> 107.70 (2000-03-20) across the historical 2:1 split, while adj_close is continuous (94.73 -> 92.08). Correct.",
+        "calendar_gaps": "Only multi-day gap is 2001-09-10 -> 2001-09-17 (post-9/11 closure). Rows/year 248-253, consistent with exchange calendar.",
+        "spot_checks": {
+          "2023-12-29 close": "409.52 (matches known year-end 2023 value)",
+          "2020-03-23 close": "170.46 (matches known COVID-bottom value; dividend 0.3627 ex-date also correct)",
+          "2009-03-09 close": "25.74 (matches known GFC-bottom value)",
+          "2010-01-04 close": "46.42 (matches known value)"
+        }
+      },
+      "cross_check": {
+        "against": "hf://datasets/zexianli/nasdaq_data price_movement/QQQ.csv (FNSPID-derived, yfinance lineage - independent of Alpha Vantage)",
+        "rows_compared": 7,
+        "fields": ["open", "close"],
+        "dates": ["2023-12-28", "2023-12-27", "2023-12-26", "2023-12-22", "2023-12-21", "2023-12-20", "2023-12-19"],
+        "max_abs_deviation": 1.3e-05,
+        "verdict": "Penny-exact agreement (deviations are float32 representation noise in the reference)."
+      },
+      "caveats": [
+        "Coverage ends 2024-01-10 (dataset upload date); Feb-Dec 2024 not included.",
+        "adj_close is anchored to the 2024-01-10 download date; re-anchoring is needed if merging with newer data.",
+        "Volume not independently cross-checked."
+      ]
+    }
+  },
+  "gaps": {
+    "IWM": "NOT ACQUIRED. No non-gated plain-text (CSV/JSONL) daily OHLCV source found on Hugging Face Hub. Adjusted-CLOSE-only series (2008-2026) exists in hf://datasets/P2SAMAPA/etf_trend_data (market_data.csv), and full OHLCV exists only in parquet (P2SAMAPA repos, younginpiniti/us-stocks-daily-all) or gated form (paperswithbacktest/ETFs-Daily-Price) - none retrievable over the text-only MCP transport.",
+    "DIA": "NOT ACQUIRED. No text OHLCV source found; DIA is absent even from the adjusted-close panels found (P2SAMAPA market_data.csv does not include it). Open/close-only (no high/low/volume) history to 2023-12 exists in zexianli/nasdaq_data price_movement/DIA.csv (assumed present; per-symbol layout confirmed for SPY/QQQ).",
+    "GLD": "NOT ACQUIRED (same reasons as IWM; adjusted close 2008-2026 available in P2SAMAPA market_data.csv only).",
+    "TLT": "NOT ACQUIRED (same reasons as IWM; adjusted close 2008-2026 available in P2SAMAPA market_data.csv only).",
+    "SPY_2019_2024": "SPY OHLCV after 2019-11-14 not acquired in trustworthy text form (open/close-only continuation to 2023-12-28 exists in zexianli/nasdaq_data).",
+    "policy": "No synthetic, interpolated, or spliced data was written. Every row in the delivered CSVs is a byte-exact transform of a single upstream source."
+  },
+  "intraday_probe": {
+    "finding": "Real US-equity intraday data DOES exist on the Hub in plain CSV.",
+    "sample": "hf://datasets/Maxim37/timeseries-1m-QQQ-5y (QQQ_2019-2024.csv, 65.5 MB CSV): 1-minute OHLCV bars incl. pre-market (04:00 ET), header Timestamp,Open,High,Low,Close,Volume; first bars 2019-01-02 04:00 at ~145.16, plausible for QQQ. Only an 800-byte sample was downloaded.",
+    "also_noted": [
+      "hf://datasets/Maxim37/timeseries-1m-QQQ-10y (parquet, 1-minute QQQ 10y)",
+      "hf://datasets/brandonyeequon/stock-market-data-warehouse (15-minute bars for US stocks, organized by sector)",
+      "hf://datasets/jwigginton/timeseries-1mn-sp500 (parquet, 1-minute S&P 500 constituents)",
+      "hf://datasets/thillsss/SPX-MES-VIX-data (SPX/MES futures + VIX, updated 2026-07)"
+    ]
+  }
+}

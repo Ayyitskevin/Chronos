@@ -1,0 +1,185 @@
+//@version=6
+// =============================================================================
+// Expectancy Journal Module v1.1 (5T Pine Suite · Tranche 3)
+// Per-setup performance journal keyed off setup-encoded entry IDs (the L1P /
+// S1F convention). Section A below is a THROWAWAY demo strategy so this file
+// compiles standalone — replace it with your strategy, or copy Section B to
+// the bottom of Markov Regime BULL+/BEAR+ v1.0.
+// Reports per setup-suffix: n, win rate + Wilson lower bound, profit factor,
+// average P/L, net, and best-trade dependency. Closed legs only (non-repaint).
+// Decision support — not advice.
+// -----------------------------------------------------------------------------
+// v1.1 changelog (2026-07-11):
+//   · FIX (attribution contract): setup keys were built from the entry ID's
+//     LAST CHARACTER only, so legacy bare IDs ("S1"/"S2"/"S3"/"L1") split into
+//     fake per-leg-digit families. v1.1 parses side (first char) + leg digits
+//     + trailing suffix: "L1P"/"L2P" → L·P, "S1F" → S·F, and every bare ID
+//     groups into ONE side·• family. Natively attributes the long P/R/A/B and
+//     short F/B/R families plus AIO v3.6's optional S1F/S1B/S1R/S1X scheme.
+//   · FIX (overflow honesty): the table hard-capped at 8 setup families and
+//     silently dropped the rest. Cap is now 12 AND anything beyond capacity
+//     accumulates into a visible OTHER row (n + net) — no silent drops.
+//   · PERF: the closed-trade scan (up to 9000 iterations) re-runs only when
+//     strategy.closedtrades changes, not on every tick; table persists.
+//   · FIX: table.merge_cells is once-guarded.
+//   · Section A demo strategy and section markers unchanged — Section B is
+//     still the graft.
+//   · Evidence label: needs user run.
+// =============================================================================
+strategy("Expectancy Journal Module v1.1", shorttitle = "Journal v1.1", overlay = true,
+     initial_capital = 100000, commission_type = strategy.commission.percent, commission_value = 0.03,
+     slippage = 2, calc_on_every_tick = false, process_orders_on_close = false)
+
+// =============================================================================
+// SECTION A · DEMO STRATEGY — REPLACE ME (exists only so the journal has food)
+// =============================================================================
+demo_fast = ta.ema(close, 9)
+demo_slow = ta.ema(close, 21)
+if barstate.isconfirmed and ta.crossover(demo_fast, demo_slow)
+    strategy.entry("L1D", strategy.long, comment = "L1D · demo")
+if barstate.isconfirmed and ta.crossunder(demo_fast, demo_slow)
+    strategy.close("L1D", comment = "demo exit")
+// ======================= END SECTION A · DEMO ================================
+
+// =============================================================================
+// SECTION B · THE JOURNAL — copy from here down into your strategy
+// =============================================================================
+grp_j = "9 · Expectancy Journal"
+j_max_trades = input.int(3000, "Max closed legs to scan", minval = 100, maxval = 9000, group = grp_j)
+j_min_n = input.int(20, "Small-sample warning below n", minval = 5, maxval = 500, group = grp_j)
+j_pos_in = input.string("top_left", "Journal position", options = ["top_left", "top_center", "top_right", "bottom_left", "bottom_center", "bottom_right"], group = grp_j)
+
+cJ_panel = color.new(#141a22, 0)
+cJ_cell = color.new(#1b2430, 0)
+cJ_cell2 = color.new(#20293a, 0)
+cJ_frame = color.new(#2e4a66, 0)
+cJ_text = color.new(#e8edf2, 0)
+cJ_dim = color.new(#9fb0c0, 0)
+cJ_faint = color.new(#5a6572, 0)
+cJ_bull = color.new(#1e9e6a, 0)
+cJ_bear = color.new(#e5484d, 0)
+
+fJ_pos(_s) =>
+    _s == "top_left" ? position.top_left : _s == "top_center" ? position.top_center :
+     _s == "top_right" ? position.top_right : _s == "bottom_left" ? position.bottom_left :
+     _s == "bottom_center" ? position.bottom_center : position.bottom_right
+
+fJ_fmt(_v, _dp) =>
+    na(_v) ? "n/a" : str.tostring(_v, _dp == 0 ? "#" : _dp == 1 ? "#.#" : "#.##")
+
+fJ_money(_v) =>
+    na(_v) ? "n/a" : (_v < 0 ? "-$" : "$") + str.tostring(math.abs(_v), "#,###")
+
+fJ_wilson_lo(_p, _n) =>
+    _n <= 0 or na(_p) ? float(na) :
+     (_p + 1.96 * 1.96 / (2 * _n) - 1.96 * math.sqrt((_p * (1 - _p) + 1.96 * 1.96 / (4 * _n)) / _n)) / (1 + 1.96 * 1.96 / _n)
+
+fJ_pf_txt(_gp, _gl) =>
+    _gl > 0 ? str.tostring(_gp / _gl, "#.##") : _gp > 0 ? "inf" : "n/a"
+
+// v1.1 parse: side char, then leg digits, then setup suffix ("L1P" → "P",
+// "S1F" → "F"). Bare legacy IDs that end at the digits ("S1", "L2") return
+// "•" so ALL legacy legs group into ONE side·• family.
+fJ_suffix(_id) =>
+    int _len = str.length(_id)
+    string _sfx = "•"
+    if _len > 1
+        int _i = 1
+        while _i < _len and str.contains("0123456789", str.substring(_id, _i, _i + 1))
+            _i += 1
+        if _i < _len
+            _sfx := str.substring(_id, _i)
+    _sfx
+
+var table jt = table.new(fJ_pos(j_pos_in), 8, 15, bgcolor = cJ_panel, frame_color = cJ_frame,
+     frame_width = 1, border_color = color.new(color.white, 92), border_width = 1)
+var bool jt_merged = false
+var int last_scanned = -1
+
+fJ_cell(_c, _r, _txt, _tc, _bg) =>
+    table.cell(jt, _c, _r, _txt, text_color = _tc, bgcolor = _bg, text_size = size.small)
+
+if barstate.islast and strategy.closedtrades != last_scanned
+    last_scanned := strategy.closedtrades
+    // dynamic setup-key discovery: side (first char) + leg digits + suffix (v1.1)
+    keys = array.new_string()
+    k_n = array.new_int()
+    k_w = array.new_int()
+    k_gp = array.new_float()
+    k_gl = array.new_float()
+    k_net = array.new_float()
+    k_best = array.new_float()
+    int other_n = 0
+    float other_net = 0.0
+    int _tot = strategy.closedtrades
+    int _first = math.max(0, _tot - j_max_trades)
+    if _tot > 0
+        for i = _first to _tot - 1
+            _id = strategy.closedtrades.entry_id(i)
+            _p = strategy.closedtrades.profit(i)
+            _side = str.startswith(_id, "S") ? "S" : "L"
+            _sfx = fJ_suffix(_id)
+            _key = _side + "·" + _sfx
+            int _ki = array.indexof(keys, _key)
+            if _ki < 0 and array.size(keys) < 12
+                array.push(keys, _key)
+                array.push(k_n, 0)
+                array.push(k_w, 0)
+                array.push(k_gp, 0.0)
+                array.push(k_gl, 0.0)
+                array.push(k_net, 0.0)
+                array.push(k_best, 0.0)
+                _ki := array.size(keys) - 1
+            if _ki >= 0
+                array.set(k_n, _ki, array.get(k_n, _ki) + 1)
+                array.set(k_net, _ki, array.get(k_net, _ki) + _p)
+                if _p > 0
+                    array.set(k_w, _ki, array.get(k_w, _ki) + 1)
+                    array.set(k_gp, _ki, array.get(k_gp, _ki) + _p)
+                    if _p > array.get(k_best, _ki)
+                        array.set(k_best, _ki, _p)
+                else if _p < 0
+                    array.set(k_gl, _ki, array.get(k_gl, _ki) + math.abs(_p))
+            else
+                other_n += 1
+                other_net += _p
+    fJ_cell(0, 0, "Journal", cJ_text, cJ_frame)
+    fJ_cell(1, 0, "n", cJ_text, cJ_frame)
+    fJ_cell(2, 0, "WR", cJ_text, cJ_frame)
+    fJ_cell(3, 0, "Wlo", cJ_text, cJ_frame)
+    fJ_cell(4, 0, "PF", cJ_text, cJ_frame)
+    fJ_cell(5, 0, "Avg", cJ_text, cJ_frame)
+    fJ_cell(6, 0, "Net", cJ_text, cJ_frame)
+    fJ_cell(7, 0, "BestDep", cJ_text, cJ_frame)
+    int _rows = array.size(keys)
+    if _rows == 0
+        fJ_cell(0, 1, "no closed legs yet", cJ_faint, cJ_cell)
+    else
+        for r = 0 to _rows - 1
+            _n = array.get(k_n, r)
+            _w = array.get(k_w, r)
+            _wr = _n > 0 ? _w * 1.0 / _n : float(na)
+            _wlo = fJ_wilson_lo(_wr, _n)
+            _net2 = array.get(k_net, r)
+            _bd = _net2 > 0 ? array.get(k_best, r) / _net2 * 100.0 : float(na)
+            _bg = r % 2 == 0 ? cJ_cell : cJ_cell2
+            _warn = _n < j_min_n
+            fJ_cell(0, r + 1, array.get(keys, r), str.startswith(array.get(keys, r), "S") ? cJ_bear : cJ_bull, _bg)
+            fJ_cell(1, r + 1, str.tostring(_n) + (_warn ? " !" : ""), _warn ? cJ_bear : cJ_dim, _bg)
+            fJ_cell(2, r + 1, fJ_fmt(_wr * 100, 0) + "%", cJ_dim, _bg)
+            fJ_cell(3, r + 1, fJ_fmt(_wlo * 100, 0) + "%", cJ_faint, _bg)
+            fJ_cell(4, r + 1, fJ_pf_txt(array.get(k_gp, r), array.get(k_gl, r)), cJ_dim, _bg)
+            fJ_cell(5, r + 1, fJ_money(_n > 0 ? _net2 / _n : na), cJ_dim, _bg)
+            fJ_cell(6, r + 1, fJ_money(_net2), _net2 >= 0 ? cJ_bull : cJ_bear, _bg)
+            fJ_cell(7, r + 1, fJ_fmt(_bd, 0) + "%", na(_bd) ? cJ_faint : _bd > 40 ? cJ_bear : cJ_faint, _bg)
+    if other_n > 0
+        fJ_cell(0, 13, "OTHER", cJ_faint, cJ_cell)
+        fJ_cell(1, 13, str.tostring(other_n), cJ_dim, cJ_cell)
+        fJ_cell(6, 13, fJ_money(other_net), other_net >= 0 ? cJ_bull : cJ_bear, cJ_cell)
+    fJ_cell(0, 14, "$ expectancy v1.1 · R-journal = graft into BULL+/BEAR+ (stop known at entry) · Wilson 95%", cJ_faint, cJ_panel)
+    if not jt_merged
+        table.merge_cells(jt, 0, 14, 7, 14)
+        jt_merged := true
+// ======================= END SECTION B · JOURNAL =============================
+// ============================= End of file ==================================
+// Expectancy Journal Module v1.1

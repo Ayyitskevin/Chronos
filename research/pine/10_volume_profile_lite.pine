@@ -1,0 +1,232 @@
+//@version=6
+// =============================================================================
+// Volume Profile Lite v1.1 (5T Pine Suite · Tranche 3)
+// Session-anchored volume-at-price APPROXIMATION: each confirmed bar's volume
+// is distributed evenly across the price bins its high-low range spans.
+// Provides POC / VAH / VAL (70% value area), acceptance state, and naked-POC
+// tracking (prior-day POCs never revisited). NOT tick data — TradingView's
+// built-in profile is the reference tool; this exists for exports and levels.
+// Non-repaint: bins accumulate on confirmed bars only. Not advice.
+// -----------------------------------------------------------------------------
+// v1.1 changelog (2026-07-11):
+//   · FIX (HIGH): naked-POC tracker was dead on arrival — on each new day it
+//     pushed the NEW day's first-bar POC (y_poc had already been overwritten
+//     before the push read it) and the touch loop saw that level inside the
+//     same bar's range, marking it touched instantly. v1.1 pushes the
+//     completed PRIOR day's final POC (day_final_poc snapshot, updated AFTER
+//     the push point) and never touch-checks a level on the bar it was born
+//     (np_born guard).
+//   · NEW: PROFILE_CLIPPED_EXPORT — 1.0 when the day's traded range exceeded
+//     the ±100-bin span (volume piles silently into edge bins on trend days);
+//     faint "clipped" tell appended to the HUD state cell. Display-layer
+//     only — bin math unchanged.
+//   · FIX: HUD state color used close > nz(vah), which read bullish while VAH
+//     was still na (warm-up). Coloring is now na-aware (na → dim).
+//   · NEW: "Naked POC touched" alertcondition (confirmed-gated first touch) +
+//     dynamic alert() with optional JSON payload, default OFF (v1.0 text
+//     behavior preserved).
+//   · Housekeeping: request.security() barmerge arguments now keyword-passed.
+//   · Evidence label: needs user run.
+// =============================================================================
+indicator("Volume Profile Lite v1.1", shorttitle = "VP Lite v1.1", overlay = true, max_boxes_count = 500, max_lines_count = 100)
+
+grp_vp = "1 · Profile"
+grp_dsp = "2 · Display"
+
+rows_target = input.int(40, "Target rows across daily ATR", minval = 10, maxval = 100, group = grp_vp,
+     tooltip = "Bin size auto-scales: prior-day ATR / this. Manual override below.")
+bin_manual = input.float(0.0, "Manual bin size (0 = auto)", minval = 0.0, step = 0.01, group = grp_vp)
+va_pct = input.float(70.0, "Value area %", minval = 50.0, maxval = 95.0, step = 5.0, group = grp_vp)
+track_npoc = input.bool(true, "Track naked POCs (prior days)", group = grp_vp)
+npoc_keep = input.int(15, "Naked POCs kept", minval = 3, maxval = 20, group = grp_vp)
+
+show_hist = input.bool(true, "Draw histogram (last bar)", group = grp_dsp)
+hist_width = input.int(30, "Histogram max width (bars)", minval = 10, maxval = 100, group = grp_dsp)
+hud_pos_in = input.string("bottom_right", "HUD position", options = ["top_left", "top_center", "top_right", "bottom_left", "bottom_center", "bottom_right"], group = grp_dsp)
+use_json_alerts = input.bool(false, "JSON alert payloads (webhook)", group = grp_dsp, tooltip = "OFF: human-readable alert text (v1.0 behavior). ON: machine-readable JSON for webhook automation. Display-layer only.")
+
+c_panel = color.new(#141a22, 0)
+c_cell = color.new(#1b2430, 0)
+c_frame = color.new(#2e4a66, 0)
+c_text = color.new(#e8edf2, 0)
+c_dim = color.new(#9fb0c0, 0)
+c_faint = color.new(#5a6572, 0)
+c_bull = color.new(#1e9e6a, 0)
+c_bear = color.new(#e5484d, 0)
+c_poc = color.new(#f5a623, 0)
+c_va = color.new(#7aa2f7, 0)
+
+f_pos(_s) =>
+    _s == "top_left" ? position.top_left : _s == "top_center" ? position.top_center :
+     _s == "top_right" ? position.top_right : _s == "bottom_left" ? position.bottom_left :
+     _s == "bottom_center" ? position.bottom_center : position.bottom_right
+
+f_fmt(_v, _dp) =>
+    na(_v) ? "n/a" : str.tostring(_v, _dp == 0 ? "#" : _dp == 1 ? "#.#" : "#.##")
+
+f_tcell(_t, _c, _r, _txt, _tc, _bg) =>
+    table.cell(_t, _c, _r, _txt, text_color = _tc, bgcolor = _bg, text_size = size.small)
+
+new_day = ta.change(time("D")) != 0
+d_atr = request.security(syminfo.tickerid, "D", ta.atr(14)[1], gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+var float anchor = na
+anchor := new_day ? open : anchor
+bin_sz = bin_manual > 0 ? bin_manual : math.max(syminfo.mintick, nz(d_atr) > 0 ? d_atr / rows_target : syminfo.mintick * 10)
+NB = 201
+CTR = 100
+
+f_idx(_p) =>
+    na(anchor) or bin_sz <= 0 ? -1 : math.max(0, math.min(NB - 1, CTR + math.round((_p - anchor) / bin_sz)))
+
+var array<float> bins = array.new_float(NB, 0.0)
+var int lo_seen = CTR
+var int hi_seen = CTR
+var bool day_clipped = false
+if new_day
+    array.fill(bins, 0.0)
+    lo_seen := CTR
+    hi_seen := CTR
+    day_clipped := false
+if barstate.isconfirmed and not na(anchor) and volume > 0
+    _il = f_idx(low)
+    _ih = f_idx(high)
+    if _il >= 0 and _ih >= _il
+        _n = _ih - _il + 1
+        _per = volume / _n
+        for i = _il to _ih
+            array.set(bins, i, array.get(bins, i) + _per)
+        lo_seen := math.min(lo_seen, _il)
+        hi_seen := math.max(hi_seen, _ih)
+// ---- Edge-clip tell (v1.1): raw (unclamped) bin index outside the span ----
+if barstate.isconfirmed and not na(anchor) and bin_sz > 0
+    _raw_lo = CTR + math.round((low - anchor) / bin_sz)
+    _raw_hi = CTR + math.round((high - anchor) / bin_sz)
+    if _raw_lo < 0 or _raw_hi > NB - 1
+        day_clipped := true
+
+// ---- POC / VA (recomputed each bar from bins) ----
+float tot = array.sum(bins)
+int poc_i = -1
+float poc_v = 0.0
+for i = lo_seen to hi_seen
+    _v = array.get(bins, i)
+    if _v > poc_v
+        poc_v := _v
+        poc_i := i
+float va_cum = poc_v
+int va_lo = poc_i
+int va_hi = poc_i
+if poc_i >= 0 and tot > 0
+    while va_cum < tot * va_pct / 100.0 and (va_lo > lo_seen or va_hi < hi_seen)
+        _up = va_hi < hi_seen ? array.get(bins, va_hi + 1) : -1.0
+        _dn = va_lo > lo_seen ? array.get(bins, va_lo - 1) : -1.0
+        if _up >= _dn
+            va_hi += 1
+            va_cum += math.max(_up, 0.0)
+        else
+            va_lo -= 1
+            va_cum += math.max(_dn, 0.0)
+f_price_of(_i) =>
+    _i < 0 or na(anchor) ? float(na) : anchor + (_i - CTR) * bin_sz
+poc = f_price_of(poc_i)
+vah = f_price_of(va_hi) + bin_sz / 2
+val = f_price_of(va_lo) - bin_sz / 2
+in_va = not na(vah) and not na(val) and close <= vah and close >= val
+va_state = na(vah) ? "n/a" : close > vah ? "ABOVE VALUE" : close < val ? "BELOW VALUE" : "IN VALUE"
+
+// ---- Naked POC tracking ----
+var array<float> np_p = array.new_float()
+var array<int> np_t = array.new_int()
+var array<int> np_born = array.new_int()
+var float day_final_poc = na
+// v1.1: push the completed PRIOR day's final POC (the snapshot below updates
+// AFTER this push runs), and never touch-check a level on the bar it is born.
+if new_day and track_npoc and not na(day_final_poc)
+    array.push(np_p, day_final_poc)
+    array.push(np_t, 0)
+    array.push(np_born, bar_index)
+    if array.size(np_p) > npoc_keep
+        array.shift(np_p)
+        array.shift(np_t)
+        array.shift(np_born)
+if barstate.isconfirmed
+    day_final_poc := poc
+bool npoc_touched = false
+float npoc_touch_p = na
+if barstate.isconfirmed and track_npoc and array.size(np_p) > 0
+    for k = 0 to array.size(np_p) - 1
+        if array.get(np_t, k) == 0 and array.get(np_born, k) < bar_index and low <= array.get(np_p, k) and high >= array.get(np_p, k)
+            array.set(np_t, k, 1)
+            npoc_touched := true
+            npoc_touch_p := array.get(np_p, k)
+float np_nearest = na
+int np_count = 0
+if array.size(np_p) > 0
+    for k = 0 to array.size(np_p) - 1
+        if array.get(np_t, k) == 0
+            np_count += 1
+            _d = math.abs(array.get(np_p, k) - close)
+            if na(np_nearest) or _d < math.abs(np_nearest - close)
+                np_nearest := array.get(np_p, k)
+
+// ---- Drawings (last bar only) ----
+var array<box> hb = array.new<box>()
+var array<line> nl = array.new<line>()
+if barstate.islast
+    while array.size(hb) > 0
+        box.delete(array.pop(hb))
+    while array.size(nl) > 0
+        line.delete(array.pop(nl))
+    if show_hist and poc_v > 0
+        for i = lo_seen to hi_seen
+            _v = array.get(bins, i)
+            if _v > 0
+                _w = math.max(1, math.round(_v / poc_v * hist_width))
+                _y1 = f_price_of(i) + bin_sz * 0.45
+                _y2 = f_price_of(i) - bin_sz * 0.45
+                _in = i >= va_lo and i <= va_hi
+                array.push(hb, box.new(bar_index + 3, _y1, bar_index + 3 + _w, _y2,
+                     border_color = color.new(color.white, 100),
+                     bgcolor = i == poc_i ? color.new(c_poc, 30) : _in ? color.new(c_va, 70) : color.new(c_faint, 80)))
+    if track_npoc and array.size(np_p) > 0
+        for k = 0 to array.size(np_p) - 1
+            if array.get(np_t, k) == 0
+                array.push(nl, line.new(bar_index - 150, array.get(np_p, k), bar_index + 2, array.get(np_p, k),
+                     color = color.new(c_poc, 45), style = line.style_dotted))
+
+plot(poc, "POC", color = c_poc, linewidth = 2, style = plot.style_linebr)
+plot(vah, "VAH", color = color.new(c_va, 40), style = plot.style_linebr)
+plot(val, "VAL", color = color.new(c_va, 40), style = plot.style_linebr)
+
+plot(poc, "POC_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(vah, "VAH_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(val, "VAL_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(in_va ? 1.0 : 0.0, "IN_VA_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(np_nearest, "NAKED_NEAREST_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(float(np_count), "NAKED_COUNT_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(day_clipped ? 1.0 : 0.0, "PROFILE_CLIPPED_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+
+var table hud = table.new(f_pos(hud_pos_in), 2, 4, bgcolor = c_panel, frame_color = c_frame,
+     frame_width = 1, border_color = color.new(color.white, 92), border_width = 1)
+if barstate.islast
+    f_tcell(hud, 0, 0, "VP Lite*", c_text, c_frame)
+    f_tcell(hud, 1, 0, va_state + (day_clipped ? " · clipped" : ""), na(vah) or na(val) ? c_dim : close > vah ? c_bull : close < val ? c_bear : c_dim, c_cell)
+    f_tcell(hud, 0, 1, "POC / VA", c_dim, c_panel)
+    f_tcell(hud, 1, 1, f_fmt(poc, 2) + " · " + f_fmt(val, 2) + "–" + f_fmt(vah, 2), c_dim, c_cell)
+    f_tcell(hud, 0, 2, "Naked POCs", c_dim, c_panel)
+    f_tcell(hud, 1, 2, str.tostring(np_count) + " open · nearest " + f_fmt(np_nearest, 2), np_count > 0 ? c_poc : c_faint, c_cell)
+    f_tcell(hud, 0, 3, "*bar-based approx", c_faint, c_panel)
+    f_tcell(hud, 1, 3, "not tick data", c_faint, c_panel)
+
+cross_poc = barstate.isconfirmed and not na(poc) and ((close > poc and close[1] <= poc) or (close < poc and close[1] >= poc))
+leave_va = barstate.isconfirmed and not in_va and nz(in_va[1] ? 1 : 0) == 1
+alertcondition(cross_poc, "POC cross", "VP Lite: confirmed close crossed the POC")
+alertcondition(leave_va, "Left value area", "VP Lite: confirmed close left the value area")
+alertcondition(npoc_touched, "Naked POC touched", "VP Lite: a naked prior-day POC was first touched (confirmed)")
+if npoc_touched
+    _msg = use_json_alerts ?
+         '{"ev":"npoc_touch","sym":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","poc":' + (na(npoc_touch_p) ? "null" : f_fmt(npoc_touch_p, 2)) + ',"t":' + str.tostring(time) + '}' :
+         "VP Lite: naked POC touched @ " + f_fmt(npoc_touch_p, 2)
+    alert(_msg, alert.freq_once_per_bar_close)
+// ============================= End of file ==================================
+// Volume Profile Lite v1.1

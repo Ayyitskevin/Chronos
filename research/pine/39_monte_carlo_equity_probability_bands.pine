@@ -1,0 +1,258 @@
+//@version=6
+// =============================================================================
+// Monte Carlo Option-Inspired Equity Probability Bands v1.0 (5T Pine Suite · Desk Kit)
+//
+// "MONTE CARLO"? READ THIS FIRST — THE HONESTY IS THE HEADLINE.
+// Despite the genre name this tool carries, NOTHING here is simulated. No
+// random paths are drawn. These are ANALYTIC LOGNORMAL (GBM) QUANTILE BANDS
+// — the same closed-form geometry that prices options:
+//     band(q) = S · exp(m·k + z_q · sigma · sqrt(k))
+// for quantiles 5 / 25 / 50 / 75 / 95 at a horizon of k bars, where sigma is
+// an EWMA realized volatility per bar and the log-drift m is −sigma²/2 by
+// default (zero expected arithmetic return — the option-pricing geometry
+// with rate zero). A Monte Carlo simulation of GBM with enough paths would
+// converge to exactly these lines; drawing the lines directly is the same
+// claim with less theater.
+//
+// AND THE CLAIM ITSELF IS WRONG IN A KNOWN DIRECTION. Real returns have
+// fatter tails than the lognormal assumes (Mandelbrot 1963; Fama 1965;
+// Cont 2001, stylized facts), so real 5/95 exceedances WILL tend to run
+// above nominal — see the suite's Tail-Risk filter for the dedicated lens.
+// This tool MEASURES its own miscalibration instead of hiding it: every
+// confirmed bar it looks up the band projected k bars ago and scores whether
+// today's close landed inside. Observed coverage vs the nominal 90% (with a
+// Wilson 95% lower bound) is the calibration star of the HUD. If it reads
+// 82% here, the model under-covers here, and the HUD says so in words.
+//
+// RESEARCH BASIS, stated plainly.
+// Lognormal price geometry: Black & Scholes (1973), Merton (1973).
+// Fat-tail critique: as above. Educational framing inspired by the Quant
+// Guild channel's option-math and simulation episodes. Honesty points:
+//   1. Quantile bands are NOT forecasts and NOT support/resistance. They
+//      are where a thin-tailed model says price "should" wander.
+//   2. sigma is measured per bar from this chart (Wilder-smoothed EWMA of
+//      squared log returns, zero-mean proxy); the annualized figure shown
+//      on the HUD uses a disclosed bars-per-year approximation — display
+//      only, the band math never touches it.
+//   3. The optional drift toggle recenters the fan on the historical mean
+//      log return — mostly estimation noise at desk horizons. Leave it off.
+//
+// Non-repaint: sigma, projections, and coverage scoring advance on confirmed
+// bars only; the drawn fan re-anchors to the last confirmed bar. Decision
+// support only — a human places every trade. Risk controls outrank all
+// signals.
+//
+// v1.0 changelog (2026-07-17):
+//   Initial release. Analytic lognormal quantile bands (5/25/50/75/95) at a
+//   k-bar horizon from EWMA realized vol; drift OFF by default (toggle =
+//   historical mean log return, labeled estimation noise); forward fan
+//   drawn as lines from the last confirmed bar to bar+k with quantile
+//   labels (deleted/redrawn on the last bar); optional historical band-edge
+//   plots (default OFF); historical coverage self-check — every confirmed
+//   bar scores the k-bar-ago 5–95 band against the realized close, observed
+//   coverage vs nominal 90% with Wilson 95% lower bound and a plain-words
+//   verdict; band-escape alerts on confirmed closes outside the live
+//   (k-ago) band; data-window exports; JSON alerts (default OFF). Every
+//   behavior-adjacent option ships at its conservative default.
+//   Evidence label: needs user run.
+// =============================================================================
+indicator("Monte Carlo Option-Inspired Equity Probability Bands v1.0", shorttitle = "Prob Bands v1",
+     overlay = true, max_lines_count = 12, max_labels_count = 12)
+
+grp_mode = "0 · Mode"
+grp_vol  = "1 · Volatility Model"
+grp_proj = "2 · Projection"
+grp_cov  = "3 · Coverage Self-Check"
+grp_dsp  = "4 · Display"
+
+variant_tag = input.string("v1.0-base", "Variant tag (freeze-the-config discipline)", group = grp_mode,
+     tooltip = "Label this exact settings set. Any settings change = new tag = new variant with its own validation cycle. The tag prints on the HUD and in alerts so screenshots self-document.")
+
+vol_len = input.int(20, "EWMA vol length (bars)", minval = 5, maxval = 250, group = grp_vol,
+     tooltip = "sigma per bar = sqrt of the Wilder-smoothed (RMA) average of squared log returns — an EWMA realized-vol proxy that assumes zero mean. Shorter = reactive bands that whipsaw; longer = stable bands that lag vol shifts. A disclosed choice, not a truth.")
+use_drift = input.bool(false, "Recenter on historical mean log return (leave off)", group = grp_vol,
+     tooltip = "OFF (default): log-drift m = −sigma²/2 — zero expected arithmetic return, the option-pricing geometry with rate zero. ON: m = the mean log return over the drift window — at desk horizons this is mostly ESTIMATION NOISE and it recenters the whole fan on a guess. Leave it off.")
+drift_len = input.int(250, "Drift window (bars, if enabled)", minval = 20, maxval = 1000, group = grp_vol)
+sess_hours = input.float(6.5, "Session hours per day (annualized display only)", minval = 0.5, maxval = 24.0, step = 0.5, group = grp_vol,
+     tooltip = "Used ONLY for the HUD's annualized sigma figure via a bars-per-year approximation (252 sessions × this many hours intraday; 252/52/12 for D/W/M). 24h markets: set 24. The band math never touches this number.")
+
+k_horizon = input.int(20, "Projection horizon k (bars)", minval = 1, maxval = 200, group = grp_proj,
+     tooltip = "The fan projects k bars forward and the coverage check scores the band that was projected k bars ago. One k drives both, so the panel audits exactly what the chart draws.")
+
+min_cov_n = input.int(30, "Coverage sample warning (n)", minval = 5, maxval = 1000, group = grp_cov,
+     tooltip = "Below this count the coverage verdict carries the suite's thin-sample flag. The Wilson lower bound does the honesty work either way.")
+
+hud_mode = input.string("Full", "HUD mode", options = ["Off", "Micro", "Full"], group = grp_dsp)
+hud_pos_in = input.string("top_right", "HUD position", options = ["top_left", "top_center", "top_right", "bottom_left", "bottom_center", "bottom_right"], group = grp_dsp)
+show_proj = input.bool(true, "Draw forward quantile fan", group = grp_dsp)
+show_hist = input.bool(false, "Plot historical 5/95 band edges (k-ago projections)", group = grp_dsp,
+     tooltip = "Draws, at each bar, the 5% and 95% levels that were projected onto it k bars earlier — the envelope the coverage check scores against. OFF by default to keep the chart clean.")
+use_json_alerts = input.bool(false, "JSON alert payloads (webhook)", group = grp_dsp,
+     tooltip = "OFF: human-readable alert text. ON: machine-readable JSON for webhook automation. Display-layer only.")
+
+// =============================================================================
+// Palette & helpers (suite standard)
+// =============================================================================
+c_bull  = color.rgb(89, 159, 125)
+c_bear  = color.rgb(190, 96, 111)
+c_neut  = color.rgb(112, 126, 148)
+c_gold  = color.rgb(214, 162, 82)
+c_panel = color.new(#0E1316, 5)
+c_cell  = color.new(#151D22, 7)
+c_cell2 = color.new(#10171B, 9)
+c_frame = color.new(#5BD6B0, 88)
+c_text  = color.white
+c_dim   = color.new(color.white, 45)
+c_faint = color.new(color.white, 68)
+
+f_pos(_s) =>
+    switch _s
+        "top_left"      => position.top_left
+        "top_center"    => position.top_center
+        "top_right"     => position.top_right
+        "bottom_left"   => position.bottom_left
+        "bottom_center" => position.bottom_center
+        "bottom_right"  => position.bottom_right
+        => position.top_right
+f_fmt(_x, _d) =>
+    _m = math.pow(10.0, _d)
+    na(_x) ? "n/a" : str.tostring(math.round(_x * _m) / _m)
+f_tcell(_tbl, _c, _r, _txt, _col, _bg) =>
+    table.cell(_tbl, _c, _r, _txt, text_color = _col, bgcolor = _bg, text_size = size.tiny, text_halign = text.align_center)
+// Wilson score lower bound (z = 1.96), suite-standard honesty for hit rates.
+f_wilson_lo(_p, _n) =>
+    _n <= 0 or na(_p) ? float(na) :
+         (_p + 1.96 * 1.96 / (2 * _n) - 1.96 * math.sqrt((_p * (1 - _p) + 1.96 * 1.96 / (4 * _n)) / _n)) / (1 + 1.96 * 1.96 / _n)
+// Bars-per-year approximation for the annualized DISPLAY figure only.
+f_bpy() =>
+    float _sec = timeframe.in_seconds(timeframe.period)
+    timeframe.isintraday ? 252.0 * (sess_hours * 3600.0) / _sec :
+         timeframe.isdaily ? 252.0 / timeframe.multiplier :
+         timeframe.isweekly ? 52.0 / timeframe.multiplier :
+         timeframe.ismonthly ? 12.0 / timeframe.multiplier : 252.0
+
+// =============================================================================
+// Volatility model: EWMA (RMA) of squared log returns, zero-mean proxy
+// =============================================================================
+one_bar_ret = not na(close[1]) and close > 0 and close[1] > 0 ? math.log(close / close[1]) : float(na)
+sig2 = ta.rma(one_bar_ret * one_bar_ret, vol_len)
+sigma_bar = not na(sig2) and sig2 > 0 ? math.sqrt(sig2) : float(na)
+mu_hat = ta.sma(one_bar_ret, drift_len)
+sigma_ann_pct = not na(sigma_bar) ? sigma_bar * math.sqrt(f_bpy()) * 100.0 : float(na)
+
+// Normal quantile constants (z for 5/25/50/75/95): fixed, labeled.
+z05 = -1.6449
+z25 = -0.6745
+z75 = 0.6745
+z95 = 1.6449
+
+// =============================================================================
+// Projection + coverage self-check (confirmed bars only)
+//   Coverage FIRST reads the band stored k bars ago (its projection lands on
+//   this bar), THEN this bar's own projection is stored. Quantile levels are
+//   held in var series so [k] retrieves exactly what was projected then.
+// =============================================================================
+var float q05_v = na
+var float q25_v = na
+var float q50_v = na
+var float q75_v = na
+var float q95_v = na
+var int anchor_bar = na
+var float anchor_close = na
+var int cov_n = 0
+var int cov_in = 0
+bool breach_up = false
+bool breach_dn = false
+if barstate.isconfirmed and not na(sigma_bar) and close > 0
+    if not na(q05_v[k_horizon]) and not na(q95_v[k_horizon])
+        cov_n += 1
+        if close >= q05_v[k_horizon] and close <= q95_v[k_horizon]
+            cov_in += 1
+        else
+            breach_up := close > q95_v[k_horizon]
+            breach_dn := close < q05_v[k_horizon]
+    float _m = use_drift ? nz(mu_hat, 0.0) : -0.5 * sig2   // log-drift: −sigma²/2 (zero arithmetic drift) unless recentered
+    float _mk = _m * k_horizon
+    float _sk = sigma_bar * math.sqrt(float(k_horizon))
+    q05_v := close * math.exp(_mk + z05 * _sk)
+    q25_v := close * math.exp(_mk + z25 * _sk)
+    q50_v := close * math.exp(_mk)
+    q75_v := close * math.exp(_mk + z75 * _sk)
+    q95_v := close * math.exp(_mk + z95 * _sk)
+    anchor_bar := bar_index
+    anchor_close := close
+cov_pct = cov_n > 0 ? cov_in * 100.0 / cov_n : float(na)
+cov_wlo = cov_n > 0 ? f_wilson_lo(cov_in * 1.0 / cov_n, cov_n) * 100.0 : float(na)
+cov_verdict = na(cov_pct) ? "no sample yet" :
+     cov_pct < 88.0 ? "model under-covers — tails are fatter" :
+     cov_pct > 92.0 ? "over-covers (conservative here)" : "≈ nominal"
+
+// =============================================================================
+// Forward fan: lines + labels from the last confirmed anchor to anchor + k,
+// deleted and redrawn on the last bar (display layer only)
+// =============================================================================
+var array<line> fan_lines = array.new<line>()
+var array<label> fan_labels = array.new<label>()
+if barstate.islast
+    while array.size(fan_lines) > 0
+        line.delete(array.pop(fan_lines))
+    while array.size(fan_labels) > 0
+        label.delete(array.pop(fan_labels))
+    if show_proj and not na(anchor_close) and not na(q05_v)
+        _qs = array.from(q05_v, q25_v, q50_v, q75_v, q95_v)
+        _nm = array.from("5%", "25%", "50%", "75%", "95%")
+        for _i = 0 to 4
+            float _qv = array.get(_qs, _i)
+            color _lc = _i == 2 ? c_gold : _i == 0 or _i == 4 ? color.new(c_neut, 15) : color.new(c_neut, 45)
+            string _st = _i == 2 ? line.style_solid : _i == 0 or _i == 4 ? line.style_dashed : line.style_dotted
+            array.push(fan_lines, line.new(anchor_bar, anchor_close, anchor_bar + k_horizon, _qv, xloc = xloc.bar_index, color = _lc, style = _st, width = _i == 2 ? 2 : 1))
+            array.push(fan_labels, label.new(anchor_bar + k_horizon, _qv, array.get(_nm, _i) + " " + str.tostring(_qv, format.mintick), xloc = xloc.bar_index, style = label.style_label_left, textcolor = _i == 2 ? c_gold : c_dim, color = c_panel, size = size.tiny))
+
+// =============================================================================
+// Plots & exports (historical edges optional; exports always in data window)
+// =============================================================================
+plot(show_hist ? q05_v[k_horizon] : na, "Hist 5% edge (k-ago projection)", color = color.new(c_bear, 55), linewidth = 1, style = plot.style_linebr)
+plot(show_hist ? q95_v[k_horizon] : na, "Hist 95% edge (k-ago projection)", color = color.new(c_bull, 55), linewidth = 1, style = plot.style_linebr)
+
+plot(q05_v, "EPB_Q05_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(q50_v, "EPB_Q50_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(q95_v, "EPB_Q95_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(cov_pct, "EPB_COVERAGE_PCT_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(cov_n, "EPB_COVERAGE_N_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+
+// =============================================================================
+// HUD
+// =============================================================================
+var table hud = table.new(f_pos(hud_pos_in), 2, 6, bgcolor = c_panel, frame_color = c_frame,
+     frame_width = 1, border_color = color.new(color.white, 92), border_width = 1)
+if barstate.islast and hud_mode != "Off"
+    _state_txt = na(sigma_bar) ? "WARMING (vol model)" : "ANALYTIC BANDS · NOT SIMULATION"
+    f_tcell(hud, 0, 0, "Prob Bands " + variant_tag, c_text, c_frame)
+    f_tcell(hud, 1, 0, _state_txt, c_text, c_cell)
+    if hud_mode == "Full"
+        f_tcell(hud, 0, 1, "sigma (per bar · ann.*)", c_dim, c_panel)
+        f_tcell(hud, 1, 1, f_fmt(sigma_bar * 100.0, 2) + "% · " + f_fmt(sigma_ann_pct, 1) + "% ann (approx)", c_dim, c_cell)
+        f_tcell(hud, 0, 2, "Horizon · drift", c_dim, c_panel)
+        f_tcell(hud, 1, 2, "k = " + str.tostring(k_horizon) + " bars · " + (use_drift ? "drift ON (estimation noise)" : "zero drift"), use_drift ? c_gold : c_dim, c_cell)
+        f_tcell(hud, 0, 3, "Band (5 / 50 / 95)", c_dim, c_panel)
+        f_tcell(hud, 1, 3, (na(q05_v) ? "n/a" : str.tostring(q05_v, format.mintick)) + " / " + (na(q50_v) ? "n/a" : str.tostring(q50_v, format.mintick)) + " / " + (na(q95_v) ? "n/a" : str.tostring(q95_v, format.mintick)), c_dim, c_cell)
+        f_tcell(hud, 0, 4, "Coverage vs nominal 90%", c_dim, c_panel)
+        f_tcell(hud, 1, 4, "observed " + f_fmt(cov_pct, 0) + "% (Wlo " + f_fmt(cov_wlo, 0) + "%) · n=" + str.tostring(cov_n) + (cov_n < min_cov_n ? " !" : "") + " · " + cov_verdict, cov_n < min_cov_n ? c_faint : (na(cov_pct) or cov_pct >= 88.0 ? c_dim : c_gold), c_cell2)
+        f_tcell(hud, 0, 5, "*option-math geometry, not simulation", c_faint, c_panel)
+        f_tcell(hud, 1, 5, "not forecast · zero drift · fat tails not modeled", c_faint, c_panel)
+
+// =============================================================================
+// Alerts (confirmed-bar events; formal wording per suite convention)
+// =============================================================================
+alertcondition(breach_up, "Close above 95% band", "Prob Bands: confirmed close above the 95% quantile projected k bars ago (calibration event, not a signal)")
+alertcondition(breach_dn, "Close below 5% band", "Prob Bands: confirmed close below the 5% quantile projected k bars ago (calibration event, not a signal)")
+if breach_up or breach_dn
+    _side = breach_up ? "above" : "below"
+    if use_json_alerts
+        alert('{"ev":"prob_bands","sym":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","side":"' + _side + '","close":' + str.tostring(close, format.mintick) + ',"q05":' + (na(q05_v[k_horizon]) ? "null" : str.tostring(q05_v[k_horizon], format.mintick)) + ',"q95":' + (na(q95_v[k_horizon]) ? "null" : str.tostring(q95_v[k_horizon], format.mintick)) + ',"coverage_pct":' + (na(cov_pct) ? "null" : f_fmt(cov_pct, 1)) + ',"n":' + str.tostring(cov_n) + ',"variant":"' + variant_tag + '","t":' + str.tostring(time) + '}', alert.freq_once_per_bar_close)
+    else
+        alert("Prob Bands [" + variant_tag + "]: " + syminfo.ticker + " confirmed close " + _side + " the k-ago 5–95 band (calibration event, not a signal) · close " + str.tostring(close, format.mintick) + " · observed coverage " + f_fmt(cov_pct, 0) + "% vs nominal 90% (n=" + str.tostring(cov_n) + ")", alert.freq_once_per_bar_close)
+
+// =============================================================================
+// End of file · Monte Carlo Option-Inspired Equity Probability Bands v1.0
+// =============================================================================

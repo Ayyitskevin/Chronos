@@ -1,0 +1,244 @@
+//@version=6
+// =============================================================================
+// Regime-Aware Risk Parity Allocator v1.0 (5T Pine Suite · Desk Kit)
+//
+// WHAT THIS IS — boundary first, because the name overpromises.
+// A WEIGHT DISPLAY, not an allocator in fact. It computes inverse-volatility
+// PERCENTAGE weights for a four-sleeve basket and shows a regime-scaled
+// gross-exposure POSTURE TEMPLATE. It moves no money, knows no account,
+// places no orders, and the suite risk layer (fixed %-of-equity risk with
+// hard caps) OUTRANKS anything on this panel. Percent language only — there
+// are no currency amounts anywhere in this script. Decision support only —
+// a human sizes every position.
+//
+// RESEARCH BASIS, stated plainly.
+// Naive risk parity: weight each sleeve by the inverse of its volatility, so
+// each contributes equal risk — UNDER A ZERO-CORRELATION ASSUMPTION. That
+// assumption is the known, documented flaw: this panel IGNORES CORRELATIONS
+// ENTIRELY, and correlated sleeves (SPY/QQQ/IWM on most days) double-count
+// risk, so true equal risk contribution would need the covariance matrix
+// institutional risk parity uses. That omission is the price of Pine
+// simplicity, and it is disclosed on the panel itself, not hidden. The
+// regime posture row is even more modest: bull/neutral/bear gross-exposure
+// percentages are INPUTS YOU CHOSE, displayed back at you when the wired
+// regime source changes state — a posture template, not an instruction.
+//
+// Non-repaint: security calls use lookahead_off on the chart timeframe;
+// alert events fire on confirmed bars only (intrabar weight values float
+// until close, as any live statistic does).
+//
+// v1.0 changelog (2026-07-17):
+//   Initial release. Four symbol sleeves (include toggles, na-guarded, one
+//   request.security tuple each — keyword args, ignore_invalid_symbol);
+//   inverse-vol weights re-normalized over valid sleeves only (excluded/na
+//   sleeves show "—"); regime posture template scaled by an optional strict
+//   {-1,0,+1} External Regime link (HMM pattern) with bull/neutral/bear
+//   gross inputs; effective-%-at-posture row; correlation-limitation row
+//   verbatim on the HUD; weight plots + data-window exports; weight-shift
+//   alertcondition (any sleeve > threshold vs lookback, confirmed) +
+//   optional JSON alert (default OFF). Percent language only throughout.
+//   Evidence label: needs user run.
+// =============================================================================
+indicator("Regime-Aware Risk Parity Allocator v1.0", shorttitle = "Risk Parity v1", overlay = false)
+
+grp_mode = "0 · Mode"
+grp_bask = "1 · Basket"
+grp_vol  = "2 · Volatility Model"
+grp_reg  = "3 · Regime Posture"
+grp_dsp  = "4 · Display"
+
+variant_tag = input.string("v1.0-base", "Variant tag (freeze-the-config discipline)", group = grp_mode,
+     tooltip = "Label this exact settings set. Any settings change = new tag = new variant with its own validation cycle. The tag prints on the HUD and in alerts so screenshots self-document.")
+
+sym1 = input.symbol("AMEX:SPY", "Sleeve 1 symbol", group = grp_bask)
+inc1 = input.bool(true, "Include sleeve 1", group = grp_bask)
+sym2 = input.symbol("NASDAQ:QQQ", "Sleeve 2 symbol", group = grp_bask)
+inc2 = input.bool(true, "Include sleeve 2", group = grp_bask)
+sym3 = input.symbol("AMEX:IWM", "Sleeve 3 symbol", group = grp_bask)
+inc3 = input.bool(true, "Include sleeve 3", group = grp_bask)
+sym4 = input.symbol("AMEX:GLD", "Sleeve 4 symbol", group = grp_bask)
+inc4 = input.bool(true, "Include sleeve 4", group = grp_bask,
+     tooltip = "Excluded or data-less sleeves show — and the remaining weights re-normalize to 100%.")
+
+vol_len = input.int(20, "Volatility lookback (bars)", minval = 5, maxval = 250, group = grp_vol,
+     tooltip = "Stdev of one-bar log returns per sleeve, on the chart timeframe. Short lookbacks react faster and whip harder; the weights inherit whichever you choose.")
+
+use_regime_link = input.bool(false, "Scale gross by external regime link", group = grp_reg)
+regime_src = input.source(close, "Regime link (wire to a REGIME_EXPORT)", group = grp_reg,
+     tooltip = "Optional. Wire to a suite REGIME_EXPORT emitting strictly -1 / 0 / +1. Valid values pick which gross-exposure template row applies; anything else reads LINK? and the NEUTRAL template is displayed with a warning. Unlinked = 100% (unscaled).")
+bull_gross = input.float(100.0, "Bull gross exposure template %", minval = 0.0, maxval = 200.0, step = 5.0, group = grp_reg,
+     tooltip = "posture template — an input you chose, displayed back at you; not an instruction")
+neutral_gross = input.float(60.0, "Neutral gross exposure template %", minval = 0.0, maxval = 200.0, step = 5.0, group = grp_reg,
+     tooltip = "posture template — an input you chose, displayed back at you; not an instruction")
+bear_gross = input.float(30.0, "Bear gross exposure template %", minval = 0.0, maxval = 200.0, step = 5.0, group = grp_reg,
+     tooltip = "posture template — an input you chose, displayed back at you; not an instruction")
+
+hud_mode = input.string("Full", "HUD mode", options = ["Off", "Micro", "Full"], group = grp_dsp)
+hud_pos_in = input.string("top_right", "HUD position", options = ["top_left", "top_center", "top_right", "bottom_left", "bottom_center", "bottom_right"], group = grp_dsp)
+show_weight_plots = input.bool(true, "Plot sleeve weights (0-100%)", group = grp_dsp)
+shift_pts = input.float(10.0, "Weight-shift alert threshold (pts)", minval = 1.0, maxval = 50.0, step = 1.0, group = grp_dsp)
+shift_bars = input.int(20, "Weight-shift lookback (bars)", minval = 1, maxval = 250, group = grp_dsp,
+     tooltip = "Alert when any included sleeve's weight moved more than the threshold percentage points versus this many bars ago (confirmed bars).")
+use_json_alerts = input.bool(false, "JSON alert payloads (webhook)", group = grp_dsp,
+     tooltip = "OFF: human-readable alert text. ON: machine-readable JSON for webhook automation. Display-layer only.")
+
+// =============================================================================
+// Palette & helpers (suite standard)
+// =============================================================================
+c_bull  = color.rgb(89, 159, 125)
+c_bear  = color.rgb(190, 96, 111)
+c_neut  = color.rgb(112, 126, 148)
+c_gold  = color.rgb(214, 162, 82)
+c_panel = color.new(#0E1316, 5)
+c_cell  = color.new(#151D22, 7)
+c_cell2 = color.new(#10171B, 9)
+c_frame = color.new(#5BD6B0, 88)
+c_text  = color.white
+c_dim   = color.new(color.white, 45)
+c_faint = color.new(color.white, 68)
+
+f_pos(_s) =>
+    switch _s
+        "top_left"      => position.top_left
+        "top_center"    => position.top_center
+        "top_right"     => position.top_right
+        "bottom_left"   => position.bottom_left
+        "bottom_center" => position.bottom_center
+        "bottom_right"  => position.bottom_right
+        => position.top_right
+f_fmt(_x, _d) =>
+    _m = math.pow(10.0, _d)
+    na(_x) ? "n/a" : str.tostring(math.round(_x * _m) / _m)
+f_tcell(_tbl, _c, _r, _txt, _col, _bg) =>
+    table.cell(_tbl, _c, _r, _txt, text_color = _col, bgcolor = _bg, text_size = size.tiny, text_halign = text.align_center)
+f_jnum(_x, _d) =>
+    na(_x) ? "null" : f_fmt(_x, _d)
+f_sym_short(_s) =>
+    _parts = str.split(_s, ":")
+    array.size(_parts) > 1 ? array.get(_parts, 1) : _s
+
+// =============================================================================
+// Per-sleeve fetch: ONE request.security tuple per symbol (keyword args).
+// The pack runs inside each symbol's context; na-guards keep bad bars out.
+// =============================================================================
+f_volpack() =>
+    float _r = close > 0 and close[1] > 0 ? math.log(close / close[1]) : float(na)
+    [close, ta.stdev(_r, vol_len)]
+
+[cl1, vol1] = request.security(sym1, timeframe.period, f_volpack(), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off, ignore_invalid_symbol = true)
+[cl2, vol2] = request.security(sym2, timeframe.period, f_volpack(), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off, ignore_invalid_symbol = true)
+[cl3, vol3] = request.security(sym3, timeframe.period, f_volpack(), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off, ignore_invalid_symbol = true)
+[cl4, vol4] = request.security(sym4, timeframe.period, f_volpack(), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off, ignore_invalid_symbol = true)
+
+// =============================================================================
+// Inverse-volatility weights over VALID sleeves only (equal risk contribution
+// under the zero-correlation assumption — the disclosed limitation)
+// =============================================================================
+ok1 = inc1 and not na(cl1) and not na(vol1) and vol1 > 0
+ok2 = inc2 and not na(cl2) and not na(vol2) and vol2 > 0
+ok3 = inc3 and not na(cl3) and not na(vol3) and vol3 > 0
+ok4 = inc4 and not na(cl4) and not na(vol4) and vol4 > 0
+inv1 = ok1 ? 1.0 / vol1 : 0.0
+inv2 = ok2 ? 1.0 / vol2 : 0.0
+inv3 = ok3 ? 1.0 / vol3 : 0.0
+inv4 = ok4 ? 1.0 / vol4 : 0.0
+inv_sum = inv1 + inv2 + inv3 + inv4
+w1 = ok1 and inv_sum > 0 ? inv1 / inv_sum * 100.0 : float(na)
+w2 = ok2 and inv_sum > 0 ? inv2 / inv_sum * 100.0 : float(na)
+w3 = ok3 and inv_sum > 0 ? inv3 / inv_sum * 100.0 : float(na)
+w4 = ok4 and inv_sum > 0 ? inv4 / inv_sum * 100.0 : float(na)
+any_valid = ok1 or ok2 or ok3 or ok4
+
+// =============================================================================
+// Regime posture (strict {-1,0,+1} link validation, HMM pattern). The gross
+// number is a DISPLAYED template — an input echoed back, not an instruction.
+// =============================================================================
+_rv = regime_src
+link_valid = use_regime_link and not na(_rv) and (_rv == -1.0 or _rv == 0.0 or _rv == 1.0)
+int regime_state = link_valid ? int(_rv) : 0
+gross_pct = not use_regime_link ? 100.0 :
+     not link_valid ? neutral_gross :
+     regime_state == 1 ? bull_gross :
+     regime_state == -1 ? bear_gross : neutral_gross
+regime_txt = not use_regime_link ? "link off" : not link_valid ? "LINK?" :
+     regime_state == 1 ? "BULL" : regime_state == -1 ? "BEAR" : "NEUTRAL"
+eff1 = w1 * gross_pct / 100.0
+eff2 = w2 * gross_pct / 100.0
+eff3 = w3 * gross_pct / 100.0
+eff4 = w4 * gross_pct / 100.0
+
+// =============================================================================
+// Plots (weight lines 0-100) & exports
+// =============================================================================
+plot(show_weight_plots ? w1 : na, "Sleeve 1 weight %", color = c_bull, linewidth = 2)
+plot(show_weight_plots ? w2 : na, "Sleeve 2 weight %", color = c_gold, linewidth = 2)
+plot(show_weight_plots ? w3 : na, "Sleeve 3 weight %", color = c_neut, linewidth = 2)
+plot(show_weight_plots ? w4 : na, "Sleeve 4 weight %", color = c_bear, linewidth = 2)
+
+plot(w1, "RP_W1_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(w2, "RP_W2_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(w3, "RP_W3_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(w4, "RP_W4_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(gross_pct, "RP_GROSS_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+
+// =============================================================================
+// HUD
+// =============================================================================
+f_sleeve_txt(_ok, _inc, _vol, _w, _eff) =>
+    not _inc ? "— excluded" :
+         not _ok ? "— no data / warming" :
+         "vol " + f_fmt(_vol * 100.0, 2) + "% · w " + f_fmt(_w, 1) + "% · eff " + f_fmt(_eff, 1) + "%"
+
+var table hud = table.new(f_pos(hud_pos_in), 2, 9, bgcolor = c_panel, frame_color = c_frame,
+     frame_width = 1, border_color = color.new(color.white, 92), border_width = 1)
+if barstate.islast and hud_mode != "Off"
+    _status_txt = not any_valid ? "NO VALID SLEEVES / WARMING" :
+         "gross " + f_fmt(gross_pct, 0) + "% · " + regime_txt + " · WEIGHT DISPLAY, not an allocator"
+    _status_bg = not any_valid ? c_cell : use_regime_link and not link_valid ? color.new(c_bear, 45) : color.new(c_gold, 55)
+    f_tcell(hud, 0, 0, "Risk Parity " + variant_tag, c_text, c_frame)
+    f_tcell(hud, 1, 0, _status_txt, c_text, _status_bg)
+    if hud_mode == "Full"
+        f_tcell(hud, 0, 1, "1 · " + f_sym_short(sym1), c_bull, c_panel)
+        f_tcell(hud, 1, 1, f_sleeve_txt(ok1, inc1, vol1, w1, eff1), ok1 ? c_dim : c_faint, c_cell)
+        f_tcell(hud, 0, 2, "2 · " + f_sym_short(sym2), c_gold, c_panel)
+        f_tcell(hud, 1, 2, f_sleeve_txt(ok2, inc2, vol2, w2, eff2), ok2 ? c_dim : c_faint, c_cell2)
+        f_tcell(hud, 0, 3, "3 · " + f_sym_short(sym3), c_neut, c_panel)
+        f_tcell(hud, 1, 3, f_sleeve_txt(ok3, inc3, vol3, w3, eff3), ok3 ? c_dim : c_faint, c_cell)
+        f_tcell(hud, 0, 4, "4 · " + f_sym_short(sym4), c_bear, c_panel)
+        f_tcell(hud, 1, 4, f_sleeve_txt(ok4, inc4, vol4, w4, eff4), ok4 ? c_dim : c_faint, c_cell2)
+        _gross_txt = not use_regime_link ? "100% · link off (unscaled)" :
+             not link_valid ? f_fmt(gross_pct, 0) + "% · LINK? (invalid link — NEUTRAL template shown)" :
+             f_fmt(gross_pct, 0) + "% · " + regime_txt + " (templates " + f_fmt(bull_gross, 0) + "/" + f_fmt(neutral_gross, 0) + "/" + f_fmt(bear_gross, 0) + ")"
+        f_tcell(hud, 0, 5, "Gross posture (template)", c_dim, c_panel)
+        f_tcell(hud, 1, 5, _gross_txt, use_regime_link and not link_valid ? c_bear : c_dim, c_cell)
+        f_tcell(hud, 0, 6, "Limitation", c_dim, c_panel)
+        f_tcell(hud, 1, 6, "correlations ignored — correlated sleeves double-count risk", c_dim, c_cell2)
+        f_tcell(hud, 0, 7, "Vol model", c_dim, c_panel)
+        f_tcell(hud, 1, 7, "stdev(log returns), " + str.tostring(vol_len) + " bars · chart TF · inverse-vol weights", c_dim, c_cell)
+        f_tcell(hud, 0, 8, "*weight display, not an allocator", c_faint, c_panel)
+        f_tcell(hud, 1, 8, "% only · risk layer outranks this panel", c_faint, c_panel)
+
+// =============================================================================
+// Alert: any sleeve weight shifted more than the threshold vs the lookback
+// (confirmed bars; formal wording per suite convention)
+// =============================================================================
+f_shift(_w) =>
+    float _prev = _w[shift_bars]
+    not na(_w) and not na(_prev) ? math.abs(_w - _prev) : 0.0
+shift1 = f_shift(w1)
+shift2 = f_shift(w2)
+shift3 = f_shift(w3)
+shift4 = f_shift(w4)
+shift_max = math.max(math.max(shift1, shift2), math.max(shift3, shift4))
+shift_event = barstate.isconfirmed and shift_max > shift_pts
+alertcondition(shift_event, "Risk Parity: weight shift above threshold", "Risk Parity Allocator: a sleeve weight moved more than the shift threshold versus the lookback — volatility structure changed")
+if shift_event
+    if use_json_alerts
+        alert('{"ev":"risk_parity","sym":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","event":"weight_shift","shift_max_pts":' + f_jnum(shift_max, 1) + ',"w1":' + f_jnum(w1, 1) + ',"w2":' + f_jnum(w2, 1) + ',"w3":' + f_jnum(w3, 1) + ',"w4":' + f_jnum(w4, 1) + ',"gross":' + f_jnum(gross_pct, 0) + ',"regime":"' + regime_txt + '","variant":"' + variant_tag + '","t":' + str.tostring(time) + '}', alert.freq_once_per_bar_close)
+    else
+        alert("Risk Parity Allocator [" + variant_tag + "]: sleeve weight shifted " + f_fmt(shift_max, 1) + " pts vs " + str.tostring(shift_bars) + " bars ago" +
+             " · w " + f_fmt(w1, 1) + "/" + f_fmt(w2, 1) + "/" + f_fmt(w3, 1) + "/" + f_fmt(w4, 1) + "%" +
+             " · gross " + f_fmt(gross_pct, 0) + "% (" + regime_txt + ") · weight display, not an allocator", alert.freq_once_per_bar_close)
+
+// =============================================================================
+// End of file · Regime-Aware Risk Parity Allocator v1.0

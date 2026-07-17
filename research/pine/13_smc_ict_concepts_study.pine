@@ -1,0 +1,343 @@
+//@version=6
+// =============================================================================
+// SMC / ICT Concepts Study v1.1 (5T Pine Suite · Special)
+// Market structure (BOS/CHoCH from CONFIRMED pivots), equal-high/low liquidity
+// pools with sweep detection, Fair Value Gaps with mitigation, basic order
+// blocks, and killzone shading. Vocabulary and chart-reading tool.
+// Doctrine: no forecast claims. Structure uses confirmed pivots (lags by
+// pivot-length bars — deliberately; that is the honest version). All drawing
+// arrays are capped. Study events, never signals. Not advice.
+// -----------------------------------------------------------------------------
+// v1.1 changelog (2026-07-11):
+//   · FIX (MEDIUM): liquidity pools were removed only on sweep-and-reject, so
+//     a clean close-through left a stale, already-consumed pool line on the
+//     chart (and in the nearest-pool exports) forever. A pool is now consumed
+//     on ANY breach of its level; only the sweep-and-reject path sets the
+//     sweep flag.
+//   · NEW: sweep→structure confluence — fires when a sweep occurred within
+//     the last N bars (input, default 5) AND a CHoCH (or BOS) confirms in the
+//     OPPOSITE direction of the swept side; the one overlap the header
+//     endorses (stop-runs). SWEEP_CHOCH_EXPORT + confirmed-gated
+//     alertcondition "Sweep → structure flip". Describes past structure —
+//     predicts nothing.
+//   · NEW (default OFF = v1.0 behavior): displacement-qualified order blocks —
+//     when ON, an OB candidate requires the breaking bar's body ≥ an ATR
+//     multiple (input, default 1.0).
+//   · DOCS: killzone session inputs now carry a timezone-honesty tooltip —
+//     sessions resolve in the EXCHANGE timezone, so the "NY AM"/"London"
+//     labels are only correct where exchange time matches; adjust per symbol.
+//   · NEW: optional JSON payload for the sweep alert via alert(), default OFF
+//     (v1.0 text behavior preserved).
+//   · Scope note: Kevin-personal study — excluded from the gift package. All
+//     v1.0 honesty framing preserved verbatim.
+//   · Evidence label: needs user run.
+// =============================================================================
+indicator("SMC / ICT Concepts Study v1.1", shorttitle = "SMC Study v1.1", overlay = true,
+     max_boxes_count = 200, max_lines_count = 100, max_labels_count = 200)
+
+grp_st = "1 · Structure"
+grp_lq = "2 · Liquidity"
+grp_fv = "3 · Fair Value Gaps"
+grp_ob = "4 · Order Blocks"
+grp_kz = "5 · Killzones"
+grp_dsp = "6 · Display"
+
+piv_len = input.int(5, "Pivot length (bars each side)", minval = 2, maxval = 20, group = grp_st,
+     tooltip = "Structure confirms pivot-length bars late. That lag is honesty, not a bug.")
+show_struct_labels = input.bool(true, "Label BOS / CHoCH", group = grp_st)
+
+liq_tol_atr = input.float(0.10, "Equal-level tolerance (ATR)", minval = 0.02, maxval = 1.0, step = 0.02, group = grp_lq)
+liq_keep = input.int(6, "Liquidity lines kept per side", minval = 2, maxval = 10, group = grp_lq)
+sweep_confl_n = input.int(5, "Sweep→structure window (bars)", minval = 1, maxval = 50, group = grp_lq,
+     tooltip = "Confluence flag: a sweep within this many bars followed by a CHoCH/BOS in the opposite direction of the swept side. Describes past structure — predicts nothing.")
+
+fvg_on = input.bool(true, "Show Fair Value Gaps", group = grp_fv)
+fvg_min_atr = input.float(0.15, "Min FVG size (ATR)", minval = 0.0, maxval = 3.0, step = 0.05, group = grp_fv)
+fvg_mit = input.string("50%", "FVG mitigation", options = ["Touch", "50%", "Full"], group = grp_fv)
+fvg_keep = input.int(20, "FVGs kept per side", minval = 4, maxval = 30, group = grp_fv)
+
+ob_on = input.bool(true, "Show basic order blocks", group = grp_ob)
+ob_keep = input.int(6, "Order blocks kept per side", minval = 2, maxval = 10, group = grp_ob)
+ob_displacement_on = input.bool(false, "Displacement filter (default OFF = v1.0 behavior)", group = grp_ob,
+     tooltip = "ON: an order block only plants when the breaking bar's body ≥ the ATR multiple below. OFF: any BOS/CHoCH plants the last opposite candle (v1.0 behavior).")
+ob_min_body_atr = input.float(1.0, "Min breaking-bar body (ATR)", minval = 0.1, maxval = 5.0, step = 0.1, group = grp_ob)
+
+kz1_on = input.bool(true, "Killzone 1 (NY AM)", group = grp_kz)
+kz1 = input.session("0930-1100", "KZ1 session", group = grp_kz,
+     tooltip = "Sessions resolve in the EXCHANGE timezone of the chart symbol — the 'NY AM' label is only correct on symbols whose exchange time matches New York. Adjust per symbol.")
+kz2_on = input.bool(false, "Killzone 2 (London)", group = grp_kz)
+kz2 = input.session("0200-0500", "KZ2 session", group = grp_kz,
+     tooltip = "Sessions resolve in the EXCHANGE timezone of the chart symbol — the 'London' label is only correct on symbols whose exchange time matches. Adjust per symbol.")
+
+hud_pos_in = input.string("bottom_right", "HUD position", options = ["top_left", "top_center", "top_right", "bottom_left", "bottom_center", "bottom_right"], group = grp_dsp)
+atr_len = input.int(14, "ATR length", minval = 1, maxval = 100, group = grp_dsp)
+use_json_alerts = input.bool(false, "JSON alert payloads (webhook)", group = grp_dsp, tooltip = "OFF: human-readable alert text (v1.0 behavior). ON: machine-readable JSON for webhook automation. Display-layer only.")
+
+c_panel = color.new(#141a22, 0)
+c_cell = color.new(#1b2430, 0)
+c_frame = color.new(#2e4a66, 0)
+c_text = color.new(#e8edf2, 0)
+c_dim = color.new(#9fb0c0, 0)
+c_faint = color.new(#5a6572, 0)
+c_bull = color.new(#1e9e6a, 0)
+c_bear = color.new(#e5484d, 0)
+c_liq = color.new(#f5a623, 0)
+c_fvgb = color.new(#1e9e6a, 82)
+c_fvgs = color.new(#e5484d, 82)
+
+f_pos(_s) =>
+    _s == "top_left" ? position.top_left : _s == "top_center" ? position.top_center :
+     _s == "top_right" ? position.top_right : _s == "bottom_left" ? position.bottom_left :
+     _s == "bottom_center" ? position.bottom_center : position.bottom_right
+
+f_fmt(_v, _dp) =>
+    na(_v) ? "n/a" : str.tostring(_v, _dp == 0 ? "#" : _dp == 1 ? "#.#" : "#.##")
+
+f_tcell(_t, _c, _r, _txt, _tc, _bg) =>
+    table.cell(_t, _c, _r, _txt, text_color = _tc, bgcolor = _bg, text_size = size.small)
+
+atr_val = ta.atr(atr_len)
+
+// =============================================================================
+// Structure: confirmed pivots → BOS / CHoCH
+// =============================================================================
+ph = ta.pivothigh(high, piv_len, piv_len)
+pl = ta.pivotlow(low, piv_len, piv_len)
+var float last_sh = na
+var float prev_sh = na
+var float last_sl = na
+var float prev_sl = na
+if not na(ph)
+    prev_sh := last_sh
+    last_sh := ph
+if not na(pl)
+    prev_sl := last_sl
+    last_sl := pl
+
+var int struct_state = 0
+var int last_event_bar = na
+var array<label> lbls = array.new<label>()
+f_lbl(_txt, _y, _col, _loc_up) =>
+    if show_struct_labels
+        array.push(lbls, label.new(bar_index, _y, _txt, style = _loc_up ? label.style_label_down : label.style_label_up,
+             color = color.new(_col, 60), textcolor = c_text, size = size.small))
+        if array.size(lbls) > 60
+            label.delete(array.shift(lbls))
+
+bos_up = false
+bos_dn = false
+choch_up = false
+choch_dn = false
+if barstate.isconfirmed and not na(last_sh) and not na(last_sl)
+    if struct_state >= 0 and close > last_sh and close[1] <= last_sh
+        if struct_state == 0
+            struct_state := 1
+        bos_up := struct_state == 1
+        struct_state := 1
+        last_event_bar := bar_index
+        f_lbl("BOS", high, c_bull, true)
+    if struct_state <= 0 and close < last_sl and close[1] >= last_sl
+        if struct_state == 0
+            struct_state := -1
+        bos_dn := struct_state == -1
+        struct_state := -1
+        last_event_bar := bar_index
+        f_lbl("BOS", low, c_bear, false)
+    if struct_state == 1 and close < last_sl and close[1] >= last_sl
+        struct_state := -1
+        choch_dn := true
+        last_event_bar := bar_index
+        f_lbl("CHoCH", low, c_bear, false)
+    if struct_state == -1 and close > last_sh and close[1] <= last_sh
+        struct_state := 1
+        choch_up := true
+        last_event_bar := bar_index
+        f_lbl("CHoCH", high, c_bull, true)
+
+// =============================================================================
+// Liquidity: equal highs/lows → pool lines → sweep detection
+// =============================================================================
+var array<float> liq_up_p = array.new_float()
+var array<line> liq_up_l = array.new<line>()
+var array<float> liq_dn_p = array.new_float()
+var array<line> liq_dn_l = array.new<line>()
+var int last_sweep_dir = 0
+var int last_sweep_bar = na
+
+if not na(ph) and not na(prev_sh) and math.abs(ph - prev_sh) <= liq_tol_atr * nz(atr_val)
+    _lvl = math.max(ph, prev_sh)
+    array.push(liq_up_p, _lvl)
+    array.push(liq_up_l, line.new(bar_index - piv_len, _lvl, bar_index + 20, _lvl, color = c_liq, style = line.style_dashed))
+    if array.size(liq_up_p) > liq_keep
+        array.shift(liq_up_p)
+        line.delete(array.shift(liq_up_l))
+if not na(pl) and not na(prev_sl) and math.abs(pl - prev_sl) <= liq_tol_atr * nz(atr_val)
+    _lvl = math.min(pl, prev_sl)
+    array.push(liq_dn_p, _lvl)
+    array.push(liq_dn_l, line.new(bar_index - piv_len, _lvl, bar_index + 20, _lvl, color = c_liq, style = line.style_dashed))
+    if array.size(liq_dn_p) > liq_keep
+        array.shift(liq_dn_p)
+        line.delete(array.shift(liq_dn_l))
+
+sweep_up = false
+sweep_dn = false
+float sweep_lvl_hit = na
+// v1.1: a pool is consumed on ANY breach of its level (sweep-and-reject OR
+// clean close-through); only the sweep-and-reject path sets the sweep flag.
+if barstate.isconfirmed and array.size(liq_up_p) > 0
+    for k = array.size(liq_up_p) - 1 to 0
+        _lvl = array.get(liq_up_p, k)
+        if high > _lvl
+            if close < _lvl
+                sweep_up := true
+                last_sweep_dir := 1
+                last_sweep_bar := bar_index
+                sweep_lvl_hit := _lvl
+            array.remove(liq_up_p, k)
+            line.delete(array.get(liq_up_l, k))
+            array.remove(liq_up_l, k)
+if barstate.isconfirmed and array.size(liq_dn_p) > 0
+    for k = array.size(liq_dn_p) - 1 to 0
+        _lvl = array.get(liq_dn_p, k)
+        if low < _lvl
+            if close > _lvl
+                sweep_dn := true
+                last_sweep_dir := -1
+                last_sweep_bar := bar_index
+                sweep_lvl_hit := _lvl
+            array.remove(liq_dn_p, k)
+            line.delete(array.get(liq_dn_l, k))
+            array.remove(liq_dn_l, k)
+
+float liq_up_near = na
+float liq_dn_near = na
+if array.size(liq_up_p) > 0
+    for k = 0 to array.size(liq_up_p) - 1
+        _l = array.get(liq_up_p, k)
+        if _l > close and (na(liq_up_near) or _l < liq_up_near)
+            liq_up_near := _l
+if array.size(liq_dn_p) > 0
+    for k = 0 to array.size(liq_dn_p) - 1
+        _l = array.get(liq_dn_p, k)
+        if _l < close and (na(liq_dn_near) or _l > liq_dn_near)
+            liq_dn_near := _l
+
+// ---- Sweep→structure confluence (v1.1): sweep within N bars + CHoCH/BOS in
+// the opposite direction. Describes past structure — predicts nothing. ----
+recent_up_sweep = last_sweep_dir == 1 and not na(last_sweep_bar) and bar_index - last_sweep_bar <= sweep_confl_n
+recent_dn_sweep = last_sweep_dir == -1 and not na(last_sweep_bar) and bar_index - last_sweep_bar <= sweep_confl_n
+sweep_choch = barstate.isconfirmed and ((recent_up_sweep and (choch_dn or bos_dn)) or (recent_dn_sweep and (choch_up or bos_up)))
+
+// =============================================================================
+// Fair Value Gaps (3-bar imbalance) with mitigation
+// =============================================================================
+var array<box> fvg_b = array.new<box>()
+var array<box> fvg_s = array.new<box>()
+if fvg_on and barstate.isconfirmed and nz(atr_val) > 0
+    if low > high[2] and (low - high[2]) >= fvg_min_atr * atr_val
+        array.push(fvg_b, box.new(bar_index - 2, low, bar_index + 12, high[2], border_color = color.new(c_bull, 70), bgcolor = c_fvgb))
+        if array.size(fvg_b) > fvg_keep
+            box.delete(array.shift(fvg_b))
+    if high < low[2] and (low[2] - high) >= fvg_min_atr * atr_val
+        array.push(fvg_s, box.new(bar_index - 2, low[2], bar_index + 12, high, border_color = color.new(c_bear, 70), bgcolor = c_fvgs))
+        if array.size(fvg_s) > fvg_keep
+            box.delete(array.shift(fvg_s))
+if barstate.isconfirmed and array.size(fvg_b) > 0
+    for k = array.size(fvg_b) - 1 to 0
+        _bx = array.get(fvg_b, k)
+        _top = box.get_top(_bx)
+        _bot = box.get_bottom(_bx)
+        _hit = fvg_mit == "Touch" ? low <= _top : fvg_mit == "50%" ? low <= (_top + _bot) / 2 : low <= _bot
+        if _hit
+            box.delete(_bx)
+            array.remove(fvg_b, k)
+if barstate.isconfirmed and array.size(fvg_s) > 0
+    for k = array.size(fvg_s) - 1 to 0
+        _bx = array.get(fvg_s, k)
+        _top = box.get_top(_bx)
+        _bot = box.get_bottom(_bx)
+        _hit = fvg_mit == "Touch" ? high >= _bot : fvg_mit == "50%" ? high >= (_top + _bot) / 2 : high >= _top
+        if _hit
+            box.delete(_bx)
+            array.remove(fvg_s, k)
+
+// =============================================================================
+// Basic order blocks: last opposite candle before a BOS
+// =============================================================================
+var float ob_dn_hi = na
+var float ob_dn_lo = na
+var float ob_up_hi = na
+var float ob_up_lo = na
+if barstate.isconfirmed
+    if close < open
+        ob_dn_hi := high
+        ob_dn_lo := low
+    if close > open
+        ob_up_hi := high
+        ob_up_lo := low
+var array<box> ob_b = array.new<box>()
+var array<box> ob_s = array.new<box>()
+// v1.1 displacement gate (default OFF = v1.0 behavior)
+ob_displacement_ok = not ob_displacement_on or (nz(atr_val) > 0 and math.abs(close - open) >= ob_min_body_atr * atr_val)
+if ob_on and (bos_up or choch_up) and not na(ob_dn_hi) and ob_displacement_ok
+    array.push(ob_b, box.new(bar_index - 1, ob_dn_hi, bar_index + 20, ob_dn_lo, border_color = color.new(c_bull, 55), bgcolor = color.new(c_bull, 88)))
+    if array.size(ob_b) > ob_keep
+        box.delete(array.shift(ob_b))
+if ob_on and (bos_dn or choch_dn) and not na(ob_up_hi) and ob_displacement_ok
+    array.push(ob_s, box.new(bar_index - 1, ob_up_hi, bar_index + 20, ob_up_lo, border_color = color.new(c_bear, 55), bgcolor = color.new(c_bear, 88)))
+    if array.size(ob_s) > ob_keep
+        box.delete(array.shift(ob_s))
+if barstate.isconfirmed and array.size(ob_b) > 0
+    for k = array.size(ob_b) - 1 to 0
+        if close < box.get_bottom(array.get(ob_b, k))
+            box.delete(array.get(ob_b, k))
+            array.remove(ob_b, k)
+if barstate.isconfirmed and array.size(ob_s) > 0
+    for k = array.size(ob_s) - 1 to 0
+        if close > box.get_top(array.get(ob_s, k))
+            box.delete(array.get(ob_s, k))
+            array.remove(ob_s, k)
+
+// =============================================================================
+// Killzones, exports, HUD, alerts
+// =============================================================================
+bgcolor(kz1_on and not na(time(timeframe.period, kz1)) ? color.new(c_liq, 95) : na, title = "Killzone 1")
+bgcolor(kz2_on and not na(time(timeframe.period, kz2)) ? color.new(c_dim, 95) : na, title = "Killzone 2")
+
+plot(float(struct_state), "STRUCT_STATE_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(float(array.size(fvg_b)), "FVG_BULL_N_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(float(array.size(fvg_s)), "FVG_BEAR_N_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(liq_up_near, "LIQ_UP_NEAREST_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(liq_dn_near, "LIQ_DN_NEAREST_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(sweep_up ? 1.0 : sweep_dn ? -1.0 : 0.0, "SWEEP_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(sweep_choch ? 1.0 : 0.0, "SWEEP_CHOCH_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+
+var table hud = table.new(f_pos(hud_pos_in), 2, 6, bgcolor = c_panel, frame_color = c_frame,
+     frame_width = 1, border_color = color.new(color.white, 92), border_width = 1)
+if barstate.islast
+    f_tcell(hud, 0, 0, "SMC Study*", c_text, c_frame)
+    f_tcell(hud, 1, 0, struct_state == 1 ? "BULL STRUCTURE" : struct_state == -1 ? "BEAR STRUCTURE" : "UNSET", struct_state == 1 ? c_bull : struct_state == -1 ? c_bear : c_faint, c_cell)
+    f_tcell(hud, 0, 1, "Last event", c_dim, c_panel)
+    f_tcell(hud, 1, 1, na(last_event_bar) ? "—" : str.tostring(bar_index - last_event_bar) + " bars ago", c_dim, c_cell)
+    f_tcell(hud, 0, 2, "Liquidity", c_dim, c_panel)
+    f_tcell(hud, 1, 2, "↑ " + f_fmt(liq_up_near, 2) + " · ↓ " + f_fmt(liq_dn_near, 2), c_liq, c_cell)
+    f_tcell(hud, 0, 3, "Last sweep", c_dim, c_panel)
+    f_tcell(hud, 1, 3, last_sweep_dir == 0 ? "—" : (last_sweep_dir == 1 ? "Buy-side" : "Sell-side") + " · " + str.tostring(bar_index - nz(last_sweep_bar)) + " bars", last_sweep_dir == 1 ? c_bear : last_sweep_dir == -1 ? c_bull : c_faint, c_cell)
+    f_tcell(hud, 0, 4, "FVG open", c_dim, c_panel)
+    f_tcell(hud, 1, 4, "Bull " + str.tostring(array.size(fvg_b)) + " · Bear " + str.tostring(array.size(fvg_s)), c_dim, c_cell)
+    f_tcell(hud, 0, 5, "*vocabulary tool", c_faint, c_panel)
+    f_tcell(hud, 1, 5, "describes past structure · predicts nothing", c_faint, c_panel)
+
+alertcondition(bos_up or choch_up, "Bullish structure event", "SMC Study: bullish BOS/CHoCH confirmed")
+alertcondition(bos_dn or choch_dn, "Bearish structure event", "SMC Study: bearish BOS/CHoCH confirmed")
+alertcondition(sweep_up, "Buy-side liquidity sweep", "SMC Study: equal-highs pool swept and rejected")
+alertcondition(sweep_dn, "Sell-side liquidity sweep", "SMC Study: equal-lows pool swept and rejected")
+alertcondition(sweep_choch, "Sweep → structure flip", "SMC Study: liquidity sweep followed by an opposite structure event (describes past structure)")
+if sweep_up or sweep_dn
+    _side = sweep_up ? "buy" : "sell"
+    _msg = use_json_alerts ?
+         '{"ev":"liq_sweep","sym":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","side":"' + _side + '","level":' + (na(sweep_lvl_hit) ? "null" : f_fmt(sweep_lvl_hit, 2)) + ',"t":' + str.tostring(time) + '}' :
+         "SMC Study: " + (sweep_up ? "buy-side" : "sell-side") + " liquidity sweep @ " + f_fmt(sweep_lvl_hit, 2) + " (describes past structure)"
+    alert(_msg, alert.freq_once_per_bar_close)
+// ============================= End of file ==================================
+// SMC / ICT Concepts Study v1.1

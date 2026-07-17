@@ -1,0 +1,187 @@
+//@version=6
+// =============================================================================
+// Breadth & Internals Proxy v1.1 (5T Pine Suite · Tranche 2)
+// The market-level regime beneath your per-symbol regime: is today a trend
+// day or a range day? NYSE TICK / ADD / VOLD when available, plus an
+// ETF-ratio composite (RSP/SPY breadth proxy, QQQ/SPY risk appetite) that
+// works on any plan. Trend-day score is a labeled HEURISTIC.
+// Non-repaint: confirmed-bar accumulation. Separate pane. Not advice.
+// -----------------------------------------------------------------------------
+// v1.1 changelog (2026-07-11):
+//   - request.security(): positional barmerge args -> keyword form on all six
+//     calls — compile-blocking class. The three internals calls (TICK/ADD/VOLD)
+//     add ignore_invalid_symbol = true so missing data-plan symbols degrade to
+//     na (the existing "n/a (plan?)" HUD path) instead of erroring the study.
+//   - Zero-data direction fix: TICK/ADD side votes are now 0 when there is no
+//     data (both counters 0) — v1.0 silently defaulted those votes bullish.
+//   - All three alertconditions confirm-gated (barstate.isconfirmed).
+//   - Regime-alignment readout: regime_src input (wire to any suite script's
+//     REGIME_EXPORT, valid only at exactly -1/0/+1), HUD row, and ALIGN_EXPORT
+//     (+1 aligned / -1 divergent / 0 neutral or n/a).
+//   - c_hot is now used (ALIGNED HUD row color); it was declared but unused.
+//   - Trend-day group tooltip: on daily+ charts TICK persistence degrades to
+//     daily-close samples — treat the score as unreliable there.
+//   - Optional JSON alert payloads for webhooks (default OFF; display layer only).
+//   Evidence label: needs user run.
+// =============================================================================
+indicator("Breadth & Internals Proxy v1.1", shorttitle = "Internals v1.1", overlay = false)
+
+grp_sym = "1 · Sources"
+grp_dt = "2 · Trend-Day Heuristic"
+grp_dsp = "3 · Display"
+
+use_tick = input.bool(true, "Use TICK", group = grp_sym)
+tick_sym = input.symbol("USI:TICK", "TICK symbol", group = grp_sym)
+use_add = input.bool(true, "Use ADD (advance-decline)", group = grp_sym)
+add_sym = input.symbol("USI:ADD", "ADD symbol", group = grp_sym)
+use_vold = input.bool(true, "Use VOLD (up-down volume)", group = grp_sym)
+vold_sym = input.symbol("USI:VOLD", "VOLD symbol", group = grp_sym)
+broad_sym = input.symbol("AMEX:RSP", "Equal-weight proxy", group = grp_sym)
+cap_sym = input.symbol("AMEX:SPY", "Cap-weight benchmark", group = grp_sym)
+risk_sym = input.symbol("NASDAQ:QQQ", "Risk-appetite proxy", group = grp_sym)
+ratio_slope_len = input.int(30, "Ratio slope lookback (bars)", minval = 5, maxval = 200, group = grp_sym)
+regime_src = input.source(close, "Regime link (wire to a REGIME_EXPORT)", group = grp_sym, tooltip = "Optional. Wire to any suite script's REGIME_EXPORT (-1/0/+1). Unwired or invalid values read n/a.")
+
+tick_extreme = input.int(800, "TICK extreme level", minval = 200, maxval = 2000, step = 50, group = grp_dt)
+dt_score_hot = input.int(70, "Trend-day score threshold", minval = 50, maxval = 100, group = grp_dt, tooltip = "Intraday heuristic. On daily+ charts TICK/ADD persistence degrades to one daily-close sample per bar — treat persistence and the trend-day score as unreliable there.")
+
+hud_pos_in = input.string("bottom_right", "HUD position", options = ["top_left", "top_center", "top_right", "bottom_left", "bottom_center", "bottom_right"], group = grp_dsp)
+use_json_alerts = input.bool(false, "JSON alert payloads (webhook)", group = grp_dsp, tooltip = "OFF: human-readable alert text (v1.0 behavior). ON: machine-readable JSON for webhook automation. Display-layer only.")
+
+c_panel = color.new(#141a22, 0)
+c_cell = color.new(#1b2430, 0)
+c_frame = color.new(#2e4a66, 0)
+c_text = color.new(#e8edf2, 0)
+c_dim = color.new(#9fb0c0, 0)
+c_faint = color.new(#5a6572, 0)
+c_bull = color.new(#1e9e6a, 0)
+c_bear = color.new(#e5484d, 0)
+c_hot = color.new(#f5a623, 0)
+
+f_pos(_s) =>
+    _s == "top_left" ? position.top_left : _s == "top_center" ? position.top_center :
+     _s == "top_right" ? position.top_right : _s == "bottom_left" ? position.bottom_left :
+     _s == "bottom_center" ? position.bottom_center : position.bottom_right
+
+f_fmt(_v, _dp) =>
+    na(_v) ? "n/a" : str.tostring(_v, _dp == 0 ? "#" : _dp == 1 ? "#.#" : "#.##")
+
+f_tcell(_t, _c, _r, _txt, _tc, _bg) =>
+    table.cell(_t, _c, _r, _txt, text_color = _tc, bgcolor = _bg, text_size = size.small)
+
+new_day = ta.change(time("D")) != 0
+
+// ---- Sources ----
+tick_c = use_tick ? request.security(tick_sym, timeframe.period, close, gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off, ignore_invalid_symbol = true) : float(na)
+add_c = use_add ? request.security(add_sym, timeframe.period, close, gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off, ignore_invalid_symbol = true) : float(na)
+vold_c = use_vold ? request.security(vold_sym, timeframe.period, close, gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off, ignore_invalid_symbol = true) : float(na)
+broad_c = request.security(broad_sym, timeframe.period, close, gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+capw_c = request.security(cap_sym, timeframe.period, close, gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+risk_c = request.security(risk_sym, timeframe.period, close, gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+
+// ---- Session accumulators (confirmed bars) ----
+var float cum_tick = 0.0
+var int tick_pos = 0
+var int tick_neg = 0
+var int tick_ext_up = 0
+var int tick_ext_dn = 0
+var int add_pos = 0
+var int add_neg = 0
+var int sess_bars = 0
+if new_day
+    cum_tick := 0.0
+    tick_pos := 0
+    tick_neg := 0
+    tick_ext_up := 0
+    tick_ext_dn := 0
+    add_pos := 0
+    add_neg := 0
+    sess_bars := 0
+if barstate.isconfirmed
+    sess_bars += 1
+    if not na(tick_c)
+        cum_tick += tick_c
+        tick_pos += tick_c > 0 ? 1 : 0
+        tick_neg += tick_c < 0 ? 1 : 0
+        tick_ext_up += tick_c >= tick_extreme ? 1 : 0
+        tick_ext_dn += tick_c <= -tick_extreme ? 1 : 0
+    if not na(add_c)
+        add_pos += add_c > 0 ? 1 : 0
+        add_neg += add_c < 0 ? 1 : 0
+
+tick_side_n = tick_pos + tick_neg
+tick_persist = tick_side_n > 0 ? math.max(tick_pos, tick_neg) * 100.0 / tick_side_n : float(na)
+add_side_n = add_pos + add_neg
+add_persist = add_side_n > 0 ? math.max(add_pos, add_neg) * 100.0 / add_side_n : float(na)
+add_side = add_side_n == 0 ? 0 : add_pos >= add_neg ? 1 : -1
+tick_side = tick_side_n == 0 ? 0 : tick_pos >= tick_neg ? 1 : -1
+vold_side = na(vold_c) ? 0 : vold_c > 0 ? 1 : -1
+
+// ---- Ratio composite (works on any data plan) ----
+breadth_ratio = not na(broad_c) and not na(capw_c) and capw_c != 0 ? broad_c / capw_c : float(na)
+risk_ratio = not na(risk_c) and not na(capw_c) and capw_c != 0 ? risk_c / capw_c : float(na)
+br_slope = na(breadth_ratio) ? float(na) : breadth_ratio - breadth_ratio[ratio_slope_len]
+rr_slope = na(risk_ratio) ? float(na) : risk_ratio - risk_ratio[ratio_slope_len]
+
+// ---- Trend-day score (labeled heuristic) ----
+dir_vote = tick_side + add_side + vold_side
+dir = dir_vote > 0 ? 1 : dir_vote < 0 ? -1 : 0
+score = 0.0
+score += not na(add_persist) and add_persist >= 70 ? 30 : not na(add_persist) and add_persist >= 60 ? 15 : 0
+score += not na(tick_persist) and tick_persist >= 65 ? 25 : not na(tick_persist) and tick_persist >= 55 ? 12 : 0
+score += vold_side != 0 and vold_side == dir ? 20 : 0
+score += not na(rr_slope) and ((dir == 1 and rr_slope > 0) or (dir == -1 and rr_slope < 0)) ? 15 : 0
+score += (dir == 1 and tick_ext_up >= 3) or (dir == -1 and tick_ext_dn >= 3) ? 10 : 0
+score := sess_bars < 6 ? 0.0 : math.min(score, 100.0)
+day_state = score >= dt_score_hot ? (dir == 1 ? "TREND UP" : dir == -1 ? "TREND DOWN" : "MIXED") : "RANGE / MIXED"
+
+// ---- Regime alignment (optional wire-in; valid only when exactly -1/0/+1) ----
+regime_valid = not na(regime_src) and (regime_src == -1.0 or regime_src == 0.0 or regime_src == 1.0)
+regime_v = regime_valid ? math.round(regime_src) : 0
+align_state = regime_valid and ((dir == 1 and regime_v == 1) or (dir == -1 and regime_v == -1)) ? 1 :
+     regime_valid and ((dir == 1 and regime_v == -1) or (dir == -1 and regime_v == 1)) ? -1 : 0
+align_txt = not regime_valid ? "n/a" : align_state == 1 ? "ALIGNED" : align_state == -1 ? "DIVERGENT" : "NEUTRAL"
+
+// ---- Pane plots ----
+plot(cum_tick, "Cumulative TICK", color = cum_tick >= 0 ? c_bull : c_bear, linewidth = 2)
+plot(add_c, "ADD", color = color.new(c_dim, 40))
+hline(0, "Zero", color = color.new(color.white, 85))
+plot(score, "TREND_SCORE_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(tick_c, "TICK_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(vold_c, "VOLD_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(br_slope, "BREADTH_SLOPE_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(rr_slope, "RISK_SLOPE_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(float(align_state), "ALIGN_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+
+// ---- HUD ----
+var table hud = table.new(f_pos(hud_pos_in), 2, 7, bgcolor = c_panel, frame_color = c_frame,
+     frame_width = 1, border_color = color.new(color.white, 92), border_width = 1)
+if barstate.islast
+    _sbg = score >= dt_score_hot ? (dir == 1 ? color.new(c_bull, 55) : color.new(c_bear, 55)) : c_cell
+    f_tcell(hud, 0, 0, "Internals*", c_text, c_frame)
+    f_tcell(hud, 1, 0, day_state + " · " + f_fmt(score, 0), c_text, _sbg)
+    f_tcell(hud, 0, 1, "TICK", c_dim, c_panel)
+    f_tcell(hud, 1, 1, na(tick_c) ? "n/a (plan?)" : f_fmt(tick_c, 0) + " · cum " + f_fmt(cum_tick, 0) + " · ext " + str.tostring(tick_ext_up) + "/" + str.tostring(tick_ext_dn), na(tick_c) ? c_faint : cum_tick >= 0 ? c_bull : c_bear, c_cell)
+    f_tcell(hud, 0, 2, "ADD", c_dim, c_panel)
+    f_tcell(hud, 1, 2, na(add_c) ? "n/a (plan?)" : f_fmt(add_c, 0) + " · persist " + f_fmt(add_persist, 0) + "%", na(add_c) ? c_faint : add_side == 1 ? c_bull : c_bear, c_cell)
+    f_tcell(hud, 0, 3, "VOLD", c_dim, c_panel)
+    f_tcell(hud, 1, 3, na(vold_c) ? "n/a (plan?)" : vold_side == 1 ? "Up-vol dominant" : "Down-vol dominant", na(vold_c) ? c_faint : vold_side == 1 ? c_bull : c_bear, c_cell)
+    f_tcell(hud, 0, 4, "Ratios", c_dim, c_panel)
+    f_tcell(hud, 1, 4, "RSP/SPY " + (na(br_slope) ? "n/a" : br_slope > 0 ? "↑" : "↓") + " · QQQ/SPY " + (na(rr_slope) ? "n/a" : rr_slope > 0 ? "↑" : "↓"), c_dim, c_cell)
+    f_tcell(hud, 0, 5, "Regime align", c_dim, c_panel)
+    f_tcell(hud, 1, 5, align_txt, align_state == 1 ? c_hot : align_state == -1 ? c_bear : c_faint, c_cell)
+    f_tcell(hud, 0, 6, "*heuristic context", c_faint, c_panel)
+    f_tcell(hud, 1, 6, "gate input, never a signal", c_faint, c_panel)
+
+// ---- Alerts ----
+trend_cross = score >= dt_score_hot and score[1] < dt_score_hot
+alertcondition(trend_cross and barstate.isconfirmed, "Trend-day score crossed threshold", "Internals: trend-day score crossed the threshold")
+alertcondition(tick_ext_up >= 3 and tick_ext_up[1] < 3 and barstate.isconfirmed, "TICK extreme cluster (up)", "Internals: 3+ upside TICK extremes today")
+alertcondition(tick_ext_dn >= 3 and tick_ext_dn[1] < 3 and barstate.isconfirmed, "TICK extreme cluster (down)", "Internals: 3+ downside TICK extremes today")
+if barstate.isconfirmed and trend_cross
+    if use_json_alerts
+        alert('{"ev":"trend_day","sym":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","score":' + (na(score) ? "null" : f_fmt(score, 0)) + ',"dir":' + str.tostring(dir) + ',"align":"' + align_txt + '","t":' + str.tostring(time) + '}', alert.freq_once_per_bar_close)
+    else
+        alert("Internals: " + day_state + " · score " + f_fmt(score, 0) + " · cumTICK " + f_fmt(cum_tick, 0), alert.freq_once_per_bar_close)
+// =============================================================================
+// End of file — Breadth & Internals Proxy v1.1

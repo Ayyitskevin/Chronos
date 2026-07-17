@@ -1,0 +1,37 @@
+# ADR-0008 — Executable candidates limited to daily-bar, long-only ETF strategies
+
+Status: Accepted (2026-07-17). Index entry: DECISIONS.md D-12.
+
+## Context
+
+The Pine corpus (42 audited script artifacts, ASSUMPTIONS.md A-01) contains intraday systems (ORB,
+session VWAP, RVOL screeners), options studies, and daily-bar systems. The target account is a
+small IBKR cash account (~USD 3,000): pattern-day-trading rules make intraday impractical below
+USD 25,000 in a margin account; cash settlement constrains turnover; the fixed ~USD 1.00 minimum
+commission is ~3.3 bps per side on this equity, a cost floor that destroys high-frequency edges;
+and no trustworthy intraday data was obtainable in this environment (A-31).
+
+## Decision
+
+Initial executable candidates are limited to daily-bar, long-only, non-leveraged ETF strategies
+derived from the corpus:
+
+- Markov regime-gated trend continuation family — `regime_trend_v1`
+  (`src/chronos/strategies/regime_trend.py`, spec `specs/regime_trend_v1.yaml`);
+- RSI-2-class mean reversion family — `mean_reversion_v1`
+  (`src/chronos/strategies/mean_reversion.py`, spec `specs/mean_reversion_v1.yaml`).
+
+Both are validated against simple baselines (`src/chronos/strategies/baselines.py`: buy-and-hold,
+SMA trend, deterministic random entries). The candidate universe is restricted to highly liquid
+US-listed ETFs (A-11). Intraday corpus scripts are classified research-only; options-related
+scripts remain studies (the wheel dashboard stays decision-support only, A-12).
+
+## Consequences
+
+- Honesty over ambition: the platform ships with two executable strategy families, not 42.
+- Whole-share sizing on USD 3,000 produces meaningful rounding drag; it is modelled, not hidden
+  (A-22).
+- Research results must beat baselines net of the conservative cost floor (A-20/A-21) to matter;
+  the quantitative validation report (TASKS.md "Next") is the evidence, and it does not exist yet.
+- Expanding scope (single stocks, intraday, options execution) requires owner approval, new data,
+  and new ADRs — not a config change.

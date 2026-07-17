@@ -1,0 +1,209 @@
+//@version=6
+// =============================================================================
+// Mean-Reversion Extremes Study v1.1 (5T Pine Suite · Tranche 3)
+// Connors-lineage short-term reversion flags (RSI-2 class) + VWAP stretch,
+// regime-aware: long flags only in daily uptrends, short flags only in daily
+// downtrends (classic rule), suppressed once flagged until RSI recrosses 50.
+// Each flag is then SCORED: did price touch session VWAP within the horizon
+// before an ATR-based adverse move? Running hit rates with Wilson lower
+// bounds per side. Flags are study events — never signals. Not advice.
+// -----------------------------------------------------------------------------
+// v1.1 changelog (2026-07-11):
+//   · FIX (HIGH): episodes still pending at the session rollover auto-scored
+//     as WINS — session VWAP resets to ≈ first-bar hlc3, which price touches
+//     by construction. v1.1: on the first bar of a new day any pending episode
+//     EXPIRES UNSCORED — removed from n, tallied in a faint "exp" HUD counter.
+//     Rationale: an unresolved overnight episode is not evidence either way.
+//   · FIX (measurement honesty): the adverse-move/timeout (FAIL) check now
+//     runs BEFORE the VWAP-touch (win) check each bar — same-bar collisions
+//     previously scored optimistically as wins; they now score conservatively.
+//   · FIX: the fail threshold is snapshotted at flag time (pl_fail_lvl /
+//     ps_fail_lvl) instead of drifting with current-bar ATR on every bar.
+//   · FIX: VWAP touch checks are na-guarded (nz(svwap) = 0 could fake touches
+//     during warm-up).
+//   · NEW: MR_LONG_WLO_EXPORT / MR_SHORT_WLO_EXPORT — the already-computed
+//     Wilson lower bounds (×100), data-window only.
+//   · NEW: optional JSON payload for the two flag alerts via alert(), default
+//     OFF (v1.0 text behavior preserved).
+//   · Housekeeping: request.security() barmerge arguments now keyword-passed.
+//   · Evidence label: needs user run.
+// =============================================================================
+indicator("Mean-Reversion Extremes Study v1.1", shorttitle = "MR Study v1.1", overlay = true)
+
+grp_mr = "1 · Extremes"
+grp_sc = "2 · Outcome Scoring"
+grp_dsp = "3 · Display"
+
+rsi_th_lo = input.float(10.0, "RSI-2 oversold", minval = 1.0, maxval = 30.0, group = grp_mr)
+rsi_th_hi = input.float(90.0, "RSI-2 overbought", minval = 70.0, maxval = 99.0, group = grp_mr)
+stretch_sigma = input.float(2.0, "Min |stretch| from session VWAP (sigma)", minval = 0.5, maxval = 5.0, step = 0.25, group = grp_mr)
+require_daily_trend = input.bool(true, "Regime filter: long flags only above daily EMA20 (and mirror)", group = grp_mr)
+
+horizon_bars = input.int(30, "Outcome horizon (bars)", minval = 5, maxval = 200, group = grp_sc)
+fail_atr = input.float(1.5, "Adverse move = fail (ATR)", minval = 0.5, maxval = 5.0, step = 0.25, group = grp_sc)
+atr_len = input.int(14, "ATR length", minval = 1, maxval = 100, group = grp_sc)
+
+hud_pos_in = input.string("bottom_right", "HUD position", options = ["top_left", "top_center", "top_right", "bottom_left", "bottom_center", "bottom_right"], group = grp_dsp)
+show_marks = input.bool(true, "Mark extreme flags", group = grp_dsp)
+use_json_alerts = input.bool(false, "JSON alert payloads (webhook)", group = grp_dsp, tooltip = "OFF: human-readable alert text (v1.0 behavior). ON: machine-readable JSON for webhook automation. Display-layer only.")
+
+c_panel = color.new(#141a22, 0)
+c_cell = color.new(#1b2430, 0)
+c_frame = color.new(#2e4a66, 0)
+c_text = color.new(#e8edf2, 0)
+c_dim = color.new(#9fb0c0, 0)
+c_faint = color.new(#5a6572, 0)
+c_bull = color.new(#1e9e6a, 0)
+c_bear = color.new(#e5484d, 0)
+c_vw = color.new(#7aa2f7, 0)
+
+f_pos(_s) =>
+    _s == "top_left" ? position.top_left : _s == "top_center" ? position.top_center :
+     _s == "top_right" ? position.top_right : _s == "bottom_left" ? position.bottom_left :
+     _s == "bottom_center" ? position.bottom_center : position.bottom_right
+
+f_fmt(_v, _dp) =>
+    na(_v) ? "n/a" : str.tostring(_v, _dp == 0 ? "#" : _dp == 1 ? "#.#" : "#.##")
+
+f_tcell(_t, _c, _r, _txt, _tc, _bg) =>
+    table.cell(_t, _c, _r, _txt, text_color = _tc, bgcolor = _bg, text_size = size.small)
+
+f_wilson_lo(_p, _n) =>
+    _n <= 0 or na(_p) ? float(na) :
+     (_p + 1.96 * 1.96 / (2 * _n) - 1.96 * math.sqrt((_p * (1 - _p) + 1.96 * 1.96 / (4 * _n)) / _n)) / (1 + 1.96 * 1.96 / _n)
+
+atr_val = ta.atr(atr_len)
+rsi2 = ta.rsi(close, 2)
+daily_up = request.security(syminfo.tickerid, "D", close[1] > ta.ema(close, 20)[1] ? 1.0 : 0.0, gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on) == 1.0
+
+// ---- Session VWAP + sigma (manual, session-anchored) ----
+new_day = ta.change(time("D")) != 0
+var float cv = 0.0
+var float cpv = 0.0
+var float cpv2 = 0.0
+if new_day
+    cv := nz(volume)
+    cpv := nz(volume) * hlc3
+    cpv2 := nz(volume) * hlc3 * hlc3
+else
+    cv += nz(volume)
+    cpv += nz(volume) * hlc3
+    cpv2 += nz(volume) * hlc3 * hlc3
+svwap = cv > 0 ? cpv / cv : float(na)
+svar = cv > 0 and not na(svwap) ? math.max(cpv2 / cv - svwap * svwap, 0.0) : float(na)
+ssd = na(svar) ? float(na) : math.sqrt(svar)
+stretch = not na(svwap) and not na(ssd) and ssd > 0 ? (close - svwap) / ssd : float(na)
+
+// ---- One-shot arming per episode (reset on RSI recross of 50) ----
+var bool armed_long = true
+var bool armed_short = true
+if barstate.isconfirmed
+    if rsi2 > 50
+        armed_long := true
+    if rsi2 < 50
+        armed_short := true
+long_flag = barstate.isconfirmed and armed_long and rsi2 <= rsi_th_lo and nz(stretch) <= -stretch_sigma and (not require_daily_trend or daily_up)
+short_flag = barstate.isconfirmed and armed_short and rsi2 >= rsi_th_hi and nz(stretch) >= stretch_sigma and (not require_daily_trend or not daily_up)
+if long_flag
+    armed_long := false
+if short_flag
+    armed_short := false
+
+// ---- Outcome scoring: touch VWAP within horizon before adverse ATR move ----
+var bool pl_on = false
+var float pl_ref = na
+var int pl_age = 0
+var bool ps_on = false
+var float ps_ref = na
+var int ps_age = 0
+var int l_n = 0
+var int l_w = 0
+var int s_n = 0
+var int s_w = 0
+var int l_exp = 0
+var int s_exp = 0
+var float pl_fail_lvl = na
+var float ps_fail_lvl = na
+if barstate.isconfirmed
+    // v1.1: session rollover — pending episodes expire UNSCORED (an unresolved
+    // overnight episode is not evidence either way)
+    if new_day
+        if pl_on
+            pl_on := false
+            l_n -= 1
+            l_exp += 1
+        if ps_on
+            ps_on := false
+            s_n -= 1
+            s_exp += 1
+    // v1.1: FAIL/timeout checked first (conservative on same-bar collisions);
+    // fail level snapshotted at flag time; VWAP touch na-guarded
+    if pl_on
+        pl_age += 1
+        if low <= pl_fail_lvl or pl_age >= horizon_bars
+            pl_on := false
+        else if not na(svwap) and high >= svwap
+            l_w += 1
+            pl_on := false
+    if ps_on
+        ps_age += 1
+        if high >= ps_fail_lvl or ps_age >= horizon_bars
+            ps_on := false
+        else if not na(svwap) and low <= svwap
+            s_w += 1
+            ps_on := false
+    if long_flag and not pl_on
+        pl_on := true
+        pl_ref := close
+        pl_fail_lvl := pl_ref - fail_atr * nz(atr_val)
+        pl_age := 0
+        l_n += 1
+    if short_flag and not ps_on
+        ps_on := true
+        ps_ref := close
+        ps_fail_lvl := ps_ref + fail_atr * nz(atr_val)
+        ps_age := 0
+        s_n += 1
+l_pct = l_n > 0 ? l_w * 100.0 / l_n : float(na)
+s_pct = s_n > 0 ? s_w * 100.0 / s_n : float(na)
+l_wlo = l_n > 0 ? f_wilson_lo(l_w * 1.0 / l_n, l_n) * 100.0 : float(na)
+s_wlo = s_n > 0 ? f_wilson_lo(s_w * 1.0 / s_n, s_n) * 100.0 : float(na)
+
+// ---- Visuals / exports / HUD / alerts ----
+plot(svwap, "Session VWAP", color = c_vw, style = plot.style_linebr)
+plotshape(show_marks and long_flag, "MR Long Extreme", style = shape.circle, location = location.belowbar, color = c_bull, size = size.tiny)
+plotshape(show_marks and short_flag, "MR Short Extreme", style = shape.circle, location = location.abovebar, color = c_bear, size = size.tiny)
+
+plot(rsi2, "RSI2_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(stretch, "STRETCH_SIGMA_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(long_flag ? 1.0 : 0.0, "MR_LONG_FLAG_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(short_flag ? 1.0 : 0.0, "MR_SHORT_FLAG_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(l_pct, "MR_LONG_TOUCH_PCT_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(s_pct, "MR_SHORT_TOUCH_PCT_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(l_wlo, "MR_LONG_WLO_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(s_wlo, "MR_SHORT_WLO_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+
+var table hud = table.new(f_pos(hud_pos_in), 2, 5, bgcolor = c_panel, frame_color = c_frame,
+     frame_width = 1, border_color = color.new(color.white, 92), border_width = 1)
+if barstate.islast
+    f_tcell(hud, 0, 0, "MR Study · ANTI-STYLE", c_text, c_frame)
+    f_tcell(hud, 1, 0, pl_on ? "LONG PENDING " + str.tostring(pl_age) + "/" + str.tostring(horizon_bars) : ps_on ? "SHORT PENDING " + str.tostring(ps_age) + "/" + str.tostring(horizon_bars) : "Watching", pl_on ? c_bull : ps_on ? c_bear : c_dim, c_cell)
+    f_tcell(hud, 0, 1, "RSI-2 · Stretch", c_dim, c_panel)
+    f_tcell(hud, 1, 1, f_fmt(rsi2, 0) + " · " + f_fmt(stretch, 2) + "σ", math.abs(nz(stretch)) >= stretch_sigma ? c_text : c_faint, c_cell)
+    f_tcell(hud, 0, 2, "Daily regime", c_dim, c_panel)
+    f_tcell(hud, 1, 2, daily_up ? "Up (longs armed)" : "Down (shorts armed)", daily_up ? c_bull : c_bear, c_cell)
+    f_tcell(hud, 0, 3, "Long flags", c_dim, c_panel)
+    f_tcell(hud, 1, 3, "n" + str.tostring(l_n) + " · touch " + f_fmt(l_pct, 0) + "% · Wlo " + f_fmt(l_wlo, 0) + "%" + (l_exp > 0 ? " · exp " + str.tostring(l_exp) : ""), l_n < 20 ? c_faint : c_dim, c_cell)
+    f_tcell(hud, 0, 4, "Short flags", c_dim, c_panel)
+    f_tcell(hud, 1, 4, "n" + str.tostring(s_n) + " · touch " + f_fmt(s_pct, 0) + "% · Wlo " + f_fmt(s_wlo, 0) + "%" + (s_exp > 0 ? " · exp " + str.tostring(s_exp) : ""), s_n < 20 ? c_faint : c_dim, c_cell)
+
+alertcondition(long_flag, "MR long extreme", "MR Study: oversold extreme flagged (study event, not a signal)")
+alertcondition(short_flag, "MR short extreme", "MR Study: overbought extreme flagged (study event, not a signal)")
+if long_flag or short_flag
+    _side = long_flag ? "long" : "short"
+    _msg = use_json_alerts ?
+         '{"ev":"mr_flag","sym":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","side":"' + _side + '","rsi2":' + (na(rsi2) ? "null" : f_fmt(rsi2, 2)) + ',"stretch_sigma":' + (na(stretch) ? "null" : f_fmt(stretch, 2)) + ',"t":' + str.tostring(time) + '}' :
+         "MR Study: " + _side + " extreme flagged (study event, not a signal) · RSI2 " + f_fmt(rsi2, 0) + " · stretch " + f_fmt(stretch, 2) + "σ"
+    alert(_msg, alert.freq_once_per_bar_close)
+// ============================= End of file ==================================
+// Mean-Reversion Extremes Study v1.1

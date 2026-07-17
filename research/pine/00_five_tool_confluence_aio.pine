@@ -1,0 +1,2443 @@
+//@version=6
+// =============================================================================
+// Five-Tool Confluence AIO v3.6 "Statistician's Cut" — Markov + Dual-Side System
+//
+// v3.6 upgrade (from v3.5-SHORT.6). Additive by design: every behavior change
+// ships default-OFF except one attribution bug fix, per KLQuant change control.
+//   - 1c Markov Statistics: selectable stay-probability estimator
+//     (Raw / Wilson lower bound / Laplace smoothed) feeding SHORT+/LONG+
+//     gates and the SHORT+ HUD. Dashboard cells keep raw + Wilson interval.
+//   - Empirical dwell-time tracking per regime (last 120 completed spells)
+//     with current-age percentile in the HUD and Markov dashboard.
+//   - SHORT+ dwell-percentile youth gate (default OFF, separate variant).
+//   - LONG+ optional continuation-quality gate (default OFF; asymmetric by
+//     doctrine — bull regimes are not age-gated the way bear regimes are).
+//   - Setup-coded short entry IDs S1F/S1B/S1R/S1X (default OFF) so the trade
+//     list and Expectancy Journal can attribute per-setup short stats.
+//   - Breakeven offset R after Target 1 (default 0.0 = legacy breakeven).
+//   - Optional JSON alert payloads for webhook/Odysseus wiring (default OFF).
+//   - FIX: blended sleeve attribution books entry-bar equity deltas
+//     (commission/slippage) to the side just opened instead of dropping them.
+//   - Zero new plot() calls (plot-budget doctrine); telemetry via HUD/alerts.
+//   - Core entries/exits/stops/regime/AVWAP/scoring logic unchanged.
+// =============================================================================
+strategy(
+     "Five-Tool Confluence AIO v3.6 — Regime · RS · Div · AVWAP · Risk · Markov",
+     shorttitle = "5T Confluence v3.6",
+     overlay = true,
+     initial_capital = 100000,
+     commission_type = strategy.commission.percent,
+     commission_value = 0.03,
+     slippage = 2,
+     pyramiding = 3,
+     calc_on_every_tick = false,
+     calc_on_order_fills = false,
+     process_orders_on_close = false,
+     use_bar_magnifier = true,
+     max_bars_back = 5000,
+     max_labels_count = 200,
+     max_lines_count = 100)
+// =============================================================================
+// Groups
+// =============================================================================
+grp_mode  = "0 · Mode"
+grp_val   = "0a · Research & Validation"
+grp_reg   = "1 · Regime Engine"
+grp_gate  = "1a · Regime Filters & Entry Gates"
+grp_ext   = "1b · External Regime Override"
+grp_mkv   = "1c · Markov Statistics"
+grp_rs    = "2 · Relative Strength"
+grp_env   = "2a · Market Environment"
+grp_div   = "3 · Divergence"
+grp_vw    = "4 · Anchored VWAP"
+grp_ent   = "5 · Entry Confluence"
+grp_short = "5a · Short-Side System"
+grp_long  = "5b · Long-Side System"
+grp_blend = "6b · Blended Capital Split"
+grp_rsk   = "6 · Risk & Exits"
+grp_halt  = "6a · Protection Rules"
+grp_dsp   = "7 · Display"
+// =============================================================================
+// 0 · Mode
+// =============================================================================
+enable_orders = input.bool(true, "Enable backtest orders", group = grp_mode,
+     tooltip = "ON: signals drive the Strategy Tester. OFF: chart-tool mode only.")
+allow_shorts = input.bool(false, "Allow shorts", group = grp_mode,
+     tooltip = "OFF by default. Shorts use the dedicated sell-side system when enabled.")
+// =============================================================================
+// 0a · Research & Validation
+// =============================================================================
+use_date_filter = input.bool(false, "Use backtest date window", group = grp_val)
+test_start = input.time(timestamp("1 Jan 2018 00:00 +0000"), "Entry start date", group = grp_val)
+test_end   = input.time(timestamp("31 Dec 2099 23:59 +0000"), "Entry end date", group = grp_val)
+oos_start = input.time(timestamp("1 Jan 2022 00:00 +0000"), "Out-of-sample report start", group = grp_val,
+     tooltip = "Validation dashboard treats trades exiting after this date as out-of-sample.")
+validation_mode = input.string("Full", "Validation dashboard", options = ["Off", "Compact", "Full"], group = grp_val)
+validation_pos_in = input.string("bottom_left", "Validation dashboard position",
+     options = ["top_left", "top_center", "top_right", "bottom_left", "bottom_center", "bottom_right"], group = grp_val)
+validation_focus = input.string("Auto", "Validation focus", options = ["Auto", "Classic", "Blended"], group = grp_val,
+     tooltip = "Classic: single-account validation view. Blended: sleeve-aware validation view. Auto: Blended when the per-side virtual capital split is on, otherwise Classic.")
+validation_show_chunks = input.bool(false, "Show walk-forward chunk detail rows", group = grp_val,
+     tooltip = "OFF: chunk stability stays summarized by the Bad Chunks count and the per-side WF pattern cells. ON: adds the full per-chunk table below the core board.")
+wf_segments = input.int(6, "Walk-forward trade chunks", minval = 2, maxval = 8, group = grp_val,
+     tooltip = "Splits closed trades chronologically into chunks and reports consistency.")
+max_report_trades = input.int(3000, "Max closed trades to scan", minval = 100, maxval = 9000, group = grp_val)
+min_validation_trades = input.int(100, "Minimum trades for robust sample", minval = 10, maxval = 2000, group = grp_val)
+min_oos_pf_warn = input.float(1.05, "Minimum out-of-sample profit factor", minval = 0.10, maxval = 5.00, step = 0.05, group = grp_val)
+max_best_trade_dep_pct = input.float(25.0, "Max best-trade dependency %", minval = 1.0, maxval = 100.0, step = 1.0, group = grp_val)
+max_negative_segments = input.int(1, "Max negative chunks", minval = 0, maxval = 8, group = grp_val)
+in_test_window = not use_date_filter or (time >= test_start and time <= test_end)
+// =============================================================================
+// 1 · Regime Engine
+// =============================================================================
+preset_input = input.string("Auto", "Preset", options = ["Auto", "Custom", "Daily", "4H", "Weekly"], group = grp_reg,
+     tooltip = "Auto maps intraday charts up to 4H into the 4H preset, weekly charts into Weekly, and everything else into Daily.")
+lookback_custom = input.int(20, "Custom lookback window", minval = 5, maxval = 250, group = grp_reg)
+enter_z_custom = input.float(0.85, "Custom enter threshold", minval = 0.10, maxval = 5.00, step = 0.05, group = grp_reg)
+exit_z_custom = input.float(0.55, "Custom exit threshold", minval = 0.05, maxval = 4.95, step = 0.05, group = grp_reg)
+confirm_custom = input.int(2, "Custom confirmation bars", minval = 1, maxval = 10, group = grp_reg)
+vol_model = input.string("StDev", "Realized-volatility model", options = ["StDev", "EWMA", "ATR%"], group = grp_reg)
+use_vol_percentile_adjustment = input.bool(true, "Adjust thresholds by volatility percentile", group = grp_reg)
+vol_percentile_len = input.int(252, "Volatility percentile lookback", minval = 50, maxval = 1000, group = grp_reg)
+percentile_sensitivity = input.float(0.25, "Volatility sensitivity", minval = 0.00, maxval = 1.00, step = 0.05, group = grp_reg)
+use_hysteresis = input.bool(true, "Use hysteresis", group = grp_reg)
+// =============================================================================
+// 1a · Regime Filters & Entry Gates
+// =============================================================================
+use_ema_filter = input.bool(true, "Use EMA direction filter", group = grp_gate)
+ema_filter_len = input.int(100, "EMA filter length", minval = 10, maxval = 300, group = grp_gate)
+strength_filter = input.string("Off", "Regime quality filter",
+     options = ["Off", "ADX", "Efficiency Ratio", "ADX or ER", "ADX and ER"], group = grp_gate)
+adx_len = input.int(14, "ADX DI length", minval = 5, maxval = 50, group = grp_gate)
+adx_smoothing = input.int(14, "ADX smoothing", minval = 5, maxval = 50, group = grp_gate)
+adx_threshold = input.float(20.0, "ADX threshold", minval = 5.0, maxval = 60.0, step = 0.5, group = grp_gate)
+er_len = input.int(20, "Efficiency-ratio length", minval = 5, maxval = 100, group = grp_gate)
+er_threshold = input.float(0.25, "Efficiency-ratio threshold", minval = 0.05, maxval = 1.00, step = 0.05, group = grp_gate)
+gap_guard_mode = input.string("Neutralize new flips", "Gap / shock handling",
+     options = ["Off", "Neutralize new flips", "Force Neutral"], group = grp_gate)
+gap_atr_len = input.int(14, "Gap ATR length", minval = 5, maxval = 100, group = grp_gate)
+gap_atr_mult = input.float(4.0, "Gap ATR multiple", minval = 1.0, maxval = 20.0, step = 0.25, group = grp_gate)
+playbook_quality_filter = input.string("ADX or ER", "Entry quality filter",
+     options = ["Off", "ADX", "Efficiency Ratio", "ADX or ER", "ADX and ER"], group = grp_gate)
+min_strength_for_bias = input.float(55.0, "Minimum strength for entries", minval = 0.0, maxval = 100.0, step = 1.0, group = grp_gate)
+min_bars_for_bias = input.int(1, "Minimum bars in regime", minval = 1, maxval = 20, group = grp_gate)
+block_entries_on_gap = input.bool(true, "Block new entries on shock bar", group = grp_gate,
+     tooltip = "Uses the raw shock detector, independent of the regime-side gap handling mode.")
+use_fresh_overextension_guard = input.bool(false, "Guard fresh entries when strength is extreme", group = grp_gate)
+max_strength_for_fresh_bias = input.float(92.0, "Max fresh-entry strength", minval = 50.0, maxval = 100.0, step = 1.0, group = grp_gate)
+fresh_bias_guard_bars = input.int(3, "Fresh-guard bars", minval = 1, maxval = 20, group = grp_gate)
+extension_strength_threshold = input.float(85.0, "Mature extension threshold", minval = 50.0, maxval = 100.0, step = 1.0, group = grp_gate)
+// =============================================================================
+// 1b · External Regime Override
+// =============================================================================
+use_external = input.bool(false, "Use external regime source", group = grp_ext,
+     tooltip = "Optional. The external source must output exactly -1, 0, or +1 for 20 consecutive bars before it is trusted.")
+ext_regime_src = input.source(close, "External regime link", group = grp_ext)
+use_ext_strength = input.bool(false, "Use external strength source", group = grp_ext,
+     tooltip = "Only used while the external regime source is trusted. Invalid strength blocks new entries. Without this link, internal strength is trusted only while the internal and external regimes agree.")
+ext_strength_src = input.source(close, "External strength link", group = grp_ext)
+// =============================================================================
+// 1c · Markov Statistics
+// =============================================================================
+mk_estimator = input.string("Raw", "Stay-probability estimator",
+     options = ["Raw", "Wilson lower bound", "Laplace smoothed"], group = grp_mkv,
+     tooltip = "Applies to SHORT+/LONG+ gate math and the SHORT+ HUD stay cell. Raw = observed frequency (v3.5 behavior). Wilson lower bound = conservative small-sample floor. Laplace = pseudo-count smoothing. Markov dashboard cells always show raw frequency with Wilson intervals.")
+mk_laplace_alpha = input.float(1.0, "Laplace pseudo-count alpha", minval = 0.1, maxval = 10.0, step = 0.1, group = grp_mkv)
+use_dwell_tracking = input.bool(true, "Track completed regime dwell times", group = grp_mkv,
+     tooltip = "Records completed regime spell lengths (last 120 per state) and reports the current regime age as a percentile of its own history. Display-only unless a dwell gate is enabled.")
+// =============================================================================
+// 2 · Relative Strength
+// =============================================================================
+rs_mode = input.string("Above zero", "RS requirement", options = ["Off", "Above zero", "Leader (above + rising)"], group = grp_rs)
+veto_laggard = input.bool(true, "Veto entries against strong RS", group = grp_rs,
+     tooltip = "Longs are vetoed on a full RS laggard; shorts are vetoed on a full RS leader.")
+bench_sym = input.symbol("AMEX:SPY", "Benchmark", group = grp_rs)
+mans_len = input.int(200, "Mansfield MA length", minval = 5, maxval = 300, group = grp_rs)
+rs_slope_len = input.int(3, "Slope lookback bars", minval = 1, maxval = 20, group = grp_rs)
+nh_len = input.int(50, "RS new-high/new-low lookback", minval = 5, maxval = 260, group = grp_rs)
+// =============================================================================
+// 2a · Market Environment
+// =============================================================================
+use_benchmark_filter = input.bool(false, "Use benchmark risk filter", group = grp_env,
+     tooltip = "Longs require benchmark above its EMA. Shorts require benchmark below its EMA.")
+benchmark_filter_len = input.int(100, "Benchmark EMA length", minval = 10, maxval = 300, group = grp_env)
+use_htf_filter = input.bool(false, "Use higher-timeframe EMA filter", group = grp_env,
+     tooltip = "Uses COMPLETED higher-timeframe bars only (non-repainting). Inert unless the higher timeframe is above the chart timeframe.")
+htf_tf = input.timeframe("D", "Higher timeframe", group = grp_env)
+htf_ema_len = input.int(100, "Higher-timeframe EMA length", minval = 10, maxval = 300, group = grp_env)
+// =============================================================================
+// 3 · Divergence
+// =============================================================================
+osc_type = input.string("RSI", "Oscillator", options = ["RSI", "MFI"], group = grp_div)
+osc_len = input.int(14, "Oscillator length", minval = 2, maxval = 100, group = grp_div)
+piv_l = input.int(5, "Pivot left bars", minval = 1, maxval = 50, group = grp_div)
+piv_r = input.int(5, "Pivot right bars", minval = 1, maxval = 50, group = grp_div)
+min_gap = input.int(5, "Min bars between pivots", minval = 1, maxval = 200, group = grp_div)
+max_gap = input.int(60, "Max bars between pivots", minval = 5, maxval = 400, group = grp_div)
+// =============================================================================
+// 4 · Anchored VWAP
+// =============================================================================
+vwap_src = input.source(hlc3, "AVWAP price source", group = grp_vw)
+vwap_weighting = input.string("Volume", "AVWAP weighting", options = ["Volume", "Equal (no-volume symbols)"], group = grp_vw)
+use_value_zone = input.bool(true, "Regular divergence needs value zone", group = grp_vw)
+block_entries_on_avwap_dead = input.bool(true, "Block entries if volume AVWAP is unavailable", group = grp_vw)
+use_avwap_stale_guard = input.bool(false, "Force AVWAP re-anchor if stale", group = grp_vw)
+avwap_stale_atr_mult = input.float(8.0, "Stale re-anchor ATR multiple", minval = 1.0, maxval = 50.0, step = 0.5, group = grp_vw)
+avwap_stale_min_bars = input.int(10, "Stale re-anchor min bars", minval = 2, maxval = 500, group = grp_vw)
+avwap_display_max_atr = input.float(20.0, "Hide AVWAP/value-zone beyond N ATR from price", minval = 2.0, maxval = 100.0, step = 1.0, group = grp_vw)
+// =============================================================================
+// 5 · Entry Confluence
+// =============================================================================
+trig_flip = input.bool(true, "Trigger: regime flip", group = grp_ent)
+trig_hidden = input.bool(true, "Trigger: hidden continuation divergence", group = grp_ent)
+trig_regular = input.bool(true, "Trigger: regular divergence in value zone", group = grp_ent)
+trig_reclaim = input.bool(true, "Trigger: AVWAP reclaim with RS confirmation", group = grp_ent)
+min_score = input.int(55, "Minimum confluence score", minval = 0, maxval = 100, group = grp_ent)
+// =============================================================================
+// 5a · Short-Side System
+// =============================================================================
+use_short_side_v2 = input.bool(true, "Use dedicated sell-side logic", group = grp_short,
+     tooltip = "ON: shorts require relative weakness, failed reclaim/bounce, no-chase, support-room, and squeeze-risk filters. OFF: legacy mirrored short logic.")
+short_rw_mode = input.string("Relative weakness leader", "Short relative-weakness requirement",
+     options = ["Mansfield below zero", "Relative weakness leader", "New RS low"],
+     group = grp_short)
+require_failed_reclaim_short = input.bool(true, "Require failed AVWAP/supply reclaim", group = grp_short)
+allow_short_breakdown_trigger = input.bool(true, "Allow bear-flag breakdown trigger", group = grp_short)
+short_retest_tolerance_atr = input.float(0.35, "Supply retest tolerance ATR", minval = 0.0, maxval = 3.0, step = 0.05, group = grp_short)
+short_rejection_wick_frac = input.float(0.35, "Rejection upper-wick fraction", minval = 0.0, maxval = 1.0, step = 0.05, group = grp_short)
+short_flag_len = input.int(8, "Bear-flag shelf lookback", minval = 3, maxval = 50, group = grp_short)
+use_short_no_chase_filter = input.bool(true, "Use downside no-chase filter", group = grp_short)
+short_max_dist_below_avwap_atr = input.float(3.0, "Max distance below AVWAP ATR", minval = 0.25, maxval = 15.0, step = 0.25, group = grp_short)
+short_rsi_len = input.int(14, "Short RSI length", minval = 2, maxval = 100, group = grp_short)
+short_oversold_rsi = input.float(28.0, "No-chase RSI threshold", minval = 1.0, maxval = 50.0, step = 1.0, group = grp_short)
+short_down_bars_len = input.int(4, "Consecutive down-bar window", minval = 2, maxval = 10, group = grp_short)
+short_max_stop_pct = input.float(8.0, "Max short stop distance %", minval = 0.25, maxval = 50.0, step = 0.25, group = grp_short)
+use_short_support_filter = input.bool(true, "Use support proximity filter", group = grp_short)
+short_support_len = input.int(50, "Support lookback", minval = 5, maxval = 260, group = grp_short)
+short_min_room_to_support_atr = input.float(1.25, "Minimum room to support ATR", minval = 0.0, maxval = 10.0, step = 0.25, group = grp_short)
+use_short_squeeze_filter = input.bool(true, "Use squeeze-risk filter", group = grp_short)
+short_green_body_atr = input.float(0.90, "Large green body ATR", minval = 0.10, maxval = 5.00, step = 0.10, group = grp_short)
+short_gap_up_atr = input.float(0.75, "Gap-up squeeze ATR", minval = 0.10, maxval = 5.00, step = 0.10, group = grp_short)
+short_high_atr_pct = input.float(8.0, "High ATR% squeeze warning", minval = 0.50, maxval = 50.0, step = 0.25, group = grp_short)
+use_short_structural_stop = input.bool(true, "Structural short stop (above supply)", group = grp_short)
+short_stop_buffer_atr = input.float(0.25, "Structural stop buffer ATR", minval = 0.0, maxval = 3.0, step = 0.05, group = grp_short)
+use_short_avwap_exit = input.bool(true, "Exit shorts on AVWAP reclaim", group = grp_short)
+use_short_setup_ids = input.bool(false, "Setup-coded short entry IDs (S1F/S1B/S1R/S1X)", group = grp_short,
+     tooltip = "OFF: legacy S1/S2/S3 IDs (default; keeps existing journals consistent). ON: appends F=failed reclaim, B=bear-flag breakdown, R=bear-flip retest, X=bear flip so the trade list and Expectancy Journal can attribute per-setup short stats, matching the long side's P/R/A/B suffixes.")
+// SHORT+ premium Bear Continuation controls.
+short_plus_enabled = input.bool(true, "SHORT+ Enable premium Bear Continuation engine", group = grp_short)
+short_plus_show_hud = input.bool(true, "SHORT+ Show premium HUD panel", group = grp_short)
+short_plus_strict_markov = input.bool(true, "SHORT+ Require Bear + sticky + young Markov", group = grp_short)
+short_plus_min_stay_pct = input.float(60.0, "SHORT+ Min Bear stay probability %", minval = 0.0, maxval = 100.0, step = 1.0, group = grp_short)
+short_plus_min_markov_n = input.int(20, "SHORT+ Min Markov Bear-row samples", minval = 0, maxval = 5000, group = grp_short)
+short_plus_max_regime_age = input.int(12, "SHORT+ Max young Bear-regime age", minval = 1, maxval = 500, group = grp_short)
+short_plus_max_maturity = input.float(1.00, "SHORT+ Max Markov maturity", minval = 0.10, maxval = 5.00, step = 0.05, group = grp_short)
+short_plus_use_dwell_gate = input.bool(false, "SHORT+ Use dwell-percentile youth gate", group = grp_short,
+     tooltip = "Blocks continuation shorts once the current Bear regime age exceeds this percentile of completed Bear dwell times on this chart. Needs at least 5 completed Bear spells; inert until then. Default OFF: validate as a separate variant against the v3.6 baseline.")
+short_plus_max_dwell_pctile = input.float(60.0, "SHORT+ Max dwell percentile", minval = 0.0, maxval = 100.0, step = 5.0, group = grp_short)
+short_plus_allow_bear_retest = input.bool(true, "SHORT+ Add Bear-Flip First Retest setup", group = grp_short)
+short_plus_primary_only = input.bool(false, "SHORT+ Block secondary-only continuation shorts", group = grp_short)
+short_plus_min_cont_score = input.int(72, "SHORT+ Min continuation score", minval = 0, maxval = 100, group = grp_short)
+short_plus_score_boost_on = input.bool(true, "SHORT+ Boost qualifying short score", group = grp_short)
+short_plus_score_boost = input.float(10.0, "SHORT+ Qualifying score boost", minval = 0.0, maxval = 30.0, step = 0.5, group = grp_short)
+short_plus_session_filter = input.bool(false, "SHORT+ Use intraday session filter", group = grp_short)
+short_plus_session = input.session("0935-1530", "SHORT+ Intraday session", group = grp_short)
+short_plus_max_trigger_range_atr = input.float(1.40, "SHORT+ Max trigger candle range ATR", minval = 0.10, maxval = 5.00, step = 0.05, group = grp_short)
+short_plus_lower_close_on = input.bool(true, "SHORT+ Require lower-half close", group = grp_short)
+short_plus_max_close_location = input.float(0.48, "SHORT+ Max close location in bar", minval = 0.05, maxval = 0.95, step = 0.01, group = grp_short)
+short_plus_volume_filter = input.bool(true, "SHORT+ Require volume expansion", group = grp_short)
+short_plus_volume_len = input.int(20, "SHORT+ Volume MA length", minval = 1, maxval = 500, group = grp_short)
+short_plus_volume_mult = input.float(1.05, "SHORT+ Min volume / volume MA", minval = 0.10, maxval = 5.00, step = 0.05, group = grp_short)
+short_plus_risk_mult_on = input.bool(true, "SHORT+ Enable conviction risk multiplier", group = grp_short)
+short_plus_a_grade_risk_mult = input.float(1.20, "SHORT+ A-grade risk multiplier", minval = 0.00, maxval = 3.00, step = 0.05, group = grp_short)
+short_plus_std_risk_mult = input.float(1.00, "SHORT+ Standard pass risk multiplier", minval = 0.00, maxval = 3.00, step = 0.05, group = grp_short)
+short_plus_block_risk_mult = input.float(0.00, "SHORT+ Blocked risk multiplier", minval = 0.00, maxval = 3.00, step = 0.05, group = grp_short)
+// =============================================================================
+// 5b · Long-Side System
+// =============================================================================
+use_long_side_v2 = input.bool(false, "Use dedicated buy-side logic", group = grp_long,
+     tooltip = "ON: longs require a named setup plus no-chase/resistance/exhaustion filters and a structural stop. OFF: legacy blended long logic, fully unchanged.")
+long_rs_mode = input.string("Relative strength leader", "Long relative-strength requirement",
+     options = ["Mansfield above zero", "Relative strength leader", "New RS high"], group = grp_long)
+require_leader_pullback = input.bool(true, "Require RS leader for pullback setup", group = grp_long)
+allow_bull_retest_trigger = input.bool(true, "Allow bull-flip first-retest trigger", group = grp_long)
+allow_avwap_reclaim_trigger = input.bool(true, "Allow AVWAP reclaim continuation trigger", group = grp_long)
+allow_base_breakout_trigger = input.bool(true, "Allow VCP/base breakout trigger", group = grp_long)
+long_pullback_lookback = input.int(8, "Pullback lookback (bars)", minval = 3, maxval = 50, group = grp_long)
+long_base_lookback = input.int(20, "Base lookback (bars)", minval = 5, maxval = 100, group = grp_long)
+long_base_tightness_max_pct = input.float(8.0, "Base tightness max %", minval = 1.0, maxval = 50.0, step = 0.5, group = grp_long)
+long_pullback_tolerance_atr = input.float(0.35, "Pullback retest tolerance ATR", minval = 0.0, maxval = 3.0, step = 0.05, group = grp_long)
+use_long_no_chase_filter = input.bool(true, "Use upside no-chase filter", group = grp_long)
+long_max_dist_above_avwap_atr = input.float(3.0, "Max distance above AVWAP ATR", minval = 0.25, maxval = 15.0, step = 0.25, group = grp_long)
+long_rsi_len = input.int(14, "Long RSI length", minval = 2, maxval = 100, group = grp_long)
+long_overbought_rsi = input.float(72.0, "No-chase RSI threshold", minval = 50.0, maxval = 99.0, step = 1.0, group = grp_long)
+long_up_bars_len = input.int(4, "Consecutive up-bar window", minval = 2, maxval = 10, group = grp_long)
+long_max_stop_pct = input.float(8.0, "Max long stop distance %", minval = 0.25, maxval = 50.0, step = 0.25, group = grp_long)
+use_long_resistance_filter = input.bool(true, "Use resistance proximity filter", group = grp_long)
+long_resistance_lookback = input.int(50, "Resistance lookback", minval = 5, maxval = 260, group = grp_long)
+long_min_room_to_resistance_atr = input.float(1.25, "Minimum room to resistance ATR", minval = 0.0, maxval = 10.0, step = 0.25, group = grp_long)
+use_long_exhaustion_filter = input.bool(true, "Use gap-up/exhaustion filter", group = grp_long)
+long_gap_up_atr = input.float(0.75, "Gap-up exhaustion ATR", minval = 0.10, maxval = 5.00, step = 0.10, group = grp_long)
+long_exhaustion_atr_pct = input.float(8.0, "High ATR% exhaustion warning", minval = 0.50, maxval = 50.0, step = 0.25, group = grp_long)
+use_long_structural_stop = input.bool(true, "Structural long stop (below support)", group = grp_long)
+long_stop_buffer_atr = input.float(0.25, "Structural stop buffer ATR", minval = 0.0, maxval = 3.0, step = 0.05, group = grp_long)
+use_long_avwap_exit = input.bool(true, "Exit longs on AVWAP failure", group = grp_long)
+use_long_rs_deterioration_exit = input.bool(false, "Exit longs on RS deterioration", group = grp_long)
+use_long_base_failure_exit = input.bool(false, "Exit base-breakout longs on pivot failure", group = grp_long)
+// LONG+ optional continuation-quality gate (asymmetric by design; default OFF).
+long_plus_enabled = input.bool(false, "LONG+ Enable continuation-quality gate", group = grp_long,
+     tooltip = "Optional mirror of the SHORT+ quality gates for longs. Default OFF. Duration-dependence evidence says mature bull regimes do not die of old age the way bear regimes do, so the age/dwell gates here are optional extras, not doctrine. Validate as a separate variant.")
+long_plus_strict_markov = input.bool(true, "LONG+ Require Bull + sticky Markov", group = grp_long)
+long_plus_min_stay_pct = input.float(60.0, "LONG+ Min Bull stay probability %", minval = 0.0, maxval = 100.0, step = 1.0, group = grp_long)
+long_plus_min_markov_n = input.int(20, "LONG+ Min Markov Bull-row samples", minval = 0, maxval = 5000, group = grp_long)
+long_plus_max_regime_age = input.int(12, "LONG+ Max Bull-regime age", minval = 1, maxval = 500, group = grp_long)
+long_plus_max_maturity = input.float(1.00, "LONG+ Max Markov maturity", minval = 0.10, maxval = 5.00, step = 0.05, group = grp_long)
+long_plus_use_dwell_gate = input.bool(false, "LONG+ Use dwell-percentile youth gate", group = grp_long)
+long_plus_max_dwell_pctile = input.float(60.0, "LONG+ Max dwell percentile", minval = 0.0, maxval = 100.0, step = 5.0, group = grp_long)
+long_plus_session_filter = input.bool(false, "LONG+ Use intraday session filter", group = grp_long)
+long_plus_session = input.session("0935-1530", "LONG+ Intraday session", group = grp_long)
+long_plus_max_trigger_range_atr = input.float(1.40, "LONG+ Max trigger candle range ATR", minval = 0.10, maxval = 5.00, step = 0.05, group = grp_long)
+long_plus_upper_close_on = input.bool(true, "LONG+ Require upper-half close", group = grp_long)
+long_plus_min_close_location = input.float(0.52, "LONG+ Min close location in bar", minval = 0.05, maxval = 0.95, step = 0.01, group = grp_long)
+long_plus_volume_filter = input.bool(true, "LONG+ Require volume expansion", group = grp_long)
+long_plus_volume_len = input.int(20, "LONG+ Volume MA length", minval = 1, maxval = 500, group = grp_long)
+long_plus_volume_mult = input.float(1.05, "LONG+ Min volume / volume MA", minval = 0.10, maxval = 5.00, step = 0.05, group = grp_long)
+// =============================================================================
+// 6b · Blended Capital Split
+// =============================================================================
+use_blended_capital_split = input.bool(false, "Use per-side virtual capital split", group = grp_blend)
+long_capital_alloc_pct = input.float(65.0, "Long virtual capital allocation %", minval = 5.0, maxval = 95.0, step = 5.0, group = grp_blend)
+// =============================================================================
+// 6 · Risk & Exits
+// =============================================================================
+risk_pct = input.float(1.0, "Risk per trade % of equity", minval = 0.05, maxval = 5.0, step = 0.05, group = grp_rsk)
+atr_len = input.int(14, "ATR length", minval = 1, maxval = 100, group = grp_rsk)
+atr_mult = input.float(2.0, "ATR stop multiple", minval = 0.5, maxval = 10.0, step = 0.1, group = grp_rsk)
+cap_pct = input.float(100.0, "Max position value % of equity", minval = 10.0, maxval = 200.0, step = 5.0, group = grp_rsk)
+use_pointvalue_sizing = input.bool(true, "Use contract point value in sizing", group = grp_rsk)
+qty_step = input.float(1.0, "Quantity step", minval = 0.00000001, step = 0.00000001, group = grp_rsk)
+min_qty = input.float(1.0, "Minimum tradable quantity", minval = 0.00000001, step = 0.00000001, group = grp_rsk)
+t1_r = input.float(1.0, "Target 1 R", minval = 0.5, maxval = 10.0, step = 0.5, group = grp_rsk)
+t2_r = input.float(2.0, "Target 2 R", minval = 0.5, maxval = 20.0, step = 0.5, group = grp_rsk)
+be_after_t1 = input.bool(true, "Breakeven after Target 1", group = grp_rsk)
+be_offset_r = input.float(0.0, "Breakeven offset R", minval = -0.5, maxval = 1.0, step = 0.05, group = grp_rsk,
+     tooltip = "0 = plain breakeven at entry (v3.5 behavior). Positive locks a fraction of R beyond entry after Target 1; e.g. 0.1 parks the stop at entry + 0.1R for longs / entry - 0.1R for shorts.")
+use_trail = input.bool(true, "Chandelier trail on runner", group = grp_rsk)
+ch_len = input.int(22, "Chandelier lookback", minval = 1, maxval = 300, group = grp_rsk)
+ch_mult = input.float(3.0, "Chandelier ATR multiple", minval = 0.5, maxval = 10.0, step = 0.1, group = grp_rsk)
+trail_after_r = input.float(1.0, "Activate trail after R in profit", minval = 0.0, maxval = 10.0, step = 0.5, group = grp_rsk)
+exit_on_neutral = input.bool(false, "Exit on neutral regime", group = grp_rsk)
+// =============================================================================
+// 6a · Protection Rules
+// =============================================================================
+use_equity_dd_halt = input.bool(true, "Pause entries after equity drawdown", group = grp_halt)
+max_equity_dd_for_entries = input.float(25.0, "Max equity drawdown % before pause", minval = 1.0, maxval = 90.0, step = 0.5, group = grp_halt)
+equity_halt_rearm = input.string("Rolling peak", "Equity halt re-arm", options = ["Rolling peak", "Latch (v3.2)"], group = grp_halt)
+equity_peak_window = input.int(252, "Rolling peak window (bars)", minval = 20, maxval = 2000, group = grp_halt)
+use_daily_loss_halt = input.bool(false, "Pause entries after daily loss", group = grp_halt)
+daily_loss_halt_pct = input.float(3.0, "Daily loss pause %", minval = 0.25, maxval = 25.0, step = 0.25, group = grp_halt)
+cooldown_bars_after_trade = input.int(0, "Cooldown bars after trade closes", minval = 0, maxval = 500, group = grp_halt)
+use_time_stop = input.bool(false, "Use max-bars time stop", group = grp_halt)
+max_bars_in_trade = input.int(100, "Max bars in trade", minval = 1, maxval = 5000, group = grp_halt)
+use_atr_pct_filter = input.bool(false, "Use ATR% sanity filter", group = grp_halt)
+min_atr_pct = input.float(0.10, "Min ATR%", minval = 0.00, maxval = 20.0, step = 0.05, group = grp_halt)
+max_atr_pct = input.float(15.0, "Max ATR%", minval = 0.10, maxval = 100.0, step = 0.25, group = grp_halt)
+use_liquidity_filter = input.bool(false, "Use dollar-volume liquidity filter", group = grp_halt)
+liq_len = input.int(20, "Dollar-volume MA length", minval = 1, maxval = 200, group = grp_halt)
+min_dollar_volume = input.float(1000000.0, "Minimum average dollar volume", minval = 0.0, step = 100000.0, group = grp_halt)
+// =============================================================================
+// 7 · Display
+// =============================================================================
+hud_mode = input.string("Full", "HUD mode", options = ["Off", "Micro", "Full"], group = grp_dsp)
+hud_pos_in = input.string("top_right", "HUD position", options = ["top_left", "top_center", "top_right", "bottom_left", "bottom_center", "bottom_right"], group = grp_dsp)
+show_regime_bg = input.bool(true, "Regime background tint", group = grp_dsp)
+show_avwap_plot = input.bool(true, "Plot AVWAP and value zones", group = grp_dsp)
+show_trig_marks = input.bool(true, "Mark entry signals", group = grp_dsp)
+show_markov_readout = input.bool(true, "Show regime transition readout", group = grp_dsp)
+markov_pos_in = input.string("bottom_right", "Transition readout position",
+     options = ["top_left", "top_center", "top_right", "bottom_left", "bottom_center", "bottom_right"],
+     group = grp_dsp)
+markov_sampling = input.string("Confirmed bars", "Transition sampling",
+     options = ["Confirmed bars", "Non-overlap lookback"], group = grp_dsp)
+markov_min_row_n = input.int(20, "Transition row sample warning", minval = 1, maxval = 500, group = grp_dsp)
+stop_display_max_atr = input.float(30.0, "Hide stop plots beyond N ATR from price", minval = 5.0, maxval = 200.0, step = 5.0, group = grp_dsp)
+use_json_alerts = input.bool(false, "JSON alert payloads (webhook/Odysseus)", group = grp_dsp,
+     tooltip = "OFF: human-readable alert text (v3.5 behavior). ON: entry alerts fire machine-readable JSON for webhook automation.")
+// =============================================================================
+// Palette
+// =============================================================================
+c_bull  = color.rgb(89, 159, 125)
+c_bear  = color.rgb(190, 96, 111)
+c_neut  = color.rgb(112, 126, 148)
+c_rf    = color.rgb(255, 213, 79)
+c_trail = color.rgb(214, 162, 82)
+c_ext   = color.rgb(214, 162, 82)
+c_panel = color.new(#0E1316, 5)
+c_cell  = color.new(#151D22, 7)
+c_cell2 = color.new(#10171B, 9)
+c_frame = color.new(#5BD6B0, 88)
+c_text  = color.white
+c_dim   = color.new(color.white, 45)
+c_faint = color.new(color.white, 68)
+// =============================================================================
+// Helpers
+// =============================================================================
+f_pos(_s) =>
+    switch _s
+        "top_left"      => position.top_left
+        "top_center"    => position.top_center
+        "top_right"     => position.top_right
+        "bottom_left"   => position.bottom_left
+        "bottom_center" => position.bottom_center
+        "bottom_right"  => position.bottom_right
+        => position.top_right
+f_fmt(_x, _d) =>
+    _m = math.pow(10.0, _d)
+    na(_x) ? "n/a" : str.tostring(math.round(_x * _m) / _m)
+f_money(_x) =>
+    na(_x) ? "n/a" : (_x > 0 ? "+" : "") + f_fmt(_x, 0)
+f_pct(_x) =>
+    na(_x) ? "n/a" : f_fmt(_x, 1) + "%"
+f_price(_x) =>
+    na(_x) ? "n/a" : str.tostring(_x, format.mintick)
+f_pf_num(_gp, _gl) =>
+    _gl > 0 ? _gp / _gl : _gp > 0 ? 999.0 : float(na)
+f_pf_txt(_pf) =>
+    na(_pf) ? "n/a" : _pf >= 999.0 ? "∞" : f_fmt(_pf, 2)
+f_quality_gate(_mode, _adx_ok, _er_ok) =>
+    _mode == "Off" ? true :
+     _mode == "ADX" ? _adx_ok :
+     _mode == "Efficiency Ratio" ? _er_ok :
+     _mode == "ADX or ER" ? (_adx_ok or _er_ok) :
+     _mode == "ADX and ER" ? (_adx_ok and _er_ok) :
+     true
+f_point_value() =>
+    use_pointvalue_sizing and not na(syminfo.pointvalue) and syminfo.pointvalue > 0 ? syminfo.pointvalue : 1.0
+f_round_qty(_q) =>
+    _step = math.max(qty_step, 0.00000001)
+    math.floor(_q / _step) * _step
+f_entry_open(_id) =>
+    _open = false
+    if strategy.opentrades > 0
+        for i = 0 to strategy.opentrades - 1
+            if strategy.opentrades.entry_id(i) == _id
+                _open := true
+    _open
+f_avwap(_src, _w, _anchor, _use_stale_guard, _stale_atr, _stale_mult, _stale_min_n) =>
+    var float _pv = na
+    var float _wsum = na
+    var float _p2v = na
+    var bool _on = false
+    var int _n = 0
+    _prev_vw = _on and not na(_wsum) and _wsum > 0 ? _pv / _wsum : na
+    _stale = _use_stale_guard and _on and _n >= _stale_min_n and not na(_prev_vw) and
+         not na(_stale_atr) and _stale_atr > 0 and
+         math.abs(_src - _prev_vw) > _stale_mult * _stale_atr
+    _reset = _anchor or _stale
+    if _reset
+        _pv := 0.0
+        _wsum := 0.0
+        _p2v := 0.0
+        _on := true
+        _n := 0
+    if _on and not na(_src) and not na(_w) and _w > 0
+        _pv += _src * _w
+        _wsum += _w
+        _p2v += _src * _src * _w
+        _n += 1
+    _vw = _on and not na(_wsum) and _wsum > 0 ? _pv / _wsum : na
+    _vr = _on and not na(_vw) and _wsum > 0 ? math.max(_p2v / _wsum - _vw * _vw, 0.0) : na
+    _sd = na(_vr) ? na : math.sqrt(_vr)
+    [_vw, _sd, _on, _reset, _stale]
+f_tcell(_tbl, _c, _r, _txt, _col, _bg) =>
+    table.cell(_tbl, _c, _r, _txt, text_color = _col, bgcolor = _bg, text_size = size.tiny, text_halign = text.align_center)
+f_mk_idx(_s) =>
+    _s == 1 ? 0 : _s == 0 ? 1 : _s == -1 ? 2 : int(na)
+f_mk_name(_i) =>
+    _i == 0 ? "Bull" : _i == 1 ? "Neutral" : _i == 2 ? "Bear" : "n/a"
+f_mk_prob(_x, _n) =>
+    _n > 0 ? float(_x) / float(_n) : float(na)
+f_mk_ci_txt(_x, _n) =>
+    if _n <= 0
+        "n/a"
+    else
+        _p = float(_x) / float(_n)
+        _z = 1.96
+        _den = 1.0 + _z * _z / float(_n)
+        _center = (_p + _z * _z / (2.0 * float(_n))) / _den
+        _half = (_z * math.sqrt((_p * (1.0 - _p) + _z * _z / (4.0 * float(_n))) / float(_n))) / _den
+        _lo = math.max(0.0, _center - _half)
+        _hi = math.min(1.0, _center + _half)
+        f_fmt(_p * 100.0, 0) + "%\n[" + f_fmt(_lo * 100.0, 0) + "-" + f_fmt(_hi * 100.0, 0) + "]"
+f_mk_bg(_p, _cur_row) =>
+    _base = _cur_row ? c_rf : c_neut
+    na(_p) ? c_cell2 : color.new(_base, int(math.max(25.0, math.min(92.0, 92.0 - _p * 55.0))))
+f_clamp(_x, _lo, _hi) =>
+    math.max(_lo, math.min(_hi, _x))
+f_pts(_cond, _pts) =>
+    _cond ? _pts : 0.0
+f_yesno(_cond) =>
+    _cond ? "Y" : "N"
+f_wf_pattern(_segNetArr, _segNArr) =>
+    string _pat = ""
+    int _bad = 0
+    int _used = 0
+    if array.size(_segNetArr) > 0
+        for s = 0 to array.size(_segNetArr) - 1
+            int _n = array.get(_segNArr, s)
+            float _nn = array.get(_segNetArr, s)
+            if _n <= 0
+                _pat += "·"
+            else
+                _used += 1
+                _pat += _nn < 0 ? "-" : "+"
+                _bad += _nn < 0 ? 1 : 0
+    [_pat, _bad, _used]
+f_mk_wilson_lb(_x, _n) =>
+    if _n <= 0
+        float(na)
+    else
+        _p = float(_x) / float(_n)
+        _z = 1.96
+        _den = 1.0 + _z * _z / float(_n)
+        _center = (_p + _z * _z / (2.0 * float(_n))) / _den
+        _half = (_z * math.sqrt((_p * (1.0 - _p) + _z * _z / (4.0 * float(_n))) / float(_n))) / _den
+        math.max(0.0, _center - _half)
+f_mk_gate_prob(_x, _n) =>
+    _den_lap = float(_n) + 3.0 * mk_laplace_alpha
+    mk_estimator == "Wilson lower bound" ? f_mk_wilson_lb(_x, _n) :
+     mk_estimator == "Laplace smoothed" ? (_den_lap > 0 ? (float(_x) + mk_laplace_alpha) / _den_lap : float(na)) :
+     f_mk_prob(_x, _n)
+f_dwell_percentile(_arr, _cur) =>
+    int _n = array.size(_arr)
+    if _n < 5
+        float(na)
+    else
+        int _below = 0
+        for _i = 0 to _n - 1
+            _below += array.get(_arr, _i) <= _cur ? 1 : 0
+        float(_below) / float(_n) * 100.0
+// =============================================================================
+// MODULE 1 · Regime Engine
+// =============================================================================
+chart_tf_sec = timeframe.in_seconds(timeframe.period)
+auto_preset =
+     not na(chart_tf_sec) and chart_tf_sec <= 4 * 60 * 60 ? "4H" :
+     not na(chart_tf_sec) and chart_tf_sec >= 7 * 24 * 60 * 60 ? "Weekly" :
+     "Daily"
+preset = preset_input == "Auto" ? auto_preset : preset_input
+preset_lookback = preset == "4H" ? 30 : preset == "Weekly" ? 20 : 20
+preset_enter_z  = preset == "4H" ? 1.10 : preset == "Weekly" ? 0.70 : 0.85
+preset_exit_z   = preset == "4H" ? 0.70 : preset == "Weekly" ? 0.45 : 0.55
+preset_confirm  = preset == "4H" ? 3 : preset == "Weekly" ? 2 : 2
+lookback_window = preset == "Custom" ? lookback_custom : preset_lookback
+enter_z_base    = preset == "Custom" ? enter_z_custom  : preset_enter_z
+exit_z_base     = preset == "Custom" ? exit_z_custom   : preset_exit_z
+confirm_bars    = preset == "Custom" ? confirm_custom  : preset_confirm
+lookback_close = close[lookback_window]
+valid_window_log_input = not na(lookback_close) and close > 0 and lookback_close > 0
+valid_bar_log_input    = not na(close[1]) and close > 0 and close[1] > 0
+window_log_ret  = valid_window_log_input ? math.log(close / lookback_close) : float(na)
+one_bar_log_ret = valid_bar_log_input ? math.log(close / close[1]) : float(na)
+realized_window_vol = ta.stdev(one_bar_log_ret, lookback_window) * math.sqrt(lookback_window)
+ewma_window_vol     = math.sqrt(ta.rma(math.pow(one_bar_log_ret, 2.0), lookback_window) * lookback_window)
+atr_window          = ta.atr(lookback_window)
+atr_window_vol      = close > 0 ? atr_window / close * math.sqrt(lookback_window) : float(na)
+selected_realized_vol =
+     vol_model == "EWMA" ? ewma_window_vol :
+     vol_model == "ATR%" ? atr_window_vol :
+     realized_window_vol
+vol_percentile = ta.percentrank(selected_realized_vol, vol_percentile_len)
+// --- continued in next block ---
+vol_factor =
+     use_vol_percentile_adjustment and not na(vol_percentile)
+     ? math.max(0.50, 1.0 + ((vol_percentile - 50.0) / 100.0) * percentile_sensitivity)
+     : 1.0
+enter_z = math.max(0.10, enter_z_base * vol_factor)
+exit_z  = math.max(0.05, math.min(exit_z_base * vol_factor, enter_z - 0.05))
+regime_z = not na(window_log_ret) and selected_realized_vol > 0 ? window_log_ret / selected_realized_vol : float(na)
+ema_filter = ta.ema(close, ema_filter_len)
+bull_trend_ok = not use_ema_filter or close > ema_filter
+bear_trend_ok = not use_ema_filter or close < ema_filter
+[plus_di, minus_di, adx_value] = ta.dmi(adx_len, adx_smoothing)
+abs_chg = math.abs(ta.change(close))
+er_num  = not na(close[er_len]) ? math.abs(close - close[er_len]) : float(na)
+er_den  = ta.sma(abs_chg, er_len) * er_len
+efficiency_ratio = not na(er_den) and er_den > 0 ? er_num / er_den : float(na)
+adx_ok = not na(adx_value) and adx_value >= adx_threshold
+er_ok  = not na(efficiency_ratio) and efficiency_ratio >= er_threshold
+trend_quality_ok = f_quality_gate(strength_filter, adx_ok, er_ok)
+var int confirmed_core = na
+prev_state_for_hys = na(confirmed_core) ? 0 : confirmed_core
+bull_vol = not na(regime_z) and regime_z > enter_z
+bear_vol = not na(regime_z) and regime_z < -enter_z
+bull_vol_hold = not na(regime_z) and regime_z > exit_z
+bear_vol_hold = not na(regime_z) and regime_z < -exit_z
+raw_vol_enter =
+     bull_vol and bull_trend_ok ? 1 :
+     bear_vol and bear_trend_ok ? 2 :
+     0
+raw_vol_hys =
+     use_hysteresis
+     ? prev_state_for_hys == 1 and bull_vol_hold and bull_trend_ok ? 1 :
+       prev_state_for_hys == 2 and bear_vol_hold and bear_trend_ok ? 2 :
+       raw_vol_enter
+     : raw_vol_enter
+data_ready = not na(regime_z)
+int candidate_base = data_ready ? raw_vol_hys : int(na)
+int candidate_after_quality =
+     not na(candidate_base) and candidate_base != 0 and not trend_quality_ok ? 0 : candidate_base
+gap_atr = ta.atr(gap_atr_len)
+gap_abs = not na(close[1]) ? math.abs(open - close[1]) : float(na)
+gap_shock =
+     not na(gap_abs) and not na(gap_atr) and
+     gap_abs > gap_atr_mult * gap_atr
+int candidate_regime = candidate_after_quality
+if gap_guard_mode != "Off" and gap_shock and not na(candidate_after_quality)
+    candidate_regime :=
+         gap_guard_mode == "Force Neutral" ? 0 :
+         gap_guard_mode == "Neutralize new flips" and candidate_after_quality != prev_state_for_hys ? 0 :
+         candidate_after_quality
+candidate_held = not na(candidate_regime)
+for k = 0 to confirm_bars - 1
+    candidate_held := candidate_held and not na(candidate_regime[k]) and candidate_regime[k] == candidate_regime
+if barstate.isconfirmed and candidate_held
+    confirmed_core := candidate_regime
+abs_z = math.abs(regime_z)
+int_strength = not na(abs_z) ? math.min(100.0, abs_z / math.max(enter_z * 1.50, 0.0001) * 100.0) : float(na)
+var int bars_in_regime = 0
+if barstate.isconfirmed
+    if na(confirmed_core)
+        bars_in_regime := 0
+    else if na(confirmed_core[1]) or confirmed_core != confirmed_core[1]
+        bars_in_regime := 1
+    else
+        bars_in_regime += 1
+extension_risk =
+     not na(confirmed_core) and confirmed_core != 0 and
+     not na(int_strength) and int_strength >= extension_strength_threshold and
+     bars_in_regime > lookback_window
+int chop_risk = adx_ok and er_ok ? 0 : adx_ok or er_ok ? 1 : 2
+int internal_regime = na(confirmed_core) ? int(na) : confirmed_core == 1 ? 1 : confirmed_core == 2 ? -1 : 0
+// =============================================================================
+// MODULE 1b · External Regime Override
+// =============================================================================
+_ev = ext_regime_src
+ext_in_set = not na(_ev) and (_ev == 1.0 or _ev == 0.0 or _ev == -1.0)
+var int ext_ok_run = 0
+ext_ok_run := ext_in_set ? math.min(ext_ok_run + 1, 10000) : 0
+var int ext_bad_run = 0
+ext_bad_run := ext_in_set ? 0 : ext_bad_run + 1
+var bool ext_latched = false
+if use_external and ext_ok_run >= 20
+    ext_latched := true
+if ext_bad_run > 5
+    ext_latched := false
+var int ext_last = 0
+if ext_in_set
+    ext_last := int(_ev)
+ext_live = use_external and ext_latched
+regime = use_external ? (ext_live ? ext_last : int(na)) : internal_regime
+var int last_regime = 0
+var bool have_regime = false
+regime_first_seen = not have_regime and not na(regime)
+regime_flip = have_regime and not na(regime) and regime != last_regime
+regime_anchor = regime_first_seen or regime_flip
+flip_to_bull = regime_flip and regime == 1
+flip_to_bear = regime_flip and regime == -1
+if not na(regime)
+    last_regime := regime
+    have_regime := true
+var int active_bars_in_regime = 0
+// v3.6: completed regime dwell-time history (last 120 spells per state).
+// Pushed on the flip bar BEFORE the age counter resets, using the prior regime.
+var array<int> mk_dwells_bull = array.new_int()
+var array<int> mk_dwells_neut = array.new_int()
+var array<int> mk_dwells_bear = array.new_int()
+if barstate.isconfirmed and use_dwell_tracking and regime_flip and active_bars_in_regime > 0
+    int _dw_prev = f_mk_idx(regime[1])
+    if not na(_dw_prev)
+        array<int> _darr = _dw_prev == 0 ? mk_dwells_bull : _dw_prev == 1 ? mk_dwells_neut : mk_dwells_bear
+        array.push(_darr, active_bars_in_regime)
+        if array.size(_darr) > 120
+            array.shift(_darr)
+if barstate.isconfirmed
+    if na(regime)
+        active_bars_in_regime := 0
+    else if regime_anchor
+        active_bars_in_regime := 1
+    else
+        active_bars_in_regime += 1
+// =============================================================================
+// MODULE 1c · Empirical Markov Transition Readout
+// =============================================================================
+var array<int> mk_counts = array.new_int(9, 0)
+var array<int> mk_rows   = array.new_int(3, 0)
+var int mk_last_sample_regime = na
+var int mk_last_sample_bar = na
+var int mk_total_transitions = 0
+mk_stride = markov_sampling == "Non-overlap lookback" ? lookback_window : 1
+mk_take_sample =
+     barstate.isconfirmed and
+     not na(regime) and
+     (na(mk_last_sample_bar) or bar_index - mk_last_sample_bar >= mk_stride)
+if barstate.isconfirmed and na(regime)
+    mk_last_sample_regime := na
+    mk_last_sample_bar := na
+else if mk_take_sample
+    if not na(mk_last_sample_regime)
+        _from = f_mk_idx(mk_last_sample_regime)
+        _to = f_mk_idx(regime)
+        if not na(_from) and not na(_to)
+            _cell = _from * 3 + _to
+            array.set(mk_counts, _cell, array.get(mk_counts, _cell) + 1)
+            array.set(mk_rows, _from, array.get(mk_rows, _from) + 1)
+            mk_total_transitions += 1
+    mk_last_sample_regime := regime
+    mk_last_sample_bar := bar_index
+mk_cur_idx = f_mk_idx(regime)
+mk_cur_ok  = not na(mk_cur_idx)
+mk_cur_i   = mk_cur_ok ? mk_cur_idx : 0
+mk_cur_n   = mk_cur_ok ? array.get(mk_rows, mk_cur_i) : 0
+mk_stay_ct = mk_cur_ok ? array.get(mk_counts, mk_cur_i * 3 + mk_cur_i) : 0
+mk_p_stay = f_mk_prob(mk_stay_ct, mk_cur_n)
+mk_mean_dwell_samples =
+     not na(mk_p_stay) and mk_p_stay < 0.999
+     ? 1.0 / math.max(1.0 - mk_p_stay, 0.0001)
+     : float(na)
+mk_mean_dwell_bars = not na(mk_mean_dwell_samples) ? mk_mean_dwell_samples * mk_stride : float(na)
+mk_maturity =
+     not na(mk_mean_dwell_bars) and mk_mean_dwell_bars > 0
+     ? float(active_bars_in_regime) / mk_mean_dwell_bars
+     : float(na)
+// v3.6: estimator-adjusted stay probability for gates + dwell-age percentile.
+// Raw mk_p_stay is kept for the dashboard, mean-dwell math, and exports.
+mk_gate_p_stay = mk_cur_ok ? f_mk_gate_prob(mk_stay_ct, mk_cur_n) : float(na)
+array<int> mk_cur_dwells = mk_cur_i == 0 ? mk_dwells_bull : mk_cur_i == 1 ? mk_dwells_neut : mk_dwells_bear
+mk_age_pctile = mk_cur_ok and use_dwell_tracking ? f_dwell_percentile(mk_cur_dwells, active_bars_in_regime) : float(na)
+// Strength for entry gate.
+_sv = ext_strength_src
+ext_strength_ok = use_ext_strength and ext_live and not na(_sv) and _sv >= 0.0 and _sv <= 100.0
+strength = use_external
+     ? (use_ext_strength
+        ? (ext_strength_ok ? _sv : float(na))
+        : (not na(internal_regime) and internal_regime == regime ? int_strength : float(na)))
+     : int_strength
+playbook_quality_ok = f_quality_gate(playbook_quality_filter, adx_ok, er_ok)
+playbook_strength_ok = not na(strength) and strength >= min_strength_for_bias
+playbook_stability_ok = active_bars_in_regime >= min_bars_for_bias
+playbook_gap_ok = not block_entries_on_gap or not gap_shock
+fresh_overextension_block =
+     use_fresh_overextension_guard and not na(strength) and
+     strength > max_strength_for_fresh_bias and active_bars_in_regime <= fresh_bias_guard_bars
+entry_gates_ok =
+     playbook_quality_ok and playbook_strength_ok and playbook_stability_ok and
+     playbook_gap_ok and not fresh_overextension_block
+ext_active = extension_risk and (not use_external or (not na(internal_regime) and internal_regime == regime))
+chop_factor = chop_risk == 0 ? 1.0 : chop_risk == 1 ? 0.75 : 0.45
+mature_ext_factor = ext_active ? 0.70 : 1.0
+risk_scale = chop_factor * mature_ext_factor
+// =============================================================================
+// MODULE 2 · Relative Strength
+// =============================================================================
+bench_close = request.security(bench_sym, timeframe.period, close,
+     gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+rs_ratio = not na(bench_close) and bench_close > 0 and close > 0 ? close / bench_close : float(na)
+rs_ma = ta.sma(rs_ratio, mans_len)
+mans = not na(rs_ratio) and not na(rs_ma) and rs_ma != 0 ? (rs_ratio / rs_ma - 1.0) * 100.0 : float(na)
+mans_rising = not na(mans) and not na(mans[rs_slope_len]) and mans > mans[rs_slope_len]
+rs_leader  = not na(mans) and mans > 0 and mans_rising
+rs_laggard = not na(mans) and mans < 0 and not mans_rising
+rs_high_prev = ta.highest(rs_ratio, nh_len)[1]
+rs_low_prev  = ta.lowest(rs_ratio, nh_len)[1]
+rs_new_high = not na(rs_ratio) and not na(rs_high_prev) and rs_ratio > rs_high_prev
+rs_new_low  = not na(rs_ratio) and not na(rs_low_prev) and rs_ratio < rs_low_prev
+rs_long_ok = rs_mode == "Off" ? true : rs_mode == "Above zero" ? (not na(mans) and mans > 0) : rs_leader
+rs_long_ok := rs_long_ok and not (veto_laggard and rs_laggard)
+rs_short_ok = rs_mode == "Off" ? true : rs_mode == "Above zero" ? (not na(mans) and mans < 0) : rs_laggard
+rs_short_ok := rs_short_ok and not (veto_laggard and rs_leader)
+// =============================================================================
+// MODULE 2a · Market Environment
+// =============================================================================
+bench_filter_ema = ta.ema(bench_close, benchmark_filter_len)
+benchmark_long_ok =
+     not use_benchmark_filter or
+     (not na(bench_close) and not na(bench_filter_ema) and bench_close > bench_filter_ema)
+benchmark_short_ok =
+     not use_benchmark_filter or
+     (not na(bench_close) and not na(bench_filter_ema) and bench_close < bench_filter_ema)
+htf_tf_sec = timeframe.in_seconds(htf_tf)
+htf_valid = not na(chart_tf_sec) and not na(htf_tf_sec) and htf_tf_sec > chart_tf_sec
+htf_req_tf = htf_valid ? htf_tf : timeframe.period
+htf_close = request.security(syminfo.tickerid, htf_req_tf, close[1],
+     gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+htf_ema = request.security(syminfo.tickerid, htf_req_tf, ta.ema(close, htf_ema_len)[1],
+     gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+htf_long_ok = not use_htf_filter or not htf_valid or (not na(htf_close) and not na(htf_ema) and htf_close > htf_ema)
+htf_short_ok = not use_htf_filter or not htf_valid or (not na(htf_close) and not na(htf_ema) and htf_close < htf_ema)
+// =============================================================================
+// MODULE 3 · Divergence
+// =============================================================================
+float osc = na
+bool osc_dead = false
+if osc_type == "MFI"
+    osc := ta.mfi(hlc3, osc_len)
+    osc_dead := na(volume) or volume == 0
+else
+    osc := ta.rsi(close, osc_len)
+ph = ta.pivothigh(osc, piv_l, piv_r)
+pl = ta.pivotlow(osc, piv_l, piv_r)
+phF = not na(ph)
+plF = not na(pl)
+var float prev_osc_pl = na
+var float prev_lo_pl  = na
+var int   prev_pl_bar = na
+var float prev_osc_ph = na
+var float prev_hi_ph  = na
+var int   prev_ph_bar = na
+bool regBull = false
+bool hidBull = false
+bool regBear = false
+bool hidBear = false
+if plF
+    int _pl_bar = bar_index - piv_r
+    float _osc_pl = osc[piv_r]
+    float _lo_pl = low[piv_r]
+    int _gap = not na(prev_pl_bar) ? _pl_bar - prev_pl_bar : int(na)
+    bool _in_range = not na(_gap) and _gap >= min_gap and _gap <= max_gap
+    regBull := _in_range and not na(prev_lo_pl) and not na(prev_osc_pl) and _lo_pl < prev_lo_pl and _osc_pl > prev_osc_pl
+    hidBull := _in_range and not na(prev_lo_pl) and not na(prev_osc_pl) and _lo_pl > prev_lo_pl and _osc_pl < prev_osc_pl
+    prev_osc_pl := _osc_pl
+    prev_lo_pl  := _lo_pl
+    prev_pl_bar := _pl_bar
+if phF
+    int _ph_bar = bar_index - piv_r
+    float _osc_ph = osc[piv_r]
+    float _hi_ph = high[piv_r]
+    int _gap = not na(prev_ph_bar) ? _ph_bar - prev_ph_bar : int(na)
+    bool _in_range = not na(_gap) and _gap >= min_gap and _gap <= max_gap
+    regBear := _in_range and not na(prev_hi_ph) and not na(prev_osc_ph) and _hi_ph > prev_hi_ph and _osc_ph < prev_osc_ph
+    hidBear := _in_range and not na(prev_hi_ph) and not na(prev_osc_ph) and _hi_ph < prev_hi_ph and _osc_ph > prev_osc_ph
+    prev_osc_ph := _osc_ph
+    prev_hi_ph  := _hi_ph
+    prev_ph_bar := _ph_bar
+// =============================================================================
+// MODULE 4 · Anchored VWAP
+// =============================================================================
+float vwap_w = 1.0
+if vwap_weighting == "Volume"
+    vwap_w := na(volume) or volume <= 0 ? 0.0 : volume
+avwap_guard_atr = ta.atr(atr_len)
+[flip_vw, flip_sd, flip_on, avwap_any_reset, avwap_stale_reset] = f_avwap(vwap_src, vwap_w, regime_anchor, use_avwap_stale_guard, avwap_guard_atr, avwap_stale_atr_mult, avwap_stale_min_bars)
+avwap_weight_dead = flip_on and vwap_weighting == "Volume" and na(flip_vw)
+avwap_ok_for_entries = not block_entries_on_avwap_dead or not avwap_weight_dead
+above_avwap = flip_on and not na(flip_vw) and close > flip_vw
+below_avwap = flip_on and not na(flip_vw) and close < flip_vw
+value_zone_long = flip_on and not na(flip_vw) and not na(flip_sd) and close <= flip_vw and close >= flip_vw - flip_sd
+value_zone_short = flip_on and not na(flip_vw) and not na(flip_sd) and close >= flip_vw and close <= flip_vw + flip_sd
+reclaim_up = flip_on and not na(flip_vw) and not na(flip_vw[1]) and close > flip_vw and close[1] <= flip_vw[1]
+reclaim_dn = flip_on and not na(flip_vw) and not na(flip_vw[1]) and close < flip_vw and close[1] >= flip_vw[1]
+avwap_logic_dist_atr =
+     flip_on and not na(flip_vw) and not na(avwap_guard_atr) and avwap_guard_atr > 0
+     ? math.abs(close - flip_vw) / avwap_guard_atr
+     : float(na)
+var int avwap_age_bars = 0
+if barstate.isconfirmed
+    if not flip_on
+        avwap_age_bars := 0
+    else if avwap_any_reset
+        avwap_age_bars := 1
+    else
+        avwap_age_bars += 1
+// =============================================================================
+// MODULE 5 · Entry Confluence
+// =============================================================================
+confirmed = barstate.isconfirmed
+long_trig_flip    = trig_flip and flip_to_bull
+long_trig_hidden  = trig_hidden and hidBull and above_avwap
+long_trig_regular = trig_regular and regBull and (not use_value_zone or value_zone_long)
+long_trig_reclaim = trig_reclaim and reclaim_up and rs_leader
+long_trigger = long_trig_flip or long_trig_hidden or long_trig_regular or long_trig_reclaim
+short_trig_flip    = trig_flip and flip_to_bear
+short_trig_hidden  = trig_hidden and hidBear and below_avwap
+short_trig_regular = trig_regular and regBear and (not use_value_zone or value_zone_short)
+short_trig_reclaim = trig_reclaim and reclaim_dn and rs_laggard
+short_trigger = short_trig_flip or short_trig_hidden or short_trig_regular or short_trig_reclaim
+f_score(_dir) =>
+    _trig = _dir > 0 ?
+         (long_trig_flip ? 25.0 : long_trig_hidden ? 25.0 : long_trig_regular ? 20.0 : long_trig_reclaim ? 15.0 : 0.0) :
+         (short_trig_flip ? 25.0 : short_trig_hidden ? 25.0 : short_trig_regular ? 20.0 : short_trig_reclaim ? 15.0 : 0.0)
+    _rs = _dir > 0 ?
+         (rs_leader ? 25.0 : not na(mans) and mans > 0 ? 15.0 : not na(mans) and mans_rising ? 10.0 : 0.0) :
+         (rs_laggard ? 25.0 : not na(mans) and mans < 0 ? 15.0 : 0.0)
+    _loc = _dir > 0 ?
+         (above_avwap ? 15.0 : value_zone_long ? 10.0 : 0.0) :
+         (below_avwap ? 15.0 : value_zone_short ? 10.0 : 0.0)
+    _nh = _dir > 0 ? (rs_new_high ? 10.0 : 0.0) : (rs_new_low ? 10.0 : 0.0)
+    _st = not na(strength) and strength >= min_strength_for_bias ? 10.0 : 0.0
+    math.min(100.0, _trig + _rs + _loc + _nh + _st)
+long_score = f_score(1)
+short_score = f_score(-1)
+// =============================================================================
+// MODULE 6 · Protection Rules
+// =============================================================================
+atr_val = ta.atr(atr_len)
+atr_pct = close > 0 and not na(atr_val) ? atr_val / close * 100.0 : float(na)
+atr_pct_ok =
+     not use_atr_pct_filter or
+     (not na(atr_pct) and atr_pct >= min_atr_pct and atr_pct <= max_atr_pct)
+dollar_vol = not na(volume) and close > 0 ? volume * close * f_point_value() : float(na)
+dollar_vol_ma = ta.sma(dollar_vol, liq_len)
+liquidity_ok =
+     not use_liquidity_filter or
+     (not na(dollar_vol_ma) and dollar_vol_ma >= min_dollar_volume)
+var float equity_peak = na
+equity_peak := na(equity_peak) ? strategy.equity : math.max(equity_peak, strategy.equity)
+rolling_equity_peak = ta.highest(strategy.equity, equity_peak_window)
+halt_ref_peak = equity_halt_rearm == "Rolling peak" ? rolling_equity_peak : equity_peak
+equity_dd_pct = not na(halt_ref_peak) and halt_ref_peak > 0 ? (halt_ref_peak - strategy.equity) / halt_ref_peak * 100.0 : 0.0
+equity_dd_halt = use_equity_dd_halt and equity_dd_pct >= max_equity_dd_for_entries
+daily_halt_applicable = not na(chart_tf_sec) and chart_tf_sec <= 24 * 60 * 60
+day_time = time(daily_halt_applicable ? "D" : timeframe.period)
+new_day = daily_halt_applicable and not na(day_time) and (na(day_time[1]) or day_time != day_time[1])
+var float day_start_equity = na
+var bool daily_halt = false
+if daily_halt_applicable and (na(day_start_equity) or new_day)
+    day_start_equity := strategy.equity
+    daily_halt := false
+daily_dd_pct = daily_halt_applicable and not na(day_start_equity) and day_start_equity > 0
+     ? (day_start_equity - strategy.equity) / day_start_equity * 100.0
+     : 0.0
+if use_daily_loss_halt and daily_halt_applicable and daily_dd_pct >= daily_loss_halt_pct
+    daily_halt := true
+_blend_was_long = nz(strategy.position_size[1]) > 0
+_blend_was_short = nz(strategy.position_size[1]) < 0
+var float blend_last_equity = na
+var float long_virtual_equity = na
+var float short_virtual_equity = na
+if na(blend_last_equity)
+    blend_last_equity := strategy.equity
+    long_virtual_equity := strategy.equity * long_capital_alloc_pct / 100.0
+    short_virtual_equity := strategy.equity * (100.0 - long_capital_alloc_pct) / 100.0
+else
+    _blend_equity_delta = strategy.equity - blend_last_equity
+    if _blend_equity_delta != 0.0
+        if _blend_was_long
+            long_virtual_equity += _blend_equity_delta
+        else if _blend_was_short
+            short_virtual_equity += _blend_equity_delta
+        // v3.6 FIX: entry-bar deltas (commission/slippage on fill) were
+        // unattributed when flat the prior bar. Book them to the side opened.
+        else if strategy.position_size > 0
+            long_virtual_equity += _blend_equity_delta
+        else if strategy.position_size < 0
+            short_virtual_equity += _blend_equity_delta
+    blend_last_equity := strategy.equity
+f_side_risk_halt(_side_equity, _use_dd_halt, _max_dd_pct, _peak_window, _rearm_mode, _use_daily_halt, _daily_pct, _daily_applicable) =>
+    var float _peak = na
+    _peak := na(_peak) ? _side_equity : math.max(_peak, _side_equity)
+    _rolling_peak = ta.highest(_side_equity, _peak_window)
+    _ref_peak = _rearm_mode == "Rolling peak" ? _rolling_peak : _peak
+    _dd_pct = not na(_ref_peak) and _ref_peak > 0 ? (_ref_peak - _side_equity) / _ref_peak * 100.0 : 0.0
+    _dd_halt = _use_dd_halt and _dd_pct >= _max_dd_pct
+    var float _day_start = na
+    var bool _daily_halt_local = false
+    _new_day_local = _daily_applicable and not na(day_time) and (na(day_time[1]) or day_time != day_time[1])
+    if _daily_applicable and (na(_day_start) or _new_day_local)
+        _day_start := _side_equity
+        _daily_halt_local := false
+    _daily_dd_pct = _daily_applicable and not na(_day_start) and _day_start > 0
+         ? (_day_start - _side_equity) / _day_start * 100.0
+         : 0.0
+    if _use_daily_halt and _daily_applicable and _daily_dd_pct >= _daily_pct
+        _daily_halt_local := true
+    _halt = _dd_halt or _daily_halt_local
+    [_halt, _dd_pct, _daily_dd_pct]
+[long_risk_halt, long_equity_dd_pct, long_daily_dd_pct] = f_side_risk_halt(long_virtual_equity, use_equity_dd_halt, max_equity_dd_for_entries, equity_peak_window, equity_halt_rearm, use_daily_loss_halt, daily_loss_halt_pct, daily_halt_applicable)
+[short_risk_halt, short_equity_dd_pct, short_daily_dd_pct] = f_side_risk_halt(short_virtual_equity, use_equity_dd_halt, max_equity_dd_for_entries, equity_peak_window, equity_halt_rearm, use_daily_loss_halt, daily_loss_halt_pct, daily_halt_applicable)
+var int last_exit_bar = na
+var int active_entry_bar = na
+var float plan_rdist = na
+var float plan_q = 0.0
+var float plan_q1 = 0.0
+var float plan_q2 = 0.0
+var float plan_q3 = 0.0
+var bool legs_placed = false
+var bool t1_done = false
+var bool t2_done = false
+var float leg_stop = na
+var float run_stop = na
+var string long_active_suffix = ""
+var string long_id1 = "L1"
+var string long_id2 = "L2"
+var string long_id3 = "L3"
+var string short_active_suffix = ""
+var string short_id1 = "S1"
+var string short_id2 = "S2"
+var string short_id3 = "S3"
+var float long_base_pivot_at_entry = na
+var int long_last_exit_bar = na
+var int short_last_exit_bar = na
+if strategy.position_size != 0 and nz(strategy.position_size[1]) == 0
+    active_entry_bar := bar_index
+if strategy.position_size == 0 and nz(strategy.position_size[1]) != 0
+    last_exit_bar := bar_index
+    if _blend_was_long
+        long_last_exit_bar := bar_index
+    else if _blend_was_short
+        short_last_exit_bar := bar_index
+    active_entry_bar := na
+    legs_placed := false
+    t1_done := false
+    t2_done := false
+    plan_rdist := na
+    plan_q := 0.0
+    plan_q1 := 0.0
+    plan_q2 := 0.0
+    plan_q3 := 0.0
+    leg_stop := na
+    run_stop := na
+    long_base_pivot_at_entry := na
+cooldown_ok =
+     cooldown_bars_after_trade <= 0 or
+     na(last_exit_bar) or
+     bar_index - last_exit_bar >= cooldown_bars_after_trade
+long_cooldown_ok =
+     cooldown_bars_after_trade <= 0 or
+     na(long_last_exit_bar) or
+     bar_index - long_last_exit_bar >= cooldown_bars_after_trade
+short_cooldown_ok =
+     cooldown_bars_after_trade <= 0 or
+     na(short_last_exit_bar) or
+     bar_index - short_last_exit_bar >= cooldown_bars_after_trade
+risk_halt = equity_dd_halt or daily_halt
+long_risk_halt_eff = use_blended_capital_split ? long_risk_halt : risk_halt
+short_risk_halt_eff = use_blended_capital_split ? short_risk_halt : risk_halt
+long_cooldown_ok_eff = use_blended_capital_split ? long_cooldown_ok : cooldown_ok
+short_cooldown_ok_eff = use_blended_capital_split ? short_cooldown_ok : cooldown_ok
+env_long_ok = benchmark_long_ok and htf_long_ok
+env_short_ok = benchmark_short_ok and htf_short_ok
+pretrade_ok_common = atr_pct_ok and liquidity_ok and avwap_ok_for_entries
+long_env_ok = not long_risk_halt_eff and long_cooldown_ok_eff and pretrade_ok_common and env_long_ok
+short_env_ok = not short_risk_halt_eff and short_cooldown_ok_eff and pretrade_ok_common and env_short_ok
+// =============================================================================
+// MODULE 5a/6 · Dedicated Short-Side System + SHORT+
+// =============================================================================
+rw_below_zero = not na(mans) and mans < 0
+rw_deteriorating = not na(mans) and not mans_rising
+rw_leader_short = rw_below_zero and rw_deteriorating
+rw_new_low_short = rs_new_low and rw_below_zero
+short_rw_ok_v2 =
+     short_rw_mode == "Mansfield below zero" ? rw_below_zero :
+     short_rw_mode == "Relative weakness leader" ? rw_leader_short :
+     short_rw_mode == "New RS low" ? rw_new_low_short :
+     rw_leader_short
+short_rw_ok_v2 := short_rw_ok_v2 and not rs_leader
+short_range = high - low
+short_upper_wick = high - math.max(open, close)
+short_rejection_candle =
+     close < open or
+     (short_range > 0 and short_upper_wick / short_range >= short_rejection_wick_frac)
+short_near_supply =
+     flip_on and not na(flip_vw) and not na(atr_val) and atr_val > 0 and
+     high >= flip_vw - atr_val * short_retest_tolerance_atr and
+     close < flip_vw
+short_failed_reclaim_v2 =
+     below_avwap and short_near_supply and short_rejection_candle
+// SHORT+ Bear-Flip First Retest state machine.
+// This does not touch long-side retest logic.
+var bool short_bear_retest_seen = false
+var bool short_bear_retest_taken = false
+if barstate.isconfirmed
+    if flip_to_bear
+        short_bear_retest_seen := false
+        short_bear_retest_taken := false
+    else if regime == -1 and not short_bear_retest_taken
+        if above_avwap or (flip_on and not na(flip_vw) and not na(atr_val) and atr_val > 0 and math.abs(close - flip_vw) <= short_retest_tolerance_atr * atr_val)
+            short_bear_retest_seen := true
+short_bear_flip_retest_v2 =
+     short_plus_allow_bear_retest and
+     regime == -1 and
+     short_bear_retest_seen and
+     not short_bear_retest_taken and
+     below_avwap and
+     short_near_supply and
+     short_rejection_candle and
+     short_rw_ok_v2
+short_flag_floor = ta.lowest(low[1], short_flag_len)
+short_bear_flag_breakdown =
+     allow_short_breakdown_trigger and
+     below_avwap and
+     not na(short_flag_floor) and
+     close < short_flag_floor and
+     short_rw_ok_v2
+short_trigger_v2_base =
+     require_failed_reclaim_short
+     ? short_failed_reclaim_v2 or short_bear_flag_breakdown
+     : short_failed_reclaim_v2 or short_bear_flag_breakdown or short_trig_flip
+short_trigger_v2 =
+     short_trigger_v2_base or
+     (short_plus_enabled and short_bear_flip_retest_v2)
+// Downside no-chase filter.
+short_rsi = ta.rsi(close, short_rsi_len)
+short_dist_below_avwap_atr =
+     flip_on and not na(flip_vw) and not na(atr_val) and atr_val > 0
+     ? math.max(0.0, (flip_vw - close) / atr_val)
+     : 0.0
+int short_down_count = 0
+for i = 0 to short_down_bars_len - 1
+    short_down_count += (not na(close[i + 1]) and close[i] < close[i + 1]) ? 1 : 0
+short_shelf_high = ta.highest(high, short_flag_len)
+short_struct_ref = flip_on and not na(flip_vw) and flip_vw > short_shelf_high ? flip_vw : short_shelf_high
+short_struct_stop = not na(atr_val) ? short_struct_ref + short_stop_buffer_atr * atr_val : float(na)
+short_struct_dist = not na(short_struct_stop) and short_struct_stop > close ? short_struct_stop - close : float(na)
+short_stop_dist_eff =
+     use_short_structural_stop and not na(short_struct_dist)
+     ? short_struct_dist
+     : (not na(atr_val) ? atr_val * atr_mult : float(na))
+short_stop_pct =
+     close > 0 and not na(short_stop_dist_eff)
+     ? short_stop_dist_eff / close * 100.0
+     : float(na)
+// --- continued in next block ---
+short_avwap_stretched = short_dist_below_avwap_atr >= short_max_dist_below_avwap_atr
+short_rsi_oversold = not na(short_rsi) and short_rsi <= short_oversold_rsi
+short_too_many_down_bars = short_down_count >= short_down_bars_len
+short_stop_too_wide = not na(short_stop_pct) and short_stop_pct > short_max_stop_pct
+short_no_chase_block =
+     use_short_no_chase_filter and
+     (short_avwap_stretched or short_rsi_oversold or short_too_many_down_bars or short_stop_too_wide)
+short_support_ref = ta.lowest(low[1], short_support_len)
+short_room_to_support_atr =
+     not na(short_support_ref) and not na(atr_val) and atr_val > 0 and close > short_support_ref
+     ? (close - short_support_ref) / atr_val
+     : float(na)
+short_support_block =
+     use_short_support_filter and
+     not na(short_room_to_support_atr) and
+     short_room_to_support_atr <= short_min_room_to_support_atr
+short_green_body =
+     not na(atr_val) and
+     close > open and
+     close - open >= atr_val * short_green_body_atr
+short_gap_up =
+     not na(close[1]) and not na(atr_val) and
+     open - close[1] >= atr_val * short_gap_up_atr
+short_high_vol_squeeze =
+     not na(atr_pct) and atr_pct >= short_high_atr_pct
+short_rs_recovery =
+     not na(mans) and mans < 0 and mans_rising
+short_squeeze_block =
+     use_short_squeeze_filter and
+     (short_green_body or short_gap_up or short_high_vol_squeeze or short_rs_recovery)
+// SHORT+ continuation-quality engine.
+short_plus_markov_sticky = not na(mk_gate_p_stay) and mk_gate_p_stay * 100.0 >= short_plus_min_stay_pct
+short_plus_markov_n_ok = mk_cur_n >= short_plus_min_markov_n
+short_plus_young_by_age = active_bars_in_regime <= short_plus_max_regime_age
+short_plus_young_by_maturity = na(mk_maturity) ? true : mk_maturity <= short_plus_max_maturity
+short_plus_dwell_ok = not short_plus_use_dwell_gate or na(mk_age_pctile) or mk_age_pctile <= short_plus_max_dwell_pctile
+short_plus_markov_core =
+     not na(regime) and regime == -1 and
+     short_plus_markov_sticky and
+     short_plus_markov_n_ok and
+     short_plus_young_by_age and
+     short_plus_young_by_maturity and
+     short_plus_dwell_ok
+short_plus_markov_gate_ok =
+     not short_plus_strict_markov or short_plus_markov_core
+short_sector_laggard_v2 =
+     rw_new_low_short and
+     rw_below_zero and
+     below_avwap
+short_plus_primary_setup =
+     short_failed_reclaim_v2 or
+     short_bear_flag_breakdown or
+     short_bear_flip_retest_v2
+short_plus_secondary_setup =
+     short_sector_laggard_v2 and
+     (short_failed_reclaim_v2 or short_bear_flag_breakdown or short_bear_flip_retest_v2 or short_trigger_v2_base)
+short_plus_setup_ok =
+     short_plus_primary_setup or
+     (not short_plus_primary_only and short_plus_secondary_setup)
+short_plus_setup_name =
+     short_bear_flag_breakdown  ? "Bear-Flag Breakdown" :
+     short_bear_flip_retest_v2  ? "Bear-Flip Retest" :
+     short_failed_reclaim_v2    ? "Failed AVWAP Reclaim" :
+     short_sector_laggard_v2    ? "Sector Laggard" :
+     short_no_chase_block       ? "No-Chase Exhaustion" :
+     "None"
+short_plus_setup_slug =
+     short_bear_flag_breakdown  ? "bearFlag+" :
+     short_bear_flip_retest_v2  ? "bearRetest+" :
+     short_failed_reclaim_v2    ? "failAVWAP+" :
+     short_sector_laggard_v2    ? "laggard+" :
+     "short+"
+short_plus_session_ok =
+     not short_plus_session_filter or not na(time(timeframe.period, short_plus_session))
+short_plus_atr_safe = math.max(nz(atr_val), syminfo.mintick)
+short_plus_trigger_range_atr =
+     (high - low) / short_plus_atr_safe
+short_plus_trigger_range_ok =
+     short_plus_trigger_range_atr <= short_plus_max_trigger_range_atr
+short_plus_close_location =
+     high == low ? 0.50 : (close - low) / (high - low)
+short_plus_lower_close_ok =
+     not short_plus_lower_close_on or short_plus_close_location <= short_plus_max_close_location
+short_plus_volume_ma = ta.sma(volume, short_plus_volume_len)
+short_plus_volume_ok =
+     not short_plus_volume_filter or
+     na(short_plus_volume_ma) or
+     volume >= short_plus_volume_ma * short_plus_volume_mult
+short_plus_cont_score_raw =
+     f_pts(short_plus_markov_core, 32.0) +
+     f_pts(short_bear_flag_breakdown, 22.0) +
+     f_pts(short_bear_flip_retest_v2, 22.0) +
+     f_pts(short_failed_reclaim_v2, 20.0) +
+     f_pts(short_sector_laggard_v2, 8.0) +
+     f_pts(below_avwap, 8.0) +
+     f_pts(not short_no_chase_block, 8.0) +
+     f_pts(not short_support_block, 6.0) +
+     f_pts(not short_squeeze_block, 6.0) +
+     f_pts(short_plus_trigger_range_ok, 5.0) +
+     f_pts(short_plus_lower_close_ok, 5.0) +
+     f_pts(short_plus_volume_ok, 5.0)
+short_plus_cont_score = f_clamp(short_plus_cont_score_raw, 0.0, 100.0)
+short_plus_score_ok = short_plus_cont_score >= short_plus_min_cont_score
+short_plus_gate_core =
+     short_plus_markov_gate_ok and
+     short_plus_setup_ok and
+     short_plus_session_ok and
+     short_plus_trigger_range_ok and
+     short_plus_lower_close_ok and
+     short_plus_volume_ok and
+     short_plus_score_ok
+short_plus_gate_pass =
+     not short_plus_enabled or
+     not use_short_side_v2 or
+     short_plus_gate_core
+short_plus_a_grade =
+     short_plus_enabled and
+     use_short_side_v2 and
+     short_plus_gate_core and
+     short_plus_primary_setup and
+     short_plus_markov_core and
+     short_plus_cont_score >= 85.0
+short_plus_in_bear = not na(regime) and regime == -1
+short_plus_blocker =
+     not short_plus_enabled          ? "OFF" :
+     not use_short_side_v2           ? "SHORT V2 OFF" :
+     not allow_shorts                ? "SHORTS OFF" :
+     not short_plus_in_bear          ? "NO BEAR REGIME" :
+     not short_plus_markov_gate_ok   ? (short_plus_dwell_ok ? "MARKOV" : "DWELL") :
+     not short_plus_setup_ok         ? "NO SETUP" :
+     not short_plus_session_ok       ? "SESSION" :
+     not short_plus_trigger_range_ok ? "BAR RANGE" :
+     not short_plus_lower_close_ok   ? "CLOSE LOC" :
+     not short_plus_volume_ok        ? "VOLUME" :
+     not short_plus_score_ok         ? "SCORE" :
+     "PASS"
+short_plus_state =
+     not short_plus_enabled ? "OFF" :
+     not use_short_side_v2  ? "SHORT V2 OFF" :
+     not allow_shorts       ? "SHORTS DISABLED" :
+     not short_plus_in_bear ? "STANDBY · " + (na(regime) ? "NO REGIME" : regime == 1 ? "BULL" : "NEUTRAL") :
+     short_plus_a_grade     ? "A-GRADE BEAR CONT" :
+     short_plus_gate_core   ? "BEAR CONT PASS" :
+     "BLOCKED: " + short_plus_blocker
+short_plus_risk_mult =
+     not short_plus_enabled or not short_plus_risk_mult_on or not use_short_side_v2 ? 1.0 :
+     short_plus_a_grade ? short_plus_a_grade_risk_mult :
+     short_plus_gate_core ? short_plus_std_risk_mult :
+     short_plus_block_risk_mult
+short_permission_v2 =
+     not na(regime) and regime == -1 and
+     entry_gates_ok and
+     short_env_ok
+short_block_v2 =
+     chop_risk == 2 or
+     short_no_chase_block or
+     short_support_block or
+     short_squeeze_block
+short_review_ok_v2 =
+     short_permission_v2 and
+     short_rw_ok_v2 and
+     not short_block_v2
+short_v2_score =
+     math.min(100.0,
+         (short_failed_reclaim_v2 ? 45.0 : short_bear_flag_breakdown ? 32.0 : short_bear_flip_retest_v2 ? 36.0 : short_trig_flip ? 15.0 : 0.0) +
+         (rw_new_low_short ? 35.0 : rw_leader_short ? 25.0 : rw_below_zero ? 14.0 : 0.0) +
+         (below_avwap ? 20.0 : 0.0))
+active_short_score_base = use_short_side_v2 ? short_v2_score : short_score
+short_plus_score_boost_applied =
+     short_plus_enabled and
+     use_short_side_v2 and
+     short_plus_score_boost_on and
+     short_plus_gate_core
+     ? short_plus_score_boost
+     : 0.0
+active_short_score = math.min(100.0, active_short_score_base + short_plus_score_boost_applied)
+active_short_trigger = use_short_side_v2 ? short_trigger_v2 : short_trigger
+active_short_review_ok = use_short_side_v2 ? (short_review_ok_v2 and short_plus_gate_pass) : (entry_gates_ok and rs_short_ok and short_env_ok)
+// =============================================================================
+// MODULE 5b/6 · Dedicated Long-Side System
+// =============================================================================
+long_rs_above_zero = not na(mans) and mans > 0
+long_rs_improving = not na(mans) and mans_rising
+long_rs_new_high_confirmed = rs_new_high and long_rs_above_zero
+long_rs_ok_v2 =
+     long_rs_mode == "Mansfield above zero" ? long_rs_above_zero :
+     long_rs_mode == "Relative strength leader" ? rs_leader :
+     long_rs_mode == "New RS high" ? long_rs_new_high_confirmed :
+     rs_leader
+long_rs_ok_v2 := long_rs_ok_v2 and not rs_laggard
+long_support_shelf_pullback = ta.lowest(low[1], long_pullback_lookback)
+long_support_shelf_base = ta.lowest(low[1], long_base_lookback)
+long_base_pivot = ta.highest(high[1], long_base_lookback)
+long_base_range_pct =
+     close > 0 ? (ta.highest(high[1], long_base_lookback) - ta.lowest(low[1], long_base_lookback)) / close * 100.0 : float(na)
+long_base_tight = not na(long_base_range_pct) and long_base_range_pct <= long_base_tightness_max_pct
+var bool long_retest_seen = false
+var bool long_retest_taken = false
+if barstate.isconfirmed
+    if flip_to_bull
+        long_retest_seen := false
+        long_retest_taken := false
+    else if regime == 1 and not long_retest_taken
+        if below_avwap or (flip_on and not na(flip_vw) and not na(atr_val) and atr_val > 0 and math.abs(close - flip_vw) <= long_pullback_tolerance_atr * atr_val)
+            long_retest_seen := true
+long_range = high - low
+long_lower_wick = math.min(open, close) - low
+long_defense_candle =
+     close > open or
+     (long_range > 0 and long_lower_wick / long_range >= 0.5)
+long_pullback_defended =
+     not na(long_support_shelf_pullback) and not na(atr_val) and atr_val > 0 and
+     low <= long_support_shelf_pullback + long_pullback_tolerance_atr * atr_val and
+     close >= long_support_shelf_pullback - long_pullback_tolerance_atr * atr_val
+long_leader_pullback_v2 =
+     regime == 1 and
+     (require_leader_pullback ? long_rs_ok_v2 : long_rs_above_zero) and
+     above_avwap[1] and
+     long_pullback_defended and
+     long_defense_candle
+long_bull_retest_v2 =
+     allow_bull_retest_trigger and
+     regime == 1 and
+     long_retest_seen and
+     not long_retest_taken and
+     (reclaim_up or (close > open and close > close[1])) and
+     (long_rs_above_zero or long_rs_improving)
+long_avwap_reclaim_v2 =
+     allow_avwap_reclaim_trigger and
+     regime == 1 and
+     reclaim_up and
+     (long_rs_above_zero or long_rs_improving or rs_leader or rs_new_high)
+long_base_breakout_v2 =
+     allow_base_breakout_trigger and
+     regime == 1 and
+     (long_rs_ok_v2 or rs_new_high) and
+     long_base_tight and
+     not na(long_base_pivot) and
+     close > long_base_pivot and
+     (flip_on and not na(flip_vw) and not na(atr_val) and atr_val > 0
+          ? (close - flip_vw) / atr_val <= long_max_dist_above_avwap_atr
+          : true)
+long_trigger_v2 = long_leader_pullback_v2 or long_bull_retest_v2 or long_avwap_reclaim_v2 or long_base_breakout_v2
+long_support_shelf = long_base_breakout_v2 ? long_support_shelf_base : long_support_shelf_pullback
+long_struct_ref = flip_on and not na(flip_vw) and not na(long_support_shelf) and flip_vw < long_support_shelf ? flip_vw : long_support_shelf
+long_struct_stop = not na(long_struct_ref) and not na(atr_val) ? long_struct_ref - long_stop_buffer_atr * atr_val : float(na)
+long_struct_dist = not na(long_struct_stop) and close > long_struct_stop ? close - long_struct_stop : float(na)
+long_stop_dist_eff =
+     use_long_structural_stop and not na(long_struct_dist)
+     ? long_struct_dist
+     : (not na(atr_val) ? atr_val * atr_mult : float(na))
+long_stop_pct =
+     close > 0 and not na(long_stop_dist_eff)
+     ? long_stop_dist_eff / close * 100.0
+     : float(na)
+long_rsi = ta.rsi(close, long_rsi_len)
+long_dist_above_avwap_atr =
+     flip_on and not na(flip_vw) and not na(atr_val) and atr_val > 0
+     ? math.max(0.0, (close - flip_vw) / atr_val)
+     : 0.0
+int long_up_count = 0
+for i = 0 to long_up_bars_len - 1
+    long_up_count += (not na(close[i + 1]) and close[i] > close[i + 1]) ? 1 : 0
+long_avwap_stretched = long_dist_above_avwap_atr >= long_max_dist_above_avwap_atr
+long_rsi_overbought = not na(long_rsi) and long_rsi >= long_overbought_rsi
+long_too_many_up_bars = long_up_count >= long_up_bars_len
+long_stop_too_wide = not na(long_stop_pct) and long_stop_pct > long_max_stop_pct
+long_no_chase_block =
+     use_long_no_chase_filter and
+     (long_avwap_stretched or long_rsi_overbought or long_too_many_up_bars or long_stop_too_wide)
+long_resistance_ref = ta.highest(high[1], long_resistance_lookback)
+long_room_to_resistance_atr =
+     not na(long_resistance_ref) and not na(atr_val) and atr_val > 0 and long_resistance_ref > close
+     ? (long_resistance_ref - close) / atr_val
+     : float(na)
+long_resistance_applies =
+     long_base_breakout_v2 ? (not na(long_resistance_ref) and not na(long_base_pivot) and long_resistance_ref > long_base_pivot) : true
+long_resistance_block =
+     use_long_resistance_filter and
+     long_resistance_applies and
+     not na(long_room_to_resistance_atr) and
+     long_room_to_resistance_atr <= long_min_room_to_resistance_atr
+long_gap_exhaustion =
+     not na(close[1]) and not na(atr_val) and
+     open - close[1] >= long_gap_up_atr * atr_val and
+     not na(atr_pct) and atr_pct >= long_exhaustion_atr_pct
+long_exhaustion_block = use_long_exhaustion_filter and long_gap_exhaustion
+long_permission_v2 =
+     not na(regime) and regime == 1 and
+     entry_gates_ok and
+     long_env_ok
+long_block_v2 =
+     chop_risk == 2 or
+     long_no_chase_block or
+     long_resistance_block or
+     long_exhaustion_block
+long_review_ok_v2 =
+     long_permission_v2 and
+     long_rs_ok_v2 and
+     not long_block_v2
+long_v2_score =
+     math.min(100.0,
+         (long_leader_pullback_v2 ? 40.0 : long_bull_retest_v2 ? 35.0 : long_avwap_reclaim_v2 ? 30.0 : long_base_breakout_v2 ? 40.0 : 0.0) +
+         (rs_leader ? 30.0 : long_rs_above_zero ? 18.0 : 0.0) +
+         (above_avwap ? 15.0 : 0.0) +
+         (rs_new_high ? 15.0 : 0.0))
+// v3.6 LONG+ optional continuation-quality gate (default OFF).
+// Asymmetric by doctrine: duration-dependence evidence supports youth gates on
+// bear regimes, not bull regimes, so the age/dwell gates here are opt-in.
+long_plus_markov_sticky = not na(mk_gate_p_stay) and mk_gate_p_stay * 100.0 >= long_plus_min_stay_pct
+long_plus_markov_n_ok = mk_cur_n >= long_plus_min_markov_n
+long_plus_young_by_age = active_bars_in_regime <= long_plus_max_regime_age
+long_plus_young_by_maturity = na(mk_maturity) ? true : mk_maturity <= long_plus_max_maturity
+long_plus_dwell_ok = not long_plus_use_dwell_gate or na(mk_age_pctile) or mk_age_pctile <= long_plus_max_dwell_pctile
+long_plus_markov_core =
+     not na(regime) and regime == 1 and
+     long_plus_markov_sticky and
+     long_plus_markov_n_ok and
+     long_plus_young_by_age and
+     long_plus_young_by_maturity and
+     long_plus_dwell_ok
+long_plus_markov_gate_ok =
+     not long_plus_strict_markov or long_plus_markov_core
+long_plus_session_ok =
+     not long_plus_session_filter or not na(time(timeframe.period, long_plus_session))
+long_plus_atr_safe = math.max(nz(atr_val), syminfo.mintick)
+long_plus_trigger_range_atr = (high - low) / long_plus_atr_safe
+long_plus_trigger_range_ok = long_plus_trigger_range_atr <= long_plus_max_trigger_range_atr
+long_plus_close_location = high == low ? 0.50 : (close - low) / (high - low)
+long_plus_upper_close_ok = not long_plus_upper_close_on or long_plus_close_location >= long_plus_min_close_location
+long_plus_volume_ma = ta.sma(volume, long_plus_volume_len)
+long_plus_volume_ok =
+     not long_plus_volume_filter or
+     na(long_plus_volume_ma) or
+     volume >= long_plus_volume_ma * long_plus_volume_mult
+long_plus_in_bull = not na(regime) and regime == 1
+long_plus_gate_core =
+     long_plus_markov_gate_ok and
+     long_plus_session_ok and
+     long_plus_trigger_range_ok and
+     long_plus_upper_close_ok and
+     long_plus_volume_ok
+long_plus_gate_pass =
+     not long_plus_enabled or
+     not use_long_side_v2 or
+     long_plus_gate_core
+long_plus_blocker =
+     not long_plus_enabled            ? "OFF" :
+     not use_long_side_v2             ? "LONG V2 OFF" :
+     not long_plus_in_bull            ? "NO BULL REGIME" :
+     not long_plus_dwell_ok           ? "DWELL" :
+     not long_plus_markov_gate_ok     ? "MARKOV" :
+     not long_plus_session_ok         ? "SESSION" :
+     not long_plus_trigger_range_ok   ? "BAR RANGE" :
+     not long_plus_upper_close_ok     ? "CLOSE LOC" :
+     not long_plus_volume_ok          ? "VOLUME" :
+     "PASS"
+active_long_score = use_long_side_v2 ? long_v2_score : long_score
+active_long_trigger = use_long_side_v2 ? long_trigger_v2 : long_trigger
+active_long_review_ok = use_long_side_v2 ? (long_review_ok_v2 and long_plus_gate_pass) : (entry_gates_ok and rs_long_ok and long_env_ok)
+// =============================================================================
+// Entry Permission
+// =============================================================================
+can_long =
+     confirmed and in_test_window and not na(regime) and regime == 1 and
+     active_long_review_ok and active_long_trigger and
+     active_long_score >= min_score and strategy.position_size == 0
+can_short =
+     confirmed and in_test_window and allow_shorts and not na(regime) and regime == -1 and
+     active_short_review_ok and active_short_trigger and
+     active_short_score >= min_score and
+     strategy.position_size == 0
+// =============================================================================
+// Telemetry
+// =============================================================================
+var int sig_short_failreclaim = 0
+var int sig_short_bearflag = 0
+var int sig_short_bearflip = 0
+var int blk_short_no_chase = 0
+var int blk_short_support = 0
+var int blk_short_squeeze = 0
+short_wouldbe =
+     confirmed and in_test_window and allow_shorts and not na(regime) and regime == -1 and
+     short_permission_v2 and short_rw_ok_v2 and active_short_trigger and
+     active_short_score >= min_score and strategy.position_size == 0
+if can_short
+    sig_short_failreclaim += short_failed_reclaim_v2 ? 1 : 0
+    sig_short_bearflag += (not short_failed_reclaim_v2 and short_bear_flag_breakdown) ? 1 : 0
+    sig_short_bearflip += (not short_failed_reclaim_v2 and not short_bear_flag_breakdown and (short_bear_flip_retest_v2 or short_trig_flip)) ? 1 : 0
+if short_wouldbe
+    blk_short_no_chase += short_no_chase_block ? 1 : 0
+    blk_short_support += short_support_block ? 1 : 0
+    blk_short_squeeze += short_squeeze_block ? 1 : 0
+var int sig_long_pullback = 0
+var int sig_long_bullretest = 0
+var int sig_long_avwapreclaim = 0
+var int sig_long_basebreakout = 0
+var int blk_long_no_chase = 0
+var int blk_long_resistance = 0
+var int blk_long_exhaustion = 0
+long_wouldbe =
+     confirmed and in_test_window and not na(regime) and regime == 1 and
+     long_permission_v2 and long_rs_ok_v2 and long_trigger_v2 and
+     long_v2_score >= min_score and strategy.position_size == 0
+if can_long and use_long_side_v2
+    sig_long_pullback += long_leader_pullback_v2 ? 1 : 0
+    sig_long_bullretest += (not long_leader_pullback_v2 and long_bull_retest_v2) ? 1 : 0
+    sig_long_avwapreclaim += (not long_leader_pullback_v2 and not long_bull_retest_v2 and long_avwap_reclaim_v2) ? 1 : 0
+    sig_long_basebreakout += (not long_leader_pullback_v2 and not long_bull_retest_v2 and not long_avwap_reclaim_v2 and long_base_breakout_v2) ? 1 : 0
+if long_wouldbe
+    blk_long_no_chase += long_no_chase_block ? 1 : 0
+    blk_long_resistance += long_resistance_block ? 1 : 0
+    blk_long_exhaustion += long_exhaustion_block ? 1 : 0
+// =============================================================================
+// MODULE 6b · Sizing and Orders
+// =============================================================================
+ch_long_raw  = ta.highest(high, ch_len) - atr_val * ch_mult
+ch_short_raw = ta.lowest(low, ch_len) + atr_val * ch_mult
+t2_eff = math.max(t2_r, t1_r)
+f_plan_qty(_stop_dist, _sizing_equity) =>
+    _pv = f_point_value()
+    _risk_frac = risk_pct / 100.0 * risk_scale
+    _unit_risk = _stop_dist * _pv
+    _unit_notional = close * _pv
+    _q_risk = not na(_unit_risk) and _unit_risk > 0 ? (_sizing_equity * _risk_frac) / _unit_risk : 0.0
+    _q_cap = not na(_unit_notional) and _unit_notional > 0 ? (_sizing_equity * cap_pct / 100.0) / _unit_notional : 0.0
+    _q_raw = math.min(_q_risk, _q_cap)
+    _q = f_round_qty(_q_raw)
+    _q >= min_qty ? _q : 0.0
+f_plan_qty_mult(_stop_dist, _sizing_equity, _risk_mult) =>
+    _pv = f_point_value()
+    _risk_frac = risk_pct / 100.0 * risk_scale * math.max(_risk_mult, 0.0)
+    _unit_risk = _stop_dist * _pv
+    _unit_notional = close * _pv
+    _q_risk = not na(_unit_risk) and _unit_risk > 0 ? (_sizing_equity * _risk_frac) / _unit_risk : 0.0
+    _q_cap = not na(_unit_notional) and _unit_notional > 0 ? (_sizing_equity * cap_pct / 100.0) / _unit_notional : 0.0
+    _q_raw = math.min(_q_risk, _q_cap)
+    _q = f_round_qty(_q_raw)
+    _q >= min_qty ? _q : 0.0
+f_reset_plan(_q) =>
+    _can_split = _q >= min_qty * 3.0
+    _third = f_round_qty(_q / 3.0)
+    _q1 = _can_split ? _third : _q
+    _q2 = _can_split ? _third : 0.0
+    _q3 = _can_split ? f_round_qty(_q - _q1 - _q2) : 0.0
+    if _can_split and _q3 < min_qty
+        _q2 := f_round_qty(_q - _q1)
+        _q3 := 0.0
+    [_q1, _q2, _q3]
+if enable_orders and can_long
+    _dist = use_long_side_v2 and use_long_structural_stop and not na(long_struct_dist) ? long_struct_dist : atr_val * atr_mult
+    _long_sizing_equity = use_blended_capital_split ? long_virtual_equity : strategy.equity
+    _q = f_plan_qty(_dist, _long_sizing_equity)
+    _stop0 = close - _dist
+    if _q >= min_qty and _stop0 > 0
+        plan_rdist := _dist
+        plan_q := _q
+        [q1_, q2_, q3_] = f_reset_plan(_q)
+        plan_q1 := q1_
+        plan_q2 := q2_
+        plan_q3 := q3_
+        legs_placed := false
+        t1_done := false
+        t2_done := false
+        leg_stop := na
+        run_stop := na
+        long_active_suffix :=
+             not use_long_side_v2 ? "" :
+             long_leader_pullback_v2 ? "P" :
+             long_bull_retest_v2 ? "R" :
+             long_avwap_reclaim_v2 ? "A" :
+             long_base_breakout_v2 ? "B" : ""
+        long_id1 := "L1" + long_active_suffix
+        long_id2 := "L2" + long_active_suffix
+        long_id3 := "L3" + long_active_suffix
+        long_base_pivot_at_entry := use_long_side_v2 and long_base_breakout_v2 ? long_base_pivot : na
+        if use_long_side_v2 and long_bull_retest_v2
+            long_retest_taken := true
+        _why =
+             not use_long_side_v2 ? (long_trig_flip ? "flip" : long_trig_hidden ? "hidDiv" : long_trig_regular ? "regDiv" : "reclaim") :
+             long_leader_pullback_v2 ? "pullback" :
+             long_bull_retest_v2 ? "bullRetest" :
+             long_avwap_reclaim_v2 ? "avwapReclaim" :
+             long_base_breakout_v2 ? "baseBreakout" : "longV2"
+        strategy.entry(long_id1, strategy.long, qty = plan_q1, comment = long_id1 + " · " + _why + " · " + f_fmt(active_long_score, 0))
+        strategy.exit("PROT_L1", from_entry = long_id1, stop = _stop0)
+        if plan_q2 >= min_qty
+            strategy.entry(long_id2, strategy.long, qty = plan_q2, comment = long_id2 + " · " + _why)
+            strategy.exit("PROT_L2", from_entry = long_id2, stop = _stop0)
+        if plan_q3 >= min_qty
+            strategy.entry(long_id3, strategy.long, qty = plan_q3, comment = long_id3 + " · " + _why)
+            strategy.exit("PROT_L3", from_entry = long_id3, stop = _stop0)
+if enable_orders and can_short
+    _dist = use_short_structural_stop and not na(short_struct_dist) ? short_struct_dist : atr_val * atr_mult
+    _short_sizing_equity = use_blended_capital_split ? short_virtual_equity : strategy.equity
+    _q = short_plus_enabled and use_short_side_v2 and short_plus_risk_mult_on ? f_plan_qty_mult(_dist, _short_sizing_equity, short_plus_risk_mult) : f_plan_qty(_dist, _short_sizing_equity)
+    _stop0 = close + _dist
+    if _q >= min_qty and _dist > 0
+        plan_rdist := _dist
+        plan_q := _q
+        [q1_, q2_, q3_] = f_reset_plan(_q)
+        plan_q1 := q1_
+        plan_q2 := q2_
+        plan_q3 := q3_
+        legs_placed := false
+        t1_done := false
+        t2_done := false
+        leg_stop := na
+        run_stop := na
+        if use_short_side_v2 and short_bear_flip_retest_v2
+            short_bear_retest_taken := true
+        // v3.6: setup-coded IDs (toggle). Suffix precedence matches the legacy
+        // _why/telemetry order (failAVWAP > bearFlag > bearRetest > flip).
+        short_active_suffix :=
+             not (use_short_side_v2 and use_short_setup_ids) ? "" :
+             short_failed_reclaim_v2 ? "F" :
+             short_bear_flag_breakdown ? "B" :
+             short_bear_flip_retest_v2 ? "R" :
+             short_trig_flip ? "X" : ""
+        short_id1 := "S1" + short_active_suffix
+        short_id2 := "S2" + short_active_suffix
+        short_id3 := "S3" + short_active_suffix
+        _why =
+             use_short_side_v2
+             ? short_plus_enabled and short_plus_gate_core ? short_plus_setup_slug :
+               short_failed_reclaim_v2 ? "failAVWAP" : short_bear_flag_breakdown ? "bearFlag" : short_bear_flip_retest_v2 ? "bearRetest" : short_trig_flip ? "bearFlip" : "shortV2"
+             : short_trig_flip ? "flip" : short_trig_hidden ? "hidDiv" : short_trig_regular ? "regDiv" : "reclaim"
+        strategy.entry(short_id1, strategy.short, qty = plan_q1, comment = short_id1 + " · " + _why + " · " + f_fmt(active_short_score, 0))
+        strategy.exit("PROT_S1", from_entry = short_id1, stop = _stop0)
+        if plan_q2 >= min_qty
+            strategy.entry(short_id2, strategy.short, qty = plan_q2, comment = short_id2 + " · " + _why)
+            strategy.exit("PROT_S2", from_entry = short_id2, stop = _stop0)
+        if plan_q3 >= min_qty
+            strategy.entry(short_id3, strategy.short, qty = plan_q3, comment = short_id3 + " · " + _why)
+            strategy.exit("PROT_S3", from_entry = short_id3, stop = _stop0)
+// =============================================================================
+// MODULE 6c · Position Management
+// =============================================================================
+in_long = strategy.position_size > 0
+in_short = strategy.position_size < 0
+avg = strategy.position_avg_price
+if enable_orders and (in_long or in_short) and not na(plan_rdist) and plan_rdist > 0
+    _sgn = in_long ? 1.0 : -1.0
+    _t1 = avg + _sgn * t1_r * plan_rdist
+    _t2 = avg + _sgn * t2_eff * plan_rdist
+    if na(leg_stop)
+        leg_stop := avg - _sgn * plan_rdist
+    if legs_placed
+        if not t1_done and plan_q2 > 0 and not f_entry_open(in_long ? long_id1 : short_id1)
+            t1_done := true
+// --- continued in next block ---
+        if not t2_done and plan_q2 > 0 and not f_entry_open(in_long ? long_id2 : short_id2)
+            t2_done := true
+    if be_after_t1 and t1_done
+        _be_px = avg + _sgn * be_offset_r * plan_rdist
+        leg_stop := in_long ? math.max(leg_stop, _be_px) : math.min(leg_stop, _be_px)
+    if na(run_stop)
+        run_stop := leg_stop
+    run_stop := in_long ? math.max(run_stop, leg_stop) : math.min(run_stop, leg_stop)
+    _profit_r = _sgn * (close - avg) / plan_rdist
+    if use_trail and _profit_r >= trail_after_r
+        _ch = in_long ? ch_long_raw : ch_short_raw
+        if not na(_ch)
+            run_stop := in_long ? math.max(run_stop, _ch) : math.min(run_stop, _ch)
+    if not legs_placed
+        strategy.cancel("PROT_L1")
+        strategy.cancel("PROT_L2")
+        strategy.cancel("PROT_L3")
+        strategy.cancel("PROT_S1")
+        strategy.cancel("PROT_S2")
+        strategy.cancel("PROT_S3")
+        legs_placed := true
+    if in_long
+        if plan_q2 <= 0
+            strategy.exit("L1_ALL", from_entry = long_id1, limit = _t2, stop = run_stop)
+        else
+            if not t1_done and plan_q1 >= min_qty
+                strategy.exit("L1_T1", from_entry = long_id1, limit = _t1, stop = leg_stop)
+            if not t2_done and plan_q2 >= min_qty
+                strategy.exit("L2_T2", from_entry = long_id2, limit = _t2, stop = leg_stop)
+            if plan_q3 >= min_qty
+                strategy.exit("L3_RUN", from_entry = long_id3, stop = run_stop)
+    if in_short
+        if plan_q2 <= 0
+            strategy.exit("S1_ALL", from_entry = short_id1, limit = _t2, stop = run_stop)
+        else
+            if not t1_done and plan_q1 >= min_qty
+                strategy.exit("S1_T1", from_entry = short_id1, limit = _t1, stop = leg_stop)
+            if not t2_done and plan_q2 >= min_qty
+                strategy.exit("S2_T2", from_entry = short_id2, limit = _t2, stop = leg_stop)
+            if plan_q3 >= min_qty
+                strategy.exit("S3_RUN", from_entry = short_id3, stop = run_stop)
+regime_against_long = not na(regime) and (regime == -1 or (exit_on_neutral and regime == 0))
+regime_against_short = not na(regime) and (regime == 1 or (exit_on_neutral and regime == 0))
+if enable_orders and confirmed and in_long and regime_against_long
+    strategy.close(long_id1, comment = "Regime exit")
+    strategy.close(long_id2, comment = "Regime exit")
+    strategy.close(long_id3, comment = "Regime exit")
+if enable_orders and confirmed and in_short and regime_against_short
+    strategy.close(short_id1, comment = "Regime exit")
+    strategy.close(short_id2, comment = "Regime exit")
+    strategy.close(short_id3, comment = "Regime exit")
+if enable_orders and confirmed and in_short and use_short_avwap_exit and reclaim_up
+    strategy.close(short_id1, comment = "AVWAP reclaim")
+    strategy.close(short_id2, comment = "AVWAP reclaim")
+    strategy.close(short_id3, comment = "AVWAP reclaim")
+if enable_orders and confirmed and in_long and use_long_side_v2 and use_long_avwap_exit and reclaim_dn
+    strategy.close(long_id1, comment = "AVWAP failure")
+    strategy.close(long_id2, comment = "AVWAP failure")
+    strategy.close(long_id3, comment = "AVWAP failure")
+long_rs_deteriorated = not na(mans) and mans < 0 and not mans_rising
+if enable_orders and confirmed and in_long and use_long_side_v2 and use_long_rs_deterioration_exit and long_rs_deteriorated
+    strategy.close(long_id1, comment = "RS deteriorated")
+    strategy.close(long_id2, comment = "RS deteriorated")
+    strategy.close(long_id3, comment = "RS deteriorated")
+long_base_failed = not na(long_base_pivot_at_entry) and close < long_base_pivot_at_entry
+if enable_orders and confirmed and in_long and use_long_side_v2 and use_long_base_failure_exit and long_base_failed
+    strategy.close(long_id1, comment = "Base failed")
+    strategy.close(long_id2, comment = "Base failed")
+    strategy.close(long_id3, comment = "Base failed")
+time_stop_hit =
+     use_time_stop and strategy.position_size != 0 and
+     not na(active_entry_bar) and bar_index - active_entry_bar >= max_bars_in_trade
+if enable_orders and confirmed and time_stop_hit
+    strategy.close(long_id1, comment = "Time stop")
+    strategy.close(long_id2, comment = "Time stop")
+    strategy.close(long_id3, comment = "Time stop")
+    strategy.close(short_id1, comment = "Time stop")
+    strategy.close(short_id2, comment = "Time stop")
+    strategy.close(short_id3, comment = "Time stop")
+// =============================================================================
+// Visuals
+// =============================================================================
+bg_col =
+     not show_regime_bg or na(regime) ? na :
+     regime == 1 ? color.new(c_bull, 94) :
+     regime == -1 ? color.new(c_bear, 94) :
+     na
+bgcolor(bg_col, title = "Regime tint")
+avwap_mid_val = flip_vw
+avwap_lo_val = flip_on and not na(flip_vw) and not na(flip_sd) ? flip_vw - flip_sd : float(na)
+avwap_hi_val = flip_on and not na(flip_vw) and not na(flip_sd) ? flip_vw + flip_sd : float(na)
+avwap_plot_ready = show_avwap_plot and flip_on and not na(atr_val) and atr_val > 0
+avwap_mid_ok =
+     avwap_plot_ready and
+     not na(avwap_mid_val) and
+     math.abs(close - avwap_mid_val) / atr_val <= avwap_display_max_atr
+avwap_lo_ok =
+     avwap_plot_ready and
+     not na(avwap_lo_val) and
+     math.abs(close - avwap_lo_val) / atr_val <= avwap_display_max_atr
+avwap_hi_ok =
+     avwap_plot_ready and
+     not na(avwap_hi_val) and
+     math.abs(close - avwap_hi_val) / atr_val <= avwap_display_max_atr
+avwap_plot_hidden =
+     show_avwap_plot and flip_on and not na(atr_val) and atr_val > 0 and
+     ((not na(avwap_mid_val) and not avwap_mid_ok) or
+      (not na(avwap_lo_val) and not avwap_lo_ok) or
+      (not na(avwap_hi_val) and not avwap_hi_ok))
+plot(avwap_mid_ok ? avwap_mid_val : na, "Anchored VWAP", color = color.new(c_rf, 25), linewidth = 1, style = plot.style_linebr)
+p_vz_mid = plot(avwap_mid_ok ? avwap_mid_val : na, "Value zone center", color = na, display = display.none)
+p_vz_lo = plot(avwap_lo_ok ? avwap_lo_val : na, "Long value zone", color = color.new(c_rf, 85), linewidth = 1, style = plot.style_linebr)
+p_vz_hi = plot(avwap_hi_ok ? avwap_hi_val : na, "Short value zone", color = color.new(c_rf, 85), linewidth = 1, style = plot.style_linebr)
+fill(p_vz_mid, p_vz_lo, color = show_avwap_plot ? color.new(c_rf, 95) : na, title = "Long value zone fill")
+fill(p_vz_hi, p_vz_mid, color = show_avwap_plot ? color.new(c_rf, 96) : na, title = "Short value zone fill")
+plotshape(show_trig_marks and can_long, title = "Long signal", style = shape.triangleup, location = location.belowbar, color = color.new(c_bull, 0), size = size.small)
+plotshape(show_trig_marks and can_short, title = "Short signal", style = shape.triangledown, location = location.abovebar, color = color.new(c_bear, 0), size = size.small)
+run_stop_plot_ok = not na(run_stop) and not na(atr_val) and atr_val > 0 and math.abs(close - run_stop) / atr_val <= stop_display_max_atr
+leg_stop_plot_ok = not na(leg_stop) and not na(atr_val) and atr_val > 0 and math.abs(close - leg_stop) / atr_val <= stop_display_max_atr
+plot(enable_orders and strategy.position_size != 0 and legs_placed and run_stop_plot_ok ? run_stop : na, "Runner stop", color = color.new(c_trail, 20), linewidth = 1, style = plot.style_linebr)
+plot(enable_orders and strategy.position_size != 0 and legs_placed and leg_stop_plot_ok ? leg_stop : na, "Leg stop", color = color.new(c_bear, 45), linewidth = 1, style = plot.style_linebr)
+// =============================================================================
+// Data Window Exports
+// =============================================================================
+plot(na(regime) ? na : float(regime), "REGIME_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(regime_z, "REGIME_Z_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(strength, "STRENGTH_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(float(chop_risk), "CHOP_RISK_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(extension_risk ? 1.0 : 0.0, "EXTENSION_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(mans, "MANSFIELD_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(flip_vw, "AVWAP_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(active_long_score, "LONG_SCORE_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(active_short_score, "SHORT_SCORE_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(equity_dd_pct, "EQUITY_DD_PCT_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(daily_dd_pct, "DAILY_DD_PCT_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(atr_pct, "ATR_PCT_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(float(mk_total_transitions), "MARKOV_TRANSITIONS_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(na(mk_p_stay) ? na : mk_p_stay * 100.0, "REGIME_PSTAY_PCT_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(short_review_ok_v2 ? 1.0 : 0.0, "SHORT_REVIEW_OK_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(short_failed_reclaim_v2 ? 1.0 : 0.0, "SHORT_FAILED_RECLAIM_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(short_bear_flag_breakdown ? 1.0 : 0.0, "SHORT_BEAR_FLAG_BREAK_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(short_bear_flip_retest_v2 ? 1.0 : 0.0, "SHORT_BEAR_FLIP_RETEST_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(short_sector_laggard_v2 ? 1.0 : 0.0, "SHORT_SECTOR_LAGGARD_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(short_plus_enabled ? short_plus_cont_score : na, "SHORT_PLUS_SCORE_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(short_plus_gate_core ? 1.0 : 0.0, "SHORT_PLUS_GATE_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(short_plus_a_grade ? 1.0 : 0.0, "SHORT_PLUS_AGRADE_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(short_plus_risk_mult, "SHORT_PLUS_RISK_MULT_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(short_plus_score_boost_applied, "SHORT_PLUS_SCORE_BOOST_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(short_no_chase_block ? 1.0 : 0.0, "SHORT_NO_CHASE_BLOCK_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(short_support_block ? 1.0 : 0.0, "SHORT_SUPPORT_BLOCK_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(short_squeeze_block ? 1.0 : 0.0, "SHORT_SQUEEZE_BLOCK_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(na(short_struct_stop) ? na : short_struct_stop, "SHORT_STRUCT_STOP_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(short_stop_pct, "SHORT_STOP_PCT_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(float(blk_short_no_chase), "SHORT_BLOCKED_NO_CHASE_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(float(blk_short_support), "SHORT_BLOCKED_SUPPORT_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(float(blk_short_squeeze), "SHORT_BLOCKED_SQUEEZE_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(long_review_ok_v2 ? 1.0 : 0.0, "LONG_REVIEW_OK_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(float(blk_long_no_chase), "LONG_BLOCKED_NO_CHASE_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(float(blk_long_resistance), "LONG_BLOCKED_RESISTANCE_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(float(blk_long_exhaustion), "LONG_BLOCKED_EXHAUSTION_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(na(long_struct_stop) ? na : long_struct_stop, "LONG_STRUCT_STOP_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(long_stop_pct, "LONG_STOP_PCT_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(use_blended_capital_split ? long_virtual_equity : na, "LONG_VIRTUAL_EQUITY_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(use_blended_capital_split ? short_virtual_equity : na, "SHORT_VIRTUAL_EQUITY_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(avwap_stale_reset ? 1.0 : 0.0, "AVWAP_FORCE_RESET_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(float(avwap_age_bars), "AVWAP_AGE_BARS_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(avwap_plot_hidden ? 1.0 : 0.0, "AVWAP_DISPLAY_HIDDEN_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+// =============================================================================
+// Main HUD
+// =============================================================================
+var table dash = table.new(f_pos(hud_pos_in), 4, hud_mode == "Full" ? 6 : 1,
+     bgcolor = hud_mode == "Off" ? color.new(c_panel, 100) : c_panel,
+     frame_color = hud_mode == "Off" ? color.new(c_frame, 100) : c_frame,
+     frame_width = 1,
+     border_color = color.new(color.white, 92),
+     border_width = 1)
+if barstate.islast and hud_mode != "Off"
+    _src_txt = use_external ? (ext_live ? "EXT" : ext_ok_run > 0 ? "SYNCING" : "LINK?") : "CORE"
+    _reg_txt = na(regime) ? "Inactive" : regime == 1 ? "Bull" : regime == -1 ? "Bear" : "Neutral"
+    _reg_col = na(regime) ? c_bear : regime == 1 ? c_bull : regime == -1 ? c_bear : c_neut
+    _rs_txt = na(mans) ? "RS n/a" : rs_leader ? "Leader" : rs_laggard ? "Laggard" : mans > 0 ? "RS+" : "RS-"
+    _osc_txt = osc_dead ? "No Volume" : osc_type + " " + f_fmt(osc, 0)
+    _pos_txt =
+         in_long ? "Long · " + f_fmt(plan_rdist > 0 ? (close - avg) / plan_rdist : na, 1) + "R" :
+         in_short ? "Short · " + f_fmt(plan_rdist > 0 ? (avg - close) / plan_rdist : na, 1) + "R" :
+         enable_orders ? "Flat" : "Chart Only"
+    _n = strategy.closedtrades
+    _n_txt = "Trades: " + str.tostring(_n) + (_n < 30 ? " · Low Sample" : "")
+    f_tcell(dash, 0, 0, _reg_txt + " · " + _src_txt, c_text, color.new(_reg_col, 40))
+    f_tcell(dash, 1, 0, _rs_txt, c_text, c_cell)
+    f_tcell(dash, 2, 0, _pos_txt, c_text, c_cell2)
+    f_tcell(dash, 3, 0, _n_txt, _n < 30 ? c_dim : c_text, c_cell)
+    if hud_mode == "Full"
+        _avwap_txt =
+             avwap_weight_dead ? "AVWAP: No Volume" :
+             "AVWAP: " + (flip_on ? f_price(flip_vw) : "n/a") + (above_avwap ? " ↑" : below_avwap ? " ↓" : "")
+        _halt_txt =
+             risk_halt ? "Paused: Risk" :
+             not cooldown_ok ? "Paused: Cooldown" :
+             not atr_pct_ok ? "Paused: ATR" :
+             not liquidity_ok ? "Paused: Liquidity" :
+             "Ready"
+        _short_score_label = use_short_side_v2 ? (short_plus_enabled ? "Sv2+" : "Sv2") : "S"
+        _long_score_label = use_long_side_v2 ? "Lv2" : "L"
+        _short_state_txt =
+             short_risk_halt_eff or not short_cooldown_ok_eff ? "Short: Halted" :
+             short_plus_enabled and use_short_side_v2 and short_plus_a_grade ? "SHORT+: A-Grade" :
+             short_plus_enabled and use_short_side_v2 and short_plus_gate_core ? "SHORT+: Pass" :
+             short_plus_enabled and use_short_side_v2 and short_plus_setup_ok and not short_plus_gate_core ? "SHORT+: " + short_plus_blocker :
+             not use_short_side_v2 ? "Short: Legacy" :
+             short_no_chase_block ? "Short: No Chase" :
+             short_support_block ? "Short: Support Near" :
+             short_squeeze_block ? "Short: Squeeze Risk" :
+             short_review_ok_v2 ? "Short: Review OK" :
+             "Short: Not Ready"
+        _long_state_txt =
+             long_risk_halt_eff or not long_cooldown_ok_eff ? "Long: Halted" :
+             long_plus_enabled and use_long_side_v2 and long_plus_gate_core ? "LONG+: Pass" :
+             long_plus_enabled and use_long_side_v2 and long_plus_in_bull and not long_plus_gate_core ? "LONG+: " + long_plus_blocker :
+             not use_long_side_v2 ? "Long: Legacy" :
+             long_no_chase_block ? "Long: No Chase" :
+             long_resistance_block ? "Long: Resistance" :
+             long_exhaustion_block ? "Long: Exhaustion" :
+             long_review_ok_v2 ? "Long: Review OK" :
+             "Long: Not Ready"
+        f_tcell(dash, 0, 1, "Z-Score: " + f_fmt(regime_z, 2), c_dim, c_panel)
+        f_tcell(dash, 1, 1, "Strength: " + f_fmt(strength, 0), c_dim, c_panel)
+        f_tcell(dash, 2, 1, "Enter/Exit: " + f_fmt(enter_z, 2) + " / " + f_fmt(exit_z, 2), c_dim, c_panel)
+        f_tcell(dash, 3, 1, preset + " · " + vol_model, c_dim, c_panel)
+        f_tcell(dash, 0, 2, chop_risk == 0 ? "Chop: Low" : chop_risk == 1 ? "Chop: Medium" : "Chop: High", chop_risk == 2 ? c_bear : c_dim, c_panel)
+        f_tcell(dash, 1, 2, gap_shock ? "Gap: Shock" : "Gap: Normal", gap_shock ? c_bear : c_faint, c_panel)
+        _age_txt =
+             "Reg Age: " + str.tostring(active_bars_in_regime) +
+             (avwap_age_bars != active_bars_in_regime ? " / VW " + str.tostring(avwap_age_bars) : "") +
+             (ext_active ? " · Extended" : "")
+        f_tcell(dash, 2, 2, _age_txt, ext_active ? c_ext : c_dim, c_panel)
+        f_tcell(dash, 3, 2, "Risk Scale: " + f_fmt(risk_scale, 2) + "x", risk_scale < 1.0 ? c_ext : c_dim, c_panel)
+        f_tcell(dash, 0, 3, "Osc: " + _osc_txt, osc_dead ? c_bear : c_dim, c_panel)
+        f_tcell(dash, 1, 3, "Mansfield: " + f_fmt(mans, 2) + "%", c_dim, c_panel)
+        f_tcell(dash, 2, 3, _avwap_txt, avwap_weight_dead ? c_bear : c_dim, c_panel)
+        f_tcell(dash, 3, 3, "Score " + _long_score_label + "/" + _short_score_label + ": " + f_fmt(active_long_score, 0) + " / " + f_fmt(active_short_score, 0), c_dim, c_panel)
+        f_tcell(dash, 0, 4, _halt_txt, risk_halt or not cooldown_ok or not atr_pct_ok or not liquidity_ok ? c_bear : c_bull, c_cell2)
+        f_tcell(dash, 1, 4, "Equity DD: " + f_pct(equity_dd_pct), equity_dd_halt ? c_bear : c_dim, c_cell2)
+        f_tcell(dash, 2, 4, "ATR: " + f_pct(atr_pct), not atr_pct_ok ? c_bear : c_dim, c_cell2)
+        f_tcell(dash, 3, 4, enable_orders ? "Orders: Sim On" : "Orders: Off", enable_orders ? c_dim : c_faint, c_cell2)
+        f_tcell(dash, 0, 5, _long_state_txt, long_review_ok_v2 ? c_bull : c_faint, c_cell2)
+        f_tcell(dash, 1, 5, "Validation", c_faint, c_cell2)
+        f_tcell(dash, 2, 5, use_date_filter ? "Date Filter: On" : "Date Filter: Off", use_date_filter ? c_dim : c_faint, c_cell2)
+        f_tcell(dash, 3, 5, _short_state_txt, short_plus_a_grade ? c_bear : short_review_ok_v2 ? c_bull : c_faint, c_cell2)
+// =============================================================================
+// SHORT+ Premium HUD
+// =============================================================================
+var table spdash = table.new(position.middle_right, 2, 7,
+     bgcolor = color.new(c_panel, 8),
+     frame_color = color.new(c_bear, 65),
+     frame_width = 1,
+     border_color = color.new(color.white, 90),
+     border_width = 1)
+if barstate.islast
+    if short_plus_show_hud and short_plus_enabled
+        int _sp_bear_n = array.get(mk_rows, 2)
+        int _sp_bear_stay_ct = array.get(mk_counts, 8)
+        float _sp_bear_p_stay = f_mk_gate_prob(_sp_bear_stay_ct, _sp_bear_n)
+        string _sp_est_tag = mk_estimator == "Wilson lower bound" ? " wLB" : mk_estimator == "Laplace smoothed" ? " Lap" : ""
+        string _sp_stay_txt = na(_sp_bear_p_stay) ? "n/a" : f_fmt(_sp_bear_p_stay * 100.0, 0) + "%"
+        bool _sp_bear_n_ok = _sp_bear_n >= short_plus_min_markov_n
+        color _sp_state_bg = short_plus_a_grade ? color.new(c_bear, 10) : short_plus_gate_core and short_plus_in_bear ? color.new(c_ext, 35) : color.new(c_cell2, 0)
+        color _sp_score_bg = short_plus_cont_score >= 85 ? color.new(c_bear, 10) : short_plus_cont_score >= short_plus_min_cont_score ? color.new(c_ext, 35) : color.new(c_cell2, 0)
+        string _sp_boost_txt = short_plus_score_boost_applied > 0 ? " (+" + f_fmt(short_plus_score_boost_applied, 0) + ")" : ""
+        string _sp_gates_txt =
+             (short_plus_trigger_range_ok ? "Rng✓" : "Rng✗") + " " +
+             (short_plus_lower_close_ok ? "Cls✓" : "Cls✗") + " " +
+             (short_plus_volume_ok ? "Vol✓" : "Vol✗") + " " +
+             (short_plus_session_ok ? "Ses✓" : "Ses✗") +
+             (short_plus_use_dwell_gate ? (short_plus_dwell_ok ? " Dwl✓" : " Dwl✗") : "")
+        f_tcell(spdash, 0, 0, "SHORT+", c_text, color.new(c_bear, 35))
+        f_tcell(spdash, 1, 0, short_plus_state, c_text, _sp_state_bg)
+        f_tcell(spdash, 0, 1, "Score", c_dim, c_panel)
+        f_tcell(spdash, 1, 1, f_fmt(short_plus_cont_score, 0) + " / " + str.tostring(short_plus_min_cont_score) + _sp_boost_txt, c_text, _sp_score_bg)
+        f_tcell(spdash, 0, 2, "Setup", c_dim, c_panel)
+        f_tcell(spdash, 1, 2, short_plus_setup_name, short_plus_primary_setup ? c_text : c_dim, c_cell2)
+        f_tcell(spdash, 0, 3, "Bear Markov", c_dim, c_panel)
+        f_tcell(spdash, 1, 3, "Stay " + _sp_stay_txt + _sp_est_tag + " · n" + str.tostring(_sp_bear_n) + (_sp_bear_n_ok ? "" : " !"), short_plus_markov_core ? c_bear : _sp_bear_n_ok ? c_dim : c_faint, c_cell2)
+        f_tcell(spdash, 0, 4, "Regime Age", c_dim, c_panel)
+        f_tcell(spdash, 1, 4, str.tostring(active_bars_in_regime) + " / " + str.tostring(short_plus_max_regime_age) + (na(mk_maturity) ? "" : " · M " + f_fmt(mk_maturity, 2)) + (na(mk_age_pctile) ? "" : " · P" + f_fmt(mk_age_pctile, 0)), short_plus_young_by_age and short_plus_young_by_maturity and short_plus_dwell_ok ? c_dim : c_ext, c_cell2)
+        f_tcell(spdash, 0, 5, "Risk Mult", c_dim, c_panel)
+        f_tcell(spdash, 1, 5, f_fmt(short_plus_risk_mult, 2) + "x", short_plus_risk_mult > 1.0 ? c_bear : c_dim, c_cell2)
+        f_tcell(spdash, 0, 6, "Gates", c_dim, c_panel)
+        f_tcell(spdash, 1, 6, _sp_gates_txt, short_plus_gate_core ? c_bear : c_faint, c_cell2)
+    else
+        table.clear(spdash, 0, 0, 1, 6)
+// =============================================================================
+// Markov Transition Dashboard
+// =============================================================================
+var table mkdash = table.new(f_pos(markov_pos_in), 5, 7,
+     bgcolor = c_panel,
+     frame_color = c_frame,
+     frame_width = 1,
+     border_color = color.new(color.white, 92),
+     border_width = 1)
+if barstate.islast
+    if show_markov_readout
+        f_tcell(mkdash, 0, 0, "Transitions", c_text, c_cell)
+        f_tcell(mkdash, 1, 0, "→Bull", c_dim, c_cell)
+        f_tcell(mkdash, 2, 0, "→Neut", c_dim, c_cell)
+        f_tcell(mkdash, 3, 0, "→Bear", c_dim, c_cell)
+        f_tcell(mkdash, 4, 0, "n", c_dim, c_cell)
+        for _fr = 0 to 2
+            int _rowN = array.get(mk_rows, _fr)
+            bool _curRow = mk_cur_ok and mk_cur_i == _fr
+            f_tcell(mkdash, 0, 1 + _fr, f_mk_name(_fr), _curRow ? c_text : c_dim, _curRow ? color.new(c_rf, 60) : c_cell2)
+            for _to = 0 to 2
+                int _ct = array.get(mk_counts, _fr * 3 + _to)
+                float _p = f_mk_prob(_ct, _rowN)
+                f_tcell(mkdash, 1 + _to, 1 + _fr, f_mk_ci_txt(_ct, _rowN), c_text, f_mk_bg(_p, _curRow))
+            f_tcell(mkdash, 4, 1 + _fr, str.tostring(_rowN) + (_rowN < markov_min_row_n ? " !" : ""), _rowN < markov_min_row_n ? c_bear : c_dim, c_cell2)
+        float _p_to_bull = mk_cur_ok ? f_mk_prob(array.get(mk_counts, mk_cur_i * 3 + 0), mk_cur_n) : float(na)
+        float _p_to_bear = mk_cur_ok ? f_mk_prob(array.get(mk_counts, mk_cur_i * 3 + 2), mk_cur_n) : float(na)
+        float _net_bias = not na(_p_to_bull) and not na(_p_to_bear) ? (_p_to_bull - _p_to_bear) * 100.0 : float(na)
+        string _mat_tag = na(mk_maturity) ? "n/a" : mk_maturity < 0.75 ? "Young" : mk_maturity > 1.25 ? "Mature" : "Normal"
+        f_tcell(mkdash, 0, 4, "Current: " + (mk_cur_ok ? f_mk_name(mk_cur_i) : "n/a"), c_text, c_cell)
+        f_tcell(mkdash, 1, 4, "Stay " + (na(mk_p_stay) ? "n/a" : f_fmt(mk_p_stay * 100.0, 0) + "%"), c_dim, c_cell)
+        f_tcell(mkdash, 2, 4, "Net " + (na(_net_bias) ? "n/a" : (_net_bias > 0 ? "+" : "") + f_fmt(_net_bias, 0) + "%"), na(_net_bias) ? c_faint : _net_bias >= 0 ? c_bull : c_bear, c_cell)
+        f_tcell(mkdash, 3, 4, "Dwell ~" + f_fmt(mk_mean_dwell_bars, 0), c_dim, c_cell)
+        f_tcell(mkdash, 4, 4, "Age " + str.tostring(active_bars_in_regime) + (na(mk_age_pctile) ? "" : " · P" + f_fmt(mk_age_pctile, 0)), c_dim, c_cell)
+        f_tcell(mkdash, 0, 5, "Maturity", c_faint, c_cell2)
+        f_tcell(mkdash, 1, 5, "M " + f_fmt(mk_maturity, 2), c_dim, c_cell2)
+        f_tcell(mkdash, 2, 5, _mat_tag, _mat_tag == "Mature" ? c_ext : c_dim, c_cell2)
+        f_tcell(mkdash, 3, 5, "Stride " + str.tostring(mk_stride), c_faint, c_cell2)
+        f_tcell(mkdash, 4, 5, "N " + str.tostring(mk_total_transitions), c_faint, c_cell2)
+        bool _base_ok =
+             array.get(mk_rows, 0) >= markov_min_row_n and
+             array.get(mk_rows, 1) >= markov_min_row_n and
+             array.get(mk_rows, 2) >= markov_min_row_n
+        float _pi_b = 1.0 / 3.0
+        float _pi_n = 1.0 / 3.0
+        float _pi_r = 1.0 / 3.0
+        if _base_ok
+            for _it = 0 to 31
+                float _nb = _pi_b * f_mk_prob(array.get(mk_counts, 0), array.get(mk_rows, 0)) + _pi_n * f_mk_prob(array.get(mk_counts, 3), array.get(mk_rows, 1)) + _pi_r * f_mk_prob(array.get(mk_counts, 6), array.get(mk_rows, 2))
+                float _nn = _pi_b * f_mk_prob(array.get(mk_counts, 1), array.get(mk_rows, 0)) + _pi_n * f_mk_prob(array.get(mk_counts, 4), array.get(mk_rows, 1)) + _pi_r * f_mk_prob(array.get(mk_counts, 7), array.get(mk_rows, 2))
+                float _nr = _pi_b * f_mk_prob(array.get(mk_counts, 2), array.get(mk_rows, 0)) + _pi_n * f_mk_prob(array.get(mk_counts, 5), array.get(mk_rows, 1)) + _pi_r * f_mk_prob(array.get(mk_counts, 8), array.get(mk_rows, 2))
+                float _sum = _nb + _nn + _nr
+                if _sum > 0
+                    _pi_b := _nb / _sum
+                    _pi_n := _nn / _sum
+                    _pi_r := _nr / _sum
+        f_tcell(mkdash, 0, 6, "Base rate", c_faint, c_cell)
+        f_tcell(mkdash, 1, 6, _base_ok ? "B " + f_fmt(_pi_b * 100.0, 0) + "%" : "n/a", c_dim, c_cell)
+        f_tcell(mkdash, 2, 6, _base_ok ? "N " + f_fmt(_pi_n * 100.0, 0) + "%" : "n/a", c_dim, c_cell)
+        f_tcell(mkdash, 3, 6, _base_ok ? "Br " + f_fmt(_pi_r * 100.0, 0) + "%" : "n/a", c_dim, c_cell)
+        f_tcell(mkdash, 4, 6, "Not forecast", c_faint, c_cell)
+    else
+        table.clear(mkdash, 0, 0, 4, 6)
+// =============================================================================
+// Validation Dashboard — Classic + Blended sleeve-aware
+// =============================================================================
+val_segs = math.max(2, math.min(wf_segments, 8))
+val_blended = validation_focus == "Blended" or (validation_focus == "Auto" and use_blended_capital_split)
+val_rows =
+     validation_mode == "Full"    ? (val_blended ? (validation_show_chunks ? val_segs + 9 : 8) : (validation_show_chunks ? val_segs + 8 : 7)) :
+     validation_mode == "Compact" ? (val_blended ? 4 : 6) :
+     1
+var table valdash = table.new(f_pos(validation_pos_in), 5, val_rows,
+     bgcolor = validation_mode == "Off" ? color.new(c_panel, 100) : c_panel,
+     frame_color = validation_mode == "Off" ? color.new(c_frame, 100) : c_frame,
+     frame_width = 1,
+     border_color = color.new(color.white, 92),
+     border_width = 1)
+if barstate.islast and validation_mode != "Off"
+    for _r = 0 to val_rows - 1
+        for _c = 0 to 4
+            f_tcell(valdash, _c, _r, "", c_faint, color.new(c_panel, 100))
+    // ---- Closed-leg scan: combined + per-side -------------------------------
+    int _total = strategy.closedtrades
+    int _segs = val_segs
+    _segN = array.new_int(_segs, 0)
+    _segNet = array.new_float(_segs, 0.0)
+    _segGP = array.new_float(_segs, 0.0)
+    _segGL = array.new_float(_segs, 0.0)
+    _lSegN = array.new_int(_segs, 0)
+    _lSegNet = array.new_float(_segs, 0.0)
+    _sSegN = array.new_int(_segs, 0)
+    _sSegNet = array.new_float(_segs, 0.0)
+    float _net = 0.0
+    float _gp = 0.0
+    float _gl = 0.0
+    int _wins = 0
+    int _losses = 0
+    int _curLossStreak = 0
+    int _maxLossStreak = 0
+    float _oosNet = 0.0
+    float _oosGP = 0.0
+    float _oosGL = 0.0
+    int _oosN = 0
+    int _oosWins = 0
+    float _best1 = 0.0
+    float _best2 = 0.0
+    float _best3 = 0.0
+    // Long-side closed-leg accumulators.
+    float _lNet = 0.0
+    float _lGP = 0.0
+    float _lGL = 0.0
+    int _lN = 0
+    int _lWins = 0
+    int _lCurStreak = 0
+    int _lMaxStreak = 0
+    int _lOosN = 0
+    float _lOosNet = 0.0
+    float _lOosGP = 0.0
+    float _lOosGL = 0.0
+    int _lOosWins = 0
+    // Short-side closed-leg accumulators.
+    float _sNet = 0.0
+    float _sGP = 0.0
+    float _sGL = 0.0
+    int _sN = 0
+    int _sWins = 0
+    int _sCurStreak = 0
+    int _sMaxStreak = 0
+    int _sOosN = 0
+    float _sOosNet = 0.0
+    float _sOosGP = 0.0
+    float _sOosGL = 0.0
+    int _sOosWins = 0
+    int _nUsed = 0
+    if _total > 0
+        int _last = _total - 1
+        int _first = math.max(0, _last - max_report_trades + 1)
+        _nUsed := _last - _first + 1
+        // Pass 1: per-side totals so each side gets its own chronological chunks.
+        int _lTotal = 0
+        int _sTotal = 0
+        for i = _first to _last
+            if str.startswith(strategy.closedtrades.entry_id(i), "S")
+                _sTotal += 1
+            else
+                _lTotal += 1
+        // Pass 2: full stats.
+        for i = _first to _last
+            float _p = strategy.closedtrades.profit(i)
+            int _exitT = strategy.closedtrades.exit_time(i)
+            int _seq = i - _first
+            int _seg = math.min(_segs - 1, int(math.floor(float(_seq) * _segs / math.max(_nUsed, 1))))
+            bool _isOos = _exitT >= oos_start
+            _net += _p
+            if str.startswith(strategy.closedtrades.entry_id(i), "S")
+                int _sSeg = math.min(_segs - 1, int(math.floor(float(_sN) * _segs / math.max(_sTotal, 1))))
+                _sN += 1
+                _sNet += _p
+                array.set(_sSegN, _sSeg, array.get(_sSegN, _sSeg) + 1)
+                array.set(_sSegNet, _sSeg, array.get(_sSegNet, _sSeg) + _p)
+                if _p > 0
+                    _sGP += _p
+                    _sWins += 1
+                    _sCurStreak := 0
+                else if _p < 0
+                    _sGL += math.abs(_p)
+                    _sCurStreak += 1
+                    _sMaxStreak := math.max(_sMaxStreak, _sCurStreak)
+                if _isOos
+                    _sOosN += 1
+                    _sOosNet += _p
+                    if _p > 0
+                        _sOosGP += _p
+                        _sOosWins += 1
+                    else if _p < 0
+                        _sOosGL += math.abs(_p)
+            else
+                int _lSeg = math.min(_segs - 1, int(math.floor(float(_lN) * _segs / math.max(_lTotal, 1))))
+                _lN += 1
+                _lNet += _p
+                array.set(_lSegN, _lSeg, array.get(_lSegN, _lSeg) + 1)
+                array.set(_lSegNet, _lSeg, array.get(_lSegNet, _lSeg) + _p)
+                if _p > 0
+                    _lGP += _p
+                    _lWins += 1
+                    _lCurStreak := 0
+                else if _p < 0
+                    _lGL += math.abs(_p)
+                    _lCurStreak += 1
+                    _lMaxStreak := math.max(_lMaxStreak, _lCurStreak)
+                if _isOos
+                    _lOosN += 1
+                    _lOosNet += _p
+                    if _p > 0
+                        _lOosGP += _p
+                        _lOosWins += 1
+                    else if _p < 0
+                        _lOosGL += math.abs(_p)
+            if _p > 0
+                _gp += _p
+                _wins += 1
+                _curLossStreak := 0
+                if _p > _best1
+                    _best3 := _best2
+                    _best2 := _best1
+                    _best1 := _p
+                else if _p > _best2
+                    _best3 := _best2
+                    _best2 := _p
+                else if _p > _best3
+                    _best3 := _p
+            else if _p < 0
+                _gl += math.abs(_p)
+                _losses += 1
+                _curLossStreak += 1
+                _maxLossStreak := math.max(_maxLossStreak, _curLossStreak)
+            array.set(_segN, _seg, array.get(_segN, _seg) + 1)
+            array.set(_segNet, _seg, array.get(_segNet, _seg) + _p)
+            if _p > 0
+                array.set(_segGP, _seg, array.get(_segGP, _seg) + _p)
+            else
+                array.set(_segGL, _seg, array.get(_segGL, _seg) + math.abs(_p))
+            if _isOos
+                _oosN += 1
+                _oosNet += _p
+                if _p > 0
+                    _oosGP += _p
+                    _oosWins += 1
+                else
+                    _oosGL += math.abs(_p)
+    // ---- Derived stats ------------------------------------------------------
+    _pf = f_pf_num(_gp, _gl)
+    _wr = _nUsed > 0 ? _wins * 100.0 / _nUsed : float(na)
+    _oosPF = f_pf_num(_oosGP, _oosGL)
+    _oosWR = _oosN > 0 ? _oosWins * 100.0 / _oosN : float(na)
+    _lPF = f_pf_num(_lGP, _lGL)
+    _lWR = _lN > 0 ? _lWins * 100.0 / _lN : float(na)
+    _sPF = f_pf_num(_sGP, _sGL)
+    _sWR = _sN > 0 ? _sWins * 100.0 / _sN : float(na)
+    _lOosPF = f_pf_num(_lOosGP, _lOosGL)
+    _lOosWR = _lOosN > 0 ? _lOosWins * 100.0 / _lOosN : float(na)
+    _sOosPF = f_pf_num(_sOosGP, _sOosGL)
+    _sOosWR = _sOosN > 0 ? _sOosWins * 100.0 / _sOosN : float(na)
+    _netExBest1 = _net - _best1
+    _netExBest3 = _net - _best1 - _best2 - _best3
+    _bestDep = _net > 0 ? _best1 / _net * 100.0 : float(na)
+    int _negSegs = 0
+    for s = 0 to _segs - 1
+        if array.get(_segNet, s) < 0
+            _negSegs += 1
+    [_lPat, _lBadChunks, _lUsedChunks] = f_wf_pattern(_lSegNet, _lSegN)
+    [_sPat, _sBadChunks, _sUsedChunks] = f_wf_pattern(_sSegNet, _sSegN)
+    // ---- Virtual sleeve state (reads existing blended variables) ------------
+    float long_start_cap = strategy.initial_capital * long_capital_alloc_pct / 100.0
+    float short_start_cap = strategy.initial_capital * (100.0 - long_capital_alloc_pct) / 100.0
+    float long_virtual_return_pct = long_start_cap > 0 ? (long_virtual_equity - long_start_cap) / long_start_cap * 100.0 : float(na)
+    float short_virtual_return_pct = short_start_cap > 0 ? (short_virtual_equity - short_start_cap) / short_start_cap * 100.0 : float(na)
+    float _lNetPctCap = long_start_cap > 0 ? _lNet / long_start_cap * 100.0 : float(na)
+// --- continued in next block ---
+    float _sNetPctCap = short_start_cap > 0 ? _sNet / short_start_cap * 100.0 : float(na)
+    bool _lHalted = long_risk_halt_eff
+    bool _sHalted = short_risk_halt_eff
+    bool _lCooling = not long_cooldown_ok_eff
+    bool _sCooling = not short_cooldown_ok_eff
+    // ---- Review flags --------------------------------------------------------
+    _warnTrades = _nUsed < min_validation_trades
+    _warnOos = _oosN == 0 or (not na(_oosPF) and _oosPF < min_oos_pf_warn)
+    _warnDep = not na(_bestDep) and _bestDep > max_best_trade_dep_pct
+    _warnSeg = _negSegs > max_negative_segments
+    bool _shortSideActive = allow_shorts or _sN > 0
+    _warnLn = _lN < min_validation_trades
+    _warnSn = _shortSideActive and _sN < min_validation_trades
+    _warnLOos = _lOosN == 0 or (not na(_lOosPF) and _lOosPF < min_oos_pf_warn)
+    _warnSOos = _shortSideActive and (_sOosN == 0 or (not na(_sOosPF) and _sOosPF < min_oos_pf_warn))
+    _warnLSeg = _lBadChunks > max_negative_segments
+    _warnSSeg = _shortSideActive and _sBadChunks > max_negative_segments
+    float _ddWarnLevel = 0.75 * max_equity_dd_for_entries
+    _warnLDD = long_equity_dd_pct >= _ddWarnLevel
+    _warnSDD = _shortSideActive and short_equity_dd_pct >= _ddWarnLevel
+    _classicWarn = _warnTrades or _warnOos or _warnDep or _warnSeg
+    _blendWarn = _classicWarn or _warnLn or _warnSn or _warnLOos or _warnSOos or _warnLSeg or _warnSSeg or _warnLDD or _warnSDD or _lHalted or _sHalted
+    _robustWarn = val_blended ? _blendWarn : _classicWarn
+    _robustTxt = _robustWarn ? "Review" : "Healthy"
+    _robustCol = _robustWarn ? c_bear : c_bull
+    if val_blended
+        // =====================================================================
+        // BLENDED VIEW — lean core (8 rows) + optional chunk detail
+        // =====================================================================
+        string _splitTag = use_blended_capital_split ? f_fmt(long_capital_alloc_pct, 0) + "/" + f_fmt(100.0 - long_capital_alloc_pct, 0) : "Split OFF"
+        f_tcell(valdash, 0, 0, "Blended Val · " + _splitTag, c_text, color.new(_robustCol, 45))
+        f_tcell(valdash, 1, 0, _robustTxt, c_text, color.new(_robustCol, 45))
+        f_tcell(valdash, 2, 0, "Legs: " + str.tostring(_nUsed), c_text, c_cell)
+        f_tcell(valdash, 3, 0, "PF: " + f_pf_txt(_pf), c_text, c_cell)
+        f_tcell(valdash, 4, 0, "WR: " + f_pct(_wr), c_text, c_cell)
+        if validation_mode == "Compact"
+            f_tcell(valdash, 0, 1, "Long", c_faint, c_cell2)
+            f_tcell(valdash, 1, 1, "Sleeve: " + f_pct(long_virtual_return_pct), long_virtual_return_pct >= 0 ? c_bull : c_bear, c_cell2)
+            f_tcell(valdash, 2, 1, "PF: " + f_pf_txt(_lPF), c_dim, c_cell2)
+            f_tcell(valdash, 3, 1, "WR: " + f_pct(_lWR), c_dim, c_cell2)
+            f_tcell(valdash, 4, 1, _lHalted ? "HALT" : _lCooling ? "Cooldown" : "Live", _lHalted ? c_bear : _lCooling ? c_ext : c_dim, c_cell2)
+            f_tcell(valdash, 0, 2, "Short", c_faint, c_panel)
+            f_tcell(valdash, 1, 2, "Sleeve: " + f_pct(short_virtual_return_pct), short_virtual_return_pct >= 0 ? c_bull : c_bear, c_panel)
+            f_tcell(valdash, 2, 2, "PF: " + f_pf_txt(_sPF), c_dim, c_panel)
+            f_tcell(valdash, 3, 2, "WR: " + f_pct(_sWR), c_dim, c_panel)
+            f_tcell(valdash, 4, 2, _sHalted ? "HALT" : _sCooling ? "Cooldown" : "Live", _sHalted ? c_bear : _sCooling ? c_ext : c_dim, c_panel)
+            f_tcell(valdash, 0, 3, "Checks", c_faint, c_cell2)
+            f_tcell(valdash, 1, 3, "Net: " + f_money(_net), _net >= 0 ? c_bull : c_bear, c_cell2)
+            f_tcell(valdash, 2, 3, _warnOos or _warnLOos or _warnSOos ? "OOS: Review" : "OOS: OK", _warnOos or _warnLOos or _warnSOos ? c_bear : c_faint, c_cell2)
+            f_tcell(valdash, 3, 3, _warnSeg or _warnLSeg or _warnSSeg ? "Stability: Review" : "Stability: OK", _warnSeg or _warnLSeg or _warnSSeg ? c_bear : c_faint, c_cell2)
+            f_tcell(valdash, 4, 3, use_blended_capital_split ? "Split: ON" : "Split: OFF", c_faint, c_cell2)
+        else
+            string _lStateTxt = _lHalted ? "HALT" : _lCooling ? "Cooldown" : "Live"
+            string _sStateTxt = _sHalted ? "HALT" : _sCooling ? "Cooldown" : "Live"
+            string _lWfTxt = _lN == 0 ? "WF n/a" : _lPat + " · " + str.tostring(_lBadChunks) + "/" + str.tostring(_lUsedChunks)
+            string _sWfTxt = _sN == 0 ? "WF n/a" : _sPat + " · " + str.tostring(_sBadChunks) + "/" + str.tostring(_sUsedChunks)
+            // ---- Row 1 · Actual Strategy Tester (combined closed legs)
+            f_tcell(valdash, 0, 1, "Tester", c_faint, c_cell)
+            f_tcell(valdash, 1, 1, "Net: " + f_money(_net), _net >= 0 ? c_bull : c_bear, c_cell)
+            f_tcell(valdash, 2, 1, "Streak: " + str.tostring(_maxLossStreak), _maxLossStreak >= 5 ? c_bear : c_dim, c_cell)
+            f_tcell(valdash, 3, 1, "OOS: n" + str.tostring(_oosN) + " · PF " + f_pf_txt(_oosPF), _warnOos ? c_bear : c_dim, c_cell)
+            f_tcell(valdash, 4, 1, "Bad Chunks: " + str.tostring(_negSegs) + "/" + str.tostring(_segs), _warnSeg ? c_bear : c_dim, c_cell)
+            // ---- Row 2 · Stress
+            f_tcell(valdash, 0, 2, "Stress", c_faint, c_panel)
+            f_tcell(valdash, 1, 2, "Ex Best 1: " + f_money(_netExBest1), _netExBest1 >= 0 ? c_bull : c_bear, c_panel)
+            f_tcell(valdash, 2, 2, "Ex Best 3: " + f_money(_netExBest3), _netExBest3 >= 0 ? c_bull : c_bear, c_panel)
+            f_tcell(valdash, 3, 2, "Best Dep: " + f_pct(_bestDep), _warnDep ? c_bear : c_dim, c_panel)
+            f_tcell(valdash, 4, 2, "OOS WR: " + f_pct(_oosWR), c_dim, c_panel)
+            // ---- Rows 3-4 · Virtual sleeve state
+            f_tcell(valdash, 0, 3, "Long Sleeve", c_faint, c_cell2)
+            f_tcell(valdash, 1, 3, "Ret: " + f_pct(long_virtual_return_pct), long_virtual_return_pct >= 0 ? c_bull : c_bear, c_cell2)
+            f_tcell(valdash, 2, 3, "DD: " + f_pct(long_equity_dd_pct), _warnLDD ? c_bear : c_dim, c_cell2)
+            f_tcell(valdash, 3, 3, "Day DD: " + f_pct(long_daily_dd_pct), c_dim, c_cell2)
+            f_tcell(valdash, 4, 3, _lStateTxt, _lHalted ? c_bear : _lCooling ? c_ext : c_dim, c_cell2)
+            f_tcell(valdash, 0, 4, "Short Sleeve", c_faint, c_panel)
+            f_tcell(valdash, 1, 4, "Ret: " + f_pct(short_virtual_return_pct), short_virtual_return_pct >= 0 ? c_bull : c_bear, c_panel)
+            f_tcell(valdash, 2, 4, "DD: " + f_pct(short_equity_dd_pct), _warnSDD ? c_bear : c_dim, c_panel)
+            f_tcell(valdash, 3, 4, "Day DD: " + f_pct(short_daily_dd_pct), c_dim, c_panel)
+            f_tcell(valdash, 4, 4, _sStateTxt, _sHalted ? c_bear : _sCooling ? c_ext : c_dim, c_panel)
+            // ---- Rows 5-6 · Direction legs (sleeve-normalized) + walk-forward pattern
+            f_tcell(valdash, 0, 5, "Long · n" + str.tostring(_lN) + (_warnLn ? " !" : ""), _warnLn ? c_bear : c_faint, c_cell2)
+            f_tcell(valdash, 1, 5, "vs Cap: " + f_pct(_lNetPctCap), _lNet >= 0 ? c_bull : c_bear, c_cell2)
+            f_tcell(valdash, 2, 5, "PF: " + f_pf_txt(_lPF), c_dim, c_cell2)
+            f_tcell(valdash, 3, 5, "OOS PF: " + f_pf_txt(_lOosPF), _warnLOos ? c_bear : c_dim, c_cell2)
+            f_tcell(valdash, 4, 5, _lWfTxt, _warnLSeg ? c_bear : c_dim, c_cell2)
+            f_tcell(valdash, 0, 6, "Short · n" + str.tostring(_sN) + (_warnSn ? " !" : ""), _warnSn ? c_bear : c_faint, c_panel)
+            f_tcell(valdash, 1, 6, "vs Cap: " + f_pct(_sNetPctCap), _sNet >= 0 ? c_bull : c_bear, c_panel)
+            f_tcell(valdash, 2, 6, "PF: " + f_pf_txt(_sPF), c_dim, c_panel)
+            f_tcell(valdash, 3, 6, "OOS PF: " + f_pf_txt(_sOosPF), _warnSOos ? c_bear : c_dim, c_panel)
+            f_tcell(valdash, 4, 6, _sWfTxt, _warnSSeg ? c_bear : c_dim, c_panel)
+            // ---- Row 7 · Review flags
+            string _lowTxt = (_warnTrades ? "C " : "") + (_warnLn ? "L " : "") + (_warnSn ? "S" : "")
+            string _oosTxt = (_warnOos ? "C " : "") + (_warnLOos ? "L " : "") + (_warnSOos ? "S" : "")
+            string _stabTxt = (_warnSeg ? "C " : "") + (_warnLSeg ? "L " : "") + (_warnSSeg ? "S" : "")
+            string _slvTxt =
+                 _lHalted or _sHalted ? "Halted: " + (_lHalted ? "L " : "") + (_sHalted ? "S" : "") :
+                 _warnLDD or _warnSDD ? "DD High: " + (_warnLDD ? "L " : "") + (_warnSDD ? "S" : "") :
+                 _lCooling or _sCooling ? "Cooling: " + (_lCooling ? "L " : "") + (_sCooling ? "S" : "") :
+                 "Sleeves OK"
+            color _slvCol = _lHalted or _sHalted or _warnLDD or _warnSDD ? c_bear : _lCooling or _sCooling ? c_ext : c_faint
+            f_tcell(valdash, 0, 7, "Review If", c_faint, c_cell2)
+            f_tcell(valdash, 1, 7, _lowTxt == "" ? "Sample OK" : "Low n: " + _lowTxt, _lowTxt == "" ? c_faint : c_bear, c_cell2)
+            f_tcell(valdash, 2, 7, _oosTxt == "" ? "OOS OK" : "OOS Weak: " + _oosTxt, _oosTxt == "" ? c_faint : c_bear, c_cell2)
+            f_tcell(valdash, 3, 7, _stabTxt == "" ? "Stable" : "Unstable: " + _stabTxt, _stabTxt == "" ? c_faint : c_bear, c_cell2)
+            f_tcell(valdash, 4, 7, _slvTxt, _slvCol, c_cell2)
+            // ---- Optional chunk detail table
+            if validation_show_chunks
+                f_tcell(valdash, 0, 8, "Chunk", c_faint, c_cell)
+                f_tcell(valdash, 1, 8, "Legs", c_faint, c_cell)
+                f_tcell(valdash, 2, 8, "Net", c_faint, c_cell)
+                f_tcell(valdash, 3, 8, "PF", c_faint, c_cell)
+                f_tcell(valdash, 4, 8, "Status", c_faint, c_cell)
+                for s = 0 to _segs - 1
+                    int _row = 9 + s
+                    int _cn = array.get(_segN, s)
+                    float _cnet = array.get(_segNet, s)
+                    float _cgp = array.get(_segGP, s)
+                    float _cgl = array.get(_segGL, s)
+                    float _cpf = f_pf_num(_cgp, _cgl)
+                    bool _cok = _cn > 0 and _cnet >= 0
+                    color _cbg = s % 2 == 0 ? c_panel : c_cell2
+                    f_tcell(valdash, 0, _row, "#" + str.tostring(s + 1), c_dim, _cbg)
+                    f_tcell(valdash, 1, _row, str.tostring(_cn), _cn == 0 ? c_bear : c_dim, _cbg)
+                    f_tcell(valdash, 2, _row, f_money(_cnet), _cnet >= 0 ? c_bull : c_bear, _cbg)
+                    f_tcell(valdash, 3, _row, f_pf_txt(_cpf), c_dim, _cbg)
+                    f_tcell(valdash, 4, _row, _cok ? "OK" : "Weak", _cok ? c_bull : c_bear, _cbg)
+    else
+        // =====================================================================
+        // CLASSIC VIEW — unchanged core, chunk table now optional
+        // =====================================================================
+        f_tcell(valdash, 0, 0, "Validation", c_text, color.new(_robustCol, 45))
+        f_tcell(valdash, 1, 0, _robustTxt, c_text, color.new(_robustCol, 45))
+        f_tcell(valdash, 2, 0, "Legs: " + str.tostring(_nUsed), c_text, c_cell)
+        f_tcell(valdash, 3, 0, "PF: " + f_pf_txt(_pf), c_text, c_cell)
+        f_tcell(valdash, 4, 0, "WR: " + f_pct(_wr), c_text, c_cell)
+        f_tcell(valdash, 0, 1, "All Closed Legs", c_faint, c_cell2)
+        f_tcell(valdash, 1, 1, "Net: " + f_money(_net), _net >= 0 ? c_bull : c_bear, c_cell2)
+        f_tcell(valdash, 2, 1, "PF: " + f_pf_txt(_pf), c_dim, c_cell2)
+        f_tcell(valdash, 3, 1, "WR: " + f_pct(_wr), c_dim, c_cell2)
+        f_tcell(valdash, 4, 1, "Loss Streak: " + str.tostring(_maxLossStreak), _maxLossStreak >= 5 ? c_bear : c_dim, c_cell2)
+        f_tcell(valdash, 0, 2, "Longs", c_faint, c_panel)
+        f_tcell(valdash, 1, 2, "Legs: " + str.tostring(_lN), c_dim, c_panel)
+        f_tcell(valdash, 2, 2, "Net: " + f_money(_lNet), _lNet >= 0 ? c_bull : c_bear, c_panel)
+        f_tcell(valdash, 3, 2, "PF: " + f_pf_txt(_lPF), c_dim, c_panel)
+        f_tcell(valdash, 4, 2, "WR: " + f_pct(_lWR), c_dim, c_panel)
+        f_tcell(valdash, 0, 3, "Shorts", c_faint, c_cell2)
+        f_tcell(valdash, 1, 3, "Legs: " + str.tostring(_sN) + (_sN < min_validation_trades ? " !" : ""), _sN < min_validation_trades ? c_bear : c_dim, c_cell2)
+        f_tcell(valdash, 2, 3, "Net: " + f_money(_sNet), _sNet >= 0 ? c_bull : c_bear, c_cell2)
+        f_tcell(valdash, 3, 3, "PF: " + f_pf_txt(_sPF), c_dim, c_cell2)
+        f_tcell(valdash, 4, 3, "WR: " + f_pct(_sWR), c_dim, c_cell2)
+        f_tcell(valdash, 0, 4, "Out-of-Sample", c_faint, c_panel)
+        f_tcell(valdash, 1, 4, "Legs: " + str.tostring(_oosN), _oosN == 0 ? c_bear : c_dim, c_panel)
+        f_tcell(valdash, 2, 4, "Net: " + f_money(_oosNet), _oosNet >= 0 ? c_bull : c_bear, c_panel)
+        f_tcell(valdash, 3, 4, "PF: " + f_pf_txt(_oosPF), _warnOos ? c_bear : c_dim, c_panel)
+        f_tcell(valdash, 4, 4, "WR: " + f_pct(_oosWR), c_dim, c_panel)
+        f_tcell(valdash, 0, 5, "Stress Test", c_faint, c_cell2)
+        f_tcell(valdash, 1, 5, "Ex Best 1: " + f_money(_netExBest1), _netExBest1 >= 0 ? c_bull : c_bear, c_cell2)
+        f_tcell(valdash, 2, 5, "Ex Best 3: " + f_money(_netExBest3), _netExBest3 >= 0 ? c_bull : c_bear, c_cell2)
+        f_tcell(valdash, 3, 5, "Best Dep: " + f_pct(_bestDep), _warnDep ? c_bear : c_dim, c_cell2)
+        f_tcell(valdash, 4, 5, "Bad Chunks: " + str.tostring(_negSegs), _warnSeg ? c_bear : c_dim, c_cell2)
+        if validation_mode == "Full"
+            if validation_show_chunks
+                f_tcell(valdash, 0, 6, "Chunk", c_faint, c_cell)
+                f_tcell(valdash, 1, 6, "Legs", c_faint, c_cell)
+                f_tcell(valdash, 2, 6, "Net", c_faint, c_cell)
+                f_tcell(valdash, 3, 6, "PF", c_faint, c_cell)
+                f_tcell(valdash, 4, 6, "Status", c_faint, c_cell)
+                for s = 0 to _segs - 1
+                    int _row = 7 + s
+                    int _cn = array.get(_segN, s)
+                    float _cnet = array.get(_segNet, s)
+                    float _cgp = array.get(_segGP, s)
+                    float _cgl = array.get(_segGL, s)
+                    float _cpf = f_pf_num(_cgp, _cgl)
+                    bool _cok = _cn > 0 and _cnet >= 0
+                    color _cbg = s % 2 == 0 ? c_panel : c_cell2
+                    f_tcell(valdash, 0, _row, "#" + str.tostring(s + 1), c_dim, _cbg)
+                    f_tcell(valdash, 1, _row, str.tostring(_cn), _cn == 0 ? c_bear : c_dim, _cbg)
+                    f_tcell(valdash, 2, _row, f_money(_cnet), _cnet >= 0 ? c_bull : c_bear, _cbg)
+                    f_tcell(valdash, 3, _row, f_pf_txt(_cpf), c_dim, _cbg)
+                    f_tcell(valdash, 4, _row, _cok ? "OK" : "Weak", _cok ? c_bull : c_bear, _cbg)
+            int _noteRow = validation_show_chunks ? 7 + _segs : 6
+            f_tcell(valdash, 0, _noteRow, "Review If", c_faint, c_cell2)
+            f_tcell(valdash, 1, _noteRow, _warnTrades ? "Low n" : "Sample OK", _warnTrades ? c_bear : c_faint, c_cell2)
+            f_tcell(valdash, 2, _noteRow, _warnOos ? "OOS Weak" : "OOS OK", _warnOos ? c_bear : c_faint, c_cell2)
+            f_tcell(valdash, 3, _noteRow, _warnDep ? "Top Heavy" : "Balanced", _warnDep ? c_bear : c_faint, c_cell2)
+            f_tcell(valdash, 4, _noteRow, _warnSeg ? "Unstable" : "Stable", _warnSeg ? c_bear : c_faint, c_cell2)
+// =============================================================================
+// Alerts
+// =============================================================================
+alertcondition(can_long, "Long setup confirmed", "Five-Tool Confluence: long setup confirmed")
+alertcondition(can_short, "Short setup confirmed", "Five-Tool Confluence: short setup confirmed")
+alertcondition(regime_flip, "Regime flip confirmed", "Five-Tool Confluence: regime flip confirmed")
+if can_long
+    float _al_stop_l = close - (use_long_side_v2 and use_long_structural_stop and not na(long_struct_dist) ? long_struct_dist : atr_val * atr_mult)
+    string _al_setup_l = use_long_side_v2 ? (long_leader_pullback_v2 ? "Leader Pullback" : long_bull_retest_v2 ? "Bull-Flip Retest" : long_avwap_reclaim_v2 ? "AVWAP Reclaim" : "Base Breakout") : "Legacy trigger"
+    if use_json_alerts
+        alert('{"ev":"entry","side":"long","sym":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","setup":"' + _al_setup_l + '","score":' + f_fmt(active_long_score, 0) + ',"stop":' + (na(_al_stop_l) ? "null" : f_fmt(_al_stop_l, 4)) + ',"regime":' + str.tostring(regime) + ',"risk_mult":' + f_fmt(risk_scale, 2) + ',"p_stay":' + (na(mk_gate_p_stay) ? "null" : f_fmt(mk_gate_p_stay, 3)) + ',"age_pctile":' + (na(mk_age_pctile) ? "null" : f_fmt(mk_age_pctile, 0)) + ',"lplus":"' + (long_plus_enabled ? long_plus_blocker : "off") + '","t":' + str.tostring(time) + '}',
+             alert.freq_once_per_bar_close)
+    else
+        alert("AIO v3.6: LONG setup · " + syminfo.ticker + " · " + _al_setup_l +
+             " · score " + f_fmt(active_long_score, 0) +
+             " · stop~" + f_price(_al_stop_l),
+             alert.freq_once_per_bar_close)
+if can_short
+    float _al_stop_s = close + (use_short_structural_stop and not na(short_struct_dist) ? short_struct_dist : atr_val * atr_mult)
+    if use_json_alerts
+        alert('{"ev":"entry","side":"short","sym":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","setup":"' + short_plus_setup_name + '","score":' + f_fmt(active_short_score, 0) + ',"stop":' + (na(_al_stop_s) ? "null" : f_fmt(_al_stop_s, 4)) + ',"regime":' + str.tostring(regime) + ',"risk_mult":' + f_fmt(short_plus_risk_mult, 2) + ',"p_stay":' + (na(mk_gate_p_stay) ? "null" : f_fmt(mk_gate_p_stay, 3)) + ',"age_pctile":' + (na(mk_age_pctile) ? "null" : f_fmt(mk_age_pctile, 0)) + ',"splus":"' + short_plus_blocker + '","t":' + str.tostring(time) + '}',
+             alert.freq_once_per_bar_close)
+    else
+        alert("AIO v3.6: SHORT setup · " + syminfo.ticker + " · " + short_plus_setup_name +
+             " · score " + f_fmt(active_short_score, 0) +
+             " · SHORT+ " + short_plus_state +
+             " · risk x" + f_fmt(short_plus_risk_mult, 2) +
+             " · stop~" + f_price(_al_stop_s),
+             alert.freq_once_per_bar_close)
+if barstate.isconfirmed and regime_flip
+    alert("AIO v3.6: Regime flip → " + (regime == 1 ? "BULL" : regime == -1 ? "BEAR" : "NEUTRAL") + " · " + syminfo.ticker,
+         alert.freq_once_per_bar_close)
+// =============================================================================
+// Halt Visibility Banner
+// =============================================================================
+var table haltdash = table.new(position.top_center, 1, 1,
+     bgcolor = color.new(c_bear, 100),
+     frame_color = color.new(c_bear, 100),
+     frame_width = 1)
+var int halt_age_bars = 0
+if barstate.isconfirmed
+    halt_age_bars := risk_halt ? halt_age_bars + 1 : 0
+if barstate.islast
+    if risk_halt
+        table.cell(haltdash, 0, 0,
+             "⛔ ENTRIES PAUSED · " + (equity_dd_halt ? "Equity DD " + f_pct(equity_dd_pct) : "Daily Loss " + f_pct(daily_dd_pct)) + " · " + str.tostring(halt_age_bars) + " bars",
+             text_color = c_text, bgcolor = color.new(c_bear, 15), text_size = size.small)
+    else
+        table.clear(haltdash, 0, 0, 0, 0)
+// =============================================================================
+// End of file
+// =============================================================================

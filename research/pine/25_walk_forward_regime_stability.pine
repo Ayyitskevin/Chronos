@@ -1,0 +1,283 @@
+//@version=6
+// =============================================================================
+// Walk-Forward Regime Stability Analyzer v1.0 (5T Pine Suite · Desk Kit)
+//
+// WHAT THIS IS.
+// A stationarity check on the regime PROCESS itself. Every fixed-parameter
+// backtest implicitly assumes the regime process behaved the same way across
+// the whole test window. This study chunks the loaded history into equal
+// segments and measures whether regime BEHAVIOR was stable chunk to chunk:
+// flip frequency (flips per 100 bars), mean dwell, %time Bull/Bear, and
+// mean |z| of the observation. Wild chunk-to-chunk variation means the calm
+// chunks are subsidizing the backtest — the walk-forward doctrine the suite
+// applies to strategies, here applied to the regime engine's raw material.
+//
+// RESEARCH BASIS, stated plainly.
+// The backtest-realism thesis (framing inspired by the Quant Guild
+// channel): a single full-history statistic hides parameter fragility;
+// chunked / walk-forward views expose it. This is the cheapest honest
+// version of that idea — descriptive per-chunk statistics with a labeled
+// heuristic verdict, no optimization, no forecasting.
+//
+// HONESTY, stated plainly.
+//   1. The verdict (STABLE / MIXED / UNSTABLE) is a coefficient-of-
+//      variation cut on chunk flip rates. The cv thresholds are labeled
+//      heuristics, not statistical tests.
+//   2. Chunking uses the loaded history length — adding bars re-chunks;
+//      that is inherent to walk-forward views, not repaint of any decision
+//      variable. Nothing here gates or signals anything.
+//   3. Chunks with too few counted bars are excluded from the verdict and
+//      flagged on the HUD.
+//
+// Non-repaint: all accumulators advance on confirmed bars only; the chunk
+// assignment of an already-counted bar never changes within a loaded
+// session. Alerts fire on confirmed bars (realtime only, per TradingView).
+// Decision support only — a human places every trade. Risk controls
+// outrank all signals.
+//
+// v1.0 changelog (2026-07-17):
+//   Initial release. Equal-history chunking (2..8 segments, default 6)
+//   over the loaded chart; per-chunk flips, flips/100 bars, mean dwell,
+//   %Bull/%Bear, mean |z|; stability verdict from the cv of chunk flip
+//   rates (STABLE < 0.35 / MIXED / UNSTABLE > 0.75 — labeled heuristics,
+//   user-set); chunk mini-rows marked +/-/· against the median flip rate;
+//   regime source = external link (strict -1/0/+1 validation) with
+//   internal hard-threshold z fallback, HUD names the live source; chunk
+//   step plot + current-chunk flip-rate plot; Data-Window exports;
+//   verdict-change alert with optional JSON payloads (default OFF).
+//   Behavior-adjacent options ship at conservative defaults. Evidence
+//   label: needs user run.
+// =============================================================================
+indicator("Walk-Forward Regime Stability Analyzer v1.0", shorttitle = "WF Stability v1",
+     overlay = false)
+
+grp_mode = "0 · Mode"
+grp_chk  = "1 · Chunking"
+grp_link = "2 · Regime Source"
+grp_ver  = "3 · Verdict Thresholds"
+grp_dsp  = "4 · Display"
+
+variant_tag = input.string("v1.0-base", "Variant tag (freeze-the-config discipline)", group = grp_mode,
+     tooltip = "Label this exact settings set. Any settings change = new tag = new variant with its own validation cycle. The tag prints on the HUD and in alerts so screenshots self-document.")
+
+segments = input.int(6, "History chunks (segments)", minval = 2, maxval = 8, group = grp_chk,
+     tooltip = "The loaded history is split into this many equal chunks. More chunks = finer stability view, thinner per-chunk samples.")
+min_chunk_bars = input.int(20, "Min counted bars per usable chunk", minval = 5, maxval = 500, group = grp_chk,
+     tooltip = "Chunks with fewer counted (confirmed, regime-ready) bars are excluded from the verdict and flagged. Protects the cv from garbage flip rates.")
+
+use_regime_link = input.bool(false, "Use external regime link", group = grp_link)
+regime_src = input.source(close, "Regime link (wire to a REGIME_EXPORT)", group = grp_link,
+     tooltip = "Wire to any suite script's REGIME_EXPORT. Validated STRICTLY: only exact -1 / 0 / +1 values count. Anything else falls back to the internal classifier and the HUD flags LINK?.")
+z_lookback = input.int(20, "Internal fallback: z lookback (bars)", minval = 5, maxval = 250, group = grp_link,
+     tooltip = "The fallback classifier is the suite observation — volatility-normalized window return z-score — with hard thresholds and no hysteresis. A convenience stand-in, not a substitute for the flagship engine.")
+z_enter = input.float(0.85, "Internal fallback: z threshold", minval = 0.10, maxval = 3.00, step = 0.05, group = grp_link)
+
+cv_stable = input.float(0.35, "STABLE below cv", minval = 0.05, maxval = 1.00, step = 0.05, group = grp_ver)
+cv_unstable = input.float(0.75, "UNSTABLE above cv", minval = 0.20, maxval = 3.00, step = 0.05, group = grp_ver,
+     tooltip = "Coefficient of variation (stdev/mean) of flips-per-100-bars across usable chunks. Between the cuts reads MIXED. These cuts are labeled heuristics — move them and retag the variant.")
+
+hud_mode = input.string("Full", "HUD mode", options = ["Off", "Micro", "Full"], group = grp_dsp)
+hud_pos_in = input.string("top_right", "HUD position", options = ["top_left", "top_center", "top_right", "bottom_left", "bottom_center", "bottom_right"], group = grp_dsp)
+show_chunk_plot = input.bool(true, "Plot chunk index (step)", group = grp_dsp)
+show_fr_plot = input.bool(true, "Plot flips/100 bars (current chunk)", group = grp_dsp)
+use_json_alerts = input.bool(false, "JSON alert payloads (webhook)", group = grp_dsp,
+     tooltip = "OFF: human-readable alert text. ON: machine-readable JSON for webhook automation. Display-layer only.")
+
+// =============================================================================
+// Palette & helpers (suite standard)
+// =============================================================================
+c_bull  = color.rgb(89, 159, 125)
+c_bear  = color.rgb(190, 96, 111)
+c_neut  = color.rgb(112, 126, 148)
+c_gold  = color.rgb(214, 162, 82)
+c_panel = color.new(#0E1316, 5)
+c_cell  = color.new(#151D22, 7)
+c_cell2 = color.new(#10171B, 9)
+c_frame = color.new(#5BD6B0, 88)
+c_text  = color.white
+c_dim   = color.new(color.white, 45)
+c_faint = color.new(color.white, 68)
+
+f_pos(_s) =>
+    switch _s
+        "top_left"      => position.top_left
+        "top_center"    => position.top_center
+        "top_right"     => position.top_right
+        "bottom_left"   => position.bottom_left
+        "bottom_center" => position.bottom_center
+        "bottom_right"  => position.bottom_right
+        => position.top_right
+f_fmt(_x, _d) =>
+    _m = math.pow(10.0, _d)
+    na(_x) ? "n/a" : str.tostring(math.round(_x * _m) / _m)
+f_tcell(_tbl, _c, _r, _txt, _col, _bg) =>
+    table.cell(_tbl, _c, _r, _txt, text_color = _col, bgcolor = _bg, text_size = size.tiny, text_halign = text.align_center)
+// Wilson score lower bound (z = 1.96), suite-standard honesty for counted rates.
+f_wilson_lo(_p, _n) =>
+    _n <= 0 or na(_p) ? float(na) :
+         (_p + 1.96 * 1.96 / (2 * _n) - 1.96 * math.sqrt((_p * (1 - _p) + 1.96 * 1.96 / (4 * _n)) / _n)) / (1 + 1.96 * 1.96 / _n)
+f_rname(_s) =>
+    _s == 1 ? "Bull" : _s == -1 ? "Bear" : "Neutral"
+f_vname(_v) =>
+    _v == 1 ? "STABLE" : _v == 0 ? "MIXED" : _v == -1 ? "UNSTABLE" : "n/a"
+f_vcol(_v) =>
+    _v == 1 ? c_bull : _v == 0 ? c_gold : _v == -1 ? c_bear : c_neut
+
+// =============================================================================
+// Regime source: external link (strict -1/0/+1) with internal z fallback.
+// The HUD names whichever source is live; an enabled-but-invalid link reads
+// LINK? and the internal classifier takes over rather than polluting counts.
+// =============================================================================
+one_bar_ret = not na(close[1]) and close > 0 and close[1] > 0 ? math.log(close / close[1]) : float(na)
+win_ret = not na(close[z_lookback]) and close > 0 and close[z_lookback] > 0 ? math.log(close / close[z_lookback]) : float(na)
+win_vol = ta.stdev(one_bar_ret, z_lookback) * math.sqrt(z_lookback)
+obs_z = not na(win_ret) and not na(win_vol) and win_vol > 0 ? win_ret / win_vol : float(na)
+int z_state = na(obs_z) ? 0 : obs_z > z_enter ? 1 : obs_z < -z_enter ? -1 : 0
+_rvl = regime_src
+link_valid = use_regime_link and not na(_rvl) and (_rvl == -1.0 or _rvl == 0.0 or _rvl == 1.0)
+int regime_now = link_valid ? int(_rvl) : z_state
+regime_ready = link_valid or not na(obs_z)
+regime_src_txt = link_valid ? "external link" : use_regime_link ? "LINK? → internal z" : "internal z"
+
+// =============================================================================
+// Chunk assignment. Pine cannot know total bars in advance, so each bar maps
+// itself: chunk = min(segments-1, floor(bar_index * segments / last_bar_index)).
+// Chunking uses the loaded history length (last_bar_index is known at runtime
+// and constant per load) — adding bars re-chunks; that is inherent to
+// walk-forward views, not repaint of any decision variable.
+// =============================================================================
+int ck_now = math.min(segments - 1, int(1.0 * bar_index * segments / math.max(last_bar_index, 1)))
+
+// Per-chunk accumulators (fixed size 8; only 0..segments-1 are used)
+var array<int> ck_flips = array.new_int(8, 0)
+var array<int> ck_bars = array.new_int(8, 0)
+var array<int> ck_bull = array.new_int(8, 0)
+var array<int> ck_bear = array.new_int(8, 0)
+var array<float> ck_dwell_sum = array.new_float(8, 0.0)
+var array<int> ck_dwell_n = array.new_int(8, 0)
+var array<float> ck_absz_sum = array.new_float(8, 0.0)
+var array<int> ck_absz_n = array.new_int(8, 0)
+var int prev_reg_s = -9
+var int cur_dwell = 0
+var int flips_total = 0
+var float all_dwell_sum = 0.0
+var int all_dwell_n = 0
+
+var float cv_val = na
+var int verdict_i = -9
+var int used_chunks = 0
+bool verdict_change = false
+if barstate.isconfirmed and regime_ready
+    array.set(ck_bars, ck_now, array.get(ck_bars, ck_now) + 1)
+    if regime_now == 1
+        array.set(ck_bull, ck_now, array.get(ck_bull, ck_now) + 1)
+    if regime_now == -1
+        array.set(ck_bear, ck_now, array.get(ck_bear, ck_now) + 1)
+    if not na(obs_z)
+        array.set(ck_absz_sum, ck_now, array.get(ck_absz_sum, ck_now) + math.abs(obs_z))
+        array.set(ck_absz_n, ck_now, array.get(ck_absz_n, ck_now) + 1)
+    if prev_reg_s == -9
+        prev_reg_s := regime_now
+        cur_dwell := 1
+    else if regime_now != prev_reg_s
+        array.set(ck_flips, ck_now, array.get(ck_flips, ck_now) + 1)
+        array.set(ck_dwell_sum, ck_now, array.get(ck_dwell_sum, ck_now) + cur_dwell)
+        array.set(ck_dwell_n, ck_now, array.get(ck_dwell_n, ck_now) + 1)
+        flips_total += 1
+        all_dwell_sum += cur_dwell
+        all_dwell_n += 1
+        cur_dwell := 1
+        prev_reg_s := regime_now
+    else
+        cur_dwell += 1
+    // Verdict: cv of flips/100-bars across usable chunks (labeled heuristic)
+    float _s = 0.0
+    float _sq = 0.0
+    int _u = 0
+    for _i = 0 to segments - 1
+        int _b = array.get(ck_bars, _i)
+        if _b >= min_chunk_bars
+            float _fr = array.get(ck_flips, _i) * 100.0 / _b
+            _s += _fr
+            _sq += _fr * _fr
+            _u += 1
+    used_chunks := _u
+    if _u >= 2
+        float _mean = _s / _u
+        float _var = math.max(_sq / _u - _mean * _mean, 0.0)
+        float _cv = _mean > 0 ? math.sqrt(_var) / _mean : 0.0
+        int _v = _cv < cv_stable ? 1 : _cv > cv_unstable ? -1 : 0
+        verdict_change := verdict_i != _v
+        cv_val := _cv
+        verdict_i := _v
+
+float cur_fr = array.get(ck_bars, ck_now) > 0 ? array.get(ck_flips, ck_now) * 100.0 / array.get(ck_bars, ck_now) : float(na)
+float mean_dwell_all = all_dwell_n > 0 ? all_dwell_sum / all_dwell_n : float(na)
+
+// =============================================================================
+// Plots & exports
+// =============================================================================
+plot(show_chunk_plot ? float(ck_now + 1) : na, "Chunk index (1-based)", color = color.new(c_neut, 25), style = plot.style_stepline)
+plot(show_fr_plot ? cur_fr : na, "Flips/100 bars (current chunk)", color = c_gold, linewidth = 2)
+
+plot(verdict_i == -9 ? na : float(verdict_i), "WFS_VERDICT_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(cv_val, "WFS_CV_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(float(ck_now + 1), "WFS_CUR_CHUNK_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(cur_fr, "WFS_FLIP_RATE_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+
+// =============================================================================
+// HUD
+// =============================================================================
+var table hud = table.new(f_pos(hud_pos_in), 2, 12, bgcolor = c_panel, frame_color = c_frame,
+     frame_width = 1, border_color = color.new(color.white, 92), border_width = 1)
+if barstate.islast and hud_mode != "Off"
+    _state_txt = not regime_ready ? "WARMING · regime source" :
+         used_chunks < 2 ? "COLLECTING · " + str.tostring(used_chunks) + " usable chunks" :
+         f_vname(verdict_i) + " · cv " + f_fmt(cv_val, 2) + " · " + str.tostring(used_chunks) + " chunks"
+    _state_bg = not regime_ready or used_chunks < 2 ? c_cell : color.new(f_vcol(verdict_i), 45)
+    f_tcell(hud, 0, 0, "WF Stability " + variant_tag, c_text, c_frame)
+    f_tcell(hud, 1, 0, _state_txt, c_text, _state_bg)
+    if hud_mode == "Full"
+        // median flip rate over usable chunks → +/-/· marks per chunk
+        _frs = array.new_float()
+        for _i = 0 to segments - 1
+            int _b = array.get(ck_bars, _i)
+            if _b >= min_chunk_bars
+                array.push(_frs, array.get(ck_flips, _i) * 100.0 / _b)
+        float _med = array.size(_frs) > 0 ? array.median(_frs) : float(na)
+        for _i = 0 to segments - 1
+            int _b = array.get(ck_bars, _i)
+            int _row = 1 + _i
+            bool _now = _i == ck_now
+            if _b >= min_chunk_bars
+                float _fr = array.get(ck_flips, _i) * 100.0 / _b
+                string _mark = na(_med) ? "·" : _fr > _med * 1.2 ? "+" : _fr < _med * 0.8 ? "-" : "·"
+                float _dw = array.get(ck_dwell_n, _i) > 0 ? array.get(ck_dwell_sum, _i) / array.get(ck_dwell_n, _i) : float(na)
+                float _bp = array.get(ck_bull, _i) * 100.0 / _b
+                float _brp = array.get(ck_bear, _i) * 100.0 / _b
+                float _az = array.get(ck_absz_n, _i) > 0 ? array.get(ck_absz_sum, _i) / array.get(ck_absz_n, _i) : float(na)
+                f_tcell(hud, 0, _row, "C" + str.tostring(_i + 1) + " " + _mark + (_now ? " (now)" : ""), _mark == "+" ? c_gold : c_dim, c_panel)
+                f_tcell(hud, 1, _row, "fl " + f_fmt(_fr, 1) + "/100 · dw " + f_fmt(_dw, 1) + " · B" + f_fmt(_bp, 0) + "/Br" + f_fmt(_brp, 0) + "% · |z| " + f_fmt(_az, 2) + " · n" + str.tostring(_b), c_dim, _now ? c_cell2 : c_cell)
+            else
+                f_tcell(hud, 0, _row, "C" + str.tostring(_i + 1) + " !" + (_now ? " (now)" : ""), c_faint, c_panel)
+                f_tcell(hud, 1, _row, "n" + str.tostring(_b) + " < " + str.tostring(min_chunk_bars) + " — excluded from verdict", c_faint, _now ? c_cell2 : c_cell)
+        f_tcell(hud, 0, 1 + segments, "Overall", c_dim, c_panel)
+        f_tcell(hud, 1, 1 + segments, "flips " + str.tostring(flips_total) + " · mean dwell ~" + f_fmt(mean_dwell_all, 1) + " bars (n" + str.tostring(all_dwell_n) + ")", c_dim, c_cell)
+        f_tcell(hud, 0, 2 + segments, "Regime source", c_dim, c_panel)
+        f_tcell(hud, 1, 2 + segments, regime_src_txt + " · now " + f_rname(regime_now), use_regime_link and not link_valid ? c_bear : c_dim, c_cell)
+        f_tcell(hud, 0, 3 + segments, "*stability of the regime PROCESS", c_faint, c_panel)
+        f_tcell(hud, 1, 3 + segments, "not of any strategy · heuristic cv cuts " + f_fmt(cv_stable, 2) + "/" + f_fmt(cv_unstable, 2), c_faint, c_panel)
+
+// =============================================================================
+// Alerts (confirmed-bar verdict change; realtime only, per TradingView)
+// =============================================================================
+alertcondition(verdict_change, "Stability verdict changed (confirmed)", "WF Regime Stability: chunk-to-chunk stability verdict changed")
+if verdict_change
+    if use_json_alerts
+        alert('{"ev":"wf_stability","sym":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","verdict":"' + f_vname(verdict_i) + '","cv":' + (na(cv_val) ? "null" : f_fmt(cv_val, 3)) + ',"chunks_used":' + str.tostring(used_chunks) + ',"flips_total":' + str.tostring(flips_total) + ',"variant":"' + variant_tag + '","t":' + str.tostring(time) + '}', alert.freq_once_per_bar_close)
+    else
+        alert("WF Stability [" + variant_tag + "]: " + syminfo.ticker + " verdict → " + f_vname(verdict_i) +
+             " · cv " + f_fmt(cv_val, 2) + " over " + str.tostring(used_chunks) + " chunks · flips " + str.tostring(flips_total), alert.freq_once_per_bar_close)
+
+// =============================================================================
+// End of file · Walk-Forward Regime Stability Analyzer v1.0

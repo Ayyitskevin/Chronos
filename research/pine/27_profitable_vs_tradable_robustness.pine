@@ -1,0 +1,279 @@
+//@version=6
+// =============================================================================
+// Profitable vs Tradable Robustness Tester v1.0 (5T Pine Suite · Desk Kit)
+//
+// WHAT THIS IS.
+// A strategy-shell GRAFT in the Expectancy Journal pattern. Section A below is
+// a THROWAWAY demo strategy so this file compiles standalone — replace it with
+// your strategy, or copy Section B to the bottom of any suite strategy. The
+// graft reads the HOST strategy's closed trades and answers one question:
+// what do the PROVEN (Wilson lower-bound) statistics imply about what the
+// operator would actually have to sit through?
+//
+// RESEARCH BASIS, stated plainly.
+// A strategy can be PROFITABLE in a sample yet UNTRADABLE by a human — because
+// the sample's luck will not repeat, and the drawdowns and loss streaks its
+// honest statistics imply would break the operator long before the math played
+// out (the Quant Guild profitable-vs-tradable thesis; the suite's Wilson-first
+// doctrine). This panel prices that directly:
+//   1. LUCK: profit factor recomputed with the best 1 and best 3 trades
+//      removed, plus best-trade dependency (% of net owed to one trade). An
+//      edge that dies without its best three trades was never an edge.
+//   2. STREAKS: expected maximum loss streak over the next N trades at BOTH
+//      the observed win rate and the Wilson 95% lower-bound win rate, via
+//      streak ~= ln(horizon) / ln(1/(1-p)) — an approximation that ASSUMES
+//      INDEPENDENT trades, and is labeled as such everywhere it prints.
+//   3. UNITS HONESTY: all P/L here is in strategy CURRENCY, like the journal.
+//      Grafted onto suite strategies whose disciplined stops keep the average
+//      loss near 1R, the streak-drawdown row reads naturally in R.
+// Verdict rows are HEURISTICS and labeled as such — thresholds are inputs,
+// not laws. Closed trades only (non-repaint). Decision support only — a human
+// places every trade. Risk controls outrank all signals.
+//
+// v1.0 changelog (2026-07-17):
+//   Initial release. Cached closed-trade scan (re-runs only when
+//   strategy.closedtrades changes); n / win rate / Wilson-LB win rate; avg
+//   win / avg loss / PF / net; PF ex-best-1 and ex-best-3; best-trade
+//   dependency; expected max loss streak over a user horizon at observed AND
+//   Wilson-LB win rates (approximation, independence assumed) with the
+//   streak-times-avg-loss drawdown estimate; PROFITABLE verdict (PF > 1 and
+//   net > 0 in sample) and TRADABLE verdict (three checks, each shown with
+//   the number that decided it); merge-guarded table; data-window exports;
+//   TRADABLE-flip alertcondition + optional JSON alert (default OFF).
+//   Evidence label: needs user run.
+// =============================================================================
+strategy("Profitable vs Tradable Robustness Tester v1.0", shorttitle = "Robust Test v1", overlay = true,
+     initial_capital = 100000, commission_type = strategy.commission.percent, commission_value = 0.03,
+     slippage = 2, calc_on_every_tick = false, process_orders_on_close = false)
+
+// =============================================================================
+// SECTION A · DEMO STRATEGY — REPLACE ME (exists only so the tester has trades)
+// =============================================================================
+demo_fast = ta.ema(close, 9)
+demo_slow = ta.ema(close, 21)
+if barstate.isconfirmed and ta.crossover(demo_fast, demo_slow)
+    strategy.entry("L1D", strategy.long, comment = "L1D · demo")
+if barstate.isconfirmed and ta.crossunder(demo_fast, demo_slow)
+    strategy.close("L1D", comment = "demo exit")
+// ======================= END SECTION A · DEMO ================================
+
+// =============================================================================
+// SECTION B · THE ROBUSTNESS TESTER — copy from here down into your strategy
+// =============================================================================
+grp_rt = "9 · Robustness Tester"
+rt_variant_tag = input.string("v1.0-base", "Variant tag (freeze-the-config discipline)", group = grp_rt,
+     tooltip = "Label this exact settings set. Any settings change = new tag = new variant with its own validation cycle. The tag prints on the table and in alerts so screenshots self-document.")
+rt_max_report_trades = input.int(3000, "Max closed trades to scan", minval = 100, maxval = 9000, group = grp_rt)
+rt_horizon = input.int(100, "Streak horizon (next N trades)", minval = 10, maxval = 10000, group = grp_rt,
+     tooltip = "The expected-max-loss-streak rows answer: over the NEXT this-many trades, how long a losing run should the operator expect at least once? Approximation, independence assumed.")
+rt_dd_tol = input.float(8.0, "Max DD tolerance (avg-loss units)", minval = 1.0, maxval = 100.0, step = 0.5, group = grp_rt,
+     tooltip = "Tradable check (b): the Wilson-LB expected loss streak times the average loss must fit inside this many average losses. Default 8 — a heuristic about operator endurance, not a law. On suite strategies with disciplined ~1R stops this reads directly in R.")
+rt_min_n = input.int(20, "Small-sample warning below n", minval = 5, maxval = 500, group = grp_rt)
+rt_pos_in = input.string("top_right", "Table position", options = ["top_left", "top_center", "top_right", "bottom_left", "bottom_center", "bottom_right"], group = grp_rt)
+rt_use_json_alerts = input.bool(false, "JSON alert payloads (webhook)", group = grp_rt,
+     tooltip = "OFF: human-readable alert text. ON: machine-readable JSON for webhook automation. Display-layer only.")
+
+// Palette (suite standard values, RT-namespaced so the graft never collides)
+cRT_bull  = color.rgb(89, 159, 125)
+cRT_bear  = color.rgb(190, 96, 111)
+cRT_neut  = color.rgb(112, 126, 148)
+cRT_gold  = color.rgb(214, 162, 82)
+cRT_panel = color.new(#0E1316, 5)
+cRT_cell  = color.new(#151D22, 7)
+cRT_cell2 = color.new(#10171B, 9)
+cRT_frame = color.new(#5BD6B0, 88)
+cRT_text  = color.white
+cRT_dim   = color.new(color.white, 45)
+cRT_faint = color.new(color.white, 68)
+
+fRT_pos(_s) =>
+    switch _s
+        "top_left"      => position.top_left
+        "top_center"    => position.top_center
+        "top_right"     => position.top_right
+        "bottom_left"   => position.bottom_left
+        "bottom_center" => position.bottom_center
+        "bottom_right"  => position.bottom_right
+        => position.top_right
+fRT_fmt(_x, _d) =>
+    _m = math.pow(10.0, _d)
+    na(_x) ? "n/a" : str.tostring(math.round(_x * _m) / _m)
+fRT_money(_v) =>
+    na(_v) ? "n/a" : (_v < 0 ? "-$" : "$") + str.tostring(math.abs(_v), "#,###.##")
+fRT_pf_txt(_gp, _gl) =>
+    _gl > 0 ? str.tostring(_gp / _gl, "#.##") : _gp > 0 ? "inf" : "n/a"
+fRT_jnum(_x, _d) =>
+    na(_x) ? "null" : fRT_fmt(_x, _d)
+// Wilson score lower bound (z = 1.96), suite-standard honesty for hit rates.
+fRT_wilson_lo(_p, _n) =>
+    _n <= 0 or na(_p) ? float(na) :
+         (_p + 1.96 * 1.96 / (2 * _n) - 1.96 * math.sqrt((_p * (1 - _p) + 1.96 * 1.96 / (4 * _n)) / _n)) / (1 + 1.96 * 1.96 / _n)
+// Expected max loss streak over _h trades at win prob _pwin.
+// streak ~= ln(h) / ln(1/(1-p)) — approximation (independence assumed).
+fRT_streak(_h, _pwin) =>
+    na(_pwin) ? float(na) :
+         _pwin >= 1.0 ? 0.0 :
+         _pwin <= 0.0 ? float(_h) :
+         math.log(float(_h)) / math.log(1.0 / (1.0 - _pwin))
+
+// Cached statistics — the scan below re-runs ONLY when strategy.closedtrades
+// changes; exports and alerts read these persistent values.
+var int rt_n = 0
+var float rt_wr = na
+var float rt_wlb = na
+var float rt_avg_win = na
+var float rt_avg_loss = na
+var float rt_net = na
+var float rt_gp = 0.0
+var float rt_gl = 0.0
+var float rt_pf = na
+var float rt_pf_ex1 = na
+var float rt_pf_ex3 = na
+var float rt_best_dep = na
+var float rt_streak_obs = na
+var float rt_streak_lb = na
+var float rt_dd_obs = na
+var float rt_dd_lb = na
+var float rt_lb_exp = na
+var int rt_profitable_i = -1
+var int rt_check_a = -1
+var int rt_check_b = -1
+var int rt_check_c = -1
+var int rt_verdict_now = -1
+var int rt_last_scanned = -1
+
+var table rt_tbl = table.new(fRT_pos(rt_pos_in), 2, 15, bgcolor = cRT_panel, frame_color = cRT_frame,
+     frame_width = 1, border_color = color.new(color.white, 92), border_width = 1)
+var bool rt_merged = false
+fRT_cell(_c, _r, _txt, _tc, _bg) =>
+    table.cell(rt_tbl, _c, _r, _txt, text_color = _tc, bgcolor = _bg, text_size = size.small)
+
+if barstate.islast and strategy.closedtrades != rt_last_scanned
+    rt_last_scanned := strategy.closedtrades
+    int _tot = strategy.closedtrades
+    int _first = math.max(0, _tot - rt_max_report_trades)
+    int _n = 0
+    int _w = 0
+    float _gp = 0.0
+    float _gl = 0.0
+    float _net = 0.0
+    float _b1 = 0.0
+    float _b2 = 0.0
+    float _b3 = 0.0
+    if _tot > 0
+        for i = _first to _tot - 1
+            float _p = strategy.closedtrades.profit(i)
+            _n += 1
+            _net += _p
+            if _p > 0
+                _w += 1
+                _gp += _p
+                if _p > _b1
+                    _b3 := _b2
+                    _b2 := _b1
+                    _b1 := _p
+                else if _p > _b2
+                    _b3 := _b2
+                    _b2 := _p
+                else if _p > _b3
+                    _b3 := _p
+            else if _p < 0
+                _gl += math.abs(_p)
+    int _l = _n - _w
+    float _gp_ex1 = math.max(_gp - _b1, 0.0)
+    float _gp_ex3 = math.max(_gp - _b1 - _b2 - _b3, 0.0)
+    rt_n := _n
+    rt_gp := _gp
+    rt_gl := _gl
+    rt_wr := _n > 0 ? _w * 1.0 / _n : float(na)
+    rt_wlb := _n > 0 ? fRT_wilson_lo(rt_wr, _n) : float(na)
+    rt_avg_win := _w > 0 ? _gp / _w : 0.0
+    rt_avg_loss := _l > 0 ? _gl / _l : 0.0
+    rt_net := _n > 0 ? _net : float(na)
+    rt_pf := _gl > 0 ? _gp / _gl : float(na)
+    rt_pf_ex1 := _gl > 0 ? _gp_ex1 / _gl : float(na)
+    rt_pf_ex3 := _gl > 0 ? _gp_ex3 / _gl : float(na)
+    rt_best_dep := _n > 0 and _net > 0 ? _b1 / _net * 100.0 : float(na)
+    rt_streak_obs := _n > 0 ? fRT_streak(rt_horizon, rt_wr) : float(na)
+    rt_streak_lb := _n > 0 ? fRT_streak(rt_horizon, rt_wlb) : float(na)
+    rt_dd_obs := _n > 0 and not na(rt_streak_obs) ? rt_streak_obs * rt_avg_loss : float(na)
+    rt_dd_lb := _n > 0 and not na(rt_streak_lb) ? rt_streak_lb * rt_avg_loss : float(na)
+    rt_lb_exp := _n > 0 and not na(rt_wlb) ? rt_wlb * rt_avg_win - (1.0 - rt_wlb) * rt_avg_loss : float(na)
+    // Verdicts (heuristics, labeled). PROFITABLE = PF > 1 AND net > 0 in the
+    // sample. TRADABLE = three checks on the PROVEN side of the statistics.
+    bool _prof = _n > 0 and (_gl > 0 ? _gp / _gl > 1.0 : _gp > 0) and _net > 0
+    bool _a = _n > 0 and (_gl > 0 ? _gp_ex3 / _gl > 1.0 : _gp_ex3 > 0)
+    bool _b = _n > 0 and not na(rt_streak_lb) and rt_streak_lb <= rt_dd_tol
+    bool _c = _n > 0 and not na(rt_lb_exp) and rt_lb_exp > 0
+    rt_profitable_i := _n > 0 ? (_prof ? 1 : 0) : -1
+    rt_check_a := _n > 0 ? (_a ? 1 : 0) : -1
+    rt_check_b := _n > 0 ? (_b ? 1 : 0) : -1
+    rt_check_c := _n > 0 ? (_c ? 1 : 0) : -1
+    rt_verdict_now := _n > 0 ? (_a and _b and _c ? 1 : 0) : -1
+    // ---- table (drawn only on scan; persists between scans) ----
+    bool _thin = _n > 0 and _n < rt_min_n
+    string _thin_sfx = _thin ? " !" : ""
+    string _v_txt = _n == 0 ? "NO CLOSED TRADES YET" :
+         rt_profitable_i == 1 and rt_verdict_now == 1 ? "PROFITABLE + TRADABLE" :
+         rt_profitable_i == 1 ? "PROFITABLE, NOT TRADABLE — luck won't repeat" :
+         "NOT PROFITABLE IN SAMPLE"
+    color _v_bg = _n == 0 ? cRT_cell : rt_profitable_i == 1 and rt_verdict_now == 1 ? color.new(cRT_bull, 45) :
+         rt_profitable_i == 1 ? color.new(cRT_gold, 45) : color.new(cRT_bear, 45)
+    fRT_cell(0, 0, "Robust Test " + rt_variant_tag, cRT_text, cRT_frame)
+    fRT_cell(1, 0, _v_txt, cRT_text, _v_bg)
+    fRT_cell(0, 1, "n · win rate · Wilson-LB", cRT_dim, cRT_panel)
+    fRT_cell(1, 1, str.tostring(_n) + " · " + fRT_fmt(rt_wr * 100.0, 1) + "% · " + fRT_fmt(rt_wlb * 100.0, 1) + "%" + _thin_sfx, _thin ? cRT_faint : cRT_dim, cRT_cell)
+    fRT_cell(0, 2, "Avg win · avg loss ($)", cRT_dim, cRT_panel)
+    fRT_cell(1, 2, fRT_money(rt_avg_win) + " · " + fRT_money(rt_avg_loss), cRT_dim, cRT_cell2)
+    fRT_cell(0, 3, "PF · net (sample)", cRT_dim, cRT_panel)
+    fRT_cell(1, 3, fRT_pf_txt(_gp, _gl) + " · " + fRT_money(rt_net), cRT_dim, cRT_cell)
+    fRT_cell(0, 4, "PF ex-best-1 · ex-best-3", cRT_dim, cRT_panel)
+    fRT_cell(1, 4, fRT_pf_txt(_gp_ex1, _gl) + " · " + fRT_pf_txt(_gp_ex3, _gl), cRT_dim, cRT_cell2)
+    fRT_cell(0, 5, "Best-trade dependency", cRT_dim, cRT_panel)
+    fRT_cell(1, 5, na(rt_best_dep) ? "n/a" : fRT_fmt(rt_best_dep, 0) + "% of net", not na(rt_best_dep) and rt_best_dep > 40 ? cRT_bear : cRT_dim, cRT_cell)
+    fRT_cell(0, 6, "Loss streak @ observed W", cRT_dim, cRT_panel)
+    fRT_cell(1, 6, "~" + fRT_fmt(rt_streak_obs, 1) + " losses → ~" + fRT_money(rt_dd_obs) + " (approx*)", cRT_dim, cRT_cell2)
+    fRT_cell(0, 7, "Loss streak @ Wilson-LB W", cRT_gold, cRT_panel)
+    fRT_cell(1, 7, "~" + fRT_fmt(rt_streak_lb, 1) + " losses → ~" + fRT_money(rt_dd_lb) + " (approx*)", cRT_gold, cRT_cell2)
+    fRT_cell(0, 8, "PROFITABLE (in sample)?", cRT_dim, cRT_panel)
+    fRT_cell(1, 8, _n == 0 ? "n/a" : (rt_profitable_i == 1 ? "✓ " : "✗ ") + "PF " + fRT_pf_txt(_gp, _gl) + " · net " + fRT_money(rt_net), rt_profitable_i == 1 ? cRT_bull : rt_profitable_i == 0 ? cRT_bear : cRT_faint, cRT_cell)
+    fRT_cell(0, 9, "(a) survives ex-best-3?", cRT_dim, cRT_panel)
+    fRT_cell(1, 9, _n == 0 ? "n/a" : (rt_check_a == 1 ? "✓ " : "✗ ") + "PF ex-best-3 " + fRT_pf_txt(_gp_ex3, _gl) + " vs 1.00", rt_check_a == 1 ? cRT_bull : rt_check_a == 0 ? cRT_bear : cRT_faint, cRT_cell2)
+    fRT_cell(0, 10, "(b) LB streak ≤ tolerance?", cRT_dim, cRT_panel)
+    fRT_cell(1, 10, _n == 0 ? "n/a" : (rt_check_b == 1 ? "✓ " : "✗ ") + fRT_fmt(rt_streak_lb, 1) + " ≤ " + fRT_fmt(rt_dd_tol, 1) + " avg-loss units (~" + fRT_money(rt_dd_lb) + ")", rt_check_b == 1 ? cRT_bull : rt_check_b == 0 ? cRT_bear : cRT_faint, cRT_cell2)
+    fRT_cell(0, 11, "(c) LB expectancy > 0?", cRT_dim, cRT_panel)
+    fRT_cell(1, 11, _n == 0 ? "n/a" : (rt_check_c == 1 ? "✓ " : "✗ ") + fRT_money(rt_lb_exp) + " / trade at Wilson-LB W", rt_check_c == 1 ? cRT_bull : rt_check_c == 0 ? cRT_bear : cRT_faint, cRT_cell2)
+    fRT_cell(0, 12, "TRADABLE (proven stats)?", cRT_text, cRT_panel)
+    fRT_cell(1, 12, _n == 0 ? "n/a" : rt_verdict_now == 1 ? "✓ TRADABLE — all three checks pass" : "✗ NOT TRADABLE — see failed check(s)", rt_verdict_now == 1 ? cRT_bull : rt_verdict_now == 0 ? cRT_bear : cRT_faint, rt_verdict_now == 1 ? color.new(cRT_bull, 78) : rt_verdict_now == 0 ? color.new(cRT_bear, 78) : cRT_cell)
+    fRT_cell(0, 13, "*sample statistics vs proven statistics · approximations labeled · $ units (R via suite grafting)", cRT_faint, cRT_panel)
+    fRT_cell(0, 14, "*streak ≈ ln(horizon)/ln(1/(1−W)) over next " + str.tostring(rt_horizon) + " trades — approximation (independence assumed) · verdicts are heuristics, not laws", cRT_faint, cRT_panel)
+    if not rt_merged
+        table.merge_cells(rt_tbl, 0, 13, 1, 13)
+        table.merge_cells(rt_tbl, 0, 14, 1, 14)
+        rt_merged := true
+
+// Exports (data-window only; na until the first scan on the last bar)
+plot(rt_lb_exp, "RT_LB_EXPECTANCY_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(rt_streak_lb, "RT_LB_STREAK_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(rt_pf_ex3, "RT_PF_EXBEST3_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(rt_verdict_now == 1 ? 1.0 : rt_verdict_now == 0 ? 0.0 : na, "RT_TRADABLE_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(rt_n, "RT_N_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+
+// Alert: TRADABLE verdict flip (confirmed bars; both states known)
+var int rt_prev_verdict = -1
+rt_flip = barstate.isconfirmed and rt_verdict_now >= 0 and rt_prev_verdict >= 0 and rt_verdict_now != rt_prev_verdict
+if barstate.isconfirmed
+    rt_prev_verdict := rt_verdict_now
+alertcondition(rt_flip, "Robustness: TRADABLE verdict changed", "Robustness Tester: the TRADABLE verdict flipped — proven-statistics checks changed state")
+if rt_flip
+    string _vt = rt_verdict_now == 1 ? "TRADABLE" : "NOT TRADABLE"
+    if rt_use_json_alerts
+        alert('{"ev":"robustness","sym":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","tradable":' + str.tostring(rt_verdict_now) + ',"profitable":' + str.tostring(rt_profitable_i) + ',"n":' + str.tostring(rt_n) + ',"w":' + fRT_jnum(rt_wr, 4) + ',"w_lb":' + fRT_jnum(rt_wlb, 4) + ',"pf_exbest3":' + fRT_jnum(rt_pf_ex3, 3) + ',"lb_streak":' + fRT_jnum(rt_streak_lb, 2) + ',"lb_expectancy":' + fRT_jnum(rt_lb_exp, 2) + ',"variant":"' + rt_variant_tag + '","t":' + str.tostring(time) + '}', alert.freq_once_per_bar_close)
+    else
+        alert("Robustness Tester [" + rt_variant_tag + "]: " + syminfo.ticker + " verdict → " + _vt +
+             " · n " + str.tostring(rt_n) + " · Wlo " + fRT_fmt(rt_wlb * 100.0, 1) + "%" +
+             " · PF ex-best-3 " + fRT_fmt(rt_pf_ex3, 2) + " · LB streak ~" + fRT_fmt(rt_streak_lb, 1) +
+             " · LB expectancy " + fRT_money(rt_lb_exp), alert.freq_once_per_bar_close)
+// ======================= END SECTION B · ROBUSTNESS TESTER ===================
+// =============================================================================
+// End of file · Profitable vs Tradable Robustness Tester v1.0

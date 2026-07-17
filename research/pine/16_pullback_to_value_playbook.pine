@@ -1,0 +1,577 @@
+//@version=6
+// =============================================================================
+// Pullback-to-Value Playbook v1.0 (5T Pine Suite · Desk Kit)
+//
+// One playbook, both sides: buy leaders pulling back INTO value in bull
+// regimes; short laggards rallying INTO value in bear regimes. "Value" here
+// is not an opinion — it is the overlap of independently defensible levels:
+//   1. REGIME   — a compact volatility-normalized classifier gates direction.
+//   2. RS       — Mansfield relative strength picks leaders/laggards vs SPY.
+//   3. AVWAP    — anchored at regime flips; its ±1σ band is the value zone.
+//   4. FIB      — the active swing leg's 0.382–0.618 pocket. Attention zones
+//                 only (see Fibonacci Confluence Mapper header: the published
+//                 tests find no standalone edge — fib earns a seat here ONLY
+//                 as confluence with the AVWAP zone, never alone).
+//   5. TRIGGER  — a defense/rejection candle inside value, with no-chase and
+//                 structural-stop discipline. Risk owns the exits.
+//
+// The compact regime engine here trades presets/quality-gates for brevity —
+// the flagship AIO and BULL+/BEAR+ carry the full machinery. Validate this
+// strategy through the same five-gate protocol before believing anything.
+// Costs modeled; fills are next-bar; % equity sizing only; no real balances.
+// Decision support only. Not advice. Evidence label: needs user run.
+// =============================================================================
+strategy(
+     "Pullback-to-Value Playbook v1.0 — Regime · RS · AVWAP · Fib · R",
+     shorttitle = "P2V Playbook v1",
+     overlay = true,
+     initial_capital = 100000,
+     commission_type = strategy.commission.percent,
+     commission_value = 0.03,
+     slippage = 2,
+     pyramiding = 3,
+     calc_on_every_tick = false,
+     calc_on_order_fills = false,
+     process_orders_on_close = false,
+     max_bars_back = 2000,
+     max_labels_count = 100,
+     max_lines_count = 60)
+
+grp_mode = "0 · Mode"
+grp_reg  = "1 · Compact Regime"
+grp_rs   = "2 · Relative Strength"
+grp_val  = "3 · Value (AVWAP + Fib)"
+grp_set  = "4 · Setup & Filters"
+grp_rsk  = "5 · Risk & Exits"
+grp_halt = "5a · Protection"
+grp_dsp  = "6 · Display"
+
+enable_orders = input.bool(true, "Enable backtest orders", group = grp_mode)
+allow_longs = input.bool(true, "Allow longs", group = grp_mode)
+allow_shorts = input.bool(false, "Allow shorts", group = grp_mode,
+     tooltip = "OFF by default. Shorts face borrow/locate/squeeze frictions the tester does not model — hold them to a harder standard.")
+variant_tag = input.string("v1.0-base", "Variant tag (freeze-the-config discipline)", group = grp_mode,
+     tooltip = "Any settings change = new tag = new variant with its own validation cycle.")
+oos_start = input.time(timestamp("1 Jan 2024 00:00 +0000"), "Out-of-sample report start", group = grp_mode)
+
+reg_lookback = input.int(20, "Regime lookback", minval = 5, maxval = 250, group = grp_reg)
+reg_enter_z = input.float(0.85, "Enter threshold (z)", minval = 0.10, maxval = 5.00, step = 0.05, group = grp_reg)
+reg_exit_z = input.float(0.55, "Exit threshold (z)", minval = 0.05, maxval = 4.95, step = 0.05, group = grp_reg)
+reg_confirm = input.int(2, "Confirmation bars", minval = 1, maxval = 10, group = grp_reg)
+reg_ema_len = input.int(100, "EMA direction filter", minval = 10, maxval = 300, group = grp_reg,
+     tooltip = "Compact engine: vol-normalized window return with hysteresis + EMA agreement + confirm bars. The flagship scripts add presets, quality gates, gap-shock handling.")
+
+bench_sym = input.symbol("AMEX:SPY", "Benchmark", group = grp_rs)
+mans_len = input.int(200, "Mansfield MA length", minval = 5, maxval = 300, group = grp_rs)
+rs_slope_len = input.int(3, "Slope lookback", minval = 1, maxval = 20, group = grp_rs)
+require_rs = input.bool(true, "Require RS agreement", group = grp_rs,
+     tooltip = "Longs: Mansfield above zero (leaders preferred). Shorts: below zero. OFF only for research.")
+
+vwap_src = input.source(hlc3, "AVWAP price source", group = grp_val)
+value_mode = input.string("AVWAP zone AND fib pocket", "Value definition",
+     options = ["AVWAP zone AND fib pocket", "AVWAP zone OR fib pocket", "AVWAP zone only"], group = grp_val,
+     tooltip = "AND (default): price must be inside the AVWAP ±1σ band AND the swing leg's 0.382–0.618 pocket — fib never acts alone. OR / AVWAP-only are research variants.")
+piv_left = input.int(8, "Fib pivot left bars", minval = 2, maxval = 50, group = grp_val)
+piv_right = input.int(8, "Fib pivot right bars", minval = 2, maxval = 50, group = grp_val)
+min_leg_atr = input.float(3.0, "Min fib leg size (ATR)", minval = 0.5, maxval = 20.0, step = 0.5, group = grp_val)
+
+no_chase_rsi_len = input.int(14, "No-chase RSI length", minval = 2, maxval = 100, group = grp_set)
+long_min_rsi = input.float(35.0, "Long: min pullback RSI", minval = 1.0, maxval = 60.0, step = 1.0, group = grp_set,
+     tooltip = "A pullback below this RSI is a breakdown, not a dip — skip it.")
+short_max_rsi = input.float(65.0, "Short: max rally RSI", minval = 40.0, maxval = 99.0, step = 1.0, group = grp_set)
+max_stop_pct = input.float(8.0, "Max stop distance %", minval = 0.25, maxval = 50.0, step = 0.25, group = grp_set)
+shelf_len = input.int(8, "Structural shelf lookback", minval = 3, maxval = 50, group = grp_set)
+stop_buffer_atr = input.float(0.25, "Structural stop buffer ATR", minval = 0.0, maxval = 3.0, step = 0.05, group = grp_set)
+
+risk_pct = input.float(1.0, "Risk per trade % of equity", minval = 0.05, maxval = 5.0, step = 0.05, group = grp_rsk)
+atr_len = input.int(14, "ATR length", minval = 1, maxval = 100, group = grp_rsk)
+atr_mult = input.float(2.0, "ATR stop multiple (fallback)", minval = 0.5, maxval = 10.0, step = 0.1, group = grp_rsk)
+cap_pct = input.float(100.0, "Max position value % of equity", minval = 10.0, maxval = 200.0, step = 5.0, group = grp_rsk)
+qty_step = input.float(1.0, "Quantity step", minval = 0.00000001, group = grp_rsk)
+min_qty = input.float(1.0, "Minimum tradable quantity", minval = 0.00000001, group = grp_rsk)
+t1_r = input.float(1.0, "Target 1 R", minval = 0.5, maxval = 10.0, step = 0.5, group = grp_rsk)
+t2_r = input.float(2.0, "Target 2 R", minval = 0.5, maxval = 20.0, step = 0.5, group = grp_rsk)
+be_after_t1 = input.bool(true, "Breakeven after Target 1", group = grp_rsk)
+be_offset_r = input.float(0.0, "Breakeven offset R", minval = -0.5, maxval = 1.0, step = 0.05, group = grp_rsk)
+use_trail = input.bool(true, "Chandelier trail on runner", group = grp_rsk)
+ch_len = input.int(22, "Chandelier lookback", minval = 1, maxval = 300, group = grp_rsk)
+ch_mult = input.float(3.0, "Chandelier ATR multiple", minval = 0.5, maxval = 10.0, step = 0.1, group = grp_rsk)
+trail_after_r = input.float(1.0, "Activate trail after R", minval = 0.0, maxval = 10.0, step = 0.5, group = grp_rsk)
+exit_on_regime_flip = input.bool(true, "Exit on adverse regime flip", group = grp_rsk)
+exit_on_avwap_loss = input.bool(true, "Exit on AVWAP loss (adverse reclaim)", group = grp_rsk)
+
+use_equity_dd_halt = input.bool(true, "Pause entries after equity drawdown", group = grp_halt)
+max_equity_dd = input.float(25.0, "Max equity drawdown %", minval = 1.0, maxval = 90.0, step = 0.5, group = grp_halt)
+cooldown_bars = input.int(3, "Cooldown bars after trade closes", minval = 0, maxval = 500, group = grp_halt)
+use_liquidity_filter = input.bool(true, "Dollar-volume liquidity floor", group = grp_halt)
+min_dollar_volume = input.float(1000000.0, "Minimum avg dollar volume", minval = 0.0, step = 100000.0, group = grp_halt)
+liq_len = input.int(20, "Dollar-volume MA length", minval = 1, maxval = 200, group = grp_halt)
+
+hud_mode = input.string("Full", "HUD mode", options = ["Off", "Micro", "Full"], group = grp_dsp)
+hud_pos_in = input.string("top_right", "HUD position", options = ["top_left", "top_center", "top_right", "bottom_left", "bottom_center", "bottom_right"], group = grp_dsp)
+show_zones = input.bool(true, "Plot AVWAP value zone", group = grp_dsp)
+show_marks = input.bool(true, "Mark entries", group = grp_dsp)
+use_json_alerts = input.bool(false, "JSON alert payloads (webhook)", group = grp_dsp)
+
+// =============================================================================
+// Palette & helpers
+// =============================================================================
+c_bull  = color.rgb(89, 159, 125)
+c_bear  = color.rgb(190, 96, 111)
+c_gold  = color.rgb(214, 162, 82)
+c_panel = color.new(#0E1316, 5)
+c_cell  = color.new(#151D22, 7)
+c_frame = color.new(#5BD6B0, 88)
+c_text  = color.white
+c_dim   = color.new(color.white, 45)
+c_faint = color.new(color.white, 68)
+
+f_pos(_s) =>
+    switch _s
+        "top_left"      => position.top_left
+        "top_center"    => position.top_center
+        "top_right"     => position.top_right
+        "bottom_left"   => position.bottom_left
+        "bottom_center" => position.bottom_center
+        "bottom_right"  => position.bottom_right
+        => position.top_right
+f_fmt(_x, _d) =>
+    _m = math.pow(10.0, _d)
+    na(_x) ? "n/a" : str.tostring(math.round(_x * _m) / _m)
+f_price(_x) =>
+    na(_x) ? "n/a" : str.tostring(_x, format.mintick)
+f_tcell(_tbl, _c, _r, _txt, _col, _bg) =>
+    table.cell(_tbl, _c, _r, _txt, text_color = _col, bgcolor = _bg, text_size = size.tiny, text_halign = text.align_center)
+f_round_qty(_q) =>
+    _step = math.max(qty_step, 0.00000001)
+    math.floor(_q / _step) * _step
+
+atr_val = ta.atr(atr_len)
+
+// =============================================================================
+// 1 · Compact regime (confirmed-bar commit)
+// =============================================================================
+one_bar_ret = not na(close[1]) and close > 0 and close[1] > 0 ? math.log(close / close[1]) : float(na)
+win_ret = not na(close[reg_lookback]) and close > 0 and close[reg_lookback] > 0 ? math.log(close / close[reg_lookback]) : float(na)
+win_vol = ta.stdev(one_bar_ret, reg_lookback) * math.sqrt(reg_lookback)
+regime_z = not na(win_ret) and not na(win_vol) and win_vol > 0 ? win_ret / win_vol : float(na)
+reg_ema = ta.ema(close, reg_ema_len)
+
+var int confirmed_core = na
+prev_core = na(confirmed_core) ? 0 : confirmed_core
+bull_enter = not na(regime_z) and regime_z > reg_enter_z and close > reg_ema
+bear_enter = not na(regime_z) and regime_z < -reg_enter_z and close < reg_ema
+bull_hold = not na(regime_z) and regime_z > reg_exit_z and close > reg_ema
+bear_hold = not na(regime_z) and regime_z < -reg_exit_z and close < reg_ema
+int candidate =
+     prev_core == 1 and bull_hold ? 1 :
+     prev_core == -1 and bear_hold ? -1 :
+     bull_enter ? 1 :
+     bear_enter ? -1 :
+     0
+bool cand_held = not na(regime_z)
+for k = 0 to reg_confirm - 1
+    cand_held := cand_held and candidate[k] == candidate
+if barstate.isconfirmed and cand_held and not na(regime_z)
+    confirmed_core := candidate
+regime = confirmed_core
+
+var int last_regime = 0
+var bool have_regime = false
+regime_flip = have_regime and not na(regime) and regime != last_regime
+regime_anchor = (not have_regime and not na(regime)) or regime_flip
+flip_to_bull = regime_flip and regime == 1
+flip_to_bear = regime_flip and regime == -1
+if not na(regime)
+    last_regime := regime
+    have_regime := true
+
+// =============================================================================
+// 2 · Relative strength (Mansfield vs benchmark)
+// =============================================================================
+bench_close = request.security(bench_sym, timeframe.period, close,
+     gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+rs_ratio = not na(bench_close) and bench_close > 0 and close > 0 ? close / bench_close : float(na)
+rs_ma = ta.sma(rs_ratio, mans_len)
+mans = not na(rs_ratio) and not na(rs_ma) and rs_ma != 0 ? (rs_ratio / rs_ma - 1.0) * 100.0 : float(na)
+mans_rising = not na(mans) and not na(mans[rs_slope_len]) and mans > mans[rs_slope_len]
+rs_long_ok = not require_rs or (not na(mans) and mans > 0)
+rs_short_ok = not require_rs or (not na(mans) and mans < 0)
+
+// =============================================================================
+// 3 · Value: flip-anchored AVWAP ±1σ  +  fib pocket of the active leg
+// =============================================================================
+var float av_pv = na
+var float av_w  = na
+var float av_p2 = na
+var bool  av_on = false
+if regime_anchor
+    av_pv := 0.0
+    av_w := 0.0
+    av_p2 := 0.0
+    av_on := true
+float _w = na(volume) or volume <= 0 ? 0.0 : volume
+if av_on and not na(vwap_src) and _w > 0
+    av_pv += vwap_src * _w
+    av_w  += _w
+    av_p2 += vwap_src * vwap_src * _w
+avwap = av_on and not na(av_w) and av_w > 0 ? av_pv / av_w : float(na)
+av_var = av_on and not na(avwap) and av_w > 0 ? math.max(av_p2 / av_w - avwap * avwap, 0.0) : float(na)
+av_sd = na(av_var) ? float(na) : math.sqrt(av_var)
+value_lo = not na(avwap) and not na(av_sd) ? avwap - av_sd : float(na)
+value_hi = not na(avwap) and not na(av_sd) ? avwap + av_sd : float(na)
+in_value_long = not na(value_lo) and close <= avwap and close >= value_lo
+in_value_short = not na(value_hi) and close >= avwap and close <= value_hi
+
+// Fib pocket from confirmed pivots (with-trend legs only)
+ph = ta.pivothigh(high, piv_left, piv_right)
+pl = ta.pivotlow(low, piv_left, piv_right)
+var float swing_hi = na
+var int   swing_hi_bar = na
+var float swing_lo = na
+var int   swing_lo_bar = na
+var int   leg_dir = 0
+var float leg_start = na
+var float leg_end = na
+if barstate.isconfirmed and not na(ph)
+    swing_hi := ph
+    swing_hi_bar := bar_index - piv_right
+    if not na(swing_lo) and swing_lo_bar < swing_hi_bar
+        leg_dir := 1
+        leg_start := swing_lo
+        leg_end := swing_hi
+if barstate.isconfirmed and not na(pl)
+    swing_lo := pl
+    swing_lo_bar := bar_index - piv_right
+    if not na(swing_hi) and swing_hi_bar < swing_lo_bar
+        leg_dir := -1
+        leg_start := swing_hi
+        leg_end := swing_lo
+leg_size = not na(leg_start) and not na(leg_end) ? math.abs(leg_end - leg_start) : float(na)
+leg_valid = leg_dir != 0 and not na(leg_size) and not na(atr_val) and atr_val > 0 and leg_size >= min_leg_atr * atr_val
+// Long pocket: retrace of an UP leg, between 0.382 and 0.618 below the high.
+pocket_long_hi = leg_valid and leg_dir == 1 ? leg_end - leg_size * 0.382 : float(na)
+pocket_long_lo = leg_valid and leg_dir == 1 ? leg_end - leg_size * 0.618 : float(na)
+pocket_short_lo = leg_valid and leg_dir == -1 ? leg_end + leg_size * 0.382 : float(na)
+pocket_short_hi = leg_valid and leg_dir == -1 ? leg_end + leg_size * 0.618 : float(na)
+in_pocket_long = not na(pocket_long_hi) and close <= pocket_long_hi and close >= pocket_long_lo
+in_pocket_short = not na(pocket_short_lo) and close >= pocket_short_lo and close <= pocket_short_hi
+
+value_long =
+     value_mode == "AVWAP zone only" ? in_value_long :
+     value_mode == "AVWAP zone OR fib pocket" ? (in_value_long or in_pocket_long) :
+     in_value_long and in_pocket_long
+value_short =
+     value_mode == "AVWAP zone only" ? in_value_short :
+     value_mode == "AVWAP zone OR fib pocket" ? (in_value_short or in_pocket_short) :
+     in_value_short and in_pocket_short
+
+// =============================================================================
+// 4 · Trigger, filters, stops
+// =============================================================================
+rsi_v = ta.rsi(close, no_chase_rsi_len)
+bar_range = high - low
+lower_wick = math.min(open, close) - low
+upper_wick = high - math.max(open, close)
+defense_candle = close > open or (bar_range > 0 and lower_wick / bar_range >= 0.5)
+rejection_candle = close < open or (bar_range > 0 and upper_wick / bar_range >= 0.5)
+
+shelf_lo = ta.lowest(low[1], shelf_len)
+shelf_hi = ta.highest(high[1], shelf_len)
+long_struct_ref = not na(value_lo) and not na(shelf_lo) ? math.min(shelf_lo, value_lo) : not na(shelf_lo) ? shelf_lo : value_lo
+short_struct_ref = not na(value_hi) and not na(shelf_hi) ? math.max(shelf_hi, value_hi) : not na(shelf_hi) ? shelf_hi : value_hi
+long_stop = not na(long_struct_ref) and not na(atr_val) ? long_struct_ref - stop_buffer_atr * atr_val : float(na)
+short_stop = not na(short_struct_ref) and not na(atr_val) ? short_struct_ref + stop_buffer_atr * atr_val : float(na)
+long_stop_dist = not na(long_stop) and close > long_stop ? close - long_stop : float(na)
+short_stop_dist = not na(short_stop) and short_stop > close ? short_stop - close : float(na)
+long_stop_eff = not na(long_stop_dist) ? long_stop_dist : not na(atr_val) ? atr_val * atr_mult : float(na)
+short_stop_eff = not na(short_stop_dist) ? short_stop_dist : not na(atr_val) ? atr_val * atr_mult : float(na)
+long_stop_pct = close > 0 and not na(long_stop_eff) ? long_stop_eff / close * 100.0 : float(na)
+short_stop_pct = close > 0 and not na(short_stop_eff) ? short_stop_eff / close * 100.0 : float(na)
+
+long_no_chase_ok = not na(rsi_v) and rsi_v >= long_min_rsi and (na(long_stop_pct) or long_stop_pct <= max_stop_pct)
+short_no_chase_ok = not na(rsi_v) and rsi_v <= short_max_rsi and (na(short_stop_pct) or short_stop_pct <= max_stop_pct)
+
+// Protections
+dollar_vol = not na(volume) and close > 0 ? volume * close : float(na)
+dollar_vol_ma = ta.sma(dollar_vol, liq_len)
+liquidity_ok = not use_liquidity_filter or (not na(dollar_vol_ma) and dollar_vol_ma >= min_dollar_volume)
+var float equity_peak = na
+equity_peak := na(equity_peak) ? strategy.equity : math.max(equity_peak, strategy.equity)
+equity_dd_pct = not na(equity_peak) and equity_peak > 0 ? (equity_peak - strategy.equity) / equity_peak * 100.0 : 0.0
+risk_halt = use_equity_dd_halt and equity_dd_pct >= max_equity_dd
+var int last_exit_bar = na
+if strategy.position_size == 0 and nz(strategy.position_size[1]) != 0
+    last_exit_bar := bar_index
+cooldown_ok = cooldown_bars <= 0 or na(last_exit_bar) or bar_index - last_exit_bar >= cooldown_bars
+
+long_setup = regime == 1 and rs_long_ok and value_long and defense_candle and long_no_chase_ok
+short_setup = regime == -1 and rs_short_ok and value_short and rejection_candle and short_no_chase_ok
+can_long = barstate.isconfirmed and allow_longs and long_setup and not risk_halt and cooldown_ok and liquidity_ok and strategy.position_size == 0
+can_short = barstate.isconfirmed and allow_shorts and short_setup and not risk_halt and cooldown_ok and liquidity_ok and strategy.position_size == 0
+
+// =============================================================================
+// 5 · Sizing, orders, management (three legs · thirds)
+// =============================================================================
+var float plan_rdist = na
+var float plan_q1 = 0.0
+var float plan_q2 = 0.0
+var float plan_q3 = 0.0
+var bool legs_placed = false
+var bool t1_done = false
+var bool t2_done = false
+var float leg_stop = na
+var float run_stop = na
+var string side_pfx = "L"
+if strategy.position_size == 0 and nz(strategy.position_size[1]) != 0
+    legs_placed := false
+    t1_done := false
+    t2_done := false
+    plan_rdist := na
+    leg_stop := na
+    run_stop := na
+
+f_plan_qty(_stop_dist) =>
+    _q_risk = not na(_stop_dist) and _stop_dist > 0 ? (strategy.equity * risk_pct / 100.0) / _stop_dist : 0.0
+    _q_cap = close > 0 ? (strategy.equity * cap_pct / 100.0) / close : 0.0
+    _q = f_round_qty(math.min(_q_risk, _q_cap))
+    _q >= min_qty ? _q : 0.0
+f_split(_q) =>
+    _can = _q >= min_qty * 3.0
+    _a = _can ? f_round_qty(_q / 3.0) : _q
+    _b = _can ? f_round_qty(_q / 3.0) : 0.0
+    _c = _can ? f_round_qty(_q - _a - _b) : 0.0
+    if _can and _c < min_qty
+        _b := f_round_qty(_q - _a)
+        _c := 0.0
+    [_a, _b, _c]
+f_entry_open(_id) =>
+    _open = false
+    if strategy.opentrades > 0
+        for i = 0 to strategy.opentrades - 1
+            if strategy.opentrades.entry_id(i) == _id
+                _open := true
+    _open
+
+if enable_orders and can_long
+    _q = f_plan_qty(long_stop_eff)
+    _stop0 = close - long_stop_eff
+    if _q >= min_qty and _stop0 > 0
+        plan_rdist := long_stop_eff
+        [a_, b_, c_] = f_split(_q)
+        plan_q1 := a_
+        plan_q2 := b_
+        plan_q3 := c_
+        legs_placed := false
+        t1_done := false
+        t2_done := false
+        leg_stop := na
+        run_stop := na
+        side_pfx := "L"
+        strategy.entry("L1V", strategy.long, qty = plan_q1, comment = "L1V · p2v · " + variant_tag)
+        strategy.exit("PROT_L1", from_entry = "L1V", stop = _stop0)
+        if plan_q2 >= min_qty
+            strategy.entry("L2V", strategy.long, qty = plan_q2, comment = "L2V · p2v")
+            strategy.exit("PROT_L2", from_entry = "L2V", stop = _stop0)
+        if plan_q3 >= min_qty
+            strategy.entry("L3V", strategy.long, qty = plan_q3, comment = "L3V · p2v")
+            strategy.exit("PROT_L3", from_entry = "L3V", stop = _stop0)
+if enable_orders and can_short
+    _q = f_plan_qty(short_stop_eff)
+    _stop0 = close + short_stop_eff
+    if _q >= min_qty
+        plan_rdist := short_stop_eff
+        [a_, b_, c_] = f_split(_q)
+        plan_q1 := a_
+        plan_q2 := b_
+        plan_q3 := c_
+        legs_placed := false
+        t1_done := false
+        t2_done := false
+        leg_stop := na
+        run_stop := na
+        side_pfx := "S"
+        strategy.entry("S1V", strategy.short, qty = plan_q1, comment = "S1V · p2v · " + variant_tag)
+        strategy.exit("PROT_S1", from_entry = "S1V", stop = _stop0)
+        if plan_q2 >= min_qty
+            strategy.entry("S2V", strategy.short, qty = plan_q2, comment = "S2V · p2v")
+            strategy.exit("PROT_S2", from_entry = "S2V", stop = _stop0)
+        if plan_q3 >= min_qty
+            strategy.entry("S3V", strategy.short, qty = plan_q3, comment = "S3V · p2v")
+            strategy.exit("PROT_S3", from_entry = "S3V", stop = _stop0)
+
+in_long = strategy.position_size > 0
+in_short = strategy.position_size < 0
+avg = strategy.position_avg_price
+ch_long_raw = ta.highest(high, ch_len) - atr_val * ch_mult
+ch_short_raw = ta.lowest(low, ch_len) + atr_val * ch_mult
+t2_eff = math.max(t2_r, t1_r)
+if enable_orders and (in_long or in_short) and not na(plan_rdist) and plan_rdist > 0
+    _sgn = in_long ? 1.0 : -1.0
+    _t1 = avg + _sgn * t1_r * plan_rdist
+    _t2 = avg + _sgn * t2_eff * plan_rdist
+    if na(leg_stop)
+        leg_stop := avg - _sgn * plan_rdist
+    if legs_placed
+        if not t1_done and plan_q2 > 0 and not f_entry_open(in_long ? "L1V" : "S1V")
+            t1_done := true
+        if not t2_done and plan_q2 > 0 and not f_entry_open(in_long ? "L2V" : "S2V")
+            t2_done := true
+    if be_after_t1 and t1_done
+        _be_px = avg + _sgn * be_offset_r * plan_rdist
+        leg_stop := in_long ? math.max(leg_stop, _be_px) : math.min(leg_stop, _be_px)
+    if na(run_stop)
+        run_stop := leg_stop
+    run_stop := in_long ? math.max(run_stop, leg_stop) : math.min(run_stop, leg_stop)
+    _profit_r = _sgn * (close - avg) / plan_rdist
+    if use_trail and _profit_r >= trail_after_r
+        _ch = in_long ? ch_long_raw : ch_short_raw
+        if not na(_ch)
+            run_stop := in_long ? math.max(run_stop, _ch) : math.min(run_stop, _ch)
+    if not legs_placed
+        strategy.cancel("PROT_L1")
+        strategy.cancel("PROT_L2")
+        strategy.cancel("PROT_L3")
+        strategy.cancel("PROT_S1")
+        strategy.cancel("PROT_S2")
+        strategy.cancel("PROT_S3")
+        legs_placed := true
+    if in_long
+        if plan_q2 <= 0
+            strategy.exit("L1V_ALL", from_entry = "L1V", limit = _t2, stop = run_stop)
+        else
+            if not t1_done and plan_q1 >= min_qty
+                strategy.exit("L1V_T1", from_entry = "L1V", limit = _t1, stop = leg_stop)
+            if not t2_done and plan_q2 >= min_qty
+                strategy.exit("L2V_T2", from_entry = "L2V", limit = _t2, stop = leg_stop)
+            if plan_q3 >= min_qty
+                strategy.exit("L3V_RUN", from_entry = "L3V", stop = run_stop)
+    if in_short
+        if plan_q2 <= 0
+            strategy.exit("S1V_ALL", from_entry = "S1V", limit = _t2, stop = run_stop)
+        else
+            if not t1_done and plan_q1 >= min_qty
+                strategy.exit("S1V_T1", from_entry = "S1V", limit = _t1, stop = leg_stop)
+            if not t2_done and plan_q2 >= min_qty
+                strategy.exit("S2V_T2", from_entry = "S2V", limit = _t2, stop = leg_stop)
+            if plan_q3 >= min_qty
+                strategy.exit("S3V_RUN", from_entry = "S3V", stop = run_stop)
+
+reclaim_dn = not na(avwap) and not na(avwap[1]) and close < avwap and close[1] >= avwap[1]
+reclaim_up = not na(avwap) and not na(avwap[1]) and close > avwap and close[1] <= avwap[1]
+if enable_orders and barstate.isconfirmed and in_long and ((exit_on_regime_flip and regime == -1) or (exit_on_avwap_loss and reclaim_dn))
+    strategy.close("L1V", comment = regime == -1 ? "Regime exit" : "AVWAP loss")
+    strategy.close("L2V", comment = regime == -1 ? "Regime exit" : "AVWAP loss")
+    strategy.close("L3V", comment = regime == -1 ? "Regime exit" : "AVWAP loss")
+if enable_orders and barstate.isconfirmed and in_short and ((exit_on_regime_flip and regime == 1) or (exit_on_avwap_loss and reclaim_up))
+    strategy.close("S1V", comment = regime == 1 ? "Regime exit" : "AVWAP reclaim")
+    strategy.close("S2V", comment = regime == 1 ? "Regime exit" : "AVWAP reclaim")
+    strategy.close("S3V", comment = regime == 1 ? "Regime exit" : "AVWAP reclaim")
+
+// =============================================================================
+// Visuals
+// =============================================================================
+bgcolor(na(regime) ? na : regime == 1 ? color.new(c_bull, 94) : regime == -1 ? color.new(c_bear, 94) : na, title = "Regime tint")
+plot(show_zones ? avwap : na, "AVWAP", color = color.new(c_gold, 25), style = plot.style_linebr)
+p_vlo = plot(show_zones ? value_lo : na, "Value low", color = color.new(c_gold, 85), style = plot.style_linebr)
+p_vhi = plot(show_zones ? value_hi : na, "Value high", color = color.new(c_gold, 85), style = plot.style_linebr)
+fill(p_vlo, p_vhi, color = show_zones ? color.new(c_gold, 95) : na, title = "Value zone")
+plotshape(show_marks and can_long, "Long entry", style = shape.triangleup, location = location.belowbar, color = color.new(c_bull, 0), size = size.small)
+plotshape(show_marks and can_short, "Short entry", style = shape.triangledown, location = location.abovebar, color = color.new(c_bear, 0), size = size.small)
+
+// =============================================================================
+// Validation-lite (full five-gate validation lives in the flagship protocol)
+// =============================================================================
+var table val = table.new(position.bottom_left, 5, 2, bgcolor = c_panel, frame_color = c_frame,
+     frame_width = 1, border_color = color.new(color.white, 92), border_width = 1)
+if barstate.islast and hud_mode == "Full"
+    int _n = strategy.closedtrades
+    float _gp = 0.0
+    float _gl = 0.0
+    int _w = 0
+    int _oosN = 0
+    float _oosGp = 0.0
+    float _oosGl = 0.0
+    if _n > 0
+        for i = 0 to _n - 1
+            _p = strategy.closedtrades.profit(i)
+            _gp += _p > 0 ? _p : 0.0
+            _gl += _p < 0 ? -_p : 0.0
+            _w += _p > 0 ? 1 : 0
+            if strategy.closedtrades.exit_time(i) >= oos_start
+                _oosN += 1
+                _oosGp += _p > 0 ? _p : 0.0
+                _oosGl += _p < 0 ? -_p : 0.0
+    _pf = _gl > 0 ? _gp / _gl : _gp > 0 ? 999.0 : float(na)
+    _oosPf = _oosGl > 0 ? _oosGp / _oosGl : _oosGp > 0 ? 999.0 : float(na)
+    f_tcell(val, 0, 0, "P2V Val", c_text, c_frame)
+    f_tcell(val, 1, 0, "Legs: " + str.tostring(_n) + (_n < 100 ? " !" : ""), _n < 100 ? c_bear : c_text, c_cell)
+    f_tcell(val, 2, 0, "PF: " + (na(_pf) ? "n/a" : _pf >= 999 ? "∞" : f_fmt(_pf, 2)), c_text, c_cell)
+    f_tcell(val, 3, 0, "WR: " + (_n > 0 ? f_fmt(_w * 100.0 / _n, 1) + "%" : "n/a"), c_dim, c_cell)
+    f_tcell(val, 4, 0, "OOS: n" + str.tostring(_oosN) + " PF " + (na(_oosPf) ? "n/a" : _oosPf >= 999 ? "∞" : f_fmt(_oosPf, 2)), c_dim, c_cell)
+    f_tcell(val, 0, 1, "*legs, not ideas", c_faint, c_panel)
+    f_tcell(val, 1, 1, "run the five-gate", c_faint, c_panel)
+    f_tcell(val, 2, 1, "protocol before", c_faint, c_panel)
+    f_tcell(val, 3, 1, "believing numbers", c_faint, c_panel)
+    f_tcell(val, 4, 1, variant_tag, c_faint, c_panel)
+
+// =============================================================================
+// HUD
+// =============================================================================
+var table hud = table.new(f_pos(hud_pos_in), 2, 7, bgcolor = c_panel, frame_color = c_frame,
+     frame_width = 1, border_color = color.new(color.white, 92), border_width = 1)
+if barstate.islast and hud_mode != "Off"
+    _state =
+         risk_halt ? "HALTED · equity DD" :
+         not cooldown_ok ? "COOLDOWN" :
+         regime == 1 and value_long ? (long_setup ? "LONG SETUP LIVE" : "IN VALUE · waiting trigger") :
+         regime == -1 and value_short ? (short_setup ? "SHORT SETUP LIVE" : "IN VALUE · waiting trigger") :
+         na(regime) ? "NO REGIME" :
+         regime == 0 ? "NEUTRAL · stand down" :
+         "IN REGIME · waiting pullback"
+    f_tcell(hud, 0, 0, "P2V " + variant_tag, c_text, c_frame)
+    f_tcell(hud, 1, 0, _state, risk_halt ? c_bear : c_text, c_cell)
+    if hud_mode == "Full"
+        f_tcell(hud, 0, 1, "Regime", c_dim, c_panel)
+        f_tcell(hud, 1, 1, (na(regime) ? "n/a" : regime == 1 ? "Bull" : regime == -1 ? "Bear" : "Neutral") + " · z " + f_fmt(regime_z, 2), na(regime) ? c_faint : regime == 1 ? c_bull : regime == -1 ? c_bear : c_dim, c_cell)
+        f_tcell(hud, 0, 2, "RS (Mansfield)", c_dim, c_panel)
+        f_tcell(hud, 1, 2, f_fmt(mans, 2) + "%" + (mans_rising ? " ↑" : " ↓"), na(mans) ? c_faint : mans > 0 ? c_bull : c_bear, c_cell)
+        f_tcell(hud, 0, 3, "AVWAP zone", c_dim, c_panel)
+        f_tcell(hud, 1, 3, na(avwap) ? "n/a" : f_price(value_lo) + " – " + f_price(value_hi), c_dim, c_cell)
+        f_tcell(hud, 0, 4, "Fib pocket", c_dim, c_panel)
+        f_tcell(hud, 1, 4, leg_valid ? (leg_dir == 1 ? f_price(pocket_long_lo) + " – " + f_price(pocket_long_hi) : f_price(pocket_short_lo) + " – " + f_price(pocket_short_hi)) : "no valid leg", leg_valid ? c_gold : c_faint, c_cell)
+        f_tcell(hud, 0, 5, "Stops", c_dim, c_panel)
+        f_tcell(hud, 1, 5, "L " + f_price(long_stop) + " · S " + f_price(short_stop), c_dim, c_cell)
+        f_tcell(hud, 0, 6, "*value = confluence", c_faint, c_panel)
+        f_tcell(hud, 1, 6, "fib never acts alone · not advice", c_faint, c_panel)
+
+// =============================================================================
+// Data Window exports
+// =============================================================================
+plot(na(regime) ? na : float(regime), "REGIME_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(mans, "MANSFIELD_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(avwap, "AVWAP_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(leg_dir == 1 ? pocket_long_hi : pocket_short_hi, "FIB_POCKET_HI_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(leg_dir == 1 ? pocket_long_lo : pocket_short_lo, "FIB_POCKET_LO_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(long_setup ? 1.0 : 0.0, "LONG_SETUP_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(short_setup ? 1.0 : 0.0, "SHORT_SETUP_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(long_stop, "LONG_STRUCT_STOP_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(short_stop, "SHORT_STRUCT_STOP_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(equity_dd_pct, "EQUITY_DD_PCT_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+
+// =============================================================================
+// Alerts
+// =============================================================================
+alertcondition(can_long, "P2V long setup confirmed", "Pullback-to-Value: long setup confirmed")
+alertcondition(can_short, "P2V short setup confirmed", "Pullback-to-Value: short setup confirmed")
+if can_long or can_short
+    _side = can_long ? "long" : "short"
+    _stop_px = can_long ? close - long_stop_eff : close + short_stop_eff
+    if use_json_alerts
+        alert('{"ev":"p2v_setup","side":"' + _side + '","sym":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","stop":' + (na(_stop_px) ? "null" : f_fmt(_stop_px, 4)) + ',"regime":' + str.tostring(regime) + ',"mans":' + (na(mans) ? "null" : f_fmt(mans, 2)) + ',"variant":"' + variant_tag + '","t":' + str.tostring(time) + '}', alert.freq_once_per_bar_close)
+    else
+        alert("P2V [" + variant_tag + "]: " + syminfo.ticker + " " + str.upper(_side) + " pullback-to-value setup · stop~" + f_price(_stop_px), alert.freq_once_per_bar_close)
+
+// =============================================================================
+// End of file · Pullback-to-Value Playbook v1.0
+// =============================================================================

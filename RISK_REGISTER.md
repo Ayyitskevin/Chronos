@@ -1,0 +1,30 @@
+# RISK REGISTER
+
+Living register of project and operational risks. Severity: C=critical, H=high,
+M=medium, L=low. Status: OPEN / MITIGATED / ACCEPTED / CLOSED.
+
+| ID | Risk | Sev | Status | Mitigation / Notes |
+|----|------|-----|--------|--------------------|
+| R-01 | Accidental live trading | C | MITIGATED | No live-capable code path: mode lock hard-denies CANARY_LIVE/LIVE; paper capability requires 6 simultaneous conditions; wheel-dashboard IBKR adapter raises on every order method. Re-verify at every release (tests/safety). |
+| R-02 | Paper/live confusion (wrong account) | C | MITIGATED | Account pattern `D[UF]\d{4,}` + operator allowlist + broker-reported environment + exact managed-accounts match before every submission window. Tested. |
+| R-03 | Duplicate orders (replay, reconnect, double signal) | H | MITIGATED | Deterministic intent ids (UUIDv5 of economic content); ledger primary-key refusal; risk-engine duplicate check; sim-broker duplicate rejection; idempotent event application. Tested. Residual: cancel-replace flows are not implemented (no modify path exists). |
+| R-04 | Unknown broker state after disconnect/restart | H | MITIGATED | Startup/reconnect enters non-trading state; reconciliation must pass; unknown order/position blocks trading and halts; no auto-flatten. Residual: reconciliation evidence collection against a real gateway is untested here (owner action). |
+| R-05 | Risk-engine bypass by strategy code | H | MITIGATED | Structural: proposals cannot express orders; approvals are instance-token-bound; frozen policy; engine exceptions deny. Tested (forged approval, foreign engine, policy mutation). |
+| R-06 | Halt cleared by restart | H | MITIGATED | Halt state is a durable file; missing/corrupt file reads as HALTED; rearm requires operator note. Tested. |
+| R-07 | Look-ahead / repainting contamination in translated strategies | H | MITIGATED (for derived cores) | Closed-bar-only engine; next-bar fills; audit of every script (docs/PINE_AUDIT.md); derived strategies re-specified rather than trusting Pine defaults. Residual: no TradingView reference exports — parity is spec-level only (A-03). |
+| R-08 | Research data provenance (public mirrors, not broker data) | H | OPEN (ACCEPTED for research phase) | Per-file manifests with hashes + validation + cross-checks; research conclusions carry a data caveat; owner should re-run against IBKR historical data before promotion beyond paper. |
+| R-09 | Overfitting / selection bias in strategy choice | H | OPEN | Chronological partitions, untouched final test window, baselines incl. deterministic random twin, parameter-stability review; small candidate count. Residual risk inherent to backtesting is documented in RESEARCH_REPORT. |
+| R-10 | USD 3k account economics (commission drag, whole shares) | H | ACCEPTED (documented) | USD 1 minimum commission ≈ 3.3 bps/side; whole-share rounding drag modeled; results reported net. This risk alone can invalidate marginal edges. |
+| R-11 | Intraday corpus strategies unvalidatable here | M | ACCEPTED | No trustworthy intraday data in this environment; scripts classified research-only, not rejected on merit (A-31). |
+| R-12 | ib_async maintenance / TWS API changes | M | OPEN | Pinned range in pyproject; ADR-0002 records alternatives; adapter surface is narrow (IBLike protocol) for replaceability. |
+| R-13 | SQLite durability under crash | M | MITIGATED | WAL + synchronous=FULL; ledger failure halts trading before submission; backup/restore documented. |
+| R-14 | Audit-log tamper or corruption | M | MITIGATED | Hash-chained records, fsync on append, verify command, incident playbook. A corrupt final line now raises a specific `AuditLogCorruptionError` on construction (fails closed) rather than an uncaught exception (independent review H4). |
+| R-20 | Halt bypass by a halt landing mid-submission (TOCTOU) | H | MITIGATED | The execution engine re-reads the halt immediately before handing the order to the broker, not only at the top of the call (independent review H1). Regression-tested. |
+| R-21 | Platform state files world-readable on a shared host | M | MITIGATED | Ledger/halt/audit files (and WAL/SHM sidecars) are chmod 0600 via a symlink- and ownership-checked helper; halt write is fsync-durable (independent review M1/L1). |
+| R-22 | Reconciliation is presence-only (no state-level contradiction detection) | M | OPEN (accepted) | `reconcile()` compares id sets, not per-order fill/lifecycle state, and its evidence-gathering caller (the shadow/paper service loop) is not implemented. No auto-flatten exists. Go-live prerequisite (docs/GO_LIVE_CHECKLIST Gate 2/3). |
+| R-23 | Restart does not hydrate in-flight orders; their broker events halt and lose the evidence trail | M | OPEN (accepted, fails closed) | Startup `_orders` hydration from the ledger is part of the unbuilt service loop; today an in-flight order's post-restart event triggers a safe `UNKNOWN_ORDER` halt. Go-live prerequisite. |
+| R-15 | Dependency supply chain (no lockfile) | M | OPEN | pyproject uses bounded ranges; lockfile generation recommended (docs/SECURITY.md); CI installs fresh. |
+| R-16 | Notion corpus drift vs audited hashes | L | MITIGATED | Registry pins SHA-256 per script; `verify-corpus` command detects drift. |
+| R-17 | Wheel dashboard and platform state confusion | L | MITIGATED | Separate database files and schemas (ADR-0003); no shared mutable state. |
+| R-18 | Clock drift on operator host | M | OPEN | Staleness checks bound decision ages; time-sync check is documented operator duty (docs/OPERATIONS.md); automated NTP verification not implemented. |
+| R-19 | Session usage limits interrupting long autonomous builds | L | ACCEPTED | Workflow resume caching + checkpoint commits made recovery cheap (observed and exercised during this build). |

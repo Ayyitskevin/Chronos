@@ -1,0 +1,245 @@
+//@version=6
+// =============================================================================
+// Statistical Edge Validation Dashboard v1.0 (5T Pine Suite · Desk Kit)
+// Consolidated closed-trade edge panel — every statistic wears its honesty
+// label. Section A below is a THROWAWAY demo strategy so this file compiles
+// standalone — replace it with your strategy, or copy Section B to the
+// bottom of Markov Regime BULL+/BEAR+ (journal graft pattern).
+//
+// WHAT IT REPORTS (closed legs only, non-repaint):
+//   · n, win rate, and the Wilson 95% LOWER-bound win rate (believe the LB).
+//   · Expectancy per trade with a normal-approximation 95% CI
+//     (mean ± 1.96·sd/√n over trade P&L — "normal approx; trade P&L is not
+//     normal; treat as rough" is printed right on the panel).
+//   · Profit factor AND PF-at-LB: PF recomputed with the Wilson lower-bound
+//     win rate against the OBSERVED average win/loss — what PF looks like if
+//     the win rate is as bad as the data still allows.
+//   · SQN-style ratio mean/(sd/√n), labeled "distribution caveats apply".
+//   · FIVE-GATE VERDICT: sample gate (n ≥ 100), LB-expectancy gate (CI low
+//     > 0), PF-at-LB gate (> 1), stress echo (PF excluding the 3 best wins
+//     > 1), SQN gate (≥ 1.6, heuristic). All five or no verdict.
+// Figures are $ units — R-multiple attribution comes via suite grafting
+// (stop known at entry). Decision support — not advice, never a forecast.
+//
+// v1.0 changelog (2026-07-17):
+//   Initial release. Journal-pattern graft (Section A demo REPLACE-ME +
+//   Section B markers, group 9, prefixed helpers), cached closed-trade scan
+//   (re-runs only when strategy.closedtrades changes), merge-guarded table,
+//   Wilson-LB win rate, normal-approx expectancy CI (labeled rough),
+//   PF-at-LB, best-3 stress echo, SQN-style ratio (labeled), five-gate
+//   verdict, data-window exports, LB-expectancy sign-flip alert with
+//   optional JSON payload (default OFF). Evidence label: needs user run.
+// =============================================================================
+strategy("Statistical Edge Validation Dashboard v1.0", shorttitle = "Stat Edge v1", overlay = true,
+     initial_capital = 100000, commission_type = strategy.commission.percent, commission_value = 0.03,
+     slippage = 2, calc_on_every_tick = false, process_orders_on_close = false)
+
+// =============================================================================
+// SECTION A · DEMO STRATEGY — REPLACE ME (exists only so the panel has food)
+// =============================================================================
+demo_fast = ta.ema(close, 9)
+demo_slow = ta.ema(close, 21)
+if barstate.isconfirmed and ta.crossover(demo_fast, demo_slow)
+    strategy.entry("L1D", strategy.long, comment = "L1D · demo")
+if barstate.isconfirmed and ta.crossunder(demo_fast, demo_slow)
+    strategy.close("L1D", comment = "demo exit")
+// ======================= END SECTION A · DEMO ================================
+
+// =============================================================================
+// SECTION B · THE DASHBOARD — copy from here down into your strategy
+// =============================================================================
+grp_sed = "9 · Stat Edge Dashboard"
+sed_variant = input.string("v1.0-base", "Variant tag (freeze-the-config discipline)", group = grp_sed,
+     tooltip = "Label this exact settings set. Any settings change = new tag = new variant with its own validation cycle. The tag prints on the panel and in alerts so screenshots self-document.")
+sed_max_scan = input.int(3000, "Max closed legs to scan", minval = 100, maxval = 9000, group = grp_sed)
+sed_gate_n = input.int(100, "Sample gate: n at least", minval = 20, maxval = 1000, group = grp_sed)
+sed_sqn_gate = input.float(1.6, "SQN gate: at least", minval = 0.5, maxval = 5.0, step = 0.1, group = grp_sed,
+     tooltip = "Heuristic threshold on the SQN-style ratio mean/(sd/sqrt(n)). Distribution caveats apply — trade P&L is not normal, so treat this gate as a rough screen, not a proof.")
+sed_pos_in = input.string("top_left", "Panel position", options = ["top_left", "top_center", "top_right", "bottom_left", "bottom_center", "bottom_right"], group = grp_sed)
+sed_use_json = input.bool(false, "JSON alert payloads (webhook)", group = grp_sed,
+     tooltip = "OFF: human-readable alert text. ON: machine-readable JSON for webhook automation. Display-layer only.")
+
+cS_panel = color.new(#141a22, 0)
+cS_cell = color.new(#1b2430, 0)
+cS_cell2 = color.new(#20293a, 0)
+cS_frame = color.new(#2e4a66, 0)
+cS_text = color.new(#e8edf2, 0)
+cS_dim = color.new(#9fb0c0, 0)
+cS_faint = color.new(#5a6572, 0)
+cS_bull = color.new(#1e9e6a, 0)
+cS_bear = color.new(#e5484d, 0)
+
+fS_pos(_s) =>
+    _s == "top_left" ? position.top_left : _s == "top_center" ? position.top_center :
+     _s == "top_right" ? position.top_right : _s == "bottom_left" ? position.bottom_left :
+     _s == "bottom_center" ? position.bottom_center : position.bottom_right
+
+fS_fmt(_v, _dp) =>
+    na(_v) ? "n/a" : str.tostring(_v, _dp == 0 ? "#" : _dp == 1 ? "#.#" : "#.##")
+
+fS_money(_v) =>
+    na(_v) ? "n/a" : (_v < 0 ? "-$" : "$") + str.tostring(math.abs(_v), "#,###.##")
+
+fS_wilson_lo(_p, _n) =>
+    _n <= 0 or na(_p) ? float(na) :
+     (_p + 1.96 * 1.96 / (2 * _n) - 1.96 * math.sqrt((_p * (1 - _p) + 1.96 * 1.96 / (4 * _n)) / _n)) / (1 + 1.96 * 1.96 / _n)
+
+fS_pf_txt(_gp, _gl) =>
+    _gl > 0 ? str.tostring(_gp / _gl, "#.##") : _gp > 0 ? "inf" : "n/a"
+
+fS_gate_txt(_ok) =>
+    _ok ? "PASS" : "fail"
+
+// ---- Cached closed-trade scan (re-runs only when the trade count changes) ----
+var int sed_last_scanned = -1
+var int sed_n = 0
+var int sed_w = 0
+var int sed_nl = 0
+var float sed_gp = 0.0
+var float sed_gl = 0.0
+var float sed_net = 0.0
+var float sed_mean = na
+var float sed_sd = na
+var float sed_wr = na
+var float sed_wlo = na
+var float sed_exp_lo = na
+var float sed_exp_hi = na
+var float sed_pf_lb = na
+var float sed_gp_ex3 = na
+var float sed_sqn = na
+var bool sed_pf_inf = false
+var bool sed_pflb_inf = false
+if strategy.closedtrades != sed_last_scanned
+    sed_last_scanned := strategy.closedtrades
+    int _tot = strategy.closedtrades
+    int _first = math.max(0, _tot - sed_max_scan)
+    int _n = 0
+    int _w = 0
+    int _nl = 0
+    float _sum = 0.0
+    float _sum2 = 0.0
+    float _gp = 0.0
+    float _gl = 0.0
+    float _b1 = 0.0
+    float _b2 = 0.0
+    float _b3 = 0.0
+    if _tot > 0
+        for i = _first to _tot - 1
+            float _p = strategy.closedtrades.profit(i)
+            _n += 1
+            _sum += _p
+            _sum2 += _p * _p
+            if _p > 0
+                _w += 1
+                _gp += _p
+                if _p > _b1
+                    _b3 := _b2
+                    _b2 := _b1
+                    _b1 := _p
+                else if _p > _b2
+                    _b3 := _b2
+                    _b2 := _p
+                else if _p > _b3
+                    _b3 := _p
+            else if _p < 0
+                _nl += 1
+                _gl += math.abs(_p)
+    sed_n := _n
+    sed_w := _w
+    sed_nl := _nl
+    sed_gp := _gp
+    sed_gl := _gl
+    sed_net := _sum
+    sed_mean := _n > 0 ? _sum / _n : float(na)
+    sed_sd := _n > 1 ? math.sqrt(math.max((_sum2 - _sum * _sum / _n) / (_n - 1), 0.0)) : float(na)
+    sed_wr := _n > 0 ? _w * 1.0 / _n : float(na)
+    sed_wlo := fS_wilson_lo(sed_wr, _n)
+    float _ci = _n > 1 and not na(sed_sd) ? 1.96 * sed_sd / math.sqrt(_n) : float(na)
+    sed_exp_lo := not na(sed_mean) and not na(_ci) ? sed_mean - _ci : float(na)
+    sed_exp_hi := not na(sed_mean) and not na(_ci) ? sed_mean + _ci : float(na)
+    float _avg_win = _w > 0 ? _gp / _w : float(na)
+    float _avg_loss = _nl > 0 ? _gl / _nl : float(na)
+    sed_pf_inf := _gl == 0 and _gp > 0
+    sed_pflb_inf := na(_avg_loss) and not na(_avg_win) and not na(sed_wlo) and sed_wlo > 0
+    sed_pf_lb := not na(sed_wlo) and not na(_avg_win) and not na(_avg_loss) and (1.0 - sed_wlo) * _avg_loss > 0 ?
+         sed_wlo * _avg_win / ((1.0 - sed_wlo) * _avg_loss) : float(na)
+    sed_gp_ex3 := math.max(_gp - (_b1 + _b2 + _b3), 0.0)
+    sed_sqn := _n > 1 and not na(sed_sd) and sed_sd > 0 ? sed_mean / (sed_sd / math.sqrt(_n)) : float(na)
+
+// ---- Five gates (all or no verdict) ----
+bool g1 = sed_n >= sed_gate_n
+bool g2 = not na(sed_exp_lo) and sed_exp_lo > 0
+bool g3 = sed_pflb_inf or (not na(sed_pf_lb) and sed_pf_lb > 1)
+bool g4 = sed_gl > 0 ? sed_gp_ex3 / sed_gl > 1 : not na(sed_gp_ex3) and sed_gp_ex3 > 0
+bool g5 = not na(sed_sqn) and sed_sqn >= sed_sqn_gate
+int sed_verdict = g1 and g2 and g3 and g4 and g5 ? 1 : 0
+int sed_gates_passed = (g1 ? 1 : 0) + (g2 ? 1 : 0) + (g3 ? 1 : 0) + (g4 ? 1 : 0) + (g5 ? 1 : 0)
+
+// ---- Exports (data window) ----
+plot(sed_wlo * 100.0, "SED_LB_WR_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(sed_mean, "SED_EXPECTANCY_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(sed_exp_lo, "SED_EXP_CI_LO_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(sed_pf_lb, "SED_PF_LB_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(float(sed_verdict), "SED_VERDICT_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+
+// ---- Panel (merge-guarded; redrawn only when the scan refreshes) ----
+var table sed_t = table.new(fS_pos(sed_pos_in), 2, 15, bgcolor = cS_panel, frame_color = cS_frame,
+     frame_width = 1, border_color = color.new(color.white, 92), border_width = 1)
+var bool sed_merged = false
+var int sed_rendered_for = -2
+fS_cell(_c, _r, _txt, _tc, _bg) =>
+    table.cell(sed_t, _c, _r, _txt, text_color = _tc, bgcolor = _bg, text_size = size.small)
+if barstate.islast and sed_rendered_for != sed_last_scanned
+    sed_rendered_for := sed_last_scanned
+    fS_cell(0, 0, "Stat Edge v1.0 · " + sed_variant + " · closed legs only", cS_text, cS_frame)
+    fS_cell(0, 1, "n (closed legs)", cS_dim, cS_panel)
+    fS_cell(1, 1, str.tostring(sed_n) + (sed_n < sed_gate_n ? " !" : ""), sed_n < sed_gate_n ? cS_bear : cS_text, cS_cell)
+    fS_cell(0, 2, "Win rate · Wilson LB", cS_dim, cS_panel)
+    fS_cell(1, 2, fS_fmt(sed_wr * 100, 0) + "% · LB " + fS_fmt(sed_wlo * 100, 0) + "%", cS_dim, cS_cell2)
+    fS_cell(0, 3, "Expectancy / trade", cS_dim, cS_panel)
+    fS_cell(1, 3, fS_money(sed_mean), na(sed_mean) ? cS_faint : sed_mean > 0 ? cS_bull : cS_bear, cS_cell)
+    fS_cell(0, 4, "95% CI (normal approx*)", cS_dim, cS_panel)
+    fS_cell(1, 4, fS_money(sed_exp_lo) + " … " + fS_money(sed_exp_hi), cS_dim, cS_cell2)
+    fS_cell(0, 5, "PF · PF at LB win rate", cS_dim, cS_panel)
+    fS_cell(1, 5, fS_pf_txt(sed_gp, sed_gl) + " · " + (sed_pflb_inf ? "inf" : fS_fmt(sed_pf_lb, 2)), cS_dim, cS_cell)
+    fS_cell(0, 6, "SQN-style mean/(sd/√n)", cS_dim, cS_panel)
+    fS_cell(1, 6, fS_fmt(sed_sqn, 2) + " (distribution caveats apply)", cS_dim, cS_cell2)
+    fS_cell(0, 7, "Gate 1 · sample n ≥ " + str.tostring(sed_gate_n), cS_dim, cS_panel)
+    fS_cell(1, 7, fS_gate_txt(g1) + " (n " + str.tostring(sed_n) + ")", g1 ? cS_bull : cS_bear, cS_cell)
+    fS_cell(0, 8, "Gate 2 · LB expectancy > 0", cS_dim, cS_panel)
+    fS_cell(1, 8, fS_gate_txt(g2) + " (" + fS_money(sed_exp_lo) + ")", g2 ? cS_bull : cS_bear, cS_cell2)
+    fS_cell(0, 9, "Gate 3 · PF at LB > 1", cS_dim, cS_panel)
+    fS_cell(1, 9, fS_gate_txt(g3) + " (" + (sed_pflb_inf ? "inf" : fS_fmt(sed_pf_lb, 2)) + ")", g3 ? cS_bull : cS_bear, cS_cell)
+    fS_cell(0, 10, "Gate 4 · stress echo PF ex-best-3 > 1", cS_dim, cS_panel)
+    fS_cell(1, 10, fS_gate_txt(g4) + " (" + fS_pf_txt(sed_gp_ex3, sed_gl) + ")", g4 ? cS_bull : cS_bear, cS_cell2)
+    fS_cell(0, 11, "Gate 5 · SQN ≥ " + fS_fmt(sed_sqn_gate, 1) + " (heuristic)", cS_dim, cS_panel)
+    fS_cell(1, 11, fS_gate_txt(g5) + " (" + fS_fmt(sed_sqn, 2) + ")", g5 ? cS_bull : cS_bear, cS_cell)
+    fS_cell(0, 12, "VERDICT", cS_text, cS_panel)
+    fS_cell(1, 12, sed_verdict == 1 ? "5/5 gates — edge survives its own error bars (so far)" : str.tostring(sed_gates_passed) + "/5 gates — NO verdict: edge not established at these error bars", sed_verdict == 1 ? cS_bull : cS_bear, cS_cell)
+    fS_cell(0, 13, "$ units — R via suite grafting (stop known at entry) · Wilson 95%", cS_faint, cS_panel)
+    fS_cell(0, 14, "*normal approx: trade P&L is not normal — treat CI as rough · counted history, not forecast · not advice", cS_faint, cS_panel)
+    if not sed_merged
+        table.merge_cells(sed_t, 0, 0, 1, 0)
+        table.merge_cells(sed_t, 0, 13, 1, 13)
+        table.merge_cells(sed_t, 0, 14, 1, 14)
+        sed_merged := true
+
+// ---- Alert: LB-expectancy sign flip (confirmed bars only) ----
+var int sed_prev_sign = 0
+int sed_sign = na(sed_exp_lo) ? 0 : sed_exp_lo > 0 ? 1 : sed_exp_lo < 0 ? -1 : 0
+bool sed_flip_ev = barstate.isconfirmed and sed_sign != 0 and sed_prev_sign != 0 and sed_sign != sed_prev_sign
+if barstate.isconfirmed and sed_sign != 0
+    sed_prev_sign := sed_sign
+alertcondition(sed_flip_ev, "LB-expectancy sign flip", "Stat Edge Dashboard: the lower-bound expectancy changed sign (confirmed)")
+if sed_flip_ev
+    if sed_use_json
+        alert('{"ev":"stat_edge","sym":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","n":' + str.tostring(sed_n) + ',"wr":' + (na(sed_wr) ? "null" : fS_fmt(sed_wr, 3)) + ',"wlo":' + (na(sed_wlo) ? "null" : fS_fmt(sed_wlo, 3)) + ',"exp":' + (na(sed_mean) ? "null" : fS_fmt(sed_mean, 2)) + ',"exp_ci_lo":' + (na(sed_exp_lo) ? "null" : fS_fmt(sed_exp_lo, 2)) + ',"pf_lb":' + (sed_pflb_inf ? "null" : na(sed_pf_lb) ? "null" : fS_fmt(sed_pf_lb, 2)) + ',"verdict":' + str.tostring(sed_verdict) + ',"variant":"' + sed_variant + '","t":' + str.tostring(time) + '}', alert.freq_once_per_bar_close)
+    else
+        alert("Stat Edge Dashboard [" + sed_variant + "]: LB expectancy flipped to " + (sed_sign == 1 ? "POSITIVE" : "NEGATIVE") +
+             " · mean " + fS_money(sed_mean) + " · CI low " + fS_money(sed_exp_lo) + " · n " + str.tostring(sed_n) +
+             " — normal approx, treat as rough", alert.freq_once_per_bar_close)
+// ======================= END SECTION B · DASHBOARD ===========================
+
+// =============================================================================
+// End of file · Statistical Edge Validation Dashboard v1.0
+// =============================================================================

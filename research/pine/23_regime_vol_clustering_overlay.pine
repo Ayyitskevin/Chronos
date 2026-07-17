@@ -1,0 +1,257 @@
+//@version=6
+// =============================================================================
+// Regime-Dependent Volatility Clustering Overlay v1.0 (5T Pine Suite · Desk Kit)
+//
+// WHAT THIS IS.
+// Two honest measurements about volatility on THIS chart, kept separate:
+//   1. CLUSTERING STRENGTH — does volatility cluster here at all? The study
+//      reports the lag-1..lag-5 autocorrelation of |log return|. Positive
+//      autocorrelation of absolute returns IS volatility clustering; the
+//      lag-1 value plus a labeled heuristic threshold gives the verdict.
+//   2. CONDITIONAL VOL CONTEXT — how high is current volatility BY THE
+//      STANDARDS OF THE CURRENT REGIME? With a regime source (external link
+//      or internal fallback), the study keeps a separate realized-vol history
+//      ring per regime (cap 250 samples per state) and reports current vol
+//      as a percentile of ITS OWN regime's history. "P82 within Bear
+//      history" is high even by bear standards; the same absolute vol might
+//      sit at P30 in another state. That conditional percentile is the
+//      tool's point — the unconditional percentile is shown beside it so
+//      the two can disagree in plain sight.
+//
+// RESEARCH BASIS, stated plainly.
+// Volatility clustering — "large changes tend to be followed by large
+// changes, of either sign" — is Mandelbrot (1963, J. Business); the
+// ARCH/GARCH lineage (Engle 1982) is its formalization. Autocorrelation of
+// absolute returns is the standard diagnostic. The educational framing here
+// is inspired by the Quant Guild channel's volatility-regime treatments.
+//
+// HONESTY, stated plainly.
+//   1. Everything here is DESCRIPTIVE. Autocorrelation says |returns| were
+//      serially dependent over this chart's sample; it times nothing.
+//   2. The conditional percentile is a rank within a capped ring of THIS
+//      chart's own per-regime history. Thin rings carry the suite's flag;
+//      the number means little until the ring fills.
+//   3. The clustering verdict cut (lag-1 AC 0.10) is a labeled heuristic,
+//      not a significance test.
+//
+// Non-repaint: the rings, the conditional percentile, and the regime state
+// used for pushes advance on confirmed bars only; the live bar's vol line
+// and unconditional percentile are display-layer and settle at the close.
+// Alerts fire on confirmed bars. Decision support only — a human places
+// every trade. Risk controls outrank all signals.
+//
+// v1.0 changelog (2026-07-17):
+//   Initial release. Lag-1..5 |log-return| autocorrelation (corr window
+//   user-set) with labeled clustering verdict; per-regime realized-vol
+//   rings (cap 250/state, confirmed pushes, self-excluded percentile);
+//   conditional-vs-unconditional percentile pair; regime source = external
+//   link (strict -1/0/+1 validation) with internal hard-threshold z
+//   fallback, HUD names the live source; per-regime mean-vol row; tiered
+//   HUD; Data-Window exports; hot-conditional-percentile alert with
+//   optional JSON payloads (default OFF). Behavior-adjacent options ship
+//   at conservative defaults. Evidence label: needs user run.
+// =============================================================================
+indicator("Regime-Dependent Volatility Clustering Overlay v1.0", shorttitle = "Vol Cluster v1",
+     overlay = false)
+
+grp_mode = "0 · Mode"
+grp_vol  = "1 · Volatility & Clustering"
+grp_link = "2 · Regime Source"
+grp_ring = "3 · Conditional Vol Memory"
+grp_dsp  = "4 · Display"
+
+variant_tag = input.string("v1.0-base", "Variant tag (freeze-the-config discipline)", group = grp_mode,
+     tooltip = "Label this exact settings set. Any settings change = new tag = new variant with its own validation cycle. The tag prints on the HUD and in alerts so screenshots self-document.")
+
+vol_len = input.int(20, "Realized-vol lookback (bars)", minval = 5, maxval = 250, group = grp_vol,
+     tooltip = "Window for the stdev of one-bar log returns — the realized-vol statistic that gets ranked, ringed, and reported.")
+corr_len = input.int(100, "Autocorrelation window (bars)", minval = 30, maxval = 500, group = grp_vol,
+     tooltip = "Sample window for the lag-1..5 autocorrelation of |log return|. Longer = steadier estimate, slower to notice change.")
+ac_thr = input.float(0.10, "Clustering verdict cut (lag-1 AC)", minval = 0.0, maxval = 0.9, step = 0.01, group = grp_vol,
+     tooltip = "Lag-1 autocorrelation at or above this reads CLUSTERING PRESENT on the HUD. A labeled heuristic, not a significance test.")
+pct_lookback = input.int(252, "Unconditional percentile lookback (bars)", minval = 50, maxval = 2000, group = grp_vol,
+     tooltip = "Window for the UNCONDITIONAL percentile rank of current vol — the naive context the conditional percentile is meant to correct.")
+
+use_regime_link = input.bool(false, "Use external regime link", group = grp_link)
+regime_src = input.source(close, "Regime link (wire to a REGIME_EXPORT)", group = grp_link,
+     tooltip = "Wire to any suite script's REGIME_EXPORT. Validated STRICTLY: only exact -1 / 0 / +1 values count. Anything else falls back to the internal classifier and the HUD flags LINK?.")
+z_lookback = input.int(20, "Internal fallback: z lookback (bars)", minval = 5, maxval = 250, group = grp_link,
+     tooltip = "The fallback classifier is the suite observation — volatility-normalized window return z-score — with hard thresholds and no hysteresis. A convenience stand-in, not a substitute for the flagship engine.")
+z_enter = input.float(0.85, "Internal fallback: z threshold", minval = 0.10, maxval = 3.00, step = 0.05, group = grp_link)
+
+ring_cap = input.int(250, "Ring capacity per regime (samples)", minval = 30, maxval = 250, group = grp_ring,
+     tooltip = "Confirmed realized-vol samples kept per regime state. Capped so the conditional percentile reflects RECENT regime character, not the whole archive.")
+min_ring_n = input.int(30, "Thin-sample warning (ring n)", minval = 5, maxval = 250, group = grp_ring,
+     tooltip = "Below this many same-regime samples the conditional percentile carries the suite's thin-sample flag and the hot alert stays quiet.")
+hot_pct = input.float(90.0, "Alert: conditional percentile crossing", minval = 50.0, maxval = 99.0, step = 1.0, group = grp_ring,
+     tooltip = "Confirmed-bar alert when the conditional percentile crosses up through this level — current vol turning extreme BY ITS OWN REGIME'S standards.")
+
+hud_mode = input.string("Full", "HUD mode", options = ["Off", "Micro", "Full"], group = grp_dsp)
+hud_pos_in = input.string("top_right", "HUD position", options = ["top_left", "top_center", "top_right", "bottom_left", "bottom_center", "bottom_right"], group = grp_dsp)
+show_vol_plot = input.bool(true, "Plot realized vol (%/bar)", group = grp_dsp)
+show_cond_plot = input.bool(true, "Plot conditional percentile", group = grp_dsp)
+use_json_alerts = input.bool(false, "JSON alert payloads (webhook)", group = grp_dsp,
+     tooltip = "OFF: human-readable alert text. ON: machine-readable JSON for webhook automation. Display-layer only.")
+
+// =============================================================================
+// Palette & helpers (suite standard)
+// =============================================================================
+c_bull  = color.rgb(89, 159, 125)
+c_bear  = color.rgb(190, 96, 111)
+c_neut  = color.rgb(112, 126, 148)
+c_gold  = color.rgb(214, 162, 82)
+c_panel = color.new(#0E1316, 5)
+c_cell  = color.new(#151D22, 7)
+c_cell2 = color.new(#10171B, 9)
+c_frame = color.new(#5BD6B0, 88)
+c_text  = color.white
+c_dim   = color.new(color.white, 45)
+c_faint = color.new(color.white, 68)
+
+f_pos(_s) =>
+    switch _s
+        "top_left"      => position.top_left
+        "top_center"    => position.top_center
+        "top_right"     => position.top_right
+        "bottom_left"   => position.bottom_left
+        "bottom_center" => position.bottom_center
+        "bottom_right"  => position.bottom_right
+        => position.top_right
+f_fmt(_x, _d) =>
+    _m = math.pow(10.0, _d)
+    na(_x) ? "n/a" : str.tostring(math.round(_x * _m) / _m)
+f_tcell(_tbl, _c, _r, _txt, _col, _bg) =>
+    table.cell(_tbl, _c, _r, _txt, text_color = _col, bgcolor = _bg, text_size = size.tiny, text_halign = text.align_center)
+// Wilson score lower bound (z = 1.96), suite-standard honesty for counted rates.
+f_wilson_lo(_p, _n) =>
+    _n <= 0 or na(_p) ? float(na) :
+         (_p + 1.96 * 1.96 / (2 * _n) - 1.96 * math.sqrt((_p * (1 - _p) + 1.96 * 1.96 / (4 * _n)) / _n)) / (1 + 1.96 * 1.96 / _n)
+f_rname(_s) =>
+    _s == 1 ? "Bull" : _s == -1 ? "Bear" : "Neutral"
+f_rcol(_s) =>
+    _s == 1 ? c_bull : _s == -1 ? c_bear : c_neut
+
+// =============================================================================
+// Observation: realized vol, |return| autocorrelation, unconditional pctile
+// =============================================================================
+one_bar_ret = not na(close[1]) and close > 0 and close[1] > 0 ? math.log(close / close[1]) : float(na)
+abs_ret = math.abs(one_bar_ret)
+rv = ta.stdev(one_bar_ret, vol_len)
+vol_pct = ta.percentrank(rv, pct_lookback)
+
+ac1 = ta.correlation(abs_ret, abs_ret[1], corr_len)
+ac2 = ta.correlation(abs_ret, abs_ret[2], corr_len)
+ac3 = ta.correlation(abs_ret, abs_ret[3], corr_len)
+ac4 = ta.correlation(abs_ret, abs_ret[4], corr_len)
+ac5 = ta.correlation(abs_ret, abs_ret[5], corr_len)
+ac_mean = math.avg(ac1, ac2, ac3, ac4, ac5)
+
+var int rv_seen = 0
+if barstate.isconfirmed and not na(rv)
+    rv_seen += 1
+warmed = not na(vol_pct)
+
+// =============================================================================
+// Regime source: external link (strict -1/0/+1) with internal z fallback.
+// The HUD names whichever source is live; an enabled-but-invalid link reads
+// LINK? and the internal classifier takes over rather than polluting rings.
+// =============================================================================
+win_ret = not na(close[z_lookback]) and close > 0 and close[z_lookback] > 0 ? math.log(close / close[z_lookback]) : float(na)
+win_vol = ta.stdev(one_bar_ret, z_lookback) * math.sqrt(z_lookback)
+obs_z = not na(win_ret) and not na(win_vol) and win_vol > 0 ? win_ret / win_vol : float(na)
+int z_state = na(obs_z) ? 0 : obs_z > z_enter ? 1 : obs_z < -z_enter ? -1 : 0
+_rvl = regime_src
+link_valid = use_regime_link and not na(_rvl) and (_rvl == -1.0 or _rvl == 0.0 or _rvl == 1.0)
+int regime_now = link_valid ? int(_rvl) : z_state
+regime_ready = link_valid or not na(obs_z)
+regime_src_txt = link_valid ? "external link" : use_regime_link ? "LINK? → internal z" : "internal z"
+
+// =============================================================================
+// Per-regime realized-vol rings (confirmed pushes, cap per state) and the
+// conditional percentile — current vol ranked against PRIOR samples of its
+// own regime only (self-excluded: rank first, push after).
+// =============================================================================
+var array<float> ring_bull = array.new_float()
+var array<float> ring_neut = array.new_float()
+var array<float> ring_bear = array.new_float()
+var float cond_pctile = na
+var int cond_n = 0
+var int cond_reg = 0
+bool cond_hot_cross = false
+if barstate.isconfirmed and not na(rv) and regime_ready
+    array<float> _ring = ring_neut
+    if regime_now == 1
+        _ring := ring_bull
+    if regime_now == -1
+        _ring := ring_bear
+    int _n = array.size(_ring)
+    float _le = 0.0
+    if _n > 0
+        for _i = 0 to _n - 1
+            _le += array.get(_ring, _i) <= rv ? 1.0 : 0.0
+    float _newp = _n > 0 ? _le * 100.0 / _n : float(na)
+    cond_hot_cross := _n >= min_ring_n and not na(_newp) and _newp >= hot_pct and (na(cond_pctile) or cond_pctile < hot_pct)
+    cond_pctile := _newp
+    cond_n := _n
+    cond_reg := regime_now
+    array.push(_ring, rv)
+    if array.size(_ring) > ring_cap
+        array.shift(_ring)
+
+// =============================================================================
+// Plots & exports
+// =============================================================================
+plot(show_vol_plot ? rv * 100.0 : na, "Realized vol (%/bar)", color = color.new(c_neut, 25), linewidth = 1)
+plot(show_cond_plot ? cond_pctile : na, "Conditional vol percentile", color = f_rcol(cond_reg), linewidth = 2)
+hline(hot_pct, "Hot percentile", color = color.new(color.white, 80), linestyle = hline.style_dotted)
+
+plot(rv * 100.0, "VC_VOL_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(vol_pct, "VC_UNCOND_PCTILE_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(cond_pctile, "VC_COND_PCTILE_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(ac1, "VC_LAG1_AC_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(float(cond_n), "VC_RING_N_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+
+// =============================================================================
+// HUD
+// =============================================================================
+var table hud = table.new(f_pos(hud_pos_in), 2, 7, bgcolor = c_panel, frame_color = c_frame,
+     frame_width = 1, border_color = color.new(color.white, 92), border_width = 1)
+if barstate.islast and hud_mode != "Off"
+    _state_txt = not warmed ? "WARMING · " + str.tostring(math.min(rv_seen, pct_lookback)) + "/" + str.tostring(pct_lookback) :
+         na(cond_pctile) ? "P n/a · ring empty" :
+         "P" + f_fmt(cond_pctile, 0) + " within " + f_rname(cond_reg) + " history"
+    _state_bg = not warmed or na(cond_pctile) ? c_cell : color.new(f_rcol(cond_reg), 45)
+    f_tcell(hud, 0, 0, "Vol Cluster " + variant_tag, c_text, c_frame)
+    f_tcell(hud, 1, 0, _state_txt, c_text, _state_bg)
+    if hud_mode == "Full"
+        _ac_verdict = na(ac1) ? "n/a" : ac1 >= ac_thr ? "CLUSTERING PRESENT*" : "clustering weak*"
+        f_tcell(hud, 0, 1, "Clustering (lag-1 AC)", c_dim, c_panel)
+        f_tcell(hud, 1, 1, f_fmt(ac1, 2) + " · lags1-5 mean " + f_fmt(ac_mean, 2) + " · " + _ac_verdict, na(ac1) ? c_faint : ac1 >= ac_thr ? c_gold : c_dim, c_cell)
+        f_tcell(hud, 0, 2, "Vol now · uncond pctile", c_dim, c_panel)
+        f_tcell(hud, 1, 2, f_fmt(rv * 100.0, 2) + "%/bar · P" + f_fmt(vol_pct, 0), c_dim, c_cell)
+        f_tcell(hud, 0, 3, "Cond pctile (this regime)", c_dim, c_panel)
+        f_tcell(hud, 1, 3, "P" + f_fmt(cond_pctile, 0) + " · ring n" + str.tostring(cond_n) + (cond_n < min_ring_n ? " !" : ""), cond_n < min_ring_n ? c_faint : c_dim, c_cell)
+        _mb = array.size(ring_bull) > 0 ? array.avg(ring_bull) * 100.0 : float(na)
+        _mn = array.size(ring_neut) > 0 ? array.avg(ring_neut) * 100.0 : float(na)
+        _mbr = array.size(ring_bear) > 0 ? array.avg(ring_bear) * 100.0 : float(na)
+        f_tcell(hud, 0, 4, "Mean vol B / N / Br", c_dim, c_panel)
+        f_tcell(hud, 1, 4, f_fmt(_mb, 2) + " / " + f_fmt(_mn, 2) + " / " + f_fmt(_mbr, 2) + " %/bar", c_dim, c_cell)
+        f_tcell(hud, 0, 5, "Regime source", c_dim, c_panel)
+        f_tcell(hud, 1, 5, regime_src_txt + " · " + f_rname(cond_reg), use_regime_link and not link_valid ? c_bear : c_dim, c_cell)
+        f_tcell(hud, 0, 6, "*descriptive statistics", c_faint, c_panel)
+        f_tcell(hud, 1, 6, "conditions context, never signals · not advice", c_faint, c_panel)
+
+// =============================================================================
+// Alerts (confirmed-bar events; formal wording per suite convention)
+// =============================================================================
+alertcondition(cond_hot_cross, "Conditional vol percentile crossed hot", "Vol Clustering Overlay: volatility crossed the hot percentile within its own regime history")
+if cond_hot_cross
+    if use_json_alerts
+        alert('{"ev":"vol_cluster","sym":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","regime":"' + f_rname(cond_reg) + '","cond_pctile":' + (na(cond_pctile) ? "null" : f_fmt(cond_pctile, 1)) + ',"uncond_pctile":' + (na(vol_pct) ? "null" : f_fmt(vol_pct, 1)) + ',"ring_n":' + str.tostring(cond_n) + ',"lag1_ac":' + (na(ac1) ? "null" : f_fmt(ac1, 3)) + ',"vol_bar_pct":' + (na(rv) ? "null" : f_fmt(rv * 100.0, 3)) + ',"variant":"' + variant_tag + '","t":' + str.tostring(time) + '}', alert.freq_once_per_bar_close)
+    else
+        alert("Vol Clustering [" + variant_tag + "]: " + syminfo.ticker + " vol P" + f_fmt(cond_pctile, 0) +
+             " within " + f_rname(cond_reg) + " history (uncond P" + f_fmt(vol_pct, 0) + ") · ring n" + str.tostring(cond_n) +
+             " · lag-1 AC " + f_fmt(ac1, 2), alert.freq_once_per_bar_close)
+
+// =============================================================================
+// End of file · Regime-Dependent Volatility Clustering Overlay v1.0

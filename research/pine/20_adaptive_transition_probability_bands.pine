@@ -1,0 +1,275 @@
+//@version=6
+// =============================================================================
+// Adaptive Regime Transition Probability Bands v1.0 (5T Pine Suite · Desk Kit)
+//
+// WHAT THIS IS.
+// A counted 3×3 regime transition matrix (Bull / Neutral / Bear, confirmed
+// bars, Laplace-smoothed) propagated k steps forward from a one-hot vector
+// on the current state. The three bands answer exactly one question:
+// "IF the counted matrix held, a chain sitting in today's state would
+// occupy Bull / Neutral / Bear with these probabilities k bars out."
+//
+// WHAT THIS IS NOT — say it three times (header, HUD, alerts).
+// This is CONDITIONAL ARITHMETIC on counted history, not a forecast:
+//   1. The matrix DRIFTS. It is this chart's past transition frequencies;
+//      nothing pins the future to them.
+//   2. Sample sizes bound confidence. Row counts are shown, thin rows are
+//      flagged, and a Wilson 95% lower bound is reported on the current
+//      row's stay frequency — when n is small the arithmetic is precise
+//      and the evidence is not.
+//   3. Regime processes may not be Markov at all — dwell may depend on age.
+//      That assumption is measured, not assumed, by the companion
+//      Markov Property Regime Persistence Gauge; read the two together.
+// Visualization framing inspired by the Quant Guild channel's
+// transition-matrix treatments.
+//
+// Non-repaint: classification and counting advance on confirmed bars only;
+// the k-step bands recompute from committed state + counted matrix.
+// Decision support only — a human places every trade. Risk controls
+// outrank all signals.
+//
+// v1.0 changelog (2026-07-17):
+//   Initial release. Regime source = external link (strict -1/0/+1, per-bar
+//   validation) with internal z-classifier fallback shared with the
+//   Persistence Gauge — HUD names the live source. Confirmed-bar 3×3
+//   counting; Laplace smoothing (alpha, default 1.0) applied at probability
+//   time; k-step occupancy propagation (k 1..20, default 5) via explicit
+//   3-term sums; fixed 1/3/5/10-bar HUD horizons; 32-iteration long-run
+//   stationary estimate rendered only when every row has n ≥ min_row_n;
+//   probability bands plotted 0–100 with threshold-crossing alerts (bull /
+//   bear, confirmed) and optional JSON payloads (default OFF). Conditional-
+//   arithmetic honesty stated in header, HUD footer, and alert text.
+//   Evidence label: needs user run.
+// =============================================================================
+indicator("Adaptive Regime Transition Probability Bands v1.0", shorttitle = "Trans Bands v1",
+     overlay = false)
+
+grp_mode = "0 · Mode"
+grp_src  = "1 · Regime Source"
+grp_mx   = "2 · Matrix & Horizon"
+grp_al   = "3 · Alerts"
+grp_dsp  = "4 · Display"
+
+variant_tag = input.string("v1.0-base", "Variant tag (freeze-the-config discipline)", group = grp_mode,
+     tooltip = "Label this exact settings set. Any settings change = new tag = new variant with its own validation cycle. The tag prints on the HUD and in alerts so screenshots self-document.")
+
+regime_src = input.source(close, "Regime link (wire to a REGIME_EXPORT)", group = grp_src,
+     tooltip = "Wire to any suite script's REGIME_EXPORT. Valid only when the bar's value is exactly -1, 0, or +1; on any other value the bar falls back to the internal classifier below. The HUD names which source is live.")
+use_link = input.bool(true, "Use regime link when valid (OFF = force internal)", group = grp_src,
+     tooltip = "Default ON changes nothing while the link is unwired (close is never a valid -1/0/+1 stream, so the internal classifier runs). Turn OFF to force the internal classifier even with a wire attached.")
+cls_lookback = input.int(20, "Internal classifier lookback (bars)", minval = 5, maxval = 250, group = grp_src,
+     tooltip = "Internal fallback: window log-return divided by (stdev of one-bar log returns × √n) — the suite's core z observation. z > +0.85 → bull, z < -0.85 → bear, else neutral, confirmed bars.")
+
+laplace_alpha = input.float(1.0, "Laplace pseudo-count alpha", minval = 0.1, maxval = 10.0, step = 0.1, group = grp_mx,
+     tooltip = "Smoothing applied when the counted matrix is turned into probabilities: (count + alpha) / (row n + 3·alpha). Keeps early probabilities defined and never lets a never-seen transition read exactly 0% — which counted history could not support anyway.")
+k_horizon = input.int(5, "k-step horizon (bars)", minval = 1, maxval = 20, group = grp_mx,
+     tooltip = "How many steps the one-hot current-state vector is pushed through the matrix for the plotted bands. The HUD mini-table always shows 1/3/5/10 alongside.")
+min_row_n = input.int(20, "Minimum row n (thin flag / stationary gate)", minval = 5, maxval = 500, group = grp_mx,
+     tooltip = "Rows with fewer counted transitions carry the thin-sample flag, WARMING holds until this many total transitions are counted, and the long-run stationary row renders only when ALL THREE rows clear it.")
+
+alert_th = input.float(60.0, "Alert: k-step probability threshold %", minval = 5.0, maxval = 99.0, step = 1.0, group = grp_al,
+     tooltip = "Confirmed-bar alert when the k-step Bull or Bear occupancy probability crosses ABOVE this level. A crossing of counted arithmetic — not a forecast and not a signal.")
+
+hud_mode = input.string("Full", "HUD mode", options = ["Off", "Micro", "Full"], group = grp_dsp)
+hud_pos_in = input.string("top_right", "HUD position", options = ["top_left", "top_center", "top_right", "bottom_left", "bottom_center", "bottom_right"], group = grp_dsp)
+show_prob_plots = input.bool(true, "Plot k-step probability bands", group = grp_dsp)
+use_json_alerts = input.bool(false, "JSON alert payloads (webhook)", group = grp_dsp,
+     tooltip = "OFF: human-readable alert text. ON: machine-readable JSON for webhook automation. Display-layer only.")
+
+// =============================================================================
+// Palette & helpers (suite standard)
+// =============================================================================
+c_bull  = color.rgb(89, 159, 125)
+c_bear  = color.rgb(190, 96, 111)
+c_neut  = color.rgb(112, 126, 148)
+c_gold  = color.rgb(214, 162, 82)
+c_panel = color.new(#0E1316, 5)
+c_cell  = color.new(#151D22, 7)
+c_cell2 = color.new(#10171B, 9)
+c_frame = color.new(#5BD6B0, 88)
+c_text  = color.white
+c_dim   = color.new(color.white, 45)
+c_faint = color.new(color.white, 68)
+
+f_pos(_s) =>
+    switch _s
+        "top_left"      => position.top_left
+        "top_center"    => position.top_center
+        "top_right"     => position.top_right
+        "bottom_left"   => position.bottom_left
+        "bottom_center" => position.bottom_center
+        "bottom_right"  => position.bottom_right
+        => position.top_right
+f_fmt(_x, _d) =>
+    _m = math.pow(10.0, _d)
+    na(_x) ? "n/a" : str.tostring(math.round(_x * _m) / _m)
+f_tcell(_tbl, _c, _r, _txt, _col, _bg) =>
+    table.cell(_tbl, _c, _r, _txt, text_color = _col, bgcolor = _bg, text_size = size.tiny, text_halign = text.align_center)
+// Wilson score lower bound (z = 1.96), suite-standard honesty for counted rates.
+f_wilson_lo(_p, _n) =>
+    _n <= 0 or na(_p) ? float(na) :
+         (_p + 1.96 * 1.96 / (2 * _n) - 1.96 * math.sqrt((_p * (1 - _p) + 1.96 * 1.96 / (4 * _n)) / _n)) / (1 + 1.96 * 1.96 / _n)
+f_rname(_s) =>
+    _s == 1 ? "BULL" : _s == -1 ? "BEAR" : "NEUTRAL"
+// State index convention (suite): row/col 0 = Bull, 1 = Neutral, 2 = Bear
+f_sidx(_s) =>
+    _s == 1 ? 0 : _s == 0 ? 1 : 2
+
+// =============================================================================
+// Regime source: link (strict, per-bar) with internal z-classifier fallback
+// (same compact classifier as the Persistence Gauge — the two are companions)
+// =============================================================================
+one_bar_ret = not na(close[1]) and close > 0 and close[1] > 0 ? math.log(close / close[1]) : float(na)
+win_ret = not na(close[cls_lookback]) and close > 0 and close[cls_lookback] > 0 ? math.log(close / close[cls_lookback]) : float(na)
+win_vol = ta.stdev(one_bar_ret, cls_lookback) * math.sqrt(cls_lookback)
+obs_z = not na(win_ret) and not na(win_vol) and win_vol > 0 ? win_ret / win_vol : float(na)
+
+_lv = regime_src
+link_ok = use_link and not na(_lv) and (_lv == -1.0 or _lv == 0.0 or _lv == 1.0)
+int int_raw = na(obs_z) ? 0 : obs_z > 0.85 ? 1 : obs_z < -0.85 ? -1 : 0
+live_ready = link_ok or not na(obs_z)
+int live_state = link_ok ? int(_lv) : int_raw
+var string src_live = "INTERNAL"
+if barstate.isconfirmed
+    src_live := link_ok ? "LINK" : "INTERNAL"
+
+// =============================================================================
+// Transition counting (confirmed bars, stays + changes — suite Markov-readout
+// method: counts array 9, rows array 3)
+// =============================================================================
+var array<int> tr_counts = array.new_int(9, 0)
+var array<int> tr_rows = array.new_int(3, 0)
+var int cur_reg = 0
+var bool seeded = false
+var int obs_n = 0
+if barstate.isconfirmed and live_ready
+    int _s = live_state
+    if not seeded
+        cur_reg := _s
+        seeded := true
+    else
+        int _fr = f_sidx(cur_reg)
+        int _to = f_sidx(_s)
+        array.set(tr_counts, _fr * 3 + _to, array.get(tr_counts, _fr * 3 + _to) + 1)
+        array.set(tr_rows, _fr, array.get(tr_rows, _fr) + 1)
+        obs_n += 1
+        cur_reg := _s
+
+warmed = seeded and obs_n >= min_row_n
+
+// Laplace-smoothed transition probability row → col
+f_A(_fr, _to) =>
+    _n = array.get(tr_rows, _fr)
+    _c = array.get(tr_counts, _fr * 3 + _to)
+    (_c + laplace_alpha) / (_n + 3.0 * laplace_alpha)
+f_mx() =>
+    [f_A(0, 0), f_A(0, 1), f_A(0, 2), f_A(1, 0), f_A(1, 1), f_A(1, 2), f_A(2, 0), f_A(2, 1), f_A(2, 2)]
+// k-step occupancy: one-hot current state pushed through the matrix k times
+// (explicit 3-term sums, bounded loop). Conditional arithmetic — IF the
+// matrix held.
+f_kstep(_k) =>
+    [_a00, _a01, _a02, _a10, _a11, _a12, _a20, _a21, _a22] = f_mx()
+    float _vb = cur_reg == 1 ? 1.0 : 0.0
+    float _vn = cur_reg == 0 ? 1.0 : 0.0
+    float _vr = cur_reg == -1 ? 1.0 : 0.0
+    for _i = 1 to _k
+        float _nb = _vb * _a00 + _vn * _a10 + _vr * _a20
+        float _nn = _vb * _a01 + _vn * _a11 + _vr * _a21
+        float _nr = _vb * _a02 + _vn * _a12 + _vr * _a22
+        _vb := _nb
+        _vn := _nn
+        _vr := _nr
+    [_vb, _vn, _vr]
+// Long-run stationary estimate: 32 propagation iterations from uniform
+// (suite base-rate method). Rendered only when all three rows clear min_row_n.
+f_stationary() =>
+    [_a00, _a01, _a02, _a10, _a11, _a12, _a20, _a21, _a22] = f_mx()
+    float _vb = 1.0 / 3.0
+    float _vn = 1.0 / 3.0
+    float _vr = 1.0 / 3.0
+    for _i = 1 to 32
+        float _nb = _vb * _a00 + _vn * _a10 + _vr * _a20
+        float _nn = _vb * _a01 + _vn * _a11 + _vr * _a21
+        float _nr = _vb * _a02 + _vn * _a12 + _vr * _a22
+        _vb := _nb
+        _vn := _nn
+        _vr := _nr
+    [_vb, _vn, _vr]
+
+[vb_k, vn_k, vr_k] = f_kstep(k_horizon)
+pb_pct = warmed ? vb_k * 100.0 : float(na)
+pn_pct = warmed ? vn_k * 100.0 : float(na)
+pr_pct = warmed ? vr_k * 100.0 : float(na)
+
+// Current-row evidence: raw (unsmoothed) stay frequency + Wilson floor
+cur_idx = f_sidx(cur_reg)
+row_n_cur = seeded ? array.get(tr_rows, cur_idx) : 0
+stay_cnt = seeded ? array.get(tr_counts, cur_idx * 3 + cur_idx) : 0
+stay_p = row_n_cur > 0 ? stay_cnt * 1.0 / row_n_cur : float(na)
+stay_wlo = f_wilson_lo(stay_p, row_n_cur)
+
+// Threshold crossings (confirmed bars, warm only)
+bull_cross = barstate.isconfirmed and warmed and not na(pb_pct[1]) and pb_pct >= alert_th and pb_pct[1] < alert_th
+bear_cross = barstate.isconfirmed and warmed and not na(pr_pct[1]) and pr_pct >= alert_th and pr_pct[1] < alert_th
+
+// =============================================================================
+// Plots & exports (bands 0–100)
+// =============================================================================
+plot(show_prob_plots ? pb_pct : na, "P(Bull) k-step %", color = c_bull, linewidth = 2)
+plot(show_prob_plots ? pn_pct : na, "P(Neutral) k-step %", color = color.new(c_neut, 35), linewidth = 1)
+plot(show_prob_plots ? pr_pct : na, "P(Bear) k-step %", color = c_bear, linewidth = 2)
+hline(alert_th, "Alert threshold", color = color.new(color.white, 85), linestyle = hline.style_dotted)
+
+plot(pb_pct, "TB_P_BULL_K_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(pn_pct, "TB_P_NEUT_K_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(pr_pct, "TB_P_BEAR_K_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(float(k_horizon), "TB_K_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(seeded ? float(row_n_cur) : na, "TB_ROW_N_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+
+// =============================================================================
+// HUD
+// =============================================================================
+var table hud = table.new(f_pos(hud_pos_in), 2, 8, bgcolor = c_panel, frame_color = c_frame,
+     frame_width = 1, border_color = color.new(color.white, 92), border_width = 1)
+if barstate.islast and hud_mode != "Off"
+    _hdr_txt = not warmed ? "WARMING · " + str.tostring(math.min(obs_n, min_row_n)) + "/" + str.tostring(min_row_n) :
+         f_rname(cur_reg) + " (" + src_live + ") · n" + str.tostring(row_n_cur) + (row_n_cur < min_row_n ? " !" : "") + " · stay Wlo " + f_fmt(stay_wlo * 100.0, 0) + "%"
+    _hdr_bg = not warmed ? c_cell : cur_reg == 1 ? color.new(c_bull, 45) : cur_reg == -1 ? color.new(c_bear, 45) : c_cell
+    f_tcell(hud, 0, 0, "Trans Bands " + variant_tag, c_text, c_frame)
+    f_tcell(hud, 1, 0, _hdr_txt, c_text, _hdr_bg)
+    if hud_mode == "Full"
+        f_tcell(hud, 0, 1, "k-step (k=" + str.tostring(k_horizon) + ")", c_dim, c_panel)
+        f_tcell(hud, 1, 1, "B " + f_fmt(pb_pct, 0) + " / N " + f_fmt(pn_pct, 0) + " / Br " + f_fmt(pr_pct, 0) + " %", c_dim, c_cell)
+        [h1b, h1n, h1r] = f_kstep(1)
+        [h3b, h3n, h3r] = f_kstep(3)
+        [h5b, h5n, h5r] = f_kstep(5)
+        [h10b, h10n, h10r] = f_kstep(10)
+        f_tcell(hud, 0, 2, "h=1", c_dim, c_panel)
+        f_tcell(hud, 1, 2, warmed ? "B " + f_fmt(h1b * 100.0, 0) + " / N " + f_fmt(h1n * 100.0, 0) + " / Br " + f_fmt(h1r * 100.0, 0) + " %" : "warming", c_dim, c_cell2)
+        f_tcell(hud, 0, 3, "h=3", c_dim, c_panel)
+        f_tcell(hud, 1, 3, warmed ? "B " + f_fmt(h3b * 100.0, 0) + " / N " + f_fmt(h3n * 100.0, 0) + " / Br " + f_fmt(h3r * 100.0, 0) + " %" : "warming", c_dim, c_cell2)
+        f_tcell(hud, 0, 4, "h=5", c_dim, c_panel)
+        f_tcell(hud, 1, 4, warmed ? "B " + f_fmt(h5b * 100.0, 0) + " / N " + f_fmt(h5n * 100.0, 0) + " / Br " + f_fmt(h5r * 100.0, 0) + " %" : "warming", c_dim, c_cell2)
+        f_tcell(hud, 0, 5, "h=10", c_dim, c_panel)
+        f_tcell(hud, 1, 5, warmed ? "B " + f_fmt(h10b * 100.0, 0) + " / N " + f_fmt(h10n * 100.0, 0) + " / Br " + f_fmt(h10r * 100.0, 0) + " %" : "warming", c_dim, c_cell2)
+        _rows_ok = array.get(tr_rows, 0) >= min_row_n and array.get(tr_rows, 1) >= min_row_n and array.get(tr_rows, 2) >= min_row_n
+        [st_b, st_n, st_r] = f_stationary()
+        f_tcell(hud, 0, 6, "Stationary (32-iter)", c_dim, c_panel)
+        f_tcell(hud, 1, 6, _rows_ok ? "B " + f_fmt(st_b * 100.0, 0) + " / N " + f_fmt(st_n * 100.0, 0) + " / Br " + f_fmt(st_r * 100.0, 0) + " %" : "n/a — thin rows (n " + str.tostring(array.get(tr_rows, 0)) + "/" + str.tostring(array.get(tr_rows, 1)) + "/" + str.tostring(array.get(tr_rows, 2)) + ")", _rows_ok ? c_dim : c_faint, c_cell)
+        f_tcell(hud, 0, 7, "*conditional arithmetic on counted history", c_faint, c_panel)
+        f_tcell(hud, 1, 7, "IF the matrix held · not a forecast · not advice", c_faint, c_panel)
+
+// =============================================================================
+// Alerts (confirmed-bar threshold crossings; conditional-arithmetic wording)
+// =============================================================================
+alertcondition(bull_cross, "k-step P(Bull) crossed above threshold", "Transition Bands: k-step Bull occupancy probability crossed above the alert threshold (conditional arithmetic, not a forecast)")
+alertcondition(bear_cross, "k-step P(Bear) crossed above threshold", "Transition Bands: k-step Bear occupancy probability crossed above the alert threshold (conditional arithmetic, not a forecast)")
+if bull_cross or bear_cross
+    _side = bull_cross ? "bull" : "bear"
+    if use_json_alerts
+        alert('{"ev":"trans_bands","sym":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","side":"' + _side + '","k":' + str.tostring(k_horizon) + ',"p_bull":' + (na(pb_pct) ? "null" : f_fmt(pb_pct, 1)) + ',"p_neut":' + (na(pn_pct) ? "null" : f_fmt(pn_pct, 1)) + ',"p_bear":' + (na(pr_pct) ? "null" : f_fmt(pr_pct, 1)) + ',"row_n":' + str.tostring(row_n_cur) + ',"th":' + f_fmt(alert_th, 1) + ',"source":"' + src_live + '","variant":"' + variant_tag + '","t":' + str.tostring(time) + '}', alert.freq_once_per_bar_close)
+    else
+        alert("Transition Bands [" + variant_tag + "]: " + syminfo.ticker + " k-step " + _side + " occupancy crossed " + f_fmt(alert_th, 0) + "% (k=" + str.tostring(k_horizon) + ") · B " + f_fmt(pb_pct, 0) + " / N " + f_fmt(pn_pct, 0) + " / Br " + f_fmt(pr_pct, 0) + " · row n" + str.tostring(row_n_cur) + " · IF the matrix held — not a forecast", alert.freq_once_per_bar_close)
+
+// =============================================================================
+// End of file · Adaptive Regime Transition Probability Bands v1.0

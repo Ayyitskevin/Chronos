@@ -1,0 +1,88 @@
+# Canonical specification — Markov regime-gated trend continuation (derived core).
+# Validated against chronos.specs.schema.StrategySpec. See docs/PARITY_REPORT.md.
+
+strategy_id: regime_trend_v1
+version: 1.0.0
+family: regime_gated_trend_continuation
+description: >
+  Long-only daily-bar derivation of the load-bearing core of Pine 01 "Markov
+  Regime BULL+ v1.1" (whose header states "the gate is the strategy"): a
+  volatility-normalized regime engine with hysteresis and confirmation, an
+  EMA(100) direction filter, and a 3-state Markov continuation gate on the
+  bull row. The AVWAP/relative-strength setup layers, pyramiding legs,
+  session micro-gates, and script-internal equity halts are DELIBERATELY
+  omitted; the platform risk engine owns halts. This is a derived strategy,
+  not a behavioral clone of the Pine script.
+supported_symbols: [SPY, QQQ, IWM, DIA, GLD, TLT]
+supported_intervals: ["1d"]
+required_fields: [open, high, low, close, volume]
+required_lookback_bars: 275
+signal_logic: >
+  regime_z(t) = ln(close_t / close_{t-20}) / (stdev(ln(close_i/close_{i-1}),
+  20) * sqrt(20)), computed on closed bars only. Realized-vol percentrank
+  over the prior 252 observations scales thresholds by
+  max(0.5, 1 + (rank - 50)/100 * 0.25). enter_z = max(0.10, 0.85 * factor);
+  exit_z = max(0.05, min(0.55 * factor, enter_z - 0.05)). Raw state: BULL if
+  regime_z > enter_z and close > EMA100 (hysteresis: holds while regime_z >
+  exit_z); BEAR mirrored; else NEUTRAL. A state publishes after 2
+  consecutive closed bars (confirmation). Markov: count confirmed-state
+  transitions (stride 1, 3x3 matrix); bull-row stay probability =
+  stays/row_n (Raw estimator).
+entry_rules:
+  - flat AND confirmed state == BULL
+  - bull-row Markov samples >= 20 AND stay probability >= 0.60
+  - full indicator warm-up complete (>= 275 bars)
+  - order: next-bar limit at reference close * 1.001, DAY, whole shares
+exit_rules:
+  - confirmed state leaves BULL (exit on next bar, limit at close * 0.999)
+  - protective stop traded through (see stop_logic)
+stop_logic: >
+  Protective stop at entry_limit * (1 - min(0.5, max(0.005, 2.0 * ATR14 /
+  close))) — the Pine script's fallback ATR stop. The backtest models it as
+  a resting stop evaluated per bar; live/paper carries it as the risk
+  engine's mandatory stop_price on the entry intent.
+target_logic: none — exits are regime loss or stop only in this derivation
+sizing_logic: >
+  Portfolio layer sizes floor(min(cash, equity * 0.95 * policy cap) /
+  limit) whole shares; the risk engine independently caps notional,
+  exposure, and per-trade risk. The Pine script's own percent-risk sizing is
+  NOT used (platform risk engine owns sizing limits).
+cooldown_bars: 0
+session_rules: regular US session daily bars only; no extended-hours data
+regime_constraints: trades only in confirmed BULL regime by construction
+liquidity_constraints: >
+  Candidate universe restricted to highly liquid US ETFs (ASSUMPTIONS A-11);
+  no per-bar liquidity check on daily ETF bars.
+parameters:
+  - {name: lookback, value: 20, minimum: 10, maximum: 60, description: regime window (Daily preset)}
+  - {name: enter_z_base, value: 0.85, minimum: 0.4, maximum: 1.5, description: entry threshold}
+  - {name: exit_z_base, value: 0.55, minimum: 0.2, maximum: 1.2, description: hysteresis exit threshold}
+  - {name: confirm_bars, value: 2, minimum: 1, maximum: 5, description: confirmation bars}
+  - {name: ema_filter_len, value: 100, minimum: 20, maximum: 300, description: direction filter}
+  - {name: vol_percentile_len, value: 252, minimum: 100, maximum: 500, description: vol percentile window}
+  - {name: percentile_sensitivity, value: 0.25, minimum: 0.0, maximum: 1.0, description: threshold scaling}
+  - {name: markov_min_stay, value: 0.60, minimum: 0.5, maximum: 0.9, description: bull-row stay gate}
+  - {name: markov_min_row_n, value: 20, minimum: 5, maximum: 200, description: bull-row sample floor}
+  - {name: atr_stop_mult, value: 2.0, minimum: 1.0, maximum: 4.0, description: fallback stop multiple}
+expected_failure_regimes:
+  - choppy sideways markets that repeatedly confirm and lose BULL (whipsaw)
+  - gap-driven crashes through the stop (stop models limit-at-stop, gaps fill worse)
+  - low-volatility melt-ups where the Markov row is thin early in history
+prohibited_conditions:
+  - short entries (long-only derivation)
+  - pyramiding (single position)
+  - intraday data (spec is daily-only)
+pine_references:
+  - catalog_number: "01"
+    filename: research/pine/01_markov_regime_bull_plus.pine
+    sha256: efedcd5efe17b7559bb2147af6fe391a14a4b2217c35060c1a44d58c8d02c0dd
+    notes: Daily preset constants (lookback 20, enter 0.85, exit 0.55, confirm 2)
+translation_notes:
+  - "Omitted: AVWAP anchor logic, relative-strength module, setup selection (L1P/R/A/B), pyramiding to 3 legs, session micro-gates, gap veto, ADX/ER quality filter (script default Off), Wilson/Laplace estimators (script default Raw), dwell/age/maturity gates (v1.1 default OFF)."
+  - "Pine stdev is population; this derivation computes population stdev over log returns — matches."
+  - "Pine EMA seeds from first value; this implementation seeds EMA with SMA(n); difference decays geometrically and is documented in docs/PARITY_REPORT.md."
+  - "Entry timing: Pine uses next-bar-open market entries for setups; this derivation submits next-bar marketable limits (close*1.001) because the platform prohibits market orders."
+fixture_references:
+  - tests/parity/test_incremental_vs_batch.py
+status: research_prototype
+owner_approved: false

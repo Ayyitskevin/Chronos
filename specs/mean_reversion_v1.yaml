@@ -1,0 +1,70 @@
+# Canonical specification — RSI-2 mean reversion (derived daily core).
+# Validated against chronos.specs.schema.StrategySpec. See docs/PARITY_REPORT.md.
+
+strategy_id: mean_reversion_v1
+version: 1.0.0
+family: short_term_mean_reversion
+description: >
+  Long-only daily-bar derivation of Pine 11 "Mean-Reversion Extremes Study
+  v1.1" (a study that flags RSI-2 oversold extremes in daily uptrends and
+  scores reversion outcomes; it defines no orders). The executable
+  derivation trades the long flag with the study's own adverse-move
+  threshold as a stop. The session-VWAP sigma-stretch component cannot exist
+  on daily bars and is omitted — a recorded deviation that makes this a
+  simpler strategy than the study's intraday flags.
+supported_symbols: [SPY, QQQ, IWM, DIA, GLD, TLT]
+supported_intervals: ["1d"]
+required_fields: [open, high, low, close, volume]
+required_lookback_bars: 40
+signal_logic: >
+  RSI(2) via Wilder RMA of gains/losses on daily closes. Daily uptrend
+  filter uses PRIOR bar values: close[1] > EMA20[1] (the study's
+  non-repainting daily filter). Suppression: after a flag fires the strategy
+  re-arms only when RSI(2) recrosses above 50.
+entry_rules:
+  - flat AND armed AND RSI(2) <= 10 AND prior close > prior EMA20
+  - full warm-up complete
+  - order: next-bar limit at reference close * 1.001, DAY, whole shares
+exit_rules:
+  - RSI(2) >= 50 (reversion realized), exit next bar
+  - 10-bar time stop
+  - protective stop traded through (see stop_logic)
+stop_logic: >
+  Protective stop at entry_limit * (1 - min(0.5, max(0.005, 1.5 * ATR14 /
+  close))) — the study's "adverse move = fail" 1.5-ATR threshold repurposed
+  as a hard stop.
+target_logic: none — reversion exit plays the target role
+sizing_logic: portfolio layer whole-share sizing under independent risk caps
+cooldown_bars: 0
+session_rules: regular US session daily bars only
+regime_constraints: entries only when prior close is above prior EMA20 (daily uptrend)
+liquidity_constraints: liquid US ETFs only (ASSUMPTIONS A-11)
+parameters:
+  - {name: rsi_len, value: 2, minimum: 2, maximum: 5, description: RSI length}
+  - {name: oversold, value: 10.0, minimum: 1.0, maximum: 30.0, description: entry flag level}
+  - {name: rearm_level, value: 50.0, minimum: 40.0, maximum: 70.0, description: suppression recross}
+  - {name: exit_level, value: 50.0, minimum: 40.0, maximum: 80.0, description: reversion exit}
+  - {name: ema_filter_len, value: 20, minimum: 10, maximum: 200, description: daily trend filter}
+  - {name: fail_atr_mult, value: 1.5, minimum: 0.5, maximum: 5.0, description: stop multiple}
+  - {name: time_stop_bars, value: 10, minimum: 3, maximum: 30, description: time stop}
+expected_failure_regimes:
+  - sustained downtrends that keep the filter off (inactivity, not loss)
+  - crash continuation where oversold keeps falling (stop takes the loss)
+  - low-volatility grind where RSI-2 rarely reaches 10 (few trades)
+prohibited_conditions:
+  - short entries (the study's short flags are not derived)
+  - averaging down (one entry per arm cycle)
+  - intraday data
+pine_references:
+  - catalog_number: "11"
+    filename: research/pine/11_mean_reversion_extremes_study.pine
+    sha256: 1cfbd657b0cf09b6bbb9652f85479d390c371add597a7a5f8df95b4553e9532d
+    notes: study defines flags and outcome scoring, not orders
+translation_notes:
+  - "Omitted: session-VWAP sigma stretch (impossible on daily bars), short-side flags, VWAP-touch outcome scoring, HUD/alerts."
+  - "The study's daily filter reads request.security(D, close[1] > ema(close,20)[1]) with lookahead_on — the standard non-repainting prior-day idiom; on a daily chart this equals using prior-bar values directly, which is what the derivation does."
+  - "The study flags on barstate.isconfirmed; the platform processes closed bars only, so this is structural."
+fixture_references:
+  - tests/parity/test_incremental_vs_batch.py
+status: research_prototype
+owner_approved: false

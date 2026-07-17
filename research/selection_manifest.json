@@ -1,0 +1,33 @@
+{
+  "purpose": "Candidate-selection criteria FROZEN before validation-stage results were computed or inspected. The final test window (2022-01-01..) is run exactly once, after this file was committed, and its outcome cannot amend these criteria retroactively.",
+  "frozen_at_utc": "2026-07-17T13:05:00Z",
+  "information_available_when_frozen": {
+    "corpus": "42-script registry + forensic audit in progress; derived-core parameters taken verbatim from Pine sources (Daily presets), NOT tuned on the research data by this project",
+    "data": "SPY 2000-01..2019-11 unadjusted; QQQ 1999-11..2024-01 with adj_close; provenance research/data/raw/MANIFEST.json",
+    "results_seen_so_far": "development window (..2017-12-31) only: both candidates net-positive but below the SMA 50/200 baseline and roughly at/below the deterministic random-entry twin at comparable exposure",
+    "results_not_yet_seen": "validation window 2018-2021, all stress/sensitivity runs, final test window"
+  },
+  "candidates": ["regime_trend_v1", "mean_reversion_v1"],
+  "baselines": ["baseline_buy_hold (49%-disaster-stop variant)", "baseline_sma_trend (50/200)", "baseline_random_entries (fixed-seed LCG, 5%/bar entry, 10-bar hold)"],
+  "criteria_for_backtest_validated": [
+    "C1: net-positive after base costs (USD 1 min commission + 2 bps/side slippage) on the validation window on at least one symbol",
+    "C2: on that symbol/window, beats the deterministic random-entry twin on BOTH total return and Sharpe",
+    "C3: beats the SMA-trend baseline on total return OR delivers a materially lower max drawdown (<= half the baseline's) while net-positive",
+    "C4: profit factor >= 1.1 with >= 20 closed trades on the validation window, AND remains net-positive under 2x commission stress and >= 10 bps slippage stress",
+    "C5: parameter sensitivity: a majority of the predefined +/- variants (scripts/run_research.py SENSITIVITY) remain net-positive on the validation window (no knife-edge dependence)",
+    "C6: final test window (run once): net-positive and directionally consistent with the validation conclusion; a final-test failure rejects the candidate rather than triggering re-tuning"
+  ],
+  "portfolio_criterion": "The two candidates are only proposed as a combined portfolio if their validation-window daily-return correlation < 0.5 and the combination improves return/drawdown over the better single candidate.",
+  "eligibility_semantics": {
+    "meets C1-C5": "backtest_validated (shadow eligible per docs/GO_LIVE_CHECKLIST.md gates)",
+    "fails any of C1-C5": "not_eligible (research prototype only)",
+    "passes C1-C5 but fails C6": "not_eligible; failure reported verbatim in docs/RESEARCH_REPORT.md"
+  },
+  "known_biases_and_limits": [
+    "Parameters originate from the corpus author's defaults, which may themselves have been informed by overlapping history (uncontrollable here; recorded).",
+    "Two liquid ETFs only; survivorship not applicable to index ETFs, but breadth is minimal.",
+    "SPY series ends 2019-11: SPY contributes dev + partial validation only, no final test.",
+    "Unadjusted prices for SPY (dividend drag omitted from signals and returns understates buy-side total return by roughly the dividend yield).",
+    "Multiple-testing: 2 candidates x 2 symbols x frozen criteria; no parameter search was run before freezing; sensitivity grid is reported, not used for selection."
+  ]
+}

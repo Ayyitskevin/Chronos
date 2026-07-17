@@ -1,0 +1,296 @@
+//@version=6
+// =============================================================================
+// Dynamic Squeeze Exhaustion with Regime Context v1.0 (5T Pine Suite · Desk Kit)
+//
+// WHAT THIS IS.
+// The community-standard compression detector — Bollinger-inside-Keltner —
+// plus the one empirical piece the standard tool never gives you: ON THIS
+// CHART, when squeezes released, which way did price actually resolve,
+// COUNTED PER REGIME AT RELEASE, with Wilson lower bounds. Suite doctrine
+// (Guide 5) is restated verbatim on the HUD: a squeeze is a HARD entry
+// block while it is on. Compression predicts expansion, not direction —
+// what this study adds is the counted history of how releases resolved
+// under each regime here, so the desk can see whether "regime direction
+// resolves the release" is even true on this symbol, this timeframe.
+//
+// RESEARCH BASIS, stated plainly.
+// BB-inside-KC squeeze detection is community-standard practice
+// (Bollinger's band-width compression observation; the Keltner comparison
+// popularized by Carter's TTM Squeeze). The comparison used here is
+// stdev(close,len)*bb_mult < atr(len)*kc_mult — the factor 2 on both band
+// widths cancels. Squeeze semantics mirror the suite's Squeeze Sentinel
+// v1.1: a squeeze must survive a minimum number of confirmed bars before
+// its release counts as an event.
+//
+// HONESTY, stated plainly.
+//   1. The resolution table is COUNTED HISTORY on this chart, never a
+//      forecast. n, up%, down%, and the Wilson lower bound on the majority
+//      direction are reported per regime-at-release; thin rows are flagged.
+//   2. "Resolved" means: after resolve_bars confirmed bars, price moved
+//      beyond a 0.25×ATR deadband from the release close. Inside the
+//      deadband is FLAT and stays in the denominator — flats dilute both
+//      directions, as they should.
+//   3. The hard block is doctrine, not statistics: no entries while the
+//      squeeze is on, in either direction, whatever the table says.
+//
+// Non-repaint: squeeze state, release events, pending scoring, and all
+// counts advance on confirmed bars only; the intrabar display holds the
+// last confirmed state. Alerts fire on confirmed bars. Decision support
+// only — a human places every trade. Risk controls outrank all signals.
+//
+// v1.0 changelog (2026-07-17):
+//   Initial release. BB-inside-KC squeeze (len 20, mults 2.0/1.5, min
+//   duration 6 confirmed bars, Sentinel v1.1 semantics); release-resolution
+//   measurement (resolve_bars 20, 0.25×ATR deadband, up/down/flat) counted
+//   per regime at release with Wilson lower bound on the majority
+//   direction and thin flags; overlapping releases scored independently
+//   via a pending queue; regime source = external link (strict -1/0/+1
+//   validation) with internal hard-threshold z fallback, HUD names the
+//   live source; squeeze tint + release diamonds; tiered HUD with the
+//   verbatim HARD BLOCK doctrine line; Data-Window exports; squeeze-start
+//   and release alerts with optional JSON payloads (default OFF).
+//   Behavior-adjacent options ship at conservative defaults. Evidence
+//   label: needs user run.
+// =============================================================================
+indicator("Dynamic Squeeze Exhaustion with Regime Context v1.0", shorttitle = "SQZ Context v1",
+     overlay = true)
+
+grp_mode = "0 · Mode"
+grp_sqz  = "1 · Squeeze Detection"
+grp_res  = "2 · Resolution Measurement"
+grp_link = "3 · Regime Source"
+grp_dsp  = "4 · Display"
+
+variant_tag = input.string("v1.0-base", "Variant tag (freeze-the-config discipline)", group = grp_mode,
+     tooltip = "Label this exact settings set. Any settings change = new tag = new variant with its own validation cycle. The tag prints on the HUD and in alerts so screenshots self-document.")
+
+sqz_len = input.int(20, "Squeeze length (BB stdev & KC ATR)", minval = 5, maxval = 100, group = grp_sqz)
+bb_mult = input.float(2.0, "Bollinger multiplier", minval = 0.5, maxval = 5.0, step = 0.1, group = grp_sqz)
+kc_mult = input.float(1.5, "Keltner multiplier", minval = 0.5, maxval = 5.0, step = 0.1, group = grp_sqz,
+     tooltip = "Squeeze ON when stdev(close,len)*bb_mult < atr(len)*kc_mult — Bollinger width inside Keltner width. Community-standard 20 / 2.0 / 1.5 defaults.")
+min_dur = input.int(6, "Min squeeze duration (confirmed bars)", minval = 1, maxval = 50, group = grp_sqz,
+     tooltip = "A squeeze shorter than this never produces a release event — one-bar compression flickers stay out of the statistics. The HARD BLOCK doctrine still applies from the first squeeze bar; blocking more is the safe direction. Mirrors Squeeze Sentinel v1.1 semantics.")
+
+resolve_bars = input.int(20, "Resolution horizon (confirmed bars)", minval = 5, maxval = 100, group = grp_res,
+     tooltip = "How many confirmed bars after a release before the outcome is scored. The horizon is a measurement convention — score it, do not trade it.")
+deadband_atr = input.float(0.25, "Flat deadband (×ATR at release)", minval = 0.0, maxval = 2.0, step = 0.05, group = grp_res,
+     tooltip = "Moves inside ±this many ATRs (ATR frozen at release) score FLAT — neither direction gets credit for noise.")
+min_side_n = input.int(10, "Thin-sample warning (row n)", minval = 3, maxval = 200, group = grp_res,
+     tooltip = "Below this many scored releases in a regime row, the row carries the suite's thin-sample flag. Wilson lower bounds do the honesty work either way.")
+
+use_regime_link = input.bool(false, "Use external regime link", group = grp_link)
+regime_src = input.source(close, "Regime link (wire to a REGIME_EXPORT)", group = grp_link,
+     tooltip = "Wire to any suite script's REGIME_EXPORT. Validated STRICTLY: only exact -1 / 0 / +1 values count. Anything else falls back to the internal classifier and the HUD flags LINK?.")
+z_lookback = input.int(20, "Internal fallback: z lookback (bars)", minval = 5, maxval = 250, group = grp_link,
+     tooltip = "The fallback classifier is the suite observation — volatility-normalized window return z-score — with hard thresholds and no hysteresis. A convenience stand-in, not a substitute for the flagship engine.")
+z_enter = input.float(0.85, "Internal fallback: z threshold", minval = 0.10, maxval = 3.00, step = 0.05, group = grp_link)
+
+hud_mode = input.string("Full", "HUD mode", options = ["Off", "Micro", "Full"], group = grp_dsp)
+hud_pos_in = input.string("top_right", "HUD position", options = ["top_left", "top_center", "top_right", "bottom_left", "bottom_center", "bottom_right"], group = grp_dsp)
+show_sqz_tint = input.bool(true, "Squeeze-on background tint", group = grp_dsp)
+show_rel_marks = input.bool(true, "Release markers", group = grp_dsp)
+use_json_alerts = input.bool(false, "JSON alert payloads (webhook)", group = grp_dsp,
+     tooltip = "OFF: human-readable alert text. ON: machine-readable JSON for webhook automation. Display-layer only.")
+
+// =============================================================================
+// Palette & helpers (suite standard)
+// =============================================================================
+c_bull  = color.rgb(89, 159, 125)
+c_bear  = color.rgb(190, 96, 111)
+c_neut  = color.rgb(112, 126, 148)
+c_gold  = color.rgb(214, 162, 82)
+c_panel = color.new(#0E1316, 5)
+c_cell  = color.new(#151D22, 7)
+c_cell2 = color.new(#10171B, 9)
+c_frame = color.new(#5BD6B0, 88)
+c_text  = color.white
+c_dim   = color.new(color.white, 45)
+c_faint = color.new(color.white, 68)
+
+f_pos(_s) =>
+    switch _s
+        "top_left"      => position.top_left
+        "top_center"    => position.top_center
+        "top_right"     => position.top_right
+        "bottom_left"   => position.bottom_left
+        "bottom_center" => position.bottom_center
+        "bottom_right"  => position.bottom_right
+        => position.top_right
+f_fmt(_x, _d) =>
+    _m = math.pow(10.0, _d)
+    na(_x) ? "n/a" : str.tostring(math.round(_x * _m) / _m)
+f_tcell(_tbl, _c, _r, _txt, _col, _bg) =>
+    table.cell(_tbl, _c, _r, _txt, text_color = _col, bgcolor = _bg, text_size = size.tiny, text_halign = text.align_center)
+// Wilson score lower bound (z = 1.96), suite-standard honesty for counted rates.
+f_wilson_lo(_p, _n) =>
+    _n <= 0 or na(_p) ? float(na) :
+         (_p + 1.96 * 1.96 / (2 * _n) - 1.96 * math.sqrt((_p * (1 - _p) + 1.96 * 1.96 / (4 * _n)) / _n)) / (1 + 1.96 * 1.96 / _n)
+f_rname(_s) =>
+    _s == 1 ? "Bull" : _s == -1 ? "Bear" : "Neutral"
+f_rcol(_s) =>
+    _s == 1 ? c_bull : _s == -1 ? c_bear : c_neut
+f_ridx(_s) =>
+    _s == 1 ? 0 : _s == 0 ? 1 : 2
+
+// =============================================================================
+// Regime source: external link (strict -1/0/+1) with internal z fallback.
+// The HUD names whichever source is live; an enabled-but-invalid link reads
+// LINK? and the internal classifier takes over rather than polluting counts.
+// =============================================================================
+one_bar_ret = not na(close[1]) and close > 0 and close[1] > 0 ? math.log(close / close[1]) : float(na)
+win_ret = not na(close[z_lookback]) and close > 0 and close[z_lookback] > 0 ? math.log(close / close[z_lookback]) : float(na)
+win_vol = ta.stdev(one_bar_ret, z_lookback) * math.sqrt(z_lookback)
+obs_z = not na(win_ret) and not na(win_vol) and win_vol > 0 ? win_ret / win_vol : float(na)
+int z_state = na(obs_z) ? 0 : obs_z > z_enter ? 1 : obs_z < -z_enter ? -1 : 0
+_rvl = regime_src
+link_valid = use_regime_link and not na(_rvl) and (_rvl == -1.0 or _rvl == 0.0 or _rvl == 1.0)
+int regime_now = link_valid ? int(_rvl) : z_state
+regime_ready = link_valid or not na(obs_z)
+regime_src_txt = link_valid ? "external link" : use_regime_link ? "LINK? → internal z" : "internal z"
+
+// =============================================================================
+// Squeeze detection + confirmed-bar state machine (Sentinel v1.1 semantics)
+// =============================================================================
+basis_sd = ta.stdev(close, sqz_len)
+rng_atr = ta.atr(sqz_len)
+sqz_raw = not na(basis_sd) and not na(rng_atr) and basis_sd * bb_mult < rng_atr * kc_mult
+warmed_sq = not na(basis_sd) and not na(rng_atr)
+
+var bool sqz_on = false
+var int sqz_bars = 0
+var int bars_since_rel = 1000000
+var int rel_count = 0
+var int last_rel_reg = 0
+var bool any_release = false
+// Pending queue: releases score independently after resolve_bars, so a new
+// squeeze releasing inside another release's horizon never drops a sample.
+var array<float> pend_close = array.new_float()
+var array<float> pend_dead = array.new_float()
+var array<int> pend_reg = array.new_int()
+var array<int> pend_left = array.new_int()
+// Outcome counts per regime-at-release (rows Bull/Neutral/Bear)
+var array<int> res_up = array.new_int(3, 0)
+var array<int> res_dn = array.new_int(3, 0)
+var array<int> res_fl = array.new_int(3, 0)
+
+bool sqz_start_ev = false
+bool sqz_release_ev = false
+int rel_bars_ev = 0
+if barstate.isconfirmed
+    // 1 · score maturing pendings against this confirmed close
+    if array.size(pend_left) > 0
+        for _i = array.size(pend_left) - 1 to 0
+            int _l = array.get(pend_left, _i) - 1
+            if _l <= 0
+                float _mv = close - array.get(pend_close, _i)
+                float _dd = array.get(pend_dead, _i)
+                int _ri = array.get(pend_reg, _i)
+                if _mv > _dd
+                    array.set(res_up, _ri, array.get(res_up, _ri) + 1)
+                else if _mv < -_dd
+                    array.set(res_dn, _ri, array.get(res_dn, _ri) + 1)
+                else
+                    array.set(res_fl, _ri, array.get(res_fl, _ri) + 1)
+                array.remove(pend_close, _i)
+                array.remove(pend_dead, _i)
+                array.remove(pend_reg, _i)
+                array.remove(pend_left, _i)
+            else
+                array.set(pend_left, _i, _l)
+    // 2 · squeeze state machine
+    if sqz_raw
+        if not sqz_on
+            sqz_start_ev := true
+        sqz_on := true
+        sqz_bars += 1
+    else
+        if sqz_on and sqz_bars >= min_dur
+            sqz_release_ev := true
+            rel_bars_ev := sqz_bars
+            rel_count += 1
+            last_rel_reg := regime_now
+            any_release := true
+            // regime unknown during warmup → release still fires, stats skip it
+            if regime_ready
+                array.push(pend_close, close)
+                array.push(pend_dead, deadband_atr * rng_atr)
+                array.push(pend_reg, f_ridx(regime_now))
+                array.push(pend_left, resolve_bars)
+        sqz_on := false
+        sqz_bars := 0
+    bars_since_rel := sqz_release_ev ? 0 : math.min(bars_since_rel + 1, 1000000)
+
+// Per-regime resolution stats (majority direction + Wilson lower bound)
+f_res_row(_ri) =>
+    int _u = array.get(res_up, _ri)
+    int _d = array.get(res_dn, _ri)
+    int _f = array.get(res_fl, _ri)
+    int _n = _u + _d + _f
+    float _up_pct = _n > 0 ? _u * 100.0 / _n : float(na)
+    float _dn_pct = _n > 0 ? _d * 100.0 / _n : float(na)
+    int _maj = math.max(_u, _d)
+    float _wlo = _n > 0 ? f_wilson_lo(_maj * 1.0 / _n, _n) : float(na)
+    string _side = _u >= _d ? "up" : "dn"
+    [_n, _up_pct, _dn_pct, _wlo, _side]
+
+// =============================================================================
+// Visuals & exports
+// =============================================================================
+bgcolor(show_sqz_tint and sqz_on ? color.new(c_gold, 82) : na, title = "Squeeze-on tint")
+plotshape(show_rel_marks and sqz_release_ev, "Squeeze release", style = shape.diamond,
+     location = location.belowbar, color = c_gold, size = size.tiny)
+
+plot(sqz_on ? 1.0 : 0.0, "SQC_ON_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(float(sqz_bars), "SQC_BARS_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(sqz_release_ev ? 1.0 : 0.0, "SQC_RELEASE_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(any_release ? float(last_rel_reg) : na, "SQC_REGIME_AT_RELEASE_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(float(array.size(pend_left)), "SQC_PENDING_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+
+// =============================================================================
+// HUD
+// =============================================================================
+var table hud = table.new(f_pos(hud_pos_in), 2, 7, bgcolor = c_panel, frame_color = c_frame,
+     frame_width = 1, border_color = color.new(color.white, 92), border_width = 1)
+if barstate.islast and hud_mode != "Off"
+    _state_txt = not warmed_sq ? "WARMING · needs " + str.tostring(sqz_len) + " bars" :
+         sqz_on ? "SQUEEZE ON · HARD BLOCK — no entries" :
+         bars_since_rel <= resolve_bars ? "RELEASED " + str.tostring(bars_since_rel) + " bars ago" : "NO SQUEEZE"
+    _state_bg = not warmed_sq ? c_cell : sqz_on ? color.new(c_bear, 35) :
+         bars_since_rel <= resolve_bars ? color.new(c_gold, 55) : c_cell
+    f_tcell(hud, 0, 0, "SQZ Context " + variant_tag, c_text, c_frame)
+    f_tcell(hud, 1, 0, _state_txt, c_text, _state_bg)
+    if hud_mode == "Full"
+        f_tcell(hud, 0, 1, "Regime now · source", c_dim, c_panel)
+        f_tcell(hud, 1, 1, f_rname(regime_now) + " · " + regime_src_txt + " · releases " + str.tostring(rel_count), use_regime_link and not link_valid ? c_bear : c_dim, c_cell)
+        [n_b, up_b, dn_b, wlo_b, sd_b] = f_res_row(0)
+        [n_n, up_n, dn_n, wlo_n, sd_n] = f_res_row(1)
+        [n_r, up_r, dn_r, wlo_r, sd_r] = f_res_row(2)
+        f_tcell(hud, 0, 2, "Bull-release resolved", c_dim, c_panel)
+        f_tcell(hud, 1, 2, n_b == 0 ? "no scored releases" : "n" + str.tostring(n_b) + " · up " + f_fmt(up_b, 0) + "% / dn " + f_fmt(dn_b, 0) + "% · Wlo(" + sd_b + ") " + f_fmt(wlo_b * 100.0, 0) + "%" + (n_b < min_side_n ? " !" : ""), n_b < min_side_n ? c_faint : c_bull, c_cell)
+        f_tcell(hud, 0, 3, "Neutral-release resolved", c_dim, c_panel)
+        f_tcell(hud, 1, 3, n_n == 0 ? "no scored releases" : "n" + str.tostring(n_n) + " · up " + f_fmt(up_n, 0) + "% / dn " + f_fmt(dn_n, 0) + "% · Wlo(" + sd_n + ") " + f_fmt(wlo_n * 100.0, 0) + "%" + (n_n < min_side_n ? " !" : ""), n_n < min_side_n ? c_faint : c_neut, c_cell)
+        f_tcell(hud, 0, 4, "Bear-release resolved", c_dim, c_panel)
+        f_tcell(hud, 1, 4, n_r == 0 ? "no scored releases" : "n" + str.tostring(n_r) + " · up " + f_fmt(up_r, 0) + "% / dn " + f_fmt(dn_r, 0) + "% · Wlo(" + sd_r + ") " + f_fmt(wlo_r * 100.0, 0) + "%" + (n_r < min_side_n ? " !" : ""), n_r < min_side_n ? c_faint : c_bear, c_cell)
+        if array.size(pend_left) > 0
+            f_tcell(hud, 0, 5, "Pending resolution", c_dim, c_panel)
+            f_tcell(hud, 1, 5, str.tostring(array.size(pend_left)) + " scoring · next in " + str.tostring(array.min(pend_left)) + " bars", c_gold, c_cell)
+        f_tcell(hud, 0, 6, "*counted resolutions on this chart", c_faint, c_panel)
+        f_tcell(hud, 1, 6, "direction stats are history, not prediction · not advice", c_faint, c_panel)
+
+// =============================================================================
+// Alerts (confirmed-bar events; formal wording per suite convention)
+// =============================================================================
+alertcondition(sqz_start_ev, "Squeeze ON (confirmed)", "Squeeze Regime Context: compression detected — hard entry block active per suite doctrine")
+alertcondition(sqz_release_ev, "Squeeze RELEASED (confirmed)", "Squeeze Regime Context: squeeze released — resolution scoring begins")
+if sqz_start_ev or sqz_release_ev
+    _typ = sqz_release_ev ? "release" : "start"
+    _bars_field = sqz_release_ev ? rel_bars_ev : sqz_bars
+    if use_json_alerts
+        alert('{"ev":"sqz_context","type":"' + _typ + '","sym":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","regime":"' + f_rname(regime_now) + '","bars":' + str.tostring(_bars_field) + ',"pending":' + str.tostring(array.size(pend_left)) + ',"variant":"' + variant_tag + '","t":' + str.tostring(time) + '}', alert.freq_once_per_bar_close)
+    else
+        alert("Squeeze Context [" + variant_tag + "]: " + syminfo.ticker + " squeeze " + _typ +
+             (sqz_release_ev ? " after " + str.tostring(_bars_field) + " bars · regime at release " + f_rname(regime_now) + " · scoring over " + str.tostring(resolve_bars) + " bars"
+              : " — HARD BLOCK, no entries while on"), alert.freq_once_per_bar_close)
+
+// =============================================================================
+// End of file · Dynamic Squeeze Exhaustion with Regime Context v1.0

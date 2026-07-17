@@ -1,0 +1,324 @@
+//@version=6
+// =============================================================================
+// Session Structure & Opening Range v1.1 (5T Pine Suite · Tranche 1)
+//
+// v1.1 (2026-07-11) — polish/parity pass. Evidence label: needs user run.
+//   + Gap now measured in DAILY ATR units by default (research-tuned;
+//     matches the SIP screener's GAP_ATR_EXPORT so siblings agree). v1.0's
+//     chart-TF ATR units remain selectable — on low timeframes they made
+//     the 0.75 "hot" threshold read hot nearly always.
+//   + Retest slice-through option (default OFF = v1.0): v1.0 only counted
+//     a retest when the bar's extreme landed INSIDE the tolerance band;
+//     a bar cutting straight through never registered.
+//   + DAY_TYPE_EXPORT is now confirmed-bar latched (HUD stays live).
+//   + New exports: IB_HIGH / IB_LOW / VWAP_HOLD_PCT.
+//   + JSON alert payloads (default OFF) beside human-readable alerts.
+//   FIX: request.security barmerge args keyword-form (v1.0 passed
+//     lookahead positionally into the ignore_invalid_symbol slot).
+//
+// The location layer for intraday continuation. Research basis:
+//   - Zarattini/Barbon/Aziz (2024): 5-minute ORB on Stocks in Play — the OR
+//     defines the day's first committed range; breaks of it carry expectancy
+//     only on the right stocks (pair this with the SIP Screener).
+//   - Gao/Han/Li/Zhou (JFE 2018): time-of-day structure is real — the open
+//     sets direction information the close still remembers.
+//
+// Provides: Opening Range (final, non-repaint), Initial Balance, session VWAP
+// with SD bands, prior-day H/L/C, gap context, ORB break/retest state machine,
+// and a day-type classifier (heuristic — labeled as such, not a signal).
+//
+// Non-repaint: OR/IB values are only acted on after their windows close on a
+// confirmed bar. Breaks are confirmed closes. Prior-day levels use [1] with
+// lookahead_on (fixed history). Decision support only — not advice.
+// =============================================================================
+indicator("Session Structure & Opening Range v1.1", shorttitle = "Session ORB v1.1", overlay = true, max_lines_count = 100)
+
+// =============================================================================
+// Groups
+// =============================================================================
+grp_or  = "1 · Opening Range & Initial Balance"
+grp_vw  = "2 · Session VWAP"
+grp_brk = "3 · Break & Retest Logic"
+grp_dt  = "4 · Day-Type Classifier"
+grp_dsp = "5 · Display"
+
+// =============================================================================
+// Inputs
+// =============================================================================
+sess = input.session("0930-1600", "Session (exchange time)", group = grp_or)
+or_minutes = input.int(5, "Opening Range minutes", minval = 1, maxval = 120, group = grp_or,
+     tooltip = "5 was the best-performing window in the 2024 study. Chart timeframe must be <= this value or the OR degrades to first-bar granularity (HUD will warn).")
+ib_minutes = input.int(60, "Initial Balance minutes", minval = 15, maxval = 240, group = grp_or)
+show_ib = input.bool(true, "Show Initial Balance", group = grp_or)
+show_pd = input.bool(true, "Show prior-day H/L/C", group = grp_or)
+
+show_vwap = input.bool(true, "Session VWAP", group = grp_vw)
+show_sd1 = input.bool(true, "±1σ bands", group = grp_vw)
+show_sd2 = input.bool(false, "±2σ bands", group = grp_vw)
+
+break_buffer_atr = input.float(0.00, "Break buffer (ATR)", minval = 0.0, maxval = 2.0, step = 0.05, group = grp_brk,
+     tooltip = "0 = raw confirmed close beyond the OR. Add buffer to demand conviction.")
+one_shot_breaks = input.bool(true, "One break signal per side per day", group = grp_brk)
+retest_tol_atr = input.float(0.25, "Retest tolerance (ATR)", minval = 0.05, maxval = 2.0, step = 0.05, group = grp_brk)
+atr_len = input.int(14, "ATR length", minval = 1, maxval = 100, group = grp_brk)
+gap_units = input.string("Daily ATR (v1.1)", "Gap units", options = ["Daily ATR (v1.1)", "Chart ATR (v1.0)"], group = grp_brk,
+     tooltip = "Daily ATR (default, v1.1): overnight gap sized against daily volatility — comparable across timeframes and consistent with the SIP screener. Chart ATR (v1.0): sized against the chart timeframe's ATR — reads systematically 'hot' on low timeframes.")
+retest_intersect = input.bool(false, "Retest counts on slice-through (range-intersect)", group = grp_brk,
+     tooltip = "OFF (v1.0 behavior): a retest registers only when the bar's extreme lands INSIDE the ±tolerance band — a deep bar slicing straight through never counts. ON: any bar whose range intersects the band counts. Separate variant.")
+
+dt_vwap_hold_pct = input.float(70.0, "Trend day: min % bars on one VWAP side", minval = 50.0, maxval = 100.0, step = 5.0, group = grp_dt)
+dt_min_range_ext = input.float(2.0, "Trend day: min day-range / OR-range", minval = 1.0, maxval = 10.0, step = 0.25, group = grp_dt)
+
+hud_mode = input.string("Full", "HUD mode", options = ["Off", "Micro", "Full"], group = grp_dsp)
+hud_pos_in = input.string("bottom_right", "HUD position", options = ["top_left", "top_center", "top_right", "bottom_left", "bottom_center", "bottom_right"], group = grp_dsp)
+show_marks = input.bool(true, "Mark break signals", group = grp_dsp)
+use_json_alerts = input.bool(false, "JSON alert payloads (webhook)", group = grp_dsp,
+     tooltip = "OFF: human-readable alert text (v1.0 behavior). ON: break alerts fire machine-readable JSON for webhook automation. Display-layer only.")
+
+// =============================================================================
+// Palette & helpers
+// =============================================================================
+c_panel = color.new(#141a22, 0)
+c_cell = color.new(#1b2430, 0)
+c_frame = color.new(#2e4a66, 0)
+c_text = color.new(#e8edf2, 0)
+c_dim = color.new(#9fb0c0, 0)
+c_faint = color.new(#5a6572, 0)
+c_bull = color.new(#1e9e6a, 0)
+c_bear = color.new(#e5484d, 0)
+c_or = color.new(#f5a623, 0)
+c_vw = color.new(#7aa2f7, 0)
+
+f_pos(_s) =>
+    _s == "top_left" ? position.top_left : _s == "top_center" ? position.top_center :
+     _s == "top_right" ? position.top_right : _s == "bottom_left" ? position.bottom_left :
+     _s == "bottom_center" ? position.bottom_center : position.bottom_right
+
+f_fmt(_v, _dp) =>
+    na(_v) ? "n/a" : str.tostring(_v, _dp == 0 ? "#" : _dp == 1 ? "#.#" : "#.##")
+
+f_tcell(_t, _c, _r, _txt, _tc, _bg) =>
+    table.cell(_t, _c, _r, _txt, text_color = _tc, bgcolor = _bg, text_size = size.small)
+
+atr_val = ta.atr(atr_len)
+
+// =============================================================================
+// Session engine
+// =============================================================================
+in_sess = not na(time(timeframe.period, sess))
+sess_new = in_sess and not in_sess[1]
+var int t0 = na
+t0 := sess_new ? time : t0
+elapsed_min = in_sess and not na(t0) ? (time - t0) / 60000.0 : float(na)
+tf_min = timeframe.in_seconds(timeframe.period) / 60.0
+tf_too_big = tf_min > or_minutes
+
+// Prior-day context (fixed history — non-repaint)
+[pd_high, pd_low, pd_close, pd_atr] = request.security(syminfo.tickerid, "D", [high[1], low[1], close[1], ta.atr(14)[1]],
+     gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)  // [1]-offset completed-day history only
+var float day_open = na
+day_open := sess_new ? open : day_open
+gap_ref_atr = gap_units == "Chart ATR (v1.0)" ? atr_val : pd_atr
+gap_atr = not na(day_open) and not na(pd_close) and not na(gap_ref_atr) and gap_ref_atr > 0 ? (day_open - pd_close) / gap_ref_atr : float(na)
+
+// =============================================================================
+// Opening Range & Initial Balance (finalized, non-repaint)
+// =============================================================================
+var float or_h = na
+var float or_l = na
+var bool or_done = false
+var float ib_h = na
+var float ib_l = na
+var bool ib_done = false
+var float day_h = na
+var float day_l = na
+
+if sess_new
+    or_h := high
+    or_l := low
+    or_done := false
+    ib_h := high
+    ib_l := low
+    ib_done := false
+    day_h := high
+    day_l := low
+else if in_sess
+    day_h := math.max(day_h, high)
+    day_l := math.min(day_l, low)
+    if not na(elapsed_min)
+        if elapsed_min < or_minutes
+            or_h := math.max(or_h, high)
+            or_l := math.min(or_l, low)
+        else
+            or_done := true
+        if elapsed_min < ib_minutes
+            ib_h := math.max(ib_h, high)
+            ib_l := math.min(ib_l, low)
+        else
+            ib_done := true
+
+or_range = or_done and not na(or_h) and not na(or_l) ? or_h - or_l : float(na)
+day_range = not na(day_h) and not na(day_l) ? day_h - day_l : float(na)
+range_ext = not na(or_range) and or_range > 0 and not na(day_range) ? day_range / or_range : float(na)
+
+// =============================================================================
+// Session VWAP + SD bands (manual, session-anchored)
+// =============================================================================
+var float cum_v = 0.0
+var float cum_pv = 0.0
+var float cum_pv2 = 0.0
+if sess_new
+    cum_v := nz(volume)
+    cum_pv := nz(volume) * hlc3
+    cum_pv2 := nz(volume) * hlc3 * hlc3
+else if in_sess
+    cum_v += nz(volume)
+    cum_pv += nz(volume) * hlc3
+    cum_pv2 += nz(volume) * hlc3 * hlc3
+svwap = cum_v > 0 ? cum_pv / cum_v : float(na)
+svwap_var = cum_v > 0 and not na(svwap) ? math.max(cum_pv2 / cum_v - svwap * svwap, 0.0) : float(na)
+svwap_sd = na(svwap_var) ? float(na) : math.sqrt(svwap_var)
+
+// VWAP-side persistence for day-type
+var int bars_above = 0
+var int bars_below = 0
+if sess_new
+    bars_above := 0
+    bars_below := 0
+if in_sess and barstate.isconfirmed and not na(svwap)
+    bars_above += close > svwap ? 1 : 0
+    bars_below += close < svwap ? 1 : 0
+side_n = bars_above + bars_below
+above_pct = side_n > 0 ? bars_above * 100.0 / side_n : float(na)
+
+// =============================================================================
+// ORB break & retest state machine (confirmed bars, latched per day)
+// =============================================================================
+var int break_dir = 0
+var bool long_fired = false
+var bool short_fired = false
+var bool retest_long = false
+var bool retest_short = false
+if sess_new
+    break_dir := 0
+    long_fired := false
+    short_fired := false
+    retest_long := false
+    retest_short := false
+
+buf = break_buffer_atr * nz(atr_val)
+long_break_raw = in_sess and or_done and barstate.isconfirmed and close > or_h + buf
+short_break_raw = in_sess and or_done and barstate.isconfirmed and close < or_l - buf
+long_break = long_break_raw and (not one_shot_breaks or not long_fired)
+short_break = short_break_raw and (not one_shot_breaks or not short_fired)
+if long_break
+    long_fired := true
+    if break_dir == 0
+        break_dir := 1
+if short_break
+    short_fired := true
+    if break_dir == 0
+        break_dir := -1
+// Retest: after a break, price trades back to the broken level within tolerance
+tol = retest_tol_atr * nz(atr_val)
+if in_sess and barstate.isconfirmed and break_dir == 1 and long_fired and not retest_long
+    retest_long := retest_intersect ? (low <= or_h + tol and high >= or_h - tol) : (low <= or_h + tol and low >= or_h - tol)
+if in_sess and barstate.isconfirmed and break_dir == -1 and short_fired and not retest_short
+    retest_short := retest_intersect ? (high >= or_l - tol and low <= or_l + tol) : (high >= or_l - tol and high <= or_l + tol)
+
+// =============================================================================
+// Day-type classifier (heuristic — context, never a signal)
+// =============================================================================
+day_type =
+     na(range_ext) or na(above_pct) or side_n < 6 ? 0 :
+     range_ext >= dt_min_range_ext and above_pct >= dt_vwap_hold_pct and close > nz(svwap) ? 1 :
+     range_ext >= dt_min_range_ext and (100.0 - above_pct) >= dt_vwap_hold_pct and close < nz(svwap) ? -1 :
+     0
+day_type_txt = day_type == 1 ? "Trend Up" : day_type == -1 ? "Trend Down" : "Balance"
+// v1.1: confirmed-bar latch so the export doesn't flicker intrabar (HUD stays live).
+var int day_type_conf = 0
+if barstate.isconfirmed
+    day_type_conf := day_type
+
+// =============================================================================
+// Plots
+// =============================================================================
+plot(in_sess and or_done ? or_h : na, "OR High", color = c_or, linewidth = 2, style = plot.style_linebr)
+plot(in_sess and or_done ? or_l : na, "OR Low", color = c_or, linewidth = 2, style = plot.style_linebr)
+plot(show_ib and in_sess and ib_done ? ib_h : na, "IB High", color = color.new(c_or, 60), linewidth = 1, style = plot.style_linebr)
+plot(show_ib and in_sess and ib_done ? ib_l : na, "IB Low", color = color.new(c_or, 60), linewidth = 1, style = plot.style_linebr)
+plot(show_vwap and in_sess ? svwap : na, "Session VWAP", color = c_vw, linewidth = 2, style = plot.style_linebr)
+plot(show_vwap and show_sd1 and in_sess ? svwap + svwap_sd : na, "VWAP +1σ", color = color.new(c_vw, 60), style = plot.style_linebr)
+plot(show_vwap and show_sd1 and in_sess ? svwap - svwap_sd : na, "VWAP -1σ", color = color.new(c_vw, 60), style = plot.style_linebr)
+plot(show_vwap and show_sd2 and in_sess ? svwap + 2 * svwap_sd : na, "VWAP +2σ", color = color.new(c_vw, 80), style = plot.style_linebr)
+plot(show_vwap and show_sd2 and in_sess ? svwap - 2 * svwap_sd : na, "VWAP -2σ", color = color.new(c_vw, 80), style = plot.style_linebr)
+plot(show_pd ? pd_high : na, "Prior Day High", color = color.new(c_dim, 40), style = plot.style_circles)
+plot(show_pd ? pd_low : na, "Prior Day Low", color = color.new(c_dim, 40), style = plot.style_circles)
+plot(show_pd ? pd_close : na, "Prior Day Close", color = color.new(c_faint, 30), style = plot.style_cross)
+plotshape(show_marks and long_break, "OR Break Long", style = shape.triangleup, location = location.belowbar, color = c_bull, size = size.small)
+plotshape(show_marks and short_break, "OR Break Short", style = shape.triangledown, location = location.abovebar, color = c_bear, size = size.small)
+
+// =============================================================================
+// Data Window exports
+// =============================================================================
+plot(or_done ? or_h : na, "OR_HIGH_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(or_done ? or_l : na, "OR_LOW_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(float(break_dir), "OR_BREAK_DIR_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(svwap, "SESSION_VWAP_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(svwap_sd, "VWAP_SD_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(range_ext, "RANGE_EXT_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(float(day_type_conf), "DAY_TYPE_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(gap_atr, "GAP_ATR_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(ib_h, "IB_HIGH_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(ib_l, "IB_LOW_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(above_pct, "VWAP_HOLD_PCT_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+
+// =============================================================================
+// HUD
+// =============================================================================
+var table hud = table.new(f_pos(hud_pos_in), 2, hud_mode == "Full" ? 8 : 1, bgcolor = c_panel,
+     frame_color = c_frame, frame_width = 1, border_color = color.new(color.white, 92), border_width = 1)
+if barstate.islast and hud_mode != "Off"
+    _state = not in_sess ? "CLOSED" : not or_done ? "OR FORMING" :
+         break_dir == 1 ? "LONG BREAK" + (retest_long ? " · RETESTED" : "") :
+         break_dir == -1 ? "SHORT BREAK" + (retest_short ? " · RETESTED" : "") : "INSIDE OR"
+    _sbg = break_dir == 1 ? color.new(c_bull, 55) : break_dir == -1 ? color.new(c_bear, 55) : c_cell
+    f_tcell(hud, 0, 0, "Session ORB" + (tf_too_big ? " ⚠ TF>OR" : ""), tf_too_big ? c_bear : c_text, c_frame)
+    f_tcell(hud, 1, 0, _state, c_text, _sbg)
+    if hud_mode == "Full"
+        f_tcell(hud, 0, 1, "OR Range", c_dim, c_panel)
+        f_tcell(hud, 1, 1, f_fmt(or_range, 2) + " · " + f_fmt(na(or_range) or na(atr_val) or atr_val == 0 ? na : or_range / atr_val, 2) + " ATR", c_dim, c_cell)
+        f_tcell(hud, 0, 2, "VWAP", c_dim, c_panel)
+        f_tcell(hud, 1, 2, f_fmt(svwap, 2) + (na(svwap) ? "" : close > svwap ? " ↑" : " ↓") + " · hold " + f_fmt(math.max(nz(above_pct), 100 - nz(above_pct)), 0) + "%", close > nz(svwap) ? c_bull : c_bear, c_cell)
+        f_tcell(hud, 0, 3, "Range Ext", c_dim, c_panel)
+        f_tcell(hud, 1, 3, f_fmt(range_ext, 2) + "x OR", na(range_ext) ? c_faint : range_ext >= dt_min_range_ext ? c_or : c_dim, c_cell)
+        f_tcell(hud, 0, 4, "Day Type*", c_dim, c_panel)
+        f_tcell(hud, 1, 4, day_type_txt, day_type == 1 ? c_bull : day_type == -1 ? c_bear : c_dim, c_cell)
+        f_tcell(hud, 0, 5, "Gap", c_dim, c_panel)
+        f_tcell(hud, 1, 5, f_fmt(gap_atr, 2) + (gap_units == "Chart ATR (v1.0)" ? " cATR" : " dATR"), na(gap_atr) ? c_faint : math.abs(gap_atr) >= 0.75 ? c_or : c_dim, c_cell)
+        f_tcell(hud, 0, 6, "Prior Day", c_dim, c_panel)
+        f_tcell(hud, 1, 6, "H " + f_fmt(pd_high, 2) + " · L " + f_fmt(pd_low, 2), c_dim, c_cell)
+        f_tcell(hud, 0, 7, "*heuristic context", c_faint, c_panel)
+        f_tcell(hud, 1, 7, "not a signal", c_faint, c_panel)
+
+// =============================================================================
+// Alerts
+// =============================================================================
+alertcondition(long_break, "OR Break Long", "Session ORB: confirmed close above Opening Range high")
+alertcondition(short_break, "OR Break Short", "Session ORB: confirmed close below Opening Range low")
+alertcondition(retest_long and not retest_long[1], "OR Retest (long side)", "Session ORB: broken OR high retested")
+alertcondition(retest_short and not retest_short[1], "OR Retest (short side)", "Session ORB: broken OR low retested")
+if long_break
+    if use_json_alerts
+        alert('{"ev":"or_break","dir":"long","sym":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","or_range_atr":' + (na(or_range) or na(atr_val) or atr_val == 0 ? "null" : f_fmt(or_range / atr_val, 2)) + ',"gap_atr":' + (na(gap_atr) ? "null" : f_fmt(gap_atr, 2)) + ',"day_type":' + str.tostring(day_type_conf) + ',"t":' + str.tostring(time) + '}', alert.freq_once_per_bar_close)
+    else
+        alert("Session ORB: " + syminfo.ticker + " LONG break · OR " + f_fmt(or_range, 2) + " (" + f_fmt(or_range / math.max(atr_val, syminfo.mintick), 2) + " ATR) · gap " + f_fmt(gap_atr, 2) + " ATR", alert.freq_once_per_bar_close)
+if short_break
+    if use_json_alerts
+        alert('{"ev":"or_break","dir":"short","sym":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","or_range_atr":' + (na(or_range) or na(atr_val) or atr_val == 0 ? "null" : f_fmt(or_range / atr_val, 2)) + ',"gap_atr":' + (na(gap_atr) ? "null" : f_fmt(gap_atr, 2)) + ',"day_type":' + str.tostring(day_type_conf) + ',"t":' + str.tostring(time) + '}', alert.freq_once_per_bar_close)
+    else
+        alert("Session ORB: " + syminfo.ticker + " SHORT break · OR " + f_fmt(or_range, 2) + " (" + f_fmt(or_range / math.max(atr_val, syminfo.mintick), 2) + " ATR) · gap " + f_fmt(gap_atr, 2) + " ATR", alert.freq_once_per_bar_close)
+
+// =============================================================================
+// End of file · Session Structure & Opening Range v1.1
+// =============================================================================

@@ -1,0 +1,276 @@
+//@version=6
+// =============================================================================
+// Session Structure with Markov Probability Bands v1.0 (5T Pine Suite · Desk Kit)
+//
+// WHAT THIS IS.
+// An opening-range structure tool that answers one counted question per side:
+// on THIS chart, when a session's first confirmed break of the opening range
+// was UP (or DOWN), how often did the session's FINAL close stay beyond the
+// broken level? The OR high/low print as levels ("bands") whose labels carry
+// that side's counted hold rate with its Wilson lower bound and n — counted
+// day outcomes on this chart. HISTORY, not the probability of today.
+//
+// "Markov" in the honest suite sense: conditioning today's expectation on a
+// single observed state (which side broke first), exactly like the suite's
+// regime-conditional readouts — a frequency table, not a fitted model, and
+// never a forecast. Wilson lower bounds and thin-sample flags (n < 10 " !")
+// do the honesty work.
+//
+// MECHANICS (ORB v1.1 semantics).
+// The opening range builds while session elapsed time < the OR window, then
+// freezes for the day (finalize-once latch). A break is a CONFIRMED close
+// beyond OR high + buffer or OR low − buffer; the first break wins and only
+// one break is scored per day. A day's outcome is recorded when the next
+// session begins, from fixed completed-day values — the in-progress day is
+// never counted. Intraday charts only: on daily and higher timeframes every
+// figure is n/a and the HUD says so loudly (Noise v1.1 convention).
+//
+// Non-repaint: breaks on confirmed closes only; day records finalize once
+// from completed sessions; labels restate counted history only. Decision
+// support only — a human places every trade. Not advice.
+//
+// v1.0 changelog (2026-07-17):
+//   Initial release. Finalize-once opening range (default 30 min), ATR break
+//   buffer, first-break-wins scoring, per-direction hold counts with Wilson
+//   lower bounds and thin-sample flags, OR level lines + counted-history
+//   labels, intraday-only guard with loud HUD warning, timeframe-vs-window
+//   misfit warning, tiered HUD with honesty footer, data-window exports,
+//   confirmed break alerts, JSON alerts (default OFF).
+//   Evidence label: needs user run.
+// =============================================================================
+indicator("Session Structure with Markov Probability Bands v1.0", shorttitle = "Session Bands v1",
+     overlay = true, max_lines_count = 60, max_labels_count = 60)
+
+grp_mode = "0 · Mode"
+grp_or   = "1 · Opening Range"
+grp_meas = "2 · Hold Measurement"
+grp_dsp  = "3 · Display"
+
+variant_tag = input.string("v1.0-base", "Variant tag (freeze-the-config discipline)", group = grp_mode,
+     tooltip = "Label this exact settings set. Any settings change = new tag = new variant with its own validation cycle. The tag prints on the HUD and in alerts so screenshots self-document.")
+
+sess = input.session("0930-1600", "Session (exchange time)", group = grp_or,
+     tooltip = "The measured session window. Day boundaries follow the chart's session; the session's last confirmed close inside this window is the 'final close' scored against the broken level.")
+or_minutes = input.int(30, "Opening Range minutes", minval = 1, maxval = 120, group = grp_or)
+break_buffer_atr = input.float(0.00, "Break buffer (ATR)", minval = 0.0, maxval = 2.0, step = 0.05, group = grp_or,
+     tooltip = "0 = raw confirmed close beyond the OR. Add buffer to demand conviction. The buffer applies to break DETECTION only; the hold test uses the raw OR level itself.")
+atr_len = input.int(14, "ATR length (buffer units)", minval = 1, maxval = 100, group = grp_or)
+
+min_n = input.int(10, "Thin-sample flag below n days", minval = 3, maxval = 200, group = grp_meas,
+     tooltip = "Below this count the hold-rate rows and labels carry the suite's thin-sample flag. Wilson lower bounds do the honesty work either way.")
+
+show_lines = input.bool(true, "Draw OR level lines + counted-history labels", group = grp_dsp)
+hud_mode = input.string("Full", "HUD mode", options = ["Off", "Micro", "Full"], group = grp_dsp)
+hud_pos_in = input.string("top_right", "HUD position", options = ["top_left", "top_center", "top_right", "bottom_left", "bottom_center", "bottom_right"], group = grp_dsp)
+use_json_alerts = input.bool(false, "JSON alert payloads (webhook)", group = grp_dsp,
+     tooltip = "OFF: human-readable alert text. ON: machine-readable JSON for webhook automation. Display-layer only.")
+
+// =============================================================================
+// Palette & helpers (suite standard)
+// =============================================================================
+c_bull  = color.rgb(89, 159, 125)
+c_bear  = color.rgb(190, 96, 111)
+c_neut  = color.rgb(112, 126, 148)
+c_gold  = color.rgb(214, 162, 82)
+c_panel = color.new(#0E1316, 5)
+c_cell  = color.new(#151D22, 7)
+c_frame = color.new(#5BD6B0, 88)
+c_text  = color.white
+c_dim   = color.new(color.white, 45)
+c_faint = color.new(color.white, 68)
+
+f_pos(_s) =>
+    switch _s
+        "top_left"      => position.top_left
+        "top_center"    => position.top_center
+        "top_right"     => position.top_right
+        "bottom_left"   => position.bottom_left
+        "bottom_center" => position.bottom_center
+        "bottom_right"  => position.bottom_right
+        => position.top_right
+f_fmt(_x, _d) =>
+    _m = math.pow(10.0, _d)
+    na(_x) ? "n/a" : str.tostring(math.round(_x * _m) / _m)
+f_tcell(_tbl, _c, _r, _txt, _col, _bg) =>
+    table.cell(_tbl, _c, _r, _txt, text_color = _col, bgcolor = _bg, text_size = size.tiny, text_halign = text.align_center)
+f_wilson_lo(_p, _n) =>
+    _n <= 0 or na(_p) ? float(na) :
+         (_p + 1.96 * 1.96 / (2 * _n) - 1.96 * math.sqrt((_p * (1 - _p) + 1.96 * 1.96 / (4 * _n)) / _n)) / (1 + 1.96 * 1.96 / _n)
+
+// =============================================================================
+// Session engine (intraday only)
+// =============================================================================
+intraday_ok = timeframe.isintraday
+atr_val = ta.atr(atr_len)
+in_sess = intraday_ok and not na(time(timeframe.period, sess))
+new_day = ta.change(time("D")) != 0
+day_start = in_sess and (not in_sess[1] or new_day)
+tf_min = timeframe.in_seconds(timeframe.period) / 60.0
+tf_too_big = intraday_ok and tf_min > or_minutes
+
+// Day state (reset once per day via day-id latch, safe across realtime ticks)
+var int last_day_id = na
+var int t0 = na
+var int or_start_bar = na
+var float or_h = na
+var float or_l = na
+var bool or_done = false
+var int brk_dir = 0
+var float sess_close = na
+var bool drawn_today = false
+// Previous-day snapshot, consumed on the confirmed side (non-repaint record)
+var int pend_dir = 0
+var float pend_lvl = na
+var float pend_close = na
+var bool pend_ready = false
+if day_start and (na(last_day_id) or time("D") != last_day_id)
+    last_day_id := time("D")
+    pend_dir := brk_dir
+    pend_lvl := brk_dir == 1 ? or_h : brk_dir == -1 ? or_l : float(na)
+    pend_close := sess_close
+    pend_ready := or_done and brk_dir != 0 and not na(pend_lvl) and not na(sess_close)
+    t0 := time
+    or_start_bar := bar_index
+    or_h := high
+    or_l := low
+    or_done := false
+    brk_dir := 0
+    sess_close := na
+    drawn_today := false
+
+// Opening range: build while elapsed < window, then freeze (finalize-once)
+elapsed_min = in_sess and not na(t0) ? (time - t0) / 60000.0 : float(na)
+if in_sess and not na(elapsed_min)
+    if not or_done
+        if elapsed_min < or_minutes
+            or_h := math.max(nz(or_h, high), high)
+            or_l := math.min(nz(or_l, low), low)
+        else
+            or_done := true
+
+// =============================================================================
+// Confirmed side: record completed day, track final close, detect first break
+// =============================================================================
+var int up_n = 0
+var int up_hold = 0
+var int dn_n = 0
+var int dn_hold = 0
+buf = break_buffer_atr * nz(atr_val)
+bool brk_up_ev = false
+bool brk_dn_ev = false
+if barstate.isconfirmed and intraday_ok
+    if pend_ready
+        if pend_dir == 1
+            up_n += 1
+            up_hold += pend_close > pend_lvl ? 1 : 0
+        else if pend_dir == -1
+            dn_n += 1
+            dn_hold += pend_close < pend_lvl ? 1 : 0
+        pend_ready := false
+    if in_sess
+        sess_close := close
+        if or_done and brk_dir == 0
+            if close > or_h + buf
+                brk_dir := 1
+                brk_up_ev := true
+            else if close < or_l - buf
+                brk_dir := -1
+                brk_dn_ev := true
+
+up_hr = up_n > 0 ? up_hold * 1.0 / up_n : float(na)
+dn_hr = dn_n > 0 ? dn_hold * 1.0 / dn_n : float(na)
+up_wlo = f_wilson_lo(up_hr, up_n)
+dn_wlo = f_wilson_lo(dn_hr, dn_n)
+
+// =============================================================================
+// OR level lines + counted-history labels (today only; created once per day)
+// =============================================================================
+var line ln_h = na
+var line ln_l = na
+var label lb_h = na
+var label lb_l = na
+if intraday_ok and show_lines and in_sess and or_done and not drawn_today
+    drawn_today := true
+    if not na(ln_h)
+        line.delete(ln_h)
+    if not na(ln_l)
+        line.delete(ln_l)
+    if not na(lb_h)
+        label.delete(lb_h)
+    if not na(lb_l)
+        label.delete(lb_l)
+    _up_txt = "OR H " + str.tostring(or_h, format.mintick) + " · up-break held " + (up_n == 0 ? "n0" : f_fmt(up_hr * 100.0, 0) + "% · Wlo " + f_fmt(up_wlo * 100.0, 0) + "% · n" + str.tostring(up_n) + (up_n < min_n ? " !" : ""))
+    _dn_txt = "OR L " + str.tostring(or_l, format.mintick) + " · down-break held " + (dn_n == 0 ? "n0" : f_fmt(dn_hr * 100.0, 0) + "% · Wlo " + f_fmt(dn_wlo * 100.0, 0) + "% · n" + str.tostring(dn_n) + (dn_n < min_n ? " !" : ""))
+    _hist_note = "Counted day outcomes on this chart — history, not probability of today."
+    ln_h := line.new(or_start_bar, or_h, bar_index, or_h, color = color.new(c_bull, 30), width = 2)
+    ln_l := line.new(or_start_bar, or_l, bar_index, or_l, color = color.new(c_bear, 30), width = 2)
+    lb_h := label.new(bar_index, or_h, _up_txt, style = label.style_label_left, color = c_cell, textcolor = c_dim, size = size.tiny, tooltip = _hist_note)
+    lb_l := label.new(bar_index, or_l, _dn_txt, style = label.style_label_left, color = c_cell, textcolor = c_dim, size = size.tiny, tooltip = _hist_note)
+if intraday_ok and show_lines and in_sess and drawn_today and not na(ln_h)
+    line.set_x2(ln_h, bar_index)
+    line.set_x2(ln_l, bar_index)
+    label.set_x(lb_h, bar_index)
+    label.set_x(lb_l, bar_index)
+
+// =============================================================================
+// Break markers & exports
+// =============================================================================
+plotshape(brk_up_ev, "Up break (confirmed)", style = shape.triangleup, location = location.belowbar, color = c_bull, size = size.tiny)
+plotshape(brk_dn_ev, "Down break (confirmed)", style = shape.triangledown, location = location.abovebar, color = c_bear, size = size.tiny)
+
+plot(intraday_ok and or_done ? or_h : na, "SMB_OR_HIGH_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(intraday_ok and or_done ? or_l : na, "SMB_OR_LOW_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(float(brk_dir), "SMB_BREAK_DIR_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(up_wlo * 100.0, "SMB_UP_HOLD_WLO_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(dn_wlo * 100.0, "SMB_DN_HOLD_WLO_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+
+// =============================================================================
+// HUD
+// =============================================================================
+var table hud = table.new(f_pos(hud_pos_in), 2, 8, bgcolor = c_panel, frame_color = c_frame,
+     frame_width = 1, border_color = color.new(color.white, 92), border_width = 1)
+if barstate.islast and hud_mode != "Off"
+    _state_txt = not intraday_ok ? "NOT INTRADAY — bands n/a" :
+         not in_sess ? "OUTSIDE SESSION" :
+         not or_done ? "OR BUILDING · " + f_fmt(elapsed_min, 0) + "/" + str.tostring(or_minutes) + "m" :
+         brk_dir == 1 ? "UP BREAK · holding = close > OR H at final" :
+         brk_dir == -1 ? "DOWN BREAK · holding = close < OR L at final" : "INSIDE OR"
+    _state_bg = not intraday_ok ? color.new(c_bear, 40) : brk_dir == 1 ? color.new(c_bull, 45) : brk_dir == -1 ? color.new(c_bear, 45) : c_cell
+    f_tcell(hud, 0, 0, "Session Bands " + variant_tag, c_text, c_frame)
+    f_tcell(hud, 1, 0, _state_txt, c_text, _state_bg)
+    if hud_mode == "Full" and intraday_ok
+        f_tcell(hud, 0, 1, "Opening range (" + str.tostring(or_minutes) + "m)", c_dim, c_panel)
+        f_tcell(hud, 1, 1, not or_done ? "building" : str.tostring(or_l, format.mintick) + " – " + str.tostring(or_h, format.mintick), c_dim, c_cell)
+        f_tcell(hud, 0, 2, "Up-break held to final", c_dim, c_panel)
+        f_tcell(hud, 1, 2, up_n == 0 ? "n0 — no cases yet" : f_fmt(up_hr * 100.0, 0) + "% · Wlo " + f_fmt(up_wlo * 100.0, 0) + "% · n" + str.tostring(up_n) + (up_n < min_n ? " !" : ""), up_n < min_n ? c_faint : c_dim, c_cell)
+        f_tcell(hud, 0, 3, "Down-break held to final", c_dim, c_panel)
+        f_tcell(hud, 1, 3, dn_n == 0 ? "n0 — no cases yet" : f_fmt(dn_hr * 100.0, 0) + "% · Wlo " + f_fmt(dn_wlo * 100.0, 0) + "% · n" + str.tostring(dn_n) + (dn_n < min_n ? " !" : ""), dn_n < min_n ? c_faint : c_dim, c_cell)
+        f_tcell(hud, 0, 4, "Scoring", c_dim, c_panel)
+        f_tcell(hud, 1, 4, "first break wins · one per day · buffer " + f_fmt(break_buffer_atr, 2) + " ATR", c_faint, c_cell)
+        f_tcell(hud, 0, 5, "Timeframe fit", c_dim, c_panel)
+        f_tcell(hud, 1, 5, tf_too_big ? "MISFIT: " + f_fmt(tf_min, 0) + "m TF > " + str.tostring(or_minutes) + "m OR window" : f_fmt(tf_min, 0) + "m TF inside " + str.tostring(or_minutes) + "m window", tf_too_big ? c_bear : c_faint, c_cell)
+        f_tcell(hud, 0, 6, "*counted day outcomes", c_faint, c_panel)
+        f_tcell(hud, 1, 6, "history on this chart — not probability of today", c_faint, c_panel)
+        f_tcell(hud, 0, 7, "*completed days only", c_faint, c_panel)
+        f_tcell(hud, 1, 7, "in-progress day never counted · not advice", c_faint, c_panel)
+
+// =============================================================================
+// Alerts (confirmed-bar events; formal wording per suite convention)
+// =============================================================================
+alertcondition(brk_up_ev, "OR up-break (confirmed)", "Session Bands: confirmed close above the opening range")
+alertcondition(brk_dn_ev, "OR down-break (confirmed)", "Session Bands: confirmed close below the opening range")
+if brk_up_ev or brk_dn_ev
+    _dir_txt = brk_up_ev ? "UP" : "DOWN"
+    _side_stats = brk_up_ev ?
+         "held " + f_fmt(up_hr * 100.0, 0) + "% · Wlo " + f_fmt(up_wlo * 100.0, 0) + "% · n" + str.tostring(up_n) :
+         "held " + f_fmt(dn_hr * 100.0, 0) + "% · Wlo " + f_fmt(dn_wlo * 100.0, 0) + "% · n" + str.tostring(dn_n)
+    if use_json_alerts
+        alert('{"ev":"session_band","sym":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","dir":"' + _dir_txt + '","or_h":' + (na(or_h) ? "null" : f_fmt(or_h, 4)) + ',"or_l":' + (na(or_l) ? "null" : f_fmt(or_l, 4)) + ',"hold_wlo":' + (brk_up_ev ? (na(up_wlo) ? "null" : f_fmt(up_wlo * 100.0, 1)) : (na(dn_wlo) ? "null" : f_fmt(dn_wlo * 100.0, 1))) + ',"side_n":' + str.tostring(brk_up_ev ? up_n : dn_n) + ',"variant":"' + variant_tag + '","t":' + str.tostring(time) + '}', alert.freq_once_per_bar_close)
+    else
+        alert("Session Bands [" + variant_tag + "]: " + syminfo.ticker + " confirmed " + _dir_txt +
+             " break of the opening range · history for this side: " + _side_stats +
+             " — counted day outcomes, not probability of today", alert.freq_once_per_bar_close)
+
+// =============================================================================
+// End of file · Session Structure with Markov Probability Bands v1.0
+// =============================================================================

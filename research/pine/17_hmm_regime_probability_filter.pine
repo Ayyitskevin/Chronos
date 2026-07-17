@@ -1,0 +1,333 @@
+//@version=6
+// =============================================================================
+// Hidden Markov Model Regime Probability Filter v1.0 (5T Pine Suite · Desk Kit)
+//
+// WHAT THIS IS.
+// A three-state (Bull / Neutral / Bear) hidden-Markov-model FILTER over the
+// suite's core observation — the volatility-normalized window return z-score.
+// Each confirmed bar it runs one step of the HMM forward recursion and
+// reports the probability that the market currently occupies each state,
+// given the assumed model. Where the flagship regime engine outputs a hard
+// classification with hysteresis, this filter outputs the soft probabilities
+// underneath such a classification — a second, independent lens on the same
+// question, suitable for gating the BULL+/BEAR+ engines through their
+// External Regime link (this script's HMM_REGIME_EXPORT emits exactly
+// -1 / 0 / +1 for that purpose once warm).
+//
+// RESEARCH BASIS, stated plainly.
+// Regime-switching filters descend from Hamilton (1989, Econometrica) —
+// the canonical Markov-switching model of GNP/market regimes — and the
+// forward-algorithm machinery of Baum et al. The educational framing here
+// is inspired by the Quant Guild channel's treatment of Markov and HMM
+// regime methods. Two honesty points the literature itself insists on:
+//   1. These are FILTERED (causal) probabilities: P(state_t | data up to t).
+//      "Smoothed" probabilities — the prettier charts in most papers — use
+//      FUTURE data and would repaint. This tool never smooths.
+//   2. Parameters here are USER-SET (or empirically counted), not fitted by
+//      Baum-Welch/EM. Fitting inside Pine would silently refit on every
+//      load — unstable and unauditable. Fixed parameters are a stability
+//      feature and an adaptivity limitation; both are disclosed.
+//
+// The probabilities describe present state membership UNDER AN ASSUMED
+// MODEL. They are not forecasts, and the model can be wrong. The self-
+// measurement panel (Wilson lower bounds, per suite convention) tracks how
+// this filter's committed states have actually behaved on THIS chart —
+// believe that panel, not the elegance of the math.
+//
+// Non-repaint: the recursion advances on confirmed bars only; the intrabar
+// display holds the last confirmed probabilities. Decision support only —
+// a human places every trade. Risk controls outrank all signals.
+//
+// v1.0 changelog (2026-07-12):
+//   Initial release. Forward-filtered 3-state HMM on the suite z-score;
+//   sticky-prior or empirically-counted (Laplace-smoothed) transition
+//   matrix; commit threshold with uncommitted state; External-Regime-
+//   compatible export; Wilson-bound self-measurement (next-bar sign
+//   agreement per committed side + committed-state dwell); optional
+//   regime-link agreement readout; tiered HUD; JSON alerts (default OFF).
+//   Suite default discipline preserved: every behavior-adjacent option
+//   ships at its conservative default; asymmetric doctrine untouched
+//   (this study gates nothing by itself — the consuming engine's own
+//   youth/dwell gate defaults, primary on BEAR+ and optional-OFF on
+//   BULL+, remain in force there).
+//   Evidence label: needs user run.
+// =============================================================================
+indicator("Hidden Markov Model Regime Probability Filter v1.0", shorttitle = "HMM Regime v1",
+     overlay = false, max_labels_count = 20)
+
+grp_mode = "0 · Mode"
+grp_obs  = "1 · Observation Model"
+grp_hmm  = "2 · HMM Parameters"
+grp_link = "3 · Integration Links"
+grp_meas = "4 · Self-Measurement"
+grp_dsp  = "5 · Display"
+
+variant_tag = input.string("v1.0-base", "Variant tag (freeze-the-config discipline)", group = grp_mode,
+     tooltip = "Label this exact settings set. Any settings change = new tag = new variant with its own validation cycle. The tag prints on the HUD and in alerts so screenshots self-document.")
+
+obs_lookback = input.int(20, "Observation lookback (bars)", minval = 5, maxval = 250, group = grp_obs,
+     tooltip = "Window for the volatility-normalized return z-score — the same observation the flagship regime engine classifies. Matching the engine's lookback keeps the two lenses comparable.")
+warm_bars = input.int(100, "Warm-up bars before reporting", minval = 20, maxval = 1000, group = grp_obs,
+     tooltip = "The recursion needs history before its probabilities mean anything. Below this count the HUD reads WARMING and exports are na.")
+
+mu_bull = input.float(1.00, "Bull state mean (z units)", minval = 0.10, maxval = 5.00, step = 0.05, group = grp_hmm)
+mu_bear = input.float(-1.00, "Bear state mean (z units)", minval = -5.00, maxval = -0.10, step = 0.05, group = grp_hmm)
+sd_bull = input.float(0.75, "Bull state sigma", minval = 0.10, maxval = 5.00, step = 0.05, group = grp_hmm)
+sd_neut = input.float(0.60, "Neutral state sigma", minval = 0.10, maxval = 5.00, step = 0.05, group = grp_hmm,
+     tooltip = "Gaussian emission parameters per state (Neutral mean is fixed at 0). Defaults mirror the flagship's enter-threshold geometry. These are HYPOTHESES about what each regime's z-scores look like — not fitted truths.")
+sd_bear = input.float(0.75, "Bear state sigma", minval = 0.10, maxval = 5.00, step = 0.05, group = grp_hmm)
+trans_mode = input.string("Sticky prior (fixed)", "Transition matrix",
+     options = ["Sticky prior (fixed)", "Empirical (counted + Laplace)"], group = grp_hmm,
+     tooltip = "Sticky prior (default): a fixed self-transition probability with the remainder split evenly — stable from bar one, zero data dependence. Empirical: counts THIS chart's own confirmed hard-threshold state transitions (the suite's Markov-readout method) with Laplace smoothing, and uses that matrix. Empirical adapts to the chart but inherits its sample-size problems — the HUD shows the row counts.")
+p_stay = input.float(0.92, "Sticky prior: self-transition probability", minval = 0.50, maxval = 0.999, step = 0.005, group = grp_hmm)
+laplace_alpha = input.float(1.0, "Empirical: Laplace pseudo-count alpha", minval = 0.1, maxval = 10.0, step = 0.1, group = grp_hmm)
+commit_pct = input.float(60.0, "Commit threshold %", minval = 34.0, maxval = 99.0, step = 1.0, group = grp_hmm,
+     tooltip = "The filter names a state only when its probability clears this bar. Below it the state reads UNCOMMITTED and the regime-compatible export emits 0 (neutral). A heuristic threshold, honestly labeled.")
+
+use_regime_link = input.bool(false, "Compare against external regime link", group = grp_link)
+regime_src = input.source(close, "Regime link (wire to a REGIME_EXPORT)", group = grp_link,
+     tooltip = "Optional. Wire to the flagship engine's REGIME_EXPORT (-1/0/+1) to see how often this filter's committed state agrees with it. Unwired or invalid values read n/a. Comparison only — neither source gates the other here.")
+
+min_meas_n = input.int(20, "Self-measurement sample warning (n)", minval = 5, maxval = 500, group = grp_meas,
+     tooltip = "Below this count the hit-rate rows carry the suite's thin-sample flag. Wilson lower bounds do the honesty work either way.")
+
+hud_mode = input.string("Full", "HUD mode", options = ["Off", "Micro", "Full"], group = grp_dsp)
+hud_pos_in = input.string("top_right", "HUD position", options = ["top_left", "top_center", "top_right", "bottom_left", "bottom_center", "bottom_right"], group = grp_dsp)
+show_prob_plots = input.bool(true, "Plot state probabilities", group = grp_dsp)
+show_state_tint = input.bool(true, "Committed-state background tint", group = grp_dsp)
+use_json_alerts = input.bool(false, "JSON alert payloads (webhook)", group = grp_dsp,
+     tooltip = "OFF: human-readable alert text. ON: machine-readable JSON for webhook automation. Display-layer only.")
+
+// =============================================================================
+// Palette & helpers (suite standard)
+// =============================================================================
+c_bull  = color.rgb(89, 159, 125)
+c_bear  = color.rgb(190, 96, 111)
+c_neut  = color.rgb(112, 126, 148)
+c_gold  = color.rgb(214, 162, 82)
+c_panel = color.new(#0E1316, 5)
+c_cell  = color.new(#151D22, 7)
+c_cell2 = color.new(#10171B, 9)
+c_frame = color.new(#5BD6B0, 88)
+c_text  = color.white
+c_dim   = color.new(color.white, 45)
+c_faint = color.new(color.white, 68)
+
+f_pos(_s) =>
+    switch _s
+        "top_left"      => position.top_left
+        "top_center"    => position.top_center
+        "top_right"     => position.top_right
+        "bottom_left"   => position.bottom_left
+        "bottom_center" => position.bottom_center
+        "bottom_right"  => position.bottom_right
+        => position.top_right
+f_fmt(_x, _d) =>
+    _m = math.pow(10.0, _d)
+    na(_x) ? "n/a" : str.tostring(math.round(_x * _m) / _m)
+f_tcell(_tbl, _c, _r, _txt, _col, _bg) =>
+    table.cell(_tbl, _c, _r, _txt, text_color = _col, bgcolor = _bg, text_size = size.tiny, text_halign = text.align_center)
+// Wilson score lower bound (z = 1.96), suite-standard honesty for hit rates.
+f_wilson_lo(_p, _n) =>
+    _n <= 0 or na(_p) ? float(na) :
+         (_p + 1.96 * 1.96 / (2 * _n) - 1.96 * math.sqrt((_p * (1 - _p) + 1.96 * 1.96 / (4 * _n)) / _n)) / (1 + 1.96 * 1.96 / _n)
+// Gaussian probability density (unnormalized constant is fine — the forward
+// step renormalizes, so only relative likelihoods matter).
+f_gauss(_x, _mu, _sd) =>
+    _sd <= 0 or na(_x) ? float(na) : math.exp(-0.5 * math.pow((_x - _mu) / _sd, 2.0)) / _sd
+
+// =============================================================================
+// Observation: volatility-normalized window return (suite core statistic)
+// =============================================================================
+one_bar_ret = not na(close[1]) and close > 0 and close[1] > 0 ? math.log(close / close[1]) : float(na)
+win_ret = not na(close[obs_lookback]) and close > 0 and close[obs_lookback] > 0 ? math.log(close / close[obs_lookback]) : float(na)
+win_vol = ta.stdev(one_bar_ret, obs_lookback) * math.sqrt(obs_lookback)
+obs_z = not na(win_ret) and not na(win_vol) and win_vol > 0 ? win_ret / win_vol : float(na)
+
+var int z_seen = 0
+if barstate.isconfirmed and not na(obs_z)
+    z_seen += 1
+warmed = z_seen >= warm_bars
+
+// =============================================================================
+// Empirical transition counts (hard-threshold shadow classifier, confirmed
+// bars — the suite Markov-readout method, used only when Empirical is on)
+// =============================================================================
+var int shadow_state = 0
+var array<int> tr_counts = array.new_int(9, 0)   // rows Bull/Neut/Bear × cols
+var array<int> tr_rows = array.new_int(3, 0)
+f_sidx(_s) =>
+    _s == 1 ? 0 : _s == 0 ? 1 : 2
+if barstate.isconfirmed and not na(obs_z)
+    int _new_state = obs_z > mu_bull * 0.85 ? 1 : obs_z < mu_bear * 0.85 ? -1 : 0
+    int _fr = f_sidx(shadow_state)
+    int _to = f_sidx(_new_state)
+    array.set(tr_counts, _fr * 3 + _to, array.get(tr_counts, _fr * 3 + _to) + 1)
+    array.set(tr_rows, _fr, array.get(tr_rows, _fr) + 1)
+    shadow_state := _new_state
+// Transition probability row→col under the selected mode (Laplace-smoothed
+// when empirical; fixed sticky prior otherwise).
+f_A(_fr, _to) =>
+    if trans_mode == "Sticky prior (fixed)"
+        _fr == _to ? p_stay : (1.0 - p_stay) / 2.0
+    else
+        _n = array.get(tr_rows, _fr)
+        _c = array.get(tr_counts, _fr * 3 + _to)
+        (_c + laplace_alpha) / (_n + 3.0 * laplace_alpha)
+
+// =============================================================================
+// HMM forward recursion (confirmed bars only — filtered, never smoothed)
+// =============================================================================
+var float p_bull = 1.0 / 3.0
+var float p_neut = 1.0 / 3.0
+var float p_bear = 1.0 / 3.0
+if barstate.isconfirmed and not na(obs_z)
+    float _e_bull = f_gauss(obs_z, mu_bull, sd_bull)
+    float _e_neut = f_gauss(obs_z, 0.0, sd_neut)
+    float _e_bear = f_gauss(obs_z, mu_bear, sd_bear)
+    if not na(_e_bull) and not na(_e_neut) and not na(_e_bear)
+        // prediction step: propagate yesterday's belief through the matrix
+        float _pr_bull = p_bull * f_A(0, 0) + p_neut * f_A(1, 0) + p_bear * f_A(2, 0)
+        float _pr_neut = p_bull * f_A(0, 1) + p_neut * f_A(1, 1) + p_bear * f_A(2, 1)
+        float _pr_bear = p_bull * f_A(0, 2) + p_neut * f_A(1, 2) + p_bear * f_A(2, 2)
+        // update step: weight by emission likelihoods, floor, renormalize
+        float _a_bull = math.max(_pr_bull * _e_bull, 1e-10)
+        float _a_neut = math.max(_pr_neut * _e_neut, 1e-10)
+        float _a_bear = math.max(_pr_bear * _e_bear, 1e-10)
+        float _sum = _a_bull + _a_neut + _a_bear
+        if _sum > 0
+            p_bull := _a_bull / _sum
+            p_neut := _a_neut / _sum
+            p_bear := _a_bear / _sum
+
+p_max = math.max(p_bull, math.max(p_neut, p_bear))
+int argmax_state = p_bull >= p_neut and p_bull >= p_bear ? 1 : p_bear >= p_neut ? -1 : 0
+committed = warmed and p_max * 100.0 >= commit_pct
+int hmm_state = committed ? argmax_state : 0
+// External-Regime-compatible output: exactly -1/0/+1 once warm (na before).
+float hmm_regime_out = warmed ? float(hmm_state) : float(na)
+
+var int prev_committed_state = 0
+state_flip = barstate.isconfirmed and warmed and hmm_state != prev_committed_state
+flip_to_bull = state_flip and hmm_state == 1
+flip_to_bear = state_flip and hmm_state == -1
+flip_to_uncommitted = state_flip and hmm_state == 0
+if barstate.isconfirmed
+    prev_committed_state := hmm_state
+
+// =============================================================================
+// Regime link comparison (optional, strict {-1,0,+1} validation)
+// =============================================================================
+_rv = regime_src
+link_valid = use_regime_link and not na(_rv) and (_rv == -1.0 or _rv == 0.0 or _rv == 1.0)
+var int agree_n = 0
+var int agree_hits = 0
+if barstate.isconfirmed and warmed and link_valid and hmm_state != 0
+    agree_n += 1
+    agree_hits += int(_rv) == hmm_state ? 1 : 0
+agree_pct = agree_n > 0 ? agree_hits * 100.0 / agree_n : float(na)
+
+// =============================================================================
+// Self-measurement (suite convention: Wilson floors before win rates)
+// Next-bar sign agreement while committed, per side — a calibration probe,
+// not an edge claim: confident states should at least tilt the coin.
+// =============================================================================
+var int bull_n = 0
+var int bull_hits = 0
+var int bear_n = 0
+var int bear_hits = 0
+if barstate.isconfirmed and warmed and not na(close[1])
+    if prev_committed_state[1] == 1
+        bull_n += 1
+        bull_hits += close > close[1] ? 1 : 0
+    else if prev_committed_state[1] == -1
+        bear_n += 1
+        bear_hits += close < close[1] ? 1 : 0
+bull_hr = bull_n > 0 ? bull_hits * 1.0 / bull_n : float(na)
+bear_hr = bear_n > 0 ? bear_hits * 1.0 / bear_n : float(na)
+bull_wlo = f_wilson_lo(bull_hr, bull_n)
+bear_wlo = f_wilson_lo(bear_hr, bear_n)
+// Committed-state dwell (completed committed spells, both directional states)
+var int cur_dwell = 0
+var float dwell_sum = 0.0
+var int dwell_n = 0
+if barstate.isconfirmed
+    if hmm_state != 0 and hmm_state == prev_committed_state[1]
+        cur_dwell += 1
+    else
+        if prev_committed_state[1] != 0 and cur_dwell > 0
+            dwell_sum += cur_dwell
+            dwell_n += 1
+        cur_dwell := hmm_state != 0 ? 1 : 0
+mean_dwell = dwell_n > 0 ? dwell_sum / dwell_n : float(na)
+
+// =============================================================================
+// Plots, tint, exports
+// =============================================================================
+plot(show_prob_plots and warmed ? p_bull * 100.0 : na, "P(Bull) %", color = c_bull, linewidth = 2)
+plot(show_prob_plots and warmed ? p_bear * 100.0 : na, "P(Bear) %", color = c_bear, linewidth = 2)
+plot(show_prob_plots and warmed ? p_neut * 100.0 : na, "P(Neutral) %", color = color.new(c_neut, 35), linewidth = 1)
+hline(commit_pct, "Commit threshold", color = color.new(color.white, 80), linestyle = hline.style_dotted)
+bgcolor(show_state_tint and warmed and hmm_state == 1 ? color.new(c_bull, 88) :
+     show_state_tint and warmed and hmm_state == -1 ? color.new(c_bear, 88) : na, title = "Committed state tint")
+
+plot(warmed ? p_bull * 100.0 : na, "HMM_P_BULL_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(warmed ? p_neut * 100.0 : na, "HMM_P_NEUT_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(warmed ? p_bear * 100.0 : na, "HMM_P_BEAR_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(hmm_regime_out, "HMM_REGIME_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(warmed ? p_max * 100.0 : na, "HMM_CONFIDENCE_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(committed ? 1.0 : 0.0, "HMM_COMMITTED_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(bull_wlo, "HMM_BULL_HIT_WLO_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(bear_wlo, "HMM_BEAR_HIT_WLO_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(mean_dwell, "HMM_MEAN_DWELL_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(obs_z, "HMM_OBS_Z_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+
+// =============================================================================
+// HUD
+// =============================================================================
+var table hud = table.new(f_pos(hud_pos_in), 2, 8, bgcolor = c_panel, frame_color = c_frame,
+     frame_width = 1, border_color = color.new(color.white, 92), border_width = 1)
+if barstate.islast and hud_mode != "Off"
+    _state_txt = not warmed ? "WARMING · " + str.tostring(math.min(z_seen, warm_bars)) + "/" + str.tostring(warm_bars) :
+         hmm_state == 1 ? "COMMITTED · BULL " + f_fmt(p_bull * 100.0, 0) + "%" :
+         hmm_state == -1 ? "COMMITTED · BEAR " + f_fmt(p_bear * 100.0, 0) + "%" :
+         "UNCOMMITTED · max " + f_fmt(p_max * 100.0, 0) + "%"
+    _state_bg = not warmed ? c_cell : hmm_state == 1 ? color.new(c_bull, 45) : hmm_state == -1 ? color.new(c_bear, 45) : c_cell
+    f_tcell(hud, 0, 0, "HMM " + variant_tag, c_text, c_frame)
+    f_tcell(hud, 1, 0, _state_txt, c_text, _state_bg)
+    if hud_mode == "Full"
+        f_tcell(hud, 0, 1, "P(Bull / Neut / Bear)", c_dim, c_panel)
+        f_tcell(hud, 1, 1, f_fmt(p_bull * 100.0, 0) + " / " + f_fmt(p_neut * 100.0, 0) + " / " + f_fmt(p_bear * 100.0, 0) + " %", c_dim, c_cell)
+        f_tcell(hud, 0, 2, "Observation z", c_dim, c_panel)
+        f_tcell(hud, 1, 2, f_fmt(obs_z, 2) + " · lb " + str.tostring(obs_lookback), c_dim, c_cell)
+        _tr_txt = trans_mode == "Sticky prior (fixed)" ? "Sticky " + f_fmt(p_stay * 100.0, 1) + "%" :
+             "Empirical · rows n " + str.tostring(array.get(tr_rows, 0)) + "/" + str.tostring(array.get(tr_rows, 1)) + "/" + str.tostring(array.get(tr_rows, 2))
+        f_tcell(hud, 0, 3, "Transitions", c_dim, c_panel)
+        f_tcell(hud, 1, 3, _tr_txt, c_dim, c_cell)
+        f_tcell(hud, 0, 4, "Next-bar agree (Bull)", c_dim, c_panel)
+        f_tcell(hud, 1, 4, f_fmt(bull_hr * 100.0, 0) + "% · Wlo " + f_fmt(bull_wlo * 100.0, 0) + "% · n" + str.tostring(bull_n) + (bull_n < min_meas_n ? " !" : ""), bull_n < min_meas_n ? c_faint : c_dim, c_cell)
+        f_tcell(hud, 0, 5, "Next-bar agree (Bear)", c_dim, c_panel)
+        f_tcell(hud, 1, 5, f_fmt(bear_hr * 100.0, 0) + "% · Wlo " + f_fmt(bear_wlo * 100.0, 0) + "% · n" + str.tostring(bear_n) + (bear_n < min_meas_n ? " !" : ""), bear_n < min_meas_n ? c_faint : c_dim, c_cell)
+        f_tcell(hud, 0, 6, "Dwell · Link agree", c_dim, c_panel)
+        f_tcell(hud, 1, 6, "~" + f_fmt(mean_dwell, 0) + " bars · " + (not use_regime_link ? "link off" : not link_valid ? "LINK?" : f_fmt(agree_pct, 0) + "% (n" + str.tostring(agree_n) + ")"), use_regime_link and not link_valid ? c_bear : c_dim, c_cell)
+        f_tcell(hud, 0, 7, "*filtered, not smoothed", c_faint, c_panel)
+        f_tcell(hud, 1, 7, "state membership, not forecast · not advice", c_faint, c_panel)
+
+// =============================================================================
+// Alerts (confirmed-bar events; formal wording per suite convention)
+// =============================================================================
+alertcondition(flip_to_bull, "HMM committed to BULL", "HMM Regime Filter: probability committed to the Bull state")
+alertcondition(flip_to_bear, "HMM committed to BEAR", "HMM Regime Filter: probability committed to the Bear state")
+alertcondition(flip_to_uncommitted, "HMM dropped to UNCOMMITTED", "HMM Regime Filter: no state clears the commit threshold")
+if state_flip
+    _st_txt = hmm_state == 1 ? "BULL" : hmm_state == -1 ? "BEAR" : "UNCOMMITTED"
+    if use_json_alerts
+        alert('{"ev":"hmm_state","sym":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","state":"' + _st_txt + '","p_bull":' + f_fmt(p_bull, 3) + ',"p_neut":' + f_fmt(p_neut, 3) + ',"p_bear":' + f_fmt(p_bear, 3) + ',"confidence":' + f_fmt(p_max, 3) + ',"obs_z":' + (na(obs_z) ? "null" : f_fmt(obs_z, 3)) + ',"variant":"' + variant_tag + '","t":' + str.tostring(time) + '}', alert.freq_once_per_bar_close)
+    else
+        alert("HMM Regime Filter [" + variant_tag + "]: " + syminfo.ticker + " committed state → " + _st_txt +
+             " · P " + f_fmt(p_max * 100.0, 0) + "% (B " + f_fmt(p_bull * 100.0, 0) + " / N " + f_fmt(p_neut * 100.0, 0) + " / Br " + f_fmt(p_bear * 100.0, 0) + ")" +
+             " · z " + f_fmt(obs_z, 2), alert.freq_once_per_bar_close)
+
+// =============================================================================
+// End of file · Hidden Markov Model Regime Probability Filter v1.0
+// =============================================================================

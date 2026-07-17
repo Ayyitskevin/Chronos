@@ -1,0 +1,161 @@
+//@version=6
+// =============================================================================
+// Buffett Desk Lens v1.0 (5T Pine Suite · Desk Kit)
+//
+// Old-school context on the chart: what does the business earn relative to
+// what bonds pay, what are you paying for book, is the franchise's return on
+// equity holding, and how far below its own high has the market marked it?
+// "Be fearful when others are greedy and greedy when others are fearful" —
+// this panel measures the second half of that sentence and DECIDES NOTHING.
+//
+// HONESTY, up front:
+//   - Fundamentals via request.financial() arrive LATE and get REVISED. They
+//     exist for many US listings and are patchy elsewhere; every cell shows
+//     n/a rather than guessing. ETFs/indices/futures have none — expect a
+//     panel of n/a there.
+//   - Earnings yield vs the 10-year is a CRUDE equity-risk-premium sketch
+//     (the "Fed model" family) — context for patience, not a valuation.
+//   - The drawdown gauge is descriptive. Cheap can get cheaper; quality is
+//     a separate question this panel cannot answer.
+// Decision support only. Not advice. Evidence label: needs user run.
+// =============================================================================
+indicator("Buffett Desk Lens v1.0", shorttitle = "Buffett Lens v1", overlay = true)
+
+grp_src = "1 · Sources"
+grp_thr = "2 · Context Thresholds"
+grp_dsp = "3 · Display"
+
+bond_sym = input.symbol("TVC:US10Y", "10-year yield symbol", group = grp_src,
+     tooltip = "Quoted in percent (e.g. 4.3). The earnings-yield spread uses its completed daily value.")
+eps_period = input.string("TTM", "Earnings period", options = ["TTM", "FY", "FQ"], group = grp_src)
+roe_lookback_qtrs = input.int(4, "ROE trend lookback (reported values)", minval = 2, maxval = 8, group = grp_src,
+     tooltip = "Compares the newest reported ROE against the value N reports ago. Needs that many distinct reports on this chart's history before it renders.")
+
+dd_watch_pct = input.float(20.0, "Drawdown: 'interesting' threshold %", minval = 5.0, maxval = 60.0, step = 1.0, group = grp_thr)
+dd_fear_pct  = input.float(35.0, "Drawdown: 'fear' threshold %", minval = 10.0, maxval = 80.0, step = 1.0, group = grp_thr,
+     tooltip = "Descriptive buckets for the 52-week drawdown gauge. They mark how far sentiment has swung — they do not measure quality or safety.")
+
+hud_mode = input.string("Full", "HUD mode", options = ["Off", "Micro", "Full"], group = grp_dsp)
+hud_pos_in = input.string("top_right", "HUD position", options = ["top_left", "top_center", "top_right", "bottom_left", "bottom_center", "bottom_right"], group = grp_dsp)
+use_json_alerts = input.bool(false, "JSON alert payloads (webhook)", group = grp_dsp,
+     tooltip = "OFF: human-readable alert text. ON: machine-readable JSON for webhook automation. Display-layer only.")
+
+// =============================================================================
+// Palette & helpers
+// =============================================================================
+c_bull  = color.rgb(89, 159, 125)
+c_bear  = color.rgb(190, 96, 111)
+c_gold  = color.rgb(214, 162, 82)
+c_panel = color.new(#0E1316, 5)
+c_cell  = color.new(#151D22, 7)
+c_frame = color.new(#5BD6B0, 88)
+c_text  = color.white
+c_dim   = color.new(color.white, 45)
+c_faint = color.new(color.white, 68)
+
+f_pos(_s) =>
+    switch _s
+        "top_left"      => position.top_left
+        "top_center"    => position.top_center
+        "top_right"     => position.top_right
+        "bottom_left"   => position.bottom_left
+        "bottom_center" => position.bottom_center
+        "bottom_right"  => position.bottom_right
+        => position.top_right
+f_fmt(_x, _d) =>
+    _m = math.pow(10.0, _d)
+    na(_x) ? "n/a" : str.tostring(math.round(_x * _m) / _m)
+f_tcell(_tbl, _c, _r, _txt, _col, _bg) =>
+    table.cell(_tbl, _c, _r, _txt, text_color = _col, bgcolor = _bg, text_size = size.tiny, text_halign = text.align_center)
+
+// =============================================================================
+// Fundamentals (na-tolerant by construction)
+// =============================================================================
+eps_ttm = request.financial(syminfo.tickerid, "EARNINGS_PER_SHARE_DILUTED", eps_period,
+     ignore_invalid_symbol = true)
+bvps = request.financial(syminfo.tickerid, "BOOK_VALUE_PER_SHARE", "FQ",
+     ignore_invalid_symbol = true)
+roe = request.financial(syminfo.tickerid, "RETURN_ON_EQUITY", "FQ",
+     ignore_invalid_symbol = true)
+
+earnings_yield = not na(eps_ttm) and close > 0 ? eps_ttm / close * 100.0 : float(na)
+pb = not na(bvps) and bvps > 0 ? close / bvps : float(na)
+
+us10y = request.security(bond_sym, "D", close[1],
+     gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on, ignore_invalid_symbol = true)
+yield_spread = not na(earnings_yield) and not na(us10y) ? earnings_yield - us10y : float(na)
+
+// ROE trend: ring of DISTINCT reported values (fundamentals step, not stream)
+var array<float> roe_hist = array.new_float()
+if barstate.isconfirmed and not na(roe) and (array.size(roe_hist) == 0 or roe != array.get(roe_hist, array.size(roe_hist) - 1))
+    array.push(roe_hist, roe)
+    if array.size(roe_hist) > 12
+        array.shift(roe_hist)
+roe_n = array.size(roe_hist)
+roe_then = roe_n > roe_lookback_qtrs ? array.get(roe_hist, roe_n - 1 - roe_lookback_qtrs) : float(na)
+roe_delta = not na(roe) and not na(roe_then) ? roe - roe_then : float(na)
+
+// 52-week drawdown gauge (completed daily bars — non-repaint)
+hi_52w = request.security(syminfo.tickerid, "D", ta.highest(high, 252)[1],
+     gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+dd_52w = not na(hi_52w) and hi_52w > 0 ? (hi_52w - close) / hi_52w * 100.0 : float(na)
+dd_bucket =
+     na(dd_52w) ? "n/a" :
+     dd_52w < 10.0 ? "Near highs — patience is a position" :
+     dd_52w < dd_watch_pct ? "Ordinary pullback" :
+     dd_52w < dd_fear_pct ? "Correction territory — sharpen pencils" :
+     "Deep drawdown — fear is loud here"
+dd_col = na(dd_52w) ? c_faint : dd_52w < 10.0 ? c_dim : dd_52w < dd_watch_pct ? c_dim : dd_52w < dd_fear_pct ? c_gold : c_bear
+
+fundamentals_absent = na(eps_ttm) and na(bvps) and na(roe)
+
+// =============================================================================
+// HUD
+// =============================================================================
+var table hud = table.new(f_pos(hud_pos_in), 2, 7, bgcolor = c_panel, frame_color = c_frame,
+     frame_width = 1, border_color = color.new(color.white, 92), border_width = 1)
+if barstate.islast and hud_mode != "Off"
+    f_tcell(hud, 0, 0, "Buffett Lens", c_text, c_frame)
+    f_tcell(hud, 1, 0, fundamentals_absent ? "NO FUNDAMENTALS (symbol/plan)" : syminfo.ticker, fundamentals_absent ? c_faint : c_text, c_cell)
+    if hud_mode == "Full"
+        f_tcell(hud, 0, 1, "Earnings yield", c_dim, c_panel)
+        f_tcell(hud, 1, 1, f_fmt(earnings_yield, 2) + "%" + (na(us10y) ? "" : " vs 10Y " + f_fmt(us10y, 2) + "%"), na(earnings_yield) ? c_faint : c_text, c_cell)
+        f_tcell(hud, 0, 2, "Spread", c_dim, c_panel)
+        f_tcell(hud, 1, 2, (na(yield_spread) ? "n/a" : (yield_spread > 0 ? "+" : "") + f_fmt(yield_spread, 2) + " pts") + " · crude ERP", na(yield_spread) ? c_faint : yield_spread > 0 ? c_bull : c_bear, c_cell)
+        f_tcell(hud, 0, 3, "Price / Book", c_dim, c_panel)
+        f_tcell(hud, 1, 3, f_fmt(pb, 2) + "x", na(pb) ? c_faint : c_text, c_cell)
+        f_tcell(hud, 0, 4, "ROE trend", c_dim, c_panel)
+        f_tcell(hud, 1, 4, f_fmt(roe, 1) + "%" + (na(roe_delta) ? " · need " + str.tostring(roe_lookback_qtrs + 1) + " reports" : (roe_delta >= 0 ? " ↑" : " ↓") + f_fmt(math.abs(roe_delta), 1) + " vs " + str.tostring(roe_lookback_qtrs) + " ago"), na(roe) ? c_faint : na(roe_delta) ? c_dim : roe_delta >= 0 ? c_bull : c_bear, c_cell)
+        f_tcell(hud, 0, 5, "52w drawdown", c_dim, c_panel)
+        f_tcell(hud, 1, 5, f_fmt(dd_52w, 1) + "% · " + dd_bucket, dd_col, c_cell)
+        f_tcell(hud, 0, 6, "*context, not valuation", c_faint, c_panel)
+        f_tcell(hud, 1, 6, "fundamentals lag & revise · decides nothing", c_faint, c_panel)
+
+// =============================================================================
+// Data Window exports
+// =============================================================================
+plot(earnings_yield, "EARNINGS_YIELD_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(yield_spread, "YIELD_SPREAD_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(pb, "PB_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(roe, "ROE_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(roe_delta, "ROE_DELTA_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(dd_52w, "DD_52W_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+
+// =============================================================================
+// Alerts (descriptive threshold crossings, confirmed bars)
+// =============================================================================
+cross_watch = barstate.isconfirmed and not na(dd_52w) and dd_52w >= dd_watch_pct and dd_52w[1] < dd_watch_pct
+cross_fear  = barstate.isconfirmed and not na(dd_52w) and dd_52w >= dd_fear_pct and dd_52w[1] < dd_fear_pct
+alertcondition(cross_watch, "Drawdown crossed 'interesting'", "Buffett Lens: 52w drawdown crossed the watch threshold")
+alertcondition(cross_fear, "Drawdown crossed 'fear'", "Buffett Lens: 52w drawdown crossed the fear threshold")
+if cross_watch or cross_fear
+    if use_json_alerts
+        alert('{"ev":"dd_cross","sym":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","dd_52w":' + (na(dd_52w) ? "null" : f_fmt(dd_52w, 1)) + ',"bucket":"' + (cross_fear ? "fear" : "watch") + '","ey":' + (na(earnings_yield) ? "null" : f_fmt(earnings_yield, 2)) + ',"spread":' + (na(yield_spread) ? "null" : f_fmt(yield_spread, 2)) + ',"pb":' + (na(pb) ? "null" : f_fmt(pb, 2)) + ',"t":' + str.tostring(time) + '}', alert.freq_once_per_bar_close)
+    else
+        alert("Buffett Lens: " + syminfo.ticker + " 52w drawdown " + f_fmt(dd_52w, 1) + "% crossed the " +
+             (cross_fear ? "FEAR" : "watch") + " threshold · EY " + f_fmt(earnings_yield, 2) + "% vs 10Y " + f_fmt(us10y, 2) +
+             "% · P/B " + f_fmt(pb, 2), alert.freq_once_per_bar_close)
+
+// =============================================================================
+// End of file · Buffett Desk Lens v1.0
+// =============================================================================

@@ -1,0 +1,265 @@
+//@version=6
+// =============================================================================
+// Volatility Regime Switching — Markov Chain v1.0 (5T Pine Suite · Desk Kit)
+//
+// WHAT THIS IS.
+// A three-state volatility-regime readout with a counted Markov-chain
+// transition report. Realized volatility (stdev of one-bar log returns) is
+// percentile-ranked against its own history and bucketed LOW / MID / HIGH.
+// A confirmed-bar state machine with a small confirmation requirement names
+// the committed state; every confirmed bar the committed-state transition
+// (stay or change) is counted into a 3×3 matrix, and the HUD reports the
+// current row's stay probability with a Wilson 95% lower bound, plus
+// completed dwell statistics per state.
+//
+// RESEARCH BASIS, stated plainly.
+// Volatility clustering — calm follows calm, storm follows storm — is among
+// the most robust facts in market data (Mandelbrot 1963, J. Business; the
+// ARCH/GARCH lineage from Engle 1982). The framing here is inspired by the
+// Quant Guild channel's Markov volatility-regime treatments.
+//
+// HONESTY, stated plainly.
+//   1. The states here are OBSERVABLE — percentile buckets of realized vol —
+//      not latent. There is no hidden model being inferred; if you can read
+//      the percentile, you can read the state.
+//   2. The transition matrix is THIS CHART'S counted history, nothing more.
+//      "Stay probability 82%" means "82% of counted confirmed bars in this
+//      state stayed in it, on this symbol, this timeframe, this lookback."
+//      It is not a forecast; the matrix drifts as the market does, and the
+//      Wilson lower bound plus row counts say how thin the evidence is.
+//
+// Non-repaint: bucket, state machine, counts, and dwell all advance on
+// confirmed bars only; the intrabar display holds the last confirmed state.
+// Decision support only — a human places every trade. Risk controls outrank
+// all signals.
+//
+// v1.0 changelog (2026-07-17):
+//   Initial release. Realized-vol percentile buckets (LOW/MID/HIGH, cut
+//   points user-set) with confirm-bars hysteresis-lite state machine;
+//   3×3 committed-state transition counts (stays + changes, suite Markov-
+//   readout method) with per-row stay probability + Wilson 95% lower bound
+//   and thin-sample flags; completed-dwell tracking per state (mean dwell);
+//   optional regime link (strict -1/0/+1) for a joint context tag; vol
+//   percentile plot + state tint; Data-Window exports; state-change alerts
+//   with optional JSON payloads (default OFF). Annualized vol is a display
+//   option only — mechanics use the raw statistic. Behavior-adjacent options
+//   ship at conservative defaults. Evidence label: needs user run.
+// =============================================================================
+indicator("Volatility Regime Switching — Markov Chain v1.0", shorttitle = "Vol Regime v1",
+     overlay = false)
+
+grp_mode = "0 · Mode"
+grp_vol  = "1 · Volatility & Buckets"
+grp_sm   = "2 · State Machine"
+grp_link = "3 · Integration Links"
+grp_meas = "4 · Self-Measurement"
+grp_dsp  = "5 · Display"
+
+variant_tag = input.string("v1.0-base", "Variant tag (freeze-the-config discipline)", group = grp_mode,
+     tooltip = "Label this exact settings set. Any settings change = new tag = new variant with its own validation cycle. The tag prints on the HUD and in alerts so screenshots self-document.")
+
+vol_len = input.int(20, "Realized-vol lookback (bars)", minval = 5, maxval = 250, group = grp_vol,
+     tooltip = "Window for the stdev of one-bar log returns — the raw realized-vol statistic everything else ranks and buckets.")
+pct_lookback = input.int(252, "Percentile-rank lookback (bars)", minval = 50, maxval = 2000, group = grp_vol,
+     tooltip = "How much of this chart's own history the current vol is ranked against. The state is a rank, so it adapts to the symbol — a 'HIGH' on a sleepy utility is not a 'HIGH' on a crypto pair.")
+lo_pct = input.float(33.0, "LOW bucket below percentile", minval = 5.0, maxval = 49.0, step = 1.0, group = grp_vol)
+hi_pct = input.float(67.0, "HIGH bucket above percentile", minval = 51.0, maxval = 95.0, step = 1.0, group = grp_vol,
+     tooltip = "Bucket cut points. Between the two cuts is MID. Terciles by default — even the bucket edges are conventions, not discoveries.")
+ann_display = input.bool(false, "HUD: display annualized vol (×√252)", group = grp_vol,
+     tooltip = "Display-layer only — mechanics always use the raw per-bar statistic. The √252 convention assumes daily bars; on intraday charts the annualized number is a labeling convention, not a measurement.")
+
+confirm_bars = input.int(2, "Confirm bars before state change", minval = 1, maxval = 10, group = grp_sm,
+     tooltip = "Hysteresis-lite: the committed state changes only after this many CONSECUTIVE confirmed bars land in the new bucket. Cuts single-bar whipsaw at the cost of entry lag.")
+
+use_regime_link = input.bool(false, "Joint tag: compare against external regime link", group = grp_link)
+regime_src = input.source(close, "Regime link (wire to a REGIME_EXPORT)", group = grp_link,
+     tooltip = "Optional. Wire to any suite script's REGIME_EXPORT (valid only at exactly -1/0/+1) to see a joint context tag like 'Bear × HIGH VOL' on the HUD. Context only — neither source gates the other here.")
+
+min_row_n = input.int(20, "Thin-sample warning (row n)", minval = 5, maxval = 500, group = grp_meas,
+     tooltip = "Below this many counted transitions from the current state, the stay-probability row carries the suite's thin-sample flag. Wilson lower bounds do the honesty work either way.")
+
+hud_mode = input.string("Full", "HUD mode", options = ["Off", "Micro", "Full"], group = grp_dsp)
+hud_pos_in = input.string("top_right", "HUD position", options = ["top_left", "top_center", "top_right", "bottom_left", "bottom_center", "bottom_right"], group = grp_dsp)
+show_pct_plot = input.bool(true, "Plot vol percentile", group = grp_dsp)
+show_state_tint = input.bool(true, "State background tint", group = grp_dsp)
+use_json_alerts = input.bool(false, "JSON alert payloads (webhook)", group = grp_dsp,
+     tooltip = "OFF: human-readable alert text. ON: machine-readable JSON for webhook automation. Display-layer only.")
+
+// =============================================================================
+// Palette & helpers (suite standard)
+// =============================================================================
+c_bull  = color.rgb(89, 159, 125)
+c_bear  = color.rgb(190, 96, 111)
+c_neut  = color.rgb(112, 126, 148)
+c_gold  = color.rgb(214, 162, 82)
+c_panel = color.new(#0E1316, 5)
+c_cell  = color.new(#151D22, 7)
+c_cell2 = color.new(#10171B, 9)
+c_frame = color.new(#5BD6B0, 88)
+c_text  = color.white
+c_dim   = color.new(color.white, 45)
+c_faint = color.new(color.white, 68)
+
+f_pos(_s) =>
+    switch _s
+        "top_left"      => position.top_left
+        "top_center"    => position.top_center
+        "top_right"     => position.top_right
+        "bottom_left"   => position.bottom_left
+        "bottom_center" => position.bottom_center
+        "bottom_right"  => position.bottom_right
+        => position.top_right
+f_fmt(_x, _d) =>
+    _m = math.pow(10.0, _d)
+    na(_x) ? "n/a" : str.tostring(math.round(_x * _m) / _m)
+f_tcell(_tbl, _c, _r, _txt, _col, _bg) =>
+    table.cell(_tbl, _c, _r, _txt, text_color = _col, bgcolor = _bg, text_size = size.tiny, text_halign = text.align_center)
+// Wilson score lower bound (z = 1.96), suite-standard honesty for counted rates.
+f_wilson_lo(_p, _n) =>
+    _n <= 0 or na(_p) ? float(na) :
+         (_p + 1.96 * 1.96 / (2 * _n) - 1.96 * math.sqrt((_p * (1 - _p) + 1.96 * 1.96 / (4 * _n)) / _n)) / (1 + 1.96 * 1.96 / _n)
+f_sname(_s) =>
+    _s == 0 ? "LOW" : _s == 1 ? "MID" : "HIGH"
+f_scol(_s) =>
+    _s == 0 ? c_bull : _s == 1 ? c_neut : c_bear
+
+// =============================================================================
+// Realized vol → percentile rank (raw statistic; annualization display-only)
+// =============================================================================
+one_bar_ret = not na(close[1]) and close > 0 and close[1] > 0 ? math.log(close / close[1]) : float(na)
+rv = ta.stdev(one_bar_ret, vol_len)
+vol_pct = ta.percentrank(rv, pct_lookback)
+rv_ann = na(rv) ? float(na) : rv * math.sqrt(252.0)
+
+var int rv_seen = 0
+if barstate.isconfirmed and not na(rv)
+    rv_seen += 1
+warmed = not na(vol_pct)
+
+// =============================================================================
+// Confirmed-bar state machine (hysteresis-lite) + committed-state transition
+// counts (stays + changes each confirmed bar — suite Markov-readout method)
+// + completed-dwell tracking per state
+// =============================================================================
+var int vol_state = 1
+var int pend_state = 1
+var int pend_n = 0
+var bool seeded = false
+var int cur_age = 0
+var array<int> tr_counts = array.new_int(9, 0)     // rows LOW/MID/HIGH × cols
+var array<int> tr_rows = array.new_int(3, 0)
+var array<float> dwell_sum = array.new_float(3, 0.0)
+var array<int> dwell_cnt = array.new_int(3, 0)
+
+bool state_flip = false
+if barstate.isconfirmed and warmed
+    int _bucket = vol_pct < lo_pct ? 0 : vol_pct > hi_pct ? 2 : 1
+    if not seeded
+        vol_state := _bucket
+        pend_state := _bucket
+        pend_n := 0
+        cur_age := 1
+        seeded := true
+    else
+        int _old = vol_state
+        if _bucket == vol_state
+            pend_state := vol_state
+            pend_n := 0
+        else
+            if _bucket == pend_state
+                pend_n += 1
+            else
+                pend_state := _bucket
+                pend_n := 1
+            if pend_n >= confirm_bars
+                vol_state := _bucket
+                pend_n := 0
+        // committed-state transition (pending-but-unconfirmed bars count as stays)
+        array.set(tr_counts, _old * 3 + vol_state, array.get(tr_counts, _old * 3 + vol_state) + 1)
+        array.set(tr_rows, _old, array.get(tr_rows, _old) + 1)
+        if vol_state != _old
+            state_flip := true
+            array.set(dwell_sum, _old, array.get(dwell_sum, _old) + cur_age)
+            array.set(dwell_cnt, _old, array.get(dwell_cnt, _old) + 1)
+            cur_age := 1
+        else
+            cur_age += 1
+
+flip_low = state_flip and vol_state == 0
+flip_mid = state_flip and vol_state == 1
+flip_high = state_flip and vol_state == 2
+
+// Current-row statistics: stay probability + Wilson floor + transition row
+row_n = seeded ? array.get(tr_rows, vol_state) : 0
+stay_cnt = seeded ? array.get(tr_counts, vol_state * 3 + vol_state) : 0
+stay_p = row_n > 0 ? stay_cnt * 1.0 / row_n : float(na)
+stay_wlo = f_wilson_lo(stay_p, row_n)
+p2l = row_n > 0 ? array.get(tr_counts, vol_state * 3 + 0) * 1.0 / row_n : float(na)
+p2m = row_n > 0 ? array.get(tr_counts, vol_state * 3 + 1) * 1.0 / row_n : float(na)
+p2h = row_n > 0 ? array.get(tr_counts, vol_state * 3 + 2) * 1.0 / row_n : float(na)
+dwell_n_cur = seeded ? array.get(dwell_cnt, vol_state) : 0
+mean_dwell_cur = dwell_n_cur > 0 ? array.get(dwell_sum, vol_state) / dwell_n_cur : float(na)
+
+// =============================================================================
+// Regime link joint tag (optional, strict {-1,0,+1} validation, context only)
+// =============================================================================
+_rv = regime_src
+link_valid = use_regime_link and not na(_rv) and (_rv == -1.0 or _rv == 0.0 or _rv == 1.0)
+joint_txt = not use_regime_link ? "link off" : not link_valid ? "LINK?" :
+     (_rv == 1.0 ? "Bull" : _rv == -1.0 ? "Bear" : "Neutral") + " × " + f_sname(vol_state) + " VOL"
+
+// =============================================================================
+// Plots, tint, exports
+// =============================================================================
+plot(show_pct_plot ? vol_pct : na, "Vol percentile", color = seeded ? f_scol(vol_state) : c_neut, linewidth = 2)
+hline(lo_pct, "LOW bucket cut", color = color.new(color.white, 85), linestyle = hline.style_dotted)
+hline(hi_pct, "HIGH bucket cut", color = color.new(color.white, 85), linestyle = hline.style_dotted)
+bgcolor(show_state_tint and seeded ? color.new(f_scol(vol_state), 88) : na, title = "Vol state tint")
+
+plot(seeded ? float(vol_state) : na, "VOL_STATE_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(vol_pct, "VOL_PCTILE_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(seeded ? stay_p * 100.0 : na, "VOL_STAY_PCT_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(seeded ? stay_wlo * 100.0 : na, "VOL_STAY_WLO_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(seeded ? float(row_n) : na, "VOL_ROW_N_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+plot(seeded ? mean_dwell_cur : na, "VOL_MEAN_DWELL_EXPORT", color = color.new(color.white, 100), display = display.data_window)
+
+// =============================================================================
+// HUD
+// =============================================================================
+var table hud = table.new(f_pos(hud_pos_in), 2, 7, bgcolor = c_panel, frame_color = c_frame,
+     frame_width = 1, border_color = color.new(color.white, 92), border_width = 1)
+if barstate.islast and hud_mode != "Off"
+    _state_txt = not seeded ? "WARMING · " + str.tostring(math.min(rv_seen, pct_lookback)) + "/" + str.tostring(pct_lookback) :
+         f_sname(vol_state) + " VOL · " + f_fmt(vol_pct, 0) + "th pct"
+    _state_bg = not seeded ? c_cell : color.new(f_scol(vol_state), 45)
+    f_tcell(hud, 0, 0, "Vol Regime " + variant_tag, c_text, c_frame)
+    f_tcell(hud, 1, 0, _state_txt, c_text, _state_bg)
+    if hud_mode == "Full"
+        f_tcell(hud, 0, 1, "Realized vol · pctile", c_dim, c_panel)
+        f_tcell(hud, 1, 1, (ann_display ? f_fmt(rv_ann * 100.0, 1) + "% ann*" : f_fmt(rv * 100.0, 2) + "%/bar") + " · " + f_fmt(vol_pct, 0) + "th", c_dim, c_cell)
+        f_tcell(hud, 0, 2, "Stay P (this state)", c_dim, c_panel)
+        f_tcell(hud, 1, 2, f_fmt(stay_p * 100.0, 0) + "% · Wlo " + f_fmt(stay_wlo * 100.0, 0) + "% · n" + str.tostring(row_n) + (row_n < min_row_n ? " !" : ""), row_n < min_row_n ? c_faint : c_dim, c_cell)
+        f_tcell(hud, 0, 3, "Dwell (this state)", c_dim, c_panel)
+        f_tcell(hud, 1, 3, "age " + str.tostring(cur_age) + " · mean ~" + f_fmt(mean_dwell_cur, 1) + " bars (n" + str.tostring(dwell_n_cur) + ")", c_dim, c_cell)
+        f_tcell(hud, 0, 4, "P(next: L / M / H)", c_dim, c_panel)
+        f_tcell(hud, 1, 4, f_fmt(p2l * 100.0, 0) + " / " + f_fmt(p2m * 100.0, 0) + " / " + f_fmt(p2h * 100.0, 0) + " %", c_dim, c_cell)
+        f_tcell(hud, 0, 5, "Joint regime", c_dim, c_panel)
+        f_tcell(hud, 1, 5, joint_txt, use_regime_link and not link_valid ? c_bear : link_valid ? c_gold : c_faint, c_cell)
+        f_tcell(hud, 0, 6, "*observable buckets", c_faint, c_panel)
+        f_tcell(hud, 1, 6, "counted history, not forecast · not advice", c_faint, c_panel)
+
+// =============================================================================
+// Alerts (confirmed-bar committed-state changes; formal wording)
+// =============================================================================
+alertcondition(flip_low, "Vol state → LOW", "Volatility Regime: committed state changed to LOW")
+alertcondition(flip_mid, "Vol state → MID", "Volatility Regime: committed state changed to MID")
+alertcondition(flip_high, "Vol state → HIGH", "Volatility Regime: committed state changed to HIGH")
+if state_flip
+    _st = f_sname(vol_state)
+    if use_json_alerts
+        alert('{"ev":"vol_state","sym":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","state":"' + _st + '","pctile":' + (na(vol_pct) ? "null" : f_fmt(vol_pct, 1)) + ',"rv_bar_pct":' + (na(rv) ? "null" : f_fmt(rv * 100.0, 3)) + ',"stay_pct":' + (na(stay_p) ? "null" : f_fmt(stay_p * 100.0, 1)) + ',"stay_wlo":' + (na(stay_wlo) ? "null" : f_fmt(stay_wlo * 100.0, 1)) + ',"row_n":' + str.tostring(row_n) + ',"mean_dwell":' + (na(mean_dwell_cur) ? "null" : f_fmt(mean_dwell_cur, 1)) + ',"variant":"' + variant_tag + '","t":' + str.tostring(time) + '}', alert.freq_once_per_bar_close)
+    else
+        alert("Vol Regime [" + variant_tag + "]: " + syminfo.ticker + " vol state → " + _st + " · pctile " + f_fmt(vol_pct, 0) + " · new row stay " + f_fmt(stay_p * 100.0, 0) + "% (Wlo " + f_fmt(stay_wlo * 100.0, 0) + "%, n" + str.tostring(row_n) + ")", alert.freq_once_per_bar_close)
+
+// =============================================================================
+// End of file · Volatility Regime Switching — Markov Chain v1.0
