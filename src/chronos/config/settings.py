@@ -50,6 +50,36 @@ class Settings(BaseSettings):
     allow_live_trading: bool = False
     allow_outside_rth: bool = False
 
+    # Live-wheel plan (Milestone 1): configuration surface added ahead of the
+    # gate stack. The hard-raise on allow_live_trading below remains in force
+    # until Milestone 6 replaces it with the full gated model (fail-closed at
+    # every intermediate commit — docs/LIVE_WHEEL_GAME_PLAN.md §6b).
+    ib_account_allowlist: SymbolAllowlist = ()
+    enable_paper_trading: bool = True
+    require_live_arming: bool = True
+    live_arm_ttl_minutes: Annotated[int, Field(gt=0, le=120)] = 15
+    require_typed_confirmation: bool = True
+    order_confirmation_ttl_seconds: Annotated[int, Field(gt=0, le=300)] = 20
+    max_open_short_option_contracts: Annotated[int, Field(ge=0)] = 5
+    max_opening_orders_per_day: Annotated[int, Field(ge=0)] = 3
+    max_gross_assignment_usd: Annotated[Decimal, Field(ge=0)] = Decimal("25000")
+    min_cash_buffer_usd: Annotated[Decimal, Field(ge=0)] = Decimal("5000")
+    min_cash_buffer_pct: Annotated[Decimal, Field(ge=0, le=1)] = Decimal("0.10")
+    min_excess_liquidity_usd: Annotated[Decimal, Field(ge=0)] = Decimal("10000")
+    max_session_drawdown_usd: Annotated[Decimal, Field(ge=0)] = Decimal("1000")
+    max_session_drawdown_pct: Annotated[Decimal, Field(ge=0, le=1)] = Decimal("0.02")
+
+    # Product families beyond options (owner-directed scope, plan §6b).
+    # An empty crypto allowlist keeps the crypto family entirely disabled.
+    crypto_allowlist: SymbolAllowlist = ()
+    max_crypto_allocation_pct: Annotated[Decimal, Field(ge=0, le=1)] = Decimal("0.10")
+    max_crypto_notional_per_order_usd: Annotated[Decimal, Field(ge=0)] = Decimal("1000")
+
+    # Local backend service (FastAPI); loopback-only by design.
+    backend_host: str = "127.0.0.1"
+    backend_port: Annotated[int, Field(gt=0, lt=65536)] = 8765
+    backend_token_file: Path = Path("data/backend_api_token")
+
     symbol_allowlist: SymbolAllowlist = ("AAPL", "MSFT", "SPY")
     target_abs_delta: Annotated[Decimal, Field(gt=0, lt=1)] = Decimal("0.30")
     min_abs_delta: Annotated[Decimal, Field(gt=0, lt=1)] = Decimal("0.20")
@@ -129,6 +159,19 @@ class Settings(BaseSettings):
             ZoneInfo(self.market_timezone)
         except ZoneInfoNotFoundError as error:
             raise ValueError("MARKET_TIMEZONE must name an installed IANA timezone") from error
+        if len(set(self.ib_account_allowlist)) != len(self.ib_account_allowlist):
+            raise ValueError("IB_ACCOUNT_ALLOWLIST must not contain duplicates")
+        if any(not entry.isalnum() for entry in self.ib_account_allowlist):
+            raise ValueError("IB_ACCOUNT_ALLOWLIST entries must be alphanumeric")
+        if len(set(self.crypto_allowlist)) != len(self.crypto_allowlist):
+            raise ValueError("CRYPTO_ALLOWLIST must not contain duplicates")
+        if any(not symbol.isalnum() for symbol in self.crypto_allowlist):
+            raise ValueError("CRYPTO_ALLOWLIST entries must be alphanumeric")
+        if self.backend_host not in ("127.0.0.1", "localhost", "::1"):
+            raise ValueError(
+                "BACKEND_HOST must be a loopback address; remote exposure of the "
+                "order-writing backend is out of scope by design"
+            )
         return self
 
     @property

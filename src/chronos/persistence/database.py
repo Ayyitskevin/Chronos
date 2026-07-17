@@ -16,11 +16,12 @@ from sqlalchemy.pool import StaticPool
 from chronos.persistence.schema import Base, DatabaseScopeRow, SchemaVersionRow
 from chronos.utils.identifiers import account_fingerprint
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _DATABASE_RECOVERY_GUIDANCE = (
-    "Preserve and back up this database, then configure a fresh DATABASE_URL; Chronos will not "
-    "modify an existing non-current or drifted schema."
+    "Preserve and back up this database first. A prior-version schema can be upgraded with "
+    "`alembic upgrade head` (see alembic.ini); a drifted or unversioned schema cannot — "
+    "configure a fresh DATABASE_URL instead. Chronos never modifies such a database itself."
 )
 _SQLITE_SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
 
@@ -38,6 +39,13 @@ _ACCOUNT_SCOPED_TABLES = (
     "reconciliation_runs",
     "application_events",
     "guardrail_decisions",
+    # Live-wheel order pipeline (schema v3): all carry account-specific data.
+    "order_intents",
+    "order_confirmations",
+    "live_arm_events",
+    "kill_switch_events",
+    "cash_reservations",
+    "share_reservations",
 )
 
 
@@ -230,6 +238,9 @@ def _secure_sqlite_file(path: Path) -> None:
 def _schema_drift(engine: Engine) -> tuple[str, ...]:
     schema_inspector = inspect(engine)
     actual_tables = set(schema_inspector.get_table_names())
+    # Alembic's own bookkeeping table is expected on migrated databases and is
+    # deliberately outside the Chronos metadata.
+    actual_tables.discard("alembic_version")
     expected_tables = set(Base.metadata.tables)
     drift: list[str] = []
 

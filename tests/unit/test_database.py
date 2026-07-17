@@ -171,7 +171,7 @@ def test_schema_initialization_creates_required_evidence_tables() -> None:
         "submitted_orders",
         "wheel_cycles",
     } <= names
-    assert SCHEMA_VERSION == 2
+    assert SCHEMA_VERSION == 3
 
 
 def test_application_events_are_append_only_and_queryable() -> None:
@@ -320,7 +320,7 @@ def test_current_schema_missing_table_is_refused_without_mutation(tmp_path: Path
         _assert_initialize_refuses_without_mutation(
             database,
             database_path,
-            expected_version=2,
+            expected_version=SCHEMA_VERSION,
             expected_error="missing tables: guardrail_decisions",
         )
     finally:
@@ -345,7 +345,7 @@ def test_current_schema_missing_required_column_is_refused_without_mutation(
         _assert_initialize_refuses_without_mutation(
             database,
             database_path,
-            expected_version=2,
+            expected_version=SCHEMA_VERSION,
             expected_error="database_scope missing columns: account_fingerprint",
         )
     finally:
@@ -368,7 +368,7 @@ def test_current_schema_missing_unique_constraint_is_refused_without_mutation(
         _assert_initialize_refuses_without_mutation(
             database,
             database_path,
-            expected_version=2,
+            expected_version=SCHEMA_VERSION,
             expected_error="strategy_state unique constraints do not match",
         )
     finally:
@@ -389,7 +389,7 @@ def test_current_schema_missing_foreign_key_is_refused_without_mutation(tmp_path
         _assert_initialize_refuses_without_mutation(
             database,
             database_path,
-            expected_version=2,
+            expected_version=SCHEMA_VERSION,
             expected_error="strategy_state foreign keys do not match",
         )
     finally:

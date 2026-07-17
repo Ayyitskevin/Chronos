@@ -1,5 +1,16 @@
 # Chronos Live Wheel — Game Plan (start → completion)
 
+> **North star (owner, 2026-07-17):** "my interpretation of a quantitative
+> Jane-Street-caliber AI quant trading bot… my personal trading co-pilot."
+> Honest translation this project builds toward: **institutional-grade
+> engineering discipline** (fail-closed risk, reconciliation against broker
+> truth, frozen evaluation criteria, kill switches, honest measurement)
+> **wrapped around a personal co-pilot** — Chronos surfaces evidence and
+> executes safely; the owner makes every trading decision. What is *not*
+> promised: institutional edges (market-making infrastructure, flow) or
+> autonomous alpha — the research arm exists precisely so any strategy must
+> *earn* promotion under frozen criteria before it ever touches execution.
+
 **Status:** Milestone 0 (this document). Branch: `feat/live-wheel-dashboard`.
 **Audience:** the owner, and any Claude session (Opus/Sonnet) continuing this
 work mid-stream. Read this before writing code. The owner's full mission
@@ -317,6 +328,69 @@ milestone shipped with the standard gates green and a milestone report.
 - If the repo state diverges from this plan (e.g. the owner merged other
   work), re-audit before coding; update §2 rather than assuming.
 
+## 6b. Scope expansion (owner-directed, 2026-07-17): stocks and crypto
+
+The owner has extended the mission: Chronos must also trade **stocks** and
+**crypto**, through the *same* human-confirmed, gated, single-writer order
+pipeline. This section is the authoritative adaptation; the owner's original
+prompt listed crypto as rejected-in-live — **the owner's later message
+explicitly overrides that** for a phased, gated implementation.
+
+**Product-family model.** `domain/enums.py` gains `ProductFamily`
+(`OPTION | STOCK | CRYPTO`) in Milestone 3. Every order intent carries its
+family; eligibility, risk checks, sessions, and quantity semantics dispatch
+on it. One pipeline, three families — no family-specific submission paths.
+
+**Stocks (folds into the existing milestones).** Buy/sell **limit DAY**
+orders for allowlisted US-listed equities/ETFs, whole shares only in the
+MVP. This is a natural Wheel companion (exiting assigned stock, rounding
+lots, deliberate entries that seed covered-call positions). Same gates,
+same typed confirmation, same risk engine (symbol/product allowlist,
+concentration, cash sufficiency for buys, held-share sufficiency for sells
+— **no short selling**, no margin buys). Lands in Milestone 5 (paper)
+alongside options; live in Milestone 7. Stock paper validation works
+normally (IBKR paper supports stocks).
+
+**Crypto (new Milestone 7C — after live options/stocks are validated).**
+Honest constraints that shape the design, stated up front:
+
+- IBKR crypto is **spot only** (Paxos/Zero Hash venue). There are **no
+  crypto options at IBKR**, therefore no crypto wheel — crypto support means
+  human-confirmed spot buy/sell with guardrails plus the regime-context
+  panel (the regime/mean-reversion cores run on daily crypto bars exactly as
+  on equities, same "heuristic, not a validated signal" labeling).
+- **Fractional Decimal quantities** (e.g. 0.005 BTC) — quantity moves from
+  int to Decimal for this family only, with venue min-size/notional
+  validation from qualified contract details, never assumed.
+- **~24/7 sessions** — the trading-hours module gets family-aware calendars;
+  the "market open" risk check consults the family calendar.
+- Limit orders only (as everywhere); crypto exchange routing (not SMART);
+  **no shorting, no margin, no staking/transfer features** — trade only.
+- **IBKR paper accounts do not support crypto.** The paper-validation path
+  is impossible for this family. Validation is therefore: deterministic demo
+  fixtures + the recording-spy live-path walk (as Milestone 7) + an
+  owner-performed minimal-size live acceptance. This limitation is disclosed
+  in README/limitations rather than papered over.
+- Region/eligibility for IBKR crypto varies by jurisdiction — verifying the
+  owner's account eligibility is an owner action at 7C start.
+- New settings: `CRYPTO_ALLOWLIST` (default empty ⇒ family disabled),
+  `MAX_CRYPTO_ALLOCATION_PCT`, `MAX_CRYPTO_NOTIONAL_PER_ORDER_USD`. Empty
+  allowlist keeps crypto fully off — deny-by-default like everything else.
+
+**Milestone deltas:** M1 adds the new settings keys (safe defaults, family
+off). M3 adds `ProductFamily`, family eligibility, family-aware trading
+hours. M4 dashboard shows family badges; crypto symbols appear only when
+allowlisted. M5 implements stock orders end-to-end in paper. M7 live-enables
+options+stocks. **M7C** implements crypto qualification, fractional
+quantities, session calendar, risk checks, demo fixtures, spy validation.
+M8 hardening covers all three families.
+
+**Sequencing amendment (safety):** Milestone 1 *adds* the new configuration
+keys but **keeps** the existing hard-raise validators on
+`allow_live_trading`/live-transmission untouched; those convert to the
+gated model only in Milestone 6 when the full gate stack exists to replace
+them. Fail-closed at every intermediate commit.
+
 ## 7. Open owner decisions (blocking only where marked)
 
 1. **Confirm the split posture** (§1): platform stays live-incapable; only
@@ -329,3 +403,9 @@ milestone shipped with the standard gates green and a milestone report.
    assumes: kept, optional.)*
 5. GTC orders, margin-secured puts, automatic rolling: all out of scope for
    MVP per spec; revisit only by explicit owner request.
+6. Crypto (owner-directed, §6b): confirm IBKR account crypto eligibility for
+   the owner's jurisdiction before Milestone 7C; provide `CRYPTO_ALLOWLIST`
+   symbols (suggested start: BTC, ETH); accept that crypto validation cannot
+   use paper and requires an owner-performed minimal-size live acceptance.
+7. Stock trading (owner-directed, §6b): whole shares, limit DAY, long-only
+   in the MVP — confirm this matches intent. *(Assumed yes.)*
