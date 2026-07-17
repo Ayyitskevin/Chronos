@@ -284,6 +284,38 @@ def test_monitoring_imports_no_broker_adapter() -> None:
     _assert_no_broker_imports(ledger_view_mod.__file__)
 
 
+def test_monitoring_pulls_no_broker_module_transitively() -> None:
+    # The AST check above only sees each file's OWN import statements; a broker
+    # adapter reached through a transitive import (e.g. via a package
+    # __init__) would evade it (M5 independent review). Import the monitoring
+    # entry points in a clean subprocess and assert no broker-ish module lands
+    # in sys.modules at all.
+    import subprocess
+    import sys
+
+    probe = (
+        "import sys\n"
+        "import chronos.monitoring.snapshot\n"
+        "import chronos.monitoring.ledger_view\n"
+        "import chronos.monitoring.streamlit_app\n"
+        "import chronos.cli.main\n"
+        "bad = [m for m in sys.modules if 'ib_async' in m or 'ibkr' in m.lower()\n"
+        "       or m.startswith('chronos.broker') or '.brokers' in m]\n"
+        "print('|'.join(sorted(bad)))\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=True,
+    )
+    loaded_broker_modules = [m for m in result.stdout.strip().split("|") if m]
+    assert loaded_broker_modules == [], (
+        f"monitoring entry points transitively loaded broker modules: {loaded_broker_modules}"
+    )
+
+
 def test_streamlit_config_snapshot_reads_env(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

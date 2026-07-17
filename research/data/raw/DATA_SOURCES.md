@@ -80,10 +80,10 @@ details (hashes, row counts, per-file validation) are in `MANIFEST.json`.
 - **Adjusted status** (verified by spot values + cross-check):
   - **GLD — effectively NOMINAL.** GLD pays no distribution, so its adjusted
     series equals as-traded prices. Matches known nominal values to the penny
-    (2019-01-02 close 121.33; Aug-2020 record high 193.89; 2021-12-31 170.96).
+    (2019-01-02 close 121.33; Aug-2020 record-region close 193.89 (high 194.45); 2021-12-31 170.96).
   - **IWM — dividend-ADJUSTED** (back-adjusted to a ~2026 anchor). ~4–8% below
     nominal (2019-12-31 close 152.97 vs nominal ~165.8).
-  - **TLT — heavily dividend-ADJUSTED.** ~15% below nominal (2019-01-02 close
+  - **TLT — heavily dividend-ADJUSTED.** ~19% below nominal at series start, ~15% by end-2021 (2019-01-02 close
     98.69 vs nominal ~122; 2021-12-31 126.28 vs nominal ~149). Still genuine
     internally-consistent OHLCV (open/high/low/close on the same scale) — **not**
     a close-only series.

@@ -3,8 +3,10 @@
 A reviewer flagged this module as untested. The CLI is a safety surface: every
 command prints the mode banner, none can enable live trading, and there is no
 ``--force``. These tests drive each subcommand through ``main(argv)`` and pin
-its exit code and durable side effects. They also assert the structural safety
-property: no subcommand and no flag turns live trading on.
+its exit code and durable side effects. The live-safety property is asserted
+two ways: a spelling denylist as a regression guard for known footguns, and a
+structural test that every mode the CLI could request resolves to a
+non-transmitting capability and that the CLI imports no broker adapter.
 """
 
 from __future__ import annotations
@@ -75,7 +77,11 @@ def test_status_command(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> N
     assert main([*_base_args(tmp_path), "status"]) == 0
     out = capsys.readouterr().out
     assert "CHRONOS PLATFORM" in out
+    # Pin the safety CONTENT of the banner, not just the label: the line must
+    # state live trading is hard-disabled with no override.
     assert "LIVE TRADING" in out
+    assert "hard-disabled" in out
+    assert "no override exists" in out
 
 
 def test_halt_then_rearm_roundtrip(tmp_path: Path) -> None:
@@ -200,18 +206,60 @@ def test_backtest_command(tmp_path: Path, capsys: pytest.CaptureFixture[str]) ->
     assert '"strategy"' in capsys.readouterr().out
 
 
-def test_no_subcommand_exposes_live_trading() -> None:
-    # Structural safety: no subcommand name enables live trading, and none of
-    # the parser's option strings is a live/force override.
+def test_cli_option_denylist_regression() -> None:
+    # Regression guard against re-introducing the specific footgun flags. This
+    # is a spelling denylist ONLY — it cannot prove no live path exists (a
+    # differently-named command would pass it); that guarantee is asserted
+    # structurally by test_live_capability_is_unreachable_through_the_cli below
+    # and enforced in code by resolve_mode_lock's hard denial.
     parser = build_parser()
     subactions = [
         action for action in parser._actions if action.__class__.__name__ == "_SubParsersAction"
     ]
     assert subactions, "expected a subparsers action"
-    names = set(subactions[0].choices)
-    assert "live" not in names
-    assert not any("live" in name for name in names)
     banned = {"--force", "--live", "--enable-live", "--transmit", "--yes-really"}
     for choice in subactions[0].choices.values():
         options = {opt for action in choice._actions for opt in action.option_strings}
         assert not (options & banned)
+
+
+def test_live_capability_is_unreachable_through_the_cli() -> None:
+    # The REAL structural guarantee: no CLI input can produce an order-capable
+    # mode lock, because the CLI module contains no call that could. Verify
+    # (a) the mode-lock resolver hard-denies live for every requested mode the
+    # CLI could pass, and (b) the CLI source never sets
+    # order_transmission_enabled=True and never imports a broker adapter.
+    import ast
+    import inspect
+
+    from chronos.cli import main as cli_module
+    from chronos.control.modes import ExecutionCapability, TradingMode, resolve_mode_lock
+
+    for mode in TradingMode:
+        lock = resolve_mode_lock(
+            requested_mode=mode,
+            paper_account_allowlist=(),
+            broker_reported_account_id=None,
+            broker_reported_environment_is_paper=None,
+            order_transmission_enabled=False,
+        )
+        assert lock.capability in (
+            ExecutionCapability.NO_ORDERS,
+            ExecutionCapability.SIMULATED_ONLY,
+            ExecutionCapability.DENIED_LIVE_DISABLED,
+        ), f"mode {mode} resolved to an order-transmitting capability via CLI-shaped inputs"
+
+    source = inspect.getsource(cli_module)
+    assert "order_transmission_enabled=True" not in source
+    tree = ast.parse(source)
+    imported: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.append(node.module)
+    for name in imported:
+        assert "ib_async" not in name
+        assert not name.startswith("chronos.broker")
+        assert "brokers" not in name
+        assert "ibkr" not in name.lower()

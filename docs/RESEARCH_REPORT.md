@@ -181,10 +181,37 @@ tight USD 3,000 / 0.25 cap would yield fewer trades still (QQQ regime: 7, not
 18). **The C4 pass/fail outcome is identical either way** — no candidate
 clears 20 under either cap — and zero candidates are selected regardless.
 
-**C6 / final test**: with zero candidates passing C1–C5, the final window
-(2022-01-01..) was **not consumed** and remains pristine. Note the new
-symbols cannot reach it (their data ends 2021-12), so a future final test on
-them requires extending their history first.
+**C6 / final test — corrected disclosure (raised by the M5 independent
+review).** An earlier revision of this report claimed the final window
+(2022-01-01..) was "not consumed and remains pristine." **That was wrong.**
+The harness's `--stage all` default computes the final stage, and the run that
+produced this report's results also produced final-window numbers, which are
+committed in `research/results/research_all.json`. Hiding or deleting them
+would compound the error, so they are reported here (QQQ only — the sole
+symbol whose data reaches past 2022-01; window 2022-01-03..2024-01-10):
+
+| Strategy | Trades | Net ret | MaxDD | PF | Sharpe |
+|---|---|---|---|---|---|
+| regime_trend_v1 | 3 | +16.0% | 4.7% | 6.56 | 1.05 |
+| mean_reversion_v1 | 7 | +0.3% | 2.3% | 1.10 | 0.06 |
+| baseline_sma_trend | 0* | +34.1% | 9.9% | — | 1.58 |
+| baseline_buy_hold | 0 | +1.5% | 33.2% | — | 0.15 |
+| baseline_random_entries | 13 | −2.7% | 24.0% | 0.85 | −0.03 |
+
+(*open position marked, no closed round trip.)
+
+What these numbers **did not** do: influence selection. Rejection is driven
+entirely by C4's ≥ 20-trade floor on the *validation* window, decided before
+any final-window figure was read — and the final window's own samples (3 and
+7 trades) are even thinner. What they **did** do: consume QQQ's one-shot
+holdout. A future "run once, blind" final test on QQQ is no longer possible;
+any re-test of these candidates on QQQ must treat 2022–2024 as seen data and
+reserve a *new* untouched window (data after 2024-01, or IBKR-sourced fresh
+history). The new symbols' data ends 2021-12, so their final windows remain
+genuinely untouched — but only because the data stops, not by discipline.
+Process fix adopted: the harness's default stage should not include `final`;
+running the final stage should require the explicit flag
+(`--stage final`), which `scripts/run_research.py` now enforces.
 
 ## Honest interpretation
 
@@ -239,7 +266,8 @@ them requires extending their history first.
    universe shares one adjustment convention and reaches the reserved final
    window. This replaces the current heterogeneous, transcribed 2019–2021
    patch.
-2. Re-run this harness unchanged; the final window is still unconsumed.
+2. Re-run this harness; note QQQ's 2022–2024 holdout is now consumed (see the
+   C6 disclosure), so reserve a fresh untouched window for any re-test.
 3. Prioritize the two hypotheses this run surfaced: `regime_trend_v1` on
    liquid equity indices, and `mean_reversion_v1` on **small-caps** (IWM), the
    only place its daily reduction looked alive. A candidate is promotable only

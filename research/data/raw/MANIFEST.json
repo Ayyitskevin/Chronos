@@ -239,7 +239,7 @@
         "close",
         "volume"
       ],
-      "adjusted": "EFFECTIVELY NOMINAL. GLD pays no distributions, so its dividend-adjusted series equals as-traded prices. Spot values match widely-known nominal GLD to the penny (2019-01-02 close 121.33; 2020-08-06 high 193.89 near the Aug-2020 record; 2021-12-31 close 170.96).",
+      "adjusted": "EFFECTIVELY NOMINAL. GLD pays no distributions, so its dividend-adjusted series equals as-traded prices. Spot values match widely-known nominal GLD to the penny (2019-01-02 close 121.33; 2020-08-06 close 193.89 (high 194.45) near the Aug-2020 record; 2021-12-31 close 170.96).",
       "validation": {
         "parseable_csv": true,
         "duplicate_dates": 0,
@@ -267,7 +267,7 @@
       "spot_checks": {
         "2019-01-02 close": "121.33 (matches known nominal GLD close ~121.3)",
         "2020-03-16 low": "136.12 (COVID liquidation low, matches known ~136)",
-        "2020-08-06 high": "193.89 (Aug-2020 gold record; matches GLD all-time-high region ~194)",
+        "2020-08-06 close": "193.89 (high that day: 194.45; Aug-2020 gold record region ~194 — label corrected by the M5 independent review: 193.89 is the CLOSE, not the high)",
         "2021-12-31 close": "170.96 (matches known year-end 2021 value ~170.9)"
       },
       "caveats": [
@@ -299,7 +299,7 @@
         "close",
         "volume"
       ],
-      "adjusted": "ADJUSTED (heavily). All of open/high/low/close are dividend-back-adjusted. TLT distributes monthly, so the adjustment is large: 2019-01-02 close 98.69 vs nominal ~122; 2021-12-31 close 126.28 vs nominal ~149 (~15% below nominal). This is INTERNALLY-CONSISTENT adjusted OHLCV (not close-only). The task's plausibility note 'TLT ~95-100 end-2023 unadjusted' does NOT apply here because this series is adjusted and ends 2021.",
+      "adjusted": "ADJUSTED (heavily). All of open/high/low/close are dividend-back-adjusted. TLT distributes monthly, so the adjustment is large: 2019-01-02 close 98.69 vs nominal ~122; 2021-12-31 close 126.28 vs nominal ~149 (discount ~19% at series start narrowing to ~15% by end-2021 as the back-adjustment anchor nears). This is INTERNALLY-CONSISTENT adjusted OHLCV (not close-only). The task's plausibility note 'TLT ~95-100 end-2023 unadjusted' does NOT apply here because this series is adjusted and ends 2021.",
       "validation": {
         "parseable_csv": true,
         "duplicate_dates": 0,

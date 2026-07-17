@@ -207,6 +207,16 @@ class TestHaltPersistence:
         assert state.halted
         assert state.reason is HaltReason.STATE_CORRUPTION
 
+    @pytest.mark.parametrize("content", ["[]", "null", "123", "true", '"halted"'])
+    def test_non_object_json_halt_file_fails_closed(self, tmp_path: Path, content: str) -> None:
+        # Valid JSON that is not an object must read as STATE_CORRUPTION per
+        # the documented contract, not raise (independent review M5-F1).
+        path = tmp_path / "halt.json"
+        path.write_text(content, encoding="utf-8")
+        state = HaltStore(path).read()
+        assert state.halted
+        assert state.reason is HaltReason.STATE_CORRUPTION
+
     def test_halt_survives_process_restart(self, tmp_path: Path) -> None:
         path = tmp_path / "halt.json"
         HaltStore(path).halt(HaltReason.DAILY_LOSS_LIMIT, "limit hit")

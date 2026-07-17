@@ -228,8 +228,15 @@ _TMP_HALT = HaltStore(Path(tempfile.mkdtemp()) / "halt.json")
 _TMP_HALT.rearm("property test arm")
 _ARMED_HALT = _TMP_HALT.read()
 
-# Numeric limits where a *smaller* value is always at least as strict (denies at
-# least as much) for a single validation. cooldown is intentionally excluded.
+# Numeric limits where a *smaller* value is never less strict for a single
+# validation (each enforced check compares value (>|>=) limit, so shrinking the
+# limit can only add denials). cooldown is intentionally excluded. Honest scope
+# notes (M5 review): `max_order_rejections_per_day` is not currently enforced
+# by the engine at validate-time (it is a day-scoped operational counter), and
+# `max_price_deviation_fraction` cannot fire in this scenario (limit == last
+# price, deviation 0) — both are trivially monotone here and kept so the
+# property immediately covers them if/when they are wired in; the concrete
+# breach=>deny coverage lives in test_risk_engine_limits.py.
 _MONOTONE_LIMIT_FIELDS = (
     "max_bot_capital_usd",
     "max_position_notional_usd",

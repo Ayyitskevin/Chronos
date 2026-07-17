@@ -189,6 +189,10 @@ class ExecutionEngine:
                     HaltReason.UNKNOWN_ORDER,
                     f"broker event for unknown intent {event.intent_id}",
                 )
+                # An event for an order we never saw means our model of the
+                # broker is incomplete; block trading until reconciliation
+                # re-establishes it (a restart must not resume on stale state).
+                self.reconciliation_passed = False
                 continue
             try:
                 self._apply_event(machine, event)
@@ -198,6 +202,10 @@ class ExecutionEngine:
                     HaltReason.STATE_CORRUPTION,
                     f"illegal order transition ({machine_status_now}): {error}",
                 )
+                # Clear the reconciliation flag unconditionally: the RECONCILE
+                # recovery below can itself be an illegal transition (e.g. from a
+                # terminal state), and that must not leave trading re-armable.
+                self.reconciliation_passed = False
                 try:
                     machine.apply(
                         IntentStatus.UNKNOWN,
@@ -209,7 +217,6 @@ class ExecutionEngine:
                         at_utc=event.at_utc,
                         evidence="contradictory broker evidence",
                     )
-                    self.reconciliation_passed = False
                 except OrderTransitionError:
                     pass
         del now_utc
@@ -249,8 +256,21 @@ class ExecutionEngine:
             machine.record_partial_fill(event.cumulative_filled, at_utc=event.at_utc)
             applied = True
         elif event.kind is BrokerEventKind.FILLED:
+            # Cumulative fills are monotonic; a FILLED reporting fewer shares
+            # than we have already seen filled is a broker/model contradiction
+            # and must halt, exactly as the partial-fill path does — not be
+            # silently accepted (the fill count would otherwise rewind).
+            if event.cumulative_filled < machine.filled_quantity:
+                raise OrderTransitionError(
+                    f"intent {machine.intent_id}: FILLED cumulative fill decreased "
+                    f"({machine.filled_quantity} -> {event.cumulative_filled})"
+                )
             applied = machine.apply(IntentStatus.FILLED, at_utc=event.at_utc, evidence=event.detail)
-            machine.filled_quantity = event.cumulative_filled
+            # Only trust the reported count when the transition actually
+            # happened; a duplicate FILLED on an already-terminal machine is a
+            # no-op and must not overwrite in-memory state off the ledger.
+            if applied:
+                machine.filled_quantity = event.cumulative_filled
         elif event.kind is BrokerEventKind.CANCELLED:
             applied = machine.apply(
                 IntentStatus.CANCELLED, at_utc=event.at_utc, evidence=event.detail

@@ -157,6 +157,23 @@ class TestFillAccounting:
         assert machine.filled_quantity == 5
         assert machine.status is IntentStatus.PARTIALLY_FILLED
 
+    def test_partial_fill_on_terminal_machine_leaves_quantity_unchanged(self) -> None:
+        # A partial fill arriving after the order is terminal (FILLED) is an
+        # illegal transition; it must raise AND must not smear filled_quantity
+        # to a value the machine never accepted. The passed count (12) is >= the
+        # current fill (10), so it clears the monotonic guard and reaches apply().
+        machine = machine_at(
+            IntentStatus.RISK_APPROVED,
+            IntentStatus.PENDING_SUBMISSION,
+            IntentStatus.SUBMITTED,
+        )
+        machine.record_partial_fill(10, at_utc=NOW)
+        machine.apply(IntentStatus.FILLED, at_utc=NOW, evidence="fully filled")
+        assert machine.filled_quantity == 10
+        with pytest.raises(OrderTransitionError):
+            machine.record_partial_fill(12, at_utc=NOW)
+        assert machine.filled_quantity == 10  # unchanged despite the raise
+
 
 class TestTimestampsAndUnknown:
     def test_naive_datetime_raises(self) -> None:

@@ -75,6 +75,12 @@ class HaltStore:
     def read(self) -> HaltState:
         try:
             payload = json.loads(self._path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                # Valid JSON that is not an object ([], null, 123, "x") must
+                # read as STATE_CORRUPTION, not raise AttributeError below.
+                raise ValueError(
+                    f"halt file must contain a JSON object, got {type(payload).__name__}"
+                )
             if payload.get("schema") != _SCHEMA_VERSION:
                 raise ValueError(f"unsupported halt schema {payload.get('schema')!r}")
             halted = bool(payload["halted"])

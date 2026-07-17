@@ -104,6 +104,28 @@ class TestValidateSeries:
         assert IssueKind.NON_POSITIVE_PRICE in kinds
         assert report.blocking
 
+    def test_infinite_high_is_blocking(self) -> None:
+        # inf > 0 passes positivity and low <= x <= inf passes the range check,
+        # so without an explicit finiteness guard this corrupt bar sails
+        # through (independent review M5).
+        report = validate_series(series_of(make_bar(MON, high=float("inf"))))
+        kinds = [issue.kind for issue in report.issues]
+        assert IssueKind.NON_FINITE_VALUE in kinds
+        assert report.blocking
+
+    def test_nan_volume_is_blocking(self) -> None:
+        # NaN < 0 is False, so the negative-volume check never fires on NaN.
+        report = validate_series(series_of(make_bar(MON, volume=float("nan"))))
+        kinds = [issue.kind for issue in report.issues]
+        assert IssueKind.NON_FINITE_VALUE in kinds
+        assert report.blocking
+
+    def test_nan_price_is_blocking(self) -> None:
+        report = validate_series(series_of(make_bar(MON, close=float("nan"))))
+        kinds = [issue.kind for issue in report.issues]
+        assert IssueKind.NON_FINITE_VALUE in kinds
+        assert report.blocking
+
 
 class TestCsvProvider:
     def test_header_normalization_and_adj_close(self, tmp_path: Path) -> None:
