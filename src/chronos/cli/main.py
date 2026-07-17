@@ -125,7 +125,8 @@ def cmd_verify_audit(args: argparse.Namespace) -> int:
 def cmd_shadow_scan(args: argparse.Namespace) -> int:
     store = HaltStore(args.halt_file)
     _banner(TradingMode.SHADOW, store)
-    from chronos.auditlog.log import AuditLog
+    from chronos.auditlog.log import AuditLog, AuditLogCorruptionError
+    from chronos.control.halt import HaltReason
     from chronos.research.runner import STRATEGY_FACTORIES
     from chronos.research.shadow import shadow_scan
 
@@ -137,13 +138,19 @@ def cmd_shadow_scan(args: argparse.Namespace) -> int:
     if not strategies:
         print(f"no known strategies in {args.strategies!r}")
         return 1
+    try:
+        audit_log = AuditLog(args.audit_file)
+    except AuditLogCorruptionError as error:
+        store.halt(HaltReason.AUDIT_LOG_FAILURE, str(error))
+        print(f"AUDIT LOG CORRUPT — halted, refusing to run: {error}")
+        return 1
     reports = shadow_scan(
         strategies=strategies,
         symbols=tuple(s.strip().upper() for s in args.symbols.split(",") if s.strip()),
         data_dir=args.data_dir,
         risk_policy=load_risk_policy(args.policy),
         halt_store=store,
-        audit_log=AuditLog(args.audit_file),
+        audit_log=audit_log,
         equity_usd=args.equity,
     )
     print(json.dumps(reports, indent=2, default=str))

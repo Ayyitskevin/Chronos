@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from chronos.auditlog.log import AuditLog, verify_chain
+import pytest
+
+from chronos.auditlog.log import AuditLog, AuditLogCorruptionError, verify_chain
 
 
 def write_records(path: Path, count: int) -> None:
@@ -78,3 +80,17 @@ class TestReopen:
         ok, detail = verify_chain(path)
         assert ok, detail
         assert "3 records" in detail
+
+    def test_corrupt_last_line_fails_closed_on_construction(self, tmp_path: Path) -> None:
+        # A process killed mid-append can leave a truncated final line. The
+        # next construction must fail closed with a catchable exception, not a
+        # raw JSONDecodeError, so a caller can halt cleanly.
+        path = tmp_path / "audit.jsonl"
+        log = AuditLog(path)
+        log.append("startup", {"n": 1})
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write('{"sequence":1,"kind":"partial","payload":{"x"')
+        with pytest.raises(AuditLogCorruptionError):
+            AuditLog(path)
+        ok, _ = verify_chain(path)
+        assert not ok

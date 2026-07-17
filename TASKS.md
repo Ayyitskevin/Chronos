@@ -6,44 +6,58 @@ milestones (M1–M10) are documented in README.md and docs/architecture.md.
 ## Done
 
 - [x] Baseline recorded: 951 passed / 1 skipped (credential-gated) on Python 3.12.
-- [x] Pine corpus fetched byte-exact from Notion Master Index: 42/42 artifacts
-      (00–40 + archived 0A), SHA-256 pinned. Note: brief said ~77; the
-      authoritative index contains 42 (ASSUMPTIONS A-01).
-- [x] Phase 1 registry: research/strategy_registry.yaml + strategy_catalog.{csv,json}.
-- [x] Platform foundation: marketdata, indicators, specs, strategies (2 derived
-      + 3 baselines), portfolio, risk engine, execution engine + state machine +
-      ledgers, simulated broker with fault injection, IBKR paper adapter,
+- [x] Phase 1 — Pine corpus fetched byte-exact from Notion Master Index: 42/42
+      artifacts (00–40 + archived 0A), SHA-256 pinned in
+      `research/strategy_registry.yaml` (+ CSV/JSON catalogs). Brief said ~77;
+      the authoritative index contains 42 (ASSUMPTIONS A-01).
+- [x] Phase 2 — forensic audit of all 42 scripts: `docs/PINE_AUDIT.md` +
+      `research/pine_findings.json`. 28 NON_EXECUTABLE_INDICATOR, 13
+      PASS_WITH_CONSTRAINTS, 1 REQUIRES_REWRITE (script 08 compile blocker);
+      zero repainting/lookahead-contaminated. Duplication analysis in
+      `docs/STRATEGY_CATALOG.md` (≈4 genuinely distinct executable systems).
+- [x] Phase 3/4 — canonical specs for `regime_trend_v1` and
+      `mean_reversion_v1`; deterministic implementations; specification-level
+      parity (`docs/PARITY_REPORT.md`; no TradingView exports — A-03).
+- [x] Phase 5 — market-data plane, fail-closed quality checks, CSV provider.
+- [x] Phase 5/6 — historical data acquired (SPY, QQQ) with provenance manifest
+      + validation; chronological research harness; validation with cost/
+      slippage stress, sensitivity, baselines; `docs/RESEARCH_REPORT.md` +
+      `docs/STRATEGY_SELECTION.md` + `research/selection_manifest.json`.
+      **Outcome: zero candidates selected.**
+- [x] Phase 7–12 — deny-by-default risk engine, order state machine, execution
+      engine, simulated broker + fault injection, IBKR paper adapter,
       reconciliation gate, control plane (modes/halt/promotion), audit log,
-      notifications, backtest engine + metrics, research runner, CLI.
-- [x] Safety acceptance suite (29 tests) green; full legacy suite green.
-- [x] Canonical specs for regime_trend_v1 and mean_reversion_v1.
-- [x] ASSUMPTIONS.md, DECISIONS.md, RISK_REGISTER.md, docs/ARCHITECTURE.md,
-      docs/RISK_POLICY.md, config/risk.example.yaml.
+      notifications, backtest engine + metrics, research runner, shadow scan,
+      CLI.
+- [x] Phase 14 — persistent order ledger (SQLite + memory), hash-chained audit
+      log, owner-only file permissions.
+- [x] Phase 16 — safety/unit/parity/chaos suites: 217 platform tests; full
+      suite 1158 passed / 1 skipped (`docs/TEST_PLAN.md`, `docs/TEST_RESULTS.md`).
+- [x] Phase 17/18 — CLI, operational docs suite (ADRs 0001–0008, IBKR
+      integration/runbook, security, deployment, operations, backup, incident
+      response, go-live checklist).
+- [x] Independent adversarial review (7 dimensions) +
+      remediation of all CRITICAL/HIGH findings:
+      `docs/INDEPENDENT_REVIEW.md`, `docs/REMEDIATION_REPORT.md`.
+- [x] Tracking docs: ASSUMPTIONS, DECISIONS, RISK_REGISTER, CHANGELOG, HANDOFF.
 
-## In flight
+## Open (owner action or future work)
 
-- [ ] Phase 2 forensic audit of all 42 scripts → docs/PINE_AUDIT.md +
-      research/pine_findings.json (agent fan-out running).
-- [ ] Historical daily OHLCV acquisition with provenance manifest
-      (research/data/raw/ + MANIFEST.json) (agent running).
-- [ ] Platform unit/parity/chaos test suites (agent running).
-- [ ] Operational docs suite: ADRs, IBKR integration/runbook, security,
-      deployment, operations, backup, incident response, test plan,
-      go-live checklist (agent running).
-
-## Next
-
-- [ ] Phase 6 quantitative validation: chronological partitions, walk-forward,
-      cost/slippage stress, baselines, per-symbol results → docs/RESEARCH_REPORT.md,
-      docs/STRATEGY_SELECTION.md, research/selection_manifest.json.
-- [ ] docs/STRATEGY_CATALOG.md + docs/PARITY_REPORT.md + docs/TEST_RESULTS.md.
-- [ ] Independent adversarial review (fresh agents) → docs/INDEPENDENT_REVIEW.md,
-      docs/REMEDIATION_REPORT.md; remediate critical/high findings.
-- [ ] Final gates (ruff/format/mypy/pytest), CHANGELOG, HANDOFF, push, draft PR.
+- [ ] Owner: provide TradingView reference exports to upgrade parity from
+      specification-level to TradingView-verified (`fixtures/tradingview/`).
+- [ ] Owner: re-run research from IBKR historical data (or another trusted
+      feed covering IWM/DIA/GLD/TLT and a longer SPY history). The frozen
+      final-test window (2022+) is unconsumed and reserved for this.
+- [ ] Future work (out of scope this build): the long-running shadow/paper
+      service loop — live bar ingestion, startup reconciliation wiring
+      (hydrate `_orders` from the ledger; invoke `reconcile()`), notifications
+      daemon. Two accepted MEDIUM review findings (M4 state-level
+      reconciliation, M5 restart order hydration) are blocked on this.
+- [ ] Owner: if a strategy ever clears the frozen research criteria, author a
+      reviewed `config/risk.yaml` and a promotion record before any shadow run.
 
 ## Explicitly out of scope for this build
 
 - Canary/live activation of any kind (refused in code; future reviewed release).
 - Options execution; short selling; margin; market orders.
 - Intraday strategy validation (no trustworthy intraday data here — A-31).
-- TradingView-export parity (no exports provided — A-03; owner action).

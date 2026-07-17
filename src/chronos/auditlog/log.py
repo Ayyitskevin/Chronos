@@ -19,7 +19,16 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from chronos.utils.secure_files import secure_owner_only
+
 _GENESIS = "0" * 64
+
+
+class AuditLogCorruptionError(RuntimeError):
+    """The audit log's last record could not be recovered; construction fails
+    closed with this specific, catchable exception rather than a raw
+    ``json.JSONDecodeError`` or ``KeyError`` so a caller can halt trading
+    cleanly (see ``HaltReason.AUDIT_LOG_FAILURE``)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,8 +63,14 @@ class AuditLog:
                     last_line = line
         if not last_line:
             return 0, _GENESIS
-        record = json.loads(last_line)
-        return int(record["sequence"]) + 1, str(record["record_hash"])
+        try:
+            record = json.loads(last_line)
+            return int(record["sequence"]) + 1, str(record["record_hash"])
+        except (json.JSONDecodeError, KeyError, ValueError, TypeError) as error:
+            raise AuditLogCorruptionError(
+                f"audit log's last record is unreadable, refusing to append past it: "
+                f"{self._path}: {error}"
+            ) from error
 
     def append(self, kind: str, payload: dict[str, object]) -> AuditRecord:
         at = datetime.now(tz=UTC).isoformat()
@@ -86,6 +101,7 @@ class AuditLog:
             handle.write(line + "\n")
             handle.flush()
             os.fsync(handle.fileno())
+        secure_owner_only(self._path)
         self._sequence += 1
         self._last_hash = record_hash
         return record

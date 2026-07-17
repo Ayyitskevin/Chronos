@@ -49,7 +49,7 @@ rather than pretending the platform can express a stopless position.
 | regime_trend_v1 | SPY | 86 | +10.2% | 17.4% | 1.05 | 0.12 | 28% |
 | regime_trend_v1 | QQQ | 88 | +34.1% | 15.5% | 1.37 | 0.24 | 30% |
 | mean_reversion_v1 | SPY | 78 | +1.3% | 12.4% | 1.03 | 0.04 | 4% |
-| mean_reversion_v1 | QQQ | 81 | +19.0% | 18.4% | 1.40 | 0.21 | 5% |
+| mean_reversion_v1 | QQQ | 81 | +18.9% | 18.4% | 1.40 | 0.21 | 5% |
 | baseline_sma_trend | SPY | 8 | +199.9% | 18.6% | 14.4 | 0.66 | 54% |
 | baseline_sma_trend | QQQ | 12 | +209.8% | 26.4% | 3.01 | 0.55 | 56% |
 | baseline_random_entries | SPY | 141 | +71.8% | 20.3% | 1.55 | 0.37 | 31% |
@@ -88,9 +88,28 @@ Status: `not_eligible` (research prototype).
 **regime_trend_v1 — passes C1, C2, C3 on QQQ; FAILS C4**: 18 closed trades
 < the frozen floor of 20. C4's cost legs would have passed; C5 would have
 passed. Per the manifest, failing any of C1–C5 → `not_eligible`. We do not
-bend a frozen criterion by two trades after seeing the results — that is
-precisely the selection bias the floor exists to prevent. The near-miss and
-its strengths are recorded for the next iteration.
+bend a frozen criterion after seeing the results — that is precisely the
+selection bias the floor exists to prevent.
+
+**Disclosure — the "18 trades" figure is cap-dependent (raised by an
+independent review).** The research risk policy in `scripts/run_research.py`
+uses deliberately wide caps (bot capital / notional / aggregate exposure set
+to USD 10M, per-trade risk 0.50) so that a fixed USD 3,000 notional ceiling
+does not become binding as equity compounds over a multi-year backtest and
+silently suppress trades. This choice was made in the same commit that froze
+the selection criteria and was **not originally disclosed here** — a
+transparency gap this paragraph now closes. It matters because the trade
+count is sensitive to it: re-running QQQ validation under the codebase's
+*original* USD 3,000 / 0.25 caps yields **7 trades, not 18** (the tight
+notional cap rejects entries once equity grows). So the honest framing is not
+"missed the floor by 2" — under tight caps it misses by 13. **The pass/fail
+outcome is identical either way** (C4 fails under both), and zero candidates
+are selected regardless; but readers should not infer that 18 trades is an
+intrinsic, cap-independent property of the strategy. The wide-cap number is
+the right one for *measuring* the strategy's natural trade frequency
+unclipped; the tight-cap number is the right one for a USD 3,000 account's
+*actual* capacity. Neither clears the floor. The near-miss language has been
+removed accordingly.
 
 **C6 / final test**: with zero candidates passing C1–C5, the final window
 (2022-01-01..) was **not consumed** and remains pristine for future research

@@ -292,3 +292,35 @@ class TestUnknownOrderEvent:
         blocked = pipeline.engine.submit_approved(later, approval, now_utc=NOW)  # type: ignore[arg-type]
         assert not blocked.submitted
         assert blocked.refusal is SubmissionRefused.HALTED
+
+
+class TestBrokerSubmitException:
+    def test_submit_exception_halts_and_requires_reconciliation(self, tmp_path: Path) -> None:
+        # A broker whose submit() raises (e.g. a socket drop mid-request)
+        # leaves the true order state UNKNOWN; the engine must halt and drop
+        # reconciliation rather than assume the order did or did not reach the
+        # broker.
+        pipeline = Pipeline(tmp_path)
+
+        class ExplodingBroker:
+            def submit(self, intent: OrderIntent) -> object:
+                raise ConnectionError("socket dropped mid-submit")
+
+            def request_cancel(self, intent_id: str) -> None: ...
+
+            def drain_events(self) -> tuple[object, ...]:
+                return ()
+
+        pipeline.engine.broker = ExplodingBroker()  # type: ignore[assignment]
+        intent = make_intent()
+        result = pipeline.submit(intent)
+
+        assert not result.submitted
+        assert result.refusal is SubmissionRefused.BROKER_SUBMIT_FAILED
+        assert not pipeline.engine.reconciliation_passed
+        assert pipeline.engine.order_status(intent.intent_id) is (
+            IntentStatus.RECONCILIATION_REQUIRED
+        )
+        state = pipeline.halt_store.read()
+        assert state.halted
+        assert state.reason is HaltReason.CONNECTION_UNSTABLE

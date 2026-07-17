@@ -38,7 +38,16 @@ remain refused in code regardless.
 - [PARTIAL] Pine corpus audit (docs/PINE_AUDIT.md) — in flight (TASKS.md); all 42 scripts fetched
   and hash-pinned, semantic audit in progress.
 - [DONE] docs/TEST_RESULTS.md, docs/RESEARCH_REPORT.md, docs/STRATEGY_SELECTION.md.
-- [NOT DONE] Independent adversarial review (TASKS.md "Next").
+- [DONE] Pine corpus forensic audit complete: all 42 scripts, docs/PINE_AUDIT.md +
+  research/pine_findings.json. Distribution: 28 `NON_EXECUTABLE_INDICATOR`,
+  13 `PASS_WITH_CONSTRAINTS`, 1 `REQUIRES_REWRITE` (script 08, a trivial
+  use-before-declare compile blocker — documented, not fixed upstream). Zero
+  `REPAINTING` or `LOOKAHEAD_CONTAMINATED` findings; every `request.security`
+  call across the corpus uses the safe `[1]`-offset + `lookahead_on` idiom.
+- [DONE] Independent adversarial review across seven dimensions, with all CRITICAL/HIGH findings
+  remediated and regression-tested (docs/INDEPENDENT_REVIEW.md, docs/REMEDIATION_REPORT.md). Two
+  MEDIUM findings (state-level reconciliation, restart order hydration) are accepted as go-live
+  prerequisites blocked on the unbuilt service loop, not silently deferred.
 
 ## Gate 1 — Research/backtest exit (into REPLAY, then SHADOW)
 
@@ -87,8 +96,11 @@ be submitted anywhere (`src/chronos/control/modes.py`).
   (`scripts/smoke_test_ibkr.py`) — first proof this code has ever touched a real gateway.
 - [OWNER] Operational discipline rehearsed: halt/rearm, backup/restore, reconnect procedure
   (docs/IBKR_RUNBOOK.md, docs/BACKUP_AND_RECOVERY.md) executed at least once each, for real.
-- [NOT DONE] Independent adversarial review completed and critical/high findings remediated
-  (TASKS.md).
+- [DONE] Independent adversarial review completed and all critical/high findings remediated
+  (docs/INDEPENDENT_REVIEW.md, docs/REMEDIATION_REPORT.md). Note: two MEDIUM findings specific to
+  this gate (M4 state-level reconciliation, M5 restart order hydration) remain open because they
+  require the not-yet-built shadow/paper service loop — they must be closed before a real shadow
+  run, not before merging this research build.
 
 ## Gate 3 — Paper gate (PAPER operation)
 

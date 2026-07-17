@@ -9,11 +9,15 @@ NOT IMPLEMENTED / REQUIRES OWNER ACTION.
 
 | Command | Result |
 |---|---|
-| `.venv/bin/pytest -q` | **1115 passed, 1 skipped** (~13 s) |
+| `.venv/bin/pytest -q` | **1158 passed, 1 skipped** (~13 s) |
 | `.venv/bin/ruff check .` | clean |
-| `.venv/bin/ruff format --check .` | clean (146 files) |
-| `.venv/bin/mypy src/chronos` | clean, strict (89 source files) |
-| GitHub Actions `quality` job | failed on an intermediate WIP commit (lint of in-progress test files); green expected from commit `d16d863` onward — verify on the PR |
+| `.venv/bin/ruff format --check .` | clean (152 files) |
+| `.venv/bin/mypy src/chronos` | clean, strict (90 source files) |
+| GitHub Actions `quality` job | failed on an intermediate WIP commit (lint of in-progress test files); green from commit `d16d863` onward — verify on the PR |
+
+The 1158 total is 951 (wheel) + 31 (safety) + 139 (platform_unit) + 27
+(parity) + 10 (chaos) + 1 skipped; the platform suites grew during
+independent-review remediation (docs/REMEDIATION_REPORT.md).
 
 ## Breakdown
 
@@ -21,10 +25,10 @@ NOT IMPLEMENTED / REQUIRES OWNER ACTION.
 |---|---|---|---|
 | Wheel dashboard `tests/unit` + `tests/integration` | 951 | PASSED | untouched baseline preserved |
 | `tests/integration/test_ibkr_smoke.py` | 1 | SKIPPED / NOT RUNNABLE WITHOUT CREDENTIALS | opt-in via `CHRONOS_RUN_IBKR_SMOKE=1` + running TWS/Gateway; strictly read-only |
-| `tests/safety` (platform safety acceptance) | 29 | PASSED | mode locks (live denial under maximal config; six-condition paper lock), halt persistence/fail-closed, deny-by-default risk engine, execution gating (forged/foreign/mismatched approvals, halt, reconciliation, duplicates, ledger failure, unknown events), strategy isolation |
-| `tests/platform_unit` | 99 | PASSED | state machine, sim broker, ledgers (incl. SQLite reopen + schema tamper), sizer, data quality/CSV, audit-log tamper evidence, promotion gates, notifier isolation, specs schema, metrics hand-checks |
+| `tests/safety` (platform safety acceptance) | 31 | PASSED | mode locks (live denial under maximal config; six-condition paper lock; unrecognized-mode deny-by-default), halt persistence/fail-closed, deny-by-default risk engine, execution gating (forged/foreign/mismatched approvals, halt, halt-during-submission TOCTOU, reconciliation, duplicates, ledger failure, unknown events), strategy isolation |
+| `tests/platform_unit` | 139 | PASSED | state machine, sim broker, ledgers (incl. SQLite reopen + schema tamper), sizer, data quality/CSV, audit-log tamper + corrupt-recovery, promotion gates, notifier isolation, specs schema, metrics hand-checks, IBKR paper adapter (fill translation, disconnect race), reconciliation, baselines, intent-id collision resistance, owner-only file perms |
 | `tests/parity` | 27 | PASSED | hand-computed indicator references; incremental-vs-batch equality at 1e-9; continuity-reset equivalence. **Specification-level parity only — no TradingView fixtures exist (docs/PARITY_REPORT.md)** |
-| `tests/chaos` | 9 | PASSED | rejection/partial/duplicate/drop-ack/rogue-event/ledger-failure paths; fault-run determinism |
+| `tests/chaos` | 10 | PASSED | rejection/partial/duplicate/drop-ack/rogue-event/ledger-failure/broker-submit-exception paths; fault-run determinism |
 
 ## Safety-invariant coverage map (brief → test)
 
@@ -51,7 +55,7 @@ NOT IMPLEMENTED / REQUIRES OWNER ACTION.
 
 | Item | Status |
 |---|---|
-| Paper-account submission integration test against real IB Gateway | REQUIRES OWNER ACTION (credentials + TWS; adapter is unit-tested against a fake IB object only) |
+| Paper-account submission integration test against real IB Gateway | REQUIRES OWNER ACTION (credentials + TWS; the adapter is unit-tested against a fake IB object in `tests/platform_unit/test_ibkr_paper_adapter.py`, never against a real gateway) |
 | TradingView parity fixtures | REQUIRES OWNER ACTION (exports; see fixtures/tradingview/README.md) |
 | Property-based (hypothesis) tests | NOT IMPLEMENTED — invariants covered by deterministic LCG-driven tests instead; adding `hypothesis` is listed as future work in TEST_PLAN.md |
 | Long-running shadow service tests | NOT IMPLEMENTED (no such service; shadow-scan is one-shot and tested via its components) |

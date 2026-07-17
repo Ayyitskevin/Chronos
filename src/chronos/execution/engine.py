@@ -37,6 +37,7 @@ class SubmissionRefused(StrEnum):
     RECONCILIATION_PENDING = "RECONCILIATION_PENDING"
     DUPLICATE_INTENT = "DUPLICATE_INTENT"
     LEDGER_UNAVAILABLE = "LEDGER_UNAVAILABLE"
+    BROKER_SUBMIT_FAILED = "BROKER_SUBMIT_FAILED"
 
 
 class LedgerPort(Protocol):
@@ -138,11 +139,40 @@ class ExecutionEngine:
                 False, SubmissionRefused.LEDGER_UNAVAILABLE, "ledger unavailable; halted"
             )
 
+        # Re-read the halt immediately before handing the order to the broker.
+        # The earlier read happened before ledger I/O (a real fsync on the
+        # SQLite ledger); an operator or automatic halt can land inside that
+        # window, and "halts outrank everything" requires catching it here
+        # rather than submitting an already-halted order.
+        halt = self.halt_store.read()
+        if halt.trading_blocked:
+            return SubmissionResult(
+                False,
+                SubmissionRefused.HALTED,
+                f"halted before submission: {halt.reason.value if halt.reason else 'unknown'}",
+            )
+
         machine = OrderStateMachine(intent_id=intent.intent_id)
         machine.apply(IntentStatus.RISK_APPROVED, at_utc=now_utc, evidence="risk approval")
         machine.apply(IntentStatus.PENDING_SUBMISSION, at_utc=now_utc, evidence="handed to adapter")
         self._orders[intent.intent_id] = machine
-        self.broker.submit(intent)
+        try:
+            self.broker.submit(intent)
+        except Exception as error:
+            # The call may or may not have reached the broker before raising
+            # (e.g. a socket drop mid-request); the true state is UNKNOWN and
+            # requires reconciliation, never assumed either submitted or not.
+            evidence = f"broker.submit raised: {error!r}"
+            machine.apply(IntentStatus.UNKNOWN, at_utc=now_utc, evidence=evidence)
+            machine.apply(IntentStatus.RECONCILIATION_REQUIRED, at_utc=now_utc, evidence=evidence)
+            self.reconciliation_passed = False
+            self.ledger.record_transition(intent.intent_id, machine.status, now_utc, evidence)
+            self.halt_store.halt(HaltReason.CONNECTION_UNSTABLE, evidence)
+            return SubmissionResult(
+                False,
+                SubmissionRefused.BROKER_SUBMIT_FAILED,
+                "broker submission raised an exception; halted pending reconciliation",
+            )
         self._transition(
             machine, IntentStatus.SUBMITTED, at_utc=now_utc, evidence="submission call returned"
         )

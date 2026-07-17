@@ -62,6 +62,20 @@ this is a single-operator local system (ASSUMPTIONS.md A-42).
   with file write access could rewrite the whole chain. There is no external anchor (no remote
   copy, no signing). Off-machine backups (docs/BACKUP_AND_RECOVERY.md) are the compensating
   control.
+- A truncated final record (e.g. a process killed mid-append) is detected on the next
+  construction: `AuditLog(...)` raises `AuditLogCorruptionError` and the CLI shadow-scan path
+  halts with `AUDIT_LOG_FAILURE` rather than crashing with a raw traceback.
+
+### Owner-only permissions on platform state files
+
+- `data/platform_ledger.db` (+ its `-wal`/`-shm` sidecars), `data/platform_halt.json`, and
+  `data/platform_audit.jsonl` are created with mode `0600` via
+  `chronos.utils.secure_files.secure_owner_only`, which refuses to follow a symlink and refuses a
+  file not owned by the current process (so a local attacker cannot redirect the chmod). This
+  matches the hardening the wheel dashboard already applies to its own SQLite/log files. These
+  files hold trade intents, symbols, and prices — not credentials — but should not be
+  world-readable on a shared host. The halt file is additionally fsync-durable (temp file +
+  directory fsync + atomic rename).
 
 ### Fail-closed halt and deny-by-default risk policy
 

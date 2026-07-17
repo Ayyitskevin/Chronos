@@ -150,5 +150,18 @@ class HaltStore:
         }
         self._path.parent.mkdir(parents=True, exist_ok=True)
         temp = self._path.with_suffix(".tmp")
-        temp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        # fsync the temp file and the directory so a just-issued halt (the
+        # platform's kill switch) survives OS-level power loss, not just a
+        # process crash. Atomic rename still prevents a torn read.
+        descriptor = os.open(str(temp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(descriptor, json.dumps(payload, indent=2).encode("utf-8"))
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
         os.replace(temp, self._path)
+        dir_fd = os.open(str(self._path.parent), os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)

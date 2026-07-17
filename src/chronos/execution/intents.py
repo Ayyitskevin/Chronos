@@ -79,19 +79,30 @@ class OrderIntent:
 
     @property
     def intent_id(self) -> str:
-        """Deterministic identity used for idempotent submission."""
+        """Deterministic identity used for idempotent submission.
+
+        Fields are length-prefixed (``len:value``) before joining so that no
+        combination of embedded delimiters in the free-text fields
+        (``strategy_id``, ``strategy_version``, ``symbol``,
+        ``source_bar_sequence_id``) can make two economically-different intents
+        hash to the same id. This is the duplicate-suppression key, so a
+        collision would be a safety defect.
+        """
+
+        def field(value: str) -> str:
+            return f"{len(value)}:{value}"
 
         content = "|".join(
             (
-                self.strategy_id,
-                self.strategy_version,
-                self.symbol,
-                self.side.value,
-                str(self.quantity),
-                str(self.limit_price),
-                str(self.stop_price) if self.stop_price is not None else "-",
-                self.time_in_force.value,
-                self.source_bar_sequence_id,
+                field(self.strategy_id),
+                field(self.strategy_version),
+                field(self.symbol),
+                field(self.side.value),
+                field(str(self.quantity)),
+                field(str(self.limit_price)),
+                field(str(self.stop_price) if self.stop_price is not None else "-"),
+                field(self.time_in_force.value),
+                field(self.source_bar_sequence_id),
             )
         )
         return str(uuid.uuid5(_INTENT_NAMESPACE, content))

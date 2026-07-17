@@ -14,6 +14,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from chronos.execution.intents import IntentStatus, OrderIntent
+from chronos.utils.secure_files import secure_owner_only
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_info (version INTEGER NOT NULL);
@@ -74,6 +75,9 @@ class SqliteLedger:
                 f"ledger schema version {row[0]} unsupported (expected {_SCHEMA_VERSION}); "
                 "refusing to run against an unknown schema"
             )
+        secure_owner_only(path)
+        secure_owner_only(path.with_name(path.name + "-wal"))
+        secure_owner_only(path.with_name(path.name + "-shm"))
 
     def close(self) -> None:
         self._connection.close()

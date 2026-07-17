@@ -19,9 +19,20 @@
 - Safety acceptance test suite (`tests/safety/`) covering mode locks, halt
   persistence, deny-by-default risk, execution gating, and strategy isolation.
 - Deny-by-default risk policy schema + `config/risk.example.yaml`.
-- Documentation: `docs/ARCHITECTURE.md`, `docs/RISK_POLICY.md`,
-  `ASSUMPTIONS.md`, `DECISIONS.md`, `RISK_REGISTER.md`, `TASKS.md`
-  (operational docs suite and research reports in progress).
+- Complete documentation set: `docs/ARCHITECTURE.md`, `docs/RISK_POLICY.md`,
+  `docs/STRATEGY_CATALOG.md`, `docs/PINE_AUDIT.md`, `docs/PARITY_REPORT.md`,
+  `docs/RESEARCH_REPORT.md`, `docs/STRATEGY_SELECTION.md`, `docs/TEST_PLAN.md`,
+  `docs/TEST_RESULTS.md`, `docs/SECURITY.md`, `docs/DEPLOYMENT.md`,
+  `docs/OPERATIONS.md`, `docs/BACKUP_AND_RECOVERY.md`,
+  `docs/INCIDENT_RESPONSE.md`, `docs/IBKR_INTEGRATION.md`,
+  `docs/IBKR_RUNBOOK.md`, `docs/GO_LIVE_CHECKLIST.md`, ADRs 0001–0008,
+  `docs/INDEPENDENT_REVIEW.md`, `docs/REMEDIATION_REPORT.md`; plus
+  `ASSUMPTIONS.md`, `DECISIONS.md`, `RISK_REGISTER.md`, `TASKS.md`, `HANDOFF.md`.
+- Independent adversarial review across seven dimensions with all
+  CRITICAL/HIGH findings remediated (see REMEDIATION_REPORT).
+- Owner-only (0600) permissions on platform ledger/halt/audit files;
+  halt-write fsync durability; collision-resistant order-intent ids;
+  deny-by-default for unrecognized trading modes.
 - Dependencies: `pyyaml` (+ `types-PyYAML` dev).
 
 ### Changed

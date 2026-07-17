@@ -179,6 +179,20 @@ class TestModeLocks:
         )
         assert lock.capability is ExecutionCapability.NO_ORDERS
 
+    def test_unrecognized_mode_denies_by_default(self) -> None:
+        # A mode value that is not a handled TradingMode must not fall through
+        # into the PAPER evaluation and be granted submission.
+        lock = resolve_mode_lock(
+            requested_mode="totally_not_a_real_mode",  # type: ignore[arg-type]
+            paper_account_allowlist=("DU1234567",),
+            broker_reported_account_id="DU1234567",
+            broker_reported_environment_is_paper=True,
+            order_transmission_enabled=True,
+        )
+        assert lock.capability is ExecutionCapability.NO_ORDERS
+        assert not lock.may_submit_paper
+        assert lock.denial_reasons
+
 
 class TestHaltPersistence:
     def test_missing_halt_file_fails_closed(self, tmp_path: Path) -> None:
@@ -465,6 +479,26 @@ class TestExecutionGate:
         state = engine.halt_store.read()
         assert state.halted
         assert state.reason is HaltReason.UNKNOWN_ORDER
+
+    def test_halt_landing_during_submission_is_caught(self, tmp_path: Path) -> None:
+        # A halt that lands after the initial checks but before the order
+        # reaches the broker (modeled via a ledger whose write halts) must
+        # still block submission: halts outrank everything.
+        engine, risk_engine = build_engine(tmp_path)
+        intent, approval = self.approved(risk_engine, tmp_path)
+        original = engine.ledger.record_intent
+
+        def halting_record_intent(*args: object, **kwargs: object) -> None:
+            engine.halt_store.halt(HaltReason.OPERATOR_REQUEST, "concurrent halt")
+            original(*args, **kwargs)  # type: ignore[arg-type]
+
+        engine.ledger.record_intent = halting_record_intent  # type: ignore[method-assign]
+        result = engine.submit_approved(intent, approval, now_utc=NOW)  # type: ignore[arg-type]
+        assert not result.submitted
+        assert result.refusal is SubmissionRefused.HALTED
+        broker = engine.broker
+        assert isinstance(broker, SimulatedExecutionBroker)
+        assert broker.open_order_intent_ids() == ()  # never reached the broker
 
 
 class TestStrategyIsolation:

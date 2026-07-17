@@ -110,6 +110,18 @@ def resolve_mode_lock(
             denial_reasons=(),
         )
 
+    # Anything that is not one of the explicitly-handled modes above — including
+    # a value that is not a TradingMode at all — is denied. This keeps a future
+    # config/env-driven mode selector from falling through into the PAPER
+    # evaluation on an unrecognized string.
+    if requested_mode is not TradingMode.PAPER:
+        return ModeLock(
+            mode=TradingMode.PAPER,
+            capability=ExecutionCapability.NO_ORDERS,
+            paper_account_id=None,
+            denial_reasons=(f"unrecognized trading mode {requested_mode!r}; denied by default",),
+        )
+
     # PAPER: every condition below must independently pass.
     if not order_transmission_enabled:
         reasons.append("order transmission is disabled (ALLOW_ORDER_TRANSMIT is false)")

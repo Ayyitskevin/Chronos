@@ -17,9 +17,10 @@ Every order is a DAY limit order with ``outsideRth=False`` and
 order path and no live path here; nothing in this module reads credentials —
 authentication belongs to the operator's TWS/IB Gateway session.
 
-STATUS: implemented and unit-tested against a fake IB object; NOT yet
-exercised against a real IB Gateway from this environment (no credentials —
-see docs/TEST_RESULTS.md "Requires owner action").
+STATUS: implemented and unit-tested against a fake IB object
+(``tests/platform_unit/test_ibkr_paper_adapter.py``); NOT yet exercised
+against a real IB Gateway from this environment (no credentials — see
+docs/TEST_RESULTS.md "Requires owner action").
 """
 
 from __future__ import annotations
@@ -117,6 +118,10 @@ class IBKRPaperExecutionAdapter:
         order.outsideRth = False
         order.orderRef = intent.intent_id
         order.transmit = True
+        if not self.ib.isConnected():
+            raise BrokerSafetyError(
+                "gateway disconnected between account verification and order submission"
+            )
         trade = self.ib.placeOrder(contract, order)
         self._trades[intent.intent_id] = trade
         return SubmissionReceipt(intent_id=intent.intent_id, submitted_at_utc=datetime.now(tz=UTC))
@@ -128,7 +133,18 @@ class IBKRPaperExecutionAdapter:
         self.ib.cancelOrder(trade.order)
 
     def drain_events(self) -> tuple[BrokerEvent, ...]:
-        """Pump the ib_async loop briefly and translate trade state to events."""
+        """Pump the ib_async loop briefly and translate trade state to events.
+
+        Fill quantity is authoritative over IB's raw status text for every
+        fill-relevant kind: the status field and the filled field can be
+        observed inconsistently within a single poll (TWS eventual
+        consistency), so a status of "Filled" with filled < total is
+        reported as PARTIAL_FILL, and any status with filled >= total is
+        reported as FILLED regardless of what the status string says. An
+        entirely unrecognized status is never silently dropped, even at
+        zero fill: it surfaces as ERROR so the engine halts rather than
+        going dark on an unknown broker state.
+        """
 
         with contextlib.suppress(Exception):
             # A pump failure surfaces via data staleness, never as a crash here.
@@ -140,21 +156,36 @@ class IBKRPaperExecutionAdapter:
             previous = self._emitted.get(intent_id)
             if previous == (status, filled):
                 continue
+
+            recognized = status in _STATUS_MAP
             kind = _STATUS_MAP.get(status)
-            if kind is None and filled == 0:
-                self._emitted[intent_id] = (status, filled)
-                continue
-            if status not in _STATUS_MAP:
+            if kind is None:
+                if recognized and filled == 0:
+                    # "PendingSubmit" with nothing filled yet: legitimately
+                    # nothing to report.
+                    self._emitted[intent_id] = (status, filled)
+                    continue
                 kind = BrokerEventKind.ERROR
+
             total = getattr(trade.order, "totalQuantity", 0)
-            if kind is BrokerEventKind.ACKNOWLEDGED and 0 < filled < total:
-                kind = BrokerEventKind.PARTIAL_FILL
+            if kind in (
+                BrokerEventKind.ACKNOWLEDGED,
+                BrokerEventKind.PARTIAL_FILL,
+                BrokerEventKind.FILLED,
+            ):
+                if total > 0 and filled >= total:
+                    kind = BrokerEventKind.FILLED
+                elif filled > 0:
+                    kind = BrokerEventKind.PARTIAL_FILL
+                else:
+                    kind = BrokerEventKind.ACKNOWLEDGED
+
             average_raw = getattr(trade.orderStatus, "avgFillPrice", None)
             average = Decimal(str(average_raw)) if average_raw and filled > 0 else None
             commission = self._commission_total(trade)
             self._events.append(
                 BrokerEvent(
-                    kind=kind if kind is not None else BrokerEventKind.ERROR,
+                    kind=kind,
                     intent_id=intent_id,
                     at_utc=datetime.now(tz=UTC),
                     cumulative_filled=filled,
