@@ -13,6 +13,13 @@ Promotion is single-step and evidence-based (`src/chronos/control/promotion.py`)
 "arms" anything by itself. The mode lock re-derives capability from live evidence every time
 (ADR-0007).
 
+**Bottom line as of this build:** the platform machinery (Gate 0) is implemented and tested, and
+the research process (Gate 1) ran to completion — but it concluded that **neither derived
+strategy currently has a demonstrated edge** (docs/STRATEGY_SELECTION.md). Gates 2 and 3 (shadow,
+paper) therefore have no eligible candidate to carry through them yet; the machinery to do so
+exists and is tested, but exercising it today would be theater, not evidence. Gates 4 and 5 (live)
+remain refused in code regardless.
+
 ## Gate 0 — Foundation (prerequisite to everything)
 
 - [DONE] Deterministic platform implemented: marketdata, indicators, specs, strategies (2 derived
@@ -25,27 +32,40 @@ Promotion is single-step and evidence-based (`src/chronos/control/promotion.py`)
 - [DONE] Live-capable modes hard-refused in code; paper capability requires six simultaneous
   conditions (tested).
 - [DONE] Persistent fail-closed halt; deny-by-default risk policy schema; hash-chained audit log.
-- [PARTIAL] Platform unit/parity/chaos suites — directories exist; being authored in parallel
-  (docs/TEST_PLAN.md; counts land in docs/TEST_RESULTS.md).
-- [PARTIAL] Pine corpus audit (docs/PINE_AUDIT.md) — in flight (TASKS.md).
-- [NOT DONE] docs/TEST_RESULTS.md, docs/RESEARCH_REPORT.md, docs/STRATEGY_SELECTION.md,
-  independent adversarial review (TASKS.md "Next").
+- [DONE] Platform unit/parity/chaos suites: 135 tests (99 unit, 27 parity, 9 chaos), all green
+  (docs/TEST_PLAN.md, docs/TEST_RESULTS.md). Full suite incl. legacy wheel dashboard:
+  1115 passed, 1 credential-gated skip.
+- [PARTIAL] Pine corpus audit (docs/PINE_AUDIT.md) — in flight (TASKS.md); all 42 scripts fetched
+  and hash-pinned, semantic audit in progress.
+- [DONE] docs/TEST_RESULTS.md, docs/RESEARCH_REPORT.md, docs/STRATEGY_SELECTION.md.
+- [NOT DONE] Independent adversarial review (TASKS.md "Next").
 
 ## Gate 1 — Research/backtest exit (into REPLAY, then SHADOW)
 
-- [PARTIAL] Historical daily OHLCV with provenance manifest in `research/data/raw/` — acquisition
-  in flight; `research/data/raw/` is not yet populated.
-- [NOT DONE] Quantitative validation: chronological partitions, walk-forward, cost/slippage
-  stress at 2/5/10/25 bps, baseline comparisons, per-symbol results, published in
-  docs/RESEARCH_REPORT.md with data hashes and policy hashes.
-- [NOT DONE] Strategy selection record (docs/STRATEGY_SELECTION.md): which strategy ids/symbols
-  are candidates and why, signed off by the owner.
+- [PARTIAL] Historical daily OHLCV with provenance manifest in `research/data/raw/` — SPY
+  (2000-01..2019-11, unadjusted) and QQQ (1999-11..2024-01, adjusted) acquired, integrity-
+  validated, and cross-checked to the penny against an independent source
+  (`research/data/raw/MANIFEST.json`, `DATA_SOURCES.md`). IWM/DIA/GLD/TLT could **not** be
+  trustworthily acquired in this environment and were excluded, not fabricated.
+- [DONE] Quantitative validation: chronological partitions (dev/validation/frozen-final-test),
+  cost stress (2x commission) and slippage stress (5/10/25 bps), parameter sensitivity,
+  baseline comparisons (buy-hold, SMA trend, deterministic random-entry twin), published in
+  docs/RESEARCH_REPORT.md with data hashes and policy hash. Selection criteria were frozen
+  (`research/selection_manifest.json`) **before** validation results were computed.
+- [DONE] Strategy selection record (docs/STRATEGY_SELECTION.md): **zero candidates selected.**
+  `mean_reversion_v1` fails the frozen net-positive criterion; `regime_trend_v1` passes three of
+  five frozen criteria on QQQ but fails the frozen minimum-trade-count floor by two trades — the
+  criterion was applied as written, not relaxed post hoc. This record requires owner review, not
+  owner invention of new criteria after the fact.
 - [DONE] Backtest reproducibility: identical inputs produce identical outputs; every run stamps
   code commit, data SHA-256, policy hash (`src/chronos/research/runner.py`).
-- [OWNER] Re-run research from IBKR historical data before trusting mirror-sourced conclusions
-  (ASSUMPTIONS.md A-30 caveat).
-- [NOT DONE] Promotion record RESEARCH→…→REPLAY→SHADOW written via
-  `chronos.control.promotion.write_promotion_record` with all gate checks passing.
+- [OWNER] Re-run research from IBKR historical data (or another trusted source covering
+  IWM/DIA/GLD/TLT and a longer SPY history) before trusting mirror-sourced conclusions
+  (ASSUMPTIONS.md A-30 caveat). The frozen final-test window (2022-01-01..) was **never consumed**
+  and remains available for that re-run.
+- [NOT APPLICABLE] Promotion record RESEARCH→…→REPLAY→SHADOW: with zero candidates passing
+  selection, there is nothing eligible to promote. A promotion record would be manufactured
+  confidence; none was written.
 
 ## Gate 2 — Shadow gate (SHADOW → PAPER eligibility)
 
@@ -86,9 +106,9 @@ be submitted anywhere (`src/chronos/control/modes.py`).
 - [NOT DONE] Defined paper exit criteria (e.g. M sessions/trades with zero reconciliation
   discrepancies, fills consistent with the backtest fill model net of costs, no SEV-1/SEV-2
   incidents) recorded in a promotion record before the run.
-- [NOT DONE] Risk policy for paper (`config/risk.yaml`) written and reviewed by the owner — the
-  example file denies everything by design (`config/risk.example.yaml`; note that file's
-  "gitignored" comment is currently inaccurate — see docs/OPERATIONS.md).
+- [NOT DONE] Risk policy for paper (`config/risk.yaml`, gitignored by default) written and
+  reviewed by the owner — the example file denies everything by design
+  (`config/risk.example.yaml`). Moot until a strategy passes Gate 1 selection.
 
 ## Gate 4 — Canary eligibility (CANARY_LIVE)
 
