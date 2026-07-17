@@ -1,325 +1,351 @@
-# Chronos — Autonomous Build Brief for Opus 4.8
+# Chronos — Autonomous Continuation Brief (for Claude Opus 4.8)
 
-You are the principal engineer for **Chronos**, an AI-assisted, deterministic
-algorithmic trading platform built from a corpus of quantitative-finance Pine
-Scripts, targeting Interactive Brokers with an eventual ~USD 3,000 account.
-**Capital preservation and correctness outrank returns and speed.** It is
-acceptable — preferable — to conclude that no strategy is currently tradable
-rather than invent confidence the evidence does not support.
+You are taking over **Chronos**: a deterministic, safety-first trading
+research platform for Interactive Brokers, built from the owner's Pine
+Script corpus, targeting an eventual ~USD 3,000 account. A complete first
+build already exists on this branch — CI green, 1,158 tests passing, seven
+independent adversarial reviews performed and remediated. **Your job is to
+carry it to completion, not to rebuild it.**
 
-This brief is written from a completed first build. It exists so you do not
-re-learn the environment the hard way. **Read the whole thing before acting.**
+This document was written by the session that built the system. It encodes
+what that build learned so you spend your effort on the frontier, not on
+rediscovery. It supersedes any earlier draft of this file. Read it fully
+before your first tool call.
 
 ---
 
-## 0. Prime directive and how to start
+## 1. The one paragraph that governs everything
 
-**Do not assume a blank slate.** The repository already contains a working
-first build (branch `claude/chronos-trading-system-rrzroq`, PR #1, CI green,
-1158 tests passing). Your job is to drive it to *completion*, not to rebuild
-what exists. So the very first thing you do is **orient**:
+Optimize in this order: capital preservation → correctness → risk
+containment → reproducibility → parity → resilience → auditability →
+statistical robustness → maintainability → performance → aesthetics. The
+first build's research concluded, honestly, that **zero strategies currently
+have a demonstrated edge** — and that conclusion survived adversarial
+review. "Still zero, with better evidence" is a valid final answer for your
+run too. You are never being asked to make the numbers look better; you are
+being asked to make the evidence stronger and the platform complete.
+
+---
+
+## 2. Orient before acting (every session, ~3 minutes)
 
 ```bash
-git log --oneline -20
-git status
-cat TASKS.md HANDOFF.md docs/GO_LIVE_CHECKLIST.md
-ls src/chronos research docs specs tests
-```
-
-Then establish the baseline (see §2 for the Python-version trap):
-
-```bash
-python3.12 -m venv .venv
-.venv/bin/python -m pip install -e '.[dev]'
-.venv/bin/pytest -q                 # expect ~1158 passed, 1 skipped
+git log --oneline -15 && git status
+cat HANDOFF.md TASKS.md                       # current truth
+python3.12 -m venv .venv 2>/dev/null; .venv/bin/python -m pip install -q -e '.[dev]'
+.venv/bin/pytest -q                            # baseline: ~1158 passed, 1 skipped
 .venv/bin/ruff check . && .venv/bin/ruff format --check . && .venv/bin/mypy src/chronos
 ```
 
-If that baseline holds, **skip every phase already marked done in TASKS.md**
-and go straight to §5 (Remaining Work). If you are ever on a fresh clone with
-none of this present, execute §4 (Full Phase Plan) in order.
+**`python3.12` explicitly** — the bare `python3` here is 3.11 and the
+install fails on `requires-python >= 3.12`.
 
-Work **state-aware and idempotently**: check whether a deliverable exists and
-is correct before producing it. Every phase below names its output files so
-you can tell.
+If the baseline is green: skip to §6 (the work plan) and take the highest
+incomplete milestone. If anything is red: fixing it *is* your first task —
+never stack new work on a broken baseline. If you're somehow on a clone
+missing the first build entirely, stop and re-read `TASKS.md` +
+`docs/GO_LIVE_CHECKLIST.md` before assuming anything needs rebuilding.
 
----
+Key map (all exists, all tested):
 
-## 1. Non-negotiable safety rules (these never change)
-
-1. **No live order, ever, during development.** Live/canary modes are refused
-   *in code* (`chronos.control.modes.resolve_mode_lock` returns
-   `DENIED_LIVE_DISABLED`; the promotion evaluator appends a failing gate).
-   Keep it that way. There is no `--force`, no env var, no config that enables
-   live. Preserve this in every change.
-2. **No generative model in the order path.** Strategy → portfolio → risk →
-   execution → broker is deterministic, versioned, tested, replayable. AI
-   (you) may only assist offline: research, classification, docs, code
-   generation, analysis. Nothing you emit at runtime may submit/cancel/modify
-   an order, size a position, set a stop, or move a limit.
-3. **Deny by default, fail closed.** Every risk allowance defaults to
-   zero/empty/false. A missing/corrupt state file reads as HALTED. Fresh
-   deployments start HALTED. Any uncertainty → refuse, don't guess.
-4. **Separation of authority is structural, not conventional.** Strategies
-   emit `StrategyProposal` (no quantity, no account, no broker fields — the
-   type physically cannot express an order). The risk engine's policy is
-   frozen; it mints instance-token-bound approvals; the execution engine
-   refuses any approval it didn't mint. Do not weaken these seams.
-5. **No secrets in the repo.** Env vars / local secrets only. `.env.example`
-   holds placeholders. Never commit credentials, account numbers, or tokens —
-   check every commit (`git diff --cached`) before pushing.
-6. **Broker evidence is the only truth.** Never infer an order succeeded
-   because a call returned; never auto-flatten an unknown position. Acks and
-   fills are authoritative; unknown/contradictory state halts and requires
-   reconciliation + manual rearm.
-
-If a change would violate any of these, stop and flag it rather than proceed.
+| Concern | Where |
+|---|---|
+| Pine corpus (42 scripts, SHA-256 pinned) | `research/pine/`, `research/strategy_registry.yaml` |
+| Forensic audit | `research/pine_findings.json`, `docs/PINE_AUDIT.md` |
+| Strategy specs + implementations | `specs/*.yaml`, `src/chronos/strategies/` |
+| Backtest/replay engine | `src/chronos/backtest/`, `src/chronos/research/runner.py` |
+| Risk engine (deny-by-default) | `src/chronos/risk/` |
+| Execution: intents, state machine, ledgers, sim broker, IBKR paper adapter, reconciliation | `src/chronos/execution/` |
+| Control: mode locks, persistent halt, promotion gates | `src/chronos/control/` |
+| Research harness + frozen criteria | `scripts/run_research.py`, `research/selection_manifest.json` |
+| Safety acceptance tests | `tests/safety/` (31), plus `tests/{platform_unit,parity,chaos}` |
+| CLI | `python -m chronos.cli` (status, backtest, shadow-scan, halt, rearm, verify-*) |
+| Wheel dashboard (older subsystem — leave intact) | `src/chronos/{broker,services,strategy,ui}` |
 
 ---
 
-## 2. Environment reality (hard-won — this is the point of the brief)
+## 3. Invariants you must never break — and how to prove you didn't
 
-- **Python 3.12 is required; the default `python3` is 3.11 and will fail**
-  install with `requires-python: >=3.12`. Always build the venv with
-  `python3.12 -m venv .venv`. (Costs ~5 min if you miss it.)
-- **The Pine corpus lives in Notion, not the repo.** Use the Notion MCP
-  (`mcp__Notion__notion-search` / `notion-fetch`). Path: Command Center →
-  Trading Library → **Pine Quant Library — Master Index**. The brief says
-  "~77 scripts"; the authoritative index has **42** (catalog 00–40 + archived
-  0A). Some scripts are split across inline "Part N of M" code fences on one
-  page — concatenate in order, byte-exact. Record the 77-vs-42 discrepancy in
-  ASSUMPTIONS.md; do not invent missing scripts. (Already done —
-  `research/pine/`, hashes in `research/strategy_registry.yaml`.)
-- **All finance/market-data websites are blocked (HTTP 403 through the
-  proxy).** yahoo, stooq, nasdaq, tiingo, alphavantage, polygon — all dead.
-  Do **not** waste time on them. Real historical data comes from the
-  **Hugging Face MCP** (`mcp__Hugging_Face__hf_fs`), which works server-side.
-  - Search with SHORT single-word queries ("SPY", "QQQ", "sp500", "ETF
-    daily", "kaggle", "finance"). Prefer datasets with plain CSV files
-    (`ls -R` to confirm; parquet-only shards are unusable without a
-    binary-capable transport).
-  - `hf_fs cat` is text, ~80 KB/call — read large CSVs in offset chunks and
-    reassemble byte-exact. Never fabricate or interpolate a row.
-  - Known-good leads already used: `mmirmomeni/spy_daily` (SPY, unadjusted,
-    2000–2019-11), `Maxim37/timeseries-QQQ-1d-25yr` (QQQ, adjusted,
-    1999–2024). Cross-check against a second lineage (e.g.
-    `zexianli/nasdaq_data`). Neither declares a license → mark research-use-only.
-  - Intraday exists (e.g. `Maxim37/timeseries-1m-QQQ-5y`) but is large; only
-    sample it. Intraday strategies can't be validated here regardless (PDT +
-    account size make them untradeable — A-31).
-- **Use the Workflow tool for fan-out.** The corpus fetch (42 pages) and the
-  forensic audit (42 scripts) were each one Workflow with ~42 parallel
-  agents. Workflows **resume from cache** after interruption
-  (`resumeFromRunId`) — completed agents replay instantly. This is what makes
-  a long build survivable.
-- **Usage limits reset at 07:00 UTC.** A big fan-out can hit the limit
-  mid-run. Recovery pattern that worked: checkpoint-commit often, then use
-  `mcp__claude-code-remote__send_later` to re-wake yourself after the reset
-  and resume the workflow from its `runId`. Don't fight the limit; schedule
-  around it.
-- **CI reports via workflow runs, not the commit-status API.**
-  `pull_request_read get_status` shows `pending`/`total_count: 0` even when
-  green. Confirm with `actions_list list_workflow_runs` (filter by branch) and
-  read `conclusion: success`. Don't panic at the misleading `pending`.
-- **`actions_list` output can exceed the token cap** — it gets saved to a
-  file; parse it with a `python3 -c` one-liner, or do it in a subagent.
-- **The four gates that must stay green** (they are CI, `.github/workflows/ci.yml`):
-  `ruff check .`, `ruff format --check .` (line length 100),
-  `mypy src/chronos` (strict), `pytest -q`. Run them before every commit.
+These are load-bearing. After **any** change to `risk/`, `execution/`,
+`control/`, or `cli/`, run `pytest tests/safety tests/chaos -q` at minimum;
+full suite before every commit.
 
----
-
-## 3. Operating discipline (how to run autonomously)
-
-- **Checkpoint-commit after every meaningful unit** with descriptive messages;
-  push regularly. Commits are your recovery points across usage limits and
-  context resets. End commit messages with the required co-author/session
-  trailers (see the repo's existing commits for the exact format).
-- **Parallelize with background agents/workflows**, but give each a **single
-  editing owner** per file/directory so two agents never rewrite the same
-  file. In the first build: one agent owned tests, one owned docs, one owned
-  data, workflows owned corpus/audit — no collisions.
-- **When you delegate a search or review, keep the conclusion, not the file
-  dump.** Sub-agent final reports are for you, not the user — relay only what
-  matters.
-- **Verify before you claim.** Never say a test passed unless you ran it.
-  Distinguish passed / failed / skipped / not-runnable-without-credentials /
-  not-implemented. The independent reviewers in the first build caught a
-  docstring that claimed test coverage that didn't exist — don't repeat that.
-- **Maintain the living docs** as you go: `TASKS.md`, `ASSUMPTIONS.md`,
-  `DECISIONS.md`, `RISK_REGISTER.md`, `CHANGELOG.md`, `HANDOFF.md`. Reconcile
-  stale statuses — a checklist that says a thing is both "in progress" and
-  "done" is a real defect (reviewers flagged it).
-- **Disclose methodology choices that affect results.** The first build's
-  research widened risk caps to measure unclipped trade frequency and
-  initially didn't say so; a reviewer correctly flagged it as misleading.
-  Any knob that changes a reported number gets disclosed in the report.
-- **After building, run an independent adversarial review** with fresh agents
-  that did not author the module under review, told to *demonstrate* defects
-  (repro in /tmp, file:line evidence), not summarize design. Remediate every
-  CRITICAL/HIGH with a regression test; record accepted findings with a
-  rationale. See `docs/INDEPENDENT_REVIEW.md` / `docs/REMEDIATION_REPORT.md`
-  for the bar to clear.
+1. **Live trading is impossible in code.** `resolve_mode_lock` hard-denies
+   CANARY_LIVE/LIVE and denies unrecognized modes by default; promotion to a
+   live mode always appends a failing gate. Enforced by
+   `tests/safety/test_safety_invariants.py::TestModeLocks` and
+   `test_promotion.py`. There is no `--force` anywhere; do not add one.
+2. **Paper submission requires six simultaneous conditions** (transmission
+   flag, non-empty allowlist, broker-reported id on the allowlist, id
+   matches `D[UF]\d{4,}`, broker-verified paper environment, PAPER mode).
+   One mistyped env var must never be sufficient.
+3. **Deny-by-default risk.** An all-zero `RiskPolicy` approves nothing;
+   unknown YAML keys are rejected; the policy object is frozen; an internal
+   engine exception becomes a denial. Strategies hold no engine reference
+   and emit `StrategyProposal` objects that *cannot express an order* (no
+   quantity/account/broker fields) — keep the type that way.
+4. **Approvals are unforgeable in practice**: instance-token-bound, checked
+   by identity in `ExecutionEngine.submit_approved`, which also re-reads the
+   halt immediately before `broker.submit` (a reviewer proved the TOCTOU;
+   don't reintroduce it).
+5. **Fail closed, always.** Fresh deployments start HALTED
+   (`NEVER_ARMED`); corrupt/missing halt or audit state reads as
+   halted/raises `AuditLogCorruptionError`; ledger write failure halts
+   before submission; a broker `submit()` exception → order `UNKNOWN` →
+   `RECONCILIATION_REQUIRED` + halt. Restart never clears a halt; rearm
+   requires an operator note.
+6. **Broker evidence is the only truth.** Never infer success from a call
+   returning; unknown orders/events halt; **never auto-flatten** an
+   unexplained position — block and demand review instead.
+7. **No generative model in the runtime order path.** You write code,
+   audits, and docs offline; every runtime decision is deterministic,
+   versioned, replayable.
+8. **No secrets in the repo, ever.** Placeholders only in `.env.example`;
+   check `git diff --cached` before each push. TWS/Gateway auth belongs to
+   the owner; never automate login or 2FA.
+9. **Research integrity.** Selection criteria are frozen *before* results
+   are computed (`research/selection_manifest.json`); the final-test window
+   (2022+) is consumed **at most once**, only after criteria are frozen;
+   criteria are never bent after seeing results — the first build refused to
+   bend a 2-trade miss, and that refusal survived review. Any knob that
+   changes a reported number gets disclosed in the report (a reviewer caught
+   an undisclosed cap-widening once; that class of omission is a HIGH).
+10. **Docs must match code.** Reviewers diff every claim against source.
+    When behavior changes, update `docs/`, `TASKS.md`, `CHANGELOG.md`,
+    `RISK_REGISTER.md`, and `docs/GO_LIVE_CHECKLIST.md` in the same commit.
+    Two documents contradicting each other is a real defect here.
 
 ---
 
-## 4. Full phase plan (only if starting from scratch; otherwise skip to §5)
+## 4. Environment playbook (earned facts — trust these first)
 
-Each phase lists its outputs so you can detect what's already done. This is
-the ordering that worked — corpus first, platform in parallel with research,
-review last.
-
-| Phase | Deliverable (check if it exists) | Notes |
-|---|---|---|
-| 1 Inventory | `research/pine/*` (42), `research/strategy_registry.yaml` + catalog CSV/JSON, `docs/STRATEGY_CATALOG.md`; `scripts/build_strategy_registry.py` | Fetch from Notion via Workflow fan-out; SHA-256 pin. |
-| 2 Forensic audit | `research/pine_findings.json`, `docs/PINE_AUDIT.md`; `scripts/build_audit_docs.py` | One audit agent per script; structured schema; integrity status per script. |
-| 3 Specs | `specs/*.yaml`, `chronos.specs` schema | Vendor-neutral, every Pine deviation enumerated. |
-| 4 Parity | `chronos.indicators`, `chronos.strategies`, `tests/parity/`, `docs/PARITY_REPORT.md` | Spec-level only unless owner provides TradingView exports (`fixtures/tradingview/`). |
-| 5 Data | `chronos.marketdata`, `research/data/raw/{*.csv,MANIFEST.json,DATA_SOURCES.md}` | HF MCP; provenance + validation + cross-check; record gaps, don't fabricate. |
-| 6 Quant validation | `scripts/run_research.py`, `research/results/`, `research/selection_manifest.json`, `docs/RESEARCH_REPORT.md`, `docs/STRATEGY_SELECTION.md` | Freeze criteria **before** touching validation; keep final-test window untouched. |
-| 7–9 Platform | `chronos.{portfolio,risk,execution,control}`, brokers (simulated + ibkr_paper), `chronos.execution.reconciliation` | Deny-by-default risk engine; order state machine; mode locks; reconciliation gate. |
-| 10 Backtest/replay | `chronos.backtest`, `chronos.research.runner` | Closed-bar-only; next-bar fills; determinism asserted. |
-| 11 Modes/gates | `chronos.control.{modes,promotion}` | RESEARCH→…→PAPER; live refused; single-step promotion. |
-| 12 Kill switch | `chronos.control.halt` | Persistent, fail-closed, restart-survivable. |
-| 14 Persistence/audit | `chronos.execution.{ledger,sqlite_ledger}`, `chronos.auditlog` | Append-oriented; hash-chained; owner-only file perms. |
-| 15 Monitoring | **platform dashboard — NOT built yet (see §5)** | Only the wheel dashboard exists. |
-| 16 Tests | `tests/{safety,platform_unit,parity,chaos}` | Safety acceptance suite is the crown jewel. |
-| 17–18 Sec/deploy/CLI/docs | `chronos.cli`, full `docs/` set, ADRs 0001–0008 | Owner-only perms; localhost only; no lockfile (document it). |
-| Review | `docs/INDEPENDENT_REVIEW.md`, `docs/REMEDIATION_REPORT.md` | 7 dimensions; remediate CRITICAL/HIGH. |
-
-Acceptance for each phase = its outputs exist, are accurate, and the four
-gates are green.
-
----
-
-## 5. Remaining work to reach "completion" (from the current state)
-
-The first build is a **research prototype / backtest-executed** system that
-correctly concluded **zero strategies are currently tradable**. Reaching the
-next real milestones requires the following, in priority order. Do them
-state-aware; each has a concrete acceptance gate.
-
-### 5.1 Broader, better research data (highest research value)
-- **Why:** conclusions rest on SPY+QQQ only, mirror-sourced, SPY ends 2019-11,
-  unadjusted. IWM/DIA/GLD/TLT are missing.
-- **Do:** acquire dividend-adjusted daily OHLCV for the full ETF universe (HF
-  MCP, or ingest an owner-provided/IBKR export if available) with the same
-  provenance discipline (`MANIFEST.json`, hashes, cross-checks, validation).
-  Extend `research/data/raw/`.
-- **Then:** re-run `scripts/run_research.py --stage all`. The final-test
-  window (2022+) is **unconsumed** — it may be touched exactly once, after
-  criteria are (re)frozen. Update `docs/RESEARCH_REPORT.md` /
-  `STRATEGY_SELECTION.md` with the new evidence. If a strategy now clears the
-  frozen criteria, say so honestly; if not, that's still the answer.
-- **Gate:** every result reproduces bit-for-bit; data provenance recorded; no
-  criterion bent after seeing results; final-test window consumed at most once.
-
-### 5.2 The long-running shadow/paper SERVICE LOOP (biggest engineering gap)
-This is the single largest missing piece and it blocks two accepted review
-findings (RISK_REGISTER R-22, R-23) and go-live Gates 2–3.
-- **Build:** a daemon that, on a schedule/stream, (a) ingests the latest
-  closed bars through a real data adapter, (b) on startup/reconnect enters a
-  non-trading reconciliation state, **hydrates `ExecutionEngine._orders` from
-  the ledger** (`working_intent_ids()`), calls `reconciliation.reconcile()`
-  with real broker evidence, and only sets `reconciliation_passed=True` on a
-  clean report, (c) runs the production decision path, (d) drives
-  notifications, (e) never submits in SHADOW (NO_ORDERS) and submits in PAPER
-  only under a verified paper lock.
-- **Close R-22:** extend `reconcile()` to compare per-order *state* (fill qty,
-  lifecycle), not just id-set membership. Add the evidence-gathering caller.
-- **Close R-23:** the startup `_orders` hydration above; an in-flight order's
-  post-restart event must reconcile, not just halt-and-drop.
-- **Gate:** deterministic replay tests of the loop; chaos tests for
-  restart-mid-order, disconnect, partial-fill-before-disconnect; the loop
-  never submits in SHADOW; PAPER requires all six mode-lock conditions.
-
-### 5.3 Platform monitoring dashboard (Phase 15)
-- **Why:** only the wheel dashboard exists; the platform has none.
-- **Build:** a read-only view (reuse the Streamlit stack or a small local web
-  app, localhost only) showing mode, live-lock status, halt reason, broker/
-  data health, reconciliation status, positions/orders/fills, realized/
-  unrealized P&L, remaining loss capacity, active risk limits, code commit.
-  **Paper vs live must be unmistakable and not color-only.** No trading logic
-  in the UI.
-- **Gate:** renders from ledger/audit/halt state without a broker call; no way
-  to submit an order from the UI; localhost binding only.
-
-### 5.4 IBKR paper smoke against a real gateway (OWNER-gated)
-- The paper adapter has **never touched a real gateway** (no credentials
-  here). This needs the owner running TWS/IB Gateway and
-  `CHRONOS_RUN_IBKR_SMOKE=1`. You cannot complete it autonomously — surface it
-  as an owner action and make sure the harness is ready
-  (`scripts/smoke_test_ibkr.py`, and an equivalent for the execution-plane
-  adapter). Never let a test hit a live endpoint.
-
-### 5.5 Optional strategy expansion (only if research justifies)
-- The flagship confluence AIO (script 00) and BEAR+ (02) are the remaining
-  distinct executable systems. BEAR+ needs a short-selling decision
-  (disabled by default for a $3k cash account — get owner approval first).
-  Only translate more strategies if §5.1 gives a reason to; more code without
-  edge is negative value.
-
-### 5.6 TradingView parity (OWNER-gated)
-- Upgrade parity from spec-level to TradingView-verified **only if** the owner
-  provides strategy-tester exports into `fixtures/tradingview/`. Then build
-  `tests/parity` fixtures comparing bar-by-bar and trade-by-trade, with
-  mismatch reports (first divergent timestamp, Pine vs Python, root cause).
+- **Corpus**: lives in Notion (Command Center → Trading Library → *Pine
+  Quant Library — Master Index*), fetched via the Notion MCP. It contains
+  **42** artifacts, not the "~77" the original brief claimed (A-01). Large
+  scripts are split across inline "Part N of M" code fences on one page —
+  concatenate byte-exact. Verify local integrity anytime with
+  `python -m chronos.cli verify-corpus`.
+- **Market data**: every finance website is 403-blocked by the egress proxy
+  (yahoo, stooq, tiingo, alphavantage, polygon, nasdaq — all of them; don't
+  re-probe). Real data comes from the **Hugging Face MCP** (`hf_fs`),
+  server-side. Search with *short* queries ("SPY", "sp500", "ETF daily",
+  "kaggle"). Prefer plain-CSV datasets; parquet shards are unreadable
+  through the text-only `cat` (~80 KB/call — chunk by offset and reassemble
+  byte-exact; never fabricate a row). Known-good: `mmirmomeni/spy_daily`,
+  `Maxim37/timeseries-QQQ-1d-25yr`; cross-check lineage:
+  `zexianli/nasdaq_data`. Everything gets a `MANIFEST.json` entry: source
+  URI, sha256, row count, date range, adjusted status, validation results.
+- **An `Interactive_Brokers_IBKR` MCP connector exists but is
+  unauthenticated** in this environment. If the owner authorizes it (their
+  claude.ai connector settings), prefer it as the historical-data source
+  (read-only use only) — that directly retires the mirror-data caveat
+  (RISK_REGISTER R-08). Until then it is unavailable; don't ask for tokens.
+- **Fan-out**: use the Workflow tool for per-script/per-page parallel work
+  (the corpus fetch and audit were each one workflow of ~42 agents).
+  Workflows **resume from cache** via `resumeFromRunId` — completed agents
+  replay instantly. This is what makes long autonomous runs survivable.
+- **Usage limits**: a big fan-out can exhaust the session budget mid-run
+  (resets 07:00 UTC). Recovery pattern that worked: checkpoint-commit
+  constantly, schedule a self-wakeup (`send_later`), resume the workflow
+  from its run id. Plan around the limit; don't fight it.
+- **CI reads misleading**: `pull_request_read get_status` reports `pending,
+  total_count: 0` even when green. The truth is in
+  `actions_list list_workflow_runs` (filter by branch, read `conclusion`).
+  That listing can exceed the token cap — parse the saved file with a
+  `python3 -c` one-liner or inside a subagent.
+- **Gates** (mirror CI exactly): `ruff check .`, `ruff format --check .`
+  (line length 100), `mypy src/chronos` (strict), `pytest -q`. Run locally
+  before every commit; CI should never surprise you.
+- **Parallel agents**: one editing owner per file/directory, always. Never
+  `cat` a subagent's `.output` transcript into context.
+- **Research results reproduce bit-for-bit.** If re-running
+  `scripts/run_research.py` changes previously-committed numbers without a
+  data/code change, that is a determinism defect to investigate — never
+  silently overwrite.
 
 ---
 
-## 6. Known pitfalls (things that bit the first build)
+## 5. Explicit anti-goals (do none of these)
 
-- Python 3.11 default → install fails. Use 3.12.
-- Finance sites all 403 → use HF MCP; don't burn time probing them.
-- `pull_request_read get_status` lies (`pending`) → check `actions_list`.
-- Huge tool outputs (actions list, agent transcripts) overflow context → parse
-  saved files with `python3 -c`, or delegate to a subagent; never `cat` an
-  agent's `.output` transcript.
-- Deleting/weakening a safety seam to make a test pass is never the fix — the
-  test is telling you something. (The paper-account-pattern check was
-  correctly tightened, not loosened, when a test caught it.)
-- Reviewers will (and should) attack: undisclosed methodology, doc/code drift,
-  fill-translation edge cases (status vs filled-qty inconsistency), halt
-  TOCTOU, file permissions, unhandled corrupt-state recovery. All were found
-  and fixed once — re-check them after any change to those areas.
-
----
-
-## 7. Definition of done (and honest status labels)
-
-Never label the system "live ready." Use precise statuses:
-`research prototype` · `backtest validated` · `shadow eligible` ·
-`paper eligible` · `paper validated` · `canary review eligible` ·
-`not eligible`. **Only evidence sets the status.**
-
-Consider your assignment complete when:
-1. §5.1–5.3 are done (data + service loop + monitoring), with gates green.
-2. Full suite passes; ruff/format/mypy clean; CI green on the branch.
-3. A fresh independent adversarial review found nothing CRITICAL/HIGH
-   unremediated.
-4. `HANDOFF.md` truthfully states the current status, what's verified, what
-   remains owner-gated (§5.4, §5.6), and the recommended next milestone.
-5. The safety invariants are all still true and tested: live impossible in
-   code, deny-by-default, fresh deploy starts halted, six-condition paper
-   lock, no strategy promoted without evidence.
-
-If the honest answer at the end is still "no strategy has a demonstrated
-edge," **that is a valid and complete outcome** — deliver it plainly with the
-evidence, do not manufacture a promotion.
+- No live or canary order path, no market orders, no shorts, no margin, no
+  options execution, no averaging down, no pyramiding.
+- No auto-promotion between modes; promotion records are evidence, not
+  switches.
+- No unfreezing or reinterpreting selection criteria after results exist; no
+  second consumption of a final-test window.
+- No weakening a safety seam to make a test pass — the test is the message.
+- No synthetic data presented as market data; gaps are recorded, not filled.
+- No claiming untested things are tested (a reviewer caught exactly one such
+  docstring; it was treated as a CRITICAL).
+- No touching the wheel dashboard's milestones/invariants except to keep its
+  tests green.
+- No re-fetching or re-auditing the corpus unless hashes fail verification.
 
 ---
 
-## 8. First three commands for your first session
+## 6. The work plan to completion (priority order)
+
+Work milestone by milestone. For each: announce the plan, execute end to
+end, run gates, checkpoint-commit, push, update the tracking docs. Statuses
+live in `TASKS.md` §Open and `docs/GO_LIVE_CHECKLIST.md` — keep both
+truthful as you go.
+
+### M1 — Broaden the research data and re-run research
+*The highest-value item: all conclusions currently rest on SPY+QQQ, mirror-
+sourced, SPY truncated at 2019-11, unadjusted.*
+
+1. Acquire dividend-adjusted daily OHLCV for IWM, DIA, GLD, TLT and a
+   longer SPY (HF MCP per §4; or the IBKR connector if the owner authorizes
+   it). Same provenance discipline as the existing files; update
+   `research/data/raw/MANIFEST.json` + `DATA_SOURCES.md`; record what you
+   could not get.
+2. Re-freeze selection criteria **before** touching new validation windows:
+   update `research/selection_manifest.json` (new `frozen_at`, what data is
+   now available, unchanged or deliberately amended criteria — amendments
+   must be justified by data availability, never by prior results), commit
+   it, *then* run.
+3. `scripts/run_research.py --stage dev`, then `val`; only if a candidate
+   clears C1–C5 run `--stage final` — once.
+4. Rewrite `docs/RESEARCH_REPORT.md` + `docs/STRATEGY_SELECTION.md` from the
+   new evidence, disclosures included (cap policy, cold-start warmup,
+   adjusted-vs-raw series choice per symbol).
+
+**Done when:** every number in the reports reproduces from committed
+inputs; selection outcome (zero or more candidates) stated plainly with
+per-symbol evidence; final window consumed ≤ once and that fact provable
+from git history.
+
+### M2 — The long-running shadow service loop
+*The largest engineering gap. Closes accepted review findings R-22 and
+R-23 (see `RISK_REGISTER.md`) and unlocks go-live Gate 2.*
+
+Build `chronos/service/` (new package) + a `python -m chronos.service`
+entry point, deliberately named differently from the CLI:
+
+1. **Startup sequence (order matters):** load config → resolve mode lock →
+   read halt (stay halted if halted) → open ledger/audit → **hydrate
+   `ExecutionEngine._orders` from `SqliteLedger.working_intent_ids()`**
+   (closes R-23: today a restart drops in-flight orders' events into an
+   UNKNOWN_ORDER halt with no evidence trail) → gather broker evidence →
+   run reconciliation → only a clean report sets
+   `reconciliation_passed=True`.
+2. **Close R-22:** extend `execution/reconciliation.py` beyond id-set
+   presence to per-order *state* comparison (broker status + filled qty vs
+   ledger's latest transition + fills). Contradictions → discrepancy →
+   blocked, halted, human review. Keep the function pure; the service owns
+   evidence-gathering.
+3. **Main loop:** on a schedule (daily bars: after close), ingest latest
+   closed bars through a data adapter with the existing quality gate, run
+   strategy → portfolio → risk through the production path, append every
+   decision to the audit log, emit notifications via the existing fanout.
+   In SHADOW the mode lock is `NO_ORDERS` — structurally no submission. In
+   PAPER (only under the six-condition lock) submissions flow through
+   `submit_approved` exactly as the backtest path does.
+4. **Resilience:** clean shutdown on signals; on any unexpected exception →
+   persist halt, exit nonzero; restart re-enters reconciliation, never
+   resumes trading automatically.
+5. **Tests:** deterministic replay of the loop over recorded bars (twice →
+   identical audit trails); chaos: restart-mid-order (hydration must
+   reconcile, not halt-and-lose-evidence), disconnect during the window,
+   contradictory reconciliation evidence, halt raised mid-cycle. Extend
+   `tests/safety` with: service cannot submit in SHADOW; service never sets
+   `reconciliation_passed` without a clean report.
+
+**Done when:** R-22/R-23 rows in `RISK_REGISTER.md` flip to MITIGATED with
+test references; GO_LIVE Gate 2 items about the loop flip to DONE; all
+gates green.
+
+### M3 — Platform monitoring (Phase 15; only the wheel dashboard exists)
+
+Read-only, localhost-only view over ledger + audit + halt + latest service
+state: mode and live-lock status (paper/live distinction **not by color
+alone**), halt reason, reconciliation status, market-data age, positions,
+open orders, recent fills, realized/unrealized P&L, remaining loss
+capacity, active limits, code commit. Reuse the Streamlit stack for
+consistency. **No trading logic, no submit path, no broker calls from the
+UI** — render persisted state only. Test: renders from fixture state files;
+grep-level test that the UI package imports no broker adapter.
+
+### M4 — Hardening and coverage residue
+
+- Tests for `chronos/cli/main.py` (currently untested — a reviewer flagged
+  it), `research/runner.py`, `research/shadow.py`.
+- Dependency lockfile (uv or pip-tools) + CI install from it;
+  `docs/SECURITY.md` currently documents its absence — update it.
+- Property-based tests (hypothesis) for the invariants that deserve them:
+  intent-id uniqueness, state-machine legality, sizer bounds, risk-engine
+  deny-monotonicity (a stricter policy never approves what a looser one
+  denied).
+- Optional, only if M1 justified more strategies: translate BEAR+ (02)
+  **only after** the owner approves short selling — otherwise skip; and
+  treat the AIO (00) as REQUIRES_REWRITE-scale work needing its own plan.
+
+### M5 — Fresh independent adversarial review + remediation
+
+Seven fresh reviewer agents (quant methodology, risk architecture,
+brokerage integration, security, failure recovery, test quality, doc
+accuracy) that did **not** author the code under review, mandated to
+*demonstrate* defects with file:line evidence and `/tmp` repros — not to
+summarize design. Mutation-test spot checks (restore sources afterward and
+prove it with `git diff`). Remediate every CRITICAL/HIGH with a regression
+test; record accepted findings with rationale. Refresh
+`docs/INDEPENDENT_REVIEW.md` + `docs/REMEDIATION_REPORT.md`. The first
+round's reports set the bar — read them first.
+
+### M6 — Truthful final handoff
+
+Refresh `HANDOFF.md`, `TASKS.md`, `CHANGELOG.md`, `docs/GO_LIVE_CHECKLIST.md`,
+`docs/TEST_RESULTS.md` (exact counts from your own runs). Update the PR
+body. State the precise status label — `research prototype`,
+`backtest validated`, `shadow eligible`, `paper eligible`, or
+`not eligible` — **only as the evidence supports**, and never "live ready."
+
+### Owner-gated (surface, prepare, do not force)
+
+- Real-gateway smoke test: needs the owner running TWS/Gateway
+  (`CHRONOS_RUN_IBKR_SMOKE=1`, `scripts/smoke_test_ibkr.py`); the
+  execution-plane paper adapter has **never** touched a real gateway.
+- TradingView parity fixtures: needs owner exports into
+  `fixtures/tradingview/`; until then parity remains spec-level
+  (`docs/PARITY_REPORT.md`) — label it accordingly, never as
+  "verified against TradingView."
+- IBKR MCP connector authorization (see §4).
+- Short-selling approval before any BEAR+ work; live financial limits are
+  the owner's to set and default to zero until then.
+
+---
+
+## 7. Autonomy protocol
+
+- **Cadence per milestone:** plan (2–3 sentences in your log) → execute →
+  gates → checkpoint-commit → push → update tracking docs → move on.
+  Commits are your recovery points across limits and context resets; make
+  them small and truthful. Use the repo's existing commit-trailer format.
+- **Delegate leaf work** (per-script analysis, test authoring, doc sweeps,
+  data chunk-fetching, reviews) to parallel agents/workflows with disjoint
+  file ownership. Keep architecture and safety-critical code in your own
+  hands.
+- **Stop and ask only when genuinely owner-gated** (§6 list), when a choice
+  changes financial risk, or when something is irreversible. Everything
+  else: make the conservative call, record it in `ASSUMPTIONS.md`, keep
+  moving.
+- **Report faithfully.** Failed test → say so with output. Skipped step →
+  say so. If the honest conclusion at the end is "still zero tradable
+  strategies, platform complete," deliver exactly that with the evidence.
+  That sentence, fully backed, is a successful completion of this brief.
+
+---
+
+## 8. First actions, verbatim
 
 ```bash
 # 1. Orient
-git log --oneline -20 && cat HANDOFF.md TASKS.md docs/GO_LIVE_CHECKLIST.md
-# 2. Baseline (note python3.12)
+git log --oneline -15 && cat HANDOFF.md TASKS.md
+# 2. Baseline (python3.12, not python3)
 python3.12 -m venv .venv && .venv/bin/python -m pip install -e '.[dev]' && .venv/bin/pytest -q
-# 3. Decide: baseline holds → start §5.1; anything red → fix before new work
+# 3. Verify corpus integrity
+.venv/bin/python -m chronos.cli verify-corpus
 ```
 
-Then pick the highest-priority incomplete item in §5, announce your plan,
-and execute it end to end — build, test, review, checkpoint-commit, push.
-Proceed autonomously; only stop for the genuinely owner-gated items (§5.4,
-§5.6, the BEAR+ short-selling decision) or an irreversible/financial choice.
+Green baseline → begin **M1** and proceed through **M6** without waiting
+for permission between milestones.
