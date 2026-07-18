@@ -8,7 +8,7 @@ from chronos.config.limits import (
     MAX_CANDIDATE_STRIKES_PER_EXPIRATION,
 )
 from chronos.config.settings import Settings
-from chronos.domain.enums import BrokerMode, DemoProfile, IBEnvironment
+from chronos.domain.enums import BrokerAdapter, BrokerMode, DemoProfile, IBEnvironment
 
 
 def test_safe_demo_defaults() -> None:
@@ -105,10 +105,8 @@ def test_paper_transmission_requires_configured_account() -> None:
         )
 
 
-def test_live_transmission_is_rejected() -> None:
-    with pytest.raises(
-        ValidationError, match="Live order transmission is wired at the single submission"
-    ):
+def test_live_env_with_transmit_but_no_live_flag_is_ambiguous_and_refused() -> None:
+    with pytest.raises(ValidationError, match="ambiguous without"):
         Settings(
             _env_file=None,
             broker_mode=BrokerMode.IBKR,
@@ -117,21 +115,83 @@ def test_live_transmission_is_rejected() -> None:
         )
 
 
-def test_live_trading_flag_cannot_be_enabled() -> None:
-    # Refuses, but as an awaited-M7 deliverable — never "permanently disabled".
-    with pytest.raises(ValidationError, match="Milestone 7"):
+def test_live_trading_flag_alone_fails_the_conjunction() -> None:
+    # ADR-0009: one flag can never enable live; every unmet conjunct is named.
+    with pytest.raises(ValidationError, match="full live conjunction"):
         Settings(_env_file=None, allow_live_trading=True)
 
 
-def test_live_trading_environment_flag_parses_false_and_rejects_true(
+def test_live_trading_environment_flag_parses_false_and_rejects_bare_true(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("ALLOW_LIVE_TRADING", "false")
     assert Settings(_env_file=None).allow_live_trading is False
 
     monkeypatch.setenv("ALLOW_LIVE_TRADING", "true")
-    with pytest.raises(ValidationError, match="Milestone 7"):
+    with pytest.raises(ValidationError, match="full live conjunction"):
         Settings(_env_file=None)
+
+
+def _live_conjunction_kwargs() -> dict[str, object]:
+    """The full, valid ADR-0009 live conjunction (test fixture — fake account)."""
+
+    return {
+        "broker_mode": BrokerMode.IBKR,
+        "broker_adapter": BrokerAdapter.OFFICIAL_IBKR,
+        "ib_environment": IBEnvironment.LIVE,
+        "ib_port": 7496,
+        "allow_order_transmit": True,
+        "allow_live_trading": True,
+        "ib_account_id": "U7654321",
+        "ib_account_allowlist": ("U7654321",),
+    }
+
+
+def test_full_live_conjunction_is_accepted_and_live_transmission_possible() -> None:
+    settings = Settings(_env_file=None, **_live_conjunction_kwargs())
+    assert settings.live_transmission_possible is True
+    # Structural mutual exclusion: the paper path is impossible on this object.
+    assert settings.transmission_possible is False
+
+
+@pytest.mark.parametrize(
+    ("override", "expected_problem"),
+    [
+        ({"broker_adapter": BrokerAdapter.IB_ASYNC}, "official_ibkr"),
+        ({"allow_order_transmit": False}, "ALLOW_ORDER_TRANSMIT"),
+        ({"ib_account_id": "DU1234567", "ib_account_allowlist": ("DU1234567",)}, "live account"),
+        ({"ib_account_allowlist": ()}, "IB_ACCOUNT_ALLOWLIST"),
+        ({"ib_account_allowlist": ("U9999999",)}, "must be on IB_ACCOUNT_ALLOWLIST"),
+        ({"require_live_arming": False}, "REQUIRE_LIVE_ARMING"),
+        ({"require_typed_confirmation": False}, "REQUIRE_TYPED_CONFIRMATION"),
+    ],
+)
+def test_each_missing_conjunct_refuses_live(
+    override: dict[str, object], expected_problem: str
+) -> None:
+    kwargs = _live_conjunction_kwargs() | override
+    with pytest.raises(ValidationError, match=expected_problem):
+        Settings(_env_file=None, **kwargs)
+
+
+def test_live_with_paper_environment_refuses() -> None:
+    kwargs = _live_conjunction_kwargs() | {"ib_environment": IBEnvironment.PAPER, "ib_port": 7497}
+    with pytest.raises(ValidationError, match="IB_ENVIRONMENT must be 'live'"):
+        Settings(_env_file=None, **kwargs)
+
+
+def test_settings_are_frozen() -> None:
+    # ADR-0009: branch selection immutability is a property of the type.
+    settings = Settings(_env_file=None)
+    with pytest.raises(ValidationError):
+        settings.allow_live_trading = True  # type: ignore[misc]
+
+
+def test_live_transmission_possible_rederives_after_model_copy_bypass() -> None:
+    # model_copy(update=...) skips validators; the property must not be fooled.
+    settings = Settings(_env_file=None)
+    tampered = settings.model_copy(update={"allow_live_trading": True})
+    assert tampered.live_transmission_possible is False
 
 
 @pytest.mark.parametrize(
@@ -184,12 +244,11 @@ class TestLiveWheelMilestone1Settings:
         assert settings.backend_host == "127.0.0.1"
         assert settings.backend_port == 8765
 
-    def test_live_flag_refuses_until_live_path_exists(self) -> None:
-        # Live trading is the committed deliverable (owner direction). The M6 gate
-        # stack now exists; the flag refuses ONLY because the LIVE transmit branch
-        # is wired at the boundary in M7. The message must frame it as awaited, not
-        # permanently disabled.
-        with pytest.raises(ValidationError, match="Milestone 7"):
+    def test_live_flag_requires_the_full_conjunction(self) -> None:
+        # Live trading is the committed deliverable (owner direction). Since M7
+        # the flag is honored — but ONLY under the complete ADR-0009 conjunction;
+        # a bare flag still refuses with every unmet conjunct named.
+        with pytest.raises(ValidationError, match="full live conjunction"):
             Settings(_env_file=None, allow_live_trading=True)
 
     def test_backend_host_must_be_loopback(self) -> None:

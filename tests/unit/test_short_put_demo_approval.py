@@ -369,7 +369,10 @@ def test_cached_m7_capital_policy_replay_is_recomputed_and_withheld(
         calls.append(request)
         return cached
 
-    harness.base.settings.max_symbol_allocation_pct = Decimal("0.01")
+    # Settings is frozen (ADR-0009); this test deliberately simulates policy
+    # drift between the cached what-if and the recompute, so it bypasses the
+    # freeze explicitly — a tamper no production code path can perform.
+    object.__setattr__(harness.base.settings, "max_symbol_allocation_pct", Decimal("0.01"))
     monkeypatch.setattr(ShortPutDemoWhatIfService, "preview", cached_preview)
     try:
         result = _service(harness).rehearse(_request(harness))
@@ -379,7 +382,7 @@ def test_cached_m7_capital_policy_replay_is_recomputed_and_withheld(
         assert len(calls) == 1
         _assert_no_order_methods(harness)
     finally:
-        harness.base.settings.max_symbol_allocation_pct = original_allocation
+        object.__setattr__(harness.base.settings, "max_symbol_allocation_pct", original_allocation)
         harness.close()
 
 
@@ -901,7 +904,8 @@ def test_reference_factory_boundary_mutation_is_rechecked_before_success(
                 profile=DemoProfile.SAFETY_CASES,
             )
         else:
-            harness.base.settings.max_symbol_allocation_pct = Decimal("0.01")
+            # Frozen Settings (ADR-0009): deliberate mid-flight tamper simulation.
+            object.__setattr__(harness.base.settings, "max_symbol_allocation_pct", Decimal("0.01"))
         return APPROVAL_REFERENCE
 
     try:
@@ -914,7 +918,7 @@ def test_reference_factory_boundary_mutation_is_rechecked_before_success(
         _assert_no_order_methods(harness)
     finally:
         harness.base.connection.broker = original_broker
-        harness.base.settings.max_symbol_allocation_pct = original_allocation
+        object.__setattr__(harness.base.settings, "max_symbol_allocation_pct", original_allocation)
         harness.close()
 
 

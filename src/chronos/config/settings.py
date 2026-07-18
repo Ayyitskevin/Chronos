@@ -16,6 +16,7 @@ from chronos.config.limits import (
     MAX_CANDIDATE_REQUEST_CONTRACTS,
     MAX_CANDIDATE_STRIKES_PER_EXPIRATION,
 )
+from chronos.domain.accounts import is_live_account_id
 from chronos.domain.enums import BrokerAdapter, BrokerMode, DemoProfile, IBEnvironment
 
 
@@ -36,6 +37,9 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
         case_sensitive=False,
+        # ADR-0009: branch selection (paper vs live) is derived from settings, so
+        # process-lifetime immutability is enforced by the type, not convention.
+        frozen=True,
     )
 
     broker_mode: BrokerMode = BrokerMode.DEMO
@@ -51,10 +55,9 @@ class Settings(BaseSettings):
     allow_live_trading: bool = False
     allow_outside_rth: bool = False
 
-    # Live-wheel plan (Milestone 1): configuration surface added ahead of the
-    # gate stack. The hard-raise on allow_live_trading below remains in force
-    # until Milestone 6 replaces it with the full gated model (fail-closed at
-    # every intermediate commit — docs/LIVE_WHEEL_GAME_PLAN.md §6b).
+    # Live-wheel configuration surface (M1) — since Milestone 7 the live flag
+    # is honored under the strict ADR-0009 conjunction validated below, and
+    # `live_transmission_possible` re-derives that conjunction at every read.
     ib_account_allowlist: SymbolAllowlist = ()
     enable_paper_trading: bool = True
     require_live_arming: bool = True
@@ -126,15 +129,40 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_safety_and_ranges(self) -> Settings:
         if self.allow_live_trading:
-            raise ValueError(
-                "Live trading is a committed deliverable. The live safety gate stack now "
-                "exists (Milestone 6: the ten-gate live stack, arming, the session-drawdown "
-                "breaker, and the kill switch); what remains is Milestone 7 — wiring "
-                "transmit=True for the LIVE branch at the single submission boundary and "
-                "validating it with a recording spy. Until that lands the flag refuses "
-                "rather than pretend, and will be honored once M7 wires live transmission "
-                "(docs/LIVE_WHEEL_GAME_PLAN.md)."
-            )
+            # ADR-0009 §2: live capability is a strict conjunction, never one flag.
+            # Every unmet conjunct is named so a misconfiguration is diagnosable
+            # without weakening the refusal. The live gate stack (arming, typed
+            # confirmation, kill switch, drawdown breaker, ten-gate walk) applies
+            # at runtime ON TOP of this load-time validation.
+            problems: list[str] = []
+            if self.broker_mode is not BrokerMode.IBKR:
+                problems.append("BROKER_MODE must be 'ibkr'")
+            if self.broker_adapter is not BrokerAdapter.OFFICIAL_IBKR:
+                problems.append(
+                    "BROKER_ADAPTER must be 'official_ibkr' (the only adapter with a "
+                    "validated live order path)"
+                )
+            if self.ib_environment is not IBEnvironment.LIVE:
+                problems.append("IB_ENVIRONMENT must be 'live'")
+            if not self.allow_order_transmit:
+                problems.append("ALLOW_ORDER_TRANSMIT must be true (transmission master switch)")
+            if not is_live_account_id(self.ib_account_id):
+                problems.append(
+                    "IB_ACCOUNT_ID must match the IBKR live account pattern (U + digits)"
+                )
+            if not self.ib_account_allowlist:
+                problems.append("IB_ACCOUNT_ALLOWLIST must not be empty")
+            elif self.ib_account_id not in self.ib_account_allowlist:
+                problems.append("IB_ACCOUNT_ID must be on IB_ACCOUNT_ALLOWLIST")
+            if not self.require_live_arming:
+                problems.append("REQUIRE_LIVE_ARMING must remain true (MVP live model)")
+            if not self.require_typed_confirmation:
+                problems.append("REQUIRE_TYPED_CONFIRMATION must remain true (MVP live model)")
+            if problems:
+                raise ValueError(
+                    "ALLOW_LIVE_TRADING=true requires the full live conjunction "
+                    "(ADR-0009, docs/LIVE_WHEEL_GAME_PLAN.md): " + "; ".join(problems)
+                )
         if not self.symbol_allowlist:
             raise ValueError("SYMBOL_ALLOWLIST must contain at least one symbol")
         if len(set(self.symbol_allowlist)) != len(self.symbol_allowlist):
@@ -150,13 +178,15 @@ class Settings(BaseSettings):
                 "MAX_EXPIRATIONS * MAX_STRIKES_PER_EXPIRATION must not exceed "
                 f"{MAX_CANDIDATE_REQUEST_CONTRACTS}"
             )
-        if self.ib_environment is IBEnvironment.LIVE and self.allow_order_transmit:
+        if (
+            self.ib_environment is IBEnvironment.LIVE
+            and self.allow_order_transmit
+            and not self.allow_live_trading
+        ):
             raise ValueError(
-                "Live order transmission is wired at the single submission boundary in "
-                "Milestone 7. The Milestone 6 live gate stack (arming, kill switch, "
-                "session-drawdown breaker, ten-gate stack) exists, but the LIVE transmit "
-                "branch is not yet enabled, so this combination refuses rather than pretend "
-                "(docs/LIVE_WHEEL_GAME_PLAN.md)."
+                "IB_ENVIRONMENT=live with ALLOW_ORDER_TRANSMIT=true is ambiguous without "
+                "ALLOW_LIVE_TRADING=true (plus the full ADR-0009 live conjunction); "
+                "refusing rather than guess intent"
             )
         if (
             self.broker_mode is BrokerMode.IBKR
@@ -205,6 +235,30 @@ class Settings(BaseSettings):
             and self.allow_order_transmit
             and not self.allow_live_trading
             and bool(self.ib_account_id.strip())
+        )
+
+    @property
+    def live_transmission_possible(self) -> bool:
+        """Whether configuration can enter the LIVE transmission path (ADR-0009).
+
+        Re-derives the ENTIRE live conjunction rather than trusting that the
+        load-time validator ran (defense against any validation bypass such as
+        ``model_copy(update=...)``). Structurally mutually exclusive with
+        :attr:`transmission_possible`: ``ib_environment`` is one enum field, so
+        no Settings instance can present both paths as possible.
+        """
+
+        return (
+            self.broker_mode is BrokerMode.IBKR
+            and self.broker_adapter is BrokerAdapter.OFFICIAL_IBKR
+            and self.ib_environment is IBEnvironment.LIVE
+            and self.allow_order_transmit
+            and self.allow_live_trading
+            and is_live_account_id(self.ib_account_id)
+            and bool(self.ib_account_allowlist)
+            and self.ib_account_id in self.ib_account_allowlist
+            and self.require_live_arming
+            and self.require_typed_confirmation
         )
 
 
