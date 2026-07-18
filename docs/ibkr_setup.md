@@ -1,6 +1,33 @@
 # Interactive Brokers setup
 
-Chronos uses `ib_async` behind its broker abstraction. The Milestone 2 smoke path is strictly
+Chronos supports two IBKR adapters behind one broker abstraction (selected by
+`BROKER_ADAPTER`): the **official TWS API adapter** (`official_ibkr`, the
+production default) and the optional `ib_async` adapter. Both are read-only
+until the Milestone 5-7 order service exists.
+
+## Installing the official TWS API (production default)
+
+The official `ibapi` package is **not on PyPI** and is deliberately not in
+`requirements.txt` or the lockfile. Install it from IBKR's official
+distribution (owner action, one time):
+
+1. Download the "TWS API" (latest stable) from
+   <https://interactivebrokers.github.io> and accept IBKR's license.
+2. Unzip; the Python client lives at `IBJts/source/pythonclient`.
+3. Install it into the Chronos venv:
+
+   ```bash
+   cd IBJts/source/pythonclient
+   /path/to/Chronos/.venv/bin/pip install .
+   ```
+
+4. Verify: `.venv/bin/python -c "import ibapi; print(ibapi.__file__)"`.
+
+Chronos runs fully in demo mode without this package; selecting
+`BROKER_ADAPTER=official_ibkr` with `BROKER_MODE=ibkr` before installing it
+fails fast with this guidance. CI never installs or imports it.
+
+Chronos also ships an optional `ib_async` adapter (`BROKER_ADAPTER=ib_async`). The Milestone 2 smoke path is strictly
 read-only: it can verify connectivity, portfolio summary access, contract discovery, and one
 bounded underlying quote. It does not call any order preview, submission, modification,
 order-cancellation, exercise, or global-cancel method.

@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from chronos import runtime as session
 from chronos.broker.demo import DEMO_NOW, DemoBroker
 from chronos.config.settings import Settings
 from chronos.domain.enums import (
@@ -17,7 +18,6 @@ from chronos.domain.models import AccountSummary, ConnectionStatus
 from chronos.persistence.database import Database
 from chronos.persistence.schema import DatabaseScopeRow
 from chronos.services.short_put_risk_preview import ShortPutRiskPreviewRequest
-from chronos.ui import session
 from chronos.ui.session import _validate_scope_observations
 
 NOW = datetime(2026, 1, 15, 15, 30, tzinfo=UTC)
@@ -107,7 +107,7 @@ def test_runtime_wires_demo_reads_through_one_market_data_manager(
     monkeypatch.setattr(DemoBroker, "account_summary", track_account_summary)
     monkeypatch.setattr(DemoBroker, "connection_status", track_connection_status)
 
-    runtime = session._build_runtime()
+    runtime = session.build_runtime(register_atexit=False)
     try:
         assert startup_calls == {"account_summary": 1, "connection_status": 1}
         assert isinstance(runtime.broker, DemoBroker)
@@ -188,7 +188,7 @@ def test_runtime_scope_binding_failure_closes_broker_and_database(
     monkeypatch.setattr(Database, "dispose", track_dispose)
 
     with pytest.raises(ValueError, match="fixed test rejection"):
-        session._build_runtime()
+        session.build_runtime(register_atexit=False)
 
     assert events == [
         "scope_binding_attempted",
@@ -222,7 +222,7 @@ def test_runtime_scope_preflight_rejects_before_database_binding(
     monkeypatch.setattr(DemoBroker, "connection_status", mismatched_status)
 
     with pytest.raises(ValueError, match="environment does not match"):
-        session._build_runtime()
+        session.build_runtime(register_atexit=False)
 
     verification = Database(settings.database_url)
     try:

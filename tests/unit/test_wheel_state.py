@@ -604,14 +604,36 @@ def test_broker_position_rejects_a_blank_account_id() -> None:
         stock_position("100", account_id="   ")
 
 
-def test_buy_to_close_against_an_active_short_option_is_closing() -> None:
+def test_buy_to_close_against_a_short_put_is_put_close_pending() -> None:
     decision = derive(
         positions=(option_position(OptionRight.PUT, "-1"),),
         orders=(option_order(OptionRight.PUT, side=OrderSide.BUY),),
     )
 
-    assert decision.stage is WheelStage.CLOSING
+    assert decision.stage is WheelStage.PUT_CLOSE_PENDING
     assert decision.opening_actions_locked is True
+
+
+def test_buy_to_close_against_a_short_call_is_call_close_pending() -> None:
+    decision = derive(
+        positions=(
+            stock_position("100"),
+            option_position(OptionRight.CALL, "-1"),
+        ),
+        orders=(option_order(OptionRight.CALL, side=OrderSide.BUY),),
+    )
+
+    assert decision.stage is WheelStage.CALL_CLOSE_PENDING
+    assert decision.opening_actions_locked is True
+
+
+def test_partial_assignment_is_assignment_reconciling_not_manual_review() -> None:
+    decision = derive(partial_assignment=True)
+
+    assert decision.stage is WheelStage.ASSIGNMENT_RECONCILING
+    assert decision.opening_actions_locked is True
+    assert decision.manual_review_required is False
+    assert any("assignment" in reason.lower() for reason in decision.reasons)
 
 
 def test_buy_to_close_cannot_match_a_different_option_contract() -> None:
@@ -689,7 +711,6 @@ def test_fully_reconciled_assignment_outcomes_follow_broker_positions() -> None:
         "reconciliation_status",
     ),
     [
-        (True, False, False, ReconciliationStatus.RECONCILED),
         (False, True, False, ReconciliationStatus.RECONCILED),
         (False, False, True, ReconciliationStatus.RECONCILED),
         (False, False, False, ReconciliationStatus.PENDING),

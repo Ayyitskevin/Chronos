@@ -319,3 +319,117 @@ class GuardrailDecisionRow(Base):
         default=utc_now,
         nullable=False,
     )
+
+
+# --------------------------------------------------------------------------- #
+# Live-wheel order pipeline (schema v3; docs/LIVE_WHEEL_GAME_PLAN.md M1).
+# Populated from Milestone 5 on; created empty at v3 migration time so the
+# durable shape exists before any order machinery runs.
+# --------------------------------------------------------------------------- #
+
+
+class OrderIntentRow(Base):
+    __tablename__ = "order_intents"
+
+    intent_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    idempotency_key: Mapped[str] = mapped_column(String(80), unique=True, nullable=False)
+    account_fingerprint: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    environment: Mapped[str] = mapped_column(String(16), nullable=False)
+    product_family: Mapped[str] = mapped_column(String(16), nullable=False)
+    wheel_cycle_id: Mapped[str | None] = mapped_column(ForeignKey("wheel_cycles.id"))
+    symbol: Mapped[str] = mapped_column(String(32), index=True, nullable=False)
+    con_id: Mapped[int | None] = mapped_column(Integer)
+    local_symbol: Mapped[str | None] = mapped_column(String(64))
+    action: Mapped[str] = mapped_column(String(16), nullable=False)
+    open_close_effect: Mapped[str] = mapped_column(String(16), nullable=False)
+    quantity: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
+    order_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    limit_price: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
+    time_in_force: Mapped[str] = mapped_column(String(8), nullable=False)
+    outside_rth: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    quote_snapshot_id: Mapped[str | None] = mapped_column(String(64))
+    risk_snapshot_id: Mapped[str | None] = mapped_column(String(64))
+    preview_id: Mapped[str | None] = mapped_column(String(64))
+    confirmation_hash: Mapped[str | None] = mapped_column(String(128))
+    order_ref: Mapped[str | None] = mapped_column(String(80), unique=True)
+    status: Mapped[str] = mapped_column(String(32), index=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, nullable=False)
+    confirmed_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    submitted_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+
+
+class OrderConfirmationRow(Base):
+    __tablename__ = "order_confirmations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    intent_id: Mapped[str] = mapped_column(ForeignKey("order_intents.intent_id"), nullable=False)
+    summary_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    ui_session_id: Mapped[str | None] = mapped_column(String(80))
+    quote_snapshot_id: Mapped[str | None] = mapped_column(String(64))
+    risk_snapshot_id: Mapped[str | None] = mapped_column(String(64))
+    confirmed_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class LiveArmEventRow(Base):
+    __tablename__ = "live_arm_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    event: Mapped[str] = mapped_column(String(32), nullable=False)  # armed/expired/revoked
+    account_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, nullable=False)
+
+
+class KillSwitchEventRow(Base):
+    __tablename__ = "kill_switch_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    action: Mapped[str] = mapped_column(String(32), nullable=False)
+    initiated_by: Mapped[str] = mapped_column(String(64), nullable=False)
+    detail: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, nullable=False)
+
+
+class CashReservationRow(Base):
+    __tablename__ = "cash_reservations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    intent_id: Mapped[str | None] = mapped_column(ForeignKey("order_intents.intent_id"))
+    symbol: Mapped[str] = mapped_column(String(32), index=True, nullable=False)
+    amount_usd: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
+    reason: Mapped[str] = mapped_column(String(64), nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, index=True, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, nullable=False)
+    released_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+
+
+class ShareReservationRow(Base):
+    __tablename__ = "share_reservations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    intent_id: Mapped[str | None] = mapped_column(ForeignKey("order_intents.intent_id"))
+    symbol: Mapped[str] = mapped_column(String(32), index=True, nullable=False)
+    shares: Mapped[int] = mapped_column(Integer, nullable=False)
+    reason: Mapped[str] = mapped_column(String(64), nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, index=True, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, nullable=False)
+    released_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+
+
+class WriterLeaseRow(Base):
+    """Single-writer lease row (see chronos.utils.locking).
+
+    The lease code operates on this table with raw compare-and-swap SQL; the
+    model exists so the table is part of the canonical metadata (create_all,
+    drift checking, migrations). Exactly one row (id=1) is ever used.
+    """
+
+    __tablename__ = "writer_lease"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    token: Mapped[str] = mapped_column(Text, nullable=False)
+    holder: Mapped[str] = mapped_column(Text, nullable=False)
+    acquired_at: Mapped[str] = mapped_column(Text, nullable=False)
+    expires_at: Mapped[str] = mapped_column(Text, nullable=False)

@@ -32,11 +32,11 @@ async def test_ibkr_read_only_smoke() -> None:
     """Read one bounded slice of broker state and market data, then cleanly disconnect."""
 
     # These imports must remain below the opt-in skip marker. The default test run must not load
-    # the network adapter or initialize any ib_async resources.
-    from chronos.broker.ibkr import IBKRBroker
+    # any network adapter or initialize broker resources.
+    from chronos.broker.base import Broker
     from chronos.broker.market_data import MarketDataManager
     from chronos.config.settings import Settings
-    from chronos.domain.enums import BrokerMode, DataQuality
+    from chronos.domain.enums import BrokerAdapter, BrokerMode, DataQuality
 
     settings = Settings()
     assert settings.broker_mode is BrokerMode.IBKR, "Set BROKER_MODE=ibkr for the smoke test"
@@ -44,7 +44,15 @@ async def test_ibkr_read_only_smoke() -> None:
     assert settings.allow_live_trading is False
     assert settings.symbol_allowlist
 
-    broker = IBKRBroker(settings)
+    broker: Broker
+    if settings.broker_adapter is BrokerAdapter.IB_ASYNC:
+        from chronos.broker.ibkr import IBKRBroker
+
+        broker = IBKRBroker(settings)
+    else:
+        from chronos.broker.official_ibkr import OfficialIBKRBroker
+
+        broker = OfficialIBKRBroker(settings)
     market_data = MarketDataManager(broker)
     try:
         await asyncio.wait_for(broker.connect(), timeout=15)

@@ -24,10 +24,19 @@ class DisplayEnvironment(StrEnum):
     LIVE = "LIVE"
 
 
+class BrokerAdapter(StrEnum):
+    """Which broker implementation serves BrokerMode.IBKR."""
+
+    DEMO = "demo"
+    OFFICIAL_IBKR = "official_ibkr"
+    IB_ASYNC = "ib_async"
+
+
 class DataQuality(StrEnum):
     LIVE = "LIVE"
     FROZEN = "FROZEN"
     DELAYED = "DELAYED"
+    DELAYED_FROZEN = "DELAYED_FROZEN"
     DEMO = "DEMO"
     STALE = "STALE"
     UNKNOWN = "UNKNOWN"
@@ -55,11 +64,22 @@ class WheelStage(StrEnum):
     FLAT = "FLAT"
     SHORT_PUT_PENDING = "SHORT_PUT_PENDING"
     SHORT_PUT_OPEN = "SHORT_PUT_OPEN"
+    PUT_CLOSE_PENDING = "PUT_CLOSE_PENDING"
     LONG_STOCK = "LONG_STOCK"
     SHORT_CALL_PENDING = "SHORT_CALL_PENDING"
     SHORT_CALL_OPEN = "SHORT_CALL_OPEN"
+    CALL_CLOSE_PENDING = "CALL_CLOSE_PENDING"
     CLOSING = "CLOSING"
+    ASSIGNMENT_RECONCILING = "ASSIGNMENT_RECONCILING"
     MANUAL_REVIEW = "MANUAL_REVIEW"
+
+
+class ProductFamily(StrEnum):
+    """Order-pipeline product families (docs/LIVE_WHEEL_GAME_PLAN.md §6b)."""
+
+    OPTION = "OPTION"
+    STOCK = "STOCK"
+    CRYPTO = "CRYPTO"
 
 
 class ReconciliationStatus(StrEnum):

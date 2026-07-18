@@ -18,6 +18,9 @@ classifiers = [
   "Topic :: Office/Business :: Financial :: Investment",
 ]
 dependencies = [
+  "alembic>=1.14,<2",
+  "fastapi>=0.115,<1",
+  "httpx>=0.27,<1",
   "ib_async>=2.0,<3",
   "pandas>=2.2,<3",
   "plotly>=5.24,<7",
@@ -27,6 +30,7 @@ dependencies = [
   "sqlalchemy>=2.0,<3",
   "streamlit>=1.40,<2",
   "tzdata>=2024.2",
+  "uvicorn>=0.32,<1",
 ]
 
 [project.optional-dependencies]
@@ -72,5 +76,5 @@ pretty = true
 show_error_codes = true
 
 [[tool.mypy.overrides]]
-module = ["ib_async.*", "plotly.*", "streamlit.*"]
+module = ["ib_async.*", "ibapi.*", "plotly.*", "streamlit.*"]
 ignore_missing_imports = true
