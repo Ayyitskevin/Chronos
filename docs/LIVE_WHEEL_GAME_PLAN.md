@@ -448,7 +448,9 @@ expiry, the full check list incl. cash-secured-put at gross, covered-call
 coverage, concentration, session-open, allowlist, caps, stock whole-share/
 no-short); what-if preview; the SINGLE paper submission boundary
 (`PaperOrderSubmissionBoundary.submit` — the only `transmit=True` in the
-codebase, behind a fail-closed gate chain: lease → transmission_possible →
+live-Wheel `chronos.orders` path; the dormant autonomous
+`chronos.execution` adapter has its own separate, unreachable one — behind a
+fail-closed gate chain: lease → transmission_possible →
 mode-lock PAPER_SUBMISSION → account match → risk approved+unexpired → typed
 confirmation hash-match+TTL → USER_CONFIRMED idempotency); the order tracker
 (lifecycle + duplicate-callback idempotency + partial-fill monotonicity);
@@ -481,6 +483,33 @@ The IBKR MCP connector is authorized and verified (account: USD 110 cash, no
 positions — options wheeling requires further funding; stock/crypto families
 are the executable ones at this size).
 
-**Next: Milestone 6** — live safety layer (the eight-gate stack formalized,
-live arming with TTL, session-drawdown breaker, kill switch, and the posture
-migration of all "live impossible" claims to the split model).
+**Milestone 6 delivered** the live safety layer (built and tested, in the
+isolated `chronos.orders` package; live transmission is NOT enabled — that is
+M7): the fail-closed **ten-gate live stack** (`live_gate.py`: config,
+connection, reconciliation, data, risk, preview, session-arming, per-order
+confirmation, plus the kill-switch and session-drawdown breakers), each gate a
+typed check asserted to block independently; **live arming** (`arming.py`,
+backend memory, TTL, revocation, constant-time phrase compare that is never
+logged/persisted/echoed, audited to `live_arm_events`); the **durable kill
+switch** (`kill_switch.py`, atomic write, DISENGAGED default but fail-closed on
+a corrupt file, audited to `kill_switch_events`); the **session-drawdown
+breaker** (`session_drawdown.py`, persisted per-session NLV baseline, breach
+engages the kill switch); the `/live/*` API (arm/disarm/status/kill, token +
+writer-lease gated) wired into the runtime; and the **posture migration** —
+settings validators, the UI settings page, and the game plan now frame live as
+awaiting the M7 transmit wiring (never "permanently disabled"), with the
+settings tests updated to match. Docs: `docs/live_trading_runbook.md`.
+
+**M6 verification:** full pytest suite green, mypy --strict clean, ruff clean;
+30 new safety tests (each of the ten gates blocks independently; arming
+TTL/revocation; kill-switch fail-closed-on-corrupt + restart persistence;
+drawdown breach engages the kill switch; the `/live` endpoints). No live order
+is transmitted anywhere; `ALLOW_LIVE_TRADING` and LIVE+transmit remain refused
+by configuration until M7.
+
+**Next: Milestone 7** — live execution capability (validated without trading):
+wire `transmit=True` for the LIVE branch at the single submission boundary,
+building the live order object from the qualified contract/valid tick/confirmed
+account/DAY limit; validate the full gate walk with a **recording spy broker**
+(correct order object emitted, no order reaches a venue); then Milestone 7C for
+crypto (fractional Decimal quantities, family session calendar).

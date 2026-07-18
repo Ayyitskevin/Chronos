@@ -68,8 +68,10 @@ def render(client: ApiClient) -> None:
         }
     )
     st.info(
-        "Live trading is a committed deliverable that ships with the Milestone 6-7 "
-        "gate stack (arming, typed confirmation, the eight fail-closed gates). It is "
-        "not yet wired, so the configuration above is displayed, not yet enforced for "
-        "live orders."
+        "Live trading is a committed deliverable. The Milestone 6 live safety layer now "
+        "exists — arming (with TTL), the kill switch, the session-drawdown breaker, and "
+        "the ten-gate live stack — and the /live endpoints manage it. What remains is "
+        "Milestone 7: wiring transmit=True for the LIVE branch at the single submission "
+        "boundary. Until then the policy above is displayed and the gates are built and "
+        "tested, but no live order is transmitted."
     )
