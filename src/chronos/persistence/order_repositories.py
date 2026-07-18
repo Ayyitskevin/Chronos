@@ -257,6 +257,20 @@ class OrderIntentRepository:
             )
             return tuple(_intent_row_to_record(row) for row in rows)
 
+    def ids_in_status(self, status: OrderLifecycle, *, current_account_id: str) -> tuple[str, ...]:
+        """Intent ids currently in exactly ``status`` (live reconciliation gate)."""
+
+        fingerprint = account_fingerprint(current_account_id)
+        with self._sessions() as session:
+            _require_matching_account_scope(session, current_account_id)
+            rows = session.scalars(
+                select(OrderIntentRow.intent_id)
+                .where(OrderIntentRow.account_fingerprint == fingerprint)
+                .where(OrderIntentRow.status == status.value)
+                .order_by(OrderIntentRow.created_at)
+            )
+            return tuple(rows)
+
     def list_all(self, *, current_account_id: str) -> tuple[OrderIntentRecord, ...]:
         fingerprint = account_fingerprint(current_account_id)
         with self._sessions() as session:
@@ -373,11 +387,19 @@ class OrderTrackerRepository:
         remaining_quantity: Decimal | None = None,
         evidence: dict[str, Any] | None = None,
         occurred_at: datetime,
+        enforce_from_status: bool = False,
     ) -> bool:
         """Write one order_events row and set the intent status in one txn.
 
         Returns ``False`` when ``event_key`` was already recorded (a duplicate
         or late broker callback), mutating nothing.
+
+        With ``enforce_from_status=True`` this is a true CAS (ADR-0009 §4): the
+        intent's CURRENT status must equal ``from_status`` inside this same
+        transaction, otherwise nothing is written and ``False`` is returned —
+        the guard the submission boundary uses so an intent that left
+        USER_CONFIRMED while gate evidence was being gathered can never be
+        clobbered back into the submit path.
         """
 
         with self._sessions.begin() as session:
@@ -385,6 +407,8 @@ class OrderTrackerRepository:
             intent = session.get(OrderIntentRow, intent_id)
             if intent is None:
                 raise ValueError(f"Unknown order intent {intent_id!r}")
+            if enforce_from_status and (from_status is None or intent.status != from_status.value):
+                return False
             if session.scalar(select(OrderEventRow.id).where(OrderEventRow.event_key == event_key)):
                 return False
             sequence = self._next_sequence(session, intent_id)

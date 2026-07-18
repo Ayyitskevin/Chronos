@@ -1,12 +1,14 @@
-"""Human-in-the-loop paper order-management pipeline (Milestone 5).
+"""Human-in-the-loop order-management pipeline (M5 paper; M7 live branch).
 
-This package is the eventually-live-capable order path: intent construction,
-the structured risk engine, what-if preview, the single paper submission
-boundary, lifecycle tracking, buy-to-close/modify/cancel, and restart /
-SUBMISSION_UNKNOWN recovery. It deliberately imports NOTHING from the
-autonomous ``chronos.execution`` / ``chronos.risk`` packages, which remain
-live-incapable and unchanged. The only place ``transmit=True`` is ever
-assigned is :meth:`chronos.orders.submission.PaperOrderSubmissionBoundary.submit`.
+This package is the live-capable order path: intent construction, the
+structured risk engine, what-if preview, the single submission boundary with
+its paper and live branches (ADR-0009), lifecycle tracking,
+buy-to-close/modify/cancel, and restart / SUBMISSION_UNKNOWN recovery. It
+deliberately imports NOTHING from the autonomous ``chronos.execution`` /
+``chronos.risk`` packages, which remain live-incapable and unchanged. The only
+place ``transmit=True`` is ever assigned is inside
+:class:`chronos.orders.submission.OrderSubmissionBoundary` — one line serving
+both branches, each behind its own fail-closed gate chain.
 """
 
 from __future__ import annotations
@@ -36,7 +38,7 @@ from chronos.orders.state_machine import (
     OrderLifecycleMachine,
 )
 from chronos.orders.submission import (
-    PaperOrderSubmissionBoundary,
+    OrderSubmissionBoundary,
     SubmissionOutcome,
     SubmissionRefusalCode,
 )
@@ -55,8 +57,8 @@ __all__ = [
     "OrderRiskDecision",
     "OrderRiskEngine",
     "OrderStatusUpdate",
+    "OrderSubmissionBoundary",
     "OrderTracker",
-    "PaperOrderSubmissionBoundary",
     "ProposeResult",
     "RiskEvidence",
     "SubmissionOutcome",

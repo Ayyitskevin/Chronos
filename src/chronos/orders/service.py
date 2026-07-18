@@ -33,12 +33,13 @@ from chronos.orders.risk import (
     RiskEvidence,
     order_risk_decision_from_record,
 )
-from chronos.orders.submission import PaperOrderSubmissionBoundary, SubmissionOutcome
+from chronos.orders.submission import OrderSubmissionBoundary, SubmissionOutcome
 from chronos.orders.tracker import OrderTracker
 from chronos.persistence.order_repositories import (
     OrderConfirmationRepository,
     OrderIntentRecord,
     OrderIntentRepository,
+    OrderTrackerRepository,
     RiskCheckRecord,
     RiskDecisionRecord,
     RiskDecisionRepository,
@@ -72,10 +73,11 @@ class OrderManagementService:
         evidence_provider: RiskEvidenceProvider,
         risk_engine: OrderRiskEngine,
         preview_service: OrderPreviewService,
-        submission_boundary: PaperOrderSubmissionBoundary,
+        submission_boundary: OrderSubmissionBoundary,
         modification: OrderModificationService,
         cancellation: OrderCancellationService,
         tracker: OrderTracker,
+        tracker_repo: OrderTrackerRepository,
         reconciler: OrderRestartReconciler,
         intents: OrderIntentRepository,
         confirmations: OrderConfirmationRepository,
@@ -92,6 +94,7 @@ class OrderManagementService:
         self._modification = modification
         self._cancellation = cancellation
         self._tracker = tracker
+        self._tracker_repo = tracker_repo
         self._reconciler = reconciler
         self._intents = intents
         self._confirmations = confirmations
@@ -185,11 +188,28 @@ class OrderManagementService:
         if stored.status is not OrderLifecycle.VALIDATED:
             raise OrderPipelineError("order must be VALIDATED before preview")
         result = self._preview.preview(intent)
+        if not result.accepted:
+            # ADR-0009 §5: a declined what-if must NOT advance the lifecycle —
+            # the intent stays VALIDATED and the refusal is durably recorded,
+            # so no downstream gate can mistake "previewed" for "accepted".
+            self._tracker_repo.record_transition(
+                intent_id=intent.intent_id,
+                event_key=f"{intent.intent_id}:preview_declined:{moment.isoformat()}",
+                source="PREVIEW",
+                from_status=OrderLifecycle.VALIDATED,
+                to_status=OrderLifecycle.VALIDATED,
+                current_account_id=self._account_id,
+                evidence={"accepted": False, "warnings": list(result.warnings)},
+                occurred_at=moment,
+            )
+            return result
+        preview_id = f"PRV-{intent.intent_id}-{result.previewed_at.isoformat()}"
         self._intents.set_status(
             intent.intent_id,
             OrderLifecycle.WHAT_IF_PREVIEWED,
             current_account_id=self._account_id,
             at=moment,
+            preview_id=preview_id,
         )
         return result
 
@@ -274,6 +294,21 @@ class OrderManagementService:
     def cancel(self, intent_id: str, *, now: datetime | None = None) -> CancellationResult:
         moment = now or utc_now()
         return self._cancellation.cancel(intent_id, current_account_id=self._account_id, now=moment)
+
+    def resolve_submission_unknown(
+        self, intent_id: str, *, operator_note: str, now: datetime | None = None
+    ) -> bool:
+        """Audited operator resolution for a broker-absent SUBMISSION_UNKNOWN
+        intent (ADR-0009 §6). Returns True when the operator rejection was
+        applied; False when broker evidence resolved the intent instead."""
+
+        moment = now or utc_now()
+        return self._reconciler.operator_resolve(
+            intent_id,
+            operator_note=operator_note,
+            current_account_id=self._account_id,
+            now=moment,
+        )
 
     def reconcile_on_restart(self, *, now: datetime | None = None) -> int:
         moment = now or utc_now()

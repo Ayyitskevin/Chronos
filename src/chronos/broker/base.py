@@ -41,6 +41,16 @@ class BrokerSafetyError(BrokerError):
     """An operation crossed a Chronos safety boundary and was blocked."""
 
 
+class BrokerRefusedBeforeSend(BrokerSafetyError):
+    """The adapter refused locally, before any network send (ADR-0009 §6).
+
+    Raising this is a PROOF CLAIM: the venue never saw the order — no bytes
+    were written to the gateway socket. The submission boundary relies on it to
+    resolve the intent to REJECTED synchronously instead of stranding it in
+    SUBMISSION_UNKNOWN. An adapter must never raise it after starting a send.
+    """
+
+
 @runtime_checkable
 class Broker(Protocol):
     """Async broker boundary; callers serialize it through the connection manager."""

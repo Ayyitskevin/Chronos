@@ -38,7 +38,14 @@ class OrderMutationError(RuntimeError):
 
 
 class OrderModificationService:
-    """Re-place a working order at a new limit price on the same broker id."""
+    """Re-place a working order at a new limit price on the same broker id.
+
+    LIVE refusal (ADR-0009 §7): a modify re-prices a working order at the venue
+    through none of the ten live gates, and the per-order confirmation hash
+    binds the ORIGINAL limit price — so for a live environment this service
+    refuses outright. The live re-pricing workflow is cancel + re-propose +
+    the full gate walk. Cancellation stays available (risk-reducing).
+    """
 
     def __init__(
         self,
@@ -47,11 +54,13 @@ class OrderModificationService:
         intents: OrderIntentRepository,
         tracker: OrderTracker,
         tracker_repo: OrderTrackerRepository,
+        live_environment: bool = False,
     ) -> None:
         self._connection = connection
         self._intents = intents
         self._tracker = tracker
         self._tracker_repo = tracker_repo
+        self._live_environment = live_environment
 
     def modify(
         self,
@@ -61,6 +70,13 @@ class OrderModificationService:
         current_account_id: str,
         now: datetime,
     ) -> OrderSubmission:
+        if self._live_environment:
+            raise OrderMutationError(
+                "live order modification is refused (ADR-0009 §7): the typed "
+                "confirmation binds the original limit price and a modify walks "
+                "zero live gates — cancel the working order and re-propose at "
+                "the new price instead"
+            )
         if new_limit_price <= 0:
             raise OrderMutationError("new limit price must be positive")
         intent = self._intents.get(intent_id, current_account_id=current_account_id)
@@ -96,7 +112,14 @@ class OrderModificationService:
 
 
 class OrderCancellationService:
-    """Request cancellation, moving through CANCEL_PENDING."""
+    """Request cancellation, moving through CANCEL_PENDING.
+
+    DELIBERATELY un-gated by arming/kill-switch on every branch (ADR-0009 §7):
+    cancellation is risk-reducing and must work precisely when the kill switch
+    is engaged — an emergency stop halts new exposure AND pulls working orders.
+    It still requires the writer lease (enforced at the API layer) and the
+    account scope (enforced here by the repositories).
+    """
 
     def __init__(
         self,

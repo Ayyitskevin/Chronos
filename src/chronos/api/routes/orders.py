@@ -79,6 +79,10 @@ class ModifyRequest(ChronosModel):
     new_limit_price: Decimal
 
 
+class ResolveRequest(ChronosModel):
+    operator_note: str
+
+
 def _service(state: BackendState) -> OrderManagementService:
     return state.runtime.order_management
 
@@ -227,4 +231,31 @@ def cancel(intent_id: str, state: WriterDep) -> OrderView:
         _service(state).cancel(intent_id)
     except (OrderPipelineError, OrderMutationError) as error:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+    return _view(_require_record(state, intent_id))
+
+
+@router.post("/orders/{intent_id}/resolve", response_model=OrderView)
+def resolve(intent_id: str, request: ResolveRequest, state: WriterDep) -> OrderView:
+    """Audited operator resolution of a broker-absent SUBMISSION_UNKNOWN intent.
+
+    Drives the intent to REJECTED only when a fresh broker snapshot taken in
+    this call shows no matching order and no executions (ADR-0009 §6); if the
+    broker DOES know the order, its true state is applied instead and this
+    returns 409 so the operator sees the evidence-based resolution.
+    """
+
+    try:
+        resolved = _service(state).resolve_submission_unknown(
+            intent_id, operator_note=request.operator_note
+        )
+    except (OrderPipelineError, ValueError) as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+    if not resolved:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "broker evidence resolved this intent (or its status changed); "
+                "operator rejection was not applied — re-check the order state"
+            ),
+        )
     return _view(_require_record(state, intent_id))

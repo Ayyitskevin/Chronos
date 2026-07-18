@@ -127,6 +127,41 @@ class OrderTracker:
             occurred_at=update.occurred_at,
         )
 
+    def record_operator_rejection(
+        self,
+        *,
+        intent_id: str,
+        current_account_id: str,
+        note: str,
+        snapshot_open_orders: int,
+        snapshot_executions: int,
+        now: datetime,
+    ) -> bool:
+        """Audited SUBMISSION_UNKNOWN -> REJECTED by explicit operator action.
+
+        True-CAS guarded (``enforce_from_status``): if the intent left
+        SUBMISSION_UNKNOWN between the caller's snapshot and this write —
+        e.g. a late broker callback finally resolved it — nothing is written
+        and ``False`` is returned (ADR-0009 §6).
+        """
+
+        return self._tracker.record_transition(
+            intent_id=intent_id,
+            event_key=f"{intent_id}:operator_resolution:REJECTED",
+            source="OPERATOR",
+            from_status=OrderLifecycle.SUBMISSION_UNKNOWN,
+            to_status=OrderLifecycle.REJECTED,
+            current_account_id=current_account_id,
+            evidence={
+                "operator_note": note,
+                "fresh_snapshot_open_orders": snapshot_open_orders,
+                "fresh_snapshot_executions": snapshot_executions,
+                "resolution": "broker_absent_after_fresh_snapshot",
+            },
+            occurred_at=now,
+            enforce_from_status=True,
+        )
+
     def _latest_filled(self, intent_id: str, current_account_id: str) -> Decimal:
         events = self._tracker.events(intent_id, current_account_id=current_account_id)
         filled = [event.filled_quantity for event in events if event.filled_quantity is not None]

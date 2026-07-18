@@ -18,10 +18,23 @@ from chronos.broker.connection import BrokerConnectionManager
 from chronos.broker.demo import DemoBroker, demo_now
 from chronos.broker.market_data import MarketDataManager
 from chronos.config.settings import Settings, get_settings
-from chronos.domain.enums import BrokerAdapter, BrokerMode, ConnectionState, IBEnvironment
-from chronos.domain.models import AccountSummary, ConnectionStatus
+from chronos.domain.enums import (
+    BrokerAdapter,
+    BrokerMode,
+    ConnectionState,
+    IBEnvironment,
+    ProductFamily,
+)
+from chronos.domain.models import (
+    AccountSummary,
+    ConnectionStatus,
+    MarketQuote,
+    OptionContract,
+    UnderlyingContract,
+)
 from chronos.orders.arming import LiveArmingService
 from chronos.orders.evidence import BrokerRiskEvidenceProvider
+from chronos.orders.intent import WheelOrderIntent
 from chronos.orders.kill_switch import LiveKillSwitch
 from chronos.orders.live_audit import KillSwitchEventRepository, LiveArmEventRepository
 from chronos.orders.mutations import OrderCancellationService, OrderModificationService
@@ -30,7 +43,7 @@ from chronos.orders.reconciliation_recovery import OrderRestartReconciler
 from chronos.orders.risk import OrderRiskEngine
 from chronos.orders.service import OrderManagementService
 from chronos.orders.session_drawdown import SessionDrawdownBreaker
-from chronos.orders.submission import PaperOrderSubmissionBoundary
+from chronos.orders.submission import OrderSubmissionBoundary
 from chronos.orders.tracker import OrderTracker
 from chronos.persistence.database import Database
 from chronos.persistence.order_repositories import (
@@ -160,12 +173,10 @@ def build_runtime(*, register_atexit: bool = True) -> AppRuntime:
             settings,
             clock=demo_now if isinstance(broker, DemoBroker) else None,
         )
-        order_management = _build_order_management(
-            settings=settings,
-            connection=connection,
-            database=database,
-            account=account,
-        )
+        # ADR-0009 §4: the live safety services are constructed BEFORE the order
+        # pipeline and the SAME instances are injected into the submission
+        # boundary — LiveArmingService state is process-memory, so a second
+        # instance would make /live/arm invisible to the boundary.
         live_kill_switch = LiveKillSwitch(
             settings.live_kill_switch_file,
             audit=KillSwitchEventRepository(database.sessions),
@@ -183,6 +194,16 @@ def build_runtime(*, register_atexit: bool = True) -> AppRuntime:
             max_drawdown_pct=settings.max_session_drawdown_pct,
             market_timezone=settings.market_timezone,
             kill_switch=live_kill_switch,
+        )
+        order_management = _build_order_management(
+            settings=settings,
+            connection=connection,
+            database=database,
+            account=account,
+            market_data=market_data,
+            live_arming=live_arming,
+            live_kill_switch=live_kill_switch,
+            session_drawdown=session_drawdown,
         )
     except BaseException:
         if connection is not None:
@@ -229,8 +250,38 @@ def _build_order_management(
     connection: BrokerConnectionManager,
     database: Database,
     account: AccountSummary,
+    market_data: MarketDataManager,
+    live_arming: LiveArmingService,
+    live_kill_switch: LiveKillSwitch,
+    session_drawdown: SessionDrawdownBreaker,
 ) -> OrderManagementService:
-    """Wire the Milestone 5 human-in-the-loop order pipeline into the runtime."""
+    """Wire the human-in-the-loop order pipeline (M5 paper + M7 live branch)."""
+
+    if settings.live_transmission_possible and (
+        live_arming is None or live_kill_switch is None or session_drawdown is None
+    ):  # pragma: no cover - construction-order regression guard (ADR-0009 §4)
+        raise RuntimeError(
+            "live-capable configuration requires the live safety services to be "
+            "constructed before the order pipeline"
+        )
+
+    def _read_fresh_quote(intent: WheelOrderIntent) -> MarketQuote | None:
+        """Fresh-quote adapter for the boundary's LIVE data gate."""
+
+        if intent.product_family is ProductFamily.OPTION and isinstance(
+            intent.contract, OptionContract
+        ):
+            quotes = connection.run(
+                market_data.option_quotes((intent.contract,), force_refresh=True)
+            )
+            managed = quotes[0] if quotes else None
+        elif isinstance(intent.contract, UnderlyingContract):
+            managed = connection.run(
+                market_data.underlying_quote(intent.contract, force_refresh=True)
+            )
+        else:
+            return None
+        return managed.quote if managed is not None else None
 
     intents = OrderIntentRepository(database.sessions)
     tracker_repo = OrderTrackerRepository(database.sessions)
@@ -244,18 +295,23 @@ def _build_order_management(
         evidence_provider=BrokerRiskEvidenceProvider(connection=connection, settings=settings),
         risk_engine=OrderRiskEngine(settings),
         preview_service=OrderPreviewService(connection),
-        submission_boundary=PaperOrderSubmissionBoundary(
+        submission_boundary=OrderSubmissionBoundary(
             settings=settings,
             connection=connection,
             intents=intents,
             confirmations=confirmations,
             tracker=tracker_repo,
+            live_arming=live_arming,
+            live_kill_switch=live_kill_switch,
+            session_drawdown=session_drawdown,
+            quote_reader=_read_fresh_quote,
         ),
         modification=OrderModificationService(
             connection=connection,
             intents=intents,
             tracker=tracker,
             tracker_repo=tracker_repo,
+            live_environment=settings.ib_environment is IBEnvironment.LIVE,
         ),
         cancellation=OrderCancellationService(
             connection=connection,
@@ -264,6 +320,7 @@ def _build_order_management(
             tracker_repo=tracker_repo,
         ),
         tracker=tracker,
+        tracker_repo=tracker_repo,
         reconciler=OrderRestartReconciler(connection=connection, intents=intents, tracker=tracker),
         intents=intents,
         confirmations=confirmations,
