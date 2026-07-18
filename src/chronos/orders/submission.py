@@ -1,9 +1,12 @@
 """The single centralized paper order-submission boundary (Milestone 5).
 
-This module contains the ONLY assignment of ``transmit=True`` in the entire
-codebase, and it happens exactly once, inside
+This module is the single ``transmit=True`` assignment in the live-Wheel order
+path (``chronos.orders``); it happens exactly once, inside
 :meth:`PaperOrderSubmissionBoundary.submit`, and only after every fail-closed
-gate below has passed:
+gate below has passed. (The dormant autonomous ``chronos.execution`` adapter has
+its own separate transmit site, but ``chronos.orders`` imports nothing from it
+and no production entrypoint wires it, so it is unreachable from this path.)
+Gates:
 
 1. the single-writer lease is held (no read-only mode);
 2. ``settings.transmission_possible`` (IBKR + PAPER + allow_order_transmit +
@@ -172,7 +175,12 @@ class PaperOrderSubmissionBoundary:
             )
 
         # Pre-persist SUBMISSION_UNKNOWN so a crash mid-submit is recoverable.
-        self._tracker.record_transition(
+        # The unique pre-submit event_key is ALSO the concurrency guard: exactly
+        # one caller can win it. record_transition returns False for a duplicate
+        # (a concurrent/replayed submit of the same intent), and we MUST fail
+        # closed on that loser rather than transmit twice — the process-level
+        # writer lease is not a per-intent mutex.
+        won_presubmit = self._tracker.record_transition(
             intent_id=intent.intent_id,
             event_key=f"{intent.intent_id}:presubmit:SUBMISSION_UNKNOWN",
             source="SUBMIT",
@@ -182,8 +190,14 @@ class PaperOrderSubmissionBoundary:
             evidence={"phase": "pre_submit"},
             occurred_at=now,
         )
+        if not won_presubmit:
+            return _refuse(
+                SubmissionRefusalCode.INTENT_NOT_CONFIRMED,
+                "intent already left USER_CONFIRMED (a concurrent/duplicate submit "
+                "won the pre-submit guard); refusing to transmit again",
+            )
 
-        # --- THE SINGLE transmit=True ASSIGNMENT IN THE ENTIRE CODEBASE ------
+        # --- THE SINGLE transmit=True ASSIGNMENT IN THE M5 ORDER PATH --------
         request = intent.to_order_request(transmit=True)
         try:
             submission = self._connection.run(self._connection.broker.submit_order(request))

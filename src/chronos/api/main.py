@@ -47,6 +47,23 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         read_only=read_only,
     )
     app.state.api_token = load_or_create_token(runtime.settings.backend_token_file)
+    if not read_only:
+        # A writer backend resolves any orders left at SUBMISSION_UNKNOWN by a
+        # prior crash — by order_ref against broker truth, never by re-submitting.
+        # Read-only backends must not write, so they skip it.
+        try:
+            resolved = runtime.order_management.reconcile_on_restart()
+            if resolved:
+                _logger.info(
+                    "Resolved %d order(s) during startup reconciliation",
+                    resolved,
+                    extra={"event": "order_restart_reconciled", "resolved": resolved},
+                )
+        except Exception:
+            _logger.exception(
+                "Order restart reconciliation failed; continuing (orders stay unresolved)",
+                extra={"event": "order_restart_reconcile_failed"},
+            )
     try:
         yield
     finally:

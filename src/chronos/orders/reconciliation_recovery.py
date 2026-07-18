@@ -16,11 +16,7 @@ from decimal import Decimal
 from chronos.broker.connection import BrokerConnectionManager
 from chronos.domain.enums import OrderLifecycle
 from chronos.domain.models import BrokerExecution, BrokerOrder
-from chronos.orders.tracker import (
-    OrderStatusUpdate,
-    OrderTracker,
-    broker_status_to_lifecycle,
-)
+from chronos.orders.tracker import OrderStatusUpdate, OrderTracker
 from chronos.persistence.order_repositories import (
     OrderIntentRecord,
     OrderIntentRepository,
@@ -43,12 +39,15 @@ def resolve_from_broker_evidence(
     open_orders: tuple[BrokerOrder, ...],
     executions: tuple[BrokerExecution, ...],
     now: datetime,
-) -> OrderStatusUpdate:
+) -> OrderStatusUpdate | None:
     """Derive the true lifecycle for one intent from broker evidence.
 
     Matching is by the intent's ``order_ref`` (CHR-) only — Chronos never acts
-    on an order it does not own. An order absent from both open orders and
-    executions never reached the broker and resolves to REJECTED.
+    on an order it does not own, and NEVER re-submits. Returns ``None`` (leave
+    unresolved for the operator) when the order is absent from this snapshot:
+    a timed-out submit very often DID reach the venue, so mere absence is not
+    positive evidence of rejection and must not drive a live order to a wrong
+    terminal state.
     """
 
     order_ref = intent.order_ref
@@ -57,11 +56,14 @@ def resolve_from_broker_evidence(
 
     if working:
         order = working[0]
-        lifecycle = broker_status_to_lifecycle(
-            order.lifecycle.value,
-            filled_quantity=order.filled_quantity,
-            remaining_quantity=order.remaining_quantity,
-        )
+        # The adapter already delivers a typed OrderLifecycle; do NOT re-map its
+        # value through the raw-IBKR-string mapper. Refine only by fill quantity.
+        if order.filled_quantity >= order.quantity:
+            lifecycle = OrderLifecycle.FILLED
+        elif order.filled_quantity > 0:
+            lifecycle = OrderLifecycle.PARTIALLY_FILLED
+        else:
+            lifecycle = order.lifecycle
         return OrderStatusUpdate(
             intent_id=intent.intent_id,
             broker_order_id=order.broker_order_id,
@@ -88,13 +90,10 @@ def resolve_from_broker_evidence(
             occurred_at=now,
         )
 
-    # Not found anywhere: the order never reached the broker. Never re-submit.
-    return OrderStatusUpdate(
-        intent_id=intent.intent_id,
-        lifecycle=OrderLifecycle.REJECTED,
-        source="RECONCILE",
-        occurred_at=now,
-    )
+    # Absent from this snapshot: leave unresolved (surfaced to the operator via
+    # list_orders) rather than concluding a terminal REJECTED without positive
+    # evidence the order never reached the venue.
+    return None
 
 
 class OrderRestartReconciler:
@@ -129,6 +128,9 @@ class OrderRestartReconciler:
                 executions=executions,
                 now=now,
             )
+            if update is None:
+                # Absent from the snapshot: left unresolved for operator review.
+                continue
             if self._tracker.ingest(update, current_account_id=current_account_id):
                 applied.append(update)
         return tuple(applied)

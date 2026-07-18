@@ -65,3 +65,37 @@ def test_terminal_helpers() -> None:
     assert is_terminal(OrderLifecycle.CANCELLED)
     assert is_terminal(OrderLifecycle.REJECTED)
     assert not is_terminal(OrderLifecycle.SUBMITTED)
+
+
+def test_broker_status_terminal_wins_over_partial_fill() -> None:
+    # A partially-filled order that is then cancelled/rejected reports
+    # filled>0 AND remaining>0; it must map to the terminal state, not
+    # PARTIALLY_FILLED (else it never closes).
+    from decimal import Decimal
+
+    from chronos.orders.tracker import broker_status_to_lifecycle
+
+    assert (
+        broker_status_to_lifecycle(
+            "Cancelled", filled_quantity=Decimal("5"), remaining_quantity=Decimal("5")
+        )
+        is OrderLifecycle.CANCELLED
+    )
+    assert (
+        broker_status_to_lifecycle(
+            "ApiRejected", filled_quantity=Decimal("1"), remaining_quantity=Decimal("1")
+        )
+        is OrderLifecycle.REJECTED
+    )
+    assert (
+        broker_status_to_lifecycle(
+            "PartiallyFilled", filled_quantity=Decimal("1"), remaining_quantity=Decimal("1")
+        )
+        is OrderLifecycle.PARTIALLY_FILLED
+    )
+    assert (
+        broker_status_to_lifecycle(
+            "Filled", filled_quantity=Decimal("2"), remaining_quantity=Decimal("0")
+        )
+        is OrderLifecycle.FILLED
+    )

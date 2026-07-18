@@ -19,7 +19,7 @@ from decimal import Decimal
 
 from chronos.broker.connection import BrokerConnectionManager
 from chronos.config.settings import Settings
-from chronos.domain.enums import OptionRight, ProductFamily, ReconciliationStatus
+from chronos.domain.enums import OptionRight, OrderSide, ProductFamily, ReconciliationStatus
 from chronos.domain.models import BrokerOrder, BrokerPosition, OptionContract
 from chronos.orders.intent import WheelOrderIntent
 from chronos.orders.risk import RiskEvidence
@@ -51,6 +51,14 @@ class BrokerRiskEvidenceProvider:
         settled_long_shares = _long_shares(positions, intent.symbol)
         shares_covering_short_calls = _short_call_shares(positions, intent.symbol)
         held_short_option_contracts = _held_short_for_symbol(positions, intent)
+        # Resting (unfilled) covered-call orders commit shares too; without this
+        # two calls could both be approved against the same shares -> naked call.
+        shares_reserved_for_pending_calls = _pending_call_shares(open_orders, intent.symbol)
+        # Concentration baseline: existing gross wheel exposure, per symbol and
+        # across the account, so the check caps AGGREGATE exposure, not just the
+        # single new order.
+        current_symbol_allocation = _symbol_allocation(positions, intent.symbol)
+        current_total_wheel_allocation = _total_allocation(positions)
 
         session = session_for(
             intent.product_family,
@@ -66,7 +74,10 @@ class BrokerRiskEvidenceProvider:
             active_short_option_contracts=active_short_option_contracts,
             settled_long_shares=settled_long_shares,
             shares_covering_short_calls=shares_covering_short_calls,
+            shares_reserved_for_pending_calls=shares_reserved_for_pending_calls,
             held_short_option_contracts=held_short_option_contracts,
+            current_symbol_allocation=current_symbol_allocation,
+            current_total_wheel_allocation=current_total_wheel_allocation,
         )
 
     def _broker_confirms_open(self, now: datetime) -> bool | None:
@@ -150,4 +161,57 @@ def _held_short_for_symbol(positions: tuple[BrokerPosition, ...], intent: WheelO
             and position.quantity < 0
         ):
             total += int(abs(position.quantity))
+    return total
+
+
+def _pending_call_shares(open_orders: tuple[BrokerOrder, ...], symbol: str) -> Decimal:
+    """Shares committed to resting (unfilled) covered-call sell orders."""
+
+    total = Decimal("0")
+    for order in open_orders:
+        contract = order.contract
+        if (
+            isinstance(contract, OptionContract)
+            and contract.right is OptionRight.CALL
+            and contract.symbol == symbol
+            and order.side is OrderSide.SELL
+        ):
+            deliverable = contract.deliverable_shares or contract.multiplier
+            total += order.remaining_quantity * deliverable
+    return total
+
+
+def _long_stock_value(position: BrokerPosition) -> Decimal:
+    price = position.market_price if position.market_price is not None else position.average_cost
+    return position.quantity * price
+
+
+def _symbol_allocation(positions: tuple[BrokerPosition, ...], symbol: str) -> Decimal:
+    """Gross wheel exposure for one symbol: short-put obligations + long stock."""
+
+    total = Decimal("0")
+    for position in positions:
+        contract = position.contract
+        if contract.symbol != symbol:
+            continue
+        if (
+            isinstance(contract, OptionContract)
+            and contract.right is OptionRight.PUT
+            and position.quantity < 0
+        ):
+            deliverable = contract.deliverable_shares or contract.multiplier
+            total += contract.strike * deliverable * abs(position.quantity)
+        elif not isinstance(contract, OptionContract) and position.quantity > 0:
+            total += _long_stock_value(position)
+    return total
+
+
+def _total_allocation(positions: tuple[BrokerPosition, ...]) -> Decimal:
+    """Gross wheel exposure across the whole account."""
+
+    total = _short_put_obligation(positions)
+    for position in positions:
+        contract = position.contract
+        if not isinstance(contract, OptionContract) and position.quantity > 0:
+            total += _long_stock_value(position)
     return total

@@ -65,12 +65,17 @@ def _stock_buy_cash_check(
         settings.min_cash_buffer_usd,
         evidence.account.net_liquidation * settings.min_cash_buffer_pct,
     )
-    available = evidence.account.total_cash - buffer
+    # A stock purchase must not consume the cash that secures open or pending
+    # short puts: subtract those gross obligations before checking availability,
+    # or the buy strands a cash-secured put (violates the GROSS-security rule).
+    put_obligations = evidence.existing_short_put_obligation + evidence.pending_open_put_obligation
+    available = evidence.account.total_cash - buffer - put_obligations
     if cost <= available:
         return _passed("stock_cash_sufficiency", f"cost {cost} within available {available}")
     return _failed(
         "stock_cash_sufficiency",
-        f"cost {cost} exceeds available cash {available} after buffer {buffer}",
+        f"cost {cost} exceeds available cash {available} "
+        f"(after buffer {buffer} and put obligations {put_obligations})",
     )
 
 

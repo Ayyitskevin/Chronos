@@ -49,6 +49,16 @@ def broker_status_to_lifecycle(
     """
 
     normalized = status.strip().lower()
+    # Terminal/administrative statuses are decided FIRST: an order that partially
+    # filled and was then cancelled/rejected reports filled>0 AND remaining>0, so
+    # the generic partial-fill heuristic below would otherwise misclassify it as
+    # PARTIALLY_FILLED and it would never reach a terminal state.
+    if normalized in {"cancelled", "canceled", "apicancelled", "apicanceled"}:
+        return OrderLifecycle.CANCELLED
+    if normalized in {"inactive", "rejected", "apirejected"}:
+        return OrderLifecycle.REJECTED
+    if normalized in {"pendingcancel"}:
+        return OrderLifecycle.CANCEL_PENDING
     if normalized == "filled" and remaining_quantity <= 0:
         return OrderLifecycle.FILLED
     partially_filled = normalized in {"filled", "partiallyfilled"} or (
@@ -56,14 +66,8 @@ def broker_status_to_lifecycle(
     )
     if partially_filled:
         return OrderLifecycle.PARTIALLY_FILLED
-    if normalized in {"cancelled", "canceled", "apicancelled", "apicanceled"}:
-        return OrderLifecycle.CANCELLED
-    if normalized in {"pendingcancel"}:
-        return OrderLifecycle.CANCEL_PENDING
     if normalized in {"submitted", "presubmitted", "pendingsubmit"}:
         return OrderLifecycle.SUBMITTED
-    if normalized in {"inactive", "rejected", "apirejected"}:
-        return OrderLifecycle.REJECTED
     return OrderLifecycle.SUBMISSION_UNKNOWN
 
 
@@ -85,10 +89,16 @@ class OrderTracker:
         if intent is None:
             raise ValueError(f"Unknown order intent {update.intent_id!r}")
 
-        prior_filled = self._latest_filled(update.intent_id, current_account_id)
-        if update.filled_quantity < prior_filled:
-            # A stale/out-of-order callback that would move fills backward.
-            return False
+        # The monotonic stale-fill guard applies ONLY to fill-progress updates:
+        # a fill callback reporting a lower cumulative fill than already seen is
+        # stale and ignored. Terminal/administrative transitions (CANCELLED,
+        # REJECTED, CANCEL_PENDING) must NOT be dropped for carrying a lower
+        # filled_quantity — the state machine decides their legality instead, so
+        # a real terminal resolution is applied (or a contradiction surfaces).
+        if update.lifecycle in {OrderLifecycle.PARTIALLY_FILLED, OrderLifecycle.FILLED}:
+            prior_filled = self._latest_filled(update.intent_id, current_account_id)
+            if update.filled_quantity < prior_filled:
+                return False
 
         machine = OrderLifecycleMachine(intent.status)
         # apply() raises OrderLifecycleError on a contradiction (surfaced to the
