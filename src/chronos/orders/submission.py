@@ -1,51 +1,77 @@
-"""The single centralized paper order-submission boundary (Milestone 5).
+"""The single centralized order-submission boundary (M5 paper; M7 live branch).
 
-This module is the single ``transmit=True`` assignment in the live-Wheel order
-path (``chronos.orders``); it happens exactly once, inside
-:meth:`PaperOrderSubmissionBoundary.submit`, and only after every fail-closed
-gate below has passed. (The dormant autonomous ``chronos.execution`` adapter has
-its own separate transmit site, but ``chronos.orders`` imports nothing from it
-and no production entrypoint wires it, so it is unreachable from this path.)
-Gates:
+This module contains the single ``transmit=True`` assignment in the live-Wheel
+order path (``chronos.orders``); it happens exactly once, inside
+:meth:`OrderSubmissionBoundary._cas_and_transmit`, and only after every
+fail-closed gate of the selected branch has passed. (The dormant autonomous
+``chronos.execution`` adapter has its own separate transmit site, but
+``chronos.orders`` imports nothing from it and no production entrypoint wires
+it, so it is unreachable from this path.)
+
+PAPER branch gates (M5, unchanged semantics):
 
 1. the single-writer lease is held (no read-only mode);
-2. ``settings.transmission_possible`` (IBKR + PAPER + allow_order_transmit +
-   not allow_live_trading + account set) — False in every demo/test/CI config;
-3. the multi-condition mode lock grants PAPER_SUBMISSION (live is hard-denied);
+2. ``settings.transmission_possible`` — False in every demo/test/CI config;
+3. the multi-condition mode lock grants PAPER_SUBMISSION (live is hard-denied
+   there; the LIVE branch below never consults that lock);
 4. the order's account matches the connected paper account;
 5. the structured risk decision is APPROVED and unexpired;
 6. a typed operator confirmation exists, is unexpired, and its hash matches the
    server-re-derived order+risk summary;
-7. the intent is in exactly the USER_CONFIRMED state (idempotency / no replay).
+7. the intent is in exactly the USER_CONFIRMED state, re-verified by a true
+   status CAS at the pre-submit transition.
 
-M5 is paper-only: there is no live branch here. The mode lock hard-denies live
-and ``transmission_possible`` requires PAPER, so a live account can never reach
-the ``transmit=True`` assignment. The live gate stack (arming, the kill switch,
-the eight formal gates) is layered on in Milestone 6.
+LIVE branch (M7, ADR-0009): selected purely by frozen configuration
+(``settings.ib_environment is LIVE``). All broker/DB evidence is gathered
+FRESH inside :meth:`submit` (never trusted from startup bindings), the
+TTL-sensitive gates evaluate against a fresh clock reading taken after the
+slow I/O, the ten-gate live stack (``evaluate_live_gates``) must pass with the
+kill-switch file read as the LAST piece of evidence, and the kill switch is
+re-read once more between the CAS and the transmit line. A local, provably
+not-sent refusal (``BrokerRefusedBeforeSend``, or that final kill-switch
+re-read) resolves the intent to REJECTED synchronously; only a failure after
+bytes may have left remains SUBMISSION_UNKNOWN for reconciliation — which is
+never auto-retried.
 
-Before the broker call the intent is marked SUBMISSION_UNKNOWN, so a crash or
-timeout mid-submit leaves a recoverable state that reconciliation resolves by
-``order_ref`` — never an auto-retry.
+Before the broker call the intent is marked SUBMISSION_UNKNOWN via a true CAS
+(``enforce_from_status=True``): the event-key uniqueness refuses duplicate
+submits, and the in-transaction status predicate refuses a submit whose intent
+left USER_CONFIRMED while evidence was being gathered.
 """
 
 from __future__ import annotations
 
-from datetime import datetime
+from collections.abc import Callable
+from datetime import datetime, timedelta
+from decimal import Decimal
 from enum import StrEnum
 
-from chronos.broker.base import BrokerError
+from chronos.broker.base import BrokerError, BrokerRefusedBeforeSend
 from chronos.broker.connection import BrokerConnectionManager
 from chronos.config.settings import Settings
 from chronos.control.modes import ExecutionCapability, TradingMode, resolve_mode_lock
-from chronos.domain.enums import OrderLifecycle
-from chronos.domain.models import ChronosModel, OrderSubmission
+from chronos.domain.accounts import classify_observed_environment
+from chronos.domain.enums import DataQuality, IBEnvironment, OrderLifecycle, ProductFamily
+from chronos.domain.models import ChronosModel, MarketQuote, OrderSubmission
+from chronos.orders.arming import LiveArmingService
 from chronos.orders.intent import WheelOrderIntent, order_summary_hash
+from chronos.orders.kill_switch import LiveKillSwitch
+from chronos.orders.live_gate import LiveGateInputs, evaluate_live_gates
+from chronos.orders.live_mode import resolve_live_submission
 from chronos.orders.risk import OrderRiskDecision, OrderRiskEngine
+from chronos.orders.session_drawdown import SessionDrawdownBreaker
 from chronos.persistence.order_repositories import (
     OrderConfirmationRepository,
     OrderIntentRepository,
     OrderTrackerRepository,
 )
+from chronos.utils.time import utc_now
+
+# Acceptable data-quality classes for the LIVE data gate. Frozen/stale/unknown
+# always fail; DEMO never occurs on a live connection but is excluded anyway.
+_LIVE_ACCEPTABLE_QUALITY = frozenset({DataQuality.LIVE, DataQuality.DELAYED})
+
+_STOCK_MIN_TICK = Decimal("0.01")
 
 
 class SubmissionRefusalCode(StrEnum):
@@ -61,6 +87,11 @@ class SubmissionRefusalCode(StrEnum):
     CONFIRMATION_MISMATCH = "CONFIRMATION_MISMATCH"
     INTENT_NOT_CONFIRMED = "INTENT_NOT_CONFIRMED"
     BROKER_SUBMIT_FAILED = "BROKER_SUBMIT_FAILED"
+    # LIVE branch (ADR-0009).
+    LIVE_DEPENDENCIES_MISSING = "LIVE_DEPENDENCIES_MISSING"
+    LIVE_GRANT_DENIED = "LIVE_GRANT_DENIED"
+    LIVE_GATE_BLOCKED = "LIVE_GATE_BLOCKED"
+    BROKER_REFUSED_BEFORE_SEND = "BROKER_REFUSED_BEFORE_SEND"
 
 
 class SubmissionOutcome(ChronosModel):
@@ -74,8 +105,22 @@ def _refuse(code: SubmissionRefusalCode, detail: str) -> SubmissionOutcome:
     return SubmissionOutcome(submitted=False, refusal=code, detail=detail)
 
 
-class PaperOrderSubmissionBoundary:
-    """Fail-closed gate chain culminating in the sole ``transmit=True`` site."""
+def _tick_conforms(limit_price: Decimal, min_tick: Decimal) -> bool:
+    if min_tick <= 0:
+        return False
+    return limit_price % min_tick == 0
+
+
+class OrderSubmissionBoundary:
+    """Fail-closed gate chains culminating in the sole ``transmit=True`` site.
+
+    The live dependencies default to ``None``; a boundary constructed without
+    them refuses the LIVE branch entirely (missing machinery = fail closed).
+    ``quote_reader`` returns a fresh :class:`MarketQuote` for an intent's
+    contract (production wiring adapts :class:`MarketDataManager`); ``clock``
+    supplies the fresh post-I/O timestamp for TTL gates (tests inject a
+    controllable clock; production defaults to :func:`utc_now`).
+    """
 
     def __init__(
         self,
@@ -85,12 +130,39 @@ class PaperOrderSubmissionBoundary:
         intents: OrderIntentRepository,
         confirmations: OrderConfirmationRepository,
         tracker: OrderTrackerRepository,
+        live_arming: LiveArmingService | None = None,
+        live_kill_switch: LiveKillSwitch | None = None,
+        session_drawdown: SessionDrawdownBreaker | None = None,
+        quote_reader: Callable[[WheelOrderIntent], MarketQuote | None] | None = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
+        if settings.ib_environment is IBEnvironment.LIVE and (
+            live_arming is None
+            or live_kill_switch is None
+            or session_drawdown is None
+            or quote_reader is None
+        ):
+            # Fail LOUD at construction (M7 review finding F6): a live-environment
+            # boundary missing its safety machinery must never exist — a silent
+            # per-submit refusal would surface only at the first real order.
+            raise RuntimeError(
+                "a LIVE-environment submission boundary requires arming, kill "
+                "switch, drawdown breaker, and quote reader at construction"
+            )
         self._settings = settings
         self._connection = connection
         self._intents = intents
         self._confirmations = confirmations
         self._tracker = tracker
+        self._live_arming = live_arming
+        self._live_kill_switch = live_kill_switch
+        self._session_drawdown = session_drawdown
+        self._quote_reader = quote_reader
+        self._clock = clock or utc_now
+
+    # ------------------------------------------------------------------ #
+    # Entry point
+    # ------------------------------------------------------------------ #
 
     def submit(
         self,
@@ -102,14 +174,36 @@ class PaperOrderSubmissionBoundary:
         writer_lease_held: bool,
         now: datetime,
     ) -> SubmissionOutcome:
-        account_id = connected_account_id
-
-        # 1. Single-writer lease.
+        # 1. Single-writer lease (both branches).
         if not writer_lease_held:
             return _refuse(
                 SubmissionRefusalCode.READ_ONLY_LEASE,
                 "backend is read-only; the single-writer lease is not held",
             )
+        if self._settings.ib_environment is IBEnvironment.LIVE:
+            return self._submit_live(intent=intent, risk_decision=risk_decision, now=now)
+        return self._submit_paper(
+            intent=intent,
+            risk_decision=risk_decision,
+            connected_account_id=connected_account_id,
+            broker_environment_is_paper=broker_environment_is_paper,
+            now=now,
+        )
+
+    # ------------------------------------------------------------------ #
+    # PAPER branch (M5 semantics, plus the true CAS)
+    # ------------------------------------------------------------------ #
+
+    def _submit_paper(
+        self,
+        *,
+        intent: WheelOrderIntent,
+        risk_decision: OrderRiskDecision,
+        connected_account_id: str,
+        broker_environment_is_paper: bool,
+        now: datetime,
+    ) -> SubmissionOutcome:
+        account_id = connected_account_id
 
         # 2. Configuration can even enter the paper transmission path.
         if not self._settings.transmission_possible:
@@ -139,7 +233,172 @@ class PaperOrderSubmissionBoundary:
                 "order account does not match the connected paper account",
             )
 
-        # 5. Structured risk decision approved and fresh.
+        shared = self._shared_confirmation_gates(
+            intent=intent, risk_decision=risk_decision, account_id=account_id, now=now
+        )
+        if shared is not None:
+            return shared
+
+        return self._cas_and_transmit(
+            intent=intent,
+            account_id=account_id,
+            now=now,
+            final_kill_check=False,
+            branch_detail="paper order transmitted",
+        )
+
+    # ------------------------------------------------------------------ #
+    # LIVE branch (M7, ADR-0009)
+    # ------------------------------------------------------------------ #
+
+    def _submit_live(
+        self,
+        *,
+        intent: WheelOrderIntent,
+        risk_decision: OrderRiskDecision,
+        now: datetime,
+    ) -> SubmissionOutcome:
+        del now  # LIVE TTL gates use a fresh post-I/O clock reading (ADR-0009 §4).
+
+        # 0. Live machinery must exist: missing dependencies fail closed.
+        if (
+            self._live_arming is None
+            or self._live_kill_switch is None
+            or self._session_drawdown is None
+            or self._quote_reader is None
+        ):
+            return _refuse(
+                SubmissionRefusalCode.LIVE_DEPENDENCIES_MISSING,
+                "live submission dependencies are not wired (arming/kill switch/"
+                "drawdown/quote reader); refusing the LIVE branch entirely",
+            )
+
+        # 2. Configuration gate: the full ADR-0009 conjunction, re-derived.
+        if not self._settings.live_transmission_possible:
+            return _refuse(
+                SubmissionRefusalCode.TRANSMISSION_NOT_POSSIBLE,
+                "settings.live_transmission_possible is False (the ADR-0009 live "
+                "conjunction is not satisfied)",
+            )
+
+        # 3. Fresh broker evidence -> the orders-plane live grant.
+        try:
+            status = self._connection.run(self._connection.broker.connection_status())
+        except BrokerError as error:
+            return _refuse(
+                SubmissionRefusalCode.LIVE_GRANT_DENIED,
+                f"broker connection status unavailable; refusing live submission: {error}",
+            )
+        observed_environment = classify_observed_environment(status.managed_accounts)
+        grant = resolve_live_submission(
+            order_transmission_enabled=self._settings.allow_order_transmit,
+            live_trading_enabled=self._settings.allow_live_trading,
+            live_account_allowlist=self._settings.ib_account_allowlist,
+            broker_reported_account_id=status.account_id,
+            broker_observed_environment=observed_environment,
+        )
+        if not grant.may_submit_live or grant.live_account_id is None:
+            return _refuse(
+                SubmissionRefusalCode.LIVE_GRANT_DENIED,
+                "live submission grant denied: " + "; ".join(grant.denial_reasons),
+            )
+        account_id = grant.live_account_id
+
+        # 4. Account match: intent == freshly observed connected account.
+        if intent.account_id != account_id:
+            return _refuse(
+                SubmissionRefusalCode.ACCOUNT_MISMATCH,
+                "order account does not match the broker-observed live account",
+            )
+
+        # 5. Remaining I/O evidence, gathered up front (ADR-0009 §4 step 5).
+        connection_healthy = bool(status.connected)
+        stuck_ids = self._intents.ids_in_status(
+            OrderLifecycle.SUBMISSION_UNKNOWN, current_account_id=account_id
+        )
+        quote = self._read_quote(intent)
+        nlv, nlv_error = self._read_net_liquidation()
+
+        # 6. Fresh clock AFTER the slow I/O: TTL gates must not pass on stale time.
+        fresh_now = self._clock()
+
+        drawdown_breached, drawdown_reason = self._drawdown_evidence(
+            nlv=nlv, nlv_error=nlv_error, now=fresh_now
+        )
+
+        # Data gate: fresh, acceptable-quality quote AND tick-valid limit price.
+        data_ok, data_reason = self._data_evidence(intent, quote, fresh_now)
+
+        # Risk / confirmation / arming evidence at the fresh clock.
+        risk_ok = risk_decision.approved and not OrderRiskEngine.is_expired(
+            risk_decision, now=fresh_now
+        )
+        confirmation_ok, confirmation_reason = self._confirmation_evidence(
+            intent=intent, risk_decision=risk_decision, account_id=account_id, now=fresh_now
+        )
+        armed = self._live_arming.is_armed(now=fresh_now)
+
+        # 7. Intent state + persisted preview evidence (re-fetched, not trusted).
+        stored = self._intents.get(intent.intent_id, current_account_id=account_id)
+        if stored is None or stored.status is not OrderLifecycle.USER_CONFIRMED:
+            return _refuse(
+                SubmissionRefusalCode.INTENT_NOT_CONFIRMED,
+                "intent is not in the USER_CONFIRMED state; refusing to (re)submit",
+            )
+        preview_ok = stored.preview_id is not None
+
+        # 8. The ten-gate walk — kill-switch file read LAST (ADR-0009 §4 step 8).
+        kill_switch_engaged = self._live_kill_switch.is_engaged()
+        inputs = LiveGateInputs(
+            config_live_enabled=True,
+            connection_healthy=connection_healthy,
+            reconciled=not stuck_ids,
+            data_quality_ok=data_ok,
+            risk_approved=risk_ok,
+            preview_accepted=preview_ok,
+            armed=armed,
+            confirmation_valid=confirmation_ok,
+            kill_switch_engaged=kill_switch_engaged,
+            drawdown_breached=drawdown_breached,
+            reconciliation_reason=(
+                "unresolved SUBMISSION_UNKNOWN intents block live submission: "
+                + ", ".join(stuck_ids)
+                if stuck_ids
+                else ""
+            ),
+            data_reason=data_reason,
+            confirmation_reason=confirmation_reason,
+            drawdown_reason=drawdown_reason,
+        )
+        decision = evaluate_live_gates(inputs)
+        if not decision.all_passed:
+            return _refuse(
+                SubmissionRefusalCode.LIVE_GATE_BLOCKED,
+                "live gate stack blocked submission: " + "; ".join(decision.blocking_reasons),
+            )
+
+        return self._cas_and_transmit(
+            intent=intent,
+            account_id=account_id,
+            now=fresh_now,
+            final_kill_check=True,
+            branch_detail="live order transmitted",
+        )
+
+    # ------------------------------------------------------------------ #
+    # Shared gates and the single transmit site
+    # ------------------------------------------------------------------ #
+
+    def _shared_confirmation_gates(
+        self,
+        *,
+        intent: WheelOrderIntent,
+        risk_decision: OrderRiskDecision,
+        account_id: str,
+        now: datetime,
+    ) -> SubmissionOutcome | None:
+        """Gates 5-7 of the paper chain; returns a refusal or ``None`` to pass."""
+
         if not risk_decision.approved:
             return _refuse(
                 SubmissionRefusalCode.RISK_NOT_APPROVED,
@@ -148,38 +407,108 @@ class PaperOrderSubmissionBoundary:
         if OrderRiskEngine.is_expired(risk_decision, now=now):
             return _refuse(SubmissionRefusalCode.RISK_EXPIRED, "risk decision has expired")
 
-        # 6. Typed operator confirmation: present, fresh, and hash-matched.
-        confirmation = self._confirmations.latest(intent.intent_id, current_account_id=account_id)
-        if confirmation is None:
-            return _refuse(
-                SubmissionRefusalCode.CONFIRMATION_MISSING, "no typed confirmation recorded"
-            )
-        if now >= confirmation.expires_at:
-            return _refuse(
-                SubmissionRefusalCode.CONFIRMATION_EXPIRED, "typed confirmation has expired"
-            )
-        expected_hash = order_summary_hash(intent, risk_decision_id=risk_decision.decision_id)
-        if confirmation.summary_hash != expected_hash:
-            return _refuse(
-                SubmissionRefusalCode.CONFIRMATION_MISMATCH,
-                "confirmation hash does not match the re-derived order/risk summary",
-            )
+        confirmation_ok, reason = self._confirmation_evidence(
+            intent=intent, risk_decision=risk_decision, account_id=account_id, now=now
+        )
+        if not confirmation_ok:
+            code = {
+                "missing": SubmissionRefusalCode.CONFIRMATION_MISSING,
+                "expired": SubmissionRefusalCode.CONFIRMATION_EXPIRED,
+            }.get(reason.split(":")[0], SubmissionRefusalCode.CONFIRMATION_MISMATCH)
+            return _refuse(code, reason)
 
-        # 7. Idempotency: the intent must be exactly USER_CONFIRMED (not already
-        #    submitting/submitted, not reverted).
         stored = self._intents.get(intent.intent_id, current_account_id=account_id)
         if stored is None or stored.status is not OrderLifecycle.USER_CONFIRMED:
             return _refuse(
                 SubmissionRefusalCode.INTENT_NOT_CONFIRMED,
                 "intent is not in the USER_CONFIRMED state; refusing to (re)submit",
             )
+        return None
 
+    def _confirmation_evidence(
+        self,
+        *,
+        intent: WheelOrderIntent,
+        risk_decision: OrderRiskDecision,
+        account_id: str,
+        now: datetime,
+    ) -> tuple[bool, str]:
+        confirmation = self._confirmations.latest(intent.intent_id, current_account_id=account_id)
+        if confirmation is None:
+            return False, "missing: no typed confirmation recorded"
+        if now >= confirmation.expires_at:
+            return False, "expired: typed confirmation has expired"
+        expected_hash = order_summary_hash(intent, risk_decision_id=risk_decision.decision_id)
+        if confirmation.summary_hash != expected_hash:
+            return False, (
+                "mismatch: confirmation hash does not match the re-derived order/risk summary"
+            )
+        return True, ""
+
+    def _read_quote(self, intent: WheelOrderIntent) -> MarketQuote | None:
+        assert self._quote_reader is not None  # guarded by the dependency gate
+        try:
+            return self._quote_reader(intent)
+        except Exception:
+            return None
+
+    def _read_net_liquidation(self) -> tuple[Decimal | None, str]:
+        try:
+            account = self._connection.run(self._connection.broker.account_summary())
+        except BrokerError as error:
+            return None, f"net liquidation unavailable: {error}"
+        return account.net_liquidation, ""
+
+    def _drawdown_evidence(
+        self, *, nlv: Decimal | None, nlv_error: str, now: datetime
+    ) -> tuple[bool, str]:
+        """ADR-0009 §4: an unreadable NLV refuses WITHOUT the breaker side effects."""
+
+        assert self._session_drawdown is not None  # guarded by the dependency gate
+        if nlv is None:
+            return True, (
+                "session drawdown cannot be evaluated; refusing this submission "
+                f"without engaging the kill switch ({nlv_error})"
+            )
+        decision = self._session_drawdown.check(nlv, now=now)
+        return decision.breached, decision.reason
+
+    def _data_evidence(
+        self, intent: WheelOrderIntent, quote: MarketQuote | None, now: datetime
+    ) -> tuple[bool, str]:
+        if quote is None:
+            return False, "no fresh quote available for the order's contract"
+        age = now - quote.timestamp
+        max_age = timedelta(seconds=self._settings.max_quote_age_seconds)
+        if age > max_age:
+            return False, f"quote is stale ({age.total_seconds():.1f}s old)"
+        if quote.data_quality not in _LIVE_ACCEPTABLE_QUALITY:
+            return False, f"quote data quality is not acceptable ({quote.data_quality.value})"
+        min_tick = (
+            intent.contract.min_tick
+            if intent.product_family is ProductFamily.OPTION
+            and hasattr(intent.contract, "min_tick")
+            else _STOCK_MIN_TICK
+        )
+        if not _tick_conforms(intent.limit_price, min_tick):
+            return False, (
+                f"limit price {intent.limit_price} does not conform to min tick {min_tick}"
+            )
+        return True, ""
+
+    def _cas_and_transmit(
+        self,
+        *,
+        intent: WheelOrderIntent,
+        account_id: str,
+        now: datetime,
+        final_kill_check: bool,
+        branch_detail: str,
+    ) -> SubmissionOutcome:
         # Pre-persist SUBMISSION_UNKNOWN so a crash mid-submit is recoverable.
-        # The unique pre-submit event_key is ALSO the concurrency guard: exactly
-        # one caller can win it. record_transition returns False for a duplicate
-        # (a concurrent/replayed submit of the same intent), and we MUST fail
-        # closed on that loser rather than transmit twice — the process-level
-        # writer lease is not a per-intent mutex.
+        # TRUE CAS (ADR-0009 §4 step 9): the unique pre-submit event_key refuses
+        # a duplicate/concurrent submit, and enforce_from_status refuses a
+        # submit whose intent left USER_CONFIRMED while evidence was gathered.
         won_presubmit = self._tracker.record_transition(
             intent_id=intent.intent_id,
             event_key=f"{intent.intent_id}:presubmit:SUBMISSION_UNKNOWN",
@@ -189,21 +518,54 @@ class PaperOrderSubmissionBoundary:
             current_account_id=account_id,
             evidence={"phase": "pre_submit"},
             occurred_at=now,
+            enforce_from_status=True,
         )
         if not won_presubmit:
             return _refuse(
                 SubmissionRefusalCode.INTENT_NOT_CONFIRMED,
                 "intent already left USER_CONFIRMED (a concurrent/duplicate submit "
-                "won the pre-submit guard); refusing to transmit again",
+                "or a status change won the pre-submit guard); refusing to transmit",
             )
 
-        # --- THE SINGLE transmit=True ASSIGNMENT IN THE M5 ORDER PATH --------
+        # Final kill-switch re-read (LIVE only): a local file read between the
+        # CAS and the transmit line. A refusal here is provably not-sent, so the
+        # intent is resolved to REJECTED synchronously (ADR-0009 §4 step 10).
+        if final_kill_check:
+            assert self._live_kill_switch is not None  # guarded by the dependency gate
+            if self._live_kill_switch.is_engaged():
+                self._resolve_not_sent(
+                    intent=intent,
+                    account_id=account_id,
+                    reason="kill switch engaged between pre-submit and transmit",
+                    now=now,
+                )
+                return _refuse(
+                    SubmissionRefusalCode.LIVE_GATE_BLOCKED,
+                    "kill switch engaged between pre-submit and transmit; nothing "
+                    "was sent and the intent was resolved to REJECTED",
+                )
+
+        # --- THE SINGLE transmit=True ASSIGNMENT IN chronos.orders -----------
         request = intent.to_order_request(transmit=True)
         try:
             submission = self._connection.run(self._connection.broker.submit_order(request))
+        except BrokerRefusedBeforeSend as error:
+            # The adapter refused locally before any network send: the venue
+            # provably never saw the order (ADR-0009 §6).
+            self._resolve_not_sent(
+                intent=intent,
+                account_id=account_id,
+                reason=f"broker adapter refused before send: {error}",
+                now=now,
+            )
+            return _refuse(
+                SubmissionRefusalCode.BROKER_REFUSED_BEFORE_SEND,
+                f"broker adapter refused before any network send: {error}; the "
+                "intent was resolved to REJECTED (nothing reached the venue)",
+            )
         except BrokerError as error:
-            # Leave the intent at SUBMISSION_UNKNOWN for reconciliation; never
-            # auto-retry from here.
+            # Bytes may have left: leave SUBMISSION_UNKNOWN for reconciliation;
+            # never auto-retry from here.
             return _refuse(
                 SubmissionRefusalCode.BROKER_SUBMIT_FAILED,
                 f"broker refused or failed the submission: {error}",
@@ -224,5 +586,19 @@ class PaperOrderSubmissionBoundary:
             submitted=True,
             refusal=SubmissionRefusalCode.NOT_REFUSED,
             submission=submission,
-            detail="paper order transmitted",
+            detail=branch_detail,
+        )
+
+    def _resolve_not_sent(
+        self, *, intent: WheelOrderIntent, account_id: str, reason: str, now: datetime
+    ) -> None:
+        self._tracker.record_transition(
+            intent_id=intent.intent_id,
+            event_key=f"{intent.intent_id}:presend_refusal:REJECTED",
+            source="SUBMIT",
+            from_status=OrderLifecycle.SUBMISSION_UNKNOWN,
+            to_status=OrderLifecycle.REJECTED,
+            current_account_id=account_id,
+            evidence={"phase": "refused_before_send", "reason": reason},
+            occurred_at=now,
         )

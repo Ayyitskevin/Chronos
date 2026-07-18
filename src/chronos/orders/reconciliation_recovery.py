@@ -3,15 +3,21 @@
 On startup, and after any submit whose broker id is unknown, the working
 intents are matched to broker truth by their Chronos-owned ``order_ref``
 (CHR-) and by ``permId``/executions. A SUBMISSION_UNKNOWN intent is resolved to
-its true state — SUBMITTED / PARTIALLY_FILLED / FILLED / REJECTED — and a submit
-is NEVER retried automatically: if the order is not found at the broker at all,
-it never reached the venue and resolves to REJECTED.
+its true state when the broker snapshot carries positive evidence, and a submit
+is NEVER retried automatically. Mere ABSENCE from a snapshot is NOT resolved
+automatically — a timed-out submit very often did reach the venue, so absence
+leaves the intent unresolved for the operator (M5 review remediation). The
+designed exit is :meth:`OrderRestartReconciler.operator_resolve`: an audited,
+typed-note operator action that drives a broker-absent SUBMISSION_UNKNOWN
+intent to REJECTED only against a fresh snapshot taken in the same call
+(ADR-0009 §6).
 """
 
 from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 from chronos.broker.connection import BrokerConnectionManager
 from chronos.domain.enums import OrderLifecycle
@@ -105,10 +111,12 @@ class OrderRestartReconciler:
         connection: BrokerConnectionManager,
         intents: OrderIntentRepository,
         tracker: OrderTracker,
+        market_timezone: str = "America/New_York",
     ) -> None:
         self._connection = connection
         self._intents = intents
         self._tracker = tracker
+        self._market_tz = ZoneInfo(market_timezone)
 
     def reconcile(self, *, current_account_id: str, now: datetime) -> tuple[OrderStatusUpdate, ...]:
         working = [
@@ -134,3 +142,74 @@ class OrderRestartReconciler:
             if self._tracker.ingest(update, current_account_id=current_account_id):
                 applied.append(update)
         return tuple(applied)
+
+    def operator_resolve(
+        self,
+        intent_id: str,
+        *,
+        operator_note: str,
+        current_account_id: str,
+        now: datetime,
+    ) -> bool:
+        """Audited operator resolution of a broker-absent SUBMISSION_UNKNOWN intent.
+
+        Drives the intent to REJECTED **only** when a FRESH broker snapshot
+        taken inside this call shows no matching working order and no
+        executions for its ``order_ref`` — otherwise the normal reconciliation
+        evidence applies instead and this refuses. Requires a non-empty typed
+        note; the transition is recorded with ``source="OPERATOR"`` and the
+        snapshot evidence, so recovery is a designed action, never DB surgery
+        (ADR-0009 §6).
+        """
+
+        note = operator_note.strip()
+        if not note:
+            raise ValueError("operator resolution requires a non-empty typed note")
+        intent = self._intents.get(intent_id, current_account_id=current_account_id)
+        if intent is None:
+            raise ValueError(f"unknown order intent {intent_id!r}")
+        if intent.status is not OrderLifecycle.SUBMISSION_UNKNOWN:
+            raise ValueError(
+                "operator resolution applies only to SUBMISSION_UNKNOWN intents; "
+                f"this intent is {intent.status.value}"
+            )
+        # Evidence-window guard (M7 review finding F2, the dangerous direction):
+        # IBKR's executions snapshot covers the CURRENT trading session only, so
+        # "no executions" is NOT provable absence for a submit from a prior
+        # session — a Friday fill is invisible on Monday, and resolving it to
+        # REJECTED would hide a real position. Refuse unless the intent entered
+        # SUBMISSION_UNKNOWN in the same market-timezone session the snapshot
+        # covers.
+        unknown_since = self._tracker.first_event_time(
+            intent_id,
+            to_status=OrderLifecycle.SUBMISSION_UNKNOWN,
+            current_account_id=current_account_id,
+        )
+        if unknown_since is None or (
+            unknown_since.astimezone(self._market_tz).date()
+            != now.astimezone(self._market_tz).date()
+        ):
+            raise ValueError(
+                "broker absence is not provable: the executions window covers only "
+                "the current trading session, and this intent entered "
+                "SUBMISSION_UNKNOWN outside it. Verify the order manually in TWS "
+                "(orders AND trade log AND positions) before any resolution."
+            )
+        open_orders = self._connection.run(self._connection.broker.open_orders())
+        executions = self._connection.run(self._connection.broker.executions())
+        update = resolve_from_broker_evidence(
+            intent, open_orders=open_orders, executions=executions, now=now
+        )
+        if update is not None:
+            # The broker DOES know this order — apply truth, refuse the manual
+            # rejection (the operator was about to resolve against evidence).
+            self._tracker.ingest(update, current_account_id=current_account_id)
+            return False
+        return self._tracker.record_operator_rejection(
+            intent_id=intent_id,
+            current_account_id=current_account_id,
+            note=note,
+            snapshot_open_orders=len(open_orders),
+            snapshot_executions=len(executions),
+            now=now,
+        )

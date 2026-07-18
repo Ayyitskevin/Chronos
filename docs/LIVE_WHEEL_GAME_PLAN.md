@@ -507,9 +507,51 @@ drawdown breach engages the kill switch; the `/live` endpoints). No live order
 is transmitted anywhere; `ALLOW_LIVE_TRADING` and LIVE+transmit remain refused
 by configuration until M7.
 
-**Next: Milestone 7** — live execution capability (validated without trading):
-wire `transmit=True` for the LIVE branch at the single submission boundary,
-building the live order object from the qualified contract/valid tick/confirmed
-account/DAY limit; validate the full gate walk with a **recording spy broker**
-(correct order object emitted, no order reaches a venue); then Milestone 7C for
-crypto (fractional Decimal quantities, family session calendar).
+**Milestone 7 DELIVERED (2026-07-18)** — live execution capability, validated
+without trading, per the panel-remediated design in
+`docs/adr/ADR-0009-live-submission-branch.md` (PRs #11-#13):
+
+- **M7a** settings: `ALLOW_LIVE_TRADING` honored only under the strict
+  conjunction (IBKR + official adapter + LIVE + transmit switch + U-pattern
+  account on a non-empty allowlist + arming/typed-confirmation flags); frozen
+  `Settings`; `live_transmission_possible` re-derives the conjunction on every
+  read and is structurally mutually exclusive with the paper property; pytest
+  tripwires guard against a live `.env` leaking into test runs.
+- **M7b** orders-plane live grant (`chronos.orders.live_mode`): deny-by-default
+  mirror of the paper lock, fed by broker-OBSERVED evidence
+  (`ObservedEnvironment` from managed-account patterns — never a settings
+  echo); a paper DU/DF account on the live allowlist is refused by pattern.
+  `chronos.control.modes` (autonomous plane) untouched.
+- **M7c** the boundary (`OrderSubmissionBoundary`, renamed) carries both
+  branches into ONE `transmit=True` line: fresh in-call broker evidence, I/O
+  gathered up front, TTL gates on a fresh post-I/O clock, the ten-gate
+  `evaluate_live_gates` walk (kill-switch file read last), a TRUE CAS
+  pre-submit (`enforce_from_status`), a final kill-switch re-read between CAS
+  and transmit, `BrokerRefusedBeforeSend` → synchronous REJECTED (provably
+  not sent), and the audited operator resolution
+  (`POST /orders/{id}/resolve`, typed note, fresh same-call snapshot) so a
+  stranded SUBMISSION_UNKNOWN can never permanently wedge live trading.
+  Live modify is refused (cancel + re-propose); cancel deliberately works
+  under an engaged kill switch. Declined what-ifs no longer advance the
+  lifecycle; accepted previews persist `preview_id`.
+- **M7d** `OfficialIBKRBroker` order path: whatIf preview, gated placeOrder
+  (local pre-send re-verification raising `BrokerRefusedBeforeSend`; the
+  transmit flag is mapped from the boundary's request, never a literal),
+  last-line kill-switch check on mutating calls, `open_orders` normalization,
+  observed `managed_accounts` in `connection_status`.
+- **M7e** proof: 28 recording-spy tests (happy path emits exactly one correct
+  live order object; every adversarial case leaves `submit_calls == 0`;
+  the unwedging exits proven end-to-end) plus AST structural tests (exactly
+  one `transmit=True` in `chronos.orders`, located in `submission.py`; no
+  autonomous-plane imports).
+
+**M7 honest limitations:** the official `ibapi` package is not installable in
+the build environment, so the adapter's placeOrder/cancelOrder wiring is
+validated against fake-ibapi objects and the boundary spy — **owner gateway
+verification against a running gateway remains an owner action** (§6 working
+agreement). Modify-in-place is deferred on the official adapter. No live order
+was placed during development; tests/CI construct only fakes and spies.
+
+**Next: Milestone 7C** — crypto family (fractional Decimal quantities, venue
+min-size validation, family session calendar, demo fixtures + spy validation;
+IBKR paper does not support crypto — disclosed), then Milestone 8 hardening.

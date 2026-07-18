@@ -38,7 +38,7 @@ from chronos.orders.preview import OrderPreviewService
 from chronos.orders.reconciliation_recovery import OrderRestartReconciler
 from chronos.orders.risk import OrderRiskEngine, RiskEvidence
 from chronos.orders.service import OrderManagementService
-from chronos.orders.submission import PaperOrderSubmissionBoundary, SubmissionRefusalCode
+from chronos.orders.submission import OrderSubmissionBoundary, SubmissionRefusalCode
 from chronos.orders.tracker import OrderStatusUpdate, OrderTracker
 from chronos.persistence.database import Database
 from chronos.persistence.order_repositories import (
@@ -98,7 +98,7 @@ class _Harness:
         self.intents = intents
         self.tracker = tracker
         self.tracker_repo = tracker_repo
-        boundary = PaperOrderSubmissionBoundary(
+        boundary = OrderSubmissionBoundary(
             settings=settings,
             connection=self.connection,
             intents=intents,
@@ -126,6 +126,7 @@ class _Harness:
                 tracker_repo=tracker_repo,
             ),
             tracker=tracker,
+            tracker_repo=tracker_repo,
             reconciler=OrderRestartReconciler(
                 connection=self.connection, intents=intents, tracker=tracker
             ),

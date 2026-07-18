@@ -111,6 +111,8 @@ class CallbackBridge:
         self._current_time: _SingleFlight | None = None
         self._positions: _SingleFlight | None = None
         self._open_orders: _SingleFlight | None = None
+        self._order_acks: dict[int, _SingleFlight] = {}
+        self.order_statuses: dict[int, tuple[str, float, float]] = {}
         self._quotes: dict[int, QuoteState] = {}
         self._commissions: dict[str, tuple[Decimal | None, str | None]] = {}
         self._market_rules: dict[int, list[tuple[Decimal, Decimal]]] = {}
@@ -140,6 +142,16 @@ class CallbackBridge:
         if code in _BENIGN_CODES or req_id < 0:
             with self._lock:
                 self.notices.append(f"[{code}] {message}")
+            return
+        # Order-path errors arrive keyed by ORDER id, not request id, and many
+        # venue rejects come ONLY through this callback (M7 review finding H2):
+        # complete the matching ack flight so submit/preview see the reject
+        # immediately instead of stranding on a timeout.
+        with self._lock:
+            ack = self._order_acks.get(req_id)
+        if ack is not None and not ack.done.is_set():
+            ack.items.append(("error", req_id, code, message))
+            ack.done.set()
             return
         self.registry.fail(req_id, code, message)
 
@@ -193,8 +205,12 @@ class CallbackBridge:
     def on_open_order(self, order_id: int, contract: Any, order: Any, order_state: Any) -> None:
         with self._lock:
             flight = self._open_orders
+            ack = self._order_acks.get(order_id)
         if flight is not None and not flight.done.is_set():
             flight.items.append((order_id, contract, order, order_state))
+        if ack is not None and not ack.done.is_set():
+            ack.items.append(("openOrder", order_id, contract, order, order_state))
+            ack.done.set()
 
     def on_open_order_end(self) -> None:
         with self._lock:
@@ -202,10 +218,60 @@ class CallbackBridge:
         if flight is not None:
             flight.done.set()
 
+    def reset_for_reconnect(self) -> None:
+        """Clear connection-scoped state before a fresh handshake (finding H4).
+
+        Without this, stale events let a reconnect skip handshake verification
+        and a latched ``connection_closed`` permanently marks a healthy new
+        session as dead. Order-status caches are also connection-scoped: id
+        sequences can restart across gateway sessions.
+        """
+
+        with self._lock:
+            self.connected_event.clear()
+            self.managed_accounts_event.clear()
+            self.connection_closed.clear()
+            self.managed_accounts = ()
+            self.next_valid_id = None
+            self.order_statuses.clear()
+            self._order_acks.clear()
+
+    # -- per-order acknowledgement (M7 order path) ---------------------- #
+
+    def start_order_ack(self, order_id: int) -> _SingleFlight:
+        """Await the first openOrder/orderStatus callback for one order id."""
+
+        with self._lock:
+            flight = _SingleFlight()
+            self._order_acks[order_id] = flight
+            return flight
+
+    def clear_order_ack(self, order_id: int) -> None:
+        with self._lock:
+            self._order_acks.pop(order_id, None)
+
+    def on_order_status(
+        self,
+        order_id: int,
+        status: str,
+        filled: float,
+        remaining: float,
+        avg_fill_price: float,
+        perm_id: int,
+    ) -> None:
+        with self._lock:
+            ack = self._order_acks.get(order_id)
+            self.order_statuses[order_id] = (status, filled, remaining)
+        if ack is not None and not ack.done.is_set():
+            ack.items.append(("orderStatus", order_id, status, filled, remaining, perm_id))
+            ack.done.set()
+
     def _fail_all_single_flights(self, reason: str) -> None:
         del reason  # waiters observe connection_closed; items stay as-is
         with self._lock:
-            for flight in (self._current_time, self._positions, self._open_orders):
+            flights = [self._current_time, self._positions, self._open_orders]
+            flights.extend(self._order_acks.values())
+            for flight in flights:
                 if flight is not None:
                     flight.done.set()
 

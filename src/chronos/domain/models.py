@@ -44,6 +44,10 @@ class ConnectionStatus(ChronosModel):
     data_quality: DataQuality = DataQuality.UNKNOWN
     last_successful_sync: AwareDatetime | None = None
     message: str = ""
+    # Broker-OBSERVED evidence (ADR-0009 §3): the gateway's managed-account ids
+    # as reported by the session itself — never derived from configuration.
+    # Empty means unobserved, which the live grant treats as UNKNOWN (denies).
+    managed_accounts: tuple[str, ...] = ()
 
 
 class AccountSummary(ChronosModel):
