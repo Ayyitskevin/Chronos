@@ -94,10 +94,25 @@ class OrderLifecycle(StrEnum):
     WHAT_IF_PREVIEWED = "WHAT_IF_PREVIEWED"
     USER_CONFIRMED = "USER_CONFIRMED"
     SUBMITTED = "SUBMITTED"
+    # A submit call that raised or timed out with no broker order id: the true
+    # state is unknown and must be resolved by reconciliation, never by a retry
+    # (docs/LIVE_WHEEL_GAME_PLAN.md Milestone 5).
+    SUBMISSION_UNKNOWN = "SUBMISSION_UNKNOWN"
     PARTIALLY_FILLED = "PARTIALLY_FILLED"
+    # An operator cancel has been requested but the broker has not yet confirmed
+    # it; the order is still working and may still fill.
+    CANCEL_PENDING = "CANCEL_PENDING"
     FILLED = "FILLED"
     CANCELLED = "CANCELLED"
     REJECTED = "REJECTED"
+
+
+class RiskCheckStatus(StrEnum):
+    """Tri-state result of one structured risk check; unknown fails closed."""
+
+    PASS = "PASS"
+    FAIL = "FAIL"
+    UNKNOWN = "UNKNOWN"
 
 
 class OrderSide(StrEnum):
@@ -109,6 +124,9 @@ class OrderIntent(StrEnum):
     OPEN_SHORT_PUT = "OPEN_SHORT_PUT"
     OPEN_COVERED_CALL = "OPEN_COVERED_CALL"
     CLOSE_SHORT_OPTION = "CLOSE_SHORT_OPTION"
+    # Stock fold-in (plan §6b): long-only equities through the same pipeline.
+    OPEN_LONG_STOCK = "OPEN_LONG_STOCK"
+    CLOSE_LONG_STOCK = "CLOSE_LONG_STOCK"
 
 
 class AssignmentPressure(StrEnum):

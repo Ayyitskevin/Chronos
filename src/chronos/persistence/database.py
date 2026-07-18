@@ -16,7 +16,7 @@ from sqlalchemy.pool import StaticPool
 from chronos.persistence.schema import Base, DatabaseScopeRow, SchemaVersionRow
 from chronos.utils.identifiers import account_fingerprint
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _DATABASE_RECOVERY_GUIDANCE = (
     "Preserve and back up this database first. A prior-version schema can be upgraded with "
@@ -46,6 +46,10 @@ _ACCOUNT_SCOPED_TABLES = (
     "kill_switch_events",
     "cash_reservations",
     "share_reservations",
+    # Order-management lifecycle (schema v4): account-specific order/risk data.
+    "order_events",
+    "risk_decisions",
+    "risk_check_results",
 )
 
 

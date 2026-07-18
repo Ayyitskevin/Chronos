@@ -1,0 +1,153 @@
+"""Concrete broker-reading risk-evidence provider.
+
+Gathers the :class:`~chronos.orders.risk.RiskEvidence` the engine needs from
+fresh broker reads (account, positions, open orders) plus persisted active
+intents and the family-aware trading session. This is the integration seam the
+owner exercises against a real paper gateway; the pipeline orchestration is
+tested with a canned provider, so this module is deliberately thin and
+side-effect free beyond serialized broker reads.
+
+All gross obligations are computed from broker truth (option strike times
+deliverable times contracts), never premium-netted, matching the reservation
+rules.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from decimal import Decimal
+
+from chronos.broker.connection import BrokerConnectionManager
+from chronos.config.settings import Settings
+from chronos.domain.enums import OptionRight, ProductFamily, ReconciliationStatus
+from chronos.domain.models import BrokerOrder, BrokerPosition, OptionContract
+from chronos.orders.intent import WheelOrderIntent
+from chronos.orders.risk import RiskEvidence
+from chronos.services.trading_hours import session_for
+
+
+class BrokerRiskEvidenceProvider:
+    """Read the broker + repos to assemble one intent's risk evidence."""
+
+    def __init__(
+        self,
+        *,
+        connection: BrokerConnectionManager,
+        settings: Settings,
+        reconciliation_status: ReconciliationStatus = ReconciliationStatus.RECONCILED,
+    ) -> None:
+        self._connection = connection
+        self._settings = settings
+        self._reconciliation_status = reconciliation_status
+
+    def gather(self, intent: WheelOrderIntent, *, now: datetime) -> RiskEvidence:
+        account = self._connection.run(self._connection.broker.account_summary())
+        positions = self._connection.run(self._connection.broker.positions())
+        open_orders = self._connection.run(self._connection.broker.open_orders())
+
+        existing_short_put_obligation = _short_put_obligation(positions)
+        pending_open_put_obligation = _pending_put_obligation(open_orders)
+        active_short_option_contracts = _short_option_contracts(positions)
+        settled_long_shares = _long_shares(positions, intent.symbol)
+        shares_covering_short_calls = _short_call_shares(positions, intent.symbol)
+        held_short_option_contracts = _held_short_for_symbol(positions, intent)
+
+        session = session_for(
+            intent.product_family,
+            now=now,
+            broker_confirms_open=self._broker_confirms_open(now),
+        )
+        return RiskEvidence(
+            account=account,
+            reconciliation_status=self._reconciliation_status,
+            session=session,
+            existing_short_put_obligation=existing_short_put_obligation,
+            pending_open_put_obligation=pending_open_put_obligation,
+            active_short_option_contracts=active_short_option_contracts,
+            settled_long_shares=settled_long_shares,
+            shares_covering_short_calls=shares_covering_short_calls,
+            held_short_option_contracts=held_short_option_contracts,
+        )
+
+    def _broker_confirms_open(self, now: datetime) -> bool | None:
+        # liquidHours-derived session evidence is threaded in via the adapter's
+        # qualified contract details; until an adapter surfaces it, equities stay
+        # AMBIGUOUS (fail-closed) and crypto is always open.
+        return None
+
+
+def _short_put_obligation(positions: tuple[BrokerPosition, ...]) -> Decimal:
+    total = Decimal("0")
+    for position in positions:
+        contract = position.contract
+        if (
+            isinstance(contract, OptionContract)
+            and contract.right is OptionRight.PUT
+            and position.quantity < 0
+        ):
+            contracts = abs(position.quantity)
+            deliverable = contract.deliverable_shares or contract.multiplier
+            total += contract.strike * deliverable * contracts
+    return total
+
+
+def _pending_put_obligation(open_orders: tuple[BrokerOrder, ...]) -> Decimal:
+    total = Decimal("0")
+    for order in open_orders:
+        contract = order.contract
+        if isinstance(contract, OptionContract) and contract.right is OptionRight.PUT:
+            deliverable = contract.deliverable_shares or contract.multiplier
+            total += contract.strike * deliverable * order.remaining_quantity
+    return total
+
+
+def _short_option_contracts(positions: tuple[BrokerPosition, ...]) -> int:
+    total = 0
+    for position in positions:
+        if isinstance(position.contract, OptionContract) and position.quantity < 0:
+            total += int(abs(position.quantity))
+    return total
+
+
+def _long_shares(positions: tuple[BrokerPosition, ...], symbol: str) -> Decimal:
+    total = Decimal("0")
+    for position in positions:
+        contract = position.contract
+        if (
+            not isinstance(contract, OptionContract)
+            and contract.symbol == symbol
+            and position.quantity > 0
+        ):
+            total += position.quantity
+    return total
+
+
+def _short_call_shares(positions: tuple[BrokerPosition, ...], symbol: str) -> Decimal:
+    total = Decimal("0")
+    for position in positions:
+        contract = position.contract
+        if (
+            isinstance(contract, OptionContract)
+            and contract.right is OptionRight.CALL
+            and contract.symbol == symbol
+            and position.quantity < 0
+        ):
+            deliverable = contract.deliverable_shares or contract.multiplier
+            total += abs(position.quantity) * deliverable
+    return total
+
+
+def _held_short_for_symbol(positions: tuple[BrokerPosition, ...], intent: WheelOrderIntent) -> int:
+    if intent.product_family is not ProductFamily.OPTION:
+        return 0
+    con_id = getattr(intent.contract, "con_id", None)
+    total = 0
+    for position in positions:
+        contract = position.contract
+        if (
+            isinstance(contract, OptionContract)
+            and contract.con_id == con_id
+            and position.quantity < 0
+        ):
+            total += int(abs(position.quantity))
+    return total

@@ -418,6 +418,73 @@ class ShareReservationRow(Base):
     released_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
 
 
+# --------------------------------------------------------------------------- #
+# Order-management lifecycle (schema v4; docs/LIVE_WHEEL_GAME_PLAN.md M5).
+# order_events is the append-only lifecycle log AND the duplicate-callback
+# idempotency ledger (event_key is unique); risk_decisions/risk_check_results
+# persist the structured tri-state RiskDecision with its expiry. No existing
+# table is altered, so the drift checker needs no special-casing.
+# --------------------------------------------------------------------------- #
+
+
+class OrderEventRow(Base):
+    __tablename__ = "order_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    intent_id: Mapped[str] = mapped_column(
+        ForeignKey("order_intents.intent_id"),
+        index=True,
+        nullable=False,
+    )
+    # One row per distinct broker/operator event; a duplicate callback replays
+    # the same event_key and is rejected by this uniqueness (idempotency).
+    event_key: Mapped[str] = mapped_column(String(160), unique=True, nullable=False)
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+    from_status: Mapped[str | None] = mapped_column(String(32))
+    to_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    broker_order_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    filled_quantity: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
+    remaining_quantity: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    recorded_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(),
+        default=utc_now,
+        nullable=False,
+    )
+
+
+class RiskDecisionRow(Base):
+    __tablename__ = "risk_decisions"
+
+    decision_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    correlation_id: Mapped[str | None] = mapped_column(String(80), index=True)
+    account_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(32), index=True, nullable=False)
+    product_family: Mapped[str] = mapped_column(String(16), nullable=False)
+    overall_result: Mapped[str] = mapped_column(String(16), nullable=False)
+    decided_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+
+
+class RiskCheckResultRow(Base):
+    __tablename__ = "risk_check_results"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    decision_id: Mapped[str] = mapped_column(
+        ForeignKey("risk_decisions.decision_id"),
+        index=True,
+        nullable=False,
+    )
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    check_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    detail: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+
+
 class WriterLeaseRow(Base):
     """Single-writer lease row (see chronos.utils.locking).
 

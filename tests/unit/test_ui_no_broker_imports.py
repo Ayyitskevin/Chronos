@@ -22,6 +22,7 @@ _FORBIDDEN_PREFIXES = (
     "chronos.runtime",
     "chronos.ui.session",
     "chronos.services",
+    "chronos.orders",
     "ib_async",
     "ibapi",
 )
