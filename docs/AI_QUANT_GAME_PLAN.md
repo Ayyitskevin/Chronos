@@ -20,12 +20,18 @@ different stack, every layer of which is buildable here:
    overtrading, revenge trades, unmodeled costs, silent overfitting. Chronos has already
    engineered much of this away (fail-closed risk, frozen selection criteria, kill
    switches, honest measurement). Discipline is the moat; everything else stands on it.
-2. **Structural premia, not predictions.** The committed strategy set harvests documented,
-   capacity-tolerant sources of return: the volatility risk premium (the Wheel),
-   regime-conditioned trend, and short-horizon mean reversion. None require winning a race.
-3. **Breadth through automation.** One human cannot watch 40 strategies across three asset
-   families. A machine that scans, sizes, and journals everything — and only escalates
-   decisions — can.
+2. **Structural premia, not predictions.** The committed strategy set *targets* documented,
+   capacity-tolerant sources of return: the volatility risk premium (the Wheel) and
+   regime-conditioned trend, with short-horizon mean reversion held as a re-test hypothesis
+   (`docs/STRATEGY_SELECTION.md`). None require winning a race — and none is yet validated
+   in-house (zero candidates selected). The research factory exists to test these premia
+   under frozen criteria, not to presume them.
+3. **Breadth through automation.** One human cannot continuously watch the dozens of
+   strategy–symbol–regime combinations the factory may eventually validate across three
+   asset families. A machine that scans, sizes, and journals everything — and only
+   escalates decisions — can. (Today that breadth is prospective: the corpus holds ~4
+   distinct executable systems and zero validated strategies; breadth is an *output* of
+   the factory, not a present asset.)
 4. **Research velocity with anti-overfitting rails.** AI makes hypothesis generation cheap.
    Cheap hypotheses are dangerous without multiple-testing controls, so the research
    factory (Phase C) pairs AI-speed iteration with tooling-enforced holdout discipline —
@@ -39,10 +45,12 @@ different stack, every layer of which is buildable here:
 wheeling requires funding (a cash-secured put on even a $20 underlying reserves ~$2,000);
 stock and crypto in small size are the executable families today. This plan is deliberately
 **capability-first**: build the machine now so that capital, when added, drops into a
-proven system rather than an experiment.
+proven system rather than an experiment. Until the account is funded, any live order is a
+pipeline-acceptance test, not trading — and milestones state their capital thresholds so
+no session operationalizes theater at sizes where costs dominate.
 
-**The AI boundary (unchanged, load-bearing):** ADR-0004 / DECISIONS.md D-11 — *no
-generative model output feeds any runtime order decision.* The AI layer reads state and
+**The AI boundary (unchanged, load-bearing):** ADR-0004 / DECISIONS.md D-11, verbatim —
+*no generative model output feeds any runtime decision.* The AI layer reads state and
 knowledge, writes analysis, proposals, and explanations; deterministic, tested code
 evaluates every gate and owns the single transmit site. "AI quant" here means
 AI-accelerated research and AI-explained operations around a deterministic executor —
@@ -111,8 +119,9 @@ Verified by repo survey 2026-07-18:
    │ P2 RESEARCH FACTORY        │      │ single transmit site, gates,  │
    │ data plane (IBKR history), │      │ arming, kill switch, breaker  │
    │ walk-forward, purged CV,   │      └──────────▲────────────────────┘
-   │ experiment registry, wheel │                 │ human-confirmed intents
-   │ simulator                  │      ┌──────────┴────────────────────┐
+   │ experiment registry, wheel │                 │ proposed intents (all gates;
+   │ simulator                  │                 │ authorization per Phase E rung)
+   │                            │      ┌──────────┴────────────────────┐
    └───────────┬────────────────┘      │ P6 AUTONOMY LADDER (capstone) │
                │ promotes (frozen      │ scheduler → proposed intents →│
                └──── criteria only) ──▶│ graduated shadow/paper/canary │
@@ -144,7 +153,9 @@ Verified by repo survey 2026-07-18:
   scheduler-driven strategy evaluation → auto-*proposed* intents awaiting human
   confirmation → bounded unattended paper autonomy → tiny-size live canary — each rung a
   separate owner decision, each requiring frozen-criteria validation, each capped by the
-  existing kill-switch/drawdown machinery. No strategy skips rungs.
+  existing kill-switch/drawdown machinery. No strategy skips rungs. Rungs E3 and beyond
+  additionally require a redesigned standing-authorization model (milestone E3a) delivered
+  through a reviewed release — unattended operation is never a configuration change.
 
 ---
 
@@ -159,7 +170,7 @@ with the standard report and an explicit owner go/no-go before the next begins.
 |---|-----------|------|--------------------|
 | A1 | **M7 — Live execution capability, validated without trading** | L | `transmit=True` for the LIVE branch at the single submission boundary only; live order object from qualified contract / valid tick / confirmed account / DAY limit; full ten-gate walk validated with a recording spy broker (wrong-account, arming-expiry, confirmation-mismatch, kill-switch-interruption cases); **no order reaches any venue in dev/test/CI** |
 | A2 | **M7C — Crypto family** | M | Spot-only, fractional Decimal quantities, venue min-size validation, family session calendar, `CRYPTO_ALLOWLIST` default-empty; demo fixtures + spy validation (IBKR paper does not support crypto — disclosed) |
-| A3 | **M8 — Hardening, chaos, docs, PR** | M | Wheel-path chaos tests; README rewrite (fixes the stale "live hard-disabled" posture text); `docs/limitations.md`; full-suite soak; adversarial self-review; PR |
+| A3 | **M8 — Hardening, chaos, docs, PR** | M | Wheel-path chaos tests; README rewrite (fixes the stale "live hard-disabled" posture text); `docs/limitations.md`; retire the legacy in-process Streamlit app (superseded by the thin-client UI, slated for removal since M5); full-suite soak; adversarial self-review; PR |
 
 ### Phase B — Strategy Knowledge Base (the library becomes queryable)
 
@@ -172,11 +183,12 @@ with the standard report and an explicit owner go/no-go before the next begins.
 
 | # | Milestone | Size | Definition of done |
 |---|-----------|------|--------------------|
-| C1 | **IBKR historical data pipeline** | L | `reqHistoricalData` in the read-only adapter path (no order surface touched); incremental local bar store with provenance manifests; uniform adjustment handling (total-return aware); pacing-compliant backfill; data-quality gate reuse; **fresh holdout windows declared and embargoed in tooling before any strategy sees the data** |
-| C2 | **Experiment registry + holdout guardian** | M | Every research run recorded (config hash, data hashes, criteria version, stage, git commit); holdout reads mediated by the registry — consuming a holdout requires an explicit, logged, once-only unlock; the M5 review's "burned holdout" failure class becomes structurally impossible |
-| C3 | **Walk-forward + statistics upgrade** | L | Rolling-window walk-forward loop in code; purged/embargoed CV; bootstrap CIs on all headline metrics; deflated Sharpe / multiple-testing adjustment reported alongside every result; low-sample verdicts stay blocking |
-| C4 | **Re-validation campaign** | M | The two reserved hypotheses (regime_trend_v1 on liquid indices; mean_reversion_v1 on small-caps) re-run on trusted uniform data under re-frozen criteria with fresh holdouts; next-tier corpus candidates (from SKB) triaged; outcome recorded honestly — zero-selected remains an acceptable answer |
-| C5 | **Wheel/options research capability** | L | Forward-building options dataset (scheduled chain/IV snapshot capture into the local store — history accrues from day one); Wheel lifecycle simulator (CSP → assignment → covered call → called away) on underlying bars + captured/estimated premium surfaces, with model risk quantified and disclosed; cost/assignment stress grids |
+| C0 | **Options chain/IV forward capture — deploy ASAP** | S | Scheduled snapshot capture of option chains/IV/greeks for allowlisted underlyings into the local store with provenance manifests. Deployed as early as the two-process topology (C1) allows — IBKR provides **no historical data for expired options**, so every week of delay is unrecoverable history. $0-tier capture is delayed/EOD-snapshot quality (real-time OPRA is a paid subscription IBKR has historically gated on account minimums); staleness is recorded in the manifests, not hidden |
+| C1 | **IBKR historical bar pipeline** | L | `reqHistoricalData` runs in a **separate read-only data process** with its own gateway client id — it never holds the writer lease and never imports `chronos.orders` (enforced by the same AST + subprocess import-isolation tests that guard the UI); pacing-compliant backfill coordinated with the trading backend; the store keeps **unadjusted bars plus a corporate-action/dividend event stream**, deriving adjusted/total-return views at read time — never incrementally appending to an adjusted series (retroactive re-adjustment would silently break hash-pinned provenance); data-quality gate reuse; **fresh holdout windows declared and embargoed in tooling before any strategy sees the data** |
+| C2 | **Experiment registry + holdout guardian** | M | Every research run recorded (config hash, data hashes, criteria version, stage, git commit); the multiple-testing trial count is **derived automatically from the registry** — every walk-forward inner-loop parameter configuration and every AI-drafted proposal that touched data counts as a trial (self-reported N is theater); holdout reads mediated by the registry — consuming a holdout requires an explicit, logged, once-only unlock **typed by the owner; no scheduled job, proposal-execution path, or copilot artifact can invoke it**; a holdout budget policy rations unlocks against newly accrued data; the M5 review's "burned holdout" failure class becomes structurally impossible |
+| C3 | **Walk-forward + statistics upgrade** | L | Rolling-window walk-forward loop in code with fixed reporting rules: what may be labeled out-of-sample is defined up front, and per-window re-optimization counts each configuration as a registry trial. Statistics scoped to what the samples support: bar-level stationary/block bootstrap CIs (not IID trade-level resampling on autocorrelated series); deflated Sharpe with registry-derived trial counts; purged/embargoed CV applied **only** to fitted-model/parameter-search workflows (fixed-rule replays have nothing to purge); low-sample verdicts stay blocking. Stated plainly: at current trade frequencies this upgrade **formalizes rejection rather than enabling validation** — the binding fix is longer uniform history (C1) and/or higher-frequency strategy families |
+| C4 | **Re-validation campaign** | M | Preceded by **pre-registered power arithmetic** (expected trades per candidate per clean window; earliest arithmetically-possible pass date) and a **contamination map** of seen/burned/clean symbol-windows — QQQ is burned through 2024-01 and 2018–2021 is seen on all five symbols; the pooling question (whether the ≥20-trade floor may aggregate across the uniform panel) is decided at criteria re-freeze time, before results exist. If the arithmetic shows a pass is impossible in the available clean windows, C4 re-scopes to contamination mapping and **spends no holdout unlocks**. Otherwise: the two reserved hypotheses re-run on trusted uniform data under re-frozen criteria with fresh holdouts; next-tier SKB candidates triaged; outcome recorded honestly — zero-selected remains an acceptable answer |
+| C5 | **Wheel/options research capability** | L | Wheel lifecycle simulator (CSP → assignment → covered call → called away) on underlying bars plus captured (C0) and estimated premium surfaces, with estimate-vs-capture model risk quantified and disclosed; cost/assignment stress grids. Honesty bound stated in the deliverable itself: with no expired-options backfill available, captured surfaces accrue at calendar speed and will span few volatility regimes for years — C5 therefore delivers **stress-grid analysis and model-risk measurement, not frozen-criteria Wheel validation**; validation requires either the paid-data decision (N2) or an explicitly accepted multi-year capture horizon |
 
 ### Phase D — Operations ledger + AI copilot
 
@@ -184,21 +196,23 @@ with the standard report and an explicit owner go/no-go before the next begins.
 |---|-----------|------|--------------------|
 | D1 | **P&L attribution + tracking error** | M | Per-strategy/per-family realized+unrealized P&L pipeline from broker truth; live/paper vs backtest tracking-error monitor; strategy health states (healthy / degraded / halted) persisted and displayed |
 | D2 | **Notifications** | S | Push/email on kill-switch engagement, drawdown trip, halt, fill, reconciliation anomaly (existing notifier protocol, real channels) |
-| D3 | **AI copilot v1 (advisory plane)** | L | Morning brief (positions, risk state, regime context, calendar); trade theses citing SKB entries + current risk evidence; post-trade attribution narratives; anomaly explanations. Structural guarantees: copilot package cannot import order/submission/broker-write modules (AST + subprocess tests, same pattern as UI isolation); all output labeled advisory; **zero generative output parsed into any runtime decision** (ADR-0004 restated) |
-| D4 | **AI research assistant** | M | Copilot drafts research proposals (hypothesis, SKB lineage, test spec) as structured documents the experiment registry can execute; proposals are inputs to the frozen-criteria pipeline, never shortcuts around it |
+| D3 | **AI copilot v1 (advisory plane)** | L | Morning brief (positions, risk state, regime context, calendar); trade theses citing SKB entries + current risk evidence; post-trade attribution narratives; anomaly explanations. Structural guarantees, both required: (a) the copilot package cannot import order/submission/broker-write modules (AST + subprocess tests, same pattern as UI isolation); (b) **data-flow isolation** — copilot output is written only to a designated advisory store, and a test asserts no runtime module (`chronos.orders`, the allocator, the scheduler, strategy-health logic) reads from that store. All output labeled advisory; **no generative model output feeds any runtime decision** (ADR-0004 / D-11, verbatim) |
+| D4 | **AI research assistant** | M | Copilot drafts research proposals (hypothesis, SKB lineage, test spec) as structured documents; the experiment registry executes a proposal **only after explicit owner review**, treats it identically to a human-authored one, and counts it in trial accounting; proposals can never trigger a holdout unlock and never shortcut the frozen-criteria pipeline |
 
 ### Phase E — Portfolio layer + autonomy ladder (each rung an explicit owner decision)
 
 | # | Milestone | Size | Definition of done |
 |---|-----------|------|--------------------|
-| E1 | **Portfolio allocator** | L | Cross-strategy/cross-family capital allocation with per-symbol/per-family caps, position netting, conflict resolution; outputs *suggested* intents into the existing human-confirmed pipeline; account equity/positions from broker truth |
+| E1 | **Portfolio allocator** | L | Cross-strategy/cross-family capital allocation with per-symbol/per-family caps, position netting, conflict resolution; outputs *suggested* intents into the existing human-confirmed pipeline; account equity/positions from broker truth. Capital threshold: designed now, **dormant below ~$10k deployed** — below that, multi-sleeve splitting multiplies IBKR's $1/order minimum into a prohibitive per-sleeve cost floor, so the allocator's useful outputs are netting and conflict checks only |
 | E2 | **Scheduler + proposed-intent queue (semi-auto)** | M | Scheduled evaluation on fresh data; qualifying strategies enqueue fully-built proposed intents; the owner reviews/confirms in the dashboard — the confirmation and transmit path is byte-identical to manual flow |
-| E3 | **Bounded paper autonomy** | L | New reviewed release per `docs/GO_LIVE_CHECKLIST.md` doctrine: unattended paper-only operation for promoted strategies inside hard caps (orders/day, notional, loss); every safety layer active; soak period with published tracking-error results |
-| E4 | **Live canary autonomy** | L | Only for strategies that cleared frozen criteria AND the paper soak; minimum-size live operation under graduated caps; kill-switch/drawdown/halt machinery unchanged; expansion of size is an owner decision per strategy, informed by D1 evidence |
+| E3a | **Standing-authorization redesign (safety-critical scope)** | M | Design document + independent adversarial review for the E3+ authorization model: per-order typed confirmation and session arming are replaced at unattended rungs by an **owner-pre-authorized, revocable envelope** (per-strategy caps: orders/day, notional, loss, symbol set, expiry; kill-switch precedence absolute). This is the reserved `ALLOW_AUTOMATED_TRANSMISSION` seam from LIVE_WHEEL_GAME_PLAN §6b made concrete. No unattended order exists until this ships in a reviewed release |
+| E3 | **Bounded paper autonomy** | L | New reviewed release per `docs/GO_LIVE_CHECKLIST.md` doctrine, implementing E3a's authorization model: unattended paper-only operation for promoted strategies inside the pre-authorized envelope; every other safety layer active and unchanged; soak period with published tracking-error results |
+| E4 | **Live canary autonomy** | L | **Its own future reviewed release with a fresh independent adversarial review** (Gate-4 doctrine, `docs/GO_LIVE_CHECKLIST.md`). Only for strategies that cleared frozen criteria AND the E3 paper soak; minimum-size live operation under graduated caps, running through the `chronos.orders` plane — the autonomous plane's CANARY_LIVE/LIVE hard denial (`control/modes.py`, `control/promotion.py`, ADR-0007) **stays untouched**; equivalent promotion machinery (versioned promotion records, single-step rung progression, gates written before the run) is built for the orders plane as part of this milestone; kill-switch/drawdown/halt machinery unchanged; size expansion is a per-strategy owner decision informed by D1 evidence |
 
 Phases B and C can interleave with Phase A if the owner prefers research progress while
 M7's owner-gated items (ibapi install, gateway verification) are pending — B1/B2 touch no
-execution code. Default order is as listed.
+execution code, and C0 should deploy as early as the C1 two-process topology allows,
+because captured options history is unrecoverable. Default order is as listed.
 
 ---
 
@@ -209,12 +223,20 @@ execution code. Default order is as listed.
    module may assign or override the final transmit state — including everything built by
    this plan.
 3. Market orders are impossible; puts are cash-secured; naked calls can never be enabled
-   through configuration in the MVP.
-4. No generative model output feeds any runtime order decision (ADR-0004). The copilot
-   plane is read-and-advise only, enforced structurally by import-isolation tests.
+   through configuration. No phase of this plan changes this; any future revisit requires
+   an explicit owner directive plus a reviewed release — this document grants neither.
+4. No generative model output feeds any runtime **decision** (ADR-0004 / D-11, verbatim —
+   not merely order decisions). The copilot plane is read-and-advise only, enforced
+   structurally by import isolation AND data-flow isolation (no runtime module reads the
+   advisory store).
 5. All safety machinery (mode lock, arming, per-order confirmation, kill switch,
-   drawdown breaker, writer lease, halt) applies to autonomous rungs exactly as to manual
-   flow — autonomy changes who *proposes*, never what *gates*.
+   drawdown breaker, writer lease, halt) applies **unchanged through rung E2** — up to
+   there, autonomy changes who *proposes*, never what *gates*. Rungs E3+ replace
+   per-order typed confirmation and session arming with the E3a standing-authorization
+   envelope; that substitution is itself safety-critical scope requiring its own design
+   document, independent adversarial review, and reviewed release before any unattended
+   order — and it never touches the kill switch, drawdown breaker, mode lock, writer
+   lease, or halt, which apply identically at every rung.
 6. Frozen-criteria promotion: no strategy reaches paper autonomy, let alone live, without
    passing criteria that were frozen before its results existed. "Zero selected, with
    better evidence" remains a valid outcome of any research phase.
@@ -238,10 +260,14 @@ explicit acceptance of spec-level parity); ibapi install + gateway verification 
 New for this plan:
 - **N1. Funding intent.** The plan is capability-first regardless, but knowing the target
   account size (and when) lets C4/C5 prioritize the strategy families you'll actually run.
-- **N2. Data budget.** IBKR historical data is free within pacing limits for held account
-  types; if deeper options history is ever wanted, paid sources (e.g. an options-data
-  vendor) are an explicit future decision — the plan assumes $0 data spend and builds
-  forward-capture instead.
+- **N2. Data budget.** IBKR historical *bar* data is free within pacing limits for held
+  account types, but IBKR provides **no historical data for expired options** — there is
+  no backfill path at any spend level through IBKR. The plan assumes $0 data spend and
+  builds forward capture (C0) instead, accepting that $0-tier capture is delayed/EOD
+  quality (real-time OPRA is a paid subscription IBKR has historically gated on account
+  minimums). Consequence stated plainly: meaningful frozen-criteria Wheel validation
+  requires either a paid options-data vendor (explicit future owner decision) or an
+  accepted multi-year capture horizon.
 - **N3. Copilot model + spend.** D3/D4 run an LLM on schedule; owner picks the
   model/frequency/budget envelope. All copilot output is stored locally.
 - **N4. Autonomy appetite.** E2 (semi-auto proposals) vs E3/E4 (unattended) are separate
@@ -252,6 +278,26 @@ New for this plan:
 ## 6. Working protocol (unchanged)
 
 Milestone-by-milestone: build → gates (ruff, mypy --strict, pytest) → adversarial review
-for safety-relevant milestones → report (Completed / Files changed / Commands+results /
-Known limitations / Safety status / Proposed next) → **explicit owner go-ahead** → next.
+for safety-relevant milestones — explicitly: **A1, A2, C2, D3, E1, E2, E3a, E3, E4**
+(anything that constructs intents, mediates holdouts, authors operator-facing trade
+rationale, or changes authorization; the implementing session may add to this list but
+never remove from it) → report (Completed / Files changed / Commands+results / Known
+limitations / Safety status / Proposed next) → **explicit owner go-ahead** → next.
 All work on the designated branch; PR per milestone into `feat/wheel-dashboard-mvp`.
+
+---
+
+## 7. Review record
+
+2026-07-18: this plan was adversarially reviewed before adoption by two independent
+reviewers (quantitative-research honesty; safety-invariant consistency — a third,
+facts/sequencing, was verified inline after an infrastructure failure). Confirmed
+findings, all remediated in this text: the original invariant 5 was logically impossible
+for unattended rungs (fixed via E3a); E4 lacked the reviewed-release doctrine; the AI
+boundary had been silently narrowed from D-11's "any runtime decision" (restored, with
+data-flow isolation added); an "in the MVP" qualifier weakened the naked-call invariant
+(struck); C4's power arithmetic and contamination map were missing; C0 was split out of
+C5 because expired-options history is unrecoverable; C3's statistics were rescoped to
+what n<30 trade samples support. Known soft spots a future reviewer should re-attack:
+the E3a authorization design (deliberately unspecified here), the C5 premium-estimation
+model risk, and any drift between this plan and LIVE_WHEEL_GAME_PLAN §7 owner decisions.
