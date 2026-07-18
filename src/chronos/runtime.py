@@ -18,9 +18,23 @@ from chronos.broker.connection import BrokerConnectionManager
 from chronos.broker.demo import DemoBroker, demo_now
 from chronos.broker.market_data import MarketDataManager
 from chronos.config.settings import Settings, get_settings
-from chronos.domain.enums import BrokerAdapter, BrokerMode, ConnectionState
+from chronos.domain.enums import BrokerAdapter, BrokerMode, ConnectionState, IBEnvironment
 from chronos.domain.models import AccountSummary, ConnectionStatus
+from chronos.orders.evidence import BrokerRiskEvidenceProvider
+from chronos.orders.mutations import OrderCancellationService, OrderModificationService
+from chronos.orders.preview import OrderPreviewService
+from chronos.orders.reconciliation_recovery import OrderRestartReconciler
+from chronos.orders.risk import OrderRiskEngine
+from chronos.orders.service import OrderManagementService
+from chronos.orders.submission import PaperOrderSubmissionBoundary
+from chronos.orders.tracker import OrderTracker
 from chronos.persistence.database import Database
+from chronos.persistence.order_repositories import (
+    OrderConfirmationRepository,
+    OrderIntentRepository,
+    OrderTrackerRepository,
+    RiskDecisionRepository,
+)
 from chronos.persistence.repositories import LocalReconciliationRepository
 from chronos.services.reconciliation import ReconciliationCoordinator
 from chronos.services.short_put_candidates import ShortPutCandidateService
@@ -45,6 +59,7 @@ class AppRuntime:
     short_put_risk_preview: ShortPutRiskPreviewService
     short_put_demo_what_if: ShortPutDemoWhatIfService
     short_put_demo_approval: ShortPutDemoApprovalService
+    order_management: OrderManagementService
 
     def close(self) -> None:
         try:
@@ -138,6 +153,12 @@ def build_runtime(*, register_atexit: bool = True) -> AppRuntime:
             settings,
             clock=demo_now if isinstance(broker, DemoBroker) else None,
         )
+        order_management = _build_order_management(
+            settings=settings,
+            connection=connection,
+            database=database,
+            account=account,
+        )
     except BaseException:
         if connection is not None:
             try:
@@ -167,7 +188,57 @@ def build_runtime(*, register_atexit: bool = True) -> AppRuntime:
         short_put_risk_preview=short_put_risk_preview,
         short_put_demo_what_if=short_put_demo_what_if,
         short_put_demo_approval=short_put_demo_approval,
+        order_management=order_management,
     )
     if register_atexit:
         atexit.register(runtime.close)
     return runtime
+
+
+def _build_order_management(
+    *,
+    settings: Settings,
+    connection: BrokerConnectionManager,
+    database: Database,
+    account: AccountSummary,
+) -> OrderManagementService:
+    """Wire the Milestone 5 human-in-the-loop order pipeline into the runtime."""
+
+    intents = OrderIntentRepository(database.sessions)
+    tracker_repo = OrderTrackerRepository(database.sessions)
+    confirmations = OrderConfirmationRepository(database.sessions)
+    risk_decisions = RiskDecisionRepository(database.sessions)
+    tracker = OrderTracker(intents, tracker_repo)
+    return OrderManagementService(
+        settings=settings,
+        environment=settings.ib_environment,
+        account_id=account.account_id,
+        evidence_provider=BrokerRiskEvidenceProvider(connection=connection, settings=settings),
+        risk_engine=OrderRiskEngine(settings),
+        preview_service=OrderPreviewService(connection),
+        submission_boundary=PaperOrderSubmissionBoundary(
+            settings=settings,
+            connection=connection,
+            intents=intents,
+            confirmations=confirmations,
+            tracker=tracker_repo,
+        ),
+        modification=OrderModificationService(
+            connection=connection,
+            intents=intents,
+            tracker=tracker,
+            tracker_repo=tracker_repo,
+        ),
+        cancellation=OrderCancellationService(
+            connection=connection,
+            intents=intents,
+            tracker=tracker,
+            tracker_repo=tracker_repo,
+        ),
+        tracker=tracker,
+        reconciler=OrderRestartReconciler(connection=connection, intents=intents, tracker=tracker),
+        intents=intents,
+        confirmations=confirmations,
+        risk_decisions=risk_decisions,
+        broker_environment_is_paper=settings.ib_environment is IBEnvironment.PAPER,
+    )

@@ -59,6 +59,9 @@ _ACTIVE_SUBMITTED_ORDER_LIFECYCLES = frozenset(
     {
         OrderLifecycle.SUBMITTED,
         OrderLifecycle.PARTIALLY_FILLED,
+        # An in-flight cancel is still a working order at the broker until the
+        # cancel confirms; it must count as active for ownership/reconciliation.
+        OrderLifecycle.CANCEL_PENDING,
     }
 )
 _TERMINAL_SUBMITTED_ORDER_LIFECYCLES = frozenset(
@@ -598,8 +601,10 @@ def _persisted_order_identity(
 def _side_for_order_intent(intent: OrderIntent) -> OrderSide:
     if intent in {OrderIntent.OPEN_SHORT_PUT, OrderIntent.OPEN_COVERED_CALL}:
         return OrderSide.SELL
-    if intent is OrderIntent.CLOSE_SHORT_OPTION:
+    if intent in {OrderIntent.CLOSE_SHORT_OPTION, OrderIntent.OPEN_LONG_STOCK}:
         return OrderSide.BUY
+    if intent is OrderIntent.CLOSE_LONG_STOCK:
+        return OrderSide.SELL
     raise ValueError("Persisted order draft has an unsupported intent")
 
 

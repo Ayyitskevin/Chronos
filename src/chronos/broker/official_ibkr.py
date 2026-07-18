@@ -78,9 +78,14 @@ _INSTALL_GUIDANCE = (
 )
 
 _ORDER_PATH_GUIDANCE = (
-    "Order transmission through the official adapter arrives with the Milestone 5-7 "
-    "order service and live gate stack (docs/LIVE_WHEEL_GAME_PLAN.md); the adapter "
-    "is read-only until then."
+    "The Milestone 5 order-management pipeline (chronos.orders) is complete and drives "
+    "any Broker implementation through its single paper submission boundary. This "
+    "official TWS adapter's placeOrder/cancelOrder wiring is validated in Milestone 7 "
+    "with a recording spy broker (a correct order object is emitted without any order "
+    "reaching a venue), because the official ibapi package is not installable in this "
+    "environment; the owner completes gateway verification against a running paper "
+    "gateway (docs/LIVE_WHEEL_GAME_PLAN.md). Until that wiring lands the official "
+    "adapter refuses order methods and stays read-only."
 )
 
 
@@ -744,7 +749,8 @@ class OfficialIBKRBroker:
         del contract_ids
 
     # ------------------------------------------------------------------ #
-    # Order surface: refused until the Milestone 5-7 order service exists
+    # Order surface: the chronos.orders pipeline is complete (M5); this
+    # adapter's transmission wiring is recording-spy validated in M7.
     # ------------------------------------------------------------------ #
 
     async def preview_order(self, request: OrderRequest) -> OrderPreview:

@@ -439,11 +439,48 @@ are enforced by tests: the UI reaches no broker module (AST walk + subprocess
 sys.modules probe) and no page exposes a submit/transmit control. Gates green:
 full pytest suite passing, mypy --strict clean, ruff clean.
 
+**Milestone 5 delivered** the human-in-the-loop paper order-management
+pipeline in a NEW, isolated `chronos.orders` package (it imports nothing from
+the autonomous `chronos.execution`/`chronos.risk`, which stay live-incapable):
+`WheelOrderIntent` + deterministic idempotency key; a structured tri-state risk
+engine (`OrderRiskDecision`, per-check PASS/FAIL/UNKNOWN, unknown⇒fail, decision
+expiry, the full check list incl. cash-secured-put at gross, covered-call
+coverage, concentration, session-open, allowlist, caps, stock whole-share/
+no-short); what-if preview; the SINGLE paper submission boundary
+(`PaperOrderSubmissionBoundary.submit` — the only `transmit=True` in the
+codebase, behind a fail-closed gate chain: lease → transmission_possible →
+mode-lock PAPER_SUBMISSION → account match → risk approved+unexpired → typed
+confirmation hash-match+TTL → USER_CONFIRMED idempotency); the order tracker
+(lifecycle + duplicate-callback idempotency + partial-fill monotonicity);
+buy-to-close, limit-only modify, cancel through CANCEL_PENDING; restart
+reconciliation + SUBMISSION_UNKNOWN recovery (matches by `order_ref`, resolves
+not-found to REJECTED, NEVER auto-retries); persistence v4 (`order_events`,
+`risk_decisions`, `risk_check_results` + migration 0003); the `/orders/*` API
+(token + writer-lease + allowlist gated); and `scripts/paper_soak_report.py`.
+Stocks fold into the same pipeline (limit DAY, whole shares, long-only).
+
+New `OrderLifecycle` states: `SUBMISSION_UNKNOWN`, `CANCEL_PENDING`. New
+`RiskCheckStatus` enum. New stock `OrderIntent` members.
+
+**M5 verification:** full pytest suite green (1419 passed), mypy --strict
+clean, ruff clean. The pipeline is proven against a recording `FakeBroker` (the
+happy path transmits exactly once with `transmit=True` to a paper account;
+every refusal path leaves `submit_calls == 0`). `DemoBroker.submit_order` still
+raises; `settings.transmission_possible` is False in every non-paper config, so
+no order is placed by any test/CI/dev path.
+
+**M5 owner-verified boundary (honest limitation):** the `OfficialIBKRBroker`
+order methods still refuse — the official `ibapi` package is not installable in
+this environment, so the adapter's `placeOrder`/`cancelOrder` wiring is
+recording-spy validated in Milestone 7 (a correct order object emitted without
+reaching a venue) and gateway-verified by the owner against a running paper
+gateway, per §6's working agreement. The complete pipeline drives any `Broker`
+implementation, so this is the one remaining integration seam.
+
 The IBKR MCP connector is authorized and verified (account: USD 110 cash, no
 positions — options wheeling requires further funding; stock/crypto families
 are the executable ones at this size).
 
-**Next: Milestone 5** — paper order management (order intent, risk engine,
-what-if preview, paper submission, order tracker, buy-to-close, modification,
-cancellation, partial fills, restart reconciliation, paper validation report;
-wire liquidHours into trading_hours `broker_confirms_open`).
+**Next: Milestone 6** — live safety layer (the eight-gate stack formalized,
+live arming with TTL, session-drawdown breaker, kill switch, and the posture
+migration of all "live impossible" claims to the split model).

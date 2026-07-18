@@ -8,6 +8,8 @@ submit/transmit control.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 import httpx
 import pytest
 from streamlit.testing.v1 import AppTest
@@ -77,10 +79,18 @@ def _mock_client() -> ApiClient:
 
 
 @pytest.fixture(autouse=True)
-def _reset_cache() -> None:
+def _reset_cache() -> Iterator[None]:
     import streamlit as st
 
+    from chronos.config.settings import get_settings
+
     st.cache_resource.clear()
+    # backend_app._build_client evaluates get_settings() as the argument to the
+    # (patched) ApiClient.from_settings, populating the process-wide lru_cache.
+    # Clear it so a later test's DATABASE_URL/env monkeypatch is honoured.
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 def _patch_from_settings(monkeypatch: pytest.MonkeyPatch, factory: object) -> None:

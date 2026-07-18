@@ -170,8 +170,11 @@ def test_schema_initialization_creates_required_evidence_tables() -> None:
         "strategy_state",
         "submitted_orders",
         "wheel_cycles",
+        "order_events",
+        "risk_decisions",
+        "risk_check_results",
     } <= names
-    assert SCHEMA_VERSION == 3
+    assert SCHEMA_VERSION == 4
 
 
 def test_application_events_are_append_only_and_queryable() -> None:

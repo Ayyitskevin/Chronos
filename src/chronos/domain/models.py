@@ -404,7 +404,10 @@ class BrokerOrder(ChronosModel):
 class OrderRequest(ChronosModel):
     correlation_id: str
     account_id: str
-    contract: OptionContract
+    # Instrument (UnderlyingContract | OptionContract) so equity orders (plan
+    # §6b stock fold-in) traverse the same submission boundary as options.
+    # OptionContract remains valid, so existing option callers are unaffected.
+    contract: Instrument
     intent: OrderIntent
     side: OrderSide
     quantity: PositiveInt
