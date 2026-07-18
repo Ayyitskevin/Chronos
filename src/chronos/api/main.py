@@ -35,36 +35,53 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         runtime.database.sessions,
         holder=f"backend:{runtime.settings.backend_host}:{runtime.settings.backend_port}",
     )
-    read_only = not lease.acquire()
-    if read_only:
-        holder = lease.state().holder
-        _logger.warning(
-            "Another Chronos backend holds the writer lease; starting READ-ONLY",
-            extra={"event": "backend_read_only", "lease_holder": holder},
-        )
-    app.state.backend = BackendState(
-        runtime=runtime,
-        lease=None if read_only else lease,
-        read_only=read_only,
-    )
-    app.state.api_token = load_or_create_token(runtime.settings.backend_token_file)
-    if not read_only:
-        # A writer backend resolves any orders left at SUBMISSION_UNKNOWN by a
-        # prior crash — by order_ref against broker truth, never by re-submitting.
-        # Read-only backends must not write, so they skip it.
-        try:
-            resolved = runtime.order_management.reconcile_on_restart()
-            if resolved:
-                _logger.info(
-                    "Resolved %d order(s) during startup reconciliation",
-                    resolved,
-                    extra={"event": "order_restart_reconciled", "resolved": resolved},
-                )
-        except Exception:
-            _logger.exception(
-                "Order restart reconciliation failed; continuing (orders stay unresolved)",
-                extra={"event": "order_restart_reconcile_failed"},
+    # Everything between the lease acquire and the yield must be cleaned up if it
+    # raises — otherwise a failure here (e.g. an unwritable token dir) would leak
+    # the runtime AND leave the single-writer lease held by a dead process, so a
+    # restart would boot read-only.
+    read_only = True
+    try:
+        read_only = not lease.acquire()
+        if read_only:
+            holder = lease.state().holder
+            _logger.warning(
+                "Another Chronos backend holds the writer lease; starting READ-ONLY",
+                extra={"event": "backend_read_only", "lease_holder": holder},
             )
+        app.state.backend = BackendState(
+            runtime=runtime,
+            lease=None if read_only else lease,
+            read_only=read_only,
+        )
+        app.state.api_token = load_or_create_token(runtime.settings.backend_token_file)
+        if not read_only:
+            # A writer backend resolves any orders left at SUBMISSION_UNKNOWN by a
+            # prior crash — by order_ref against broker truth, never re-submitting.
+            # Read-only backends must not write, so they skip it.
+            try:
+                resolved = runtime.order_management.reconcile_on_restart()
+                if resolved:
+                    _logger.info(
+                        "Resolved %d order(s) during startup reconciliation",
+                        resolved,
+                        extra={"event": "order_restart_reconciled", "resolved": resolved},
+                    )
+            except Exception:
+                _logger.exception(
+                    "Order restart reconciliation failed; continuing (orders unresolved)",
+                    extra={"event": "order_restart_reconcile_failed"},
+                )
+    except BaseException:
+        if not read_only:
+            try:
+                lease.release()
+            except Exception:
+                _logger.exception(
+                    "Failed to release the writer lease during aborted startup",
+                    extra={"event": "backend_startup_lease_release_failed"},
+                )
+        runtime.close()
+        raise
     try:
         yield
     finally:

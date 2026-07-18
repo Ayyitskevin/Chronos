@@ -448,7 +448,9 @@ expiry, the full check list incl. cash-secured-put at gross, covered-call
 coverage, concentration, session-open, allowlist, caps, stock whole-share/
 no-short); what-if preview; the SINGLE paper submission boundary
 (`PaperOrderSubmissionBoundary.submit` — the only `transmit=True` in the
-codebase, behind a fail-closed gate chain: lease → transmission_possible →
+live-Wheel `chronos.orders` path; the dormant autonomous
+`chronos.execution` adapter has its own separate, unreachable one — behind a
+fail-closed gate chain: lease → transmission_possible →
 mode-lock PAPER_SUBMISSION → account match → risk approved+unexpired → typed
 confirmation hash-match+TTL → USER_CONFIRMED idempotency); the order tracker
 (lifecycle + duplicate-callback idempotency + partial-fill monotonicity);

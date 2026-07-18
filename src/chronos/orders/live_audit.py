@@ -12,7 +12,10 @@ from datetime import datetime
 
 from sqlalchemy.orm import Session, sessionmaker
 
-from chronos.persistence.repositories import _require_scope
+from chronos.persistence.repositories import (
+    _reject_raw_account_event_data,
+    _require_scope,
+)
 from chronos.persistence.schema import KillSwitchEventRow, LiveArmEventRow
 
 
@@ -24,6 +27,9 @@ class LiveArmEventRepository:
         self._fingerprint = account_fingerprint
 
     def record(self, *, event: str, reason: str, occurred_at: datetime) -> None:
+        # Defense-in-depth: the reason is free text; never let a raw broker
+        # account id land in the audit trail (only the fingerprint may).
+        _reject_raw_account_event_data(persisted_values=(event, reason))
         with self._sessions.begin() as session:
             _require_scope(session)
             session.add(
@@ -50,6 +56,9 @@ class KillSwitchEventRepository:
         detail: dict[str, object],
         occurred_at: datetime,
     ) -> None:
+        # Defense-in-depth: the operator-supplied reason/note in detail is free
+        # text; never let a raw broker account id land in the audit trail.
+        _reject_raw_account_event_data(persisted_values=(action, initiated_by, *detail.values()))
         with self._sessions.begin() as session:
             _require_scope(session)
             session.add(

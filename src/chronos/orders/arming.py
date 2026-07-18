@@ -14,6 +14,7 @@ them. This mirrors the spec rule "never log raw live-arm phrases".
 from __future__ import annotations
 
 import hmac
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Protocol
@@ -66,36 +67,58 @@ class LiveArmingService:
         self._ttl = timedelta(minutes=ttl_minutes)
         self._audit = audit or NullArmAuditSink()
         self._arm: _Arm | None = None
+        # Sync FastAPI routes run in a threadpool; concurrent arm/is_armed/revoke
+        # would otherwise race on _arm (e.g. double-recording a lazy expiry).
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def _require_aware(now: datetime) -> None:
+        if now.tzinfo is None:
+            raise ValueError("live-arming timestamps must be timezone-aware")
 
     def arm(self, typed_phrase: str, *, now: datetime, reason: str = "operator arm") -> ArmState:
-        # Constant-time compare; the raw phrase is never stored or logged.
-        if not hmac.compare_digest(typed_phrase, REQUIRED_ARM_PHRASE):
+        self._require_aware(now)
+        # Compare as bytes so a non-ASCII phrase is a clean mismatch rather than
+        # a TypeError (hmac.compare_digest rejects non-ASCII str); the raw phrase
+        # is never stored, logged, or echoed.
+        if not hmac.compare_digest(
+            typed_phrase.encode("utf-8"), REQUIRED_ARM_PHRASE.encode("utf-8")
+        ):
             raise LiveArmingError("live arm phrase did not match the required phrase")
-        expires_at = now + self._ttl
-        self._arm = _Arm(expires_at=expires_at, reason=reason)
+        with self._lock:
+            expires_at = now + self._ttl
+            self._arm = _Arm(expires_at=expires_at, reason=reason)
         self._audit.record(event="armed", reason=reason, occurred_at=now)
         return ArmState(armed=True, expires_at=expires_at, reason=reason)
 
     def is_armed(self, *, now: datetime) -> bool:
-        arm = self._arm
-        if arm is None:
-            return False
-        if now >= arm.expires_at:
-            # Lazily expire: clear the token and record the expiry once.
-            self._arm = None
-            self._audit.record(event="expired", reason=arm.reason, occurred_at=now)
-            return False
-        return True
+        self._require_aware(now)
+        with self._lock:
+            arm = self._arm
+            if arm is None:
+                return False
+            if now >= arm.expires_at:
+                # Lazily expire: clear the token and record the expiry once.
+                self._arm = None
+                expired_reason = arm.reason
+            else:
+                return True
+        self._audit.record(event="expired", reason=expired_reason, occurred_at=now)
+        return False
 
     def revoke(self, *, now: datetime, reason: str = "operator revoke") -> ArmState:
-        if self._arm is not None:
+        self._require_aware(now)
+        with self._lock:
+            had_arm = self._arm is not None
             self._arm = None
+        if had_arm:
             self._audit.record(event="revoked", reason=reason, occurred_at=now)
         return ArmState(armed=False, reason=reason)
 
     def state(self, *, now: datetime) -> ArmState:
         if self.is_armed(now=now):
-            arm = self._arm
-            assert arm is not None  # is_armed True guarantees a live arm
-            return ArmState(armed=True, expires_at=arm.expires_at, reason=arm.reason)
+            with self._lock:
+                arm = self._arm
+            if arm is not None:
+                return ArmState(armed=True, expires_at=arm.expires_at, reason=arm.reason)
         return ArmState(armed=False)

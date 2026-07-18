@@ -13,12 +13,16 @@ from __future__ import annotations
 import json
 import os
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from chronos.domain.models import ChronosModel
 from chronos.orders.kill_switch import LiveKillSwitch
+
+
+class _CorruptBaseline(Exception):
+    """The session-baseline file is present but unreadable for this session."""
 
 
 class DrawdownDecision(ChronosModel):
@@ -53,19 +57,37 @@ class SessionDrawdownBreaker:
         return now.astimezone(self._tz).date().isoformat()
 
     def _read_baseline(self, session_date: str) -> Decimal | None:
+        """Return today's baseline, ``None`` to (re)establish, or raise on corrupt.
+
+        A genuinely absent file (fresh deploy) or a different ``session_date``
+        (new trading day) returns ``None`` so ``check`` establishes a fresh
+        baseline. A file that is PRESENT but unreadable/unparseable — or whose
+        baseline for TODAY is non-numeric/non-finite/non-positive — raises
+        :class:`_CorruptBaseline`, so ``check`` fails CLOSED rather than
+        silently re-baselining at a possibly drawn-down value.
+        """
+
         try:
-            payload = json.loads(self._path.read_text(encoding="utf-8"))
+            text = self._path.read_text(encoding="utf-8")
         except FileNotFoundError:
-            return None
-        except (OSError, ValueError, TypeError):
-            return None
-        if not isinstance(payload, dict) or payload.get("session_date") != session_date:
-            return None
-        raw = payload.get("baseline_nlv")
+            return None  # absent: establish a fresh baseline
+        except OSError as error:
+            raise _CorruptBaseline(f"baseline file unreadable: {error}") from error
         try:
-            return Decimal(str(raw))
-        except (TypeError, ValueError):
-            return None
+            payload = json.loads(text)
+        except ValueError as error:
+            raise _CorruptBaseline(f"baseline file is not valid JSON: {error}") from error
+        if not isinstance(payload, dict):
+            raise _CorruptBaseline("baseline file is not a JSON object")
+        if payload.get("session_date") != session_date:
+            return None  # new trading day: establish a fresh baseline
+        try:
+            value = Decimal(str(payload.get("baseline_nlv")))
+        except (InvalidOperation, ValueError, TypeError) as error:
+            raise _CorruptBaseline(f"baseline_nlv is not a number: {error}") from error
+        if not value.is_finite() or value <= 0:
+            raise _CorruptBaseline(f"baseline_nlv is not a positive finite number: {value}")
+        return value
 
     def _write_baseline(self, session_date: str, baseline: Decimal, now: datetime) -> None:
         payload = {
@@ -82,10 +104,46 @@ class SessionDrawdownBreaker:
         finally:
             os.close(descriptor)
         os.replace(temp, self._path)
+        # fsync the parent directory so a just-established baseline survives OS
+        # power loss (parity with the kill switch); otherwise a lost baseline
+        # reads as "absent" on restart and re-establishes at the current NLV.
+        dir_fd = os.open(str(self._path.parent), os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+
+    def _tripped(
+        self, session_date: str, current_nlv: Decimal, reason: str, now: datetime
+    ) -> DrawdownDecision:
+        if self._kill_switch is not None and not self._kill_switch.is_engaged():
+            self._kill_switch.engage(
+                reason=f"session drawdown breaker: {reason}",
+                initiated_by="session_drawdown_breaker",
+                now=now,
+            )
+        return DrawdownDecision(
+            breached=True,
+            session_date=session_date,
+            baseline_nlv=Decimal("0"),
+            current_nlv=current_nlv,
+            drawdown_usd=Decimal("0"),
+            drawdown_pct=Decimal("0"),
+            reason=reason,
+        )
 
     def check(self, current_nlv: Decimal, *, now: datetime) -> DrawdownDecision:
         session_date = self._session_date(now)
-        baseline = self._read_baseline(session_date)
+        try:
+            baseline = self._read_baseline(session_date)
+        except _CorruptBaseline as error:
+            # Fail CLOSED: a corrupt in-session baseline could hide a drawdown.
+            return self._tripped(
+                session_date,
+                current_nlv,
+                f"session baseline unreadable; failing closed: {error}",
+                now,
+            )
         if baseline is None:
             # First observation this session establishes the baseline.
             baseline = current_nlv

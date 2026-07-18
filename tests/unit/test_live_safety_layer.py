@@ -38,6 +38,21 @@ def test_arm_requires_exact_phrase() -> None:
     assert not service.is_armed(now=_NOW)
 
 
+def test_arm_non_ascii_phrase_rejected_cleanly() -> None:
+    # A non-ASCII phrase must be a clean mismatch, not a TypeError from
+    # hmac.compare_digest (which would surface as a 500 in the API).
+    service = LiveArmingService(ttl_minutes=15)
+    with pytest.raises(LiveArmingError):
+        service.arm("I ACCEPT LIVE TRADING RÌSK", now=_NOW)
+    assert not service.is_armed(now=_NOW)
+
+
+def test_arm_requires_timezone_aware_now() -> None:
+    service = LiveArmingService(ttl_minutes=15)
+    with pytest.raises(ValueError, match="timezone-aware"):
+        service.arm(REQUIRED_ARM_PHRASE, now=datetime(2026, 7, 17, 15, 0))  # noqa: DTZ001
+
+
 def test_arm_grants_then_expires() -> None:
     service = LiveArmingService(ttl_minutes=15)
     service.arm(REQUIRED_ARM_PHRASE, now=_NOW)
@@ -141,6 +156,49 @@ def test_drawdown_new_session_resets_baseline(tmp_path: Path) -> None:
     decision = breaker.check(Decimal("90000"), now=next_day)
     assert decision.baseline_nlv == Decimal("90000")
     assert not decision.breached
+
+
+def test_drawdown_corrupt_baseline_fails_closed(tmp_path: Path) -> None:
+    # A PRESENT but unreadable baseline must fail CLOSED (breach + engage the
+    # kill switch), NOT silently re-baseline at the current (drawn-down) value.
+    switch = LiveKillSwitch(tmp_path / "ks.json")
+    breaker = _breaker(tmp_path, kill_switch=switch)
+    breaker.check(Decimal("100000"), now=_NOW)  # establish
+    (tmp_path / "baseline.json").write_text("{ not valid json", encoding="utf-8")
+    decision = breaker.check(Decimal("90000"), now=_NOW)
+    assert decision.breached
+    assert switch.is_engaged()
+    assert "failing closed" in decision.reason
+
+
+def test_drawdown_nan_baseline_fails_closed(tmp_path: Path) -> None:
+    # A well-formed file whose baseline for TODAY is NaN/non-numeric fails closed.
+    import json
+
+    switch = LiveKillSwitch(tmp_path / "ks.json")
+    breaker = _breaker(tmp_path, kill_switch=switch)
+    breaker.check(Decimal("100000"), now=_NOW)  # establish (writes today's session_date)
+    payload = json.loads((tmp_path / "baseline.json").read_text())
+    payload["baseline_nlv"] = "NaN"  # today's baseline is now non-numeric
+    (tmp_path / "baseline.json").write_text(json.dumps(payload), encoding="utf-8")
+    decision = breaker.check(Decimal("95000"), now=_NOW)
+    assert decision.breached
+    assert switch.is_engaged()
+
+
+def test_arm_audit_rejects_raw_account_id() -> None:
+    # Defense-in-depth: a raw broker account id in a free-text reason is refused.
+    from chronos.orders.live_audit import LiveArmEventRepository
+
+    class _Sessions:
+        def begin(self) -> object:  # pragma: no cover - never reached (guard first)
+            raise AssertionError("should reject before opening a session")
+
+    repo = LiveArmEventRepository.__new__(LiveArmEventRepository)
+    repo._sessions = _Sessions()  # type: ignore[attr-defined]
+    repo._fingerprint = "abc123"  # type: ignore[attr-defined]
+    with pytest.raises(ValueError, match="raw broker account"):
+        repo.record(event="armed", reason="halted account DU1234567", occurred_at=_NOW)
 
 
 # --- live gate stack ------------------------------------------------------
