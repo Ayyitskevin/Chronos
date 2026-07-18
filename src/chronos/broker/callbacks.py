@@ -143,6 +143,16 @@ class CallbackBridge:
             with self._lock:
                 self.notices.append(f"[{code}] {message}")
             return
+        # Order-path errors arrive keyed by ORDER id, not request id, and many
+        # venue rejects come ONLY through this callback (M7 review finding H2):
+        # complete the matching ack flight so submit/preview see the reject
+        # immediately instead of stranding on a timeout.
+        with self._lock:
+            ack = self._order_acks.get(req_id)
+        if ack is not None and not ack.done.is_set():
+            ack.items.append(("error", req_id, code, message))
+            ack.done.set()
+            return
         self.registry.fail(req_id, code, message)
 
     # ------------------------------------------------------------------ #
@@ -207,6 +217,24 @@ class CallbackBridge:
             flight = self._open_orders
         if flight is not None:
             flight.done.set()
+
+    def reset_for_reconnect(self) -> None:
+        """Clear connection-scoped state before a fresh handshake (finding H4).
+
+        Without this, stale events let a reconnect skip handshake verification
+        and a latched ``connection_closed`` permanently marks a healthy new
+        session as dead. Order-status caches are also connection-scoped: id
+        sequences can restart across gateway sessions.
+        """
+
+        with self._lock:
+            self.connected_event.clear()
+            self.managed_accounts_event.clear()
+            self.connection_closed.clear()
+            self.managed_accounts = ()
+            self.next_valid_id = None
+            self.order_statuses.clear()
+            self._order_acks.clear()
 
     # -- per-order acknowledgement (M7 order path) ---------------------- #
 

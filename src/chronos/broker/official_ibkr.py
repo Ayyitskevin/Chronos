@@ -1,4 +1,4 @@
-"""Production IBKR adapter on the official TWS API (read-only at M2).
+"""Production IBKR adapter on the official TWS API (read paths + M7 order path).
 
 Design (docs/LIVE_WHEEL_GAME_PLAN.md, Milestone 2):
 
@@ -96,21 +96,16 @@ _QUOTE_TIMEOUT_S = 15.0
 _PAPER_PORTS = frozenset({7497, 4002})
 _LIVE_PORTS = frozenset({7496, 4001})
 
+# TWS error codes that are DEFINITIVE order rejections (the order will never
+# work at the venue): price violations, rejected/unavailable orders, and
+# validation failures. Ambiguous codes deliberately stay out — those leave the
+# intent SUBMISSION_UNKNOWN for reconciliation (M7 review finding H2).
+_DEFINITIVE_ORDER_REJECT_CODES = frozenset({110, 201, 203, 321, 10268})
+
 _INSTALL_GUIDANCE = (
     "The official IBKR TWS API package (ibapi) is not installed. It is not on "
     "PyPI: download the TWS API from interactivebrokers.github.io, then install "
     "the bundled Python client (see docs/ibkr_setup.md). Demo mode runs without it."
-)
-
-_ORDER_PATH_GUIDANCE = (
-    "The Milestone 5 order-management pipeline (chronos.orders) is complete and drives "
-    "any Broker implementation through its single paper submission boundary. This "
-    "official TWS adapter's placeOrder/cancelOrder wiring is validated in Milestone 7 "
-    "with a recording spy broker (a correct order object is emitted without any order "
-    "reaching a venue), because the official ibapi package is not installable in this "
-    "environment; the owner completes gateway verification against a running paper "
-    "gateway (docs/LIVE_WHEEL_GAME_PLAN.md). Until that wiring lands the official "
-    "adapter refuses order methods and stays read-only."
 )
 
 
@@ -123,6 +118,17 @@ def _load_ibapi() -> tuple[Any, Any, Any, Any]:
     except ImportError as error:
         raise BrokerError(_INSTALL_GUIDANCE) from error
     return EClient, EWrapper, Contract, ExecutionFilter
+
+
+def _load_order_class() -> Any:
+    """The real ``ibapi.order.Order`` — a dedicated loader so the order path
+    can never silently bind to the wrong ibapi class (M7 review finding C1)."""
+
+    try:
+        from ibapi.order import Order
+    except ImportError as error:
+        raise BrokerRefusedBeforeSend(_INSTALL_GUIDANCE) from error
+    return Order
 
 
 def _make_app(bridge: CallbackBridge) -> Any:
@@ -549,6 +555,9 @@ class OfficialIBKRBroker:
     async def connect(self) -> None:
         if self._app is not None:
             return
+        # Fresh handshake state: stale events must not vouch for a new session
+        # (M7 review finding H4).
+        self.bridge.reset_for_reconnect()
         app = _make_app(self.bridge)
         app.connect(self._settings.ib_host, self._settings.ib_port, self._settings.ib_client_id)
         thread = threading.Thread(target=app.run, name="chronos-ibapi-reader", daemon=True)
@@ -608,7 +617,14 @@ class OfficialIBKRBroker:
             state=ConnectionState.CONNECTED if connected else ConnectionState.DISCONNECTED,
             environment=environment,
             connected=connected,
-            account_id=self._settings.ib_account_id if connected else None,
+            # Broker-corroborated identity (review finding M2): the configured
+            # id is reported ONLY while the gateway currently manages it —
+            # otherwise None, which every grant path denies.
+            account_id=(
+                self._settings.ib_account_id
+                if connected and self._settings.ib_account_id in self.bridge.managed_accounts
+                else None
+            ),
             data_quality=DataQuality.UNKNOWN,
             message="official TWS API adapter",
             # Broker-OBSERVED evidence (ADR-0009 §3): what the gateway itself
@@ -707,14 +723,42 @@ class OfficialIBKRBroker:
             raise BrokerConnectionError("open-orders request did not complete")
         orders: list[BrokerOrder] = []
         for order_id, contract, order, order_state in flight.items:
-            instrument = instrument_from_contract(contract)
+            order_ref = str(getattr(order, "orderRef", "") or "")
+            is_chronos = order_ref.startswith("CHR-")
             order_type = str(getattr(order, "orderType", "") or "")
             limit_price = Decimal(str(getattr(order, "lmtPrice", 0) or 0))
-            if order_type != "LMT" or limit_price <= 0:
-                raise BrokerSafetyError(
-                    f"open order {order_id} is not a positive-limit LMT order "
-                    f"({order_type!r}); refusing to normalize non-Chronos order shapes"
+            raw_action = str(getattr(order, "action", "") or "")
+            conforming = (
+                order_type == "LMT"
+                and limit_price > 0
+                and raw_action in {side.value for side in OrderSide}
+            )
+            if not conforming:
+                if is_chronos:
+                    # A Chronos-owned order in a non-Chronos shape is evidence
+                    # of corruption: hard fail-closed.
+                    raise BrokerSafetyError(
+                        f"Chronos open order {order_id} ({order_ref}) is not a "
+                        f"positive-limit LMT order ({order_type!r}); refusing"
+                    )
+                # FOREIGN orders (manual TWS/mobile, other client ids) must not
+                # wedge reconciliation or the operator-resolve snapshot (M7
+                # review finding H1): quarantine with a notice and move on —
+                # Chronos never acts on orders it does not own anyway.
+                self.bridge.notices.append(
+                    f"[foreign-order] skipped non-LMT open order {order_id} "
+                    f"({order_type!r}, ref={order_ref!r}) during normalization"
                 )
+                continue
+            try:
+                instrument = instrument_from_contract(contract)
+            except BrokerError:
+                if is_chronos:
+                    raise
+                self.bridge.notices.append(
+                    f"[foreign-order] skipped unnormalizable open order {order_id}"
+                )
+                continue
             quantity = Decimal(str(getattr(order, "totalQuantity", 0) or 0))
             status_entry = self.bridge.order_statuses.get(order_id)
             raw_status = (
@@ -734,7 +778,7 @@ class OfficialIBKRBroker:
                     account_id=str(getattr(order, "account", "") or ""),
                     order_ref=str(getattr(order, "orderRef", "") or "") or None,
                     contract=instrument,
-                    side=OrderSide(str(getattr(order, "action", "BUY"))),
+                    side=OrderSide(raw_action),
                     quantity=quantity,
                     filled_quantity=filled,
                     remaining_quantity=remaining,
@@ -859,7 +903,10 @@ class OfficialIBKRBroker:
         """Local, pre-send re-verification shared by the order methods."""
 
         app = self._app
-        if app is None:
+        if app is None or self.bridge.connection_closed.is_set():
+            # Local, provable pre-send fact: a dead session sends nothing
+            # (review finding H3 — refusing here prevents a stranded
+            # SUBMISSION_UNKNOWN for an order that could never leave).
             raise BrokerRefusedBeforeSend("not connected; no order call was sent")
         verify_environment_port(self._settings.ib_environment, self._settings.ib_port)
         expected = self._settings.ib_account_id
@@ -880,7 +927,8 @@ class OfficialIBKRBroker:
         return app
 
     def _build_order_objects(self, request: OrderRequest, *, what_if: bool) -> tuple[Any, Any]:
-        _, _, Contract, Order = _load_ibapi()
+        _, _, Contract, _ = _load_ibapi()
+        Order = _load_order_class()
         con_id = getattr(request.contract, "con_id", None)
         if not con_id:
             raise BrokerRefusedBeforeSend("contract is not qualified (no con_id); refusing")
@@ -923,14 +971,40 @@ class OfficialIBKRBroker:
         if request.transmit:
             raise BrokerRefusedBeforeSend("previews must never carry transmit=True; refusing")
         contract, order = self._build_order_objects(request, what_if=True)
-        order_id = self.order_ids.allocate()
-        app.placeOrder(order_id, contract, order)
-        ack = await self._await_order_ack(order_id)
+        try:
+            order_id = self.order_ids.allocate()
+        except RuntimeError as error:  # pre-send local fact (finding L1)
+            raise BrokerRefusedBeforeSend(f"order-id allocator not seeded: {error}") from error
+        # Register the ack BEFORE placeOrder — the reader thread can answer in
+        # the gap otherwise (finding M4; mirrors submit_order).
+        flight = self.bridge.start_order_ack(order_id)
+        try:
+            app.placeOrder(order_id, contract, order)
+            done = await asyncio.get_running_loop().run_in_executor(
+                None, flight.done.wait, _REQUEST_TIMEOUT_S
+            )
+            if not done or not flight.items:
+                raise BrokerConnectionError(f"no whatIf acknowledgement for order {order_id}")
+            ack = tuple(flight.items[0])
+        finally:
+            self.bridge.clear_order_ack(order_id)
+        if ack[0] == "error":
+            # The gateway answered the whatIf with an error: a declined preview,
+            # not acceptance evidence (finding H2).
+            return OrderPreview(
+                request=request,
+                accepted=False,
+                warnings=(f"[{ack[2]}] {ack[3]}",),
+                broker_message=str(ack[3]),
+                previewed_at=datetime.now(tz=UTC),
+            )
         if ack[0] != "openOrder":
             raise BrokerDataError("whatIf preview did not return an order state")
         order_state = ack[4]
         commission = clean_price(_maybe_float(getattr(order_state, "commission", None)))
-        accepted = str(getattr(order_state, "status", "")).lower() not in {"inactive", "rejected"}
+        # Fail-closed acceptance (review finding M1): only known-good statuses
+        # count; an absent/empty/unknown status is NOT acceptance evidence.
+        accepted = str(getattr(order_state, "status", "")).lower() in {"presubmitted", "submitted"}
         return OrderPreview(
             request=request,
             accepted=accepted,
@@ -961,14 +1035,18 @@ class OfficialIBKRBroker:
                 "from the submission boundary; refusing before send"
             )
         contract, order = self._build_order_objects(request, what_if=False)
-        order_id = self.order_ids.allocate()
+        try:
+            order_id = self.order_ids.allocate()
+        except RuntimeError as error:  # pre-send local fact (finding L1)
+            raise BrokerRefusedBeforeSend(f"order-id allocator not seeded: {error}") from error
         flight = self.bridge.start_order_ack(order_id)
         try:
             app.placeOrder(order_id, contract, order)
             done = await asyncio.get_running_loop().run_in_executor(
                 None, flight.done.wait, _REQUEST_TIMEOUT_S
             )
-            if not done or self.bridge.connection_closed.is_set():
+            # A captured ack outranks a subsequent connection close (finding L3).
+            if not done or (not flight.items and self.bridge.connection_closed.is_set()):
                 # Bytes may have left: NOT a refused-before-send.
                 raise BrokerConnectionError(
                     f"no acknowledgement for order {order_id}; state unknown"
@@ -978,14 +1056,30 @@ class OfficialIBKRBroker:
             self.bridge.clear_order_ack(order_id)
         raw_status = ""
         perm_id: int | None = None
-        if payload and payload[0] == "orderStatus":
+        filled = Decimal("0")
+        remaining = Decimal(request.quantity)
+        if payload and payload[0] == "error":
+            # The gateway answered placeOrder with an error callback (finding
+            # H2). placeOrder WAS called, so this is post-send territory: a
+            # definitive venue reject maps to REJECTED; anything ambiguous
+            # stays unknown for reconciliation.
+            code = int(payload[2])
+            if code in _DEFINITIVE_ORDER_REJECT_CODES:
+                raw_status = "Inactive"
+            else:
+                raise BrokerConnectionError(
+                    f"order {order_id} errored ambiguously ([{code}] {payload[3]}); state unknown"
+                )
+        elif payload and payload[0] == "orderStatus":
             raw_status = str(payload[2])
             perm_id = int(payload[5]) or None
+            filled = Decimal(str(payload[3]))
+            remaining = Decimal(str(payload[4]))
         elif payload and payload[0] == "openOrder":
             raw_status = str(getattr(payload[4], "status", "") or "")
             perm_id = int(getattr(payload[3], "permId", 0) or 0) or None
         lifecycle = broker_status_to_lifecycle(
-            raw_status, filled_quantity=Decimal("0"), remaining_quantity=Decimal(request.quantity)
+            raw_status, filled_quantity=filled, remaining_quantity=remaining
         )
         return OrderSubmission(
             correlation_id=request.correlation_id,
@@ -1012,7 +1106,7 @@ class OfficialIBKRBroker:
         # Deliberately NOT kill-switch gated: cancellation is risk-reducing and
         # must work during an emergency stop (ADR-0009 §7).
         app = self._app
-        if app is None:
+        if app is None or self.bridge.connection_closed.is_set():
             raise BrokerRefusedBeforeSend("not connected; no cancel was sent")
         verify_environment_port(self._settings.ib_environment, self._settings.ib_port)
         flight = self.bridge.start_order_ack(broker_order_id)
