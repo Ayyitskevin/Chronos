@@ -10,29 +10,32 @@ Design (docs/LIVE_WHEEL_GAME_PLAN.md, Milestone 2):
   forwards primitive callback payloads into the import-safe
   :class:`~chronos.broker.callbacks.CallbackBridge`; async methods await the
   correlated results through the request registry.
-- Read paths only. Order methods raise :class:`BrokerSafetyError` until the
-  Milestone 5-7 order service exists — the live path arrives there, by
-  design, not here.
+- Read paths plus the M7 order path (ADR-0009 §8): preview/submit/cancel are
+  driven ONLY by the chronos.orders submission boundary; every LOCAL refusal
+  raises :class:`BrokerRefusedBeforeSend` (provably nothing reached the
+  gateway socket).
 - Fail-closed normalization: unsupported security types, unparseable
   payloads, or missing account identity raise instead of guessing.
 """
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import threading
 from collections.abc import Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Protocol
 
 from chronos.broker.base import (
     BrokerConnectionError,
     BrokerDataError,
     BrokerError,
+    BrokerRefusedBeforeSend,
     BrokerSafetyError,
 )
-from chronos.broker.callbacks import CallbackBridge, QuoteState
+from chronos.broker.callbacks import CallbackBridge, QuoteState, clean_price
 from chronos.broker.order_ids import OrderIdAllocator
 from chronos.broker.request_registry import RequestRegistry
 from chronos.config.settings import Settings
@@ -42,6 +45,7 @@ from chronos.domain.enums import (
     DisplayEnvironment,
     IBEnvironment,
     OptionRight,
+    OrderLifecycle,
     OrderSide,
 )
 from chronos.domain.models import (
@@ -63,6 +67,27 @@ from chronos.domain.models import (
     OrderSubmission,
     UnderlyingContract,
 )
+from chronos.orders.tracker import broker_status_to_lifecycle
+
+
+class _KillSwitchLike(Protocol):
+    """Structural type for the last-line breaker check (avoids an import cycle)."""
+
+    def is_engaged(self) -> bool: ...
+
+
+def _maybe_float(value: Any) -> float | None:
+    """ibapi order-state money fields arrive as strings, floats, or sentinels."""
+
+    if value is None:
+        return None
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    # ibapi uses very large sentinel values for "unset".
+    return result if abs(result) < 1e300 else None
+
 
 _CONNECT_TIMEOUT_S = 15.0
 _REQUEST_TIMEOUT_S = 20.0
@@ -192,6 +217,30 @@ def _make_app(bridge: CallbackBridge) -> Any:
 
         def openOrderEnd(self) -> None:
             bridge.on_open_order_end()
+
+        def orderStatus(
+            self,
+            orderId: int,
+            status: str,
+            filled: Any,
+            remaining: Any,
+            avgFillPrice: float,
+            permId: int,
+            parentId: int,
+            lastFillPrice: float,
+            clientId: int,
+            whyHeld: str,
+            mktCapPrice: float,
+        ) -> None:
+            del parentId, lastFillPrice, clientId, whyHeld, mktCapPrice
+            bridge.on_order_status(
+                int(orderId),
+                str(status),
+                float(filled),
+                float(remaining),
+                float(avgFillPrice),
+                int(permId),
+            )
 
         def tickPrice(self, reqId: int, tickType: int, price: float, attrib: Any) -> None:
             bridge.on_tick_price(int(reqId), int(tickType), float(price))
@@ -466,9 +515,12 @@ def verify_environment_port(environment: IBEnvironment, port: int) -> None:
 
 
 class OfficialIBKRBroker:
-    """Read-only production adapter over the official TWS API."""
+    """Production adapter over the official TWS API (read paths + M7 order path)."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self, settings: Settings, *, live_kill_switch: _KillSwitchLike | None = None
+    ) -> None:
+        self._live_kill_switch = live_kill_switch
         _load_ibapi()  # fail fast with install guidance if the package is absent
         if not settings.ib_account_id.strip():
             raise BrokerSafetyError(
@@ -558,7 +610,10 @@ class OfficialIBKRBroker:
             connected=connected,
             account_id=self._settings.ib_account_id if connected else None,
             data_quality=DataQuality.UNKNOWN,
-            message="official TWS API adapter (read-only until Milestone 5)",
+            message="official TWS API adapter",
+            # Broker-OBSERVED evidence (ADR-0009 §3): what the gateway itself
+            # reported via managedAccounts — never Settings.ib_environment.
+            managed_accounts=self.bridge.managed_accounts if connected else (),
         )
 
     # ------------------------------------------------------------------ #
@@ -640,15 +695,58 @@ class OfficialIBKRBroker:
         return tuple(results)
 
     async def open_orders(self) -> tuple[BrokerOrder, ...]:
-        # Deferred to Milestone 5 alongside the order tracker: normalizing
-        # openOrder/orderStatus pairs needs the lifecycle model that milestone
-        # defines. Reads used by M2 reconciliation come from positions and
-        # executions; pretending to normalize orders without the lifecycle
-        # semantics would be guesswork, so this fails closed until then.
-        raise BrokerDataError(
-            "open_orders is implemented in Milestone 5 with the order tracker; "
-            "the official adapter refuses to guess order lifecycles until then"
+        """Normalize openOrder/orderStatus pairs with the M5 lifecycle model."""
+
+        app = self._require_app()
+        flight = self.bridge.start_open_orders()
+        app.reqAllOpenOrders()
+        done = await asyncio.get_running_loop().run_in_executor(
+            None, flight.done.wait, _REQUEST_TIMEOUT_S
         )
+        if not done or self.bridge.connection_closed.is_set():
+            raise BrokerConnectionError("open-orders request did not complete")
+        orders: list[BrokerOrder] = []
+        for order_id, contract, order, order_state in flight.items:
+            instrument = instrument_from_contract(contract)
+            order_type = str(getattr(order, "orderType", "") or "")
+            limit_price = Decimal(str(getattr(order, "lmtPrice", 0) or 0))
+            if order_type != "LMT" or limit_price <= 0:
+                raise BrokerSafetyError(
+                    f"open order {order_id} is not a positive-limit LMT order "
+                    f"({order_type!r}); refusing to normalize non-Chronos order shapes"
+                )
+            quantity = Decimal(str(getattr(order, "totalQuantity", 0) or 0))
+            status_entry = self.bridge.order_statuses.get(order_id)
+            raw_status = (
+                status_entry[0] if status_entry else str(getattr(order_state, "status", "") or "")
+            )
+            filled = Decimal(str(status_entry[1])) if status_entry else Decimal("0")
+            remaining = (
+                Decimal(str(status_entry[2]))
+                if status_entry
+                else max(quantity - filled, Decimal("0"))
+            )
+            orders.append(
+                BrokerOrder(
+                    broker_order_id=int(order_id),
+                    permanent_id=int(getattr(order, "permId", 0) or 0) or None,
+                    client_id=int(getattr(order, "clientId", 0) or 0),
+                    account_id=str(getattr(order, "account", "") or ""),
+                    order_ref=str(getattr(order, "orderRef", "") or "") or None,
+                    contract=instrument,
+                    side=OrderSide(str(getattr(order, "action", "BUY"))),
+                    quantity=quantity,
+                    filled_quantity=filled,
+                    remaining_quantity=remaining,
+                    limit_price=limit_price,
+                    lifecycle=broker_status_to_lifecycle(
+                        raw_status, filled_quantity=filled, remaining_quantity=remaining
+                    ),
+                    transmit=bool(getattr(order, "transmit", False)),
+                    outside_rth=bool(getattr(order, "outsideRth", False)),
+                )
+            )
+        return tuple(orders)
 
     async def qualify_underlying(self, symbol: str) -> UnderlyingContract:
         app = self._require_app()
@@ -749,18 +847,197 @@ class OfficialIBKRBroker:
         del contract_ids
 
     # ------------------------------------------------------------------ #
-    # Order surface: the chronos.orders pipeline is complete (M5); this
-    # adapter's transmission wiring is recording-spy validated in M7.
+    # Order surface (M7, ADR-0009 §8). Wiring is validated against a fake
+    # ibapi application object plus the boundary-level recording spy; the
+    # owner performs gateway verification against a running gateway. All
+    # LOCAL refusals raise BrokerRefusedBeforeSend — a proof claim that no
+    # bytes reached the gateway socket — so the boundary can resolve the
+    # intent to REJECTED synchronously instead of stranding it.
     # ------------------------------------------------------------------ #
 
+    def _reverify_for_order_path(self, *, account_id: str, mutating: bool) -> Any:
+        """Local, pre-send re-verification shared by the order methods."""
+
+        app = self._app
+        if app is None:
+            raise BrokerRefusedBeforeSend("not connected; no order call was sent")
+        verify_environment_port(self._settings.ib_environment, self._settings.ib_port)
+        expected = self._settings.ib_account_id
+        if account_id != expected:
+            raise BrokerRefusedBeforeSend(
+                "order account does not match the configured account; refusing before send"
+            )
+        if expected not in self.bridge.managed_accounts:
+            raise BrokerRefusedBeforeSend(
+                "connected session does not manage the configured account; refusing before send"
+            )
+        if mutating and self._live_kill_switch is not None and self._live_kill_switch.is_engaged():
+            # Last-line breaker (ADR-0009 §8): covers engage-after-CAS races and
+            # any hypothetical non-boundary caller holding this broker object.
+            raise BrokerRefusedBeforeSend(
+                "live kill switch is ENGAGED; refusing the order call before send"
+            )
+        return app
+
+    def _build_order_objects(self, request: OrderRequest, *, what_if: bool) -> tuple[Any, Any]:
+        _, _, Contract, Order = _load_ibapi()
+        con_id = getattr(request.contract, "con_id", None)
+        if not con_id:
+            raise BrokerRefusedBeforeSend("contract is not qualified (no con_id); refusing")
+        contract = Contract()
+        contract.conId = int(con_id)
+        contract.exchange = getattr(request.contract, "exchange", "SMART") or "SMART"
+        order = Order()
+        order.action = request.side.value
+        order.orderType = "LMT"  # market orders are impossible by construction
+        order.totalQuantity = int(request.quantity)
+        order.lmtPrice = float(request.limit_price)
+        order.tif = "DAY"
+        order.outsideRth = False
+        order.account = request.account_id
+        order.orderRef = request.order_ref
+        order.whatIf = bool(what_if)
+        # The transmit flag is MAPPED from the request (never assigned a
+        # literal True here): only the submission boundary builds transmit=True.
+        order.transmit = bool(request.transmit) and not what_if
+        return contract, order
+
+    async def _await_order_ack(self, order_id: int) -> tuple[Any, ...]:
+        flight = self.bridge.start_order_ack(order_id)
+        try:
+            done = await asyncio.get_running_loop().run_in_executor(
+                None, flight.done.wait, _REQUEST_TIMEOUT_S
+            )
+            if not done or self.bridge.connection_closed.is_set():
+                raise BrokerConnectionError(
+                    f"no broker acknowledgement for order {order_id} within {_REQUEST_TIMEOUT_S}s"
+                )
+            if not flight.items:
+                raise BrokerDataError(f"order {order_id} acknowledgement carried no payload")
+            return tuple(flight.items[0])
+        finally:
+            self.bridge.clear_order_ack(order_id)
+
     async def preview_order(self, request: OrderRequest) -> OrderPreview:
-        raise BrokerSafetyError(_ORDER_PATH_GUIDANCE)
+        app = self._reverify_for_order_path(account_id=request.account_id, mutating=False)
+        if request.transmit:
+            raise BrokerRefusedBeforeSend("previews must never carry transmit=True; refusing")
+        contract, order = self._build_order_objects(request, what_if=True)
+        order_id = self.order_ids.allocate()
+        app.placeOrder(order_id, contract, order)
+        ack = await self._await_order_ack(order_id)
+        if ack[0] != "openOrder":
+            raise BrokerDataError("whatIf preview did not return an order state")
+        order_state = ack[4]
+        commission = clean_price(_maybe_float(getattr(order_state, "commission", None)))
+        accepted = str(getattr(order_state, "status", "")).lower() not in {"inactive", "rejected"}
+        return OrderPreview(
+            request=request,
+            accepted=accepted,
+            estimated_commission=commission,
+            initial_margin_change=clean_price(
+                _maybe_float(getattr(order_state, "initMarginChange", None))
+            ),
+            maintenance_margin_change=clean_price(
+                _maybe_float(getattr(order_state, "maintMarginChange", None))
+            ),
+            equity_with_loan_change=clean_price(
+                _maybe_float(getattr(order_state, "equityWithLoanChange", None))
+            ),
+            warnings=tuple(
+                warning
+                for warning in (str(getattr(order_state, "warningText", "") or "").strip(),)
+                if warning
+            ),
+            broker_message=str(getattr(order_state, "status", "") or ""),
+            previewed_at=datetime.now(tz=UTC),
+        )
 
     async def submit_order(self, request: OrderRequest) -> OrderSubmission:
-        raise BrokerSafetyError(_ORDER_PATH_GUIDANCE)
+        app = self._reverify_for_order_path(account_id=request.account_id, mutating=True)
+        if not request.transmit:
+            raise BrokerRefusedBeforeSend(
+                "submit_order requires an explicitly transmit-authorized request "
+                "from the submission boundary; refusing before send"
+            )
+        contract, order = self._build_order_objects(request, what_if=False)
+        order_id = self.order_ids.allocate()
+        flight = self.bridge.start_order_ack(order_id)
+        try:
+            app.placeOrder(order_id, contract, order)
+            done = await asyncio.get_running_loop().run_in_executor(
+                None, flight.done.wait, _REQUEST_TIMEOUT_S
+            )
+            if not done or self.bridge.connection_closed.is_set():
+                # Bytes may have left: NOT a refused-before-send.
+                raise BrokerConnectionError(
+                    f"no acknowledgement for order {order_id}; state unknown"
+                )
+            payload = tuple(flight.items[0]) if flight.items else ()
+        finally:
+            self.bridge.clear_order_ack(order_id)
+        raw_status = ""
+        perm_id: int | None = None
+        if payload and payload[0] == "orderStatus":
+            raw_status = str(payload[2])
+            perm_id = int(payload[5]) or None
+        elif payload and payload[0] == "openOrder":
+            raw_status = str(getattr(payload[4], "status", "") or "")
+            perm_id = int(getattr(payload[3], "permId", 0) or 0) or None
+        lifecycle = broker_status_to_lifecycle(
+            raw_status, filled_quantity=Decimal("0"), remaining_quantity=Decimal(request.quantity)
+        )
+        return OrderSubmission(
+            correlation_id=request.correlation_id,
+            broker_order_id=order_id,
+            permanent_id=perm_id,
+            client_id=self._settings.ib_client_id,
+            lifecycle=lifecycle,
+            submitted_at=datetime.now(tz=UTC),
+        )
 
     async def modify_order(self, request: OrderModification) -> OrderSubmission:
-        raise BrokerSafetyError(_ORDER_PATH_GUIDANCE)
+        # The LIVE pipeline refuses modifies upstream (ADR-0009 §7). The paper
+        # pipeline's modify path currently runs through the ib_async adapter;
+        # this adapter defers modify-in-place, and refuses provably-before-send
+        # so nothing is ever stranded.
+        del request
+        self._reverify_for_order_path(account_id=self._settings.ib_account_id, mutating=True)
+        raise BrokerRefusedBeforeSend(
+            "modify-in-place is not implemented for the official adapter in M7; "
+            "cancel and re-submit through the boundary instead (nothing was sent)"
+        )
 
     async def cancel_order(self, broker_order_id: int) -> CancellationResult:
-        raise BrokerSafetyError(_ORDER_PATH_GUIDANCE)
+        # Deliberately NOT kill-switch gated: cancellation is risk-reducing and
+        # must work during an emergency stop (ADR-0009 §7).
+        app = self._app
+        if app is None:
+            raise BrokerRefusedBeforeSend("not connected; no cancel was sent")
+        verify_environment_port(self._settings.ib_environment, self._settings.ib_port)
+        flight = self.bridge.start_order_ack(broker_order_id)
+        try:
+            app.cancelOrder(broker_order_id, "")
+            done = await asyncio.get_running_loop().run_in_executor(
+                None, flight.done.wait, _REQUEST_TIMEOUT_S
+            )
+            payload = tuple(flight.items[0]) if done and flight.items else ()
+        finally:
+            self.bridge.clear_order_ack(broker_order_id)
+        raw_status = str(payload[2]) if payload and payload[0] == "orderStatus" else ""
+        lowered = raw_status.lower()
+        if lowered in {"cancelled", "apicancelled"}:
+            lifecycle = OrderLifecycle.CANCELLED
+        elif not raw_status or lowered == "pendingcancel":
+            lifecycle = OrderLifecycle.CANCEL_PENDING
+        else:
+            lifecycle = broker_status_to_lifecycle(
+                raw_status, filled_quantity=Decimal("0"), remaining_quantity=Decimal("0")
+            )
+        return CancellationResult(
+            broker_order_id=broker_order_id,
+            requested=True,
+            lifecycle=lifecycle,
+            message=raw_status or "cancel requested; awaiting broker confirmation",
+            timestamp=datetime.now(tz=UTC),
+        )

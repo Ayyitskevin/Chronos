@@ -119,6 +119,12 @@ def build_runtime(*, register_atexit: bool = True) -> AppRuntime:
     connection: BrokerConnectionManager | None = None
     try:
         database.initialize()
+        # ADR-0009: ONE durable kill-switch instance shared by the broker
+        # adapter's last-line check, the submission boundary, and the /live API.
+        live_kill_switch = LiveKillSwitch(
+            settings.live_kill_switch_file,
+            audit=KillSwitchEventRepository(database.sessions),
+        )
         broker: Broker
         if settings.broker_mode is BrokerMode.DEMO:
             broker = DemoBroker(profile=settings.demo_profile)
@@ -128,10 +134,13 @@ def build_runtime(*, register_atexit: bool = True) -> AppRuntime:
             broker = IBKRBroker(settings)
         else:
             # Production default: the official TWS API adapter (lazy import;
-            # raises with install guidance when the package is absent).
+            # raises with install guidance when the package is absent). The
+            # kill switch is constructed first and shared so the adapter's
+            # last-line breaker check (ADR-0009 §8) sees the same durable state
+            # as the /live API and the submission boundary.
             from chronos.broker.official_ibkr import OfficialIBKRBroker
 
-            broker = OfficialIBKRBroker(settings)
+            broker = OfficialIBKRBroker(settings, live_kill_switch=live_kill_switch)
         market_data = MarketDataManager(
             broker,
             max_quote_age=timedelta(seconds=settings.max_quote_age_seconds),
@@ -176,11 +185,9 @@ def build_runtime(*, register_atexit: bool = True) -> AppRuntime:
         # ADR-0009 §4: the live safety services are constructed BEFORE the order
         # pipeline and the SAME instances are injected into the submission
         # boundary — LiveArmingService state is process-memory, so a second
-        # instance would make /live/arm invisible to the boundary.
-        live_kill_switch = LiveKillSwitch(
-            settings.live_kill_switch_file,
-            audit=KillSwitchEventRepository(database.sessions),
-        )
+        # instance would make /live/arm invisible to the boundary. (The kill
+        # switch instance was built above, before broker construction, so the
+        # adapter's last-line check shares it too.)
         live_arming = LiveArmingService(
             ttl_minutes=settings.live_arm_ttl_minutes,
             audit=LiveArmEventRepository(
