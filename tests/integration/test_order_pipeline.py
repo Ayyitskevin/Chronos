@@ -187,6 +187,51 @@ def test_happy_path_transmits_exactly_once(harness: _Harness) -> None:
     assert stored is not None and stored.status is OrderLifecycle.SUBMITTED
 
 
+def test_second_submit_never_transmits_twice(harness: _Harness) -> None:
+    intent = _short_put_intent()
+    _drive_to_confirmed(harness, intent, FIXED_NOW)
+    first = harness.service.submit(intent, writer_lease_held=True, now=FIXED_NOW)  # type: ignore[arg-type]
+    assert first.submitted is True
+    # A repeat submit of the same (now SUBMITTED) intent is refused and never
+    # calls the broker again — the pre-submit idempotency guard / gate 7.
+    second = harness.service.submit(intent, writer_lease_held=True, now=FIXED_NOW)  # type: ignore[arg-type]
+    assert second.submitted is False
+    assert second.refusal is SubmissionRefusalCode.INTENT_NOT_CONFIRMED
+    assert len(harness.broker.submit_calls) == 1
+
+
+def test_cancelled_after_partial_fill_reaches_terminal(harness: _Harness) -> None:
+    intent = _short_put_intent()
+    _drive_to_confirmed(harness, intent, FIXED_NOW)
+    harness.service.submit(intent, writer_lease_held=True, now=FIXED_NOW)  # type: ignore[arg-type]
+    harness.tracker.ingest(
+        OrderStatusUpdate(
+            intent_id="intent-1",
+            broker_order_id=9001,
+            lifecycle=OrderLifecycle.PARTIALLY_FILLED,
+            filled_quantity=Decimal("1"),
+            remaining_quantity=Decimal("1"),
+            occurred_at=FIXED_NOW,
+        ),
+        current_account_id=PAPER_ACCOUNT,
+    )
+    # A cancel that arrives after a partial fill must reach CANCELLED (terminal),
+    # not stay PARTIALLY_FILLED forever.
+    harness.tracker.ingest(
+        OrderStatusUpdate(
+            intent_id="intent-1",
+            broker_order_id=9001,
+            lifecycle=OrderLifecycle.CANCELLED,
+            filled_quantity=Decimal("1"),
+            remaining_quantity=Decimal("1"),
+            occurred_at=FIXED_NOW,
+        ),
+        current_account_id=PAPER_ACCOUNT,
+    )
+    stored = harness.service.get("intent-1")
+    assert stored is not None and stored.status is OrderLifecycle.CANCELLED
+
+
 def test_read_only_lease_refuses_without_calling_broker(harness: _Harness) -> None:
     intent = _short_put_intent()
     _drive_to_confirmed(harness, intent, FIXED_NOW)
@@ -362,7 +407,11 @@ def test_submission_unknown_recovers_and_never_retries(harness: _Harness) -> Non
     assert harness.broker.submit_calls == []
 
 
-def test_submission_unknown_with_no_broker_order_rejects(harness: _Harness) -> None:
+def test_submission_unknown_absent_from_broker_stays_unresolved(harness: _Harness) -> None:
+    # An order absent from a single snapshot is NOT concluded REJECTED: a
+    # timed-out submit often reached the venue, so mere absence is not positive
+    # evidence of rejection. It stays SUBMISSION_UNKNOWN for operator review and
+    # is NEVER re-submitted.
     intent = _short_put_intent()
     _drive_to_confirmed(harness, intent, FIXED_NOW)
     harness.tracker_repo.record_transition(
@@ -375,9 +424,9 @@ def test_submission_unknown_with_no_broker_order_rejects(harness: _Harness) -> N
         occurred_at=FIXED_NOW,
     )
     applied = harness.service.reconcile_on_restart(now=FIXED_NOW)
-    assert applied == 1
+    assert applied == 0  # nothing resolved from an empty snapshot
     stored = harness.service.get("intent-1")
-    assert stored is not None and stored.status is OrderLifecycle.REJECTED
+    assert stored is not None and stored.status is OrderLifecycle.SUBMISSION_UNKNOWN
     assert harness.broker.submit_calls == []
 
 

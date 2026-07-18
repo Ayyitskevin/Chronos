@@ -18,6 +18,8 @@ import uuid
 from datetime import datetime, timedelta
 from decimal import Decimal
 
+from pydantic import Field
+
 from chronos.config.settings import Settings
 from chronos.domain.enums import (
     OrderIntent,
@@ -83,18 +85,20 @@ class RiskEvidence(ChronosModel):
     wheel_eligible_action: OrderIntent | None = None
     wheel_opening_locked: bool = False
     wheel_manual_review: bool = False
-    # Position / allocation evidence (all gross, never premium-netted).
-    existing_short_put_obligation: Decimal = Decimal("0")
-    pending_open_put_obligation: Decimal = Decimal("0")
-    current_symbol_allocation: Decimal = Decimal("0")
-    current_total_wheel_allocation: Decimal = Decimal("0")
-    active_short_option_contracts: int = 0
-    opening_orders_today: int = 0
-    settled_long_shares: Decimal = Decimal("0")
-    shares_covering_short_calls: Decimal = Decimal("0")
-    shares_reserved_for_pending_calls: Decimal = Decimal("0")
-    shares_reserved_by_other_orders: Decimal = Decimal("0")
-    held_short_option_contracts: int = 0
+    # Position / allocation evidence (all gross, never premium-netted). The
+    # ge=0 constraints keep a malformed negative obligation from reaching the
+    # reservation primitives as a hard ValueError.
+    existing_short_put_obligation: Decimal = Field(default=Decimal("0"), ge=0)
+    pending_open_put_obligation: Decimal = Field(default=Decimal("0"), ge=0)
+    current_symbol_allocation: Decimal = Field(default=Decimal("0"), ge=0)
+    current_total_wheel_allocation: Decimal = Field(default=Decimal("0"), ge=0)
+    active_short_option_contracts: int = Field(default=0, ge=0)
+    opening_orders_today: int = Field(default=0, ge=0)
+    settled_long_shares: Decimal = Field(default=Decimal("0"), ge=0)
+    shares_covering_short_calls: Decimal = Field(default=Decimal("0"), ge=0)
+    shares_reserved_for_pending_calls: Decimal = Field(default=Decimal("0"), ge=0)
+    shares_reserved_by_other_orders: Decimal = Field(default=Decimal("0"), ge=0)
+    held_short_option_contracts: int = Field(default=0, ge=0)
 
 
 def _passed(name: str, detail: str) -> OrderRiskCheck:
@@ -261,6 +265,9 @@ class OrderRiskEngine:
     ) -> list[OrderRiskCheck]:
         checks: list[OrderRiskCheck] = []
         deliverable = contract.deliverable_shares or contract.multiplier
+        # Every primitive that can raise ValueError (bad deliverable, negative
+        # bucket, ...) is inside this guard so a malformed input becomes an
+        # UNKNOWN check, never an exception escaping the engine (fail-closed).
         try:
             capital_check = capital.evaluate_short_put_capital(
                 context=self._capital_context(intent, evidence),
@@ -269,24 +276,24 @@ class OrderRiskEngine:
                 verified_deliverable_shares=deliverable,
                 contracts=intent.quantity,
             )
+            obligation = capital.short_put_notional(
+                strike=contract.strike, multiplier=deliverable, contracts=intent.quantity
+            )
+            cash_buffer = max(
+                self._settings.min_cash_buffer_usd,
+                evidence.account.net_liquidation * self._settings.min_cash_buffer_pct,
+            )
+            summary = reservations.reserve_cash(
+                reservations.CashReservationInput(
+                    existing_short_put_obligation=evidence.existing_short_put_obligation,
+                    pending_put_order_obligation=evidence.pending_open_put_obligation,
+                    proposed_order_obligation=obligation,
+                    cash_buffer=cash_buffer,
+                ),
+                available_cash=evidence.account.total_cash,
+            )
         except ValueError as error:
             return [_unknown("cash_secured_put", f"capital inputs rejected: {error}")]
-        obligation = capital.short_put_notional(
-            strike=contract.strike, multiplier=deliverable, contracts=intent.quantity
-        )
-        cash_buffer = max(
-            self._settings.min_cash_buffer_usd,
-            evidence.account.net_liquidation * self._settings.min_cash_buffer_pct,
-        )
-        summary = reservations.reserve_cash(
-            reservations.CashReservationInput(
-                existing_short_put_obligation=evidence.existing_short_put_obligation,
-                pending_put_order_obligation=evidence.pending_open_put_obligation,
-                proposed_order_obligation=obligation,
-                cash_buffer=cash_buffer,
-            ),
-            available_cash=evidence.account.total_cash,
-        )
         if capital_check.passed and summary.sufficient:
             checks.append(
                 _passed(

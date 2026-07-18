@@ -203,3 +203,83 @@ def test_stock_buy_within_cash_passes_and_short_sell_fails() -> None:
         now=_NOW,
     )
     assert _status(sell_decision, "stock_no_short") is RiskCheckStatus.FAIL
+
+
+def test_pending_covered_call_shares_block_a_naked_second_call() -> None:
+    # Fix: shares committed to a resting covered-call order are reserved, so a
+    # second call on the same 100 shares is NOT covered (would be naked).
+    from chronos.domain.enums import OptionRight
+
+    engine = OrderRiskEngine(paper_settings())
+    call = option_contract(right=OptionRight.CALL, con_id=222)
+    intent = build_option_intent(
+        account_id=PAPER_ACCOUNT,
+        intent=OrderIntent.OPEN_COVERED_CALL,
+        contract=call,
+        quantity=1,
+        limit_price=Decimal("2.00"),
+        correlation_id="CHR-ORD-" + "3" * 32,
+    )
+    decision = engine.evaluate(
+        intent,
+        RiskEvidence(
+            account=_account(),
+            reconciliation_status=ReconciliationStatus.RECONCILED,
+            session=_open_session(),
+            settled_long_shares=Decimal("100"),
+            shares_reserved_for_pending_calls=Decimal("100"),  # already committed
+        ),
+        now=_NOW,
+    )
+    assert _status(decision, "covered_call_coverage") is RiskCheckStatus.FAIL
+
+
+def test_stock_buy_blocked_by_existing_put_obligation() -> None:
+    # Fix: a stock buy cannot consume cash securing an open short put.
+    engine = OrderRiskEngine(paper_settings())
+    buy = build_stock_intent(
+        account_id=PAPER_ACCOUNT,
+        intent=OrderIntent.OPEN_LONG_STOCK,
+        contract=stock_contract(),
+        quantity=100,
+        limit_price=Decimal("200.00"),  # $20,000 cost
+        correlation_id="CHR-ORD-" + "4" * 32,
+    )
+    decision = engine.evaluate(
+        buy,
+        RiskEvidence(
+            account=_account(cash="35000"),
+            reconciliation_status=ReconciliationStatus.RECONCILED,
+            session=_open_session(),
+            existing_short_put_obligation=Decimal("28000"),  # secures an open CSP
+        ),
+        now=_NOW,
+    )
+    assert _status(decision, "stock_cash_sufficiency") is RiskCheckStatus.FAIL
+
+
+def test_concentration_uses_existing_baseline() -> None:
+    # Fix: existing wheel exposure is the concentration baseline, so a new order
+    # that pushes AGGREGATE symbol allocation over the cap fails.
+    engine = OrderRiskEngine(paper_settings(max_symbol_allocation_pct="0.25"))
+    intent = build_option_intent(
+        account_id=PAPER_ACCOUNT,
+        intent=OrderIntent.OPEN_SHORT_PUT,
+        contract=option_contract(),  # strike 150 -> $15,000 new obligation
+        quantity=1,
+        limit_price=Decimal("1.20"),
+        correlation_id="CHR-ORD-" + "5" * 32,
+    )
+    decision = engine.evaluate(
+        intent,
+        RiskEvidence(
+            account=_account(nlv="100000", cash="90000"),  # 25% cap = $25,000
+            reconciliation_status=ReconciliationStatus.RECONCILED,
+            session=_open_session(),
+            current_symbol_allocation=Decimal("20000"),  # existing AAPL exposure
+            current_total_wheel_allocation=Decimal("20000"),
+        ),
+        now=_NOW,
+    )
+    # 20,000 existing + 15,000 new = 35,000 > 25,000 cap.
+    assert _status(decision, "concentration") is RiskCheckStatus.FAIL
