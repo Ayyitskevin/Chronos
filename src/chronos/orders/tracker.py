@@ -162,6 +162,21 @@ class OrderTracker:
             enforce_from_status=True,
         )
 
+    def first_event_time(
+        self,
+        intent_id: str,
+        *,
+        to_status: OrderLifecycle,
+        current_account_id: str,
+    ) -> datetime | None:
+        """When the intent FIRST transitioned into ``to_status`` (audit trail)."""
+
+        events = self._tracker.events(intent_id, current_account_id=current_account_id)
+        for event in events:
+            if event.to_status is to_status:
+                return event.occurred_at
+        return None
+
     def _latest_filled(self, intent_id: str, current_account_id: str) -> Decimal:
         events = self._tracker.events(intent_id, current_account_id=current_account_id)
         filled = [event.filled_quantity for event in events if event.filled_quantity is not None]

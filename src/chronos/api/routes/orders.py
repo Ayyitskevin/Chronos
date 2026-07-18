@@ -6,9 +6,10 @@ single-writer lease (``require_writer`` -> 409 in read-only mode) AND, where a
 symbol is supplied, allowlist membership (403 otherwise). The backend re-derives
 every stage from fresh evidence and re-addresses the in-flight proposal by id;
 the client never carries a contract or an authorization token across the
-round-trips. No endpoint here can transmit a live order — the submission
-boundary is paper-only and hard-refuses unless ``transmission_possible`` and the
-full gate chain pass.
+round-trips. ``POST /orders/{id}/submit`` is the single transmit path for BOTH
+branches (ADR-0009): paper behind the seven-gate chain, live behind the
+ten-gate walk — the boundary hard-refuses unless the selected branch's entire
+chain passes.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from chronos.api.auth import require_token
 from chronos.api.dependencies import BackendState, get_state, require_writer
+from chronos.broker.base import BrokerError
 from chronos.domain.enums import OptionRight, OrderIntent, ProductFamily
 from chronos.domain.models import ChronosModel, OptionContractSpec
 from chronos.orders.intent import (
@@ -248,7 +250,7 @@ def resolve(intent_id: str, request: ResolveRequest, state: WriterDep) -> OrderV
         resolved = _service(state).resolve_submission_unknown(
             intent_id, operator_note=request.operator_note
         )
-    except (OrderPipelineError, ValueError) as error:
+    except (OrderPipelineError, ValueError, BrokerError) as error:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
     if not resolved:
         raise HTTPException(

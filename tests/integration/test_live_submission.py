@@ -315,31 +315,20 @@ def _assert_refused(live: _LiveHarness, outcome: object, code: SubmissionRefusal
     assert live.broker.submit_calls == []
 
 
-def test_missing_live_dependencies_fail_closed(tmp_path: Path) -> None:
+def test_missing_live_dependencies_fail_loud_at_construction(tmp_path: Path) -> None:
+    # M7 review finding F6: a live-environment boundary missing its safety
+    # machinery must never exist — construction fails loudly, not per-submit.
     h = _LiveHarness(LiveSpyBroker(), live_settings(), tmp_path)
     try:
-        h.arm()
-        intent = _live_intent()
-        _confirmed(h, intent)
-        bare = OrderSubmissionBoundary(
-            settings=h.settings,
-            connection=h.connection,
-            intents=h.intents,
-            confirmations=OrderConfirmationRepository(h.db.sessions),
-            tracker=h.tracker_repo,
-        )
-        outcome = bare.submit(
-            intent=intent,
-            risk_decision=h.service.propose(
-                _live_intent("live-2", "CHR-ORD-" + "E" * 32, Decimal("1.25")),
-                now=h.clock.now,
-            ).risk,
-            connected_account_id=LIVE_ACCOUNT,
-            broker_environment_is_paper=False,
-            writer_lease_held=True,
-            now=h.clock.now,
-        )
-        _assert_refused(h, outcome, SubmissionRefusalCode.LIVE_DEPENDENCIES_MISSING)
+        with pytest.raises(RuntimeError, match="LIVE-environment submission boundary"):
+            OrderSubmissionBoundary(
+                settings=h.settings,
+                connection=h.connection,
+                intents=h.intents,
+                confirmations=OrderConfirmationRepository(h.db.sessions),
+                tracker=h.tracker_repo,
+            )
+        assert h.broker.submit_calls == []
     finally:
         h.close()
 
@@ -569,7 +558,9 @@ def test_operator_resolution_unwedges_live_trading(live: _LiveHarness) -> None:
     live.broker.submit_error = None
     # The audited operator action: fresh snapshot shows broker absence.
     resolved = live.service.resolve_submission_unknown(
-        "live-stuck", operator_note="verified absent in TWS orders + trade log"
+        "live-stuck",
+        operator_note="verified absent in TWS orders + trade log",
+        now=FIXED_NOW,
     )
     assert resolved is True
     stored = live.service.get("live-stuck")
@@ -609,7 +600,7 @@ def test_operator_resolution_refuses_when_broker_knows_the_order(
         ),
     )
     resolved = live.service.resolve_submission_unknown(
-        "live-stuck", operator_note="attempting manual rejection"
+        "live-stuck", operator_note="attempting manual rejection", now=FIXED_NOW
     )
     assert resolved is False
     stored = live.service.get("live-stuck")
@@ -690,3 +681,128 @@ def test_cancel_works_with_kill_switch_engaged(live: _LiveHarness) -> None:
     result = live.service.cancel("live-1")
     assert result.requested is True
     assert live.broker.cancel_calls == [9001]  # risk-reducing action still works
+
+
+# --- review-remediation regression tests (M7 adversarial findings) ---------
+
+
+def test_operator_resolution_refuses_stale_session_window(live: _LiveHarness) -> None:
+    # F2 (the dangerous direction): executions cover the CURRENT session only,
+    # so a prior-session SUBMISSION_UNKNOWN must never resolve on "absence".
+    live.arm()
+    stuck = _live_intent("live-stuck", "CHR-ORD-" + "C" * 32)
+    _confirmed(live, stuck)
+    live.broker.submit_error = BrokerError("socket dropped mid-send")
+    _submit(live, stuck)
+    live.broker.submit_error = None
+    next_day = FIXED_NOW + timedelta(days=3)  # Friday submit, Monday resolve
+    with pytest.raises(ValueError, match="broker absence is not provable"):
+        live.service.resolve_submission_unknown(
+            "live-stuck", operator_note="looks absent to me", now=next_day
+        )
+    stored = live.service.get("live-stuck")
+    assert stored is not None and stored.status is OrderLifecycle.SUBMISSION_UNKNOWN
+
+
+def test_non_positive_nlv_never_establishes_a_baseline(live: _LiveHarness) -> None:
+    # F3: an implausible first NLV read refuses without a baseline write and
+    # without the durable kill-switch side effect.
+    live.arm()
+    intent = _live_intent()
+    _confirmed(live, intent)
+    live.broker.nlv = Decimal("0")
+    outcome = _submit(live, intent)
+    _assert_refused(live, outcome, SubmissionRefusalCode.LIVE_GATE_BLOCKED)
+    assert not live.kill_switch.is_engaged()
+    # A later, sane NLV establishes normally and the walk proceeds.
+    live.broker.nlv = Decimal("100000")
+    outcome = _submit(live, intent)
+    assert outcome.submitted is True  # type: ignore[attr-defined]
+
+
+def test_declined_preview_never_advances_or_confirms(live: _LiveHarness) -> None:
+    # F5: a broker-declined what-if leaves VALIDATED, records no preview_id,
+    # and blocks confirmation — the live preview gate can never see fake True.
+    live.arm()
+    intent = _live_intent()
+    proposal = live.service.propose(intent, now=live.clock.now)
+    live.broker._preview_accepted = False
+    result = live.service.preview(intent, now=live.clock.now)
+    assert result.accepted is False
+    stored = live.service.get("live-1")
+    assert stored is not None
+    assert stored.status is OrderLifecycle.VALIDATED
+    assert stored.preview_id is None
+    from chronos.orders.service import OrderPipelineError
+
+    with pytest.raises(OrderPipelineError, match="previewed before confirmation"):
+        live.service.confirm(intent, risk_decision_id=proposal.risk.decision_id, now=live.clock.now)
+    assert live.broker.submit_calls == []
+
+
+def test_confirmation_fresh_at_entry_but_expired_on_fresh_clock_blocks(
+    live: _LiveHarness,
+) -> None:
+    # F7: distinguishes the fresh-clock discipline — the caller's `now` says
+    # the confirmation is still valid; only the boundary's own clock knows
+    # it expired mid-walk.
+    live.arm()
+    intent = _live_intent()
+    _confirmed(live, intent)
+    live.clock.now = FIXED_NOW + timedelta(seconds=21)
+    outcome = live.service.submit(intent, writer_lease_held=True, now=FIXED_NOW)
+    _assert_refused(live, outcome, SubmissionRefusalCode.LIVE_GATE_BLOCKED)
+
+
+def test_live_account_mismatch_refuses(tmp_path: Path) -> None:
+    # F8: the broker-observed live account differs from the intent's account.
+    # (A foreign-account intent cannot even be proposed — the DB scope guard
+    # refuses it — so the mismatch is staged by flipping the OBSERVED account
+    # to a second allowlisted live account after confirmation.)
+    settings = live_settings(ib_account_allowlist=(LIVE_ACCOUNT, "U9999999"))
+    h = _LiveHarness(LiveSpyBroker(), settings, tmp_path)
+    try:
+        h.arm()
+        intent = _live_intent()
+        _confirmed(h, intent)
+        h.broker.account_id = "U9999999"
+        h.broker.managed_accounts = ("U9999999",)
+        outcome = _submit(h, intent)
+        _assert_refused(h, outcome, SubmissionRefusalCode.ACCOUNT_MISMATCH)
+    finally:
+        h.close()
+
+
+def test_wrong_lifecycle_refuses_with_intent_not_confirmed(live: _LiveHarness) -> None:
+    # F8: the exact refusal code is asserted on the live branch.
+    live.arm()
+    intent = _live_intent()
+    proposal = live.service.propose(intent, now=live.clock.now)
+    del proposal
+    outcome = _submit(live, intent)  # still VALIDATED — never confirmed
+    _assert_refused(live, outcome, SubmissionRefusalCode.INTENT_NOT_CONFIRMED)
+
+
+def test_corrupt_baseline_through_the_boundary_blocks_and_latches(
+    live: _LiveHarness, tmp_path: Path
+) -> None:
+    # F8: corrupt in-session baseline, exercised through the boundary walk.
+    live.arm()
+    intent = _live_intent()
+    _confirmed(live, intent)
+    live.drawdown.check(Decimal("100000"), now=live.clock.now)  # establish
+    (tmp_path / "baseline.json").write_text("{ not valid json", encoding="utf-8")
+    outcome = _submit(live, intent)
+    _assert_refused(live, outcome, SubmissionRefusalCode.LIVE_GATE_BLOCKED)
+    assert live.kill_switch.is_engaged()  # real corruption DOES latch
+
+
+def test_runtime_wiring_shares_live_instances() -> None:
+    # F6: the boundary must hold the SAME live-safety instances as AppRuntime
+    # (arming is process-memory; a copy would ignore /live/arm forever).
+    import chronos.runtime as runtime_module
+
+    source = Path(runtime_module.__file__).read_text(encoding="utf-8")
+    assert "live_arming=live_arming" in source
+    assert "live_kill_switch=live_kill_switch" in source
+    assert "session_drawdown=session_drawdown" in source

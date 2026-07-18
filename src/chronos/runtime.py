@@ -264,14 +264,6 @@ def _build_order_management(
 ) -> OrderManagementService:
     """Wire the human-in-the-loop order pipeline (M5 paper + M7 live branch)."""
 
-    if settings.live_transmission_possible and (
-        live_arming is None or live_kill_switch is None or session_drawdown is None
-    ):  # pragma: no cover - construction-order regression guard (ADR-0009 §4)
-        raise RuntimeError(
-            "live-capable configuration requires the live safety services to be "
-            "constructed before the order pipeline"
-        )
-
     def _read_fresh_quote(intent: WheelOrderIntent) -> MarketQuote | None:
         """Fresh-quote adapter for the boundary's LIVE data gate."""
 
@@ -328,7 +320,12 @@ def _build_order_management(
         ),
         tracker=tracker,
         tracker_repo=tracker_repo,
-        reconciler=OrderRestartReconciler(connection=connection, intents=intents, tracker=tracker),
+        reconciler=OrderRestartReconciler(
+            connection=connection,
+            intents=intents,
+            tracker=tracker,
+            market_timezone=settings.market_timezone,
+        ),
         intents=intents,
         confirmations=confirmations,
         risk_decisions=risk_decisions,

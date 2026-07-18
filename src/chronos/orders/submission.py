@@ -136,6 +136,19 @@ class OrderSubmissionBoundary:
         quote_reader: Callable[[WheelOrderIntent], MarketQuote | None] | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
+        if settings.ib_environment is IBEnvironment.LIVE and (
+            live_arming is None
+            or live_kill_switch is None
+            or session_drawdown is None
+            or quote_reader is None
+        ):
+            # Fail LOUD at construction (M7 review finding F6): a live-environment
+            # boundary missing its safety machinery must never exist — a silent
+            # per-submit refusal would surface only at the first real order.
+            raise RuntimeError(
+                "a LIVE-environment submission boundary requires arming, kill "
+                "switch, drawdown breaker, and quote reader at construction"
+            )
         self._settings = settings
         self._connection = connection
         self._intents = intents

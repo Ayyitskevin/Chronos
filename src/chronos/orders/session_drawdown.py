@@ -145,6 +145,23 @@ class SessionDrawdownBreaker:
                 now,
             )
         if baseline is None:
+            if not current_nlv.is_finite() or current_nlv <= 0:
+                # ADR-0009 §4 / M7 review finding F3: a non-positive first
+                # observation is an implausible NLV read, never a baseline.
+                # Refuse THIS check without writing the file and without the
+                # durable kill-switch side effect (cannot-evaluate != breached).
+                return DrawdownDecision(
+                    breached=True,
+                    session_date=session_date,
+                    baseline_nlv=Decimal("0"),
+                    current_nlv=current_nlv,
+                    drawdown_usd=Decimal("0"),
+                    drawdown_pct=Decimal("0"),
+                    reason=(
+                        "refusing to establish a non-positive session baseline "
+                        f"(NLV read implausible: {current_nlv})"
+                    ),
+                )
             # First observation this session establishes the baseline.
             baseline = current_nlv
             self._write_baseline(session_date, baseline, now)

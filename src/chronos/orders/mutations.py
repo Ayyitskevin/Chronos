@@ -5,8 +5,9 @@ and re-places on the same ``broker_order_id`` — it is NOT a lifecycle
 transition, so the order stays SUBMITTED/PARTIALLY_FILLED and only a MODIFIED
 event is recorded. Cancellation drives SUBMITTED/PARTIALLY_FILLED ->
 CANCEL_PENDING and, when the broker confirms in the same call, -> CANCELLED;
-otherwise the confirming callback resolves it via the tracker. CHR- ownership
-is enforced by the adapter, which refuses any order it does not own.
+otherwise the confirming callback resolves it via the tracker. Ownership rests
+on the service-layer tracker lookup: only broker ids Chronos recorded for its
+own intents ever reach these services.
 """
 
 from __future__ import annotations

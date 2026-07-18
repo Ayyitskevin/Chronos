@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 from chronos.broker.connection import BrokerConnectionManager
 from chronos.domain.enums import OrderLifecycle
@@ -110,10 +111,12 @@ class OrderRestartReconciler:
         connection: BrokerConnectionManager,
         intents: OrderIntentRepository,
         tracker: OrderTracker,
+        market_timezone: str = "America/New_York",
     ) -> None:
         self._connection = connection
         self._intents = intents
         self._tracker = tracker
+        self._market_tz = ZoneInfo(market_timezone)
 
     def reconcile(self, *, current_account_id: str, now: datetime) -> tuple[OrderStatusUpdate, ...]:
         working = [
@@ -169,6 +172,28 @@ class OrderRestartReconciler:
             raise ValueError(
                 "operator resolution applies only to SUBMISSION_UNKNOWN intents; "
                 f"this intent is {intent.status.value}"
+            )
+        # Evidence-window guard (M7 review finding F2, the dangerous direction):
+        # IBKR's executions snapshot covers the CURRENT trading session only, so
+        # "no executions" is NOT provable absence for a submit from a prior
+        # session — a Friday fill is invisible on Monday, and resolving it to
+        # REJECTED would hide a real position. Refuse unless the intent entered
+        # SUBMISSION_UNKNOWN in the same market-timezone session the snapshot
+        # covers.
+        unknown_since = self._tracker.first_event_time(
+            intent_id,
+            to_status=OrderLifecycle.SUBMISSION_UNKNOWN,
+            current_account_id=current_account_id,
+        )
+        if unknown_since is None or (
+            unknown_since.astimezone(self._market_tz).date()
+            != now.astimezone(self._market_tz).date()
+        ):
+            raise ValueError(
+                "broker absence is not provable: the executions window covers only "
+                "the current trading session, and this intent entered "
+                "SUBMISSION_UNKNOWN outside it. Verify the order manually in TWS "
+                "(orders AND trade log AND positions) before any resolution."
             )
         open_orders = self._connection.run(self._connection.broker.open_orders())
         executions = self._connection.run(self._connection.broker.executions())
