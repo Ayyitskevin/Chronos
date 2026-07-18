@@ -81,6 +81,12 @@ class Settings(BaseSettings):
     backend_port: Annotated[int, Field(gt=0, lt=65536)] = 8765
     backend_token_file: Path = Path("data/backend_api_token")
 
+    # Live safety layer (Milestone 6). Durable, atomic-write flag files owned by
+    # the live-Wheel path; the kill switch defaults DISENGAGED (a fresh deploy
+    # trades subject to the other gates) but fails closed on a corrupt file.
+    live_kill_switch_file: Path = Path("data/live_kill_switch.json")
+    session_baseline_file: Path = Path("data/session_baseline.json")
+
     symbol_allowlist: SymbolAllowlist = ("AAPL", "MSFT", "SPY")
     target_abs_delta: Annotated[Decimal, Field(gt=0, lt=1)] = Decimal("0.30")
     min_abs_delta: Annotated[Decimal, Field(gt=0, lt=1)] = Decimal("0.20")
@@ -121,10 +127,13 @@ class Settings(BaseSettings):
     def validate_safety_and_ranges(self) -> Settings:
         if self.allow_live_trading:
             raise ValueError(
-                "Live trading is a committed deliverable that ships with the Milestone 6-7 "
-                "gate stack (docs/LIVE_WHEEL_GAME_PLAN.md); this build does not yet contain "
-                "the live submission path, so the flag refuses rather than pretend. It will "
-                "be honored once arming, confirmation, and the live gates exist."
+                "Live trading is a committed deliverable. The live safety gate stack now "
+                "exists (Milestone 6: the ten-gate live stack, arming, the session-drawdown "
+                "breaker, and the kill switch); what remains is Milestone 7 — wiring "
+                "transmit=True for the LIVE branch at the single submission boundary and "
+                "validating it with a recording spy. Until that lands the flag refuses "
+                "rather than pretend, and will be honored once M7 wires live transmission "
+                "(docs/LIVE_WHEEL_GAME_PLAN.md)."
             )
         if not self.symbol_allowlist:
             raise ValueError("SYMBOL_ALLOWLIST must contain at least one symbol")
@@ -143,9 +152,11 @@ class Settings(BaseSettings):
             )
         if self.ib_environment is IBEnvironment.LIVE and self.allow_order_transmit:
             raise ValueError(
-                "Live order transmission arrives with the Milestone 6-7 live gate stack; "
-                "this build has no live submission path yet, so the combination refuses "
-                "rather than pretend (docs/LIVE_WHEEL_GAME_PLAN.md)."
+                "Live order transmission is wired at the single submission boundary in "
+                "Milestone 7. The Milestone 6 live gate stack (arming, kill switch, "
+                "session-drawdown breaker, ten-gate stack) exists, but the LIVE transmit "
+                "branch is not yet enabled, so this combination refuses rather than pretend "
+                "(docs/LIVE_WHEEL_GAME_PLAN.md)."
             )
         if (
             self.broker_mode is BrokerMode.IBKR

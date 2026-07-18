@@ -107,7 +107,7 @@ def test_paper_transmission_requires_configured_account() -> None:
 
 def test_live_transmission_is_rejected() -> None:
     with pytest.raises(
-        ValidationError, match="Live order transmission arrives with the Milestone 6-7"
+        ValidationError, match="Live order transmission is wired at the single submission"
     ):
         Settings(
             _env_file=None,
@@ -118,7 +118,8 @@ def test_live_transmission_is_rejected() -> None:
 
 
 def test_live_trading_flag_cannot_be_enabled() -> None:
-    with pytest.raises(ValidationError, match="Milestone 6-7"):
+    # Refuses, but as an awaited-M7 deliverable — never "permanently disabled".
+    with pytest.raises(ValidationError, match="Milestone 7"):
         Settings(_env_file=None, allow_live_trading=True)
 
 
@@ -129,7 +130,7 @@ def test_live_trading_environment_flag_parses_false_and_rejects_true(
     assert Settings(_env_file=None).allow_live_trading is False
 
     monkeypatch.setenv("ALLOW_LIVE_TRADING", "true")
-    with pytest.raises(ValidationError, match="Milestone 6-7"):
+    with pytest.raises(ValidationError, match="Milestone 7"):
         Settings(_env_file=None)
 
 
@@ -184,10 +185,11 @@ class TestLiveWheelMilestone1Settings:
         assert settings.backend_port == 8765
 
     def test_live_flag_refuses_until_live_path_exists(self) -> None:
-        # Live trading is the committed deliverable (owner direction); the flag
-        # refuses ONLY because the live submission path is not built yet. This
-        # pin is replaced at Milestone 6 when the gate stack honors the flag.
-        with pytest.raises(ValidationError, match="Milestone 6-7"):
+        # Live trading is the committed deliverable (owner direction). The M6 gate
+        # stack now exists; the flag refuses ONLY because the LIVE transmit branch
+        # is wired at the boundary in M7. The message must frame it as awaited, not
+        # permanently disabled.
+        with pytest.raises(ValidationError, match="Milestone 7"):
             Settings(_env_file=None, allow_live_trading=True)
 
     def test_backend_host_must_be_loopback(self) -> None:

@@ -20,12 +20,16 @@ from chronos.broker.market_data import MarketDataManager
 from chronos.config.settings import Settings, get_settings
 from chronos.domain.enums import BrokerAdapter, BrokerMode, ConnectionState, IBEnvironment
 from chronos.domain.models import AccountSummary, ConnectionStatus
+from chronos.orders.arming import LiveArmingService
 from chronos.orders.evidence import BrokerRiskEvidenceProvider
+from chronos.orders.kill_switch import LiveKillSwitch
+from chronos.orders.live_audit import KillSwitchEventRepository, LiveArmEventRepository
 from chronos.orders.mutations import OrderCancellationService, OrderModificationService
 from chronos.orders.preview import OrderPreviewService
 from chronos.orders.reconciliation_recovery import OrderRestartReconciler
 from chronos.orders.risk import OrderRiskEngine
 from chronos.orders.service import OrderManagementService
+from chronos.orders.session_drawdown import SessionDrawdownBreaker
 from chronos.orders.submission import PaperOrderSubmissionBoundary
 from chronos.orders.tracker import OrderTracker
 from chronos.persistence.database import Database
@@ -60,6 +64,9 @@ class AppRuntime:
     short_put_demo_what_if: ShortPutDemoWhatIfService
     short_put_demo_approval: ShortPutDemoApprovalService
     order_management: OrderManagementService
+    live_arming: LiveArmingService
+    live_kill_switch: LiveKillSwitch
+    session_drawdown: SessionDrawdownBreaker
 
     def close(self) -> None:
         try:
@@ -159,6 +166,24 @@ def build_runtime(*, register_atexit: bool = True) -> AppRuntime:
             database=database,
             account=account,
         )
+        live_kill_switch = LiveKillSwitch(
+            settings.live_kill_switch_file,
+            audit=KillSwitchEventRepository(database.sessions),
+        )
+        live_arming = LiveArmingService(
+            ttl_minutes=settings.live_arm_ttl_minutes,
+            audit=LiveArmEventRepository(
+                database.sessions,
+                account_fingerprint=account_fingerprint(account.account_id),
+            ),
+        )
+        session_drawdown = SessionDrawdownBreaker(
+            settings.session_baseline_file,
+            max_drawdown_usd=settings.max_session_drawdown_usd,
+            max_drawdown_pct=settings.max_session_drawdown_pct,
+            market_timezone=settings.market_timezone,
+            kill_switch=live_kill_switch,
+        )
     except BaseException:
         if connection is not None:
             try:
@@ -189,6 +214,9 @@ def build_runtime(*, register_atexit: bool = True) -> AppRuntime:
         short_put_demo_what_if=short_put_demo_what_if,
         short_put_demo_approval=short_put_demo_approval,
         order_management=order_management,
+        live_arming=live_arming,
+        live_kill_switch=live_kill_switch,
+        session_drawdown=session_drawdown,
     )
     if register_atexit:
         atexit.register(runtime.close)
