@@ -44,10 +44,18 @@ def test_exactly_one_transmit_true_keyword_in_the_package() -> None:
 
 
 def test_no_module_outside_submission_passes_transmit_non_false() -> None:
+    # Widened to ALL of src/chronos (M7 review finding F8): a transmit=True
+    # call in chronos.api / chronos.ui would be invisible to an orders-only
+    # scan.
+    import chronos
+
+    src_root = Path(chronos.__file__).parent
     offenders: list[tuple[str, int]] = []
-    for name, tree in _module_asts().items():
-        if name == "submission.py":
+    for path in sorted(src_root.rglob("*.py")):
+        name = str(path.relative_to(src_root))
+        if name == "orders/submission.py":
             continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
