@@ -94,6 +94,18 @@ def test_crypto_allocation_unmarked_when_any_holding_lacks_price() -> None:
     assert marked is False
 
 
+def test_crypto_allocation_unmarked_when_a_holding_is_marked_non_positive() -> None:
+    # Adversarial-review F5: a 0 (or negative) mark is anomalous broker data and
+    # must fail UNKNOWN, not silently value the holding at zero and let an
+    # over-allocated BUY slip past the allocation cap.
+    positions = (
+        _crypto_pos("BTC", "0.5", "64000"),
+        _crypto_pos("ETH", "2.0", "0"),  # zero mark
+    )
+    _value, marked = _crypto_allocation(positions)
+    assert marked is False
+
+
 def test_pending_crypto_buy_notional_counts_only_buys() -> None:
     orders = (
         _crypto_order("BTC", OrderSide.BUY, "0.01", "64000"),  # 640

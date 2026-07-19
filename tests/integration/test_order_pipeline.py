@@ -22,6 +22,7 @@ from tests.support.order_fakes import (
     paper_settings,
 )
 
+from chronos.broker.base import BrokerConnectionError, BrokerRefusedBeforeSend
 from chronos.broker.connection import BrokerConnectionManager
 from chronos.config.settings import Settings
 from chronos.domain.enums import (
@@ -428,6 +429,72 @@ def test_submission_unknown_absent_from_broker_stays_unresolved(harness: _Harnes
     assert applied == 0  # nothing resolved from an empty snapshot
     stored = harness.service.get("intent-1")
     assert stored is not None and stored.status is OrderLifecycle.SUBMISSION_UNKNOWN
+    assert harness.broker.submit_calls == []
+
+
+# --- M8b chaos: real fault injection at broker.submit_order (paper path) ------
+# The tests above force SUBMISSION_UNKNOWN synthetically; these drive the actual
+# transmit-path exception handling by making broker.submit_order raise mid-call.
+
+
+def test_broker_error_during_submit_leaves_recoverable_submission_unknown(
+    harness: _Harness,
+) -> None:
+    intent = _short_put_intent()
+    _drive_to_confirmed(harness, intent, FIXED_NOW)
+    # The socket drops mid-send: bytes may have left, so the outcome is ambiguous.
+    harness.broker.submit_error = BrokerConnectionError("socket dropped mid-send")
+
+    outcome = harness.service.submit(intent, writer_lease_held=True, now=FIXED_NOW)  # type: ignore[arg-type]
+
+    assert outcome.submitted is False
+    assert outcome.refusal is SubmissionRefusalCode.BROKER_SUBMIT_FAILED
+    # The pre-submit CAS already persisted SUBMISSION_UNKNOWN; a failed send never
+    # rolls it back and never auto-retries (the fake raised before recording).
+    stored = harness.service.get("intent-1")
+    assert stored is not None and stored.status is OrderLifecycle.SUBMISSION_UNKNOWN
+    assert harness.broker.submit_calls == []
+
+    # It is recoverable: the broker later shows the order working under our ref,
+    # and restart reconciliation resolves it WITHOUT ever re-submitting.
+    harness.broker.submit_error = None
+    harness.broker._open_orders = (
+        BrokerOrder(
+            broker_order_id=9500,
+            client_id=17,
+            account_id=PAPER_ACCOUNT,
+            order_ref="CHR-ORD-" + "A" * 32,
+            contract=option_contract(),
+            side=intent.side,  # type: ignore[attr-defined]
+            quantity=Decimal("1"),
+            filled_quantity=Decimal("0"),
+            remaining_quantity=Decimal("1"),
+            limit_price=Decimal("1.20"),
+            lifecycle=OrderLifecycle.SUBMITTED,
+        ),
+    )
+    applied = harness.service.reconcile_on_restart(now=FIXED_NOW)
+    assert applied == 1
+    recovered = harness.service.get("intent-1")
+    assert recovered is not None and recovered.status is OrderLifecycle.SUBMITTED
+    assert harness.broker.submit_calls == []  # never re-sent
+
+
+def test_broker_refused_before_send_during_submit_resolves_rejected_without_wedge(
+    harness: _Harness,
+) -> None:
+    intent = _short_put_intent()
+    _drive_to_confirmed(harness, intent, FIXED_NOW)
+    # The adapter refuses locally before any network send: the venue provably
+    # never saw the order, so it resolves to REJECTED synchronously (no wedge).
+    harness.broker.submit_error = BrokerRefusedBeforeSend("refused locally before send")
+
+    outcome = harness.service.submit(intent, writer_lease_held=True, now=FIXED_NOW)  # type: ignore[arg-type]
+
+    assert outcome.submitted is False
+    assert outcome.refusal is SubmissionRefusalCode.BROKER_REFUSED_BEFORE_SEND
+    stored = harness.service.get("intent-1")
+    assert stored is not None and stored.status is OrderLifecycle.REJECTED
     assert harness.broker.submit_calls == []
 
 

@@ -59,6 +59,10 @@ _SELL_INTENTS: frozenset[OrderIntent] = frozenset(
 )
 # A uuid5 namespace fixed for Chronos order idempotency (never security-bearing).
 _IDEMPOTENCY_NAMESPACE = uuid.UUID("6f2a1e14-1d2b-5c3a-9f77-c0ffee5100d5")
+# Upper magnitude bound: Numeric(20,8) allows 12 integer digits, so a quantity
+# must be strictly below 1e12 (ADR-0010 §1). Pairs with the -8 scale check to
+# bound the persisted/hashed/transmitted quantity to exactly Numeric(20,8).
+_MAX_QUANTITY = Decimal(10) ** 12
 
 
 def side_for_intent(intent: OrderIntent) -> OrderSide:
@@ -128,6 +132,14 @@ class WheelOrderIntent(ChronosModel):
             # finer would round-trip lossily and desynchronize the audit
             # record from the hashed/transmitted quantity.
             raise ValueError("quantity is finer than the 1e-8 persistence scale")
+        if value >= _MAX_QUANTITY:
+            # Upper magnitude bound, the other half of Numeric(20,8) (12 integer
+            # digits). Without it a huge quantity (a) overflows the 28-digit
+            # Decimal context in the venue-conformance modulo, raising an
+            # ArithmeticError that escapes the "engine never raises" contract,
+            # and (b) would be rounded by canonical_quantity's normalize(),
+            # forking the idempotency key/confirmation hash from the true value.
+            raise ValueError("quantity exceeds the Numeric(20,8) persistence magnitude")
         return value
 
     @field_validator("limit_price")

@@ -351,7 +351,7 @@ concentration, cash sufficiency for buys, held-share sufficiency for sells
 alongside options; live in Milestone 7. Stock paper validation works
 normally (IBKR paper supports stocks).
 
-**Crypto (new Milestone 7C — after live options/stocks are validated).**
+**Crypto (new Milestone 7C — after live options/stocks are validated) — DELIVERED.**
 Honest constraints that shape the design, stated up front:
 
 - IBKR crypto is **spot only** (Paxos/Zero Hash venue). There are **no
@@ -552,6 +552,63 @@ verification against a running gateway remains an owner action** (§6 working
 agreement). Modify-in-place is deferred on the official adapter. No live order
 was placed during development; tests/CI construct only fakes and spies.
 
-**Next: Milestone 7C** — crypto family (fractional Decimal quantities, venue
-min-size validation, family session calendar, demo fixtures + spy validation;
-IBKR paper does not support crypto — disclosed), then Milestone 8 hardening.
+**Milestone 7C DELIVERED (2026-07-19)** — the crypto family folded into the
+SAME human-confirmed, allowlist-gated, single-writer submission boundary as
+options and stocks, per the panel-remediated design in
+`docs/adr/ADR-0010-crypto-family.md` (all 22 design-panel findings folded in).
+The mandated commit order lands read-path normalization first and the
+intent-validator refusal deletion last, so every intermediate state stays safe
+(crypto is refused until the final commit switches it on):
+
+- **Commit 1** `CryptoContract` domain model (spot, PAXOS/Zero Hash venue,
+  optional `min_tick`/`min_size`/`size_increment`) + read-path normalization —
+  which also fixes a latent account-wide read wedge: a manually-held crypto
+  position previously broke `positions()`/`executions()`/`open_orders()` for
+  the whole account.
+- **Commit 2** family-conditional fractional `Decimal` quantities. The
+  canonical serialization `format(quantity.normalize(), "f")` is byte-identical
+  to the pre-M7C `str(int)` for every integral quantity — golden-pinned so an
+  option/stock idempotency key or confirmation hash can never fork.
+- **Commit 3** crypto risk branch (venue min-size/increment conformance from
+  qualified metadata — absent ⇒ UNKNOWN, never assumed; per-order notional cap;
+  BUY-scoped allocation cap that must be MARKED from a fresh quote; cash
+  sufficiency that encumbers open/pending short puts AND resting crypto BUYs;
+  no-short SELL check net of resting SELLs), the ~24/7 family calendar (crypto
+  defaults OPEN; broker "closed" evidence wins), allowlist eligibility (empty
+  `CRYPTO_ALLOWLIST` disables the family), and family-aware TIF. Crypto
+  aggregates are kept SEPARATE from the wheel/stock aggregates so a crypto
+  holding never distorts stock concentration or cash math (decontamination
+  proven by test).
+- **Commit 4** adapter crypto path: `qualify_crypto` + `request_crypto_quote`
+  on the broker protocol; the official adapter harvests venue metadata from
+  ContractDetails and builds **Decimal-preserving** orders (`int()` would
+  truncate 0.005 BTC to a 0-size order), routes to the crypto venue (never a
+  hardcoded SMART), and maps TIF/outsideRth/transmit from the request; demo
+  BTC/ETH fixtures; `MarketDataManager.crypto_quote`; runtime fresh-quote
+  branch; `build_crypto_intent` + API `_build_intent` crypto branch with a
+  Decimal quantity field.
+- **Commit 5** lift the intent-validator refusal (whole-unit enforcement moves
+  into the OPTION/STOCK branches; crypto keeps fractional quantities) + the
+  recording-spy pipeline suite.
+
+**M7C verification:** full pytest suite green (1587 passed), mypy --strict
+clean, ruff + ruff format clean. The crypto family is proven through the same
+recording `FakeBroker`: the happy path (DAY and IOC) emits exactly one order
+carrying the fractional `Decimal` quantity untouched, the family TIF, and
+`transmit=True` to the paper account; every refusal path (below min-size, over
+notional, over allocation, unmarked allocation, family disabled, SELL beyond
+holdings, un-permitted TIF, missing writer lease) leaves `submit_calls == []`.
+
+**M7C honest limitation:** **IBKR paper accounts do not support crypto**, so —
+exactly as the plan disclosed up front — the family cannot be paper-validated.
+Its validation is therefore (1) deterministic demo fixtures, (2) the
+recording-spy pipeline walk above, and (3) an owner-performed minimal-size live
+acceptance through the finished app. The raw `ibapi` Order build for crypto is
+unit-tested against fake-ibapi objects (the official package is not installable
+in this environment); owner gateway verification against a running gateway with
+TWS API ≥ 10.10 (the Decimal-`totalQuantity` precondition) remains an owner
+action, per §6.
+
+**Next: Milestone 8** — hardening, chaos tests across all three families, CI
+Alembic verification, README rewrite, `docs/limitations.md`, adversarial
+self-review, final PR.

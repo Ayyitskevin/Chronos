@@ -33,6 +33,30 @@ _V4_TABLES = {
     "risk_check_results",
 }
 
+# Frozen v2 baseline (the pre-alembic create_all schema, migration 0001 no-op).
+# This set is deliberately hardcoded, NOT derived from Base.metadata, so a table
+# added to the models without a migration cannot hide inside it.
+_V2_BASELINE_TABLES = {
+    "application_events",
+    "candidate_evaluations",
+    "commissions",
+    "database_scope",
+    "fills",
+    "guardrail_decisions",
+    "order_drafts",
+    "order_previews",
+    "reconciliation_runs",
+    "rejected_candidate_reasons",
+    "schema_version",
+    "strategy_basis_entries",
+    "strategy_state",
+    "submitted_orders",
+    "wheel_cycles",
+}
+
+# The complete table universe the migration chain accounts for through head.
+_ALL_MIGRATED_TABLES = _V2_BASELINE_TABLES | _V3_TABLES | _V4_TABLES
+
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
@@ -142,3 +166,63 @@ def test_fresh_database_needs_no_alembic(tmp_path: Path) -> None:
         assert set(inspector.get_table_names()) >= _V3_TABLES | _V4_TABLES
     finally:
         database.dispose()
+
+
+def test_models_have_no_untracked_tables() -> None:
+    """The models must match the frozen migration manifest exactly (M8c).
+
+    Adding or removing a table in the ORM models fails here until the frozen
+    ``_ALL_MIGRATED_TABLES`` manifest is updated — the human prompt to write the
+    matching migration. Pairs with the upgrade test below, which proves the
+    chain actually builds that manifest.
+    """
+
+    assert set(Base.metadata.tables) == _ALL_MIGRATED_TABLES
+
+
+def _make_frozen_v2_database(path: Path) -> None:
+    """Create ONLY the hardcoded v2 baseline tables (no current-metadata deriv)."""
+
+    engine = sa.create_engine(f"sqlite:///{path}")
+    tables = [Base.metadata.tables[name] for name in _V2_BASELINE_TABLES]
+    Base.metadata.create_all(engine, tables=tables)
+    with engine.begin() as connection:
+        connection.execute(
+            sa.text(
+                "INSERT INTO schema_version (version, applied_at) "
+                "VALUES (2, '2026-01-01 00:00:00.000000')"
+            )
+        )
+    engine.dispose()
+
+
+def test_migration_chain_builds_exactly_the_current_models(tmp_path: Path) -> None:
+    """The migration chain, applied to a FROZEN v2 baseline, must reproduce the
+    current model TABLE SET exactly (M8c).
+
+    Scope and honest limits (see docs/limitations.md):
+    - Catches the naive missing-migration case: a table added to the models
+      (and to the frozen ``_V2_BASELINE_TABLES``/manifest so the manifest test
+      passes) without a matching migration is absent from the chain, so the
+      result set diverges and this fails. If a dev instead adds the table ONLY
+      to ``_V2_BASELINE_TABLES`` and not to a migration, the baseline fixture
+      creates it and this cannot tell — the guard trusts the frozen baseline,
+      which has no independent v2-schema source of truth (0001 is a no-op).
+    - Table-name level only: a missing ADD COLUMN/index/constraint migration is
+      NOT caught here (the baseline tables are built from current metadata, so
+      they already carry the new column). Add such migrations explicitly.
+    """
+
+    db_path = tmp_path / "chronos.db"
+    _make_frozen_v2_database(db_path)
+
+    config = _alembic_config(db_path)
+    command.stamp(config, "0001")
+    command.upgrade(config, "head")
+
+    engine = sa.create_engine(f"sqlite:///{db_path}")
+    tables = set(sa.inspect(engine).get_table_names())
+    engine.dispose()
+    tables.discard("alembic_version")  # alembic's own bookkeeping, not a model
+
+    assert tables == set(Base.metadata.tables)

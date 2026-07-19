@@ -304,9 +304,17 @@ class TestOrderObjectBuilding:
         )
         monkeypatch.setattr(official_ibkr_module, "_load_order_class", lambda: _FakeOrder)
 
-    def _build(self, request: OrderRequest, *, what_if: bool = False) -> tuple[object, object]:
-        # The method never touches ``self``; a bare instance shell is enough.
+    def _build(
+        self,
+        request: OrderRequest,
+        *,
+        what_if: bool = False,
+        allow_outside_rth: bool = False,
+    ) -> tuple[object, object]:
+        # The method reads only self._settings.allow_outside_rth (the F4 clamp);
+        # a bare shell carrying that one attribute is enough.
         broker = object.__new__(OfficialIBKRBroker)
+        broker._settings = SimpleNamespace(allow_outside_rth=allow_outside_rth)  # type: ignore[assignment]
         return OfficialIBKRBroker._build_order_objects(broker, request, what_if=what_if)
 
     def test_fractional_crypto_quantity_is_preserved_not_truncated(
@@ -388,3 +396,45 @@ class TestOrderObjectBuilding:
 
         assert order.whatIf is True
         assert order.transmit is False
+
+    def test_outside_rth_request_is_clamped_when_the_setting_forbids_it(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # F4 defense in depth: even a request asking for outside-RTH is clamped
+        # to RTH unless the owner setting allows it.
+        self._patch_loaders(monkeypatch)
+        request = OrderRequest(
+            correlation_id="CHR-ORD-" + "D" * 32,
+            account_id="U7654321",
+            contract=CryptoContract(con_id=1, symbol="ETH"),
+            intent=OrderIntent.OPEN_LONG_CRYPTO,
+            side=OrderSide.BUY,
+            quantity=Decimal("0.1"),
+            limit_price=Decimal("3000"),
+            order_ref="CHR-ORD-" + "D" * 32,
+            outside_rth=True,
+        )
+
+        _contract, order = self._build(request, allow_outside_rth=False)
+
+        assert order.outsideRth is False
+
+    def test_outside_rth_request_passes_when_the_setting_allows_it(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._patch_loaders(monkeypatch)
+        request = OrderRequest(
+            correlation_id="CHR-ORD-" + "E" * 32,
+            account_id="U7654321",
+            contract=CryptoContract(con_id=1, symbol="ETH"),
+            intent=OrderIntent.OPEN_LONG_CRYPTO,
+            side=OrderSide.BUY,
+            quantity=Decimal("0.1"),
+            limit_price=Decimal("3000"),
+            order_ref="CHR-ORD-" + "E" * 32,
+            outside_rth=True,
+        )
+
+        _contract, order = self._build(request, allow_outside_rth=True)
+
+        assert order.outsideRth is True

@@ -14,6 +14,7 @@ from collections.abc import Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
+from chronos.broker.base import BrokerError
 from chronos.config.settings import Settings
 from chronos.domain.enums import (
     ConnectionState,
@@ -63,6 +64,10 @@ class FakeBroker:
         self.modify_calls: list[OrderModification] = []
         self.cancel_calls: list[int] = []
         self.preview_calls: list[OrderRequest] = []
+        # Fault injection: when set, submit_order raises this before recording,
+        # so submit_calls stays empty (the boundary caught it). Used to drive the
+        # transmit-path exception handling under fault.
+        self.submit_error: BrokerError | None = None
 
     async def connect(self) -> None:
         return None
@@ -111,6 +116,8 @@ class FakeBroker:
         )
 
     async def submit_order(self, request: OrderRequest) -> OrderSubmission:
+        if self.submit_error is not None:
+            raise self.submit_error
         self.submit_calls.append(request)
         broker_order_id = self._next_id
         self._next_id += 1

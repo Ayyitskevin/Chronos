@@ -296,3 +296,13 @@ def test_crypto_ioc_rejected_when_setting_is_day() -> None:
         _crypto_intent(quantity=Decimal("0.001"), time_in_force="IOC"), _evidence(), now=_NOW
     )
     assert any(c.name == "limit_only" and c.status.value == "FAIL" for c in decision.checks)
+
+
+def test_crypto_day_still_permitted_when_setting_is_ioc() -> None:
+    # Adversarial-review F3: enabling IOC must not block a plain DAY crypto order
+    # (the builder/API default). DAY is always permitted; IOC is additive.
+    engine = OrderRiskEngine(_settings(crypto_time_in_force="IOC"))
+    decision = engine.evaluate(
+        _crypto_intent(quantity=Decimal("0.001"), time_in_force="DAY"), _evidence(), now=_NOW
+    )
+    assert any(c.name == "limit_only" and c.status.value == "PASS" for c in decision.checks)

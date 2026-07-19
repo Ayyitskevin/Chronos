@@ -54,6 +54,7 @@ from chronos.domain.accounts import classify_observed_environment
 from chronos.domain.enums import DataQuality, IBEnvironment, OrderLifecycle, ProductFamily
 from chronos.domain.models import (
     ChronosModel,
+    CryptoContract,
     MarketQuote,
     OptionContract,
     OrderSubmission,
@@ -489,12 +490,24 @@ class OrderSubmissionBoundary:
             return False, f"quote is stale ({age.total_seconds():.1f}s old)"
         if quote.data_quality not in _LIVE_ACCEPTABLE_QUALITY:
             return False, f"quote data quality is not acceptable ({quote.data_quality.value})"
-        min_tick = (
-            intent.contract.min_tick
-            if intent.product_family is ProductFamily.OPTION
-            and isinstance(intent.contract, OptionContract)
-            else _STOCK_MIN_TICK
-        )
+        if intent.product_family is ProductFamily.OPTION and isinstance(
+            intent.contract, OptionContract
+        ):
+            min_tick = intent.contract.min_tick
+        elif intent.product_family is ProductFamily.CRYPTO and isinstance(
+            intent.contract, CryptoContract
+        ):
+            # Crypto tick comes ONLY from the qualified contract (ADR-0010 §6):
+            # coins have venue-specific ticks, so the stock 0.01 default is wrong.
+            # Absent metadata is UNKNOWN ⇒ fail closed, exactly like size.
+            if intent.contract.min_tick is None:
+                return False, (
+                    "crypto contract is missing venue min-tick metadata; "
+                    "cannot verify limit-price conformance"
+                )
+            min_tick = intent.contract.min_tick
+        else:
+            min_tick = _STOCK_MIN_TICK
         if not _tick_conforms(intent.limit_price, min_tick):
             return False, (
                 f"limit price {intent.limit_price} does not conform to min tick {min_tick}"

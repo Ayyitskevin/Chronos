@@ -250,7 +250,11 @@ def _crypto_allocation(positions: tuple[BrokerPosition, ...]) -> tuple[Decimal, 
         contract = position.contract
         if not isinstance(contract, CryptoContract) or position.quantity <= 0:
             continue
-        if position.market_price is None:
+        # A non-positive mark is treated the same as a missing one: a real venue
+        # never marks a held coin at 0, so 0/negative is anomalous data that must
+        # fail UNKNOWN rather than silently value the holding at zero and let an
+        # over-allocated BUY slip past the cap.
+        if position.market_price is None or position.market_price <= 0:
             marked = False
             continue
         total += position.quantity * position.market_price
