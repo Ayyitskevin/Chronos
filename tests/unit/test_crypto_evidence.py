@@ -90,7 +90,7 @@ def test_crypto_allocation_unmarked_when_any_holding_lacks_price() -> None:
         _crypto_pos("BTC", "0.5", "64000"),
         _crypto_pos("ETH", "2.0", None),  # no mark
     )
-    value, marked = _crypto_allocation(positions)
+    _value, marked = _crypto_allocation(positions)
     assert marked is False
 
 
