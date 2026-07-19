@@ -825,6 +825,46 @@ class OfficialIBKRBroker:
             raise BrokerDataError(f"underlying qualification returned a non-stock for {symbol!r}")
         return instrument
 
+    async def qualify_crypto(self, symbol: str) -> CryptoContract:
+        """Qualify a spot-crypto contract (ADR-0010): secType CRYPTO, PAXOS venue.
+
+        Venue metadata (``min_tick``/``min_size``/``size_increment``) is
+        harvested from ContractDetails, mirroring how option qualification
+        reads ``minTick``. The exact ContractDetails field names
+        (``minSize``/``sizeIncrement``) require TWS API >= 10.10 and are an
+        owner gateway-verification item; absent fields stay ``None`` so the
+        dependent risk checks fail UNKNOWN rather than assume.
+        """
+
+        app = self._require_app()
+        _, _, Contract, _ = _load_ibapi()
+        contract = Contract()
+        contract.symbol = symbol.strip().upper()
+        contract.secType = "CRYPTO"
+        contract.exchange = "PAXOS"
+        contract.currency = "USD"
+        request_id = self.registry.open()
+        app.reqContractDetails(request_id, contract)
+        details = await self.registry.wait(request_id, timeout=_REQUEST_TIMEOUT_S)
+        if not details:
+            raise BrokerDataError(f"no contract details for crypto {symbol!r}")
+        first = details[0]
+        instrument = instrument_from_contract(getattr(first, "contract", first))
+        if not isinstance(instrument, CryptoContract):
+            raise BrokerDataError(f"crypto qualification returned a non-crypto for {symbol!r}")
+        updates: dict[str, Decimal] = {}
+        for attr, field in (
+            ("minTick", "min_tick"),
+            ("minSize", "min_size"),
+            ("sizeIncrement", "size_increment"),
+        ):
+            raw = getattr(first, attr, None)
+            if raw:
+                updates[field] = Decimal(str(raw))
+        if updates:
+            instrument = instrument.model_copy(update=updates)
+        return instrument
+
     async def option_chain_parameters(
         self,
         underlying: UnderlyingContract,
@@ -870,6 +910,9 @@ class OfficialIBKRBroker:
     async def request_underlying_quote(self, contract: UnderlyingContract) -> MarketQuote:
         return await self._snapshot_quote(contract, con_id=contract.con_id, generic_ticks="")
 
+    async def request_crypto_quote(self, contract: CryptoContract) -> MarketQuote:
+        return await self._snapshot_quote(contract, con_id=contract.con_id, generic_ticks="")
+
     async def request_option_quotes(
         self,
         contracts: Sequence[OptionContract],
@@ -888,7 +931,10 @@ class OfficialIBKRBroker:
         _, _, Contract, _ = _load_ibapi()
         contract = Contract()
         contract.conId = con_id
-        contract.exchange = "SMART"
+        # Route by the instrument's own venue (ADR-0010 §6): STK/OPT use SMART,
+        # crypto uses PAXOS/Zero Hash — a SMART-routed crypto quote request
+        # fails or returns wrong data at IBKR.
+        contract.exchange = getattr(instrument, "exchange", "SMART") or "SMART"
         request_id = self.registry.open()
         self.bridge.open_quote(request_id)
         app.reqMktData(request_id, contract, generic_ticks, True, False, [])
@@ -948,14 +994,21 @@ class OfficialIBKRBroker:
             raise BrokerRefusedBeforeSend("contract is not qualified (no con_id); refusing")
         contract = Contract()
         contract.conId = int(con_id)
+        # Exchange from the qualified contract: STK/OPT route SMART, CRYPTO
+        # carries its venue (PAXOS/Zero Hash) — never hardcoded (ADR-0010 §6).
         contract.exchange = getattr(request.contract, "exchange", "SMART") or "SMART"
         order = Order()
         order.action = request.side.value
         order.orderType = "LMT"  # market orders are impossible by construction
-        order.totalQuantity = int(request.quantity)
+        # Decimal-preserving (ADR-0010 §6): int() would truncate 0.005 BTC to 0.
+        # ibapi Order.totalQuantity is Decimal in TWS API >= 10.10 (the crypto
+        # precondition); integral option/stock quantities round-trip unchanged.
+        order.totalQuantity = request.quantity
         order.lmtPrice = float(request.limit_price)
-        order.tif = "DAY"
-        order.outsideRth = False
+        # TIF mapped from the request (ADR-0010 §3): DAY for options/stocks,
+        # the owner-verified crypto TIF for crypto.
+        order.tif = request.time_in_force
+        order.outsideRth = bool(request.outside_rth)
         order.account = request.account_id
         order.orderRef = request.order_ref
         order.whatIf = bool(what_if)

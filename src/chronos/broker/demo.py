@@ -30,6 +30,7 @@ from chronos.domain.models import (
     BrokerSnapshot,
     CancellationResult,
     ConnectionStatus,
+    CryptoContract,
     DemoFixtureCase,
     MarketQuote,
     ModelGreeks,
@@ -68,9 +69,11 @@ class DemoBroker:
         self._connected = False
         self._last_sync: datetime | None = None
         self._underlyings = self._make_underlyings()
+        self._cryptos = self._make_cryptos()
         self._option_contracts: dict[int, OptionContract] = {}
         self._underlying_quotes: dict[int, MarketQuote] = {}
         self._option_quotes: dict[int, MarketQuote] = {}
+        self._crypto_quotes: dict[int, MarketQuote] = {}
         self._positions: tuple[BrokerPosition, ...] = ()
         self._orders: tuple[BrokerOrder, ...] = ()
         self._executions: tuple[BrokerExecution, ...] = ()
@@ -192,6 +195,15 @@ class DemoBroker:
         except KeyError as error:
             raise BrokerDataError(f"No deterministic demo contract for {symbol.upper()}") from error
 
+    async def qualify_crypto(self, symbol: str) -> CryptoContract:
+        self._require_connection()
+        try:
+            return self._cryptos[symbol.upper()]
+        except KeyError as error:
+            raise BrokerDataError(
+                f"No deterministic demo crypto contract for {symbol.upper()}"
+            ) from error
+
     async def option_chain_parameters(
         self,
         underlying: UnderlyingContract,
@@ -259,6 +271,13 @@ class DemoBroker:
             return self._underlying_quotes[contract.con_id]
         except KeyError as error:
             raise BrokerDataError(f"No deterministic quote for {contract.symbol}") from error
+
+    async def request_crypto_quote(self, contract: CryptoContract) -> MarketQuote:
+        self._require_connection()
+        try:
+            return self._crypto_quotes[contract.con_id]
+        except KeyError as error:
+            raise BrokerDataError(f"No deterministic crypto quote for {contract.symbol}") from error
 
     async def request_option_quotes(
         self,
@@ -379,6 +398,26 @@ class DemoBroker:
             for con_id, symbol, primary_exchange in values
         }
 
+    @staticmethod
+    def _make_cryptos() -> dict[str, CryptoContract]:
+        # Venue metadata mirrors qualified ContractDetails: min_size/size_increment
+        # are always populated here so the demo exercises the CONFORMING path
+        # (the UNKNOWN/absent-metadata path is exercised by the risk unit tests).
+        values = (
+            (3001, "BTC", "0.01", "0.0001", "0.0001"),
+            (3002, "ETH", "0.01", "0.001", "0.001"),
+        )
+        return {
+            symbol: CryptoContract(
+                con_id=con_id,
+                symbol=symbol,
+                min_tick=Decimal(min_tick),
+                min_size=Decimal(min_size),
+                size_increment=Decimal(size_increment),
+            )
+            for con_id, symbol, min_tick, min_size, size_increment in values
+        }
+
     def _build_fixtures(self, as_of: datetime) -> None:
         expiry_14 = (as_of + timedelta(days=14)).date()
         expiry_21 = (as_of + timedelta(days=21)).date()
@@ -426,6 +465,24 @@ class DemoBroker:
                 volume=1_000_000,
             )
             for symbol, (bid, ask, last, quality, timestamp) in stock_values.items()
+        }
+
+        crypto_values = {
+            "BTC": ("63990.00", "64010.00", "64000.00"),
+            "ETH": ("2999.00", "3001.00", "3000.00"),
+        }
+        self._crypto_quotes = {
+            self._cryptos[symbol].con_id: MarketQuote(
+                contract=self._cryptos[symbol],
+                timestamp=as_of,
+                data_quality=DataQuality.DEMO,
+                bid=Decimal(bid),
+                ask=Decimal(ask),
+                last=Decimal(last),
+                close=Decimal(last),
+                volume=1_000_000,
+            )
+            for symbol, (bid, ask, last) in crypto_values.items()
         }
 
         option_values: dict[int, tuple[str, str, str | None, int | None, int | None]] = {

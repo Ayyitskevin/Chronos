@@ -29,6 +29,7 @@ from chronos.domain.enums import (
 )
 from chronos.domain.models import (
     ChronosModel,
+    CryptoContract,
     Instrument,
     OptionContract,
     OrderRequest,
@@ -155,23 +156,34 @@ class WheelOrderIntent(ChronosModel):
                 OrderIntent.CLOSE_SHORT_OPTION,
             }:
                 raise ValueError("OPTION intents must be a short-put/covered-call/close intent")
+            self._require_whole_units()
         elif self.product_family is ProductFamily.STOCK:
             if not isinstance(self.contract, UnderlyingContract):
                 raise ValueError("STOCK intents require an UnderlyingContract")
             if self.intent not in {OrderIntent.OPEN_LONG_STOCK, OrderIntent.CLOSE_LONG_STOCK}:
                 raise ValueError("STOCK intents must be OPEN_LONG_STOCK or CLOSE_LONG_STOCK")
-        else:  # CRYPTO is deferred to Milestone 7C.
-            raise ValueError("CRYPTO order intents are not supported until Milestone 7C")
-        if self.quantity != self.quantity.to_integral_value():
-            # ADR-0010 §1: fractional quantities are a CRYPTO-only capability;
-            # options and stocks stay whole-unit (first line of the defense in
-            # depth — the stock risk check re-asserts this as a genuine FAIL).
-            # (When the CRYPTO branch lands, this check moves inside the
-            # OPTION/STOCK branches above.)
-            raise ValueError(f"{self.product_family.value} quantities must be whole units")
+            self._require_whole_units()
+        elif self.product_family is ProductFamily.CRYPTO:
+            # Fractional Decimal quantities are permitted here (ADR-0010 §1) —
+            # the whole-unit check is deliberately NOT applied to crypto. The
+            # venue min-size/size-increment conformance is enforced downstream
+            # in the crypto risk branch, from qualified contract metadata.
+            if not isinstance(self.contract, CryptoContract):
+                raise ValueError("CRYPTO intents require a CryptoContract")
+            if self.intent not in {OrderIntent.OPEN_LONG_CRYPTO, OrderIntent.CLOSE_LONG_CRYPTO}:
+                raise ValueError("CRYPTO intents must be OPEN_LONG_CRYPTO or CLOSE_LONG_CRYPTO")
+        else:  # pragma: no cover - exhaustive over ProductFamily; fail closed
+            raise ValueError(f"unsupported product family {self.product_family.value}")
         if self.contract.symbol != self.contract.symbol.strip().upper():
             raise ValueError("contract symbol must be normalized")
         return self
+
+    def _require_whole_units(self) -> None:
+        # ADR-0010 §1: fractional quantities are a CRYPTO-only capability;
+        # options and stocks stay whole-unit (first line of the defense in
+        # depth — the stock risk check re-asserts this as a genuine FAIL).
+        if self.quantity != self.quantity.to_integral_value():
+            raise ValueError(f"{self.product_family.value} quantities must be whole units")
 
     @property
     def side(self) -> OrderSide:
@@ -339,5 +351,37 @@ def build_stock_intent(
         contract=contract,
         quantity=Decimal(quantity),
         limit_price=limit_price,
+        outside_rth=False,
+    )
+
+
+def build_crypto_intent(
+    *,
+    account_id: str,
+    intent: OrderIntent,
+    contract: CryptoContract,
+    quantity: int | Decimal,
+    limit_price: Decimal,
+    time_in_force: Literal["DAY", "IOC"] = "DAY",
+    correlation_id: str | None = None,
+    intent_id: str | None = None,
+) -> WheelOrderIntent:
+    """Build a spot-crypto intent (ADR-0010): fractional Decimal quantity, PAXOS venue.
+
+    ``time_in_force`` is family-conditional — DAY or the owner-verified crypto TIF;
+    the risk engine's family-aware ``limit_only`` check re-asserts the configured
+    value, so passing an unpermitted TIF here still fails closed downstream.
+    """
+
+    return WheelOrderIntent(
+        intent_id=intent_id or uuid.uuid4().hex,
+        correlation_id=correlation_id or new_correlation_id(),
+        account_id=account_id,
+        product_family=ProductFamily.CRYPTO,
+        intent=intent,
+        contract=contract,
+        quantity=Decimal(quantity),
+        limit_price=limit_price,
+        time_in_force=time_in_force,
         outside_rth=False,
     )

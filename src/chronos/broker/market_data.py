@@ -24,6 +24,7 @@ from chronos.config.limits import (
 )
 from chronos.domain.enums import DataQuality, OptionRight
 from chronos.domain.models import (
+    CryptoContract,
     MarketQuote,
     OptionChainParameters,
     OptionContract,
@@ -426,6 +427,45 @@ class MarketDataManager:
             (contract.con_id,),
             lambda: self._broker.request_underlying_quote(contract),
             operation=f"underlying quote for {contract.symbol}",
+        )
+        if quote.contract.con_id != contract.con_id:
+            raise MarketDataUnavailableError(
+                f"Broker returned a mismatched quote for {contract.symbol}",
+                contract_ids=(contract.con_id,),
+            )
+        fetched_at = self._now()
+        entry = _CacheEntry(quote, fetched_at)
+        self._quote_cache[contract.con_id] = entry
+        return self._managed_quote(entry, fetched_at, from_cache=False)
+
+    async def crypto_quote(
+        self,
+        contract: CryptoContract,
+        *,
+        force_refresh: bool = False,
+    ) -> ManagedQuote:
+        """Fetch a spot-crypto quote and always cancel its temporary subscription."""
+
+        async with self._quote_operation_lock:
+            return await self._crypto_quote_locked(contract, force_refresh=force_refresh)
+
+    async def _crypto_quote_locked(
+        self,
+        contract: CryptoContract,
+        *,
+        force_refresh: bool,
+    ) -> ManagedQuote:
+        observed_at = self._now()
+        self._raise_if_quarantined()
+        self._prune_expired_caches(observed_at)
+        cached = self._usable_cached_quote(contract.con_id, observed_at, force_refresh)
+        if cached is not None:
+            return self._managed_quote(cached, observed_at, from_cache=True)
+
+        quote = await self._request_with_subscription(
+            (contract.con_id,),
+            lambda: self._broker.request_crypto_quote(contract),
+            operation=f"crypto quote for {contract.symbol}",
         )
         if quote.contract.con_id != contract.con_id:
             raise MarketDataUnavailableError(

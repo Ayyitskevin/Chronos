@@ -28,6 +28,7 @@ from chronos.domain.enums import (
 from chronos.domain.models import (
     AccountSummary,
     ConnectionStatus,
+    CryptoContract,
     MarketQuote,
     OptionContract,
     UnderlyingContract,
@@ -276,6 +277,10 @@ def _build_order_management(
                 market_data.option_quotes((intent.contract,), force_refresh=True)
             )
             managed = quotes[0] if quotes else None
+        elif intent.product_family is ProductFamily.CRYPTO and isinstance(
+            intent.contract, CryptoContract
+        ):
+            managed = connection.run(market_data.crypto_quote(intent.contract, force_refresh=True))
         elif isinstance(intent.contract, UnderlyingContract):
             managed = connection.run(
                 market_data.underlying_quote(intent.contract, force_refresh=True)

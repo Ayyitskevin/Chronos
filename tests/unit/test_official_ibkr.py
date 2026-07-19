@@ -11,12 +11,13 @@ from __future__ import annotations
 
 import importlib.util
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
 
+from chronos.broker import official_ibkr as official_ibkr_module
 from chronos.broker.base import BrokerDataError, BrokerError, BrokerSafetyError
 from chronos.broker.callbacks import QuoteState
 from chronos.broker.official_ibkr import (
@@ -30,8 +31,19 @@ from chronos.broker.official_ibkr import (
     verify_environment_port,
 )
 from chronos.config.settings import Settings
-from chronos.domain.enums import DataQuality, IBEnvironment, OptionRight, OrderSide
-from chronos.domain.models import OptionContract, UnderlyingContract
+from chronos.domain.enums import (
+    DataQuality,
+    IBEnvironment,
+    OptionRight,
+    OrderIntent,
+    OrderSide,
+)
+from chronos.domain.models import (
+    CryptoContract,
+    OptionContract,
+    OrderRequest,
+    UnderlyingContract,
+)
 
 NOW = datetime(2026, 7, 17, 15, 0, tzinfo=UTC)
 
@@ -256,3 +268,123 @@ class TestChainAndQuoteNormalizers:
         quote = quote_from_state(QuoteState(), contract=underlying, timestamp=NOW)
         assert quote.greeks is None
         assert quote.bid is None  # missing stays missing — never invented
+
+
+class _FakeContract:
+    conId = 0
+    exchange = ""
+
+
+class _FakeOrder:
+    def __init__(self) -> None:
+        self.action = ""
+        self.orderType = ""
+        self.totalQuantity: object = None
+        self.lmtPrice = 0.0
+        self.tif = ""
+        self.outsideRth = False
+        self.account = ""
+        self.orderRef = ""
+        self.whatIf = False
+        self.transmit = False
+
+
+class TestOrderObjectBuilding:
+    """``_build_order_objects`` maps an ``OrderRequest`` onto the raw ibapi
+    Order/Contract. The official package is absent here, so the two ibapi
+    loaders are monkeypatched to lightweight stand-ins — the mapping logic
+    (Decimal-preserving quantity, family TIF, transmit) is what matters, not
+    the concrete ibapi classes.
+    """
+
+    @staticmethod
+    def _patch_loaders(monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            official_ibkr_module, "_load_ibapi", lambda: (None, None, _FakeContract, None)
+        )
+        monkeypatch.setattr(official_ibkr_module, "_load_order_class", lambda: _FakeOrder)
+
+    def _build(self, request: OrderRequest, *, what_if: bool = False) -> tuple[object, object]:
+        # The method never touches ``self``; a bare instance shell is enough.
+        broker = object.__new__(OfficialIBKRBroker)
+        return OfficialIBKRBroker._build_order_objects(broker, request, what_if=what_if)
+
+    def test_fractional_crypto_quantity_is_preserved_not_truncated(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._patch_loaders(monkeypatch)
+        request = OrderRequest(
+            correlation_id="CHR-ORD-" + "C" * 32,
+            account_id="U7654321",
+            contract=CryptoContract(con_id=479624278, symbol="BTC"),
+            intent=OrderIntent.OPEN_LONG_CRYPTO,
+            side=OrderSide.BUY,
+            quantity=Decimal("0.005"),
+            limit_price=Decimal("64000"),
+            order_ref="CHR-ORD-" + "C" * 32,
+            time_in_force="IOC",
+        )
+
+        contract, order = self._build(request)
+
+        # int() would have truncated 0.005 -> 0 and silently placed a 0-size order.
+        assert order.totalQuantity == Decimal("0.005")
+        assert isinstance(order.totalQuantity, Decimal)
+        assert order.tif == "IOC"  # family-conditional TIF mapped from the request
+        assert order.outsideRth is False
+        assert order.transmit is False  # mapped from request.transmit (never literal True)
+        assert contract.exchange == "PAXOS"  # crypto venue, never SMART
+        assert contract.conId == 479624278
+
+    def test_integral_option_quantity_and_day_tif_round_trip_unchanged(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._patch_loaders(monkeypatch)
+        option = OptionContract(
+            con_id=777,
+            symbol="AAPL",
+            underlying_con_id=999,
+            expiration=date(2026, 8, 21),
+            strike=Decimal("190"),
+            right=OptionRight.PUT,
+            multiplier=Decimal("100"),
+            trading_class="AAPL",
+            local_symbol="AAPL 260821P00190000",
+        )
+        request = OrderRequest(
+            correlation_id="CHR-ORD-" + "A" * 32,
+            account_id="U7654321",
+            contract=option,
+            intent=OrderIntent.OPEN_SHORT_PUT,
+            side=OrderSide.SELL,
+            quantity=Decimal("2"),
+            limit_price=Decimal("3.20"),
+            order_ref="CHR-ORD-" + "A" * 32,
+        )
+
+        contract, order = self._build(request)
+
+        assert order.totalQuantity == Decimal("2")
+        assert order.tif == "DAY"  # options are always DAY
+        assert contract.exchange == "SMART"
+
+    def test_what_if_forces_transmit_false_even_if_request_transmits(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._patch_loaders(monkeypatch)
+        request = OrderRequest(
+            correlation_id="CHR-ORD-" + "B" * 32,
+            account_id="U7654321",
+            contract=CryptoContract(con_id=1, symbol="ETH"),
+            intent=OrderIntent.OPEN_LONG_CRYPTO,
+            side=OrderSide.BUY,
+            quantity=Decimal("0.1"),
+            limit_price=Decimal("3000"),
+            order_ref="CHR-ORD-" + "B" * 32,
+            transmit=True,
+        )
+
+        _contract, order = self._build(request, what_if=True)
+
+        assert order.whatIf is True
+        assert order.transmit is False
