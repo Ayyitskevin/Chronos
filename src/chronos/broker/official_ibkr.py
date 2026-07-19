@@ -1008,7 +1008,11 @@ class OfficialIBKRBroker:
         # TIF mapped from the request (ADR-0010 §3): DAY for options/stocks,
         # the owner-verified crypto TIF for crypto.
         order.tif = request.time_in_force
-        order.outsideRth = bool(request.outside_rth)
+        # Defense in depth (adversarial-review F4): outside-RTH requires BOTH the
+        # request flag AND the owner setting. The setting is the authority, so no
+        # caller — present or future — can transmit outside regular trading hours
+        # unless the owner explicitly enabled it. Clamps to the safe RTH default.
+        order.outsideRth = bool(request.outside_rth) and self._settings.allow_outside_rth
         order.account = request.account_id
         order.orderRef = request.order_ref
         order.whatIf = bool(what_if)
