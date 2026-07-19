@@ -27,7 +27,10 @@ limitations referenced by the README and the runbooks.
   validation is (1) deterministic demo fixtures, (2) the recording-spy pipeline walk, and (3) an
   owner-performed minimal-size live acceptance. This limitation is disclosed, not papered over.
 - Crypto is **deny-by-default**: an empty `CRYPTO_ALLOWLIST` disables the entire family. It never
-  trades unless the owner explicitly allowlists symbols on a live account.
+  trades unless the owner explicitly allowlists symbols on a live account. There is no dedicated
+  "crypto is live-only" code gate; the live-only effect is enforced by multiple fail-closed layers
+  — IBKR paper has no crypto, so on a paper gateway a crypto order fails closed at qualification /
+  market-data / venue-conformance and would be rejected by the venue regardless.
 - Spot only (no crypto options ⇒ no crypto wheel), long-only, limit orders only, no margin, no
   shorting, no staking/transfer features.
 - Venue min-size / size-increment / min-tick come **only** from the qualified IBKR

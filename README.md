@@ -48,11 +48,13 @@ is an owner action through the finished app.
 ## Safety posture
 
 - **One reachable transmit site.** Exactly one `transmit=True` exists in `chronos.orders`
-  (the submission boundary); a structural test enforces it. Nothing else can send.
+  (the submission boundary); a structural test enforces it. Nothing else in the Live Wheel path
+  can send; the dormant autonomous-plane paper adapter has its own separate, never-instantiated
+  transmit site behind a halt store that defaults HALTED (see [docs/limitations.md](docs/limitations.md)).
 - **Demo is the default** and needs no brokerage account. Paper and live are opt-in config.
-- **Live is fail-closed and gated**, never assumed: a ten-check live stack (config, connection,
-  reconciliation, data, risk, preview, session arming, per-order typed confirmation) plus a
-  durable kill switch and a session-drawdown breaker, each proven to block independently.
+- **Live is fail-closed and gated**, never assumed: a ten-check live stack — config, connection,
+  reconciliation, data, risk, preview, session arming, per-order typed confirmation, a durable
+  kill switch, and a session-drawdown breaker — each proven to block independently.
 - **Market orders are impossible by construction** — every order is a positive-price limit.
 - **Cash-secured puts only; naked short calls are not config-enableable.**
 - Chronos never asks for or stores an IBKR username or password.
