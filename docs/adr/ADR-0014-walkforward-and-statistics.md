@@ -118,8 +118,16 @@ Read-only; places no order. New settings for the defaults (`walkforward_test_win
   capability, reported as not-applicable rather than run as decoration.
 - **DSR is an estimate.** `N` (trial count) is exact from the registry, but the cross-trial
   Sharpe variance `V` is estimated from the current run's folds (other-session trials
-  contribute to `N`, not `V`); the report states this. The stdlib inverse-normal is
-  Acklam's approximation (≈1e-9), disclosed.
+  contribute to `N`, not `V`); the report states this. When `V` cannot be estimated (fewer
+  than two defined window Sharpes, i.e. a single OOS window) while `N > 1`, the deflated
+  Sharpe is reported as **`null` (INSUFFICIENT_EVIDENCE)** rather than an *undeflated* PSR —
+  the multiple-testing penalty is never silently skipped under the `deflated_sharpe` name
+  (C3 review finding 1). A single registered trial (`N <= 1`) needs no deflation and reports
+  the PSR directly. The stdlib inverse-normal is Acklam's approximation (**relative** error
+  ≈1e-9; absolute ≈5e-9 in the deep tails), disclosed.
+- **The trade floor is a validated safety gate.** `min_trades` must be `>= 1`; `walk_forward`
+  rejects a sub-1 floor and `_verdict` additionally clamps it, so "low sample never PASSes"
+  cannot be defeated by a `0`/negative floor (C3 review finding 2).
 - **Data heterogeneity carries over** (ADR-0006): walk-forward runs honestly only on the
   long uniform series (SPY/QQQ); the 3-year 2019–2021 symbols are too short for daily
   folds and are excluded with a recorded reason, not silently run.

@@ -69,7 +69,11 @@ def norm_cdf(x: float) -> float:
 
 
 def norm_ppf(p: float) -> float:
-    """Inverse standard-normal CDF (Acklam's approximation, |err| < 1.2e-9)."""
+    """Inverse standard-normal CDF (Acklam's approximation, |relative err| < 1.2e-9).
+
+    The bound is *relative*; absolute error reaches ~5e-9 in the deep tails (p ~ 1e-7),
+    which is negligible for the DSR probes (1-1/N, 1-1/(N*e)) at realistic trial counts.
+    """
 
     if not 0.0 < p < 1.0:
         raise ValueError(f"norm_ppf requires 0 < p < 1, got {p!r}")

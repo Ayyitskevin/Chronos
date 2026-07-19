@@ -27,6 +27,7 @@ from chronos.control.halt import HaltStore
 from chronos.marketdata.bars import BarSeries
 from chronos.registry import RegistryLedger, RunStage, register_run, trial_count
 from chronos.research.stats import (
+    Moments,
     block_bootstrap_ci,
     deflated_sharpe,
     moments,
@@ -96,6 +97,13 @@ def walk_forward(
 ) -> WalkForwardReport:
     """Run the fixed-config walk-forward and return its sample-honest report + verdict."""
 
+    # The trade floor is a load-bearing safety gate; a sub-1 floor would defeat the
+    # "low sample never PASSes" guarantee, so reject it up front (C3 review finding 2).
+    if min_trades < 1:
+        raise ValueError(
+            f"min_trades must be >= 1 (the trade floor is a safety gate), got {min_trades}"
+        )
+
     result = run_backtest(
         series=series,
         strategy=strategy_factory(),
@@ -132,7 +140,10 @@ def walk_forward(
     )
     n_trials = trial_count(ledger, strategy_id=strategy_id)
     window_sharpes = [w.sharpe for w in windows if w.sharpe is not None]
-    trial_variance = statistics.pvariance(window_sharpes) if len(window_sharpes) >= 2 else 0.0
+    # None when the cross-window Sharpe variance cannot be estimated (< 2 defined window
+    # Sharpes). The DSR helper then refuses to deflate against N > 1 trials rather than
+    # emit an undeflated PSR under the deflated_sharpe name (C3 review finding 1).
+    trial_variance = statistics.pvariance(window_sharpes) if len(window_sharpes) >= 2 else None
 
     ci = (
         block_bootstrap_ci(
@@ -146,18 +157,7 @@ def walk_forward(
         if pooled_sharpe is not None and m is not None
         else None
     )
-    dsr = (
-        deflated_sharpe(
-            pooled_sharpe,
-            len(oos_returns),
-            trial_count=n_trials,
-            trial_sharpe_variance=trial_variance,
-            skew=m.skew,
-            kurtosis=m.kurtosis,
-        )
-        if pooled_sharpe is not None and m is not None
-        else None
-    )
+    dsr = _deflated_or_none(pooled_sharpe, len(oos_returns), n_trials, trial_variance, m)
 
     verdict, reason = _verdict(pooled_trades, ci, dsr, min_trades)
     return WalkForwardReport(
@@ -175,6 +175,46 @@ def walk_forward(
         purged_cv="not applicable (fixed-rule replay)",
         verdict=verdict,
         reason=reason,
+    )
+
+
+def _deflated_or_none(
+    pooled_sharpe: float | None,
+    n_obs: int,
+    n_trials: int,
+    trial_variance: float | None,
+    m: Moments | None,
+) -> float | None:
+    """Deflated Sharpe, or ``None`` when it cannot be computed *honestly* (review finding 1).
+
+    A single registered trial (``N <= 1``) needs no deflation, so the DSR is the PSR against
+    a zero benchmark. For ``N > 1`` we require a positive, *estimated* cross-trial Sharpe
+    variance: without it (fewer than two defined window Sharpes, or a degenerate zero) we
+    return ``None`` rather than an undeflated PSR masquerading as a deflated one — the honest
+    signal that the multiple-testing penalty could not be applied. ``None`` then routes to a
+    blocking INSUFFICIENT_EVIDENCE in ``_verdict``.
+    """
+
+    if pooled_sharpe is None or m is None:
+        return None
+    if n_trials <= 1:
+        return deflated_sharpe(
+            pooled_sharpe,
+            n_obs,
+            trial_count=1,
+            trial_sharpe_variance=0.0,
+            skew=m.skew,
+            kurtosis=m.kurtosis,
+        )
+    if trial_variance is None or trial_variance <= 0.0:
+        return None
+    return deflated_sharpe(
+        pooled_sharpe,
+        n_obs,
+        trial_count=n_trials,
+        trial_sharpe_variance=trial_variance,
+        skew=m.skew,
+        kurtosis=m.kurtosis,
     )
 
 
@@ -217,17 +257,28 @@ def _verdict(
     dsr: float | None,
     min_trades: int,
 ) -> tuple[WalkForwardVerdict, str]:
-    if pooled_trades < min_trades:
+    # Defense in depth: clamp the floor to >= 1 so the gate cannot be defeated even by a
+    # direct caller passing 0/negative (walk_forward also rejects it up front; finding 2).
+    floor = max(1, min_trades)
+    if pooled_trades < floor:
         return (
             WalkForwardVerdict.INSUFFICIENT_EVIDENCE,
-            f"only {pooled_trades} OOS trades (< {min_trades} floor)",
+            f"only {pooled_trades} OOS trades (< {floor} floor)",
         )
-    if ci is None or dsr is None:
-        return WalkForwardVerdict.INSUFFICIENT_EVIDENCE, "statistics undefined (too few OOS bars)"
+    if ci is None:
+        return (
+            WalkForwardVerdict.INSUFFICIENT_EVIDENCE,
+            "Sharpe bootstrap CI undefined (too few OOS bars)",
+        )
     if ci[1] <= 0.0:
         return WalkForwardVerdict.FAIL, f"Sharpe bootstrap CI strictly <= 0 {ci}"
     if ci[0] <= 0.0:
         return WalkForwardVerdict.INSUFFICIENT_EVIDENCE, f"Sharpe bootstrap CI includes 0 {ci}"
+    if dsr is None:
+        return (
+            WalkForwardVerdict.INSUFFICIENT_EVIDENCE,
+            "deflated Sharpe undefined (cross-trial variance unavailable for N > 1)",
+        )
     if dsr < _DSR_PASS_THRESHOLD:
         return (
             WalkForwardVerdict.INSUFFICIENT_EVIDENCE,
