@@ -191,6 +191,65 @@ def cmd_backtest(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_skb_query(args: argparse.Namespace) -> int:
+    from chronos.skb import query as skb_query
+    from chronos.skb.compiler import REPO_ROOT, STORE_PATH, load_store
+    from chronos.skb.schema import (
+        Classification,
+        Direction,
+        Disposition,
+        DispositionReason,
+        StrategyFamily,
+    )
+
+    store = load_store(REPO_ROOT / STORE_PATH)
+    results = skb_query.query_scripts(
+        store,
+        disposition=Disposition(args.disposition) if args.disposition else None,
+        reason=DispositionReason(args.reason) if args.reason else None,
+        family=StrategyFamily(args.family) if args.family else None,
+        direction=Direction(args.direction) if args.direction else None,
+        classification=Classification(args.classification) if args.classification else None,
+        executable=(True if args.executable else None),
+        ported=args.ported,
+        tradable_direction=Direction(args.tradable) if args.tradable else None,
+    )
+    if args.format == "ids":
+        print(" ".join(e.catalog_number for e in results))
+    elif args.format == "json":
+        print(json.dumps([e.model_dump(mode="json") for e in results], indent=2))
+    else:
+        for e in results:
+            print(
+                f"{e.catalog_number:>3}  {e.disposition.value:<10} "
+                f"{e.disposition_reason.value:<34} "
+                f"{e.strategy_family.value:<22} {e.direction.value:<13} {e.title}"
+            )
+    print(f"# {len(results)} script(s)", file=sys.stderr)
+    return 0
+
+
+def cmd_skb_stats(args: argparse.Namespace) -> int:
+    del args
+    from chronos.skb import query as skb_query
+    from chronos.skb.compiler import REPO_ROOT, STORE_PATH, load_store
+
+    store = load_store(REPO_ROOT / STORE_PATH)
+    print(
+        json.dumps(
+            {
+                "pine_scripts": store.pine_script_count,
+                "derived_strategies": store.derived_strategy_count,
+                "corpus_hash": store.corpus_hash,
+                "by_disposition": skb_query.disposition_counts(store),
+                "by_family": skb_query.family_counts(store),
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="chronos-platform",
@@ -257,7 +316,45 @@ def build_parser() -> argparse.ArgumentParser:
     backtest.add_argument("--slippage-bps", type=float, default=2.0)
     backtest.set_defaults(func=cmd_backtest)
 
+    _add_skb_commands(sub)
+
     return parser
+
+
+def _add_skb_commands(sub: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
+    from chronos.skb.schema import (
+        Classification,
+        Direction,
+        Disposition,
+        DispositionReason,
+        StrategyFamily,
+    )
+
+    skb = sub.add_parser("skb", help="query the Strategy Knowledge Base (read-only)")
+    skb_sub = skb.add_subparsers(dest="skb_command", required=True)
+
+    query = skb_sub.add_parser("query", help="filter Pine scripts by structured fields")
+    query.add_argument("--disposition", choices=[d.value for d in Disposition])
+    query.add_argument("--reason", choices=[r.value for r in DispositionReason])
+    query.add_argument("--family", choices=[f.value for f in StrategyFamily])
+    query.add_argument("--direction", choices=[d.value for d in Direction])
+    query.add_argument("--classification", choices=[c.value for c in Classification])
+    query.add_argument(
+        "--executable", action="store_true", help="only integrity PASS_WITH_CONSTRAINTS scripts"
+    )
+    query.add_argument(
+        "--tradable",
+        choices=[Direction.LONG.value, Direction.SHORT.value],
+        help="tradable in this side (matches bidirectional too)",
+    )
+    ported = query.add_mutually_exclusive_group()
+    ported.add_argument("--ported", dest="ported", action="store_true", default=None)
+    ported.add_argument("--not-ported", dest="ported", action="store_false", default=None)
+    query.add_argument("--format", choices=["table", "ids", "json"], default="table")
+    query.set_defaults(func=cmd_skb_query)
+
+    stats = skb_sub.add_parser("stats", help="summary counts by disposition and family")
+    stats.set_defaults(func=cmd_skb_stats)
 
 
 def main(argv: list[str] | None = None) -> int:

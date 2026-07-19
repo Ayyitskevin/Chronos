@@ -1,7 +1,9 @@
 # Strategy Knowledge Base (SKB)
 
 `skb.json` is the compiled Strategy Knowledge Base — a single validated store that
-joins the whole Pine corpus with its research context (AI Quant plan Phase B, B1).
+joins the whole Pine corpus with its research context (AI Quant plan Phase B, B1/B2).
+`CATALOG.md` is the human-readable view of the same store, rendered from it — browse
+that; query `skb.json` from code or the `chronos skb` CLI.
 
 ## What it joins
 
@@ -13,10 +15,15 @@ joins the whole Pine corpus with its research context (AI Quant plan Phase B, B1
 | `research/selection_manifest.json` | the frozen selection criteria + candidacy |
 | `research/results/research_all.json` | backtest results (all partitions incl. the once-run final test) |
 
-Two entity levels: **Pine scripts** (42) and **derived strategies** (2). A script a
-spec derives from is marked `disposition: ported`; the rest are `unclassified`
-pending the B2 backfill. Timeframe / asset-class / regime-tags are defined
-vocabularies left `unknown`/empty in B1 — never guessed from prose.
+Two entity levels: **Pine scripts** (42) and **derived strategies** (2). B2
+backfills a port **disposition** on every script — `ported` (2, a spec derives it),
+`deferred` (4, executable standalone strategies not yet ported), `blocked_on` (1,
+integrity `REQUIRES_REWRITE`), `rejected` (35, not a standalone tradable strategy) —
+each with a machine-readable `disposition_reason`. The disposition is a pure function
+of the clean categoricals (integrity status, classification, direction), never prose,
+so it is reproducible and reviewable (`chronos/skb/disposition.py`). Timeframe /
+asset-class / regime-tags remain defined vocabularies left `unknown`/empty — the
+corpus states them only in prose, never guessed.
 
 ## Guarantees
 
@@ -33,9 +40,23 @@ vocabularies left `unknown`/empty in B1 — never guessed from prose.
 ## Regenerate
 
 ```bash
-python scripts/build_skb.py           # rewrite skb.json
-python scripts/build_skb.py --check   # CI-style: fail if the committed store is stale
+python scripts/build_skb.py           # rewrite skb.json AND CATALOG.md
+python scripts/build_skb.py --check   # CI-style: fail if either committed artifact is stale
 ```
 
-Do not hand-edit `skb.json`; change a source input and regenerate. B2 adds a query
-surface (`chronos skb query ...`) and the full per-script disposition backfill.
+Do not hand-edit `skb.json` or `CATALOG.md`; change a source input and regenerate.
+
+## Query (read-only)
+
+```bash
+chronos skb stats                              # counts by disposition + family
+chronos skb query --disposition deferred       # the not-yet-ported executable strategies
+chronos skb query --tradable long --format ids # tradable long (folds in bidirectional)
+```
+
+The query surface (`chronos/skb/query.py`) is a pure filter/aggregation over the
+store — it imports no runtime/order code and places no orders. `tradable_direction`
+matches a side inclusively (a `bidirectional` script satisfies both `long` and
+`short`). Honesty note: timeframe/data dependencies live only in prose, so a
+question like "blocked on intraday data" is **not** answerable as a structured
+query — the disposition/reason vocabulary is the structured surface.

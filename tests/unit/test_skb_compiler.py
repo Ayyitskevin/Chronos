@@ -75,14 +75,14 @@ def test_basename_normalization_joins_path_prefixed_findings() -> None:
 def test_ported_disposition_is_derived_from_specs() -> None:
     store = compile_skb()
     by_catalog = {p.catalog_number: p for p in store.pine_scripts}
-    # The two specs derive catalog 01 and 11.
+    # The two specs derive catalog 01 and 11; PORTED wins over any other rule.
     assert by_catalog["01"].disposition is Disposition.PORTED
     assert by_catalog["11"].disposition is Disposition.PORTED
     ported = {p.catalog_number for p in store.pine_scripts if p.disposition is Disposition.PORTED}
     assert ported == {"01", "11"}
-    # Everything else awaits the B2 backfill.
-    others = [p for p in store.pine_scripts if p.catalog_number not in ported]
-    assert all(p.disposition is Disposition.UNCLASSIFIED for p in others)
+    # After the B2 backfill no script is left UNCLASSIFIED (see
+    # test_skb_disposition for the full deterministic split).
+    assert all(p.disposition is not Disposition.UNCLASSIFIED for p in store.pine_scripts)
 
 
 def test_derived_strategies_carry_candidacy_and_results() -> None:
