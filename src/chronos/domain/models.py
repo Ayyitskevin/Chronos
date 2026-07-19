@@ -443,7 +443,7 @@ class OrderRequest(ChronosModel):
     contract: Instrument
     intent: OrderIntent
     side: OrderSide
-    quantity: PositiveInt
+    quantity: Decimal = Field(gt=0)
     limit_price: Decimal = Field(gt=0)
     order_ref: str
     transmit: bool = False

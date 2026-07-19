@@ -274,10 +274,10 @@ class OrderRiskEngine:
                 strike=contract.strike,
                 multiplier=contract.multiplier,
                 verified_deliverable_shares=deliverable,
-                contracts=intent.quantity,
+                contracts=int(intent.quantity),
             )
             obligation = capital.short_put_notional(
-                strike=contract.strike, multiplier=deliverable, contracts=intent.quantity
+                strike=contract.strike, multiplier=deliverable, contracts=int(intent.quantity)
             )
             cash_buffer = max(
                 self._settings.min_cash_buffer_usd,
@@ -330,7 +330,7 @@ class OrderRiskEngine:
                 context=self._capital_context(intent, evidence),
                 multiplier=contract.multiplier,
                 verified_deliverable_shares=deliverable,
-                contracts=intent.quantity,
+                contracts=int(intent.quantity),
                 unencumbered_shares=max(share_summary.unencumbered_shares, Decimal("0")),
             )
         except ValueError as error:

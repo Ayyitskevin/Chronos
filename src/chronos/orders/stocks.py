@@ -38,11 +38,12 @@ def validate_stock_order(
 ) -> list[OrderRiskCheck]:
     checks: list[OrderRiskCheck] = []
 
-    # quantity is a PositiveInt on the model, so this documents and re-asserts
-    # the whole-share invariant.
-    if intent.quantity > 0:
+    # ADR-0010 §1 (panel h-3): a GENUINE whole-share FAIL check — the model
+    # validator is the first line, but this one cannot be bypassed by
+    # model_copy(update=...) or a future builder regression.
+    if intent.quantity > 0 and intent.quantity == intent.quantity.to_integral_value():
         checks.append(_passed("stock_whole_shares", f"{intent.quantity} whole shares"))
-    else:  # pragma: no cover - PositiveInt forbids this
+    else:
         checks.append(_failed("stock_whole_shares", "stock orders must be positive whole shares"))
 
     if intent.side is OrderSide.BUY:

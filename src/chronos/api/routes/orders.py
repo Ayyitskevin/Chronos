@@ -29,6 +29,7 @@ from chronos.orders.intent import (
     WheelOrderIntent,
     build_option_intent,
     build_stock_intent,
+    canonical_quantity,
     new_correlation_id,
 )
 from chronos.orders.mutations import OrderMutationError
@@ -109,7 +110,7 @@ def _view(record: OrderIntentRecord) -> OrderView:
         product_family=record.product_family,
         intent=record.open_close_effect,
         status=record.status.value,
-        quantity=str(record.quantity),
+        quantity=canonical_quantity(record.quantity),
         limit_price=(format(record.limit_price, "f") if record.limit_price is not None else None),
         risk_snapshot_id=record.risk_snapshot_id,
     )
