@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from chronos.registry import (
+    KIND_UNLOCK,
     RegistryLedger,
     RunStage,
     accrued_capture_sessions,
@@ -16,6 +18,8 @@ from chronos.registry import (
     register_run,
     trial_count,
 )
+
+_NOW = datetime(2026, 7, 20, 21, 0, tzinfo=UTC)
 
 
 def _ledger(tmp_path: Path) -> RegistryLedger:
@@ -85,35 +89,56 @@ def test_data_fingerprint_reads_bars_and_actions(tmp_path: Path) -> None:
         ),
         encoding="utf-8",
     )
-    fp = data_fingerprint(tmp_path, ["SPY", "QQQ", "IWM"])
-    assert fp["SPY"] == {"bars_sha": "bars_hash", "actions_sha": "actions_hash"}
-    assert fp["QQQ"] == {"bars_sha": "qqq_bars", "actions_sha": None}
-    assert fp["IWM"] == {"bars_sha": None, "actions_sha": None}  # absent symbol
+    fp = data_fingerprint(history, ["SPY", "QQQ", "IWM"])
+    assert fp["SPY"] == {
+        "bars_sha": "bars_hash",
+        "actions_sha": "actions_hash",
+        "actions_captured": True,
+    }
+    # No actions file captured — a None sha is flagged, not mistaken for "no dividends".
+    assert fp["QQQ"] == {"bars_sha": "qqq_bars", "actions_sha": None, "actions_captured": False}
+    assert fp["IWM"] == {"bars_sha": None, "actions_sha": None, "actions_captured": False}
+
+
+def test_verify_detects_tail_truncation(tmp_path: Path) -> None:
+    # A bare hash chain can't catch tail deletion; the head anchor must (review F1).
+    ledger = _ledger(tmp_path)
+    _run(ledger, "regime_trend_v1")
+    _run(ledger, "regime_trend_v1")
+    _run(ledger, "mean_reversion_v1")
+    assert ledger.verify()[0] is True
+    lines = ledger.path.read_text(encoding="utf-8").splitlines()
+    ledger.path.write_text("\n".join(lines[:-1]) + "\n", encoding="utf-8")  # drop the last record
+    ok, detail = ledger.verify()
+    assert ok is False and "truncation" in detail
+    # And whole-file deletion (anchor survives) is also caught.
+    ledger.path.unlink()
+    assert ledger.verify()[0] is False
+
+
+def _budget(ledger: RegistryLedger, now: datetime, accrued: int = 40) -> int:
+    return available_budget(
+        ledger, now=now, accrued_sessions=accrued, sessions_per_unlock=20, max_outstanding_unlocks=2
+    )
 
 
 def test_budget_rations_against_accrual(tmp_path: Path) -> None:
     ledger = _ledger(tmp_path)
-    # 40 accrued sessions, one credit per 20 → 2 earned, 0 spent, capped at 2 → 2.
-    assert (
-        available_budget(
-            ledger, accrued_sessions=40, sessions_per_unlock=20, max_outstanding_unlocks=2
-        )
-        == 2
+    assert _budget(ledger, _NOW, accrued=40) == 2  # 2 earned, 0 spent
+    assert _budget(ledger, _NOW, accrued=0) == 0  # fail closed
+    assert _budget(ledger, _NOW, accrued=200) == 2  # cap bounds it below earned
+
+
+def test_budget_refunds_an_expired_unused_grant(tmp_path: Path) -> None:
+    # An outstanding grant spends a credit; once it expires unused, the credit returns
+    # (review F4 — an expired grant must not permanently burn a credit).
+    ledger = _ledger(tmp_path)
+    expires = (_NOW + timedelta(minutes=15)).isoformat()
+    ledger.append(
+        KIND_UNLOCK, {"unlock_id": "u1", "window": "w", "reason": "r", "expires_at": expires}
     )
-    # Zero accrual fails closed.
-    assert (
-        available_budget(
-            ledger, accrued_sessions=0, sessions_per_unlock=20, max_outstanding_unlocks=2
-        )
-        == 0
-    )
-    # The cap bounds it below what's earned.
-    assert (
-        available_budget(
-            ledger, accrued_sessions=200, sessions_per_unlock=20, max_outstanding_unlocks=2
-        )
-        == 2
-    )
+    assert _budget(ledger, _NOW + timedelta(minutes=1)) == 1  # active grant spends one
+    assert _budget(ledger, _NOW + timedelta(minutes=30)) == 2  # expired → refunded
 
 
 def test_accrued_capture_sessions_counts_option_snapshots(tmp_path: Path) -> None:

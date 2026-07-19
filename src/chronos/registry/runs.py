@@ -1,13 +1,15 @@
 """Experiment-run recording + honest data fingerprints + trial counting (ADR-0013 §2/§5).
 
 A research run is recorded in the ledger with its config/data/criteria/commit
-provenance; the multiple-testing trial count is then **derived** from the ledger
-(every data-touching run counts) — never a self-reported number.
+provenance; the multiple-testing trial count is then **derived** from the recorded runs.
 
-The data fingerprint is honest about *which* store a run used: it hashes the C1
-histdata **bars + corporate-actions** pair per symbol (the dual hash D-14 pins), not
-the legacy single-CSV sha; a run over the legacy raw corpus records that under a
-separate ``legacy_raw`` key so the two provenance regimes are never conflated.
+Honesty (C2 review F3/F5/F7): the derivation is honest, but its *completeness* depends on
+every data-touching run actually being registered with ``touched_data=True`` — which is
+enforced structurally only once the runner auto-registers (a follow-on). ``register_run``
+fails closed on null provenance (an "unknown" commit or an empty criteria reference is
+refused rather than silently recorded). ``data_fingerprint`` attests the *manifest's*
+recorded hash for each file, and distinguishes "no corporate-actions captured" from "no
+dividends" via an explicit ``actions_captured`` flag — it does not recompute file bytes.
 """
 
 from __future__ import annotations
@@ -22,6 +24,8 @@ from pathlib import Path
 from chronos.auditlog.log import AuditRecord
 from chronos.histdata.store import manifest_path
 from chronos.registry.ledger import KIND_RUN, RegistryLedger
+
+_NULL_COMMITS = frozenset({"", "unknown"})
 
 
 class RunStage(StrEnum):
@@ -46,22 +50,29 @@ def current_commit(root: Path) -> str:
     return result.stdout.strip() or "unknown"
 
 
-def data_fingerprint(root: Path, symbols: Iterable[str]) -> dict[str, dict[str, str | None]]:
-    """Per-symbol {bars_sha, actions_sha} from the histdata MANIFEST (None if absent)."""
+def data_fingerprint(history_root: Path, symbols: Iterable[str]) -> dict[str, dict[str, object]]:
+    """Per-symbol provenance from the histdata MANIFEST at ``history_root``.
 
-    path = manifest_path(root / "research/data/history")
+    Returns ``{symbol: {bars_sha, actions_sha, actions_captured}}``. ``actions_captured``
+    is ``False`` when no corporate-actions file was ever captured for the symbol (so a
+    ``None`` ``actions_sha`` is not mistaken for "this instrument has no dividends").
+    """
+
+    path = manifest_path(history_root)
     manifest: dict[str, object] = {}
     if path.exists():
         manifest = json.loads(path.read_text(encoding="utf-8"))
     by_symbol = manifest.get("symbols", {})
     entries = by_symbol if isinstance(by_symbol, dict) else {}
-    out: dict[str, dict[str, str | None]] = {}
+    out: dict[str, dict[str, object]] = {}
     for symbol in symbols:
         entry = entries.get(symbol, {})
         entry = entry if isinstance(entry, dict) else {}
+        actions = entry.get("corporate_actions")
         out[symbol] = {
             "bars_sha": _sha_of(entry.get("bars")),
-            "actions_sha": _sha_of(entry.get("corporate_actions")),
+            "actions_sha": _sha_of(actions),
+            "actions_captured": isinstance(actions, dict),
         }
     return out
 
@@ -85,8 +96,14 @@ def register_run(
     touched_data: bool = True,
     experiment_id: str | None = None,
 ) -> AuditRecord:
-    """Record one research run; returns the chained ledger record."""
+    """Record one research run; fails closed on null provenance."""
 
+    if code_commit.strip() in _NULL_COMMITS:
+        raise ValueError("register_run requires a real code_commit (got empty/'unknown')")
+    if not criteria_ref.strip():
+        raise ValueError("register_run requires a non-empty criteria_ref")
+    if not strategy_id.strip():
+        raise ValueError("register_run requires a strategy_id")
     payload: dict[str, object] = {
         "experiment_id": experiment_id or secrets.token_hex(8),
         "stage": stage.value,
@@ -101,7 +118,11 @@ def register_run(
 
 
 def trial_count(ledger: RegistryLedger, *, strategy_id: str | None = None) -> int:
-    """The multiple-testing N: data-touching runs in the ledger (optionally scoped)."""
+    """The multiple-testing N: data-touching runs recorded in the ledger (optionally scoped).
+
+    Derived from the ledger, not a self-reported field — but honest only insofar as every
+    data-touching run is registered (see module docstring).
+    """
 
     count = 0
     for record in ledger.records_of(KIND_RUN):

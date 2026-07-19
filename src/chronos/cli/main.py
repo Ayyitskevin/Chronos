@@ -380,7 +380,7 @@ def cmd_registry_stats(args: argparse.Namespace) -> int:
             indent=2,
         )
     )
-    return 0
+    return 0 if ok else 1  # a broken/truncated ledger is a non-zero, actionable state
 
 
 def cmd_registry_verify(args: argparse.Namespace) -> int:
@@ -392,6 +392,8 @@ def cmd_registry_verify(args: argparse.Namespace) -> int:
 
 
 def cmd_holdout_status(args: argparse.Namespace) -> int:
+    from datetime import UTC, datetime
+
     from chronos.config.settings import get_settings
     from chronos.histdata.holdout import load_holdouts
     from chronos.registry import (
@@ -403,6 +405,7 @@ def cmd_holdout_status(args: argparse.Namespace) -> int:
 
     settings = get_settings()
     ledger = RegistryLedger(args.ledger)
+    ok, detail = ledger.verify()
     accrued = accrued_capture_sessions(args.history_root)
     print(
         json.dumps(
@@ -412,15 +415,18 @@ def cmd_holdout_status(args: argparse.Namespace) -> int:
                 "accrued_sessions": accrued,
                 "available_unlock_budget": available_budget(
                     ledger,
+                    now=datetime.now(UTC),
                     accrued_sessions=accrued,
                     sessions_per_unlock=settings.holdout_sessions_per_unlock,
                     max_outstanding_unlocks=settings.holdout_max_outstanding_unlocks,
                 ),
+                "chain_ok": ok,
+                "chain_detail": detail,
             },
             indent=2,
         )
     )
-    return 0
+    return 0 if ok else 1
 
 
 def cmd_holdout_unlock(args: argparse.Namespace) -> int:

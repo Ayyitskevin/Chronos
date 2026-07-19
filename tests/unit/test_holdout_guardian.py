@@ -9,6 +9,7 @@ the ledger.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
@@ -169,3 +170,30 @@ def test_symbol_not_covered_by_window_is_refused(tmp_path: Path) -> None:
     grant = _grant(ledger, tmp_path)
     with pytest.raises(HoldoutGuardianError, match="does not cover"):
         mediated_holdout_read(ledger, tmp_path, "QQQ", grant=grant, now=_T0 + timedelta(minutes=1))
+
+
+def test_guardian_refuses_on_a_tampered_ledger(tmp_path: Path) -> None:
+    # The guardian verifies the chain before trusting it (review F2).
+    ledger = _setup(tmp_path)
+    grant = _grant(ledger, tmp_path)
+    lines = ledger.path.read_text(encoding="utf-8").splitlines()
+    row = json.loads(lines[0])
+    row["payload"]["window"] = "x"  # in-place edit → chain break
+    lines[0] = json.dumps(row, sort_keys=True, separators=(",", ":"))
+    ledger.path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    with pytest.raises(HoldoutGuardianError, match="verification"):
+        mediated_holdout_read(ledger, tmp_path, "SPY", grant=grant, now=_T0 + timedelta(minutes=1))
+
+
+def test_truncating_a_burn_is_caught_not_silently_unburned(tmp_path: Path) -> None:
+    # The exact M5 exploit: burn a window, then drop the trailing consume line to
+    # un-burn it. The head anchor makes verify() catch the truncation, and the guardian
+    # refuses to act on the unverified ledger rather than re-unlocking a spent window.
+    ledger = _setup(tmp_path)
+    grant = _grant(ledger, tmp_path)
+    mediated_holdout_read(ledger, tmp_path, "SPY", grant=grant, now=_T0 + timedelta(minutes=1))
+    assert is_burned(ledger, _WINDOW)
+    lines = ledger.path.read_text(encoding="utf-8").splitlines()
+    ledger.path.write_text("\n".join(lines[:-1]) + "\n", encoding="utf-8")  # drop the consume
+    with pytest.raises(HoldoutGuardianError, match="verification"):
+        _grant(ledger, tmp_path, now=_T0 + timedelta(minutes=3))
