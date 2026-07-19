@@ -136,9 +136,26 @@ class TestInstrumentNormalizer:
         assert instrument.deliverable_verified is False  # never assumed
 
     def test_unsupported_sec_type_fails_closed(self) -> None:
-        contract = SimpleNamespace(secType="CRYPTO", symbol="BTC", conId=1, currency="USD")
+        contract = SimpleNamespace(secType="FUT", symbol="ES", conId=1, currency="USD")
         with pytest.raises(BrokerDataError, match="unsupported security type"):
             instrument_from_contract(contract)
+
+    def test_crypto_sec_type_normalizes_without_venue_metadata(self) -> None:
+        # ADR-0010 §7 commit 1: a held crypto position must normalize on the
+        # read path (previously it wedged every positions()/executions() read).
+        from chronos.domain.models import CryptoContract
+
+        contract = SimpleNamespace(
+            secType="CRYPTO", symbol="BTC", conId=479624278, currency="USD", exchange="PAXOS"
+        )
+        instrument = instrument_from_contract(contract)
+        assert isinstance(instrument, CryptoContract)
+        assert instrument.symbol == "BTC"
+        assert instrument.exchange == "PAXOS"
+        # Venue metadata is NEVER populated by the read path (qualification only).
+        assert instrument.min_tick is None
+        assert instrument.min_size is None
+        assert instrument.size_increment is None
 
     def test_missing_con_id_fails_closed(self) -> None:
         contract = SimpleNamespace(secType="STK", symbol="AAPL", conId=0, currency="USD")

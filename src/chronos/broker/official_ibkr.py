@@ -55,6 +55,7 @@ from chronos.domain.models import (
     BrokerPosition,
     CancellationResult,
     ConnectionStatus,
+    CryptoContract,
     Instrument,
     MarketQuote,
     ModelGreeks,
@@ -360,9 +361,22 @@ def instrument_from_contract(contract: Any) -> Instrument:
             local_symbol=local_symbol or f"{symbol}-{raw_expiry}",
             currency=currency,
         )
+    if sec_type == "CRYPTO":
+        # Read-path normalization (ADR-0010 §7 commit 1): venue metadata stays
+        # None here — only qualification may populate it. Landing this BEFORE
+        # any crypto order path exists also fixes the latent account-wide read
+        # wedge: a manually-purchased crypto position no longer breaks
+        # positions()/executions()/open_orders() for the whole account.
+        exchange = str(getattr(contract, "exchange", "") or "PAXOS")
+        return CryptoContract(
+            con_id=con_id,
+            symbol=symbol,
+            exchange=exchange,
+            currency=currency,
+        )
     raise BrokerDataError(
-        f"unsupported security type {sec_type!r} for {symbol!r}; Chronos M2 normalizes "
-        "STK and OPT only (crypto arrives with Milestone 7C's domain model)"
+        f"unsupported security type {sec_type!r} for {symbol!r}; Chronos normalizes "
+        "STK, OPT, and CRYPTO contracts only"
     )
 
 

@@ -20,7 +20,7 @@ from decimal import Decimal
 from chronos.broker.connection import BrokerConnectionManager
 from chronos.config.settings import Settings
 from chronos.domain.enums import OptionRight, OrderSide, ProductFamily, ReconciliationStatus
-from chronos.domain.models import BrokerOrder, BrokerPosition, OptionContract
+from chronos.domain.models import BrokerOrder, BrokerPosition, OptionContract, UnderlyingContract
 from chronos.orders.intent import WheelOrderIntent
 from chronos.orders.risk import RiskEvidence
 from chronos.services.trading_hours import session_for
@@ -125,7 +125,7 @@ def _long_shares(positions: tuple[BrokerPosition, ...], symbol: str) -> Decimal:
     for position in positions:
         contract = position.contract
         if (
-            not isinstance(contract, OptionContract)
+            isinstance(contract, UnderlyingContract)
             and contract.symbol == symbol
             and position.quantity > 0
         ):
@@ -201,7 +201,7 @@ def _symbol_allocation(positions: tuple[BrokerPosition, ...], symbol: str) -> De
         ):
             deliverable = contract.deliverable_shares or contract.multiplier
             total += contract.strike * deliverable * abs(position.quantity)
-        elif not isinstance(contract, OptionContract) and position.quantity > 0:
+        elif isinstance(contract, UnderlyingContract) and position.quantity > 0:
             total += _long_stock_value(position)
     return total
 
@@ -212,6 +212,6 @@ def _total_allocation(positions: tuple[BrokerPosition, ...]) -> Decimal:
     total = _short_put_obligation(positions)
     for position in positions:
         contract = position.contract
-        if not isinstance(contract, OptionContract) and position.quantity > 0:
+        if isinstance(contract, UnderlyingContract) and position.quantity > 0:
             total += _long_stock_value(position)
     return total

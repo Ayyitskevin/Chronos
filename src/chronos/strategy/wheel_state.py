@@ -19,6 +19,7 @@ from chronos.domain.models import (
     BrokerOrderIdentity,
     BrokerPosition,
     ChronosModel,
+    CryptoContract,
     OptionContract,
     UnderlyingContract,
 )
@@ -181,6 +182,10 @@ def derive_wheel_state(evidence: WheelStateInput) -> WheelStateDecision:
                 stock_shares_by_instrument.get(stock_key, Decimal("0")) + position.quantity
             )
             continue
+        if isinstance(position.contract, CryptoContract):
+            # Crypto is its own product family (ADR-0010): never a Wheel
+            # object and never a manual-review trigger — excluded here.
+            continue
         option = position.contract
         if position.quantity > 0:
             manual_reasons.append(
@@ -247,6 +252,8 @@ def derive_wheel_state(evidence: WheelStateInput) -> WheelStateDecision:
         if isinstance(order.contract, UnderlyingContract):
             manual_reasons.append("An open stock order cannot be classified as a Wheel action.")
             continue
+        if isinstance(order.contract, CryptoContract):
+            continue  # crypto orders are outside the Wheel model (ADR-0010)
         option = order.contract
         existing_contract = option_metadata_by_con_id.get(option.con_id)
         if existing_contract is not None and existing_contract != option:

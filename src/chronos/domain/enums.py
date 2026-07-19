@@ -53,6 +53,7 @@ class ConnectionState(StrEnum):
 class SecurityType(StrEnum):
     STOCK = "STK"
     OPTION = "OPT"
+    CRYPTO = "CRYPTO"
 
 
 class OptionRight(StrEnum):
