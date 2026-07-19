@@ -1,6 +1,7 @@
 # ADR-0013: Experiment registry + holdout guardian (Milestone C2)
 
-Status: proposed (design-review pending)
+Status: accepted (two-reviewer adversarial review completed post-merge; findings
+remediated — §11 records them and corrects the overclaims)
 Date: 2026-07-19
 
 ## Context
@@ -191,12 +192,54 @@ Two test layers (mirroring `test_histdata_isolation` + `test_single_transmit_sit
 - Burned-holdout scenario: read a window under a grant → it is burned → a subsequent
   unlock request and a subsequent "fresh" run over it are both refused/flagged.
 
+## 11. Two-reviewer review remediation (record)
+
+A safety + a correctness reviewer ran to completion (post-merge) and both broke the
+original "structurally impossible" framing. All confirmed findings were remediated; the
+claims below are the corrected, honest ones.
+
+- **F1/safety-1 (CRITICAL) — chain truncation un-burned a window undetected.** A bare
+  hash chain can't detect tail deletion (a valid prefix is a valid chain), so dropping
+  the trailing `holdout_consume` line un-burned a window while `verify()` still said
+  "intact". **Fix:** an out-of-band **head anchor** (`registry.head.json`: expected
+  count + last hash) that `verify()` checks, so truncation / whole-file deletion /
+  rollback are detected.
+- **F2/safety-1 (HIGH) — nothing verified before trusting.** The guardian read the
+  ledger without verifying it. **Fix:** `request_unlock` and `mediated_holdout_read`
+  call `verify()` first and **fail closed**; `registry stats` / `holdout status` exit
+  non-zero on a broken chain.
+- **safety-2 (HIGH) — TOCTOU let one grant be consumed twice (double unmask).** The
+  arming service it mirrors uses a lock; the guardian had dropped it. **Fix:** the
+  read-verify-append critical section holds an exclusive **OS file lock** (`fcntl.flock`).
+- **safety-3 (HIGH) — the guardian was bypassable.** `embargoed_view(unlocked=True)` had
+  no single-site guard. **Fix:** `test_single_unmask_site.py` asserts `unlocked=True` is
+  passed from exactly one site (the guardian).
+- **safety-4 (HIGH) — the no-automated-unlock test had coverage holes.** **Fix:** it now
+  scans the whole automated tree (`service`/`services`/`control`/`execution`/`orders` +
+  `runtime.py`), not a hand-picked list.
+- **F4/F5/F7 (MEDIUM) — honesty.** Budget now counts burns + *active* grants (an expired
+  unused grant is refunded); `register_run` fails closed on null provenance (`""`/
+  `"unknown"` commit, empty criteria); `data_fingerprint` carries an `actions_captured`
+  flag and takes the history root directly.
+
+**Corrected claims (the honest guarantee).** The M5 burned-holdout failure is **detected
+and refused**, not "structurally impossible" in an absolute sense: the anchor + verify
+catch accidental/incidental truncation, deletion, in-place edits, and rollback, and no
+*shipped* automated path can invoke the unlock. Out of scope (disclosed): an actor who
+rewrites **both** the ledger and its anchor consistently (the anchor is not a signed,
+off-host root of trust), a determined **runtime-reflection** evasion of the unlock guard,
+and completeness of the **trial count** (it is derived from *registered* runs; auto-
+registration of the runner is a follow-on). Single-writer concurrency is enforced by the
+file lock. §3's `mediated_holdout_read(ledger, history_root, symbol, ...)` argument order
+is authoritative.
+
 ## Consequences
 
-The research plane gains a tamper-evident registry whose ledger is the authority on
-how many trials were run and which holdouts are spent, and a holdout guardian that
-makes the M5 burned-holdout failure structurally impossible: no shipped automated path
-can unlock a holdout, an unlock is owner-typed and single-use, and a consumed window is
-permanently burned in a hash-chained log. Nothing in the trading/live plane changes;
-the single `transmit=True` boundary and the C1 isolation are untouched; the registry
-ships empty.
+The research plane gains a tamper-evident, anchor-verified registry whose ledger is the
+authority on how many trials were **registered** and which holdouts are spent, and a
+holdout guardian that makes the M5 burned-holdout failure **detected and refused**: no
+shipped automated path can unlock a holdout, an unlock is owner-typed, single-use, and
+file-locked, and a consumed window is burned in a hash-chained log whose truncation is
+caught by the head anchor. The honest residuals are recorded in §11 and
+`docs/limitations.md`. Nothing in the trading/live plane changes; the single
+`transmit=True` boundary and the C1 isolation are untouched; the registry ships empty.

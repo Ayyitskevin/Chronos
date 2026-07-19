@@ -1,24 +1,24 @@
-"""The holdout guardian (ADR-0013 §3/§4).
+"""The holdout guardian (ADR-0013 §3/§4, hardened by the C2 two-reviewer review).
 
 Consuming a holdout requires an explicit, **owner-typed, single-use, logged** unlock,
-and a consumed window is permanently **burned** in the hash-chained ledger — so the M5
-"burned holdout silently reused as fresh" failure is structurally impossible.
+and a consumed window is **burned** in the anchor-verified, hash-chained ledger — so the
+M5 "burned holdout silently reused as fresh" failure is caught rather than silent.
 
 The owner-typed guarantee follows the codebase's `orders.arming` doctrine: a
 module-constant phrase (never a setting, never serialized), validated with
-``hmac.compare_digest``, and never stored/logged/echoed. "No automated path can invoke
-it" is enforced structurally by ``tests/safety/test_registry_no_automated_unlock.py``,
-which bars the scheduler / service / proposal / promotion / submission modules from
-importing this module or calling its unlock functions.
+``hmac.compare_digest`` and never stored/logged/echoed. "No shipped automated path
+invokes it" is guarded by ``tests/safety/test_registry_no_automated_unlock.py`` and
+``test_single_unmask_site.py`` (accidental-wiring guards; a determined runtime-reflection
+evasion is out of scope and disclosed in ADR-0013 §7 / limitations).
 
-State machine (all refusals fail closed):
-
-- ``request_unlock`` grants a single-use unlock for a *declared, not-yet-burned* window
-  with *no outstanding grant* and *available budget*, on a correct phrase.
-- ``mediated_holdout_read`` is the **only** sanctioned caller of the C1
-  ``embargoed_view(..., unlocked=True)``; it accepts an unexpired, unconsumed grant for
-  a still-declared window covering the symbol, records the consume (**burning** the
-  window) *before* unmasking, and returns the full series.
+Review hardening:
+- **verify-before-trust (F1/F2/safety-1):** every trust of burned/consumed state runs
+  ``ledger.verify()`` (chain + head anchor) first and fails closed on a broken/truncated
+  ledger.
+- **concurrency (safety-2):** the read-verify-append critical section holds an exclusive
+  OS file lock, so two processes cannot both consume one grant.
+- **expiry (both reviewers):** ``now`` must be timezone-aware and expiry is compared as
+  ``datetime`` objects, not ISO strings.
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ from chronos.histdata.holdout import HoldoutWindow, embargoed_view, load_holdout
 from chronos.histdata.store import read_bars
 from chronos.marketdata.bars import BarSeries
 from chronos.registry.budget import available_budget
-from chronos.registry.ledger import KIND_CONSUME, KIND_UNLOCK, RegistryLedger
+from chronos.registry.ledger import KIND_CONSUME, KIND_UNLOCK, RegistryLedger, registry_lock
 
 # Module constant — never a setting, so it can never land in a serialized/logged config.
 REQUIRED_HOLDOUT_UNLOCK_PHRASE = "I ACCEPT BURNING THIS HOLDOUT"
@@ -57,8 +57,29 @@ def _phrase_ok(typed_phrase: str) -> bool:
     )
 
 
+def _require_aware(now: datetime) -> None:
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise HoldoutGuardianError("`now` must be timezone-aware (UTC)")
+
+
+def _require_verified(ledger: RegistryLedger) -> None:
+    ok, detail = ledger.verify()
+    if not ok:
+        raise HoldoutGuardianError(f"registry ledger failed verification: {detail}")
+
+
+def _expiry(record: AuditRecord) -> datetime | None:
+    value = record.payload.get("expires_at")
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
 def burned_windows(ledger: RegistryLedger) -> frozenset[str]:
-    """Windows with a recorded consume — permanently spent."""
+    """Windows with a recorded consume — spent."""
 
     return frozenset(str(r.payload["window"]) for r in ledger.records_of(KIND_CONSUME))
 
@@ -87,10 +108,10 @@ def _has_outstanding_grant(ledger: RegistryLedger, window: str, now: datetime) -
     for record in ledger.records_of(KIND_UNLOCK):
         if str(record.payload.get("window")) != window:
             continue
-        unlock_id = str(record.payload.get("unlock_id"))
-        if unlock_id in consumed:
+        if str(record.payload.get("unlock_id")) in consumed:
             continue
-        if now.isoformat() < str(record.payload.get("expires_at", "")):
+        expiry = _expiry(record)
+        if expiry is not None and now < expiry:
             return True
     return False
 
@@ -110,36 +131,47 @@ def request_unlock(
 ) -> UnlockGrant:
     """Grant a single-use holdout unlock; fails closed on any precondition."""
 
+    _require_aware(now)
     if not _phrase_ok(typed_phrase):
         raise HoldoutGuardianError("holdout unlock phrase mismatch")  # never echo the phrase
-    windows = load_holdouts(history_root)
-    if _window_by_name(windows, window_name) is None:
-        raise HoldoutGuardianError(f"holdout window {window_name!r} is not declared")
-    if is_burned(ledger, window_name):
-        raise HoldoutGuardianError(
-            f"holdout window {window_name!r} is already burned; it cannot be re-unlocked"
-        )
-    if _has_outstanding_grant(ledger, window_name, now):
-        raise HoldoutGuardianError(
-            f"holdout window {window_name!r} already has an outstanding unlock grant"
-        )
     if not reason.strip():
         raise HoldoutGuardianError("an unlock reason is required")
-    budget = available_budget(
-        ledger,
-        accrued_sessions=accrued_sessions,
-        sessions_per_unlock=sessions_per_unlock,
-        max_outstanding_unlocks=max_outstanding_unlocks,
-    )
-    if budget <= 0:
-        raise HoldoutGuardianError("no holdout unlock budget; more data must accrue")
+    with registry_lock(ledger.path):
+        _require_verified(ledger)
+        windows = load_holdouts(history_root)
+        if _window_by_name(windows, window_name) is None:
+            raise HoldoutGuardianError(f"holdout window {window_name!r} is not declared")
+        if is_burned(ledger, window_name):
+            raise HoldoutGuardianError(
+                f"holdout window {window_name!r} is already burned; it cannot be re-unlocked"
+            )
+        if _has_outstanding_grant(ledger, window_name, now):
+            raise HoldoutGuardianError(
+                f"holdout window {window_name!r} already has an outstanding unlock grant"
+            )
+        if (
+            available_budget(
+                ledger,
+                now=now,
+                accrued_sessions=accrued_sessions,
+                sessions_per_unlock=sessions_per_unlock,
+                max_outstanding_unlocks=max_outstanding_unlocks,
+            )
+            <= 0
+        ):
+            raise HoldoutGuardianError("no holdout unlock budget; more data must accrue")
 
-    unlock_id = secrets.token_hex(16)
-    expires_at = (now + timedelta(minutes=ttl_minutes)).isoformat()
-    ledger.append(
-        KIND_UNLOCK,
-        {"unlock_id": unlock_id, "window": window_name, "reason": reason, "expires_at": expires_at},
-    )
+        unlock_id = secrets.token_hex(16)
+        expires_at = (now + timedelta(minutes=ttl_minutes)).isoformat()
+        ledger.append(
+            KIND_UNLOCK,
+            {
+                "unlock_id": unlock_id,
+                "window": window_name,
+                "reason": reason,
+                "expires_at": expires_at,
+            },
+        )
     return UnlockGrant(unlock_id=unlock_id, window=window_name, expires_at=expires_at)
 
 
@@ -153,26 +185,31 @@ def mediated_holdout_read(
 ) -> BarSeries:
     """The only sanctioned unmasking read; records the burn *before* returning data."""
 
-    record = _unlock_record(ledger, grant.unlock_id)
-    if record is None:
-        raise HoldoutGuardianError("unknown unlock grant")
-    if grant.unlock_id in _consumed_unlock_ids(ledger):
-        raise HoldoutGuardianError("unlock grant already consumed (single-use)")
-    if is_burned(ledger, grant.window):
-        raise HoldoutGuardianError(f"holdout window {grant.window!r} is already burned")
-    if now.isoformat() >= str(record.payload.get("expires_at", "")):
-        raise HoldoutGuardianError("unlock grant expired")
-    windows = load_holdouts(history_root)
-    window = _window_by_name(windows, grant.window)
-    if window is None:
-        raise HoldoutGuardianError(f"holdout window {grant.window!r} is no longer declared")
-    if not window.applies_to(symbol):
-        raise HoldoutGuardianError(f"holdout window {grant.window!r} does not cover {symbol}")
+    _require_aware(now)
+    with registry_lock(ledger.path):
+        _require_verified(ledger)
+        record = _unlock_record(ledger, grant.unlock_id)
+        if record is None:
+            raise HoldoutGuardianError("unknown unlock grant")
+        if grant.unlock_id in _consumed_unlock_ids(ledger):
+            raise HoldoutGuardianError("unlock grant already consumed (single-use)")
+        if is_burned(ledger, grant.window):
+            raise HoldoutGuardianError(f"holdout window {grant.window!r} is already burned")
+        expiry = _expiry(record)
+        if expiry is None or now >= expiry:
+            raise HoldoutGuardianError("unlock grant expired")
+        windows = load_holdouts(history_root)
+        window = _window_by_name(windows, grant.window)
+        if window is None:
+            raise HoldoutGuardianError(f"holdout window {grant.window!r} is no longer declared")
+        if not window.applies_to(symbol):
+            raise HoldoutGuardianError(f"holdout window {grant.window!r} does not cover {symbol}")
 
-    # Record the consume (burning the window) BEFORE unmasking, so a burn is durable even
-    # if the read is interrupted — the fail-safe direction.
-    ledger.append(
-        KIND_CONSUME, {"unlock_id": grant.unlock_id, "window": grant.window, "symbol": symbol}
-    )
+        # Record the consume (burning the window) BEFORE unmasking, so a burn is durable
+        # even if the read is interrupted — the fail-safe direction.
+        ledger.append(
+            KIND_CONSUME,
+            {"unlock_id": grant.unlock_id, "window": grant.window, "symbol": symbol},
+        )
     series = read_bars(history_root, symbol)
     return embargoed_view(series, windows, symbol, unlocked=True)

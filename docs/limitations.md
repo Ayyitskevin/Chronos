@@ -122,24 +122,32 @@ limitations referenced by the README and the runbooks.
 
 ## Experiment registry + holdout guardian (C2, `chronos.registry`)
 
+- **The M5 "burned holdout" failure is detected and refused, not absolutely impossible.**
+  The guardian verifies the ledger (hash chain **plus** an out-of-band head anchor)
+  before trusting it and fails closed; the anchor catches accidental/incidental
+  truncation, whole-file deletion, in-place edits, and rollback. **Out of scope
+  (disclosed):** an actor who rewrites *both* the ledger and its head anchor consistently
+  — the anchor is not a signed, off-host root of trust; the guarantee is detection of
+  incidental loss + tamper-evidence, not prevention against a writer who controls both
+  files on their own disk.
 - **"Owner-typed" is enforced structurally + by phrase, not by a runtime interactivity
-  check** — the codebase has none. The unlock requires a module-constant phrase and is
-  **structurally unreachable** from every shipped scheduled/service/proposal/promotion/
-  submission path (AST + call-node tests); the future copilot plane is barred
-  prospectively. An owner who scripts the phrase into their *own* automation defeats it,
-  but no shipped automated path can.
-- **The research runner is not auto-wired to the registry in this milestone.** C2
-  delivers the ledger, the guardian, and `data_fingerprint`; runs are recorded through
-  the new API. Auto-registering the existing runner/shadow paths (and pointing them at
-  the C1 store's bars+actions dual hash instead of the legacy single-CSV sha) is a
-  follow-on, kept out to avoid changing established research provenance mid-milestone.
-- **The budget policy is a first cut** (linear credits earned per accrued capture
-  session); it *rations* unlocks, it does not model statistical power — that lands with
-  C3/C4. With an empty store, budget is zero and unlocks fail closed.
-- **The ledger's tamper-evidence is detection, not prevention.** `verify` (and CI) catch
-  any edit/reorder/truncation of the hash chain; they do not stop an owner with write
-  access from replacing the whole file — the guarantee is that such tampering is
-  *detectable*, matching the platform audit log.
+  check** (the codebase has none). The unlock requires a module-constant phrase; no
+  *shipped* automated path can import or call it (AST tests over the whole
+  service/services/control/execution/orders tree + `runtime.py`; a single-unmask-site
+  test), and the copilot plane is barred prospectively. **Out of scope:** a determined
+  runtime-reflection evasion (importlib string-dispatch, `unlocked=<var>`), and an owner
+  scripting the phrase into their *own* automation.
+- **Single-use is enforced under concurrency** by an OS file lock around the
+  read-verify-append critical section; two processes cannot both consume one grant.
+- **The trial count is derived from *registered* runs.** The arithmetic is honest, but
+  completeness depends on every data-touching run being registered — the research runner
+  is not auto-wired to the registry in this milestone (a follow-on; also pointing it at
+  the C1 bars+actions dual hash instead of the legacy single-CSV sha). `register_run`
+  fails closed on null provenance.
+- **The budget policy is a first cut** (linear credits per accrued capture session);
+  burns and *active* grants spend credits, expired-unused grants are refunded; it
+  *rations* unlocks, it does not model statistical power (C3/C4). Empty store ⇒ zero
+  budget ⇒ unlocks fail closed.
 
 ## Strategy / research honesty
 
