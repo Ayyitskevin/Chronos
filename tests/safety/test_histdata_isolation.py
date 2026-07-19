@@ -77,7 +77,15 @@ def _leaked(probe: str) -> list[str]:
 def test_histdata_modules_have_no_forbidden_ast_imports() -> None:
     # Guard the guard: the package really does contain the modules we expect.
     names = {path.stem for path in _module_files()}
-    assert {"official_client", "store", "backfill", "__main__"} <= names
+    assert {
+        "official_client",
+        "official_options_client",
+        "store",
+        "options_store",
+        "backfill",
+        "options_capture",
+        "__main__",
+    } <= names
     for path in _module_files():
         for name in _imported_names(path.read_text(encoding="utf-8")):
             for forbidden in _FORBIDDEN:
@@ -90,7 +98,7 @@ def test_importing_histdata_leaks_no_forbidden_module() -> None:
     prefixes = repr(_PROBE_FORBIDDEN)
     probe = (
         "import chronos.histdata, chronos.histdata.official_client, "
-        "chronos.histdata.__main__, sys; "
+        "chronos.histdata.official_options_client, chronos.histdata.__main__, sys; "
         f"bad=[m for m in sys.modules if m.startswith({prefixes})]; "
         "print(';'.join(sorted(bad)))"
     )
@@ -98,9 +106,10 @@ def test_importing_histdata_leaks_no_forbidden_module() -> None:
     assert leaked == [], f"histdata import leaked forbidden modules: {leaked}"
 
 
-def test_official_client_keeps_ibapi_lazy() -> None:
+def test_official_clients_keep_ibapi_lazy() -> None:
     probe = (
-        "import chronos.histdata.official_client, sys; "
+        "import chronos.histdata.official_client, "
+        "chronos.histdata.official_options_client, sys; "
         "bad=[m for m in sys.modules if m.startswith(('ibapi','ib_async'))]; "
         "print(';'.join(sorted(bad)))"
     )

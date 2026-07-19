@@ -53,6 +53,10 @@ class Settings(BaseSettings):
     # ge=1 (not ge=0): client id 0 is TWS/Gateway's master id, wrong for a data plane.
     # Must differ from ib_client_id — TWS rejects two live connections sharing an id.
     ib_data_client_id: Annotated[int, Field(ge=1)] = 18
+    # Options forward-capture bounds (ADR-0012 §3). The capture window is recorded in
+    # every snapshot, so anything outside it is absent *by policy*, not missing data.
+    option_capture_expiry_horizon_days: Annotated[int, Field(ge=1)] = 120
+    option_capture_strike_window_pct: Annotated[float, Field(gt=0, le=1)] = 0.20
     ib_account_id: str = ""
 
     allow_order_transmit: bool = False
