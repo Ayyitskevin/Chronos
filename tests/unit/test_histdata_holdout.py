@@ -61,6 +61,17 @@ def test_symbol_scoped_window_only_masks_that_symbol() -> None:
     assert [b.session_date.day for b in embargoed_view(series, [window], "SPY")] == [2, 4]
 
 
+def test_symbol_scope_is_case_insensitive_and_never_fails_open() -> None:
+    # A ["SPY"] window must still mask a lowercase "spy" query (review bug 2 —
+    # a case mismatch must not reveal held-out data).
+    series = _series("spy", [2, 3, 4])
+    window = HoldoutWindow("spy", date(2024, 1, 3), date(2024, 1, 3), symbols=("SPY",))
+    assert [b.session_date.day for b in embargoed_view(series, [window], "spy")] == [2, 4]
+    # And a lowercase-declared scope masks an uppercase query.
+    lower = HoldoutWindow("x", date(2024, 1, 3), date(2024, 1, 3), symbols=("spy",))
+    assert lower.applies_to("SPY") is True
+
+
 def test_global_window_masks_every_symbol() -> None:
     window = HoldoutWindow("global", date(2024, 1, 3), date(2024, 1, 3))
     for symbol in ("SPY", "QQQ"):

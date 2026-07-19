@@ -99,6 +99,26 @@ def test_allow_correction_supersedes_and_records(tmp_path: Path) -> None:
     assert _manifest(tmp_path)["symbols"]["SPY"]["bars"]["corrections"] == ["2024-01-02"]
 
 
+def test_correction_record_survives_a_later_idempotent_write(tmp_path: Path) -> None:
+    # A logged supersede must not be erased by an ordinary no-op re-fetch (review bug 1).
+    write_bars(tmp_path, _series(_bar(2, 100)), captured_at=_CAPTURED)
+    write_bars(tmp_path, _series(_bar(2, 105)), captured_at=_CAPTURED, allow_correction=True)
+    # An ordinary re-fetch of the (now-corrected) data adds nothing.
+    result = write_bars(tmp_path, _series(_bar(2, 105)), captured_at="2024-07-01T00:00:00+00:00")
+    assert result.rows_added == 0
+    assert _manifest(tmp_path)["symbols"]["SPY"]["bars"]["corrections"] == ["2024-01-02"]
+
+
+def test_multiple_corrections_accumulate(tmp_path: Path) -> None:
+    write_bars(tmp_path, _series(_bar(2, 100), _bar(3, 100)), captured_at=_CAPTURED)
+    write_bars(tmp_path, _series(_bar(2, 105)), captured_at=_CAPTURED, allow_correction=True)
+    write_bars(tmp_path, _series(_bar(3, 106)), captured_at=_CAPTURED, allow_correction=True)
+    assert _manifest(tmp_path)["symbols"]["SPY"]["bars"]["corrections"] == [
+        "2024-01-02",
+        "2024-01-03",
+    ]
+
+
 def test_float_spelling_difference_is_not_a_conflict(tmp_path: Path) -> None:
     # 100.0 vs 100.0000004 canonicalize equal (< 1e-6) — no false conflict (D5).
     write_bars(tmp_path, _series(_bar(2, 100.0)), captured_at=_CAPTURED)

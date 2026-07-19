@@ -40,9 +40,12 @@ class HoldoutWindow:
             raise ValueError("HoldoutWindow.name must be non-empty")
         if self.end < self.start:
             raise ValueError(f"holdout {self.name!r}: end {self.end} precedes start {self.start}")
+        # Normalize scope symbols so matching is case-insensitive from any construction
+        # path — a scoped embargo must never fail OPEN on a lowercase query symbol.
+        object.__setattr__(self, "symbols", tuple(s.upper() for s in self.symbols))
 
     def applies_to(self, symbol: str) -> bool:
-        return not self.symbols or symbol in self.symbols
+        return not self.symbols or symbol.upper() in self.symbols
 
     def contains(self, day: date) -> bool:
         return self.start <= day <= self.end

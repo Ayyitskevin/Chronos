@@ -99,6 +99,10 @@ def write_bars(
     if path.exists():
         existing = load_daily_csv(path, series.symbol, source, exchange).series
         merged, added, corrections = _merge(existing, series, allow_correction=allow_correction)
+        if added == 0 and not corrections:
+            # Pure idempotent no-op: rewriting would churn captured_at and — worse —
+            # clobber the recorded corrections. Leave the store and manifest untouched.
+            return WriteResult(series.symbol, len(merged), 0, ())
     else:
         merged, added, corrections = series, len(series), ()
 
@@ -224,6 +228,11 @@ def _update_manifest(
 ) -> None:
     manifest = _load_manifest(root)
     entry = _symbol_entry(manifest, symbol)
+    # Corrections are an append-only audit trail — union with any already recorded so a
+    # later backfill (or a second supersede) never erases an earlier one.
+    prior_bars = entry.get("bars")
+    prior_corrections = prior_bars.get("corrections", []) if isinstance(prior_bars, dict) else []
+    all_corrections = sorted({*prior_corrections, *corrections})
     entry["bars"] = {
         "source": source,
         "exchange": exchange,
@@ -233,7 +242,7 @@ def _update_manifest(
         "end": series.bars[-1].session_date.isoformat() if series.bars else None,
         "adjusted": False,
         "captured_at": captured_at,
-        "corrections": list(corrections),
+        "corrections": all_corrections,
     }
     _store_manifest(root, manifest)
 
