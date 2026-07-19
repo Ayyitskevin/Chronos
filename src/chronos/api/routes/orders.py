@@ -133,6 +133,14 @@ def _require_record(state: BackendState, intent_id: str) -> OrderIntentRecord:
 def _build_intent(request: OrderProposeRequest, state: BackendState) -> WheelOrderIntent:
     account_id = _service(state).account_id
     correlation_id = new_correlation_id()
+    if request.product_family is not ProductFamily.CRYPTO and request.time_in_force != "DAY":
+        # TIF is family-conditional (ADR-0010 §3): only CRYPTO may be non-DAY.
+        # Reject explicitly rather than silently coercing to DAY, so the client
+        # never believes it sent an IOC option/stock order that we downgraded.
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="only CRYPTO orders may set a non-DAY time_in_force",
+        )
     if request.product_family is ProductFamily.STOCK:
         underlying = state.runtime.connection.run(
             state.runtime.broker.qualify_underlying(request.symbol)
@@ -207,6 +215,11 @@ def propose(request: OrderProposeRequest, state: WriterDep) -> ProposeResponse:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)
         ) from error
+    except BrokerError as error:
+        # Contract qualification hit the broker (e.g. a symbol the gateway can't
+        # resolve, or an adapter that refuses the family). Surface as 502, not a
+        # bare 500 — the request was well-formed; the broker could not fulfil it.
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(error)) from error
     result = _service(state).propose(intent)
     return ProposeResponse(
         order=_view(result.intent),

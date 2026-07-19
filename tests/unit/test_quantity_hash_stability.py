@@ -17,6 +17,8 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 
+import pytest
+
 from chronos.domain.enums import OptionRight, OrderIntent
 from chronos.domain.models import OptionContract, UnderlyingContract
 from chronos.orders.intent import (
@@ -106,3 +108,17 @@ def test_decimal_exponent_variants_cannot_fork_keys() -> None:
             order_summary_hash(intent, risk_decision_id="RD-GOLDEN-1")  # type: ignore[arg-type]
             == _GOLDEN_OPTION_SUMMARY_HASH
         ), f"summary hash forked for quantity spelling {quantity!r}"
+
+
+def test_quantity_upper_magnitude_bound_is_enforced() -> None:
+    """Adversarial-review F1/F2: a quantity at/above the Numeric(20,8) magnitude
+    (12 integer digits) must be rejected AT CONSTRUCTION, so it can never (a)
+    overflow the 28-digit Decimal context in the crypto venue-conformance modulo
+    and escape the "engine never raises" contract, nor (b) be silently rounded
+    by ``canonical_quantity``'s ``normalize()`` and fork the key/hash.
+    """
+
+    with pytest.raises(ValueError, match="persistence magnitude"):
+        _golden_stock_intent(Decimal("1e12"))
+    # Just below the bound remains valid (whole-unit stock, 12 nines).
+    _golden_stock_intent(Decimal("999999999999"))
