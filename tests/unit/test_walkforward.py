@@ -15,13 +15,17 @@ from __future__ import annotations
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 
+import pytest
+
 from chronos.backtest.engine import BacktestConfig
 from chronos.control.halt import HaltStore
 from chronos.marketdata.bars import Bar, BarInterval, BarSeries
 from chronos.registry import RegistryLedger, trial_count
+from chronos.research.stats import moments
 from chronos.research.walkforward import (
     WalkForwardReport,
     WalkForwardVerdict,
+    _deflated_or_none,
     _verdict,
     walk_forward,
 )
@@ -116,7 +120,7 @@ def _permissive_policy() -> RiskPolicy:
     )
 
 
-def _run(ledger_path: Path, halt_path: Path, seed: int) -> WalkForwardReport:
+def _run(ledger_path: Path, halt_path: Path, seed: int, min_trades: int = 20) -> WalkForwardReport:
     halt_store = HaltStore(halt_path)
     halt_store.rearm("armed for walk-forward test")
     return walk_forward(
@@ -133,7 +137,7 @@ def _run(ledger_path: Path, halt_path: Path, seed: int) -> WalkForwardReport:
         criteria_ref="test-criteria-v1",
         test_window=10,
         warmup=5,
-        min_trades=20,
+        min_trades=min_trades,
         seed=seed,
         block_size=5,
         n_resamples=200,
@@ -217,3 +221,44 @@ def test_a_second_run_on_the_same_ledger_raises_the_trial_count(tmp_path: Path) 
     # The registry is the multiple-testing memory: a second evaluation deflates harder.
     assert first.trial_count == 1
     assert second.trial_count == 2
+
+
+# --- Layer 3: review remediation (honesty seams) -----------------------------------------
+
+
+def test_deflated_sharpe_is_none_when_variance_unavailable_for_multiple_trials() -> None:
+    # Finding 1: with N > 1 trials but no estimable cross-trial variance, we must NOT report
+    # an *undeflated* PSR under the deflated_sharpe name — return None (→ INSUFFICIENT).
+    m = moments([0.01, 0.02, -0.01, 0.03, 0.0, 0.02])
+    assert m is not None
+    assert _deflated_or_none(0.30, 120, 50, None, m) is None  # variance unestimable
+    assert _deflated_or_none(0.30, 120, 50, 0.0, m) is None  # degenerate zero variance
+    # A single trial needs no deflation → a real number (== the undeflated PSR, honestly).
+    single = _deflated_or_none(0.30, 120, 1, None, m)
+    assert single is not None and single > 0
+    # A real positive cross-trial variance deflates strictly below the single-trial value.
+    deflated = _deflated_or_none(0.30, 120, 50, 0.01, m)
+    assert deflated is not None and deflated < single
+    # An undefined point Sharpe is None regardless of N/variance.
+    assert _deflated_or_none(None, 120, 1, 0.01, m) is None
+
+
+def test_verdict_clamps_a_sub_one_trade_floor() -> None:
+    # Finding 2: a 0/negative floor must not defeat the gate — zero trades still blocks.
+    verdict_zero, _ = _verdict(pooled_trades=0, ci=(0.1, 0.5), dsr=0.99, min_trades=0)
+    assert verdict_zero is WalkForwardVerdict.INSUFFICIENT_EVIDENCE
+    verdict_neg, _ = _verdict(pooled_trades=0, ci=(0.1, 0.5), dsr=0.99, min_trades=-5)
+    assert verdict_neg is WalkForwardVerdict.INSUFFICIENT_EVIDENCE
+
+
+def test_verdict_distinguishes_dsr_unavailable_from_too_few_bars() -> None:
+    # dsr None with a defined CI is the deflation-variance case, reported distinctly.
+    verdict, reason = _verdict(pooled_trades=50, ci=(0.1, 0.5), dsr=None, min_trades=20)
+    assert verdict is WalkForwardVerdict.INSUFFICIENT_EVIDENCE
+    assert "deflated Sharpe undefined" in reason
+
+
+def test_walk_forward_rejects_a_sub_one_trade_floor(tmp_path: Path) -> None:
+    # The public entry fails closed on an invalid safety floor rather than trusting it.
+    with pytest.raises(ValueError, match="min_trades"):
+        _run(tmp_path / "x.jsonl", tmp_path / "xh.json", seed=1, min_trades=0)
