@@ -447,6 +447,9 @@ class OrderRequest(ChronosModel):
     limit_price: Decimal = Field(gt=0)
     order_ref: str
     transmit: bool = False
+    # Family-conditional TIF (ADR-0010 §3): the adapter maps this to the venue
+    # order's tif. Options/stocks are always DAY; crypto may be DAY or IOC.
+    time_in_force: Literal["DAY", "IOC"] = "DAY"
     outside_rth: bool = False
 
 

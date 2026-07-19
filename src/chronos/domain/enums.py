@@ -128,6 +128,9 @@ class OrderIntent(StrEnum):
     # Stock fold-in (plan §6b): long-only equities through the same pipeline.
     OPEN_LONG_STOCK = "OPEN_LONG_STOCK"
     CLOSE_LONG_STOCK = "CLOSE_LONG_STOCK"
+    # Crypto fold-in (plan §6b, ADR-0010): long-only spot crypto, same pipeline.
+    OPEN_LONG_CRYPTO = "OPEN_LONG_CRYPTO"
+    CLOSE_LONG_CRYPTO = "CLOSE_LONG_CRYPTO"
 
 
 class AssignmentPressure(StrEnum):

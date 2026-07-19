@@ -99,6 +99,13 @@ class RiskEvidence(ChronosModel):
     shares_reserved_for_pending_calls: Decimal = Field(default=Decimal("0"), ge=0)
     shares_reserved_by_other_orders: Decimal = Field(default=Decimal("0"), ge=0)
     held_short_option_contracts: int = Field(default=0, ge=0)
+    # Crypto evidence (ADR-0010 §4), kept SEPARATE from the wheel aggregates so a
+    # crypto holding never distorts stock concentration or cash math.
+    held_crypto_quantity: Decimal = Field(default=Decimal("0"), ge=0)
+    crypto_sell_reserved_quantity: Decimal = Field(default=Decimal("0"), ge=0)
+    current_crypto_allocation: Decimal = Field(default=Decimal("0"), ge=0)
+    crypto_allocation_marked: bool = True
+    pending_crypto_buy_notional: Decimal = Field(default=Decimal("0"), ge=0)
 
 
 def _passed(name: str, detail: str) -> OrderRiskCheck:
@@ -139,6 +146,8 @@ class OrderRiskEngine:
             checks.append(self._check_opening_count(evidence))
         if intent.product_family is ProductFamily.OPTION:
             checks.extend(self._option_checks(intent, evidence))
+        elif intent.product_family is ProductFamily.CRYPTO:
+            checks.extend(self._crypto_checks(intent, evidence))
         else:
             checks.extend(self._stock_checks(intent, evidence))
 
@@ -187,11 +196,26 @@ class OrderRiskEngine:
             return _unknown("market_open", session.reason)
         return _failed("market_open", session.reason)
 
-    @staticmethod
-    def _check_limit_only(intent: WheelOrderIntent) -> OrderRiskCheck:
-        if intent.order_type == "LMT" and intent.time_in_force == "DAY" and intent.limit_price > 0:
-            return _passed("limit_only", "limit DAY order with a positive price")
-        return _failed("limit_only", "only positive-price limit DAY orders are permitted")
+    def _check_limit_only(self, intent: WheelOrderIntent) -> OrderRiskCheck:
+        # Family-conditional TIF (ADR-0010 §3): OPTION/STOCK are DAY-only; CRYPTO
+        # takes the owner-verified crypto TIF setting. LMT and a positive price
+        # are required on every family (market orders are impossible).
+        if intent.product_family is ProductFamily.CRYPTO:
+            allowed_tif = {self._settings.crypto_time_in_force}
+        else:
+            allowed_tif = {"DAY"}
+        if (
+            intent.order_type == "LMT"
+            and intent.time_in_force in allowed_tif
+            and intent.limit_price > 0
+        ):
+            return _passed(
+                "limit_only", f"limit {intent.time_in_force} order with a positive price"
+            )
+        return _failed(
+            "limit_only",
+            f"only positive-price limit orders with TIF in {sorted(allowed_tif)} are permitted",
+        )
 
     def _check_max_contracts(self, intent: WheelOrderIntent) -> OrderRiskCheck:
         if intent.product_family is not ProductFamily.OPTION:
@@ -290,7 +314,9 @@ class OrderRiskEngine:
                     proposed_order_obligation=obligation,
                     cash_buffer=cash_buffer,
                 ),
-                available_cash=evidence.account.total_cash,
+                # Cash committed to resting crypto BUYs is not available to
+                # secure a new put (ADR-0010 ris-1); 0 until crypto is enabled.
+                available_cash=evidence.account.total_cash - evidence.pending_crypto_buy_notional,
             )
         except ValueError as error:
             return [_unknown("cash_secured_put", f"capital inputs rejected: {error}")]
@@ -373,6 +399,13 @@ class OrderRiskEngine:
         from chronos.orders.stocks import validate_stock_order
 
         return validate_stock_order(intent, evidence=evidence, settings=self._settings)
+
+    def _crypto_checks(
+        self, intent: WheelOrderIntent, evidence: RiskEvidence
+    ) -> list[OrderRiskCheck]:
+        from chronos.orders.crypto import validate_crypto_order
+
+        return validate_crypto_order(intent, evidence=evidence, settings=self._settings)
 
     def _concentration_check(self, capital_check: capital.CapitalCheck) -> OrderRiskCheck:
         breach = any("allocation exceeds" in reason for reason in capital_check.reasons)
