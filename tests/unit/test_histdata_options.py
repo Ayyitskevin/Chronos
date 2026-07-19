@@ -212,6 +212,90 @@ def test_store_conflict_is_fail_closed_and_correctable(tmp_path: Path) -> None:
     assert read_snapshot(tmp_path, "SPY", _SESSION) == conflicting
 
 
+def test_recapture_identical_data_with_new_clock_is_a_no_op(tmp_path: Path) -> None:
+    # A same-day re-run with identical market data but a fresh capture clock must not
+    # false-conflict; the stored snapshot (and its original clock) is left untouched.
+    client = _connected(_chain(spot=100.0, exp_offsets=[30], strikes=[100]))
+    first = capture_snapshot(
+        tmp_path,
+        client,
+        "SPY",
+        session=_SESSION,
+        captured_at="2026-07-20T21:05:00+00:00",
+        source="ibkr",
+        expiry_horizon_days=120,
+        strike_window_pct=0.2,
+    )
+    capture_snapshot(
+        tmp_path,
+        client,
+        "SPY",
+        session=_SESSION,
+        captured_at="2026-07-20T21:15:00+00:00",
+        source="ibkr",
+        expiry_horizon_days=120,
+        strike_window_pct=0.2,
+    )
+    stored = read_snapshot(tmp_path, "SPY", _SESSION)
+    assert stored is not None
+    assert stored.captured_at == first.captured_at  # no-op: original clock preserved
+
+
+def test_correction_is_logged_in_manifest(tmp_path: Path) -> None:
+    import json
+
+    client = _connected(_chain(spot=100.0, exp_offsets=[30], strikes=[100]))
+    capture_snapshot(
+        tmp_path,
+        client,
+        "SPY",
+        session=_SESSION,
+        captured_at=_CAPTURED,
+        source="ibkr",
+        expiry_horizon_days=120,
+        strike_window_pct=0.2,
+    )
+    snapshots = json.loads((tmp_path / "MANIFEST.json").read_text(encoding="utf-8"))
+    prior_sha = snapshots["symbols"]["SPY"]["options"]["snapshots"][_SESSION.isoformat()]["sha256"]
+
+    conflicting = OptionChainSnapshot(
+        underlying="SPY",
+        captured_at="2026-07-20T22:00:00+00:00",
+        source="ibkr",
+        expiry_horizon_days=120,
+        strike_window_pct=0.2,
+        spot=101.0,
+    )
+    write_snapshot(tmp_path, _SESSION, conflicting, allow_correction=True)
+    entry = json.loads((tmp_path / "MANIFEST.json").read_text(encoding="utf-8"))
+    superseded = entry["symbols"]["SPY"]["options"]["snapshots"][_SESSION.isoformat()]["superseded"]
+    assert len(superseded) == 1
+    assert superseded[0]["prior_sha256"] == prior_sha
+    assert superseded[0]["prior_captured_at"] == _CAPTURED
+
+
+def test_boundary_strike_is_not_dropped_by_float_error() -> None:
+    # spot=50, pct=0.16 → high edge is 50*1.16 == 57.99999999999999; strike 58 must stay.
+    chain = _chain(spot=50.0, exp_offsets=[30], strikes=[58.0])
+    contracts, reason = select_contracts(
+        chain, _SESSION, expiry_horizon_days=120, strike_window_pct=0.16
+    )
+    assert reason == ""
+    assert {c.strike for c in contracts} == {58.0}
+
+
+def test_options_cli_reports_connect_failure_cleanly(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # No gateway / no ibapi here: connect() fails; the run reports it and exits 1
+    # without a traceback (the docstring's contract).
+    from chronos.histdata.__main__ import main
+
+    code = main(["options", "--symbols", "SPY", "--history-root", str(tmp_path)])
+    assert code == 1
+    assert "connect failed" in capsys.readouterr().out
+
+
 def test_manifest_records_provenance_and_quality(tmp_path: Path) -> None:
     import json
 

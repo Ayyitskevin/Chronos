@@ -34,9 +34,11 @@ def select_contracts(
         return (), f"no expiration within {expiry_horizon_days}d of {session.isoformat()}"
     if chain.spot is None:
         return (), "spot unavailable; cannot center the strike window"
-    low = chain.spot * (1.0 - strike_window_pct)
-    high = chain.spot * (1.0 + strike_window_pct)
-    strikes = tuple(s for s in sorted(chain.strikes) if low <= s <= high)
+    # Round the band edges (and compare rounded strikes) so a strike sitting exactly on
+    # spot*(1±pct) is not dropped by float error, e.g. 50*1.16 == 57.99999999999999.
+    low = round(chain.spot * (1.0 - strike_window_pct), 6)
+    high = round(chain.spot * (1.0 + strike_window_pct), 6)
+    strikes = tuple(s for s in sorted(chain.strikes) if low <= round(s, 6) <= high)
     if not strikes:
         return (), f"no strike within +/-{strike_window_pct:.0%} of spot {chain.spot}"
     contracts = tuple(

@@ -11,8 +11,10 @@ trading database, holds no writer lease, and imports no order/broker module —
 enforced structurally by ``tests/safety/test_histdata_isolation.py``.
 
 The real fetch runs only against a live gateway (owner-run; invariant 8/9). In this
-environment the official clients raise a clear "ibapi not installed" error, which the
-per-symbol isolation in the coordinators turns into a reported outcome, not a crash.
+environment the official clients raise a clear "ibapi not installed" error at
+``connect()``; the process reports it as a single connection-failure line and exits
+non-zero. Once connected, a per-symbol fetch failure is isolated to that symbol's
+outcome line by the coordinators.
 """
 
 from __future__ import annotations
@@ -25,9 +27,11 @@ from pathlib import Path
 
 from chronos.config.settings import get_settings
 from chronos.histdata.backfill import backfill_symbols
+from chronos.histdata.client import HistoricalDataError
 from chronos.histdata.official_client import OfficialIBKRHistoricalClient
 from chronos.histdata.official_options_client import OfficialIBKROptionClient
 from chronos.histdata.options_capture import capture_symbols
+from chronos.histdata.options_client import OptionSnapshotError
 from chronos.histdata.pacing import PacingController
 
 HISTORY_ROOT = Path(__file__).resolve().parents[3] / "research/data/history"
@@ -75,7 +79,11 @@ def _run_bars(args: argparse.Namespace) -> int:
         return 2
     now = datetime.now(UTC)
     client = OfficialIBKRHistoricalClient(exchange=args.exchange)
-    client.connect()
+    try:
+        client.connect()
+    except HistoricalDataError as error:
+        print(json.dumps({"error": f"connect failed: {error}"}))
+        return 1
     try:
         outcomes = backfill_symbols(
             client,
@@ -114,11 +122,23 @@ def _run_options(args: argparse.Namespace) -> int:
         print("no symbols given", file=sys.stderr)
         return 2
     settings = get_settings()
-    horizon = args.horizon_days or settings.option_capture_expiry_horizon_days
-    window = args.strike_window_pct or settings.option_capture_strike_window_pct
+    horizon = (
+        args.horizon_days
+        if args.horizon_days is not None
+        else settings.option_capture_expiry_horizon_days
+    )
+    window = (
+        args.strike_window_pct
+        if args.strike_window_pct is not None
+        else settings.option_capture_strike_window_pct
+    )
     now = datetime.now(UTC)
     client = OfficialIBKROptionClient()
-    client.connect()
+    try:
+        client.connect()
+    except OptionSnapshotError as error:
+        print(json.dumps({"error": f"connect failed: {error}"}))
+        return 1
     try:
         outcomes = capture_symbols(
             args.history_root,
