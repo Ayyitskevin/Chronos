@@ -98,7 +98,7 @@ class LiveSpyBroker(FakeBroker):
         self.nlv = Decimal("100000")
         self.connection_status_error: BrokerError | None = None
         self.account_summary_error: BrokerError | None = None
-        self.submit_error: BrokerError | None = None
+        # submit_error is initialized by the FakeBroker base (M8b).
 
     async def connection_status(self) -> ConnectionStatus:
         if self.connection_status_error is not None:

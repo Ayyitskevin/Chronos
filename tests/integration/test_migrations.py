@@ -198,13 +198,19 @@ def _make_frozen_v2_database(path: Path) -> None:
 
 def test_migration_chain_builds_exactly_the_current_models(tmp_path: Path) -> None:
     """The migration chain, applied to a FROZEN v2 baseline, must reproduce the
-    current model table set exactly — the definitive 'no pending/missing
-    migration' check (M8c).
+    current model TABLE SET exactly (M8c).
 
-    Unlike the v2/v3 upgrade tests (whose fixtures are derived from current
-    metadata, so a new table hides in the fixture), this starts from a hardcoded
-    baseline: a table added to the models without a migration is absent from both
-    the baseline and the chain, so the result set diverges and this fails.
+    Scope and honest limits (see docs/limitations.md):
+    - Catches the naive missing-migration case: a table added to the models
+      (and to the frozen ``_V2_BASELINE_TABLES``/manifest so the manifest test
+      passes) without a matching migration is absent from the chain, so the
+      result set diverges and this fails. If a dev instead adds the table ONLY
+      to ``_V2_BASELINE_TABLES`` and not to a migration, the baseline fixture
+      creates it and this cannot tell — the guard trusts the frozen baseline,
+      which has no independent v2-schema source of truth (0001 is a no-op).
+    - Table-name level only: a missing ADD COLUMN/index/constraint migration is
+      NOT caught here (the baseline tables are built from current metadata, so
+      they already carry the new column). Add such migrations explicitly.
     """
 
     db_path = tmp_path / "chronos.db"
