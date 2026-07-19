@@ -121,8 +121,9 @@ long-only, limit orders only, and fractional. What differs operationally:
   check is UNKNOWN and the order fails closed — it is never assumed. There is no
   min-notional check (IBKR ContractDetails carries none); the venue's own
   minimum-order rejection plus the per-order MAX notional cap are the guards.
-- **Time-in-force.** Crypto TIF is `CRYPTO_TIME_IN_FORCE` (`DAY` or `IOC`); an
-  intent whose TIF does not match the setting fails the `limit_only` gate.
+- **Time-in-force.** Crypto orders always accept `DAY` (the safe default);
+  setting `CRYPTO_TIME_IN_FORCE=IOC` *additionally* accepts `IOC`, so enabling
+  IOC never blocks a plain DAY order. Any other TIF fails the `limit_only` gate.
   Options and stocks remain DAY-only.
 - **Allocation cap needs a fresh mark.** The BUY allocation cap is measured
   against a marked crypto valuation; if a held crypto position cannot be marked

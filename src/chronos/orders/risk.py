@@ -197,11 +197,13 @@ class OrderRiskEngine:
         return _failed("market_open", session.reason)
 
     def _check_limit_only(self, intent: WheelOrderIntent) -> OrderRiskCheck:
-        # Family-conditional TIF (ADR-0010 §3): OPTION/STOCK are DAY-only; CRYPTO
-        # takes the owner-verified crypto TIF setting. LMT and a positive price
-        # are required on every family (market orders are impossible).
+        # Family-conditional TIF (ADR-0010 §3): OPTION/STOCK are DAY-only. CRYPTO
+        # always permits DAY (the safe default) and additively permits the
+        # owner-verified crypto TIF, so enabling IOC never blocks a plain DAY
+        # crypto order (adversarial-review F3). LMT and a positive price are
+        # required on every family (market orders are impossible).
         if intent.product_family is ProductFamily.CRYPTO:
-            allowed_tif = {self._settings.crypto_time_in_force}
+            allowed_tif = {"DAY", self._settings.crypto_time_in_force}
         else:
             allowed_tif = {"DAY"}
         if (
