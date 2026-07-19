@@ -17,7 +17,9 @@ from chronos.histdata.adjust import (
     AdjustmentView,
     adjust_series,
 )
+from chronos.histdata.client import HistoricalDataClient, HistoricalDataError
 from chronos.histdata.corporate_actions import ActionKind, CorporateAction
+from chronos.histdata.pacing import PacingController
 
 __all__ = [
     "ActionKind",
@@ -25,5 +27,8 @@ __all__ = [
     "AdjustmentResult",
     "AdjustmentView",
     "CorporateAction",
+    "HistoricalDataClient",
+    "HistoricalDataError",
+    "PacingController",
     "adjust_series",
 ]
