@@ -102,3 +102,37 @@ switch** — recovery is an explicit operator action, never a silent re-arm.
 - **Adapter refusals before send** (`BrokerRefusedBeforeSend`) resolve the
   intent to REJECTED automatically — nothing reached the venue, nothing
   wedges, and the refusal reason is recorded on the intent's event trail.
+
+## Crypto family (M7C) operational notes
+
+Crypto rides the **same** boundary, gates, arming, kill switch, and drawdown
+breaker as options and stocks — it is spot only (Paxos/Zero Hash via IBKR),
+long-only, limit orders only, and fractional. What differs operationally:
+
+- **Enabling the family.** Crypto is deny-by-default: an empty `CRYPTO_ALLOWLIST`
+  disables it entirely (the eligibility gate FAILs). Enable by listing symbols
+  (e.g. `CRYPTO_ALLOWLIST=BTC,ETH`). A symbol on both `SYMBOL_ALLOWLIST` and
+  `CRYPTO_ALLOWLIST` is an ambiguous-configuration error and is refused. Two
+  per-order/portfolio caps apply: `MAX_CRYPTO_NOTIONAL_PER_ORDER_USD` and
+  `MAX_CRYPTO_ALLOCATION_PCT` (of net liquidation).
+- **Fractional quantities.** Crypto quantities are `Decimal` (e.g. 0.005 BTC).
+  Venue min-size and size-increment come **only** from the qualified contract's
+  ContractDetails; if the gateway does not return them, the venue-conformance
+  check is UNKNOWN and the order fails closed — it is never assumed. There is no
+  min-notional check (IBKR ContractDetails carries none); the venue's own
+  minimum-order rejection plus the per-order MAX notional cap are the guards.
+- **Time-in-force.** Crypto TIF is `CRYPTO_TIME_IN_FORCE` (`DAY` or `IOC`); an
+  intent whose TIF does not match the setting fails the `limit_only` gate.
+  Options and stocks remain DAY-only.
+- **Allocation cap needs a fresh mark.** The BUY allocation cap is measured
+  against a marked crypto valuation; if a held crypto position cannot be marked
+  to a fresh quote, the cap is UNKNOWN and the BUY fails closed. A SELL never
+  triggers the allocation cap (it reduces exposure).
+- **Sessions.** Crypto is ~24/7: the family calendar defaults OPEN, but broker
+  session evidence reporting the venue closed (halt/maintenance) wins and blocks
+  submission.
+- **Paper cannot validate crypto.** IBKR paper accounts have no crypto, so there
+  is no paper dry-run for this family. Validate a change with the demo profile
+  and the recording-spy pipeline suite, then perform a minimal-size live
+  acceptance yourself through the finished app. Owner gateway verification
+  requires TWS API ≥ 10.10 (Decimal `totalQuantity`).
