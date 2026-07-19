@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
@@ -27,6 +27,7 @@ from chronos.domain.enums import OptionRight, OrderIntent, ProductFamily
 from chronos.domain.models import ChronosModel, OptionContractSpec
 from chronos.orders.intent import (
     WheelOrderIntent,
+    build_crypto_intent,
     build_option_intent,
     build_stock_intent,
     canonical_quantity,
@@ -47,9 +48,15 @@ class OrderProposeRequest(ChronosModel):
     symbol: str
     product_family: ProductFamily
     intent: OrderIntent
-    quantity: int
+    # Decimal so a crypto order can be fractional (ADR-0010 §1). OPTION/STOCK
+    # whole-unit enforcement is unchanged — the intent validator re-asserts it
+    # and the stock risk check re-asserts it again (defense in depth).
+    quantity: Decimal
     limit_price: Decimal
-    # Option-only fields (ignored for STOCK).
+    # Family-conditional TIF (ADR-0010 §3): ignored for OPTION/STOCK (always
+    # DAY); a crypto order may pass IOC when the owner setting permits it.
+    time_in_force: Literal["DAY", "IOC"] = "DAY"
+    # Option-only fields (ignored for STOCK/CRYPTO).
     expiration: date | None = None
     strike: Decimal | None = None
     right: OptionRight | None = None
@@ -138,6 +145,17 @@ def _build_intent(request: OrderProposeRequest, state: BackendState) -> WheelOrd
             limit_price=request.limit_price,
             correlation_id=correlation_id,
         )
+    if request.product_family is ProductFamily.CRYPTO:
+        crypto = state.runtime.connection.run(state.runtime.broker.qualify_crypto(request.symbol))
+        return build_crypto_intent(
+            account_id=account_id,
+            intent=request.intent,
+            contract=crypto,
+            quantity=request.quantity,
+            limit_price=request.limit_price,
+            time_in_force=request.time_in_force,
+            correlation_id=correlation_id,
+        )
     if request.expiration is None or request.strike is None or request.right is None:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -180,7 +198,15 @@ def get_order(intent_id: str, state: StateDep) -> OrderView:
 @router.post("/orders/propose", response_model=ProposeResponse)
 def propose(request: OrderProposeRequest, state: WriterDep) -> ProposeResponse:
     _require_allowlisted(request.symbol, state)
-    intent = _build_intent(request, state)
+    try:
+        intent = _build_intent(request, state)
+    except ValueError as error:
+        # The intent value-object validator rejects economically invalid
+        # requests (e.g. a fractional OPTION/STOCK quantity, or an intent that
+        # does not match the product family). Surface as 422, not 500.
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)
+        ) from error
     result = _service(state).propose(intent)
     return ProposeResponse(
         order=_view(result.intent),

@@ -13,6 +13,7 @@ from chronos.domain.models import (
     BrokerPosition,
     CancellationResult,
     ConnectionStatus,
+    CryptoContract,
     MarketQuote,
     OptionChainParameters,
     OptionContract,
@@ -73,6 +74,8 @@ class Broker(Protocol):
 
     async def qualify_underlying(self, symbol: str) -> UnderlyingContract: ...
 
+    async def qualify_crypto(self, symbol: str) -> CryptoContract: ...
+
     async def option_chain_parameters(
         self,
         underlying: UnderlyingContract,
@@ -86,6 +89,11 @@ class Broker(Protocol):
     async def request_underlying_quote(
         self,
         contract: UnderlyingContract,
+    ) -> MarketQuote: ...
+
+    async def request_crypto_quote(
+        self,
+        contract: CryptoContract,
     ) -> MarketQuote: ...
 
     async def request_option_quotes(

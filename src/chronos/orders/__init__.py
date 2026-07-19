@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from chronos.orders.intent import (
     WheelOrderIntent,
+    build_crypto_intent,
     build_option_intent,
     build_stock_intent,
     order_summary_hash,
@@ -65,6 +66,7 @@ __all__ = [
     "SubmissionRefusalCode",
     "WheelOrderIntent",
     "build_buy_to_close_intent",
+    "build_crypto_intent",
     "build_option_intent",
     "build_stock_intent",
     "order_summary_hash",

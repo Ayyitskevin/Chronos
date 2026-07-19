@@ -29,6 +29,7 @@ from chronos.domain.enums import (
 )
 from chronos.domain.models import (
     ChronosModel,
+    CryptoContract,
     Instrument,
     OptionContract,
     OrderRequest,
@@ -339,5 +340,37 @@ def build_stock_intent(
         contract=contract,
         quantity=Decimal(quantity),
         limit_price=limit_price,
+        outside_rth=False,
+    )
+
+
+def build_crypto_intent(
+    *,
+    account_id: str,
+    intent: OrderIntent,
+    contract: CryptoContract,
+    quantity: int | Decimal,
+    limit_price: Decimal,
+    time_in_force: Literal["DAY", "IOC"] = "DAY",
+    correlation_id: str | None = None,
+    intent_id: str | None = None,
+) -> WheelOrderIntent:
+    """Build a spot-crypto intent (ADR-0010): fractional Decimal quantity, PAXOS venue.
+
+    ``time_in_force`` is family-conditional — DAY or the owner-verified crypto TIF;
+    the risk engine's family-aware ``limit_only`` check re-asserts the configured
+    value, so passing an unpermitted TIF here still fails closed downstream.
+    """
+
+    return WheelOrderIntent(
+        intent_id=intent_id or uuid.uuid4().hex,
+        correlation_id=correlation_id or new_correlation_id(),
+        account_id=account_id,
+        product_family=ProductFamily.CRYPTO,
+        intent=intent,
+        contract=contract,
+        quantity=Decimal(quantity),
+        limit_price=limit_price,
+        time_in_force=time_in_force,
         outside_rth=False,
     )

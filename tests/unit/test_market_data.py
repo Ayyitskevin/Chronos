@@ -18,6 +18,7 @@ from chronos.broker.market_data import (
 from chronos.config.limits import MAX_CANDIDATE_REQUEST_CONTRACTS
 from chronos.domain.enums import DataQuality, OptionRight
 from chronos.domain.models import (
+    CryptoContract,
     MarketQuote,
     OptionChainParameters,
     OptionContract,
@@ -96,6 +97,12 @@ class FakeMarketDataBroker:
     ) -> MarketQuote:
         return self._quote(contract)
 
+    async def request_crypto_quote(
+        self,
+        contract: CryptoContract,
+    ) -> MarketQuote:
+        return self._quote(contract)
+
     async def request_option_quotes(
         self,
         contracts: tuple[OptionContract, ...],
@@ -130,7 +137,7 @@ class FakeMarketDataBroker:
         if self.cancellation_failures:
             raise self.cancellation_failures.pop(0)
 
-    def _quote(self, contract: UnderlyingContract | OptionContract) -> MarketQuote:
+    def _quote(self, contract: UnderlyingContract | OptionContract | CryptoContract) -> MarketQuote:
         if self.missing_values:
             return MarketQuote(
                 contract=contract,
@@ -496,6 +503,22 @@ async def test_quote_cache_reports_freshness_and_expires_deterministically() -> 
     assert refreshed.fresh is True
     assert broker.option_quote_calls == [(801,), (801,)]
     assert broker.cancellation_calls == [(801,), (801,)]
+
+
+@pytest.mark.asyncio
+async def test_crypto_quote_fetches_and_always_cancels_subscription() -> None:
+    clock = MutableClock()
+    broker = FakeMarketDataBroker(clock)
+    manager = make_manager(broker)
+    contract = CryptoContract(con_id=3001, symbol="BTC")
+
+    managed = await manager.crypto_quote(contract, force_refresh=True)
+
+    assert managed.quote.contract.con_id == 3001
+    assert managed.from_cache is False
+    # The temporary crypto subscription is always cancelled (ADR-0010 §6: crypto
+    # rides the identical bounded subscription lifecycle as underlyings).
+    assert broker.cancellation_calls == [(3001,)]
 
 
 @pytest.mark.asyncio

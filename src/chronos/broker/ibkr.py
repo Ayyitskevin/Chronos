@@ -60,6 +60,7 @@ from chronos.domain.models import (
     BrokerPosition,
     CancellationResult,
     ConnectionStatus,
+    CryptoContract,
     Instrument,
     MarketQuote,
     ModelGreeks,
@@ -459,6 +460,13 @@ class IBKRBroker:
         self._last_sync = self._now()
         return mapped
 
+    async def qualify_crypto(self, symbol: str) -> CryptoContract:
+        del symbol
+        raise BrokerSafetyError(
+            "the ib_async adapter does not support crypto; the official adapter "
+            "is the crypto path (ADR-0010)"
+        )
+
     async def option_chain_parameters(
         self,
         underlying: UnderlyingContract,
@@ -552,6 +560,16 @@ class IBKRBroker:
         contract: UnderlyingContract,
     ) -> MarketQuote:
         return (await self._request_quotes((contract,)))[0]
+
+    async def request_crypto_quote(
+        self,
+        contract: CryptoContract,
+    ) -> MarketQuote:
+        del contract
+        raise BrokerSafetyError(
+            "the ib_async adapter does not support crypto; the official adapter "
+            "is the crypto path (ADR-0010)"
+        )
 
     async def request_option_quotes(
         self,

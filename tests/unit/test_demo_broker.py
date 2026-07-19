@@ -4,7 +4,12 @@ from decimal import Decimal
 import pytest
 from tests.conftest import FIXED_NOW
 
-from chronos.broker.base import Broker, BrokerConnectionError, BrokerSafetyError
+from chronos.broker.base import (
+    Broker,
+    BrokerConnectionError,
+    BrokerDataError,
+    BrokerSafetyError,
+)
 from chronos.broker.demo import DEMO_ACCOUNT_ID, DEMO_NOW, DemoBroker
 from chronos.domain.enums import (
     DataQuality,
@@ -13,8 +18,9 @@ from chronos.domain.enums import (
     OptionRight,
     OrderIntent,
     OrderSide,
+    SecurityType,
 )
-from chronos.domain.models import OptionContractSpec, OrderRequest
+from chronos.domain.models import CryptoContract, OptionContractSpec, OrderRequest
 
 
 def test_demo_broker_satisfies_protocol(demo_broker: DemoBroker) -> None:
@@ -173,3 +179,37 @@ async def test_demo_preview_is_non_transmitting_and_submit_is_blocked(
     assert preview.estimated_commission == Decimal("0.65")
     with pytest.raises(BrokerSafetyError, match="cannot submit"):
         await demo_broker.submit_order(request)
+
+
+@pytest.mark.asyncio
+async def test_qualify_crypto_carries_venue_metadata(demo_broker: DemoBroker) -> None:
+    await demo_broker.connect()
+    contract = await demo_broker.qualify_crypto("btc")
+
+    assert isinstance(contract, CryptoContract)
+    assert contract.symbol == "BTC"
+    assert contract.security_type is SecurityType.CRYPTO
+    assert contract.exchange == "PAXOS"
+    # Venue min-size/increment are populated (the CONFORMING path); the
+    # absent-metadata UNKNOWN path is proven by the crypto risk unit tests.
+    assert contract.min_size == Decimal("0.0001")
+    assert contract.size_increment == Decimal("0.0001")
+
+
+@pytest.mark.asyncio
+async def test_request_crypto_quote_is_deterministic(demo_broker: DemoBroker) -> None:
+    await demo_broker.connect()
+    contract = await demo_broker.qualify_crypto("ETH")
+    quote = await demo_broker.request_crypto_quote(contract)
+
+    assert quote.contract.con_id == contract.con_id
+    assert quote.bid == Decimal("2999.00")
+    assert quote.ask == Decimal("3001.00")
+    assert quote.data_quality is DataQuality.DEMO
+
+
+@pytest.mark.asyncio
+async def test_qualify_crypto_unknown_symbol_raises(demo_broker: DemoBroker) -> None:
+    await demo_broker.connect()
+    with pytest.raises(BrokerDataError, match="crypto"):
+        await demo_broker.qualify_crypto("DOGE")
