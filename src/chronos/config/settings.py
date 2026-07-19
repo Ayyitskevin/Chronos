@@ -62,6 +62,12 @@ class Settings(BaseSettings):
     holdout_unlock_ttl_minutes: Annotated[int, Field(gt=0, le=120)] = 15
     holdout_sessions_per_unlock: Annotated[int, Field(ge=1)] = 20
     holdout_max_outstanding_unlocks: Annotated[int, Field(ge=0)] = 2
+    # Walk-forward + sample-honest verdict defaults (ADR-0014 §2/§4). The out-of-sample
+    # window and warm-up prefix are in bars; the trade floor is the C4 minimum below which
+    # the verdict is a blocking INSUFFICIENT_EVIDENCE regardless of the point statistic.
+    walkforward_test_window_bars: Annotated[int, Field(ge=2)] = 63
+    walkforward_warmup_bars: Annotated[int, Field(ge=1)] = 252
+    walkforward_min_trades: Annotated[int, Field(ge=1)] = 20
     ib_account_id: str = ""
 
     allow_order_transmit: bool = False

@@ -191,6 +191,83 @@ def cmd_backtest(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_research_walkforward(args: argparse.Namespace) -> int:
+    from dataclasses import asdict
+
+    from chronos.backtest.engine import BacktestConfig
+    from chronos.config.settings import get_settings
+    from chronos.marketdata.csv_provider import load_daily_csv
+    from chronos.registry import RegistryLedger
+    from chronos.research.runner import STRATEGY_FACTORIES, current_commit
+    from chronos.research.walkforward import walk_forward
+
+    store = HaltStore(args.halt_file)
+    _banner(TradingMode.BACKTEST, store)
+    if args.strategy not in STRATEGY_FACTORIES:
+        print(
+            f"unknown strategy {args.strategy!r}; known: {sorted(STRATEGY_FACTORIES)}",
+            file=sys.stderr,
+        )
+        return 1
+    csv_path = args.data_dir / f"{args.symbol.upper()}.csv"
+    if not csv_path.exists():
+        print(f"no data file {csv_path}", file=sys.stderr)
+        return 1
+    loaded = load_daily_csv(csv_path, symbol=args.symbol.upper(), source="research_raw")
+
+    settings = get_settings()
+    test_window = args.test_window or settings.walkforward_test_window_bars
+    warmup = args.warmup or settings.walkforward_warmup_bars
+    min_trades = args.min_trades or settings.walkforward_min_trades
+    config = BacktestConfig(initial_cash_usd=args.cash, slippage_bps_per_side=args.slippage_bps)
+    config_payload = {
+        "strategy": args.strategy,
+        "initial_cash_usd": args.cash,
+        "slippage_bps_per_side": args.slippage_bps,
+        "test_window": test_window,
+        "warmup": warmup,
+        "min_trades": min_trades,
+        "block_size": args.block_size,
+        "n_resamples": args.n_resamples,
+        "seed": args.seed,
+    }
+    config_hash = hashlib.sha256(
+        json.dumps(config_payload, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+    # Dedicated, simulated halt store — never the platform halt file (mirrors run_backtest).
+    halt_name = f"walkforward_halt_{args.strategy}_{args.symbol.upper()}.json"
+    run_halt = HaltStore(Path("data") / halt_name)
+    run_halt.rearm("walk-forward run: simulated halt store")
+    report = walk_forward(
+        loaded.series,
+        STRATEGY_FACTORIES[args.strategy],
+        load_risk_policy(args.policy),
+        config,
+        halt_store=run_halt,
+        ledger=RegistryLedger(args.ledger),
+        strategy_id=args.strategy,
+        config_hash=config_hash,
+        code_commit=current_commit(),
+        data_hashes={args.symbol.upper(): {"csv_sha256": loaded.sha256}},
+        criteria_ref=args.criteria_ref,
+        test_window=test_window,
+        warmup=warmup,
+        min_trades=min_trades,
+        seed=args.seed,
+        block_size=args.block_size,
+        n_resamples=args.n_resamples,
+    )
+    print(json.dumps(asdict(report), indent=2, default=str))
+    print(
+        "RESEARCH: read-only walk-forward; no order was or can be submitted. "
+        "A low-sample INSUFFICIENT_EVIDENCE verdict is the honest, expected output "
+        "at daily-bar trade counts (ADR-0014).",
+        file=sys.stderr,
+    )
+    return 0
+
+
 def cmd_skb_query(args: argparse.Namespace) -> int:
     from chronos.skb import query as skb_query
     from chronos.skb.compiler import REPO_ROOT, STORE_PATH, load_store
@@ -318,8 +395,35 @@ def build_parser() -> argparse.ArgumentParser:
 
     _add_skb_commands(sub)
     _add_registry_commands(sub)
+    _add_research_commands(sub)
 
     return parser
+
+
+def _add_research_commands(sub: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
+    research = sub.add_parser("research", help="research-plane tools (read-only, no orders)")
+    research_sub = research.add_subparsers(dest="research_command", required=True)
+
+    wf = research_sub.add_parser(
+        "walk-forward",
+        help="rolling out-of-sample walk-forward with a sample-honest verdict (read-only)",
+    )
+    wf.add_argument("--strategy", required=True)
+    wf.add_argument("--symbol", required=True)
+    wf.add_argument("--data-dir", type=Path, default=Path("research/data/raw"))
+    wf.add_argument("--policy", type=Path, default=Path("config/risk.example.yaml"))
+    wf.add_argument("--ledger", type=Path, default=REGISTRY_LEDGER_PATH)
+    wf.add_argument("--criteria-ref", default="docs/AI_QUANT_GAME_PLAN.md#C4")
+    wf.add_argument("--cash", type=float, default=3000.0)
+    wf.add_argument("--slippage-bps", type=float, default=2.0)
+    # Window knobs fall back to settings when omitted (0/None -> default).
+    wf.add_argument("--test-window", type=int, default=None)
+    wf.add_argument("--warmup", type=int, default=None)
+    wf.add_argument("--min-trades", type=int, default=None)
+    wf.add_argument("--block-size", type=int, default=20)
+    wf.add_argument("--n-resamples", type=int, default=1000)
+    wf.add_argument("--seed", type=int, default=0)
+    wf.set_defaults(func=cmd_research_walkforward)
 
 
 def _add_skb_commands(sub: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
