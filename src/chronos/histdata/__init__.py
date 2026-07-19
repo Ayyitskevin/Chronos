@@ -6,9 +6,8 @@ stream, deriving adjusted / total-return views at read time. It is structurally
 isolated from the trading plane: it never holds the writer lease and never imports
 the order/broker/persistence modules (proven by AST + subprocess import tests).
 
-C1-b (this commit) delivers the pure core — the corporate-action model and the
-read-time adjustment. Later sub-milestones add the fetch client, pacing, the
-runnable process + store, and the holdout embargo.
+It also captures forward option-chain / IV / greeks snapshots (C0, ADR-0012) into
+the same store with staleness recorded per row.
 """
 
 from chronos.histdata.adjust import (
@@ -25,6 +24,19 @@ from chronos.histdata.holdout import (
     load_holdouts,
     read_embargoed_bars,
 )
+from chronos.histdata.options import (
+    OptionChainSnapshot,
+    OptionQuoteRow,
+    OptionRight,
+    SnapshotQuality,
+)
+from chronos.histdata.options_capture import CaptureOutcome, capture_snapshot, capture_symbols
+from chronos.histdata.options_client import (
+    ChainParams,
+    ContractKey,
+    OptionSnapshotClient,
+    OptionSnapshotError,
+)
 from chronos.histdata.pacing import PacingController
 
 __all__ = [
@@ -32,12 +44,23 @@ __all__ = [
     "AdjustmentError",
     "AdjustmentResult",
     "AdjustmentView",
+    "CaptureOutcome",
+    "ChainParams",
+    "ContractKey",
     "CorporateAction",
     "HistoricalDataClient",
     "HistoricalDataError",
     "HoldoutWindow",
+    "OptionChainSnapshot",
+    "OptionQuoteRow",
+    "OptionRight",
+    "OptionSnapshotClient",
+    "OptionSnapshotError",
     "PacingController",
+    "SnapshotQuality",
     "adjust_series",
+    "capture_snapshot",
+    "capture_symbols",
     "embargoed_view",
     "load_holdouts",
     "read_embargoed_bars",

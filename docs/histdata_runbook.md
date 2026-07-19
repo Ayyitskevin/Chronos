@@ -1,16 +1,18 @@
-# Historical-data plane runbook (C1 / ADR-0011)
+# Historical-data plane runbook (C1 / ADR-0011, C0 / ADR-0012)
 
-The `chronos.histdata` process backfills IBKR historical daily bars into a local,
-file-based store. It is **read-only** with respect to the trading plane: it opens no
-trading database, holds no writer lease, and imports no order/broker module.
+The `chronos.histdata` process ingests IBKR data into a local, file-based store: it
+backfills historical daily **bars** and captures forward option-chain **snapshots**.
+It is **read-only** with respect to the trading plane: it opens no trading database,
+holds no writer lease, and imports no order/broker module.
 
 ## What it is
 
-- A standalone process: `python -m chronos.histdata`.
+- A standalone process with two subcommands: `python -m chronos.histdata bars ...` and
+  `python -m chronos.histdata options ...`.
 - Connects to TWS/Gateway with the dedicated **`IB_DATA_CLIENT_ID`** (default 18, must
   differ from `IB_CLIENT_ID`; id 0 is the TWS master id and is rejected).
-- Writes **unadjusted** as-traded bars; adjusted / total-return views are derived at
-  read time from the corporate-action stream, never written back.
+- Bars are written **unadjusted**; adjusted / total-return views are derived at read
+  time from the corporate-action stream, never written back.
 
 ## Prerequisites (owner)
 
@@ -21,15 +23,37 @@ trading database, holds no writer lease, and imports no order/broker module.
    way), reachable at `IB_HOST:IB_PORT`.
 3. Set `IB_DATA_CLIENT_ID` to a value not used by the trading backend.
 
-## Run
+## Run — historical bars
 
 ```bash
-python -m chronos.histdata --symbols SPY,QQQ --end-date 2024-12-31 --duration-days 365
+python -m chronos.histdata bars --symbols SPY,QQQ --end-date 2024-12-31 --duration-days 365
 ```
 
 Each symbol is paced (a conservative rolling budget + per-key cooldown), fetched,
 quality-gated, and written idempotently. Output is one JSON line per symbol
 (`{symbol, rows, added, error}`); a non-zero exit means at least one symbol failed.
+
+## Run — options forward capture (deploy ASAP)
+
+```bash
+python -m chronos.histdata options --symbols SPY,QQQ [--session YYYY-MM-DD] \
+    [--horizon-days 120] [--strike-window-pct 0.20]
+```
+
+Captures one **immutable EOD snapshot** per underlying per day of a **bounded** slice
+of the chain — expirations within the horizon and strikes within the band of spot,
+both rights — with each row labeled by its quote's `DataQuality` and a per-snapshot
+staleness histogram recorded. **Schedule this daily** (cron/systemd-timer against your
+gateway): IBKR keeps *no* history for expired options, so every un-captured session is
+unrecoverable. Output is one JSON line per underlying
+(`{underlying, rows, worst_quality, reason, error}`). The $0 tier is delayed/EOD
+quality — captured and labeled `DELAYED`, never presented as live.
+
+Example daily cron (owner machine, after the US close):
+
+```cron
+15 21 * * 1-5  cd /path/to/Chronos && .venv/bin/python -m chronos.histdata options --symbols SPY,QQQ,IWM
+```
 
 ## Store layout (`research/data/history/`)
 
@@ -37,7 +61,8 @@ quality-gated, and written idempotently. Output is one JSON line per symbol
 |---|---|
 | `bars/<SYMBOL>.csv` | unadjusted daily OHLCV (`date,open,high,low,close,volume`) |
 | `corporate_actions/<SYMBOL>.json` | split + cash-dividend event stream (native basis) |
-| `MANIFEST.json` | per-symbol provenance: sha256, date range, capture time, corrections |
+| `options/<SYMBOL>/<YYYY-MM-DD>.json` | one immutable EOD option-chain snapshot |
+| `MANIFEST.json` | per-symbol provenance: sha256, ranges, capture time, corrections, option snapshots |
 | `HOLDOUTS.json` | declared, default-embargoed holdout windows |
 
 ## Contract & safety
@@ -55,9 +80,9 @@ quality-gated, and written idempotently. Output is one JSON line per symbol
   package imports nothing from the order/broker/persistence/lease planes or
   `sqlalchemy`/`sqlite3`, and `ibapi` stays lazy.
 
-## First-backfill verification (owner, once)
+## First-run verification (owner, once)
 
-The official client is unexercised in CI; on the first real run confirm:
+Both official clients are unexercised in CI. On the first real **bars** run confirm:
 
 1. Bars land in `bars/<SYMBOL>.csv` with plausible OHLCV and the expected date range.
 2. Volume units look right (TWS historical volume can be in lots for some feeds) — if
@@ -65,3 +90,15 @@ The official client is unexercised in CI; on the first real run confirm:
 3. Bar dates parse as `YYYYMMDD` (the process assumes `formatDate=1` daily bars).
 4. No pacing violations from the gateway across a multi-symbol run.
 5. `MANIFEST.json` records a sha256 and range for each symbol.
+
+On the first real **options** capture confirm:
+
+1. A snapshot lands at `options/<SYMBOL>/<DATE>.json` with rows only inside the
+   configured horizon/strike window (anything outside is absent by policy).
+2. `worst_quality` reflects your data tier honestly — `DELAYED`/`DELAYED_FROZEN` on the
+   $0 tier, `LIVE` only with a paid subscription. If it reads `LIVE` unexpectedly,
+   verify the account's option market-data permissions before trusting it.
+3. `implied_volatility`/greeks are populated where the gateway returned them and `null`
+   where it did not — none are fabricated.
+4. The official option client's `reqSecDefOptParams` / `reqMktData` greek wiring is
+   owner-completed on the live gateway; verify tick semantics on this first run.

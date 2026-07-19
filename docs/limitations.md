@@ -101,6 +101,25 @@ limitations referenced by the README and the runbooks.
   go-forward store (`research/data/history/`) and does not migrate or reconcile the
   heterogeneous 5-ETF CSVs.
 
+## Options forward capture (C0, `chronos.histdata options`)
+
+- **No expired-options history exists at any spend.** IBKR provides no historical data
+  for expired options, so capture is **forward-only** — the surface accrues at calendar
+  speed and will span few volatility regimes for years. Frozen-criteria Wheel
+  validation stays gated on either a paid vendor (owner decision N2) or an accepted
+  multi-year horizon (restated in C5). The store ships empty; the first snapshot is an
+  owner-run step.
+- **$0-tier data is delayed / EOD-snapshot quality, and labeled as such.** Every row
+  carries its `DataQuality` and each snapshot records a staleness histogram +
+  worst-case; delayed/frozen data is never presented as live. Real-time OPRA is a paid
+  subscription IBKR gates on account minimums.
+- **The real fetch is owner-gated and unexercised here.** `reqSecDefOptParams` /
+  `reqMktData` (with model greeks) run only against a live gateway; CI exercises a fake
+  client. No greeks/IV are fabricated — absent fields are `null`.
+- **Capture is bounded and the bounds are recorded.** Only expirations within the
+  horizon and strikes within the band of spot are captured; anything outside is absent
+  *by policy*, not missing data, and the applied bounds are stored in every snapshot.
+
 ## Strategy / research honesty
 
 - The regime-context panel (EMA/RSI/vol-percentile) is a Pine-derived heuristic, explicitly
