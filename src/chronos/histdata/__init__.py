@@ -19,6 +19,12 @@ from chronos.histdata.adjust import (
 )
 from chronos.histdata.client import HistoricalDataClient, HistoricalDataError
 from chronos.histdata.corporate_actions import ActionKind, CorporateAction
+from chronos.histdata.holdout import (
+    HoldoutWindow,
+    embargoed_view,
+    load_holdouts,
+    read_embargoed_bars,
+)
 from chronos.histdata.pacing import PacingController
 
 __all__ = [
@@ -29,6 +35,10 @@ __all__ = [
     "CorporateAction",
     "HistoricalDataClient",
     "HistoricalDataError",
+    "HoldoutWindow",
     "PacingController",
     "adjust_series",
+    "embargoed_view",
+    "load_holdouts",
+    "read_embargoed_bars",
 ]
