@@ -49,6 +49,10 @@ class Settings(BaseSettings):
     ib_host: str = "127.0.0.1"
     ib_port: PositiveInt = 7497
     ib_client_id: Annotated[int, Field(ge=0)] = 17
+    # Dedicated client id for the read-only historical-data process (ADR-0011 §1).
+    # ge=1 (not ge=0): client id 0 is TWS/Gateway's master id, wrong for a data plane.
+    # Must differ from ib_client_id — TWS rejects two live connections sharing an id.
+    ib_data_client_id: Annotated[int, Field(ge=1)] = 18
     ib_account_id: str = ""
 
     allow_order_transmit: bool = False
@@ -226,6 +230,11 @@ class Settings(BaseSettings):
             raise ValueError(
                 "BACKEND_HOST must be a loopback address; remote exposure of the "
                 "order-writing backend is out of scope by design"
+            )
+        if self.ib_data_client_id == self.ib_client_id:
+            raise ValueError(
+                "IB_DATA_CLIENT_ID must differ from IB_CLIENT_ID; the read-only "
+                "historical-data process needs its own gateway client id (ADR-0011)"
             )
         return self
 

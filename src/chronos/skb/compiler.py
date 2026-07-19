@@ -26,9 +26,9 @@ from typing import Any
 import yaml
 from pydantic import ValidationError
 
+from chronos.skb.disposition import classify_disposition
 from chronos.skb.schema import (
     DerivedStrategy,
-    Disposition,
     PineForensicFlags,
     PineScriptEntry,
     SelectionContext,
@@ -39,6 +39,7 @@ from chronos.skb.schema import (
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 STORE_PATH = Path("research/skb/skb.json")
+CATALOG_PATH = Path("research/skb/CATALOG.md")
 
 
 class SKBCompileError(RuntimeError):
@@ -157,16 +158,21 @@ def compile_skb(root: Path = REPO_ROOT) -> SKBStore:
                 known_defects=_tuple_of_str(finding.get("known_defects")),
                 related_scripts=_tuple_of_str(finding.get("related_scripts")),
                 forensic_flags=_flags(script),
-                disposition=(
-                    Disposition.PORTED
-                    if catalog_number in ported_catalog_numbers
-                    else Disposition.UNCLASSIFIED
-                ),
             )
         except (ValidationError, KeyError) as error:
             raise SKBCompileError(
                 f"catalog {catalog_number} ({base}) failed schema validation: {error}"
             ) from error
+        disposition, reason, detail = classify_disposition(
+            entry, is_ported=catalog_number in ported_catalog_numbers
+        )
+        entry = entry.model_copy(
+            update={
+                "disposition": disposition,
+                "disposition_reason": reason,
+                "disposition_detail": detail,
+            }
+        )
         pine_scripts.append(entry)
 
     # --- build the derived strategies -----------------------------------------

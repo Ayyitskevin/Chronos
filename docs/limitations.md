@@ -76,6 +76,31 @@ limitations referenced by the README and the runbooks.
   database, or fabricates provenance for legacy rows. Preserve and back up any existing file and
   configure a fresh `DATABASE_URL` until an explicit operator-reviewed import exists.
 
+## Historical-data plane (C1, `chronos.histdata`)
+
+- **The real IBKR fetch is owner-gated and unexercised here.** `reqHistoricalData`
+  runs only against a live gateway with the official TWS API (`ibapi`, not a
+  dependency — invariant 8). CI proves the store, adjustment, pacing, quality gate,
+  and process isolation against a fake client only; the official client's behavior
+  (volume units, exact bar-date formatting, accepted pacing) is confirmed by the
+  owner on first real backfill.
+- **No corporate-action data is fabricated.** The store ships with empty bars and
+  empty action files; adjustment correctness is proven with synthetic split/dividend
+  fixtures. Real splits/dividends are captured or entered by the owner, in **native
+  as-of-ex-date basis** (never restated to a later split's terms, or the read-time
+  factor double-counts).
+- **`TOTAL_RETURN` is the CRSP/vendor adjusted-close approximation**, exact for splits
+  and first-order for dividends — not an exact reinvested total-return index.
+- **Pacing is coded to documented limits, not measured.** Cross-process coordination
+  with the trading backend (a shared pacing budget) is not wired; the data process
+  self-paces conservatively under its own client id.
+- **The holdout embargo is a default-masked accessor, not a structural guardian.** A
+  caller that reads `bars/<SYMBOL>.csv` directly bypasses it. The once-only,
+  owner-typed, logged unlock and registry-brokered reads are Phase C2's job.
+- **The legacy `research/data/raw/` corpus is unchanged.** C1 stands up a separate
+  go-forward store (`research/data/history/`) and does not migrate or reconcile the
+  heterogeneous 5-ETF CSVs.
+
 ## Strategy / research honesty
 
 - The regime-context panel (EMA/RSI/vol-percentile) is a Pine-derived heuristic, explicitly

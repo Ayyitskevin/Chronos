@@ -79,13 +79,30 @@ class Confidence(StrEnum):
 
 
 class Disposition(StrEnum):
-    """Port disposition. B1 assigns PORTED (a spec derives it) or UNCLASSIFIED;
-    B2 backfills DEFERRED / BLOCKED_ON / REJECTED with machine-readable reasons."""
+    """Port disposition. B1 assigned PORTED (a spec derives it) or UNCLASSIFIED;
+    B2 backfills all 42 to PORTED / DEFERRED / BLOCKED_ON / REJECTED, each with a
+    machine-readable :class:`DispositionReason`."""
 
     PORTED = "ported"
     DEFERRED = "deferred"
     BLOCKED_ON = "blocked_on"
     REJECTED = "rejected"
+    UNCLASSIFIED = "unclassified"
+
+
+class DispositionReason(StrEnum):
+    """The machine-readable reason a script has its disposition (B2 backfill).
+
+    Derived deterministically from the clean categoricals (integrity status,
+    classification, direction) — never from prose. See ``skb/disposition.py``.
+    """
+
+    PORTED_TO_SPEC = "ported_to_spec"
+    EXECUTABLE_STRATEGY_NOT_YET_PORTED = "executable_strategy_not_yet_ported"
+    REQUIRES_REWRITE = "requires_rewrite"
+    NON_EXECUTABLE_INDICATOR = "non_executable_indicator"
+    STRATEGY_ADDON_NOT_STANDALONE = "strategy_addon_not_standalone"
+    NOT_A_STANDALONE_STRATEGY = "not_a_standalone_strategy"
     UNCLASSIFIED = "unclassified"
 
 
@@ -163,9 +180,12 @@ class PineScriptEntry(_Frozen):
     known_defects: tuple[str, ...] = ()
     related_scripts: tuple[str, ...] = ()
     forensic_flags: PineForensicFlags
-    # Controlled-vocabulary tags. B1 assigns disposition where a spec proves it;
-    # timeframe/asset_class/regime_tags await the B2 backfill (never guessed).
+    # Controlled-vocabulary tags. B2 backfills disposition for all 42 with a
+    # machine-readable reason; timeframe/asset_class/regime_tags remain
+    # unknown/empty (corpus states them only in prose — never guessed).
     disposition: Disposition = Disposition.UNCLASSIFIED
+    disposition_reason: DispositionReason = DispositionReason.UNCLASSIFIED
+    disposition_detail: str = ""
     timeframe: Timeframe = Timeframe.UNKNOWN
     asset_class: AssetClass = AssetClass.UNKNOWN
     regime_tags: tuple[RegimeTag, ...] = ()
