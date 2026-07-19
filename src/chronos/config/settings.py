@@ -57,6 +57,11 @@ class Settings(BaseSettings):
     # every snapshot, so anything outside it is absent *by policy*, not missing data.
     option_capture_expiry_horizon_days: Annotated[int, Field(ge=1)] = 120
     option_capture_strike_window_pct: Annotated[float, Field(gt=0, le=1)] = 0.20
+    # Holdout-unlock guardian (ADR-0013 §6/§8). The unlock phrase is a module constant,
+    # never a setting, so it is never serialized or logged.
+    holdout_unlock_ttl_minutes: Annotated[int, Field(gt=0, le=120)] = 15
+    holdout_sessions_per_unlock: Annotated[int, Field(ge=1)] = 20
+    holdout_max_outstanding_unlocks: Annotated[int, Field(ge=0)] = 2
     ib_account_id: str = ""
 
     allow_order_transmit: bool = False

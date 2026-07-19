@@ -120,6 +120,27 @@ limitations referenced by the README and the runbooks.
   horizon and strikes within the band of spot are captured; anything outside is absent
   *by policy*, not missing data, and the applied bounds are stored in every snapshot.
 
+## Experiment registry + holdout guardian (C2, `chronos.registry`)
+
+- **"Owner-typed" is enforced structurally + by phrase, not by a runtime interactivity
+  check** — the codebase has none. The unlock requires a module-constant phrase and is
+  **structurally unreachable** from every shipped scheduled/service/proposal/promotion/
+  submission path (AST + call-node tests); the future copilot plane is barred
+  prospectively. An owner who scripts the phrase into their *own* automation defeats it,
+  but no shipped automated path can.
+- **The research runner is not auto-wired to the registry in this milestone.** C2
+  delivers the ledger, the guardian, and `data_fingerprint`; runs are recorded through
+  the new API. Auto-registering the existing runner/shadow paths (and pointing them at
+  the C1 store's bars+actions dual hash instead of the legacy single-CSV sha) is a
+  follow-on, kept out to avoid changing established research provenance mid-milestone.
+- **The budget policy is a first cut** (linear credits earned per accrued capture
+  session); it *rations* unlocks, it does not model statistical power — that lands with
+  C3/C4. With an empty store, budget is zero and unlocks fail closed.
+- **The ledger's tamper-evidence is detection, not prevention.** `verify` (and CI) catch
+  any edit/reorder/truncation of the hash chain; they do not stop an owner with write
+  access from replacing the whole file — the guarantee is that such tampering is
+  *detectable*, matching the platform audit log.
+
 ## Strategy / research honesty
 
 - The regime-context panel (EMA/RSI/vol-percentile) is a Pine-derived heuristic, explicitly

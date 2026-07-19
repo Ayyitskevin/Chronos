@@ -317,6 +317,7 @@ def build_parser() -> argparse.ArgumentParser:
     backtest.set_defaults(func=cmd_backtest)
 
     _add_skb_commands(sub)
+    _add_registry_commands(sub)
 
     return parser
 
@@ -355,6 +356,144 @@ def _add_skb_commands(sub: argparse._SubParsersAction) -> None:  # type: ignore[
 
     stats = skb_sub.add_parser("stats", help="summary counts by disposition and family")
     stats.set_defaults(func=cmd_skb_stats)
+
+
+REGISTRY_LEDGER_PATH = Path("research/registry/registry.jsonl")
+HISTORY_ROOT = Path("research/data/history")
+
+
+def cmd_registry_stats(args: argparse.Namespace) -> int:
+    from chronos.registry import RegistryLedger, burned_windows, trial_count
+
+    ledger = RegistryLedger(args.ledger)
+    ok, detail = ledger.verify()
+    print(
+        json.dumps(
+            {
+                "ledger": str(args.ledger),
+                "records": len(ledger.records()),
+                "trials": trial_count(ledger),
+                "burned_windows": sorted(burned_windows(ledger)),
+                "chain_ok": ok,
+                "chain_detail": detail,
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
+def cmd_registry_verify(args: argparse.Namespace) -> int:
+    from chronos.registry import RegistryLedger
+
+    ok, detail = RegistryLedger(args.ledger).verify()
+    print("registry ledger OK" if ok else f"registry ledger FAILED: {detail}")
+    return 0 if ok else 1
+
+
+def cmd_holdout_status(args: argparse.Namespace) -> int:
+    from chronos.config.settings import get_settings
+    from chronos.histdata.holdout import load_holdouts
+    from chronos.registry import (
+        RegistryLedger,
+        accrued_capture_sessions,
+        available_budget,
+        burned_windows,
+    )
+
+    settings = get_settings()
+    ledger = RegistryLedger(args.ledger)
+    accrued = accrued_capture_sessions(args.history_root)
+    print(
+        json.dumps(
+            {
+                "declared_windows": [w.name for w in load_holdouts(args.history_root)],
+                "burned_windows": sorted(burned_windows(ledger)),
+                "accrued_sessions": accrued,
+                "available_unlock_budget": available_budget(
+                    ledger,
+                    accrued_sessions=accrued,
+                    sessions_per_unlock=settings.holdout_sessions_per_unlock,
+                    max_outstanding_unlocks=settings.holdout_max_outstanding_unlocks,
+                ),
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
+def cmd_holdout_unlock(args: argparse.Namespace) -> int:
+    import os
+    from datetime import UTC, datetime
+
+    from chronos.config.settings import get_settings
+    from chronos.registry import (
+        HoldoutGuardianError,
+        RegistryLedger,
+        accrued_capture_sessions,
+        request_unlock,
+    )
+
+    # The phrase is read from the environment, never a flag echoed into process listings.
+    phrase = os.environ.get("CHRONOS_HOLDOUT_UNLOCK_PHRASE", "")
+    if not phrase:
+        print(
+            "set CHRONOS_HOLDOUT_UNLOCK_PHRASE to the unlock phrase (never a --flag)",
+            file=sys.stderr,
+        )
+        return 2
+    settings = get_settings()
+    try:
+        grant = request_unlock(
+            RegistryLedger(args.ledger),
+            args.history_root,
+            args.window,
+            typed_phrase=phrase,
+            reason=args.reason,
+            now=datetime.now(UTC),
+            accrued_sessions=accrued_capture_sessions(args.history_root),
+            ttl_minutes=settings.holdout_unlock_ttl_minutes,
+            sessions_per_unlock=settings.holdout_sessions_per_unlock,
+            max_outstanding_unlocks=settings.holdout_max_outstanding_unlocks,
+        )
+    except HoldoutGuardianError as error:
+        print(json.dumps({"error": str(error)}), file=sys.stderr)
+        return 1
+    print(
+        json.dumps(
+            {"unlock_id": grant.unlock_id, "window": grant.window, "expires_at": grant.expires_at},
+            indent=2,
+        )
+    )
+    return 0
+
+
+def _add_registry_commands(sub: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
+    registry = sub.add_parser("registry", help="experiment registry (read-only reporting)")
+    registry_sub = registry.add_subparsers(dest="registry_command", required=True)
+    for name, func, helptext in (
+        ("stats", cmd_registry_stats, "records, trial count, and burned windows"),
+        ("verify", cmd_registry_verify, "verify the ledger hash chain (exit 1 on tamper)"),
+    ):
+        parser = registry_sub.add_parser(name, help=helptext)
+        parser.add_argument("--ledger", type=Path, default=REGISTRY_LEDGER_PATH)
+        parser.set_defaults(func=func)
+
+    holdout = sub.add_parser("holdout", help="holdout guardian (status + owner-typed unlock)")
+    holdout_sub = holdout.add_subparsers(dest="holdout_command", required=True)
+
+    status = holdout_sub.add_parser("status", help="declared/burned windows + unlock budget")
+    status.add_argument("--ledger", type=Path, default=REGISTRY_LEDGER_PATH)
+    status.add_argument("--history-root", type=Path, default=HISTORY_ROOT)
+    status.set_defaults(func=cmd_holdout_status)
+
+    unlock = holdout_sub.add_parser("unlock", help="owner-typed single-use holdout unlock")
+    unlock.add_argument("--window", required=True)
+    unlock.add_argument("--reason", required=True)
+    unlock.add_argument("--ledger", type=Path, default=REGISTRY_LEDGER_PATH)
+    unlock.add_argument("--history-root", type=Path, default=HISTORY_ROOT)
+    unlock.set_defaults(func=cmd_holdout_unlock)
 
 
 def main(argv: list[str] | None = None) -> int:
