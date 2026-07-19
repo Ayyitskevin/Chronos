@@ -20,7 +20,13 @@ from decimal import Decimal
 from chronos.broker.connection import BrokerConnectionManager
 from chronos.config.settings import Settings
 from chronos.domain.enums import OptionRight, OrderSide, ProductFamily, ReconciliationStatus
-from chronos.domain.models import BrokerOrder, BrokerPosition, OptionContract, UnderlyingContract
+from chronos.domain.models import (
+    BrokerOrder,
+    BrokerPosition,
+    CryptoContract,
+    OptionContract,
+    UnderlyingContract,
+)
 from chronos.orders.intent import WheelOrderIntent
 from chronos.orders.risk import RiskEvidence
 from chronos.services.trading_hours import session_for
@@ -60,6 +66,14 @@ class BrokerRiskEvidenceProvider:
         current_symbol_allocation = _symbol_allocation(positions, intent.symbol)
         current_total_wheel_allocation = _total_allocation(positions)
 
+        # Crypto evidence (ADR-0010 §4), gathered separately from the wheel
+        # aggregates. Allocation is MARKED from broker market prices; if any
+        # held crypto lacks a mark the allocation-cap check fails UNKNOWN.
+        held_crypto_quantity = _held_crypto(positions, intent.symbol)
+        crypto_sell_reserved_quantity = _crypto_sell_reserved(open_orders, intent.symbol)
+        current_crypto_allocation, crypto_allocation_marked = _crypto_allocation(positions)
+        pending_crypto_buy_notional = _pending_crypto_buy_notional(open_orders)
+
         session = session_for(
             intent.product_family,
             now=now,
@@ -78,6 +92,11 @@ class BrokerRiskEvidenceProvider:
             held_short_option_contracts=held_short_option_contracts,
             current_symbol_allocation=current_symbol_allocation,
             current_total_wheel_allocation=current_total_wheel_allocation,
+            held_crypto_quantity=held_crypto_quantity,
+            crypto_sell_reserved_quantity=crypto_sell_reserved_quantity,
+            current_crypto_allocation=current_crypto_allocation,
+            crypto_allocation_marked=crypto_allocation_marked,
+            pending_crypto_buy_notional=pending_crypto_buy_notional,
         )
 
     def _broker_confirms_open(self, now: datetime) -> bool | None:
@@ -184,6 +203,69 @@ def _pending_call_shares(open_orders: tuple[BrokerOrder, ...], symbol: str) -> D
 def _long_stock_value(position: BrokerPosition) -> Decimal:
     price = position.market_price if position.market_price is not None else position.average_cost
     return position.quantity * price
+
+
+def _held_crypto(positions: tuple[BrokerPosition, ...], symbol: str) -> Decimal:
+    """Long crypto quantity held for one symbol (trade-date broker truth)."""
+
+    total = Decimal("0")
+    for position in positions:
+        contract = position.contract
+        if (
+            isinstance(contract, CryptoContract)
+            and contract.symbol == symbol
+            and position.quantity > 0
+        ):
+            total += position.quantity
+    return total
+
+
+def _crypto_sell_reserved(open_orders: tuple[BrokerOrder, ...], symbol: str) -> Decimal:
+    """Crypto quantity committed to resting (unfilled) SELL orders for a symbol."""
+
+    total = Decimal("0")
+    for order in open_orders:
+        contract = order.contract
+        if (
+            isinstance(contract, CryptoContract)
+            and contract.symbol == symbol
+            and order.side is OrderSide.SELL
+        ):
+            total += order.remaining_quantity
+    return total
+
+
+def _crypto_allocation(positions: tuple[BrokerPosition, ...]) -> tuple[Decimal, bool]:
+    """Market value of all held crypto, and whether every holding had a mark.
+
+    Returns ``(value, marked)``. ``marked`` is False if ANY long crypto
+    position lacks a broker ``market_price`` — the allocation-cap check then
+    fails UNKNOWN rather than under-count appreciated crypto at cost
+    (ADR-0010 ris-6). Absent holdings ⇒ (0, True): nothing to mark.
+    """
+
+    total = Decimal("0")
+    marked = True
+    for position in positions:
+        contract = position.contract
+        if not isinstance(contract, CryptoContract) or position.quantity <= 0:
+            continue
+        if position.market_price is None:
+            marked = False
+            continue
+        total += position.quantity * position.market_price
+    return total, marked
+
+
+def _pending_crypto_buy_notional(open_orders: tuple[BrokerOrder, ...]) -> Decimal:
+    """USD notional committed to resting (unfilled) crypto BUY orders."""
+
+    total = Decimal("0")
+    for order in open_orders:
+        contract = order.contract
+        if isinstance(contract, CryptoContract) and order.side is OrderSide.BUY:
+            total += order.remaining_quantity * order.limit_price
+    return total
 
 
 def _symbol_allocation(positions: tuple[BrokerPosition, ...], symbol: str) -> Decimal:

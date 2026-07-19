@@ -45,6 +45,7 @@ _OPEN_INTENTS: frozenset[OrderIntent] = frozenset(
         OrderIntent.OPEN_SHORT_PUT,
         OrderIntent.OPEN_COVERED_CALL,
         OrderIntent.OPEN_LONG_STOCK,
+        OrderIntent.OPEN_LONG_CRYPTO,
     }
 )
 _SELL_INTENTS: frozenset[OrderIntent] = frozenset(
@@ -52,6 +53,7 @@ _SELL_INTENTS: frozenset[OrderIntent] = frozenset(
         OrderIntent.OPEN_SHORT_PUT,
         OrderIntent.OPEN_COVERED_CALL,
         OrderIntent.CLOSE_LONG_STOCK,
+        OrderIntent.CLOSE_LONG_CRYPTO,
     }
 )
 # A uuid5 namespace fixed for Chronos order idempotency (never security-bearing).
@@ -98,7 +100,10 @@ class WheelOrderIntent(ChronosModel):
     quantity: Decimal
     limit_price: Decimal
     order_type: Literal["LMT"] = "LMT"
-    time_in_force: Literal["DAY"] = "DAY"
+    # Family-conditional TIF (ADR-0010 §3): OPTION/STOCK are always DAY; CRYPTO
+    # may be DAY or IOC per the owner-verified setting. Widening the Literal
+    # does not change existing hashes — DAY intents still serialize "DAY".
+    time_in_force: Literal["DAY", "IOC"] = "DAY"
     outside_rth: bool = False
 
     @field_validator("correlation_id")
@@ -193,6 +198,7 @@ class WheelOrderIntent(ChronosModel):
             limit_price=self.limit_price,
             order_ref=self.correlation_id,
             transmit=transmit,
+            time_in_force=self.time_in_force,
             outside_rth=self.outside_rth,
         )
 

@@ -59,6 +59,19 @@ def session_for(
         raise ValueError("session decisions require a timezone-aware timestamp")
 
     if family is ProductFamily.CRYPTO:
+        # ADR-0010 §5: the ~24/7 default is OPEN at any hour/weekday, BUT broker
+        # evidence can CLOSE the family — a venue halt/maintenance signal wins,
+        # matching the equity branch below. Honesty note: no production
+        # component supplies broker_confirms_open=False for crypto in M7C (the
+        # wired evidence provider returns None => OPEN), so venue-halt closing
+        # is a reserved seam, disclosed in the runbook and limitations.
+        if broker_confirms_open is False:
+            return SessionDecision(
+                family=family,
+                session=MarketSession.CLOSED,
+                may_submit=False,
+                reason="broker session evidence reports the crypto venue closed (halt/maintenance)",
+            )
         return SessionDecision(
             family=family,
             session=MarketSession.OPEN,

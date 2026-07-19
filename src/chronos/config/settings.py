@@ -78,6 +78,10 @@ class Settings(BaseSettings):
     crypto_allowlist: SymbolAllowlist = ()
     max_crypto_allocation_pct: Annotated[Decimal, Field(ge=0, le=1)] = Decimal("0.10")
     max_crypto_notional_per_order_usd: Annotated[Decimal, Field(ge=0)] = Decimal("1000")
+    # ADR-0010 §3: family-conditional TIF. IBKR's accepted Paxos-crypto TIF set
+    # is an owner gateway-verification item; DAY is the safe default and the
+    # allowed set stays narrow. Options/stocks are always DAY (unaffected).
+    crypto_time_in_force: Literal["DAY", "IOC"] = "DAY"
 
     # Local backend service (FastAPI); loopback-only by design.
     backend_host: str = "127.0.0.1"
