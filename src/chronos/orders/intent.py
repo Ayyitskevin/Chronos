@@ -18,7 +18,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import PositiveInt, field_validator, model_validator
+from pydantic import field_validator, model_validator
 
 from chronos.domain.enums import (
     IBEnvironment,
@@ -72,6 +72,20 @@ def new_correlation_id() -> OrderRefStr:
     return _CORRELATION_PREFIX + uuid.uuid4().hex.upper()
 
 
+def canonical_quantity(quantity: Decimal) -> str:
+    """Canonical, exponent-free quantity text (ADR-0010 §1).
+
+    ``normalize()`` collapses exponent/trailing-zero variants so economically
+    identical spellings can never fork an idempotency key or confirmation
+    hash; ``format(..., "f")`` never emits E-notation and is byte-identical to
+    the pre-M7C ``str(int)`` for every integral quantity (golden-pinned).
+    NOTE: ``limit_price`` deliberately does NOT use this (changing it would
+    alter existing hashes); its trailing-zero fork is a recorded limitation.
+    """
+
+    return format(quantity.normalize(), "f")
+
+
 class WheelOrderIntent(ChronosModel):
     """One proposed order, family-aware, prior to any broker interaction."""
 
@@ -81,7 +95,7 @@ class WheelOrderIntent(ChronosModel):
     product_family: ProductFamily
     intent: OrderIntent
     contract: Instrument
-    quantity: PositiveInt
+    quantity: Decimal
     limit_price: Decimal
     order_type: Literal["LMT"] = "LMT"
     time_in_force: Literal["DAY"] = "DAY"
@@ -94,6 +108,21 @@ class WheelOrderIntent(ChronosModel):
         if not normalized.startswith(_CORRELATION_PREFIX):
             raise ValueError("correlation_id must be a Chronos-owned CHR-ORD- reference")
         return normalized
+
+    @field_validator("quantity")
+    @classmethod
+    def validate_quantity(cls, value: Decimal) -> Decimal:
+        if not value.is_finite():
+            raise ValueError("quantity must be a finite number")
+        if value <= 0:
+            raise ValueError("quantity must be positive")
+        exponent = value.normalize().as_tuple().exponent
+        if isinstance(exponent, int) and exponent < -8:
+            # Numeric(20,8) is the persistence scale (ADR-0010 §1): anything
+            # finer would round-trip lossily and desynchronize the audit
+            # record from the hashed/transmitted quantity.
+            raise ValueError("quantity is finer than the 1e-8 persistence scale")
+        return value
 
     @field_validator("limit_price")
     @classmethod
@@ -128,6 +157,13 @@ class WheelOrderIntent(ChronosModel):
                 raise ValueError("STOCK intents must be OPEN_LONG_STOCK or CLOSE_LONG_STOCK")
         else:  # CRYPTO is deferred to Milestone 7C.
             raise ValueError("CRYPTO order intents are not supported until Milestone 7C")
+        if self.quantity != self.quantity.to_integral_value():
+            # ADR-0010 §1: fractional quantities are a CRYPTO-only capability;
+            # options and stocks stay whole-unit (first line of the defense in
+            # depth — the stock risk check re-asserts this as a genuine FAIL).
+            # (When the CRYPTO branch lands, this check moves inside the
+            # OPTION/STOCK branches above.)
+            raise ValueError(f"{self.product_family.value} quantities must be whole units")
         if self.contract.symbol != self.contract.symbol.strip().upper():
             raise ValueError("contract symbol must be normalized")
         return self
@@ -177,7 +213,7 @@ class WheelOrderIntent(ChronosModel):
             self.intent.value,
             side_for_intent(self.intent).value,
             open_close_effect_for_intent(self.intent),
-            str(self.quantity),
+            canonical_quantity(self.quantity),
             format(self.limit_price, "f"),
             day_bucket,
         )
@@ -210,7 +246,7 @@ class WheelOrderIntent(ChronosModel):
             local_symbol=local_symbol,
             action=self.side,
             open_close_effect=self.open_close_effect,
-            quantity=Decimal(self.quantity),
+            quantity=self.quantity,
             order_type=self.order_type,
             limit_price=self.limit_price,
             time_in_force=self.time_in_force,
@@ -245,7 +281,7 @@ def order_summary_hash(intent: WheelOrderIntent, *, risk_decision_id: str) -> st
         str(con_id),
         intent.intent.value,
         intent.side.value,
-        str(intent.quantity),
+        canonical_quantity(intent.quantity),
         format(intent.limit_price, "f"),
         intent.time_in_force,
         risk_decision_id,
@@ -259,7 +295,7 @@ def build_option_intent(
     account_id: str,
     intent: OrderIntent,
     contract: OptionContract,
-    quantity: int,
+    quantity: int | Decimal,
     limit_price: Decimal,
     correlation_id: str | None = None,
     intent_id: str | None = None,
@@ -272,7 +308,7 @@ def build_option_intent(
         product_family=ProductFamily.OPTION,
         intent=intent,
         contract=contract,
-        quantity=quantity,
+        quantity=Decimal(quantity),
         limit_price=limit_price,
         outside_rth=outside_rth,
     )
@@ -283,7 +319,7 @@ def build_stock_intent(
     account_id: str,
     intent: OrderIntent,
     contract: UnderlyingContract,
-    quantity: int,
+    quantity: int | Decimal,
     limit_price: Decimal,
     correlation_id: str | None = None,
     intent_id: str | None = None,
@@ -295,7 +331,7 @@ def build_stock_intent(
         product_family=ProductFamily.STOCK,
         intent=intent,
         contract=contract,
-        quantity=quantity,
+        quantity=Decimal(quantity),
         limit_price=limit_price,
         outside_rth=False,
     )

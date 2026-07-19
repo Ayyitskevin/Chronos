@@ -155,7 +155,9 @@ def build_runtime(*, register_atexit: bool = True) -> AppRuntime:
         reconciliation = ReconciliationCoordinator(
             connection,
             LocalReconciliationRepository(database.sessions),
-            settings.symbol_allowlist,
+            # ADR-0010: a held crypto position must not surface as a permanent
+            # MANUAL_REVIEW 'outside the configured allowlist' symbol.
+            tuple(dict.fromkeys(settings.symbol_allowlist + settings.crypto_allowlist)),
         )
         short_put_candidates = ShortPutCandidateService(
             connection=connection,

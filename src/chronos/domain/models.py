@@ -152,7 +152,36 @@ class OptionContract(OptionContractSpec):
         )
 
 
-Instrument = UnderlyingContract | OptionContract
+class CryptoContract(ChronosModel):
+    """IBKR spot crypto contract (ADR-0010, Milestone 7C).
+
+    Venue metadata (``min_tick``/``min_size``/``size_increment``) is populated
+    ONLY from qualified contract details at qualification time — the read path
+    (positions/executions/open-orders normalization) leaves them ``None``, and
+    every dependent risk check reports UNKNOWN (fail closed) when absent. The
+    ``exchange`` default is the qualification hint; the qualified value echoes
+    the gateway's own routing (entity-dependent: Paxos vs Zero Hash).
+    """
+
+    con_id: PositiveInt
+    symbol: str
+    security_type: Literal[SecurityType.CRYPTO] = SecurityType.CRYPTO
+    exchange: str = "PAXOS"
+    currency: str = "USD"
+    min_tick: Decimal | None = Field(default=None, gt=0)
+    min_size: Decimal | None = Field(default=None, gt=0)
+    size_increment: Decimal | None = Field(default=None, gt=0)
+
+    @field_validator("symbol", "exchange", "currency")
+    @classmethod
+    def normalize_required_code(cls, value: str) -> str:
+        normalized = value.strip().upper()
+        if not normalized:
+            raise ValueError("Instrument code fields must not be blank")
+        return normalized
+
+
+Instrument = UnderlyingContract | OptionContract | CryptoContract
 
 
 class ModelGreeks(ChronosModel):
@@ -414,7 +443,7 @@ class OrderRequest(ChronosModel):
     contract: Instrument
     intent: OrderIntent
     side: OrderSide
-    quantity: PositiveInt
+    quantity: Decimal = Field(gt=0)
     limit_price: Decimal = Field(gt=0)
     order_ref: str
     transmit: bool = False

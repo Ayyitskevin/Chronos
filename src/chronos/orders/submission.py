@@ -52,7 +52,12 @@ from chronos.config.settings import Settings
 from chronos.control.modes import ExecutionCapability, TradingMode, resolve_mode_lock
 from chronos.domain.accounts import classify_observed_environment
 from chronos.domain.enums import DataQuality, IBEnvironment, OrderLifecycle, ProductFamily
-from chronos.domain.models import ChronosModel, MarketQuote, OrderSubmission
+from chronos.domain.models import (
+    ChronosModel,
+    MarketQuote,
+    OptionContract,
+    OrderSubmission,
+)
 from chronos.orders.arming import LiveArmingService
 from chronos.orders.intent import WheelOrderIntent, order_summary_hash
 from chronos.orders.kill_switch import LiveKillSwitch
@@ -487,7 +492,7 @@ class OrderSubmissionBoundary:
         min_tick = (
             intent.contract.min_tick
             if intent.product_family is ProductFamily.OPTION
-            and hasattr(intent.contract, "min_tick")
+            and isinstance(intent.contract, OptionContract)
             else _STOCK_MIN_TICK
         )
         if not _tick_conforms(intent.limit_price, min_tick):

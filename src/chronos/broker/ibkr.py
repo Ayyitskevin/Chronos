@@ -842,7 +842,7 @@ class IBKRBroker:
                 conId=contract.con_id,
                 primaryExchange=contract.primary_exchange or "",
             )
-        else:
+        elif isinstance(contract, OptionContract):
             converted = IBOption(
                 symbol=contract.symbol,
                 lastTradeDateOrContractMonth=contract.expiration.strftime("%Y%m%d"),
@@ -854,6 +854,11 @@ class IBKRBroker:
                 conId=contract.con_id,
                 localSymbol=contract.local_symbol,
                 tradingClass=contract.trading_class,
+            )
+        else:
+            raise BrokerDataError(
+                "the ib_async adapter does not support crypto contracts; the "
+                "official adapter is the crypto path (ADR-0010)"
             )
         self._cache_contract(converted, contract)
         return converted
