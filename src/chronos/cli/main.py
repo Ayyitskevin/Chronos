@@ -455,6 +455,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     _add_skb_commands(sub)
     _add_registry_commands(sub)
+    _add_paperops_commands(sub)
     _add_research_commands(sub)
 
     return parser
@@ -686,6 +687,69 @@ def _add_registry_commands(sub: argparse._SubParsersAction) -> None:  # type: ig
     unlock.add_argument("--ledger", type=Path, default=REGISTRY_LEDGER_PATH)
     unlock.add_argument("--history-root", type=Path, default=HISTORY_ROOT)
     unlock.set_defaults(func=cmd_holdout_unlock)
+
+
+DEFAULT_PAPER_DECISION_LEDGER = Path("data/paper_decision_ledger.jsonl")
+
+
+def cmd_paperops_review(args: argparse.Namespace) -> int:
+    """Compact operator review of a paper decision ledger (read-only)."""
+
+    from chronos.paperops.review import build_operator_review
+
+    store = HaltStore(args.halt_file)
+    _banner(TradingMode.PAPER, store)
+    review = build_operator_review(args.ledger)
+    print(review.render())
+    return 0 if review.ledger_ok else 1
+
+
+def cmd_paperops_replay(args: argparse.Namespace) -> int:
+    """Deterministic replay of a paper decision ledger; exit 1 on mismatch."""
+
+    from chronos.paperops.replay import replay_ledger
+
+    store = HaltStore(args.halt_file)
+    _banner(TradingMode.PAPER, store)
+    report = replay_ledger(args.ledger)
+    print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+    return 0 if report.ok else 1
+
+
+def cmd_paperops_verify(args: argparse.Namespace) -> int:
+    """Verify the paper decision ledger hash chain."""
+
+    from chronos.paperops.ledger import verify_decision_ledger
+
+    store = HaltStore(args.halt_file)
+    _banner(TradingMode.PAPER, store)
+    ok, detail = verify_decision_ledger(args.ledger)
+    print(json.dumps({"ok": ok, "detail": detail}, indent=2))
+    return 0 if ok else 1
+
+
+def _add_paperops_commands(sub: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
+    paperops = sub.add_parser(
+        "paperops",
+        help="paper-trading operations (decision ledger review/replay; no order transmit)",
+    )
+    paperops_sub = paperops.add_subparsers(dest="paperops_command", required=True)
+
+    review = paperops_sub.add_parser(
+        "review", help="operator review: considered/rejected/acted, risk, data health"
+    )
+    review.add_argument("--ledger", type=Path, default=DEFAULT_PAPER_DECISION_LEDGER)
+    review.set_defaults(func=cmd_paperops_review)
+
+    replay = paperops_sub.add_parser(
+        "replay", help="replay ledger decisions; flag mismatches (exit 1 on fail)"
+    )
+    replay.add_argument("--ledger", type=Path, default=DEFAULT_PAPER_DECISION_LEDGER)
+    replay.set_defaults(func=cmd_paperops_replay)
+
+    verify = paperops_sub.add_parser("verify", help="verify decision-ledger hash chain")
+    verify.add_argument("--ledger", type=Path, default=DEFAULT_PAPER_DECISION_LEDGER)
+    verify.set_defaults(func=cmd_paperops_verify)
 
 
 def main(argv: list[str] | None = None) -> int:
