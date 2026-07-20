@@ -19,8 +19,9 @@ New package: `src/chronos/paperops/`
 | `ledger.py` | Append-only JSONL decision ledger, hash chain, fail-closed verify |
 | `data_quality.py` | Paper quote/option quality gates (stale/missing/crossed/greeks/clock) |
 | `controls.py` | Pure portfolio controls (halt, kill switch, exposure, concentration, daily loss, duplicate, cooldown) |
+| `control_memory.py` | **Restart-safe** rehydration of fingerprints/cooldown from the decision ledger |
 | `decision.py` | Combined pure evaluation: data health + controls + optional risk |
-| `session.py` | `record_paper_decision` — evaluate then append |
+| `session.py` | `record_paper_decision` — rehydrate durable controls, evaluate, append under flock |
 | `replay.py` | Deterministic re-eval of recorded `decision_inputs`; mismatch flags |
 | `review.py` | Compact operator review (considered / rejected / acted / risk / data / anomalies) |
 
@@ -38,14 +39,18 @@ python -m chronos.cli paperops verify  --ledger data/paper_decision_ledger.jsonl
 - **Pure evaluation:** Broker I/O is out of the hot path so unit tests drive real shipped functions hermetically.
 - **Only LIVE authorizes opens:** DEMO / DELAYED / SYNTHETIC / STALE / UNKNOWN are labeled and **non-authorizing**.
 - **Live remains blocked:** Review and controls reaffirm `LIVE TRADING BLOCKED`; default settings stay non-transmitting.
+- **Restart-safe controls:** `record_paper_decision` rehydrates order fingerprints and last-order time from the ledger before evaluation (empty ephemeral memory cannot re-authorize a prior open).
+- **Single-writer serialization:** `DecisionLedger.append` holds an exclusive `fcntl` lock, re-reads the head under that lock, and refuses to append to a corrupt chain.
 
 ### Data flow
 
 ```
 PaperDecisionInput
+    → rehydrate_control_memory(ledger)  # durable fingerprints/cooldown
+    → apply_durable_control_memory
     → evaluate_paper_decision (data_quality + controls + optional risk)
     → DecisionEvent
-    → DecisionLedger.append (hash chain)
+    → DecisionLedger.append (fcntl exclusive lock + re-read head + hash chain)
     → OperatorReview / replay_ledger
 ```
 
@@ -64,7 +69,8 @@ Key test modules:
 - `tests/unit/test_paperops_ledger.py` — provenance, secrets stripped, corrupt fail-closed
 - `tests/unit/test_paperops_replay.py` — clean match, deliberate diverge, empty/corrupt fail-closed
 - `tests/unit/test_paperops_data_quality.py` — stale/missing/crossed/greeks/clock/degraded labels
-- `tests/unit/test_paperops_controls.py` — halt/kill/duplicate/cooldown/loss/exposure/race-retry; live blocked
+- `tests/unit/test_paperops_controls.py` — halt/kill/duplicate/cooldown/loss/exposure/malformed; live blocked
+- `tests/unit/test_paperops_restart_and_race.py` — **restart rehydration** (duplicate + cooldown) and **concurrent multi-process append** under exclusive flock
 - `tests/unit/test_paperops_review.py` — operator report content + corrupt fail-closed
 
 ---

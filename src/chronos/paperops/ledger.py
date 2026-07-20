@@ -3,14 +3,21 @@
 Distinct from ``chronos.auditlog`` (generic kinds) and execution ledgers
 (intent lifecycle): this store is schema-strict for paper decision provenance
 and is the sole input for deterministic paperops replay.
+
+**Concurrency.** Every ``append`` takes an exclusive OS file lock
+(:func:`decision_ledger_lock`), re-reads the tail under that lock, then writes.
+Two processes cannot both append into a corrupt chain: they serialize, and each
+rebinds sequence/previous_hash from the on-disk head before writing.
 """
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -31,6 +38,21 @@ _SCHEMA = "paper-decision-ledger-v1"
 
 class DecisionLedgerError(RuntimeError):
     """Ledger is corrupt, incomplete, or refused a write (fail closed)."""
+
+
+@contextmanager
+def decision_ledger_lock(ledger_path: Path) -> Iterator[None]:
+    """Exclusive OS file lock for a read-verify-append critical section."""
+
+    lock_path = ledger_path.parent / (ledger_path.name + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("w", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            secure_owner_only(lock_path)
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def _hash_record_body(
@@ -120,6 +142,20 @@ class DecisionLedger:
             raise DecisionLedgerError("config_hash is required")
         if not event.data_source.strip():
             raise DecisionLedgerError("data_source is required (use 'missing' if unknown)")
+
+        # Exclusive lock + re-read head: concurrent DecisionLedger instances must
+        # not both write the same sequence / break the chain.
+        with decision_ledger_lock(self._path):
+            return self._append_locked(event, at_utc=at_utc)
+
+    def _append_locked(self, event: DecisionEvent, *, at_utc: str | None) -> DecisionRecord:
+        # Fail closed if another writer left a corrupt chain.
+        ok, detail, _ = load_and_verify(self._path)
+        if not ok:
+            raise DecisionLedgerError(f"refusing to append to corrupt decision ledger: {detail}")
+        # Always rebind sequence/hash from disk under the lock (stale in-memory
+        # counters after concurrent appends from another process/instance).
+        self._sequence, self._last_hash = self._recover()
 
         at = at_utc or datetime.now(tz=UTC).isoformat()
         payload = sanitize_payload(dict(event.payload))

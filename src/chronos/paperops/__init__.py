@@ -7,6 +7,11 @@ paper session runs: every decision is recorded, replayable, and reviewable.
 Live transmission is never enabled here. Pure functions stay free of broker I/O.
 """
 
+from chronos.paperops.control_memory import (
+    DurableControlMemory,
+    apply_durable_control_memory,
+    rehydrate_control_memory,
+)
 from chronos.paperops.controls import PaperControlDecision, evaluate_paper_controls
 from chronos.paperops.data_quality import PaperDataHealth, evaluate_paper_quote
 from chronos.paperops.decision import (
@@ -14,7 +19,12 @@ from chronos.paperops.decision import (
     PaperDecisionResult,
     evaluate_paper_decision,
 )
-from chronos.paperops.ledger import DecisionLedger, DecisionLedgerError, verify_decision_ledger
+from chronos.paperops.ledger import (
+    DecisionLedger,
+    DecisionLedgerError,
+    decision_ledger_lock,
+    verify_decision_ledger,
+)
 from chronos.paperops.reasons import DecisionKind, PaperReasonCode
 from chronos.paperops.records import DecisionRecord
 from chronos.paperops.replay import ReplayReport, replay_ledger
@@ -25,6 +35,7 @@ __all__ = [
     "DecisionLedger",
     "DecisionLedgerError",
     "DecisionRecord",
+    "DurableControlMemory",
     "OperatorReview",
     "PaperControlDecision",
     "PaperDataHealth",
@@ -32,10 +43,13 @@ __all__ = [
     "PaperDecisionResult",
     "PaperReasonCode",
     "ReplayReport",
+    "apply_durable_control_memory",
     "build_operator_review",
+    "decision_ledger_lock",
     "evaluate_paper_controls",
     "evaluate_paper_decision",
     "evaluate_paper_quote",
+    "rehydrate_control_memory",
     "replay_ledger",
     "verify_decision_ledger",
 ]

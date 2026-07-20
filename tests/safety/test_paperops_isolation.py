@@ -16,6 +16,7 @@ _MODULES = (
     "ledger",
     "data_quality",
     "controls",
+    "control_memory",
     "decision",
     "session",
     "replay",

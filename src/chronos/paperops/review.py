@@ -54,11 +54,15 @@ def _is_allowed(record: DecisionRecord) -> bool:
 
 
 def _is_acted(record: DecisionRecord) -> bool:
-    return record.kind in {
-        "paper_fill",
-        "proposed_order",
-        "risk_decision",
-    } and record.outcome == "allow"
+    return (
+        record.kind
+        in {
+            "paper_fill",
+            "proposed_order",
+            "risk_decision",
+        }
+        and record.outcome == "allow"
+    )
 
 
 def build_operator_review(
