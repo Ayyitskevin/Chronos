@@ -84,7 +84,8 @@ class CampaignReport:
     min_trades: int
     cells: tuple[CampaignCell, ...]
     verdict_table: tuple[VerdictRow, ...]
-    excluded: tuple[tuple[str, str], ...]
+    excluded: tuple[tuple[str, str], ...]  # symbol-level: (symbol, reason) — applies to all
+    errored: tuple[tuple[str, str, str], ...]  # cell-level: (strategy_id, symbol, reason)
 
 
 def _parse_stage_end(stage_end: str) -> date:
@@ -171,6 +172,10 @@ def run_campaign(
             f"stage_end {stage_end!r} reaches the reserved holdout (>= {FINAL_START.isoformat()}); "
             "a holdout read must go through the C2 guardian, not the campaign"
         )
+    if not strategies:
+        raise ValueError("strategies must be non-empty")
+    if not symbols:
+        raise ValueError("symbols must be non-empty")
     unknown = [s for s in strategies if s not in STRATEGY_FACTORIES]
     if unknown:
         raise ValueError(f"unknown strategies {unknown}; known: {sorted(STRATEGY_FACTORIES)}")
@@ -215,7 +220,7 @@ def run_campaign(
     # N); re-running the campaign deflates further, by design (ADR-0015). A cell that raises
     # is recorded and skipped so one bad symbol cannot abort the whole grid.
     cells: list[CampaignCell] = []
-    cell_errors: list[tuple[str, str]] = []
+    errored: list[tuple[str, str, str]] = []
     for strategy_id in sorted(set(strategies)):
         for symbol in sorted(sliced):
             window, fingerprint = sliced[symbol]
@@ -255,7 +260,7 @@ def run_campaign(
                 )
             except Exception as error:  # one bad cell must not abort the grid
                 reason = f"cell error: {type(error).__name__}: {error}"
-                cell_errors.append((f"{strategy_id}:{symbol}", reason))
+                errored.append((strategy_id, symbol, reason))
                 cells.append(CampaignCell(strategy_id, symbol, None, reason, fingerprint))
                 continue
             cells.append(CampaignCell(strategy_id, symbol, report, None, fingerprint))
@@ -293,5 +298,6 @@ def run_campaign(
         min_trades=min_trades,
         cells=tuple(cells),
         verdict_table=verdict_table,
-        excluded=tuple(symbol_exclusions + cell_errors),
+        excluded=tuple(symbol_exclusions),
+        errored=tuple(errored),
     )

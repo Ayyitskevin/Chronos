@@ -218,13 +218,47 @@ def test_a_cell_error_is_recorded_and_does_not_abort_the_grid(
         return real_walk_forward(series, *args, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr("chronos.research.campaign.walk_forward", selective)
-    report = _run(data, tmp_path / "reg.jsonl", tmp_path / "h", seed=1, symbols=["SPY", "BAD"])
+    ledger_path = tmp_path / "reg.jsonl"
+    report = _run(data, ledger_path, tmp_path / "h", seed=1, symbols=["SPY", "BAD"])
 
-    # SPY still produced a verdict row; BAD's failure is recorded, not raised.
+    # SPY still produced a verdict row; BAD's failure is recorded in `errored`, not raised.
     assert {row.symbol for row in report.verdict_table} == {"SPY"}
-    assert any("cell error" in reason for _, reason in report.excluded)
-    errored = [c for c in report.cells if c.excluded_reason and "cell error" in c.excluded_reason]
-    assert len(errored) == 1 and errored[0].symbol == "BAD"
+    assert report.excluded == ()  # excluded is symbol-level only; a cell error is not here
+    assert [(s, sym) for s, sym, _ in report.errored] == [("baseline_buy_hold", "BAD")]
+    errored_cells = [
+        c for c in report.cells if c.excluded_reason and "cell error" in c.excluded_reason
+    ]
+    assert len(errored_cells) == 1 and errored_cells[0].symbol == "BAD"
+    # The failed BAD cell registered no trial; only SPY's trial exists.
+    assert trial_count(RegistryLedger(ledger_path), strategy_id="baseline_buy_hold") == 1
+
+
+def test_campaign_rejects_empty_strategies_or_symbols(tmp_path: Path) -> None:
+    # Same silent-empty class as the non-ISO stage_end: fail closed, don't return a green
+    # empty campaign a typo could produce.
+    data = tmp_path / "data"
+    _write_csv(data, "SPY", 120)
+    policy = load_risk_policy(RESEARCH_POLICY_PATH)
+    with pytest.raises(ValueError, match="strategies"):
+        run_campaign(
+            strategies=[],
+            symbols=["SPY"],
+            data_dir=data,
+            policy=policy,
+            ledger=RegistryLedger(tmp_path / "r1.jsonl"),
+            halt_dir=tmp_path / "h1",
+            config=_config(),
+        )
+    with pytest.raises(ValueError, match="symbols"):
+        run_campaign(
+            strategies=["baseline_buy_hold"],
+            symbols=[],
+            data_dir=data,
+            policy=policy,
+            ledger=RegistryLedger(tmp_path / "r2.jsonl"),
+            halt_dir=tmp_path / "h2",
+            config=_config(),
+        )
 
 
 def test_provenance_fingerprint_excludes_holdout_bars(tmp_path: Path) -> None:

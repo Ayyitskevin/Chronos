@@ -122,8 +122,11 @@ Read-only; places no order.
   against `trial_count`; the verdict table matches per-cell `WalkForwardReport`s.
 - Determinism: same seed → byte-identical verdict table.
 - Every excluded symbol carries a recorded reason; no silent skips. A cell that errors
-  mid-run is recorded and skipped (the grid is not aborted); a null/`unknown` git commit is
-  refused up front (the registry rejects null provenance).
+  mid-run is recorded in a separate `errored` field (keyed by strategy+symbol) and skipped —
+  the grid is not aborted — and it registers **no** trial: `walk_forward` commits the trial
+  **last**, after every statistic and the verdict succeed, so a failed evaluation cannot
+  inflate a sibling's multiple-testing N. Empty `strategies`/`symbols`, a null/`unknown` git
+  commit, and a non-ISO/holdout-reaching `stage_end` are all refused up front (fail closed).
 - Isolation + seal: the campaign imports no order/broker module (AST + `sys.modules` probe);
   a non-ISO or holdout-reaching `stage_end` is refused; and the per-cell provenance
   fingerprint is independent of any bar dated `>= FINAL_START` — holdout bytes never enter a

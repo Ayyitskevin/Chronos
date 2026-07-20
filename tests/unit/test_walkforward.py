@@ -262,3 +262,18 @@ def test_walk_forward_rejects_a_sub_one_trade_floor(tmp_path: Path) -> None:
     # The public entry fails closed on an invalid safety floor rather than trusting it.
     with pytest.raises(ValueError, match="min_trades"):
         _run(tmp_path / "x.jsonl", tmp_path / "xh.json", seed=1, min_trades=0)
+
+
+def test_a_post_registration_failure_leaves_no_orphan_trial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The trial is registered LAST: a raise in the statistics block must leave the ledger
+    # untouched, so a failed evaluation cannot inflate a sibling's multiple-testing N (C4).
+    def boom(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("synthetic stats failure")
+
+    monkeypatch.setattr("chronos.research.walkforward.block_bootstrap_ci", boom)
+    ledger_path = tmp_path / "reg.jsonl"
+    with pytest.raises(RuntimeError, match="synthetic stats failure"):
+        _run(ledger_path, tmp_path / "h.json", seed=1)
+    assert trial_count(RegistryLedger(ledger_path), strategy_id="strat_a") == 0

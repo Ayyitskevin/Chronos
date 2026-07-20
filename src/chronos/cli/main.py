@@ -316,6 +316,8 @@ def cmd_research_campaign(args: argparse.Namespace) -> int:
         )
     for symbol, reason in report.excluded:
         print(f"{'(excluded)':<20}{symbol:<5}  {reason}")
+    for strategy_id, symbol, reason in report.errored:
+        print(f"{'(errored)':<20}{symbol:<5}  {strategy_id}: {reason}")
     print(f"\nwrote {out_path}")
     print(
         "RESEARCH: read-only campaign; no order was or can be submitted. A table dominated "
