@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import subprocess
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -20,11 +22,22 @@ from chronos.research.repro import (
     redact_secrets,
     replay_from_manifest,
     stable_hash,
+    verify_datasets,
     write_manifest,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RESEARCH_POLICY = REPO_ROOT / "config" / "risk.research.yaml"
+
+
+def _git_rev_parse(revision: str, *, cwd: Path = REPO_ROOT) -> str:
+    return subprocess.run(
+        ["git", "rev-parse", "--verify", f"{revision}^{{commit}}"],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
 
 
 def _write_csv(
@@ -128,6 +141,211 @@ def test_identical_inputs_match_on_produce_replay_compare(tmp_path: Path) -> Non
     assert CompareReason.MATCH in report.reasons or not [
         r for r in report.reasons if r is not CompareReason.COMMIT_DRIFT
     ]
+
+
+def test_produce_records_chronos_commit_when_cwd_is_an_external_repo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    external = tmp_path / "external-repo"
+    external.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=external, check=True)
+    (external / "README.md").write_text("external\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=external, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Repro Test",
+            "-c",
+            "user.email=repro@example.invalid",
+            "commit",
+            "-qm",
+            "external commit",
+        ],
+        cwd=external,
+        check=True,
+    )
+    external_commit = _git_rev_parse("HEAD", cwd=external)
+    chronos_commit = _git_rev_parse("HEAD")
+    assert external_commit != chronos_commit
+
+    data = tmp_path / "data"
+    _write_csv(data, "SPY")
+    monkeypatch.chdir(external)
+    manifest = produce_named_backtest_run(
+        run_dir=tmp_path / "run",
+        strategy_id="baseline_buy_hold",
+        symbol="SPY",
+        data_dir=data,
+        policy_path=RESEARCH_POLICY,
+    )
+
+    assert manifest["code_commit"] == chronos_commit
+    assert manifest["code_commit"] != external_commit
+
+
+def test_replay_does_not_forward_original_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data = tmp_path / "data"
+    _write_csv(data, "SPY")
+    original = produce_named_backtest_run(
+        run_dir=tmp_path / "original",
+        strategy_id="baseline_buy_hold",
+        symbol="SPY",
+        data_dir=data,
+        policy_path=RESEARCH_POLICY,
+    )
+    captured: dict[str, object] = {}
+
+    def fake_produce(**kwargs: object) -> dict[str, str]:
+        captured.update(kwargs)
+        return {"code_commit": _git_rev_parse("HEAD")}
+
+    monkeypatch.setattr(
+        "chronos.research.repro.produce_named_backtest_run",
+        fake_produce,
+    )
+    replayed = replay_from_manifest(
+        original,
+        run_dir=tmp_path / "replayed",
+        data_dir=data,
+        policy_path=RESEARCH_POLICY,
+    )
+
+    assert captured["code_commit"] is None
+    assert replayed["code_commit"] == _git_rev_parse("HEAD")
+
+
+@pytest.mark.parametrize("bad_commit", ["not-a-sha", "f" * 40])
+def test_manifest_rejects_invalid_or_unresolvable_commit(tmp_path: Path, bad_commit: str) -> None:
+    data = tmp_path / "data"
+    _write_csv(data, "SPY")
+    manifest = produce_named_backtest_run(
+        run_dir=tmp_path / "original",
+        strategy_id="baseline_buy_hold",
+        symbol="SPY",
+        data_dir=data,
+        policy_path=RESEARCH_POLICY,
+    )
+    manifest["code_commit"] = bad_commit
+
+    with pytest.raises(ReproError) as exc:
+        write_manifest(manifest, tmp_path / "invalid.json")
+
+    assert exc.value.reason is CompareReason.INCOMPLETE_MANIFEST
+
+
+def test_compare_rejects_stale_output_fingerprint_after_output_mutation(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    _write_csv(data, "SPY")
+    expected = produce_named_backtest_run(
+        run_dir=tmp_path / "expected",
+        strategy_id="baseline_buy_hold",
+        symbol="SPY",
+        data_dir=data,
+        policy_path=RESEARCH_POLICY,
+    )
+    tampered = json.loads(json.dumps(expected))
+    tampered["outputs"]["bars"] += 1
+
+    report = compare_manifests(expected, tampered)
+
+    assert report.ok is False
+    assert CompareReason.CHECKSUM_DRIFT in report.reasons
+
+
+def test_load_manifest_rejects_mutated_output_artifact(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    _write_csv(data, "SPY")
+    run_dir = tmp_path / "run"
+    produce_named_backtest_run(
+        run_dir=run_dir,
+        strategy_id="baseline_buy_hold",
+        symbol="SPY",
+        data_dir=data,
+        policy_path=RESEARCH_POLICY,
+    )
+    output_path = run_dir / "output.json"
+    output = json.loads(output_path.read_text(encoding="utf-8"))
+    output["bars"] += 1
+    output_path.write_text(json.dumps(output), encoding="utf-8")
+
+    with pytest.raises(ReproError) as exc:
+        load_manifest(run_dir / "manifest.json")
+
+    assert exc.value.reason is CompareReason.CHECKSUM_DRIFT
+
+
+@pytest.mark.parametrize("dataset_id_kind", ["traversal", "absolute"])
+def test_verify_datasets_rejects_dataset_id_escape(tmp_path: Path, dataset_id_kind: str) -> None:
+    data_root = tmp_path / "data"
+    data_root.mkdir()
+    outside = tmp_path / "outside.csv"
+    outside.write_text("outside\n", encoding="utf-8")
+    dataset_id = "../outside.csv" if dataset_id_kind == "traversal" else str(outside)
+    manifest = {
+        "datasets": [
+            {
+                "dataset_id": dataset_id,
+                "symbol": "",
+                "sha256": hashlib.sha256(outside.read_bytes()).hexdigest(),
+            }
+        ]
+    }
+
+    with pytest.raises(ReproError) as exc:
+        verify_datasets(manifest, data_dir=data_root)
+
+    assert exc.value.reason is CompareReason.INCOMPLETE_MANIFEST
+
+
+@pytest.mark.parametrize("recorded_path_kind", ["traversal", "absolute"])
+def test_verify_datasets_rejects_recorded_path_escape(
+    tmp_path: Path, recorded_path_kind: str
+) -> None:
+    base_dir = tmp_path / "bundle"
+    base_dir.mkdir()
+    outside = tmp_path / "outside.csv"
+    outside.write_text("outside\n", encoding="utf-8")
+    recorded_path = "../outside.csv" if recorded_path_kind == "traversal" else str(outside)
+    manifest = {
+        "datasets": [
+            {
+                "dataset_id": "SPY.csv",
+                "symbol": "SPY",
+                "path": recorded_path,
+                "sha256": hashlib.sha256(outside.read_bytes()).hexdigest(),
+            }
+        ]
+    }
+
+    with pytest.raises(ReproError) as exc:
+        verify_datasets(manifest, base_dir=base_dir)
+
+    assert exc.value.reason is CompareReason.INCOMPLETE_MANIFEST
+
+
+def test_verify_datasets_rejects_symlink_escape(tmp_path: Path) -> None:
+    data_root = tmp_path / "data"
+    data_root.mkdir()
+    outside = tmp_path / "outside.csv"
+    outside.write_text("outside\n", encoding="utf-8")
+    (data_root / "SPY.csv").symlink_to(outside)
+    manifest = {
+        "datasets": [
+            {
+                "dataset_id": "SPY.csv",
+                "symbol": "SPY",
+                "sha256": hashlib.sha256(outside.read_bytes()).hexdigest(),
+            }
+        ]
+    }
+
+    with pytest.raises(ReproError) as exc:
+        verify_datasets(manifest, data_dir=data_root)
+
+    assert exc.value.reason is CompareReason.INCOMPLETE_MANIFEST
 
 
 def test_data_checksum_drift_fails_clearly(tmp_path: Path) -> None:

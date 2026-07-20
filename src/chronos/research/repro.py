@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -24,6 +25,8 @@ from chronos.research.runner import STRATEGY_FACTORIES, current_commit, run_name
 
 SCHEMA_VERSION = "research-run-manifest-v1"
 DEFAULT_TIMEZONE = "UTC"
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_FULL_GIT_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 
 # Host-local path fields recorded for operator convenience only — never part of
 # run identity. Identical CSV content under two directories must compare equal.
@@ -109,6 +112,68 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _resolve_code_commit(commit: object) -> str:
+    """Return a canonical commit SHA that exists in this Chronos checkout."""
+
+    candidate = str(commit or "").strip()
+    if not _FULL_GIT_SHA_RE.fullmatch(candidate):
+        raise ReproError(
+            CompareReason.INCOMPLETE_MANIFEST,
+            "code_commit must be a full 40-character hexadecimal git SHA",
+        )
+    try:
+        resolved = subprocess.run(
+            ["git", "rev-parse", "--verify", f"{candidate}^{{commit}}"],
+            cwd=_REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError) as error:
+        raise ReproError(
+            CompareReason.INCOMPLETE_MANIFEST,
+            f"code_commit is not resolvable in this Chronos checkout: {candidate}",
+        ) from error
+    if not _FULL_GIT_SHA_RE.fullmatch(resolved) or resolved.lower() != candidate.lower():
+        raise ReproError(
+            CompareReason.INCOMPLETE_MANIFEST,
+            f"code_commit did not resolve to the declared commit: {candidate}",
+        )
+    return resolved.lower()
+
+
+def _checkout_commit() -> str:
+    """Resolve HEAD from the Chronos checkout, never from the caller's cwd."""
+
+    return _resolve_code_commit(current_commit(_REPO_ROOT))
+
+
+def _safe_relative_path(value: object, *, field: str) -> Path:
+    raw = str(value or "").strip()
+    path = Path(raw)
+    if not raw or path.is_absolute() or ".." in path.parts:
+        raise ReproError(
+            CompareReason.INCOMPLETE_MANIFEST,
+            f"{field} must be a non-empty relative path without '..': {raw!r}",
+        )
+    return path
+
+
+def _confined_path(root: Path, value: object, *, field: str) -> Path:
+    """Resolve a relative path and reject traversal or symlinks outside root."""
+
+    relative = _safe_relative_path(value, field=field)
+    resolved_root = root.resolve()
+    candidate = (resolved_root / relative).resolve()
+    if not candidate.is_relative_to(resolved_root):
+        raise ReproError(
+            CompareReason.INCOMPLETE_MANIFEST,
+            f"{field} resolves outside its authoritative root: {value!r}",
+        )
+    return candidate
+
+
 def redact_secrets(value: Any) -> Any:
     """Recursively redact secret-like keys; never raise on nested structure."""
 
@@ -184,6 +249,7 @@ def datasets_for_identity(datasets: list[Any]) -> list[dict[str, str]]:
                 CompareReason.INCOMPLETE_MANIFEST,
                 "dataset entry requires dataset_id (or symbol) and sha256",
             )
+        _safe_relative_path(dataset_id, field="dataset_id")
         out.append(
             {
                 "dataset_id": dataset_id,
@@ -222,7 +288,10 @@ def manifest_fingerprint(manifest: Mapping[str, Any]) -> str:
 def build_output_fingerprint(outputs: Mapping[str, Any]) -> str:
     """Hash of the canonical output payload (metrics + summary fields)."""
 
-    return stable_hash(dict(outputs))
+    payload = dict(outputs)
+    # The artifact hash attests the same canonical output and must not hash itself.
+    payload.pop("artifact_sha256", None)
+    return stable_hash(payload)
 
 
 def _dataset_entry(
@@ -265,20 +334,91 @@ def _require_complete(manifest: Mapping[str, Any]) -> None:
         raise ReproError(CompareReason.INCOMPLETE_MANIFEST, "date_window must be an object")
     if not isinstance(manifest.get("outputs"), Mapping):
         raise ReproError(CompareReason.INCOMPLETE_MANIFEST, "outputs must be an object")
+    outputs = manifest["outputs"]
+    output_fingerprint = str(manifest.get("output_fingerprint") or "").strip()
+    if not output_fingerprint:
+        raise ReproError(
+            CompareReason.INCOMPLETE_MANIFEST,
+            "output_fingerprint must be non-empty",
+        )
+    computed_output_fingerprint = build_output_fingerprint(outputs)
+    if output_fingerprint != computed_output_fingerprint:
+        raise ReproError(
+            CompareReason.CHECKSUM_DRIFT,
+            "output_fingerprint does not match the canonical outputs",
+        )
+    artifact_sha = outputs.get("artifact_sha256")
+    if artifact_sha is not None and artifact_sha != computed_output_fingerprint:
+        raise ReproError(
+            CompareReason.CHECKSUM_DRIFT,
+            "outputs.artifact_sha256 does not match the canonical outputs",
+        )
     for key in ("strategy_id", "strategy_version", "policy_version", "policy_hash", "config_hash"):
         if not str(manifest.get(key) or "").strip():
             raise ReproError(CompareReason.INCOMPLETE_MANIFEST, f"{key} must be non-empty")
-    commit = str(manifest.get("code_commit") or "").strip()
-    if not commit or commit == "unknown":
-        raise ReproError(
-            CompareReason.INCOMPLETE_MANIFEST,
-            "code_commit must be a resolvable git SHA (not empty/unknown)",
-        )
+    _resolve_code_commit(manifest.get("code_commit"))
     try:
         int(manifest["seed"])
     except (TypeError, ValueError) as error:
         raise ReproError(CompareReason.INCOMPLETE_MANIFEST, "seed must be an integer") from error
     normalize_timezone(str(manifest.get("timezone")))
+
+
+def _verify_bundle_artifacts(manifest: Mapping[str, Any], manifest_path: Path) -> None:
+    """Verify declared bundle files without allowing paths outside the bundle."""
+
+    artifacts = manifest.get("artifacts")
+    if artifacts is None:
+        return
+    if not isinstance(artifacts, Mapping):
+        raise ReproError(CompareReason.INCOMPLETE_MANIFEST, "artifacts must be an object")
+
+    resolved: dict[str, Path] = {}
+    for name, entry in artifacts.items():
+        if not isinstance(entry, Mapping):
+            raise ReproError(
+                CompareReason.INCOMPLETE_MANIFEST,
+                f"artifacts.{name} must be an object",
+            )
+        artifact_path = _confined_path(
+            manifest_path.parent,
+            entry.get("path"),
+            field=f"artifacts.{name}.path",
+        )
+        expected_sha = str(entry.get("sha256") or "").strip()
+        if not expected_sha:
+            raise ReproError(
+                CompareReason.INCOMPLETE_MANIFEST,
+                f"artifacts.{name}.sha256 must be non-empty",
+            )
+        if not artifact_path.is_file():
+            raise ReproError(
+                CompareReason.MISSING_DATA,
+                f"declared artifact is missing: {artifact_path}",
+            )
+        actual_sha = file_sha256(artifact_path)
+        if actual_sha != expected_sha:
+            raise ReproError(
+                CompareReason.CHECKSUM_DRIFT,
+                f"artifact {name} sha256 drift: expected={expected_sha} actual={actual_sha}",
+            )
+        resolved[str(name)] = artifact_path
+
+    output_path = resolved.get("output_json")
+    if output_path is None:
+        return
+    try:
+        output_payload = json.loads(output_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise ReproError(
+            CompareReason.INCOMPLETE_MANIFEST,
+            f"output artifact is not valid JSON: {error}",
+        ) from error
+    if not isinstance(output_payload, dict) or output_payload != dict(manifest["outputs"]):
+        raise ReproError(
+            CompareReason.CHECKSUM_DRIFT,
+            "output artifact content does not match manifest outputs",
+        )
 
 
 def load_manifest(path: Path | str) -> dict[str, Any]:
@@ -310,6 +450,7 @@ def load_manifest(path: Path | str) -> dict[str, Any]:
             CompareReason.CHECKSUM_DRIFT,
             f"manifest_fingerprint mismatch: recorded={recorded} computed={expected_fp}",
         )
+    _verify_bundle_artifacts(payload, target)
     return payload
 
 
@@ -401,14 +542,15 @@ def produce_named_backtest_run(
             CompareReason.INCOMPLETE_MANIFEST,
             f"unknown strategy {strategy_id!r}; known: {sorted(STRATEGY_FACTORIES)}",
         )
-    csv_path = data_dir / f"{symbol.upper()}.csv"
-    if not csv_path.exists():
+    data_root = Path(data_dir).resolve()
+    csv_path = _confined_path(data_root, f"{symbol.upper()}.csv", field="symbol dataset")
+    if not csv_path.is_file():
         raise ReproError(CompareReason.MISSING_DATA, f"no data file {csv_path}")
 
     result = run_named_backtest(
         strategy_name=strategy_id,
         symbol=symbol,
-        data_dir=data_dir,
+        data_dir=data_root,
         policy_path=policy_path,
         initial_cash=initial_cash,
         slippage_bps=slippage_bps,
@@ -416,11 +558,11 @@ def produce_named_backtest_run(
         date_start=date_start,
         date_end=date_end,
     )
-    commit = code_commit if code_commit is not None else current_commit()
-    if commit in {"", "unknown"}:
+    commit = _checkout_commit()
+    if code_commit is not None and _resolve_code_commit(code_commit) != commit:
         raise ReproError(
-            CompareReason.INCOMPLETE_MANIFEST,
-            "code_commit must be a resolvable git SHA; run from a git checkout",
+            CompareReason.COMMIT_DRIFT,
+            "code_commit override does not match the current Chronos checkout",
         )
 
     strategy_version = str(result.get("strategy_version") or "")
@@ -441,7 +583,7 @@ def produce_named_backtest_run(
             "slice": "named_backtest",
             "strategy_id": strategy_id,
             "symbol": symbol.upper(),
-            "data_dir": str(data_dir),
+            "data_dir": str(data_root),
             "policy_path": str(policy_path),
             "initial_cash_usd": initial_cash,
             "slippage_bps_per_side": slippage_bps,
@@ -577,11 +719,12 @@ def _resolve_dataset_path(
     dataset_id = str(entry.get("dataset_id") or "").strip()
     symbol = str(entry.get("symbol") or "").strip().upper()
     if data_dir is not None:
+        root = Path(data_dir).resolve()
         candidates: list[Path] = []
         if dataset_id:
-            candidates.append(Path(data_dir) / dataset_id)
+            candidates.append(_confined_path(root, dataset_id, field="dataset_id"))
         if symbol:
-            candidates.append(Path(data_dir) / f"{symbol}.csv")
+            candidates.append(_confined_path(root, f"{symbol}.csv", field="dataset symbol"))
         # Deduplicate while preserving order.
         seen: set[str] = set()
         unique: list[Path] = []
@@ -591,7 +734,7 @@ def _resolve_dataset_path(
                 seen.add(key)
                 unique.append(candidate)
         for candidate in unique:
-            if candidate.exists():
+            if candidate.is_file():
                 return candidate
         raise ReproError(
             CompareReason.MISSING_DATA,
@@ -601,17 +744,15 @@ def _resolve_dataset_path(
 
     rel = str(entry.get("path") or "").strip()
     if rel:
-        path = Path(rel)
-        if not path.is_absolute():
-            path = base_dir / path
-        if path.exists():
+        path = _confined_path(base_dir, rel, field="dataset path")
+        if path.is_file():
             return path
         raise ReproError(CompareReason.MISSING_DATA, f"dataset missing: {path}")
 
     # No override and no recorded path: try dataset_id relative to base_dir.
     if dataset_id:
-        path = base_dir / dataset_id
-        if path.exists():
+        path = _confined_path(base_dir, dataset_id, field="dataset_id")
+        if path.is_file():
             return path
         raise ReproError(CompareReason.MISSING_DATA, f"dataset missing: {path}")
     raise ReproError(
@@ -699,7 +840,7 @@ def replay_from_manifest(
         date_end=date_end,
         seed=int(manifest["seed"]),
         timezone=str(manifest.get("timezone") or DEFAULT_TIMEZONE),
-        code_commit=code_commit if code_commit is not None else str(manifest["code_commit"]),
+        code_commit=code_commit,
     )
 
 
