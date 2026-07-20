@@ -35,6 +35,8 @@ from chronos.orders.risk import (
 )
 from chronos.orders.submission import OrderSubmissionBoundary, SubmissionOutcome
 from chronos.orders.tracker import OrderTracker
+from chronos.paperops.ledger import DecisionLedger
+from chronos.paperops.pipeline import PipelineRecorder
 from chronos.persistence.order_repositories import (
     OrderConfirmationRepository,
     OrderIntentRecord,
@@ -83,6 +85,7 @@ class OrderManagementService:
         confirmations: OrderConfirmationRepository,
         risk_decisions: RiskDecisionRepository,
         broker_environment_is_paper: bool,
+        decision_ledger: DecisionLedger | None = None,
     ) -> None:
         self._settings = settings
         self._environment = environment
@@ -100,6 +103,14 @@ class OrderManagementService:
         self._confirmations = confirmations
         self._risk_decisions = risk_decisions
         self._broker_environment_is_paper = broker_environment_is_paper
+        # Optional paperops decision ledger (audit). None = recording off
+        # (backward compatible). When set, propose/risk and submit stages
+        # append; corrupt ledger fails closed on the recording call.
+        self._pipeline_recorder: PipelineRecorder | None = (
+            PipelineRecorder.create(decision_ledger, settings)
+            if decision_ledger is not None
+            else None
+        )
         # Proposed intents held in-process so the stateless HTTP stages
         # (preview/confirm/submit) can re-address them by id without trusting a
         # client-supplied contract. Short-lived; a restart simply requires the
@@ -111,6 +122,12 @@ class OrderManagementService:
         """The connected account this service is bound to (raw; not persisted)."""
 
         return self._account_id
+
+    @property
+    def decision_ledger_enabled(self) -> bool:
+        """True when paperops decision-ledger recording is wired."""
+
+        return self._pipeline_recorder is not None
 
     # --- stage 1: propose --------------------------------------------------
 
@@ -141,6 +158,16 @@ class OrderManagementService:
             at=moment,
             risk_snapshot_id=decision.decision_id,
         )
+        # Paperops audit (optional): record propose + risk outcome. Does not
+        # change lifecycle — order service remains authoritative.
+        if self._pipeline_recorder is not None:
+            self._pipeline_recorder.record_propose(
+                intent=intent,
+                risk=decision,
+                evidence=evidence,
+                now=moment,
+                environment=self._environment,
+            )
         stored = self._require_intent(intent.intent_id)
         self._proposed[intent.intent_id] = intent
         return ProposeResult(intent=stored, risk=decision)
@@ -269,7 +296,7 @@ class OrderManagementService:
         if stored.risk_snapshot_id is None:
             raise OrderPipelineError("order has no risk decision to submit against")
         decision = self._load_decision(stored.risk_snapshot_id)
-        return self._boundary.submit(
+        outcome = self._boundary.submit(
             intent=intent,
             risk_decision=decision,
             connected_account_id=self._account_id,
@@ -277,6 +304,15 @@ class OrderManagementService:
             writer_lease_held=writer_lease_held,
             now=moment,
         )
+        # Paperops audit: record submit success or refusal (observational).
+        if self._pipeline_recorder is not None:
+            self._pipeline_recorder.record_submit(
+                intent=intent,
+                outcome=outcome,
+                now=moment,
+                environment=self._environment,
+            )
+        return outcome
 
     # --- mutations & queries ----------------------------------------------
 

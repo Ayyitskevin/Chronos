@@ -27,6 +27,7 @@ from chronos.paperops.ledger import (
     decision_ledger_lock,
     verify_decision_ledger,
 )
+from chronos.paperops.pipeline import PipelineRecorder, settings_config_hash
 from chronos.paperops.reasons import DecisionKind, PaperReasonCode
 from chronos.paperops.records import DecisionRecord
 from chronos.paperops.replay import ReplayReport, replay_ledger
@@ -44,6 +45,7 @@ __all__ = [
     "PaperDecisionInput",
     "PaperDecisionResult",
     "PaperReasonCode",
+    "PipelineRecorder",
     "ReplayReport",
     "apply_durable_control_memory",
     "bind_effective_order_fingerprint",
@@ -55,5 +57,6 @@ __all__ = [
     "order_identity_fingerprint",
     "rehydrate_control_memory",
     "replay_ledger",
+    "settings_config_hash",
     "verify_decision_ledger",
 ]

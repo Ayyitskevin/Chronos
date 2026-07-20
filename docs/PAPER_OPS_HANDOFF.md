@@ -1,16 +1,16 @@
 # Paper-ops milestone handoff
 
-**Branch:** `feat/paper-ops-milestone`  
-**Base:** `feat/research-readiness-gate` (includes LIVE TRADING BLOCKED + research readiness)  
+**Branch:** `feat/paperops-pipeline-wire` (stacks on `feat/paper-ops-milestone`)  
+**Base:** paperops package + research readiness gate  
 **Date:** 2026-07-20  
-**Scope:** Operational audit/replay layer for extended **paper** sessions.  
+**Scope:** Operational audit/replay layer for extended **paper** sessions, now **wired into the real order pipeline**.  
 **Not in scope:** New strategies, backtest optimization, live enablement, credential changes.
 
 ---
 
 ## Architecture
 
-New package: `src/chronos/paperops/`
+### Package `src/chronos/paperops/`
 
 | Module | Role |
 |--------|------|
@@ -19,11 +19,26 @@ New package: `src/chronos/paperops/`
 | `ledger.py` | Append-only JSONL decision ledger, hash chain, fail-closed verify |
 | `data_quality.py` | Paper quote/option quality gates (stale/missing/crossed/greeks/clock) |
 | `controls.py` | Pure portfolio controls (halt, kill switch, exposure, concentration, daily loss, duplicate, cooldown) |
-| `control_memory.py` | **Restart-safe** rehydration of fingerprints/cooldown from the decision ledger |
-| `decision.py` | Combined pure evaluation: data health + controls + optional risk |
-| `session.py` | `record_paper_decision` — rehydrate durable controls, evaluate, append under flock |
-| `replay.py` | Deterministic re-eval of recorded `decision_inputs`; mismatch flags |
-| `review.py` | Compact operator review (considered / rejected / acted / risk / data / anomalies) |
+| `control_memory.py` | Restart-safe rehydration of fingerprints/cooldown from the ledger |
+| `decision.py` | Combined pure evaluation + stable `order_identity_fingerprint` |
+| `session.py` | `record_paper_decision` — lock across rehydrate → evaluate → append |
+| `pipeline.py` | **Thin adapter:** order intent/risk/submit → ledger (this slice) |
+| `replay.py` | Deterministic re-eval of recorded `decision_inputs` |
+| `review.py` | Compact operator review |
+
+### Order pipeline wiring
+
+`OrderManagementService` accepts optional `decision_ledger: DecisionLedger | None`:
+
+- **`None` (default):** no recording — backward compatible with all existing callers.
+- **Injected ledger:** audited mode — corrupt ledger fails closed on the recording call.
+  - **propose:** after risk evaluate → `PipelineRecorder.record_propose` (risk PASS/FAIL → allow/deny)
+  - **submit:** after boundary → `record_submit` (submitted or refusal with stable reason code)
+  - Lifecycle remains authoritative on the order service; paperops is observational audit.
+
+`strategy_version` is explicitly **`unknown`** (wheel intents have no strategy version field).  
+`config_hash` = secret-free `settings_config_hash(settings)`.  
+`order_fingerprint` = `intent_id` for pipeline stages.
 
 CLI (read-only; no order transmit):
 
@@ -35,23 +50,21 @@ python -m chronos.cli paperops verify  --ledger data/paper_decision_ledger.jsonl
 
 ### Design choices
 
-- **Layer, don't fork:** Reuses risk/halt/kill-switch *concepts*; does not replace `chronos.orders` submission or `chronos.auditlog`. Decision ledger is schema-strict for replay.
-- **Pure evaluation:** Broker I/O is out of the hot path so unit tests drive real shipped functions hermetically.
-- **Only LIVE authorizes opens:** DEMO / DELAYED / SYNTHETIC / STALE / UNKNOWN are labeled and **non-authorizing**.
-- **Live remains blocked:** Review and controls reaffirm `LIVE TRADING BLOCKED`; default settings stay non-transmitting.
-- **Restart-safe controls:** `record_paper_decision` holds an exclusive lock across rehydrate → bind effective fingerprint → evaluate → append. Empty `order_fingerprint` is bound to a stable `order_identity_fingerprint` (excludes control-memory fields and wall clock) and that value is persisted for rehydration.
-- **Single-writer serialization:** `DecisionLedger.append` / critical section use exclusive `fcntl` locks; concurrent same-fingerprint races allow at most one ALLOW.
+- **Layer, don't fork:** Does not replace `chronos.orders` submission or `chronos.auditlog`.
+- **Live remains blocked:** Default/paper settings still `LIVE TRADING BLOCKED`; wiring never sets live flags.
+- **Restart-safe + concurrent:** exclusive flock; empty-fp stable identity; same-fp race ≤1 ALLOW.
+- **No secrets:** pipeline extras never include account ids, tokens, or credentials.
 
 ### Data flow
 
 ```
-PaperDecisionInput
-    → rehydrate_control_memory(ledger)  # durable fingerprints/cooldown
-    → apply_durable_control_memory
-    → evaluate_paper_decision (data_quality + controls + optional risk)
-    → DecisionEvent
-    → DecisionLedger.append (fcntl exclusive lock + re-read head + hash chain)
-    → OperatorReview / replay_ledger
+OrderManagementService.propose
+    → risk.evaluate (authoritative)
+    → PipelineRecorder.record_propose → DecisionLedger
+OrderManagementService.submit
+    → OrderSubmissionBoundary.submit (authoritative)
+    → PipelineRecorder.record_submit → DecisionLedger
+Operator: paperops verify | review | replay
 ```
 
 ---
@@ -59,28 +72,27 @@ PaperDecisionInput
 ## Tests run
 
 ```text
-paperops unit suite: 40+ passed
-live_block + research isolation (regression): green
-Full suite: see verification capture {SCRATCH}/pytest.txt
+tests/integration/test_pipeline_decision_ledger.py — real service path + ledger
+tests/integration/test_order_pipeline.py — regression (ledger optional/off)
+paperops unit + restart/race + live_block
+Full suite: see {SCRATCH}/pytest.txt
 ```
 
-Key test modules:
+Key modules:
 
-- `tests/unit/test_paperops_ledger.py` — provenance, secrets stripped, corrupt fail-closed
-- `tests/unit/test_paperops_replay.py` — clean match, deliberate diverge, empty/corrupt fail-closed
-- `tests/unit/test_paperops_data_quality.py` — stale/missing/crossed/greeks/clock/degraded labels
-- `tests/unit/test_paperops_controls.py` — halt/kill/duplicate/cooldown/loss/exposure/malformed; live blocked
-- `tests/unit/test_paperops_restart_and_race.py` — **restart rehydration** (duplicate + cooldown) and **concurrent multi-process append** under exclusive flock
-- `tests/unit/test_paperops_review.py` — operator report content + corrupt fail-closed
+- `tests/integration/test_pipeline_decision_ledger.py` — happy path propose+submit rows; risk deny; submit refusal; review/verify; live blocked; secret scan
+- `tests/unit/test_paperops_*.py` — ledger/replay/data quality/controls/restart-race
+- `tests/safety/test_paperops_isolation.py`, `tests/unit/test_live_block.py`
 
 ---
 
 ## Known gaps
 
-1. **Not wired into live `OrderManagementService` submit path yet** — vertical slice is callable (`record_paper_decision`) and CLI-reviewable; production order service still has its own risk/audit. Next integration: call `record_paper_decision` from paper propose/risk/submit boundaries without changing live branch.
-2. **No Streamlit page** — CLI/review report is the operator surface for this milestone (soak report remains separate DB summary).
-3. **Research readiness still NOT READY** — INSUFFICIENT_EVIDENCE remains; this milestone does not claim strategy edge or green-light paper *evaluation* of alpha.
-4. **Fills** — `PAPER_FILL` kind exists; fill recording from broker callbacks is not auto-hooked in this slice (can append events manually/tests).
+1. **Production wiring of ledger path** — service accepts injection; HTTP/backend bootstrap may still pass `None` until operator configures a ledger path for paper sessions.
+2. **Fill auto-hook** — `PipelineRecorder.record_fill` exists; tracker/callback auto-call not wired (manual/tests only).
+3. **No Streamlit page** — CLI review remains the operator surface.
+4. **Research readiness still NOT READY** — INSUFFICIENT_EVIDENCE; ledger wiring is operational, not scientific readiness.
+5. **Replay of submit stage** — submit rows are stage events; full re-eval match is strongest on propose rows.
 
 ---
 
@@ -88,11 +100,11 @@ Key test modules:
 
 Operational machinery ≠ scientific readiness. Before treating paper P&amp;L as strategy evidence:
 
-1. Research readiness paper gate met (see `docs/RESEARCH_READINESS.md`): ≥1 walk-forward **PASS** under frozen criteria, sealed holdout, bound research manifest.
-2. Paper session uses this decision ledger end-to-end (propose → risk → submit → fill all recorded).
-3. `paperops replay` clean on the session ledger; `paperops review` shows no unresolved data-health anomalies on authorizing path.
-4. Paper soak report + decision-ledger review agree on counts; kill-switch/halt exercised at least once in the session.
-5. Owner accepts that DEMO/DELAYED data never authorized opens (or session was LIVE-quality paper quotes only).
+1. Research readiness paper gate met (`docs/RESEARCH_READINESS.md`): ≥1 walk-forward **PASS**, sealed holdout, bound research manifest.
+2. Paper session runs with `decision_ledger` injected end-to-end (propose → risk → submit → fill).
+3. `paperops verify` green; `paperops review` shows considered/rejected/acted; no unresolved data-health anomalies on authorizing path.
+4. Paper soak report + decision-ledger review agree; kill-switch/halt exercised once.
+5. Owner accepts LIVE-quality paper quotes only authorized opens (DEMO/DELAYED never authorize).
 
 Until (1), paper sessions are **machinery drills**, not edge evaluation.
 
@@ -101,5 +113,4 @@ Until (1), paper sessions are **machinery drills**, not edge evaluation.
 ## PR-ready status
 
 - Isolated branch only; no merge, deploy, credential change, or live enablement.
-- Suggested title: `feat: paper-ops decision ledger, replay, data guards, operator review`
-- Preserve `feat/research-readiness-gate` commits in history.
+- Suggested title: `feat: wire paperops decision ledger into paper order pipeline`
