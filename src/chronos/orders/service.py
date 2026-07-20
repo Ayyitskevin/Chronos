@@ -115,6 +115,10 @@ class OrderManagementService:
             from chronos.paperops.pipeline import PipelineRecorder
 
             self._pipeline_recorder = PipelineRecorder.create(decision_ledger, settings)
+            # Hook fill/partial-fill audit through the tracker ingest path.
+            bind = getattr(self._tracker, "bind_fill_audit", None)
+            if callable(bind):
+                bind(self._audit_fill_from_tracker)
         # Proposed intents held in-process so the stateless HTTP stages
         # (preview/confirm/submit) can re-address them by id without trusting a
         # client-supplied contract. Short-lived; a restart simply requires the
@@ -132,6 +136,34 @@ class OrderManagementService:
         """True when paperops decision-ledger recording is wired."""
 
         return self._pipeline_recorder is not None
+
+    def _audit_fill_from_tracker(
+        self,
+        intent: OrderIntentRecord,
+        update: object,
+        *,
+        applied: bool,
+    ) -> None:
+        """Tracker fill/partial-fill observer → paperops ledger (lazy pipeline)."""
+
+        if not applied or self._pipeline_recorder is None:
+            return
+        lifecycle = getattr(update, "lifecycle", None)
+        filled = getattr(update, "filled_quantity", Decimal("0"))
+        remaining = getattr(update, "remaining_quantity", None)
+        occurred = getattr(update, "occurred_at", None)
+        if lifecycle is None or occurred is None:
+            return
+        strategy_id = f"wheel:{intent.open_close_effect}:{intent.product_family.value}"
+        self._pipeline_recorder.record_fill(
+            intent_id=intent.intent_id,
+            strategy_id=strategy_id,
+            symbol=intent.symbol,
+            filled_quantity=filled,
+            now=occurred,
+            lifecycle=lifecycle.value if hasattr(lifecycle, "value") else str(lifecycle),
+            remaining_quantity=remaining,
+        )
 
     # --- stage 1: propose --------------------------------------------------
 

@@ -305,14 +305,20 @@ class PipelineRecorder:
         symbol: str,
         filled_quantity: Decimal,
         now: datetime,
+        lifecycle: str = "FILLED",
+        remaining_quantity: Decimal | None = None,
     ) -> DecisionRecord:
-        """Record a paper fill / terminal partial (when tracker reports fill)."""
+        """Record a paper fill or partial-fill (when tracker reports fill)."""
 
         payload: dict[str, object] = {
             "pipeline_stage": "fill",
             "intent_id": intent_id,
             "symbol": symbol,
             "filled_quantity": str(filled_quantity),
+            "remaining_quantity": (
+                str(remaining_quantity) if remaining_quantity is not None else None
+            ),
+            "lifecycle": lifecycle,
             "order_fingerprint": intent_id,
             "effective_order_fingerprint": intent_id,
             "may_open": False,
@@ -326,6 +332,7 @@ class PipelineRecorder:
                 "config_hash": self.config_hash,
                 "now_utc": now.isoformat(),
                 "filled_quantity": str(filled_quantity),
+                "lifecycle": lifecycle,
             },
         }
         event = DecisionEvent(

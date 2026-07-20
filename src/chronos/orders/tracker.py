@@ -11,16 +11,31 @@ fills only ever move forward.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime
 from decimal import Decimal
+from typing import Protocol
 
 from chronos.domain.enums import OrderLifecycle
 from chronos.domain.models import ChronosModel
 from chronos.orders.state_machine import OrderLifecycleMachine
 from chronos.persistence.order_repositories import (
+    OrderIntentRecord,
     OrderIntentRepository,
     OrderTrackerRepository,
 )
+
+
+class FillAuditSink(Protocol):
+    """Optional observer for fill/partial-fill lifecycle transitions."""
+
+    def __call__(
+        self,
+        intent: OrderIntentRecord,
+        update: OrderStatusUpdate,
+        *,
+        applied: bool,
+    ) -> None: ...
 
 
 class OrderStatusUpdate(ChronosModel):
@@ -78,9 +93,17 @@ class OrderTracker:
         self,
         intents: OrderIntentRepository,
         tracker_repo: OrderTrackerRepository,
+        *,
+        fill_audit: FillAuditSink | Callable[..., None] | None = None,
     ) -> None:
         self._intents = intents
         self._tracker = tracker_repo
+        self._fill_audit = fill_audit
+
+    def bind_fill_audit(self, sink: FillAuditSink | Callable[..., None] | None) -> None:
+        """Attach or clear the optional fill audit sink (paperops ledger)."""
+
+        self._fill_audit = sink
 
     def ingest(self, update: OrderStatusUpdate, *, current_account_id: str) -> bool:
         """Apply one broker observation. Returns False on a no-op/duplicate/stale event."""
@@ -110,7 +133,7 @@ class OrderTracker:
             f"{update.intent_id}:{update.broker_order_id}:"
             f"{update.lifecycle.value}:{update.filled_quantity}"
         )
-        return self._tracker.record_transition(
+        applied = self._tracker.record_transition(
             intent_id=update.intent_id,
             event_key=event_key,
             source=update.source,
@@ -126,6 +149,14 @@ class OrderTracker:
             },
             occurred_at=update.occurred_at,
         )
+        # Paperops fill audit: only after a successful transition into fill states.
+        if (
+            applied
+            and self._fill_audit is not None
+            and update.lifecycle in {OrderLifecycle.PARTIALLY_FILLED, OrderLifecycle.FILLED}
+        ):
+            self._fill_audit(intent, update, applied=True)
+        return applied
 
     def record_operator_rejection(
         self,

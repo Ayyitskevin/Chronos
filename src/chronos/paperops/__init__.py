@@ -7,6 +7,7 @@ paper session runs: every decision is recorded, replayable, and reviewable.
 Live transmission is never enabled here. Pure functions stay free of broker I/O.
 """
 
+from chronos.paperops.bootstrap import open_paper_decision_ledger
 from chronos.paperops.control_memory import (
     DurableControlMemory,
     apply_durable_control_memory,
@@ -58,6 +59,7 @@ __all__ = [
     "evaluate_paper_controls",
     "evaluate_paper_decision",
     "evaluate_paper_quote",
+    "open_paper_decision_ledger",
     "order_identity_fingerprint",
     "rehydrate_control_memory",
     "replay_ledger",

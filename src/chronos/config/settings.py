@@ -113,6 +113,11 @@ class Settings(BaseSettings):
     live_kill_switch_file: Path = Path("data/live_kill_switch.json")
     session_baseline_file: Path = Path("data/session_baseline.json")
 
+    # Paperops decision ledger (observational audit for paper sessions only).
+    # LIVE environment never auto-opens a ledger via runtime bootstrap.
+    enable_paper_decision_ledger: bool = True
+    paper_decision_ledger_file: Path = Path("data/paper_decision_ledger.jsonl")
+
     symbol_allowlist: SymbolAllowlist = ("AAPL", "MSFT", "SPY")
     target_abs_delta: Annotated[Decimal, Field(gt=0, lt=1)] = Decimal("0.30")
     min_abs_delta: Annotated[Decimal, Field(gt=0, lt=1)] = Decimal("0.20")

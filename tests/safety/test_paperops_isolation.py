@@ -14,6 +14,7 @@ _MODULES = (
     "reasons",
     "records",
     "ledger",
+    "bootstrap",
     "data_quality",
     "controls",
     "control_memory",

@@ -294,6 +294,11 @@ def _build_order_management(
     confirmations = OrderConfirmationRepository(database.sessions)
     risk_decisions = RiskDecisionRepository(database.sessions)
     tracker = OrderTracker(intents, tracker_repo)
+    # Paperops decision ledger: paper sessions only (never auto-open on LIVE).
+    # Lazy import keeps runtime free of orders↔paperops cycle at module load.
+    from chronos.paperops.bootstrap import open_paper_decision_ledger
+
+    decision_ledger = open_paper_decision_ledger(settings)
     return OrderManagementService(
         settings=settings,
         environment=settings.ib_environment,
@@ -337,4 +342,5 @@ def _build_order_management(
         confirmations=confirmations,
         risk_decisions=risk_decisions,
         broker_environment_is_paper=settings.ib_environment is IBEnvironment.PAPER,
+        decision_ledger=decision_ledger,
     )
