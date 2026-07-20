@@ -507,6 +507,185 @@ def _add_research_commands(sub: argparse._SubParsersAction) -> None:  # type: ig
     camp.add_argument("--seed", type=int, default=0)
     camp.set_defaults(func=cmd_research_campaign)
 
+    repro = research_sub.add_parser(
+        "repro",
+        help=(
+            "deterministic research-run manifest: produce, replay, or compare "
+            "(read-only; no orders)"
+        ),
+    )
+    repro_sub = repro.add_subparsers(dest="repro_command", required=True)
+
+    produce = repro_sub.add_parser(
+        "produce",
+        help="run a deterministic named-backtest slice and write a research-run manifest",
+    )
+    produce.add_argument("--run-dir", type=Path, required=True, help="output run bundle directory")
+    produce.add_argument("--strategy", required=True)
+    produce.add_argument("--symbol", required=True)
+    produce.add_argument("--data-dir", type=Path, default=Path("research/data/raw"))
+    produce.add_argument("--policy", type=Path, default=Path("config/risk.research.yaml"))
+    produce.add_argument("--cash", type=float, default=3000.0)
+    produce.add_argument("--slippage-bps", type=float, default=2.0)
+    produce.add_argument("--date-start", default=None, help="optional ISO date inclusive")
+    produce.add_argument("--date-end", default=None, help="optional ISO date inclusive")
+    produce.add_argument("--seed", type=int, default=0)
+    produce.add_argument(
+        "--timezone",
+        default="UTC",
+        help="must normalize to UTC (research identity is UTC-only)",
+    )
+    produce.add_argument(
+        "--from-existing",
+        action="store_true",
+        help="rebuild manifest from an existing run-dir config.json + output.json",
+    )
+    produce.set_defaults(func=cmd_research_repro_produce)
+
+    replay = repro_sub.add_parser(
+        "replay",
+        help="recompute a run from an existing manifest into a new run-dir",
+    )
+    replay.add_argument("--manifest", type=Path, required=True)
+    replay.add_argument("--run-dir", type=Path, required=True, help="directory for replayed bundle")
+    replay.add_argument(
+        "--data-dir",
+        type=Path,
+        default=None,
+        help="override data dir (default: path recorded in manifest config)",
+    )
+    replay.add_argument(
+        "--policy",
+        type=Path,
+        default=None,
+        help="override policy path (default: path recorded in manifest config)",
+    )
+    replay.set_defaults(func=cmd_research_repro_replay)
+
+    compare = repro_sub.add_parser(
+        "compare",
+        help="compare two research-run manifests with precise pass/fail reasons",
+    )
+    compare.add_argument("--expected", type=Path, required=True, help="reference manifest.json")
+    compare.add_argument("--actual", type=Path, required=True, help="candidate manifest.json")
+    compare.add_argument(
+        "--require-same-commit",
+        action="store_true",
+        help="treat code_commit drift as a hard failure (default: advisory only)",
+    )
+    compare.set_defaults(func=cmd_research_repro_compare)
+
+
+def cmd_research_repro_produce(args: argparse.Namespace) -> int:
+    from chronos.research.repro import (
+        ReproError,
+        produce_from_existing_run,
+        produce_named_backtest_run,
+    )
+
+    store = HaltStore(args.halt_file)
+    _banner(TradingMode.BACKTEST, store)
+    try:
+        if args.from_existing:
+            manifest = produce_from_existing_run(args.run_dir)
+        else:
+            manifest = produce_named_backtest_run(
+                run_dir=args.run_dir,
+                strategy_id=args.strategy,
+                symbol=args.symbol,
+                data_dir=args.data_dir,
+                policy_path=args.policy,
+                initial_cash=args.cash,
+                slippage_bps=args.slippage_bps,
+                date_start=args.date_start,
+                date_end=args.date_end,
+                seed=args.seed,
+                timezone=args.timezone,
+            )
+    except ReproError as error:
+        print(json.dumps({"ok": False, "reason": error.reason.value, "detail": str(error)}))
+        return 1
+    except (FileNotFoundError, ValueError, OSError) as error:
+        print(json.dumps({"ok": False, "reason": "error", "detail": str(error)}))
+        return 1
+    print(
+        json.dumps(
+            {
+                "ok": True,
+                "run_dir": str(args.run_dir),
+                "manifest": str(Path(args.run_dir) / "manifest.json"),
+                "manifest_fingerprint": manifest.get("manifest_fingerprint"),
+                "output_fingerprint": manifest.get("output_fingerprint"),
+                "code_commit": manifest.get("code_commit"),
+                "config_hash": manifest.get("config_hash"),
+            },
+            indent=2,
+        )
+    )
+    print(
+        "RESEARCH REPRO: produce wrote a local run bundle only; no order was or can be submitted.",
+        file=sys.stderr,
+    )
+    return 0
+
+
+def cmd_research_repro_replay(args: argparse.Namespace) -> int:
+    from chronos.research.repro import ReproError, load_manifest, replay_from_manifest
+
+    store = HaltStore(args.halt_file)
+    _banner(TradingMode.BACKTEST, store)
+    try:
+        expected = load_manifest(args.manifest)
+        actual = replay_from_manifest(
+            expected,
+            run_dir=args.run_dir,
+            data_dir=args.data_dir,
+            policy_path=args.policy,
+        )
+    except ReproError as error:
+        print(json.dumps({"ok": False, "reason": error.reason.value, "detail": str(error)}))
+        return 1
+    except (FileNotFoundError, ValueError, OSError) as error:
+        print(json.dumps({"ok": False, "reason": "error", "detail": str(error)}))
+        return 1
+    print(
+        json.dumps(
+            {
+                "ok": True,
+                "run_dir": str(args.run_dir),
+                "manifest": str(Path(args.run_dir) / "manifest.json"),
+                "manifest_fingerprint": actual.get("manifest_fingerprint"),
+                "output_fingerprint": actual.get("output_fingerprint"),
+            },
+            indent=2,
+        )
+    )
+    print(
+        "RESEARCH REPRO: replay recomputed a deterministic slice only; no order path exists.",
+        file=sys.stderr,
+    )
+    return 0
+
+
+def cmd_research_repro_compare(args: argparse.Namespace) -> int:
+    from chronos.research.repro import ReproError, compare_manifests, load_manifest
+
+    store = HaltStore(args.halt_file)
+    _banner(TradingMode.BACKTEST, store)
+    try:
+        expected = load_manifest(args.expected)
+        actual = load_manifest(args.actual)
+        report = compare_manifests(
+            expected,
+            actual,
+            require_same_commit=args.require_same_commit,
+        )
+    except ReproError as error:
+        print(json.dumps({"ok": False, "reason": error.reason.value, "detail": str(error)}))
+        return 1
+    print(json.dumps(report.to_dict(), indent=2, default=str))
+    return 0 if report.ok else 1
+
 
 def _add_skb_commands(sub: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
     from chronos.skb.schema import (
