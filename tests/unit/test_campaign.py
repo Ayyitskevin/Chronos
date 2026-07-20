@@ -14,8 +14,16 @@ from pathlib import Path
 import pytest
 
 from chronos.backtest.engine import BacktestConfig
+from chronos.marketdata.bars import BarSeries
+from chronos.marketdata.csv_provider import load_daily_csv
 from chronos.registry import RegistryLedger, trial_count
-from chronos.research.campaign import FINAL_START, CampaignReport, run_campaign
+from chronos.research.campaign import (
+    FINAL_START,
+    CampaignReport,
+    _slice_to_cutoff,
+    _window_fingerprint,
+    run_campaign,
+)
 from chronos.risk.policy import load_risk_policy
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -128,7 +136,7 @@ def test_campaign_refuses_a_stage_end_reaching_the_holdout(tmp_path: Path) -> No
             ledger=RegistryLedger(tmp_path / "reg.jsonl"),
             halt_dir=tmp_path / "h",
             config=_config(),
-            stage_end=FINAL_START,  # exactly the holdout wall
+            stage_end=FINAL_START.isoformat(),  # exactly the holdout wall
             warmup=WARMUP,
             test_window=TEST_WINDOW,
         )
@@ -140,7 +148,7 @@ def test_campaign_reads_no_bar_past_the_holdout_wall(tmp_path: Path) -> None:
     data = tmp_path / "data"
     _write_csv(data, "SPY", 300, start=date(2021, 6, 1))  # runs into 2022
     report = _run(data, tmp_path / "reg.jsonl", tmp_path / "h", seed=3, symbols=["SPY"])
-    wall = date.fromisoformat(FINAL_START)
+    wall = FINAL_START
     cell = next(c for c in report.cells if c.report is not None)
     assert cell.report is not None
     assert cell.report.windows, "expected at least one OOS window"
@@ -160,3 +168,80 @@ def test_campaign_rejects_unknown_strategy(tmp_path: Path) -> None:
             halt_dir=tmp_path / "h",
             config=_config(),
         )
+
+
+# --- review remediation (robustness + provenance honesty) --------------------------------
+
+
+def test_campaign_rejects_a_non_iso_stage_end(tmp_path: Path) -> None:
+    # Finding 5: a non-ISO stage_end must fail closed, not silently yield an empty campaign.
+    data = tmp_path / "data"
+    _write_csv(data, "SPY", 120)
+    with pytest.raises(ValueError, match="ISO date"):
+        run_campaign(
+            strategies=["baseline_buy_hold"],
+            symbols=["SPY"],
+            data_dir=data,
+            policy=load_risk_policy(RESEARCH_POLICY_PATH),
+            ledger=RegistryLedger(tmp_path / "reg.jsonl"),
+            halt_dir=tmp_path / "h",
+            config=_config(),
+            stage_end="not-a-date",
+        )
+
+
+def test_campaign_refuses_a_null_git_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Finding 1: a null/unknown provenance commit must raise a clear campaign-level error
+    # up front, not abort deep inside the first cell's register_run.
+    data = tmp_path / "data"
+    _write_csv(data, "SPY", 120)
+    monkeypatch.setattr("chronos.research.campaign.current_commit", lambda: "unknown")
+    with pytest.raises(ValueError, match="commit"):
+        _run(data, tmp_path / "reg.jsonl", tmp_path / "h", seed=1, symbols=["SPY"])
+
+
+def test_a_cell_error_is_recorded_and_does_not_abort_the_grid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Finding 2: one failing cell must be recorded and skipped, not abort the whole grid.
+    data = tmp_path / "data"
+    _write_csv(data, "SPY", 120)
+    _write_csv(data, "BAD", 120)
+
+    from chronos.research.walkforward import walk_forward as real_walk_forward
+
+    def selective(series: BarSeries, *args: object, **kwargs: object) -> object:
+        if series.symbol == "BAD":
+            raise RuntimeError("synthetic cell failure")
+        return real_walk_forward(series, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("chronos.research.campaign.walk_forward", selective)
+    report = _run(data, tmp_path / "reg.jsonl", tmp_path / "h", seed=1, symbols=["SPY", "BAD"])
+
+    # SPY still produced a verdict row; BAD's failure is recorded, not raised.
+    assert {row.symbol for row in report.verdict_table} == {"SPY"}
+    assert any("cell error" in reason for _, reason in report.excluded)
+    errored = [c for c in report.cells if c.excluded_reason and "cell error" in c.excluded_reason]
+    assert len(errored) == 1 and errored[0].symbol == "BAD"
+
+
+def test_provenance_fingerprint_excludes_holdout_bars(tmp_path: Path) -> None:
+    # Finding 3: the recorded provenance fingerprint must be independent of any bar past the
+    # wall — holdout bytes never enter a recorded hash, even though the loader parses them.
+    data = tmp_path / "data"
+    _write_csv(data, "SPY", 300, start=date(2021, 6, 1))  # spans into 2022
+    full = load_daily_csv(data / "SPY.csv", symbol="SPY", source="research_raw").series
+    cutoff = date(2021, 12, 31)
+
+    post = [b for b in full.bars if b.session_date > cutoff]
+    assert post, "fixture must contain holdout bars to make this meaningful"
+    only_pre = BarSeries(
+        symbol=full.symbol,
+        interval=full.interval,
+        bars=tuple(b for b in full.bars if b.session_date <= cutoff),
+    )
+    # Fingerprinting the sliced full series == fingerprinting a pre-cutoff-only series:
+    # the bars past the wall contribute nothing to the recorded provenance hash.
+    assert _window_fingerprint(_slice_to_cutoff(full, cutoff)) == _window_fingerprint(only_pre)

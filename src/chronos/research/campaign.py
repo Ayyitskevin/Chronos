@@ -7,11 +7,14 @@ one VALIDATION trial per cell in the C2 registry so the deflated Sharpe's multip
 N is real and cumulative. It returns a reproducible verdict table.
 
 Honest by construction: cells whose sliced series is too short for a warm-up plus two
-disjoint OOS windows are **excluded with a recorded reason**, never silently skipped; and
-the campaign computes nothing on or after ``FINAL_START`` -- a caller that asks for a
-stage_end reaching into the holdout is refused (fail closed). At daily-bar trade counts the
-table is expected to be dominated by INSUFFICIENT_EVIDENCE / FAIL; that is the correct
-output, not a tool failure.
+disjoint OOS windows are **excluded with a recorded reason**, never silently skipped; a
+cell that errors mid-run is recorded and skipped (the grid is not aborted); and no bar
+dated on or after ``FINAL_START`` influences any statistic or the recorded provenance
+fingerprint -- the slice discards it and the fingerprint covers only the sliced window
+(the CSV loader still parses the whole file, but nothing past the wall reaches a result).
+A caller that asks for a stage_end reaching into the holdout is refused (fail closed). At
+daily-bar trade counts the table is expected to be dominated by INSUFFICIENT_EVIDENCE /
+FAIL; that is the correct output, not a tool failure.
 
 Research-plane and read-only: it drives the deterministic backtest (simulated broker) via
 the tested ``walk_forward`` and imports no order/broker module
@@ -20,10 +23,12 @@ the tested ``walk_forward`` and imports no order/broker module
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 
 from chronos.backtest.engine import BacktestConfig
@@ -36,9 +41,10 @@ from chronos.research.walkforward import WalkForwardReport, walk_forward
 from chronos.risk.policy import RiskPolicy
 
 # The reserved one-shot holdout wall (mirrors scripts/run_research.py FINAL_START). The
-# campaign never computes on or after this date; a holdout read is a separate, owner-typed,
-# guardian-mediated event (C2). This is exactly the window whose burn M5 flagged.
-FINAL_START = "2022-01-01"
+# campaign never lets a bar on or after this date influence a statistic or a fingerprint; a
+# holdout read is a separate, owner-typed, guardian-mediated event (C2). This is exactly the
+# window whose burn M5 flagged. A date object so comparisons are chronological, not lexical.
+FINAL_START = date(2022, 1, 1)
 DEFAULT_STAGE_END = "2021-12-31"
 
 
@@ -63,6 +69,7 @@ class CampaignCell:
     symbol: str
     report: WalkForwardReport | None
     excluded_reason: str | None
+    data_fingerprint: str | None = None  # holdout-free sha of the sliced window (None if no run)
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,9 +87,32 @@ class CampaignReport:
     excluded: tuple[tuple[str, str], ...]
 
 
-def _slice_to_stage_end(series: BarSeries, stage_end: str) -> BarSeries:
-    bars = tuple(bar for bar in series.bars if bar.session_date.isoformat() <= stage_end)
+def _parse_stage_end(stage_end: str) -> date:
+    """Parse the dev+val wall as an ISO date; reject non-ISO input (fail closed)."""
+
+    try:
+        return date.fromisoformat(stage_end)
+    except ValueError as error:
+        raise ValueError(
+            f"stage_end must be an ISO date (YYYY-MM-DD), got {stage_end!r}"
+        ) from error
+
+
+def _slice_to_cutoff(series: BarSeries, cutoff: date) -> BarSeries:
+    bars = tuple(bar for bar in series.bars if bar.session_date <= cutoff)
     return BarSeries(symbol=series.symbol, interval=series.interval, bars=bars)
+
+
+def _window_fingerprint(series: BarSeries) -> str:
+    """Deterministic content hash of exactly the (sliced) bars -- no holdout bytes."""
+
+    digest = hashlib.sha256()
+    for bar in series.bars:
+        digest.update(
+            f"{bar.session_date.isoformat()},{bar.open},{bar.high},"
+            f"{bar.low},{bar.close},{bar.volume}\n".encode()
+        )
+    return digest.hexdigest()
 
 
 def _cell_config_hash(
@@ -101,8 +131,7 @@ def _cell_config_hash(
         "strategy_id": strategy_id,
         "symbol": symbol,
         "policy_hash": policy_hash,
-        "initial_cash_usd": config.initial_cash_usd,
-        "slippage_bps_per_side": config.slippage_bps_per_side,
+        "config": dataclasses.asdict(config),  # the full backtest config, not a subset
         "warmup": warmup,
         "test_window": test_window,
         "min_trades": min_trades,
@@ -110,7 +139,9 @@ def _cell_config_hash(
         "n_resamples": n_resamples,
         "seed": seed,
     }
-    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
 
 
 def run_campaign(
@@ -133,52 +164,61 @@ def run_campaign(
 ) -> CampaignReport:
     """Run the (strategy x symbol) walk-forward grid on the dev+val span; sealed holdout."""
 
-    # Fail closed: the campaign must never compute into the reserved holdout window.
-    if stage_end >= FINAL_START:
+    # Fail closed: reject a non-ISO or holdout-reaching stage_end before touching data.
+    cutoff = _parse_stage_end(stage_end)
+    if cutoff >= FINAL_START:
         raise ValueError(
-            f"stage_end {stage_end!r} reaches the reserved holdout (>= {FINAL_START}); "
+            f"stage_end {stage_end!r} reaches the reserved holdout (>= {FINAL_START.isoformat()}); "
             "a holdout read must go through the C2 guardian, not the campaign"
         )
     unknown = [s for s in strategies if s not in STRATEGY_FACTORIES]
     if unknown:
         raise ValueError(f"unknown strategies {unknown}; known: {sorted(STRATEGY_FACTORIES)}")
 
+    # The registry rejects null provenance; surface that as a clear campaign-level error
+    # up front rather than aborting deep inside the first cell's register_run.
     code_commit = current_commit()
+    if code_commit in {"", "unknown"}:
+        raise ValueError(
+            "campaign requires a resolvable git commit for provenance "
+            "(the registry rejects null provenance); run from a git checkout"
+        )
+
     halt_dir.mkdir(parents=True, exist_ok=True)
     min_bars = warmup + 2 * test_window
 
-    # Load + slice each symbol once; record why any symbol is unusable (no silent skips).
-    sliced: dict[str, BarSeries] = {}
-    excluded: list[tuple[str, str]] = []
-    for symbol in sorted(set(symbols)):
-        path = data_dir / f"{symbol.upper()}.csv"
+    # Load + slice each symbol once; fingerprint the sliced window (holdout-free). Record
+    # why any symbol is unusable (no silent skips).
+    sliced: dict[str, tuple[BarSeries, str]] = {}
+    symbol_exclusions: list[tuple[str, str]] = []
+    for symbol in sorted({s.upper() for s in symbols}):
+        path = data_dir / f"{symbol}.csv"
         if not path.exists():
-            excluded.append((symbol.upper(), f"no data file {path}"))
+            symbol_exclusions.append((symbol, f"no data file {path}"))
             continue
-        loaded = load_daily_csv(path, symbol=symbol.upper(), source="research_raw")
-        window = _slice_to_stage_end(loaded.series, stage_end)
+        loaded = load_daily_csv(path, symbol=symbol, source="research_raw")
+        window = _slice_to_cutoff(loaded.series, cutoff)
         if len(window) < min_bars:
-            excluded.append(
+            symbol_exclusions.append(
                 (
-                    symbol.upper(),
+                    symbol,
                     f"only {len(window)} bars <= {stage_end} "
                     f"(< warmup+2*test_window = {min_bars}); too short for multiple OOS folds",
                 )
             )
             continue
-        sliced[symbol.upper()] = window
+        sliced[symbol] = (window, _window_fingerprint(window))
 
     # Fixed iteration order (strategy-major, symbol-minor, both sorted) so the verdict
     # table -- and each cell's cumulative trial count -- is deterministic. Each cell's DSR
     # is deflated against the trial count at the moment it is evaluated (running cumulative
-    # N); re-running the campaign deflates further, by design (ADR-0015).
+    # N); re-running the campaign deflates further, by design (ADR-0015). A cell that raises
+    # is recorded and skipped so one bad symbol cannot abort the whole grid.
     cells: list[CampaignCell] = []
+    cell_errors: list[tuple[str, str]] = []
     for strategy_id in sorted(set(strategies)):
         for symbol in sorted(sliced):
-            window = sliced[symbol]
-            sha = load_daily_csv(
-                data_dir / f"{symbol}.csv", symbol=symbol, source="research_raw"
-            ).sha256
+            window, fingerprint = sliced[symbol]
             config_hash = _cell_config_hash(
                 strategy_id,
                 symbol,
@@ -193,28 +233,34 @@ def run_campaign(
             )
             halt_store = HaltStore(halt_dir / f"campaign_halt_{strategy_id}_{symbol}.json")
             halt_store.rearm("campaign run: simulated halt store")
-            report = walk_forward(
-                window,
-                STRATEGY_FACTORIES[strategy_id],
-                policy,
-                config,
-                halt_store=halt_store,
-                ledger=ledger,
-                strategy_id=strategy_id,
-                config_hash=config_hash,
-                code_commit=code_commit,
-                data_hashes={symbol: {"csv_sha256": sha, "stage_end": stage_end}},
-                criteria_ref=criteria_ref,
-                test_window=test_window,
-                warmup=warmup,
-                min_trades=min_trades,
-                seed=seed,
-                block_size=block_size,
-                n_resamples=n_resamples,
-            )
-            cells.append(CampaignCell(strategy_id, symbol, report, None))
+            try:
+                report = walk_forward(
+                    window,
+                    STRATEGY_FACTORIES[strategy_id],
+                    policy,
+                    config,
+                    halt_store=halt_store,
+                    ledger=ledger,
+                    strategy_id=strategy_id,
+                    config_hash=config_hash,
+                    code_commit=code_commit,
+                    data_hashes={symbol: {"window_sha256": fingerprint, "stage_end": stage_end}},
+                    criteria_ref=criteria_ref,
+                    test_window=test_window,
+                    warmup=warmup,
+                    min_trades=min_trades,
+                    seed=seed,
+                    block_size=block_size,
+                    n_resamples=n_resamples,
+                )
+            except Exception as error:  # one bad cell must not abort the grid
+                reason = f"cell error: {type(error).__name__}: {error}"
+                cell_errors.append((f"{strategy_id}:{symbol}", reason))
+                cells.append(CampaignCell(strategy_id, symbol, None, reason, fingerprint))
+                continue
+            cells.append(CampaignCell(strategy_id, symbol, report, None, fingerprint))
 
-    for symbol, reason in excluded:
+    for symbol, reason in symbol_exclusions:
         for strategy_id in sorted(set(strategies)):
             cells.append(CampaignCell(strategy_id, symbol, None, reason))
 
@@ -247,5 +293,5 @@ def run_campaign(
         min_trades=min_trades,
         cells=tuple(cells),
         verdict_table=verdict_table,
-        excluded=tuple(excluded),
+        excluded=tuple(symbol_exclusions + cell_errors),
     )

@@ -79,11 +79,14 @@ test_window, min_trades, seed) -> CampaignReport`:
 
 ### 3. Holdout stays sealed (C2 × C3 × C4)
 
-The campaign is a VALIDATION-stage activity. It computes nothing on `>= FINAL_START` and
-performs no holdout read. A holdout evaluation remains available **only** through the C2
-`mediated_holdout_read` behind an owner-typed, single-use, logged unlock — never from the
-campaign. A safety test asserts the campaign path invokes no guardian unlock and reads no
-bar dated `>= FINAL_START`.
+The campaign is a VALIDATION-stage activity. No bar dated `>= FINAL_START` influences any
+statistic or the recorded provenance fingerprint: each series is sliced to `stage_end`
+(compared as `date` objects) before use, and the per-cell fingerprint covers only the
+sliced window — the CSV loader parses the whole file, but everything past the wall is
+discarded and never enters a result or a recorded hash. A caller that passes a non-ISO or
+holdout-reaching `stage_end` is refused (fail closed). A holdout evaluation remains
+available **only** through the C2 `mediated_holdout_read` behind an owner-typed,
+single-use, logged unlock — never from the campaign.
 
 ### 4. CLI (owner-run) + outputs
 
@@ -118,9 +121,13 @@ Read-only; places no order.
 - The campaign registers exactly one trial per (strategy × symbol × config) — asserted
   against `trial_count`; the verdict table matches per-cell `WalkForwardReport`s.
 - Determinism: same seed → byte-identical verdict table.
-- Every excluded symbol carries a recorded reason; no silent skips.
-- Isolation: the campaign imports no order/broker module; a safety test asserts it reads no
-  bar dated `>= FINAL_START` and triggers no guardian unlock (holdout stays sealed).
+- Every excluded symbol carries a recorded reason; no silent skips. A cell that errors
+  mid-run is recorded and skipped (the grid is not aborted); a null/`unknown` git commit is
+  refused up front (the registry rejects null provenance).
+- Isolation + seal: the campaign imports no order/broker module (AST + `sys.modules` probe);
+  a non-ISO or holdout-reaching `stage_end` is refused; and the per-cell provenance
+  fingerprint is independent of any bar dated `>= FINAL_START` — holdout bytes never enter a
+  statistic or a recorded hash.
 - The research policy file loads and round-trips to the same `config_hash` as the vetted
   `research-1` profile.
 
