@@ -17,6 +17,7 @@
 | `ledger.py` / `session.py` / `pipeline.py` | Hash-chained ledger, record_paper_decision, order-pipeline adapter |
 | `decision.py` / `controls.py` / `control_memory.py` | Pure evaluation + restart-safe memory |
 | `review.py` / `replay.py` | Operator review + deterministic replay |
+| `reconcile.py` | **Soak DB ↔ decision-ledger** unified audit + honest mismatch flags |
 
 ### Production wiring
 
@@ -52,7 +53,13 @@ CLI:
 python -m chronos.cli paperops review  --ledger data/paper_decision_ledger.jsonl
 python -m chronos.cli paperops replay  --ledger data/paper_decision_ledger.jsonl
 python -m chronos.cli paperops verify  --ledger data/paper_decision_ledger.jsonl
+python -m chronos.cli paperops audit   --ledger data/paper_decision_ledger.jsonl \
+  --database sqlite:///data/chronos.db
 ```
+
+`paperops audit` reconciles SQL soak metrics (`build_soak_report`) with ledger
+pipeline stages (propose/submit/fill). Corrupt/missing ledger fails closed for
+the ledger half; mismatch flags are explicit (not forced equality).
 
 ---
 
@@ -65,15 +72,17 @@ python -m chronos.cli paperops verify  --ledger data/paper_decision_ledger.jsonl
 | `tests/unit/test_tracker_fill_audit.py` | Fill sink on PARTIAL/FILLED; late bind |
 | `tests/integration/test_pipeline_decision_ledger.py` | Service injection path (prior slice) |
 | `tests/safety/test_paperops_cold_import.py` | Subprocess cold import + CLI |
+| `tests/unit/test_paperops_reconcile.py` | Soak↔ledger match, missing/corrupt fail-closed, mismatch flags |
 
 ---
 
 ## Known gaps
 
 1. Full `build_runtime()` still needs a broker connection — hermetic tests mirror `_build_order_management` ledger composition rather than spinning TWS.
-2. No Streamlit surface for the decision ledger (CLI review remains the operator UI).
+2. No Streamlit surface for the decision ledger (CLI review/audit remains the operator UI).
 3. Research readiness still **INSUFFICIENT_EVIDENCE** — ops ledger does not authorize treating paper P&L as edge proof.
 4. Demo/LIVE modes do not auto-enable the paper ledger (by design for LIVE).
+5. Soak↔ledger reconcile is honest multi-plane audit: perfect 1:1 event equality is not required; flags surface missing halves.
 
 ---
 

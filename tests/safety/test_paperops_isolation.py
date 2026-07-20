@@ -22,6 +22,7 @@ _MODULES = (
     "session",
     "replay",
     "review",
+    "reconcile",
 )
 
 

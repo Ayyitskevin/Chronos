@@ -45,18 +45,23 @@ def test_cli_paperops_verify_review_replay_subprocess(tmp_path: Path) -> None:
 
     ledger = tmp_path / "fixture.jsonl"
     ledger.write_text("", encoding="utf-8")
+    # Hermetic empty sqlite so audit does not depend on host DATABASE_URL.
+    db_url = f"sqlite:///{tmp_path / 'audit.db'}"
 
-    for subcmd in ("verify", "review", "replay"):
+    for subcmd in ("verify", "review", "replay", "audit"):
+        cmd = [
+            sys.executable,
+            "-m",
+            "chronos.cli",
+            "paperops",
+            subcmd,
+            "--ledger",
+            str(ledger),
+        ]
+        if subcmd == "audit":
+            cmd.extend(["--database", db_url])
         result = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "chronos.cli",
-                "paperops",
-                subcmd,
-                "--ledger",
-                str(ledger),
-            ],
+            cmd,
             capture_output=True,
             text=True,
             cwd=str(_REPO),
@@ -69,7 +74,7 @@ def test_cli_paperops_verify_review_replay_subprocess(tmp_path: Path) -> None:
         combined = result.stdout + result.stderr
         assert "ImportError" not in combined
         assert "circular import" not in combined.lower()
-        # CLI may exit 1 on empty/incomplete ledger (replay); must not traceback.
+        # CLI may exit 1 on empty/incomplete ledger (replay/audit); no traceback.
         if result.returncode != 0:
             assert "Traceback" not in result.stderr
 

@@ -728,6 +728,49 @@ def cmd_paperops_verify(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def cmd_paperops_audit(args: argparse.Namespace) -> int:
+    """Unified soak DB + decision-ledger reconcile report (read-only)."""
+
+    from scripts.paper_soak_report import build_soak_report
+
+    from chronos.config.settings import get_settings
+    from chronos.paperops.reconcile import SoakSnapshot, reconcile_soak_and_ledger
+    from chronos.persistence.database import Database
+
+    store = HaltStore(args.halt_file)
+    _banner(TradingMode.PAPER, store)
+    settings = get_settings()
+    ledger_path = Path(args.ledger)
+    db_url = args.database or settings.database_url
+    soak: SoakSnapshot
+    try:
+        database = Database(db_url)
+        try:
+            database.initialize()
+            soak = SoakSnapshot.from_soak_report(build_soak_report(database))
+        finally:
+            database.dispose()
+    except Exception as error:  # DB half unavailable — still report ledger
+        print(
+            f"DB soak unavailable ({type(error).__name__}: {error}); "
+            "continuing with empty soak snapshot + ledger half",
+            file=sys.stderr,
+        )
+        soak = SoakSnapshot(
+            total_intents=0,
+            status_counts={},
+            event_source_counts={},
+            submission_unknown_resolutions=0,
+        )
+    report = reconcile_soak_and_ledger(
+        soak=soak, ledger_path=ledger_path, settings=settings
+    )
+    print(report.render())
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+    return 0 if report.ok else 1
+
+
 def _add_paperops_commands(sub: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
     paperops = sub.add_parser(
         "paperops",
@@ -750,6 +793,23 @@ def _add_paperops_commands(sub: argparse._SubParsersAction) -> None:  # type: ig
     verify = paperops_sub.add_parser("verify", help="verify decision-ledger hash chain")
     verify.add_argument("--ledger", type=Path, default=DEFAULT_PAPER_DECISION_LEDGER)
     verify.set_defaults(func=cmd_paperops_verify)
+
+    audit = paperops_sub.add_parser(
+        "audit",
+        help="reconcile paper soak DB metrics with decision-ledger stage counts",
+    )
+    audit.add_argument("--ledger", type=Path, default=DEFAULT_PAPER_DECISION_LEDGER)
+    audit.add_argument(
+        "--database",
+        default=None,
+        help="SQLAlchemy DB URL (defaults to configured DATABASE_URL)",
+    )
+    audit.add_argument(
+        "--json",
+        action="store_true",
+        help="also print machine-readable reconcile dict after the text report",
+    )
+    audit.set_defaults(func=cmd_paperops_audit)
 
 
 def main(argv: list[str] | None = None) -> int:
