@@ -256,6 +256,117 @@ def test_missing_data_fails_on_replay(tmp_path: Path) -> None:
     assert exc.value.reason is CompareReason.MISSING_DATA
 
 
+def test_path_free_identity_same_content_different_dirs(tmp_path: Path) -> None:
+    """Identical CSV bytes + params under two data_dir paths must compare equal."""
+
+    data_a = tmp_path / "path_a"
+    data_b = tmp_path / "path_b"
+    _write_csv(data_a, "SPY", n_bars=50)
+    data_b.mkdir(parents=True)
+    (data_b / "SPY.csv").write_bytes((data_a / "SPY.csv").read_bytes())
+
+    m1 = produce_named_backtest_run(
+        run_dir=tmp_path / "run_path_a",
+        strategy_id="baseline_buy_hold",
+        symbol="SPY",
+        data_dir=data_a,
+        policy_path=RESEARCH_POLICY,
+        seed=4,
+        slippage_bps=0.0,
+        date_start="2019-01-02",
+        date_end="2019-03-01",
+    )
+    m2 = produce_named_backtest_run(
+        run_dir=tmp_path / "run_path_b",
+        strategy_id="baseline_buy_hold",
+        symbol="SPY",
+        data_dir=data_b,
+        policy_path=RESEARCH_POLICY,
+        seed=4,
+        slippage_bps=0.0,
+        date_start="2019-01-02",
+        date_end="2019-03-01",
+        code_commit=m1["code_commit"],
+    )
+    assert m1["output_fingerprint"] == m2["output_fingerprint"]
+    assert m1["config_hash"] == m2["config_hash"]
+    assert m1["datasets"][0]["sha256"] == m2["datasets"][0]["sha256"]
+    # Paths may differ in stored metadata; identity must not.
+    assert m1["datasets"][0]["path"] != m2["datasets"][0]["path"]
+    report = compare_manifests(m1, m2)
+    assert report.ok is True, report.to_dict()
+    assert CompareReason.CONFIG_DRIFT not in report.reasons
+
+
+def test_replay_data_dir_override_when_original_path_gone(tmp_path: Path) -> None:
+    """Original path deleted; --data-dir override with same content must pass."""
+
+    original = tmp_path / "original_data"
+    _write_csv(original, "SPY", n_bars=50)
+    m1 = produce_named_backtest_run(
+        run_dir=tmp_path / "orig_run",
+        strategy_id="baseline_buy_hold",
+        symbol="SPY",
+        data_dir=original,
+        policy_path=RESEARCH_POLICY,
+        seed=6,
+        slippage_bps=0.0,
+    )
+    # Move content to a new location and remove the original path entirely.
+    override = tmp_path / "override_data"
+    override.mkdir()
+    (override / "SPY.csv").write_bytes((original / "SPY.csv").read_bytes())
+    import shutil
+
+    shutil.rmtree(original)
+    assert not (original / "SPY.csv").exists()
+
+    m2 = replay_from_manifest(
+        m1,
+        run_dir=tmp_path / "replay_override",
+        data_dir=override,
+        policy_path=RESEARCH_POLICY,
+    )
+    report = compare_manifests(m1, m2)
+    assert report.ok is True, report.to_dict()
+    assert m1["output_fingerprint"] == m2["output_fingerprint"]
+
+
+def test_replay_data_dir_override_rejects_different_content(tmp_path: Path) -> None:
+    """Override data_dir with different bytes must fail closed at verify (not silent wrong run)."""
+
+    original = tmp_path / "orig"
+    _write_csv(original, "SPY", n_bars=50)
+    m1 = produce_named_backtest_run(
+        run_dir=tmp_path / "r1",
+        strategy_id="baseline_buy_hold",
+        symbol="SPY",
+        data_dir=original,
+        policy_path=RESEARCH_POLICY,
+        seed=8,
+        slippage_bps=0.0,
+    )
+    # Keep original path intact (matching sha) but provide a bad override.
+    bad_override = tmp_path / "bad"
+    _write_csv(bad_override, "SPY", n_bars=50, start=date(2020, 1, 2))  # different content
+    assert (original / "SPY.csv").exists()
+
+    with pytest.raises(ReproError) as exc:
+        replay_from_manifest(
+            m1,
+            run_dir=tmp_path / "r2",
+            data_dir=bad_override,
+            policy_path=RESEARCH_POLICY,
+        )
+    assert exc.value.reason is CompareReason.CHECKSUM_DRIFT
+    # And verify_datasets alone must also fail against the override, not the original.
+    from chronos.research.repro import verify_datasets
+
+    with pytest.raises(ReproError) as vexc:
+        verify_datasets(m1, data_dir=bad_override)
+    assert vexc.value.reason is CompareReason.CHECKSUM_DRIFT
+
+
 def test_cli_repro_produce_replay_compare(tmp_path: Path) -> None:
     from chronos.cli.main import build_parser
 
