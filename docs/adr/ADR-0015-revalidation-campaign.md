@@ -24,9 +24,13 @@ Discovery-confirmed facts that shape the design:
   the five strategy ids, `allow_long_entries`, overnight allowed. Under it the candidates
   trade: regime_trend_v1 = 99 (SPY)/120 (QQQ); mean_reversion_v1 = 87/106; baselines fewer.
   It is an inline constant today — not importable, not hash-reviewable as a file.
-- **Only SPY (~2000–2019) and QQQ (~1999–2024) have the daily span for multiple OOS folds.**
-  IWM/GLD/TLT are 2019–2021 (757 bars) and DIA is absent from `research/data/raw`. The
-  short series cannot support a warm-up plus several disjoint test windows.
+- **Only SPY (~2000–2019) and QQQ (~1999–2024) have the daily span for many OOS folds.**
+  IWM/GLD/TLT are 2019–2021 (757 bars) — enough for only ~2 OOS windows after a 1-year
+  warm-up, so they run but land at INSUFFICIENT_EVIDENCE on the trade floor (consistent with
+  the existing `run_research.py`, which runs any window ≥ 300 bars). DIA is absent from
+  `research/data/raw` and is excluded with a recorded reason. A cell is excluded **only**
+  when it cannot form two disjoint OOS windows (`< warmup + 2·test_window` bars) or its data
+  file is missing — never as a pre-judgment; the sample-honest verdict does the rejecting.
 - **The reserved final/holdout window is 2022-01-01.. .** `run_research.py` already enforces
   one-shot discipline: `--stage all` deliberately EXCLUDES `final`, because that is exactly
   how QQQ's 2022–2024 holdout got burned once (M5 finding). C4 must honor the same wall and
@@ -102,8 +106,10 @@ Read-only; places no order.
 - **Research policy ≠ tradeable policy.** `config/risk.research.yaml` removes caps to measure
   compounding cleanly; it is not an endorsed paper/live limit set and structurally cannot
   transmit an order (ADR-0009). Stated in the file header and the report.
-- **Data heterogeneity carries over** (ADR-0006): only SPY/QQQ run; the 2019–2021 symbols
-  and absent DIA are excluded with recorded reasons, not silently run.
+- **Data heterogeneity carries over** (ADR-0006): SPY/QQQ yield many OOS folds; the
+  2019–2021 symbols (IWM/GLD/TLT) yield only ~2 folds and land at INSUFFICIENT_EVIDENCE
+  (thin OOS trades) — run, not silently skipped; absent DIA is excluded with a recorded
+  reason. A cell is excluded only when it cannot form two OOS windows or its file is missing.
 - **Holdout remains sealed.** The campaign never touches `>= 2022-01-01`; any holdout read is
   a separate, owner-typed, guardian-mediated, single-use event (C2).
 

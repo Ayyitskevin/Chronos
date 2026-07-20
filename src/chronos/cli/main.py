@@ -268,6 +268,64 @@ def cmd_research_walkforward(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_research_campaign(args: argparse.Namespace) -> int:
+    from dataclasses import asdict
+
+    from chronos.backtest.engine import BacktestConfig
+    from chronos.registry import RegistryLedger
+    from chronos.research.campaign import run_campaign
+
+    store = HaltStore(args.halt_file)
+    _banner(TradingMode.BACKTEST, store)
+    strategies = [s.strip() for s in args.strategies.split(",") if s.strip()]
+    symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
+    report = run_campaign(
+        strategies=strategies,
+        symbols=symbols,
+        data_dir=args.data_dir,
+        policy=load_risk_policy(args.policy),
+        ledger=RegistryLedger(args.ledger),
+        # Flat data/ so the per-cell halt files match the gitignored data/*.json glob.
+        halt_dir=Path("data"),
+        config=BacktestConfig(initial_cash_usd=args.cash, slippage_bps_per_side=args.slippage_bps),
+        stage_end=args.stage_end,
+        warmup=args.warmup,
+        test_window=args.test_window,
+        min_trades=args.min_trades,
+        seed=args.seed,
+        block_size=args.block_size,
+        n_resamples=args.n_resamples,
+    )
+    results_dir = Path("research/results")
+    results_dir.mkdir(parents=True, exist_ok=True)
+    out_path = results_dir / f"campaign_{args.stage_end}.json"
+    out_path.write_text(json.dumps(asdict(report), indent=2, default=str), encoding="utf-8")
+
+    # Human-readable verdict table to stdout.
+    print(f"\nRE-VALIDATION CAMPAIGN  policy={report.policy_version} ({report.policy_hash})")
+    print(f"dev+val span <= {report.stage_end}  seed={report.seed}  (holdout 2022+ sealed)")
+    header = (
+        f"{'strategy':<20}{'sym':<5}{'win':>4}{'trades':>7}{'DSR':>7}{'N':>4}  verdict / reason"
+    )
+    print(header)
+    for row in report.verdict_table:
+        dsr = f"{row.deflated_sharpe:.2f}" if row.deflated_sharpe is not None else "None"
+        print(
+            f"{row.strategy_id:<20}{row.symbol:<5}{row.windows:>4}{row.pooled_trades:>7}"
+            f"{dsr:>7}{row.trial_count:>4}  {row.verdict} / {row.reason}"
+        )
+    for symbol, reason in report.excluded:
+        print(f"{'(excluded)':<20}{symbol:<5}  {reason}")
+    print(f"\nwrote {out_path}")
+    print(
+        "RESEARCH: read-only campaign; no order was or can be submitted. A table dominated "
+        "by INSUFFICIENT_EVIDENCE/FAIL is the honest, expected output at daily-bar trade "
+        "counts (ADR-0015). The 2022+ holdout was not touched.",
+        file=sys.stderr,
+    )
+    return 0
+
+
 def cmd_skb_query(args: argparse.Namespace) -> int:
     from chronos.skb import query as skb_query
     from chronos.skb.compiler import REPO_ROOT, STORE_PATH, load_store
@@ -424,6 +482,28 @@ def _add_research_commands(sub: argparse._SubParsersAction) -> None:  # type: ig
     wf.add_argument("--n-resamples", type=int, default=1000)
     wf.add_argument("--seed", type=int, default=0)
     wf.set_defaults(func=cmd_research_walkforward)
+
+    camp = research_sub.add_parser(
+        "campaign",
+        help="re-validation campaign: walk-forward grid + verdict table (read-only)",
+    )
+    camp.add_argument("--strategies", default="regime_trend_v1,mean_reversion_v1")
+    camp.add_argument("--symbols", default="SPY,QQQ,IWM,DIA,GLD,TLT")
+    camp.add_argument("--data-dir", type=Path, default=Path("research/data/raw"))
+    # Campaign default IS the research policy (it must permit trades to be non-vacuous);
+    # the deny-all example would trade nothing. Still read-only — no order path exists here.
+    camp.add_argument("--policy", type=Path, default=Path("config/risk.research.yaml"))
+    camp.add_argument("--ledger", type=Path, default=REGISTRY_LEDGER_PATH)
+    camp.add_argument("--stage-end", default="2021-12-31", help="dev+val wall; holdout is 2022+")
+    camp.add_argument("--cash", type=float, default=3000.0)
+    camp.add_argument("--slippage-bps", type=float, default=2.0)
+    camp.add_argument("--warmup", type=int, default=252)
+    camp.add_argument("--test-window", type=int, default=252)
+    camp.add_argument("--min-trades", type=int, default=20)
+    camp.add_argument("--block-size", type=int, default=20)
+    camp.add_argument("--n-resamples", type=int, default=1000)
+    camp.add_argument("--seed", type=int, default=0)
+    camp.set_defaults(func=cmd_research_campaign)
 
 
 def _add_skb_commands(sub: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
