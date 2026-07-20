@@ -6,6 +6,8 @@ and configuration so results are reproducible (Phase 6 requirement).
 
 from __future__ import annotations
 
+import hashlib
+import json
 import subprocess
 from collections.abc import Callable
 from dataclasses import asdict
@@ -79,6 +81,14 @@ def run_named_backtest(
 
         series = BarSeries(symbol=series.symbol, interval=series.interval, bars=bars)
     quality = validate_series(series)
+    if quality.blocking:
+        # Fail closed: never fabricate a backtest on contaminated / empty /
+        # malformed bar series. Callers must repair data or choose another source.
+        kinds = sorted({issue.kind.value for issue in quality.issues if issue.blocking})
+        raise ValueError(
+            f"blocking data-quality issues for {symbol.upper()}: {', '.join(kinds)} "
+            f"({len(quality.issues)} issue(s)); research refuses contaminated series"
+        )
     policy = load_risk_policy(policy_path)
     store = HaltStore(
         halt_path
@@ -95,6 +105,20 @@ def run_named_backtest(
         halt_store=store,
     )
     metrics = compute_metrics(result)
+    code_commit = current_commit()
+    config_payload = {
+        "initial_cash_usd": initial_cash,
+        "slippage_bps_per_side": slippage_bps,
+        "strategy": strategy_name,
+        "symbol": symbol.upper(),
+        "policy_hash": policy.config_hash,
+        "data_sha256": loaded.sha256,
+        "code_commit": code_commit,
+    }
+    # Deterministic config hash so a cold reader can bind results to inputs.
+    config_hash = hashlib.sha256(
+        json.dumps(config_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
     return {
         "strategy": strategy_name,
         "strategy_version": strategy.version,
@@ -111,7 +135,8 @@ def run_named_backtest(
         "data_quality_blocking": quality.blocking,
         "policy_version": policy.policy_version,
         "policy_hash": policy.config_hash,
-        "code_commit": current_commit(),
+        "code_commit": code_commit,
+        "config_hash": config_hash,
         "config": {
             "initial_cash_usd": initial_cash,
             "slippage_bps_per_side": slippage_bps,

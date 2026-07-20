@@ -23,7 +23,8 @@ import chronos.research as research_pkg
 # The real trading edge C3 must not touch. NOT chronos.execution/control/risk: those are
 # reached through the *simulated* backtest engine by design (see module docstring).
 _FORBIDDEN = ("chronos.orders", "chronos.broker")
-_C3_MODULES = ("stats", "walkforward", "purged_cv", "campaign")
+# C3 + readiness-gate modules: pure research plane, no order/broker edge.
+_C3_MODULES = ("stats", "walkforward", "purged_cv", "campaign", "manifest", "readiness")
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
@@ -61,7 +62,8 @@ def test_importing_walkforward_leaks_no_order_or_broker_module() -> None:
     prefixes = repr(_FORBIDDEN)
     probe = (
         "import chronos.research.stats, chronos.research.walkforward, "
-        "chronos.research.purged_cv, chronos.research.campaign, sys; "
+        "chronos.research.purged_cv, chronos.research.campaign, "
+        "chronos.research.manifest, chronos.research.readiness, sys; "
         f"bad=[m for m in sys.modules if m.startswith({prefixes})]; "
         "print(';'.join(sorted(bad)))"
     )

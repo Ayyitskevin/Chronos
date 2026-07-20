@@ -55,6 +55,9 @@ remain refused in code regardless.
 
 ## Gate 1 — Research/backtest exit (into REPLAY, then SHADOW)
 
+Evidence contracts for paper vs future live review: **[docs/RESEARCH_READINESS.md](RESEARCH_READINESS.md)**.
+Hardening report for the auditable readiness gate: **[docs/READINESS_GATE_REPORT.md](READINESS_GATE_REPORT.md)**.
+
 - [PARTIAL] Historical daily OHLCV with provenance manifest in `research/data/raw/` — SPY
   (2000-01..2019-11, unadjusted) and QQQ (1999-11..2024-01, adjusted) byte-exact and
   cross-checked to the penny; IWM/GLD/TLT (2019-01..2021-12) added later via a transcribed

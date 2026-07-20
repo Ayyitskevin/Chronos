@@ -90,6 +90,7 @@ def test_run_named_backtest_emits_reproducibility_manifest(tmp_path: Path) -> No
         "policy_version",
         "policy_hash",
         "code_commit",
+        "config_hash",
         "config",
         "risk_rejections",
         "metrics",
@@ -99,6 +100,7 @@ def test_run_named_backtest_emits_reproducibility_manifest(tmp_path: Path) -> No
     assert summary["symbol"] == "SPY"
     assert summary["bars"] == 60
     assert len(str(summary["data_sha256"])) == 64  # sha256 hex digest
+    assert len(str(summary["config_hash"])) == 64  # sha256 of config+data+code binding
     assert summary["config"] == {"initial_cash_usd": 3000.0, "slippage_bps_per_side": 2.0}
     # Identity fields must be real values, not empty placeholders: the
     # manifest is the reproducibility seam (M5 review).

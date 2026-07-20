@@ -35,6 +35,7 @@ from chronos.backtest.engine import BacktestConfig
 from chronos.control.halt import HaltStore
 from chronos.marketdata.bars import BarSeries
 from chronos.marketdata.csv_provider import load_daily_csv
+from chronos.marketdata.quality import validate_series
 from chronos.registry import RegistryLedger
 from chronos.research.runner import STRATEGY_FACTORIES, current_commit
 from chronos.research.walkforward import WalkForwardReport, walk_forward
@@ -201,7 +202,16 @@ def run_campaign(
         if not path.exists():
             symbol_exclusions.append((symbol, f"no data file {path}"))
             continue
-        loaded = load_daily_csv(path, symbol=symbol, source="research_raw")
+        try:
+            loaded = load_daily_csv(path, symbol=symbol, source="research_raw")
+        except Exception as error:  # malformed / unparseable CSV — fail closed per symbol
+            symbol_exclusions.append(
+                (
+                    symbol,
+                    f"malformed or unreadable data file {path}: {type(error).__name__}: {error}",
+                )
+            )
+            continue
         window = _slice_to_cutoff(loaded.series, cutoff)
         if len(window) < min_bars:
             symbol_exclusions.append(
@@ -209,6 +219,19 @@ def run_campaign(
                     symbol,
                     f"only {len(window)} bars <= {stage_end} "
                     f"(< warmup+2*test_window = {min_bars}); too short for multiple OOS folds",
+                )
+            )
+            continue
+        # Fail closed on blocking data-quality issues (impossible OHLC, non-finite
+        # prices, empty series, etc.). Contaminated bars must never enter statistics.
+        quality = validate_series(window)
+        if quality.blocking:
+            kinds = sorted({issue.kind.value for issue in quality.issues if issue.blocking})
+            symbol_exclusions.append(
+                (
+                    symbol,
+                    f"blocking data-quality issues on sliced window: {', '.join(kinds)} "
+                    f"({len(quality.issues)} issue(s)); refusing contaminated series",
                 )
             )
             continue

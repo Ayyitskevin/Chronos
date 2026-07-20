@@ -62,6 +62,7 @@ from chronos.domain.models import (
 from chronos.orders.arming import LiveArmingService
 from chronos.orders.intent import WheelOrderIntent, order_summary_hash
 from chronos.orders.kill_switch import LiveKillSwitch
+from chronos.orders.live_block import LIVE_TRADING_BLOCKED, evaluate_live_trading_block
 from chronos.orders.live_gate import LiveGateInputs, evaluate_live_gates
 from chronos.orders.live_mode import resolve_live_submission
 from chronos.orders.risk import OrderRiskDecision, OrderRiskEngine
@@ -280,12 +281,16 @@ class OrderSubmissionBoundary:
             )
 
         # 2. Configuration gate: the full ADR-0009 conjunction, re-derived.
-        if not self._settings.live_transmission_possible:
-            return _refuse(
-                SubmissionRefusalCode.TRANSMISSION_NOT_POSSIBLE,
-                "settings.live_transmission_possible is False (the ADR-0009 live "
-                "conjunction is not satisfied)",
+        # Explicit LIVE TRADING BLOCKED outcome for operators and tests.
+        live_block = evaluate_live_trading_block(self._settings)
+        if live_block.blocked or not self._settings.live_transmission_possible:
+            detail = (
+                f"{LIVE_TRADING_BLOCKED}: settings.live_transmission_possible is False "
+                "(the ADR-0009 live conjunction is not satisfied)"
             )
+            if live_block.reasons:
+                detail = f"{detail}; " + "; ".join(live_block.reasons)
+            return _refuse(SubmissionRefusalCode.TRANSMISSION_NOT_POSSIBLE, detail)
 
         # 3. Fresh broker evidence -> the orders-plane live grant.
         try:
