@@ -39,8 +39,8 @@ python -m chronos.cli paperops verify  --ledger data/paper_decision_ledger.jsonl
 - **Pure evaluation:** Broker I/O is out of the hot path so unit tests drive real shipped functions hermetically.
 - **Only LIVE authorizes opens:** DEMO / DELAYED / SYNTHETIC / STALE / UNKNOWN are labeled and **non-authorizing**.
 - **Live remains blocked:** Review and controls reaffirm `LIVE TRADING BLOCKED`; default settings stay non-transmitting.
-- **Restart-safe controls:** `record_paper_decision` rehydrates order fingerprints and last-order time from the ledger before evaluation (empty ephemeral memory cannot re-authorize a prior open).
-- **Single-writer serialization:** `DecisionLedger.append` holds an exclusive `fcntl` lock, re-reads the head under that lock, and refuses to append to a corrupt chain.
+- **Restart-safe controls:** `record_paper_decision` holds an exclusive lock across rehydrate → bind effective fingerprint → evaluate → append. Empty `order_fingerprint` is bound to a stable `order_identity_fingerprint` (excludes control-memory fields and wall clock) and that value is persisted for rehydration.
+- **Single-writer serialization:** `DecisionLedger.append` / critical section use exclusive `fcntl` locks; concurrent same-fingerprint races allow at most one ALLOW.
 
 ### Data flow
 

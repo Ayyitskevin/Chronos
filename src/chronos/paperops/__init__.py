@@ -17,7 +17,9 @@ from chronos.paperops.data_quality import PaperDataHealth, evaluate_paper_quote
 from chronos.paperops.decision import (
     PaperDecisionInput,
     PaperDecisionResult,
+    bind_effective_order_fingerprint,
     evaluate_paper_decision,
+    order_identity_fingerprint,
 )
 from chronos.paperops.ledger import (
     DecisionLedger,
@@ -44,11 +46,13 @@ __all__ = [
     "PaperReasonCode",
     "ReplayReport",
     "apply_durable_control_memory",
+    "bind_effective_order_fingerprint",
     "build_operator_review",
     "decision_ledger_lock",
     "evaluate_paper_controls",
     "evaluate_paper_decision",
     "evaluate_paper_quote",
+    "order_identity_fingerprint",
     "rehydrate_control_memory",
     "replay_ledger",
     "verify_decision_ledger",

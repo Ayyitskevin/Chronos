@@ -35,16 +35,46 @@ class DurableControlMemory:
         }
 
 
+_DECISION_KINDS = frozenset(
+    {
+        "candidate_signal",
+        "rejection",
+        "proposed_order",
+        "risk_decision",
+        "data_health",
+        "control_refusal",
+        "paper_fill",
+    }
+)
+
+
 def _order_fingerprint_from_record(record: DecisionRecord) -> str | None:
+    """Extract the durable control identity written for this decision.
+
+    Preference order:
+    1. payload.effective_order_fingerprint / payload.order_fingerprint
+    2. decision_inputs.order_fingerprint
+    3. record.inputs_fingerprint for decision kinds when explicit fields were
+       empty (legacy records written before effective-fp persistence).
+    """
+
     payload = record.payload
+    for key in ("effective_order_fingerprint", "order_fingerprint"):
+        raw = payload.get(key)
+        if raw is not None and str(raw).strip():
+            return str(raw).strip()
     di = payload.get("decision_inputs")
     if isinstance(di, dict):
         raw = di.get("order_fingerprint")
         if raw is not None and str(raw).strip():
             return str(raw).strip()
-    raw = payload.get("order_fingerprint")
-    if raw is not None and str(raw).strip():
-        return str(raw).strip()
+        raw = di.get("effective_order_fingerprint")
+        if raw is not None and str(raw).strip():
+            return str(raw).strip()
+    # Legacy / empty-fp fallback: evaluate used inputs_fingerprint as the
+    # proposed order identity when order_fingerprint was blank.
+    if record.kind in _DECISION_KINDS and record.inputs_fingerprint.strip():
+        return record.inputs_fingerprint.strip()
     return None
 
 

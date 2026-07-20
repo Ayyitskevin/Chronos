@@ -134,6 +134,26 @@ class DecisionLedger:
             ) from error
 
     def append(self, event: DecisionEvent, *, at_utc: str | None = None) -> DecisionRecord:
+        """Append under an exclusive lock (safe for concurrent writers)."""
+
+        self._validate_event(event)
+        with decision_ledger_lock(self._path):
+            return self._append_locked(event, at_utc=at_utc)
+
+    def append_under_held_lock(
+        self, event: DecisionEvent, *, at_utc: str | None = None
+    ) -> DecisionRecord:
+        """Append assuming the caller already holds :func:`decision_ledger_lock`.
+
+        Used by ``record_paper_decision`` so rehydrate → evaluate → append is
+        one critical section (prevents concurrent same-fingerprint double ALLOW).
+        """
+
+        self._validate_event(event)
+        return self._append_locked(event, at_utc=at_utc)
+
+    @staticmethod
+    def _validate_event(event: DecisionEvent) -> None:
         if not event.strategy_id.strip():
             raise DecisionLedgerError("strategy_id is required")
         if not event.strategy_version.strip():
@@ -142,11 +162,6 @@ class DecisionLedger:
             raise DecisionLedgerError("config_hash is required")
         if not event.data_source.strip():
             raise DecisionLedgerError("data_source is required (use 'missing' if unknown)")
-
-        # Exclusive lock + re-read head: concurrent DecisionLedger instances must
-        # not both write the same sequence / break the chain.
-        with decision_ledger_lock(self._path):
-            return self._append_locked(event, at_utc=at_utc)
 
     def _append_locked(self, event: DecisionEvent, *, at_utc: str | None) -> DecisionRecord:
         # Fail closed if another writer left a corrupt chain.

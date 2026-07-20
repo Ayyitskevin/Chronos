@@ -6,7 +6,7 @@ on the decision ledger and re-evaluable for deterministic replay.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from typing import Any
 
@@ -96,6 +96,9 @@ class PaperDecisionResult:
     explanations: tuple[str, ...]
     inputs_fingerprint: str
     decision_inputs: dict[str, Any]
+    # Fingerprint used for duplicate/cooldown controls (order_fingerprint or
+    # content hash). Always non-empty after evaluate_paper_decision.
+    effective_order_fingerprint: str
 
     def to_payload(self) -> dict[str, object]:
         return {
@@ -107,7 +110,59 @@ class PaperDecisionResult:
             "data_health": self.data_health.to_payload(),
             "controls": self.controls.to_payload(),
             "inputs_fingerprint": self.inputs_fingerprint,
+            "effective_order_fingerprint": self.effective_order_fingerprint,
         }
+
+
+def order_identity_fingerprint(inp: PaperDecisionInput) -> str:
+    """Stable content identity for duplicate detection when order_fingerprint is empty.
+
+    Excludes control-memory fields (``recent_order_fingerprints``,
+    ``last_order_at_utc``) and wall-clock ``now_utc`` so rehydration and
+    restart cannot change the identity of the same economic open. Full
+    ``to_dict()`` hashing is wrong here: applying durable memory mutates
+    those fields and would mint a new fingerprint on every retry.
+    """
+
+    material = {
+        "strategy_id": inp.strategy_id,
+        "strategy_version": inp.strategy_version,
+        "config_hash": inp.config_hash,
+        "symbol": inp.symbol,
+        "side": inp.side,
+        "quantity": inp.quantity,
+        "limit_price": inp.limit_price,
+        "bid": inp.bid,
+        "ask": inp.ask,
+        "last": inp.last,
+        "quote_utc": inp.quote_utc,
+        "data_source": inp.data_source,
+        "quality_label": inp.quality_label,
+        "iv": inp.iv,
+        "delta": inp.delta,
+        "gamma": inp.gamma,
+        "theta": inp.theta,
+        "vega": inp.vega,
+        "require_greeks": inp.require_greeks,
+        "risk_approved": inp.risk_approved,
+        "risk_reason": inp.risk_reason,
+    }
+    return inputs_fingerprint(material)
+
+
+def bind_effective_order_fingerprint(inp: PaperDecisionInput) -> PaperDecisionInput:
+    """Ensure ``order_fingerprint`` is the durable control identity.
+
+    When the caller leaves ``order_fingerprint`` empty, fall back to
+    :func:`order_identity_fingerprint` (stable across rehydrate/restart).
+    That value is written into ``order_fingerprint`` so the ledger persists
+    the same identity controls used.
+    """
+
+    effective = (inp.order_fingerprint or "").strip() or order_identity_fingerprint(inp)
+    if (inp.order_fingerprint or "").strip() == effective:
+        return inp
+    return replace(inp, order_fingerprint=effective)
 
 
 def _parse_dt(value: str | None, *, field: str) -> datetime | None:
@@ -123,9 +178,15 @@ def _parse_dt(value: str | None, *, field: str) -> datetime | None:
 def evaluate_paper_decision(inp: PaperDecisionInput) -> PaperDecisionResult:
     """Evaluate data health + controls (+ optional risk) for a paper open."""
 
-    decision_inputs = inp.to_dict()
+    # Bind durable order identity first so decision_inputs and controls agree.
+    # Empty order_fingerprint becomes the content hash of the unbound input —
+    # that same value is what gets persisted for restart rehydration.
+    bound = bind_effective_order_fingerprint(inp)
+    decision_inputs = bound.to_dict()
     fingerprint = inputs_fingerprint(decision_inputs)
-    now = _parse_dt(inp.now_utc, field="now_utc")
+    effective_fp = (bound.order_fingerprint or "").strip() or fingerprint
+
+    now = _parse_dt(bound.now_utc, field="now_utc")
     if now is None:
         # Fail closed: no evaluation clock => no authorization.
         synthetic_health = PaperDataHealth(
@@ -133,10 +194,10 @@ def evaluate_paper_decision(inp: PaperDecisionInput) -> PaperDecisionResult:
             may_authorize_open=False,
             reason_code=PaperReasonCode.DATA_CLOCK_ANOMALY,
             degradation=DataDegradation.CLOCK_ANOMALY,
-            label=inp.quality_label or "UNKNOWN",
+            label=bound.quality_label or "UNKNOWN",
             detail="now_utc is required for paper decision evaluation",
-            data_timestamp_utc=inp.quote_utc,
-            data_source=inp.data_source or "missing",
+            data_timestamp_utc=bound.quote_utc,
+            data_source=bound.data_source or "missing",
         )
         controls = PaperControlDecision(
             allowed=False,
@@ -153,53 +214,54 @@ def evaluate_paper_decision(inp: PaperDecisionInput) -> PaperDecisionResult:
             explanations=("now_utc is required; failing closed",),
             inputs_fingerprint=fingerprint,
             decision_inputs=decision_inputs,
+            effective_order_fingerprint=effective_fp,
         )
 
-    quote_utc = _parse_dt(inp.quote_utc, field="quote_utc")
+    quote_utc = _parse_dt(bound.quote_utc, field="quote_utc")
     quote = QuoteSnapshot(
-        symbol=inp.symbol,
-        bid=inp.bid,
-        ask=inp.ask,
-        last=inp.last,
+        symbol=bound.symbol,
+        bid=bound.bid,
+        ask=bound.ask,
+        last=bound.last,
         quote_utc=quote_utc,
-        source=inp.data_source,
-        quality_label=inp.quality_label,
-        iv=inp.iv,
-        delta=inp.delta,
-        gamma=inp.gamma,
-        theta=inp.theta,
-        vega=inp.vega,
-        require_greeks=inp.require_greeks,
+        source=bound.data_source,
+        quality_label=bound.quality_label,
+        iv=bound.iv,
+        delta=bound.delta,
+        gamma=bound.gamma,
+        theta=bound.theta,
+        vega=bound.vega,
+        require_greeks=bound.require_greeks,
     )
     health = evaluate_paper_quote(
         quote,
         now_utc=now,
-        max_quote_age_seconds=inp.max_quote_age_seconds,
+        max_quote_age_seconds=bound.max_quote_age_seconds,
     )
 
-    last_order = _parse_dt(inp.last_order_at_utc, field="last_order_at_utc")
-    notional = abs(float(inp.limit_price) * int(inp.quantity))
-    order_fp = inp.order_fingerprint or fingerprint
+    last_order = _parse_dt(bound.last_order_at_utc, field="last_order_at_utc")
+    notional = abs(float(bound.limit_price) * int(bound.quantity))
+    order_fp = effective_fp
     control_state = PaperControlState(
-        halted=inp.halted,
-        halt_detail=inp.halt_detail,
-        kill_switch_engaged=inp.kill_switch_engaged,
-        kill_switch_detail=inp.kill_switch_detail,
-        account_equity_usd=inp.account_equity_usd,
-        cash_usd=inp.cash_usd,
-        position_notional_by_symbol=dict(inp.position_notional_by_symbol or {}),
-        open_position_count=inp.open_position_count,
-        realized_pnl_today_usd=inp.realized_pnl_today_usd,
-        recent_order_fingerprints=inp.recent_order_fingerprints,
+        halted=bound.halted,
+        halt_detail=bound.halt_detail,
+        kill_switch_engaged=bound.kill_switch_engaged,
+        kill_switch_detail=bound.kill_switch_detail,
+        account_equity_usd=bound.account_equity_usd,
+        cash_usd=bound.cash_usd,
+        position_notional_by_symbol=dict(bound.position_notional_by_symbol or {}),
+        open_position_count=bound.open_position_count,
+        realized_pnl_today_usd=bound.realized_pnl_today_usd,
+        recent_order_fingerprints=bound.recent_order_fingerprints,
         last_order_at_utc=last_order,
         proposed_order_fingerprint=order_fp,
-        proposed_symbol=inp.symbol,
+        proposed_symbol=bound.symbol,
         proposed_notional_usd=notional,
-        max_aggregate_exposure_usd=inp.max_aggregate_exposure_usd,
-        max_symbol_exposure_fraction=inp.max_symbol_exposure_fraction,
-        max_simultaneous_positions=inp.max_simultaneous_positions,
-        max_daily_loss_usd=inp.max_daily_loss_usd,
-        cooldown_seconds=inp.cooldown_seconds,
+        max_aggregate_exposure_usd=bound.max_aggregate_exposure_usd,
+        max_symbol_exposure_fraction=bound.max_symbol_exposure_fraction,
+        max_simultaneous_positions=bound.max_simultaneous_positions,
+        max_daily_loss_usd=bound.max_daily_loss_usd,
+        cooldown_seconds=bound.cooldown_seconds,
         now_utc=now,
     )
     controls = evaluate_paper_controls(control_state)
@@ -225,14 +287,14 @@ def evaluate_paper_decision(inp: PaperDecisionInput) -> PaperDecisionResult:
         outcome = DecisionOutcome.DENY
         explanations.extend(controls.explanations)
 
-    if inp.risk_approved is False:
+    if bound.risk_approved is False:
         may_open = False
         primary = PaperReasonCode.RISK_DENIED
         kind = DecisionKind.RISK_DECISION
         outcome = DecisionOutcome.DENY
-        explanations.append(inp.risk_reason or "risk engine denied")
-    elif inp.risk_approved is True and may_open:
-        explanations.append(inp.risk_reason or "risk engine approved")
+        explanations.append(bound.risk_reason or "risk engine denied")
+    elif bound.risk_approved is True and may_open:
+        explanations.append(bound.risk_reason or "risk engine approved")
         primary = PaperReasonCode.RISK_APPROVED
         kind = DecisionKind.RISK_DECISION
 
@@ -244,7 +306,9 @@ def evaluate_paper_decision(inp: PaperDecisionInput) -> PaperDecisionResult:
         if primary not in (PaperReasonCode.RISK_APPROVED, PaperReasonCode.ORDER_PROPOSED):
             primary = PaperReasonCode.ORDER_PROPOSED
         kind = (
-            DecisionKind.RISK_DECISION if inp.risk_approved is True else DecisionKind.PROPOSED_ORDER
+            DecisionKind.RISK_DECISION
+            if bound.risk_approved is True
+            else DecisionKind.PROPOSED_ORDER
         )
 
     return PaperDecisionResult(
@@ -257,4 +321,5 @@ def evaluate_paper_decision(inp: PaperDecisionInput) -> PaperDecisionResult:
         explanations=tuple(explanations),
         inputs_fingerprint=fingerprint,
         decision_inputs=decision_inputs,
+        effective_order_fingerprint=order_fp,
     )

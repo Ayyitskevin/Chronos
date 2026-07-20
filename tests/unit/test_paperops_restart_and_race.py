@@ -205,3 +205,99 @@ def test_rehydrate_fails_closed_on_corrupt_ledger(tmp_path: Path) -> None:
 
     with pytest.raises(DecisionLedgerError, match="corrupt"):
         rehydrate_control_memory(path)
+
+
+def test_empty_order_fingerprint_restart_cannot_reauthorize(tmp_path: Path) -> None:
+    """Empty order_fingerprint must still be durable via content-hash identity.
+
+    evaluate uses content hash when order_fingerprint is blank; that effective
+    value must be persisted and rehydrated so restart cannot re-allow.
+    Identical decision inputs (including now_utc) must not re-authorize.
+    """
+
+    path = tmp_path / "empty_fp.jsonl"
+    # Fixed evaluation clock so content hash is stable across restart.
+    fixed_now = (NOW + timedelta(seconds=1)).isoformat()
+    first = record_paper_decision(
+        DecisionLedger(path),
+        _healthy(
+            order_fingerprint="",  # blank — effective id is content hash
+            recent_order_fingerprints=(),
+            last_order_at_utc=None,
+            now_utc=fixed_now,
+        ),
+        at_utc=(NOW + timedelta(seconds=2)).isoformat(),
+    )
+    assert first.result.may_open is True
+    effective = first.result.effective_order_fingerprint
+    assert effective, "effective_order_fingerprint must be non-empty"
+    assert first.record.payload.get("order_fingerprint") == effective
+    assert first.record.payload.get("effective_order_fingerprint") == effective
+
+    memory = rehydrate_control_memory(path)
+    assert effective in memory.recent_order_fingerprints, (
+        f"rehydrate missed effective fp {effective!r}; saw {memory.recent_order_fingerprints!r}"
+    )
+
+    # Restart: *identical* decision inputs (empty order_fingerprint + same now).
+    retry = record_paper_decision(
+        DecisionLedger(path),
+        _healthy(
+            order_fingerprint="",
+            recent_order_fingerprints=(),
+            last_order_at_utc=None,
+            now_utc=fixed_now,
+        ),
+        at_utc=(NOW + timedelta(seconds=21)).isoformat(),
+    )
+    assert retry.result.may_open is False, (
+        "restart re-authorized empty-fingerprint open; durable identity lost "
+        f"(first_fp={effective!r} retry_fp={retry.result.effective_order_fingerprint!r})"
+    )
+    assert PaperReasonCode.DUPLICATE_ORDER in retry.result.controls.reason_codes
+
+
+def _worker_same_fingerprint(args: tuple[str, str, str]) -> bool:
+    """Record one decision with a shared order fingerprint; return may_open."""
+
+    path_str, fingerprint, at_utc = args
+    recorded = record_paper_decision(
+        DecisionLedger(Path(path_str)),
+        _healthy(
+            order_fingerprint=fingerprint,
+            recent_order_fingerprints=(),
+            last_order_at_utc=None,
+            now_utc=at_utc,
+            # Unique now_utc per worker would change content hash; keep same
+            # fingerprint field so identity is the explicit order_fingerprint.
+        ),
+        at_utc=at_utc,
+        rehydrate_controls=True,
+    )
+    return recorded.result.may_open
+
+
+def test_concurrent_same_fingerprint_at_most_one_allow(tmp_path: Path) -> None:
+    """Two concurrent record_paper_decision calls with the same fingerprint
+    must not both allow (critical section covers rehydrate→evaluate→append).
+    """
+
+    path = tmp_path / "double_allow.jsonl"
+    fingerprint = "shared-fp-race"
+    # Same now_utc so content is identical; identity is order_fingerprint.
+    at = (NOW + timedelta(seconds=3)).isoformat()
+    jobs = [(str(path), fingerprint, at) for _ in range(8)]
+    with concurrent.futures.ProcessPoolExecutor(max_workers=4) as pool:
+        allows = list(pool.map(_worker_same_fingerprint, jobs))
+
+    allow_count = sum(1 for a in allows if a)
+    assert allow_count == 1, (
+        f"expected exactly one ALLOW under concurrent same-fingerprint race, "
+        f"got {allow_count} allows out of {len(allows)}: {allows}"
+    )
+    ok, detail = verify_decision_ledger(path)
+    assert ok, detail
+    records = DecisionLedger(path).read_all()
+    assert len(records) == 8
+    allow_records = [r for r in records if r.outcome == "allow"]
+    assert len(allow_records) == 1
