@@ -36,6 +36,11 @@
   - **submit:** after boundary → `record_submit` (submitted or refusal with stable reason code)
   - Lifecycle remains authoritative on the order service; paperops is observational audit.
 
+**Import rule (cycle-safe):** do not eager-import `chronos.paperops.pipeline` from
+`chronos.paperops` package `__init__`. The service lazy-imports the adapter only when a
+ledger is injected. Cold `import chronos.paperops` and CLI `paperops verify|review|replay`
+must work in a fresh interpreter (`tests/safety/test_paperops_cold_import.py`).
+
 `strategy_version` is explicitly **`unknown`** (wheel intents have no strategy version field).  
 `config_hash` = secret-free `settings_config_hash(settings)`.  
 `order_fingerprint` = `intent_id` for pipeline stages.

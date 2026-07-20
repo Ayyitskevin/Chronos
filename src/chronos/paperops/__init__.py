@@ -27,11 +27,16 @@ from chronos.paperops.ledger import (
     decision_ledger_lock,
     verify_decision_ledger,
 )
-from chronos.paperops.pipeline import PipelineRecorder, settings_config_hash
 from chronos.paperops.reasons import DecisionKind, PaperReasonCode
 from chronos.paperops.records import DecisionRecord
 from chronos.paperops.replay import ReplayReport, replay_ledger
 from chronos.paperops.review import OperatorReview, build_operator_review
+
+# NOTE: pipeline (order-service adapter) is intentionally NOT imported here.
+# Importing it at package load creates a cycle:
+#   paperops → pipeline → orders.intent → orders.__init__ → service → pipeline
+# Callers that need the adapter must import chronos.paperops.pipeline directly.
+# CLI review/replay/verify only need ledger/review and must cold-import cleanly.
 
 __all__ = [
     "DecisionKind",
@@ -45,7 +50,6 @@ __all__ = [
     "PaperDecisionInput",
     "PaperDecisionResult",
     "PaperReasonCode",
-    "PipelineRecorder",
     "ReplayReport",
     "apply_durable_control_memory",
     "bind_effective_order_fingerprint",
@@ -57,6 +61,5 @@ __all__ = [
     "order_identity_fingerprint",
     "rehydrate_control_memory",
     "replay_ledger",
-    "settings_config_hash",
     "verify_decision_ledger",
 ]

@@ -18,7 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
-from typing import Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from chronos.config.settings import Settings
 from chronos.domain.enums import IBEnvironment, OrderLifecycle
@@ -35,8 +35,6 @@ from chronos.orders.risk import (
 )
 from chronos.orders.submission import OrderSubmissionBoundary, SubmissionOutcome
 from chronos.orders.tracker import OrderTracker
-from chronos.paperops.ledger import DecisionLedger
-from chronos.paperops.pipeline import PipelineRecorder
 from chronos.persistence.order_repositories import (
     OrderConfirmationRepository,
     OrderIntentRecord,
@@ -47,6 +45,9 @@ from chronos.persistence.order_repositories import (
     RiskDecisionRepository,
 )
 from chronos.utils.time import utc_now
+
+if TYPE_CHECKING:
+    from chronos.paperops.ledger import DecisionLedger
 
 
 class RiskEvidenceProvider(Protocol):
@@ -106,11 +107,14 @@ class OrderManagementService:
         # Optional paperops decision ledger (audit). None = recording off
         # (backward compatible). When set, propose/risk and submit stages
         # append; corrupt ledger fails closed on the recording call.
-        self._pipeline_recorder: PipelineRecorder | None = (
-            PipelineRecorder.create(decision_ledger, settings)
-            if decision_ledger is not None
-            else None
-        )
+        # Lazy-import pipeline adapter to avoid:
+        #   paperops → pipeline → orders → service → pipeline
+        # at package import time (CLI cold-import must stay clean).
+        self._pipeline_recorder: Any | None = None
+        if decision_ledger is not None:
+            from chronos.paperops.pipeline import PipelineRecorder
+
+            self._pipeline_recorder = PipelineRecorder.create(decision_ledger, settings)
         # Proposed intents held in-process so the stateless HTTP stages
         # (preview/confirm/submit) can re-address them by id without trusting a
         # client-supplied contract. Short-lived; a restart simply requires the
