@@ -1,0 +1,58 @@
+# Chronos platform risk policy — RESEARCH PROFILE (BACKTEST / SHADOW ONLY).
+#
+# This profile deliberately REMOVES capital and exposure caps so that long-horizon
+# compounding is measured without distortion during walk-forward / campaign research
+# (ADR-0015). It is NOT an endorsed paper or live limit set.
+#
+# It CANNOT transmit an order. Live/paper transmission is a separate strict conjunction
+# (ADR-0009: broker mode, adapter, environment, ALLOW_ORDER_TRANSMIT, live account id,
+# arming, typed confirmation) — none of which a risk policy controls. This file only
+# governs which simulated proposals the backtest risk engine approves.
+#
+# Mirrors config/risk.example.yaml's field set; every omitted key keeps the schema's
+# deny-by-default value. This is the checked-in form of the vetted `research-1` profile
+# (previously an inline constant in scripts/run_research.py).
+
+policy_version: "research-1"
+
+# Research universe and the derived strategy ids (order preserved for hash stability).
+allowed_symbols: ["SPY", "QQQ", "IWM", "DIA", "GLD", "TLT"]
+allowed_strategy_ids:
+  - "regime_trend_v1"
+  - "mean_reversion_v1"
+  - "baseline_buy_hold"
+  - "baseline_sma_trend"
+  - "baseline_random_entries"
+allow_long_entries: true
+allow_short_entries: false   # unsupported in this build
+
+# Capital and exposure — research latitude (production policies re-impose real caps).
+max_bot_capital_usd: 10000000
+max_position_notional_usd: 10000000
+max_aggregate_exposure_usd: 10000000
+max_symbol_exposure_fraction: 1.0
+max_risk_per_trade_fraction: 0.50
+max_simultaneous_positions: 1
+max_open_orders: 1
+
+# Loss limits — permissive so a research sweep is not truncated mid-history.
+max_daily_loss_usd: 3000
+max_weekly_loss_usd: 3000
+max_drawdown_fraction: 0.95
+max_consecutive_losses: 1000
+
+# Data freshness — 6 days, so weekend/holiday gaps in daily bars are not flagged stale.
+max_quote_age_seconds: 518400
+max_bar_age_seconds: 518400
+max_price_deviation_fraction: 0.05
+
+max_order_rejections_per_day: 100
+cooldown_bars_after_loss_halt: 0
+
+# Behavioral prohibitions — daily-bar strategies need overnight; everything else denied.
+allow_market_orders: false
+allow_margin: false
+allow_overnight_positions: true
+allow_averaging_down: false
+allow_pyramiding: false
+allow_options: false

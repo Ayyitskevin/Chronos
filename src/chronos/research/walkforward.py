@@ -127,18 +127,11 @@ def walk_forward(
     m = moments(oos_returns)
     pooled_sharpe = sharpe(oos_returns)
 
-    # Register exactly one trial for this configuration; then read the honest cumulative N.
-    register_run(
-        ledger,
-        stage=RunStage.VALIDATION,
-        strategy_id=strategy_id,
-        config_hash=config_hash,
-        code_commit=code_commit,
-        data_hashes=data_hashes,
-        criteria_ref=criteria_ref,
-        touched_data=True,
-    )
-    n_trials = trial_count(ledger, strategy_id=strategy_id)
+    # This configuration counts as one trial toward its own multiple-testing N: read the
+    # cumulative count and add self. The trial is *registered last* (below), so a failure
+    # anywhere in the statistics block leaves NO orphan trial silently inflating a sibling's
+    # N (C4 review). Numerically identical to register-then-read: N is the post-commit count.
+    n_trials = trial_count(ledger, strategy_id=strategy_id) + 1
     window_sharpes = [w.sharpe for w in windows if w.sharpe is not None]
     # None when the cross-window Sharpe variance cannot be estimated (< 2 defined window
     # Sharpes). The DSR helper then refuses to deflate against N > 1 trials rather than
@@ -160,6 +153,19 @@ def walk_forward(
     dsr = _deflated_or_none(pooled_sharpe, len(oos_returns), n_trials, trial_variance, m)
 
     verdict, reason = _verdict(pooled_trades, ci, dsr, min_trades)
+
+    # Commit the trial only after every statistic and the verdict succeeded: a cell that
+    # raises above registers nothing, so the registry's multiple-testing N stays honest.
+    register_run(
+        ledger,
+        stage=RunStage.VALIDATION,
+        strategy_id=strategy_id,
+        config_hash=config_hash,
+        code_commit=code_commit,
+        data_hashes=data_hashes,
+        criteria_ref=criteria_ref,
+        touched_data=True,
+    )
     return WalkForwardReport(
         strategy_id=strategy_id,
         symbol=series.symbol,
