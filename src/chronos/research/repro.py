@@ -58,6 +58,7 @@ _REQUIRED_TOP_LEVEL = (
     "date_window",
     "outputs",
     "output_fingerprint",
+    "artifacts",
 )
 
 
@@ -368,10 +369,17 @@ def _verify_bundle_artifacts(manifest: Mapping[str, Any], manifest_path: Path) -
     """Verify declared bundle files without allowing paths outside the bundle."""
 
     artifacts = manifest.get("artifacts")
-    if artifacts is None:
-        return
     if not isinstance(artifacts, Mapping):
         raise ReproError(CompareReason.INCOMPLETE_MANIFEST, "artifacts must be an object")
+
+    required_artifacts = {"config_json", "output_json"}
+    missing_artifacts = required_artifacts.difference(str(name) for name in artifacts)
+    if missing_artifacts:
+        raise ReproError(
+            CompareReason.INCOMPLETE_MANIFEST,
+            "artifacts must declare config_json and output_json; missing: "
+            + ", ".join(sorted(missing_artifacts)),
+        )
 
     resolved: dict[str, Path] = {}
     for name, entry in artifacts.items():
@@ -404,21 +412,24 @@ def _verify_bundle_artifacts(manifest: Mapping[str, Any], manifest_path: Path) -
             )
         resolved[str(name)] = artifact_path
 
-    output_path = resolved.get("output_json")
-    if output_path is None:
-        return
-    try:
-        output_payload = json.loads(output_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as error:
-        raise ReproError(
-            CompareReason.INCOMPLETE_MANIFEST,
-            f"output artifact is not valid JSON: {error}",
-        ) from error
-    if not isinstance(output_payload, dict) or output_payload != dict(manifest["outputs"]):
-        raise ReproError(
-            CompareReason.CHECKSUM_DRIFT,
-            "output artifact content does not match manifest outputs",
-        )
+    expected_payloads = {
+        "config_json": dict(manifest["config"]),
+        "output_json": dict(manifest["outputs"]),
+    }
+    for name, expected_payload in expected_payloads.items():
+        artifact_path = resolved[name]
+        try:
+            artifact_payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as error:
+            raise ReproError(
+                CompareReason.INCOMPLETE_MANIFEST,
+                f"{name} artifact is not valid JSON: {error}",
+            ) from error
+        if not isinstance(artifact_payload, dict) or artifact_payload != expected_payload:
+            raise ReproError(
+                CompareReason.CHECKSUM_DRIFT,
+                f"{name} artifact content does not match manifest payload",
+            )
 
 
 def load_manifest(path: Path | str) -> dict[str, Any]:
@@ -444,8 +455,13 @@ def load_manifest(path: Path | str) -> dict[str, Any]:
     _require_complete(payload)
     # Recompute fingerprint for integrity of the identity payload.
     expected_fp = manifest_fingerprint(payload)
-    recorded = payload.get("manifest_fingerprint")
-    if recorded is not None and recorded != expected_fp:
+    recorded = str(payload.get("manifest_fingerprint") or "").strip()
+    if not recorded:
+        raise ReproError(
+            CompareReason.INCOMPLETE_MANIFEST,
+            "manifest_fingerprint must be non-empty",
+        )
+    if recorded != expected_fp:
         raise ReproError(
             CompareReason.CHECKSUM_DRIFT,
             f"manifest_fingerprint mismatch: recorded={recorded} computed={expected_fp}",

@@ -277,6 +277,79 @@ def test_load_manifest_rejects_mutated_output_artifact(tmp_path: Path) -> None:
     assert exc.value.reason is CompareReason.CHECKSUM_DRIFT
 
 
+def test_load_manifest_requires_its_fingerprint(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    _write_csv(data, "SPY")
+    run_dir = tmp_path / "run"
+    produce_named_backtest_run(
+        run_dir=run_dir,
+        strategy_id="baseline_buy_hold",
+        symbol="SPY",
+        data_dir=data,
+        policy_path=RESEARCH_POLICY,
+    )
+    manifest_path = run_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.pop("manifest_fingerprint")
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ReproError) as exc:
+        load_manifest(manifest_path)
+
+    assert exc.value.reason is CompareReason.INCOMPLETE_MANIFEST
+
+
+def test_load_manifest_requires_bundle_artifact_declarations(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    _write_csv(data, "SPY")
+    run_dir = tmp_path / "run"
+    produce_named_backtest_run(
+        run_dir=run_dir,
+        strategy_id="baseline_buy_hold",
+        symbol="SPY",
+        data_dir=data,
+        policy_path=RESEARCH_POLICY,
+    )
+    manifest_path = run_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.pop("artifacts")
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ReproError) as exc:
+        load_manifest(manifest_path)
+
+    assert exc.value.reason is CompareReason.INCOMPLETE_MANIFEST
+
+
+def test_load_manifest_rejects_config_artifact_content_drift(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    _write_csv(data, "SPY")
+    run_dir = tmp_path / "run"
+    produce_named_backtest_run(
+        run_dir=run_dir,
+        strategy_id="baseline_buy_hold",
+        symbol="SPY",
+        data_dir=data,
+        policy_path=RESEARCH_POLICY,
+    )
+    config_path = run_dir / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["initial_cash_usd"] = 9999.0
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    manifest_path = run_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["artifacts"]["config_json"]["sha256"] = hashlib.sha256(
+        config_path.read_bytes()
+    ).hexdigest()
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ReproError) as exc:
+        load_manifest(manifest_path)
+
+    assert exc.value.reason is CompareReason.CHECKSUM_DRIFT
+
+
 @pytest.mark.parametrize("dataset_id_kind", ["traversal", "absolute"])
 def test_verify_datasets_rejects_dataset_id_escape(tmp_path: Path, dataset_id_kind: str) -> None:
     data_root = tmp_path / "data"
