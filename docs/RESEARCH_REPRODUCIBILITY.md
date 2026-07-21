@@ -21,7 +21,7 @@ Schema: `research-run-manifest-v1` (`chronos.research.repro`).
 | `config` | Normalized **non-secret** run configuration |
 | `config_hash` | SHA-256 of identity-relevant config + datasets + window |
 | `policy_version` / `policy_hash` | Research risk policy provenance |
-| `datasets[]` | `dataset_id`, `symbol`, `path`, content `sha256` |
+| `datasets[]` | `dataset_id`, `symbol`, content `sha256` (identity); optional `path` (operator metadata only) |
 | `date_window` | Requested `{start,end}` ISO dates (may be null if full file) |
 | `outputs` | Canonical metrics summary + artifact path checksum |
 | `output_fingerprint` | SHA-256 of canonical output payload |
@@ -115,8 +115,10 @@ reproducibility can consume the same schema later; those artifacts without
 - Research identity is **UTC-only**; do not encode local session wall clocks
   into the manifest.
 - `code_commit` must be a real git SHA at produce time.
-- Dataset paths in the manifest are whatever was passed at produce time;
-  replay resolves them relative to the process cwd unless absolute.
+- Dataset **identity** is content-addressed (`dataset_id` + `sha256`); host paths
+  are operator metadata and do not participate in `config_hash` / compare.
+- When `--data-dir` is passed to replay, that directory is **authoritative**:
+  files are verified under the override only (not the original recorded path).
 - Full multi-cell campaign JSON under `research/results/` is **not** auto-replayed
   by this CLI; use `research campaign` for generation and this tool for
   per-slice auditability.

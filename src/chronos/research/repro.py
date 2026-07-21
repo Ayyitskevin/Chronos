@@ -25,6 +25,10 @@ from chronos.research.runner import STRATEGY_FACTORIES, current_commit, run_name
 SCHEMA_VERSION = "research-run-manifest-v1"
 DEFAULT_TIMEZONE = "UTC"
 
+# Host-local path fields recorded for operator convenience only — never part of
+# run identity. Identical CSV content under two directories must compare equal.
+_VOLATILE_CONFIG_KEYS = frozenset({"data_dir", "policy_path", "halt_path"})
+
 # Keys (case-insensitive, substring) that must never appear with real values
 # in a research-run manifest. Values are replaced with a redaction token.
 _SECRET_KEY_RE = re.compile(
@@ -156,8 +160,42 @@ def normalize_config(config: Mapping[str, Any]) -> dict[str, Any]:
     return loaded
 
 
+def config_for_identity(config: Mapping[str, Any]) -> dict[str, Any]:
+    """Config fields that participate in identity (excludes host-local paths)."""
+
+    normalized = normalize_config(config)
+    return {key: value for key, value in normalized.items() if key not in _VOLATILE_CONFIG_KEYS}
+
+
+def datasets_for_identity(datasets: list[Any]) -> list[dict[str, str]]:
+    """Dataset identity is content-addressed: id + symbol + sha256 (no path)."""
+
+    out: list[dict[str, str]] = []
+    for entry in datasets:
+        if not isinstance(entry, Mapping):
+            raise ReproError(CompareReason.INCOMPLETE_MANIFEST, "dataset entry must be an object")
+        dataset_id = str(entry.get("dataset_id") or "").strip()
+        symbol = str(entry.get("symbol") or "").strip()
+        sha256 = str(entry.get("sha256") or "").strip()
+        if not dataset_id and symbol:
+            dataset_id = f"{symbol.upper()}.csv"
+        if not dataset_id or not sha256:
+            raise ReproError(
+                CompareReason.INCOMPLETE_MANIFEST,
+                "dataset entry requires dataset_id (or symbol) and sha256",
+            )
+        out.append(
+            {
+                "dataset_id": dataset_id,
+                "symbol": symbol.upper() if symbol else "",
+                "sha256": sha256,
+            }
+        )
+    return sorted(out, key=lambda item: item["dataset_id"])
+
+
 def _identity_payload(manifest: Mapping[str, Any]) -> dict[str, Any]:
-    """Fields that define run identity (excludes produced_at, artifacts, fingerprint)."""
+    """Fields that define run identity (excludes produced_at, artifacts, host paths)."""
 
     return {
         "schema_version": manifest["schema_version"],
@@ -166,11 +204,11 @@ def _identity_payload(manifest: Mapping[str, Any]) -> dict[str, Any]:
         "seed": manifest["seed"],
         "strategy_id": manifest["strategy_id"],
         "strategy_version": manifest["strategy_version"],
-        "config": manifest["config"],
+        "config": config_for_identity(manifest["config"]),
         "config_hash": manifest["config_hash"],
         "policy_version": manifest["policy_version"],
         "policy_hash": manifest["policy_hash"],
-        "datasets": manifest["datasets"],
+        "datasets": datasets_for_identity(list(manifest["datasets"])),
         "date_window": manifest["date_window"],
         "outputs": manifest["outputs"],
         "output_fingerprint": manifest["output_fingerprint"],
@@ -219,6 +257,8 @@ def _require_complete(manifest: Mapping[str, Any]) -> None:
         )
     if not isinstance(manifest.get("datasets"), list) or not manifest["datasets"]:
         raise ReproError(CompareReason.INCOMPLETE_MANIFEST, "datasets must be a non-empty list")
+    # Validate content-addressed dataset identity (path is optional operator metadata).
+    datasets_for_identity(list(manifest["datasets"]))
     if not isinstance(manifest.get("config"), Mapping):
         raise ReproError(CompareReason.INCOMPLETE_MANIFEST, "config must be an object")
     if not isinstance(manifest.get("date_window"), Mapping):
@@ -281,17 +321,19 @@ def write_manifest(manifest: Mapping[str, Any], path: Path | str) -> dict[str, A
     if not isinstance(payload.get("config"), Mapping):
         raise ReproError(CompareReason.INCOMPLETE_MANIFEST, "config must be an object")
     payload["config"] = normalize_config(payload["config"])
-    # Recompute config_hash from the normalized config so identity is self-consistent.
+    if not isinstance(payload.get("datasets"), list):
+        raise ReproError(CompareReason.INCOMPLETE_MANIFEST, "datasets must be a non-empty list")
+    # Recompute config_hash from path-free identity so host paths never cause drift.
     identity_config = {
         "strategy_id": payload.get("strategy_id"),
         "strategy_version": payload.get("strategy_version"),
         "seed": int(payload.get("seed", 0)),
         "timezone": payload["timezone"],
-        "config": payload["config"],
+        "config": config_for_identity(payload["config"]),
         "policy_version": payload.get("policy_version"),
         "policy_hash": payload.get("policy_hash"),
         "date_window": payload.get("date_window"),
-        "datasets": payload.get("datasets"),
+        "datasets": datasets_for_identity(list(payload["datasets"])),
     }
     payload["config_hash"] = stable_hash(identity_config)
     if not payload.get("output_fingerprint"):
@@ -518,30 +560,91 @@ def produce_from_existing_run(run_dir: Path) -> dict[str, Any]:
     )
 
 
-def verify_datasets(manifest: Mapping[str, Any], *, base_dir: Path | None = None) -> None:
-    """Fail closed if any declared dataset is missing or checksum-drifted."""
+def _resolve_dataset_path(
+    entry: Mapping[str, Any],
+    *,
+    data_dir: Path | None,
+    base_dir: Path,
+) -> Path:
+    """Resolve the file to verify for one dataset entry.
+
+    When ``data_dir`` is provided (CLI ``--data-dir`` override), that directory is
+    **authoritative**: we never fall back to the manifest-recorded path. This
+    prevents both false MISSING_DATA when the original path is gone and silent
+    acceptance of a matching original path while the override holds different bytes.
+    """
+
+    dataset_id = str(entry.get("dataset_id") or "").strip()
+    symbol = str(entry.get("symbol") or "").strip().upper()
+    if data_dir is not None:
+        candidates: list[Path] = []
+        if dataset_id:
+            candidates.append(Path(data_dir) / dataset_id)
+        if symbol:
+            candidates.append(Path(data_dir) / f"{symbol}.csv")
+        # Deduplicate while preserving order.
+        seen: set[str] = set()
+        unique: list[Path] = []
+        for candidate in candidates:
+            key = str(candidate)
+            if key not in seen:
+                seen.add(key)
+                unique.append(candidate)
+        for candidate in unique:
+            if candidate.exists():
+                return candidate
+        raise ReproError(
+            CompareReason.MISSING_DATA,
+            f"dataset missing under data_dir={data_dir}: "
+            f"tried {[str(c) for c in unique] or ['(no dataset_id/symbol)']}",
+        )
+
+    rel = str(entry.get("path") or "").strip()
+    if rel:
+        path = Path(rel)
+        if not path.is_absolute():
+            path = base_dir / path
+        if path.exists():
+            return path
+        raise ReproError(CompareReason.MISSING_DATA, f"dataset missing: {path}")
+
+    # No override and no recorded path: try dataset_id relative to base_dir.
+    if dataset_id:
+        path = base_dir / dataset_id
+        if path.exists():
+            return path
+        raise ReproError(CompareReason.MISSING_DATA, f"dataset missing: {path}")
+    raise ReproError(
+        CompareReason.INCOMPLETE_MANIFEST,
+        "dataset entry missing path and dataset_id; cannot resolve input file",
+    )
+
+
+def verify_datasets(
+    manifest: Mapping[str, Any],
+    *,
+    data_dir: Path | None = None,
+    base_dir: Path | None = None,
+) -> None:
+    """Fail closed if any declared dataset is missing or checksum-drifted.
+
+    ``data_dir``, when set, is the sole search root (override wins over recorded paths).
+    """
 
     base = base_dir or Path.cwd()
     for entry in manifest["datasets"]:
         if not isinstance(entry, Mapping):
             raise ReproError(CompareReason.INCOMPLETE_MANIFEST, "dataset entry must be an object")
-        rel = str(entry.get("path") or "")
-        expected = str(entry.get("sha256") or "")
-        if not rel or not expected:
-            raise ReproError(
-                CompareReason.INCOMPLETE_MANIFEST, "dataset entry missing path or sha256"
-            )
-        path = Path(rel)
-        if not path.is_absolute():
-            path = base / path
-        if not path.exists():
-            raise ReproError(CompareReason.MISSING_DATA, f"dataset missing: {path}")
+        expected = str(entry.get("sha256") or "").strip()
+        if not expected:
+            raise ReproError(CompareReason.INCOMPLETE_MANIFEST, "dataset entry missing sha256")
+        path = _resolve_dataset_path(entry, data_dir=data_dir, base_dir=base)
         actual = file_sha256(path)
         if actual != expected:
+            label = entry.get("dataset_id") or entry.get("path") or path.name
             raise ReproError(
                 CompareReason.CHECKSUM_DRIFT,
-                f"dataset {entry.get('dataset_id', rel)} sha256 drift: "
-                f"expected={expected} actual={actual}",
+                f"dataset {label} sha256 drift at {path}: expected={expected} actual={actual}",
             )
 
 
@@ -574,7 +677,8 @@ def replay_from_manifest(
     default_policy = "config/risk.research.yaml"
     resolved_policy = policy_path or Path(str(config.get("policy_path") or default_policy))
 
-    verify_datasets(manifest, base_dir=Path.cwd())
+    # Verify the inputs that will actually be used (override data_dir is authoritative).
+    verify_datasets(manifest, data_dir=resolved_data, base_dir=Path.cwd())
 
     # Use only the recorded config date bounds (do not inject date_window values —
     # those may be observed bar edges from a full-file run and would rewrite config).
@@ -748,7 +852,7 @@ def compare_manifests(
             "risk policy version/hash differ",
         )
 
-    # Config compare uses config_hash first (covers redacted normalized config).
+    # Config compare uses path-free identity (host paths are not identity).
     if expected.get("config_hash") != actual.get("config_hash"):
         note(
             CompareReason.CONFIG_DRIFT,
@@ -757,26 +861,23 @@ def compare_manifests(
             actual.get("config_hash"),
             "normalized non-secret configuration hash differs",
         )
-    elif expected.get("config") != actual.get("config"):
-        note(
-            CompareReason.CONFIG_DRIFT,
-            "config",
-            expected.get("config"),
-            actual.get("config"),
-            "normalized configuration objects differ",
-        )
+    else:
+        exp_cfg = config_for_identity(expected["config"])
+        act_cfg = config_for_identity(actual["config"])
+        if exp_cfg != act_cfg:
+            note(
+                CompareReason.CONFIG_DRIFT,
+                "config",
+                exp_cfg,
+                act_cfg,
+                "path-free configuration objects differ",
+            )
 
-    # Dataset id + checksum.
-    exp_ds = {
-        str(d.get("dataset_id") or d.get("path")): d
-        for d in expected.get("datasets", [])
-        if isinstance(d, Mapping)
-    }
-    act_ds = {
-        str(d.get("dataset_id") or d.get("path")): d
-        for d in actual.get("datasets", [])
-        if isinstance(d, Mapping)
-    }
+    # Dataset identity is id + sha256 only (paths are operator metadata).
+    exp_identity = datasets_for_identity(list(expected.get("datasets", [])))
+    act_identity = datasets_for_identity(list(actual.get("datasets", [])))
+    exp_ds = {item["dataset_id"]: item for item in exp_identity}
+    act_ds = {item["dataset_id"]: item for item in act_identity}
     if set(exp_ds) != set(act_ds):
         note(
             CompareReason.MISSING_DATA,
