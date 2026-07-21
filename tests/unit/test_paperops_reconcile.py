@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
 from scripts.paper_soak_report import build_soak_report
 
+from chronos.cli.main import cmd_paperops_audit
 from chronos.config.settings import Settings
 from chronos.domain.enums import OrderLifecycle, OrderSide, ProductFamily
 from chronos.orders.live_block import LIVE_TRADING_BLOCKED
@@ -284,3 +287,177 @@ def test_summarize_ledger_stages_and_to_dict(tmp_path: Path) -> None:
     assert "flags" in payload
     # JSON serializable
     json.dumps(payload)
+
+
+def test_database_unavailable_blocks_audit_and_does_not_leak_error_detail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import scripts.paper_soak_report as report_module
+
+    import chronos.config.settings as settings_module
+
+    ledger_path = tmp_path / "empty.jsonl"
+    ledger_path.write_text("", encoding="utf-8")
+    secret_detail = "postgresql://user:password@example.invalid/chronos"
+
+    def _unavailable(url: str) -> object:
+        del url
+        raise RuntimeError(secret_detail)
+
+    monkeypatch.setattr(report_module, "build_read_only_sqlite_soak_report", _unavailable)
+    monkeypatch.setattr(settings_module, "get_settings", _settings)
+    args = argparse.Namespace(
+        halt_file=tmp_path / "halt.json",
+        ledger=ledger_path,
+        database="sqlite:///:memory:",
+        json=True,
+    )
+
+    exit_code = cmd_paperops_audit(args)
+
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    assert exit_code == 1
+    assert "overall: ATTENTION" in captured.out
+    assert "DB_UNAVAILABLE" in captured.out
+    assert '"db_available": false' in captured.out
+    assert "RuntimeError" in combined
+    assert secret_detail not in combined
+
+
+def test_missing_sqlite_audit_target_fails_without_creating_database(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import chronos.config.settings as settings_module
+
+    ledger_path = tmp_path / "empty.jsonl"
+    ledger_path.write_text("", encoding="utf-8")
+    database_path = tmp_path / "missing.db"
+    monkeypatch.setattr(settings_module, "get_settings", _settings)
+    args = argparse.Namespace(
+        halt_file=tmp_path / "halt.json",
+        ledger=ledger_path,
+        database=f"sqlite:///{database_path}",
+        json=True,
+    )
+
+    exit_code = cmd_paperops_audit(args)
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert not database_path.exists()
+    assert '"db_available": false' in captured.out
+    assert "DB_UNAVAILABLE" in captured.out
+
+
+def test_empty_existing_sqlite_audit_target_fails_without_initializing_schema(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import chronos.config.settings as settings_module
+
+    ledger_path = tmp_path / "empty.jsonl"
+    ledger_path.write_text("", encoding="utf-8")
+    database_path = tmp_path / "uninitialized.db"
+    database_path.touch()
+    before = database_path.read_bytes()
+    files_before = {path.name for path in tmp_path.iterdir()}
+    monkeypatch.setattr(settings_module, "get_settings", _settings)
+    args = argparse.Namespace(
+        halt_file=tmp_path / "halt.json",
+        ledger=ledger_path,
+        database=f"sqlite:///{database_path}",
+        json=True,
+    )
+
+    exit_code = cmd_paperops_audit(args)
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert database_path.read_bytes() == before
+    assert {path.name for path in tmp_path.iterdir()} == files_before
+    assert '"db_available": false' in captured.out
+
+
+def test_existing_sqlite_audit_is_read_only_and_never_initializes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import chronos.config.settings as settings_module
+    import chronos.persistence.database as database_module
+
+    database_path = tmp_path / "existing.db"
+    database = Database(f"sqlite:///{database_path}")
+    database.initialize()
+    database.dispose()
+    before = database_path.read_bytes()
+    ledger_path = tmp_path / "empty.jsonl"
+    ledger_path.write_text("", encoding="utf-8")
+    files_before = {path.name for path in tmp_path.iterdir()}
+
+    def _forbid_initialize(self: object) -> None:
+        del self
+        raise AssertionError("read-only audit must not initialize or migrate a database")
+
+    monkeypatch.setattr(database_module.Database, "initialize", _forbid_initialize)
+    monkeypatch.setattr(settings_module, "get_settings", _settings)
+    args = argparse.Namespace(
+        halt_file=tmp_path / "halt.json",
+        ledger=ledger_path,
+        database=f"sqlite:///{database_path}",
+        json=True,
+    )
+
+    exit_code = cmd_paperops_audit(args)
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert database_path.read_bytes() == before
+    assert {path.name for path in tmp_path.iterdir()} == files_before
+    assert '"db_available": true' in captured.out
+    assert '"ok": true' in captured.out
+
+
+def test_non_sqlite_audit_fails_before_database_construction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import chronos.config.settings as settings_module
+    import chronos.persistence.database as database_module
+
+    ledger_path = tmp_path / "empty.jsonl"
+    ledger_path.write_text("", encoding="utf-8")
+    constructor_calls = 0
+
+    class _ForbiddenDatabase:
+        def __init__(self, url: str) -> None:
+            nonlocal constructor_calls
+            del url
+            constructor_calls += 1
+            raise AssertionError("non-SQLite audit must fail before opening a database")
+
+    monkeypatch.setattr(database_module, "Database", _ForbiddenDatabase)
+    monkeypatch.setattr(settings_module, "get_settings", _settings)
+    args = argparse.Namespace(
+        halt_file=tmp_path / "halt.json",
+        ledger=ledger_path,
+        database="postgresql://audit-user:secret@example.invalid/chronos",
+        json=True,
+    )
+
+    exit_code = cmd_paperops_audit(args)
+
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    assert exit_code == 1
+    assert constructor_calls == 0
+    assert '"db_available": false' in captured.out
+    assert "audit-user" not in combined
+    assert "secret" not in combined

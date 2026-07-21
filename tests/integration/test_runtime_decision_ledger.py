@@ -39,7 +39,7 @@ from chronos.orders.service import OrderManagementService
 from chronos.orders.submission import OrderSubmissionBoundary
 from chronos.orders.tracker import OrderStatusUpdate, OrderTracker
 from chronos.paperops.bootstrap import open_paper_decision_ledger
-from chronos.paperops.ledger import verify_decision_ledger
+from chronos.paperops.ledger import DecisionLedger, verify_decision_ledger
 from chronos.paperops.review import build_operator_review
 from chronos.persistence.database import Database
 from chronos.persistence.order_repositories import (
@@ -224,6 +224,15 @@ def test_tracker_fill_and_partial_append_ledger_rows(
     assert '"pipeline_stage":"fill"' in text or '"pipeline_stage": "fill"' in text
     assert "FILL_RECORDED" in text
     assert "PARTIALLY_FILLED" in text or "FILLED" in text
+
+    fill_rows = [
+        record
+        for record in DecisionLedger(path).read_all()
+        if record.payload.get("pipeline_stage") == "fill"
+    ]
+    assert fill_rows
+    assert all(record.data_source == "order_pipeline" for record in fill_rows)
+    assert all(record.data_quality_label == "N/A" for record in fill_rows)
 
     review = build_operator_review(path)
     assert review.ledger_ok is True

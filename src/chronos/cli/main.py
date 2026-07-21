@@ -731,11 +731,10 @@ def cmd_paperops_verify(args: argparse.Namespace) -> int:
 def cmd_paperops_audit(args: argparse.Namespace) -> int:
     """Unified soak DB + decision-ledger reconcile report (read-only)."""
 
-    from scripts.paper_soak_report import build_soak_report
+    from scripts.paper_soak_report import build_read_only_sqlite_soak_report
 
     from chronos.config.settings import get_settings
     from chronos.paperops.reconcile import SoakSnapshot, reconcile_soak_and_ledger
-    from chronos.persistence.database import Database
 
     store = HaltStore(args.halt_file)
     _banner(TradingMode.PAPER, store)
@@ -744,16 +743,11 @@ def cmd_paperops_audit(args: argparse.Namespace) -> int:
     db_url = args.database or settings.database_url
     soak: SoakSnapshot
     try:
-        database = Database(db_url)
-        try:
-            database.initialize()
-            soak = SoakSnapshot.from_soak_report(build_soak_report(database))
-        finally:
-            database.dispose()
+        soak = SoakSnapshot.from_soak_report(build_read_only_sqlite_soak_report(db_url))
     except Exception as error:  # DB half unavailable — still report ledger
+        reason = type(error).__name__
         print(
-            f"DB soak unavailable ({type(error).__name__}: {error}); "
-            "continuing with empty soak snapshot + ledger half",
+            f"DB soak unavailable ({reason}); audit blocked; ledger integrity report retained",
             file=sys.stderr,
         )
         soak = SoakSnapshot(
@@ -761,10 +755,10 @@ def cmd_paperops_audit(args: argparse.Namespace) -> int:
             status_counts={},
             event_source_counts={},
             submission_unknown_resolutions=0,
+            db_available=False,
+            db_unavailable_reason=reason,
         )
-    report = reconcile_soak_and_ledger(
-        soak=soak, ledger_path=ledger_path, settings=settings
-    )
+    report = reconcile_soak_and_ledger(soak=soak, ledger_path=ledger_path, settings=settings)
     print(report.render())
     if args.json:
         print(json.dumps(report.to_dict(), indent=2, sort_keys=True))

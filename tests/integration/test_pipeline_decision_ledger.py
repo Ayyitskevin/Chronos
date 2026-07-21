@@ -25,7 +25,15 @@ from tests.support.order_fakes import (
 
 from chronos.broker.connection import BrokerConnectionManager
 from chronos.config.settings import Settings
-from chronos.domain.enums import IBEnvironment, OrderIntent, ProductFamily, ReconciliationStatus
+from chronos.domain.enums import (
+    BrokerAdapter,
+    BrokerMode,
+    DemoProfile,
+    IBEnvironment,
+    OrderIntent,
+    ProductFamily,
+    ReconciliationStatus,
+)
 from chronos.domain.models import AccountSummary
 from chronos.orders.intent import build_option_intent
 from chronos.orders.mutations import OrderCancellationService, OrderModificationService
@@ -36,6 +44,11 @@ from chronos.orders.service import OrderManagementService
 from chronos.orders.submission import OrderSubmissionBoundary, SubmissionRefusalCode
 from chronos.orders.tracker import OrderTracker
 from chronos.paperops.ledger import DecisionLedger, verify_decision_ledger
+from chronos.paperops.pipeline import (
+    DECISION_SETTINGS_FIELDS,
+    decision_settings_projection,
+    settings_config_hash,
+)
 from chronos.paperops.replay import replay_ledger
 from chronos.paperops.review import build_operator_review
 from chronos.persistence.database import Database
@@ -180,14 +193,19 @@ def test_happy_path_writes_propose_and_submit_ledger_rows(ledger_harness: _Ledge
     p0 = propose_rows[0]
     assert p0.strategy_version == "unknown"
     assert p0.config_hash
-    assert p0.data_source
+    assert p0.data_source == "order_intent_limit_proxy"
     assert p0.data_timestamp_utc
+    assert p0.data_quality_label == "SYNTHETIC"
+    assert p0.outcome == "deny"
+    assert p0.payload["data_health"]["may_authorize_open"] is False
     assert p0.reason_code
     assert p0.payload.get("order_fingerprint") or p0.payload.get("effective_order_fingerprint")
 
     submit_rows = [r for r in records if r.payload.get("pipeline_stage") == "submit"]
     assert submit_rows and submit_rows[0].outcome == "allow"
     assert submit_rows[0].payload.get("submitted") is True
+    assert submit_rows[0].data_source == "order_pipeline"
+    assert submit_rows[0].data_quality_label == "N/A"
 
     # Secrets must not appear in the ledger file.
     text = h.ledger_path.read_text(encoding="utf-8")
@@ -202,6 +220,120 @@ def test_happy_path_writes_propose_and_submit_ledger_rows(ledger_harness: _Ledge
 
     # Raw account id should not be dumped (we only flag presence).
     assert PAPER_ACCOUNT not in text
+
+
+_HASH_SETTING_CHANGES: tuple[tuple[str, object], ...] = (
+    ("broker_mode", BrokerMode.DEMO),
+    ("broker_adapter", BrokerAdapter.IB_ASYNC),
+    ("demo_profile", DemoProfile.EMPTY_ACCOUNT),
+    ("ib_environment", IBEnvironment.LIVE),
+    ("ib_host", "paper-gateway.internal"),
+    ("ib_port", 4002),
+    ("ib_client_id", 19),
+    ("ib_account_id", "DU7654321"),
+    ("ib_account_allowlist", ("DU7654321",)),
+    ("allow_order_transmit", False),
+    ("allow_live_trading", True),
+    ("allow_outside_rth", True),
+    ("require_live_arming", False),
+    ("live_arm_ttl_minutes", 16),
+    ("require_typed_confirmation", False),
+    ("order_confirmation_ttl_seconds", 21),
+    ("live_kill_switch_file", Path("data/other-live-kill.json")),
+    ("session_baseline_file", Path("data/other-session-baseline.json")),
+    ("database_url", "sqlite:///data/other-chronos.db"),
+    ("symbol_allowlist", ("AAPL", "QQQ")),
+    ("crypto_allowlist", ("BTC", "ETH")),
+    ("crypto_time_in_force", "IOC"),
+    ("market_timezone", "UTC"),
+    ("max_quote_age_seconds", 17),
+    ("max_contracts_per_order", 3),
+    ("max_open_short_option_contracts", 6),
+    ("max_opening_orders_per_day", 4),
+    ("max_gross_assignment_usd", Decimal("26000")),
+    ("min_cash_buffer_usd", Decimal("6000")),
+    ("min_cash_buffer_pct", Decimal("0.11")),
+    ("max_symbol_allocation_pct", Decimal("0.26")),
+    ("max_total_wheel_allocation_pct", Decimal("0.61")),
+    ("max_crypto_allocation_pct", Decimal("0.11")),
+    ("max_crypto_notional_per_order_usd", Decimal("1100")),
+    ("max_session_drawdown_usd", Decimal("1100")),
+    ("max_session_drawdown_pct", Decimal("0.03")),
+)
+
+
+@pytest.mark.parametrize(("field", "changed_value"), _HASH_SETTING_CHANGES)
+def test_paperops_config_hash_covers_decision_settings(field: str, changed_value: object) -> None:
+    settings = paper_settings()
+    changed = settings.model_copy(update={field: changed_value})
+    assert settings_config_hash(changed) != settings_config_hash(settings)
+
+
+def test_paperops_config_hash_regressions_cover_the_complete_projection() -> None:
+    assert {field for field, _value in _HASH_SETTING_CHANGES} == set(DECISION_SETTINGS_FIELDS)
+
+
+def test_decision_settings_projection_is_secret_safe_and_canonical() -> None:
+    other_account = "DU7654321"
+    settings = paper_settings(
+        ib_host="private-gateway.example",
+        ib_account_allowlist=(PAPER_ACCOUNT, other_account),
+        database_url="postgresql://audit-user:secret@db.internal/chronos",
+        live_kill_switch_file=Path("/private/chronos/live-kill.json"),
+        session_baseline_file=Path("/private/chronos/session-baseline.json"),
+    )
+
+    projection = decision_settings_projection(settings)
+    encoded = json.dumps(projection, sort_keys=True)
+    for raw_value in (
+        PAPER_ACCOUNT,
+        other_account,
+        "private-gateway.example",
+        "audit-user",
+        "secret",
+        "/private/chronos/live-kill.json",
+        "/private/chronos/session-baseline.json",
+    ):
+        assert raw_value not in encoded
+    for digest_field in (
+        "broker_endpoint_sha256",
+        "ib_account_id_sha256",
+        "ib_account_allowlist_sha256",
+        "database_url_sha256",
+        "live_state_paths_sha256",
+    ):
+        assert re.fullmatch(r"[0-9a-f]{64}", str(projection[digest_field]))
+
+    reordered = settings.model_copy(
+        update={"ib_account_allowlist": tuple(reversed(settings.ib_account_allowlist))}
+    )
+    assert decision_settings_projection(reordered) == projection
+
+
+def test_config_hash_changes_when_risk_setting_flips_decision() -> None:
+    base = paper_settings(
+        max_contracts_per_order=1,
+        max_gross_assignment_usd=Decimal("100000"),
+        max_symbol_allocation_pct=Decimal("0.50"),
+    )
+    changed = base.model_copy(update={"max_contracts_per_order": 2})
+    intent = build_option_intent(
+        account_id=PAPER_ACCOUNT,
+        intent=OrderIntent.OPEN_SHORT_PUT,
+        contract=option_contract(),
+        quantity=2,
+        limit_price=Decimal("1.20"),
+        correlation_id="CHR-ORD-" + "H" * 32,
+        intent_id="config-hash-decision-flip",
+    )
+    evidence = _CannedEvidence(FakeBroker(), base).gather(intent, now=FIXED_NOW)
+
+    before = OrderRiskEngine(base).evaluate(intent, evidence, now=FIXED_NOW)
+    after = OrderRiskEngine(changed).evaluate(intent, evidence, now=FIXED_NOW)
+
+    assert before.approved is False
+    assert after.approved is True
+    assert settings_config_hash(base) != settings_config_hash(changed)
 
 
 def test_risk_refusal_records_deny_with_reason_code(tmp_path: Path) -> None:

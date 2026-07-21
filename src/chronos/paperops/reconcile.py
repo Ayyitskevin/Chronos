@@ -14,6 +14,7 @@ from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import cast
 
 from chronos.config.settings import Settings
 from chronos.orders.live_block import LIVE_TRADING_BLOCKED, evaluate_live_trading_block
@@ -30,15 +31,29 @@ class SoakSnapshot:
     event_source_counts: dict[str, int]
     submission_unknown_resolutions: int
     risk_check_failures: dict[str, int] = field(default_factory=dict)
+    db_available: bool = True
+    db_unavailable_reason: str | None = None
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, object]) -> SoakSnapshot:
         return cls(
-            total_intents=int(data.get("total_intents") or 0),
-            status_counts=dict(data.get("status_counts") or {}),  # type: ignore[arg-type]
-            event_source_counts=dict(data.get("event_source_counts") or {}),  # type: ignore[arg-type]
-            submission_unknown_resolutions=int(data.get("submission_unknown_resolutions") or 0),
-            risk_check_failures=dict(data.get("risk_check_failures") or {}),  # type: ignore[arg-type]
+            total_intents=int(cast(int | str, data.get("total_intents") or 0)),
+            status_counts=dict(cast(Mapping[str, int], data.get("status_counts") or {})),
+            event_source_counts=dict(
+                cast(Mapping[str, int], data.get("event_source_counts") or {})
+            ),
+            submission_unknown_resolutions=int(
+                cast(int | str, data.get("submission_unknown_resolutions") or 0)
+            ),
+            risk_check_failures=dict(
+                cast(Mapping[str, int], data.get("risk_check_failures") or {})
+            ),
+            db_available=bool(data.get("db_available", True)),
+            db_unavailable_reason=(
+                str(data["db_unavailable_reason"])
+                if data.get("db_unavailable_reason") is not None
+                else None
+            ),
         )
 
     @classmethod
@@ -102,6 +117,8 @@ class ReconcileReport:
             "flags": list(self.flags),
             "soak": {
                 "total_intents": self.soak.total_intents,
+                "db_available": self.soak.db_available,
+                "db_unavailable_reason": self.soak.db_unavailable_reason,
                 "status_counts": dict(self.soak.status_counts),
                 "event_source_counts": dict(self.soak.event_source_counts),
                 "submission_unknown_resolutions": self.soak.submission_unknown_resolutions,
@@ -192,6 +209,9 @@ def reconcile_soak_and_ledger(
     ledger = summarize_ledger_stages(ledger_path)
     flags: list[str] = []
 
+    if not soak.db_available:
+        flags.append(f"DB_UNAVAILABLE: {soak.db_unavailable_reason or 'reason not recorded'}")
+
     if not ledger.chain_ok:
         if not Path(ledger.path).exists():
             flags.append(f"LEDGER_MISSING: {ledger.chain_detail}")
@@ -199,7 +219,12 @@ def reconcile_soak_and_ledger(
             flags.append(f"LEDGER_CORRUPT_OR_INCOMPLETE: {ledger.chain_detail}")
 
     # Incompleteness when DB shows activity but ledger has no propose audit.
-    if soak.total_intents > 0 and ledger.chain_ok and ledger.propose_count == 0:
+    if (
+        soak.db_available
+        and soak.total_intents > 0
+        and ledger.chain_ok
+        and ledger.propose_count == 0
+    ):
         flags.append(
             f"LEDGER_MISSING_PROPOSE_AUDIT: db has {soak.total_intents} intent(s) "
             "but ledger has 0 propose-stage records"
@@ -208,20 +233,25 @@ def reconcile_soak_and_ledger(
     db_fills = int(soak.status_counts.get("FILLED", 0)) + int(
         soak.status_counts.get("PARTIALLY_FILLED", 0)
     )
-    if db_fills > 0 and ledger.chain_ok and ledger.fill_count == 0:
+    if soak.db_available and db_fills > 0 and ledger.chain_ok and ledger.fill_count == 0:
         flags.append(
             f"LEDGER_MISSING_FILL_AUDIT: db has {db_fills} FILLED/PARTIALLY_FILLED "
             "status row(s) but ledger has 0 fill-stage records"
         )
 
-    if ledger.chain_ok and ledger.fill_count > 0 and db_fills == 0:
+    if soak.db_available and ledger.chain_ok and ledger.fill_count > 0 and db_fills == 0:
         flags.append(
             f"DB_MISSING_FILL_STATUS: ledger has {ledger.fill_count} fill-stage "
             "record(s) but db has 0 FILLED/PARTIALLY_FILLED intents"
         )
 
     # Soft delta: more proposes than intents is suspicious (should not happen).
-    if ledger.chain_ok and ledger.propose_count > soak.total_intents and soak.total_intents >= 0:
+    if (
+        soak.db_available
+        and ledger.chain_ok
+        and ledger.propose_count > soak.total_intents
+        and soak.total_intents >= 0
+    ):
         flags.append(
             f"PROPOSE_EXCEEDS_INTENTS: ledger propose={ledger.propose_count} "
             f"> db intents={soak.total_intents}"
@@ -240,7 +270,8 @@ def reconcile_soak_and_ledger(
         )
     )
     if (
-        ledger.chain_ok
+        soak.db_available
+        and ledger.chain_ok
         and ledger.submit_count > 0
         and db_submitted_ish == 0
         and soak.total_intents > 0
@@ -281,32 +312,49 @@ def _render_lines(
     live_outcome: str,
     ok: bool,
 ) -> list[str]:
+    db_availability = (
+        "AVAILABLE"
+        if soak.db_available
+        else f"UNAVAILABLE ({soak.db_unavailable_reason or 'reason not recorded'})"
+    )
     lines = [
         "Chronos paper soak ↔ decision-ledger audit",
         "==========================================",
         f"overall: {'OK' if ok else 'ATTENTION'}  |  LIVE: {live_outcome} (blocked={live_blocked})",
         "",
         "DB soak (order database)",
-        f"  order intents: {soak.total_intents}",
+        f"  availability: {db_availability}",
+        f"  order intents: {soak.total_intents}"
+        if soak.db_available
+        else "  order intents: unavailable",
         "  lifecycle status:",
     ]
-    if soak.status_counts:
+    if not soak.db_available:
+        lines.append("    (unavailable)")
+    elif soak.status_counts:
         lines.extend(
             f"    {status:<22} {count}" for status, count in sorted(soak.status_counts.items())
         )
     else:
         lines.append("    (none)")
     lines.append("  order events by source:")
-    if soak.event_source_counts:
+    if not soak.db_available:
+        lines.append("    (unavailable)")
+    elif soak.event_source_counts:
         lines.extend(
             f"    {source:<22} {count}"
             for source, count in sorted(soak.event_source_counts.items())
         )
     else:
         lines.append("    (none)")
-    lines.append(f"  SUBMISSION_UNKNOWN resolutions: {soak.submission_unknown_resolutions}")
+    if soak.db_available:
+        lines.append(f"  SUBMISSION_UNKNOWN resolutions: {soak.submission_unknown_resolutions}")
+    else:
+        lines.append("  SUBMISSION_UNKNOWN resolutions: unavailable")
     lines.append("  risk-check FAIL/UNKNOWN:")
-    if soak.risk_check_failures:
+    if not soak.db_available:
+        lines.append("    (unavailable)")
+    elif soak.risk_check_failures:
         lines.extend(
             f"    {name:<32} {count}" for name, count in sorted(soak.risk_check_failures.items())
         )

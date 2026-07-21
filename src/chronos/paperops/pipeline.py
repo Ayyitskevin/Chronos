@@ -30,24 +30,132 @@ from chronos.paperops.reasons import DecisionKind, DecisionOutcome, PaperReasonC
 from chronos.paperops.records import DecisionRecord
 from chronos.paperops.session import RecordedDecision, record_paper_decision
 
+DECISION_SETTINGS_FIELDS: tuple[str, ...] = (
+    # Broker/runtime settings that select the evidence and submission boundary.
+    "broker_mode",
+    "broker_adapter",
+    "demo_profile",
+    "ib_environment",
+    "ib_host",
+    "ib_port",
+    "ib_client_id",
+    "ib_account_id",
+    "ib_account_allowlist",
+    "allow_order_transmit",
+    "allow_live_trading",
+    "allow_outside_rth",
+    # Human/live safety settings used by service and submission dependencies.
+    "require_live_arming",
+    "live_arm_ttl_minutes",
+    "require_typed_confirmation",
+    "order_confirmation_ttl_seconds",
+    "live_kill_switch_file",
+    "session_baseline_file",
+    # State/evidence selection that can change the recorded decision.
+    "database_url",
+    "symbol_allowlist",
+    "crypto_allowlist",
+    "crypto_time_in_force",
+    "market_timezone",
+    "max_quote_age_seconds",
+    # Risk/control limits consumed by OrderRiskEngine and paperops evaluation.
+    "max_contracts_per_order",
+    "max_open_short_option_contracts",
+    "max_opening_orders_per_day",
+    "max_gross_assignment_usd",
+    "min_cash_buffer_usd",
+    "min_cash_buffer_pct",
+    "max_symbol_allocation_pct",
+    "max_total_wheel_allocation_pct",
+    "max_crypto_allocation_pct",
+    "max_crypto_notional_per_order_usd",
+    "max_session_drawdown_usd",
+    "max_session_drawdown_pct",
+)
 
-def settings_config_hash(settings: Settings) -> str:
-    """Stable, secret-free hash of settings fields that bind paper decisions."""
 
-    payload = {
+def _canonical_decimal(value: Decimal) -> str:
+    normalized = value.normalize()
+    return "0" if normalized == 0 else format(normalized, "f")
+
+
+def _sensitive_digest(domain: str, value: object) -> str:
+    material = {"domain": domain, "value": value}
+    encoded = json.dumps(material, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def decision_settings_projection(settings: Settings) -> dict[str, object]:
+    """Canonical, secret-safe settings material for recorded OMS decisions.
+
+    The projection covers configuration read by broker selection, risk,
+    OrderManagementService, OrderSubmissionBoundary, and the live safety
+    dependencies wired into that boundary. Account ids, account allowlists,
+    connection targets, database URLs, and state paths are domain-separated
+    digests only; raw sensitive values never enter the decision ledger.
+    """
+
+    account_id = settings.ib_account_id.strip().upper()
+    account_allowlist = sorted(entry.strip().upper() for entry in settings.ib_account_allowlist)
+    endpoint = {
+        "host": settings.ib_host.strip().lower(),
+        "port": int(settings.ib_port),
+        "client_id": int(settings.ib_client_id),
+    }
+    live_state_paths = {
+        "kill_switch": str(settings.live_kill_switch_file),
+        "session_baseline": str(settings.session_baseline_file),
+    }
+    return {
+        "projection": "chronos.paperops.decision-settings.v1",
         "broker_mode": settings.broker_mode.value,
+        "broker_adapter": settings.broker_adapter.value,
+        "demo_profile": settings.demo_profile.value,
         "ib_environment": settings.ib_environment.value,
+        "broker_endpoint_sha256": _sensitive_digest("broker-endpoint-v1", endpoint),
+        "ib_account_id_sha256": _sensitive_digest("ib-account-id-v1", account_id),
+        "ib_account_allowlist_sha256": _sensitive_digest(
+            "ib-account-allowlist-v1", account_allowlist
+        ),
         "allow_order_transmit": settings.allow_order_transmit,
         "allow_live_trading": settings.allow_live_trading,
-        "symbol_allowlist": list(settings.symbol_allowlist),
+        "allow_outside_rth": settings.allow_outside_rth,
+        "require_live_arming": settings.require_live_arming,
+        "live_arm_ttl_minutes": settings.live_arm_ttl_minutes,
+        "require_typed_confirmation": settings.require_typed_confirmation,
+        "order_confirmation_ttl_seconds": settings.order_confirmation_ttl_seconds,
+        "live_state_paths_sha256": _sensitive_digest("live-state-paths-v1", live_state_paths),
+        "database_url_sha256": _sensitive_digest(
+            "order-database-url-v1", settings.database_url.strip()
+        ),
+        "symbol_allowlist": sorted(symbol.strip().upper() for symbol in settings.symbol_allowlist),
+        "crypto_allowlist": sorted(symbol.strip().upper() for symbol in settings.crypto_allowlist),
+        "crypto_time_in_force": settings.crypto_time_in_force,
+        "market_timezone": settings.market_timezone,
+        "max_quote_age_seconds": settings.max_quote_age_seconds,
+        "max_contracts_per_order": settings.max_contracts_per_order,
         "max_open_short_option_contracts": settings.max_open_short_option_contracts,
         "max_opening_orders_per_day": settings.max_opening_orders_per_day,
-        "max_gross_assignment_usd": str(settings.max_gross_assignment_usd),
-        "max_session_drawdown_usd": str(settings.max_session_drawdown_usd),
-        "max_session_drawdown_pct": str(settings.max_session_drawdown_pct),
-        "require_live_arming": settings.require_live_arming,
-        "require_typed_confirmation": settings.require_typed_confirmation,
+        "max_gross_assignment_usd": _canonical_decimal(settings.max_gross_assignment_usd),
+        "min_cash_buffer_usd": _canonical_decimal(settings.min_cash_buffer_usd),
+        "min_cash_buffer_pct": _canonical_decimal(settings.min_cash_buffer_pct),
+        "max_symbol_allocation_pct": _canonical_decimal(settings.max_symbol_allocation_pct),
+        "max_total_wheel_allocation_pct": _canonical_decimal(
+            settings.max_total_wheel_allocation_pct
+        ),
+        "max_crypto_allocation_pct": _canonical_decimal(settings.max_crypto_allocation_pct),
+        "max_crypto_notional_per_order_usd": _canonical_decimal(
+            settings.max_crypto_notional_per_order_usd
+        ),
+        "max_session_drawdown_usd": _canonical_decimal(settings.max_session_drawdown_usd),
+        "max_session_drawdown_pct": _canonical_decimal(settings.max_session_drawdown_pct),
     }
+
+
+def settings_config_hash(settings: Settings) -> str:
+    """Stable hash of the canonical secret-safe decision settings projection."""
+
+    payload = decision_settings_projection(settings)
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
@@ -82,8 +190,6 @@ def build_propose_input(
     settings: Settings,
     now: datetime,
     config_hash: str,
-    data_source: str = "paper_pipeline",
-    quality_label: str = "LIVE",
 ) -> PaperDecisionInput:
     """Build a paperops decision input from pipeline propose evidence."""
 
@@ -116,6 +222,8 @@ def build_propose_input(
     strategy_version = "unknown"
 
     quote_ts = now.isoformat()
+    # The OMS exposes an order limit, not broker quote evidence. Preserve the
+    # proxy for replay, but label it synthetic so it cannot authorize.
     return PaperDecisionInput(
         strategy_id=strategy_id,
         strategy_version=strategy_version,
@@ -128,8 +236,8 @@ def build_propose_input(
         ask=limit,
         last=limit,
         quote_utc=quote_ts,
-        data_source=data_source,
-        quality_label=quality_label,
+        data_source="order_intent_limit_proxy",
+        quality_label="SYNTHETIC",
         require_greeks=False,
         max_quote_age_seconds=float(settings.max_quote_age_seconds),
         halted=False,
@@ -189,15 +297,6 @@ class PipelineRecorder:
     ) -> RecordedDecision:
         """Record propose + risk outcome (deny when risk not approved)."""
 
-        quality = "LIVE" if environment is IBEnvironment.PAPER else "UNKNOWN"
-        # Live environment must never look authorizing from paperops audit alone.
-        if environment is IBEnvironment.LIVE:
-            quality = "UNKNOWN"
-        source = (
-            "ibkr_paper_pipeline"
-            if environment is IBEnvironment.PAPER
-            else f"pipeline:{environment.value}"
-        )
         inp = build_propose_input(
             intent=intent,
             risk=risk,
@@ -205,8 +304,6 @@ class PipelineRecorder:
             settings=self.settings,
             now=now,
             config_hash=self.config_hash,
-            data_source=source,
-            quality_label=quality,
         )
         extra: dict[str, object] = {
             "pipeline_stage": "propose",
@@ -286,12 +383,8 @@ class PipelineRecorder:
             strategy_version="unknown",
             config_hash=self.config_hash,
             data_timestamp_utc=now.isoformat(),
-            data_source=(
-                "ibkr_paper_pipeline"
-                if environment is IBEnvironment.PAPER
-                else f"pipeline:{environment.value}"
-            ),
-            data_quality_label="LIVE" if environment is IBEnvironment.PAPER else "UNKNOWN",
+            data_source="order_pipeline",
+            data_quality_label="N/A",
             decision_inputs=payload["decision_inputs"],  # type: ignore[arg-type]
             payload=payload,
         )
@@ -343,8 +436,8 @@ class PipelineRecorder:
             strategy_version="unknown",
             config_hash=self.config_hash,
             data_timestamp_utc=now.isoformat(),
-            data_source="paper_pipeline",
-            data_quality_label="LIVE",
+            data_source="order_pipeline",
+            data_quality_label="N/A",
             decision_inputs=payload["decision_inputs"],  # type: ignore[arg-type]
             payload=payload,
         )
