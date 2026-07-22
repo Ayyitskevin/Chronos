@@ -528,9 +528,10 @@ without trading, per the panel-remediated design in
   `evaluate_live_gates` walk (kill-switch file read last), a TRUE CAS
   pre-submit (`enforce_from_status`), a final kill-switch re-read between CAS
   and transmit, `BrokerRefusedBeforeSend` → synchronous REJECTED (provably
-  not sent), and the audited operator resolution
-  (`POST /orders/{id}/resolve`, typed note, fresh same-call snapshot) so a
-  stranded SUBMISSION_UNKNOWN can never permanently wedge live trading.
+  not sent), and an audited operator evidence refresh
+  (`POST /orders/{id}/resolve`, typed note, fresh same-call snapshot). Positive
+  broker evidence resolves state; absence remains SUBMISSION_UNKNOWN and can
+  keep live opening orders locked rather than fabricating a rejection.
   Live modify is refused (cancel + re-propose); cancel deliberately works
   under an engaged kill switch. Declined what-ifs no longer advance the
   lifecycle; accepted previews persist `preview_id`.

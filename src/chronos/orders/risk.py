@@ -47,6 +47,8 @@ class OrderRiskDecision(ChronosModel):
     checks: tuple[OrderRiskCheck, ...]
     decided_at: datetime
     expires_at: datetime
+    reconciliation_generation: int | None = Field(default=None, ge=0)
+    reconciliation_session_id: str | None = Field(default=None, min_length=1)
 
     @property
     def approved(self) -> bool:
@@ -60,6 +62,8 @@ def order_risk_decision_from_record(
     overall: RiskCheckStatus,
     decided_at: datetime,
     expires_at: datetime,
+    reconciliation_generation: int | None = None,
+    reconciliation_session_id: str | None = None,
 ) -> OrderRiskDecision:
     """Rebuild an :class:`OrderRiskDecision` from persisted check tuples."""
 
@@ -72,6 +76,8 @@ def order_risk_decision_from_record(
         ),
         decided_at=decided_at,
         expires_at=expires_at,
+        reconciliation_generation=reconciliation_generation,
+        reconciliation_session_id=reconciliation_session_id,
     )
 
 
@@ -80,6 +86,8 @@ class RiskEvidence(ChronosModel):
 
     account: AccountSummary
     reconciliation_status: ReconciliationStatus
+    reconciliation_generation: int | None = Field(default=None, ge=0)
+    reconciliation_session_id: str | None = Field(default=None, min_length=1)
     session: SessionDecision
     # Wheel-stage context for opening intents (None ⇒ unknown ⇒ fail).
     wheel_eligible_action: OrderIntent | None = None
@@ -162,6 +170,8 @@ class OrderRiskEngine:
             checks=tuple(checks),
             decided_at=now,
             expires_at=now + timedelta(seconds=ttl_seconds),
+            reconciliation_generation=evidence.reconciliation_generation,
+            reconciliation_session_id=evidence.reconciliation_session_id,
         )
 
     @staticmethod
@@ -180,8 +190,17 @@ class OrderRiskEngine:
 
     @staticmethod
     def _check_reconciled(evidence: RiskEvidence) -> OrderRiskCheck:
-        if evidence.reconciliation_status is ReconciliationStatus.RECONCILED:
+        if (
+            evidence.reconciliation_status is ReconciliationStatus.RECONCILED
+            and evidence.reconciliation_generation is not None
+            and evidence.reconciliation_session_id is not None
+        ):
             return _passed("reconciled_proven_state", "broker state reconciled")
+        if evidence.reconciliation_status is ReconciliationStatus.RECONCILED:
+            return _unknown(
+                "reconciled_proven_state",
+                "reconciliation provenance is incomplete; evidence cannot authorize submission",
+            )
         return _failed(
             "reconciled_proven_state",
             f"reconciliation is {evidence.reconciliation_status.value}, not RECONCILED",

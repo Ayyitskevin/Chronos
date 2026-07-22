@@ -52,8 +52,9 @@ limitations referenced by the README and the runbooks.
   positions and owned working orders stay `MANUAL_REVIEW` until complete allocation provenance
   exists. `MANUAL_REVIEW` is the safe outcome for any ambiguity.
 - A `SUBMISSION_UNKNOWN` order (an ambiguous failure after a send may have started) blocks
-  further live submissions until reconciliation resolves it from broker truth, or an audited
-  operator resolution (`POST /orders/{id}/resolve`) concludes it — never an auto-retry.
+  further live submissions until reconciliation resolves it from positive broker truth. The
+  audited operator endpoint (`POST /orders/{id}/resolve`) refreshes evidence but cannot turn
+  snapshot absence into a rejection — never an auto-retry.
 - The confirmation summary hash and idempotency key canonicalize the quantity but **not** the
   limit price, so two economically-identical spellings of a limit price (e.g. trailing zeros)
   would produce distinct hashes. This is a recorded, low-impact limitation: changing the

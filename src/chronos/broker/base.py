@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from contextlib import AbstractContextManager
 from datetime import datetime
 from typing import Protocol, runtime_checkable
 
@@ -50,6 +51,17 @@ class BrokerRefusedBeforeSend(BrokerSafetyError):
     resolve the intent to REJECTED synchronously instead of stranding it in
     SUBMISSION_UNKNOWN. An adapter must never raise it after starting a send.
     """
+
+
+class BrokerSendGuard(Protocol):
+    """Atomic last-line authorization held only across a broker send call.
+
+    A transmitting adapter must enter this guard exactly once and keep it held
+    only across its synchronous socket-send primitive, never while awaiting an
+    acknowledgement callback.
+    """
+
+    def at_send(self) -> AbstractContextManager[bool]: ...
 
 
 @runtime_checkable
@@ -105,7 +117,12 @@ class Broker(Protocol):
 
     async def preview_order(self, request: OrderRequest) -> OrderPreview: ...
 
-    async def submit_order(self, request: OrderRequest) -> OrderSubmission: ...
+    async def submit_order(
+        self,
+        request: OrderRequest,
+        *,
+        send_guard: BrokerSendGuard | None = None,
+    ) -> OrderSubmission: ...
 
     async def modify_order(self, request: OrderModification) -> OrderSubmission: ...
 

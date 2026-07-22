@@ -16,9 +16,12 @@ market data).
 
 from __future__ import annotations
 
+import logging
 import math
 import threading
 from collections import deque
+from collections.abc import Callable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
@@ -30,6 +33,9 @@ from chronos.domain.enums import DataQuality
 # fail a request: 2103-2108 market-data farm messages, 2119 connecting, 2158
 # sec-def farm OK, 1101/1102 connectivity restored.
 _BENIGN_CODES = frozenset({1101, 1102, 2103, 2104, 2105, 2106, 2107, 2108, 2119, 2158})
+
+# Loss and restoration both invalidate evidence from the prior TWS session.
+_CONNECTION_UNCERTAIN_CODES = frozenset({1100, 1101, 1102, 1300, 2110})
 
 _MARKET_DATA_TYPE_MAP = {
     1: DataQuality.LIVE,
@@ -99,8 +105,19 @@ class _SingleFlight:
 class CallbackBridge:
     """Connection-level state and callback routing for the official adapter."""
 
-    def __init__(self, registry: RequestRegistry) -> None:
+    def __init__(
+        self,
+        registry: RequestRegistry,
+        *,
+        on_connection_uncertain: Callable[[str], object] | None = None,
+        on_managed_account_scope_change: (
+            Callable[[str], AbstractContextManager[None]] | None
+        ) = None,
+    ) -> None:
         self.registry = registry
+        self._on_connection_uncertain = on_connection_uncertain
+        self._on_managed_account_scope_change = on_managed_account_scope_change
+        self._logger = logging.getLogger("chronos.broker.callbacks")
         self._lock = threading.Lock()
         self.connected_event = threading.Event()
         self.next_valid_id: int | None = None
@@ -130,15 +147,32 @@ class CallbackBridge:
     def on_managed_accounts(self, accounts_csv: str) -> None:
         accounts = tuple(part.strip() for part in accounts_csv.split(",") if part.strip())
         with self._lock:
-            self.managed_accounts = accounts
+            previous = self.managed_accounts
+        scope_changed = bool(previous) and frozenset(accounts) != frozenset(previous)
+        if scope_changed and self._on_managed_account_scope_change is not None:
+            with (
+                self._on_managed_account_scope_change(
+                    "official IBKR managed-account scope changed"
+                ),
+                self._lock,
+            ):
+                self.managed_accounts = accounts
+        else:
+            if scope_changed:
+                self._invalidate_connection("official IBKR managed-account scope changed")
+            with self._lock:
+                self.managed_accounts = accounts
         self.managed_accounts_event.set()
 
     def on_connection_closed(self) -> None:
+        self._invalidate_connection("official IBKR connection closed")
         self.connection_closed.set()
         # Fail everything in flight rather than letting waiters time out slowly.
         self._fail_all_single_flights("connection closed")
 
     def on_error(self, req_id: int, code: int, message: str) -> None:
+        if code in _CONNECTION_UNCERTAIN_CODES:
+            self._invalidate_connection(f"official IBKR connectivity event {code}")
         if code in _BENIGN_CODES or req_id < 0:
             with self._lock:
                 self.notices.append(f"[{code}] {message}")
@@ -154,6 +188,18 @@ class CallbackBridge:
             ack.done.set()
             return
         self.registry.fail(req_id, code, message)
+
+    def _invalidate_connection(self, reason: str) -> None:
+        callback = self._on_connection_uncertain
+        if callback is None:
+            return
+        try:
+            callback(reason)
+        except Exception:
+            self._logger.exception(
+                "Connection uncertainty observer failed",
+                extra={"event": "connection_uncertainty_observer_failed"},
+            )
 
     # ------------------------------------------------------------------ #
     # Single-flight, id-less request flows

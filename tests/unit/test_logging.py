@@ -122,6 +122,34 @@ def test_structured_formatter_preserves_aggregate_reconciliation_summary() -> No
     assert "250000" not in json.dumps(payload)
 
 
+def test_structured_formatter_preserves_submission_reconciliation_summary() -> None:
+    record = logging.LogRecord(
+        name="chronos.api",
+        level=logging.WARNING,
+        pathname=__file__,
+        lineno=1,
+        msg="Submission reconciliation finished PENDING",
+        args=(),
+        exc_info=None,
+    )
+    record.event = "submission_reconciliation_finished"
+    record.reconciliation_status = "PENDING"
+    record.applied_count = 1
+    record.proven_count = 2
+    record.unresolved_count = 3
+    record.remaining_active_count = 4
+    record.raw_reason = "Account DU1234567 balance 250000"
+
+    payload = json.loads(StructuredJsonFormatter().format(record))
+
+    assert payload["reconciliation_status"] == "PENDING"
+    assert payload["applied_count"] == 1
+    assert payload["proven_count"] == 2
+    assert payload["unresolved_count"] == 3
+    assert payload["remaining_active_count"] == 4
+    assert "raw_reason" not in payload
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     (

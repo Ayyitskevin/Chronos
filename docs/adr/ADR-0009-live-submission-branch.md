@@ -182,12 +182,11 @@ forever, with database surgery as the only exit. M7 designs the exits:
   kill-switch re-read (§4 step 10).
 - **Failed-after-send** (timeout/disconnect once bytes may have left): stays
   SUBMISSION_UNKNOWN for reconciliation — unchanged doctrine, never auto-retried.
-- **Audited operator resolution:** a new writer-lease-gated endpoint
-  (`POST /orders/{intent_id}/resolve`) drives a broker-absent SUBMISSION_UNKNOWN intent
-  to REJECTED only when a **fresh reconciliation snapshot from a connected broker** shows
-  no matching order_ref and no executions, and the operator supplies a typed note. The
-  transition is recorded with `source="OPERATOR"` and full evidence. Recovery is a
-  designed, audited action — not DB surgery.
+- **Audited operator refresh:** the writer-lease-gated
+  `POST /orders/{intent_id}/resolve` endpoint applies matching positive broker evidence.
+  Snapshot absence never proves rejection because the broker read and local lifecycle write
+  cannot be atomic; the endpoint returns a conflict and leaves the intent
+  SUBMISSION_UNKNOWN. The typed note makes the privileged recovery attempt explicit.
 
 ### 7. Mutations on the LIVE branch (panel finding: modify was an un-gated transmit path)
 
@@ -268,8 +267,8 @@ invariant in tests rests on broker construction (fakes only), so all test Settin
   demo/test/CI profiles false; frozen Settings rejects mutation.
 - Structural AST tests per §1; `chronos.control.modes` untouched (its tests unchanged);
   UI/broker isolation unchanged.
-- Integration: arm via the runtime/API instance, boundary sees it; operator resolve
-  endpoint drives SUBMISSION_UNKNOWN → REJECTED only with fresh broker absence evidence.
+- Integration: arm via the runtime/API instance, boundary sees it; operator refresh
+  applies positive broker truth while broker absence leaves SUBMISSION_UNKNOWN locked.
 
 ## Consequences
 

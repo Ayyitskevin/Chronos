@@ -28,6 +28,7 @@ from chronos.domain.models import (
     UnderlyingContract,
 )
 from chronos.orders.intent import WheelOrderIntent
+from chronos.orders.reconciliation_readiness import ReconciliationReadiness
 from chronos.orders.risk import RiskEvidence
 from chronos.services.trading_hours import session_for
 
@@ -40,16 +41,24 @@ class BrokerRiskEvidenceProvider:
         *,
         connection: BrokerConnectionManager,
         settings: Settings,
-        reconciliation_status: ReconciliationStatus = ReconciliationStatus.RECONCILED,
+        reconciliation_readiness: ReconciliationReadiness | None = None,
     ) -> None:
         self._connection = connection
         self._settings = settings
-        self._reconciliation_status = reconciliation_status
+        self._reconciliation_readiness = reconciliation_readiness or ReconciliationReadiness()
 
     def gather(self, intent: WheelOrderIntent, *, now: datetime) -> RiskEvidence:
+        readiness_before = self._reconciliation_readiness.snapshot()
         account = self._connection.run(self._connection.broker.account_summary())
         positions = self._connection.run(self._connection.broker.positions())
         open_orders = self._connection.run(self._connection.broker.open_orders())
+        readiness_after = self._reconciliation_readiness.snapshot()
+        evidence_provenance_is_current = (
+            readiness_before.ready
+            and readiness_after.ready
+            and readiness_before.session_id == readiness_after.session_id
+            and readiness_before.generation == readiness_after.generation
+        )
 
         existing_short_put_obligation = _short_put_obligation(positions)
         pending_open_put_obligation = _pending_put_obligation(open_orders)
@@ -81,7 +90,17 @@ class BrokerRiskEvidenceProvider:
         )
         return RiskEvidence(
             account=account,
-            reconciliation_status=self._reconciliation_status,
+            reconciliation_status=(
+                ReconciliationStatus.RECONCILED
+                if evidence_provenance_is_current
+                else ReconciliationStatus.PENDING
+            ),
+            reconciliation_generation=(
+                readiness_after.generation if evidence_provenance_is_current else None
+            ),
+            reconciliation_session_id=(
+                readiness_after.session_id if evidence_provenance_is_current else None
+            ),
             session=session,
             existing_short_put_obligation=existing_short_put_obligation,
             pending_open_put_obligation=pending_open_put_obligation,

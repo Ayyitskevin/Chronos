@@ -23,7 +23,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import threading
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any, Protocol
@@ -34,6 +34,7 @@ from chronos.broker.base import (
     BrokerError,
     BrokerRefusedBeforeSend,
     BrokerSafetyError,
+    BrokerSendGuard,
 )
 from chronos.broker.callbacks import CallbackBridge, QuoteState, clean_price
 from chronos.broker.order_ids import OrderIdAllocator
@@ -75,6 +76,8 @@ class _KillSwitchLike(Protocol):
     """Structural type for the last-line breaker check (avoids an import cycle)."""
 
     def is_engaged(self) -> bool: ...
+
+    def at_send(self) -> contextlib.AbstractContextManager[bool]: ...
 
 
 def _maybe_float(value: Any) -> float | None:
@@ -538,7 +541,14 @@ class OfficialIBKRBroker:
     """Production adapter over the official TWS API (read paths + M7 order path)."""
 
     def __init__(
-        self, settings: Settings, *, live_kill_switch: _KillSwitchLike | None = None
+        self,
+        settings: Settings,
+        *,
+        live_kill_switch: _KillSwitchLike | None = None,
+        on_connection_uncertain: Callable[[str], object] | None = None,
+        on_managed_account_scope_change: (
+            Callable[[str], contextlib.AbstractContextManager[None]] | None
+        ) = None,
     ) -> None:
         self._live_kill_switch = live_kill_switch
         _load_ibapi()  # fail fast with install guidance if the package is absent
@@ -557,7 +567,11 @@ class OfficialIBKRBroker:
         verify_environment_port(settings.ib_environment, settings.ib_port)
         self._settings = settings
         self.registry = RequestRegistry()
-        self.bridge = CallbackBridge(self.registry)
+        self.bridge = CallbackBridge(
+            self.registry,
+            on_connection_uncertain=on_connection_uncertain,
+            on_managed_account_scope_change=on_managed_account_scope_change,
+        )
         self.order_ids = OrderIdAllocator()
         self._app: Any = None
         self._thread: threading.Thread | None = None
@@ -567,8 +581,10 @@ class OfficialIBKRBroker:
     # ------------------------------------------------------------------ #
 
     async def connect(self) -> None:
-        if self._app is not None:
-            return
+        if self._app is not None or self._thread is not None:
+            if self._app_connected():
+                return
+            await self.disconnect()
         # Fresh handshake state: stale events must not vouch for a new session
         # (M7 review finding H4).
         self.bridge.reset_for_reconnect()
@@ -607,21 +623,40 @@ class OfficialIBKRBroker:
         app.reqMarketDataType(1)
 
     async def disconnect(self) -> None:
-        app, self._app = self._app, None
-        thread, self._thread = self._thread, None
+        app = self._app
+        thread = self._thread
         if app is not None:
             with contextlib.suppress(Exception):
                 app.disconnect()
         if thread is not None and thread.is_alive():
             thread.join(timeout=5.0)
+            if thread.is_alive():
+                # Retain the stale session handles and refuse reconnect. The
+                # bridge is shared, so resetting it while this reader can still
+                # issue callbacks would let old-session events poison a fresh
+                # reconciliation generation.
+                raise BrokerConnectionError(
+                    "official IBKR reader thread did not stop; reconnect is locked"
+                )
+        self._app = None
+        self._thread = None
+
+    def _app_connected(self) -> bool:
+        app = self._app
+        if app is None or self.bridge.connection_closed.is_set():
+            return False
+        try:
+            return bool(app.isConnected())
+        except Exception:
+            return False
 
     def _require_app(self) -> Any:
-        if self._app is None or self.bridge.connection_closed.is_set():
+        if not self._app_connected():
             raise BrokerConnectionError("official IBKR adapter is not connected")
         return self._app
 
     async def connection_status(self) -> ConnectionStatus:
-        connected = self._app is not None and not self.bridge.connection_closed.is_set()
+        connected = self._app_connected()
         environment = (
             DisplayEnvironment.LIVE
             if self._settings.ib_environment is IBEnvironment.LIVE
@@ -963,7 +998,7 @@ class OfficialIBKRBroker:
         """Local, pre-send re-verification shared by the order methods."""
 
         app = self._app
-        if app is None or self.bridge.connection_closed.is_set():
+        if not self._app_connected():
             # Local, provable pre-send fact: a dead session sends nothing
             # (review finding H3 — refusing here prevents a stranded
             # SUBMISSION_UNKNOWN for an order that could never leave).
@@ -1098,12 +1133,21 @@ class OfficialIBKRBroker:
             previewed_at=datetime.now(tz=UTC),
         )
 
-    async def submit_order(self, request: OrderRequest) -> OrderSubmission:
+    async def submit_order(
+        self,
+        request: OrderRequest,
+        *,
+        send_guard: BrokerSendGuard | None = None,
+    ) -> OrderSubmission:
         app = self._reverify_for_order_path(account_id=request.account_id, mutating=True)
         if not request.transmit:
             raise BrokerRefusedBeforeSend(
                 "submit_order requires an explicitly transmit-authorized request "
                 "from the submission boundary; refusing before send"
+            )
+        if send_guard is None:
+            raise BrokerRefusedBeforeSend(
+                "submission is missing atomic reconciliation authorization; refusing before send"
             )
         contract, order = self._build_order_objects(request, what_if=False)
         try:
@@ -1111,18 +1155,42 @@ class OfficialIBKRBroker:
         except RuntimeError as error:  # pre-send local fact (finding L1)
             raise BrokerRefusedBeforeSend(f"order-id allocator not seeded: {error}") from error
         flight = self.bridge.start_order_ack(order_id)
+        post_send_message = ""
+        payload: tuple[Any, ...]
         try:
-            app.placeOrder(order_id, contract, order)
+            with send_guard.at_send() as authorized:
+                if not authorized:
+                    raise BrokerRefusedBeforeSend(
+                        "reconciliation authorization changed; refusing before send"
+                    )
+                kill_guard = (
+                    self._live_kill_switch.at_send()
+                    if self._live_kill_switch is not None
+                    else contextlib.nullcontext(True)
+                )
+                with kill_guard as kill_authorized:
+                    if not kill_authorized:
+                        raise BrokerRefusedBeforeSend(
+                            "live kill switch engaged; refusing before send"
+                        )
+                    try:
+                        app.placeOrder(order_id, contract, order)
+                    except Exception:
+                        # Once the send call starts, conservatively retain the
+                        # allocated identity even if the client raises.
+                        post_send_message = "broker send raised; state unknown"
+                        flight.done.set()
             done = await asyncio.get_running_loop().run_in_executor(
                 None, flight.done.wait, _REQUEST_TIMEOUT_S
             )
             # A captured ack outranks a subsequent connection close (finding L3).
             if not done or (not flight.items and self.bridge.connection_closed.is_set()):
-                # Bytes may have left: NOT a refused-before-send.
-                raise BrokerConnectionError(
-                    f"no acknowledgement for order {order_id}; state unknown"
-                )
-            payload = tuple(flight.items[0]) if flight.items else ()
+                # Bytes may have left. Preserve the allocated identity so the
+                # boundary can persist it as unknown for reconciliation.
+                payload = ()
+                post_send_message = "no broker acknowledgement; state unknown"
+            else:
+                payload = tuple(flight.items[0]) if flight.items else ()
         finally:
             self.bridge.clear_order_ack(order_id)
         raw_status = ""
@@ -1138,9 +1206,7 @@ class OfficialIBKRBroker:
             if code in _DEFINITIVE_ORDER_REJECT_CODES:
                 raw_status = "Inactive"
             else:
-                raise BrokerConnectionError(
-                    f"order {order_id} errored ambiguously ([{code}] {payload[3]}); state unknown"
-                )
+                post_send_message = f"ambiguous broker error {code}; state unknown"
         elif payload and payload[0] == "orderStatus":
             raw_status = str(payload[2])
             perm_id = int(payload[5]) or None
@@ -1159,6 +1225,7 @@ class OfficialIBKRBroker:
             client_id=self._settings.ib_client_id,
             lifecycle=lifecycle,
             submitted_at=datetime.now(tz=UTC),
+            message=post_send_message,
         )
 
     async def modify_order(self, request: OrderModification) -> OrderSubmission:
@@ -1177,7 +1244,7 @@ class OfficialIBKRBroker:
         # Deliberately NOT kill-switch gated: cancellation is risk-reducing and
         # must work during an emergency stop (ADR-0009 §7).
         app = self._app
-        if app is None or self.bridge.connection_closed.is_set():
+        if not self._app_connected():
             raise BrokerRefusedBeforeSend("not connected; no cancel was sent")
         verify_environment_port(self._settings.ib_environment, self._settings.ib_port)
         flight = self.bridge.start_order_ack(broker_order_id)

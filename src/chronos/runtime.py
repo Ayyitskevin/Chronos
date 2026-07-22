@@ -11,7 +11,7 @@ from __future__ import annotations
 import atexit
 import logging
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from chronos.broker.base import Broker
 from chronos.broker.connection import BrokerConnectionManager
@@ -24,6 +24,7 @@ from chronos.domain.enums import (
     ConnectionState,
     IBEnvironment,
     ProductFamily,
+    ReconciliationStatus,
 )
 from chronos.domain.models import (
     AccountSummary,
@@ -40,7 +41,14 @@ from chronos.orders.kill_switch import LiveKillSwitch
 from chronos.orders.live_audit import KillSwitchEventRepository, LiveArmEventRepository
 from chronos.orders.mutations import OrderCancellationService, OrderModificationService
 from chronos.orders.preview import OrderPreviewService
-from chronos.orders.reconciliation_recovery import OrderRestartReconciler
+from chronos.orders.reconciliation_readiness import (
+    ReconciliationReadiness,
+    ReconciliationReadinessSnapshot,
+)
+from chronos.orders.reconciliation_recovery import (
+    OrderRestartReconciler,
+    OrderRestartReconciliationReport,
+)
 from chronos.orders.risk import OrderRiskEngine
 from chronos.orders.service import OrderManagementService
 from chronos.orders.session_drawdown import SessionDrawdownBreaker
@@ -54,7 +62,10 @@ from chronos.persistence.order_repositories import (
     RiskDecisionRepository,
 )
 from chronos.persistence.repositories import LocalReconciliationRepository
-from chronos.services.reconciliation import ReconciliationCoordinator
+from chronos.services.reconciliation import (
+    ReconciliationCoordinator,
+    ReconciliationResult,
+)
 from chronos.services.short_put_candidates import ShortPutCandidateService
 from chronos.services.short_put_demo_approval import ShortPutDemoApprovalService
 from chronos.services.short_put_demo_what_if import ShortPutDemoWhatIfService
@@ -62,6 +73,16 @@ from chronos.services.short_put_risk_preview import ShortPutRiskPreviewService
 from chronos.ui.runtime_scope import RuntimeScopeView, build_bound_runtime_scope
 from chronos.utils.identifiers import account_fingerprint
 from chronos.utils.logging import configure_logging
+from chronos.utils.time import utc_now
+
+
+@dataclass(frozen=True, slots=True)
+class SubmissionReconciliationReport:
+    """Composite evidence used to publish order-submission readiness."""
+
+    restart: OrderRestartReconciliationReport
+    portfolio: ReconciliationResult
+    readiness: ReconciliationReadinessSnapshot
 
 
 @dataclass(slots=True)
@@ -74,6 +95,7 @@ class AppRuntime:
     database: Database
     reconciliation: ReconciliationCoordinator
     short_put_candidates: ShortPutCandidateService
+    reconciliation_readiness: ReconciliationReadiness
     short_put_risk_preview: ShortPutRiskPreviewService
     short_put_demo_what_if: ShortPutDemoWhatIfService
     short_put_demo_approval: ShortPutDemoApprovalService
@@ -81,6 +103,73 @@ class AppRuntime:
     live_arming: LiveArmingService
     live_kill_switch: LiveKillSwitch
     session_drawdown: SessionDrawdownBreaker
+
+    def reconcile_submission_readiness(
+        self, *, now: datetime | None = None
+    ) -> SubmissionReconciliationReport:
+        """Publish readiness only from one complete, unchanged evidence generation."""
+
+        moment = now or utc_now()
+        with self.reconciliation_readiness.reconciliation_session(
+            "reconciliation observation in progress"
+        ) as generation:
+            return self._reconcile_submission_readiness_generation(moment, generation)
+
+    def _reconcile_submission_readiness_generation(
+        self, moment: datetime, generation: int
+    ) -> SubmissionReconciliationReport:
+        try:
+            restart = self.order_management.reconcile_on_restart_report(now=moment)
+            portfolio = self.reconciliation.reconcile()
+            scope_status = self.connection.run(self.broker.connection_status())
+        except BaseException:
+            self.reconciliation_readiness.complete(
+                expected_generation=generation,
+                status=ReconciliationStatus.PENDING,
+                reason="reconciliation failed; order submission remains locked",
+            )
+            raise
+
+        # ReconciliationResult.opening_actions_locked deliberately remains True:
+        # its status is one predicate in this composite, never authorization by itself.
+        scope_is_current = (
+            scope_status.connected
+            and scope_status.state is ConnectionState.CONNECTED
+            and scope_status.account_id == self.order_management.account_id
+        )
+        if not scope_is_current:
+            status = ReconciliationStatus.PENDING
+            reason = "broker connection/account scope changed during reconciliation"
+        elif portfolio.status is ReconciliationStatus.MANUAL_REVIEW:
+            status = ReconciliationStatus.MANUAL_REVIEW
+            reason = "portfolio reconciliation requires manual review"
+        elif portfolio.status is not ReconciliationStatus.RECONCILED or portfolio.snapshot is None:
+            status = ReconciliationStatus.PENDING
+            reason = "portfolio reconciliation did not produce complete evidence"
+        elif portfolio.snapshot.open_orders:
+            status = ReconciliationStatus.PENDING
+            reason = "broker open orders remain; another opening action is locked"
+        elif not restart.permits_new_opening_order:
+            status = ReconciliationStatus.PENDING
+            reason = (
+                "sent-active order intents remain after restart reconciliation; "
+                "another opening action is locked"
+            )
+        else:
+            status = ReconciliationStatus.RECONCILED
+            reason = "full broker/local parity proven with no sent-active order intents"
+
+        self.reconciliation_readiness.complete(
+            expected_generation=generation,
+            status=status,
+            reason=reason,
+            reconciled_at=moment if status is ReconciliationStatus.RECONCILED else None,
+        )
+        return SubmissionReconciliationReport(
+            restart=restart,
+            portfolio=portfolio,
+            readiness=self.reconciliation_readiness.snapshot(),
+        )
 
     def close(self) -> None:
         try:
@@ -120,6 +209,7 @@ def build_runtime(*, register_atexit: bool = True) -> AppRuntime:
     connection: BrokerConnectionManager | None = None
     try:
         database.initialize()
+        reconciliation_readiness = ReconciliationReadiness()
         # ADR-0009: ONE durable kill-switch instance shared by the broker
         # adapter's last-line check, the submission boundary, and the /live API.
         live_kill_switch = LiveKillSwitch(
@@ -132,7 +222,9 @@ def build_runtime(*, register_atexit: bool = True) -> AppRuntime:
         elif settings.broker_adapter is BrokerAdapter.IB_ASYNC:
             from chronos.broker.ibkr import IBKRBroker
 
-            broker = IBKRBroker(settings)
+            broker = IBKRBroker(
+                settings, on_connection_uncertain=reconciliation_readiness.invalidate
+            )
         else:
             # Production default: the official TWS API adapter (lazy import;
             # raises with install guidance when the package is absent). The
@@ -141,13 +233,18 @@ def build_runtime(*, register_atexit: bool = True) -> AppRuntime:
             # as the /live API and the submission boundary.
             from chronos.broker.official_ibkr import OfficialIBKRBroker
 
-            broker = OfficialIBKRBroker(settings, live_kill_switch=live_kill_switch)
+            broker = OfficialIBKRBroker(
+                settings,
+                live_kill_switch=live_kill_switch,
+                on_connection_uncertain=reconciliation_readiness.invalidate,
+                on_managed_account_scope_change=(reconciliation_readiness.invalidating_transition),
+            )
         market_data = MarketDataManager(
             broker,
             max_quote_age=timedelta(seconds=settings.max_quote_age_seconds),
             clock=demo_now if isinstance(broker, DemoBroker) else None,
         )
-        connection = BrokerConnectionManager(broker)
+        connection = BrokerConnectionManager(broker, readiness=reconciliation_readiness)
         connection.connect()
         account = connection.run(broker.account_summary())
         status = connection.run(broker.connection_status())
@@ -214,6 +311,7 @@ def build_runtime(*, register_atexit: bool = True) -> AppRuntime:
             live_arming=live_arming,
             live_kill_switch=live_kill_switch,
             session_drawdown=session_drawdown,
+            reconciliation_readiness=reconciliation_readiness,
         )
     except BaseException:
         if connection is not None:
@@ -240,6 +338,7 @@ def build_runtime(*, register_atexit: bool = True) -> AppRuntime:
         market_data=market_data,
         database=database,
         reconciliation=reconciliation,
+        reconciliation_readiness=reconciliation_readiness,
         short_put_candidates=short_put_candidates,
         short_put_risk_preview=short_put_risk_preview,
         short_put_demo_what_if=short_put_demo_what_if,
@@ -264,6 +363,7 @@ def _build_order_management(
     live_arming: LiveArmingService,
     live_kill_switch: LiveKillSwitch,
     session_drawdown: SessionDrawdownBreaker,
+    reconciliation_readiness: ReconciliationReadiness,
 ) -> OrderManagementService:
     """Wire the human-in-the-loop order pipeline (M5 paper + M7 live branch)."""
 
@@ -298,7 +398,11 @@ def _build_order_management(
         settings=settings,
         environment=settings.ib_environment,
         account_id=account.account_id,
-        evidence_provider=BrokerRiskEvidenceProvider(connection=connection, settings=settings),
+        evidence_provider=BrokerRiskEvidenceProvider(
+            connection=connection,
+            settings=settings,
+            reconciliation_readiness=reconciliation_readiness,
+        ),
         risk_engine=OrderRiskEngine(settings),
         preview_service=OrderPreviewService(connection),
         submission_boundary=OrderSubmissionBoundary(
@@ -311,6 +415,7 @@ def _build_order_management(
             live_kill_switch=live_kill_switch,
             session_drawdown=session_drawdown,
             quote_reader=_read_fresh_quote,
+            reconciliation_readiness=reconciliation_readiness,
         ),
         modification=OrderModificationService(
             connection=connection,
@@ -331,6 +436,8 @@ def _build_order_management(
             connection=connection,
             intents=intents,
             tracker=tracker,
+            reconciliation_readiness=reconciliation_readiness,
+            expected_broker_client_id=settings.ib_client_id,
             market_timezone=settings.market_timezone,
         ),
         intents=intents,

@@ -12,7 +12,7 @@ fills only ever move forward.
 from __future__ import annotations
 
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from chronos.domain.enums import OrderLifecycle
 from chronos.domain.models import ChronosModel
@@ -125,6 +125,7 @@ class OrderTracker:
                 "occurred_at": update.occurred_at.isoformat(),
             },
             occurred_at=update.occurred_at,
+            enforce_from_status=True,
         )
 
     def record_operator_rejection(
@@ -190,3 +191,31 @@ class OrderTracker:
             if event.broker_order_id is not None:
                 return event.broker_order_id
         return None
+
+    def effective_limit_price(
+        self,
+        intent_id: str,
+        *,
+        original_limit_price: Decimal | None,
+        current_account_id: str,
+    ) -> Decimal | None:
+        """Latest persisted working limit, or the immutable intent value.
+
+        Paper modifications keep lifecycle state unchanged and persist their
+        replacement price in the MODIFIED event evidence. Invalid modification
+        evidence returns ``None`` so restart reconciliation fails closed.
+        """
+
+        events = self._tracker.events(intent_id, current_account_id=current_account_id)
+        for event in reversed(events):
+            if event.source != "MODIFY":
+                continue
+            raw_price = event.evidence.get("new_limit_price")
+            if not isinstance(raw_price, str):
+                return None
+            try:
+                value = Decimal(raw_price)
+            except InvalidOperation:
+                return None
+            return value if value > 0 else None
+        return original_limit_price

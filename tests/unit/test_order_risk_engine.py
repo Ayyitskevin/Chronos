@@ -56,6 +56,8 @@ def test_unknown_check_makes_overall_fail() -> None:
         RiskEvidence(
             account=_account(),
             reconciliation_status=ReconciliationStatus.RECONCILED,
+            reconciliation_generation=1,
+            reconciliation_session_id="test-session",
             session=ambiguous,
         ),
         now=_NOW,
@@ -106,6 +108,8 @@ def test_covered_call_uncovered_fails() -> None:
         RiskEvidence(
             account=_account(),
             reconciliation_status=ReconciliationStatus.RECONCILED,
+            reconciliation_generation=1,
+            reconciliation_session_id="test-session",
             session=_open_session(),
             settled_long_shares=Decimal("0"),
         ),
@@ -132,6 +136,8 @@ def test_covered_call_fully_covered_passes() -> None:
         RiskEvidence(
             account=_account(),
             reconciliation_status=ReconciliationStatus.RECONCILED,
+            reconciliation_generation=1,
+            reconciliation_session_id="test-session",
             session=_open_session(),
             settled_long_shares=Decimal("100"),
         ),
@@ -155,6 +161,8 @@ def test_buy_to_close_requires_held_short() -> None:
         RiskEvidence(
             account=_account(),
             reconciliation_status=ReconciliationStatus.RECONCILED,
+            reconciliation_generation=1,
+            reconciliation_session_id="test-session",
             session=_open_session(),
             held_short_option_contracts=1,  # closing 2 but only 1 held
         ),
@@ -178,6 +186,8 @@ def test_stock_buy_within_cash_passes_and_short_sell_fails() -> None:
         RiskEvidence(
             account=_account(cash="80000"),
             reconciliation_status=ReconciliationStatus.RECONCILED,
+            reconciliation_generation=1,
+            reconciliation_session_id="test-session",
             session=_open_session(),
         ),
         now=_NOW,
@@ -197,6 +207,8 @@ def test_stock_buy_within_cash_passes_and_short_sell_fails() -> None:
         RiskEvidence(
             account=_account(),
             reconciliation_status=ReconciliationStatus.RECONCILED,
+            reconciliation_generation=1,
+            reconciliation_session_id="test-session",
             session=_open_session(),
             settled_long_shares=Decimal("5"),  # only 5 held, selling 10 -> short
         ),
@@ -225,6 +237,8 @@ def test_pending_covered_call_shares_block_a_naked_second_call() -> None:
         RiskEvidence(
             account=_account(),
             reconciliation_status=ReconciliationStatus.RECONCILED,
+            reconciliation_generation=1,
+            reconciliation_session_id="test-session",
             session=_open_session(),
             settled_long_shares=Decimal("100"),
             shares_reserved_for_pending_calls=Decimal("100"),  # already committed
@@ -250,6 +264,8 @@ def test_stock_buy_blocked_by_existing_put_obligation() -> None:
         RiskEvidence(
             account=_account(cash="35000"),
             reconciliation_status=ReconciliationStatus.RECONCILED,
+            reconciliation_generation=1,
+            reconciliation_session_id="test-session",
             session=_open_session(),
             existing_short_put_obligation=Decimal("28000"),  # secures an open CSP
         ),
@@ -275,6 +291,8 @@ def test_concentration_uses_existing_baseline() -> None:
         RiskEvidence(
             account=_account(nlv="100000", cash="90000"),  # 25% cap = $25,000
             reconciliation_status=ReconciliationStatus.RECONCILED,
+            reconciliation_generation=1,
+            reconciliation_session_id="test-session",
             session=_open_session(),
             current_symbol_allocation=Decimal("20000"),  # existing AAPL exposure
             current_total_wheel_allocation=Decimal("20000"),

@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 
 from chronos.api.main import create_app
 from chronos.config.settings import get_settings
+from chronos.orders.service import OrderManagementService
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -57,6 +58,27 @@ def test_list_orders_empty(client: TestClient, headers: dict[str, str]) -> None:
     assert response.json() == []
 
 
+def test_startup_and_operator_reconcile_publish_readiness(
+    client: TestClient,
+    headers: dict[str, str],
+    demo_env: Path,
+) -> None:
+    health = client.get("/health").json()
+    assert health["reconciliation_status"] == "RECONCILED"
+    assert health["reconciliation_generation"] >= 1
+
+    response = client.post("/orders/reconcile", headers=headers)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "RECONCILED"
+    assert body["unresolved_count"] == 0
+    assert body["remaining_active_count"] == 0
+    log_text = (demo_env / "chronos.log").read_text(encoding="utf-8")
+    assert '"operation":"operator_reconcile"' in log_text
+    assert '"reconciliation_status":"RECONCILED"' in log_text
+    assert '"outcome":"ready"' in log_text
+
+
 def test_get_unknown_order_404(client: TestClient, headers: dict[str, str]) -> None:
     assert client.get("/orders/does-not-exist", headers=headers).status_code == 404
 
@@ -93,6 +115,32 @@ def test_propose_non_day_tif_for_stock_is_422(client: TestClient, headers: dict[
     response = client.post("/orders/propose", json=body, headers=headers)
     assert response.status_code == 422
     assert "non-DAY" in response.json()["detail"]
+
+
+def test_startup_reconciliation_failure_keeps_api_available_and_locked(
+    demo_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail_reconciliation(self: OrderManagementService, *, now: object = None) -> object:
+        del self, now
+        raise RuntimeError("sensitive broker payload DU1234567 balance 250000")
+
+    monkeypatch.setattr(OrderManagementService, "reconcile_on_restart_report", fail_reconciliation)
+    app = create_app()
+    with TestClient(app) as test_client:
+        headers = {"X-Chronos-Token": (demo_env / "backend_api_token").read_text().strip()}
+        health = test_client.get("/health").json()
+        assert health["reconciliation_status"] == "PENDING"
+        assert health["writer_lease_held"] is True
+        assert test_client.get("/orders", headers=headers).status_code == 200
+        response = test_client.post("/orders/reconcile", headers=headers)
+        assert response.status_code == 409
+        assert "submission remains locked" in response.json()["detail"]
+
+    log_text = (demo_env / "chronos.log").read_text(encoding="utf-8")
+    assert '"event":"submission_reconciliation_failed"' in log_text
+    assert '"error_type":"RuntimeError"' in log_text
+    assert '"operation":"operator_reconcile"' in log_text
+    assert "DU1234567" not in log_text
 
 
 @pytest.fixture()

@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 
 from chronos.api.main import create_app
 from chronos.config.settings import get_settings
+from chronos.orders.service import OrderManagementService
 from chronos.persistence.database import Database
 from chronos.utils.locking import WriterLease
 
@@ -98,7 +99,7 @@ def test_candidates_round_trip(client: TestClient, demo_env: Path) -> None:
     assert "status" in body
 
 
-def test_second_backend_starts_read_only(demo_env: Path) -> None:
+def test_second_backend_starts_read_only(demo_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Hold the lease externally, as a first backend would.
     settings_db = f"sqlite:///{demo_env / 'chronos.db'}"
     database = Database(settings_db)
@@ -106,6 +107,13 @@ def test_second_backend_starts_read_only(demo_env: Path) -> None:
     external = WriterLease(database.sessions, holder="test-first-writer")
     assert external.acquire() is True
     try:
+
+        def unexpected_reconciliation(
+            self: OrderManagementService, *, now: object = None
+        ) -> object:
+            del self, now
+            raise AssertionError("read-only startup must skip reconciliation")
+
         app = create_app()
         with TestClient(app) as test_client:
             health = test_client.get("/health").json()

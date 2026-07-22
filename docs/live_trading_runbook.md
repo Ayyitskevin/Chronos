@@ -95,10 +95,10 @@ switch** — recovery is an explicit operator action, never a silent re-arm.
   gate, with the stuck intent ids named in the refusal. Resolution paths, in
   order: restart reconciliation resolves it from broker evidence; otherwise
   `POST /orders/{intent_id}/resolve` with a typed operator note performs an
-  **audited** resolution to REJECTED — only after a fresh broker snapshot in
-  that same call shows no matching order and no executions. If the broker
-  still knows the order, the endpoint applies broker truth and refuses the
-  manual rejection. Never edit the database directly.
+  **audited evidence refresh**. If the broker knows the order, the endpoint
+  applies that positive truth. Snapshot absence cannot safely prove rejection,
+  so it returns a conflict and leaves SUBMISSION_UNKNOWN locked for later
+  positive evidence. Never edit the database directly.
 - **Adapter refusals before send** (`BrokerRefusedBeforeSend`) resolve the
   intent to REJECTED automatically — nothing reached the venue, nothing
   wedges, and the refusal reason is recorded on the intent's event trail.

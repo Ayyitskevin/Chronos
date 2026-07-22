@@ -9,6 +9,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from threading import Event, Thread
 
 import pytest
 
@@ -105,6 +106,27 @@ def test_kill_switch_disengage_requires_note(tmp_path: Path) -> None:
     assert not switch.is_engaged()
 
 
+def test_kill_switch_disengage_audit_failure_remains_engaged(tmp_path: Path) -> None:
+    class _Audit:
+        def record(
+            self,
+            *,
+            action: str,
+            initiated_by: str,
+            detail: dict[str, object],
+            occurred_at: datetime,
+        ) -> None:
+            del initiated_by, detail, occurred_at
+            if action == "disengage":
+                raise RuntimeError("audit unavailable")
+
+    switch = LiveKillSwitch(tmp_path / "ks.json", audit=_Audit())
+    switch.engage(reason="halt", initiated_by="op", now=_NOW)
+    with pytest.raises(RuntimeError, match="audit unavailable"):
+        switch.disengage(operator_note="reviewed", initiated_by="op", now=_NOW)
+    assert switch.is_engaged()
+
+
 def test_kill_switch_corrupt_file_fails_closed(tmp_path: Path) -> None:
     path = tmp_path / "ks.json"
     path.write_text("{ not valid json", encoding="utf-8")
@@ -114,6 +136,29 @@ def test_kill_switch_corrupt_file_fails_closed(tmp_path: Path) -> None:
 def test_kill_switch_engage_requires_reason(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="non-empty reason"):
         LiveKillSwitch(tmp_path / "ks.json").engage(reason="  ", initiated_by="op", now=_NOW)
+
+
+def test_kill_switch_engagement_waits_for_synchronous_send(tmp_path: Path) -> None:
+    switch = LiveKillSwitch(tmp_path / "ks.json")
+    engage_started = Event()
+    engage_finished = Event()
+
+    def engage() -> None:
+        engage_started.set()
+        switch.engage(reason="operator halt", initiated_by="op", now=_NOW)
+        engage_finished.set()
+
+    with switch.at_send() as authorized:
+        assert authorized is True
+        thread = Thread(target=engage)
+        thread.start()
+        assert engage_started.wait(timeout=1)
+        assert not engage_finished.wait(timeout=0.05)
+
+    assert engage_finished.wait(timeout=1)
+    thread.join(timeout=1)
+    assert not thread.is_alive()
+    assert switch.is_engaged()
 
 
 # --- session drawdown -----------------------------------------------------

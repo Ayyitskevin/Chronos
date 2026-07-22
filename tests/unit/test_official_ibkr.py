@@ -9,17 +9,28 @@ recorded callback payloads into domain models faithfully.
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from pathlib import Path
+from threading import Event, Thread
 from types import SimpleNamespace
 
 import pytest
 
 from chronos.broker import official_ibkr as official_ibkr_module
-from chronos.broker.base import BrokerDataError, BrokerError, BrokerSafetyError
-from chronos.broker.callbacks import QuoteState
+from chronos.broker.base import (
+    BrokerConnectionError,
+    BrokerDataError,
+    BrokerError,
+    BrokerRefusedBeforeSend,
+    BrokerSafetyError,
+)
+from chronos.broker.callbacks import CallbackBridge, QuoteState
 from chronos.broker.official_ibkr import (
     OfficialIBKRBroker,
     account_summary_from_rows,
@@ -30,12 +41,15 @@ from chronos.broker.official_ibkr import (
     quote_from_state,
     verify_environment_port,
 )
+from chronos.broker.order_ids import OrderIdAllocator
+from chronos.broker.request_registry import RequestRegistry
 from chronos.config.settings import Settings
 from chronos.domain.enums import (
     DataQuality,
     IBEnvironment,
     OptionRight,
     OrderIntent,
+    OrderLifecycle,
     OrderSide,
 )
 from chronos.domain.models import (
@@ -44,6 +58,7 @@ from chronos.domain.models import (
     OrderRequest,
     UnderlyingContract,
 )
+from chronos.orders.kill_switch import LiveKillSwitch
 
 NOW = datetime(2026, 7, 17, 15, 0, tzinfo=UTC)
 
@@ -270,6 +285,41 @@ class TestChainAndQuoteNormalizers:
         assert quote.bid is None  # missing stays missing — never invented
 
 
+class _DisconnectableApp:
+    def __init__(self) -> None:
+        self.disconnected = False
+
+    def disconnect(self) -> None:
+        self.disconnected = True
+
+
+class _StubbornReaderThread:
+    def __init__(self) -> None:
+        self.join_timeout: float | None = None
+
+    def is_alive(self) -> bool:
+        return True
+
+    def join(self, timeout: float | None = None) -> None:
+        self.join_timeout = timeout
+
+
+def test_disconnect_retains_stubborn_reader_and_fences_reconnect() -> None:
+    broker = object.__new__(OfficialIBKRBroker)
+    app = _DisconnectableApp()
+    thread = _StubbornReaderThread()
+    broker._app = app
+    broker._thread = thread  # type: ignore[assignment]
+
+    with pytest.raises(BrokerConnectionError, match="reader thread did not stop"):
+        asyncio.run(broker.disconnect())
+
+    assert app.disconnected is True
+    assert thread.join_timeout == 5.0
+    assert broker._app is app
+    assert broker._thread is thread
+
+
 class _FakeContract:
     conId = 0
     exchange = ""
@@ -287,6 +337,212 @@ class _FakeOrder:
         self.orderRef = ""
         self.whatIf = False
         self.transmit = False
+
+
+class _ConnectedOrderApp:
+    def __init__(self) -> None:
+        self.place_calls: list[int] = []
+
+    def isConnected(self) -> bool:
+        return True
+
+    def placeOrder(self, order_id: int, contract: object, order: object) -> None:
+        del contract, order
+        self.place_calls.append(order_id)
+
+
+class _RaisingOrderApp(_ConnectedOrderApp):
+    def placeOrder(self, order_id: int, contract: object, order: object) -> None:
+        super().placeOrder(order_id, contract, order)
+        raise RuntimeError("simulated client send failure")
+
+
+class _ConcurrentEngageOrderApp:
+    def __init__(self, switch: LiveKillSwitch, bridge: CallbackBridge) -> None:
+        self.switch = switch
+        self.bridge = bridge
+        self.place_calls: list[int] = []
+        self.engage_started = Event()
+        self.engage_finished = Event()
+        self.thread: Thread | None = None
+
+    def isConnected(self) -> bool:
+        return True
+
+    def placeOrder(self, order_id: int, contract: object, order: object) -> None:
+        del contract, order
+        self.place_calls.append(order_id)
+
+        def engage() -> None:
+            self.engage_started.set()
+            self.switch.engage(reason="operator halt", initiated_by="op", now=NOW)
+            self.engage_finished.set()
+
+        thread = Thread(target=engage)
+        self.thread = thread
+        thread.start()
+        assert self.engage_started.wait(timeout=1)
+        assert not self.engage_finished.wait(timeout=0.05)
+        self.bridge.on_order_status(
+            order_id,
+            "Submitted",
+            0.0,
+            1.0,
+            0.0,
+            0,
+        )
+
+
+class _AllowSendGuard:
+    @contextmanager
+    def at_send(self) -> Iterator[bool]:
+        yield True
+
+
+def test_submit_rechecks_kill_switch_atomically_after_order_build(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(
+        official_ibkr_module, "_load_ibapi", lambda: (None, None, _FakeContract, None)
+    )
+    monkeypatch.setattr(official_ibkr_module, "_load_order_class", lambda: _FakeOrder)
+    switch = LiveKillSwitch(tmp_path / "ks.json")
+    broker = object.__new__(OfficialIBKRBroker)
+    broker._settings = SimpleNamespace(  # type: ignore[assignment]
+        ib_environment=IBEnvironment.LIVE,
+        ib_port=7496,
+        ib_account_id="U7654321",
+        allow_outside_rth=False,
+    )
+    broker._live_kill_switch = switch
+    broker.bridge = CallbackBridge(RequestRegistry())
+    broker.bridge.managed_accounts = ("U7654321",)
+    broker.order_ids = OrderIdAllocator()
+    broker.order_ids.seed(9001)
+    app = _ConnectedOrderApp()
+    broker._app = app
+
+    original_build = broker._build_order_objects
+
+    def build_then_engage(request: OrderRequest, *, what_if: bool) -> tuple[object, object]:
+        built = original_build(request, what_if=what_if)
+        switch.engage(reason="operator halt", initiated_by="op", now=NOW)
+        return built
+
+    monkeypatch.setattr(broker, "_build_order_objects", build_then_engage)
+    request = OrderRequest(
+        correlation_id="CHR-ORD-" + "F" * 32,
+        account_id="U7654321",
+        contract=CryptoContract(con_id=1, symbol="ETH"),
+        intent=OrderIntent.OPEN_LONG_CRYPTO,
+        side=OrderSide.BUY,
+        quantity=Decimal("0.1"),
+        limit_price=Decimal("3000"),
+        order_ref="CHR-ORD-" + "F" * 32,
+        transmit=True,
+    )
+
+    with pytest.raises(BrokerRefusedBeforeSend, match="kill switch engaged"):
+        asyncio.run(broker.submit_order(request, send_guard=_AllowSendGuard()))
+
+    assert app.place_calls == []
+
+
+def test_concurrent_kill_engagement_linearizes_after_synchronous_send(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(
+        official_ibkr_module, "_load_ibapi", lambda: (None, None, _FakeContract, None)
+    )
+    monkeypatch.setattr(official_ibkr_module, "_load_order_class", lambda: _FakeOrder)
+    switch = LiveKillSwitch(tmp_path / "ks.json")
+    broker = object.__new__(OfficialIBKRBroker)
+    broker._settings = SimpleNamespace(  # type: ignore[assignment]
+        ib_environment=IBEnvironment.LIVE,
+        ib_port=7496,
+        ib_account_id="U7654321",
+        allow_outside_rth=False,
+        ib_client_id=17,
+    )
+    broker._live_kill_switch = switch
+    broker.bridge = CallbackBridge(RequestRegistry())
+    broker.bridge.managed_accounts = ("U7654321",)
+    broker.order_ids = OrderIdAllocator()
+    broker.order_ids.seed(9100)
+    app = _ConcurrentEngageOrderApp(switch, broker.bridge)
+    broker._app = app
+    request = OrderRequest(
+        correlation_id="CHR-ORD-" + "G" * 32,
+        account_id="U7654321",
+        contract=CryptoContract(con_id=1, symbol="ETH"),
+        intent=OrderIntent.OPEN_LONG_CRYPTO,
+        side=OrderSide.BUY,
+        quantity=Decimal("0.1"),
+        limit_price=Decimal("3000"),
+        order_ref="CHR-ORD-" + "G" * 32,
+        transmit=True,
+    )
+
+    submission = asyncio.run(broker.submit_order(request, send_guard=_AllowSendGuard()))
+
+    thread = app.thread
+    assert thread is not None
+    thread.join(timeout=1)
+    assert not thread.is_alive()
+    assert app.engage_finished.is_set()
+    assert app.place_calls == [9100]
+    assert submission.lifecycle is OrderLifecycle.SUBMITTED
+    assert switch.is_engaged()
+
+
+@pytest.mark.parametrize(
+    ("send_raises", "expected_message"),
+    [
+        (False, "no broker acknowledgement; state unknown"),
+        (True, "broker send raised; state unknown"),
+    ],
+)
+def test_submit_ambiguity_returns_unknown_with_allocated_broker_id(
+    monkeypatch: pytest.MonkeyPatch, send_raises: bool, expected_message: str
+) -> None:
+    monkeypatch.setattr(
+        official_ibkr_module, "_load_ibapi", lambda: (None, None, _FakeContract, None)
+    )
+    monkeypatch.setattr(official_ibkr_module, "_load_order_class", lambda: _FakeOrder)
+    monkeypatch.setattr(official_ibkr_module, "_REQUEST_TIMEOUT_S", 0.01)
+    broker = object.__new__(OfficialIBKRBroker)
+    broker._settings = SimpleNamespace(  # type: ignore[assignment]
+        ib_environment=IBEnvironment.PAPER,
+        ib_port=7497,
+        ib_account_id="DU7654321",
+        allow_outside_rth=False,
+        ib_client_id=17,
+    )
+    broker._live_kill_switch = None
+    broker.bridge = CallbackBridge(RequestRegistry())
+    broker.bridge.managed_accounts = ("DU7654321",)
+    broker.order_ids = OrderIdAllocator()
+    broker.order_ids.seed(9200)
+    app = _RaisingOrderApp() if send_raises else _ConnectedOrderApp()
+    broker._app = app
+    request = OrderRequest(
+        correlation_id="CHR-ORD-" + "H" * 32,
+        account_id="DU7654321",
+        contract=CryptoContract(con_id=1, symbol="ETH"),
+        intent=OrderIntent.OPEN_LONG_CRYPTO,
+        side=OrderSide.BUY,
+        quantity=Decimal("0.1"),
+        limit_price=Decimal("3000"),
+        order_ref="CHR-ORD-" + "H" * 32,
+        transmit=True,
+    )
+
+    submission = asyncio.run(broker.submit_order(request, send_guard=_AllowSendGuard()))
+
+    assert app.place_calls == [9200]
+    assert submission.broker_order_id == 9200
+    assert submission.lifecycle is OrderLifecycle.SUBMISSION_UNKNOWN
+    assert submission.message == expected_message
 
 
 class TestOrderObjectBuilding:

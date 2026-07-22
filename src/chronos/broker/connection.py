@@ -8,19 +8,36 @@ from collections.abc import Coroutine
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from threading import Event, Lock, Thread
-from typing import Any, TypeVar
+from typing import Any, Protocol, TypeVar
 
-from chronos.broker.base import Broker
+from chronos.broker.base import (
+    Broker,
+    BrokerRefusedBeforeSend,
+)
+from chronos.domain.enums import ConnectionState
 
 T = TypeVar("T")
+
+
+class ConnectionStateInvalidator(Protocol):
+    """Fail-closed observer for broker-session lifecycle uncertainty."""
+
+    def invalidate(self, reason: str) -> object: ...
 
 
 class BrokerConnectionManager:
     """Own a broker adapter and serialize calls on a dedicated background loop."""
 
-    def __init__(self, broker: Broker, *, call_timeout_seconds: float = 30.0) -> None:
+    def __init__(
+        self,
+        broker: Broker,
+        *,
+        call_timeout_seconds: float = 30.0,
+        readiness: ConnectionStateInvalidator | None = None,
+    ) -> None:
         self.broker = broker
         self._call_timeout_seconds = call_timeout_seconds
+        self._readiness = readiness
         self._loop = asyncio.new_event_loop()
         self._thread = Thread(target=self._run_loop, name="chronos-broker-loop", daemon=True)
         self._ready = Event()
@@ -87,14 +104,52 @@ class BrokerConnectionManager:
             return future.result(timeout=timeout or self._call_timeout_seconds)
         except FutureTimeoutError:
             future.cancel()
+            self._invalidate("broker call timed out; connection state is uncertain")
+            raise
+        except BrokerRefusedBeforeSend:
+            # This exception is a narrow proof that no broker send started; it
+            # says nothing adverse about connection health.
+            raise
+        except BaseException:
+            self._invalidate("broker call failed; connection state is uncertain")
             raise
 
     def connect(self) -> None:
+        already_healthy = False
+        if self.running:
+            try:
+                status = self.run(self.broker.connection_status())
+            except BaseException:
+                # The run call already invalidated for an uncertain failure. A
+                # typed local safety refusal still needs explicit invalidation.
+                self._invalidate("broker connection state is uncertain")
+            else:
+                already_healthy = status.connected and status.state is ConnectionState.CONNECTED
+        if not already_healthy:
+            # A genuinely new/recovered session never inherits prior evidence.
+            self._invalidate("broker connection started; reconciliation required")
         self.run(self.broker.connect())
 
     def disconnect(self) -> None:
+        # Invalidate before touching the broker so even a failed disconnect
+        # cannot leave prior authorization evidence armed.
+        self._invalidate("broker disconnected; reconciliation required after reconnect")
         if self.running:
             self.run(self.broker.disconnect())
+
+    def _invalidate(self, reason: str) -> None:
+        readiness = self._readiness
+        if readiness is None:
+            return
+        try:
+            readiness.invalidate(reason)
+        except Exception:
+            # Safety-observer failures must be visible but must not replace the
+            # broker exception/lifecycle result the caller is already handling.
+            self._logger.exception(
+                "Failed to invalidate reconciliation readiness",
+                extra={"event": "reconciliation_readiness_invalidation_failed"},
+            )
 
     def close(self) -> None:
         """Disconnect and stop the loop; safe to call repeatedly."""

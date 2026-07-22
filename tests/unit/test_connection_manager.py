@@ -5,9 +5,11 @@ from threading import Event, Lock
 import pytest
 from tests.conftest import FIXED_NOW
 
+from chronos.broker.base import BrokerDataError, BrokerRefusedBeforeSend, BrokerSafetyError
 from chronos.broker.connection import BrokerConnectionManager
 from chronos.broker.demo import DemoBroker
-from chronos.domain.enums import ConnectionState
+from chronos.domain.enums import ConnectionState, ReconciliationStatus
+from chronos.orders.reconciliation_readiness import ReconciliationReadiness
 
 
 def test_connection_manager_reuses_one_background_thread() -> None:
@@ -88,3 +90,114 @@ def test_timed_out_call_is_cancelled_before_it_can_finish() -> None:
         manager.close()
 
     assert not completed.is_set()
+
+
+def _mark_ready(readiness: ReconciliationReadiness) -> int:
+    generation = readiness.snapshot().generation
+    assert readiness.complete(
+        expected_generation=generation,
+        status=ReconciliationStatus.RECONCILED,
+        reason="test broker and local parity",
+        reconciled_at=FIXED_NOW,
+    )
+    return generation
+
+
+def test_disconnect_and_reconnect_never_inherit_prior_readiness() -> None:
+    readiness = ReconciliationReadiness()
+    broker = DemoBroker(clock=lambda: FIXED_NOW)
+    manager = BrokerConnectionManager(broker, readiness=readiness)
+    try:
+        manager.connect()
+        ready_generation = _mark_ready(readiness)
+        assert readiness.is_reconciled(expected_generation=ready_generation)
+
+        manager.disconnect()
+        disconnected = readiness.snapshot()
+        assert disconnected.status is ReconciliationStatus.PENDING
+        assert disconnected.generation > ready_generation
+
+        manager.connect()
+        reconnected = readiness.snapshot()
+        assert reconnected.status is ReconciliationStatus.PENDING
+        assert reconnected.generation > disconnected.generation
+    finally:
+        manager.close()
+
+
+def test_failed_broker_call_invalidates_prior_readiness() -> None:
+    readiness = ReconciliationReadiness()
+    broker = DemoBroker(clock=lambda: FIXED_NOW)
+    manager = BrokerConnectionManager(broker, readiness=readiness)
+
+    async def fail() -> None:
+        raise RuntimeError("socket state unknown")
+
+    try:
+        manager.connect()
+        ready_generation = _mark_ready(readiness)
+        with pytest.raises(RuntimeError, match="socket state unknown"):
+            manager.run(fail())
+        assert readiness.is_reconciled(expected_generation=ready_generation) is False
+        assert readiness.snapshot().status is ReconciliationStatus.PENDING
+    finally:
+        manager.close()
+
+
+def test_healthy_idempotent_connect_preserves_current_readiness() -> None:
+    readiness = ReconciliationReadiness()
+    broker = DemoBroker(clock=lambda: FIXED_NOW)
+    manager = BrokerConnectionManager(broker, readiness=readiness)
+    try:
+        manager.connect()
+        ready_generation = _mark_ready(readiness)
+
+        manager.connect()
+
+        assert readiness.is_reconciled(expected_generation=ready_generation)
+        assert readiness.snapshot().generation == ready_generation
+    finally:
+        manager.close()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        BrokerDataError("broker evidence missing"),
+        BrokerSafetyError("broker evidence violated a safety invariant"),
+    ],
+)
+def test_broker_evidence_errors_invalidate_prior_readiness(error: Exception) -> None:
+    readiness = ReconciliationReadiness()
+    broker = DemoBroker(clock=lambda: FIXED_NOW)
+    manager = BrokerConnectionManager(broker, readiness=readiness)
+
+    async def fail() -> None:
+        raise error
+
+    try:
+        manager.connect()
+        ready_generation = _mark_ready(readiness)
+        with pytest.raises(type(error)):
+            manager.run(fail())
+        assert readiness.is_reconciled(expected_generation=ready_generation) is False
+    finally:
+        manager.close()
+
+
+def test_proven_pre_send_refusal_preserves_connection_readiness() -> None:
+    readiness = ReconciliationReadiness()
+    broker = DemoBroker(clock=lambda: FIXED_NOW)
+    manager = BrokerConnectionManager(broker, readiness=readiness)
+
+    async def refuse() -> None:
+        raise BrokerRefusedBeforeSend("local refusal before network send")
+
+    try:
+        manager.connect()
+        ready_generation = _mark_ready(readiness)
+        with pytest.raises(BrokerRefusedBeforeSend):
+            manager.run(refuse())
+        assert readiness.is_reconciled(expected_generation=ready_generation)
+    finally:
+        manager.close()

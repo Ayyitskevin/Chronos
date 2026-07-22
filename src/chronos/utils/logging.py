@@ -20,6 +20,12 @@ _RECONCILIATION_COUNT_FIELDS = (
     "manual_review_symbol_count",
     "result_reason_count",
 )
+_SUBMISSION_RECONCILIATION_COUNT_FIELDS = (
+    "applied_count",
+    "proven_count",
+    "unresolved_count",
+    "remaining_active_count",
+)
 _MAX_AGGREGATE_DIAGNOSTIC_COUNT = 1_000_000
 
 
@@ -139,6 +145,14 @@ class StructuredJsonFormatter(logging.Formatter):
             if type(snapshot_published) is bool:
                 payload["snapshot_published"] = snapshot_published
             for name in _RECONCILIATION_COUNT_FIELDS:
+                value = getattr(record, name, None)
+                if type(value) is int and 0 <= value <= _MAX_AGGREGATE_DIAGNOSTIC_COUNT:
+                    payload[name] = value
+        if getattr(record, "event", None) == "submission_reconciliation_finished":
+            status = getattr(record, "reconciliation_status", None)
+            if type(status) is str and status in _RECONCILIATION_STATUSES:
+                payload["reconciliation_status"] = status
+            for name in _SUBMISSION_RECONCILIATION_COUNT_FIELDS:
                 value = getattr(record, name, None)
                 if type(value) is int and 0 <= value <= _MAX_AGGREGATE_DIAGNOSTIC_COUNT:
                     payload[name] = value
