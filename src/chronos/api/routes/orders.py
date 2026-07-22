@@ -14,6 +14,7 @@ chain passes.
 
 from __future__ import annotations
 
+import logging
 from datetime import date
 from decimal import Decimal
 from typing import Annotated, Literal
@@ -37,6 +38,9 @@ from chronos.orders.mutations import OrderMutationError
 from chronos.orders.service import OrderManagementService, OrderPipelineError
 from chronos.orders.submission import SubmissionOutcome
 from chronos.persistence.order_repositories import OrderIntentRecord
+
+_logger = logging.getLogger("chronos.api.orders")
+
 
 router = APIRouter(dependencies=[Depends(require_token)])
 
@@ -91,6 +95,15 @@ class ModifyRequest(ChronosModel):
 
 class ResolveRequest(ChronosModel):
     operator_note: str
+
+
+class ReconciliationResponse(ChronosModel):
+    status: str
+    generation: int
+    applied_count: int
+    proven_count: int
+    unresolved_count: int
+    remaining_active_count: int
 
 
 def _service(state: BackendState) -> OrderManagementService:
@@ -193,6 +206,65 @@ def _build_intent(request: OrderProposeRequest, state: BackendState) -> WheelOrd
     )
 
 
+@router.post("/orders/reconcile", response_model=ReconciliationResponse)
+def reconcile_orders(
+    state: WriterDep,
+) -> ReconciliationResponse:
+    """Rebuild submission readiness from fresh broker and local evidence."""
+
+    try:
+        report = state.runtime.reconcile_submission_readiness()
+    except Exception as error:
+        _logger.error(
+            "Operator submission reconciliation failed; submission remains locked",
+            extra={
+                "event": "submission_reconciliation_failed",
+                "operation": "operator_reconcile",
+                "error_type": type(error).__name__,
+                "outcome": "locked",
+                "passed": False,
+            },
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "reconciliation failed; order submission remains locked while "
+                "inspection, cancellation, and recovery remain available"
+            ),
+        ) from error
+
+    restart = report.restart
+    readiness = report.readiness
+    log = _logger.info if readiness.ready else _logger.warning
+    log(
+        "Operator submission reconciliation finished %s "
+        "(applied=%d unresolved=%d remaining_active=%d)",
+        readiness.status.value,
+        len(restart.applied_updates),
+        len(restart.unresolved),
+        len(restart.remaining_active),
+        extra={
+            "event": "submission_reconciliation_finished",
+            "operation": "operator_reconcile",
+            "reconciliation_status": readiness.status.value,
+            "applied_count": len(restart.applied_updates),
+            "outcome": "ready" if readiness.ready else "locked",
+            "passed": readiness.ready,
+            "proven_count": len(restart.proven),
+            "unresolved_count": len(restart.unresolved),
+            "remaining_active_count": len(restart.remaining_active),
+        },
+    )
+    return ReconciliationResponse(
+        status=readiness.status.value,
+        generation=readiness.generation,
+        applied_count=len(restart.applied_updates),
+        proven_count=len(restart.proven),
+        unresolved_count=len(restart.unresolved),
+        remaining_active_count=len(restart.remaining_active),
+    )
+
+
 @router.get("/orders", response_model=list[OrderView])
 def list_orders(state: StateDep) -> list[OrderView]:
     return [_view(record) for record in _service(state).list_orders()]
@@ -278,12 +350,11 @@ def cancel(intent_id: str, state: WriterDep) -> OrderView:
 
 @router.post("/orders/{intent_id}/resolve", response_model=OrderView)
 def resolve(intent_id: str, request: ResolveRequest, state: WriterDep) -> OrderView:
-    """Audited operator resolution of a broker-absent SUBMISSION_UNKNOWN intent.
+    """Operator-triggered bounded refresh of a SUBMISSION_UNKNOWN intent.
 
-    Drives the intent to REJECTED only when a fresh broker snapshot taken in
-    this call shows no matching order and no executions (ADR-0009 §6); if the
-    broker DOES know the order, its true state is applied instead and this
-    returns 409 so the operator sees the evidence-based resolution.
+    Positive broker evidence is applied through reconciliation. Snapshot
+    absence cannot safely prove rejection, so it returns 409 and the intent
+    remains locked instead of writing an unsafe terminal lifecycle.
     """
 
     try:

@@ -80,6 +80,8 @@ def _evidence(**overrides: object) -> RiskEvidence:
             as_of=_NOW,
         ),
         "reconciliation_status": ReconciliationStatus.RECONCILED,
+        "reconciliation_generation": 0,
+        "reconciliation_session_id": "crypto-risk-test-session",
         "session": session_for(ProductFamily.CRYPTO, now=_NOW),
     }
     base.update(overrides)

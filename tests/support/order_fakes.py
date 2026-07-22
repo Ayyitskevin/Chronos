@@ -14,7 +14,7 @@ from collections.abc import Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
-from chronos.broker.base import BrokerError
+from chronos.broker.base import BrokerError, BrokerRefusedBeforeSend, BrokerSendGuard
 from chronos.config.settings import Settings
 from chronos.domain.enums import (
     ConnectionState,
@@ -115,10 +115,24 @@ class FakeBroker:
             previewed_at=FIXED_NOW,
         )
 
-    async def submit_order(self, request: OrderRequest) -> OrderSubmission:
+    async def submit_order(
+        self,
+        request: OrderRequest,
+        *,
+        send_guard: BrokerSendGuard | None = None,
+    ) -> OrderSubmission:
         if self.submit_error is not None:
             raise self.submit_error
-        self.submit_calls.append(request)
+        if send_guard is None:
+            raise BrokerRefusedBeforeSend(
+                "fake submission is missing atomic reconciliation authorization"
+            )
+        with send_guard.at_send() as authorized:
+            if not authorized:
+                raise BrokerRefusedBeforeSend(
+                    "reconciliation authorization changed before fake send"
+                )
+            self.submit_calls.append(request)
         broker_order_id = self._next_id
         self._next_id += 1
         return OrderSubmission(

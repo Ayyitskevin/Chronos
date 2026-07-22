@@ -44,6 +44,7 @@ from chronos.domain.models import AccountSummary, CryptoContract
 from chronos.orders.intent import WheelOrderIntent, build_crypto_intent
 from chronos.orders.mutations import OrderCancellationService, OrderModificationService
 from chronos.orders.preview import OrderPreviewService
+from chronos.orders.reconciliation_readiness import ReconciliationReadiness
 from chronos.orders.reconciliation_recovery import OrderRestartReconciler
 from chronos.orders.risk import OrderRiskEngine, RiskEvidence
 from chronos.orders.service import OrderManagementService
@@ -98,12 +99,21 @@ class _CryptoEvidence:
         self._allocation = allocation
         self._marked = marked
         self._pending = pending_buy
+        self._readiness: ReconciliationReadiness | None = None
+
+    def bind_readiness(self, readiness: ReconciliationReadiness) -> None:
+        self._readiness = readiness
 
     def gather(self, intent: object, *, now: datetime) -> RiskEvidence:
         del intent
+        if self._readiness is None:
+            raise RuntimeError("crypto test evidence is not bound to readiness")
+        readiness = self._readiness.snapshot()
         return RiskEvidence(
             account=_crypto_account(),
             reconciliation_status=ReconciliationStatus.RECONCILED,
+            reconciliation_generation=readiness.generation,
+            reconciliation_session_id=readiness.session_id,
             session=session_for(ProductFamily.CRYPTO, now=now, broker_confirms_open=True),
             held_crypto_quantity=self._held,
             crypto_sell_reserved_quantity=self._reserved,
@@ -120,8 +130,16 @@ class _CryptoHarness:
         self.db = Database("sqlite:///:memory:")
         self.db.initialize()
         self.db.bind_scope(broker_mode="ibkr", environment="paper", account_id=PAPER_ACCOUNT)
-        self.connection = BrokerConnectionManager(broker)
+        self.readiness = ReconciliationReadiness()
+        evidence.bind_readiness(self.readiness)
+        self.connection = BrokerConnectionManager(broker, readiness=self.readiness)
         self.connection.start()
+        assert self.readiness.complete(
+            expected_generation=self.readiness.snapshot().generation,
+            status=ReconciliationStatus.RECONCILED,
+            reason="test harness broker/local parity",
+            reconciled_at=FIXED_NOW,
+        )
         intents = OrderIntentRepository(self.db.sessions)
         tracker_repo = OrderTrackerRepository(self.db.sessions)
         confirmations = OrderConfirmationRepository(self.db.sessions)
@@ -133,6 +151,7 @@ class _CryptoHarness:
             intents=intents,
             confirmations=confirmations,
             tracker=tracker_repo,
+            reconciliation_readiness=self.readiness,
         )
         self.service = OrderManagementService(
             settings=settings,
@@ -157,7 +176,11 @@ class _CryptoHarness:
             tracker=tracker,
             tracker_repo=tracker_repo,
             reconciler=OrderRestartReconciler(
-                connection=self.connection, intents=intents, tracker=tracker
+                connection=self.connection,
+                intents=intents,
+                tracker=tracker,
+                reconciliation_readiness=self.readiness,
+                expected_broker_client_id=settings.ib_client_id,
             ),
             intents=intents,
             confirmations=confirmations,

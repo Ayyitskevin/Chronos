@@ -26,7 +26,10 @@ from chronos.domain.models import CancellationResult, OrderSubmission
 from chronos.orders.intent import WheelOrderIntent, order_summary_hash
 from chronos.orders.mutations import OrderCancellationService, OrderModificationService
 from chronos.orders.preview import OrderPreviewResult, OrderPreviewService
-from chronos.orders.reconciliation_recovery import OrderRestartReconciler
+from chronos.orders.reconciliation_recovery import (
+    OrderRestartReconciler,
+    OrderRestartReconciliationReport,
+)
 from chronos.orders.risk import (
     OrderRiskDecision,
     OrderRiskEngine,
@@ -298,9 +301,12 @@ class OrderManagementService:
     def resolve_submission_unknown(
         self, intent_id: str, *, operator_note: str, now: datetime | None = None
     ) -> bool:
-        """Audited operator resolution for a broker-absent SUBMISSION_UNKNOWN
-        intent (ADR-0009 §6). Returns True when the operator rejection was
-        applied; False when broker evidence resolved the intent instead."""
+        """Run an audited evidence refresh for a SUBMISSION_UNKNOWN intent.
+
+        Positive broker evidence is applied and returns ``False``. Broker
+        absence raises without writing a terminal lifecycle; it cannot safely
+        prove rejection (ADR-0009 §6).
+        """
 
         moment = now or utc_now()
         return self._reconciler.operator_resolve(
@@ -313,6 +319,12 @@ class OrderManagementService:
     def reconcile_on_restart(self, *, now: datetime | None = None) -> int:
         moment = now or utc_now()
         return len(self._reconciler.reconcile(current_account_id=self._account_id, now=moment))
+
+    def reconcile_on_restart_report(
+        self, *, now: datetime | None = None
+    ) -> OrderRestartReconciliationReport:
+        moment = now or utc_now()
+        return self._reconciler.reconcile_report(current_account_id=self._account_id, now=moment)
 
     def get(self, intent_id: str) -> OrderIntentRecord | None:
         return self._intents.get(intent_id, current_account_id=self._account_id)
@@ -332,12 +344,28 @@ class OrderManagementService:
         record = self._risk_decisions.get(decision_id, current_account_id=self._account_id)
         if record is None:
             raise OrderPipelineError("risk decision could not be reloaded")
+        stored_generation = record.evidence.get("reconciliation_generation")
+        stored_session_id = record.evidence.get("reconciliation_session_id")
+        reconciliation_generation = (
+            stored_generation if type(stored_generation) is int and stored_generation >= 0 else None
+        )
+        reconciliation_session_id = (
+            stored_session_id
+            if (
+                type(stored_session_id) is str
+                and bool(stored_session_id)
+                and stored_session_id.strip() == stored_session_id
+            )
+            else None
+        )
         return order_risk_decision_from_record(
             tuple((c.check_name, c.status, c.detail) for c in record.checks),
             decision_id=record.decision_id,
             overall=record.overall_result,
             decided_at=record.decided_at,
             expires_at=record.expires_at,
+            reconciliation_generation=reconciliation_generation,
+            reconciliation_session_id=reconciliation_session_id,
         )
 
     def _day_bucket(self, moment: datetime) -> str:
@@ -370,6 +398,9 @@ def _decision_to_record(
         overall_result=decision.overall,
         decided_at=decision.decided_at,
         expires_at=decision.expires_at,
-        evidence={},
+        evidence={
+            "reconciliation_generation": decision.reconciliation_generation,
+            "reconciliation_session_id": decision.reconciliation_session_id,
+        },
         checks=checks,
     )

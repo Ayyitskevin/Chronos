@@ -14,8 +14,11 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
+from threading import Lock
 from typing import Protocol
 
 from chronos.domain.models import ChronosModel
@@ -50,8 +53,13 @@ class LiveKillSwitch:
     def __init__(self, path: Path, *, audit: KillSwitchAuditSink | None = None) -> None:
         self._path = path
         self._audit = audit or NullKillSwitchAuditSink()
+        self._lock = Lock()
 
     def read(self) -> KillSwitchState:
+        with self._lock:
+            return self._read_unlocked()
+
+    def _read_unlocked(self) -> KillSwitchState:
         try:
             payload = json.loads(self._path.read_text(encoding="utf-8"))
             if not isinstance(payload, dict):
@@ -86,6 +94,13 @@ class LiveKillSwitch:
     def is_engaged(self) -> bool:
         return self.read().engaged
 
+    @contextmanager
+    def at_send(self) -> Iterator[bool]:
+        """Serialize engagement against one synchronous broker send primitive."""
+
+        with self._lock:
+            yield not self._read_unlocked().engaged
+
     def engage(self, *, reason: str, initiated_by: str, now: datetime) -> KillSwitchState:
         detail = reason.strip()
         if not detail:
@@ -93,7 +108,8 @@ class LiveKillSwitch:
         state = KillSwitchState(
             engaged=True, reason=detail, initiated_by=initiated_by, engaged_at=now
         )
-        self._write(state)
+        with self._lock:
+            self._write(state)
         self._audit.record(
             action="engage",
             initiated_by=initiated_by,
@@ -107,13 +123,14 @@ class LiveKillSwitch:
         if not note:
             raise ValueError("disengaging the kill switch requires a non-empty operator note")
         state = KillSwitchState(engaged=False, note=note, initiated_by=initiated_by)
-        self._write(state)
-        self._audit.record(
-            action="disengage",
-            initiated_by=initiated_by,
-            detail={"note": note},
-            occurred_at=now,
-        )
+        with self._lock:
+            self._audit.record(
+                action="disengage",
+                initiated_by=initiated_by,
+                detail={"note": note},
+                occurred_at=now,
+            )
+            self._write(state)
         return state
 
     def _write(self, state: KillSwitchState) -> None:

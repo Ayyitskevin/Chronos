@@ -11,6 +11,7 @@ from chronos.broker.base import (
     BrokerConnectionError,
     BrokerDataError,
     BrokerSafetyError,
+    BrokerSendGuard,
 )
 from chronos.domain.enums import (
     ConnectionState,
@@ -326,8 +327,13 @@ class DemoBroker:
             previewed_at=self._clock().astimezone(UTC),
         )
 
-    async def submit_order(self, request: OrderRequest) -> OrderSubmission:
-        del request
+    async def submit_order(
+        self,
+        request: OrderRequest,
+        *,
+        send_guard: BrokerSendGuard | None = None,
+    ) -> OrderSubmission:
+        del request, send_guard
         self._require_connection()
         raise BrokerSafetyError("DemoBroker cannot submit orders")
 

@@ -36,6 +36,7 @@ from chronos.broker.base import (
     BrokerConnectionError,
     BrokerDataError,
     BrokerSafetyError,
+    BrokerSendGuard,
 )
 from chronos.broker.market_data import (
     MarketDataPacingError,
@@ -80,6 +81,7 @@ _IB_UNSET_DOUBLE = Decimal(str(UNSET_DOUBLE))
 _MARKET_DATA_PACING_CODES = frozenset({100, 420})
 _MARKET_DATA_CAPACITY_CODES = frozenset({101})
 _MARKET_DATA_PERMISSION_CODES = frozenset({354, 10089, 10090, 10091, 10186, 10189, 10197})
+_CONNECTION_UNCERTAIN_CODES = frozenset({1100, 1101, 1102, 1300, 2110})
 _PRICE_TICK_TYPES = frozenset({1, 2, 4, 9, 66, 67, 68, 75})
 
 
@@ -172,6 +174,7 @@ class IBKRBroker:
         clock: Callable[[], datetime] = utc_now,
         quote_timeout_seconds: float = 5.0,
         quote_settle_seconds: float = 0.1,
+        on_connection_uncertain: Callable[[str], object] | None = None,
     ) -> None:
         if quote_timeout_seconds <= 0:
             raise ValueError("quote_timeout_seconds must be positive")
@@ -193,7 +196,14 @@ class IBKRBroker:
         self._market_data_errors: dict[int, BrokerDataError] = {}
         self._global_market_data_error: BrokerDataError | None = None
         self._logger = logging.getLogger("chronos.broker.ibkr")
+        self._on_connection_uncertain = on_connection_uncertain
         self._client.errorEvent.connect(self._on_ib_error)
+        connected_event = getattr(self._client, "connectedEvent", None)
+        if connected_event is not None:
+            connected_event.connect(self._on_connected)
+        disconnected_event = getattr(self._client, "disconnectedEvent", None)
+        if disconnected_event is not None:
+            disconnected_event.connect(self._on_disconnected)
 
     async def connect(self) -> None:
         """Connect read-only and explicitly synchronize all-account open orders."""
@@ -608,8 +618,13 @@ class IBKRBroker:
         del request
         raise BrokerSafetyError("IBKR order previews are disabled in read-only Milestone 2")
 
-    async def submit_order(self, request: OrderRequest) -> OrderSubmission:
-        del request
+    async def submit_order(
+        self,
+        request: OrderRequest,
+        *,
+        send_guard: BrokerSendGuard | None = None,
+    ) -> OrderSubmission:
+        del request, send_guard
         raise BrokerSafetyError("IBKR order submission is disabled in read-only Milestone 2")
 
     async def modify_order(self, request: OrderModification) -> OrderSubmission:
@@ -1034,6 +1049,26 @@ class IBKRBroker:
             )
             raise BrokerDataError("IBKR could not clean up one or more failed market-data requests")
 
+    def _on_connected(self, *_args: object) -> None:
+        del _args
+        self._invalidate_connection("ib_async connection established; reconciliation required")
+
+    def _on_disconnected(self, *_args: object) -> None:
+        del _args
+        self._invalidate_connection("ib_async connection lost; reconciliation required")
+
+    def _invalidate_connection(self, reason: str) -> None:
+        callback = self._on_connection_uncertain
+        if callback is None:
+            return
+        try:
+            callback(reason)
+        except Exception:
+            self._logger.exception(
+                "Connection uncertainty observer failed",
+                extra={"event": "connection_uncertainty_observer_failed"},
+            )
+
     def _on_ib_error(
         self,
         _request_id: int,
@@ -1041,6 +1076,9 @@ class IBKRBroker:
         _error_message: str,
         contract: Contract | None,
     ) -> None:
+        if error_code in _CONNECTION_UNCERTAIN_CODES:
+            self._invalidate_connection(f"ib_async connectivity event {error_code}")
+            return
         if error_code in _MARKET_DATA_PACING_CODES:
             error: BrokerDataError = MarketDataPacingError(
                 "IBKR reported a market-data pacing violation"

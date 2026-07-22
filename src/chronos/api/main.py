@@ -55,21 +55,41 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
         app.state.api_token = load_or_create_token(runtime.settings.backend_token_file)
         if not read_only:
-            # A writer backend resolves any orders left at SUBMISSION_UNKNOWN by a
-            # prior crash — by order_ref against broker truth, never re-submitting.
-            # Read-only backends must not write, so they skip it.
+            # A writer publishes submission readiness only after both restart-order
+            # recovery and full portfolio reconciliation complete against broker
+            # truth. Read-only backends cannot persist recovery and stay PENDING.
             try:
-                resolved = runtime.order_management.reconcile_on_restart()
-                if resolved:
-                    _logger.info(
-                        "Resolved %d order(s) during startup reconciliation",
-                        resolved,
-                        extra={"event": "order_restart_reconciled", "resolved": resolved},
-                    )
-            except Exception:
-                _logger.exception(
-                    "Order restart reconciliation failed; continuing (orders unresolved)",
-                    extra={"event": "order_restart_reconcile_failed"},
+                report = runtime.reconcile_submission_readiness()
+                readiness = report.readiness
+                log = _logger.info if readiness.ready else _logger.warning
+                log(
+                    "Submission reconciliation finished %s "
+                    "(applied=%d unresolved=%d remaining_active=%d)",
+                    readiness.status.value,
+                    len(report.restart.applied_updates),
+                    len(report.restart.unresolved),
+                    len(report.restart.remaining_active),
+                    extra={
+                        "event": "submission_reconciliation_finished",
+                        "reconciliation_status": readiness.status.value,
+                        "applied_count": len(report.restart.applied_updates),
+                        "outcome": "ready" if readiness.ready else "locked",
+                        "passed": readiness.ready,
+                        "proven_count": len(report.restart.proven),
+                        "unresolved_count": len(report.restart.unresolved),
+                        "remaining_active_count": len(report.restart.remaining_active),
+                    },
+                )
+            except Exception as error:
+                _logger.error(
+                    "Submission reconciliation failed; submission remains locked "
+                    "while inspection, cancellation, and recovery stay available",
+                    extra={
+                        "event": "submission_reconciliation_failed",
+                        "error_type": type(error).__name__,
+                        "outcome": "locked",
+                        "passed": False,
+                    },
                 )
     except BaseException:
         if not read_only:

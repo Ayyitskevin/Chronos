@@ -3,8 +3,8 @@
 The spy broker is the only "venue": the happy path emits exactly ONE correct
 live order object (LMT, DAY, RTH-only, tick-valid, verified live account,
 transmit=True), and every adversarial case leaves ``submit_calls == 0``. The
-refused-before-send and operator-resolution exits are proven so a failed live
-submit can never permanently wedge live trading.
+refused-before-send and bounded recovery paths are proven; broker absence stays
+locked rather than fabricating a terminal rejection.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from tests.support.order_fakes import (
     option_contract,
 )
 
-from chronos.broker.base import BrokerError, BrokerRefusedBeforeSend
+from chronos.broker.base import BrokerError, BrokerRefusedBeforeSend, BrokerSendGuard
 from chronos.broker.connection import BrokerConnectionManager
 from chronos.config.settings import Settings
 from chronos.domain.enums import (
@@ -51,6 +51,7 @@ from chronos.orders.mutations import (
     OrderMutationError,
 )
 from chronos.orders.preview import OrderPreviewService
+from chronos.orders.reconciliation_readiness import ReconciliationReadiness
 from chronos.orders.reconciliation_recovery import OrderRestartReconciler
 from chronos.orders.risk import OrderRiskEngine, RiskEvidence
 from chronos.orders.service import OrderManagementService
@@ -122,10 +123,15 @@ class LiveSpyBroker(FakeBroker):
             as_of=FIXED_NOW,
         )
 
-    async def submit_order(self, request: OrderRequest) -> OrderSubmission:
+    async def submit_order(
+        self,
+        request: OrderRequest,
+        *,
+        send_guard: BrokerSendGuard | None = None,
+    ) -> OrderSubmission:
         if self.submit_error is not None:
             raise self.submit_error
-        return await super().submit_order(request)
+        return await super().submit_order(request, send_guard=send_guard)
 
 
 class _Clock:
@@ -137,8 +143,12 @@ class _Clock:
 
 
 class _CannedEvidence:
+    def __init__(self, readiness: ReconciliationReadiness) -> None:
+        self._readiness = readiness
+
     def gather(self, intent: object, *, now: datetime) -> RiskEvidence:
         del intent
+        readiness = self._readiness.snapshot()
         return RiskEvidence(
             account=AccountSummary(
                 account_id=LIVE_ACCOUNT,
@@ -148,6 +158,8 @@ class _CannedEvidence:
                 as_of=FIXED_NOW,
             ),
             reconciliation_status=ReconciliationStatus.RECONCILED,
+            reconciliation_generation=readiness.generation,
+            reconciliation_session_id=readiness.session_id,
             session=session_for(ProductFamily.OPTION, now=now, broker_confirms_open=True),
             wheel_eligible_action=OrderIntent.OPEN_SHORT_PUT,
         )
@@ -161,8 +173,10 @@ class _LiveHarness:
         self.db = Database("sqlite:///:memory:")
         self.db.initialize()
         self.db.bind_scope(broker_mode="ibkr", environment="live", account_id=LIVE_ACCOUNT)
-        self.connection = BrokerConnectionManager(broker)
+        self.readiness = ReconciliationReadiness()
+        self.connection = BrokerConnectionManager(broker, readiness=self.readiness)
         self.connection.start()
+        self.mark_reconciled()
         intents = OrderIntentRepository(self.db.sessions)
         tracker_repo = OrderTrackerRepository(self.db.sessions)
         confirmations = OrderConfirmationRepository(self.db.sessions)
@@ -193,12 +207,13 @@ class _LiveHarness:
             session_drawdown=self.drawdown,
             quote_reader=self._read_quote,
             clock=self.clock,
+            reconciliation_readiness=self.readiness,
         )
         self.service = OrderManagementService(
             settings=settings,
             environment=IBEnvironment.LIVE,
             account_id=LIVE_ACCOUNT,
-            evidence_provider=_CannedEvidence(),
+            evidence_provider=_CannedEvidence(self.readiness),
             risk_engine=OrderRiskEngine(settings),
             preview_service=OrderPreviewService(self.connection),
             submission_boundary=self.boundary,
@@ -218,7 +233,11 @@ class _LiveHarness:
             tracker=tracker,
             tracker_repo=tracker_repo,
             reconciler=OrderRestartReconciler(
-                connection=self.connection, intents=intents, tracker=tracker
+                connection=self.connection,
+                intents=intents,
+                tracker=tracker,
+                reconciliation_readiness=self.readiness,
+                expected_broker_client_id=settings.ib_client_id,
             ),
             intents=intents,
             confirmations=confirmations,
@@ -237,6 +256,14 @@ class _LiveHarness:
             data_quality=DataQuality.LIVE,
             bid=Decimal("1.15"),
             ask=Decimal("1.25"),
+        )
+
+    def mark_reconciled(self) -> None:
+        assert self.readiness.complete(
+            expected_generation=self.readiness.snapshot().generation,
+            status=ReconciliationStatus.RECONCILED,
+            reason="test harness broker/local parity",
+            reconciled_at=FIXED_NOW,
         )
 
     def arm(self) -> None:
@@ -306,6 +333,32 @@ def test_live_happy_path_emits_exactly_one_correct_order(live: _LiveHarness) -> 
     assert stored is not None and stored.status is OrderLifecycle.SUBMITTED
 
 
+def test_definitive_venue_reject_is_not_persisted_as_submitted(tmp_path: Path) -> None:
+    class _RejectingLiveSpyBroker(LiveSpyBroker):
+        async def submit_order(
+            self,
+            request: OrderRequest,
+            *,
+            send_guard: BrokerSendGuard | None = None,
+        ) -> OrderSubmission:
+            submission = await super().submit_order(request, send_guard=send_guard)
+            return submission.model_copy(update={"lifecycle": OrderLifecycle.REJECTED})
+
+    h = _LiveHarness(_RejectingLiveSpyBroker(), live_settings(), tmp_path)
+    try:
+        h.arm()
+        intent = _live_intent()
+        _confirmed(h, intent)
+        outcome = _submit(h, intent)
+        assert outcome.submitted is False  # type: ignore[attr-defined]
+        assert outcome.refusal is SubmissionRefusalCode.BROKER_SUBMIT_FAILED  # type: ignore[attr-defined]
+        assert len(h.broker.submit_calls) == 1
+        stored = h.service.get("live-1")
+        assert stored is not None and stored.status is OrderLifecycle.REJECTED
+    finally:
+        h.close()
+
+
 # --- adversarial walk: every case leaves submit_calls == 0 ----------------
 
 
@@ -350,6 +403,7 @@ def test_tampered_settings_cannot_pass_the_config_gate(live: _LiveHarness) -> No
         session_drawdown=live.drawdown,
         quote_reader=live._read_quote,
         clock=live.clock,
+        reconciliation_readiness=live.readiness,
     )
     outcome = boundary.submit(
         intent=intent,
@@ -528,9 +582,7 @@ def test_tick_invalid_limit_price_blocks(live: _LiveHarness) -> None:
     _assert_refused(live, outcome, SubmissionRefusalCode.LIVE_GATE_BLOCKED)
 
 
-def test_submission_unknown_backlog_blocks_and_names_the_stuck_intent(
-    live: _LiveHarness,
-) -> None:
+def test_connection_uncertainty_blocks_before_stuck_intent_scan(live: _LiveHarness) -> None:
     live.arm()
     # First order strands in SUBMISSION_UNKNOWN (ambiguous after-send failure).
     stuck = _live_intent("live-stuck", "CHR-ORD-" + "C" * 32)
@@ -544,33 +596,30 @@ def test_submission_unknown_backlog_blocks_and_names_the_stuck_intent(
     _confirmed(live, intent)
     outcome = _submit(live, intent)
     assert outcome.submitted is False  # type: ignore[attr-defined]
-    assert outcome.refusal is SubmissionRefusalCode.LIVE_GATE_BLOCKED  # type: ignore[attr-defined]
-    assert "live-stuck" in outcome.detail  # type: ignore[attr-defined]
+    assert outcome.refusal is SubmissionRefusalCode.RECONCILIATION_NOT_READY  # type: ignore[attr-defined]
+    assert "PENDING" in outcome.detail  # type: ignore[attr-defined]
     assert live.broker.submit_calls == []
 
 
-def test_operator_resolution_unwedges_live_trading(live: _LiveHarness) -> None:
+def test_operator_absence_remains_unknown_and_locked(
+    live: _LiveHarness,
+) -> None:
     live.arm()
     stuck = _live_intent("live-stuck", "CHR-ORD-" + "C" * 32)
     _confirmed(live, stuck)
     live.broker.submit_error = BrokerError("socket dropped mid-send")
     _submit(live, stuck)
     live.broker.submit_error = None
-    # The audited operator action: fresh snapshot shows broker absence.
-    resolved = live.service.resolve_submission_unknown(
-        "live-stuck",
-        operator_note="verified absent in TWS orders + trade log",
-        now=FIXED_NOW,
-    )
-    assert resolved is True
+    # Snapshot absence cannot prove that no order reached the venue.
+    with pytest.raises(ValueError, match="cannot safely prove rejection"):
+        live.service.resolve_submission_unknown(
+            "live-stuck",
+            operator_note="verified absent in TWS orders + trade log",
+            now=FIXED_NOW,
+        )
     stored = live.service.get("live-stuck")
-    assert stored is not None and stored.status is OrderLifecycle.REJECTED
-    # Live trading is unwedged: the next order proceeds through the full walk.
-    intent = _live_intent("live-2", "CHR-ORD-" + "D" * 32, Decimal("1.25"))
-    _confirmed(live, intent)
-    outcome = _submit(live, intent)
-    assert outcome.submitted is True  # type: ignore[attr-defined]
-    assert len(live.broker.submit_calls) == 1
+    assert stored is not None and stored.status is OrderLifecycle.SUBMISSION_UNKNOWN
+    assert live.broker.submit_calls == []
 
 
 def test_operator_resolution_refuses_when_broker_knows_the_order(
@@ -619,6 +668,7 @@ def test_refused_before_send_resolves_to_rejected_without_wedging(
     stored = live.service.get("live-1")
     assert stored is not None and stored.status is OrderLifecycle.REJECTED
     live.broker.submit_error = None
+    live.mark_reconciled()
     follow_up = _live_intent("live-2", "CHR-ORD-" + "D" * 32, Decimal("1.25"))
     _confirmed(live, follow_up)
     outcome = _submit(live, follow_up)
@@ -806,3 +856,45 @@ def test_runtime_wiring_shares_live_instances() -> None:
     assert "live_arming=live_arming" in source
     assert "live_kill_switch=live_kill_switch" in source
     assert "session_drawdown=session_drawdown" in source
+
+
+def test_operator_resolution_refuses_changing_broker_snapshot(
+    live: _LiveHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    live.arm()
+    correlation = "CHR-ORD-" + "C" * 32
+    stuck = _live_intent("live-stuck", correlation)
+    _confirmed(live, stuck)
+    live.broker.submit_error = BrokerError("timeout after send")
+    _submit(live, stuck)
+    live.broker.submit_error = None
+    working = BrokerOrder(
+        broker_order_id=9001,
+        client_id=17,
+        account_id=LIVE_ACCOUNT,
+        order_ref=correlation,
+        contract=option_contract(),
+        side=stuck.side,
+        quantity=Decimal("1"),
+        filled_quantity=Decimal("0"),
+        remaining_quantity=Decimal("1"),
+        limit_price=Decimal("1.20"),
+        lifecycle=OrderLifecycle.SUBMITTED,
+    )
+    observations = iter(((), (working,)))
+
+    async def changing_open_orders() -> tuple[BrokerOrder, ...]:
+        return next(observations)
+
+    monkeypatch.setattr(live.broker, "open_orders", changing_open_orders)
+
+    with pytest.raises(ValueError, match="changed across the bounded recovery observation"):
+        live.service.resolve_submission_unknown(
+            "live-stuck",
+            operator_note="attempted against a changing snapshot",
+            now=FIXED_NOW,
+        )
+
+    stored = live.service.get("live-stuck")
+    assert stored is not None and stored.status is OrderLifecycle.SUBMISSION_UNKNOWN

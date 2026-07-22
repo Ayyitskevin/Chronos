@@ -8,17 +8,19 @@ fail-closed gate of the selected branch has passed. (The dormant autonomous
 ``chronos.orders`` imports nothing from it and no production entrypoint wires
 it, so it is unreachable from this path.)
 
-PAPER branch gates (M5, unchanged semantics):
+PAPER branch gates (M5 plus generation-bound reconciliation readiness):
 
 1. the single-writer lease is held (no read-only mode);
 2. ``settings.transmission_possible`` — False in every demo/test/CI config;
 3. the multi-condition mode lock grants PAPER_SUBMISSION (live is hard-denied
    there; the LIVE branch below never consults that lock);
 4. the order's account matches the connected paper account;
-5. the structured risk decision is APPROVED and unexpired;
-6. a typed operator confirmation exists, is unexpired, and its hash matches the
+5. a fresh broker status confirms the same healthy paper account and the shared
+   reconciliation latch is RECONCILED for this connection generation;
+6. the structured risk decision is APPROVED and unexpired;
+7. a typed operator confirmation exists, is unexpired, and its hash matches the
    server-re-derived order+risk summary;
-7. the intent is in exactly the USER_CONFIRMED state, re-verified by a true
+8. the intent is in exactly the USER_CONFIRMED state, re-verified by a true
    status CAS at the pre-submit transition.
 
 LIVE branch (M7, ADR-0009): selected purely by frozen configuration
@@ -51,7 +53,13 @@ from chronos.broker.connection import BrokerConnectionManager
 from chronos.config.settings import Settings
 from chronos.control.modes import ExecutionCapability, TradingMode, resolve_mode_lock
 from chronos.domain.accounts import classify_observed_environment
-from chronos.domain.enums import DataQuality, IBEnvironment, OrderLifecycle, ProductFamily
+from chronos.domain.enums import (
+    ConnectionState,
+    DataQuality,
+    IBEnvironment,
+    OrderLifecycle,
+    ProductFamily,
+)
 from chronos.domain.models import (
     ChronosModel,
     CryptoContract,
@@ -64,6 +72,7 @@ from chronos.orders.intent import WheelOrderIntent, order_summary_hash
 from chronos.orders.kill_switch import LiveKillSwitch
 from chronos.orders.live_gate import LiveGateInputs, evaluate_live_gates
 from chronos.orders.live_mode import resolve_live_submission
+from chronos.orders.reconciliation_readiness import ReconciliationReadiness
 from chronos.orders.risk import OrderRiskDecision, OrderRiskEngine
 from chronos.orders.session_drawdown import SessionDrawdownBreaker
 from chronos.persistence.order_repositories import (
@@ -89,10 +98,12 @@ class SubmissionRefusalCode(StrEnum):
     RISK_NOT_APPROVED = "RISK_NOT_APPROVED"
     RISK_EXPIRED = "RISK_EXPIRED"
     CONFIRMATION_MISSING = "CONFIRMATION_MISSING"
+    RISK_EVIDENCE_STALE = "RISK_EVIDENCE_STALE"
     CONFIRMATION_EXPIRED = "CONFIRMATION_EXPIRED"
     CONFIRMATION_MISMATCH = "CONFIRMATION_MISMATCH"
     INTENT_NOT_CONFIRMED = "INTENT_NOT_CONFIRMED"
     BROKER_SUBMIT_FAILED = "BROKER_SUBMIT_FAILED"
+    RECONCILIATION_NOT_READY = "RECONCILIATION_NOT_READY"
     # LIVE branch (ADR-0009).
     LIVE_DEPENDENCIES_MISSING = "LIVE_DEPENDENCIES_MISSING"
     LIVE_GRANT_DENIED = "LIVE_GRANT_DENIED"
@@ -109,6 +120,12 @@ class SubmissionOutcome(ChronosModel):
 
 def _refuse(code: SubmissionRefusalCode, detail: str) -> SubmissionOutcome:
     return SubmissionOutcome(submitted=False, refusal=code, detail=detail)
+
+
+def _not_sent_resolution(applied: bool) -> str:
+    if applied:
+        return "the intent was resolved to REJECTED"
+    return "a newer persisted lifecycle was retained"
 
 
 def _tick_conforms(limit_price: Decimal, min_tick: Decimal) -> bool:
@@ -140,6 +157,7 @@ class OrderSubmissionBoundary:
         live_kill_switch: LiveKillSwitch | None = None,
         session_drawdown: SessionDrawdownBreaker | None = None,
         quote_reader: Callable[[WheelOrderIntent], MarketQuote | None] | None = None,
+        reconciliation_readiness: ReconciliationReadiness | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         if settings.ib_environment is IBEnvironment.LIVE and (
@@ -164,6 +182,7 @@ class OrderSubmissionBoundary:
         self._live_kill_switch = live_kill_switch
         self._session_drawdown = session_drawdown
         self._quote_reader = quote_reader
+        self._reconciliation_readiness = reconciliation_readiness or ReconciliationReadiness()
         self._clock = clock or utc_now
 
     # ------------------------------------------------------------------ #
@@ -239,6 +258,43 @@ class OrderSubmissionBoundary:
                 "order account does not match the connected paper account",
             )
 
+        try:
+            observed_status = self._connection.run(self._connection.broker.connection_status())
+        except BrokerError as error:
+            return _refuse(
+                SubmissionRefusalCode.RECONCILIATION_NOT_READY,
+                f"paper broker status is unavailable; reconciliation invalidated: {error}",
+            )
+        if (
+            not observed_status.connected
+            or observed_status.state is not ConnectionState.CONNECTED
+            or observed_status.account_id != account_id
+        ):
+            self._reconciliation_readiness.invalidate(
+                "paper broker connection or account scope changed"
+            )
+            return _refuse(
+                SubmissionRefusalCode.RECONCILIATION_NOT_READY,
+                "paper broker connection/account changed; run full reconciliation",
+            )
+
+        readiness = self._reconciliation_readiness.snapshot()
+        if not readiness.ready:
+            return _refuse(
+                SubmissionRefusalCode.RECONCILIATION_NOT_READY,
+                f"reconciliation is {readiness.status.value}: {readiness.reason}",
+            )
+        reconciliation_generation = readiness.generation
+        if (
+            risk_decision.reconciliation_generation != reconciliation_generation
+            or risk_decision.reconciliation_session_id != readiness.session_id
+        ):
+            return _refuse(
+                SubmissionRefusalCode.RISK_EVIDENCE_STALE,
+                "risk evidence does not belong to the current reconciliation "
+                "session/generation; re-propose the order",
+            )
+
         shared = self._shared_confirmation_gates(
             intent=intent, risk_decision=risk_decision, account_id=account_id, now=now
         )
@@ -251,6 +307,7 @@ class OrderSubmissionBoundary:
             now=now,
             final_kill_check=False,
             branch_detail="paper order transmitted",
+            expected_reconciliation_generation=reconciliation_generation,
         )
 
     # ------------------------------------------------------------------ #
@@ -295,6 +352,8 @@ class OrderSubmissionBoundary:
                 SubmissionRefusalCode.LIVE_GRANT_DENIED,
                 f"broker connection status unavailable; refusing live submission: {error}",
             )
+        if not status.connected or status.state is not ConnectionState.CONNECTED:
+            self._reconciliation_readiness.invalidate("live broker connection became unhealthy")
         observed_environment = classify_observed_environment(status.managed_accounts)
         grant = resolve_live_submission(
             order_transmission_enabled=self._settings.allow_order_transmit,
@@ -304,6 +363,7 @@ class OrderSubmissionBoundary:
             broker_observed_environment=observed_environment,
         )
         if not grant.may_submit_live or grant.live_account_id is None:
+            self._reconciliation_readiness.invalidate("live broker account scope changed")
             return _refuse(
                 SubmissionRefusalCode.LIVE_GRANT_DENIED,
                 "live submission grant denied: " + "; ".join(grant.denial_reasons),
@@ -315,6 +375,23 @@ class OrderSubmissionBoundary:
             return _refuse(
                 SubmissionRefusalCode.ACCOUNT_MISMATCH,
                 "order account does not match the broker-observed live account",
+            )
+
+        readiness = self._reconciliation_readiness.snapshot()
+        if not readiness.ready:
+            return _refuse(
+                SubmissionRefusalCode.RECONCILIATION_NOT_READY,
+                f"reconciliation is {readiness.status.value}: {readiness.reason}",
+            )
+        reconciliation_generation = readiness.generation
+        if (
+            risk_decision.reconciliation_generation != reconciliation_generation
+            or risk_decision.reconciliation_session_id != readiness.session_id
+        ):
+            return _refuse(
+                SubmissionRefusalCode.RISK_EVIDENCE_STALE,
+                "risk evidence does not belong to the current reconciliation "
+                "session/generation; re-propose the order",
             )
 
         # 5. Remaining I/O evidence, gathered up front (ADR-0009 §4 step 5).
@@ -355,10 +432,22 @@ class OrderSubmissionBoundary:
 
         # 8. The ten-gate walk — kill-switch file read LAST (ADR-0009 §4 step 8).
         kill_switch_engaged = self._live_kill_switch.is_engaged()
+        reconciliation_current = self._reconciliation_readiness.is_reconciled(
+            expected_generation=reconciliation_generation
+        )
+        if stuck_ids:
+            reconciliation_reason = (
+                "unresolved SUBMISSION_UNKNOWN intents block live submission: "
+                + ", ".join(stuck_ids)
+            )
+        elif not reconciliation_current:
+            reconciliation_reason = "reconciliation evidence changed during the live gate walk"
+        else:
+            reconciliation_reason = ""
         inputs = LiveGateInputs(
             config_live_enabled=True,
             connection_healthy=connection_healthy,
-            reconciled=not stuck_ids,
+            reconciled=reconciliation_current and not stuck_ids,
             data_quality_ok=data_ok,
             risk_approved=risk_ok,
             preview_accepted=preview_ok,
@@ -366,12 +455,7 @@ class OrderSubmissionBoundary:
             confirmation_valid=confirmation_ok,
             kill_switch_engaged=kill_switch_engaged,
             drawdown_breached=drawdown_breached,
-            reconciliation_reason=(
-                "unresolved SUBMISSION_UNKNOWN intents block live submission: "
-                + ", ".join(stuck_ids)
-                if stuck_ids
-                else ""
-            ),
+            reconciliation_reason=reconciliation_reason,
             data_reason=data_reason,
             confirmation_reason=confirmation_reason,
             drawdown_reason=drawdown_reason,
@@ -389,6 +473,7 @@ class OrderSubmissionBoundary:
             now=fresh_now,
             final_kill_check=True,
             branch_detail="live order transmitted",
+            expected_reconciliation_generation=reconciliation_generation,
         )
 
     # ------------------------------------------------------------------ #
@@ -403,7 +488,7 @@ class OrderSubmissionBoundary:
         account_id: str,
         now: datetime,
     ) -> SubmissionOutcome | None:
-        """Gates 5-7 of the paper chain; returns a refusal or ``None`` to pass."""
+        """Gates 6-8 of the paper chain; returns a refusal or ``None`` to pass."""
 
         if not risk_decision.approved:
             return _refuse(
@@ -522,6 +607,34 @@ class OrderSubmissionBoundary:
         now: datetime,
         final_kill_check: bool,
         branch_detail: str,
+        expected_reconciliation_generation: int,
+    ) -> SubmissionOutcome:
+        with self._reconciliation_readiness.submission_guard(
+            expected_generation=expected_reconciliation_generation
+        ) as acquired:
+            if not acquired:
+                return _refuse(
+                    SubmissionRefusalCode.RECONCILIATION_NOT_READY,
+                    "reconciliation evidence changed before pre-submit persistence",
+                )
+            return self._cas_and_transmit_claimed(
+                intent=intent,
+                account_id=account_id,
+                now=now,
+                final_kill_check=final_kill_check,
+                branch_detail=branch_detail,
+                expected_reconciliation_generation=expected_reconciliation_generation,
+            )
+
+    def _cas_and_transmit_claimed(
+        self,
+        *,
+        intent: WheelOrderIntent,
+        account_id: str,
+        now: datetime,
+        final_kill_check: bool,
+        branch_detail: str,
+        expected_reconciliation_generation: int,
     ) -> SubmissionOutcome:
         # Pre-persist SUBMISSION_UNKNOWN so a crash mid-submit is recoverable.
         # TRUE CAS (ADR-0009 §4 step 9): the unique pre-submit event_key refuses
@@ -545,13 +658,28 @@ class OrderSubmissionBoundary:
                 "or a status change won the pre-submit guard); refusing to transmit",
             )
 
+        if not self._reconciliation_readiness.submission_claim_is_current(
+            expected_generation=expected_reconciliation_generation
+        ):
+            resolved = self._resolve_not_sent(
+                intent=intent,
+                account_id=account_id,
+                reason="reconciliation evidence changed between pre-submit and transmit",
+                now=now,
+            )
+            return _refuse(
+                SubmissionRefusalCode.RECONCILIATION_NOT_READY,
+                "reconciliation evidence changed between pre-submit and transmit; "
+                f"nothing was sent and {_not_sent_resolution(resolved)}",
+            )
+
         # Final kill-switch re-read (LIVE only): a local file read between the
         # CAS and the transmit line. A refusal here is provably not-sent, so the
         # intent is resolved to REJECTED synchronously (ADR-0009 §4 step 10).
         if final_kill_check:
             assert self._live_kill_switch is not None  # guarded by the dependency gate
             if self._live_kill_switch.is_engaged():
-                self._resolve_not_sent(
+                resolved = self._resolve_not_sent(
                     intent=intent,
                     account_id=account_id,
                     reason="kill switch engaged between pre-submit and transmit",
@@ -559,18 +687,22 @@ class OrderSubmissionBoundary:
                 )
                 return _refuse(
                     SubmissionRefusalCode.LIVE_GATE_BLOCKED,
-                    "kill switch engaged between pre-submit and transmit; nothing "
-                    "was sent and the intent was resolved to REJECTED",
+                    "kill switch engaged between pre-submit and transmit; "
+                    f"nothing was sent and {_not_sent_resolution(resolved)}",
                 )
 
         # --- THE SINGLE transmit=True ASSIGNMENT IN chronos.orders -----------
         request = intent.to_order_request(transmit=True)
         try:
-            submission = self._connection.run(self._connection.broker.submit_order(request))
+            submission = self._connection.run(
+                self._connection.broker.submit_order(
+                    request, send_guard=self._reconciliation_readiness
+                )
+            )
         except BrokerRefusedBeforeSend as error:
             # The adapter refused locally before any network send: the venue
             # provably never saw the order (ADR-0009 §6).
-            self._resolve_not_sent(
+            resolved = self._resolve_not_sent(
                 intent=intent,
                 account_id=account_id,
                 reason=f"broker adapter refused before send: {error}",
@@ -578,8 +710,8 @@ class OrderSubmissionBoundary:
             )
             return _refuse(
                 SubmissionRefusalCode.BROKER_REFUSED_BEFORE_SEND,
-                f"broker adapter refused before any network send: {error}; the "
-                "intent was resolved to REJECTED (nothing reached the venue)",
+                f"broker adapter refused before any network send: {error}; "
+                f"{_not_sent_resolution(resolved)} (nothing reached the venue)",
             )
         except BrokerError as error:
             # Bytes may have left: leave SUBMISSION_UNKNOWN for reconciliation;
@@ -589,28 +721,72 @@ class OrderSubmissionBoundary:
                 f"broker refused or failed the submission: {error}",
             )
 
-        self._tracker.record_transition(
+        transition_applied = self._tracker.record_transition(
             intent_id=intent.intent_id,
-            event_key=f"{intent.intent_id}:{submission.broker_order_id}:SUBMITTED",
+            event_key=f"{intent.intent_id}:{submission.broker_order_id}:{submission.lifecycle.value}",
             source="SUBMIT",
             from_status=OrderLifecycle.SUBMISSION_UNKNOWN,
-            to_status=OrderLifecycle.SUBMITTED,
+            to_status=submission.lifecycle,
             current_account_id=account_id,
             broker_order_id=submission.broker_order_id,
-            evidence={"permanent_id": submission.permanent_id},
+            evidence={
+                "permanent_id": submission.permanent_id,
+                "client_id": submission.client_id,
+                "broker_lifecycle": submission.lifecycle.value,
+            },
             occurred_at=now,
+            enforce_from_status=True,
         )
+        persistence_detail = branch_detail
+        if not transition_applied:
+            durable_intent = self._intents.get(
+                intent.intent_id,
+                current_account_id=account_id,
+            )
+            if durable_intent is None:
+                return SubmissionOutcome(
+                    submitted=False,
+                    refusal=SubmissionRefusalCode.BROKER_SUBMIT_FAILED,
+                    submission=submission,
+                    detail=(
+                        "broker send completed but its acknowledgement could not be "
+                        "persisted because the order intent disappeared"
+                    ),
+                )
+            submission = submission.model_copy(update={"lifecycle": durable_intent.status})
+            persistence_detail = (
+                "broker send completed; a newer persisted lifecycle "
+                f"{durable_intent.status.value} won the acknowledgement CAS"
+            )
+        if submission.lifecycle not in {
+            OrderLifecycle.SUBMITTED,
+            OrderLifecycle.PARTIALLY_FILLED,
+            OrderLifecycle.FILLED,
+        }:
+            failure_detail = persistence_detail
+            if transition_applied:
+                failure_detail = (
+                    f"broker acknowledged the send as {submission.lifecycle.value}; "
+                    "the known broker identity was persisted without pretending it is active"
+                )
+            return SubmissionOutcome(
+                submitted=False,
+                refusal=SubmissionRefusalCode.BROKER_SUBMIT_FAILED,
+                submission=submission,
+                detail=failure_detail,
+            )
+
         return SubmissionOutcome(
             submitted=True,
             refusal=SubmissionRefusalCode.NOT_REFUSED,
             submission=submission,
-            detail=branch_detail,
+            detail=persistence_detail,
         )
 
     def _resolve_not_sent(
         self, *, intent: WheelOrderIntent, account_id: str, reason: str, now: datetime
-    ) -> None:
-        self._tracker.record_transition(
+    ) -> bool:
+        return self._tracker.record_transition(
             intent_id=intent.intent_id,
             event_key=f"{intent.intent_id}:presend_refusal:REJECTED",
             source="SUBMIT",
@@ -619,4 +795,5 @@ class OrderSubmissionBoundary:
             current_account_id=account_id,
             evidence={"phase": "refused_before_send", "reason": reason},
             occurred_at=now,
+            enforce_from_status=True,
         )

@@ -76,6 +76,19 @@ class FakeErrorEvent:
             handler(request_id, error_code, error_message, contract)
 
 
+class FakeLifecycleEvent:
+    def __init__(self) -> None:
+        self.handlers: list[Callable[..., object]] = []
+
+    def connect(self, handler: Callable[..., object]) -> object:
+        self.handlers.append(handler)
+        return handler
+
+    def emit(self) -> None:
+        for handler in tuple(self.handlers):
+            handler()
+
+
 def ib_stock() -> Stock:
     return Stock(
         symbol="AAPL",
@@ -121,6 +134,8 @@ def domain_option() -> OptionContract:
 class FakeIB:
     def __init__(self) -> None:
         self.errorEvent = FakeErrorEvent()
+        self.connectedEvent = FakeLifecycleEvent()
+        self.disconnectedEvent = FakeLifecycleEvent()
         self.connected = False
         self.accounts = [ACCOUNT_ID]
         self.connect_kwargs: dict[str, object] = {}
@@ -313,6 +328,7 @@ def make_broker(
     *,
     account_id: str = ACCOUNT_ID,
     max_quote_age_seconds: int = 5,
+    on_connection_uncertain: Callable[[str], object] | None = None,
 ) -> IBKRBroker:
     settings = Settings(
         broker_mode=BrokerMode.IBKR,
@@ -325,7 +341,33 @@ def make_broker(
         clock=lambda: FIXED_NOW,
         quote_timeout_seconds=0.2,
         quote_settle_seconds=0,
+        on_connection_uncertain=on_connection_uncertain,
     )
+
+
+def test_lifecycle_events_invalidate_reconciliation_readiness() -> None:
+    client = FakeIB()
+    reasons: list[str] = []
+    make_broker(client, on_connection_uncertain=reasons.append)
+
+    client.connectedEvent.emit()
+    client.disconnectedEvent.emit()
+
+    assert reasons == [
+        "ib_async connection established; reconciliation required",
+        "ib_async connection lost; reconciliation required",
+    ]
+
+
+@pytest.mark.parametrize("code", [1100, 1101, 1102, 1300, 2110])
+def test_connectivity_codes_invalidate_reconciliation_readiness(code: int) -> None:
+    client = FakeIB()
+    reasons: list[str] = []
+    broker = make_broker(client, on_connection_uncertain=reasons.append)
+
+    broker._on_ib_error(-1, code, "connectivity changed", None)
+
+    assert reasons == [f"ib_async connectivity event {code}"]
 
 
 @pytest.mark.asyncio
