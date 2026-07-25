@@ -10,12 +10,17 @@ enforcement, and it is deliberately stricter than the rule it replaces:
    ``sys.modules`` probe, the pattern already guarding the UI, ``histdata``, and the
    registry.
 2. **A decision cannot express an order.** ``AITradeDecision`` and every model nested
-   inside it carry no account, broker, routing, or transmit field, and ``extra="forbid"``
-   means one cannot be smuggled in. This is ADR-0004 §1's technique — make the dangerous
-   thing unrepresentable — applied to the model's output.
-3. **A mandate authorizes nothing by default, and never forever.** Frozen, expiring,
-   deny-by-default, and unable to claim more authority than its promotion rung earned.
+   inside it carry no account, broker, routing, or transmit field, ``extra="forbid"``
+   means one cannot be smuggled in, and a risk-reducing kind cannot carry a
+   new-exposure payload.
+3. **A mandate authorizes nothing by default, and never forever.** Frozen against
+   ``model_copy(update=...)`` as well as assignment, expiring, deny-by-default,
+   per-asset-family promoted, and required to set its floors explicitly.
 4. **M1 adds no broker behavior.** Nothing outside the package imports it yet.
+
+The M1 adversarial review found real holes in the first version of this file: the import
+matcher was blind to ``from chronos import autonomy``, and the naked-short guarantee was a
+substring check that a member named ``SHORT_CALL`` would have passed. Both are closed here.
 """
 
 from __future__ import annotations
@@ -40,9 +45,12 @@ from chronos.autonomy import (
     AutonomyMandate,
     AutonomyMode,
     CapitalLimits,
+    DecisionDirection,
     DecisionKind,
     DecisionProvenance,
+    EntryPlan,
     EvidenceCitation,
+    FamilyPromotion,
     InstrumentScope,
     MarketDataRequirements,
     OrderForm,
@@ -99,6 +107,7 @@ _ORDER_CAPABLE_FIELD_NAMES = frozenset(
 
 _FIXED_NOW = datetime(2026, 7, 25, 14, 0, tzinfo=UTC)
 _FINGERPRINT = "a" * 64
+_TARGET_REF = "CHR-ORD-" + "A" * 32
 
 
 def _pins() -> VersionPins:
@@ -131,13 +140,34 @@ def _citation() -> EvidenceCitation:
     return EvidenceCitation(evidence_id="ev-1", kind="quote", as_of=_FIXED_NOW, digest="c" * 64)
 
 
+def _decision(**overrides: Any) -> AITradeDecision:
+    base: dict[str, Any] = {
+        "decision_id": "d-1",
+        "kind": DecisionKind.HOLD,
+        "asset_class": TradableAssetClass.EQUITY,
+        "symbol": "SPY",
+        "provenance": _provenance(),
+    }
+    base.update(overrides)
+    return AITradeDecision(**base)
+
+
+def _open_decision(**overrides: Any) -> AITradeDecision:
+    base: dict[str, Any] = {
+        "kind": DecisionKind.OPEN,
+        "evidence": (_citation(),),
+        "invalidation_conditions": ("thesis breaks below 400",),
+    }
+    base.update(overrides)
+    return _decision(**base)
+
+
 def _mandate(**overrides: Any) -> AutonomyMandate:
     base: dict[str, Any] = {
         "mandate_id": "mandate-1",
         "mandate_version": 1,
         "account_fingerprint": _FINGERPRINT,
         "mode": AutonomyMode.SHADOW,
-        "promotion_level": PromotionLevel.SHADOW,
         "effective_from": _FIXED_NOW,
         "expires_at": _FIXED_NOW + timedelta(days=1),
         "versions": _pins(),
@@ -157,11 +187,45 @@ def _live_scope() -> InstrumentScope:
     )
 
 
+def _live_data() -> MarketDataRequirements:
+    return MarketDataRequirements(
+        max_quote_age_seconds=Decimal(5),
+        permitted_data_qualities=(DataQuality.LIVE,),
+    )
+
+
+def _live_capital() -> CapitalLimits:
+    return CapitalLimits(
+        min_cash_floor_usd=Decimal(1000),
+        min_buying_power_usd=Decimal(1000),
+    )
+
+
+def _submitting_mandate(mode: AutonomyMode, level: PromotionLevel, **overrides: Any):
+    base: dict[str, Any] = {
+        "mode": mode,
+        "promotions": (FamilyPromotion(asset_class=TradableAssetClass.EQUITY, level=level),),
+        "scope": _live_scope(),
+        "market_data": _live_data(),
+        "capital": _live_capital(),
+    }
+    base.update(overrides)
+    return _mandate(**base)
+
+
 def _autonomy_module_files() -> list[Path]:
     return sorted((_SRC / "autonomy").rglob("*.py"))
 
 
 def _imported_names(source: str) -> list[str]:
+    """Every module path an AST import can name.
+
+    Emits both ``node.module`` and ``<module>.<alias>`` for ``ImportFrom``, because
+    ``from chronos import autonomy`` names the subpackage in the *alias*, not the
+    module — a blind spot the M1 adversarial review found in the original matcher,
+    which silently defeated the isolation and milestone guards.
+    """
+
     tree = ast.parse(source)
     names: list[str] = []
     for node in ast.walk(tree):
@@ -169,6 +233,7 @@ def _imported_names(source: str) -> list[str]:
             names.extend(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module:
             names.append(node.module)
+            names.extend(f"{node.module}.{alias.name}" for alias in node.names)
     return names
 
 
@@ -196,9 +261,15 @@ def _field_names(model: type[BaseModel], seen: set[type[BaseModel]] | None = Non
 
 
 def test_autonomy_package_exists_and_is_scanned() -> None:
-    files = _autonomy_module_files()
-    names = {path.name for path in files}
-    assert {"decision.py", "mandate.py", "enums.py", "__init__.py"} <= names
+    names = {path.name for path in _autonomy_module_files()}
+    assert {"decision.py", "mandate.py", "enums.py", "base.py", "__init__.py"} <= names
+
+
+def test_import_matcher_sees_subpackage_aliases() -> None:
+    """Guard the guard: the matcher must catch `from chronos import autonomy`."""
+
+    found = _imported_names("from chronos import autonomy\n")
+    assert "chronos.autonomy" in found
 
 
 def test_autonomy_has_no_forbidden_ast_imports() -> None:
@@ -257,99 +328,150 @@ def test_decision_has_no_order_capable_field_anywhere() -> None:
 def test_decision_refuses_smuggled_fields() -> None:
     for smuggled in ({"transmit": True}, {"account_id": "U123456"}, {"broker_order_id": 7}):
         with pytest.raises(ValidationError):
-            AITradeDecision(
-                decision_id="d-1",
-                kind=DecisionKind.HOLD,
-                asset_class=TradableAssetClass.EQUITY,
-                symbol="SPY",
-                provenance=_provenance(),
-                **smuggled,
-            )
+            _decision(**smuggled)
 
 
 def test_decision_may_not_name_a_broker_order_id() -> None:
-    with pytest.raises(ValidationError):
-        AITradeDecision(
-            decision_id="d-1",
-            kind=DecisionKind.CANCEL,
-            asset_class=TradableAssetClass.EQUITY,
-            symbol="SPY",
-            provenance=_provenance(),
-            target_client_reference="12345",
-        )
+    for bad in ("12345", "CHR-", "CHR-ORD-notahex", "CHR-ORD-" + "A" * 32 + "\r\nX"):
+        with pytest.raises(ValidationError):
+            _decision(kind=DecisionKind.CANCEL, target_client_reference=bad)
+
+
+def test_decision_accepts_a_well_formed_chronos_reference() -> None:
+    decision = _decision(kind=DecisionKind.CANCEL, target_client_reference=_TARGET_REF)
+    assert decision.target_client_reference == _TARGET_REF
 
 
 def test_targeted_decision_must_name_a_chronos_reference() -> None:
     with pytest.raises(ValidationError):
-        AITradeDecision(
-            decision_id="d-1",
-            kind=DecisionKind.CANCEL,
-            asset_class=TradableAssetClass.EQUITY,
-            symbol="SPY",
-            provenance=_provenance(),
-        )
+        _decision(kind=DecisionKind.CANCEL)
 
 
 def test_exposure_creating_decision_requires_evidence_and_invalidation() -> None:
-    common: dict[str, Any] = {
-        "decision_id": "d-1",
-        "kind": DecisionKind.OPEN,
-        "asset_class": TradableAssetClass.EQUITY,
-        "symbol": "SPY",
-        "provenance": _provenance(),
-    }
-    with pytest.raises(ValidationError):  # no evidence
-        AITradeDecision(**common, invalidation_conditions=("breaks 400",))
-    with pytest.raises(ValidationError):  # no invalidation conditions
-        AITradeDecision(**common, evidence=(_citation(),))
-    # Both present: accepted.
-    decision = AITradeDecision(
-        **common, evidence=(_citation(),), invalidation_conditions=("breaks 400",)
-    )
-    assert decision.kind is DecisionKind.OPEN
-
-
-def test_hold_decision_may_not_request_a_size() -> None:
     with pytest.raises(ValidationError):
-        AITradeDecision(
-            decision_id="d-1",
-            kind=DecisionKind.HOLD,
-            asset_class=TradableAssetClass.EQUITY,
-            symbol="SPY",
-            provenance=_provenance(),
+        _decision(kind=DecisionKind.OPEN, invalidation_conditions=("breaks 400",))
+    with pytest.raises(ValidationError):
+        _decision(kind=DecisionKind.OPEN, evidence=(_citation(),))
+    assert _open_decision().kind is DecisionKind.OPEN
+
+
+def test_risk_reducing_decision_may_not_carry_a_new_exposure_payload() -> None:
+    """A CLOSE must not be able to wear an opening request's clothes."""
+
+    for kind in (DecisionKind.CLOSE, DecisionKind.REDUCE, DecisionKind.CANCEL):
+        with pytest.raises(ValidationError):
+            _decision(
+                kind=kind,
+                target_client_reference=_TARGET_REF,
+                requested_strategy=StrategyForm.LONG_EQUITY,
+            )
+        with pytest.raises(ValidationError):
+            _decision(
+                kind=kind,
+                target_client_reference=_TARGET_REF,
+                entry_plan=EntryPlan(valid_until=_FIXED_NOW),
+            )
+        with pytest.raises(ValidationError):
+            _decision(
+                kind=kind,
+                target_client_reference=_TARGET_REF,
+                requested_risk_budget_usd=Decimal(100),
+            )
+
+
+def test_hold_and_cancel_may_not_request_a_size() -> None:
+    with pytest.raises(ValidationError):
+        _decision(kind=DecisionKind.HOLD, requested_quantity=Decimal(1))
+    with pytest.raises(ValidationError):
+        _decision(
+            kind=DecisionKind.CANCEL,
+            target_client_reference=_TARGET_REF,
             requested_quantity=Decimal(1),
         )
 
 
-def test_decision_is_frozen() -> None:
-    decision = AITradeDecision(
-        decision_id="d-1",
-        kind=DecisionKind.HOLD,
-        asset_class=TradableAssetClass.EQUITY,
-        symbol="SPY",
-        provenance=_provenance(),
-    )
+def test_hold_may_not_express_a_direction() -> None:
+    with pytest.raises(ValidationError):
+        _decision(kind=DecisionKind.HOLD, direction=DecisionDirection.LONG)
+
+
+def test_decision_numeric_requests_are_bounded() -> None:
+    for field in ("requested_quantity", "requested_risk_budget_usd", "max_acceptable_loss_usd"):
+        for bad in (Decimal("-1"), Decimal("0"), Decimal("1E-9"), Decimal(10) ** 12):
+            with pytest.raises(ValidationError):
+                _open_decision(**{field: bad})
+
+
+def test_decision_instrument_alphabet_is_restricted() -> None:
+    with pytest.raises(ValidationError):
+        _decision(symbol="SPY@SMART/ISLAND")
+    with pytest.raises(ValidationError):
+        _decision(
+            asset_class=TradableAssetClass.FUTURE, symbol="", futures_root="ES 20261218 GLOBEX"
+        )
+
+
+def test_decision_refuses_futures_options() -> None:
+    """The decision-plane twin of the mandate's FUTURE_OPTION refusal."""
+
+    with pytest.raises(ValidationError):
+        _decision(asset_class=TradableAssetClass.FUTURE_OPTION, symbol="SPX")
+
+
+def test_decision_evidence_is_bounded() -> None:
+    with pytest.raises(ValidationError):
+        _open_decision(evidence=tuple(_citation() for _ in range(65)))
+
+
+def test_decision_is_frozen_including_copy_with_update() -> None:
+    decision = _open_decision()
     with pytest.raises(ValidationError):
         decision.symbol = "QQQ"  # type: ignore[misc]
+    # A copy that drops the required evidence must not survive.
+    with pytest.raises(ValidationError):
+        decision.model_copy(update={"evidence": ()})
 
 
 # ---------------------------------------------------------------- mandate guarantees
 
 
 def test_mandate_is_frozen() -> None:
+    with pytest.raises(ValidationError):
+        _mandate().mandate_id = "widened"  # type: ignore[misc]
+
+
+def test_mandate_copy_with_update_cannot_escalate_authority() -> None:
+    """model_copy(update=...) must re-run every validator (M1 review finding).
+
+    Before this, a 1-day SHADOW mandate could be copied into a ten-year
+    LIVE_AUTONOMOUS mandate with an empty scope and a SHADOW promotion rung.
+    """
+
     mandate = _mandate()
     with pytest.raises(ValidationError):
-        mandate.mandate_id = "widened"  # type: ignore[misc]
+        mandate.model_copy(update={"mode": AutonomyMode.LIVE_AUTONOMOUS})
+    with pytest.raises(ValidationError):
+        mandate.model_copy(
+            update={
+                "mode": AutonomyMode.LIVE_AUTONOMOUS,
+                "expires_at": _FIXED_NOW + timedelta(days=3650),
+            }
+        )
+    live = _submitting_mandate(AutonomyMode.LIVE_AUTONOMOUS, PromotionLevel.CAPPED_LIVE_AUTONOMOUS)
+    with pytest.raises(ValidationError):  # expiry extension past the ceiling
+        live.model_copy(update={"expires_at": _FIXED_NOW + timedelta(days=3650)})
+    with pytest.raises(ValidationError):  # scope removal
+        live.model_copy(update={"scope": InstrumentScope()})
 
 
 def test_mandate_authorizes_nothing_by_default() -> None:
     mandate = _mandate()
-    assert mandate.capital == CapitalLimits()
     assert mandate.capital.allocated_capital_usd == 0
     assert mandate.capital.max_order_notional_usd == 0
     assert mandate.scope.symbols == ()
     assert mandate.scope.asset_classes == ()
     assert mandate.scope.order_forms == ()
+    assert mandate.promotions == ()
     assert mandate.sessions.allow_overnight_holding is False
 
 
@@ -366,56 +488,130 @@ def test_mandate_window_is_a_time_predicate_only() -> None:
 
 
 def test_live_mandate_may_not_outlive_the_ceiling() -> None:
-    common: dict[str, Any] = {
-        "mode": AutonomyMode.LIVE_AUTONOMOUS,
-        "promotion_level": PromotionLevel.CAPPED_LIVE_AUTONOMOUS,
-        "scope": _live_scope(),
-        "market_data": MarketDataRequirements(permitted_data_qualities=("LIVE",)),
-    }
     with pytest.raises(ValidationError):
-        _mandate(**common, expires_at=_FIXED_NOW + MAX_LIVE_MANDATE_DURATION + timedelta(days=1))
-    within = _mandate(**common, expires_at=_FIXED_NOW + MAX_LIVE_MANDATE_DURATION)
+        _submitting_mandate(
+            AutonomyMode.LIVE_AUTONOMOUS,
+            PromotionLevel.CAPPED_LIVE_AUTONOMOUS,
+            expires_at=_FIXED_NOW + MAX_LIVE_MANDATE_DURATION + timedelta(days=1),
+        )
+    within = _submitting_mandate(
+        AutonomyMode.LIVE_AUTONOMOUS,
+        PromotionLevel.CAPPED_LIVE_AUTONOMOUS,
+        expires_at=_FIXED_NOW + MAX_LIVE_MANDATE_DURATION,
+    )
     assert within.mode in LIVE_AUTONOMY_MODES
 
 
-def test_mandate_mode_may_not_exceed_its_promotion_rung() -> None:
-    with pytest.raises(ValidationError):
+def test_promotion_is_per_asset_family() -> None:
+    """A stock promotion must not authorize futures (ADR-0016 §7)."""
+
+    scope = InstrumentScope(
+        asset_classes=(TradableAssetClass.EQUITY, TradableAssetClass.FUTURE),
+        symbols=("SPY",),
+        futures_roots=("MES",),
+        strategies=(StrategyForm.LONG_EQUITY, StrategyForm.LONG_FUTURE),
+        order_forms=(OrderForm.LIMIT,),
+    )
+    with pytest.raises(ValidationError):  # FUTURE has no promotion record
         _mandate(
-            mode=AutonomyMode.LIVE_AUTONOMOUS,
-            promotion_level=PromotionLevel.PAPER_AUTONOMOUS,
-            scope=_live_scope(),
-            market_data=MarketDataRequirements(permitted_data_qualities=("LIVE",)),
+            mode=AutonomyMode.PAPER_AUTONOMOUS,
+            promotions=(
+                FamilyPromotion(
+                    asset_class=TradableAssetClass.EQUITY,
+                    level=PromotionLevel.PAPER_AUTONOMOUS,
+                ),
+            ),
+            scope=scope,
+            market_data=_live_data(),
+            capital=_live_capital(),
         )
+    with pytest.raises(ValidationError):  # FUTURE promoted, but not far enough
+        _mandate(
+            mode=AutonomyMode.PAPER_AUTONOMOUS,
+            promotions=(
+                FamilyPromotion(
+                    asset_class=TradableAssetClass.EQUITY,
+                    level=PromotionLevel.PAPER_AUTONOMOUS,
+                ),
+                FamilyPromotion(asset_class=TradableAssetClass.FUTURE, level=PromotionLevel.SHADOW),
+            ),
+            scope=scope,
+            market_data=_live_data(),
+            capital=_live_capital(),
+        )
+
+
+def test_mandate_mode_may_not_exceed_the_family_rung() -> None:
+    with pytest.raises(ValidationError):
+        _submitting_mandate(AutonomyMode.LIVE_AUTONOMOUS, PromotionLevel.PAPER_AUTONOMOUS)
 
 
 def test_submitting_mandate_must_state_its_scope_explicitly() -> None:
     with pytest.raises(ValidationError):  # silence is never a grant
-        _mandate(
-            mode=AutonomyMode.PAPER_AUTONOMOUS,
-            promotion_level=PromotionLevel.PAPER_AUTONOMOUS,
+        _mandate(mode=AutonomyMode.PAPER_AUTONOMOUS)
+
+
+def test_submitting_mandate_must_set_its_floors() -> None:
+    """A zero floor is the *most* permissive value, not deny-by-default."""
+
+    with pytest.raises(ValidationError):  # no quote-age floor
+        _submitting_mandate(
+            AutonomyMode.PAPER_AUTONOMOUS,
+            PromotionLevel.PAPER_AUTONOMOUS,
+            market_data=MarketDataRequirements(permitted_data_qualities=(DataQuality.LIVE,)),
+        )
+    with pytest.raises(ValidationError):  # no cash / buying-power floor
+        _submitting_mandate(
+            AutonomyMode.PAPER_AUTONOMOUS,
+            PromotionLevel.PAPER_AUTONOMOUS,
+            capital=CapitalLimits(),
         )
 
 
-def test_futures_scope_requires_a_root_and_futures_options_are_refused() -> None:
-    with pytest.raises(ValidationError):
-        _mandate(
-            mode=AutonomyMode.PAPER_AUTONOMOUS,
-            promotion_level=PromotionLevel.PAPER_AUTONOMOUS,
-            scope=InstrumentScope(
-                asset_classes=(TradableAssetClass.FUTURE,),
-                strategies=(StrategyForm.LONG_FUTURE,),
-                order_forms=(OrderForm.LIMIT,),
-            ),
-            market_data=MarketDataRequirements(permitted_data_qualities=("LIVE",)),
-        )
-    with pytest.raises(ValidationError):  # recognized vocabulary, refused in code
-        InstrumentScope(asset_classes=(TradableAssetClass.FUTURE_OPTION,))
+def test_live_mandate_may_not_license_non_live_data() -> None:
+    for quality in (DataQuality.FROZEN, DataQuality.DELAYED_FROZEN, DataQuality.DEMO):
+        with pytest.raises(ValidationError):
+            _submitting_mandate(
+                AutonomyMode.LIVE_AUTONOMOUS,
+                PromotionLevel.CAPPED_LIVE_AUTONOMOUS,
+                market_data=MarketDataRequirements(
+                    max_quote_age_seconds=Decimal(5), permitted_data_qualities=(quality,)
+                ),
+            )
 
 
-def test_mandate_may_not_license_trading_on_known_bad_data() -> None:
+def test_no_mandate_may_license_known_bad_data() -> None:
     for quality in (DataQuality.STALE, DataQuality.UNKNOWN):
         with pytest.raises(ValidationError):
             MarketDataRequirements(permitted_data_qualities=(quality,))
+
+
+def test_mandate_scope_cross_validates_strategies_against_asset_classes() -> None:
+    with pytest.raises(ValidationError):  # futures strategy, no futures class
+        InstrumentScope(
+            asset_classes=(TradableAssetClass.EQUITY,),
+            symbols=("SPY",),
+            strategies=(StrategyForm.LONG_FUTURE,),
+            order_forms=(OrderForm.LIMIT,),
+        )
+    with pytest.raises(ValidationError):  # futures roots, no futures class
+        InstrumentScope(
+            asset_classes=(TradableAssetClass.EQUITY,),
+            symbols=("SPY",),
+            futures_roots=("MES",),
+            strategies=(StrategyForm.LONG_EQUITY,),
+            order_forms=(OrderForm.LIMIT,),
+        )
+
+
+def test_mandate_scope_rejects_routing_syntax_in_symbols() -> None:
+    with pytest.raises(ValidationError):
+        InstrumentScope(asset_classes=(TradableAssetClass.EQUITY,), symbols=("SPY@SMART/ISLAND",))
+
+
+def test_futures_options_scope_is_refused() -> None:
+    with pytest.raises(ValidationError):  # recognized vocabulary, refused in code
+        InstrumentScope(asset_classes=(TradableAssetClass.FUTURE_OPTION,))
 
 
 def test_mandate_requires_a_pseudonymous_account_scope() -> None:
@@ -423,17 +619,37 @@ def test_mandate_requires_a_pseudonymous_account_scope() -> None:
         _mandate(account_fingerprint="U1234567")
 
 
+def test_promotion_for_reports_the_family_rung() -> None:
+    mandate = _submitting_mandate(AutonomyMode.PAPER_AUTONOMOUS, PromotionLevel.PAPER_AUTONOMOUS)
+    assert mandate.promotion_for(TradableAssetClass.EQUITY) is PromotionLevel.PAPER_AUTONOMOUS
+    assert mandate.promotion_for(TradableAssetClass.FUTURE) is None
+
+
 # ------------------------------------------------------------- vocabulary guarantees
 
 
-def test_no_naked_short_option_strategy_is_expressible() -> None:
-    for member in StrategyForm:
-        assert "NAKED" not in member.value
-        assert "UNCOVERED" not in member.value
+def test_strategy_vocabulary_is_pinned_and_has_no_uncovered_short_option() -> None:
+    """Pinned to the exact member set, not a substring scan.
+
+    A substring check for "NAKED"/"UNCOVERED" would pass a member named
+    ``SHORT_CALL`` or ``SHORT_PUT`` — the realistic regression (M1 review).
+    """
+
+    assert {member.value for member in StrategyForm} == {
+        "LONG_EQUITY",
+        "SHORT_EQUITY",
+        "CASH_SECURED_PUT",
+        "COVERED_CALL",
+        "LONG_CALL",
+        "LONG_PUT",
+        "VERTICAL_DEBIT_SPREAD",
+        "VERTICAL_CREDIT_SPREAD",
+        "LONG_FUTURE",
+        "SHORT_FUTURE",
+    }
 
 
 def test_no_market_order_form_is_expressible() -> None:
-    assert "MARKET" not in OrderForm.__members__
     assert {member.value for member in OrderForm} == {"LIMIT", "MARKETABLE_LIMIT"}
 
 

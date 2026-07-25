@@ -50,9 +50,17 @@ options are not expressible in the strategy vocabulary, so no mandate can author
 Automated exercise, assignment handling, and broker-wide global cancellation are not
 implemented; rolling is a decision kind the gateway will compile as cancel-and-re-propose.
 
-The sections below describe the human-in-the-loop wheel path as built through Milestone 10.
-They remain accurate for manual mode; where they say an action is impossible or permanently
-locked, read that as the pre-autonomy posture, superseded only inside an active mandate.
+**How to read the rest of this document.** The sections below were written for the
+Milestone 1–10 dashboard, when order transmission genuinely was hard-disabled and the UI
+exposed only DEMO rehearsals. Two things have happened since, so take every "impossible",
+"hard-disabled", "permanently locked", or "no submission path exists" statement below as
+**historical M1–M10 posture, not current capability**:
+
+1. Milestones 5–7C (ADR-0009, ADR-0010) delivered the real paper and live order pipeline in
+   `chronos.orders`, with one transmit site behind the ten-gate stack.
+2. ADR-0016 supersedes per-order confirmation inside an active AutonomyMandate.
+
+The DEMO-rehearsal descriptions remain accurate for that demo path.
 
 Every new short option requires a verified standard share-only deliverable tied to the exact
 underlying contract ID and currency; every short call must additionally be covered by currently

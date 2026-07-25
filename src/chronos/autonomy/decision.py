@@ -21,20 +21,29 @@ What makes this type safe is what it cannot say:
   resolves and qualifies the contract, computes and clamps the final quantity,
   selects a permitted order form, and may reduce or refuse outright. The
   kernel's veto is unconditional and a refusal may not be routed around.
+- **Payload must match intent.** A risk-reducing decision cannot smuggle a
+  new-exposure request: REDUCE/CLOSE/CANCEL/HOLD may not carry a strategy or an
+  entry plan, and CANCEL/HOLD may not carry a size at all.
 - **Narrative is narrative.** ``thesis``, ``rationale``, ``key_uncertainties``,
-  and ``invalidation_conditions`` are recorded, displayed, and audited. Nothing
-  in the runtime pipeline parses them into an order parameter; a test asserts
-  no order-plane module reads them. They carry concise, decision-relevant
-  reasoning — deliberately **not** hidden model chain-of-thought, which Chronos
-  neither requests nor persists (ADR-0016 §5).
+  and ``invalidation_conditions`` are recorded, displayed, and audited. They
+  carry concise, decision-relevant reasoning — deliberately **not** hidden model
+  chain-of-thought, which Chronos neither requests nor persists (ADR-0016 §5).
+  Nothing in the runtime pipeline parses them into an order parameter. Today
+  that holds because nothing outside ``chronos.autonomy`` imports these
+  contracts at all (``tests/safety/test_autonomy_contracts.py::
+  test_m1_wires_the_contracts_into_no_runtime_path``, a milestone guard); the
+  permanent data-flow test — asserting no order-plane module reads these
+  attributes — lands with the M2 gateway that first consumes them.
 """
 
 from __future__ import annotations
 
+import re
 from decimal import Decimal
 
 from pydantic import AwareDatetime, Field, field_validator, model_validator
 
+from chronos.autonomy.base import AutonomyModel
 from chronos.autonomy.enums import (
     EXPOSURE_CREATING_DECISION_KINDS,
     TARGETED_DECISION_KINDS,
@@ -46,14 +55,14 @@ from chronos.autonomy.enums import (
     TradableAssetClass,
     TriggerComparator,
 )
-from chronos.domain.models import ChronosModel
 
-#: Chronos-owned reference prefix. A decision may only ever name a Chronos
+#: Chronos-owned reference shape. A decision may only ever name a Chronos
 #: correlation reference drawn from its EvidenceBundle — never a broker order
-#: id, which is the broker's namespace and not the model's to speak.
-_CHRONOS_REFERENCE_PREFIX = "CHR-"
+#: id, which is the broker's namespace and not the model's to speak. The
+#: pattern matches what ``chronos.utils.identifiers.new_correlation_id`` emits.
+_CHRONOS_REFERENCE_PATTERN = r"^CHR-[A-Z0-9]+-[0-9A-F]{32}$"
 
-# Quantity bounds mirroring the order plane's Numeric(20,8) persistence scale.
+# Numeric bounds mirroring the order plane's Numeric(20,8) persistence scale.
 # They are restated here rather than imported: `chronos.autonomy` deliberately
 # imports nothing from `chronos.orders` (ADR-0016 §3, asserted by an isolation
 # test), so the model plane cannot reach the submission path even transitively.
@@ -69,6 +78,19 @@ _ASSET_CLASSES_USING_SYMBOL = frozenset(
     }
 )
 
+_SYMBOL_ALPHABET = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-")
+_ROOT_ALPHABET = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+
+#: Kinds that may never carry a size request: they either do nothing (HOLD) or
+#: act on an existing order without resizing it (CANCEL).
+_SIZELESS_KINDS = frozenset({DecisionKind.HOLD, DecisionKind.CANCEL})
+
+#: Kinds that may never carry a strategy or an entry plan — anything that only
+#: removes or holds exposure has no entry to describe.
+_NO_ENTRY_KINDS = frozenset(
+    {DecisionKind.HOLD, DecisionKind.REDUCE, DecisionKind.CLOSE, DecisionKind.CANCEL}
+)
+
 
 def _validate_hex_digest(value: str, label: str) -> str:
     normalized = value.strip().lower()
@@ -78,12 +100,33 @@ def _validate_hex_digest(value: str, label: str) -> str:
     return normalized
 
 
-class DecisionProvenance(ChronosModel):
+def _validate_bounded_amount(value: Decimal, label: str) -> Decimal:
+    """Positive, finite, and inside the Numeric(20,8) persistence envelope."""
+
+    if not value.is_finite():
+        raise ValueError(f"{label} must be a finite number")
+    if value <= 0:
+        raise ValueError(f"{label} must be positive")
+    exponent = value.normalize().as_tuple().exponent
+    if isinstance(exponent, int) and exponent < _MIN_QUANTITY_EXPONENT:
+        raise ValueError(f"{label} is finer than the 1e-8 persistence scale")
+    if value >= _MAX_REQUESTED_QUANTITY:
+        raise ValueError(f"{label} exceeds the Numeric(20,8) persistence magnitude")
+    return value
+
+
+class DecisionProvenance(AutonomyModel):
     """Which model, prompt, tools, schema, and evidence produced this decision.
 
-    The supervisor checks these against the mandate's :class:`VersionPins`
-    before admission: a decision from an unpinned model, prompt, or tool schema
-    is refused rather than downgraded.
+    **Ownership matters here.** These fields are stamped by the deterministic
+    decision-queue writer from harness-held configuration — the process that
+    actually loaded the prompt and called the provider. They are *not* a model
+    self-report: a model asked to describe its own version could simply claim a
+    pinned one, which would make the mandate's :class:`VersionPins` check a
+    self-attestation rather than a control. The supervisor checks these against
+    the mandate before admission and refuses a decision from an unpinned model,
+    prompt, or tool schema rather than downgrading it. The gateway that enforces
+    the stamping lands in M2 (ADR-0016 §5).
     """
 
     provider: str = Field(min_length=1, max_length=64)
@@ -103,7 +146,7 @@ class DecisionProvenance(ChronosModel):
         return _validate_hex_digest(value, "evidence_bundle_digest")
 
 
-class EvidenceCitation(ChronosModel):
+class EvidenceCitation(AutonomyModel):
     """One citation into the EvidenceBundle backing this decision."""
 
     evidence_id: str = Field(min_length=1, max_length=128)
@@ -118,7 +161,7 @@ class EvidenceCitation(ChronosModel):
         return _validate_hex_digest(value, "digest")
 
 
-class PriceTrigger(ChronosModel):
+class PriceTrigger(AutonomyModel):
     """A typed price condition.
 
     Conditions are structured rather than prose precisely so the kernel never
@@ -133,19 +176,17 @@ class PriceTrigger(ChronosModel):
     @field_validator("value")
     @classmethod
     def _validate_value(cls, value: Decimal) -> Decimal:
-        if not value.is_finite():
-            raise ValueError("trigger value must be a finite number")
-        return value
+        return _validate_bounded_amount(value, "trigger value")
 
 
-class EntryPlan(ChronosModel):
+class EntryPlan(AutonomyModel):
     """Conditions under which the decision intends an entry to become live."""
 
     trigger: PriceTrigger | None = None
     valid_until: AwareDatetime | None = None
 
 
-class ExitPlan(ChronosModel):
+class ExitPlan(AutonomyModel):
     """Intended exits, including any protective requirement the model asks for."""
 
     profit_target: PriceTrigger | None = None
@@ -153,7 +194,7 @@ class ExitPlan(ChronosModel):
     time_exit: AwareDatetime | None = None
 
 
-class AITradeDecision(ChronosModel):
+class AITradeDecision(AutonomyModel):
     """One typed decision from an approved model. Holding one authorizes nothing."""
 
     decision_id: str = Field(min_length=1, max_length=128)
@@ -161,7 +202,7 @@ class AITradeDecision(ChronosModel):
     asset_class: TradableAssetClass
     #: Exactly one of ``symbol`` / ``futures_root`` is set, per asset class.
     symbol: str = Field(default="", max_length=32)
-    futures_root: str = Field(default="", max_length=32)
+    futures_root: str = Field(default="", max_length=8)
     direction: DecisionDirection = DecisionDirection.NEUTRAL
     requested_strategy: StrategyForm | None = None
     #: A request, not an executable size. The kernel computes and clamps.
@@ -175,47 +216,45 @@ class AITradeDecision(ChronosModel):
     max_acceptable_loss_usd: Decimal | None = None
     #: Chronos-owned reference to the order or position acted on. Never a
     #: broker order id.
-    target_client_reference: str | None = None
+    target_client_reference: str | None = Field(default=None, max_length=128)
     thesis: str = Field(default="", max_length=4000)
     rationale: str = Field(default="", max_length=4000)
     confidence: Decimal = Field(default=Decimal(0), ge=0, le=1)
     key_uncertainties: tuple[str, ...] = ()
-    evidence: tuple[EvidenceCitation, ...] = ()
+    evidence: tuple[EvidenceCitation, ...] = Field(default=(), max_length=64)
     invalidation_conditions: tuple[str, ...] = ()
     reassess_at: AwareDatetime | None = None
     provenance: DecisionProvenance
 
-    @field_validator("symbol", "futures_root")
+    @field_validator("symbol")
     @classmethod
-    def _normalize_instrument(cls, value: str) -> str:
-        return value.strip().upper()
+    def _normalize_symbol(cls, value: str) -> str:
+        normalized = value.strip().upper()
+        if normalized and not set(normalized) <= _SYMBOL_ALPHABET:
+            raise ValueError(f"symbol {normalized!r} contains unsupported characters")
+        return normalized
+
+    @field_validator("futures_root")
+    @classmethod
+    def _normalize_root(cls, value: str) -> str:
+        normalized = value.strip().upper()
+        if normalized and not set(normalized) <= _ROOT_ALPHABET:
+            raise ValueError(f"futures_root {normalized!r} contains unsupported characters")
+        return normalized
 
     @field_validator("requested_quantity")
     @classmethod
     def _validate_quantity(cls, value: Decimal | None) -> Decimal | None:
         if value is None:
             return None
-        if not value.is_finite():
-            raise ValueError("requested_quantity must be a finite number")
-        if value <= 0:
-            raise ValueError("requested_quantity must be positive")
-        exponent = value.normalize().as_tuple().exponent
-        if isinstance(exponent, int) and exponent < _MIN_QUANTITY_EXPONENT:
-            raise ValueError("requested_quantity is finer than the 1e-8 persistence scale")
-        if value >= _MAX_REQUESTED_QUANTITY:
-            raise ValueError("requested_quantity exceeds the Numeric(20,8) persistence magnitude")
-        return value
+        return _validate_bounded_amount(value, "requested_quantity")
 
     @field_validator("requested_risk_budget_usd", "max_acceptable_loss_usd")
     @classmethod
     def _validate_money(cls, value: Decimal | None) -> Decimal | None:
         if value is None:
             return None
-        if not value.is_finite():
-            raise ValueError("monetary amounts must be finite")
-        if value <= 0:
-            raise ValueError("monetary amounts must be positive when supplied")
-        return value
+        return _validate_bounded_amount(value, "monetary amount")
 
     @field_validator("target_client_reference")
     @classmethod
@@ -223,10 +262,10 @@ class AITradeDecision(ChronosModel):
         if value is None:
             return None
         normalized = value.strip().upper()
-        if not normalized.startswith(_CHRONOS_REFERENCE_PREFIX):
+        if not re.fullmatch(_CHRONOS_REFERENCE_PATTERN, normalized):
             raise ValueError(
-                "target_client_reference must be a Chronos-owned CHR- reference; "
-                "a decision may never name a broker order id"
+                "target_client_reference must be a Chronos-owned CHR-<PREFIX>-<32 hex> "
+                "reference; a decision may never name a broker order id"
             )
         return normalized
 
@@ -249,9 +288,7 @@ class AITradeDecision(ChronosModel):
     def _validate_decision(self) -> AITradeDecision:
         self._validate_instrument()
         self._validate_target_reference()
-        holds_a_request = self.requested_quantity is not None or self.requested_strategy is not None
-        if self.kind is DecisionKind.HOLD and holds_a_request:
-            raise ValueError("a HOLD decision may not request a size or a strategy")
+        self._validate_payload_matches_kind()
         if self.kind in EXPOSURE_CREATING_DECISION_KINDS:
             # Exposure may never be created on an unsupported assertion: a
             # decision that creates or extends risk must cite its evidence and
@@ -275,8 +312,13 @@ class AITradeDecision(ChronosModel):
                 raise ValueError(f"{self.asset_class.value} decisions require a symbol")
             if self.futures_root:
                 raise ValueError(f"{self.asset_class.value} decisions may not set a futures_root")
-        else:  # pragma: no cover - exhaustive over TradableAssetClass; fail closed
-            raise ValueError(f"unsupported asset class {self.asset_class.value}")
+        else:
+            # Reached by FUTURE_OPTION, which ADR-0016 §6 puts out of scope for
+            # this release: recognized vocabulary, refused in code.
+            raise ValueError(
+                f"{self.asset_class.value} is out of scope in this release; enabling it "
+                "requires its own ADR, tests, and promotion record"
+            )
 
     def _validate_target_reference(self) -> None:
         if self.kind in TARGETED_DECISION_KINDS and self.target_client_reference is None:
@@ -285,3 +327,25 @@ class AITradeDecision(ChronosModel):
             )
         if self.kind is DecisionKind.OPEN and self.target_client_reference is not None:
             raise ValueError("an OPEN decision may not name an existing order or position")
+
+    def _validate_payload_matches_kind(self) -> None:
+        """A risk-reducing decision may not carry a new-exposure request.
+
+        Without this, a CLOSE or CANCEL could arrive carrying a strategy, an
+        entry plan, a size and a LONG direction — a full opening request wearing
+        a risk-reducing label. The kernel would still veto it, but the contract
+        should not be able to say it in the first place (M1 adversarial review).
+        """
+
+        kind = self.kind.value
+        if self.kind in _SIZELESS_KINDS and self.requested_quantity is not None:
+            raise ValueError(f"a {kind} decision may not request a size")
+        if self.kind in _NO_ENTRY_KINDS:
+            if self.requested_strategy is not None:
+                raise ValueError(f"a {kind} decision may not request a strategy")
+            if self.entry_plan is not None:
+                raise ValueError(f"a {kind} decision may not carry an entry plan")
+            if self.requested_risk_budget_usd is not None:
+                raise ValueError(f"a {kind} decision may not request a risk budget")
+        if self.kind is DecisionKind.HOLD and self.direction is not DecisionDirection.NEUTRAL:
+            raise ValueError("a HOLD decision may not express a direction")

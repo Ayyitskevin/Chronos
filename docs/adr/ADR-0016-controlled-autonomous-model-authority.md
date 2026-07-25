@@ -283,6 +283,33 @@ graduated per-family promotions. Every milestone stops for owner approval.
 
 ## Known limitations and residuals
 
+0. **M1 adversarial review (2026-07-25) — findings and remediation.** A five-lens
+   review of the M1 diff found defects that were fixed at the top of M2, before
+   any gateway work. The material ones, recorded so the history is legible:
+   - `model_copy(update=...)` bypassed **every** mandate validator: a one-day
+     SHADOW mandate could be copied into a ten-year `LIVE_AUTONOMOUS` mandate
+     with an empty scope and a SHADOW promotion rung. Closed by
+     `chronos.autonomy.base.AutonomyModel`, which re-validates on copy.
+   - A single scalar `promotion_level` could not express §7's per-family
+     promotion, so one family's evidence licensed another's live trading.
+     Replaced by `promotions: tuple[FamilyPromotion, ...]`, required per
+     permitted asset class.
+   - Risk-reducing decision kinds could carry a full new-exposure payload
+     (strategy, entry plan, size, direction). Now refused by kind.
+   - "Deny-by-default" was false for **floors**: `min_cash_floor_usd`,
+     `min_buying_power_usd`, and `max_quote_age_seconds` default to zero, which
+     is the *most* permissive value. Submitting mandates must now set them.
+   - A live mandate could license FROZEN/DELAYED_FROZEN/DEMO market data that
+     the deterministic live gate already refuses. Now restricted to LIVE/DELAYED.
+   - The AST import matcher was blind to `from chronos import autonomy`,
+     silently defeating both the isolation test and the milestone guard; the
+     same hole existed in the ADR-0013 holdout test. Both fixed.
+   - The naked-short guarantee was a substring scan that a member named
+     `SHORT_CALL` would have passed; `StrategyForm` is now pinned to its exact
+     member set.
+   - Several documents published controls that do not exist yet as though they
+     were live. README now marks every safety bullet `[enforced]`, `[contract]`,
+     or `[M2+]`.
 1. **The gateway does not exist yet.** These contracts are inert in M1. A type
    that cannot express an order is necessary, not sufficient; the veto lives in
    M2's gateway and is unproven until it ships with its adversarial review.

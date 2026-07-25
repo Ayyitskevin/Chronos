@@ -9,18 +9,25 @@ evaluation, no broker behavior. Enforcement is the deterministic supervisor's
 Three properties are structural rather than procedural, and each is asserted by
 a test:
 
-1. **Immutable.** Every model here is frozen with ``extra="forbid"``. A mandate
-   cannot be widened in place, and an unrecognized field is a load error rather
-   than a silently-ignored grant. Creating, expanding, renewing, enabling, and
-   revoking are authenticated owner *events* recorded against ``mandate_id`` by
-   the supervisor; none of them mutates this record.
+1. **Immutable.** Every model here is frozen with ``extra="forbid"`` and
+   inherits :class:`~chronos.autonomy.base.AutonomyModel`, so even
+   ``model_copy(update=...)`` re-runs every validator. A mandate cannot be
+   widened in place or by copy, and an unrecognized field is a load error
+   rather than a silently-ignored grant. Creating, expanding, renewing,
+   enabling, and revoking are authenticated owner *events* recorded against
+   ``mandate_id`` by the supervisor; none of them mutates this record.
 2. **Expiring.** ``expires_at`` is required and must follow ``effective_from``.
    Live and canary-live mandates additionally may not exceed
    :data:`MAX_LIVE_MANDATE_DURATION`. There is no perpetual live authority.
-3. **Deny-by-default.** Every limit defaults to zero and every scope tuple
-   defaults to empty, so a default-constructed mandate authorizes nothing. A
-   mandate grants exactly what it enumerates, mirroring the all-zeros
-   ``config/risk.example.yaml`` doctrine.
+3. **Deny-by-default — with one honest caveat.** Every *ceiling* defaults to
+   zero and every scope tuple to empty, so a default-constructed mandate
+   authorizes nothing. But four fields are **floors**
+   (``min_cash_floor_usd``, ``min_buying_power_usd``, ``max_quote_age_seconds``
+   read as a freshness floor, and the liquidity minimums), where zero is the
+   *most* permissive value, not the most restrictive. Defaulting a floor to
+   zero is therefore not deny-by-default, so a submitting mandate is required
+   to set the load-bearing ones explicitly (see ``_validate_submitting_floors``).
+   The M1 adversarial review caught the original text claiming otherwise.
 
 The model may *read* a mandate. It can neither author one nor raise its own
 limits: no tool in the model plane writes this type (ADR-0016 §3).
@@ -33,6 +40,7 @@ from decimal import Decimal
 
 from pydantic import AwareDatetime, Field, field_validator, model_validator
 
+from chronos.autonomy.base import AutonomyModel
 from chronos.autonomy.enums import (
     LIVE_AUTONOMY_MODES,
     MINIMUM_PROMOTION_FOR_MODE,
@@ -47,7 +55,6 @@ from chronos.autonomy.enums import (
     promotion_rank,
 )
 from chronos.domain.enums import DataQuality
-from chronos.domain.models import ChronosModel
 from chronos.utils.identifiers import normalize_account_fingerprint
 
 #: Ceiling on how long a live or canary-live mandate may run before the owner
@@ -56,14 +63,69 @@ from chronos.utils.identifiers import normalize_account_fingerprint
 #: than this window (ADR-0016 §4).
 MAX_LIVE_MANDATE_DURATION: timedelta = timedelta(days=30)
 
+#: Market-data qualities a live autonomous mandate may permit. Restated here
+#: rather than imported: `chronos.autonomy` may not import `chronos.orders`
+#: (ADR-0016 §3). It must stay a subset of the deterministic live gate's
+#: `_LIVE_ACCEPTABLE_QUALITY` in `chronos/orders/submission.py` — a mandate may
+#: not license data the kernel would refuse anyway. FROZEN, DELAYED_FROZEN and
+#: DEMO are excluded: the first two are last-known-value rather than current,
+#: and DEMO is synthetic.
+LIVE_PERMITTED_DATA_QUALITIES: frozenset[DataQuality] = frozenset(
+    {DataQuality.LIVE, DataQuality.DELAYED}
+)
+
+#: Qualities no mandate may ever permit, in any mode: data known to be bad.
+NEVER_PERMITTED_DATA_QUALITIES: frozenset[DataQuality] = frozenset(
+    {DataQuality.STALE, DataQuality.UNKNOWN}
+)
+
+#: Which asset classes each strategy form can be expressed in. Used to refuse a
+#: scope that pairs a strategy with a class it cannot be traded in.
+_STRATEGY_ASSET_CLASSES: dict[StrategyForm, frozenset[TradableAssetClass]] = {
+    StrategyForm.LONG_EQUITY: frozenset({TradableAssetClass.EQUITY, TradableAssetClass.CRYPTO}),
+    StrategyForm.SHORT_EQUITY: frozenset({TradableAssetClass.EQUITY}),
+    StrategyForm.CASH_SECURED_PUT: frozenset(
+        {TradableAssetClass.EQUITY_OPTION, TradableAssetClass.INDEX_OPTION}
+    ),
+    StrategyForm.COVERED_CALL: frozenset(
+        {TradableAssetClass.EQUITY_OPTION, TradableAssetClass.INDEX_OPTION}
+    ),
+    StrategyForm.LONG_CALL: frozenset(
+        {TradableAssetClass.EQUITY_OPTION, TradableAssetClass.INDEX_OPTION}
+    ),
+    StrategyForm.LONG_PUT: frozenset(
+        {TradableAssetClass.EQUITY_OPTION, TradableAssetClass.INDEX_OPTION}
+    ),
+    StrategyForm.VERTICAL_DEBIT_SPREAD: frozenset(
+        {TradableAssetClass.EQUITY_OPTION, TradableAssetClass.INDEX_OPTION}
+    ),
+    StrategyForm.VERTICAL_CREDIT_SPREAD: frozenset(
+        {TradableAssetClass.EQUITY_OPTION, TradableAssetClass.INDEX_OPTION}
+    ),
+    StrategyForm.LONG_FUTURE: frozenset({TradableAssetClass.FUTURE}),
+    StrategyForm.SHORT_FUTURE: frozenset({TradableAssetClass.FUTURE}),
+}
+
+_SYMBOL_ASSET_CLASSES: frozenset[TradableAssetClass] = frozenset(
+    {
+        TradableAssetClass.EQUITY,
+        TradableAssetClass.EQUITY_OPTION,
+        TradableAssetClass.INDEX_OPTION,
+        TradableAssetClass.CRYPTO,
+    }
+)
+
 _MAX_SCOPE_ENTRIES = 256
+_SYMBOL_ALPHABET = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-")
 
 
 def _normalized_scope(values: tuple[str, ...], label: str) -> tuple[str, ...]:
-    """Upper-case, non-blank, duplicate-free scope entries.
+    """Upper-case, non-blank, duplicate-free, alphabet-checked scope entries.
 
     Duplicates are refused rather than collapsed: a mandate is an owner-authored
     authorization, and a scope the owner cannot read back exactly is not one.
+    The alphabet check keeps routing syntax (``SPY@SMART/ISLAND``) and control
+    characters out of a field the supervisor will match contracts against.
     """
 
     normalized: list[str] = []
@@ -71,6 +133,10 @@ def _normalized_scope(values: tuple[str, ...], label: str) -> tuple[str, ...]:
         entry = value.strip().upper()
         if not entry:
             raise ValueError(f"{label} entries must not be blank")
+        if len(entry) > 32:
+            raise ValueError(f"{label} entries are limited to 32 characters")
+        if not set(entry) <= _SYMBOL_ALPHABET:
+            raise ValueError(f"{label} entry {entry!r} contains unsupported characters")
         if entry in normalized:
             raise ValueError(f"{label} contains the duplicate entry {entry!r}")
         normalized.append(entry)
@@ -84,7 +150,7 @@ def _unique(values: tuple[object, ...], label: str) -> None:
         raise ValueError(f"{label} contains duplicate entries")
 
 
-class VersionPins(ChronosModel):
+class VersionPins(AutonomyModel):
     """Exact versions this mandate authorizes.
 
     A material change to any pin invalidates the affected promotion record and
@@ -101,7 +167,20 @@ class VersionPins(ChronosModel):
     policy_version: str = Field(min_length=1, max_length=64)
 
 
-class InstrumentScope(ChronosModel):
+class FamilyPromotion(AutonomyModel):
+    """The promotion rung one asset family has actually earned.
+
+    Promotion is per family (ADR-0016 §7): a stock promotion authorizes neither
+    futures nor options. A single scalar rung on the mandate could not express
+    that — it would let one family's evidence license another family's live
+    trading — so authority is carried per asset class instead.
+    """
+
+    asset_class: TradableAssetClass
+    level: PromotionLevel
+
+
+class InstrumentScope(AutonomyModel):
     """What may be traded. Empty means nothing — this is a grant, not a filter."""
 
     asset_classes: tuple[TradableAssetClass, ...] = ()
@@ -144,11 +223,29 @@ class InstrumentScope(ChronosModel):
                 "FUTURE_OPTION is out of scope in this release; enabling it "
                 "requires its own ADR, tests, and promotion record"
             )
+        permitted = set(self.asset_classes)
+        for strategy in self.strategies:
+            # A strategy the permitted classes cannot express is either a
+            # mistake or an attempt to smuggle authority past the class list.
+            if not (_STRATEGY_ASSET_CLASSES[strategy] & permitted):
+                raise ValueError(
+                    f"strategy {strategy.value} is not expressible in the "
+                    f"permitted asset classes; add the asset class or drop the strategy"
+                )
+        if self.futures_roots and TradableAssetClass.FUTURE not in permitted:
+            raise ValueError("futures_roots requires FUTURE in asset_classes")
+        if self.symbols and not (_SYMBOL_ASSET_CLASSES & permitted):
+            raise ValueError("symbols require a symbol-based asset class in asset_classes")
         return self
 
 
-class CapitalLimits(ChronosModel):
-    """Capital, size, exposure, and leverage ceilings. Zero authorizes nothing."""
+class CapitalLimits(AutonomyModel):
+    """Capital, size, exposure, and leverage ceilings, plus two floors.
+
+    The ``max_*`` fields are ceilings: zero authorizes nothing. The ``min_*``
+    fields are **floors**, where zero is the most permissive value — a
+    submitting mandate must set them explicitly (see ``AutonomyMandate``).
+    """
 
     allocated_capital_usd: Decimal = Field(default=Decimal(0), ge=0)
     max_order_notional_usd: Decimal = Field(default=Decimal(0), ge=0)
@@ -163,7 +260,7 @@ class CapitalLimits(ChronosModel):
     min_cash_floor_usd: Decimal = Field(default=Decimal(0), ge=0)
 
 
-class LossLimits(ChronosModel):
+class LossLimits(AutonomyModel):
     """Session, daily, and peak-to-trough loss ceilings. Zero authorizes nothing."""
 
     max_session_loss_usd: Decimal = Field(default=Decimal(0), ge=0)
@@ -172,7 +269,7 @@ class LossLimits(ChronosModel):
     max_peak_to_trough_drawdown_pct: Decimal = Field(default=Decimal(0), ge=0, le=1)
 
 
-class ConcentrationLimits(ChronosModel):
+class ConcentrationLimits(AutonomyModel):
     """Per-symbol, sector, family, and correlated-exposure ceilings, as fractions."""
 
     max_symbol_exposure_pct: Decimal = Field(default=Decimal(0), ge=0, le=1)
@@ -181,7 +278,7 @@ class ConcentrationLimits(ChronosModel):
     max_correlated_exposure_pct: Decimal = Field(default=Decimal(0), ge=0, le=1)
 
 
-class ActivityLimits(ChronosModel):
+class ActivityLimits(AutonomyModel):
     """Order, cancellation, replacement, and turnover ceilings per session."""
 
     max_orders_per_session: int = Field(default=0, ge=0)
@@ -190,8 +287,13 @@ class ActivityLimits(ChronosModel):
     max_turnover_usd_per_session: Decimal = Field(default=Decimal(0), ge=0)
 
 
-class MarketDataRequirements(ChronosModel):
-    """Freshness and liquidity floors below which the kernel creates no exposure."""
+class MarketDataRequirements(AutonomyModel):
+    """Freshness and liquidity floors below which the kernel creates no exposure.
+
+    Note these are **floors**: ``max_quote_age_seconds`` of zero would accept a
+    quote of any age were it read as "no requirement", so a submitting mandate
+    must set it, and the mandate validator enforces that.
+    """
 
     max_quote_age_seconds: Decimal = Field(default=Decimal(0), ge=0)
     permitted_data_qualities: tuple[DataQuality, ...] = ()
@@ -202,8 +304,9 @@ class MarketDataRequirements(ChronosModel):
     @model_validator(mode="after")
     def _validate_qualities(self) -> MarketDataRequirements:
         _unique(self.permitted_data_qualities, "permitted_data_qualities")
-        forbidden = {DataQuality.STALE, DataQuality.UNKNOWN}
-        offending = sorted(q.value for q in self.permitted_data_qualities if q in forbidden)
+        offending = sorted(
+            q.value for q in self.permitted_data_qualities if q in NEVER_PERMITTED_DATA_QUALITIES
+        )
         if offending:
             # Stale-data rejection is a deterministic guarantee ADR-0016 does not
             # supersede; a mandate may not license trading on data known bad.
@@ -211,7 +314,7 @@ class MarketDataRequirements(ChronosModel):
         return self
 
 
-class SessionPolicy(ChronosModel):
+class SessionPolicy(AutonomyModel):
     """Which sessions may trade, and whether positions may be carried overnight."""
 
     permitted_sessions: tuple[TradingSession, ...] = ()
@@ -223,7 +326,7 @@ class SessionPolicy(ChronosModel):
         return self
 
 
-class AutonomyMandate(ChronosModel):
+class AutonomyMandate(AutonomyModel):
     """One owner-authored, versioned, expiring, revocable grant of authority.
 
     Read the module docstring first: this is a contract, not a control. Holding
@@ -237,7 +340,8 @@ class AutonomyMandate(ChronosModel):
     #: Pseudonymous account scope — never a raw broker account id.
     account_fingerprint: str
     mode: AutonomyMode
-    promotion_level: PromotionLevel
+    #: Per-asset-family promotion. A family absent here has earned nothing.
+    promotions: tuple[FamilyPromotion, ...] = ()
     effective_from: AwareDatetime
     expires_at: AwareDatetime
     restart_behavior: RestartBehavior = RestartBehavior.REQUIRE_REACTIVATION
@@ -264,13 +368,6 @@ class AutonomyMandate(ChronosModel):
         if self.expires_at <= self.effective_from:
             raise ValueError("expires_at must be after effective_from")
 
-        minimum = MINIMUM_PROMOTION_FOR_MODE[self.mode]
-        if promotion_rank(self.promotion_level) < promotion_rank(minimum):
-            raise ValueError(
-                f"mode {self.mode.value} requires promotion level "
-                f"{minimum.value} or higher, not {self.promotion_level.value}"
-            )
-
         runs_too_long = self.expires_at - self.effective_from > MAX_LIVE_MANDATE_DURATION
         if self.mode in LIVE_AUTONOMY_MODES and runs_too_long:
             raise ValueError(
@@ -278,37 +375,93 @@ class AutonomyMandate(ChronosModel):
                 f"{MAX_LIVE_MANDATE_DURATION.days} days; renew it deliberately instead"
             )
 
+        seen: set[TradableAssetClass] = set()
+        for promotion in self.promotions:
+            if promotion.asset_class in seen:
+                raise ValueError(f"duplicate promotion for {promotion.asset_class.value}")
+            seen.add(promotion.asset_class)
+
         if self.mode in SUBMITTING_AUTONOMY_MODES:
-            # A submitting mandate must say what it permits. Silence is not a
-            # grant, and an unstated scope must never read as "everything".
-            if not self.scope.asset_classes:
-                raise ValueError(f"mode {self.mode.value} requires at least one asset class")
-            if not self.scope.order_forms:
-                raise ValueError(f"mode {self.mode.value} requires at least one order form")
-            if not self.scope.strategies:
-                raise ValueError(f"mode {self.mode.value} requires at least one strategy")
-            if not self.market_data.permitted_data_qualities:
-                raise ValueError(
-                    f"mode {self.mode.value} requires explicit permitted_data_qualities"
-                )
-            self._validate_instrument_identifiers()
+            self._validate_submitting_scope()
+            self._validate_submitting_promotions()
+            self._validate_submitting_floors()
+        if self.mode in LIVE_AUTONOMY_MODES:
+            self._validate_live_data_qualities()
         return self
 
-    def _validate_instrument_identifiers(self) -> None:
-        """Each permitted asset class must name the instruments it covers."""
+    def _validate_submitting_scope(self) -> None:
+        """A submitting mandate must say what it permits. Silence is not a grant."""
 
-        symbol_classes = {
-            TradableAssetClass.EQUITY,
-            TradableAssetClass.EQUITY_OPTION,
-            TradableAssetClass.INDEX_OPTION,
-            TradableAssetClass.CRYPTO,
-        }
-        if any(item in symbol_classes for item in self.scope.asset_classes) and not (
-            self.scope.symbols
-        ):
+        if not self.scope.asset_classes:
+            raise ValueError(f"mode {self.mode.value} requires at least one asset class")
+        if not self.scope.order_forms:
+            raise ValueError(f"mode {self.mode.value} requires at least one order form")
+        if not self.scope.strategies:
+            raise ValueError(f"mode {self.mode.value} requires at least one strategy")
+        if not self.market_data.permitted_data_qualities:
+            raise ValueError(f"mode {self.mode.value} requires explicit permitted_data_qualities")
+        symbol_classes = _SYMBOL_ASSET_CLASSES & set(self.scope.asset_classes)
+        if symbol_classes and not self.scope.symbols:
             raise ValueError("symbol-based asset classes require a non-empty symbols scope")
         if TradableAssetClass.FUTURE in self.scope.asset_classes and not self.scope.futures_roots:
             raise ValueError("FUTURE requires a non-empty futures_roots scope")
+
+    def _validate_submitting_promotions(self) -> None:
+        """Every permitted family must itself have earned this mode's rung."""
+
+        minimum = MINIMUM_PROMOTION_FOR_MODE[self.mode]
+        earned = {promotion.asset_class: promotion.level for promotion in self.promotions}
+        for asset_class in self.scope.asset_classes:
+            level = earned.get(asset_class)
+            if level is None:
+                raise ValueError(
+                    f"{asset_class.value} is in scope but has no promotion record; "
+                    "promotion is per asset family (ADR-0016 §7)"
+                )
+            if promotion_rank(level) < promotion_rank(minimum):
+                raise ValueError(
+                    f"mode {self.mode.value} requires {asset_class.value} to be promoted to "
+                    f"{minimum.value} or higher, not {level.value}"
+                )
+
+    def _validate_submitting_floors(self) -> None:
+        """Floors must be set explicitly — a zero floor is the *most* permissive.
+
+        Deny-by-default reasoning holds for ceilings but inverts for floors, so
+        these cannot simply be defaulted (M1 adversarial review).
+        """
+
+        if self.market_data.max_quote_age_seconds <= 0:
+            raise ValueError(
+                f"mode {self.mode.value} requires a positive max_quote_age_seconds; "
+                "zero would accept a quote of any age"
+            )
+        if self.capital.min_cash_floor_usd <= 0:
+            raise ValueError(f"mode {self.mode.value} requires a positive min_cash_floor_usd")
+        if self.capital.min_buying_power_usd <= 0:
+            raise ValueError(f"mode {self.mode.value} requires a positive min_buying_power_usd")
+
+    def _validate_live_data_qualities(self) -> None:
+        """A live mandate may not license data the deterministic gate refuses."""
+
+        offending = sorted(
+            q.value
+            for q in self.market_data.permitted_data_qualities
+            if q not in LIVE_PERMITTED_DATA_QUALITIES
+        )
+        if offending:
+            raise ValueError(
+                f"mode {self.mode.value} may not permit data qualities {', '.join(offending)}; "
+                "live autonomy accepts only LIVE or DELAYED"
+            )
+
+    def promotion_for(self, asset_class: TradableAssetClass) -> PromotionLevel | None:
+        """The rung ``asset_class`` has earned under this mandate, if any."""
+
+        for promotion in self.promotions:
+            if promotion.asset_class is asset_class:
+                return promotion.level
+        return None
 
     def covers_instant(self, instant: AwareDatetime) -> bool:
         """Whether ``instant`` falls inside this mandate's effective window.

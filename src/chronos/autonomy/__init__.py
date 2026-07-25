@@ -20,6 +20,7 @@ Structural guarantees, each asserted by a test in ``tests/safety/``:
 
 from __future__ import annotations
 
+from chronos.autonomy.base import AutonomyModel
 from chronos.autonomy.decision import (
     AITradeDecision,
     DecisionProvenance,
@@ -53,11 +54,14 @@ from chronos.autonomy.enums import (
     promotion_rank,
 )
 from chronos.autonomy.mandate import (
+    LIVE_PERMITTED_DATA_QUALITIES,
     MAX_LIVE_MANDATE_DURATION,
+    NEVER_PERMITTED_DATA_QUALITIES,
     ActivityLimits,
     AutonomyMandate,
     CapitalLimits,
     ConcentrationLimits,
+    FamilyPromotion,
     InstrumentScope,
     LossLimits,
     MarketDataRequirements,
@@ -69,8 +73,10 @@ __all__ = [
     "DEFAULT_AUTONOMY_MODE",
     "EXPOSURE_CREATING_DECISION_KINDS",
     "LIVE_AUTONOMY_MODES",
+    "LIVE_PERMITTED_DATA_QUALITIES",
     "MAX_LIVE_MANDATE_DURATION",
     "MINIMUM_PROMOTION_FOR_MODE",
+    "NEVER_PERMITTED_DATA_QUALITIES",
     "NON_SUBMITTING_AUTONOMY_MODES",
     "PROMOTION_LADDER",
     "RISK_REDUCING_DECISION_KINDS",
@@ -80,6 +86,7 @@ __all__ = [
     "ActivityLimits",
     "AutonomyMandate",
     "AutonomyMode",
+    "AutonomyModel",
     "CapitalLimits",
     "ConcentrationLimits",
     "DecisionDirection",
@@ -88,6 +95,7 @@ __all__ = [
     "EntryPlan",
     "EvidenceCitation",
     "ExitPlan",
+    "FamilyPromotion",
     "InstrumentScope",
     "LossLimits",
     "MarketDataRequirements",

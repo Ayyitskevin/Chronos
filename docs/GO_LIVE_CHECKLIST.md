@@ -175,5 +175,10 @@ be submitted anywhere (`src/chronos/control/modes.py`).
 
 ## Gate 5 — LIVE
 
-Same status as Gate 4: refused by this build, and further away. No item on any checklist in this
-repository authorizes live trading.
+Same status as Gate 4: refused for the deterministic strategy platform, and further away.
+
+~~No item on any checklist in this repository authorizes live trading.~~ **Corrected
+2026-07-25 — see the scope note at the top.** No item on *this* checklist authorizes live
+trading, and this platform's mode lock still refuses it in code. Repository-wide the
+statement is false: the `chronos.orders` plane has a gated live branch (ADR-0009), and
+autonomous live operation is governed by ADR-0016 §7's separate per-family promotion ladder.

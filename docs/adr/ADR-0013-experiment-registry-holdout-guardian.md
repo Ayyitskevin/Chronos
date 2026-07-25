@@ -149,6 +149,15 @@ Two test layers (mirroring `test_histdata_isolation` + `test_single_transmit_sit
   include the future copilot package path prospectively, and the assumption is flagged
   so D3/D4 inherit the bar.
 
+  **Updated 2026-07-25 (ADR-0016 / D-16).** The model plane shipped for real, as
+  `chronos.autonomy`, not as `chronos.copilot`. The bar is retargeted rather than
+  relaxed: `chronos.autonomy` is now part of the scanned automated tree, so no module in
+  it may import the registry or call the unlock — the guarantee this section makes is
+  preserved and now covers a plane that actually exists. `chronos.autonomy` is
+  deliberately *not* added to the forbidden-import list, because the deterministic
+  supervisor must import the `AITradeDecision` contract in order to judge it; the
+  prospective bar on `chronos.copilot` remains.
+
 ### 8. CLI (owner-run) + settings
 
 - `chronos registry stats|trials|verify` (read-only reporting + chain verification).

@@ -77,33 +77,49 @@ is an owner action through the finished app.
 
 Autonomy changes **who decides**, not **what gates**. Under ADR-0016 the model gains
 trade-time authority inside an owner-authored mandate; the deterministic kernel keeps
-unconditional veto authority and every guarantee below is unweakened.
+unconditional veto authority.
 
-- **One reachable transmit site.** Exactly one `transmit=True` exists in `chronos.orders`
-  (the submission boundary); a structural test enforces it. `chronos.orders` stays the single
-  canonical execution plane — **no AI-specific submission path is created**. The dormant
-  autonomous-plane paper adapter has its own separate, never-instantiated transmit site behind
-  a halt store that defaults HALTED (see [docs/limitations.md](docs/limitations.md)).
-- **The model cannot reach a broker.** `chronos.autonomy` imports nothing from the
+Bullets marked **[enforced]** are live controls with code and tests behind them today.
+Bullets marked **[contract]** are guarantees of the M1 contract types, which are wired
+into nothing yet. Bullets marked **[M2+]** are requirements ADR-0016 places on machinery
+that is **not yet built**. Nothing below is a claim that Chronos trades autonomously now.
+
+- **[enforced] One reachable transmit site.** Exactly one `transmit=True` exists in
+  `chronos.orders` (the submission boundary); a structural test enforces it. `chronos.orders`
+  stays the single canonical execution plane — **no AI-specific submission path is created**.
+  The dormant deterministic-plane paper adapter (`chronos/execution/brokers/ibkr_paper.py:120`)
+  has its own separate transmit site that this test does **not** scan; it is constructed
+  nowhere in production, and retiring or quarantining it is M2 work tracked as
+  RISK_REGISTER R-28.
+- **[enforced] The model cannot reach a broker.** `chronos.autonomy` imports nothing from the
   order, broker, execution, risk, api, or persistence planes — asserted by an AST walk and a
-  subprocess import probe. A model decision is a typed `AITradeDecision` that carries no
-  account, broker, routing, or transmit field, so it cannot express an order at all.
-- **The model cannot authorize itself.** The `AutonomyMandate` is owner-authored, frozen,
-  expiring (live mandates ≤ 30 days), and deny-by-default; the model has read-only access
-  and no tool that writes it, changes policy, or arms the system.
-- **Demo is the default** and needs no brokerage account. Paper and live are opt-in config,
-  and autonomy startup defaults to a non-live mode — an environment variable alone can never
-  activate live autonomous trading.
-- **Live is fail-closed and gated**, never assumed: a ten-check live stack — config, connection,
-  reconciliation, data, risk, preview, session arming, per-order confirmation, a durable
-  kill switch, and a session-drawdown breaker — each proven to block independently.
-- **Market orders are impossible by construction** — every order is a positive-price limit,
-  and the autonomy vocabulary has no `MARKET` order form.
-- **No uncovered short options** — the strategy vocabulary cannot express one.
-- **An AI failure never becomes permission to trade.** If the model, broker, data, clock,
-  database, lease, resolver, risk engine, or reconciliation state is unavailable, ambiguous,
-  stale, or inconsistent, the system creates no new exposure, permits only deterministic
-  risk-reducing behavior, records the denial, and alerts the owner.
+  subprocess import probe.
+- **[contract] A decision cannot express an order.** `AITradeDecision` carries no account,
+  broker, routing, or transmit field anywhere in its nested tree, refuses smuggled fields,
+  cannot name a broker order id, and cannot name the mandate it is judged against.
+- **[contract] The model cannot authorize itself.** The `AutonomyMandate` is owner-authored,
+  frozen (including against `model_copy`), expiring (live ≤ 30 days), deny-by-default, and
+  promoted per asset family. The model plane has no tool that writes it, changes policy, or
+  arms the system — and no such tool exists yet, because the tool layer is M4.
+- **[enforced] Demo is the default** and needs no brokerage account; paper and live are
+  opt-in config. **[contract]** The autonomy vocabulary's default mode constant is `SHADOW`;
+  there is no autonomy startup path yet to read it, and ADR-0016 requires that when one is
+  built, an environment variable alone can never activate live autonomous trading.
+- **[enforced] Live is fail-closed and gated**, never assumed: a ten-check live stack —
+  config, connection, reconciliation, data, risk, preview, session arming, per-order
+  confirmation, a durable kill switch, and a session-drawdown breaker — each proven to block
+  independently.
+- **[enforced] Market orders are impossible by construction** — every order is a
+  positive-price limit. **[contract]** The autonomy vocabulary has no `MARKET` order form.
+- **[enforced] Cash-secured puts only; no uncovered short options** — enforced today by the
+  orders-plane risk engine (`cash_secured_put`, `covered_call_coverage`). **[contract]** The
+  autonomy strategy vocabulary additionally cannot express an uncovered short option, so no
+  mandate can authorize one.
+- **[M2+] An AI failure must never become permission to trade.** ADR-0016 §8 requires that
+  when the model, broker, data, clock, database, lease, resolver, risk engine, or
+  reconciliation state is unavailable, ambiguous, stale, or inconsistent, the system create
+  no new exposure, permit only deterministic risk-reducing behavior, record the denial, and
+  alert the owner. This is a requirement on the M2 gateway, not a control that exists today.
 - Chronos never asks for or stores an IBKR username or password.
 - Missing broker data is represented as missing; it is never fabricated.
 - **Crypto is disabled by default** (empty `CRYPTO_ALLOWLIST`); long-only spot, fractional,

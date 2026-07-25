@@ -1,5 +1,56 @@
 # CHANGELOG
 
+## [Unreleased] — M2a: contract hardening from the M1 adversarial review (2026-07-25)
+
+Remediation of the five-lens adversarial review of M1, done before any gateway work
+because M2's gateway validates mandates and cannot be built on bypassable ones. Full
+finding list in ADR-0016 §"Known limitations and residuals" item 0.
+
+### Fixed (security-relevant)
+- **Authority escalation via `model_copy(update=...)`.** Pydantic does not re-run
+  validators on copy, so a one-day SHADOW mandate could be copied into a ten-year
+  `LIVE_AUTONOMOUS` mandate with an empty scope and a SHADOW promotion rung — every
+  mandate validator skipped. New `chronos.autonomy.base.AutonomyModel` re-validates on
+  copy; all autonomy contracts inherit it.
+- **Per-family promotion.** A single scalar `promotion_level` let one asset family's
+  evidence license another's live trading, contradicting ADR-0016 §7. Replaced with
+  `promotions: tuple[FamilyPromotion, ...]`, required for every permitted asset class.
+- **Kind/payload coherence.** A CLOSE, REDUCE or CANCEL could carry a strategy, entry
+  plan, risk budget, size and direction — an opening request wearing a risk-reducing
+  label. Now refused per kind.
+- **Floors are not deny-by-default.** `min_cash_floor_usd`, `min_buying_power_usd` and
+  `max_quote_age_seconds` default to zero, which is the *most* permissive value, not the
+  most restrictive. Submitting mandates must now set them explicitly; the docstrings that
+  claimed otherwise are corrected.
+- **Live data quality.** A live mandate could license FROZEN/DELAYED_FROZEN/DEMO data the
+  deterministic live gate already refuses. Now restricted to LIVE/DELAYED.
+- **AST import matchers were blind to `from chronos import <subpackage>`**, silently
+  defeating the autonomy isolation test, the M1 milestone guard, and the ADR-0013 holdout
+  bar. All three fixed, each with a guard-the-guard test.
+- **Naked-short guarantee was a substring scan** that a member named `SHORT_CALL` would
+  have passed. `StrategyForm` is now pinned to its exact member set.
+- Bounded `target_client_reference` to the exact `CHR-<PREFIX>-<32 hex>` shape, bounded
+  the evidence tuple and all monetary/trigger amounts, restricted symbol and futures-root
+  alphabets, cross-validated scope strategies against permitted asset classes, and made
+  the decision plane refuse `FUTURE_OPTION` explicitly.
+
+### Documentation honesty
+- README safety bullets now carry `[enforced]` / `[contract]` / `[M2+]` markers; several
+  described machinery that does not exist yet as though it were live.
+- Corrected stale claims the review surfaced outside the M1 diff: `DECISIONS.md` D-08 and
+  D-15, `docs/ARCHITECTURE.md` item 1, `docs/safety.md`'s staleness scope,
+  `docs/GO_LIVE_CHECKLIST.md`'s closing sentence, `docs/DEPLOYMENT.md`'s env-var rows,
+  `docs/adr/ADR-0013`, and `src/chronos/__init__.py`'s description.
+- `AITradeDecision` no longer claims a data-flow test that does not exist; the claim is
+  scoped to the milestone guard that does, with the permanent test owed by M2.
+- `DecisionProvenance` now documents that it is stamped by the deterministic queue writer,
+  not self-reported by the model — otherwise the version-pin check is a self-attestation.
+
+### Gates
+ruff clean, ruff format clean, mypy --strict clean (190 files), pytest 1901 passed /
+1 credential-gated skip. Still no broker behavior: nothing outside `chronos.autonomy`
+imports the contracts.
+
 ## [Unreleased] — controlled autonomous model authority (M1, 2026-07-25)
 
 ### Governance
