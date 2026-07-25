@@ -212,13 +212,9 @@ It does **not** enforce, and these are open gaps rather than decisions:
 
 - ~~**`LossLimits` and `ActivityLimits` in full**~~ — **enforced since M3.** See the M3
   section below.
-- **`scope.exchanges` and `scope.contract_families`** — a decision names no exchange by
-  construction, so these can only be checked against a *qualified* contract, and **no
-  deterministic compilation step exists yet**. The directive listed compilation under M2;
-  admission and sizing shipped, contract resolution/qualification and order-form selection
-  did not. Concretely, nothing yet converts an admitted, sized decision into a
-  `WheelOrderIntent`, so the gateway is a gate nothing has been routed through: M4 owes the
-  compiler, and until it lands `chronos.supervisor` cannot cause an order either.
+- ~~**`scope.exchanges` and `scope.contract_families`**~~ — **enforced since M4.**
+  `chronos.supervisor.compiler` checks both against the qualified contract, which is what
+  they always needed and what did not exist before.
 - **Sector, family, and correlated concentration**; and the option-liquidity floors
   (`min_option_volume`, `min_open_interest`), which need option-chain evidence the supervisor
   does not gather.
@@ -226,8 +222,10 @@ It does **not** enforce, and these are open gaps rather than decisions:
   in the supervisor; the orders plane has its own, which still applies downstream.
 - **Individual evidence citations** — the bundle is bound by id and digest, but citations
   inside it are not resolved against a store, because the EvidenceBundle store is M3/M4.
-- **Provenance authorship** — the decision-queue writer that would *stamp* provenance is
-  M4, so the version-pin check proves agreement, not authentication.
+- ~~**Provenance authorship**~~ — **authenticated since M4.** A model authors a
+  `ProposedDecision`, which has no provenance field and no id; `chronos.supervisor.queue`
+  stamps both from harness-held configuration. The version-pin check now proves authorship
+  rather than agreement.
 
 `tests/safety/test_supervisor_gateway.py` pins this list against the mandate models
 themselves: every field of every limits model must be classified ENFORCED or INERT, so a new

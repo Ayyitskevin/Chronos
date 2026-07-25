@@ -73,6 +73,13 @@ from chronos.supervisor.durable import (
     SessionCounters,
     build_state,
 )
+from chronos.supervisor.queue import (
+    PROPOSAL_STREAM,
+    HarnessIdentity,
+    ProposalRejected,
+    accept,
+    economic_fingerprint,
+)
 from chronos.supervisor.sizing import AccountEvidence, SizingOutcome, size_order
 
 __all__ = [
@@ -80,6 +87,7 @@ __all__ = [
     "AUTHORITY_STREAM",
     "DECISION_STREAM",
     "MAX_RESUBMISSIONS",
+    "PROPOSAL_STREAM",
     "AccountEvidence",
     "AdmissionCheck",
     "AdmissionOutcome",
@@ -89,19 +97,23 @@ __all__ = [
     "CompilationRefusal",
     "ContractResolver",
     "DegradedReason",
+    "HarnessIdentity",
     "MandateActivation",
     "MarketDataEvidence",
     "OwnerAlert",
+    "ProposalRejected",
     "QuoteEvidence",
     "SessionCounters",
     "SizingOutcome",
     "SupervisorState",
+    "accept",
     "acknowledge",
     "admit",
     "alert_for_degradation",
     "alert_for_refusal",
     "build_state",
     "compile_order",
+    "economic_fingerprint",
     "raise_alert",
     "select_intent",
     "size_order",

@@ -28,6 +28,7 @@ from chronos.autonomy.decision import (
     EvidenceCitation,
     ExitPlan,
     PriceTrigger,
+    ProposedDecision,
 )
 from chronos.autonomy.enums import (
     CONTEXT_DEPENDENT_DECISION_KINDS,
@@ -105,6 +106,7 @@ __all__ = [
     "PriceReference",
     "PriceTrigger",
     "PromotionLevel",
+    "ProposedDecision",
     "RestartBehavior",
     "SessionPolicy",
     "StrategyForm",
