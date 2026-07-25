@@ -261,19 +261,51 @@ provenance claim from *agreement* to *authorship*.
   and redacted *by shape*: there is no field for an account number or a credential, plus a
   tripwire that refuses to issue a bundle containing forbidden markers.
 
-**Known gaps, all tracked:**
+**Known gaps after M4, and where they stand:**
 
-- **Model isolation is a code boundary, not a process boundary (R-35).** ADR-0016 §3 wants the
-  model worker outside the broker-writing process. What exists is a tested *import* boundary;
-  it does not sandbox Python. **This blocks unattended `LIVE_AUTONOMOUS` promotion.**
-- **There is no live provider harness.** Nothing in Chronos calls a model. `HarnessIdentity`
-  describes what such a harness must supply; the harness itself is not built, so the whole
-  autonomy path is exercised by tests and by nothing else.
+- ~~**Model isolation is a code boundary**~~ — **a process boundary since M5 (R-35).** See below.
+- ~~**Nothing yet calls the compiler**~~ — **`supervisor.loop.run_cycle` does since M5.**
 - **Prompt injection is bounded, not solved (R-30).** The claim is only that an injection
   cannot exceed the mandate — not that it cannot influence a proposal.
-- **Nothing yet calls the compiler in production.** The supervisor's pieces exist and are
-  tested end to end in isolation, but no runtime loop wires admission → sizing → compilation →
-  `OrderManagementService`. That wiring, and the session-counter feed it would provide, is M5.
+- **There is still no live provider harness inside Chronos, and by design there never will
+  be.** M5 inverted the relationship: Chronos does not call a model, a model worker calls in.
+  Running that worker is an operational act outside this repository.
+
+### What M5 added, and what it deliberately did not
+
+- **The autonomy cycle** (`chronos.supervisor.loop.run_cycle`) walks one proposal through
+  ingress → stamp → admit → size → compile → hand off → record, stopping at the first refusal.
+  Every stage previously existed with nothing calling it.
+- **It does not submit.** It hands a compiled `WheelOrderIntent` to a callable, and the
+  existing `OrderManagementService` applies every gate it already applies to a human-proposed
+  order. `chronos.orders` remains the single canonical execution plane; autonomy **adds** a
+  gate stack in front of the existing one and removes none.
+- **Non-live by default, structurally.** The handoff callable is optional. Omitting it runs
+  the full walk and places no order — SHADOW — so a caller who has not thought about the last
+  step gets the safe behaviour rather than a surprise.
+- **The session counters M3 built are finally fed.** A completed cycle advances orders and
+  turnover. Counting happens at *handoff*, not at fill, because an activity limit bounds what
+  the system **attempts** — an order that was sent and rejected still consumed an attempt, and
+  counting at fill would let a system being rejected by the venue retry without limit.
+- **The proposal ingress is a process boundary (R-35).** Chronos makes no outbound model call,
+  so there is no provider SDK, no API key, and no egress path in the broker-holding process.
+  Every payload is treated as hostile: bounded size before parsing, strict single-object JSON,
+  NaN/Infinity refused, bounded nesting, full contract validation, and writer-owned fields
+  refused loudly rather than stripped. Refusals never echo payload content.
+- **Session boundaries can follow a market's day (R-34)**, via an explicit `market_timezone`.
+  An unknown zone raises rather than falling back to UTC.
+
+**Known gaps after M5:**
+
+- **Who is calling is the transport's job.** The ingress does not authenticate the worker —
+  that belongs to a Unix socket's filesystem permissions or loopback plus the existing API
+  token, and inventing a second, weaker scheme here would give false assurance.
+- **No process supervisor starts the worker.** Running it separately is operational.
+- **Owner alerts still have no out-of-band delivery (R-32)**, which remains the blocking
+  promotion criterion for unattended `LIVE_AUTONOMOUS`.
+- **R-34's residual:** market *calendar day*, not session calendar — no holidays or half-days.
+- **No scheduled runner.** `run_cycle` is a function; nothing calls it on a timer. What drives
+  it, how often, and under what supervision is not built.
 
 ### What M3 added, and what it deliberately did not
 

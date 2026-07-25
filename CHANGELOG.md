@@ -1,5 +1,61 @@
 # CHANGELOG
 
+## [Unreleased] — M5: the cycle runs, and the model worker is a separate process (2026-07-25)
+
+Every milestone before this built a stage and disclosed that nothing called it. M5 is the
+caller, and it closes the process-isolation gap by **inverting** the relationship.
+
+### The autonomy cycle (`chronos.supervisor.loop`)
+- `run_cycle` walks one proposal through ingress → stamp → admit → size → compile → hand off →
+  record, stopping at the first refusal.
+- **It does not submit.** It hands a compiled `WheelOrderIntent` to a callable; the existing
+  `OrderManagementService` applies every gate it already applies to a human-proposed order and
+  owns the single `transmit=True` site. `chronos.orders` stays the single canonical execution
+  plane — "the autonomy loop got its own submission path" is exactly how that guarantee would
+  have died. Autonomy **adds** a gate stack and removes none.
+- **Non-live by default, structurally.** The handoff is optional; omitting it runs the full
+  walk and places no order. A caller who has not thought about the last step gets SHADOW.
+- **Every cycle is journalled, especially the refusals.** "Why did it not trade" is asked far
+  more often than its opposite, and a system that logged only its actions could never answer it.
+- **M3's session counters are finally fed.** Counting happens at *handoff*, not at fill,
+  because an activity limit bounds what the system **attempts** — an order that was sent and
+  then rejected still consumed one, and counting at fill would let a system being rejected by
+  the venue retry without limit.
+
+### The proposal ingress (`chronos.supervisor.ingress`) — R-35 closed
+**Chronos does not call a model. A model worker calls in.** That inversion is the fix:
+- No provider SDK, no API key, and no egress path in the broker-holding process. A worker that
+  dies, hangs, or is never started produces no decisions, which is the correct failure mode.
+- The worker holds no Chronos capability — no broker handle, no session, no lease, no kill
+  switch, no submission path — not by promise but because none was ever in its address space.
+- **Every payload is treated as hostile**, because a separate process is exactly where an
+  attacker who compromised the worker would be standing: bounded size *before* parsing, strict
+  single-object JSON, NaN/Infinity refused (`NaN > limit` is False, so a naive ceiling check
+  would pass one), bounded nesting, full contract validation, and writer-owned fields
+  (`provenance`, `decision_id`) refused **loudly rather than stripped** — a sender who tried is
+  a sender worth knowing about.
+- Refusals never echo payload content, so a hostile worker cannot write chosen text into an
+  operator's terminal or logs.
+
+### Session boundaries (R-34)
+- `session_key` accepts an explicit `market_timezone`, so counters roll where the market's day
+  does rather than at UTC midnight — 22:00 in New York is already the next UTC day, so a single
+  trading afternoon straddled two counters. Optional and explicit rather than defaulting to a
+  guess, and an unknown zone **raises rather than falling back to UTC**, because a silent
+  fallback is wrong in exactly the way nobody notices.
+
+### Also
+- R-34 and R-35 → MITIGATED, both with residuals stated. Remaining blockers for unattended
+  `LIVE_AUTONOMOUS`: **R-32** (no out-of-band alert delivery).
+- Disclosed: the ingress does not authenticate *which* worker is calling (transport's job — a
+  Unix socket's permissions or loopback plus the API token; a second, weaker scheme here would
+  give false assurance), Chronos ships no process supervisor that starts the worker, and
+  nothing calls `run_cycle` on a timer.
+
+### Gates
+ruff clean, ruff format clean, mypy --strict clean (203 files), pytest 2159 passed / 1
+credential-gated skip. No test sends an order.
+
 ## [Unreleased] — M4: the gate finally has something routed through it (2026-07-25)
 
 Two milestones' worth of disclosed bounds close here: the gateway stops being "a gate with

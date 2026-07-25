@@ -73,6 +73,13 @@ from chronos.supervisor.durable import (
     SessionCounters,
     build_state,
 )
+from chronos.supervisor.ingress import (
+    MAX_PAYLOAD_BYTES,
+    IngressOutcome,
+    IngressRejected,
+    parse_proposal,
+)
+from chronos.supervisor.loop import CycleFacts, CycleOutcome, CycleStage, run_cycle
 from chronos.supervisor.queue import (
     PROPOSAL_STREAM,
     HarnessIdentity,
@@ -86,6 +93,7 @@ __all__ = [
     "ALERT_STREAM",
     "AUTHORITY_STREAM",
     "DECISION_STREAM",
+    "MAX_PAYLOAD_BYTES",
     "MAX_RESUBMISSIONS",
     "PROPOSAL_STREAM",
     "AccountEvidence",
@@ -96,8 +104,13 @@ __all__ = [
     "CompilationOutcome",
     "CompilationRefusal",
     "ContractResolver",
+    "CycleFacts",
+    "CycleOutcome",
+    "CycleStage",
     "DegradedReason",
     "HarnessIdentity",
+    "IngressOutcome",
+    "IngressRejected",
     "MandateActivation",
     "MarketDataEvidence",
     "OwnerAlert",
@@ -114,7 +127,9 @@ __all__ = [
     "build_state",
     "compile_order",
     "economic_fingerprint",
+    "parse_proposal",
     "raise_alert",
+    "run_cycle",
     "select_intent",
     "size_order",
     "unacknowledged",
