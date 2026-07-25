@@ -59,6 +59,14 @@ from chronos.supervisor.alerts import (
     raise_alert,
     unacknowledged,
 )
+from chronos.supervisor.compiler import (
+    CompilationOutcome,
+    CompilationRefusal,
+    ContractResolver,
+    QuoteEvidence,
+    compile_order,
+    select_intent,
+)
 from chronos.supervisor.durable import (
     AUTHORITY_STREAM,
     DECISION_STREAM,
@@ -77,10 +85,14 @@ __all__ = [
     "AdmissionOutcome",
     "AdmissionRefusal",
     "AlertSeverity",
+    "CompilationOutcome",
+    "CompilationRefusal",
+    "ContractResolver",
     "DegradedReason",
     "MandateActivation",
     "MarketDataEvidence",
     "OwnerAlert",
+    "QuoteEvidence",
     "SessionCounters",
     "SizingOutcome",
     "SupervisorState",
@@ -89,7 +101,9 @@ __all__ = [
     "alert_for_degradation",
     "alert_for_refusal",
     "build_state",
+    "compile_order",
     "raise_alert",
+    "select_intent",
     "size_order",
     "unacknowledged",
 ]
