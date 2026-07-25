@@ -159,6 +159,7 @@ class OrderSubmissionBoundary:
         quote_reader: Callable[[WheelOrderIntent], MarketQuote | None] | None = None,
         reconciliation_readiness: ReconciliationReadiness | None = None,
         clock: Callable[[], datetime] | None = None,
+        lease_verifier: Callable[[], bool] | None = None,
     ) -> None:
         if settings.ib_environment is IBEnvironment.LIVE and (
             live_arming is None
@@ -184,6 +185,24 @@ class OrderSubmissionBoundary:
         self._quote_reader = quote_reader
         self._reconciliation_readiness = reconciliation_readiness or ReconciliationReadiness()
         self._clock = clock or utc_now
+        # Live ownership re-check for the single-writer lease (R-24). Optional so
+        # that fakes and the demo path need not supply one; production wiring
+        # always does, and a structural test asserts that it does.
+        self._lease_verifier = lease_verifier
+
+    def bind_lease_verifier(self, verifier: Callable[[], bool]) -> None:
+        """Attach the live single-writer ownership check (R-24).
+
+        The boundary is built by ``build_runtime`` but the lease is acquired
+        later, in the backend lifespan, so the verifier is bound once at startup
+        — the same shared-singleton pattern already used for the kill switch.
+        Binding twice is refused: two verifiers would mean two leases, which is
+        precisely the condition this exists to detect.
+        """
+
+        if self._lease_verifier is not None:
+            raise RuntimeError("a lease verifier is already bound to this submission boundary")
+        self._lease_verifier = verifier
 
     # ------------------------------------------------------------------ #
     # Entry point
@@ -690,6 +709,25 @@ class OrderSubmissionBoundary:
                     "kill switch engaged between pre-submit and transmit; "
                     f"nothing was sent and {_not_sent_resolution(resolved)}",
                 )
+
+        # Final single-writer re-check (RISK_REGISTER R-24). `writer_lease_held`
+        # at the top of submit() is a startup-time flag that is never re-derived,
+        # so by itself it cannot notice that this process lost the lease to
+        # another backend mid-session. This asks the database, as late as
+        # possible, whether we still own it. Like the kill-switch re-read above,
+        # a refusal here is provably not-sent.
+        if self._lease_verifier is not None and not self._lease_verifier():
+            resolved = self._resolve_not_sent(
+                intent=intent,
+                account_id=account_id,
+                reason="single-writer lease lost between pre-submit and transmit",
+                now=now,
+            )
+            return _refuse(
+                SubmissionRefusalCode.READ_ONLY_LEASE,
+                "the single-writer lease was lost between pre-submit and transmit; "
+                f"nothing was sent and {_not_sent_resolution(resolved)}",
+            )
 
         # --- THE SINGLE transmit=True ASSIGNMENT IN chronos.orders -----------
         request = intent.to_order_request(transmit=True)

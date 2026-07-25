@@ -301,23 +301,49 @@ def test_importing_autonomy_leaks_no_broker_or_order_module() -> None:
     assert leaked == [], f"importing chronos.autonomy leaked forbidden modules: {leaked}"
 
 
-def test_m1_wires_the_contracts_into_no_runtime_path() -> None:
-    """M1 adds no broker behavior: nothing outside the package imports it yet.
+def test_only_the_supervisor_consumes_the_contracts() -> None:
+    """Exactly one plane may consume a model decision: the deterministic supervisor.
 
-    ADR-0016's milestone sequencing puts the ModelDecisionGateway in M2. When that
-    lands, the supervisor legitimately imports these contracts and this test is
-    replaced by the gateway's own admission tests — it is a milestone guard, not a
-    permanent invariant.
+    This replaces M1's milestone guard (which asserted *nothing* imported the
+    contracts, true only while the gateway did not exist). The permanent
+    invariant is narrower and stronger: an `AITradeDecision` reaches the order
+    pipeline through `chronos.supervisor` or not at all. If `chronos.orders`,
+    `chronos.broker`, or the UI started reading decisions directly, the
+    single-gateway guarantee in ADR-0016 §2 would be false.
     """
 
+    permitted_prefixes = ("supervisor/",)
     importers: list[str] = []
     for path in sorted(_SRC.rglob("*.py")):
         if path.is_relative_to(_SRC / "autonomy"):
             continue
+        relative = str(path.relative_to(_SRC))
+        if relative.startswith(permitted_prefixes):
+            continue
         for name in _imported_names(path.read_text(encoding="utf-8")):
             if name == "chronos.autonomy" or name.startswith("chronos.autonomy."):
-                importers.append(str(path.relative_to(_SRC)))
-    assert importers == [], f"M1 must add no broker behavior, but {importers} import the contracts"
+                importers.append(relative)
+    assert importers == [], (
+        f"only chronos.supervisor may consume model decisions, but {sorted(set(importers))} "
+        "import the autonomy contracts"
+    )
+
+
+def test_the_supervisor_never_reaches_a_broker_directly() -> None:
+    """The gateway decides; it does not transmit.
+
+    The supervisor is allowed to know about orders (it hands off proposals) but
+    must not import a broker adapter or the submission boundary — the transmit
+    site stays reachable only through the existing order service.
+    """
+
+    forbidden = ("chronos.broker", "chronos.orders.submission", "ib_async", "ibapi")
+    offenders: list[str] = []
+    for path in sorted((_SRC / "supervisor").rglob("*.py")):
+        for name in _imported_names(path.read_text(encoding="utf-8")):
+            if any(name == item or name.startswith(item + ".") for item in forbidden):
+                offenders.append(f"{path.name} imports {name}")
+    assert offenders == [], f"the supervisor must not reach a broker: {offenders}"
 
 
 # ------------------------------------------------------------ a decision cannot order

@@ -94,6 +94,10 @@ class OrderManagementService:
         self._risk_engine = risk_engine
         self._preview = preview_service
         self._boundary = submission_boundary
+        #: The single submission boundary this service drives. Exposed so the
+        #: backend lifespan can bind the live single-writer verifier (R-24)
+        #: after it acquires the lease, which happens later than runtime build.
+        self.submission_boundary = submission_boundary
         self._modification = modification
         self._cancellation = cancellation
         self._tracker = tracker

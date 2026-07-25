@@ -9,9 +9,10 @@ starts **read-only** with inspection available and mutation refused.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI
 
@@ -26,6 +27,44 @@ from chronos.runtime import build_runtime
 from chronos.utils.locking import WriterLease
 
 _logger = logging.getLogger("chronos.api")
+
+#: The lease is renewed this many times per TTL. Three gives two chances to
+#: survive a transient database hiccup before the lease lapses.
+_RENEWALS_PER_TTL = 3
+
+
+async def _heartbeat_lease(state: BackendState, lease: WriterLease, period: float) -> None:
+    """Renew the single-writer lease, and demote to read-only if it is lost.
+
+    RISK_REGISTER R-24: before this existed, ``WriterLease.renew()`` had no
+    production caller at all. The lease therefore expired after its 30-second
+    TTL while this process went on believing it was the writer — a second
+    backend could take the lease and both would consider themselves authoritative.
+    Losing the lease is not recoverable by re-acquiring it here: another writer
+    may already have acted on it, so this process demotes itself permanently and
+    an operator restarts it deliberately.
+    """
+
+    while True:
+        await asyncio.sleep(period)
+        try:
+            renewed = await asyncio.to_thread(lease.renew)
+        except Exception:
+            _logger.exception(
+                "Writer-lease renewal raised; demoting this backend to READ-ONLY",
+                extra={"event": "writer_lease_renew_error"},
+            )
+            renewed = False
+        if renewed:
+            continue
+        state.read_only = True
+        state.lease = None
+        _logger.error(
+            "Lost the single-writer lease; this backend is now READ-ONLY. "
+            "Order submission and modification are disabled until restart.",
+            extra={"event": "writer_lease_lost", "outcome": "read_only", "passed": False},
+        )
+        return
 
 
 @asynccontextmanager
@@ -55,6 +94,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
         app.state.api_token = load_or_create_token(runtime.settings.backend_token_file)
         if not read_only:
+            # R-24: the boundary re-checks lease ownership in the database
+            # immediately before transmitting, instead of trusting the
+            # startup-time `writer_lease_held` flag.
+            runtime.order_management.submission_boundary.bind_lease_verifier(lease.holds)
             # A writer publishes submission readiness only after both restart-order
             # recovery and full portfolio reconciliation complete against broker
             # truth. Read-only backends cannot persist recovery and stay PENDING.
@@ -102,9 +145,18 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                 )
         runtime.close()
         raise
+    heartbeat: asyncio.Task[None] | None = None
+    if not read_only:
+        # R-24: without this the lease silently lapses after its TTL.
+        period = lease.ttl.total_seconds() / _RENEWALS_PER_TTL
+        heartbeat = asyncio.create_task(_heartbeat_lease(app.state.backend, lease, period))
     try:
         yield
     finally:
+        if heartbeat is not None:
+            heartbeat.cancel()
+            with suppress(asyncio.CancelledError):
+                await heartbeat
         if not read_only:
             lease.release()
         runtime.close()

@@ -1,5 +1,71 @@
 # CHANGELOG
 
+## [Unreleased] — M2: deterministic gateway, lease fencing, transmit quarantine (2026-07-25)
+
+### Added — `chronos.supervisor` (the ModelDecisionGateway)
+The first code that can turn a model decision into a *proposal*. It sits between
+the model plane and `chronos.orders`, adds a gate, and removes none: an admitted,
+sized decision is handed to the existing `OrderManagementService`, which applies
+every gate it already applied to a human-proposed order and keeps the single
+`transmit=True` site. The supervisor itself never touches a broker (asserted).
+
+- `admission.py` — deny-by-default validation of a decision against the mandate
+  in force: mandate presence, degraded state (refused *first*, so an AI/broker/
+  data/lease failure never becomes permission), effective window, account
+  fingerprint, submitting mode, decision replay, model/prompt/tool/schema version
+  pins, evidence-bundle identity, HOLD as explicitly non-executable, asset class,
+  instrument allowlist, strategy, per-family promotion, and order-form
+  availability. Every check is recorded pass or fail, so a refusal is explainable.
+- `sizing.py` — where "the model's requested quantity is not executable" becomes
+  true in code. The request is an upper bound only; the kernel independently
+  derives size from per-order notional, per-order unit ceilings, allocated
+  capital, cash and buying-power **floors** (subtracted, so a floor genuinely
+  reserves), per-symbol concentration headroom, and gross-exposure headroom —
+  then clamps down and refuses when nothing survives. Decimal throughout;
+  missing or absurd contract facts refuse rather than guess.
+- 28 tests, incl. one proving the gateway re-checks promotion via
+  `model_construct` rather than trusting a mandate that skipped validation.
+
+### Fixed — R-24: the writer lease was never renewed, and was not a fencing token
+`WriterLease.renew()` had **no production caller**. The lease expired after its
+30-second TTL while the backend went on believing it was the writer, so a second
+backend could acquire it and both would consider themselves authoritative.
+
+- A lifespan heartbeat renews at TTL/3 and, on any failure, demotes the process
+  to read-only permanently (re-acquiring would be unsafe — another writer may
+  already have acted).
+- New `WriterLease.holds()` re-checks ownership in the database; the submission
+  boundary calls it immediately before the transmit line, beside the kill-switch
+  re-read. A refusal there is provably not-sent.
+- Residual, disclosed: this narrows the window, it does not close it. IBKR
+  accepts an order without knowing about our lease, so broker-side fencing is
+  unavailable.
+
+### Fixed — R-28: the second transmit site is now quarantined and inventoried
+`execution/brokers/ibkr_paper.py` enables transmission with an *attribute*
+assignment (`order.transmit = True`) outside `chronos.orders`, which the
+keyword-scoped single-transmit-site test structurally could not see.
+
+- New `tests/safety/test_broker_mutation_inventory.py`: a repository-wide
+  inventory matching **both** spellings, pinned to an explicit expected set, so a
+  new transmit site anywhere fails CI; plus an AST assertion that no production
+  module constructs the adapter.
+- The adapter refuses construction without `quarantine_ack=True`, which nothing
+  in `src/` passes — an accidental wiring fails loudly instead of quietly
+  acquiring a second, ungated broker path.
+
+### Changed
+- M1's milestone guard (nothing imports the contracts) is replaced by the
+  permanent, narrower invariant: **only** `chronos.supervisor` may consume an
+  `AITradeDecision`, and the supervisor may not import a broker adapter or the
+  submission boundary.
+- `CANCEL` is no longer classified as unconditionally risk-reducing — see the
+  M2a entry below.
+
+### Gates
+ruff clean, ruff format clean, mypy --strict clean (193 files), pytest 1942
+passed / 1 credential-gated skip.
+
 ## [Unreleased] — M2a: contract hardening from the M1 adversarial review (2026-07-25)
 
 Remediation of the five-lens adversarial review of M1, done before any gateway work
