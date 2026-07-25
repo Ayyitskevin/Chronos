@@ -53,6 +53,24 @@ _EXPECTED_TRANSMIT_SITES: set[tuple[str, str]] = {
 #: Modules that may construct the quarantined adapter. Empty: none may.
 _PERMITTED_CONSTRUCTORS: set[str] = set()
 
+#: The actual broker-mutating calls, as ``(relative path, method)``. The M2
+#: review pointed out that a file named "broker mutation inventory" which pins
+#: only transmit *flags* inventories no mutation: the flag says an order is live,
+#: the call is what reaches the venue. Both are pinned now.
+_EXPECTED_MUTATION_SITES: set[tuple[str, str]] = {
+    # The production adapter (ADR-0009). whatIf preview + the gated send + cancel.
+    ("broker/official_ibkr.py", "placeOrder"),
+    ("broker/official_ibkr.py", "cancelOrder"),
+    # QUARANTINED deterministic-plane adapter (R-28), constructed nowhere.
+    ("execution/brokers/ibkr_paper.py", "placeOrder"),
+    ("execution/brokers/ibkr_paper.py", "cancelOrder"),
+}
+
+#: Names that mutate broker state. `exerciseOptions` and `reqGlobalCancel` are
+#: listed although Chronos implements neither — if one ever appears it must fail
+#: here rather than arrive unnoticed.
+_MUTATING_METHODS = frozenset({"placeOrder", "cancelOrder", "exerciseOptions", "reqGlobalCancel"})
+
 
 def _source_files() -> list[Path]:
     return sorted(path for path in _SRC.rglob("*.py") if "egg-info" not in str(path))
@@ -100,6 +118,52 @@ def test_the_complete_transmit_inventory_is_exactly_as_expected() -> None:
 def test_only_the_orders_boundary_transmits_via_keyword() -> None:
     keyword_sites = {path for path, kind in _transmit_sites() if kind == "keyword"}
     assert keyword_sites == {"orders/submission.py"}
+
+
+def _mutation_sites() -> set[tuple[str, str]]:
+    """Every call to a broker-mutating method, anywhere in the package."""
+
+    found: set[tuple[str, str]] = set()
+    for path in _source_files():
+        relative = str(path.relative_to(_SRC))
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            name = getattr(node.func, "attr", None) or getattr(node.func, "id", None)
+            if name in _MUTATING_METHODS:
+                found.add((relative, name))
+    return found
+
+
+def test_the_complete_broker_mutation_inventory_is_exactly_as_expected() -> None:
+    """The directive's 'complete broker-mutation inventory', enforced.
+
+    A transmit flag marks an order live; the *call* is what reaches the venue.
+    Pinning only the flag would let a new placeOrder site appear silently.
+    """
+
+    actual = _mutation_sites()
+    unexpected = actual - _EXPECTED_MUTATION_SITES
+    missing = _EXPECTED_MUTATION_SITES - actual
+    assert not unexpected, (
+        f"NEW broker-mutating call site(s): {sorted(unexpected)}. chronos.orders is the "
+        "single canonical execution plane (ADR-0016 §8); a second path to a venue needs "
+        "an ADR before this set grows."
+    )
+    assert not missing, (
+        f"expected broker-mutating call site(s) disappeared: {sorted(missing)} — update "
+        "this inventory deliberately if an adapter genuinely moved."
+    )
+
+
+def test_no_exercise_or_global_cancel_capability_exists() -> None:
+    """Chronos implements neither; both would be unbounded-risk operations."""
+
+    dangerous = {
+        site for site in _mutation_sites() if site[1] in {"exerciseOptions", "reqGlobalCancel"}
+    }
+    assert dangerous == set(), f"an exercise/global-cancel capability appeared: {dangerous}"
 
 
 def test_no_production_module_constructs_the_quarantined_adapter() -> None:

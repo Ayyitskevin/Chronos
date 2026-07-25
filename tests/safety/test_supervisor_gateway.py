@@ -118,6 +118,8 @@ def _mandate(**overrides: Any) -> AutonomyMandate:
             allocated_capital_usd=Decimal(50_000),
             max_order_notional_usd=Decimal(10_000),
             max_gross_exposure_usd=Decimal(500_000),
+            max_net_exposure_usd=Decimal(500_000),
+            max_position_notional_usd=Decimal(100_000),
             max_shares_per_order=100,
             min_cash_floor_usd=Decimal(1_000),
             min_buying_power_usd=Decimal(500),
@@ -192,10 +194,22 @@ def _state(**overrides: Any) -> SupervisorState:
 
 
 def _evidence(**overrides: Any) -> AccountEvidence:
+    """Complete account evidence.
+
+    Exposure fields are ``None`` when unknown, and a mandate ceiling whose
+    evidence is missing now *refuses* rather than being ignored — so a test that
+    wants to reach a size must supply the facts its mandate's limits need.
+    """
+
     base: dict[str, Any] = {
         "net_liquidation_usd": Decimal(100_000),
         "total_cash_usd": Decimal(60_000),
         "buying_power_usd": Decimal(60_000),
+        "symbol_exposure_usd": Decimal(0),
+        "gross_exposure_usd": Decimal(0),
+        "net_exposure_usd": Decimal(0),
+        "position_notional_usd": Decimal(0),
+        "maintenance_margin_usd": Decimal(0),
     }
     base.update(overrides)
     return AccountEvidence(**base)
@@ -492,8 +506,6 @@ def test_the_inert_mandate_limit_list_is_pinned() -> None:
         "max_sector_exposure_pct",
         "max_family_exposure_pct",
         "max_correlated_exposure_pct",
-        "max_leverage",
-        "max_margin_utilization_pct",
     )
     for name in inert_today:
         assert name not in inspect.getsource(sizing_module), (
@@ -690,6 +702,8 @@ def test_option_contracts_use_the_contract_ceiling_and_multiplier() -> None:
                 allocated_capital_usd=Decimal(200_000),
                 max_order_notional_usd=Decimal(50_000),
                 max_gross_exposure_usd=Decimal(500_000),
+                max_net_exposure_usd=Decimal(500_000),
+                max_position_notional_usd=Decimal(100_000),
                 max_contracts_per_order=3,
                 min_cash_floor_usd=Decimal(1_000),
                 min_buying_power_usd=Decimal(500),

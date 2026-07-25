@@ -353,7 +353,15 @@ def test_the_supervisor_never_reaches_a_broker_directly() -> None:
     site stays reachable only through the existing order service.
     """
 
-    forbidden = ("chronos.broker", "chronos.orders.submission", "ib_async", "ibapi")
+    forbidden = (
+        "chronos.broker",
+        "chronos.orders.submission",
+        # chronos.execution holds the QUARANTINED second transmit site (R-28);
+        # omitting it left the widest hole this guard was meant to close.
+        "chronos.execution",
+        "ib_async",
+        "ibapi",
+    )
     offenders: list[str] = []
     for path in sorted((_SRC / "supervisor").rglob("*.py")):
         for name in _imported_names(path.read_text(encoding="utf-8")):

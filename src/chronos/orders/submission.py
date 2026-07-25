@@ -716,18 +716,30 @@ class OrderSubmissionBoundary:
         # another backend mid-session. This asks the database, as late as
         # possible, whether we still own it. Like the kill-switch re-read above,
         # a refusal here is provably not-sent.
-        if self._lease_verifier is not None and not self._lease_verifier():
-            resolved = self._resolve_not_sent(
-                intent=intent,
-                account_id=account_id,
-                reason="single-writer lease lost between pre-submit and transmit",
-                now=now,
-            )
-            return _refuse(
-                SubmissionRefusalCode.READ_ONLY_LEASE,
-                "the single-writer lease was lost between pre-submit and transmit; "
-                f"nothing was sent and {_not_sent_resolution(resolved)}",
-            )
+        if self._lease_verifier is not None:
+            try:
+                still_holds = self._lease_verifier()
+            except Exception:  # any failure here must fail closed
+                # This is the only database call inside the CAS-to-transmit
+                # window. An unguarded exception would escape the boundary
+                # mid-submit, leaving the intent stranded in SUBMISSION_UNKNOWN
+                # with nothing sent and no refusal recorded (M2 review). A lease
+                # we cannot verify is a lease we do not have.
+                still_holds = False
+            if not still_holds:
+                resolved = self._resolve_not_sent(
+                    intent=intent,
+                    account_id=account_id,
+                    reason="single-writer lease lost or unverifiable between pre-submit "
+                    "and transmit",
+                    now=now,
+                )
+                return _refuse(
+                    SubmissionRefusalCode.READ_ONLY_LEASE,
+                    "the single-writer lease was lost or could not be verified between "
+                    f"pre-submit and transmit; nothing was sent and "
+                    f"{_not_sent_resolution(resolved)}",
+                )
 
         # --- THE SINGLE transmit=True ASSIGNMENT IN chronos.orders -----------
         request = intent.to_order_request(transmit=True)
