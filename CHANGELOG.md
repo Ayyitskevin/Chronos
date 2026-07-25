@@ -1,5 +1,68 @@
 # CHANGELOG
 
+## [Unreleased] — M6: the owner gets told (2026-07-25)
+
+M3 made alerts durable. M5 disclosed the gap plainly: durable is not delivered, the channel
+was **pull**, and an owner who was not looking was not told. R-32 was the last blocking
+promotion criterion; this closes most of it and states exactly what remains.
+
+### Alert delivery (`chronos.supervisor.delivery`)
+- Unacknowledged alerts are pushed to sinks. **`delivered_at` records that the owner was
+  *told*, which is a different fact from *acknowledged*** — and the difference matters most in
+  the case where something went wrong and nobody noticed. Attempts are counted durably, so a
+  persistently failing sink is *visible* rather than silently retried forever.
+- An alert counts as delivered when **at least one** sink accepts. A stricter rule would let a
+  single misconfigured file path suppress the log sink forever, which is the opposite of what
+  an alerting system should do when partly broken. Every sink is attempted even after one
+  succeeds, so delivery does not depend on registration order.
+- A sink that raises is caught: an alerting system that crashes the process it is alerting
+  about has made things worse.
+
+### The decision: local sinks only
+Not timidity — the actual threat model. A networked sender needs **credentials** beside a
+process that moves money (the reference-project pattern the directive forbids), an **egress
+path** a compromised component could ride in the other direction, and its failure mode is
+**silence** — which converts "no alerts" from *unknown* into *all clear*.
+
+Shipped: a log sink (always present, cannot fail environmentally) and an optional JSONL file
+sink (0600, fsync'd, `O_NOFOLLOW` per R-21) that composes with whatever the operator already
+runs — `tail -f`, an editor watch, a systemd path unit, a desktop notifier. **A structural test
+fails if the module ever gains a network import**, so adding one is the deliberate, ADR-bearing
+act it should be.
+
+**Residual, stated rather than buried:** a local file does not follow you off the machine.
+Unattended operation *away from the host* still needs a networked channel and its own ADR.
+
+### The ingress transport (`POST /autonomy/proposals`)
+M5 said authenticating *which* worker is calling belongs to the transport. This answers it by
+**reusing what exists** rather than inventing a weaker scheme: loopback-only binding, the same
+local API token every mutating endpoint requires, and the single-writer lease. Nothing here is
+weaker than the surface it sits beside.
+
+The route parses with the ingress (bypassing FastAPI's model binding on purpose — two parsers
+would be two things to reason about) and returns 202, not 201: the proposal was *received and
+judged*, and no resource the caller owns was created. A 201 would imply an order exists.
+
+### Schema v6 (migration 0005)
+Adds `delivered_at` and `delivery_attempts`. The column add is **idempotent**, and that is
+worth explaining: revision 0004 builds its tables from *current* metadata rather than frozen
+DDL, so a database upgraded today already has these columns while one upgraded earlier does
+not. Adding blindly fails on the first path. This is the cost of the metadata-derived approach
+showing up for the first time.
+
+### Also
+- R-32 → MITIGATED (local channels only). New: **R-36** — no scheduled runner drives the cycle.
+  The proposal route validates and reports that no autonomy runtime is wired; the autonomy path
+  is **reachable but inert**, which is the safe state.
+- Fixed a false positive in M4's "no deterministic module reads untrusted text" guard: it
+  matched `request.body()`, an HTTP body. A method *call* is not a field read, and
+  `TextualEvidence.body` is a `str` that is never called — so excluding call targets separates
+  the two without weakening the guard on what it actually protects.
+
+### Gates
+ruff clean, ruff format clean, mypy --strict clean (206 files), pytest 2175 passed / 1
+credential-gated skip. No test sends an order.
+
 ## [Unreleased] — M5: the cycle runs, and the model worker is a separate process (2026-07-25)
 
 Every milestone before this built a stage and disclosed that nothing called it. M5 is the

@@ -179,7 +179,7 @@ def test_schema_initialization_creates_required_evidence_tables() -> None:
         "autonomy_session_counters",
         "autonomy_decision_attempts",
     } <= names
-    assert SCHEMA_VERSION == 5
+    assert SCHEMA_VERSION == 6
 
 
 def test_application_events_are_append_only_and_queryable() -> None:

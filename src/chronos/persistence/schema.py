@@ -641,6 +641,14 @@ class AutonomyOwnerAlertRow(Base):
     raised_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
     acknowledged_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     acknowledged_note: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    #: When this alert was successfully handed to at least one delivery sink
+    #: (schema v6, M6). NULL means the owner has not been *told* — which is
+    #: different from not having *acknowledged*, and the difference is the whole
+    #: point of R-32: an alert nobody was told about is not an alert.
+    delivered_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    #: How many delivery attempts have been made. A durable count so a sink that
+    #: is persistently failing is visible rather than silently retrying forever.
+    delivery_attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     #: How many times this same condition recurred before acknowledgement.
     #: Repeats are folded into one row so a degraded loop cannot bury the
     #: alert list under thousands of identical entries -- an alert nobody can

@@ -295,17 +295,39 @@ provenance claim from *agreement* to *authorship*.
 - **Session boundaries can follow a market's day (R-34)**, via an explicit `market_timezone`.
   An unknown zone raises rather than falling back to UTC.
 
-**Known gaps after M5:**
+### What M6 added, and what it deliberately did not
 
-- **Who is calling is the transport's job.** The ingress does not authenticate the worker —
-  that belongs to a Unix socket's filesystem permissions or loopback plus the existing API
-  token, and inventing a second, weaker scheme here would give false assurance.
-- **No process supervisor starts the worker.** Running it separately is operational.
-- **Owner alerts still have no out-of-band delivery (R-32)**, which remains the blocking
-  promotion criterion for unattended `LIVE_AUTONOMOUS`.
+- **Alert delivery** (`chronos.supervisor.delivery`), closing most of R-32. Unacknowledged
+  alerts are pushed to sinks; `delivered_at` records that the owner was **told**, which is a
+  different fact from **acknowledged**; attempts are counted durably so a failing sink is
+  visible rather than silently retried. An alert counts as delivered when *at least one* sink
+  accepts, so a misconfigured file path cannot suppress the log sink forever.
+- **Local sinks only, and that is a decision rather than an omission.** A networked sender
+  needs credentials beside a process that moves money and an egress path a compromised
+  component could ride, and its failure mode is *silence* — which converts "no alerts" from
+  **unknown** into **all clear**. A structural test fails if the module gains a network import.
+  The shipped sinks are a log sink (always present, cannot fail environmentally) and an
+  optional JSONL file sink (0600, fsync'd, `O_NOFOLLOW` per R-21) that composes with whatever
+  the operator already runs.
+- **The ingress transport** (`POST /autonomy/proposals`), which answers M5's "who is calling"
+  question by **reusing what exists** rather than inventing a weaker scheme: loopback-only
+  binding, the same local API token every mutating endpoint requires, and the single-writer
+  lease. Nothing here is weaker than the surface it sits beside.
+
+**Known gaps after M6:**
+
+- **The proposal route does not run the cycle (R-36).** It validates a proposal and reports
+  that no autonomy runtime is wired. Running the cycle needs an active mandate, a
+  supervisor-issued evidence bundle, gathered account/quote facts and a resolved contract —
+  all of which belong to a runtime that owns the broker connection. Until that exists the
+  autonomy path is **reachable but inert**, which is the safe state.
+- **No scheduled runner, and no process supervisor for the worker.** What drives a cycle, how
+  often, and under what supervision is not built.
+- **R-32's residual:** a local file does not follow you off the machine. Genuinely unattended
+  operation *away from the host* still needs a networked channel and its own ADR.
 - **R-34's residual:** market *calendar day*, not session calendar — no holidays or half-days.
-- **No scheduled runner.** `run_cycle` is a function; nothing calls it on a timer. What drives
-  it, how often, and under what supervision is not built.
+- **Who is calling, beyond the token.** The transport authenticates that a caller has local
+  access and the token; it does not distinguish one local worker from another.
 
 ### What M3 added, and what it deliberately did not
 
