@@ -210,12 +210,8 @@ proceeds, because "closing" a position we are wrong about opens the opposite one
 
 It does **not** enforce, and these are open gaps rather than decisions:
 
-- **`LossLimits` and `ActivityLimits` in full** — session/daily loss, peak-to-trough
-  drawdown, and orders/cancellations/replacements/turnover per session are read by no code.
-  They need a supervisor that owns durable per-session counters (M3). Interim lever: a
-  caller that has breached one must pass a `DegradedReason` — normally with
-  `blocks_risk_reduction=False`, so the position can still be closed, which is what a loss
-  limit is for.
+- ~~**`LossLimits` and `ActivityLimits` in full**~~ — **enforced since M3.** See the M3
+  section below.
 - **`scope.exchanges` and `scope.contract_families`** — a decision names no exchange by
   construction, so these can only be checked against a *qualified* contract, and **no
   deterministic compilation step exists yet**. The directive listed compilation under M2;
@@ -237,6 +233,57 @@ It does **not** enforce, and these are open gaps rather than decisions:
 themselves: every field of every limits model must be classified ENFORCED or INERT, so a new
 limit cannot arrive undisclosed, and a field classified INERT that the kernel starts reading
 fails the same test.
+
+### What M3 added, and what it deliberately did not
+
+M2's gateway had no memory. `admit` was a pure function over a `SupervisorState` the caller
+assembled from nowhere — the right shape for testing a veto without a broker, but it left
+three guarantees unenforceable. M3 (`chronos.supervisor.durable`) closes all three:
+
+- **`LossLimits` and `ActivityLimits` are enforced**, against durable per-session counters.
+  A breach becomes a `DegradedReason` with `blocks_risk_reduction=False`, so it stops new
+  exposure while leaving the position closable — being at a loss limit is exactly when
+  closing must remain possible. Routing through the existing degraded lever rather than new
+  refusal codes keeps that rule with one implementation instead of two.
+- **Mandate activation and revocation are durable owner events**, so
+  `RestartBehavior.REQUIRE_REACTIVATION` means something. An in-memory activation vanished
+  on restart and could not distinguish "reactivated" from "never activated". Revocation is
+  marked in place, never deleted.
+- **R-31's re-submission counters are durable.** They lived in memory, so a model could
+  route around a refusal by waiting for a restart.
+
+Two persistence prerequisites landed first, because durable state is only as trustworthy as
+the store beneath it:
+
+- **The main database now uses WAL, `synchronous=FULL`, and a `busy_timeout`**, verified on
+  every connection rather than merely issued. It previously ran on SQLite's defaults, so a
+  committed transaction could be lost on power loss — and a risk counter that silently rolls
+  back is worse than one that does not exist, because the system would trust it.
+- **Append-only tables are hash-chained** (`chronos.persistence.hash_chain`). They were
+  append-only *by convention*, which is a statement about the code rather than the data.
+
+**Known gaps, all tracked:**
+
+- **Owner alerts have no out-of-band delivery (R-32).** `chronos.supervisor.alerts` records
+  alerts durably, deduplicates recurrences, escalates but never downgrades an unacknowledged
+  alert, and keeps acknowledgements forever. It does **not** send email, SMS, push, or
+  webhooks. The channel is **pull**, so an owner who is not looking is not told. This is
+  deliberate — no outbound network calls, no credential store beside a trading system — and
+  it **blocks unattended `LIVE_AUTONOMOUS` promotion**. A structural test fails if an egress
+  dependency is added quietly.
+- **Session boundaries are calendar dates, not market sessions (R-34).** Counters roll at
+  midnight in the caller's zone. The supervisor deliberately owns no market calendar, so a
+  mandate's "session" limits are day limits until a caller supplies the real boundary.
+- **Hash chaining is tamper-evident, not tamper-proof (R-33).** It detects a targeted edit,
+  deletion, reordering or corruption. It cannot stop an attacker who can write to the
+  database from recomputing the whole chain; that needs an external anchor Chronos does not
+  have.
+- **The EvidenceBundle store is still M4.** Bundles are bound by id and digest; individual
+  citations are still not resolved against a store.
+- **Nothing counts *for* the counters yet.** `record_activity` and `record_equity` are the
+  supervisor's API, but no production caller invokes them, because the order plane is not
+  yet routed through the supervisor — compilation is M4. The limits are enforced in the
+  sense that a recorded breach binds; they are not yet *fed* by live trading.
 - **The M1 contracts shipped with real defects, found by adversarial review and fixed in M2a.**
   The worst was an authority-escalation vector: `model_copy(update=...)` bypassed every mandate
   validator, so a one-day SHADOW mandate could be copied into a ten-year `LIVE_AUTONOMOUS` one.

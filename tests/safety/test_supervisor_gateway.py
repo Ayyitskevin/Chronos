@@ -639,11 +639,12 @@ _LIMIT_ENFORCEMENT: dict[str, dict[str, str]] = {
         "min_cash_floor_usd": _ENFORCED,
     },
     "LossLimits": {
-        # Needs durable per-session P&L state the supervisor does not own (M3).
-        "max_session_loss_usd": _INERT,
-        "max_daily_loss_usd": _INERT,
-        "max_peak_to_trough_drawdown_usd": _INERT,
-        "max_peak_to_trough_drawdown_pct": _INERT,
+        # M3: enforced against durable per-session counters in supervisor.durable,
+        # which turns a breach into a DegradedReason that stops new exposure.
+        "max_session_loss_usd": _ENFORCED,
+        "max_daily_loss_usd": _ENFORCED,
+        "max_peak_to_trough_drawdown_usd": _ENFORCED,
+        "max_peak_to_trough_drawdown_pct": _ENFORCED,
     },
     "ConcentrationLimits": {
         "max_symbol_exposure_pct": _ENFORCED,
@@ -653,11 +654,11 @@ _LIMIT_ENFORCEMENT: dict[str, dict[str, str]] = {
         "max_correlated_exposure_pct": _INERT,
     },
     "ActivityLimits": {
-        # Need durable per-session counters (M3).
-        "max_orders_per_session": _INERT,
-        "max_cancellations_per_session": _INERT,
-        "max_replacements_per_session": _INERT,
-        "max_turnover_usd_per_session": _INERT,
+        # M3: enforced against durable per-session counters (see LossLimits).
+        "max_orders_per_session": _ENFORCED,
+        "max_cancellations_per_session": _ENFORCED,
+        "max_replacements_per_session": _ENFORCED,
+        "max_turnover_usd_per_session": _ENFORCED,
     },
     "MarketDataRequirements": {
         "max_quote_age_seconds": _ENFORCED,
@@ -700,9 +701,18 @@ def test_the_classification_matches_what_the_kernel_actually_reads() -> None:
     """Guard the guard: a classification nobody checks is just a comment."""
 
     import chronos.supervisor.admission as admission_module
+    import chronos.supervisor.durable as durable_module
     import chronos.supervisor.sizing as sizing_module
 
-    kernel = inspect.getsource(sizing_module) + inspect.getsource(admission_module)
+    # Every module that may enforce a mandate limit must be scanned. M3 added a
+    # third one, and a classification test that missed it would have gone on
+    # certifying LossLimits as inert while `durable.py` enforced it -- the exact
+    # stale-claim failure this pin exists to catch.
+    kernel = (
+        inspect.getsource(sizing_module)
+        + inspect.getsource(admission_module)
+        + inspect.getsource(durable_module)
+    )
     for model_name, classified in _LIMIT_ENFORCEMENT.items():
         for field, status in classified.items():
             mentioned = field in kernel

@@ -500,3 +500,150 @@ class WriterLeaseRow(Base):
     holder: Mapped[str] = mapped_column(Text, nullable=False)
     acquired_at: Mapped[str] = mapped_column(Text, nullable=False)
     expires_at: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+# --- Autonomy: the supervisor's durable state (schema v5, M3) ----------------
+#
+# Everything below exists because M2 shipped a gateway with no memory. Its
+# admission checks were pure functions over a `SupervisorState` the caller
+# assembled from nowhere, so `LossLimits` and `ActivityLimits` were contract-only
+# and the R-31 re-submission counters reset on every restart. These tables are
+# where that state lives; `chronos.supervisor.durable` reads and writes them.
+
+
+class HashChainRow(Base):
+    """One tamper-evident record in a named append-only stream.
+
+    See `chronos.persistence.hash_chain` for the design and its honest bound.
+    The `(stream, sequence)` unique constraint is load-bearing: it is what makes
+    a concurrent double-append fail instead of forking the chain.
+    """
+
+    __tablename__ = "hash_chain_records"
+    __table_args__ = (UniqueConstraint("stream", "sequence", name="uq_hash_chain_stream_sequence"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    stream: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    #: The canonical JSON text that was hashed. Stored as text, not JSON, so a
+    #: round-trip through a JSON column cannot re-order keys and break the
+    #: digest — the bytes that were hashed are the bytes that are kept.
+    payload_json: Mapped[str] = mapped_column(Text, nullable=False)
+    recorded_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    previous_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    record_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+class AutonomyMandateActivationRow(Base):
+    """An owner event that put a mandate in force, or revoked it.
+
+    M2's `MandateActivation` was a value the caller passed in, so "is this
+    mandate active" had no durable answer and could not survive a restart —
+    which is precisely what `RestartBehavior.REQUIRE_REACTIVATION` is about.
+    """
+
+    __tablename__ = "autonomy_mandate_activations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    mandate_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    mandate_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    #: The account this activation is scoped to, pseudonymously.
+    account_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    owner_event_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    activated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    #: Revocation is recorded in place rather than by deleting the activation:
+    #: an audit trail that forgets a revocation cannot show when authority ended.
+    revoked: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    revoked_reason: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    #: The process generation this activation was made in.
+    process_generation: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+
+class AutonomySessionCounterRow(Base):
+    """Per-session realized loss and activity counts for one account.
+
+    This is what makes `LossLimits` and `ActivityLimits` enforceable rather than
+    decorative. One row per (account, session date); the supervisor increments
+    it in the same transaction that records the decision, so a counter cannot
+    drift from the journal that explains it.
+    """
+
+    __tablename__ = "autonomy_session_counters"
+    __table_args__ = (
+        UniqueConstraint("account_fingerprint", "session_date", name="uq_autonomy_session"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account_fingerprint: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    #: The trading session this row counts, as an ISO date in the market's zone.
+    session_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    realized_loss_usd: Mapped[Decimal] = mapped_column(
+        Numeric(20, 8), default=Decimal(0), nullable=False
+    )
+    peak_equity_usd: Mapped[Decimal] = mapped_column(
+        Numeric(20, 8), default=Decimal(0), nullable=False
+    )
+    trough_equity_usd: Mapped[Decimal] = mapped_column(
+        Numeric(20, 8), default=Decimal(0), nullable=False
+    )
+    orders_submitted: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    cancellations: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    replacements: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    turnover_usd: Mapped[Decimal] = mapped_column(
+        Numeric(20, 8), default=Decimal(0), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, nullable=False)
+
+
+class AutonomyDecisionAttemptRow(Base):
+    """How many times one decision id has been admitted or refused (R-31).
+
+    M2 held these counts in an in-memory `SupervisorState`, so a restart reset
+    the attempt budget and a model could route around a refusal by waiting for
+    one. Durable here.
+    """
+
+    __tablename__ = "autonomy_decision_attempts"
+    __table_args__ = (
+        UniqueConstraint("account_fingerprint", "decision_id", name="uq_autonomy_decision"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account_fingerprint: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    decision_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    admitted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    refusals: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    first_seen_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class AutonomyOwnerAlertRow(Base):
+    """Something the owner must see, durable until they acknowledge it.
+
+    ADR-0016 §8 requires four things when the system degrades: create no new
+    exposure, permit deterministic risk reduction, *record the denial*, and
+    *alert the owner*. M2 did the first three. This table is the fourth.
+
+    Alerts are acknowledged, never deleted: an alert that can vanish cannot
+    prove the owner was told, which is the only thing an alert is for.
+    """
+
+    __tablename__ = "autonomy_owner_alerts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account_fingerprint: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    severity: Mapped[str] = mapped_column(String(16), nullable=False)
+    kind: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    detail: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    raised_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    acknowledged_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    acknowledged_note: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    #: How many times this same condition recurred before acknowledgement.
+    #: Repeats are folded into one row so a degraded loop cannot bury the
+    #: alert list under thousands of identical entries -- an alert nobody can
+    #: read is an alert nobody receives.
+    occurrences: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)

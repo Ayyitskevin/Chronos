@@ -1,5 +1,80 @@
 # CHANGELOG
 
+## [Unreleased] — M3: the supervisor gets a memory (2026-07-25)
+
+M2 shipped a gateway with no state, which left three guarantees unenforceable. All three
+are closed, and two persistence prerequisites landed first because durable state is only
+as trustworthy as the store beneath it.
+
+### Persistence prerequisites
+- **The main `chronos.db` now uses WAL, `synchronous=FULL`, and a `busy_timeout`** — and
+  each is *verified* on every connection, not merely issued. It ran on SQLite's defaults,
+  so a committed transaction could be lost on power loss. A risk counter that silently
+  rolls back is worse than one that does not exist, because the system would trust it.
+  (The order ledger's own store has had WAL + `synchronous=FULL` since Phase 9; the main
+  database had neither.)
+- **Fixed a latent ordering bug in the R-21 symlink guard** that enabling WAL exposed. The
+  guard ran only after the first connection, and switching journal modes makes SQLite
+  unlink a stale sidecar — so the symlink it was meant to reject had already been removed,
+  and the check passed on the real file SQLite had just created. Nothing was ever written
+  through the link, but a guard that silently stops firing is a guard that is no longer
+  there. It now runs before any connection is opened.
+- **Append-only tables are hash-chained** (`chronos.persistence.hash_chain`). They were
+  append-only *by convention* — a statement about the code, not about the data. Per-stream
+  chaining detects edits, deletions and reordering. Honest bound stated in the module and
+  as R-33: tamper-evident, not tamper-proof.
+- **Schema v5** (migration 0004). Creates tables and deliberately never backfills: an
+  absent counter must read as "no authority established", never as "no losses yet".
+
+### The supervisor's memory (`chronos.supervisor.durable`)
+- **`LossLimits` and `ActivityLimits` are enforced**, not contract-only. Every field of
+  both is backed by durable per-session counters. A breach becomes a `DegradedReason` with
+  `blocks_risk_reduction=False`, so it stops new exposure while leaving the position
+  closable — being at a loss limit is exactly when closing must remain possible. Routing
+  through the existing degraded lever rather than new refusal codes keeps that rule with
+  one implementation instead of two chances to get it wrong.
+- **Mandate activation and revocation are durable owner events**, so
+  `RestartBehavior.REQUIRE_REACTIVATION` finally means something — an in-memory activation
+  vanished on restart and could not tell "reactivated" from "never activated". Revocation
+  is marked in place, never deleted: an audit trail that forgets a revocation cannot answer
+  the first question an incident review asks.
+- **R-31's re-submission counters are durable.** They lived in memory, so a model that
+  wanted to route around a refusal only had to wait for a restart. Patience no longer
+  defeats the bound.
+- **Counters may only increase.** A caller that could decrement one could restore headroom
+  under a ceiling, making the ceiling advisory.
+
+### Owner alerting (`chronos.supervisor.alerts`)
+ADR-0016 §8's fourth clause — *alert the owner* — was the one M2 left unbuilt.
+- Alerts are durable, hash-chained, and acknowledged rather than deleted: an alert that can
+  vanish cannot prove the owner was told, which is the only thing an alert is for.
+- Recurrences fold into one row. A degraded loop would otherwise bury every other alert
+  under identical entries, and an alert list nobody can read is an alert nobody receives.
+  The occurrence count is itself information: one is an event, four thousand is a stuck
+  system.
+- Severity escalates but never downgrades while unacknowledged.
+- Alerting is deliberately **narrow** — degraded state, exhausted re-submission, revoked or
+  unactivated authority. Not ordinary scope/promotion/version-pin refusals: a gateway that
+  alerts on every disagreement trains the owner to ignore alerts, and then the one that
+  matters is ignored too.
+- **Disclosed gap (R-32): there is no out-of-band delivery.** No email, SMS, push, or
+  webhook. The channel is pull, so an owner who is not looking is not told. That is
+  deliberate (no outbound network, no credential store beside a trading system, and a
+  silently-broken push channel would turn "no alerts" from *unknown* into *all clear*) and
+  it **blocks unattended `LIVE_AUTONOMOUS` promotion**. A structural test fails if an egress
+  dependency is added quietly.
+
+### Also
+- The M2 enforcement-classification pin now scans `durable.py`. It passed without the
+  change — while certifying `LossLimits` as inert — which is exactly the stale-claim failure
+  that pin exists to catch.
+- New risks: R-32 (no alert delivery), R-33 (tamper-evident bound), R-34 (session
+  boundaries are calendar dates, not market sessions).
+
+### Gates
+ruff clean, ruff format clean, mypy --strict clean (197 files), pytest 2045 passed / 1
+credential-gated skip. No test sends an order.
+
 ## [Unreleased] — M2 review remediation: complete (2026-07-25)
 
 Remediation of the M2 five-lens adversarial review, now finished across all five lenses.

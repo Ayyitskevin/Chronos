@@ -5,6 +5,7 @@ from __future__ import annotations
 import errno
 import os
 import stat
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +17,7 @@ from sqlalchemy.pool import StaticPool
 from chronos.persistence.schema import Base, DatabaseScopeRow, SchemaVersionRow
 from chronos.utils.identifiers import account_fingerprint
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 _DATABASE_RECOVERY_GUIDANCE = (
     "Preserve and back up this database first. A prior-version schema can be upgraded with "
@@ -24,6 +25,12 @@ _DATABASE_RECOVERY_GUIDANCE = (
     "configure a fresh DATABASE_URL instead. Chronos never modifies such a database itself."
 )
 _SQLITE_SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
+
+#: How long a connection waits for a competing writer before reporting
+#: "database is locked". The single-writer lease means sustained contention is
+#: already a bug, so this covers the brief overlap during a writer handover
+#: rather than papering over two writers running at once.
+_SQLITE_BUSY_TIMEOUT_MS = 5_000
 
 _ACCOUNT_SCOPED_TABLES = (
     "wheel_cycles",
@@ -50,6 +57,15 @@ _ACCOUNT_SCOPED_TABLES = (
     "order_events",
     "risk_decisions",
     "risk_check_results",
+    # Autonomy supervisor durable state (schema v5): all account-specific.
+    # `hash_chain_records` is deliberately NOT here: it is a generic append-only
+    # store whose streams are named per account, and its payloads are already
+    # scoped by the writer. Listing it would make an unrelated stream block a
+    # rebind.
+    "autonomy_mandate_activations",
+    "autonomy_session_counters",
+    "autonomy_decision_attempts",
+    "autonomy_owner_alerts",
 )
 
 
@@ -63,6 +79,17 @@ class Database:
         self._sqlite_path = _sqlite_database_path(url)
         self._prepare_sqlite_parent(self._sqlite_path)
         self._prepare_private_sqlite_file()
+        # R-21, and the ordering is load-bearing: reject a symlinked database or
+        # sidecar BEFORE any connection is opened. This used to run only after
+        # the first connect, which happened to work while the journal mode was
+        # `delete`. Enabling WAL exposed the latent bug — switching journal modes
+        # makes SQLite unlink a stale `-wal`/`-journal` file, so by the time the
+        # check ran the symlink it was meant to reject had already been removed
+        # and the check passed on the real file SQLite had just created. Nothing
+        # was written through the link, but a guard that silently stops firing is
+        # a guard that is no longer there. Checking first also means SQLite never
+        # gets the chance to follow a link we would have refused.
+        self._restrict_sqlite_file_mode()
         engine_kwargs: dict[str, object] = {}
         if is_sqlite:
             engine_kwargs["connect_args"] = {"check_same_thread": False}
@@ -70,7 +97,11 @@ class Database:
             engine_kwargs["poolclass"] = StaticPool
         self.engine: Engine = create_engine(url, **engine_kwargs)
         if is_sqlite:
-            event.listen(self.engine, "connect", _enable_sqlite_foreign_keys)
+            event.listen(
+                self.engine,
+                "connect",
+                partial(_configure_sqlite_connection, file_backed=self._sqlite_path is not None),
+            )
         self.sessions = sessionmaker(bind=self.engine, expire_on_commit=False, class_=Session)
         if self._sqlite_path is not None:
             with self.engine.connect():
@@ -355,13 +386,70 @@ def _table_has_rows(connection: Any, table_name: str) -> bool:
     return connection.exec_driver_sql(f"SELECT 1 FROM {table_name} LIMIT 1").first() is not None
 
 
-def _enable_sqlite_foreign_keys(
+def _configure_sqlite_connection(
     dbapi_connection: Any,
     connection_record: Any,
+    *,
+    file_backed: bool,
 ) -> None:
+    """Apply, and then *verify*, the durability pragmas on every connection.
+
+    Only ``foreign_keys`` was set here. The order ledger's own SQLite store
+    (:mod:`chronos.execution.sqlite_ledger`) has used WAL and
+    ``synchronous=FULL`` since Phase 9, but the main Chronos database — which
+    holds order intents, confirmations, risk decisions, kill-switch events and,
+    from M3, the supervisor's durable state — ran on SQLite's defaults:
+    ``journal_mode=delete`` and ``synchronous=NORMAL``.
+
+    That mattered for three separate reasons, and M3 needs all three fixed
+    before it can put per-session loss and activity counters in this database:
+
+    - **``synchronous=NORMAL`` can lose committed transactions** on OS crash or
+      power loss. A risk counter that silently rolls back is worse than one that
+      does not exist, because the system would trust it.
+    - **``journal_mode=delete`` blocks readers against a writer**, so the
+      dashboard could stall the writer it is reading behind.
+    - **No ``busy_timeout`` means an immediate ``database is locked``** rather
+      than a short wait, which under the single-writer lease shows up as a
+      spurious failure exactly when two processes overlap during a handover.
+
+    The pragmas are **verified, not merely issued**. A pragma that silently
+    failed to apply would leave the system believing it has a durability
+    guarantee it does not have, which is the same class of defect as a mandate
+    ceiling that is set but never read. On a file-backed database a failure
+    raises; ``:memory:`` databases legitimately report ``journal_mode=memory``
+    and are exempt from the WAL check only.
+    """
+
     del connection_record
     cursor = dbapi_connection.cursor()
     try:
         cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.execute(f"PRAGMA busy_timeout={_SQLITE_BUSY_TIMEOUT_MS}")
+        cursor.execute("PRAGMA journal_mode=WAL")
+        journal_mode = _pragma_value(cursor)
+        cursor.execute("PRAGMA synchronous=FULL")
+        cursor.execute("PRAGMA synchronous")
+        synchronous = _pragma_value(cursor)
+
+        if file_backed and str(journal_mode).lower() != "wal":
+            raise RuntimeError(
+                f"SQLite refused write-ahead logging (journal_mode={journal_mode!r}). "
+                "Chronos will not run an order database without it: a reader would block "
+                "the writer, and crash recovery is weaker. This usually means the database "
+                "is on a filesystem that does not support WAL, such as some network mounts."
+            )
+        # 2 = FULL, 3 = EXTRA. Anything lower can lose a committed transaction.
+        if int(synchronous) < 2:
+            raise RuntimeError(
+                f"SQLite refused synchronous=FULL (synchronous={synchronous!r}). Chronos "
+                "will not run an order database that can lose a committed transaction on "
+                "power loss: a risk counter that silently rolls back is worse than none."
+            )
     finally:
         cursor.close()
+
+
+def _pragma_value(cursor: Any) -> Any:
+    row = cursor.fetchone()
+    return row[0] if row else None

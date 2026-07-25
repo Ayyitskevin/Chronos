@@ -26,14 +26,17 @@ The M2 adversarial review found that several mandate limit groups are read by no
 code, while the mandate docstring implied the supervisor re-derived them all.
 That is corrected here, and the honest list is kept in one place:
 
-- **Not enforced anywhere, pending a supervisor that owns durable per-session
-  state (M3):** ``LossLimits`` in full (session/daily loss, peak-to-trough
-  drawdown) and ``ActivityLimits`` in full (orders, cancellations, replacements,
-  turnover per session). ``SupervisorState.degraded_reasons`` is the only
-  interim lever — a caller that has breached a loss or activity limit must pass
-  a degraded reason. A breached loss limit should normally be reported with
-  ``blocks_risk_reduction=False``, so the position can still be closed: that is
-  what a loss limit is *for*.
+- **Enforced since M3, but not here.** ``LossLimits`` in full (session/daily
+  loss, peak-to-trough drawdown) and ``ActivityLimits`` in full (orders,
+  cancellations, replacements, turnover per session) are enforced by
+  :mod:`chronos.supervisor.durable`, against counters that survive a restart.
+  They reach this module as ``DegradedReason``s with
+  ``blocks_risk_reduction=False``, which is what makes a breach stop new
+  exposure while leaving the position closable — being at a loss limit is
+  precisely when closing must remain possible. Admission itself still does not
+  read those fields, and deliberately: routing them through the existing
+  degraded lever means the "no new exposure, risk reduction still allowed" rule
+  has exactly one implementation.
 - **Not enforced anywhere, pending contract compilation (M2 follow-on):**
   ``scope.exchanges`` and ``scope.contract_families``. A decision names no
   exchange by construction, so these can only be checked against a *qualified*
