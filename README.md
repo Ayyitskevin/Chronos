@@ -40,7 +40,7 @@ The repository contains two subsystems:
 
    Research-run produce/replay/compare: [docs/RESEARCH_REPRODUCIBILITY.md](docs/RESEARCH_REPRODUCIBILITY.md).
 
-   This autonomous platform starts **halted** on a fresh deployment and refuses every
+   This deterministic platform starts **halted** on a fresh deployment and refuses every
    live-capable mode in code — it is separate from, and never imported by, the Live Wheel
    order pipeline in subsystem 1.
 
