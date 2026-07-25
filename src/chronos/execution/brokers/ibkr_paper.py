@@ -1,8 +1,27 @@
-"""IBKR paper-account execution adapter (Phase 9).
+"""IBKR paper-account execution adapter (Phase 9) — **QUARANTINED** (R-28).
+
+.. warning::
+
+   **This adapter is dormant and must stay that way.** Its docstring used to
+   open by calling it "the ONLY code path in the platform that can hand an
+   equity order to Interactive Brokers". That was true of the Phase 9
+   deterministic platform and is false now, and the M2 adversarial review found
+   it still being asserted here: the live execution plane is
+   ``chronos.orders.submission``, which owns the single audited ``transmit=True``
+   keyword site and the ten-gate live stack. This module is a **second**
+   originating transmit site (an attribute assignment,
+   ``order.transmit = True``) that has none of those gates.
+
+   It is quarantined rather than deleted so it keeps its tests and its history:
+   construction now raises ``BrokerSafetyError`` unless passed
+   ``quarantine_ack=True``, which **nothing** in ``src/`` passes, and
+   ``tests/safety/test_broker_mutation_inventory.py`` fails if any production
+   module constructs it. ADR-0016 §8: ``chronos.orders`` is the single canonical
+   execution plane, and no AI-specific submission path may be created.
 
 Implements ``ExecutionBrokerPort`` over the TWS API via ``ib_async``
-(ADR-0002). This adapter is the ONLY code path in the platform that can hand
-an equity order to Interactive Brokers, and it is constructible only when:
+(ADR-0002). Within the dormant deterministic platform it was constructible only
+when:
 
 1. the resolved ``ModeLock`` grants ``PAPER_SUBMISSION`` (which itself
    requires transmission enabled, a non-empty operator allowlist, a
@@ -18,9 +37,9 @@ order path and no live path here; nothing in this module reads credentials —
 authentication belongs to the operator's TWS/IB Gateway session.
 
 STATUS: implemented and unit-tested against a fake IB object
-(``tests/platform_unit/test_ibkr_paper_adapter.py``); NOT yet exercised
-against a real IB Gateway from this environment (no credentials — see
-docs/TEST_RESULTS.md "Requires owner action").
+(``tests/platform_unit/test_ibkr_paper_adapter.py``, the only legitimate
+constructor); NEVER exercised against a real IB Gateway, and quarantined as
+above so it cannot be. See RISK_REGISTER R-28.
 """
 
 from __future__ import annotations

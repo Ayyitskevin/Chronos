@@ -1,11 +1,107 @@
 # CHANGELOG
 
-## [Unreleased] — M2 review remediation: admission hardening (2026-07-25)
+## [Unreleased] — M2 review remediation: complete (2026-07-25)
 
-Remediation of the M2 five-lens adversarial review. Ten findings from the admission lens
-were confirmed by an independent verification pass; all are fixed here. (Four verifier
-agents were killed by a session limit mid-run; their lenses — sizing, lease, quarantine,
-claims — are being re-verified and any surviving findings will follow.)
+Remediation of the M2 five-lens adversarial review, now finished across all five lenses.
+The verification pass confirmed 43 findings and refuted 10. Every confirmed finding is
+either fixed below or, where it names work that belongs to a later milestone, disclosed
+in `docs/limitations.md` and this file rather than left implied.
+
+### Fixed (CRITICAL) — sizing ignored four of the seven capital ceilings
+`size_order` published "never larger than any mandate ceiling" while
+`max_position_notional_usd`, `max_net_exposure_usd`, `max_leverage` and
+`max_margin_utilization_pct` were read by no code, so a mandate that set them tightly
+sized as though they were unlimited. The same deny-by-default inversion the zero-ceiling
+fix corrected, reached by a different route.
+
+- All seven ceilings bind. A ceiling whose evidence the supervisor did not gather is a
+  **refusal**, not an ignored limit, so the published claim is true rather than
+  aspirational.
+- `AccountEvidence` gained net/gross/symbol/position exposure, maintenance margin,
+  deployed capital and position quantity. Optional fields are `None` when unknown rather
+  than `0`, because zero is the *most permissive* value for a headroom calculation.
+- `allocated_capital_usd` caps the mandate, not one order: deployed capital is subtracted.
+  Without that, a $50k allocation authorized a $50k order on every pass while each
+  individual order looked compliant.
+- `size_order` never raises; adversarial `Decimal` input yields a refusal, because a
+  raising sizer inside the supervisor loop would strand a decision.
+
+### Fixed (HIGH) — the degraded-state rule had only one of its two halves
+ADR-0016 §8 says *create no new exposure, permit deterministic risk-reducing behavior*.
+Any degraded reason refused every decision kind, so a degraded system could not be unwound
+through the gateway at all — a stale quote feed trapped the position at exactly the moment
+the owner most wanted out.
+
+- `DegradedReason` is typed and declares whether risk reduction may proceed, defaulting to
+  **blocking** so an unconsidered reason gets the strictest behavior. One blocking reason
+  overrides every permissive one: the question is "do we know what we hold", not "how many
+  subsystems are up".
+- `size_order` takes the `DecisionKind`. Exposure-headroom ceilings bind only on decisions
+  that create exposure — applied to a CLOSE they give negative headroom, so an account
+  over its ceiling was refused the one order that brings it back under. Risk-reducing
+  orders are bounded by the position actually held, and refused when it is unknown.
+- CANCEL stays refused while degraded: it is `CONTEXT_DEPENDENT`, because cancelling a
+  *closing* order raises net risk and admission cannot see which kind of order is targeted.
+
+### Fixed (HIGH) — the writer-lease heartbeat could lock the operator out of the kill switch
+Before the M2 heartbeat, read-only was a *startup* condition, so the operator of a
+lease-holding process could always halt trading. A running backend can now demote itself
+mid-session, and uniform `require_writer` would have refused the emergency stop at the
+worst possible moment.
+
+- Engaging the kill switch and disarming are no longer writer-gated. Both only ever remove
+  authority and both write lock-protected state, so serving them from a non-lease-holder
+  is fail-safe: the worst case is that trading stops when it need not have. Arming and
+  kill-switch disengagement stay writer-gated.
+- The pre-transmit lease check — the only database call inside the CAS-to-transmit window
+  — is wrapped so any failure fails closed instead of stranding the intent in
+  `SUBMISSION_UNKNOWN` with nothing sent and no refusal recorded.
+- The bound verifier checks `read_only` as well as the database lease, so a submission
+  already in flight cannot transmit after self-demotion.
+- `_RENEWALS_PER_TTL` is documented as an interval divisor, not the retry budget its
+  comment implied: one failed renewal demotes immediately.
+
+### Fixed (HIGH) — safety tests that did not test what their names claimed
+- The file named *broker mutation inventory* pinned transmit **flags** and no broker
+  mutation. The complete `placeOrder`/`cancelOrder` inventory is pinned now, plus an
+  assertion that no `exerciseOptions`/`reqGlobalCancel` capability exists.
+- The transmit inventory matched only a literal `True` and scanned only `src/chronos`,
+  while claiming completeness "whichever syntax it uses". It now scans `scripts/` too and
+  treats anything that is not a literal `False` as a site. That surfaced five propagation
+  sites, which are declared and held separate from the two that *originate* transmit
+  authority.
+- R-24's pre-transmit gate had only structural guards, which catch deletion but survive an
+  inverted condition that would transmit *only* when the lease was lost. Lost, unverifiable
+  and held leases are now each exercised through a real submission.
+- Every mandate limit is classified ENFORCED or INERT against the models themselves, so a
+  new field cannot arrive undisclosed and an INERT field the kernel starts reading fails.
+- `decision.py` promised a data-flow test asserting no deterministic module parses model
+  narrative into an order parameter, and cited an M1 guard that M2 had retired. The test
+  exists now; the stale citation is gone.
+- `VersionPins.policy_version` had no `DecisionProvenance` counterpart, so it was compared
+  against nothing — a control that could not fail. It has one, it is compared, and a test
+  fails if any future pin lacks a counterpart.
+
+### Fixed — overstated claims
+- `chronos/supervisor/__init__.py` described the handoff to `OrderManagementService` in the
+  present tense. Nothing converts an admitted, sized decision into an order intent;
+  compilation is M4, and until it lands the gateway is a gate nothing flows through.
+- ADR-0016 labelled R-24 "CLOSED in M2" while RISK_REGISTER recorded MITIGATED with a live
+  residual. A risk with a live residual is not closed; the ADR now carries the weaker claim.
+- R-31 still read "enforcement lands with the gateway in M2" after the gateway shipped.
+- The quarantined paper adapter still opened by calling itself "the ONLY code path in the
+  platform that can hand an equity order to Interactive Brokers".
+- README's degraded-state bullet was marked `[M2+] not built`; it is built and marked
+  `[enforced]`, with a new `[M2+]` bullet for the compilation step that genuinely is not.
+- `docs/limitations.md` still published R-24 as unfixed and the second submission path as
+  un-quarantined, contradicting RISK_REGISTER and ADR-0016 at the same commit.
+- A CHANGELOG line gave a specific gateway test count that was wrong when written.
+
+---
+
+## [Earlier] — M2 review remediation: admission hardening (2026-07-25)
+
+The first batch, covering the admission lens.
 
 ### Fixed (HIGH)
 - **The strategy allowlist applied only to OPEN.** A HEDGE, INCREASE, ROLL or REPLACE
@@ -96,8 +192,11 @@ every gate it already applied to a human-proposed order and keeps the single
   reserves), per-symbol concentration headroom, and gross-exposure headroom —
   then clamps down and refuses when nothing survives. Decimal throughout;
   missing or absurd contract facts refuse rather than guess.
-- 28 tests, incl. one proving the gateway re-checks promotion via
-  `model_construct` rather than trusting a mandate that skipped validation.
+- A dedicated `tests/safety/test_supervisor_gateway.py` suite, incl. one test
+  proving the gateway re-checks promotion via `model_construct` rather than
+  trusting a mandate that skipped validation. (An earlier revision of this line
+  gave a specific test count that was wrong when written and went stale
+  immediately; the file is the count.)
 
 ### Fixed — R-24: the writer lease was never renewed, and was not a fencing token
 `WriterLease.renew()` had **no production caller**. The lease expired after its

@@ -184,29 +184,59 @@ mode, decision replay **and** bounded re-submission after refusal, model/prompt/
 version-pin agreement, evidence-**bundle** id and digest binding, HOLD as non-executable,
 asset class, instrument allowlist, strategy allowlist for every exposure-creating kind,
 short-direction coherence, per-family promotion, order-form availability, and market-data
-freshness/quality/spread. Sizing (`chronos.supervisor.sizing`) independently derives and
-clamps quantity from per-order notional, unit ceilings, allocated capital, cash and
-buying-power floors, per-symbol concentration headroom, and gross-exposure headroom.
+freshness/quality/spread, and **policy-version** agreement. Sizing
+(`chronos.supervisor.sizing`) independently derives and clamps quantity from **every**
+`CapitalLimits` ceiling — per-order notional, position notional, gross and net exposure, unit
+ceilings, allocated capital net of what is already deployed, leverage, margin utilisation —
+plus the cash and buying-power floors and per-symbol concentration headroom.
+
+Two properties of sizing are worth stating explicitly, because the M2 adversarial review
+found the code contradicting its own published claims on both:
+
+- **A ceiling whose evidence the supervisor did not gather is a refusal, not an ignored
+  limit.** Four ceilings were previously skipped in silence while the module claimed the
+  result was "never larger than any mandate ceiling". Unenforceable limits now refuse, so the
+  claim is true rather than aspirational.
+- **Exposure ceilings bound new exposure, not its removal.** On a risk-reducing decision the
+  headroom ceilings do not apply, because an account already over a ceiling has negative
+  headroom and would be refused the very order that brings it back under. Such an order is
+  bounded by the position actually held, and refused outright when that position is unknown.
+
+Degraded state follows ADR-0016 §8 in both halves: no new exposure, but risk-reducing
+decisions may still proceed — unless the degradation is one that leaves position truth
+unknown (unreconciled positions, a lost lease, an unreachable broker), in which case nothing
+proceeds, because "closing" a position we are wrong about opens the opposite one. Each
+`DegradedReason` declares which kind it is, defaulting to the blocking kind.
 
 It does **not** enforce, and these are open gaps rather than decisions:
 
 - **`LossLimits` and `ActivityLimits` in full** — session/daily loss, peak-to-trough
   drawdown, and orders/cancellations/replacements/turnover per session are read by no code.
   They need a supervisor that owns durable per-session counters (M3). Interim lever: a
-  caller that has breached one must pass a `degraded_reason`, which refuses.
+  caller that has breached one must pass a `DegradedReason` — normally with
+  `blocks_risk_reduction=False`, so the position can still be closed, which is what a loss
+  limit is for.
 - **`scope.exchanges` and `scope.contract_families`** — a decision names no exchange by
   construction, so these can only be checked against a *qualified* contract, and **no
   deterministic compilation step exists yet**. The directive listed compilation under M2;
   admission and sizing shipped, contract resolution/qualification and order-form selection
-  did not.
-- **Sector, family, and correlated concentration; leverage; margin utilisation.**
+  did not. Concretely, nothing yet converts an admitted, sized decision into a
+  `WheelOrderIntent`, so the gateway is a gate nothing has been routed through: M4 owes the
+  compiler, and until it lands `chronos.supervisor` cannot cause an order either.
+- **Sector, family, and correlated concentration**; and the option-liquidity floors
+  (`min_option_volume`, `min_open_interest`), which need option-chain evidence the supervisor
+  does not gather.
+- **`SessionPolicy` in full** — permitted sessions and overnight holding need a session clock
+  in the supervisor; the orders plane has its own, which still applies downstream.
 - **Individual evidence citations** — the bundle is bound by id and digest, but citations
   inside it are not resolved against a store, because the EvidenceBundle store is M3/M4.
 - **Provenance authorship** — the decision-queue writer that would *stamp* provenance is
   M4, so the version-pin check proves agreement, not authentication.
 
-`tests/safety/test_supervisor_gateway.py` pins this list so a mandate field cannot be added
-without declaring whether it is enforced or inert.
+`tests/safety/test_supervisor_gateway.py` pins this list against the mandate models
+themselves: every field of every limits model must be classified ENFORCED or INERT, so a new
+limit cannot arrive undisclosed, and a field classified INERT that the kernel starts reading
+fails the same test.
 - **The M1 contracts shipped with real defects, found by adversarial review and fixed in M2a.**
   The worst was an authority-escalation vector: `model_copy(update=...)` bypassed every mandate
   validator, so a one-day SHADOW mandate could be copied into a ten-year `LIVE_AUTONOMOUS` one.
@@ -221,16 +251,27 @@ without declaring whether it is enforced or inert.
   control that holds when injection succeeds; explicit injection tests are owed by M4 and are
   a frozen promotion criterion.
 - **Kernel defects the autonomy programme inherits.** The M0 audit found four that unattended
-  operation makes strictly more dangerous, all open and tracked as RISK_REGISTER R-24…R-27:
-  the writer lease is never renewed in production and its token is not used as a fencing
-  token; `max_opening_orders_per_day` is inert because its evidence is never gathered; broker
-  session evidence is never supplied, so the `market_open` check is permanently ambiguous
-  (fail-closed today, meaning no live equity/option order can currently pass risk); and option
-  deliverable verification is set only by the demo broker. These are M2 prerequisites.
-- **A dormant second submission path still exists.** `chronos/execution/brokers/ibkr_paper.py`
-  contains a working `placeOrder` with a hardcoded `transmit = True` that the
-  single-transmit-site test does not scan. It is constructed nowhere in production, but M2
-  must retire, quarantine, or prove its isolation before autonomy operates.
+  operation makes strictly more dangerous, tracked as RISK_REGISTER R-24…R-27. Status after
+  M2:
+  - **R-24 (writer lease never renewed; not a fencing token) — MITIGATED, with a live
+    residual.** The backend now renews the lease on a heartbeat and demotes itself to
+    read-only on any renewal failure, and the submission boundary re-checks ownership in the
+    database immediately before the transmit line. It is **not closed**: IBKR accepts an order
+    without knowing about our lease, so broker-side fencing is unavailable and a sufficiently
+    unlucky pause between the check and the wire cannot be defended from here.
+  - **R-25** (`max_opening_orders_per_day` inert — its evidence is never gathered),
+    **R-26** (broker session evidence is never supplied, so `market_open` is permanently
+    ambiguous; fail-closed today, meaning no live equity/option order can currently pass
+    risk), and **R-27** (option deliverable verification set only by the demo broker) remain
+    **OPEN**. Each must be closed before the asset family it governs is promoted.
+- **The dormant second submission path is QUARANTINED (R-28), not retired.**
+  `chronos/execution/brokers/ibkr_paper.py` contains a working `placeOrder` with a hardcoded
+  `order.transmit = True`. Because that is an *attribute assignment* outside `chronos.orders`,
+  the original single-transmit-site test structurally could not see it. M2 added a
+  repository-wide transmit inventory matching both spellings and any computed value, an AST
+  assertion that no production module constructs the adapter, and a construction guard
+  requiring `quarantine_ack=True` — which nothing in `src/` passes. An accidental wiring now
+  fails loudly at construction instead of quietly acquiring an ungated broker path.
 - **The 30-day live-mandate ceiling is a judgment, not a derived number.**
 - **No futures capability of any kind exists yet** (no contract model, no adapter support);
   futures options are refused outright by the mandate validator in this release.

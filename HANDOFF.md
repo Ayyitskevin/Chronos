@@ -133,5 +133,17 @@ switch, the drawdown breaker, and the writer lease. Under ADR-0016, autonomous l
 additionally requires an active owner-authored AutonomyMandate, autonomy startup defaults to a
 non-live mode, and an environment variable alone can never activate it. No test, CI run, or
 development path can transmit an order. The M0 audit recorded four kernel defects that
-unattended operation makes more dangerous (RISK_REGISTER R-24…R-27) — all open, all M2
-prerequisites.
+unattended operation makes more dangerous (RISK_REGISTER R-24…R-27). After M2: **R-24 is
+MITIGATED with a live residual** — the lease is renewed on a heartbeat and re-checked in
+the database immediately before transmit, but IBKR accepts an order without knowing about
+our lease, so broker-side fencing remains unavailable. **R-25, R-26 and R-27 remain open**,
+and each must be closed before the asset family it governs is promoted. The dormant second
+submission path (R-28) is **quarantined**, not retired.
+
+**What M2 built, and what it did not.** `chronos.supervisor` admits or refuses a decision
+and independently derives its size; both are tested and both have been through an
+adversarial review whose confirmed findings are remediated. What does **not** exist is the
+step between the gateway and the order plane: nothing converts an admitted, sized decision
+into a `WheelOrderIntent`, because deterministic contract resolution, qualification and
+order-form selection are M4. Until that lands, the gateway is a gate with nothing routed
+through it — so no part of the system trades autonomously today.

@@ -334,11 +334,17 @@ graduated per-family promotions. Every milestone stops for owner approval.
 2. **Existing kernel defects are inherited, not fixed in M1.** The M0 audit found
    four that unattended operation makes strictly more dangerous, recorded as
    RISK_REGISTER R-24 … R-27. Status after M2:
-   - **R-24 (writer lease never renewed; not a fencing token) — CLOSED in M2.**
-     A heartbeat renews at TTL/3 and demotes to read-only on loss, and the
-     submission boundary re-checks ownership in the database immediately before
-     the transmit line. Residual, disclosed: this narrows the window rather than
-     closing it, because IBKR accepts an order without knowing about our lease.
+   - **R-24 (writer lease never renewed; not a fencing token) — MITIGATED in
+     M2, not closed.** A heartbeat renews at TTL/3 and demotes to read-only on
+     loss, and the submission boundary re-checks ownership in the database
+     immediately before the transmit line. **Live residual:** this narrows the
+     window rather than closing it, because IBKR accepts an order without
+     knowing about our lease, so true broker-side fencing is unavailable and a
+     sufficiently unlucky pause between the check and the wire cannot be
+     defended from here. An earlier revision of this line said "CLOSED in M2"
+     while RISK_REGISTER recorded MITIGATED with a live residual; the M2 review
+     flagged the disagreement and this is the corrected, weaker claim. A risk
+     with a live residual is not closed.
    - **R-25** (`max_opening_orders_per_day` inert — its evidence is never
      gathered), **R-26** (`market_open` permanently ambiguous because broker
      session evidence is never supplied; fail-closed today), and **R-27** (option

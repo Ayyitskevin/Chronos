@@ -87,10 +87,13 @@ that is **not yet built**. Nothing below is a claim that Chronos trades autonomo
 - **[enforced] One reachable transmit site.** Exactly one `transmit=True` exists in
   `chronos.orders` (the submission boundary); a structural test enforces it. `chronos.orders`
   stays the single canonical execution plane — **no AI-specific submission path is created**.
-  The dormant deterministic-plane paper adapter (`chronos/execution/brokers/ibkr_paper.py:120`)
-  has its own separate transmit site that this test does **not** scan; it is constructed
-  nowhere in production, and retiring or quarantining it is M2 work tracked as
-  RISK_REGISTER R-28.
+  A repository-wide inventory pins every transmit-enabling site across `src/` and `scripts/`,
+  matching keyword and attribute spellings and any computed value, and separates the two
+  sites that *originate* transmit authority from the five that merely propagate a value some
+  originating site already decided. The dormant deterministic-plane paper adapter
+  (`chronos/execution/brokers/ibkr_paper.py`) is the second originating site: it is
+  **quarantined** (R-28) — constructed nowhere in production, and refusing construction
+  outright unless passed an acknowledgement that nothing in `src/` passes.
 - **[enforced] The model cannot reach a broker.** `chronos.autonomy` imports nothing from the
   order, broker, execution, risk, api, or persistence planes — asserted by an AST walk and a
   subprocess import probe.
@@ -115,11 +118,19 @@ that is **not yet built**. Nothing below is a claim that Chronos trades autonomo
   orders-plane risk engine (`cash_secured_put`, `covered_call_coverage`). **[contract]** The
   autonomy strategy vocabulary additionally cannot express an uncovered short option, so no
   mandate can authorize one.
-- **[M2+] An AI failure must never become permission to trade.** ADR-0016 §8 requires that
-  when the model, broker, data, clock, database, lease, resolver, risk engine, or
-  reconciliation state is unavailable, ambiguous, stale, or inconsistent, the system create
-  no new exposure, permit only deterministic risk-reducing behavior, record the denial, and
-  alert the owner. This is a requirement on the M2 gateway, not a control that exists today.
+- **[enforced] An AI failure never becomes permission to trade.** When the model, broker,
+  data, clock, database, lease, resolver, risk engine, or reconciliation state is
+  unavailable, ambiguous, stale, or inconsistent, `chronos.supervisor.admission` creates no
+  new exposure and records the denial with its reason. Risk-*reducing* decisions may still
+  proceed — refusing a close because a quote feed went stale would trap the position at
+  exactly the wrong moment — unless the degradation is one that leaves position truth
+  unknown, in which case nothing proceeds. Each reason declares which kind it is and
+  **defaults to the blocking kind**. Owner alerting is M3, and is not yet built.
+- **[M2+] The gateway is not yet routed to.** Admission and sizing exist and are tested, but
+  nothing converts an admitted, sized decision into an order intent — deterministic contract
+  resolution, qualification, and order-form selection are M4. Until that lands the supervisor
+  is a gate with nothing flowing through it, which is why no bullet above claims Chronos
+  trades autonomously today.
 - Chronos never asks for or stores an IBKR username or password.
 - Missing broker data is represented as missing; it is never fabricated.
 - **Crypto is disabled by default** (empty `CRYPTO_ALLOWLIST`); long-only spot, fractional,
