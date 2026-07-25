@@ -172,8 +172,41 @@ the README and the runbooks.
   asserts that nothing outside `chronos.autonomy` imports the contracts.
 - **A type that cannot express an order is necessary, not sufficient.** The decision contract
   carries no account, broker, routing, or transmit field, and the mandate is frozen, expiring,
-  and deny-by-default — but the actual veto lives in the gateway, which does not exist yet and
-  is unproven until it ships with its own adversarial review.
+  and deny-by-default. The deterministic gateway that actually judges a decision landed in
+  Milestone 2 (`chronos.supervisor`) and has had its own adversarial review; what it does and
+  does not enforce is below.
+
+### What the M2 gateway enforces — and what it does not
+
+Admission (`chronos.supervisor.admission`) enforces: an owner **activation** event and its
+revocation/restart state, the mandate's effective window, account fingerprint, submitting
+mode, decision replay **and** bounded re-submission after refusal, model/prompt/tool/schema
+version-pin agreement, evidence-**bundle** id and digest binding, HOLD as non-executable,
+asset class, instrument allowlist, strategy allowlist for every exposure-creating kind,
+short-direction coherence, per-family promotion, order-form availability, and market-data
+freshness/quality/spread. Sizing (`chronos.supervisor.sizing`) independently derives and
+clamps quantity from per-order notional, unit ceilings, allocated capital, cash and
+buying-power floors, per-symbol concentration headroom, and gross-exposure headroom.
+
+It does **not** enforce, and these are open gaps rather than decisions:
+
+- **`LossLimits` and `ActivityLimits` in full** — session/daily loss, peak-to-trough
+  drawdown, and orders/cancellations/replacements/turnover per session are read by no code.
+  They need a supervisor that owns durable per-session counters (M3). Interim lever: a
+  caller that has breached one must pass a `degraded_reason`, which refuses.
+- **`scope.exchanges` and `scope.contract_families`** — a decision names no exchange by
+  construction, so these can only be checked against a *qualified* contract, and **no
+  deterministic compilation step exists yet**. The directive listed compilation under M2;
+  admission and sizing shipped, contract resolution/qualification and order-form selection
+  did not.
+- **Sector, family, and correlated concentration; leverage; margin utilisation.**
+- **Individual evidence citations** — the bundle is bound by id and digest, but citations
+  inside it are not resolved against a store, because the EvidenceBundle store is M3/M4.
+- **Provenance authorship** — the decision-queue writer that would *stamp* provenance is
+  M4, so the version-pin check proves agreement, not authentication.
+
+`tests/safety/test_supervisor_gateway.py` pins this list so a mandate field cannot be added
+without declaring whether it is enforced or inert.
 - **The M1 contracts shipped with real defects, found by adversarial review and fixed in M2a.**
   The worst was an authority-escalation vector: `model_copy(update=...)` bypassed every mandate
   validator, so a one-day SHADOW mandate could be copied into a ten-year `LIVE_AUTONOMOUS` one.

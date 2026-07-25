@@ -174,10 +174,15 @@ validation.
 Stated precisely, because the difference matters: this is a **presence** check,
 not a support check. The contract enforces that a citation exists and is
 well-formed (a 64-hex digest and an id); it does not and cannot verify that the
-cited evidence exists in the bundle, that its digest matches, or that it
-actually supports the thesis. Binding citations to the EvidenceBundle they claim
-to come from is the gateway's job (M2), and until it ships "must cite evidence"
-means only that an uncited decision is refused.
+cited evidence exists in the bundle or that it actually supports the thesis.
+
+**Status after M2.** The gateway now binds the decision's *bundle* to the bundle
+the supervisor issued — both id and digest must match, and an unknown bundle is
+refused rather than passed. It does **not** yet resolve each individual
+`EvidenceCitation` inside that bundle; that needs the EvidenceBundle store, which
+lands with M3/M4. So "must cite evidence" today means: an uncited decision is
+refused, and the bundle a decision claims to have reasoned from must be the one
+on record — not that every citation within it has been verified.
 
 ### 6. Asset-class capability matrix
 

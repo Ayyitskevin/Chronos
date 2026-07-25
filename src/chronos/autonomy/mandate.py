@@ -333,9 +333,19 @@ class AutonomyMandate(AutonomyModel):
     """One owner-authored, versioned, expiring, revocable grant of authority.
 
     Read the module docstring first: this is a contract, not a control. Holding
-    an instance authorizes nothing. Every field here is an input to the
-    deterministic supervisor's checks (M2), which independently re-derive the
-    account, mode, promotion, scope, and every limit before any order is minted.
+    an instance authorizes nothing.
+
+    **Not every field is enforced yet.** As of M2 the deterministic supervisor
+    independently re-derives the account, activation, mode, promotion, scope,
+    strategy, direction, market-data freshness, and the capital ceilings and
+    floors that bind sizing. It does **not** yet enforce ``LossLimits`` or
+    ``ActivityLimits`` at all, nor ``scope.exchanges`` / ``scope.contract_families``
+    (which need a qualified contract), nor sector/family/correlated concentration,
+    leverage, or margin utilisation. The authoritative, milestone-attributed list
+    lives in :mod:`chronos.supervisor.admission` and is pinned by
+    ``tests/safety/test_supervisor_gateway.py`` so it cannot silently grow. An
+    earlier version of this docstring claimed the supervisor re-derived *every*
+    limit; the M2 adversarial review found that false and it is corrected here.
     """
 
     mandate_id: str = Field(min_length=1, max_length=128)

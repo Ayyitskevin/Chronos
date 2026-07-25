@@ -1,5 +1,53 @@
 # CHANGELOG
 
+## [Unreleased] — M2 review remediation: admission hardening (2026-07-25)
+
+Remediation of the M2 five-lens adversarial review. Ten findings from the admission lens
+were confirmed by an independent verification pass; all are fixed here. (Four verifier
+agents were killed by a session limit mid-run; their lenses — sizing, lease, quarantine,
+claims — are being re-verified and any surviving findings will follow.)
+
+### Fixed (HIGH)
+- **The strategy allowlist applied only to OPEN.** A HEDGE, INCREASE, ROLL or REPLACE
+  carrying no `requested_strategy` was admitted with the check recorded as *passed*. That
+  defeated the mitigation ADR-0016 §6 publishes for shorting — "omit SHORT_EQUITY from
+  scope" — because a SHORT-direction HEDGE never had its strategy compared against the
+  scope at all. Every exposure-creating kind must now name a permitted strategy, and a
+  SHORT direction additionally requires an explicitly short-capable strategy.
+- **An unevaluated evidence-bundle check was recorded as PASSED**, contradicting the
+  module's own "no default-allow branch" claim, and only the bundle *id* was compared.
+  Now: an unknown bundle refuses (`EVIDENCE_BUNDLE_UNKNOWN`), the **digest** is compared
+  too, and `AdmissionCheck` gained an `evaluated` flag so an unevaluated check can never
+  read as satisfied.
+- **Four mandate limit groups were read by no code** while the mandate docstring claimed
+  the supervisor re-derived "every limit". The claim is corrected, the honest
+  enforced-vs-inert list now lives in one place (`admission.py`), and a test pins it so a
+  mandate field cannot be added without declaring which it is.
+
+### Added (previously missing checks)
+- **Mandate activation, revocation, and restart reactivation.** Authoring a mandate is not
+  enabling it; admission now requires an authenticated owner activation event, refuses a
+  revoked one, and enforces `RestartBehavior.REQUIRE_REACTIVATION` against a process
+  generation. Previously `restart_behavior` was inert.
+- **Market-data freshness, quality, and spread**, from supervisor-gathered evidence.
+  Absent evidence refuses.
+- **Bounded re-submission after refusal** (R-31): a refused decision may be retried at most
+  `MAX_RESUBMISSIONS` times. Replay protection previously covered only *admitted* ids.
+
+### Documentation honesty
+- `decision.py` no longer claims the provenance-stamping gateway landed in M2; the pin
+  check proves agreement, not authorship, until the decision-queue writer lands (M4).
+- ADR-0016's citation-binding paragraph now states what M2 actually delivered (bundle
+  id+digest binding) versus what it did not (resolving individual citations).
+- `docs/limitations.md` gains a full M2 section: what the gateway enforces, and the open
+  gaps — loss/activity limits, `scope.exchanges`/`contract_families`, sector/family/
+  correlated concentration, leverage, margin, and **the absent compilation step**, which
+  the directive listed under M2 and which did not ship.
+
+### Gates
+ruff clean, ruff format clean, mypy --strict clean (193 files), pytest 1957 passed / 1
+credential-gated skip.
+
 ## [Unreleased] — M2 fix: a zero ceiling authorizes nothing (2026-07-25)
 
 **Found by self-review of the merged M2 sizing code, before any autonomous path could

@@ -28,19 +28,25 @@ kernel's veto testable without a broker, a database, or a model.
 from __future__ import annotations
 
 from chronos.supervisor.admission import (
+    MAX_RESUBMISSIONS,
     AdmissionCheck,
     AdmissionOutcome,
     AdmissionRefusal,
+    MandateActivation,
+    MarketDataEvidence,
     SupervisorState,
     admit,
 )
 from chronos.supervisor.sizing import AccountEvidence, SizingOutcome, size_order
 
 __all__ = [
+    "MAX_RESUBMISSIONS",
     "AccountEvidence",
     "AdmissionCheck",
     "AdmissionOutcome",
     "AdmissionRefusal",
+    "MandateActivation",
+    "MarketDataEvidence",
     "SizingOutcome",
     "SupervisorState",
     "admit",

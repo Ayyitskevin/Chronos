@@ -20,6 +20,7 @@ Everything here is pure: no broker, no database, no model, no clock of its own.
 
 from __future__ import annotations
 
+import inspect
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -33,6 +34,7 @@ from chronos.autonomy import (
     AutonomyMode,
     CapitalLimits,
     ConcentrationLimits,
+    DecisionDirection,
     DecisionKind,
     DecisionProvenance,
     EvidenceCitation,
@@ -47,8 +49,11 @@ from chronos.autonomy import (
 )
 from chronos.domain.enums import DataQuality
 from chronos.supervisor import (
+    MAX_RESUBMISSIONS,
     AccountEvidence,
     AdmissionRefusal,
+    MandateActivation,
+    MarketDataEvidence,
     SupervisorState,
     admit,
     size_order,
@@ -56,6 +61,7 @@ from chronos.supervisor import (
 
 _NOW = datetime(2026, 7, 25, 14, 0, tzinfo=UTC)
 _FINGERPRINT = "a" * 64
+_TARGET_REF = "CHR-ORD-" + "A" * 32
 
 
 def _pins(**overrides: str) -> VersionPins:
@@ -145,8 +151,42 @@ def _decision(**overrides: Any) -> AITradeDecision:
     return AITradeDecision(**base)
 
 
+def _activation(**overrides: Any) -> MandateActivation:
+    base: dict[str, Any] = {
+        "owner_event_id": "owner-event-1",
+        "activated_at": _NOW,
+        "process_generation": 7,
+    }
+    base.update(overrides)
+    return MandateActivation(**base)
+
+
+def _market_data(**overrides: Any) -> MarketDataEvidence:
+    base: dict[str, Any] = {
+        "quote_age_seconds": Decimal(1),
+        "quality": DataQuality.LIVE,
+    }
+    base.update(overrides)
+    return MarketDataEvidence(**base)
+
+
 def _state(**overrides: Any) -> SupervisorState:
-    base: dict[str, Any] = {"account_fingerprint": _FINGERPRINT, "now": _NOW}
+    """A supervisor state with all evidence present, so scope checks are reachable.
+
+    Admission is deny-by-default: absent activation, an unknown evidence bundle,
+    or missing quote evidence each refuse on their own. Tests that want to reach
+    a later check must therefore supply all of it.
+    """
+
+    base: dict[str, Any] = {
+        "account_fingerprint": _FINGERPRINT,
+        "now": _NOW,
+        "activation": _activation(),
+        "process_generation": 7,
+        "expected_evidence_bundle_id": "eb-1",
+        "expected_evidence_bundle_digest": "b" * 64,
+        "market_data": _market_data(),
+    }
     base.update(overrides)
     return SupervisorState(**base)
 
@@ -262,13 +302,20 @@ def test_scope_refusals() -> None:
 
 
 def test_the_gateway_rechecks_promotion_instead_of_trusting_the_mandate() -> None:
-    """Defence in depth: the gateway does not assume the mandate was validated.
+    """Defence in depth for the promotion invariant **specifically**.
 
     A well-formed mandate cannot omit a promotion for a scoped asset class — the
-    contract validator refuses to construct one. But the gateway must not *rely*
-    on that: a mandate rehydrated from storage, or a future strategy-level
-    promotion model, could present one. ``model_construct`` bypasses validation
-    exactly as a bad load would, and the gateway still refuses.
+    contract validator refuses to construct one. The gateway does not rely on
+    that: ``model_construct`` bypasses validation exactly as a bad load would,
+    and admission still refuses.
+
+    Scope, stated precisely because the M2 review found the earlier docstring
+    over-generalised: promotion, account, mode, effective window, scope,
+    strategy, direction, and market data are all re-derived by admission. The
+    live-duration cap, the permitted-data-quality restriction, the required
+    ceilings and floors, and the FUTURE_OPTION refusal are still trusted to the
+    contract validator alone — a mandate that bypassed validation could carry
+    those violations past the gateway.
     """
 
     fields = dict(_mandate())
@@ -287,6 +334,178 @@ def test_every_check_is_recorded_even_on_success() -> None:
     assert "version_pins" in names
     assert "family_promoted" in names
     assert all(check.passed for check in outcome.checks)
+
+
+def test_every_exposure_creating_kind_must_name_a_permitted_strategy() -> None:
+    """M2 review, HIGH: the strategy allowlist applied only to OPEN.
+
+    A HEDGE, INCREASE, ROLL or REPLACE carrying no strategy was admitted with the
+    check recorded as *passed*. That defeated the mitigation ADR-0016 §6
+    publishes for shorting — "omit SHORT_EQUITY from scope" — because a
+    SHORT-direction HEDGE never had a strategy compared against the scope at all.
+    """
+
+    for kind in (DecisionKind.HEDGE, DecisionKind.INCREASE, DecisionKind.ROLL):
+        overrides: dict[str, Any] = {"kind": kind, "requested_strategy": None}
+        if kind in (DecisionKind.INCREASE, DecisionKind.ROLL):
+            overrides["target_client_reference"] = _TARGET_REF
+        outcome = admit(_decision(**overrides), _mandate(), _state())
+        assert outcome.admitted is False, kind
+        assert outcome.refusal is AdmissionRefusal.STRATEGY_REQUIRED, kind
+
+
+def test_the_reported_short_hedge_bypass_is_closed() -> None:
+    """The exact reproduction from the M2 review."""
+
+    outcome = admit(
+        _decision(
+            kind=DecisionKind.HEDGE,
+            requested_strategy=None,
+            direction=DecisionDirection.SHORT,
+            requested_quantity=Decimal(99),
+        ),
+        _mandate(),  # scope.strategies is (LONG_EQUITY,) — SHORT_EQUITY omitted
+        _state(),
+    )
+    assert outcome.admitted is False
+    assert outcome.refusal is AdmissionRefusal.STRATEGY_REQUIRED
+
+
+def test_a_short_direction_needs_an_explicitly_short_strategy() -> None:
+    outcome = admit(
+        _decision(direction=DecisionDirection.SHORT, requested_strategy=StrategyForm.LONG_EQUITY),
+        _mandate(),
+        _state(),
+    )
+    assert outcome.admitted is False
+    assert outcome.refusal is AdmissionRefusal.DIRECTION_NOT_PERMITTED
+
+
+def test_a_mandate_without_an_owner_activation_authorizes_nothing() -> None:
+    """Authoring a mandate is not enabling it (ADR-0016 §4)."""
+
+    outcome = admit(_decision(), _mandate(), _state(activation=None))
+    assert outcome.admitted is False
+    assert outcome.refusal is AdmissionRefusal.MANDATE_NOT_ACTIVATED
+
+
+def test_a_revoked_mandate_is_refused() -> None:
+    outcome = admit(_decision(), _mandate(), _state(activation=_activation(revoked=True)))
+    assert outcome.admitted is False
+    assert outcome.refusal is AdmissionRefusal.MANDATE_REVOKED
+
+
+def test_restart_requires_reactivation_by_default() -> None:
+    """RestartBehavior.REQUIRE_REACTIVATION is now enforced, not inert."""
+
+    outcome = admit(_decision(), _mandate(), _state(activation=_activation(process_generation=6)))
+    assert outcome.admitted is False
+    assert outcome.refusal is AdmissionRefusal.MANDATE_NOT_ACTIVATED
+
+
+def test_an_unknown_evidence_bundle_refuses_and_is_recorded_unevaluated() -> None:
+    """M2 review, HIGH: this previously recorded a PASS when it had not run."""
+
+    outcome = admit(_decision(), _mandate(), _state(expected_evidence_bundle_id=None))
+    assert outcome.admitted is False
+    assert outcome.refusal is AdmissionRefusal.EVIDENCE_BUNDLE_UNKNOWN
+    bundle = next(c for c in outcome.checks if c.name == "evidence_bundle")
+    assert bundle.passed is False
+    assert bundle.evaluated is False
+
+
+def test_a_forged_evidence_bundle_digest_is_refused() -> None:
+    """The id matching is not enough: the digest must match too."""
+
+    outcome = admit(
+        _decision(provenance=_provenance(evidence_bundle_digest="f" * 64)),
+        _mandate(),
+        _state(),
+    )
+    assert outcome.admitted is False
+    assert outcome.refusal is AdmissionRefusal.EVIDENCE_BUNDLE_MISMATCH
+
+
+def test_absent_market_data_refuses_rather_than_passing() -> None:
+    outcome = admit(_decision(), _mandate(), _state(market_data=None))
+    assert outcome.admitted is False
+    assert outcome.refusal is AdmissionRefusal.MARKET_DATA_UNAVAILABLE
+
+
+def test_stale_or_unpermitted_market_data_is_refused() -> None:
+    stale = admit(
+        _decision(), _mandate(), _state(market_data=_market_data(quote_age_seconds=Decimal(9)))
+    )
+    assert stale.refusal is AdmissionRefusal.MARKET_DATA_STALE
+    wrong_quality = admit(
+        _decision(),
+        _mandate(),
+        _state(market_data=_market_data(quality=DataQuality.DELAYED)),
+    )
+    assert wrong_quality.refusal is AdmissionRefusal.MARKET_DATA_STALE
+
+
+def test_a_refused_decision_may_not_be_retried_forever() -> None:
+    """R-31: repetition is not a way around a rejection."""
+
+    outcome = admit(
+        _decision(), _mandate(), _state(refused_decision_attempts={"d-1": MAX_RESUBMISSIONS})
+    )
+    assert outcome.admitted is False
+    assert outcome.refusal is AdmissionRefusal.RESUBMISSION_EXHAUSTED
+
+
+def test_no_check_is_ever_recorded_as_passed_without_being_evaluated() -> None:
+    """Deny-by-default, stated as an invariant over the whole outcome."""
+
+    for state in (
+        _state(),
+        _state(activation=None),
+        _state(market_data=None),
+        _state(expected_evidence_bundle_digest=None),
+    ):
+        outcome = admit(_decision(), _mandate(), state)
+        for check in outcome.checks:
+            if not check.evaluated:
+                assert check.passed is False, check.name
+
+
+def test_the_inert_mandate_limit_list_is_pinned() -> None:
+    """A mandate field must be declared enforced or inert — it cannot just appear.
+
+    The M2 review found four whole limit groups read by no code while the mandate
+    docstring implied otherwise. This pins the honest list so adding a field
+    forces a decision about it.
+    """
+
+    import chronos.supervisor.admission as admission_module
+    import chronos.supervisor.sizing as sizing_module
+
+    source = (admission_module.__doc__ or "") + inspect.getsource(sizing_module)
+
+    inert_today = (
+        "max_session_loss_usd",
+        "max_daily_loss_usd",
+        "max_peak_to_trough_drawdown_usd",
+        "max_orders_per_session",
+        "max_turnover_usd_per_session",
+        "max_sector_exposure_pct",
+        "max_family_exposure_pct",
+        "max_correlated_exposure_pct",
+        "max_leverage",
+        "max_margin_utilization_pct",
+    )
+    for name in inert_today:
+        assert name not in inspect.getsource(sizing_module), (
+            f"{name} now appears enforced in sizing — update the disclosure in "
+            "admission.py's docstring and this pin"
+        )
+    # The disclosure must actually name the inert groups.
+    for phrase in ("LossLimits", "ActivityLimits", "scope.exchanges", "contract_families"):
+        assert phrase in (admission_module.__doc__ or ""), (
+            f"admission.py must disclose that {phrase} is not enforced"
+        )
+    assert source  # sanity
 
 
 # ---------------------------------------------------------------------- sizing
