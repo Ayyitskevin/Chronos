@@ -1,14 +1,58 @@
 # Safety model
 
-Chronos is personal decision-support and paper-trading software. The safest valid result is often
-`NO_TRADE` or `MANUAL_REVIEW`.
+Chronos is being built toward controlled autonomous trading (ADR-0016 / D-16). The safest
+valid result is still often `NO_TRADE` or `MANUAL_REVIEW`, and under autonomy that is a
+decision the deterministic kernel makes on its own authority, without asking the model.
+
+## Authority model (ADR-0016 / D-16, 2026-07-25)
+
+**Policy time belongs to the owner; trade time may belong to the model.** The owner defines
+objectives, model and provider versions, permitted instruments and strategies, capital and
+risk allocation, promotion between autonomy levels, activation and revocation of authority,
+and the durable kill switch. After the owner activates an approved AutonomyMandate, an
+approved model may originate trading decisions without per-order approval, inside that
+mandate's bounds.
+
+The model's authority is narrow by construction:
+
+- It may act **only** by emitting a typed `AITradeDecision` through the single deterministic
+  ModelDecisionGateway. Free-form chat, theses, summaries, and Markdown are never parsed
+  into orders.
+- It gets **no** IBKR client or broker object, credentials, low-level `placeOrder`/
+  `cancelOrder` functions, direct submission-module imports, arbitrary SQL/shell/filesystem/
+  network access, policy-writing tools, arming or mandate-writing tools, or deployment or
+  code-modification tools. The model worker runs outside the broker-writing process.
+- Its requested quantity is **not executable**. Deterministic code independently resolves and
+  qualifies the contract, computes and clamps quantity, calculates collateral and margin,
+  selects a permitted order form, validates tick/lot/multiplier/currency/exchange, checks
+  data freshness and liquidity, reconciles to broker truth, enforces every limit, and mints
+  execution approval.
+- **The deterministic kernel has unconditional veto authority.** It may reject or reduce any
+  request; the model cannot override, reinterpret, or repeatedly route around a rejection.
+- **An AI failure never becomes permission to trade.** If the model, broker, market data,
+  clock, database, lease, contract resolver, risk engine, or reconciliation state is
+  unavailable, ambiguous, stale, or inconsistent, the system creates no new exposure, permits
+  only deterministic risk-reducing behavior allowed by policy, records the denial, and alerts
+  the owner.
+
+**Status:** Milestone 1 landed this governance and the typed contracts only. The gateway, the
+model worker, and every autonomous execution path are Milestones 2 onward, and nothing in
+`chronos.autonomy` is wired into a runtime path today.
 
 ## Hard boundaries
 
-The MVP cannot transmit live-money orders. Enabling live trading requires a later code change,
-new tests, documentation, and explicit human authorization; an environment variable alone is
-insufficient. Market orders are rejected. Automated rolling, exercise, assignment handling,
-unattended execution, and broker-wide global cancellation are not implemented.
+Live transmission is a gated *capability*, not an impossibility (ADR-0009, Milestone 7): it
+requires the full configuration conjunction plus the ten-gate live stack, and under ADR-0016
+live autonomous operation additionally requires an active owner mandate. An environment
+variable alone is insufficient for either. Market orders are rejected — every order is a
+positive-price limit, and the autonomy vocabulary has no `MARKET` order form. Uncovered short
+options are not expressible in the strategy vocabulary, so no mandate can authorize one.
+Automated exercise, assignment handling, and broker-wide global cancellation are not
+implemented; rolling is a decision kind the gateway will compile as cancel-and-re-propose.
+
+The sections below describe the human-in-the-loop wheel path as built through Milestone 10.
+They remain accurate for manual mode; where they say an action is impossible or permanently
+locked, read that as the pre-autonomy posture, superseded only inside an active mandate.
 
 Every new short option requires a verified standard share-only deliverable tied to the exact
 underlying contract ID and currency; every short call must additionally be covered by currently
@@ -142,15 +186,25 @@ Any ambiguity fails closed. The lifecycle is append-only:
 outcome. The UI cannot skip states. This is the contract for a later PAPER submission path; the
 current DEMO rehearsal neither enters nor advances this lifecycle.
 
-## Planned kill-switch contract
+## Kill switch (delivered in Milestone 6 — this section was stale)
 
-A later kill switch must block new Chronos orders and attempt to cancel only orders whose
-Chronos-owned correlation references are known locally. It must record each request and response
-and must never invoke a broker-wide global cancel by default. No kill-switch service is wired in
-the current milestone. The UI exposes only the deterministic `DemoBroker` what-if and approval
-rehearsals described above. No IBKR preview, approval, submission, modification, or cancellation is
-exposed, and no order-lifecycle confirmation state follows either DEMO result. The expiration-risk
-preview and rehearsals remain decision support; live-money submission stays hard-disabled.
+The kill switch **is** wired: `chronos.orders.kill_switch.LiveKillSwitch`, a durable
+atomic-write flag (`LIVE_KILL_SWITCH_FILE`) that survives restart, reads as ENGAGED when
+corrupt or unreadable (fail-closed), and is cleared only by an explicit operator disengage
+with a note. It is gate 9 of the ten-gate live stack, is re-read once more between the
+pre-submit compare-and-swap and the transmit line, and is checked again as the adapter's last
+line before a mutating call. The session-drawdown breaker engages it automatically on breach.
+It blocks new orders and cancels only orders whose Chronos-owned correlation references are
+known locally; it never invokes a broker-wide global cancel by default. Cancellation
+deliberately still works while it is engaged, because cancelling is risk-reducing.
+
+**Kill-switch precedence is absolute and is not superseded by any mandate** (ADR-0016 §8): an
+engaged switch stops autonomous operation exactly as it stops manual operation, and the model
+has no tool that can disengage it.
+
+The paragraph that previously stood here — "no kill-switch service is wired… live-money
+submission stays hard-disabled" — described the Milestone 5 build and was left stale through
+M6/M7. Corrected 2026-07-25.
 
 ## Secrets and logs
 

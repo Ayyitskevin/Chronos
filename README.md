@@ -1,14 +1,29 @@
 # Chronos
 
-Chronos is a local-first trading research and decision-support system for Interactive
-Brokers, containing two subsystems:
+Chronos is a local-first, model-driven trading system for Interactive Brokers. Its
+mission (owner directive, 2026-07-25) is **controlled autonomous trading** across
+equities and ETFs, exchange-traded futures, and listed equity and index options: after
+the owner activates an approved AutonomyMandate, an approved model may originate trading
+decisions without per-order human approval, inside boundaries the owner sets at policy
+time. See [ADR-0016](docs/adr/ADR-0016-controlled-autonomous-model-authority.md) and
+DECISIONS.md **D-16**, which supersede ADR-0004 §5 / D-11.
 
-1. **Live Wheel dashboard** (below) — a human-in-the-loop order-management system for the
-   options Wheel, extended to stocks and (built, disabled-by-default) spot crypto. Every
-   order flows proposal → risk → preview → typed confirmation → a single guarded submission
-   boundary. Demo and paper are the defaults; live transmission is a fail-closed *capability*
-   gated behind a ten-check stack, session arming, a durable kill switch, a drawdown breaker,
-   and a single-writer lease — not a hard-coded block.
+**Where that stands today (be precise about this):** the governance and the typed
+contracts have landed (Milestone 1). The deterministic decision gateway, the model
+worker, and every autonomous execution path have **not** — they are Milestones 2 onward.
+Nothing in `chronos.autonomy` is wired into any runtime path, and the shipped order
+pipeline is still the human-confirmed one described below. Chronos does not trade
+autonomously today.
+
+The repository contains two subsystems:
+
+1. **Live Wheel dashboard** (below) — the order-management system for the options Wheel,
+   extended to stocks and (built, disabled-by-default) spot crypto, and the canonical live
+   execution plane that autonomous decisions will be compiled into. Every order flows
+   proposal → risk → preview → confirmation → a single guarded submission boundary. Demo
+   and paper are the defaults; live transmission is a fail-closed *capability* gated behind
+   a ten-check stack, session arming, a durable kill switch, a drawdown breaker, and a
+   single-writer lease — not a hard-coded block.
 2. **Deterministic strategy platform** — research, backtesting, replay, shadow, and
    (gated) paper execution built from the owner's Pine Quant Library corpus.
    See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/STRATEGY_CATALOG.md](docs/STRATEGY_CATALOG.md),
@@ -29,10 +44,12 @@ Brokers, containing two subsystems:
    live-capable mode in code — it is separate from, and never imported by, the Live Wheel
    order pipeline in subsystem 1.
 
-Chronos is decision-support software. It is not an autonomous trading bot, investment adviser,
-performance-prediction engine, or promise of profitable trading. Options and crypto can produce
-rapid and substantial losses. Paper fills do not prove live execution quality, and **IBKR paper
-accounts do not support crypto at all** — see [docs/limitations.md](docs/limitations.md).
+Chronos is being built toward autonomous operation, but it is not an investment adviser,
+a performance-prediction engine, or a promise of profitable trading. Trading equities,
+futures, and options can produce rapid and substantial losses, and an autonomous system
+can produce them without waiting for you. Paper fills do not prove live execution
+quality, and **IBKR paper accounts do not support crypto at all** — see
+[docs/limitations.md](docs/limitations.md).
 
 ## Current status
 
@@ -43,6 +60,14 @@ engine, the dashboard cutover, the paper order-management pipeline (M5), the liv
 fractional, allowlist-gated, off by default). Final hardening (chaos, CI migration checks, docs)
 is M8.
 
+**Autonomy programme (ADR-0016).** M0 delivered a read-only autonomy gap audit. **M1 (this
+milestone)** delivered the governance reset and the typed contracts —
+`chronos.autonomy.AITradeDecision` and `chronos.autonomy.AutonomyMandate` — and **added no
+broker behavior**; a test asserts nothing outside the package imports them. Still to come:
+M2 the deterministic decision gateway and mandate validation, M3 the persistent brain, M4
+the agent and tool layer, M5 the terminal and scheduler, and M6-M10 the per-family
+promotions from paper to capped live. Each milestone stops for owner approval.
+
 No order is placed by any test, CI run, or development path. The one and only `transmit=True`
 in the order pipeline lives at the submission boundary and is reachable only after the full
 gate chain passes. Live trading has never been exercised from this codebase; any live acceptance
@@ -50,16 +75,35 @@ is an owner action through the finished app.
 
 ## Safety posture
 
+Autonomy changes **who decides**, not **what gates**. Under ADR-0016 the model gains
+trade-time authority inside an owner-authored mandate; the deterministic kernel keeps
+unconditional veto authority and every guarantee below is unweakened.
+
 - **One reachable transmit site.** Exactly one `transmit=True` exists in `chronos.orders`
-  (the submission boundary); a structural test enforces it. Nothing else in the Live Wheel path
-  can send; the dormant autonomous-plane paper adapter has its own separate, never-instantiated
-  transmit site behind a halt store that defaults HALTED (see [docs/limitations.md](docs/limitations.md)).
-- **Demo is the default** and needs no brokerage account. Paper and live are opt-in config.
+  (the submission boundary); a structural test enforces it. `chronos.orders` stays the single
+  canonical execution plane — **no AI-specific submission path is created**. The dormant
+  autonomous-plane paper adapter has its own separate, never-instantiated transmit site behind
+  a halt store that defaults HALTED (see [docs/limitations.md](docs/limitations.md)).
+- **The model cannot reach a broker.** `chronos.autonomy` imports nothing from the
+  order, broker, execution, risk, api, or persistence planes — asserted by an AST walk and a
+  subprocess import probe. A model decision is a typed `AITradeDecision` that carries no
+  account, broker, routing, or transmit field, so it cannot express an order at all.
+- **The model cannot authorize itself.** The `AutonomyMandate` is owner-authored, frozen,
+  expiring (live mandates ≤ 30 days), and deny-by-default; the model has read-only access
+  and no tool that writes it, changes policy, or arms the system.
+- **Demo is the default** and needs no brokerage account. Paper and live are opt-in config,
+  and autonomy startup defaults to a non-live mode — an environment variable alone can never
+  activate live autonomous trading.
 - **Live is fail-closed and gated**, never assumed: a ten-check live stack — config, connection,
-  reconciliation, data, risk, preview, session arming, per-order typed confirmation, a durable
+  reconciliation, data, risk, preview, session arming, per-order confirmation, a durable
   kill switch, and a session-drawdown breaker — each proven to block independently.
-- **Market orders are impossible by construction** — every order is a positive-price limit.
-- **Cash-secured puts only; naked short calls are not config-enableable.**
+- **Market orders are impossible by construction** — every order is a positive-price limit,
+  and the autonomy vocabulary has no `MARKET` order form.
+- **No uncovered short options** — the strategy vocabulary cannot express one.
+- **An AI failure never becomes permission to trade.** If the model, broker, data, clock,
+  database, lease, resolver, risk engine, or reconciliation state is unavailable, ambiguous,
+  stale, or inconsistent, the system creates no new exposure, permits only deterministic
+  risk-reducing behavior, records the denial, and alerts the owner.
 - Chronos never asks for or stores an IBKR username or password.
 - Missing broker data is represented as missing; it is never fabricated.
 - **Crypto is disabled by default** (empty `CRYPTO_ALLOWLIST`); long-only spot, fractional,
@@ -127,6 +171,8 @@ marked IBKR smoke test is skipped by default and remains strictly read-only.
 
 ## Documentation
 
+- [ADR-0016 — Controlled Autonomous Model Authority](docs/adr/ADR-0016-controlled-autonomous-model-authority.md)
+  (the authority model, model isolation, the mandate, the promotion ladder)
 - [Live Wheel game plan & status](docs/LIVE_WHEEL_GAME_PLAN.md)
 - [Live trading runbook](docs/live_trading_runbook.md) (gates, arming, kill switch, per-family notes)
 - [Limitations](docs/limitations.md)

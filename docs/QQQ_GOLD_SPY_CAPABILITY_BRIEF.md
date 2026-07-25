@@ -6,8 +6,13 @@ inspiration; make Chronos "just as capable," exclusively trading QQQ, Gold, and 
 This brief is the standing instruction set for an Opus-class (or stronger) session
 executing that directive. It EXTENDS the adopted roadmaps — `docs/AI_QUANT_GAME_PLAN.md`
 (phases B–E) and `docs/LIVE_WHEEL_GAME_PLAN.md` — it does not fork them. Every locked
-invariant applies verbatim (AI_QUANT_GAME_PLAN §4), most importantly ADR-0004/D-11:
-**no generative model output feeds any runtime decision.**
+invariant applies verbatim (AI_QUANT_GAME_PLAN §4) — **except** that ADR-0004 §5 / D-11
+("no generative model output feeds any runtime decision") was **superseded on 2026-07-25
+by ADR-0016 / D-16**. The governing rule is now: an approved model may originate runtime
+trading decisions only through a typed `AITradeDecision` and the single deterministic
+ModelDecisionGateway, under an owner AutonomyMandate, and it cannot access IBKR directly,
+change its authorization, weaken policy, or bypass any deterministic gate. The research
+harness described below stays strictly research-side regardless (see §3.1).
 
 ## 1. What the reviewed repo actually is (verified from source, not its README)
 
@@ -80,14 +85,21 @@ on OUR engine and doctrine:
   equity-vs-buy-and-hold, and a report page — stored under `research/results/` with
   the standard reproducibility manifest.
 
-**The ADR-0004 line, restated for this harness:** the LLM here is a RESEARCH
-subject. Its outputs are backtest artifacts. Nothing it emits reaches the runtime
-order path. If an LLM-derived strategy ever looks promotable, the promotion road is
-the same frozen-criteria pipeline as everything else — and what gets promoted into
-live operation is a **distilled deterministic rule set** (spec'd in `specs/`,
-parity-tested), or, at most, LLM-*proposed* intents through the E2 human-confirmed
-seam. Runtime LLM auto-transmission is not on any roadmap and requires an explicit
-owner directive plus a reviewed release to even discuss (invariant 3/5 discipline).
+**The boundary line, restated for this harness (updated 2026-07-25, ADR-0016/D-16):**
+the LLM *in this research harness* is a RESEARCH subject — its outputs are backtest
+artifacts and nothing it emits here reaches the runtime order path. That separation
+is unchanged and still worth keeping: a backtest harness is not an execution path.
+
+What has changed is the last sentence of the original text. "Runtime LLM
+auto-transmission is not on any roadmap and requires an explicit owner directive
+plus a reviewed release to even discuss" — **the owner gave that directive on
+2026-07-25.** Runtime model-originated decisions are now the mission, via a typed
+`AITradeDecision` through the single deterministic ModelDecisionGateway under an
+AutonomyMandate (ADR-0016). That path is deliberately **separate from this harness**:
+a promotable LLM-derived strategy still travels the frozen-criteria pipeline, and
+what reaches live operation is either a distilled deterministic rule set (spec'd in
+`specs/`, parity-tested) or decisions admitted through the gateway — never raw
+harness output.
 
 ### 3.2 Hourly bars for three symbols (extends C1)
 

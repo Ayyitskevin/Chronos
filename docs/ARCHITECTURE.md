@@ -11,7 +11,17 @@ Chronos now contains two cooperating systems in one repository:
    Quant Library corpus.
 
 Both share the safety doctrine: deny-by-default, fail closed, broker evidence
-over local belief, no generative AI in any runtime decision path.
+over local belief, and an unconditional deterministic veto over every order.
+
+**Authority model (ADR-0016 / D-16, 2026-07-25).** The former "no generative AI in
+any runtime decision path" clause (ADR-0004 §5 / D-11) is superseded. An approved
+model may originate runtime trading decisions, but only as a typed
+`AITradeDecision` passing through the single deterministic ModelDecisionGateway,
+inside an active owner-authored AutonomyMandate. The model cannot access IBKR
+directly, change its authorization, weaken policy, or bypass any deterministic
+gate. ADR-0004 §§1-4 — the structural separation of authority below — are
+**preserved** and are what make that safe. The gateway is Milestone 2; as of
+Milestone 1 the contracts (`chronos.autonomy`) exist and are wired into nothing.
 
 ## Three planes (ADR-0004)
 
@@ -116,11 +126,17 @@ requires an explicit operator note (`python -m chronos.cli rearm --note ...`).
 
 ## What is intentionally not built
 
-- No live or canary-live order path (refused in code, not just config).
+- No live or canary-live order path **in this deterministic platform** (refused in
+  code, not just config — ADR-0007 is untouched by ADR-0016). Live capability
+  lives only in the `chronos.orders` plane.
 - No market orders, shorts, margin, options execution, averaging down, or
   pyramiding anywhere in the platform.
-- No AI/LLM component in any runtime path; AI was used offline to author
-  code, audits, and docs (D-11).
+- ~~No AI/LLM component in any runtime path (D-11).~~ **Superseded by ADR-0016 /
+  D-16.** A model may originate decisions through the typed `AITradeDecision` +
+  ModelDecisionGateway path, under an owner mandate. It still gets no broker
+  object, no credentials, no low-level order functions, and no policy, arming, or
+  mandate-writing tools; the model worker runs outside the broker-writing process.
+  This deterministic platform remains model-free.
 - No web-exposed control surface; the CLI is local, and the wheel dashboard
   binds locally.
 

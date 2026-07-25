@@ -1,15 +1,29 @@
 # Chronos Live Wheel — Game Plan (start → completion)
 
+> **⚠ SUPERSEDED IN PART (2026-07-25) — see
+> [ADR-0016](adr/ADR-0016-controlled-autonomous-model-authority.md) / DECISIONS.md D-16.**
+> This plan's "the owner makes every trading decision" premise, and its
+> per-order-confirmation requirement, are superseded for autonomous modes: after
+> the owner activates an approved AutonomyMandate, an approved model may originate
+> trading decisions and the system may execute them without per-order approval,
+> inside the mandate's bounds. **Everything else in this plan stands** — the gate
+> stack, the single transmit site, arming, the kill switch, the drawdown breaker,
+> the writer lease, and the frozen-criteria promotion discipline are all retained
+> and unweakened (ADR-0016 §8). Manual trading mode keeps per-order confirmation.
+> Read the milestone records below as delivered history, which they are.
+
 > **North star (owner, 2026-07-17):** "my interpretation of a quantitative
 > Jane-Street-caliber AI quant trading bot… my personal trading co-pilot."
 > Honest translation this project builds toward: **institutional-grade
 > engineering discipline** (fail-closed risk, reconciliation against broker
-> truth, frozen evaluation criteria, kill switches, honest measurement)
-> **wrapped around a personal co-pilot** — Chronos surfaces evidence and
-> executes safely; the owner makes every trading decision. What is *not*
-> promised: institutional edges (market-making infrastructure, flow) or
-> autonomous alpha — the research arm exists precisely so any strategy must
-> *earn* promotion under frozen criteria before it ever touches execution.
+> truth, frozen evaluation criteria, kill switches, honest measurement).
+> Through 2026-07-25 that was wrapped around a co-pilot in which the owner made
+> every trading decision; the owner has since directed full autonomy under a
+> mandate (D-16). What is still *not* promised: institutional edges
+> (market-making infrastructure, flow) or autonomous alpha — the research arm
+> exists precisely so any strategy must *earn* promotion under frozen criteria
+> before it ever touches execution, and that requirement is strengthened, not
+> relaxed, by autonomy.
 
 **Status:** Milestone 0 (this document). Branch: `feat/live-wheel-dashboard`.
 **Audience:** the owner, and any Claude session (Opus/Sonnet) continuing this
@@ -102,11 +116,19 @@ Concretely:
   `BrokerSafetyError` unconditionally), `tests/safety/` live-denial tests,
   `tests/unit` settings tests.
 
-Non-negotiables carried forward from the owner prompt: no auto-transmit on
-candidate match; no unattended trading; no market orders; no naked calls;
-puts genuinely cash-secured; no automatic retry of uncertain submissions; no
-order placed by any test/CI/dev workflow, ever; every live order is armed +
-typed-confirmed; `transmit=True` assigned in exactly one authorized method.
+Non-negotiables carried forward from the owner prompt, **as amended by ADR-0016
+(2026-07-25)**: no market orders; no naked calls; puts genuinely cash-secured; no
+automatic retry of uncertain submissions; no order placed by any test/CI/dev
+workflow, ever; `transmit=True` assigned in exactly one authorized method.
+
+Amended: "no auto-transmit on candidate match", "no unattended trading", and
+"every live order is armed + typed-confirmed" applied to the human-in-the-loop
+product and still govern **manual** mode. Under an active AutonomyMandate,
+unattended operation is the intended behavior and the mandate replaces per-order
+confirmation and session arming — *only* those two gates, and only inside its
+bounds. Auto-transmit still never follows from a mere candidate match: a decision
+must survive the deterministic gateway, the risk engine, and the full gate chain,
+any of which may veto or reduce it.
 
 ---
 

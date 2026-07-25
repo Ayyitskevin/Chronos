@@ -1,16 +1,26 @@
 # Chronos — Handoff
 
+> **This document describes the deterministic strategy platform as of 2026-07-17 and is
+> partly stale.** Since it was written: Milestones 5-7C delivered the gated paper and live
+> order pipeline in `chronos.orders` (ADR-0009, ADR-0010), and ADR-0016/D-16 (2026-07-25)
+> re-scoped Chronos as a controlled-autonomous, model-driven system. For current state read
+> README.md, [ADR-0016](docs/adr/ADR-0016-controlled-autonomous-model-authority.md),
+> [docs/safety.md](docs/safety.md), and [docs/limitations.md](docs/limitations.md).
+
 ## Current state
 
-- **Branch:** `claude/chronos-trading-system-rrzroq` into
-  `feat/wheel-dashboard-mvp`. Earlier continuation PRs (#1 initial build,
-  #2 M2–M4, #3 M1 research re-run) are merged; this PR carries the M5
-  adversarial review + remediation and this handoff refresh.
-- **Operating capability:** RESEARCH / BACKTEST / SHADOW. The platform starts
-  **HALTED** on any fresh deployment (fail-closed) and every live-capable
-  mode is refused in code. SHADOW is structurally `NO_ORDERS`.
-- **Tests:** 1255 passed, 1 credential-gated skip. `ruff`, `ruff format`,
-  and `mypy --strict` clean. CI installs from a hash-verified lockfile.
+- **Branch:** autonomy work is on `claude/chronos-autonomous-governance-jhgfat` into
+  `feat/wheel-dashboard-mvp`. (Historical: the platform work landed from
+  `claude/chronos-trading-system-rrzroq`; PRs #1 initial build, #2 M2–M4, #3 M1 research
+  re-run are merged.)
+- **Operating capability (deterministic platform):** RESEARCH / BACKTEST / SHADOW. It starts
+  **HALTED** on any fresh deployment (fail-closed) and every live-capable mode is refused in
+  code — ADR-0016 does not change this. SHADOW is structurally `NO_ORDERS`.
+- **Operating capability (orders plane):** DEMO by default; paper and live are gated
+  capabilities (ADR-0009). Autonomous operation is **not** yet implemented — M1 delivered
+  the governance and the `chronos.autonomy` contracts only, wired into nothing.
+- **Tests:** 1885 passed, 1 credential-gated skip (2026-07-25). `ruff`, `ruff format`, and
+  `mypy --strict` clean. CI installs from a hash-verified lockfile.
 
 ## What was built (cumulative)
 
@@ -109,10 +119,19 @@ defensible edge on the available data.
 5. Decide whether a ~USD 3,000 cash account should pursue automated trading
    at all given the cost economics documented in RESEARCH_REPORT.
 
-## Safety posture (unchanged, restated)
+## Safety posture (restated 2026-07-25)
 
-Live mode: impossible in this build. Live allowlist: not representable. Live
-capital authorization: zero. A fresh deployment starts halted. No command,
-flag, or environment variable enables live trading. Verified adversarially
-twice; the M5 review could not construct a live-order path, an approval
-forgery, a policy mutation, or a SHADOW submission.
+**For the deterministic strategy platform, unchanged:** live mode impossible, live allowlist
+not representable, live capital authorization zero, fresh deployment starts halted, no
+command/flag/environment variable enables live trading. Verified adversarially twice; the M5
+review could not construct a live-order path, an approval forgery, a policy mutation, or a
+SHADOW submission. ADR-0016 leaves all of this intact.
+
+**Repository-wide, corrected:** live transmission *is* possible in the `chronos.orders` plane
+behind ADR-0009's configuration conjunction plus the ten-gate stack, arming, the durable kill
+switch, the drawdown breaker, and the writer lease. Under ADR-0016, autonomous live operation
+additionally requires an active owner-authored AutonomyMandate, autonomy startup defaults to a
+non-live mode, and an environment variable alone can never activate it. No test, CI run, or
+development path can transmit an order. The M0 audit recorded four kernel defects that
+unattended operation makes more dangerous (RISK_REGISTER R-24…R-27) — all open, all M2
+prerequisites.

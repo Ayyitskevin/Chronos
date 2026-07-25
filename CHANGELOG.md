@@ -1,5 +1,47 @@
 # CHANGELOG
 
+## [Unreleased] — controlled autonomous model authority (M1, 2026-07-25)
+
+### Governance
+- **ADR-0016 — Controlled Autonomous Model Authority** added. Supersedes **ADR-0004 §5 only**
+  (the generative-AI prohibition); ADR-0004 §§1-4 (D-04, structural separation of authority)
+  are preserved and load-bearing.
+- **DECISIONS.md D-11 marked superseded in place** (kept for history) and replaced by **D-16**:
+  an approved generative model may originate runtime trading decisions only through a typed
+  `AITradeDecision` and the single deterministic ModelDecisionGateway; it cannot access IBKR
+  directly, change its authorization, weaken policy, or bypass any deterministic gate.
+- D-15's prospective copilot bar retargeted to the real `chronos.autonomy` plane (unchanged,
+  not relaxed).
+- Migrated: README, `docs/ARCHITECTURE.md`, `docs/architecture.md`, `docs/safety.md`,
+  `docs/limitations.md`, `docs/AI_QUANT_GAME_PLAN.md`, `docs/LIVE_WHEEL_GAME_PLAN.md`,
+  `docs/GO_LIVE_CHECKLIST.md`, `docs/live_trading_runbook.md`, `docs/TEST_PLAN.md`,
+  `ASSUMPTIONS.md`, `TASKS.md`, `RISK_REGISTER.md`.
+
+### Added
+- `chronos.autonomy` — **contracts only, wired into nothing**: `AITradeDecision` (typed,
+  frozen, `extra="forbid"`, structurally unable to express a broker order) and
+  `AutonomyMandate` (owner-authored, versioned, expiring, revocable, deny-by-default), plus
+  the autonomy vocabulary (modes, promotion ladder, asset classes, strategy and order forms).
+- `tests/safety/test_autonomy_contracts.py` — 24 structural tests enforcing D-16, including
+  model-plane import isolation (AST + subprocess probe) and a milestone guard asserting M1
+  added no broker behavior.
+
+### Risk register
+- R-01 restated (the blanket "no live-capable code path" claim retired as stale post-M7).
+- R-24…R-27 opened for kernel defects the M0 audit found and autonomy makes more dangerous
+  (unrenewed writer lease with no fencing token; inert `max_opening_orders_per_day`;
+  permanently ambiguous `market_open`; demo-only option deliverable verification).
+- R-28 (dormant second submission path), R-29 (autonomy risk expansion, accepted by owner
+  directive), R-30 (prompt injection), R-31 (refusal re-submission loops) opened.
+
+### Safety posture
+- No broker behavior added. Nothing in `chronos.autonomy` is imported by any runtime path.
+- Every deterministic guarantee in ADR-0016 §8 is unweakened: one transmit site, single-writer
+  lease, idempotency, reconciliation to broker truth, contract qualification, stale-data
+  rejection, durable kill switch and halt, drawdown breakers, capital/concentration/margin/
+  leverage limits, restart recovery, immutable audit trails, DEMO defaults, and the
+  prohibition on broker mutations from tests or CI.
+
 ## [Unreleased] — deterministic strategy platform
 
 ### Added

@@ -43,7 +43,7 @@ Behavioral: pyramiding denied unless enabled, sells capped at held shares
 
 | Control | Default |
 |---|---|
-| Live trading | impossible in this build (mode lock hard-denies) |
+| Live trading | impossible **in this deterministic platform** (mode lock hard-denies; ADR-0007, untouched by ADR-0016). The separate `chronos.orders` plane has a gated live branch — see ADR-0009 and docs/live_trading_runbook.md |
 | Live account allowlist | not even representable; paper allowlist empty by default |
 | Live capital authorization | zero (no field exists to set it) |
 | Bot capital / notional / exposure limits | 0 (deny) |
@@ -67,9 +67,13 @@ original problem.
 
 ## Options
 
-The platform trades no options. Option risk in the wheel dashboard remains
-decision-support only with its own Decimal scenario engine; no options
-execution path exists anywhere in the repository.
+**This deterministic platform** trades no options, and that is unchanged. The claim
+that "no options execution path exists anywhere in the repository" was true when
+written and is now stale: the `chronos.orders` plane gained a gated options path in
+Milestones 5-7 (cash-secured puts, covered calls, buy-to-close), with its own tri-state
+risk engine and Decimal scenario math. ADR-0016 scopes autonomous options trading to
+Milestone 8 — long calls and puts, cash-secured puts, covered calls, and defined-risk
+verticals, never uncovered short options. Corrected 2026-07-25.
 
 ## Files
 

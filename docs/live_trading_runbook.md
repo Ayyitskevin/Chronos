@@ -16,6 +16,21 @@ against a running gateway.
 
 This runbook describes the safety controls that gate every live order.
 
+## Autonomous operation (ADR-0016 / D-16) — not yet operable
+
+Under ADR-0016 an active owner-authored **AutonomyMandate** replaces gates 7
+(session arming) and 8 (per-order confirmation) — **and only those two** — inside
+its bounds. Every other gate in this runbook applies identically to an autonomous
+order, and the kill switch takes absolute precedence over any mandate.
+
+Nothing here is operable yet. Milestone 1 delivered the mandate and decision
+contracts only; the deterministic gateway that admits a decision, the model
+worker, and the autonomous execution path are Milestones 2 onward. Until they
+ship, every live order still walks all ten gates including typed confirmation.
+When they do ship, this runbook gains the mandate lifecycle (author, activate,
+renew, revoke), and revoking a mandate — like engaging the kill switch — will be
+an immediate owner action that stops new autonomous exposure.
+
 ## The ten live gates
 
 A live order may transmit **only** when every gate below passes

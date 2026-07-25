@@ -49,12 +49,22 @@ proven system rather than an experiment. Until the account is funded, any live o
 pipeline-acceptance test, not trading — and milestones state their capital thresholds so
 no session operationalizes theater at sizes where costs dominate.
 
-**The AI boundary (unchanged, load-bearing):** ADR-0004 / DECISIONS.md D-11, verbatim —
-*no generative model output feeds any runtime decision.* The AI layer reads state and
-knowledge, writes analysis, proposals, and explanations; deterministic, tested code
-evaluates every gate and owns the single transmit site. "AI quant" here means
-AI-accelerated research and AI-explained operations around a deterministic executor —
-which is also how it stays auditable.
+**The AI boundary (REPLACED 2026-07-25 — ADR-0016 / D-16).** This plan was written under
+D-11 (*no generative model output feeds any runtime decision*), and described an
+advisory-only copilot plane. **That boundary is superseded.** An owner directive re-scoped
+Chronos as a fully autonomous, model-driven system: an approved model may originate runtime
+trading decisions, but only through a typed `AITradeDecision` and the single deterministic
+ModelDecisionGateway, inside an active owner-authored AutonomyMandate. The model cannot
+access IBKR directly, change its authorization, weaken policy, or bypass any deterministic
+gate, and the deterministic kernel retains unconditional veto authority.
+
+What survives from the old framing: deterministic, tested code still evaluates every gate
+and still owns the single transmit site, and the system stays auditable because every
+decision is typed, provenance-stamped, and hash-chained. What changes: the model is now a
+decision *originator*, not merely an advisor. Read the P5/P6 pillars and the Phase D/E
+milestones below with that correction in mind — where they say "advisory," "never
+transmits," or "human-confirmed," ADR-0016 governs. The rungs, gates, and frozen-criteria
+discipline they describe are retained.
 
 ---
 
@@ -103,9 +113,10 @@ Verified by repo survey 2026-07-18:
 
 ```
               ┌────────────────────────────────────────────────┐
-              │  P5 AI COPILOT (advisory plane — reads, never   │
-              │  transmits: briefs, theses, attribution,        │
-              │  research proposals; ADR-0004 boundary)         │
+              │  P5 AI DECISION PLANE (reads evidence; emits    │
+              │  typed AITradeDecision into a durable queue —   │
+              │  never transmits, holds no broker object; also  │
+              │  briefs/theses/attribution; ADR-0016 boundary)  │
               └────────┬───────────────────────────┬───────────┘
                        │ reads                     │ reads
    ┌───────────────────▼────────┐      ┌───────────▼───────────────────┐
@@ -119,11 +130,11 @@ Verified by repo survey 2026-07-18:
    │ P2 RESEARCH FACTORY        │      │ single transmit site, gates,  │
    │ data plane (IBKR history), │      │ arming, kill switch, breaker  │
    │ walk-forward, purged CV,   │      └──────────▲────────────────────┘
-   │ experiment registry, wheel │                 │ proposed intents (all gates;
-   │ simulator                  │                 │ authorization per Phase E rung)
+   │ experiment registry, wheel │                 │ compiled intents (all gates;
+   │ simulator                  │                 │ authorized by AutonomyMandate)
    │                            │      ┌──────────┴────────────────────┐
    └───────────┬────────────────┘      │ P6 AUTONOMY LADDER (capstone) │
-               │ promotes (frozen      │ scheduler → proposed intents →│
+               │ promotes (frozen      │ scheduler → decision → gateway│
                └──── criteria only) ──▶│ graduated shadow/paper/canary │
                                        └───────────────────────────────┘
 ```
@@ -144,18 +155,24 @@ Verified by repo survey 2026-07-18:
 - **P4 — Operations ledger.** Per-strategy/per-family P&L attribution, live-vs-backtest
   tracking error, strategy health states, and real notifications (push/email on halt,
   kill-switch, drawdown, fills).
-- **P5 — AI copilot.** A separate advisory plane that reads the SKB and operations ledger
-  and writes: morning briefs, trade theses that cite SKB entries and risk state, post-trade
-  attribution narratives, anomaly explanations, and research proposals for the factory.
-  Structurally incapable of transmitting: enforced by the same AST/import-isolation test
-  pattern that already guards the UI.
-- **P6 — Autonomy ladder.** The post-M7 seam reserved in the live plan, made explicit:
-  scheduler-driven strategy evaluation → auto-*proposed* intents awaiting human
-  confirmation → bounded unattended paper autonomy → tiny-size live canary — each rung a
-  separate owner decision, each requiring frozen-criteria validation, each capped by the
-  existing kill-switch/drawdown machinery. No strategy skips rungs. Rungs E3 and beyond
-  additionally require a redesigned standing-authorization model (milestone E3a) delivered
-  through a reviewed release — unattended operation is never a configuration change.
+- **P5 — AI decision plane** (was "AI copilot — advisory"; re-scoped by ADR-0016). A
+  separate plane that reads the SKB, EvidenceBundles, and the operations ledger and writes:
+  typed `AITradeDecision` records into a durable decision queue, plus theses, morning
+  briefs, post-trade attribution narratives, and anomaly explanations. It remains
+  structurally incapable of *transmitting* — it holds no broker object, no credentials, and
+  no low-level order functions, and runs outside the broker-writing process, enforced by the
+  same AST/import-isolation test pattern that guards the UI (`tests/safety/test_autonomy_contracts.py`).
+  Its decisions reach a broker only by surviving the deterministic gateway and the existing
+  `chronos.orders` gate chain.
+- **P6 — Autonomy ladder.** Now governed by ADR-0016 §7: per-asset-family promotion along
+  BACKTEST → REPLAY → SHADOW → PAPER_AUTONOMOUS → CANARY_LIVE_AUTONOMOUS →
+  CAPPED_LIVE_AUTONOMOUS, each rung a separate owner decision, each requiring
+  frozen-before-evaluation criteria, each capped by the existing kill-switch/drawdown
+  machinery. A stock promotion authorizes neither futures nor options. No family skips
+  rungs, and a material change to model, prompt, tool schema, decision schema, contract
+  resolver, risk policy, or order compiler returns that configuration to SHADOW or PAPER.
+  The standing-authorization model E3a reserved is delivered as the AutonomyMandate;
+  unattended operation is never a configuration change.
 
 ---
 
@@ -196,7 +213,7 @@ with the standard report and an explicit owner go/no-go before the next begins.
 |---|-----------|------|--------------------|
 | D1 | **P&L attribution + tracking error** | M | Per-strategy/per-family realized+unrealized P&L pipeline from broker truth; live/paper vs backtest tracking-error monitor; strategy health states (healthy / degraded / halted) persisted and displayed |
 | D2 | **Notifications** | S | Push/email on kill-switch engagement, drawdown trip, halt, fill, reconciliation anomaly (existing notifier protocol, real channels) |
-| D3 | **AI copilot v1 (advisory plane)** | L | Morning brief (positions, risk state, regime context, calendar); trade theses citing SKB entries + current risk evidence; post-trade attribution narratives; anomaly explanations. Structural guarantees, both required: (a) the copilot package cannot import order/submission/broker-write modules (AST + subprocess tests, same pattern as UI isolation); (b) **data-flow isolation** — copilot output is written only to a designated advisory store, and a test asserts no runtime module (`chronos.orders`, the allocator, the scheduler, strategy-health logic) reads from that store. All output labeled advisory; **no generative model output feeds any runtime decision** (ADR-0004 / D-11, verbatim) |
+| D3 | **AI copilot v1 (advisory plane)** | L | Morning brief (positions, risk state, regime context, calendar); trade theses citing SKB entries + current risk evidence; post-trade attribution narratives; anomaly explanations. Structural guarantees, both required: (a) the copilot package cannot import order/submission/broker-write modules (AST + subprocess tests, same pattern as UI isolation); (b) **data-flow isolation** — copilot output is written only to a designated advisory store, and a test asserts no runtime module (`chronos.orders`, the allocator, the scheduler, strategy-health logic) reads from that store. **Superseded framing:** under ADR-0016 this plane also emits typed `AITradeDecision` records into the durable decision queue; the import- and data-flow isolation above is retained, and the decision queue is the *only* channel into runtime — narrative output stays advisory and is never parsed into an order |
 | D4 | **AI research assistant** | M | Copilot drafts research proposals (hypothesis, SKB lineage, test spec) as structured documents; the experiment registry executes a proposal **only after explicit owner review**, treats it identically to a human-authored one, and counts it in trial accounting; proposals can never trigger a holdout unlock and never shortcut the frozen-criteria pipeline |
 
 ### Phase E — Portfolio layer + autonomy ladder (each rung an explicit owner decision)
@@ -205,7 +222,7 @@ with the standard report and an explicit owner go/no-go before the next begins.
 |---|-----------|------|--------------------|
 | E1 | **Portfolio allocator** | L | Cross-strategy/cross-family capital allocation with per-symbol/per-family caps, position netting, conflict resolution; outputs *suggested* intents into the existing human-confirmed pipeline; account equity/positions from broker truth. Capital threshold: designed now, **dormant below ~$10k deployed** — below that, multi-sleeve splitting multiplies IBKR's $1/order minimum into a prohibitive per-sleeve cost floor, so the allocator's useful outputs are netting and conflict checks only |
 | E2 | **Scheduler + proposed-intent queue (semi-auto)** | M | Scheduled evaluation on fresh data; qualifying strategies enqueue fully-built proposed intents; the owner reviews/confirms in the dashboard — the confirmation and transmit path is byte-identical to manual flow |
-| E3a | **Standing-authorization redesign (safety-critical scope)** | M | Design document + independent adversarial review for the E3+ authorization model: per-order typed confirmation and session arming are replaced at unattended rungs by an **owner-pre-authorized, revocable envelope** (per-strategy caps: orders/day, notional, loss, symbol set, expiry; kill-switch precedence absolute). This is the reserved `ALLOW_AUTOMATED_TRANSMISSION` seam from LIVE_WHEEL_GAME_PLAN §6b made concrete. No unattended order exists until this ships in a reviewed release |
+| E3a | **Standing-authorization redesign (safety-critical scope)** — **DELIVERED as ADR-0016 / the AutonomyMandate (M1, 2026-07-25)** | M | The reserved envelope is now specified and typed: `chronos.autonomy.AutonomyMandate` — owner-authored, versioned, expiring (live ≤ 30 days), revocable, deny-by-default, scoped by account fingerprint, mode, promotion level, instruments, strategies, order forms, capital, exposure, loss, concentration, activity, sessions, and market-data floors; kill-switch precedence absolute. Replaces per-order confirmation and session arming **only** inside its bounds. No unattended order exists until the M2 gateway ships and the per-family promotion gates pass |
 | E3 | **Bounded paper autonomy** | L | New reviewed release per `docs/GO_LIVE_CHECKLIST.md` doctrine, implementing E3a's authorization model: unattended paper-only operation for promoted strategies inside the pre-authorized envelope; every other safety layer active and unchanged; soak period with published tracking-error results |
 | E4 | **Live canary autonomy** | L | **Its own future reviewed release with a fresh independent adversarial review** (Gate-4 doctrine, `docs/GO_LIVE_CHECKLIST.md`). Only for strategies that cleared frozen criteria AND the E3 paper soak; minimum-size live operation under graduated caps, running through the `chronos.orders` plane — the autonomous plane's CANARY_LIVE/LIVE hard denial (`control/modes.py`, `control/promotion.py`, ADR-0007) **stays untouched**; equivalent promotion machinery (versioned promotion records, single-step rung progression, gates written before the run) is built for the orders plane as part of this milestone; kill-switch/drawdown/halt machinery unchanged; size expansion is a per-strategy owner decision informed by D1 evidence |
 
@@ -225,18 +242,24 @@ because captured options history is unrecoverable. Default order is as listed.
 3. Market orders are impossible; puts are cash-secured; naked calls can never be enabled
    through configuration. No phase of this plan changes this; any future revisit requires
    an explicit owner directive plus a reviewed release — this document grants neither.
-4. No generative model output feeds any runtime **decision** (ADR-0004 / D-11, verbatim —
-   not merely order decisions). The copilot plane is read-and-advise only, enforced
-   structurally by import isolation AND data-flow isolation (no runtime module reads the
-   advisory store).
+4. ~~No generative model output feeds any runtime **decision** (ADR-0004 / D-11, verbatim).~~
+   **REPLACED by ADR-0016 / D-16.** An approved model may originate runtime trading
+   decisions **only** through a typed `AITradeDecision` and the single deterministic
+   ModelDecisionGateway, inside an active owner-authored AutonomyMandate. The model gets no
+   IBKR client, no credentials, no low-level order functions, no direct submission-module
+   imports, and no policy-, arming-, or mandate-writing tools; it runs outside the
+   broker-writing process. Free-form chat, theses, summaries, and Markdown are never parsed
+   into orders. The deterministic kernel keeps unconditional veto authority, and an AI
+   failure never becomes permission to trade.
 5. All safety machinery (mode lock, arming, per-order confirmation, kill switch,
-   drawdown breaker, writer lease, halt) applies **unchanged through rung E2** — up to
-   there, autonomy changes who *proposes*, never what *gates*. Rungs E3+ replace
-   per-order typed confirmation and session arming with the E3a standing-authorization
-   envelope; that substitution is itself safety-critical scope requiring its own design
-   document, independent adversarial review, and reviewed release before any unattended
-   order — and it never touches the kill switch, drawdown breaker, mode lock, writer
-   lease, or halt, which apply identically at every rung.
+   drawdown breaker, writer lease, halt) applies unchanged **except** that an active
+   AutonomyMandate replaces per-order human confirmation and session arming inside its
+   bounds — the substitution ADR-0016 §1 makes, and the concrete form of the envelope E3a
+   reserved. **That is the only gate autonomy replaces.** The kill switch, drawdown
+   breaker, mode lock, writer lease, halt, single transmit boundary, idempotency,
+   reconciliation-to-broker-truth, contract qualification, and stale-data rejection apply
+   identically at every rung and are enumerated in ADR-0016 §8 as explicitly
+   not-superseded. An AI failure never becomes permission to trade.
 6. Frozen-criteria promotion: no strategy reaches paper autonomy, let alone live, without
    passing criteria that were frozen before its results existed. "Zero selected, with
    better evidence" remains a valid outcome of any research phase.

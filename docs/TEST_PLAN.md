@@ -47,6 +47,26 @@ prove:
   order-capable fields (no account/quantity/broker/order_id); the risk policy object is frozen
   (mutation raises).
 
+`tests/safety/test_autonomy_contracts.py` — the structural enforcement for ADR-0016 / D-16
+(added 2026-07-25). ADR-0004 §5 conceded that "no generative AI in runtime" was verifiable
+only *by inspection*; D-16 replaces the prohibition with structure, so the structure is now
+tested. Proves: the model plane (`chronos.autonomy`) imports nothing from the
+order/broker/execution/risk/api/persistence planes (AST walk **and** subprocess `sys.modules`
+probe); `AITradeDecision` carries no account/broker/routing/transmit field anywhere in its
+nested model tree and refuses smuggled fields; a decision may not name a broker order id;
+exposure-creating decisions must cite evidence and state invalidation conditions;
+`AutonomyMandate` is frozen, must expire after it starts, authorizes nothing by default,
+cannot exceed its promotion rung, cannot outlive the 30-day live ceiling, must state its
+scope explicitly in submitting modes, refuses futures options and known-bad data qualities,
+and requires a pseudonymous account scope; no uncovered short option and no `MARKET` order
+form are expressible; the startup autonomy mode is not live. It also asserts that **M1 wired
+the contracts into no runtime path** — a milestone guard that M2's gateway tests replace.
+
+`tests/safety/test_registry_no_automated_unlock.py` — ADR-0013 §7's holdout-unlock bar,
+**retargeted** by D-16: `chronos.autonomy` joins the scanned automated tree so the model
+plane cannot reach a research holdout. It is deliberately *not* added to the forbidden-import
+list, because M2's deterministic supervisor must import the decision contract to judge it.
+
 ```bash
 .venv/bin/pytest tests/safety -q
 ```

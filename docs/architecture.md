@@ -1,5 +1,15 @@
 # Chronos architecture
 
+> **Scope note (2026-07-25).** This document records the wheel-dashboard architecture as
+> built through Milestone 10, when order transmission was hard-disabled. Milestones 5-7
+> since delivered the gated paper and live submission path (ADR-0009), and ADR-0016/D-16
+> re-scoped Chronos as a model-driven autonomous system. Where the text below says
+> live-money transmission is hard-disabled or order actions are permanently locked, read
+> it as the historical M1-M10 posture, not current capability. The current authority model
+> is [ADR-0016](adr/ADR-0016-controlled-autonomous-model-authority.md); the current
+> execution posture is [docs/safety.md](safety.md) and
+> [docs/live_trading_runbook.md](live_trading_runbook.md).
+
 ## Decisions
 
 Chronos uses a ports-and-adapters boundary around brokerage access. Strategy and UI code depend

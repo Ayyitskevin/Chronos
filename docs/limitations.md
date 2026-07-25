@@ -1,10 +1,13 @@
 # Chronos — limitations
 
 The honest, consolidated list of what Chronos does NOT do, cannot yet prove, or defers to an
-owner action. Chronos is pre-release, local-first decision-support software; it is not an
-autonomous trading bot, an investment adviser, or a promise of profitable trading. Options and
-crypto can produce rapid, substantial losses. This document is the single source of truth for
-limitations referenced by the README and the runbooks.
+owner action. Chronos is pre-release, local-first software being built toward controlled
+autonomous trading (ADR-0016 / D-16); **it does not trade autonomously today** — see the
+autonomy section below for exactly what has and has not been delivered. It is not an
+investment adviser or a promise of profitable trading. Equities, futures, options, and crypto
+can produce rapid, substantial losses, and an autonomous system can produce them without
+waiting for you. This document is the single source of truth for limitations referenced by
+the README and the runbooks.
 
 ## Broker integration
 
@@ -154,8 +157,39 @@ limitations referenced by the README and the runbooks.
 
 - The regime-context panel (EMA/RSI/vol-percentile) is a Pine-derived heuristic, explicitly
   labeled "not a validated signal," and has no pathway into order transmission.
-- The autonomous strategy platform (`chronos.execution`/`chronos.risk`) starts halted, refuses
-  every live-capable mode in code, and is never imported by the Live Wheel order pipeline. No
-  generative/model output is used in any runtime trading decision.
+- The deterministic strategy platform (`chronos.execution`/`chronos.risk`) starts halted, refuses
+  every live-capable mode in code, and is never imported by the Live Wheel order pipeline.
+  ADR-0016 does not change this: that plane stays live-incapable and model-free.
 - Backtests and shadow scans describe would-be intents only; paper fills do not prove live
   execution quality, and past behavior does not predict future results.
+
+## Autonomous model authority (ADR-0016 / D-16)
+
+- **Chronos does not trade autonomously today.** Milestone 1 delivered governance and the
+  typed `AITradeDecision` / `AutonomyMandate` contracts and **no broker behavior**. The
+  deterministic ModelDecisionGateway, mandate validation, decision admission, sizing, the
+  model worker, tools, and every autonomous execution path are Milestones 2 onward. A test
+  asserts that nothing outside `chronos.autonomy` imports the contracts.
+- **A type that cannot express an order is necessary, not sufficient.** The decision contract
+  carries no account, broker, routing, or transmit field, and the mandate is frozen, expiring,
+  and deny-by-default — but the actual veto lives in the gateway, which does not exist yet and
+  is unproven until it ships with its own adversarial review.
+- **Prompt injection is an open problem.** EvidenceBundles will be redacted, versioned, and
+  hash-pinned and tools allowlisted, but evidence derived from external text (news, filings)
+  is an untrusted input to a non-deterministic component. The deterministic kernel is the
+  control that holds when injection succeeds; explicit injection tests are owed by M4 and are
+  a frozen promotion criterion.
+- **Kernel defects the autonomy programme inherits.** The M0 audit found four that unattended
+  operation makes strictly more dangerous, all open and tracked as RISK_REGISTER R-24…R-27:
+  the writer lease is never renewed in production and its token is not used as a fencing
+  token; `max_opening_orders_per_day` is inert because its evidence is never gathered; broker
+  session evidence is never supplied, so the `market_open` check is permanently ambiguous
+  (fail-closed today, meaning no live equity/option order can currently pass risk); and option
+  deliverable verification is set only by the demo broker. These are M2 prerequisites.
+- **A dormant second submission path still exists.** `chronos/execution/brokers/ibkr_paper.py`
+  contains a working `placeOrder` with a hardcoded `transmit = True` that the
+  single-transmit-site test does not scan. It is constructed nowhere in production, but M2
+  must retire, quarantine, or prove its isolation before autonomy operates.
+- **The 30-day live-mandate ceiling is a judgment, not a derived number.**
+- **No futures capability of any kind exists yet** (no contract model, no adapter support);
+  futures options are refused outright by the mandate validator in this release.
