@@ -21,13 +21,16 @@ a test:
    :data:`MAX_LIVE_MANDATE_DURATION`. There is no perpetual live authority.
 3. **Deny-by-default — with one honest caveat.** Every *ceiling* defaults to
    zero and every scope tuple to empty, so a default-constructed mandate
-   authorizes nothing. But four fields are **floors**
-   (``min_cash_floor_usd``, ``min_buying_power_usd``, ``max_quote_age_seconds``
-   read as a freshness floor, and the liquidity minimums), where zero is the
-   *most* permissive value, not the most restrictive. Defaulting a floor to
-   zero is therefore not deny-by-default, so a submitting mandate is required
-   to set the load-bearing ones explicitly (see ``_validate_submitting_floors``).
-   The M1 adversarial review caught the original text claiming otherwise.
+   authorizes nothing. But some fields are **floors** — ``min_cash_floor_usd``,
+   ``min_buying_power_usd``, ``max_quote_age_seconds`` (read as a freshness
+   floor), and the liquidity minimums ``min_option_volume`` /
+   ``min_open_interest`` — where zero is the *most* permissive value, not the
+   most restrictive. Defaulting a floor to zero is therefore not
+   deny-by-default, so a submitting mandate must set the three load-bearing
+   ones explicitly (see ``_validate_submitting_floors``); the two liquidity
+   minimums stay advisory inputs to the kernel's own liquidity checks rather
+   than mandate-level gates. The M1 adversarial review caught the original text
+   claiming deny-by-default across the board.
 
 The model may *read* a mandate. It can neither author one nor raise its own
 limits: no tool in the model plane writes this type (ADR-0016 §3).

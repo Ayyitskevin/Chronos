@@ -10,7 +10,8 @@ an escalation vector. Against the M1 contracts it was one:
 
 produced a ten-year ``LIVE_AUTONOMOUS`` mandate with an empty scope and a
 SHADOW promotion rung — every mandate validator skipped, from an object the
-holder already had. Found by the M1 adversarial review; see ADR-0016 §9.
+holder already had. Found by the M1 adversarial review; see ADR-0016
+"Known limitations and residuals" item 0.
 
 :class:`AutonomyModel` closes it by re-validating the merged data whenever an
 update is supplied, so a copy is held to exactly the invariants a constructor

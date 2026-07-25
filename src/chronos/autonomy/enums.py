@@ -204,13 +204,26 @@ MINIMUM_PROMOTION_FOR_MODE: dict[AutonomyMode, PromotionLevel] = {
     AutonomyMode.LIVE_AUTONOMOUS: PromotionLevel.CAPPED_LIVE_AUTONOMOUS,
 }
 
-#: Decision kinds that can only reduce or remove exposure. The kernel may permit
-#: these under degraded conditions where new exposure is refused; the
-#: classification lives here as vocabulary, and the *enforcement* is the
-#: deterministic supervisor's (M2), never this module's.
+#: Decision kinds that reduce or remove exposure **by their kind alone**. The
+#: kernel may permit these under degraded conditions where new exposure is
+#: refused; the classification lives here as vocabulary, and the *enforcement*
+#: is the deterministic supervisor's (M2), never this module's.
+#:
+#: CANCEL is deliberately **not** here. Whether a cancel reduces risk depends
+#: entirely on what it cancels: cancelling a resting *opening* order removes
+#: prospective exposure, but cancelling a *closing* or protective order leaves
+#: an open position running and therefore *increases* net risk. A blanket
+#: risk-reducing classification would let the degraded-state rule (ADR-0016 §8)
+#: permit exactly the cancel that should be refused. The supervisor must
+#: classify a CANCEL from the target order's own open/close effect, not from the
+#: decision kind. Found by the M1 adversarial review.
 RISK_REDUCING_DECISION_KINDS: frozenset[DecisionKind] = frozenset(
-    {DecisionKind.HOLD, DecisionKind.REDUCE, DecisionKind.CLOSE, DecisionKind.CANCEL}
+    {DecisionKind.HOLD, DecisionKind.REDUCE, DecisionKind.CLOSE}
 )
+
+#: Kinds whose risk direction cannot be known from the kind alone — the
+#: supervisor must inspect the target before treating one as risk-reducing.
+CONTEXT_DEPENDENT_DECISION_KINDS: frozenset[DecisionKind] = frozenset({DecisionKind.CANCEL})
 
 #: Decision kinds that can create or extend exposure. ROLL and REPLACE are here
 #: because each closes and re-opens: the re-open is new exposure.

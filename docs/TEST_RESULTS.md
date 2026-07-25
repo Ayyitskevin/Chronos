@@ -5,15 +5,32 @@ root on Python 3.12 (`.venv`). Statuses use the plan's vocabulary:
 PASSED / FAILED / SKIPPED / NOT RUNNABLE WITHOUT CREDENTIALS /
 NOT IMPLEMENTED / REQUIRES OWNER ACTION.
 
-## Summary (this branch, local run — post-M5)
+## Summary (current — M2a, 2026-07-25)
 
 | Command | Result |
 |---|---|
-| `.venv/bin/pytest -q` | **1255 passed, 1 skipped** (~27 s) |
+| `.venv/bin/pytest -q` | **1901 passed, 1 skipped** (~61 s) |
+| `.venv/bin/ruff check .` | clean |
+| `.venv/bin/ruff format --check .` | clean (324 files) |
+| `.venv/bin/mypy src/chronos` | clean, strict (190 source files) |
+| GitHub Actions `quality` job | verify on the current PR |
+
+`tests/safety/` now holds ~90 tests, including
+`test_autonomy_contracts.py` (the ADR-0016 / D-16 structural suite: model-plane import
+isolation, decision order-incapability, mandate immutability under `model_copy`,
+per-family promotion, floors, and the M1 milestone guard).
+
+## Summary (historical — post-M5 snapshot, superseded)
+
+| Command | Result |
+|---|---|
+| `.venv/bin/pytest -q` | 1255 passed, 1 skipped (~27 s) |
 | `.venv/bin/ruff check .` | clean |
 | `.venv/bin/ruff format --check .` | clean (173 files) |
 | `.venv/bin/mypy src/chronos` | clean, strict (100 source files) |
-| GitHub Actions `quality` job | green on the merged continuation PRs (#2, #3); verify on the current PR |
+| GitHub Actions `quality` job | green on the merged continuation PRs (#2, #3) |
+
+The per-layer tables below date from that snapshot; their counts are historical.
 
 The 1255 total is 953 (wheel + monitor-page integration) + 36 (safety) + 226
 (platform_unit) + 27 (parity) + 13 (chaos) + 1 skipped; the platform suites

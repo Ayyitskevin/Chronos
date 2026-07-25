@@ -38,9 +38,12 @@ from pydantic import BaseModel, ValidationError
 
 import chronos.autonomy as autonomy_pkg
 from chronos.autonomy import (
+    CONTEXT_DEPENDENT_DECISION_KINDS,
     DEFAULT_AUTONOMY_MODE,
+    EXPOSURE_CREATING_DECISION_KINDS,
     LIVE_AUTONOMY_MODES,
     MAX_LIVE_MANDATE_DURATION,
+    RISK_REDUCING_DECISION_KINDS,
     AITradeDecision,
     AutonomyMandate,
     AutonomyMode,
@@ -416,6 +419,39 @@ def test_decision_refuses_futures_options() -> None:
 
     with pytest.raises(ValidationError):
         _decision(asset_class=TradableAssetClass.FUTURE_OPTION, symbol="SPX")
+
+
+def test_cancel_is_not_classified_risk_reducing_by_kind_alone() -> None:
+    """Cancelling a *closing* order increases net risk (M1 review finding).
+
+    The degraded-state rule (ADR-0016 §8) permits only risk-reducing behavior. If
+    CANCEL were blanket-classified risk-reducing, a degraded system would be
+    allowed to cancel exactly the protective/closing order it must not touch.
+    """
+
+    assert DecisionKind.CANCEL not in RISK_REDUCING_DECISION_KINDS
+    assert DecisionKind.CANCEL in CONTEXT_DEPENDENT_DECISION_KINDS
+    assert {
+        DecisionKind.HOLD,
+        DecisionKind.REDUCE,
+        DecisionKind.CLOSE,
+    } == RISK_REDUCING_DECISION_KINDS
+    # Risk-reducing and exposure-creating stay disjoint.
+    assert not (RISK_REDUCING_DECISION_KINDS & EXPOSURE_CREATING_DECISION_KINDS)
+
+
+def test_narrative_fields_reject_control_characters() -> None:
+    """Model-authored text reaches terminals, logs, and audit records."""
+
+    for payload in ("bad\x00nul", "over\rwrite", "\x1b[31mred", "del\x7f"):
+        with pytest.raises(ValidationError):
+            _open_decision(thesis=payload)
+        with pytest.raises(ValidationError):
+            _open_decision(rationale=payload)
+        with pytest.raises(ValidationError):
+            _open_decision(invalidation_conditions=(payload,))
+    # Newlines and tabs remain usable for genuine multi-line rationale.
+    assert _open_decision(rationale="line one\n\tline two").rationale
 
 
 def test_decision_evidence_is_bounded() -> None:

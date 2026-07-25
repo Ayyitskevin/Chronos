@@ -169,7 +169,15 @@ order parameter.
 
 An exposure-creating decision (OPEN, INCREASE, HEDGE, ROLL, REPLACE) must cite
 at least one evidence id and state its invalidation conditions, or it fails
-validation. Exposure is never created on an unsupported assertion.
+validation.
+
+Stated precisely, because the difference matters: this is a **presence** check,
+not a support check. The contract enforces that a citation exists and is
+well-formed (a 64-hex digest and an id); it does not and cannot verify that the
+cited evidence exists in the bundle, that its digest matches, or that it
+actually supports the thesis. Binding citations to the EvidenceBundle they claim
+to come from is the gateway's job (M2), and until it ships "must cite evidence"
+means only that an uncited decision is refused.
 
 ### 6. Asset-class capability matrix
 
@@ -177,7 +185,12 @@ The system-wide CSP-only and long-only limitations are replaced by an explicit,
 versioned capability matrix expressed in the mandate's scope. Initial scope:
 
 - **Equities and ETFs** — long positions; short positions only after separate
-  promotion, with deterministic shortability and borrow checks before shorting;
+  promotion, with deterministic shortability and borrow checks before shorting.
+  **Gap disclosed (M1 review):** `FamilyPromotion` keys promotion on asset
+  *class*, so an EQUITY promotion covers `LONG_EQUITY` and `SHORT_EQUITY`
+  alike — "separate promotion" for shorting is not yet expressible in the
+  contract. Until M2 adds strategy-level promotion, a mandate must simply omit
+  `SHORT_EQUITY` from its scope to keep shorting unauthorized;
   whole-share limit or marketable-limit orders initially; corporate-action,
   split, dividend, halt, spread, liquidity, and session checks.
 - **Options** — long calls and puts, cash-secured puts, covered calls, and

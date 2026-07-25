@@ -92,6 +92,24 @@ _NO_ENTRY_KINDS = frozenset(
 )
 
 
+def _reject_control_characters(value: str, label: str) -> str:
+    """Refuse control characters, ANSI escapes, and NUL in model-authored text.
+
+    These fields are model-authored and end up in terminals, logs, audit
+    records, and a dashboard. A NUL can truncate a C-side consumer, CR can
+    overwrite a log line, and an ANSI escape can repaint an operator's terminal
+    — so a decision could forge what a human sees while reviewing it. Newlines
+    and tabs stay allowed because real rationale needs them (M1 review).
+    """
+
+    forbidden = {
+        character for character in value if ord(character) < 32 and character not in "\n\t"
+    }
+    if forbidden or "\x7f" in value or "\x1b" in value:
+        raise ValueError(f"{label} may not contain control characters or escape sequences")
+    return value
+
+
 def _validate_hex_digest(value: str, label: str) -> str:
     normalized = value.strip().lower()
     non_hex = any(character not in "0123456789abcdef" for character in normalized)
@@ -269,12 +287,17 @@ class AITradeDecision(AutonomyModel):
             )
         return normalized
 
+    @field_validator("thesis", "rationale")
+    @classmethod
+    def _validate_narrative_text(cls, value: str) -> str:
+        return _reject_control_characters(value, "narrative text")
+
     @field_validator("key_uncertainties", "invalidation_conditions")
     @classmethod
     def _validate_narrative_list(cls, value: tuple[str, ...]) -> tuple[str, ...]:
         normalized: list[str] = []
         for item in value:
-            entry = item.strip()
+            entry = _reject_control_characters(item.strip(), "narrative entry")
             if not entry:
                 raise ValueError("narrative entries must not be blank")
             if len(entry) > 500:
