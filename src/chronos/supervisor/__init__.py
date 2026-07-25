@@ -80,12 +80,19 @@ from chronos.supervisor.ingress import (
     parse_proposal,
 )
 from chronos.supervisor.loop import CycleFacts, CycleOutcome, CycleStage, run_cycle
+from chronos.supervisor.proposals import MAX_PENDING, EnqueueOutcome, enqueue, pending_depth
 from chronos.supervisor.queue import (
     PROPOSAL_STREAM,
     HarnessIdentity,
     ProposalRejected,
     accept,
     economic_fingerprint,
+)
+from chronos.supervisor.runtime import (
+    AutonomyRuntime,
+    FactGatherer,
+    RuntimeConfig,
+    TickReport,
 )
 from chronos.supervisor.sizing import AccountEvidence, SizingOutcome, size_order
 
@@ -94,6 +101,7 @@ __all__ = [
     "AUTHORITY_STREAM",
     "DECISION_STREAM",
     "MAX_PAYLOAD_BYTES",
+    "MAX_PENDING",
     "MAX_RESUBMISSIONS",
     "PROPOSAL_STREAM",
     "AccountEvidence",
@@ -101,6 +109,7 @@ __all__ = [
     "AdmissionOutcome",
     "AdmissionRefusal",
     "AlertSeverity",
+    "AutonomyRuntime",
     "CompilationOutcome",
     "CompilationRefusal",
     "ContractResolver",
@@ -108,6 +117,8 @@ __all__ = [
     "CycleOutcome",
     "CycleStage",
     "DegradedReason",
+    "EnqueueOutcome",
+    "FactGatherer",
     "HarnessIdentity",
     "IngressOutcome",
     "IngressRejected",
@@ -116,9 +127,11 @@ __all__ = [
     "OwnerAlert",
     "ProposalRejected",
     "QuoteEvidence",
+    "RuntimeConfig",
     "SessionCounters",
     "SizingOutcome",
     "SupervisorState",
+    "TickReport",
     "accept",
     "acknowledge",
     "admit",
@@ -127,7 +140,9 @@ __all__ = [
     "build_state",
     "compile_order",
     "economic_fingerprint",
+    "enqueue",
     "parse_proposal",
+    "pending_depth",
     "raise_alert",
     "run_cycle",
     "select_intent",

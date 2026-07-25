@@ -17,7 +17,7 @@ from sqlalchemy.pool import StaticPool
 from chronos.persistence.schema import Base, DatabaseScopeRow, SchemaVersionRow
 from chronos.utils.identifiers import account_fingerprint
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 _DATABASE_RECOVERY_GUIDANCE = (
     "Preserve and back up this database first. A prior-version schema can be upgraded with "
@@ -66,6 +66,7 @@ _ACCOUNT_SCOPED_TABLES = (
     "autonomy_session_counters",
     "autonomy_decision_attempts",
     "autonomy_owner_alerts",
+    "autonomy_proposal_queue",
 )
 
 

@@ -351,3 +351,33 @@ def test_the_log_sink_reports_severity_and_recurrence() -> None:
     assert "x4000" in rendered
     assert "degraded.market_data" in rendered
     assert captured[0].levelno == logging.WARNING
+
+
+def test_escalation_re_arms_delivery(session: Session) -> None:
+    """Escalation is NEW information; a delivered WARNING must be re-told as CRITICAL.
+
+    Found by the M7 runtime tests: without this, an owner who was told about
+    the mild version of a condition would never hear about the severe one --
+    at exactly the moment the severe version is the one that matters.
+    """
+
+    _raise(session)  # WARNING
+    sink = _RecordingSink()
+    delivery.deliver_pending(session, account_fingerprint=_FINGERPRINT, sinks=(sink,), now=_NOW)
+    assert len(sink.seen) == 1
+
+    # The same condition recurs, worse.
+    _raise(session, severity=alerts.AlertSeverity.CRITICAL, summary="broker gone entirely")
+    report = delivery.deliver_pending(
+        session, account_fingerprint=_FINGERPRINT, sinks=(sink,), now=_NOW
+    )
+    assert report.delivered == 1
+    assert sink.seen[-1].severity is alerts.AlertSeverity.CRITICAL
+
+    # A NON-escalating recurrence does not re-deliver: told-and-unacknowledged
+    # is a normal state, not a reason to tell them again.
+    _raise(session, severity=alerts.AlertSeverity.CRITICAL)
+    again = delivery.deliver_pending(
+        session, account_fingerprint=_FINGERPRINT, sinks=(sink,), now=_NOW
+    )
+    assert again.considered == 0

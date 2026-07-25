@@ -1,0 +1,363 @@
+"""The tick that actually drives autonomy (R-36, M7).
+
+M5 built ``run_cycle`` and M6 made it reachable, and both disclosed that nothing
+called it on a schedule. This is that caller: a supervised loop that drains the
+proposal queue, delivers pending alerts, and observes its own health.
+
+## Time-driven, with events as hints — and why not the other way round
+
+A tick is the **only** thing that runs cycles. Events do not call
+:func:`run_tick`; they set a flag that lets the *next* tick happen sooner, never
+sooner than :attr:`RuntimeConfig.minimum_interval_seconds`.
+
+That asymmetry is the safety property. Under a genuinely event-driven design an
+event storm is an order storm: a volatile open, a burst of fills, or a
+misbehaving worker would each drive cycles at whatever rate the *market* or the
+*caller* chose. The mandate's activity limits would eventually refuse, but a
+limit catching a problem the design created is not the same as a design that
+does not create it. Under a pure timer, a fill waits for the next tick, which is
+its own kind of wrong.
+
+Coalescing gives the responsiveness without the unboundedness: any number of
+events between two ticks collapse into "wake early once", and the floor bounds
+the worst case regardless of how many arrive. Cycles per hour is therefore a
+property of the configuration, not of the day's volatility.
+
+## Non-live unless everything says otherwise
+
+``submit`` is optional here exactly as it is in ``run_cycle``, and the default
+is ``None``. A runtime wired without it walks every gate and places no order.
+Combined with admission's independent mode check, an order requires the mandate
+to permit submission **and** the operator to have supplied the handoff — two
+separate deliberate acts, neither of which is a default.
+
+## Supervision: a tick that fails must not become a tick that stops silently
+
+Every tick is wrapped. A failing tick records the failure, raises an owner
+alert, and **returns** — the loop keeps its cadence rather than dying. The one
+thing it must never do is fail quietly, because a runtime that stopped without
+saying so looks exactly like a runtime with nothing to do.
+
+Consecutive failures escalate: past :attr:`RuntimeConfig.max_consecutive_failures`
+the runtime stops itself and raises a CRITICAL alert. A loop that keeps ticking
+into a broken dependency generates noise, not progress, and stopping is the
+honest response to "I cannot do my job".
+
+## What this module still does not own
+
+It does not gather facts. :class:`FactGatherer` is a callable the operator
+supplies, because assembling ``CycleFacts`` needs the broker, the clock and the
+market-data feed — and a module that reached those would be one the model plane
+could reach through. Keeping it injected is also what lets every path here be
+tested without a broker.
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Protocol
+
+from sqlalchemy.orm import Session, sessionmaker
+
+from chronos.autonomy import AutonomyMandate
+from chronos.supervisor import alerts, delivery, proposals, queue
+from chronos.supervisor.loop import CycleFacts, CycleOutcome, CycleStage, Handoff, run_cycle
+
+_logger = logging.getLogger("chronos.supervisor.runtime")
+
+
+class FactGatherer(Protocol):
+    """Assembles the supervisor's view for one cycle.
+
+    Supplied by the operator because it needs a broker, a clock, and market
+    data. Returning ``None`` means the facts could not be gathered — which is a
+    *refusal to run*, not an error: a cycle without facts would have to invent
+    the numbers it judges against.
+    """
+
+    def __call__(self, now: datetime) -> CycleFacts | None:  # pragma: no cover - Protocol
+        ...
+
+
+#: Supplies the mandate in force, or ``None``. Separate from the fact gatherer
+#: because authority and market state come from different places and fail
+#: independently — and a runtime that could not tell those apart would report
+#: "no mandate" when the broker was merely unreachable.
+MandateSource = Callable[[], AutonomyMandate | None]
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeConfig:
+    """How the tick behaves. Every default is the conservative one."""
+
+    account_fingerprint: str
+    #: The floor between cycles. An event can pull the next tick forward to this
+    #: boundary and no further, which is what bounds the worst case.
+    minimum_interval_seconds: float = 5.0
+    #: The unhurried cadence when nothing has happened.
+    idle_interval_seconds: float = 60.0
+    #: Proposals judged per tick. Bounded so a flood cannot starve alert
+    #: delivery — which is the work that would *report* the flood.
+    proposals_per_tick: int = 10
+    #: Alerts delivered per tick.
+    alerts_per_tick: int = 50
+    #: Consecutive failed ticks before the runtime stops itself.
+    max_consecutive_failures: int = 5
+
+    def __post_init__(self) -> None:
+        if self.minimum_interval_seconds <= 0:
+            raise ValueError(
+                "minimum_interval_seconds must be positive; a zero floor makes the tick "
+                "event-driven, which is the unbounded shape this design rejects"
+            )
+        if self.idle_interval_seconds < self.minimum_interval_seconds:
+            raise ValueError(
+                "idle_interval_seconds must not be below the minimum interval; an idle "
+                "cadence faster than the floor would make the floor meaningless"
+            )
+
+
+@dataclass
+class TickReport:
+    """What one tick did. Mutable so the tick can fill it in as it goes."""
+
+    at: datetime
+    proposals_judged: int = 0
+    orders_handed_off: int = 0
+    alerts_delivered: int = 0
+    queue_depth: int = 0
+    failure: str = ""
+    outcomes: list[CycleOutcome] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return not self.failure
+
+
+class AutonomyRuntime:
+    """Drives cycles on a tick, and coalesces events into "wake early".
+
+    Deliberately synchronous and single-threaded. Two ticks overlapping would
+    mean two cycles reading the same counters and each deciding it had room —
+    a classic double-spend of an activity limit. Under the single-writer lease
+    a second runtime is already a bug; this makes a second *tick* impossible
+    within one runtime as well.
+    """
+
+    def __init__(
+        self,
+        *,
+        sessions: sessionmaker[Session],
+        config: RuntimeConfig,
+        identity: queue.HarnessIdentity,
+        mandate_source: MandateSource,
+        gather_facts: FactGatherer,
+        sinks: tuple[delivery.AlertSink, ...] = (),
+        submit: Handoff | None = None,
+    ) -> None:
+        self._sessions = sessions
+        self._config = config
+        self._identity = identity
+        self._mandate_source = mandate_source
+        self._gather_facts = gather_facts
+        self._sinks = sinks or delivery.default_sinks()
+        self._submit = submit
+        self._wake_early = False
+        self._consecutive_failures = 0
+        self._stopped = False
+        self._last_tick: datetime | None = None
+
+    # --- event coalescing ---------------------------------------------------
+
+    def note_event(self, reason: str = "") -> None:
+        """Ask for the next tick sooner. Idempotent between ticks.
+
+        Any number of events collapse into one flag, so a burst cannot produce
+        a burst of cycles. This is the whole of the event-driven surface: there
+        is deliberately no way for a caller to *run* a cycle.
+        """
+
+        self._wake_early = True
+        if reason:
+            _logger.debug("Autonomy wake requested: %s", reason, extra={"event": "autonomy_wake"})
+
+    @property
+    def stopped(self) -> bool:
+        return self._stopped
+
+    def seconds_until_next_tick(self, now: datetime) -> float:
+        """How long to wait. The floor applies whether or not an event arrived."""
+
+        if self._stopped:
+            return float("inf")
+        target = (
+            self._config.minimum_interval_seconds
+            if self._wake_early
+            else self._config.idle_interval_seconds
+        )
+        if self._last_tick is None:
+            return 0.0
+        elapsed = (now - self._last_tick).total_seconds()
+        return max(0.0, target - elapsed)
+
+    # --- the tick -----------------------------------------------------------
+
+    def run_tick(self, now: datetime) -> TickReport:
+        """One pass: drain proposals, deliver alerts, report.
+
+        Never raises. A tick that fails records why, alerts, and returns, so the
+        loop keeps its cadence. The failure that must never happen is the silent
+        one: a runtime that stopped without saying so is indistinguishable from
+        a runtime with nothing to do.
+        """
+
+        report = TickReport(at=now)
+        if self._stopped:
+            report.failure = "runtime stopped"
+            return report
+
+        self._last_tick = now
+        self._wake_early = False
+        try:
+            self._tick(now, report)
+        except Exception as error:
+            # The exception type, never its message: a hostile proposal must not
+            # be able to write chosen text into an operator's logs through the
+            # one path guaranteed to be read.
+            report.failure = f"tick raised {type(error).__name__}"
+            _logger.exception("Autonomy tick failed", extra={"event": "autonomy_tick_failed"})
+
+        if report.ok:
+            self._consecutive_failures = 0
+        else:
+            self._consecutive_failures += 1
+            self._record_failure(report, now)
+        return report
+
+    def _tick(self, now: datetime, report: TickReport) -> None:
+        mandate = self._mandate_source()
+        facts = self._gather_facts(now)
+
+        with self._sessions.begin() as session:
+            report.queue_depth = proposals.pending_depth(
+                session, account_fingerprint=self._config.account_fingerprint
+            )
+            if facts is None:
+                # No facts is a refusal to run, not an error: a cycle without
+                # them would have to invent the numbers it judges against. The
+                # queue is left intact so the work happens once facts return.
+                alerts.raise_alert(
+                    session,
+                    account_fingerprint=self._config.account_fingerprint,
+                    severity=alerts.AlertSeverity.WARNING,
+                    kind="runtime.no_facts",
+                    summary="the supervisor could not gather the facts a cycle needs",
+                    now=now,
+                )
+            else:
+                self._drain(session, mandate, facts, now, report)
+
+            delivered = delivery.deliver_pending(
+                session,
+                account_fingerprint=self._config.account_fingerprint,
+                sinks=self._sinks,
+                now=now,
+                limit=self._config.alerts_per_tick,
+            )
+            report.alerts_delivered = delivered.delivered
+
+    def _drain(
+        self,
+        session: Session,
+        mandate: AutonomyMandate | None,
+        facts: CycleFacts,
+        now: datetime,
+        report: TickReport,
+    ) -> None:
+        batch = proposals.claim_batch(
+            session,
+            account_fingerprint=self._config.account_fingerprint,
+            limit=self._config.proposals_per_tick,
+        )
+        for item in batch:
+            outcome = run_cycle(
+                item.payload,
+                session=session,
+                mandate=mandate,
+                identity=self._identity,
+                facts=facts,
+                submit=self._submit,
+            )
+            proposals.mark_processed(
+                session,
+                queue_id=item.id,
+                stage=outcome.stage.value,
+                refusal=outcome.refusal,
+                now=now,
+            )
+            report.outcomes.append(outcome)
+            report.proposals_judged += 1
+            if outcome.stage is CycleStage.COMPLETE:
+                report.orders_handed_off += 1
+
+    def _record_failure(self, report: TickReport, now: datetime) -> None:
+        """Alert on a failed tick, and stop if failures are consecutive.
+
+        Uses its own session: the tick's transaction may be the thing that
+        failed, and an alert written inside a doomed transaction is an alert
+        that never existed.
+        """
+
+        exhausted = self._consecutive_failures >= self._config.max_consecutive_failures
+        if exhausted:
+            self._stopped = True
+        try:
+            with self._sessions.begin() as session:
+                alerts.raise_alert(
+                    session,
+                    account_fingerprint=self._config.account_fingerprint,
+                    severity=(
+                        alerts.AlertSeverity.CRITICAL if exhausted else alerts.AlertSeverity.WARNING
+                    ),
+                    kind="runtime.tick_failed",
+                    summary=(
+                        f"the autonomy runtime stopped after {self._consecutive_failures} "
+                        "consecutive failed ticks"
+                        if exhausted
+                        else f"an autonomy tick failed: {report.failure}"
+                    ),
+                    detail={"consecutive_failures": self._consecutive_failures},
+                    now=now,
+                )
+                delivery.deliver_pending(
+                    session,
+                    account_fingerprint=self._config.account_fingerprint,
+                    sinks=self._sinks,
+                    now=now,
+                    limit=self._config.alerts_per_tick,
+                )
+        except Exception:
+            # The database is the thing that failed. The log sink is the floor
+            # that remains, and it is why one exists.
+            _logger.critical(
+                "Autonomy runtime could not record a tick failure; %s",
+                "the runtime has stopped" if exhausted else "it continues",
+                extra={"event": "autonomy_alert_unrecordable"},
+            )
+
+    def stop(self, reason: str = "") -> None:
+        """Stop ticking. Deliberate, and not reversible on this instance.
+
+        Restarting is an operator act: a runtime that could restart itself would
+        obscure why it stopped, and "why did it stop" is the first question.
+        """
+
+        self._stopped = True
+        _logger.warning(
+            "Autonomy runtime stopped: %s",
+            reason or "no reason given",
+            extra={"event": "autonomy_runtime_stopped"},
+        )

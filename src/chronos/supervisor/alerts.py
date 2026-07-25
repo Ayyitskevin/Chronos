@@ -145,6 +145,12 @@ def raise_alert(
         if severity_rank(severity) > severity_rank(AlertSeverity(existing.severity)):
             existing.severity = severity.value
             existing.summary = summary
+            # Escalation is NEW information, so an already-delivered alert is
+            # re-armed for delivery. Without this, a WARNING that was delivered
+            # and then escalated to CRITICAL would never be re-told — the owner
+            # would have been informed of the mild version only, at exactly the
+            # moment the severe version is the one that matters (M7 review).
+            existing.delivered_at = None
         return existing
 
     row = AutonomyOwnerAlertRow(
