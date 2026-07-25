@@ -49,9 +49,17 @@ from chronos.supervisor.admission import (
     SupervisorState,
     admit,
 )
+from chronos.supervisor.durable import (
+    AUTHORITY_STREAM,
+    DECISION_STREAM,
+    SessionCounters,
+    build_state,
+)
 from chronos.supervisor.sizing import AccountEvidence, SizingOutcome, size_order
 
 __all__ = [
+    "AUTHORITY_STREAM",
+    "DECISION_STREAM",
     "MAX_RESUBMISSIONS",
     "AccountEvidence",
     "AdmissionCheck",
@@ -60,8 +68,10 @@ __all__ = [
     "DegradedReason",
     "MandateActivation",
     "MarketDataEvidence",
+    "SessionCounters",
     "SizingOutcome",
     "SupervisorState",
     "admit",
+    "build_state",
     "size_order",
 ]

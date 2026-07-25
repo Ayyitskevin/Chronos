@@ -173,8 +173,13 @@ def test_schema_initialization_creates_required_evidence_tables() -> None:
         "order_events",
         "risk_decisions",
         "risk_check_results",
+        # Autonomy supervisor durable state (v5).
+        "hash_chain_records",
+        "autonomy_mandate_activations",
+        "autonomy_session_counters",
+        "autonomy_decision_attempts",
     } <= names
-    assert SCHEMA_VERSION == 4
+    assert SCHEMA_VERSION == 5
 
 
 def test_application_events_are_append_only_and_queryable() -> None:
@@ -632,3 +637,117 @@ def test_all_parsed_sqlite_memory_urls_use_one_shared_pool(url: str) -> None:
             assert "schema_version" in set(inspect(connection).get_table_names())
     finally:
         database.dispose()
+
+
+# --- durability pragmas (M3 prerequisite) ------------------------------------
+#
+# The order ledger's own SQLite store has used WAL + synchronous=FULL since
+# Phase 9; the main Chronos database ran on SQLite's defaults. M3 puts the
+# supervisor's durable loss and activity counters in this database, and a
+# counter that can silently roll back after a commit is worse than no counter,
+# because the system would trust it.
+
+
+def test_a_file_database_uses_write_ahead_logging(tmp_path: Path) -> None:
+    database = Database(f"sqlite+pysqlite:///{tmp_path / 'wal.db'}")
+    try:
+        database.initialize()
+        with database.engine.connect() as connection:
+            mode = connection.exec_driver_sql("PRAGMA journal_mode").scalar()
+        assert str(mode).lower() == "wal"
+    finally:
+        database.dispose()
+
+
+def test_every_connection_commits_durably(tmp_path: Path) -> None:
+    """synchronous=FULL is per-connection, so it must be set on each one.
+
+    Unlike journal_mode, this pragma is not persisted in the database file. A
+    version that set it once at creation would leave every later connection --
+    including the one that actually writes a risk counter -- back on NORMAL.
+    """
+
+    database = Database(f"sqlite+pysqlite:///{tmp_path / 'sync.db'}")
+    try:
+        database.initialize()
+        for _ in range(3):
+            with database.engine.connect() as connection:
+                # 2 = FULL, 3 = EXTRA. Anything lower can lose a committed txn.
+                assert int(connection.exec_driver_sql("PRAGMA synchronous").scalar() or 0) >= 2
+    finally:
+        database.dispose()
+
+
+def test_a_locked_database_waits_rather_than_failing_immediately(tmp_path: Path) -> None:
+    """Without busy_timeout, a brief writer overlap is an instant hard error."""
+
+    database = Database(f"sqlite+pysqlite:///{tmp_path / 'busy.db'}")
+    try:
+        database.initialize()
+        with database.engine.connect() as connection:
+            assert int(connection.exec_driver_sql("PRAGMA busy_timeout").scalar() or 0) > 0
+    finally:
+        database.dispose()
+
+
+def test_an_in_memory_database_is_exempt_from_wal_but_not_from_durability() -> None:
+    """`:memory:` legitimately reports journal_mode=memory; it must still open.
+
+    Guard against a fail-closed check that is too eager: every test in this
+    suite, and the demo path, uses an in-memory database.
+    """
+
+    database = Database("sqlite+pysqlite:///:memory:")
+    try:
+        database.initialize()
+        with database.engine.connect() as connection:
+            assert connection.exec_driver_sql("PRAGMA journal_mode").scalar() is not None
+    finally:
+        database.dispose()
+
+
+def test_the_durability_pragmas_are_verified_not_merely_issued() -> None:
+    """A pragma that silently failed to apply must raise, not be assumed.
+
+    This is the same class of defect as a mandate ceiling that is set and never
+    read: the system would believe it has a guarantee it does not have.
+    """
+
+    from chronos.persistence.database import _configure_sqlite_connection
+
+    class _Cursor:
+        """A cursor on a filesystem that quietly refuses WAL and weak sync."""
+
+        def __init__(self, journal_mode: str, synchronous: int) -> None:
+            self._journal_mode = journal_mode
+            self._synchronous = synchronous
+            self._last = ""
+
+        def execute(self, sql: str) -> None:
+            self._last = sql
+
+        def fetchone(self) -> tuple[object, ...]:
+            if self._last.startswith("PRAGMA journal_mode"):
+                return (self._journal_mode,)
+            return (self._synchronous,)
+
+        def close(self) -> None:
+            return None
+
+    class _Connection:
+        def __init__(self, journal_mode: str, synchronous: int) -> None:
+            self._journal_mode = journal_mode
+            self._synchronous = synchronous
+
+        def cursor(self) -> _Cursor:
+            return _Cursor(self._journal_mode, self._synchronous)
+
+    with pytest.raises(RuntimeError, match="refused write-ahead logging"):
+        _configure_sqlite_connection(_Connection("delete", 2), None, file_backed=True)
+
+    with pytest.raises(RuntimeError, match="refused synchronous=FULL"):
+        _configure_sqlite_connection(_Connection("wal", 1), None, file_backed=True)
+
+    # Guard the guard: the healthy combination must NOT raise, or the check
+    # above would pass for the wrong reason.
+    _configure_sqlite_connection(_Connection("wal", 2), None, file_backed=True)
