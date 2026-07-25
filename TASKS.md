@@ -68,4 +68,6 @@ programme is tracked in ADR-0016's milestone sequencing, not here.)*
   untouched by ADR-0016).
 - Options execution, short selling, margin, market orders **in this platform**.
 - Intraday strategy validation (no trustworthy intraday data here — A-31).
-- Market orders anywhere: still prohibited repository-wide, including under autonomy.
+- Unbounded venue market orders anywhere. *(Updated by ADR-0017: the autonomy plane now has
+  a mandate-granted `OrderForm.MARKET`, compiled as a **protected** collared limit — the
+  literally unbounded `MKT` remains unexpressible repository-wide.)*

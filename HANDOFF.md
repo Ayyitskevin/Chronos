@@ -129,9 +129,9 @@ SHADOW submission. ADR-0016 leaves all of this intact.
 
 **Repository-wide, corrected:** live transmission *is* possible in the `chronos.orders` plane
 behind ADR-0009's configuration conjunction plus the ten-gate stack, arming, the durable kill
-switch, the drawdown breaker, and the writer lease. Under ADR-0016, autonomous live operation
-additionally requires an active owner-authored AutonomyMandate, autonomy startup defaults to a
-non-live mode, and an environment variable alone can never activate it. No test, CI run, or
+switch, the drawdown breaker, and the writer lease. Autonomous operation additionally requires
+an owner-authored AutonomyMandate; under ADR-0017 it is a persistent file that auto-activates
+on boot (revocation survives restart; invalid/wrong-account files boot inert). No test, CI run, or
 development path can transmit an order. The M0 audit recorded four kernel defects that
 unattended operation makes more dangerous (RISK_REGISTER R-24…R-27). After M2: **R-24 is
 MITIGATED with a live residual** — the lease is renewed on a heartbeat and re-checked in

@@ -1,11 +1,16 @@
 # ADR-0016: Controlled Autonomous Model Authority
 
-Status: accepted (owner directive, 2026-07-25)
+Status: accepted (owner directive, 2026-07-25); §4 and §6 superseded in part by ADR-0017
 Date: 2026-07-25
 Index entry: DECISIONS.md **D-16**, which supersedes **D-11**.
 Supersedes: **ADR-0004 §5 only** (the generative-AI prohibition). ADR-0004 §§1-4 —
 the structural separation of authority indexed as D-04 — are **preserved and
 load-bearing**, and this ADR depends on them.
+Superseded in part by: **ADR-0017** (owner-directed maximal autonomy, D-17) — the
+30-day live-mandate ceiling and the env-var-activation rule in §4, and the
+no-`MARKET` rule in §6. Those specific rules are marked in place below; the rest
+of this ADR, including all of §8 and the deterministic kernel, is unchanged and
+load-bearing under ADR-0017.
 
 ## Context
 
@@ -134,11 +139,19 @@ Three properties are structural, not procedural:
 - **Expiring.** `expires_at` is required and must follow `effective_from`. Live
   and canary-live mandates may not exceed `MAX_LIVE_MANDATE_DURATION` (30 days).
   There is no perpetual live authority; renewal is a fresh owner action.
+  *[Superseded by ADR-0017 §1: the ceiling is now 365 days. `expires_at` is still
+  required and still enforced; renewal is still a fresh owner action.]*
 - **Deny-by-default.** Every limit defaults to zero and every scope tuple to
   empty, so a default-constructed mandate authorizes nothing — the all-zeros
   `config/risk.example.yaml` doctrine. A submitting mandate must additionally
   state asset classes, strategies, order forms, permitted data qualities, and
   the symbols or futures roots they cover; silence is never a grant.
+  *[Qualified by ADR-0017 §2: a mandate that explicitly grants
+  `model_discretion` makes the capital **ceilings** owner-optional — an unset
+  ceiling means affordability is the bound, while a set one still binds. The
+  flag itself is the owner writing the inversion down, so silence still grants
+  nothing; floors, scopes, and every other deny-by-default surface are
+  unchanged.]*
 
 Operating modes are RESEARCH, BACKTEST, REPLAY, SHADOW, PAPER_AUTONOMOUS,
 CANARY_LIVE_AUTONOMOUS, and LIVE_AUTONOMOUS. **Startup defaults to a non-live
@@ -147,6 +160,13 @@ never activate live autonomous trading — activation requires an authenticated
 owner action creating and enabling a mandate, on top of the existing ADR-0009
 configuration conjunction. A mandate's mode may never exceed the promotion rung
 its asset family has earned (`MINIMUM_PROMOTION_FOR_MODE`).
+
+*[Superseded by ADR-0017 §1: the owner authored act is now a **persistent mandate
+file** that auto-activates on boot — a running backend plus a valid file is enough
+to trade, no per-boot ritual. The "authenticated owner action" is authoring the
+file; the digest-stamped activation records which text granted authority.
+Revocation still survives restart, an invalid/wrong-account file still boots
+inert, and the ADR-0009 configuration conjunction is unchanged.]*
 
 This vocabulary is deliberately **separate** from `chronos.control.modes`.
 ADR-0007's unconditional denial of `TradingMode.CANARY_LIVE`/`LIVE` in the
@@ -227,6 +247,13 @@ provide no price protection and stay disabled. Any protective stop-market or
 emergency-liquidation policy requires its own instrument-specific ADR, tests, and
 mandate permission before that enum grows. The reference implementation's
 market-order behavior is deliberately not copied.
+
+*[Superseded by ADR-0017 §3: `OrderForm.MARKET` now exists — this was the
+"instrument-specific ADR, tests, and mandate permission" this paragraph required.
+It must be granted in the mandate's `order_forms`, and the compiler renders it as
+a **protected** marketable limit (quote±1% collar), never the reference project's
+unbounded `MKT`. Every compiled intent is still a positive-price limit; a literally
+unbounded order remains unexpressible. The naked-short absence is **not** changed.]*
 
 ### 7. Promotion ladder
 

@@ -113,6 +113,17 @@ class Settings(BaseSettings):
     live_kill_switch_file: Path = Path("data/live_kill_switch.json")
     session_baseline_file: Path = Path("data/session_baseline.json")
 
+    # Autonomy runtime (ADR-0017, owner-directed persistent authority). The
+    # mandate file is the owner's standing grant: authored once, validated on
+    # every boot, auto-activated when present. An empty path means no autonomy
+    # runtime starts — absence of the grant is absence of the authority, so a
+    # fresh checkout still boots with the model plane inert.
+    autonomy_mandate_file: Path | None = None
+    autonomy_alert_file: Path = Path("data/owner_alerts.jsonl")
+    autonomy_idle_interval_seconds: Annotated[float, Field(gt=0)] = 60.0
+    autonomy_min_interval_seconds: Annotated[float, Field(gt=0)] = 5.0
+    autonomy_market_timezone: str = "America/New_York"
+
     symbol_allowlist: SymbolAllowlist = ("AAPL", "MSFT", "SPY")
     target_abs_delta: Annotated[Decimal, Field(gt=0, lt=1)] = Decimal("0.30")
     min_abs_delta: Annotated[Decimal, Field(gt=0, lt=1)] = Decimal("0.20")

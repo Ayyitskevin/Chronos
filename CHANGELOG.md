@@ -1,6 +1,69 @@
 # CHANGELOG
 
-## [Unreleased] — M6: the owner gets told (2026-07-25)
+## [Unreleased] — M7.5 / ADR-0017: owner-directed maximal autonomy, wired (2026-07-25)
+
+The owner directed Chronos to be as close to fully autonomous as possible, modeled on the
+reference Quant-Guild bot, and answered the two scoping questions directly: **maximal**
+autonomy (self-sizing, ceilings owner-optional) and a **persistent, auto-activating**
+mandate. This entry is that override, recorded the way this project records overrides —
+ADR-0017/D-17, dated, owner as authority, superseded text marked in place — not by quietly
+deleting guarantees. "Maximal" was scoped as removing friction and owner-optional ceilings,
+**not** execution-correctness mechanisms: the single transmit site, writer lease, kill
+switch, reconciliation, floors/reserve, stale-data refusal, and the deterministic veto all
+stand unweakened.
+
+### The persistent mandate (`chronos.api.autonomy_wiring`)
+- `AUTONOMY_MANDATE_FILE` names an owner-authored mandate JSON, validated and
+  **auto-activated on every boot** — digest-stamped, so the audit trail records which text
+  granted authority and an edited file writes a distinguishable activation. Supersedes
+  ADR-0016 §4's "an env var alone may not activate live." A running backend plus the file
+  is enough to trade; no per-boot ritual.
+- What auto-activation does NOT override: **revocation survives restart** (re-granting is a
+  new `mandate_version` — a fresh owner act); an invalid, unreadable, or wrong-account file
+  boots **inert with a CRITICAL alert**; expiry still expires; **no file → no runtime** (a
+  fresh checkout with no owner grant anywhere boots inert, kept on purpose).
+- `MAX_LIVE_MANDATE_DURATION` 30d → **365d**; `restart_behavior` default →
+  `RESUME_UNTIL_EXPIRY` (`REQUIRE_REACTIVATION` remains available; only the default moved).
+- The wiring closes R-36's residual: `build_autonomy_runtime` assembles facts (broker
+  account summary + probe quote per tick, per-decision instrument qualification), mandate,
+  runtime, sinks, and the order-plane handoff; the backend lifespan drives the tick task.
+
+### Model self-sizing (`CapitalLimits.model_discretion`)
+- A new owner-written flag. When granted, unset capital **ceilings** stop meaning
+  "authorizes nothing" — affordability (cash/buying power **net of the floors**) becomes
+  the bound. Any ceiling the owner DID set still binds, and still refuses on absent
+  evidence. The **floors are still required in every mode** — discretion over size is not
+  discretion over the reserve. Defaults False; every existing mandate keeps ADR-0016
+  semantics exactly.
+
+### Protected market orders (`OrderForm.MARKET`)
+- The enum grew — this is the "instrument-specific ADR, tests, and mandate permission"
+  ADR-0016 §6 required. It must be granted in the mandate's `order_forms`, and it compiles
+  to a **protected marketable limit** at quote±1% (`MARKET_PROTECTION_COLLAR`): market-order
+  fill behavior in any sane book, a price ceiling on the broken print. Every compiled
+  intent is still a positive-price limit; the reference project's unbounded `MKT` was
+  deliberately NOT copied, and going literally unbounded is flagged in ADR-0017 as a
+  separate, un-taken decision.
+- `_select_order_form` now prefers the **most aggressive granted** form: listing an
+  aggressive form in the mandate IS the explicit grant, and quietly preferring LIMIT anyway
+  would second-guess a written authorization. Owners wanting passive fills grant only LIMIT.
+
+### The handoff is the existing pipeline
+- `order_plane_handoff` walks propose → risk → preview → confirm → submit — the same stack
+  a human proposal walks, nothing skipped. The supervisor-consumer isolation test permits
+  the app-plane wiring **by explicit module name** rather than by weakening the check.
+
+### Tests
+- `tests/safety/test_autonomy_wiring.py` (18): digest loading, invalid/missing/wrong-account
+  files inert + alerting, idempotent auto-activation, **revocation survives restart** (unit
+  and end-to-end), handoff order + risk-refusal short-circuit, fact-helper edge cases.
+- Gateway discretion suite (5): unset ceiling → affordability bound; set ceiling still
+  binds; floors never waived; discretionary submitting mandate validates without ceilings.
+- Compiler: most-aggressive-form preference; MARKET compiles to a bounded, collared,
+  tick-conformed limit. Contracts: the order-form vocabulary is pinned to exactly the three
+  protected forms.
+
+
 
 M3 made alerts durable. M5 disclosed the gap plainly: durable is not delivered, the channel
 was **pull**, and an owner who was not looking was not told. R-32 was the last blocking

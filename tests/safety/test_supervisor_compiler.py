@@ -442,10 +442,17 @@ def test_a_marketable_limit_crosses_the_spread() -> None:
     assert outcome.intent.limit_price == Decimal("401.00")
 
 
-def test_the_passive_form_is_preferred_when_both_are_permitted() -> None:
-    """Paying the spread should be an explicit grant, not the default."""
+def test_the_most_aggressive_granted_form_is_preferred() -> None:
+    """ADR-0017: listing the aggressive form IS the grant to use it.
 
-    mandate = _mandate(
+    M4 preferred the passive form on the reasoning that paying the spread should
+    be an explicit grant. ADR-0017 keeps the reasoning and relocates the grant:
+    an owner who lists MARKETABLE_LIMIT authorized the aggressive fill, and a
+    compiler that quietly preferred LIMIT would be second-guessing a written
+    authorization. An owner who wants passive lists only LIMIT.
+    """
+
+    both = _mandate(
         scope=InstrumentScope(
             asset_classes=(TradableAssetClass.EQUITY,),
             symbols=("SPY",),
@@ -453,9 +460,50 @@ def test_the_passive_form_is_preferred_when_both_are_permitted() -> None:
             order_forms=(OrderForm.LIMIT, OrderForm.MARKETABLE_LIMIT),
         )
     )
+    outcome = _compile(mandate=both, quote=_quote("399.00", "401.00"))
+    assert outcome.intent is not None
+    assert outcome.intent.limit_price == Decimal("401.00")  # the ask, i.e. aggressive
+
+    passive = _mandate(
+        scope=InstrumentScope(
+            asset_classes=(TradableAssetClass.EQUITY,),
+            symbols=("SPY",),
+            strategies=(StrategyForm.LONG_EQUITY,),
+            order_forms=(OrderForm.LIMIT,),
+        )
+    )
+    rested = _compile(mandate=passive, quote=_quote("399.00", "401.00"))
+    assert rested.intent is not None
+    assert rested.intent.limit_price == Decimal("399.00")  # only LIMIT granted → passive
+
+
+def test_a_market_form_compiles_to_a_collared_limit() -> None:
+    """ADR-0017's protected market: fills now, but never at an absurd print.
+
+    A BUY MARKET crosses to the ask PLUS the collar, so it clears the book in a
+    sane market; what it will not do is fill at a flash-crash price far through
+    the touch. The order plane still receives a finite positive limit.
+    """
+
+    from chronos.supervisor.compiler import MARKET_PROTECTION_COLLAR
+
+    mandate = _mandate(
+        scope=InstrumentScope(
+            asset_classes=(TradableAssetClass.EQUITY,),
+            symbols=("SPY",),
+            strategies=(StrategyForm.LONG_EQUITY,),
+            order_forms=(OrderForm.MARKET,),
+        )
+    )
     outcome = _compile(mandate=mandate, quote=_quote("399.00", "401.00"))
     assert outcome.intent is not None
-    assert outcome.intent.limit_price == Decimal("399.00")  # the bid, i.e. passive
+    # ask 401 * (1 + collar), tick-conformed down to the penny.
+    expected = (Decimal("401.00") * (Decimal(1) + MARKET_PROTECTION_COLLAR)).quantize(
+        Decimal("0.01")
+    )
+    assert outcome.intent.limit_price == expected
+    assert outcome.intent.limit_price > Decimal("401.00")  # aggressive
+    assert outcome.intent.limit_price.is_finite()  # never unbounded
 
 
 def test_a_crossed_or_empty_book_refuses() -> None:

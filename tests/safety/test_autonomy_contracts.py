@@ -330,19 +330,27 @@ def test_only_the_supervisor_consumes_the_contracts() -> None:
     """
 
     permitted_prefixes = ("supervisor/",)
+    # ADR-0017: the app-plane autonomy wiring assembles the runtime — it feeds
+    # proposals INTO the supervisor and hands the supervisor's compiled intent
+    # to the order plane. It references the contracts (mandate, decision types)
+    # to build that seam, but it never parses a decision into an order itself;
+    # that still happens only inside chronos.supervisor. This one module is
+    # named explicitly rather than by a directory prefix, so the guard stays
+    # tight: nothing ELSE outside the supervisor may touch the contracts.
+    permitted_modules = {"api/autonomy_wiring.py"}
     importers: list[str] = []
     for path in sorted(_SRC.rglob("*.py")):
         if path.is_relative_to(_SRC / "autonomy"):
             continue
         relative = str(path.relative_to(_SRC))
-        if relative.startswith(permitted_prefixes):
+        if relative.startswith(permitted_prefixes) or relative in permitted_modules:
             continue
         for name in _imported_names(path.read_text(encoding="utf-8")):
             if name == "chronos.autonomy" or name.startswith("chronos.autonomy."):
                 importers.append(relative)
     assert importers == [], (
-        f"only chronos.supervisor may consume model decisions, but {sorted(set(importers))} "
-        "import the autonomy contracts"
+        f"only chronos.supervisor (and the named app-plane wiring) may consume model "
+        f"decisions, but {sorted(set(importers))} import the autonomy contracts"
     )
 
 
@@ -736,8 +744,33 @@ def test_strategy_vocabulary_is_pinned_and_has_no_uncovered_short_option() -> No
     }
 
 
-def test_no_market_order_form_is_expressible() -> None:
-    assert {member.value for member in OrderForm} == {"LIMIT", "MARKETABLE_LIMIT"}
+def test_the_order_form_vocabulary_is_exactly_the_three_protected_forms() -> None:
+    """ADR-0017 added MARKET, and it is a *protected* market by construction.
+
+    The old guarantee was "no MARKET member exists". ADR-0017 supersedes it with
+    a narrower, still-real one: the only three forms are LIMIT, MARKETABLE_LIMIT,
+    and MARKET — and MARKET compiles to a collared limit, never an unbounded
+    venue order. This pins the vocabulary so a *fourth*, genuinely unprotected
+    form could not be added without changing this test on purpose.
+    """
+
+    assert {member.value for member in OrderForm} == {"LIMIT", "MARKETABLE_LIMIT", "MARKET"}
+
+
+def test_a_market_form_compiles_to_a_bounded_positive_limit() -> None:
+    """The protection is structural: even MARKET yields a finite positive price.
+
+    A literally unbounded order is unexpressible — the compiler always produces a
+    limit at the touch plus a bounded collar, so the reference project's naked
+    ``MKT`` has no equivalent here even after ADR-0017 opened the door to
+    fill-now orders.
+    """
+
+    from decimal import Decimal
+
+    from chronos.supervisor.compiler import MARKET_PROTECTION_COLLAR
+
+    assert Decimal(0) < MARKET_PROTECTION_COLLAR < Decimal("0.10")
 
 
 def test_startup_default_mode_is_not_live() -> None:

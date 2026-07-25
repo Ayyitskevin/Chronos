@@ -62,8 +62,12 @@ references a price the supervisor did not gather) also refuses, because a
 condition we cannot check is not a condition we can call satisfied. So a trigger
 can stop an order and can never create, widen, or reprice one.
 
-Market orders remain impossible: every compiled intent is a positive-price
-limit, and ``OrderForm`` has no ``MARKET`` member to select.
+``OrderForm.MARKET`` exists since ADR-0017 and compiles to a **protected
+marketable limit**: the touch plus :data:`MARKET_PROTECTION_COLLAR`, tick-
+conformed away from aggression. Every compiled intent is therefore still a
+positive-price limit at the order plane — the fill behavior of a market order
+on every ordinary day, with a ceiling on the catastrophic one. A literally
+unbounded venue market order remains unexpressible.
 """
 
 from __future__ import annotations
@@ -90,6 +94,12 @@ from chronos.domain.models import (
     UnderlyingContract,
 )
 from chronos.orders.intent import WheelOrderIntent, new_correlation_id, side_for_intent
+
+#: The protection collar on an ``OrderForm.MARKET`` compilation (ADR-0017): the
+#: limit is set this far through the touch. 1% fills like a market order in any
+#: sane book; what it refuses to chase is a broken print. IBKR's own
+#: "market with protection" products exist for the same reason.
+MARKET_PROTECTION_COLLAR = Decimal("0.01")
 
 #: ``(asset class, decision kind, strategy)`` -> the order-plane intent that
 #: expresses it. A WHITELIST: anything absent is refused, so adding an enum
@@ -467,19 +477,21 @@ def _check_contract(
 
 
 def _select_order_form(mandate: AutonomyMandate) -> OrderForm | None:
-    """Prefer the least aggressive permitted form.
+    """Prefer the MOST aggressive granted form (ADR-0017).
 
-    ``LIMIT`` rests; ``MARKETABLE_LIMIT`` crosses the spread to fill now. When a
-    mandate permits both, the passive one is chosen: paying the spread should be
-    an explicit grant, not the default. There is no ``MARKET`` to select — the
-    enum has no such member, so price protection cannot be lost here.
+    M4 preferred the passive form, reasoning that paying the spread should be an
+    explicit grant rather than a default. ADR-0017 keeps that reasoning and
+    flips the conclusion around it: listing an aggressive form in the mandate's
+    ``order_forms`` *is* the explicit grant, and an owner who granted MARKET
+    granted it to be used — a compiler that quietly preferred LIMIT anyway would
+    be second-guessing a written authorization. An owner who wants passive fills
+    grants only LIMIT, and nothing here overrides that either.
     """
 
     forms = mandate.scope.order_forms
-    if OrderForm.LIMIT in forms:
-        return OrderForm.LIMIT
-    if OrderForm.MARKETABLE_LIMIT in forms:
-        return OrderForm.MARKETABLE_LIMIT
+    for form in (OrderForm.MARKET, OrderForm.MARKETABLE_LIMIT, OrderForm.LIMIT):
+        if form in forms:
+            return form
     return None
 
 
@@ -493,7 +505,17 @@ def _derive_limit_price(
 ) -> Decimal | CompilationOutcome:
     """Compute the limit price from the quote alone. No model input reaches here."""
 
-    if form is OrderForm.MARKETABLE_LIMIT:
+    if form is OrderForm.MARKET:
+        # ADR-0017's protected market: cross the spread PLUS a bounded collar,
+        # so it fills immediately in any sane book while a flash-crash print
+        # cannot fill it at an absurd price. This is the deliberate difference
+        # from the reference project's unbounded ``MKT`` — same fill behavior
+        # on every ordinary day, a ceiling on the catastrophic one.
+        if side is OrderSide.BUY:
+            base = quote.ask * (Decimal(1) + MARKET_PROTECTION_COLLAR)
+        else:
+            base = quote.bid * (Decimal(1) - MARKET_PROTECTION_COLLAR)
+    elif form is OrderForm.MARKETABLE_LIMIT:
         # Cross the spread: buy at the ask, sell at the bid.
         base = quote.ask if side is OrderSide.BUY else quote.bid
     else:

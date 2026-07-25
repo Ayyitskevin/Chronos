@@ -61,10 +61,12 @@ from chronos.domain.enums import DataQuality
 from chronos.utils.identifiers import normalize_account_fingerprint
 
 #: Ceiling on how long a live or canary-live mandate may run before the owner
-#: must renew it deliberately. Renewal is a fresh authenticated owner action, so
-#: unattended live authority can never outlive the owner's attention by more
-#: than this window (ADR-0016 §4).
-MAX_LIVE_MANDATE_DURATION: timedelta = timedelta(days=30)
+#: must renew it deliberately. ADR-0017 (owner-directed persistent authority)
+#: raised this from 30 days to a year: the owner chose a standing mandate that
+#: re-arms on restart, and a monthly re-authorship ritual added friction without
+#: adding safety for a single-operator system. Renewal at the year boundary is
+#: still a fresh owner action — there is still no perpetual live authority.
+MAX_LIVE_MANDATE_DURATION: timedelta = timedelta(days=365)
 
 #: Market-data qualities a live autonomous mandate may permit. Restated here
 #: rather than imported: `chronos.autonomy` may not import `chronos.orders`
@@ -245,11 +247,23 @@ class InstrumentScope(AutonomyModel):
 class CapitalLimits(AutonomyModel):
     """Capital, size, exposure, and leverage ceilings, plus two floors.
 
-    The ``max_*`` fields are ceilings: zero authorizes nothing. The ``min_*``
-    fields are **floors**, where zero is the most permissive value — a
-    submitting mandate must set them explicitly (see ``AutonomyMandate``).
+    The ``max_*`` fields are ceilings: zero authorizes nothing — **unless** the
+    mandate grants ``model_discretion`` (ADR-0017), in which case an unset
+    ceiling is no ceiling and affordability is the bound, while any ceiling the
+    owner did set still binds. The ``min_*`` fields are **floors**, where zero
+    is the most permissive value — a submitting mandate must set them
+    explicitly in every mode, discretion included: discretion over size is not
+    discretion over the reserve.
     """
 
+    #: ADR-0017: the owner's grant of model self-sizing. When True, the ceiling
+    #: fields below become *optional overlays* — an explicitly-set positive
+    #: ceiling still binds, but an unset one no longer reads as "authorizes
+    #: nothing"; sizing is bounded by what the account can actually afford
+    #: (cash and buying power net of the floors) instead. This is a deliberate,
+    #: owner-written inversion of the zero-authorizes-nothing doctrine, scoped
+    #: to mandates that state it. False keeps ADR-0016 semantics exactly.
+    model_discretion: bool = False
     allocated_capital_usd: Decimal = Field(default=Decimal(0), ge=0)
     max_order_notional_usd: Decimal = Field(default=Decimal(0), ge=0)
     max_position_notional_usd: Decimal = Field(default=Decimal(0), ge=0)
@@ -357,7 +371,11 @@ class AutonomyMandate(AutonomyModel):
     promotions: tuple[FamilyPromotion, ...] = ()
     effective_from: AwareDatetime
     expires_at: AwareDatetime
-    restart_behavior: RestartBehavior = RestartBehavior.REQUIRE_REACTIVATION
+    #: ADR-0017 flips the default to RESUME_UNTIL_EXPIRY: the owner chose a
+    #: persistent mandate where bringing the process up is enough to trade.
+    #: REQUIRE_REACTIVATION remains available for owners who want the stricter
+    #: behavior back — the vocabulary lost nothing, only its default moved.
+    restart_behavior: RestartBehavior = RestartBehavior.RESUME_UNTIL_EXPIRY
     versions: VersionPins
     scope: InstrumentScope = InstrumentScope()
     capital: CapitalLimits = CapitalLimits()
@@ -453,6 +471,14 @@ class AutonomyMandate(AutonomyModel):
             raise ValueError(f"mode {self.mode.value} requires a positive min_cash_floor_usd")
         if self.capital.min_buying_power_usd <= 0:
             raise ValueError(f"mode {self.mode.value} requires a positive min_buying_power_usd")
+
+        # ADR-0017: a mandate granting model discretion waives the ceiling
+        # requirements below — affordability (cash/buying power net of the
+        # floors just validated) becomes the bound, and any ceiling the owner
+        # DID set still binds as an overlay. The floors above are still
+        # required: discretion over size is not discretion over the reserve.
+        if self.capital.model_discretion:
+            return
 
         # Ceilings are deny-by-default too: a zero ceiling authorizes nothing, so
         # a submitting mandate that leaves one at its default would size every

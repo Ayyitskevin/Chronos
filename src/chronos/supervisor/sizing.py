@@ -251,20 +251,27 @@ def _size(
         bind(abs(held), f"position held {held}")
 
     # --- ceilings that need only the mandate --------------------------------
-    bind(
-        capital.max_order_notional_usd / unit_notional,
-        f"max_order_notional_usd {capital.max_order_notional_usd}",
+    # ADR-0017: under an owner-granted `model_discretion`, an UNSET (zero)
+    # ceiling is no ceiling — affordability below is the bound — while a ceiling
+    # the owner did set still binds as an overlay. Without the grant, zero binds
+    # at zero exactly as before: deny-by-default is inverted only where the
+    # owner wrote the inversion down.
+    discretionary = capital.model_discretion
+    if not discretionary or capital.max_order_notional_usd > 0:
+        bind(
+            capital.max_order_notional_usd / unit_notional,
+            f"max_order_notional_usd {capital.max_order_notional_usd}",
+        )
+    unit_cap = (
+        capital.max_contracts_per_order
+        if asset_class in _CONTRACT_CLASSES
+        else capital.max_shares_per_order
     )
-    if asset_class in _CONTRACT_CLASSES:
-        bind(
-            Decimal(capital.max_contracts_per_order),
-            f"max_contracts_per_order {capital.max_contracts_per_order}",
-        )
-    else:
-        bind(
-            Decimal(capital.max_shares_per_order),
-            f"max_shares_per_order {capital.max_shares_per_order}",
-        )
+    unit_cap_label = (
+        "max_contracts_per_order" if asset_class in _CONTRACT_CLASSES else "max_shares_per_order"
+    )
+    if not discretionary or unit_cap > 0:
+        bind(Decimal(unit_cap), f"{unit_cap_label} {unit_cap}")
     if reducing:
         # Everything below measures room to ADD exposure. None of it can bound
         # an order that removes exposure, and applying it would refuse the trade
@@ -276,15 +283,17 @@ def _size(
     missing: list[str] = []
     # `allocated_capital_usd` caps the whole mandate, not one order. Without
     # subtracting what is already deployed it would re-authorize the full
-    # allocation on every pass (M2 review), so absent evidence refuses.
-    if evidence.deployed_capital_usd is None:
-        missing.append(f"allocated_capital_usd {capital.allocated_capital_usd}")
-    else:
-        bind(
-            (capital.allocated_capital_usd - evidence.deployed_capital_usd) / unit_notional,
-            f"allocated_capital_usd {capital.allocated_capital_usd} less deployed "
-            f"{evidence.deployed_capital_usd}",
-        )
+    # allocation on every pass (M2 review), so absent evidence refuses. Under
+    # discretion an unset allocation is simply not a limit (ADR-0017).
+    if not discretionary or capital.allocated_capital_usd > 0:
+        if evidence.deployed_capital_usd is None:
+            missing.append(f"allocated_capital_usd {capital.allocated_capital_usd}")
+        else:
+            bind(
+                (capital.allocated_capital_usd - evidence.deployed_capital_usd) / unit_notional,
+                f"allocated_capital_usd {capital.allocated_capital_usd} less deployed "
+                f"{evidence.deployed_capital_usd}",
+            )
 
     # --- floors: subtracted, so a floor genuinely reserves -------------------
     spendable = evidence.total_cash_usd - capital.min_cash_floor_usd
@@ -299,28 +308,37 @@ def _size(
     # A limit the mandate sets but whose evidence is absent REFUSES. Ignoring it
     # would make the "never larger than any mandate ceiling" claim false, which
     # is exactly what the M2 review found.
-    for cap, used, label in (
+    for configured, cap, used, label in (
         (
+            concentration.max_symbol_exposure_pct,
             concentration.max_symbol_exposure_pct * evidence.net_liquidation_usd,
             evidence.symbol_exposure_usd,
             f"max_symbol_exposure_pct {concentration.max_symbol_exposure_pct}",
         ),
         (
             capital.max_gross_exposure_usd,
+            capital.max_gross_exposure_usd,
             evidence.gross_exposure_usd,
             f"max_gross_exposure_usd {capital.max_gross_exposure_usd}",
         ),
         (
+            capital.max_net_exposure_usd,
             capital.max_net_exposure_usd,
             evidence.net_exposure_usd,
             f"max_net_exposure_usd {capital.max_net_exposure_usd}",
         ),
         (
             capital.max_position_notional_usd,
+            capital.max_position_notional_usd,
             evidence.position_notional_usd,
             f"max_position_notional_usd {capital.max_position_notional_usd}",
         ),
     ):
+        if discretionary and configured <= 0:
+            # ADR-0017: unset under discretion is no limit, so it neither binds
+            # nor demands evidence. A ceiling the owner set is enforced exactly
+            # as before, including refusing when its evidence is absent.
+            continue
         absent = headroom(cap, used, label)
         if absent is not None:
             missing.append(absent)

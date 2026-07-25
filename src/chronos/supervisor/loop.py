@@ -57,7 +57,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from chronos.autonomy import AutonomyMandate, ProposedDecision
+from chronos.autonomy import AITradeDecision, AutonomyMandate, ProposedDecision
 from chronos.domain.models import Instrument
 from chronos.orders.intent import WheelOrderIntent
 from chronos.supervisor import alerts, durable, ingress, queue
@@ -116,6 +116,31 @@ class CycleFacts:
 
 
 @dataclass(frozen=True, slots=True)
+class InstrumentFacts:
+    """The per-instrument slice of the supervisor's view (M7.5).
+
+    ``CycleFacts`` was built when a cycle judged one proposal, so it carried one
+    contract and one quote. A tick that drains a *batch* judges proposals about
+    different symbols, and reusing one instrument's quote for another's order
+    would price the wrong thing. Account-level truth stays on ``CycleFacts``;
+    this is what varies per decision, resolved by a caller-supplied gatherer
+    after the decision names its instrument.
+    """
+
+    contract: Instrument | None
+    quote: QuoteEvidence | None
+    reference_price: Decimal
+    multiplier: Decimal = Decimal(1)
+
+
+#: Resolves the instrument slice for one stamped decision, or ``None`` when it
+#: cannot — which refuses that decision rather than pricing it with stale or
+#: foreign facts. Lives outside the supervisor because resolution needs a
+#: broker; the callable is the seam that keeps the broker out of this module.
+InstrumentGatherer = Callable[[AITradeDecision], InstrumentFacts | None]
+
+
+@dataclass(frozen=True, slots=True)
 class CycleOutcome:
     """What happened to one proposal, and where it stopped."""
 
@@ -153,6 +178,7 @@ def run_cycle(
     identity: queue.HarnessIdentity,
     facts: CycleFacts,
     submit: Handoff | None = None,
+    gather_instrument: InstrumentGatherer | None = None,
 ) -> CycleOutcome:
     """Walk one proposal through every gate. Stops at the first refusal.
 
@@ -261,13 +287,46 @@ def run_cycle(
                 alerts_raised=alert_kinds,
             ),
         )
+    # --- instrument facts (M7.5) -------------------------------------------
+    # A batch tick judges proposals about different symbols; pricing one
+    # instrument's order with another's quote would trade the wrong number, so
+    # the per-instrument slice is resolved per decision when a gatherer is
+    # supplied. No gatherer keeps the single-instrument CycleFacts behavior.
+    contract: Instrument | None = facts.contract
+    quote: QuoteEvidence | None = facts.quote
+    reference_price = facts.reference_price
+    multiplier = facts.multiplier
+    if gather_instrument is not None:
+        instrument = gather_instrument(decision)
+        if instrument is None:
+            return _record(
+                session,
+                facts,
+                CycleOutcome(
+                    stage=CycleStage.SIZING,
+                    refusal="INSTRUMENT_FACTS_UNAVAILABLE",
+                    detail=(
+                        "the supervisor could not resolve a qualified contract and quote "
+                        f"for {decision.symbol or decision.futures_root}; a decision is "
+                        "never priced with another instrument's facts"
+                    ),
+                    decision_id=decision.decision_id,
+                    admission=admission,
+                    alerts_raised=alert_kinds,
+                ),
+            )
+        contract = instrument.contract
+        quote = instrument.quote
+        reference_price = instrument.reference_price
+        multiplier = instrument.multiplier
+
     # --- sizing ------------------------------------------------------------
     sizing = size_order(
         mandate=mandate,
         decision_kind=decision.kind,
         asset_class=decision.asset_class,
-        reference_price=facts.reference_price,
-        multiplier=facts.multiplier,
+        reference_price=reference_price,
+        multiplier=multiplier,
         evidence=facts.account,
         requested_quantity=decision.requested_quantity,
     )
@@ -290,9 +349,9 @@ def run_cycle(
     compilation = compile_order(
         decision=decision,
         mandate=mandate,
-        contract=facts.contract,
+        contract=contract,
         quantity=sizing.quantity,
-        quote=facts.quote,
+        quote=quote,
         account_id=facts.account_id,
     )
     if compilation.intent is None:
@@ -361,7 +420,7 @@ def run_cycle(
         account_fingerprint=facts.account_fingerprint,
         now=facts.now,
         orders_submitted=1,
-        turnover_usd=_notional(sizing.quantity, facts.reference_price, facts.multiplier),
+        turnover_usd=_notional(sizing.quantity, reference_price, multiplier),
         market_timezone=facts.market_timezone,
     )
     return _record(

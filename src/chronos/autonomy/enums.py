@@ -88,14 +88,25 @@ class StrategyForm(StrEnum):
 class OrderForm(StrEnum):
     """Order forms the deterministic compiler may select.
 
-    There is deliberately **no MARKET member**. Market entries provide no price
-    protection and stay disabled; any protective stop-market or emergency
-    liquidation policy requires its own instrument-specific ADR, tests, and
-    mandate permission before this enum grows (ADR-0016 §6).
+    ``MARKET`` exists since ADR-0017, the owner-directed maximal-autonomy
+    supersession of ADR-0016 §6's no-market rule — this is exactly the
+    "instrument-specific ADR, tests, and mandate permission" that section said
+    the enum growing would require. Two properties keep it from being the
+    reference project's unprotected ``MKT``:
+
+    - it must be **granted in the mandate's order_forms** like any other form,
+      so a mandate that never lists it can never produce one; and
+    - the compiler renders it as a **protected marketable limit**: it crosses
+      the spread plus a bounded collar, so it fills like a market order in any
+      sane book while a flash-crash print cannot fill it at an absurd price.
+      A literally unbounded order is still not expressible.
     """
 
     LIMIT = "LIMIT"
     MARKETABLE_LIMIT = "MARKETABLE_LIMIT"
+    #: Fill-now with a protective collar (ADR-0017). Compiled as an aggressive
+    #: limit at quote±collar, never as an unbounded venue market order.
+    MARKET = "MARKET"
 
 
 class RestartBehavior(StrEnum):
