@@ -58,6 +58,14 @@ milestones (M1–M10) are documented in README.md and docs/architecture.md.
 
 ## Explicitly out of scope for this build
 
-- Canary/live activation of any kind (refused in code; future reviewed release).
-- Options execution; short selling; margin; market orders.
+*(Scope note 2026-07-25: this board tracks the **deterministic strategy platform**
+(`chronos.execution`/`chronos.risk`). Its exclusions still hold for that platform — but they
+are no longer repository-wide. The `chronos.orders` plane has gated options execution and a
+live branch (ADR-0009), and ADR-0016/D-16 scope autonomous multi-asset trading. The autonomy
+programme is tracked in ADR-0016's milestone sequencing, not here.)*
+
+- Canary/live activation **of this deterministic platform** (refused in code; ADR-0007 is
+  untouched by ADR-0016).
+- Options execution, short selling, margin, market orders **in this platform**.
 - Intraday strategy validation (no trustworthy intraday data here — A-31).
+- Market orders anywhere: still prohibited repository-wide, including under autonomy.

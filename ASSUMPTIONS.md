@@ -33,9 +33,14 @@ zero / empty / disabled / deny.
 - **A-11 — Instruments.** Candidate universe restricted to highly liquid US-listed ETFs
   (SPY, QQQ, IWM, DIA, GLD, TLT) unless the owner approves otherwise. Single-stock candidates
   are research-only until approved.
-- **A-12 — Options.** The existing Chronos wheel dashboard remains decision-support only. The
-  new platform does not add any options execution path. Options-related corpus scripts (31, 39,
-  40) are classified as studies/readouts, not executable strategies.
+- **A-12 — Options.** *(Amended 2026-07-25.)* As originally written: the wheel dashboard
+  remains decision-support only and the deterministic platform adds no options execution
+  path. The second clause still holds — `chronos.execution`/`chronos.risk` have no options
+  path and remain live-incapable. The first is superseded: the `chronos.orders` plane gained
+  a gated options execution path in Milestones 5-7, and ADR-0016 scopes autonomous options
+  trading (long calls/puts, cash-secured puts, covered calls, defined-risk verticals; never
+  uncovered short options) to Milestone 8. Options-related corpus scripts (31, 39, 40) are
+  still classified as studies/readouts, not executable strategies.
 
 ## Costs
 
@@ -76,8 +81,21 @@ zero / empty / disabled / deny.
 
 ## Safety defaults chosen without owner input
 
-- Live trading disabled; no code path can transmit a live order (hard-coded, not config).
+*(Restated 2026-07-25. The first line described the pre-Milestone-7 build and is corrected;
+the deny-by-default posture behind all of them is unchanged.)*
+
+- Live trading is **disabled by default but no longer impossible**: it is a gated capability
+  requiring ADR-0009's full configuration conjunction plus the ten-gate stack, and — for
+  autonomous operation — an active owner-authored AutonomyMandate (ADR-0016). The
+  deterministic platform (`chronos.execution`) remains hard-refused in code.
 - Live account allowlist: empty. Live capital authorization: USD 0. Live risk limits: 0.
-- Short selling, margin, options execution, market orders, averaging down, pyramiding: disabled.
+  AutonomyMandate limits likewise default to zero and its scopes to empty, so a mandate
+  authorizes nothing until the owner enumerates what it permits.
+- Autonomy startup defaults to a non-live mode (`SHADOW`); an environment variable alone can
+  never activate live autonomous trading.
+- Short selling, margin, market orders, averaging down, pyramiding: disabled. Uncovered short
+  options are not expressible in the autonomy strategy vocabulary at all. Options execution
+  exists in the `chronos.orders` plane, gated.
 - Paper-order transmission also defaults OFF and requires explicit multi-condition opt-in.
-- All promotion gates require manual owner action; nothing auto-promotes.
+- All promotion gates require manual owner action; nothing auto-promotes, and promotion is
+  per asset family (a stock promotion authorizes neither futures nor options).

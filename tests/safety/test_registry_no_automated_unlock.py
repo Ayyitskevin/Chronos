@@ -11,6 +11,17 @@ guardian and is deliberately excluded. A determined runtime evasion (importlib
 string-dispatch, `unlocked=<var>`) is out of scope and disclosed in ADR-0013 §7 /
 limitations; this test stops the realistic failure — someone wiring the unlock into the
 service loop or an order/execution/control module.
+
+**Model-plane bar, retargeted (ADR-0016 / D-16, 2026-07-25).** This bar was written
+prospectively against `chronos.copilot` back when D-11 forbade any generative model in a
+runtime path. D-16 supersedes D-11 and the model plane now exists for real, as
+`chronos.autonomy`. The bar is **retargeted, not relaxed**: `chronos.autonomy` joins the
+automated tree, so every module in it is scanned and none may import the registry or call
+the unlock. The model plane therefore cannot reach a research holdout, which is the
+guarantee ADR-0013 §7 actually makes. `chronos.autonomy` is deliberately *not* added to
+the forbidden-import list, because D-16's deterministic supervisor must be able to import
+the `AITradeDecision` contract in order to judge it — barring that would forbid the very
+gate the model is judged by. D-15/ADR-0013's guarantee is unchanged.
 """
 
 from __future__ import annotations
@@ -22,12 +33,19 @@ _SRC = Path(__file__).resolve().parent.parent.parent / "src" / "chronos"
 
 # The automated planes, derived from the tree (every module under them), plus the
 # top-level app-wiring module. The owner CLI is intentionally NOT here.
-_AUTOMATED_DIRS = ("service", "services", "control", "execution", "orders")
+# `autonomy` joins the list under D-16: the model plane is an automated plane.
+_AUTOMATED_DIRS = ("service", "services", "control", "execution", "orders", "autonomy")
 _AUTOMATED_TOP_LEVEL = ("runtime.py",)
 
 _FORBIDDEN_IMPORTS = ("chronos.registry", "chronos.registry.holdout_guardian")
 _FORBIDDEN_CALLS = ("request_unlock", "mediated_holdout_read")
-_PROSPECTIVE = ("chronos.copilot",)  # barred before it exists
+# `chronos.copilot` was never built and stays barred prospectively. The real
+# model plane, `chronos.autonomy`, is deliberately NOT listed here: D-16's
+# deterministic supervisor must be able to import the AITradeDecision contract
+# to judge it. Instead the plane is added to _AUTOMATED_DIRS above, so it is
+# itself scanned for registry imports and unlock calls — the model plane is
+# barred from reaching holdouts, which is what ADR-0013 §7 actually protects.
+_PROSPECTIVE = ("chronos.copilot",)
 
 
 def _automated_module_files() -> list[Path]:
@@ -43,6 +61,8 @@ def test_the_automated_tree_is_covered() -> None:
     names = {path.name for path in files}
     # Guard the guard: the key automated modules the reviewers named are in scope.
     assert {"submission.py", "promotion.py", "engine.py", "runtime.py"} <= names
+    # The D-16 model plane is scanned like any other automated plane.
+    assert {"decision.py", "mandate.py"} <= names
     assert len(files) >= 15  # the whole tree, not a hand-picked few
     for path in files:
         assert path.exists(), f"expected automated module missing: {path}"

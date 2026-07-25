@@ -1,5 +1,23 @@
 # Go-Live Checklist
 
+> **Scope note (2026-07-25).** This checklist governs the **deterministic strategy platform**
+> (`chronos.execution`/`chronos.risk`) and its `TradingMode` ladder. Gates 4-5 below remain
+> accurate for that plane: `resolve_mode_lock` still hard-denies CANARY_LIVE/LIVE, and
+> ADR-0016 does not change it. Two things have moved since this was written, and the
+> closing sentence "no item on any checklist in this repository authorizes live trading" is
+> no longer true repository-wide:
+>
+> 1. The `chronos.orders` plane gained a gated live branch in Milestone 7 (ADR-0009).
+> 2. ADR-0016/D-16 introduce autonomous operation under an owner mandate, with **its own**
+>    per-asset-family promotion ladder (BACKTEST → REPLAY → SHADOW → PAPER_AUTONOMOUS →
+>    CANARY_LIVE_AUTONOMOUS → CAPPED_LIVE_AUTONOMOUS) and its own frozen criteria, in
+>    ADR-0016 §7. Use that ladder for anything autonomous; use this checklist for the
+>    deterministic platform.
+>
+> The reviewed-release doctrine this document establishes — criteria frozen before results,
+> single-step promotion, independent adversarial review before any live rung — is retained
+> by ADR-0016 §7 and applies to every autonomous promotion.
+
 Gate-by-gate path from where the build is today to (eventually) real-money trading. Statuses are
 honest and current as of 2026-07-17:
 

@@ -97,9 +97,13 @@ full suite before every commit.
 6. **Broker evidence is the only truth.** Never infer success from a call
    returning; unknown orders/events halt; **never auto-flatten** an
    unexplained position — block and demand review instead.
-7. **No generative model in the runtime order path.** You write code,
-   audits, and docs offline; every runtime decision is deterministic,
-   versioned, replayable.
+7. ~~**No generative model in the runtime order path.**~~ **Superseded 2026-07-25 by
+   ADR-0016 / D-16.** A model may originate runtime trading decisions, but only as a
+   typed `AITradeDecision` admitted by the single deterministic ModelDecisionGateway
+   under an active owner AutonomyMandate; it holds no broker object, no credentials,
+   and no low-level order functions, and runs outside the broker-writing process. What
+   still holds verbatim: every runtime *gate* is deterministic, versioned, and
+   replayable, and the deterministic kernel keeps unconditional veto authority.
 8. **No secrets in the repo, ever.** Placeholders only in `.env.example`;
    check `git diff --cached` before each push. TWS/Gateway auth belongs to
    the owner; never automate login or 2FA.
