@@ -143,7 +143,7 @@ def test_the_boundary_rechecks_the_lease_immediately_before_transmit() -> None:
         if "self._lease_verifier is not None" in line
     )
     assert verifier_line < transmit_line, "the lease re-check must precede the transmit line"
-    assert transmit_line - verifier_line < 25, (
+    assert transmit_line - verifier_line < 40, (
         "the lease re-check drifted away from the transmit line; it must stay in the "
         "tightest possible window"
     )

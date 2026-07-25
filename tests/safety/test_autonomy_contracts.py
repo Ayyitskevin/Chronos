@@ -134,6 +134,7 @@ def _provenance() -> DecisionProvenance:
         prompt_version="1",
         tool_schema_version="1",
         decision_schema_version="1",
+        policy_version="1",
         evidence_bundle_id="eb-1",
         evidence_bundle_digest="b" * 64,
         produced_at=_FIXED_NOW,
@@ -353,7 +354,15 @@ def test_the_supervisor_never_reaches_a_broker_directly() -> None:
     site stays reachable only through the existing order service.
     """
 
-    forbidden = ("chronos.broker", "chronos.orders.submission", "ib_async", "ibapi")
+    forbidden = (
+        "chronos.broker",
+        "chronos.orders.submission",
+        # chronos.execution holds the QUARANTINED second transmit site (R-28);
+        # omitting it left the widest hole this guard was meant to close.
+        "chronos.execution",
+        "ib_async",
+        "ibapi",
+    )
     offenders: list[str] = []
     for path in sorted((_SRC / "supervisor").rglob("*.py")):
         for name in _imported_names(path.read_text(encoding="utf-8")):
@@ -734,3 +743,33 @@ def test_no_market_order_form_is_expressible() -> None:
 def test_startup_default_mode_is_not_live() -> None:
     assert DEFAULT_AUTONOMY_MODE not in LIVE_AUTONOMY_MODES
     assert autonomy_pkg.DEFAULT_AUTONOMY_MODE is AutonomyMode.SHADOW
+
+
+def test_no_deterministic_module_reads_a_narrative_attribute() -> None:
+    """Free-form model prose may never become an order parameter (ADR-0016 §5).
+
+    `decision.py` promised this test — "the permanent data-flow test lands with
+    the M2 gateway that first consumes them" — and the M2 review found the
+    promise still outstanding while the cited M1 guard had been retired.
+
+    The narrative fields are recorded, displayed and audited. Nothing may parse
+    them: a `thesis` that reached sizing, or an `invalidation_conditions` string
+    compiled into a stop, would be exactly the "free-form text becomes an order"
+    path the directive forbids. Attribute *access* is the reachable failure, so
+    that is what is asserted — anywhere in the deterministic tree.
+    """
+
+    narrative = {"thesis", "rationale", "key_uncertainties", "invalidation_conditions"}
+    offenders: list[str] = []
+    for path in sorted(_SRC.rglob("*.py")):
+        # The contract module defines these fields; it is allowed to name them.
+        if path.is_relative_to(_SRC / "autonomy"):
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and node.attr in narrative:
+                offenders.append(f"{path.relative_to(_SRC)}:{node.lineno} reads .{node.attr}")
+    assert offenders == [], (
+        "a deterministic module reads model narrative, which must never become an "
+        f"order parameter: {offenders}"
+    )

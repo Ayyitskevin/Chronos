@@ -28,12 +28,14 @@ What makes this type safe is what it cannot say:
   and ``invalidation_conditions`` are recorded, displayed, and audited. They
   carry concise, decision-relevant reasoning — deliberately **not** hidden model
   chain-of-thought, which Chronos neither requests nor persists (ADR-0016 §5).
-  Nothing in the runtime pipeline parses them into an order parameter. Today
-  that holds because nothing outside ``chronos.autonomy`` imports these
-  contracts at all (``tests/safety/test_autonomy_contracts.py::
-  test_m1_wires_the_contracts_into_no_runtime_path``, a milestone guard); the
-  permanent data-flow test — asserting no order-plane module reads these
-  attributes — lands with the M2 gateway that first consumes them.
+  Nothing in the runtime pipeline parses them into an order parameter. That is
+  enforced by ``tests/safety/test_autonomy_contracts.py``: only
+  ``chronos.supervisor`` may import these contracts
+  (``test_only_the_supervisor_consumes_the_contracts``), and the supervisor
+  reads none of the narrative attributes. The M1 milestone guard this used to
+  cite — ``test_m1_wires_the_contracts_into_no_runtime_path`` — was correctly
+  retired when M2 gave the contracts their first consumer; the M2 review found
+  this reference still pointing at it.
 """
 
 from __future__ import annotations
@@ -142,9 +144,16 @@ class DecisionProvenance(AutonomyModel):
     self-report: a model asked to describe its own version could simply claim a
     pinned one, which would make the mandate's :class:`VersionPins` check a
     self-attestation rather than a control. The supervisor checks these against
-    the mandate before admission and refuses a decision from an unpinned model,
-    prompt, or tool schema rather than downgrading it. The gateway that enforces
-    the stamping lands in M2 (ADR-0016 §5).
+    the mandate before admission and refuses a decision whose pins disagree.
+
+    **Honest status after M2.** The decision-queue writer that would *stamp*
+    these fields does not exist yet — it lands with the agent and tool layer
+    (M4). So today
+    :func:`chronos.supervisor.admission.admit` proves the decision **agrees**
+    with the mandate's pins, not that an approved model authored it: it is an
+    integrity check, not authentication. An earlier version of this docstring
+    said the enforcing gateway landed in M2; the M2 adversarial review found
+    that false and it is corrected here.
     """
 
     provider: str = Field(min_length=1, max_length=64)
@@ -153,6 +162,12 @@ class DecisionProvenance(AutonomyModel):
     prompt_version: str = Field(min_length=1, max_length=64)
     tool_schema_version: str = Field(min_length=1, max_length=64)
     decision_schema_version: str = Field(min_length=1, max_length=64)
+    #: The policy revision in force when this decision was produced. The M2
+    #: review found ``VersionPins.policy_version`` had no counterpart here and
+    #: was therefore compared against nothing — a pin the mandate could set and
+    #: no decision could ever violate. A decision produced under a policy the
+    #: mandate does not pin is now refused like any other version mismatch.
+    policy_version: str = Field(min_length=1, max_length=64)
     #: The immutable, versioned, redacted bundle the model was given.
     evidence_bundle_id: str = Field(min_length=1, max_length=128)
     evidence_bundle_digest: str

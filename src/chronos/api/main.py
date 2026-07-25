@@ -28,8 +28,12 @@ from chronos.utils.locking import WriterLease
 
 _logger = logging.getLogger("chronos.api")
 
-#: The lease is renewed this many times per TTL. Three gives two chances to
-#: survive a transient database hiccup before the lease lapses.
+#: The lease is renewed this many times per TTL, so the renewal interval is a
+#: third of the TTL and ordinary scheduling jitter cannot let the lease lapse.
+#: It is **not** a retry budget: a single failed renewal demotes immediately,
+#: because a lease we could not renew may already have been taken by another
+#: writer, and two processes believing they are authoritative is precisely the
+#: split-brain R-24 exists to prevent. Fail closed on the first failure.
 _RENEWALS_PER_TTL = 3
 
 
@@ -60,8 +64,10 @@ async def _heartbeat_lease(state: BackendState, lease: WriterLease, period: floa
         state.read_only = True
         state.lease = None
         _logger.error(
-            "Lost the single-writer lease; this backend is now READ-ONLY. "
-            "Order submission and modification are disabled until restart.",
+            "Lost the single-writer lease; this backend is now READ-ONLY. Order "
+            "submission, modification, cancellation, manual resolution, arming and "
+            "kill-switch disengagement are disabled until restart. Engaging the kill "
+            "switch and disarming remain available: both only ever remove authority.",
             extra={"event": "writer_lease_lost", "outcome": "read_only", "passed": False},
         )
         return
@@ -97,7 +103,21 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             # R-24: the boundary re-checks lease ownership in the database
             # immediately before transmitting, instead of trusting the
             # startup-time `writer_lease_held` flag.
-            runtime.order_management.submission_boundary.bind_lease_verifier(lease.holds)
+            backend_state = app.state.backend
+
+            def _still_the_writer() -> bool:
+                """Both halves must hold, and either alone is insufficient.
+
+                ``lease.holds()`` alone would let a submission already in flight
+                transmit after the heartbeat demoted this process, because the
+                demotion is a local decision the database row does not record
+                until the lease actually lapses. ``read_only`` alone would trust
+                a startup-time flag, which is the R-24 defect itself.
+                """
+
+                return not backend_state.read_only and lease.holds()
+
+            runtime.order_management.submission_boundary.bind_lease_verifier(_still_the_writer)
             # A writer publishes submission readiness only after both restart-order
             # recovery and full portfolio reconciliation complete against broker
             # truth. Read-only backends cannot persist recovery and stay PENDING.

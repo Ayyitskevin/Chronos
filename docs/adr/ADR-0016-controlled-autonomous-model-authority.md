@@ -174,10 +174,15 @@ validation.
 Stated precisely, because the difference matters: this is a **presence** check,
 not a support check. The contract enforces that a citation exists and is
 well-formed (a 64-hex digest and an id); it does not and cannot verify that the
-cited evidence exists in the bundle, that its digest matches, or that it
-actually supports the thesis. Binding citations to the EvidenceBundle they claim
-to come from is the gateway's job (M2), and until it ships "must cite evidence"
-means only that an uncited decision is refused.
+cited evidence exists in the bundle or that it actually supports the thesis.
+
+**Status after M2.** The gateway now binds the decision's *bundle* to the bundle
+the supervisor issued — both id and digest must match, and an unknown bundle is
+refused rather than passed. It does **not** yet resolve each individual
+`EvidenceCitation` inside that bundle; that needs the EvidenceBundle store, which
+lands with M3/M4. So "must cite evidence" today means: an uncited decision is
+refused, and the bundle a decision claims to have reasoned from must be the one
+on record — not that every citation within it has been verified.
 
 ### 6. Asset-class capability matrix
 
@@ -329,11 +334,17 @@ graduated per-family promotions. Every milestone stops for owner approval.
 2. **Existing kernel defects are inherited, not fixed in M1.** The M0 audit found
    four that unattended operation makes strictly more dangerous, recorded as
    RISK_REGISTER R-24 … R-27. Status after M2:
-   - **R-24 (writer lease never renewed; not a fencing token) — CLOSED in M2.**
-     A heartbeat renews at TTL/3 and demotes to read-only on loss, and the
-     submission boundary re-checks ownership in the database immediately before
-     the transmit line. Residual, disclosed: this narrows the window rather than
-     closing it, because IBKR accepts an order without knowing about our lease.
+   - **R-24 (writer lease never renewed; not a fencing token) — MITIGATED in
+     M2, not closed.** A heartbeat renews at TTL/3 and demotes to read-only on
+     loss, and the submission boundary re-checks ownership in the database
+     immediately before the transmit line. **Live residual:** this narrows the
+     window rather than closing it, because IBKR accepts an order without
+     knowing about our lease, so true broker-side fencing is unavailable and a
+     sufficiently unlucky pause between the check and the wire cannot be
+     defended from here. An earlier revision of this line said "CLOSED in M2"
+     while RISK_REGISTER recorded MITIGATED with a live residual; the M2 review
+     flagged the disagreement and this is the corrected, weaker claim. A risk
+     with a live residual is not closed.
    - **R-25** (`max_opening_orders_per_day` inert — its evidence is never
      gathered), **R-26** (`market_open` permanently ambiguous because broker
      session evidence is never supplied; fail-closed today), and **R-27** (option

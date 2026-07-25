@@ -1,7 +1,28 @@
 """Live safety-layer endpoints (Milestone 6): arming and the kill switch.
 
-Arming and disarming, and engaging/disengaging the kill switch, are mutating
-and require the local token AND the single-writer lease. Status is read-only.
+Every endpoint here requires the local token. The single-writer lease is
+required only by the operations that **grant** authority; the two that remove
+it are deliberately reachable without it:
+
+===========================  ==========  ==========================================
+Endpoint                     Lease?      Why
+===========================  ==========  ==========================================
+``POST /live/arm``           required    grants live authority
+``POST /live/kill/disengage``required    restores trading after a halt
+``POST /live/disarm``        NOT req'd   only ever removes authority
+``POST /live/kill``          NOT req'd   the emergency stop must always be reachable
+===========================  ==========  ==========================================
+
+The M2 review found this asymmetry missing, and the writer-lease heartbeat
+(R-24) is what made it urgent: before the heartbeat, read-only was a
+*startup* condition, so the operator of a lease-holding process could always
+reach the kill switch. A running backend can now demote itself mid-session on
+a lost lease, and with a uniform ``require_writer`` that demotion would have
+locked its operator out of the emergency stop at the exact moment something had
+already gone wrong. Both spared operations are monotonically restricting and
+both write lock-protected state, so serving them from a non-lease-holder is
+fail-safe: the worst case is that trading stops when it need not have.
+
 The typed arm phrase is carried in the request body, compared server-side in
 constant time, and NEVER echoed back or logged — responses carry only the arm
 STATE (armed flag + expiry), never the phrase.
@@ -75,12 +96,21 @@ def arm(request: ArmRequest, state: WriterDep) -> ArmState:
 
 
 @router.post("/live/disarm", response_model=ArmState)
-def disarm(state: WriterDep) -> ArmState:
+def disarm(state: StateDep) -> ArmState:
+    """Revoke arming. Deliberately not writer-gated: this only removes authority."""
+
     return state.runtime.live_arming.revoke(now=_now())
 
 
 @router.post("/live/kill", response_model=KillSwitchState)
-def engage_kill_switch(request: KillRequest, state: WriterDep) -> KillSwitchState:
+def engage_kill_switch(request: KillRequest, state: StateDep) -> KillSwitchState:
+    """Engage the halt. Deliberately not writer-gated — see the module docstring.
+
+    A backend that lost its lease is exactly the backend whose operator most
+    needs the emergency stop, and refusing here would have been the one refusal
+    that increases risk.
+    """
+
     try:
         return state.runtime.live_kill_switch.engage(
             reason=request.reason, initiated_by="operator", now=_now()

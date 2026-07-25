@@ -34,7 +34,17 @@ _SRC = Path(__file__).resolve().parent.parent.parent / "src" / "chronos"
 # The automated planes, derived from the tree (every module under them), plus the
 # top-level app-wiring module. The owner CLI is intentionally NOT here.
 # `autonomy` joins the list under D-16: the model plane is an automated plane.
-_AUTOMATED_DIRS = ("service", "services", "control", "execution", "orders", "autonomy")
+_AUTOMATED_DIRS = (
+    "service",
+    "services",
+    "control",
+    "execution",
+    "orders",
+    "autonomy",
+    # M2: the deterministic supervisor is an automated plane too, and the model
+    # decisions it consumes must never reach a research holdout.
+    "supervisor",
+)
 _AUTOMATED_TOP_LEVEL = ("runtime.py",)
 
 _FORBIDDEN_IMPORTS = ("chronos.registry", "chronos.registry.holdout_guardian")
@@ -62,7 +72,7 @@ def test_the_automated_tree_is_covered() -> None:
     # Guard the guard: the key automated modules the reviewers named are in scope.
     assert {"submission.py", "promotion.py", "engine.py", "runtime.py"} <= names
     # The D-16 model plane is scanned like any other automated plane.
-    assert {"decision.py", "mandate.py"} <= names
+    assert {"decision.py", "mandate.py", "admission.py", "sizing.py"} <= names
     assert len(files) >= 15  # the whole tree, not a hand-picked few
     for path in files:
         assert path.exists(), f"expected automated module missing: {path}"
