@@ -459,7 +459,16 @@ def test_no_deterministic_module_reads_a_bundle_text_body() -> None:
         if path.is_relative_to(_SRC / "autonomy"):
             continue  # defines the field
         tree = ast.parse(path.read_text(encoding="utf-8"))
+        # A method CALL is not a field read. `TextualEvidence.body` is a `str`
+        # field and is never called, whereas `request.body()` (an HTTP body) is
+        # always called -- so excluding call targets separates the two without
+        # weakening the guard on the thing it actually protects.
+        called = {
+            id(node.func)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        }
         for node in ast.walk(tree):
-            if isinstance(node, ast.Attribute) and node.attr == "body":
+            if isinstance(node, ast.Attribute) and node.attr == "body" and id(node) not in called:
                 offenders.append(f"{path.relative_to(_SRC)}:{node.lineno}")
     assert offenders == [], f"a deterministic module reads untrusted text: {offenders}"

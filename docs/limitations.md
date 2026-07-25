@@ -261,19 +261,73 @@ provenance claim from *agreement* to *authorship*.
   and redacted *by shape*: there is no field for an account number or a credential, plus a
   tripwire that refuses to issue a bundle containing forbidden markers.
 
-**Known gaps, all tracked:**
+**Known gaps after M4, and where they stand:**
 
-- **Model isolation is a code boundary, not a process boundary (R-35).** ADR-0016 §3 wants the
-  model worker outside the broker-writing process. What exists is a tested *import* boundary;
-  it does not sandbox Python. **This blocks unattended `LIVE_AUTONOMOUS` promotion.**
-- **There is no live provider harness.** Nothing in Chronos calls a model. `HarnessIdentity`
-  describes what such a harness must supply; the harness itself is not built, so the whole
-  autonomy path is exercised by tests and by nothing else.
+- ~~**Model isolation is a code boundary**~~ — **a process boundary since M5 (R-35).** See below.
+- ~~**Nothing yet calls the compiler**~~ — **`supervisor.loop.run_cycle` does since M5.**
 - **Prompt injection is bounded, not solved (R-30).** The claim is only that an injection
   cannot exceed the mandate — not that it cannot influence a proposal.
-- **Nothing yet calls the compiler in production.** The supervisor's pieces exist and are
-  tested end to end in isolation, but no runtime loop wires admission → sizing → compilation →
-  `OrderManagementService`. That wiring, and the session-counter feed it would provide, is M5.
+- **There is still no live provider harness inside Chronos, and by design there never will
+  be.** M5 inverted the relationship: Chronos does not call a model, a model worker calls in.
+  Running that worker is an operational act outside this repository.
+
+### What M5 added, and what it deliberately did not
+
+- **The autonomy cycle** (`chronos.supervisor.loop.run_cycle`) walks one proposal through
+  ingress → stamp → admit → size → compile → hand off → record, stopping at the first refusal.
+  Every stage previously existed with nothing calling it.
+- **It does not submit.** It hands a compiled `WheelOrderIntent` to a callable, and the
+  existing `OrderManagementService` applies every gate it already applies to a human-proposed
+  order. `chronos.orders` remains the single canonical execution plane; autonomy **adds** a
+  gate stack in front of the existing one and removes none.
+- **Non-live by default, structurally.** The handoff callable is optional. Omitting it runs
+  the full walk and places no order — SHADOW — so a caller who has not thought about the last
+  step gets the safe behaviour rather than a surprise.
+- **The session counters M3 built are finally fed.** A completed cycle advances orders and
+  turnover. Counting happens at *handoff*, not at fill, because an activity limit bounds what
+  the system **attempts** — an order that was sent and rejected still consumed an attempt, and
+  counting at fill would let a system being rejected by the venue retry without limit.
+- **The proposal ingress is a process boundary (R-35).** Chronos makes no outbound model call,
+  so there is no provider SDK, no API key, and no egress path in the broker-holding process.
+  Every payload is treated as hostile: bounded size before parsing, strict single-object JSON,
+  NaN/Infinity refused, bounded nesting, full contract validation, and writer-owned fields
+  refused loudly rather than stripped. Refusals never echo payload content.
+- **Session boundaries can follow a market's day (R-34)**, via an explicit `market_timezone`.
+  An unknown zone raises rather than falling back to UTC.
+
+### What M6 added, and what it deliberately did not
+
+- **Alert delivery** (`chronos.supervisor.delivery`), closing most of R-32. Unacknowledged
+  alerts are pushed to sinks; `delivered_at` records that the owner was **told**, which is a
+  different fact from **acknowledged**; attempts are counted durably so a failing sink is
+  visible rather than silently retried. An alert counts as delivered when *at least one* sink
+  accepts, so a misconfigured file path cannot suppress the log sink forever.
+- **Local sinks only, and that is a decision rather than an omission.** A networked sender
+  needs credentials beside a process that moves money and an egress path a compromised
+  component could ride, and its failure mode is *silence* — which converts "no alerts" from
+  **unknown** into **all clear**. A structural test fails if the module gains a network import.
+  The shipped sinks are a log sink (always present, cannot fail environmentally) and an
+  optional JSONL file sink (0600, fsync'd, `O_NOFOLLOW` per R-21) that composes with whatever
+  the operator already runs.
+- **The ingress transport** (`POST /autonomy/proposals`), which answers M5's "who is calling"
+  question by **reusing what exists** rather than inventing a weaker scheme: loopback-only
+  binding, the same local API token every mutating endpoint requires, and the single-writer
+  lease. Nothing here is weaker than the surface it sits beside.
+
+**Known gaps after M6:**
+
+- **The proposal route does not run the cycle (R-36).** It validates a proposal and reports
+  that no autonomy runtime is wired. Running the cycle needs an active mandate, a
+  supervisor-issued evidence bundle, gathered account/quote facts and a resolved contract —
+  all of which belong to a runtime that owns the broker connection. Until that exists the
+  autonomy path is **reachable but inert**, which is the safe state.
+- **No scheduled runner, and no process supervisor for the worker.** What drives a cycle, how
+  often, and under what supervision is not built.
+- **R-32's residual:** a local file does not follow you off the machine. Genuinely unattended
+  operation *away from the host* still needs a networked channel and its own ADR.
+- **R-34's residual:** market *calendar day*, not session calendar — no holidays or half-days.
+- **Who is calling, beyond the token.** The transport authenticates that a caller has local
+  access and the token; it does not distinguish one local worker from another.
 
 ### What M3 added, and what it deliberately did not
 

@@ -19,6 +19,7 @@ from fastapi import FastAPI
 from chronos.api.auth import load_or_create_token
 from chronos.api.dependencies import BackendState
 from chronos.api.routes.account import router as account_router
+from chronos.api.routes.autonomy import router as autonomy_router
 from chronos.api.routes.health import router as health_router
 from chronos.api.routes.live import router as live_router
 from chronos.api.routes.orders import router as orders_router
@@ -199,4 +200,5 @@ def create_app() -> FastAPI:
     app.include_router(strategy_router)
     app.include_router(orders_router)
     app.include_router(live_router)
+    app.include_router(autonomy_router)
     return app

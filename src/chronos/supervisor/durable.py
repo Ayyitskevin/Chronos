@@ -56,6 +56,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -130,17 +131,42 @@ class SessionCounters:
         return self.drawdown_usd / self.peak_equity_usd
 
 
-def session_key(moment: datetime) -> str:
-    """The session a moment belongs to, as an ISO date.
+def session_key(moment: datetime, *, market_timezone: str | None = None) -> str:
+    """The trading session a moment belongs to, as an ISO date.
 
-    Deliberately derived from the caller's already-zone-correct datetime rather
-    than computed here: the supervisor does not own a market calendar, and a
-    module that guessed one would be inventing the session boundary that loss
-    limits are measured across.
+    M3 shipped this as the UTC calendar date and disclosed the gap as R-34: a
+    US equity session in UTC rolls mid-afternoon local, so "session" limits were
+    really "UTC day" limits and a single afternoon could straddle two counters.
+
+    Passing ``market_timezone`` converts first, so the boundary falls where the
+    market's own day does. It stays **optional and explicit** rather than
+    defaulting to a guess: a module that silently assumed New York would be
+    inventing the boundary that every loss and activity limit is measured
+    across, and inventing it wrongly for anyone trading elsewhere.
+
+    An unknown zone raises rather than falling back to UTC. A silent fallback
+    would produce counters that are subtly wrong in exactly the way nobody
+    notices — the session would still roll, just not where the operator thinks.
+
+    **Still bounded (R-34).** This aligns the boundary to a market's *calendar
+    day*, not to its session calendar: it does not know holidays, half-days, or
+    that an overnight futures session spans two dates. For equities and equity
+    options, which is the whole of the current capability matrix, a market-local
+    day and a session coincide. Futures would need a real calendar, and futures
+    are not tradable here.
     """
 
-    at: date = moment.date()
-    return at.isoformat()
+    if market_timezone is None:
+        at: date = moment.date()
+        return at.isoformat()
+    try:
+        zone = ZoneInfo(market_timezone)
+    except (ZoneInfoNotFoundError, ValueError) as error:
+        raise ValueError(
+            f"unknown market timezone {market_timezone!r}; refusing to fall back to UTC, "
+            "which would roll the session counter somewhere the operator does not expect"
+        ) from error
+    return moment.astimezone(zone).date().isoformat()
 
 
 # ----------------------------------------------------------------- activation
@@ -264,14 +290,20 @@ def revoke(
 # ------------------------------------------------------------------- counters
 
 
-def load_counters(session: Session, *, account_fingerprint: str, now: datetime) -> SessionCounters:
+def load_counters(
+    session: Session,
+    *,
+    account_fingerprint: str,
+    now: datetime,
+    market_timezone: str | None = None,
+) -> SessionCounters:
     """This session's counters, zeroed when nothing has been recorded.
 
     Zeroed is not "within limits" — see the module docstring. It is the honest
     statement that this session has no recorded activity yet.
     """
 
-    key = session_key(now)
+    key = session_key(now, market_timezone=market_timezone)
     row = _counter_row(session, account_fingerprint=account_fingerprint, session_date=key)
     if row is None:
         return SessionCounters(session_date=key)
@@ -299,7 +331,12 @@ def _counter_row(
 
 
 def record_equity(
-    session: Session, *, account_fingerprint: str, equity_usd: Decimal, now: datetime
+    session: Session,
+    *,
+    account_fingerprint: str,
+    equity_usd: Decimal,
+    now: datetime,
+    market_timezone: str | None = None,
 ) -> SessionCounters:
     """Track the session's peak and trough equity for the drawdown ceiling.
 
@@ -307,7 +344,7 @@ def record_equity(
     has a peak to measure the fall against.
     """
 
-    key = session_key(now)
+    key = session_key(now, market_timezone=market_timezone)
     row = _ensure_counter_row(session, account_fingerprint=account_fingerprint, session_date=key)
     if row.peak_equity_usd <= 0 and row.trough_equity_usd <= 0:
         row.peak_equity_usd = equity_usd
@@ -316,7 +353,9 @@ def record_equity(
         row.peak_equity_usd = max(row.peak_equity_usd, equity_usd)
         row.trough_equity_usd = min(row.trough_equity_usd, equity_usd)
     row.updated_at = now
-    return load_counters(session, account_fingerprint=account_fingerprint, now=now)
+    return load_counters(
+        session, account_fingerprint=account_fingerprint, now=now, market_timezone=market_timezone
+    )
 
 
 def record_activity(
@@ -329,6 +368,7 @@ def record_activity(
     replacements: int = 0,
     turnover_usd: Decimal = Decimal(0),
     realized_loss_usd: Decimal = Decimal(0),
+    market_timezone: str | None = None,
 ) -> SessionCounters:
     """Increment this session's activity counters.
 
@@ -352,7 +392,7 @@ def record_activity(
         if amount < 0:
             raise ValueError(f"{label} increment must not be negative, got {amount}")
 
-    key = session_key(now)
+    key = session_key(now, market_timezone=market_timezone)
     row = _ensure_counter_row(session, account_fingerprint=account_fingerprint, session_date=key)
     row.orders_submitted += orders_submitted
     row.cancellations += cancellations
@@ -360,7 +400,9 @@ def record_activity(
     row.turnover_usd += turnover_usd
     row.realized_loss_usd += realized_loss_usd
     row.updated_at = now
-    return load_counters(session, account_fingerprint=account_fingerprint, now=now)
+    return load_counters(
+        session, account_fingerprint=account_fingerprint, now=now, market_timezone=market_timezone
+    )
 
 
 def _ensure_counter_row(
@@ -595,6 +637,7 @@ def build_state(
     expected_evidence_bundle_digest: str | None = None,
     market_data: MarketDataEvidence | None = None,
     extra_degraded_reasons: tuple[DegradedReason, ...] = (),
+    market_timezone: str | None = None,
 ) -> SupervisorState:
     """Assemble the state `admit` judges against, from durable facts.
 
@@ -617,7 +660,9 @@ def build_state(
     breach this function found.
     """
 
-    counters = load_counters(session, account_fingerprint=account_fingerprint, now=now)
+    counters = load_counters(
+        session, account_fingerprint=account_fingerprint, now=now, market_timezone=market_timezone
+    )
     admitted, refusals = load_attempts(session, account_fingerprint=account_fingerprint)
     return SupervisorState(
         account_fingerprint=account_fingerprint,
