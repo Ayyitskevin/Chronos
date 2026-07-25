@@ -1,5 +1,30 @@
 # CHANGELOG
 
+## [Unreleased] — M2 fix: a zero ceiling authorizes nothing (2026-07-25)
+
+**Found by self-review of the merged M2 sizing code, before any autonomous path could
+consult it.** `size_order` *skipped* a mandate limit that was zero instead of binding on
+it, which inverted deny-by-default exactly as the M1 review found for the floors: a
+mandate whose capital ceilings were all left at their zero defaults — one that authorizes
+nothing — sized to whatever cash allowed. Reproduced at **590 shares** where the correct
+answer is "refuse".
+
+Fixed at both layers:
+
+- **Sizing:** every ceiling now binds, and zero binds at zero — per-order notional,
+  per-order unit ceiling (the one that governs the asset class), allocated capital,
+  per-symbol concentration headroom, and gross-exposure headroom.
+- **Contract:** a submitting mandate must now state `allocated_capital_usd`,
+  `max_order_notional_usd`, `max_gross_exposure_usd`, `max_symbol_exposure_pct`, and the
+  unit ceiling matching its asset classes — so the failure surfaces at authoring time with
+  a clear message, rather than as a silent refusal at trade time.
+
+Regression tests cover both: the contract refuses to construct such a mandate, and sizing
+refuses even when one is forced past validation via `model_construct`.
+
+Gates: ruff clean, ruff format clean, mypy --strict clean (193 files), pytest 1944 passed
+/ 1 credential-gated skip.
+
 ## [Unreleased] — M2: deterministic gateway, lease fencing, transmit quarantine (2026-07-25)
 
 ### Added — `chronos.supervisor` (the ModelDecisionGateway)

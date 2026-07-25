@@ -48,6 +48,7 @@ from chronos.autonomy import (
     AutonomyMandate,
     AutonomyMode,
     CapitalLimits,
+    ConcentrationLimits,
     DecisionDirection,
     DecisionKind,
     DecisionProvenance,
@@ -198,10 +199,24 @@ def _live_data() -> MarketDataRequirements:
 
 
 def _live_capital() -> CapitalLimits:
+    """A minimally complete capital block: every ceiling a submitting mandate needs.
+
+    Ceilings are deny-by-default like floors — a zero ceiling authorizes nothing —
+    so a submitting mandate must state them all.
+    """
+
     return CapitalLimits(
+        allocated_capital_usd=Decimal(50_000),
+        max_order_notional_usd=Decimal(10_000),
+        max_gross_exposure_usd=Decimal(500_000),
+        max_shares_per_order=100,
         min_cash_floor_usd=Decimal(1000),
         min_buying_power_usd=Decimal(1000),
     )
+
+
+def _live_concentration() -> ConcentrationLimits:
+    return ConcentrationLimits(max_symbol_exposure_pct=Decimal("0.50"))
 
 
 def _submitting_mandate(mode: AutonomyMode, level: PromotionLevel, **overrides: Any):
@@ -211,6 +226,7 @@ def _submitting_mandate(mode: AutonomyMode, level: PromotionLevel, **overrides: 
         "scope": _live_scope(),
         "market_data": _live_data(),
         "capital": _live_capital(),
+        "concentration": _live_concentration(),
     }
     base.update(overrides)
     return _mandate(**base)

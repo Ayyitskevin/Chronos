@@ -120,30 +120,46 @@ def size_order(
     capital = mandate.capital
     candidates: list[Decimal] = []
 
+    # EVERY ceiling binds, including a zero one. An earlier version skipped a
+    # limit that was zero, which inverted the whole deny-by-default doctrine: a
+    # mandate whose ceilings were all left at their zero defaults — i.e. one that
+    # authorizes nothing — sized to whatever cash allowed, because "no ceiling
+    # set" read as "no ceiling". Zero authorizes zero. (Same class of bug the M1
+    # review found in the floors; caught here by self-review before autonomy
+    # could ever consult it.)
+    def bind(value: Decimal, label: str) -> None:
+        candidates.append(value if value > 0 else Decimal(0))
+        constraints.append(label)
+
     # The model's request is an upper bound, never a floor.
     if requested_quantity is not None:
         candidates.append(requested_quantity)
         constraints.append(f"model requested {requested_quantity}")
 
     # Per-order notional ceiling.
-    if capital.max_order_notional_usd > 0:
-        allowed = capital.max_order_notional_usd / unit_notional
-        candidates.append(allowed)
-        constraints.append(f"max_order_notional_usd {capital.max_order_notional_usd}")
+    bind(
+        capital.max_order_notional_usd / unit_notional,
+        f"max_order_notional_usd {capital.max_order_notional_usd}",
+    )
 
-    # Per-order unit ceiling, by asset class.
+    # Per-order unit ceiling, by asset class. Only the ceiling that governs this
+    # asset class applies — a share cap is meaningless for an option contract.
     if asset_class in _CONTRACT_CLASSES:
-        if capital.max_contracts_per_order > 0:
-            candidates.append(Decimal(capital.max_contracts_per_order))
-            constraints.append(f"max_contracts_per_order {capital.max_contracts_per_order}")
-    elif capital.max_shares_per_order > 0:
-        candidates.append(Decimal(capital.max_shares_per_order))
-        constraints.append(f"max_shares_per_order {capital.max_shares_per_order}")
+        bind(
+            Decimal(capital.max_contracts_per_order),
+            f"max_contracts_per_order {capital.max_contracts_per_order}",
+        )
+    else:
+        bind(
+            Decimal(capital.max_shares_per_order),
+            f"max_shares_per_order {capital.max_shares_per_order}",
+        )
 
     # Allocated capital for the whole mandate.
-    if capital.allocated_capital_usd > 0:
-        candidates.append(capital.allocated_capital_usd / unit_notional)
-        constraints.append(f"allocated_capital_usd {capital.allocated_capital_usd}")
+    bind(
+        capital.allocated_capital_usd / unit_notional,
+        f"allocated_capital_usd {capital.allocated_capital_usd}",
+    )
 
     # Spendable cash after the mandate's floors. A floor that is not subtracted
     # is not a floor.
@@ -162,18 +178,18 @@ def size_order(
         f"{capital.min_buying_power_usd}"
     )
 
-    # Per-symbol concentration, measured against net liquidation.
+    # Per-symbol concentration, measured against net liquidation. A zero cap
+    # permits zero exposure, so it binds like any other ceiling.
     symbol_cap_pct = mandate.concentration.max_symbol_exposure_pct
-    if symbol_cap_pct > 0:
-        headroom = symbol_cap_pct * evidence.net_liquidation_usd - evidence.symbol_exposure_usd
-        candidates.append(headroom / unit_notional if headroom > 0 else Decimal(0))
-        constraints.append(f"max_symbol_exposure_pct {symbol_cap_pct}")
+    symbol_headroom = symbol_cap_pct * evidence.net_liquidation_usd - evidence.symbol_exposure_usd
+    bind(symbol_headroom / unit_notional, f"max_symbol_exposure_pct {symbol_cap_pct}")
 
     # Gross exposure ceiling.
-    if capital.max_gross_exposure_usd > 0:
-        headroom = capital.max_gross_exposure_usd - evidence.gross_exposure_usd
-        candidates.append(headroom / unit_notional if headroom > 0 else Decimal(0))
-        constraints.append(f"max_gross_exposure_usd {capital.max_gross_exposure_usd}")
+    gross_headroom = capital.max_gross_exposure_usd - evidence.gross_exposure_usd
+    bind(
+        gross_headroom / unit_notional,
+        f"max_gross_exposure_usd {capital.max_gross_exposure_usd}",
+    )
 
     quantity = min(candidates)
     if whole_units:

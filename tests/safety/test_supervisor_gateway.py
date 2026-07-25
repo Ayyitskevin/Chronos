@@ -25,6 +25,7 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
 from chronos.autonomy import (
     AITradeDecision,
@@ -110,10 +111,12 @@ def _mandate(**overrides: Any) -> AutonomyMandate:
         "capital": CapitalLimits(
             allocated_capital_usd=Decimal(50_000),
             max_order_notional_usd=Decimal(10_000),
+            max_gross_exposure_usd=Decimal(500_000),
             max_shares_per_order=100,
             min_cash_floor_usd=Decimal(1_000),
             min_buying_power_usd=Decimal(500),
         ),
+        "concentration": ConcentrationLimits(max_symbol_exposure_pct=Decimal("0.50")),
         "market_data": MarketDataRequirements(
             max_quote_age_seconds=Decimal(5),
             permitted_data_qualities=(DataQuality.LIVE,),
@@ -324,7 +327,10 @@ def test_cash_floor_actually_reserves_capital() -> None:
     outcome = size_order(
         mandate=_mandate(
             capital=CapitalLimits(
+                allocated_capital_usd=Decimal(1_000_000),
                 max_order_notional_usd=Decimal(1_000_000),
+                max_gross_exposure_usd=Decimal(1_000_000),
+                max_shares_per_order=1_000,
                 min_cash_floor_usd=Decimal(950),
                 min_buying_power_usd=Decimal(1),
             )
@@ -374,6 +380,63 @@ def test_missing_or_absurd_contract_facts_refuse_rather_than_guess(
     assert outcome.refusal
 
 
+def test_a_zero_ceiling_authorizes_nothing_rather_than_everything() -> None:
+    """Regression: zero ceilings must BIND at zero, not be skipped as "unset".
+
+    The first version of `size_order` skipped any limit that was zero. That
+    inverted deny-by-default exactly as the M1 review found for the floors: a
+    mandate whose ceilings were all left at their zero defaults — one that
+    authorizes nothing — sized to whatever cash allowed (590 shares in the
+    reproduction). Caught by self-review before autonomy could consult it.
+
+    The contract validator now refuses to *construct* such a mandate, so this
+    uses `model_construct` to prove sizing itself is safe even if one arrived
+    from storage or a future code path that skipped validation.
+    """
+
+    fields = dict(_mandate())
+    fields["capital"] = CapitalLimits(
+        min_cash_floor_usd=Decimal(1_000), min_buying_power_usd=Decimal(500)
+    )
+    fields["concentration"] = ConcentrationLimits()
+    all_zero_ceilings = AutonomyMandate.model_construct(**fields)
+
+    outcome = size_order(
+        mandate=all_zero_ceilings,
+        asset_class=TradableAssetClass.EQUITY,
+        reference_price=Decimal(100),
+        multiplier=Decimal(1),
+        evidence=_evidence(),
+        requested_quantity=None,
+    )
+    assert outcome.quantity is None, "a mandate authorizing nothing must size to nothing"
+    assert "no quantity survives" in outcome.refusal
+
+
+def test_a_submitting_mandate_must_state_its_ceilings() -> None:
+    """The same defect, refused earlier: at authoring time rather than trade time."""
+
+    for override in (
+        {"allocated_capital_usd": Decimal(0)},
+        {"max_order_notional_usd": Decimal(0)},
+        {"max_gross_exposure_usd": Decimal(0)},
+        {"max_shares_per_order": 0},
+    ):
+        fields: dict[str, Any] = {
+            "allocated_capital_usd": Decimal(50_000),
+            "max_order_notional_usd": Decimal(10_000),
+            "max_gross_exposure_usd": Decimal(500_000),
+            "max_shares_per_order": 100,
+            "min_cash_floor_usd": Decimal(1_000),
+            "min_buying_power_usd": Decimal(500),
+        }
+        fields.update(override)
+        with pytest.raises(ValidationError):
+            _mandate(capital=CapitalLimits(**fields))
+    with pytest.raises(ValidationError):
+        _mandate(concentration=ConcentrationLimits())
+
+
 def test_sizing_works_without_a_requested_quantity_at_all() -> None:
     """The kernel can size from mandate limits alone; the model need not ask."""
 
@@ -405,7 +468,9 @@ def test_option_contracts_use_the_contract_ceiling_and_multiplier() -> None:
                 ),
             ),
             capital=CapitalLimits(
+                allocated_capital_usd=Decimal(200_000),
                 max_order_notional_usd=Decimal(50_000),
+                max_gross_exposure_usd=Decimal(500_000),
                 max_contracts_per_order=3,
                 min_cash_floor_usd=Decimal(1_000),
                 min_buying_power_usd=Decimal(500),

@@ -444,6 +444,46 @@ class AutonomyMandate(AutonomyModel):
         if self.capital.min_buying_power_usd <= 0:
             raise ValueError(f"mode {self.mode.value} requires a positive min_buying_power_usd")
 
+        # Ceilings are deny-by-default too: a zero ceiling authorizes nothing, so
+        # a submitting mandate that leaves one at its default would size every
+        # order to zero. Failing here says so at authoring time, rather than
+        # leaving the owner to discover it as a silent refusal at trade time.
+        required_ceilings = (
+            ("allocated_capital_usd", self.capital.allocated_capital_usd),
+            ("max_order_notional_usd", self.capital.max_order_notional_usd),
+            ("max_gross_exposure_usd", self.capital.max_gross_exposure_usd),
+            ("max_symbol_exposure_pct", self.concentration.max_symbol_exposure_pct),
+        )
+        for name, value in required_ceilings:
+            if value <= 0:
+                raise ValueError(
+                    f"mode {self.mode.value} requires a positive {name}; a zero ceiling "
+                    "authorizes nothing and would refuse every order"
+                )
+        uses_contracts = any(
+            item
+            in {
+                TradableAssetClass.EQUITY_OPTION,
+                TradableAssetClass.INDEX_OPTION,
+                TradableAssetClass.FUTURE,
+            }
+            for item in self.scope.asset_classes
+        )
+        uses_shares = any(
+            item in {TradableAssetClass.EQUITY, TradableAssetClass.CRYPTO}
+            for item in self.scope.asset_classes
+        )
+        if uses_contracts and self.capital.max_contracts_per_order <= 0:
+            raise ValueError(
+                f"mode {self.mode.value} permits contract-based asset classes and therefore "
+                "requires a positive max_contracts_per_order"
+            )
+        if uses_shares and self.capital.max_shares_per_order <= 0:
+            raise ValueError(
+                f"mode {self.mode.value} permits share-based asset classes and therefore "
+                "requires a positive max_shares_per_order"
+            )
+
     def _validate_live_data_qualities(self) -> None:
         """A live mandate may not license data the deterministic gate refuses."""
 
