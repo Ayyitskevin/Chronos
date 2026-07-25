@@ -146,14 +146,15 @@ class DecisionProvenance(AutonomyModel):
     self-attestation rather than a control. The supervisor checks these against
     the mandate before admission and refuses a decision whose pins disagree.
 
-    **Honest status after M2.** The decision-queue writer that would *stamp*
-    these fields does not exist yet — it lands with the agent and tool layer
-    (M4). So today
-    :func:`chronos.supervisor.admission.admit` proves the decision **agrees**
-    with the mandate's pins, not that an approved model authored it: it is an
-    integrity check, not authentication. An earlier version of this docstring
-    said the enforcing gateway landed in M2; the M2 adversarial review found
-    that false and it is corrected here.
+    **Status after M4: authentication, not merely agreement.** The writer that
+    stamps these fields exists — :func:`chronos.supervisor.queue.accept`. A
+    model authors a :class:`ProposedDecision`, which has no provenance field at
+    all, and the writer attaches provenance from configuration the model process
+    never sees. So the pin check now proves an approved model produced the
+    decision, rather than proving the decision merely *agrees* with the pins.
+
+    (M2 and M3 disclosed the weaker claim honestly while the writer did not
+    exist. This is the promised upgrade, not a re-description of the old one.)
     """
 
     provider: str = Field(min_length=1, max_length=64)
@@ -227,10 +228,35 @@ class ExitPlan(AutonomyModel):
     time_exit: AwareDatetime | None = None
 
 
-class AITradeDecision(AutonomyModel):
-    """One typed decision from an approved model. Holding one authorizes nothing."""
+class ProposedDecision(AutonomyModel):
+    """Everything a model may author. Deliberately **not** a decision yet.
 
-    decision_id: str = Field(min_length=1, max_length=128)
+    M4 splits the contract in two, and the split is the control.
+
+    ``AITradeDecision`` carries ``decision_id`` and ``provenance``. If a model
+    produced those itself it would be *self-attesting*: a model asked to state
+    which model it is could simply claim a pinned one, and the mandate's
+    ``VersionPins`` check would be a self-report dressed up as a control. That
+    is exactly the honest bound M2 and M3 disclosed — the pin check proved
+    *agreement*, not authorship.
+
+    A model may only produce a ``ProposedDecision``, which has neither field.
+    :func:`chronos.supervisor.queue.accept` — deterministic code, outside the
+    model process — stamps both from harness-held configuration. The model
+    therefore cannot say who it is, and cannot choose its own identity.
+
+    Withholding ``decision_id`` matters for a second reason. If a model chose
+    its id it could escape R-31's re-submission bound simply by picking a fresh
+    one each time: the counters are keyed by id, so a new id is a new budget.
+    The writer derives the id from the decision's *economic content* instead, so
+    re-proposing the same trade yields the same id and is caught as a replay.
+    That closes the dedup residual R-31 has carried since M2.
+
+    Every validator lives here and is inherited, so a proposal is held to
+    exactly the same standard as a decision — the split removes authority, not
+    scrutiny.
+    """
+
     kind: DecisionKind
     asset_class: TradableAssetClass
     #: Exactly one of ``symbol`` / ``futures_root`` is set, per asset class.
@@ -257,7 +283,6 @@ class AITradeDecision(AutonomyModel):
     evidence: tuple[EvidenceCitation, ...] = Field(default=(), max_length=64)
     invalidation_conditions: tuple[str, ...] = ()
     reassess_at: AwareDatetime | None = None
-    provenance: DecisionProvenance
 
     @field_validator("symbol")
     @classmethod
@@ -323,7 +348,7 @@ class AITradeDecision(AutonomyModel):
         return tuple(normalized)
 
     @model_validator(mode="after")
-    def _validate_decision(self) -> AITradeDecision:
+    def _validate_decision(self) -> ProposedDecision:
         self._validate_instrument()
         self._validate_target_reference()
         self._validate_payload_matches_kind()
@@ -387,3 +412,27 @@ class AITradeDecision(AutonomyModel):
                 raise ValueError(f"a {kind} decision may not request a risk budget")
         if self.kind is DecisionKind.HOLD and self.direction is not DecisionDirection.NEUTRAL:
             raise ValueError("a HOLD decision may not express a direction")
+
+
+class AITradeDecision(ProposedDecision):
+    """A proposal that a deterministic writer has identified and attributed.
+
+    The only shape that may enter the runtime pipeline. It is exactly a
+    :class:`ProposedDecision` plus the two fields a model may never author:
+
+    - ``decision_id``, derived by the writer from the proposal's economic
+      content, so the same trade proposed twice is recognizably the same trade;
+    - ``provenance``, stamped by the writer from harness-held configuration, so
+      the mandate's ``VersionPins`` check compares against something the model
+      did not write.
+
+    Constructing one directly is possible in tests and in the writer, and that
+    is deliberate — a type cannot enforce who instantiates it. What enforces the
+    boundary is that the model process never receives a constructor for this:
+    it emits ``ProposedDecision`` and the writer, which runs outside that
+    process, produces this. The isolation tests pin that the model plane imports
+    nothing that could submit one.
+    """
+
+    decision_id: str = Field(min_length=1, max_length=128)
+    provenance: DecisionProvenance
