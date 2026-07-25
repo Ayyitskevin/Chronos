@@ -69,13 +69,13 @@ Safe defaults below are the values with no `.env` at all.
 |---|---|---|
 | `BROKER_MODE` | `demo` | `demo` or `ibkr`. Demo is deterministic, no network. |
 | `DEMO_PROFILE` | `safety_cases` | `safety_cases` or `empty_account`. |
-| `IB_ENVIRONMENT` | `paper` | `paper` or `live`. Live + transmission raises. |
+| `IB_ENVIRONMENT` | `paper` | `paper` or `live`. `live` + transmission without `ALLOW_LIVE_TRADING` raises (ambiguous intent); the full ADR-0009 conjunction is required for a live-capable config. |
 | `IB_HOST` | `127.0.0.1` | Keep loopback. |
 | `IB_PORT` | `7497` | TWS paper. IB Gateway paper is 4002. |
 | `IB_CLIENT_ID` | `17` | Must be unique per connected API client. |
 | `IB_ACCOUNT_ID` | empty | Required before paper order transmission. |
 | `ALLOW_ORDER_TRANSMIT` | `false` | Paper transmission opt-in (wheel subsystem). |
-| `ALLOW_LIVE_TRADING` | `false` | Setting `true` raises: hard-disabled. |
+| `ALLOW_LIVE_TRADING` | `false` | *(Corrected 2026-07-25.)* `true` is honored only under the full ADR-0009 nine-conjunct configuration, else startup refuses naming every unmet conjunct. At run time an order still walks the ten-gate live stack; autonomous operation additionally requires an active AutonomyMandate (ADR-0016). |
 | `ALLOW_OUTSIDE_RTH` | `false` | |
 | `SYMBOL_ALLOWLIST` | `AAPL,MSFT,SPY` | Comma-separated, alphanumeric, no duplicates. |
 | `DATABASE_URL` | `sqlite:///data/chronos.db` | Wheel ledger only (platform ledger is separate). |

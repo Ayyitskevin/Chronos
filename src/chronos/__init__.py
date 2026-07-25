@@ -1,4 +1,4 @@
-"""Chronos Wheel Strategy decision-support application."""
+"""Chronos — a local-first, model-driven trading system for Interactive Brokers."""
 
 __all__ = ["__version__"]
 

@@ -169,7 +169,15 @@ order parameter.
 
 An exposure-creating decision (OPEN, INCREASE, HEDGE, ROLL, REPLACE) must cite
 at least one evidence id and state its invalidation conditions, or it fails
-validation. Exposure is never created on an unsupported assertion.
+validation.
+
+Stated precisely, because the difference matters: this is a **presence** check,
+not a support check. The contract enforces that a citation exists and is
+well-formed (a 64-hex digest and an id); it does not and cannot verify that the
+cited evidence exists in the bundle, that its digest matches, or that it
+actually supports the thesis. Binding citations to the EvidenceBundle they claim
+to come from is the gateway's job (M2), and until it ships "must cite evidence"
+means only that an uncited decision is refused.
 
 ### 6. Asset-class capability matrix
 
@@ -177,7 +185,12 @@ The system-wide CSP-only and long-only limitations are replaced by an explicit,
 versioned capability matrix expressed in the mandate's scope. Initial scope:
 
 - **Equities and ETFs** — long positions; short positions only after separate
-  promotion, with deterministic shortability and borrow checks before shorting;
+  promotion, with deterministic shortability and borrow checks before shorting.
+  **Gap disclosed (M1 review):** `FamilyPromotion` keys promotion on asset
+  *class*, so an EQUITY promotion covers `LONG_EQUITY` and `SHORT_EQUITY`
+  alike — "separate promotion" for shorting is not yet expressible in the
+  contract. Until M2 adds strategy-level promotion, a mandate must simply omit
+  `SHORT_EQUITY` from its scope to keep shorting unauthorized;
   whole-share limit or marketable-limit orders initially; corporate-action,
   split, dividend, halt, spread, liquidity, and session checks.
 - **Options** — long calls and puts, cash-secured puts, covered calls, and
@@ -283,6 +296,33 @@ graduated per-family promotions. Every milestone stops for owner approval.
 
 ## Known limitations and residuals
 
+0. **M1 adversarial review (2026-07-25) — findings and remediation.** A five-lens
+   review of the M1 diff found defects that were fixed at the top of M2, before
+   any gateway work. The material ones, recorded so the history is legible:
+   - `model_copy(update=...)` bypassed **every** mandate validator: a one-day
+     SHADOW mandate could be copied into a ten-year `LIVE_AUTONOMOUS` mandate
+     with an empty scope and a SHADOW promotion rung. Closed by
+     `chronos.autonomy.base.AutonomyModel`, which re-validates on copy.
+   - A single scalar `promotion_level` could not express §7's per-family
+     promotion, so one family's evidence licensed another's live trading.
+     Replaced by `promotions: tuple[FamilyPromotion, ...]`, required per
+     permitted asset class.
+   - Risk-reducing decision kinds could carry a full new-exposure payload
+     (strategy, entry plan, size, direction). Now refused by kind.
+   - "Deny-by-default" was false for **floors**: `min_cash_floor_usd`,
+     `min_buying_power_usd`, and `max_quote_age_seconds` default to zero, which
+     is the *most* permissive value. Submitting mandates must now set them.
+   - A live mandate could license FROZEN/DELAYED_FROZEN/DEMO market data that
+     the deterministic live gate already refuses. Now restricted to LIVE/DELAYED.
+   - The AST import matcher was blind to `from chronos import autonomy`,
+     silently defeating both the isolation test and the milestone guard; the
+     same hole existed in the ADR-0013 holdout test. Both fixed.
+   - The naked-short guarantee was a substring scan that a member named
+     `SHORT_CALL` would have passed; `StrategyForm` is now pinned to its exact
+     member set.
+   - Several documents published controls that do not exist yet as though they
+     were live. README now marks every safety bullet `[enforced]`, `[contract]`,
+     or `[M2+]`.
 1. **The gateway does not exist yet.** These contracts are inert in M1. A type
    that cannot express an order is necessary, not sufficient; the veto lives in
    M2's gateway and is unproven until it ships with its adversarial review.

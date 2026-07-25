@@ -174,6 +174,14 @@ the README and the runbooks.
   carries no account, broker, routing, or transmit field, and the mandate is frozen, expiring,
   and deny-by-default — but the actual veto lives in the gateway, which does not exist yet and
   is unproven until it ships with its own adversarial review.
+- **The M1 contracts shipped with real defects, found by adversarial review and fixed in M2a.**
+  The worst was an authority-escalation vector: `model_copy(update=...)` bypassed every mandate
+  validator, so a one-day SHADOW mandate could be copied into a ten-year `LIVE_AUTONOMOUS` one.
+  Others: promotion was not per asset family, risk-reducing decisions could carry opening
+  payloads, "deny-by-default" was false for floors, and two AST guards were blind to
+  `from chronos import <subpackage>`. All are fixed and regression-tested; the full list is
+  ADR-0016 §"Known limitations and residuals" item 0. The honest lesson recorded here: these
+  contracts are young, and their first adversarial pass found a hole per lens.
 - **Prompt injection is an open problem.** EvidenceBundles will be redacted, versioned, and
   hash-pinned and tools allowlisted, but evidence derived from external text (news, filings)
   is an untrusted input to a non-deterministic component. The deterministic kernel is the

@@ -69,18 +69,39 @@ def test_the_automated_tree_is_covered() -> None:
     assert not (_SRC / "copilot").exists()  # copilot plane still absent (bar is prospective)
 
 
+def _imported_names(tree: ast.Module) -> list[str]:
+    """Every module path an import can name.
+
+    ``from chronos import registry`` puts the subpackage in the *alias*, not in
+    ``node.module``, so checking ``node.module`` alone missed it entirely — the
+    same blind spot the M1 adversarial review found in the autonomy isolation
+    test. Both halves are emitted here.
+    """
+
+    names: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            names.append(node.module)
+            names.extend(f"{node.module}.{alias.name}" for alias in node.names)
+    return names
+
+
+def test_the_import_matcher_sees_subpackage_aliases() -> None:
+    """Guard the guard: `from chronos import registry` must be visible."""
+
+    assert "chronos.registry" in _imported_names(ast.parse("from chronos import registry\n"))
+
+
 def test_no_automated_module_imports_or_calls_the_unlock() -> None:
     for path in _automated_module_files():
         tree = ast.parse(path.read_text(encoding="utf-8"))
+        for name in _imported_names(tree):
+            assert name not in _FORBIDDEN_IMPORTS, f"{path.name} imports {name}"
+            assert name not in _PROSPECTIVE, f"{path.name} imports {name}"
         for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    assert alias.name not in _FORBIDDEN_IMPORTS, f"{path.name} imports {alias.name}"
-                    assert alias.name not in _PROSPECTIVE, f"{path.name} imports {alias.name}"
-            elif isinstance(node, ast.ImportFrom) and node.module:
-                assert node.module not in _FORBIDDEN_IMPORTS, f"{path.name} imports {node.module}"
-                assert node.module not in _PROSPECTIVE, f"{path.name} imports {node.module}"
-            elif isinstance(node, ast.Call):
+            if isinstance(node, ast.Call):
                 func = node.func
                 name = getattr(func, "attr", None) or getattr(func, "id", None)
                 assert name not in _FORBIDDEN_CALLS, (

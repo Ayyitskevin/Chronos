@@ -2,10 +2,15 @@
 
 Chronos now contains two cooperating systems in one repository:
 
-1. **Wheel decision-support dashboard** (milestones 1–10, `chronos.broker`,
+1. **Wheel execution plane** (`chronos.orders`, `chronos.api`, `chronos.broker`,
    `chronos.services`, `chronos.strategy`, `chronos.ui`, `chronos.persistence`)
-   — a Streamlit tool for the options Wheel with hard-disabled order
-   transmission. Documented in [architecture.md](architecture.md). Unchanged.
+   — the options/stock/crypto order pipeline and its Streamlit front end. Order
+   transmission is a **gated, fail-closed capability** (ADR-0009, Milestones 5–7),
+   not hard-disabled: one transmit site behind the ten-gate live stack, arming,
+   a durable kill switch, a drawdown breaker, and the writer lease. See
+   [live_trading_runbook.md](live_trading_runbook.md) for the current posture;
+   [architecture.md](architecture.md) records the M1–M10 dashboard history, when
+   transmission genuinely was hard-disabled.
 2. **Deterministic strategy platform** (this document) — the research,
    backtest, replay, shadow, and paper execution platform built from the Pine
    Quant Library corpus.
