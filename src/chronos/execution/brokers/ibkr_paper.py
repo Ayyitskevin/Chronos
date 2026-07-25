@@ -70,11 +70,32 @@ class IBKRPaperExecutionAdapter:
     ib: IBLike
     mode_lock: ModeLock
     port: int
+    #: QUARANTINE (ADR-0016 §9 / RISK_REGISTER R-28). This adapter holds the
+    #: repository's *second* transmit site — ``order.transmit = True`` below,
+    #: a hardcoded literal that the single-transmit-site AST test cannot see
+    #: because that test scans ``transmit=`` keyword arguments in
+    #: ``chronos.orders`` and this is an attribute assignment in another
+    #: package. It is constructed nowhere in production: the only
+    #: ``ExecutionEngine`` wiring passes ``NullExecutionBroker``. Rather than
+    #: rely on that staying true by accident, construction now requires an
+    #: explicit opt-in, so a future wiring mistake fails loudly here instead of
+    #: quietly acquiring a second, ungated path to a broker. Nothing in
+    #: ``src/`` passes this flag, and a structural test asserts that.
+    quarantine_ack: bool = False
     _trades: dict[str, Any] = field(default_factory=dict)
     _emitted: dict[str, tuple[str, int]] = field(default_factory=dict)
     _events: list[BrokerEvent] = field(default_factory=list)
 
     def __post_init__(self) -> None:
+        if not self.quarantine_ack:
+            raise BrokerSafetyError(
+                "IBKRPaperExecutionAdapter is QUARANTINED (R-28): it carries a second "
+                "transmit site outside the audited chronos.orders boundary and is wired "
+                "into no production path. Constructing it requires quarantine_ack=True, "
+                "which only tests pass. If you are wiring this into a runtime path, stop "
+                "and read ADR-0016 §8 first: chronos.orders is the single canonical "
+                "execution plane."
+            )
         if not self.mode_lock.may_submit_paper:
             raise BrokerSafetyError(
                 "IBKRPaperExecutionAdapter requires a PAPER_SUBMISSION mode lock; "

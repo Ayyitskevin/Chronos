@@ -326,21 +326,28 @@ graduated per-family promotions. Every milestone stops for owner approval.
 1. **The gateway does not exist yet.** These contracts are inert in M1. A type
    that cannot express an order is necessary, not sufficient; the veto lives in
    M2's gateway and is unproven until it ships with its adversarial review.
-2. **Existing kernel defects are inherited, not fixed here.** The M0 audit found
-   that the writer lease is never renewed in production (a second process can
-   take the lease while the first still believes it holds it, and the lease token
-   is not used as a fencing token on writes or sends), that
-   `max_opening_orders_per_day` is inert because its evidence is never gathered,
-   that broker session evidence is never supplied so `market_open` is permanently
-   ambiguous, and that option deliverable verification is set only by the demo
-   broker. Unattended operation makes each strictly more dangerous. They are M2
-   prerequisites and are recorded in RISK_REGISTER.md (R-24 … R-27); this ADR
-   does not close them.
-3. **A dormant second submission path still exists.**
+2. **Existing kernel defects are inherited, not fixed in M1.** The M0 audit found
+   four that unattended operation makes strictly more dangerous, recorded as
+   RISK_REGISTER R-24 … R-27. Status after M2:
+   - **R-24 (writer lease never renewed; not a fencing token) — CLOSED in M2.**
+     A heartbeat renews at TTL/3 and demotes to read-only on loss, and the
+     submission boundary re-checks ownership in the database immediately before
+     the transmit line. Residual, disclosed: this narrows the window rather than
+     closing it, because IBKR accepts an order without knowing about our lease.
+   - **R-25** (`max_opening_orders_per_day` inert — its evidence is never
+     gathered), **R-26** (`market_open` permanently ambiguous because broker
+     session evidence is never supplied; fail-closed today), and **R-27** (option
+     deliverable verification set only by the demo broker) remain **OPEN**. Each
+     must be closed before the asset family it governs is promoted.
+3. **The dormant second submission path is QUARANTINED (R-28), not retired.**
    `chronos/execution/brokers/ibkr_paper.py` contains a functioning `placeOrder`
-   with a hardcoded `transmit = True` that the single-transmit-site test does not
-   scan. It is constructed nowhere in production, but M2 must retire, quarantine,
-   or prove its isolation before autonomy operates.
+   with a hardcoded `order.transmit = True`. Because that is an *attribute
+   assignment* outside `chronos.orders`, the original single-transmit-site test
+   structurally could not see it. M2 added a repository-wide transmit inventory
+   matching both spellings and pinned to an explicit set, an AST assertion that
+   no production module constructs the adapter, and a construction guard
+   requiring `quarantine_ack=True` — which nothing in `src/` passes. An
+   accidental wiring now fails loudly instead of acquiring an ungated broker path.
 4. **Prompt injection is an open problem, not a solved one.** EvidenceBundles are
    redacted and versioned and tools are allowlisted, but evidence derived from
    external text (news, filings) remains an untrusted input to a

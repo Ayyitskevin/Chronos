@@ -116,33 +116,43 @@ class TestConstruction:
             order_transmission_enabled=False,
         )
         with pytest.raises(BrokerSafetyError):
-            IBKRPaperExecutionAdapter(ib=FakeIB(), mode_lock=shadow, port=7497)
+            IBKRPaperExecutionAdapter(quarantine_ack=True, ib=FakeIB(), mode_lock=shadow, port=7497)
 
     def test_rejects_non_paper_port(self) -> None:
         with pytest.raises(BrokerSafetyError):
-            IBKRPaperExecutionAdapter(ib=FakeIB(), mode_lock=paper_lock(), port=7496)
+            IBKRPaperExecutionAdapter(
+                quarantine_ack=True, ib=FakeIB(), mode_lock=paper_lock(), port=7496
+            )
 
     def test_accepts_paper_ports(self) -> None:
         for port in (7497, 4002):
-            IBKRPaperExecutionAdapter(ib=FakeIB(), mode_lock=paper_lock(), port=port)
+            IBKRPaperExecutionAdapter(
+                quarantine_ack=True, ib=FakeIB(), mode_lock=paper_lock(), port=port
+            )
 
 
 class TestAccountVerification:
     def test_exact_account_match_required(self) -> None:
         ib = FakeIB(accounts=["DU1234567", "DU9999999"])
-        adapter = IBKRPaperExecutionAdapter(ib=ib, mode_lock=paper_lock(), port=7497)
+        adapter = IBKRPaperExecutionAdapter(
+            quarantine_ack=True, ib=ib, mode_lock=paper_lock(), port=7497
+        )
         with pytest.raises(BrokerSafetyError):
             adapter.verify_account()
 
     def test_superstring_account_rejected(self) -> None:
         ib = FakeIB(accounts=["DU12345678"])
-        adapter = IBKRPaperExecutionAdapter(ib=ib, mode_lock=paper_lock(), port=7497)
+        adapter = IBKRPaperExecutionAdapter(
+            quarantine_ack=True, ib=ib, mode_lock=paper_lock(), port=7497
+        )
         with pytest.raises(BrokerSafetyError):
             adapter.verify_account()
 
     def test_disconnected_rejected(self) -> None:
         ib = FakeIB(connected=False)
-        adapter = IBKRPaperExecutionAdapter(ib=ib, mode_lock=paper_lock(), port=7497)
+        adapter = IBKRPaperExecutionAdapter(
+            quarantine_ack=True, ib=ib, mode_lock=paper_lock(), port=7497
+        )
         with pytest.raises(BrokerSafetyError):
             adapter.verify_account()
 
@@ -150,7 +160,9 @@ class TestAccountVerification:
 class TestSubmit:
     def test_submit_sets_order_fields(self) -> None:
         ib = FakeIB()
-        adapter = IBKRPaperExecutionAdapter(ib=ib, mode_lock=paper_lock(), port=7497)
+        adapter = IBKRPaperExecutionAdapter(
+            quarantine_ack=True, ib=ib, mode_lock=paper_lock(), port=7497
+        )
         intent = make_intent()
         adapter.submit(intent)
         assert len(ib.placed) == 1
@@ -162,7 +174,9 @@ class TestSubmit:
 
     def test_duplicate_submit_rejected(self) -> None:
         ib = FakeIB()
-        adapter = IBKRPaperExecutionAdapter(ib=ib, mode_lock=paper_lock(), port=7497)
+        adapter = IBKRPaperExecutionAdapter(
+            quarantine_ack=True, ib=ib, mode_lock=paper_lock(), port=7497
+        )
         intent = make_intent()
         adapter.submit(intent)
         with pytest.raises(BrokerSafetyError):
@@ -172,7 +186,9 @@ class TestSubmit:
         # verify_account() sees connected=True (first two reads), then the
         # connection drops before placeOrder's own isConnected() check.
         ib = FakeIB(connected_sequence=[True, False])
-        adapter = IBKRPaperExecutionAdapter(ib=ib, mode_lock=paper_lock(), port=7497)
+        adapter = IBKRPaperExecutionAdapter(
+            quarantine_ack=True, ib=ib, mode_lock=paper_lock(), port=7497
+        )
         with pytest.raises(BrokerSafetyError):
             adapter.submit(make_intent())
         assert ib.placed == []  # order never reached the broker
@@ -183,7 +199,9 @@ class TestDrainEvents:
         self, status: str, filled: float, total: int = 10
     ) -> tuple[IBKRPaperExecutionAdapter, FakeIB]:
         ib = FakeIB()
-        adapter = IBKRPaperExecutionAdapter(ib=ib, mode_lock=paper_lock(), port=7497)
+        adapter = IBKRPaperExecutionAdapter(
+            quarantine_ack=True, ib=ib, mode_lock=paper_lock(), port=7497
+        )
         adapter.submit(make_intent(quantity=total))
         trade = ib.placed[0]
         trade.order.totalQuantity = total

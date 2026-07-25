@@ -74,6 +74,10 @@ class WriterLease:
     def holder(self) -> str:
         return self._holder
 
+    @property
+    def ttl(self) -> timedelta:
+        return self._ttl
+
     def acquire(self, *, now: datetime | None = None) -> bool:
         """Try to take the lease. Returns False when a live lease exists."""
 
@@ -135,6 +139,36 @@ class WriterLease:
             )
             session.commit()
             return bool(getattr(result, "rowcount", 0))
+
+    def holds(self, *, now: datetime | None = None) -> bool:
+        """Whether **this** process still owns a live lease, checked in the database.
+
+        This is the fencing primitive (RISK_REGISTER R-24). ``BackendState.writer``
+        is decided once at startup and never re-checked, so on its own it cannot
+        detect that this process lost the lease mid-session — before the
+        heartbeat existed, the lease simply expired after ``ttl`` while the
+        process went on believing it was the writer. The submission boundary
+        calls this immediately before transmitting, so a stale holder is refused
+        at the last possible moment rather than trusting a startup-time flag.
+
+        Note what this is and is not. It is an ownership re-check against durable
+        state, as late as the process can make it. It is **not** a fencing token
+        the broker validates: IBKR accepts an order without knowing about our
+        lease, so a sufficiently unlucky pause between this check and the wire
+        cannot be closed from here. Narrowing that window is the point; closing
+        it entirely would require broker-side fencing that does not exist.
+        """
+
+        current = now or datetime.now(tz=UTC)
+        with self._sessions() as session:
+            row = session.execute(
+                text(
+                    "SELECT 1 FROM writer_lease "
+                    "WHERE id = 1 AND token = :token AND expires_at > :now"
+                ),
+                {"token": self._token, "now": current.isoformat()},
+            ).first()
+        return row is not None
 
     def release(self) -> None:
         with self._sessions() as session:
