@@ -55,6 +55,13 @@ from chronos.autonomy.enums import (
     TriggerComparator,
     promotion_rank,
 )
+from chronos.autonomy.evidence import (
+    AccountFact,
+    EvidenceBundle,
+    PositionFact,
+    QuoteFact,
+    TextualEvidence,
+)
 from chronos.autonomy.mandate import (
     LIVE_PERMITTED_DATA_QUALITIES,
     MAX_LIVE_MANDATE_DURATION,
@@ -70,6 +77,7 @@ from chronos.autonomy.mandate import (
     SessionPolicy,
     VersionPins,
 )
+from chronos.autonomy.tools import ToolKind, ToolRegistry, ToolSpec, default_registry
 
 __all__ = [
     "CONTEXT_DEPENDENT_DECISION_KINDS",
@@ -86,6 +94,7 @@ __all__ = [
     "SUBMITTING_AUTONOMY_MODES",
     "TARGETED_DECISION_KINDS",
     "AITradeDecision",
+    "AccountFact",
     "ActivityLimits",
     "AutonomyMandate",
     "AutonomyMode",
@@ -96,6 +105,7 @@ __all__ = [
     "DecisionKind",
     "DecisionProvenance",
     "EntryPlan",
+    "EvidenceBundle",
     "EvidenceCitation",
     "ExitPlan",
     "FamilyPromotion",
@@ -103,17 +113,24 @@ __all__ = [
     "LossLimits",
     "MarketDataRequirements",
     "OrderForm",
+    "PositionFact",
     "PriceReference",
     "PriceTrigger",
     "PromotionLevel",
     "ProposedDecision",
+    "QuoteFact",
     "RestartBehavior",
     "SessionPolicy",
     "StrategyForm",
+    "TextualEvidence",
     "TimeHorizon",
+    "ToolKind",
+    "ToolRegistry",
+    "ToolSpec",
     "TradableAssetClass",
     "TradingSession",
     "TriggerComparator",
     "VersionPins",
+    "default_registry",
     "promotion_rank",
 ]

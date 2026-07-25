@@ -220,8 +220,9 @@ It does **not** enforce, and these are open gaps rather than decisions:
   does not gather.
 - **`SessionPolicy` in full** — permitted sessions and overnight holding need a session clock
   in the supervisor; the orders plane has its own, which still applies downstream.
-- **Individual evidence citations** — the bundle is bound by id and digest, but citations
-  inside it are not resolved against a store, because the EvidenceBundle store is M3/M4.
+- **Individual evidence citations** — the bundle is bound by id and digest, and M4 added the
+  bundle type itself (`chronos.autonomy.evidence`), but citations *inside* a bundle are still
+  not resolved against a store of issued evidence.
 - ~~**Provenance authorship**~~ — **authenticated since M4.** A model authors a
   `ProposedDecision`, which has no provenance field and no id; `chronos.supervisor.queue`
   stamps both from harness-held configuration. The version-pin check now proves authorship
@@ -231,6 +232,48 @@ It does **not** enforce, and these are open gaps rather than decisions:
 themselves: every field of every limits model must be classified ENFORCED or INERT, so a new
 limit cannot arrive undisclosed, and a field classified INERT that the kernel starts reading
 fails the same test.
+
+### What M4 added, and what it deliberately did not
+
+M4 is the milestone that routes something through the gate, and the one that upgrades the
+provenance claim from *agreement* to *authorship*.
+
+- **Deterministic compilation** (`chronos.supervisor.compiler`). An admitted, sized decision
+  becomes a `WheelOrderIntent`. The capability matrix is a whitelist over
+  `(asset class, kind, strategy)` and a test enumerates every combination, so adding an enum
+  member cannot silently become a tradable capability. `scope.exchanges` and
+  `scope.contract_families` finally bind, because both need a *qualified* contract and one
+  now exists.
+- **The limit price is entirely deterministic.** It comes from the supervisor's quote. A
+  decision's `PriceTrigger` is a *condition*, not a price: it can only PREVENT compilation,
+  never create, widen, or reprice an order, and a trigger the supervisor cannot evaluate
+  refuses rather than being ignored.
+- **Provenance is authenticated, not self-reported.** A model authors a `ProposedDecision`,
+  which has no provenance field and no id. `chronos.supervisor.queue` stamps both. The id is
+  a UUIDv5 over *economic content*, which closes R-31's dedup residual: re-proposing the same
+  trade yields the same id and is caught as a replay, while rewording a thesis does not mint a
+  fresh retry budget.
+- **A bounded, read-only tool surface** (`chronos.autonomy.tools`). `ToolKind` is
+  `{READ, DECISION}` — there is no write kind, so the reference project's defect (one registry
+  mixing read tools with direct broker writes) has no vocabulary here. Handlers receive an
+  evidence bundle and nothing else, the registry freezes at startup, and unknown names refuse.
+- **EvidenceBundles** (`chronos.autonomy.evidence`) are immutable, versioned, digest-pinned,
+  and redacted *by shape*: there is no field for an account number or a credential, plus a
+  tripwire that refuses to issue a bundle containing forbidden markers.
+
+**Known gaps, all tracked:**
+
+- **Model isolation is a code boundary, not a process boundary (R-35).** ADR-0016 §3 wants the
+  model worker outside the broker-writing process. What exists is a tested *import* boundary;
+  it does not sandbox Python. **This blocks unattended `LIVE_AUTONOMOUS` promotion.**
+- **There is no live provider harness.** Nothing in Chronos calls a model. `HarnessIdentity`
+  describes what such a harness must supply; the harness itself is not built, so the whole
+  autonomy path is exercised by tests and by nothing else.
+- **Prompt injection is bounded, not solved (R-30).** The claim is only that an injection
+  cannot exceed the mandate — not that it cannot influence a proposal.
+- **Nothing yet calls the compiler in production.** The supervisor's pieces exist and are
+  tested end to end in isolation, but no runtime loop wires admission → sizing → compilation →
+  `OrderManagementService`. That wiring, and the session-counter feed it would provide, is M5.
 
 ### What M3 added, and what it deliberately did not
 

@@ -1,5 +1,66 @@
 # CHANGELOG
 
+## [Unreleased] — M4: the gate finally has something routed through it (2026-07-25)
+
+Two milestones' worth of disclosed bounds close here: the gateway stops being "a gate with
+nothing routed through it", and the version-pin check stops being *agreement* and becomes
+*authorship*.
+
+### Deterministic compilation (`chronos.supervisor.compiler`)
+- An admitted, sized decision becomes a `WheelOrderIntent`. The **capability matrix is a
+  whitelist** over `(asset class, kind, strategy)`, and a test enumerates every combination —
+  which is how you prove a whitelist is one rather than trusting that it is. Adding an enum
+  member cannot silently become a tradable capability. Naked shorts, futures, futures options
+  and multi-leg spreads map to nothing, and each absence is a safety property: constructing a
+  spread one leg at a time is exactly the temporary naked exposure ADR-0016 §6 forbids.
+- **`scope.exchanges` and `scope.contract_families` bind.** M2 disclosed them as unenforceable
+  because they need a *qualified* contract; one now exists. The contract is an input rather
+  than a lookup — resolution needs a broker, and a module that reached a broker would be one
+  the model could reach through — and it is re-checked rather than trusted.
+- **The limit price is entirely deterministic.** I corrected my own first draft here: it read
+  `PriceTrigger.value` as a limit price and clamped it, which was a semantic stretch dressed
+  up as a safety feature. A `PriceTrigger` is a *condition*. Reading the contract correctly
+  gives the stronger guarantee — there is no model input to clamp. The trigger can only
+  PREVENT compilation, and one the supervisor cannot evaluate refuses rather than being
+  ignored, because silently dropping it would let a model attach conditions that look
+  protective and do nothing.
+- The passive order form is preferred when both are permitted (paying the spread should be an
+  explicit grant); tick conformance rounds *away* from aggression; a crossed book refuses.
+
+### Provenance is authenticated (`chronos.supervisor.queue`)
+- The decision contract is split, and **the split is the control**. A model may author only a
+  `ProposedDecision`, which has no provenance field and no id — there is nothing to forge.
+  The writer, outside the model process, stamps both from harness-held configuration.
+- Re-stamping an already-attributed decision is refused, or the boundary itself would become
+  the forgery tool.
+- **The id is a UUIDv5 over economic content**, which closes R-31's dedup residual. A
+  model-chosen id would have escaped the re-submission bound by being fresh each time.
+  Narrative is excluded, so rewording a thesis does not hand back the retry budget.
+
+### The model's world (`chronos.autonomy.evidence`, `chronos.autonomy.tools`)
+- **EvidenceBundles** are immutable, versioned, digest-pinned, and redacted *by shape*: no
+  field exists for an account number or credential, plus a tripwire at issue time.
+- **The tool surface has no write kind.** `ToolKind` is `{READ, DECISION}`, so the reference
+  project's defect — one registry mixing read tools with direct broker write functions — has
+  no vocabulary here. Handlers receive a bundle and nothing else (the signature is the
+  sandbox), the registry freezes at startup, and unknown names refuse rather than near-matching.
+- **R-30 (prompt injection) is bounded and tested, not solved.** Chronos claims only that an
+  injection cannot become a trade the mandate would not otherwise have permitted. Injected
+  narrative is proven to change no compiled order parameter byte-for-byte, not to change the
+  decision id, and an injected size is still clamped. External text is carried verbatim and
+  marked untrusted rather than sanitized — stripping it would destroy the record of what the
+  model was actually shown.
+
+### Also
+- R-31 **closed**. R-30 → MITIGATED (bounded). New: **R-35** — model isolation is a code
+  boundary, not a process boundary, which blocks unattended `LIVE_AUTONOMOUS` alongside R-32.
+- Disclosed plainly: **no live provider harness exists**, so nothing in Chronos calls a model,
+  and no runtime loop yet wires admission → sizing → compilation → `OrderManagementService`.
+
+### Gates
+ruff clean, ruff format clean, mypy --strict clean (201 files), pytest 2122 passed / 1
+credential-gated skip. No test sends an order.
+
 ## [Unreleased] — M3: the supervisor gets a memory (2026-07-25)
 
 M2 shipped a gateway with no state, which left three guarantees unenforceable. All three
