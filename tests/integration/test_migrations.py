@@ -38,6 +38,7 @@ _V5_TABLES = {
     "autonomy_mandate_activations",
     "autonomy_session_counters",
     "autonomy_decision_attempts",
+    "autonomy_owner_alerts",
 }
 
 # Frozen v2 baseline (the pre-alembic create_all schema, migration 0001 no-op).

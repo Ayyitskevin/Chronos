@@ -49,6 +49,16 @@ from chronos.supervisor.admission import (
     SupervisorState,
     admit,
 )
+from chronos.supervisor.alerts import (
+    ALERT_STREAM,
+    AlertSeverity,
+    OwnerAlert,
+    acknowledge,
+    alert_for_degradation,
+    alert_for_refusal,
+    raise_alert,
+    unacknowledged,
+)
 from chronos.supervisor.durable import (
     AUTHORITY_STREAM,
     DECISION_STREAM,
@@ -58,6 +68,7 @@ from chronos.supervisor.durable import (
 from chronos.supervisor.sizing import AccountEvidence, SizingOutcome, size_order
 
 __all__ = [
+    "ALERT_STREAM",
     "AUTHORITY_STREAM",
     "DECISION_STREAM",
     "MAX_RESUBMISSIONS",
@@ -65,13 +76,20 @@ __all__ = [
     "AdmissionCheck",
     "AdmissionOutcome",
     "AdmissionRefusal",
+    "AlertSeverity",
     "DegradedReason",
     "MandateActivation",
     "MarketDataEvidence",
+    "OwnerAlert",
     "SessionCounters",
     "SizingOutcome",
     "SupervisorState",
+    "acknowledge",
     "admit",
+    "alert_for_degradation",
+    "alert_for_refusal",
     "build_state",
+    "raise_alert",
     "size_order",
+    "unacknowledged",
 ]

@@ -617,3 +617,33 @@ class AutonomyDecisionAttemptRow(Base):
     refusals: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     first_seen_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
     last_seen_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class AutonomyOwnerAlertRow(Base):
+    """Something the owner must see, durable until they acknowledge it.
+
+    ADR-0016 §8 requires four things when the system degrades: create no new
+    exposure, permit deterministic risk reduction, *record the denial*, and
+    *alert the owner*. M2 did the first three. This table is the fourth.
+
+    Alerts are acknowledged, never deleted: an alert that can vanish cannot
+    prove the owner was told, which is the only thing an alert is for.
+    """
+
+    __tablename__ = "autonomy_owner_alerts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account_fingerprint: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    severity: Mapped[str] = mapped_column(String(16), nullable=False)
+    kind: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    detail: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    raised_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    acknowledged_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    acknowledged_note: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    #: How many times this same condition recurred before acknowledgement.
+    #: Repeats are folded into one row so a degraded loop cannot bury the
+    #: alert list under thousands of identical entries -- an alert nobody can
+    #: read is an alert nobody receives.
+    occurrences: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)

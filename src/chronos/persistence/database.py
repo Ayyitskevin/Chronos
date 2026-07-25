@@ -65,6 +65,7 @@ _ACCOUNT_SCOPED_TABLES = (
     "autonomy_mandate_activations",
     "autonomy_session_counters",
     "autonomy_decision_attempts",
+    "autonomy_owner_alerts",
 )
 
 

@@ -53,12 +53,13 @@ from chronos.autonomy import (
 from chronos.domain.enums import DataQuality
 from chronos.persistence import hash_chain
 from chronos.persistence.database import Database
-from chronos.persistence.schema import HashChainRow
+from chronos.persistence.schema import AutonomyOwnerAlertRow, HashChainRow
 from chronos.supervisor import (
     AdmissionRefusal,
     DegradedReason,
     MarketDataEvidence,
     admit,
+    alerts,
 )
 from chronos.supervisor import durable as dur
 
@@ -678,3 +679,335 @@ def test_the_counter_and_its_journal_entry_commit_together(session: Session) -> 
     assert admitted == frozenset({"d-1"})
     assert refusals == {}
     assert chain.records == 1
+
+
+# ------------------------------------------------------------- owner alerting
+#
+# ADR-0016 section 8's fourth clause: "record the denial, AND alert the owner."
+# M2 did the first three. These pin the fourth, including its honest boundary:
+# the channel is pull, not push, and an owner who is not looking is not told.
+
+
+def test_a_degraded_refusal_alerts_the_owner(session: Session) -> None:
+    mandate = _mandate(loss=LossLimits(max_session_loss_usd=Decimal(100)))
+    _activate(session, mandate)
+    dur.record_activity(
+        session, account_fingerprint=_FINGERPRINT, now=_NOW, realized_loss_usd=Decimal(500)
+    )
+    outcome = admit(_decision(), mandate, _state(session, mandate))
+    assert outcome.admitted is False
+
+    alerts.alert_for_refusal(
+        session,
+        account_fingerprint=_FINGERPRINT,
+        decision_id="d-1",
+        outcome=outcome,
+        now=_NOW,
+    )
+    pending = alerts.unacknowledged(session, account_fingerprint=_FINGERPRINT)
+    assert len(pending) == 1
+    assert pending[0].severity is alerts.AlertSeverity.WARNING
+
+
+def test_an_ordinary_scope_refusal_does_not_alert(session: Session) -> None:
+    """A gateway that alerts on every disagreement trains the owner to ignore it.
+
+    Then the alert that matters is ignored too. Alerting is deliberately narrow:
+    it fires when the SYSTEM is wrong, not when the model is.
+    """
+
+    mandate = _mandate()
+    _activate(session, mandate)
+    outcome = admit(_decision(symbol="TSLA"), mandate, _state(session, mandate))
+    assert outcome.refusal is AdmissionRefusal.INSTRUMENT_NOT_PERMITTED
+
+    assert (
+        alerts.alert_for_refusal(
+            session,
+            account_fingerprint=_FINGERPRINT,
+            decision_id="d-1",
+            outcome=outcome,
+            now=_NOW,
+        )
+        is None
+    )
+    assert alerts.unacknowledged(session, account_fingerprint=_FINGERPRINT) == ()
+
+
+def test_an_admitted_decision_raises_no_alert(session: Session) -> None:
+    mandate = _mandate()
+    _activate(session, mandate)
+    outcome = admit(_decision(), mandate, _state(session, mandate))
+    assert outcome.admitted is True
+    assert (
+        alerts.alert_for_refusal(
+            session,
+            account_fingerprint=_FINGERPRINT,
+            decision_id="d-1",
+            outcome=outcome,
+            now=_NOW,
+        )
+        is None
+    )
+
+
+def test_repeat_conditions_fold_into_one_row(session: Session) -> None:
+    """A degraded loop must not bury every other alert under identical entries."""
+
+    for index in range(500):
+        alerts.raise_alert(
+            session,
+            account_fingerprint=_FINGERPRINT,
+            severity=alerts.AlertSeverity.WARNING,
+            kind="degraded.market_data",
+            summary="stale quotes",
+            now=_NOW + timedelta(seconds=index),
+        )
+    pending = alerts.unacknowledged(session, account_fingerprint=_FINGERPRINT)
+    assert len(pending) == 1
+    assert pending[0].occurrences == 500
+    assert pending[0].is_recurring is True
+
+
+def test_severity_escalates_but_never_downgrades(session: Session) -> None:
+    """A later INFO must not quietly downgrade a CRITICAL nobody has seen."""
+
+    alerts.raise_alert(
+        session,
+        account_fingerprint=_FINGERPRINT,
+        severity=alerts.AlertSeverity.CRITICAL,
+        kind="degraded.broker",
+        summary="broker unreachable",
+        now=_NOW,
+    )
+    alerts.raise_alert(
+        session,
+        account_fingerprint=_FINGERPRINT,
+        severity=alerts.AlertSeverity.INFO,
+        kind="degraded.broker",
+        summary="broker flapped",
+        now=_NOW,
+    )
+    pending = alerts.unacknowledged(session, account_fingerprint=_FINGERPRINT)
+    assert pending[0].severity is alerts.AlertSeverity.CRITICAL
+
+
+def test_acknowledgement_requires_a_note(session: Session) -> None:
+    """ "Acknowledged" with no reason is indistinguishable from a stray click."""
+
+    row = alerts.raise_alert(
+        session,
+        account_fingerprint=_FINGERPRINT,
+        severity=alerts.AlertSeverity.WARNING,
+        kind="k",
+        summary="s",
+        now=_NOW,
+    )
+    with pytest.raises(ValueError, match="requires a note"):
+        alerts.acknowledge(
+            session, account_fingerprint=_FINGERPRINT, alert_id=row.id, note="  ", now=_NOW
+        )
+
+
+def test_an_acknowledged_alert_is_kept_not_deleted(session: Session) -> None:
+    """An alert that can vanish cannot prove the owner was told."""
+
+    row = alerts.raise_alert(
+        session,
+        account_fingerprint=_FINGERPRINT,
+        severity=alerts.AlertSeverity.WARNING,
+        kind="k",
+        summary="s",
+        now=_NOW,
+    )
+    assert (
+        alerts.acknowledge(
+            session,
+            account_fingerprint=_FINGERPRINT,
+            alert_id=row.id,
+            note="investigated; stale feed, restarted",
+            now=_NOW,
+        )
+        is True
+    )
+    assert alerts.unacknowledged(session, account_fingerprint=_FINGERPRINT) == ()
+    persisted = session.get(AutonomyOwnerAlertRow, row.id)
+    assert persisted is not None
+    assert persisted.acknowledged_note.startswith("investigated")
+
+
+def test_acknowledging_the_same_alert_twice_reports_it(session: Session) -> None:
+    row = alerts.raise_alert(
+        session,
+        account_fingerprint=_FINGERPRINT,
+        severity=alerts.AlertSeverity.INFO,
+        kind="k",
+        summary="s",
+        now=_NOW,
+    )
+    assert alerts.acknowledge(
+        session, account_fingerprint=_FINGERPRINT, alert_id=row.id, note="seen", now=_NOW
+    )
+    assert not alerts.acknowledge(
+        session, account_fingerprint=_FINGERPRINT, alert_id=row.id, note="again", now=_NOW
+    )
+
+
+def test_a_new_occurrence_after_acknowledgement_opens_a_fresh_alert(session: Session) -> None:
+    """Otherwise a resolved-then-recurring condition would stay silent."""
+
+    first = alerts.raise_alert(
+        session,
+        account_fingerprint=_FINGERPRINT,
+        severity=alerts.AlertSeverity.WARNING,
+        kind="degraded.broker",
+        summary="unreachable",
+        now=_NOW,
+    )
+    alerts.acknowledge(
+        session, account_fingerprint=_FINGERPRINT, alert_id=first.id, note="fixed", now=_NOW
+    )
+    alerts.raise_alert(
+        session,
+        account_fingerprint=_FINGERPRINT,
+        severity=alerts.AlertSeverity.WARNING,
+        kind="degraded.broker",
+        summary="unreachable again",
+        now=_NOW + timedelta(hours=1),
+    )
+    pending = alerts.unacknowledged(session, account_fingerprint=_FINGERPRINT)
+    assert len(pending) == 1
+    assert pending[0].occurrences == 1
+
+
+def test_alerts_are_per_account(session: Session) -> None:
+    alerts.raise_alert(
+        session,
+        account_fingerprint=_FINGERPRINT,
+        severity=alerts.AlertSeverity.CRITICAL,
+        kind="k",
+        summary="s",
+        now=_NOW,
+    )
+    assert alerts.unacknowledged(session, account_fingerprint="b" * 64) == ()
+
+
+def test_alerts_sort_most_severe_first(session: Session) -> None:
+    for severity, kind in (
+        (alerts.AlertSeverity.INFO, "a"),
+        (alerts.AlertSeverity.CRITICAL, "b"),
+        (alerts.AlertSeverity.WARNING, "c"),
+    ):
+        alerts.raise_alert(
+            session,
+            account_fingerprint=_FINGERPRINT,
+            severity=severity,
+            kind=kind,
+            summary=kind,
+            now=_NOW,
+        )
+    pending = alerts.unacknowledged(session, account_fingerprint=_FINGERPRINT)
+    assert [alert.severity for alert in pending] == [
+        alerts.AlertSeverity.CRITICAL,
+        alerts.AlertSeverity.WARNING,
+        alerts.AlertSeverity.INFO,
+    ]
+
+
+def test_a_severity_threshold_filters(session: Session) -> None:
+    alerts.raise_alert(
+        session,
+        account_fingerprint=_FINGERPRINT,
+        severity=alerts.AlertSeverity.INFO,
+        kind="k",
+        summary="s",
+        now=_NOW,
+    )
+    assert (
+        alerts.unacknowledged(
+            session,
+            account_fingerprint=_FINGERPRINT,
+            minimum_severity=alerts.AlertSeverity.WARNING,
+        )
+        == ()
+    )
+
+
+def test_degradation_alerts_even_when_no_decision_arrived(session: Session) -> None:
+    """A system that only reports problems when a model asks stays silent
+    exactly when the model plane is the thing that failed."""
+
+    raised = alerts.alert_for_degradation(
+        session,
+        account_fingerprint=_FINGERPRINT,
+        reasons=(
+            DegradedReason(subsystem="model", detail="worker down", blocks_risk_reduction=False),
+            DegradedReason(subsystem="reconciliation", detail="positions unproven"),
+        ),
+        now=_NOW,
+    )
+    assert len(raised) == 2
+    pending = alerts.unacknowledged(session, account_fingerprint=_FINGERPRINT)
+    # The one that blocks risk reduction is the more serious of the two.
+    assert pending[0].severity is alerts.AlertSeverity.CRITICAL
+    assert pending[0].kind == "degraded.reconciliation"
+
+
+def test_alerts_are_chained(session: Session) -> None:
+    row = alerts.raise_alert(
+        session,
+        account_fingerprint=_FINGERPRINT,
+        severity=alerts.AlertSeverity.WARNING,
+        kind="k",
+        summary="s",
+        now=_NOW,
+    )
+    alerts.acknowledge(
+        session, account_fingerprint=_FINGERPRINT, alert_id=row.id, note="seen", now=_NOW
+    )
+    verification = hash_chain.verify(session, f"{alerts.ALERT_STREAM}:{_FINGERPRINT}")
+    assert verification.ok is True
+    assert verification.records == 2
+
+
+def test_the_alerting_module_opens_no_network_connection() -> None:
+    """The honest boundary, enforced structurally rather than promised in prose.
+
+    The docstring says this is a pull channel with no outbound delivery. If
+    someone later adds an SMTP or webhook sender here, that claim becomes false
+    silently -- and a half-working push channel is worse than none, because
+    "no alerts" stops meaning "unknown" and starts meaning "all clear".
+    """
+
+    import ast
+    import inspect as inspect_module
+
+    from chronos.supervisor import alerts as alerts_module
+
+    tree = ast.parse(inspect_module.getsource(alerts_module))
+    imported: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.append(node.module)
+    forbidden = {
+        "smtplib",
+        "socket",
+        "http",
+        "http.client",
+        "urllib",
+        "urllib.request",
+        "requests",
+        "httpx",
+        "email",
+        "subprocess",
+    }
+    offenders = [
+        name for name in imported if name.split(".")[0] in {f.split(".")[0] for f in forbidden}
+    ]
+    assert offenders == [], (
+        f"the alerting module gained an egress dependency: {offenders}. Out-of-band "
+        "delivery is a disclosed gap and a promotion criterion, not something to add "
+        "quietly next to a trading system."
+    )
