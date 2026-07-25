@@ -29,11 +29,10 @@ rather than a matter of naming:
   own decision even over an authenticated channel.
 - Everything downstream is the same gate stack a proposal from any source
   faces. The route adds no authority; it only supplies the transport.
-- **Submission is not wired here.** The route runs the cycle in shadow: the full
-  walk happens, an intent may compile, and nothing is sent. Turning that on is a
-  separate, deliberate wiring step, and defaulting it off means an operator who
-  exposes this endpoint before thinking about the last step has still not
-  authorized a trade.
+- **The cycle does not run in the request (M7).** The route validates, stores
+  the raw payload in a bounded durable queue, and returns. The runtime judges
+  queued proposals on its own tick, so the rate of broker interaction is set by
+  configuration rather than by however fast a caller can POST.
 
 ## Why the response says so much
 
@@ -121,19 +120,49 @@ async def submit_proposal(
             detail=outcome.refusal,
         )
 
-    # The cycle itself is not wired here. Running it needs an active mandate, an
-    # evidence bundle the supervisor issued, gathered account/quote facts and a
-    # resolved contract — none of which this route may invent, and all of which
-    # belong to a runtime that owns the broker connection. Accepting the
-    # proposal and reporting that it was well-formed is the honest answer until
-    # that runtime exists; it is NOT an order, and nothing was sent.
-    del state
+    # The cycle does NOT run here (M7). Running it inside the request would let
+    # the caller's HTTP schedule drive broker interaction — the unbounded
+    # event-driven shape the runtime design rejects. The proposal is stored
+    # durably and the runtime judges it on its own tick; the queue is bounded so
+    # a runaway worker cannot fill the disk of the process holding the broker
+    # connection.
+    runtime = state.runtime
+    fingerprint = _fingerprint_of(runtime)
+    if not fingerprint:
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+        return ProposalAccepted(
+            accepted=False,
+            stage="INGRESS",
+            refusal="BACKEND_UNSCOPED",
+            detail="this backend is not bound to an account; proposals cannot be queued",
+        )
+    from chronos.supervisor import proposals as proposal_queue
+    from chronos.utils.time import utc_now
+
+    with runtime.database.sessions.begin() as db_session:
+        queued = proposal_queue.enqueue(
+            db_session,
+            account_fingerprint=fingerprint,
+            payload=body.decode("utf-8"),
+            now=utc_now(),
+        )
+    if not queued.queued:
+        # 429: the queue is a load condition the worker should back off from,
+        # not a malformed request or a server fault.
+        response.status_code = status.HTTP_429_TOO_MANY_REQUESTS
+        return ProposalAccepted(
+            accepted=False,
+            stage="INGRESS",
+            refusal="QUEUE_FULL",
+            detail=queued.refusal,
+        )
     return ProposalAccepted(
         accepted=True,
-        stage="INGRESS",
+        stage="QUEUED",
         detail=(
-            "proposal is well-formed and was recorded as received; no autonomy runtime "
-            "is wired to this backend, so nothing was judged or sent"
+            f"proposal is well-formed and queued at depth {queued.pending_depth}; the "
+            "runtime judges it on its own tick. Queued is received, not authorized — "
+            "nothing has been judged or sent"
         ),
     )
 

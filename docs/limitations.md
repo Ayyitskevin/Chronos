@@ -316,13 +316,13 @@ provenance claim from *agreement* to *authorship*.
 
 **Known gaps after M6:**
 
-- **The proposal route does not run the cycle (R-36).** It validates a proposal and reports
-  that no autonomy runtime is wired. Running the cycle needs an active mandate, a
-  supervisor-issued evidence bundle, gathered account/quote facts and a resolved contract —
-  all of which belong to a runtime that owns the broker connection. Until that exists the
-  autonomy path is **reachable but inert**, which is the safe state.
-- **No scheduled runner, and no process supervisor for the worker.** What drives a cycle, how
-  often, and under what supervision is not built.
+- ~~**The proposal route does not run the cycle (R-36)**~~ — **the runtime exists since M7.**
+  The route enqueues into a bounded durable queue; `AutonomyRuntime` judges on a time-driven
+  tick where events are hints that coalesce to a floor, never triggers. What remains of R-36:
+  the runtime is a class, not a daemon — no shipped entrypoint constructs it with a real
+  `FactGatherer` and handoff, so wiring it into the backend lifespan or a service unit is the
+  operational step left.
+- **No process supervisor for the model worker.** Running the external worker is operational.
 - **R-32's residual:** a local file does not follow you off the machine. Genuinely unattended
   operation *away from the host* still needs a networked channel and its own ADR.
 - **R-34's residual:** market *calendar day*, not session calendar — no holidays or half-days.

@@ -655,3 +655,35 @@ class AutonomyOwnerAlertRow(Base):
     #: read is an alert nobody receives.
     occurrences: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     last_seen_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class AutonomyProposalQueueRow(Base):
+    """One proposal received from an external worker, awaiting a cycle (v7, M7).
+
+    The route accepts and **stores**; the runtime dequeues and judges. That
+    split is deliberate. Running a cycle inside the request would mean an
+    external worker's HTTP call drove broker interaction on its own schedule,
+    which is precisely the unbounded event-driven shape M7 rejects: the rate
+    would be set by the caller rather than by us.
+
+    The **raw payload** is stored, not a parsed object. The ingress is the
+    single parsing authority, and re-serializing a parsed proposal would create
+    a second representation that could drift from what was actually sent — so
+    the bytes that arrived are the bytes that are judged.
+    """
+
+    __tablename__ = "autonomy_proposal_queue"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account_fingerprint: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    #: Exactly as received. Never re-serialized from a parsed object.
+    payload: Mapped[str] = mapped_column(Text, nullable=False)
+    received_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    #: PENDING until a cycle has judged it; then PROCESSED. A queued proposal
+    #: authorizes nothing — it has been *received*, which is not the same thing.
+    status: Mapped[str] = mapped_column(String(16), index=True, default="PENDING", nullable=False)
+    processed_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    #: Where the cycle stopped, and why. Kept on the row so an operator can see
+    #: the outcome of a specific submission without correlating streams.
+    cycle_stage: Mapped[str] = mapped_column(String(32), default="", nullable=False)
+    refusal: Mapped[str] = mapped_column(String(64), default="", nullable=False)

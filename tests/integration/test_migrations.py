@@ -41,6 +41,10 @@ _V5_TABLES = {
     "autonomy_owner_alerts",
 }
 
+_V7_TABLES = {
+    "autonomy_proposal_queue",
+}
+
 # Frozen v2 baseline (the pre-alembic create_all schema, migration 0001 no-op).
 # This set is deliberately hardcoded, NOT derived from Base.metadata, so a table
 # added to the models without a migration cannot hide inside it.
@@ -63,7 +67,7 @@ _V2_BASELINE_TABLES = {
 }
 
 # The complete table universe the migration chain accounts for through head.
-_ALL_MIGRATED_TABLES = _V2_BASELINE_TABLES | _V3_TABLES | _V4_TABLES | _V5_TABLES
+_ALL_MIGRATED_TABLES = _V2_BASELINE_TABLES | _V3_TABLES | _V4_TABLES | _V5_TABLES | _V7_TABLES
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -73,7 +77,7 @@ def _make_v2_database(path: Path) -> None:
 
     url = f"sqlite:///{path}"
     engine = sa.create_engine(url)
-    post_v2 = _V3_TABLES | _V4_TABLES | _V5_TABLES
+    post_v2 = _V3_TABLES | _V4_TABLES | _V5_TABLES | _V7_TABLES
     v2_tables = [table for name, table in Base.metadata.tables.items() if name not in post_v2]
     Base.metadata.create_all(engine, tables=v2_tables)
     with engine.begin() as connection:
@@ -91,7 +95,7 @@ def _make_v3_database(path: Path) -> None:
 
     url = f"sqlite:///{path}"
     engine = sa.create_engine(url)
-    post_v3 = _V4_TABLES | _V5_TABLES
+    post_v3 = _V4_TABLES | _V5_TABLES | _V7_TABLES
     v3_tables = [table for name, table in Base.metadata.tables.items() if name not in post_v3]
     Base.metadata.create_all(engine, tables=v3_tables)
     with engine.begin() as connection:
@@ -109,7 +113,8 @@ def _make_v4_database(path: Path) -> None:
 
     url = f"sqlite:///{path}"
     engine = sa.create_engine(url)
-    v4_tables = [table for name, table in Base.metadata.tables.items() if name not in _V5_TABLES]
+    post_v4 = _V5_TABLES | _V7_TABLES
+    v4_tables = [table for name, table in Base.metadata.tables.items() if name not in post_v4]
     Base.metadata.create_all(engine, tables=v4_tables)
     with engine.begin() as connection:
         connection.execute(
@@ -201,7 +206,7 @@ def test_v4_database_upgrades_to_current_schema(tmp_path: Path) -> None:
 
     engine = sa.create_engine(f"sqlite:///{db_path}")
     tables = set(sa.inspect(engine).get_table_names())
-    assert tables >= _V5_TABLES
+    assert tables >= _V5_TABLES | _V7_TABLES
     with engine.connect() as connection:
         version = connection.execute(
             sa.text("SELECT version FROM schema_version ORDER BY id DESC LIMIT 1")
@@ -224,7 +229,7 @@ def test_fresh_database_needs_no_alembic(tmp_path: Path) -> None:
     try:
         database.initialize()
         inspector = sa.inspect(database.engine)
-        assert set(inspector.get_table_names()) >= _V3_TABLES | _V4_TABLES | _V5_TABLES
+        assert set(inspector.get_table_names()) >= _V3_TABLES | _V4_TABLES | _V5_TABLES | _V7_TABLES
     finally:
         database.dispose()
 
