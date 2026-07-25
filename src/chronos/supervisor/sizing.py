@@ -15,6 +15,13 @@ Rules, in order of severity:
   ``CapitalLimits`` ceilings were silently skipped while this docstring claimed
   the result was "never larger than any mandate ceiling". That claim is now
   true because unenforceable limits refuse instead.
+- **Exposure ceilings bound new exposure, not its removal.** On a risk-reducing
+  kind the headroom ceilings do not apply, because an account already over a
+  ceiling has negative headroom and would be refused the very order that brings
+  it back under — a limit that traps you inside the breach it exists to prevent.
+  Such an order is bounded by the position actually held instead, and refused
+  outright when that position is unknown: "closing" more than we hold opens the
+  opposite position.
 - **Zero binds at zero.** A ceiling left at its default authorizes nothing; it
   is not "unset". (The first version skipped zero limits, which inverted
   deny-by-default — see the M2 fix in CHANGELOG.)
@@ -37,7 +44,12 @@ import decimal
 from dataclasses import dataclass
 from decimal import Decimal
 
-from chronos.autonomy import AutonomyMandate, TradableAssetClass
+from chronos.autonomy import (
+    RISK_REDUCING_DECISION_KINDS,
+    AutonomyMandate,
+    DecisionKind,
+    TradableAssetClass,
+)
 
 #: Asset classes whose quantity is a contract count with a multiplier, rather
 #: than a share count. Kept local: the model plane owns no order semantics.
@@ -73,6 +85,14 @@ class AccountEvidence:
     position_notional_usd: Decimal | None = None
     #: Broker-reported maintenance margin currently used.
     maintenance_margin_usd: Decimal | None = None
+    #: Capital already deployed under this mandate, in USD notional. Subtracted
+    #: from ``allocated_capital_usd``, which is a ceiling on the *mandate*, not
+    #: on one order — without this a mandate allocating $50k would authorize a
+    #: $50k order on every pass (M2 review).
+    deployed_capital_usd: Decimal | None = None
+    #: Signed quantity currently held in this instrument, in the same units the
+    #: order would use. A risk-reducing order may never exceed it.
+    position_quantity: Decimal | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +105,9 @@ class SizingOutcome:
     constraints: tuple[str, ...]
     #: Which constraint produced the final number. Makes a clamp explainable.
     binding_constraint: str = ""
+    #: True when this was sized as a risk-reducing order, so exposure-headroom
+    #: ceilings were deliberately not applied and the position held bounded it.
+    risk_reducing: bool = False
     refusal: str = ""
 
     @property
@@ -114,6 +137,7 @@ def size_order(
     *,
     mandate: AutonomyMandate,
     asset_class: TradableAssetClass,
+    decision_kind: DecisionKind,
     reference_price: Decimal,
     multiplier: Decimal,
     evidence: AccountEvidence,
@@ -126,6 +150,14 @@ def size_order(
     from the decision — the model never supplies the numbers its own size is
     computed from. ``whole_units`` defaults to per-asset-class semantics:
     fractional for crypto, whole units everywhere else.
+
+    ``decision_kind`` decides which ceilings apply. Exposure *headroom* ceilings
+    bind only on decisions that create exposure: an account already over its
+    gross-exposure ceiling has negative headroom, and applying that to a CLOSE
+    would refuse the very order that brings it back under — a limit that locks
+    you into the breach it exists to prevent. A risk-reducing order is instead
+    bounded by the position actually held, which is the tighter and more
+    meaningful constraint, and is refused outright when that position is unknown.
     """
 
     constraints: list[str] = []
@@ -133,6 +165,7 @@ def size_order(
         return _size(
             mandate=mandate,
             asset_class=asset_class,
+            decision_kind=decision_kind,
             reference_price=reference_price,
             multiplier=multiplier,
             evidence=evidence,
@@ -155,6 +188,7 @@ def _size(
     *,
     mandate: AutonomyMandate,
     asset_class: TradableAssetClass,
+    decision_kind: DecisionKind,
     reference_price: Decimal,
     multiplier: Decimal,
     evidence: AccountEvidence,
@@ -199,6 +233,23 @@ def _size(
         candidates.append((requested_quantity, "model request"))
         constraints.append(f"model requested {requested_quantity}")
 
+    reducing = decision_kind in RISK_REDUCING_DECISION_KINDS
+    if reducing:
+        # A risk-reducing order is bounded by what is actually held, not by
+        # headroom under an exposure ceiling. Unknown position => refuse:
+        # "closing" more than we hold flips the position short, which is the
+        # opposite of risk reduction and is exactly the unbounded exposure the
+        # asset-class matrix forbids.
+        held = evidence.position_quantity
+        if held is None:
+            return _refuse(
+                requested_quantity,
+                constraints,
+                f"a {decision_kind.value} decision may not be sized without the position "
+                "actually held; closing more than we hold would open the opposite position",
+            )
+        bind(abs(held), f"position held {held}")
+
     # --- ceilings that need only the mandate --------------------------------
     bind(
         capital.max_order_notional_usd / unit_notional,
@@ -214,10 +265,26 @@ def _size(
             Decimal(capital.max_shares_per_order),
             f"max_shares_per_order {capital.max_shares_per_order}",
         )
-    bind(
-        capital.allocated_capital_usd / unit_notional,
-        f"allocated_capital_usd {capital.allocated_capital_usd}",
-    )
+    if reducing:
+        # Everything below measures room to ADD exposure. None of it can bound
+        # an order that removes exposure, and applying it would refuse the trade
+        # that unwinds a breach.
+        return _finish(
+            candidates, constraints, requested_quantity, asset_class, whole_units, reducing=True
+        )
+
+    missing: list[str] = []
+    # `allocated_capital_usd` caps the whole mandate, not one order. Without
+    # subtracting what is already deployed it would re-authorize the full
+    # allocation on every pass (M2 review), so absent evidence refuses.
+    if evidence.deployed_capital_usd is None:
+        missing.append(f"allocated_capital_usd {capital.allocated_capital_usd}")
+    else:
+        bind(
+            (capital.allocated_capital_usd - evidence.deployed_capital_usd) / unit_notional,
+            f"allocated_capital_usd {capital.allocated_capital_usd} less deployed "
+            f"{evidence.deployed_capital_usd}",
+        )
 
     # --- floors: subtracted, so a floor genuinely reserves -------------------
     spendable = evidence.total_cash_usd - capital.min_cash_floor_usd
@@ -232,7 +299,6 @@ def _size(
     # A limit the mandate sets but whose evidence is absent REFUSES. Ignoring it
     # would make the "never larger than any mandate ceiling" claim false, which
     # is exactly what the M2 review found.
-    missing: list[str] = []
     for cap, used, label in (
         (
             concentration.max_symbol_exposure_pct * evidence.net_liquidation_usd,
@@ -293,6 +359,22 @@ def _size(
                 f"max_margin_utilization_pct {capital.max_margin_utilization_pct} (headroom)"
             )
 
+    return _finish(
+        candidates, constraints, requested_quantity, asset_class, whole_units, reducing=False
+    )
+
+
+def _finish(
+    candidates: list[tuple[Decimal, str]],
+    constraints: list[str],
+    requested_quantity: Decimal | None,
+    asset_class: TradableAssetClass,
+    whole_units: bool | None,
+    *,
+    reducing: bool,
+) -> SizingOutcome:
+    """Apply the tightest candidate and round. Shared by both sizing paths."""
+
     quantity, binding = min(candidates, key=lambda pair: pair[0])
     fractional = asset_class in _FRACTIONAL_CLASSES
     if whole_units if whole_units is not None else not fractional:
@@ -304,6 +386,7 @@ def _size(
             requested=requested_quantity,
             constraints=tuple(constraints),
             binding_constraint=binding,
+            risk_reducing=reducing,
             refusal=f"no quantity survives the mandate limits; binding constraint: {binding}",
         )
     return SizingOutcome(
@@ -311,4 +394,5 @@ def _size(
         requested=requested_quantity,
         constraints=tuple(constraints),
         binding_constraint=binding,
+        risk_reducing=reducing,
     )

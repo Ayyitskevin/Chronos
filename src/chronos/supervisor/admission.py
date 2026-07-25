@@ -31,7 +31,9 @@ That is corrected here, and the honest list is kept in one place:
   drawdown) and ``ActivityLimits`` in full (orders, cancellations, replacements,
   turnover per session). ``SupervisorState.degraded_reasons`` is the only
   interim lever — a caller that has breached a loss or activity limit must pass
-  a degraded reason.
+  a degraded reason. A breached loss limit should normally be reported with
+  ``blocks_risk_reduction=False``, so the position can still be closed: that is
+  what a loss limit is *for*.
 - **Not enforced anywhere, pending contract compilation (M2 follow-on):**
   ``scope.exchanges`` and ``scope.contract_families``. A decision names no
   exchange by construction, so these can only be checked against a *qualified*
@@ -68,6 +70,7 @@ from enum import StrEnum
 from chronos.autonomy import (
     EXPOSURE_CREATING_DECISION_KINDS,
     MINIMUM_PROMOTION_FOR_MODE,
+    RISK_REDUCING_DECISION_KINDS,
     SUBMITTING_AUTONOMY_MODES,
     AITradeDecision,
     AutonomyMandate,
@@ -130,6 +133,7 @@ class AdmissionRefusal(StrEnum):
     MARKET_DATA_UNAVAILABLE = "MARKET_DATA_UNAVAILABLE"
     MARKET_DATA_STALE = "MARKET_DATA_STALE"
     DEGRADED_STATE = "DEGRADED_STATE"
+    DEGRADED_RISK_REDUCTION_ONLY = "DEGRADED_RISK_REDUCTION_ONLY"
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,6 +160,38 @@ class MarketDataEvidence:
     relative_spread: Decimal | None = None
     option_volume: int | None = None
     open_interest: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DegradedReason:
+    """One subsystem that is unavailable, ambiguous, stale, or inconsistent.
+
+    ADR-0016 §8's degraded-state rule has two halves, and the M2 review found
+    only the first implemented: *create no new exposure*, **and** *permit
+    deterministic risk-reducing behavior*. Refusing a CLOSE because the system
+    is degraded is not conservative — it traps existing exposure at exactly the
+    moment the operator most wants out.
+
+    Which half applies depends on the subsystem, so the caller must say:
+
+    - A stale quote feed or an unreachable model stops new exposure while
+      leaving position truth intact, so closing is still safe:
+      ``blocks_risk_reduction=False``.
+    - Unreconciled positions, a lost lease, or an unreachable broker mean we do
+      not know what we hold. "Closing" a position we are wrong about *opens* the
+      opposite one, so nothing may proceed: ``blocks_risk_reduction=True``.
+
+    The field defaults to ``True`` deliberately. A caller that has not thought
+    about which kind of degradation this is gets the strictest behavior, and
+    permitting risk reduction is an explicit, reviewable act.
+    """
+
+    subsystem: str
+    detail: str = ""
+    blocks_risk_reduction: bool = True
+
+    def __str__(self) -> str:
+        return f"{self.subsystem}: {self.detail}" if self.detail else self.subsystem
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,7 +239,9 @@ class SupervisorState:
     the broker, market data, clock, database, lease, resolver, risk engine, or
     reconciliation state is unavailable, ambiguous, stale, or inconsistent — or a
     loss/activity limit has been breached, which admission does not itself track
-    — the caller records why here and no new exposure is admitted.
+    — the caller records why here and no new exposure is admitted. Each reason
+    also declares whether risk-reducing decisions may still proceed; see
+    :class:`DegradedReason`.
     """
 
     account_fingerprint: str
@@ -212,7 +250,7 @@ class SupervisorState:
     activation: MandateActivation | None = None
     #: Current process generation, compared against the activation's.
     process_generation: int = 0
-    degraded_reasons: tuple[str, ...] = ()
+    degraded_reasons: tuple[DegradedReason, ...] = ()
     #: Decision ids already admitted; replay protection (ADR-0016 §8).
     admitted_decision_ids: frozenset[str] = frozenset()
     #: Decision ids already refused, with how many times each was re-submitted.
@@ -266,16 +304,11 @@ def admit(
 
     # 2. Degraded state: an AI failure never becomes permission to trade, and
     #    neither does a broker/data/lease failure. Refuse before anything else
-    #    that might look like a green light.
-    if state.degraded_reasons:
-        return _fail(
-            checks,
-            "system_not_degraded",
-            AdmissionRefusal.DEGRADED_STATE,
-            "system state is degraded, so no new exposure may be created: "
-            + "; ".join(state.degraded_reasons),
-        )
-    _ok(checks, "system_not_degraded")
+    #    that might look like a green light — but permit deterministic risk
+    #    reduction where the degradation still leaves position truth intact.
+    outcome = _check_degraded(checks, decision, state)
+    if outcome is not None:
+        return outcome
 
     # 3. Activation and revocation. Authoring a mandate is not enabling it.
     outcome = _check_activation(checks, mandate, state)
@@ -396,6 +429,59 @@ def admit(
     )
 
 
+def _check_degraded(
+    checks: list[AdmissionCheck], decision: AITradeDecision, state: SupervisorState
+) -> AdmissionOutcome | None:
+    """ADR-0016 §8's degraded-state rule, both halves.
+
+    "Create no new exposure, permit only deterministic risk-reducing behavior."
+    The M2 review found only the first half implemented: any degraded reason
+    refused every decision kind, so a degraded system could not be unwound
+    through the gateway at all.
+
+    Precedence is deliberate. A single blocking reason overrides every
+    non-blocking one, because the question is not "how many subsystems are
+    unhealthy" but "do we know what we hold" — and one subsystem that leaves
+    that unknown is enough.
+    """
+
+    if not state.degraded_reasons:
+        _ok(checks, "system_not_degraded")
+        return None
+
+    blocking = tuple(reason for reason in state.degraded_reasons if reason.blocks_risk_reduction)
+    if blocking:
+        return _fail(
+            checks,
+            "system_not_degraded",
+            AdmissionRefusal.DEGRADED_STATE,
+            "system state is degraded in a way that leaves position truth unknown, so "
+            "nothing may proceed — not even a close, which could open the opposite "
+            "position if we are wrong about what we hold: "
+            + "; ".join(str(reason) for reason in blocking),
+        )
+
+    # Every reason permits risk reduction. CANCEL is deliberately excluded:
+    # it is CONTEXT_DEPENDENT, because cancelling a *closing* order increases
+    # net risk, and admission cannot tell which kind of order is targeted.
+    if decision.kind not in RISK_REDUCING_DECISION_KINDS:
+        return _fail(
+            checks,
+            "system_not_degraded",
+            AdmissionRefusal.DEGRADED_RISK_REDUCTION_ONLY,
+            f"system state is degraded, so only risk-reducing decisions may proceed and "
+            f"{decision.kind.value} is not one: "
+            + "; ".join(str(reason) for reason in state.degraded_reasons),
+        )
+    _ok(
+        checks,
+        "system_not_degraded",
+        "degraded; narrowed to risk reduction only: "
+        + "; ".join(str(reason) for reason in state.degraded_reasons),
+    )
+    return None
+
+
 def _check_activation(
     checks: list[AdmissionCheck], mandate: AutonomyMandate, state: SupervisorState
 ) -> AdmissionOutcome | None:
@@ -474,6 +560,7 @@ def _check_version_pins(
                 pins.decision_schema_version,
                 provenance.decision_schema_version,
             ),
+            ("policy_version", pins.policy_version, provenance.policy_version),
         )
         if pinned != actual
     ]

@@ -898,3 +898,65 @@ def test_operator_resolution_refuses_changing_broker_snapshot(
 
     stored = live.service.get("live-stuck")
     assert stored is not None and stored.status is OrderLifecycle.SUBMISSION_UNKNOWN
+
+
+# --- R-24: the pre-transmit single-writer re-check, behaviorally -------------
+#
+# `tests/safety/test_writer_lease_fencing.py` proves `WriterLease.holds()` and
+# `renew()` behave, and that the gate is wired and sits adjacent to the transmit
+# line. Neither of those notices an INVERTED condition: `if still_holds:` would
+# pass every structural guard while transmitting only when the lease is lost.
+# These exercise the gate through a real submission and assert nothing was sent.
+
+
+def test_a_lost_lease_refuses_at_the_transmit_boundary(live: _LiveHarness) -> None:
+    """The split-brain case: this process lost the lease mid-submission."""
+
+    live.arm()
+    live.boundary.bind_lease_verifier(lambda: False)
+    intent = _live_intent()
+    _confirmed(live, intent)
+    outcome = _submit(live, intent)
+    _assert_refused(live, outcome, SubmissionRefusalCode.READ_ONLY_LEASE)
+    # Provably not-sent: a refusal here must never strand the intent, because
+    # the venue never saw it.
+    stored = live.service.get("live-1")
+    assert stored is not None and stored.status is not OrderLifecycle.SUBMISSION_UNKNOWN
+
+
+def test_an_unverifiable_lease_fails_closed_at_the_transmit_boundary(
+    live: _LiveHarness,
+) -> None:
+    """The lease check is the only database call inside the CAS-to-transmit window.
+
+    A database failure there must refuse, not raise: an escaping exception would
+    strand the intent in SUBMISSION_UNKNOWN with nothing sent and no refusal
+    recorded. A lease we cannot verify is a lease we do not have.
+    """
+
+    def _explode() -> bool:
+        raise RuntimeError("database unavailable during the CAS-to-transmit window")
+
+    live.arm()
+    live.boundary.bind_lease_verifier(_explode)
+    intent = _live_intent()
+    _confirmed(live, intent)
+    outcome = _submit(live, intent)
+    _assert_refused(live, outcome, SubmissionRefusalCode.READ_ONLY_LEASE)
+    stored = live.service.get("live-1")
+    assert stored is not None and stored.status is not OrderLifecycle.SUBMISSION_UNKNOWN
+
+
+def test_a_held_lease_still_transmits(live: _LiveHarness) -> None:
+    """Guard the guard: the gate must not refuse a writer that genuinely holds it.
+
+    Without this, a gate hardwired to refuse would pass both tests above.
+    """
+
+    live.arm()
+    live.boundary.bind_lease_verifier(lambda: True)
+    intent = _live_intent()
+    _confirmed(live, intent)
+    outcome = _submit(live, intent)
+    assert outcome.submitted is True  # type: ignore[attr-defined]
+    assert len(live.broker.submit_calls) == 1

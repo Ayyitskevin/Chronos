@@ -52,6 +52,7 @@ from chronos.supervisor import (
     MAX_RESUBMISSIONS,
     AccountEvidence,
     AdmissionRefusal,
+    DegradedReason,
     MandateActivation,
     MarketDataEvidence,
     SupervisorState,
@@ -86,6 +87,7 @@ def _provenance(**overrides: Any) -> DecisionProvenance:
         "prompt_version": "1",
         "tool_schema_version": "1",
         "decision_schema_version": "1",
+        "policy_version": "1",
         "evidence_bundle_id": "eb-1",
         "evidence_bundle_digest": "b" * 64,
         "produced_at": _NOW,
@@ -210,6 +212,7 @@ def _evidence(**overrides: Any) -> AccountEvidence:
         "net_exposure_usd": Decimal(0),
         "position_notional_usd": Decimal(0),
         "maintenance_margin_usd": Decimal(0),
+        "deployed_capital_usd": Decimal(0),
     }
     base.update(overrides)
     return AccountEvidence(**base)
@@ -261,11 +264,109 @@ def test_no_mandate_is_a_refusal_not_a_default() -> None:
 def test_degraded_state_refuses_before_anything_looks_like_a_green_light() -> None:
     """An AI failure -- or a broker/data/lease failure -- never becomes permission."""
 
-    outcome = admit(_decision(), _mandate(), _state(degraded_reasons=("reconciliation stale",)))
+    outcome = admit(
+        _decision(),
+        _mandate(),
+        _state(degraded_reasons=(DegradedReason(subsystem="reconciliation", detail="stale"),)),
+    )
     assert outcome.admitted is False
     assert outcome.refusal is AdmissionRefusal.DEGRADED_STATE
     # And it refused early: nothing about scope or promotion was even reached.
     assert [check.name for check in outcome.checks][-1] == "system_not_degraded"
+
+
+def test_a_degraded_reason_blocks_risk_reduction_unless_it_says_otherwise() -> None:
+    """Deny-by-default applies to the *classification* too, not just the verdict.
+
+    `blocks_risk_reduction` defaults to True, so a caller that constructs a
+    reason without thinking about which kind of degradation it is gets the
+    strictest behavior. Permitting a close is an explicit, reviewable act.
+    """
+
+    assert DegradedReason(subsystem="broker").blocks_risk_reduction is True
+
+
+@pytest.mark.parametrize("kind", [DecisionKind.CLOSE, DecisionKind.REDUCE])
+def test_degraded_state_still_permits_closing_an_existing_position(kind: DecisionKind) -> None:
+    """ADR-0016 section 8 has two halves and the M2 review found only one built.
+
+    "Create no new exposure, permit only deterministic risk-reducing behavior."
+    Refusing a CLOSE because the quote feed went stale traps the position at
+    precisely the moment the owner most wants out. That is not conservative.
+    """
+
+    outcome = admit(
+        _decision(kind=kind, requested_strategy=None, target_client_reference=_TARGET_REF),
+        _mandate(),
+        _state(
+            degraded_reasons=(
+                DegradedReason(
+                    subsystem="model", detail="worker unreachable", blocks_risk_reduction=False
+                ),
+            )
+        ),
+    )
+    assert outcome.admitted is True
+    degraded_check = next(c for c in outcome.checks if c.name == "system_not_degraded")
+    assert "narrowed to risk reduction only" in degraded_check.detail
+
+
+def test_degraded_state_refuses_new_exposure_even_when_risk_reduction_is_allowed() -> None:
+    outcome = admit(
+        _decision(),  # OPEN
+        _mandate(),
+        _state(
+            degraded_reasons=(
+                DegradedReason(subsystem="model", detail="down", blocks_risk_reduction=False),
+            )
+        ),
+    )
+    assert outcome.admitted is False
+    assert outcome.refusal is AdmissionRefusal.DEGRADED_RISK_REDUCTION_ONLY
+
+
+def test_a_cancel_is_refused_while_degraded_because_it_may_increase_risk() -> None:
+    """CANCEL is CONTEXT_DEPENDENT: cancelling a *closing* order raises net risk.
+
+    Admission cannot see which kind of order is targeted, so it cannot treat
+    CANCEL as risk-reducing, and under deny-by-default it must not guess.
+    """
+
+    outcome = admit(
+        _decision(
+            kind=DecisionKind.CANCEL, requested_strategy=None, target_client_reference=_TARGET_REF
+        ),
+        _mandate(),
+        _state(
+            degraded_reasons=(
+                DegradedReason(
+                    subsystem="market_data", detail="stale", blocks_risk_reduction=False
+                ),
+            )
+        ),
+    )
+    assert outcome.admitted is False
+    assert outcome.refusal is AdmissionRefusal.DEGRADED_RISK_REDUCTION_ONLY
+
+
+def test_one_blocking_reason_overrides_every_permissive_one() -> None:
+    """The question is "do we know what we hold", not "how many subsystems are up"."""
+
+    outcome = admit(
+        _decision(
+            kind=DecisionKind.CLOSE, requested_strategy=None, target_client_reference=_TARGET_REF
+        ),
+        _mandate(),
+        _state(
+            degraded_reasons=(
+                DegradedReason(subsystem="model", detail="down", blocks_risk_reduction=False),
+                DegradedReason(subsystem="reconciliation", detail="positions unproven"),
+            )
+        ),
+    )
+    assert outcome.admitted is False
+    assert outcome.refusal is AdmissionRefusal.DEGRADED_STATE
+    assert "position truth unknown" in outcome.detail
 
 
 def test_replaying_an_admitted_decision_is_refused() -> None:
@@ -278,12 +379,38 @@ def test_replaying_an_admitted_decision_is_refused() -> None:
 
 @pytest.mark.parametrize(
     "pin",
-    ["provider", "model_id", "model_version", "prompt_version", "tool_schema_version"],
+    [
+        "provider",
+        "model_id",
+        "model_version",
+        "prompt_version",
+        "tool_schema_version",
+        "decision_schema_version",
+        "policy_version",
+    ],
 )
 def test_an_unpinned_model_prompt_or_tool_schema_is_refused(pin: str) -> None:
     outcome = admit(_decision(provenance=_provenance(**{pin: "rogue"})), _mandate(), _state())
     assert outcome.admitted is False
     assert outcome.refusal is AdmissionRefusal.VERSION_PIN_MISMATCH
+
+
+def test_every_version_pin_is_compared_against_a_provenance_field() -> None:
+    """A pin with no counterpart is a control that cannot fail.
+
+    The M2 review found `VersionPins.policy_version` had no `DecisionProvenance`
+    field, so a mandate could pin a policy revision and no decision could ever
+    violate it — the appearance of a version control with none of the effect.
+    """
+
+    from chronos.autonomy import DecisionProvenance as _Provenance
+    from chronos.autonomy import VersionPins as _Pins
+
+    unmatched = set(_Pins.model_fields) - set(_Provenance.model_fields)
+    assert unmatched == set(), (
+        f"mandate pins {sorted(unmatched)} have no provenance counterpart, so admission "
+        "compares them against nothing"
+    )
 
 
 def test_a_decision_citing_an_unissued_evidence_bundle_is_refused() -> None:
@@ -484,40 +611,118 @@ def test_no_check_is_ever_recorded_as_passed_without_being_evaluated() -> None:
                 assert check.passed is False, check.name
 
 
-def test_the_inert_mandate_limit_list_is_pinned() -> None:
-    """A mandate field must be declared enforced or inert — it cannot just appear.
+#: Every field of every mandate limits model, classified. ENFORCED means some
+#: deterministic module reads it today; INERT means nothing does and the
+#: disclosure in admission.py says so.
+#:
+#: The M2 review found four whole limit groups read by no code while the mandate
+#: docstring implied the supervisor re-derived them all. The earlier version of
+#: this pin listed inert names by hand, which caught a field being *enforced*
+#: but not a field being *added* — a new limit could arrive inert and undisclosed
+#: without failing anything. This map is now compared against the models
+#: themselves, so an unclassified field is a test failure.
+_ENFORCED = "ENFORCED"
+_INERT = "INERT"
 
-    The M2 review found four whole limit groups read by no code while the mandate
-    docstring implied otherwise. This pins the honest list so adding a field
-    forces a decision about it.
+_LIMIT_ENFORCEMENT: dict[str, dict[str, str]] = {
+    "CapitalLimits": {
+        "allocated_capital_usd": _ENFORCED,
+        "max_order_notional_usd": _ENFORCED,
+        "max_position_notional_usd": _ENFORCED,
+        "max_gross_exposure_usd": _ENFORCED,
+        "max_net_exposure_usd": _ENFORCED,
+        "max_contracts_per_order": _ENFORCED,
+        "max_shares_per_order": _ENFORCED,
+        "max_leverage": _ENFORCED,
+        "max_margin_utilization_pct": _ENFORCED,
+        "min_buying_power_usd": _ENFORCED,
+        "min_cash_floor_usd": _ENFORCED,
+    },
+    "LossLimits": {
+        # Needs durable per-session P&L state the supervisor does not own (M3).
+        "max_session_loss_usd": _INERT,
+        "max_daily_loss_usd": _INERT,
+        "max_peak_to_trough_drawdown_usd": _INERT,
+        "max_peak_to_trough_drawdown_pct": _INERT,
+    },
+    "ConcentrationLimits": {
+        "max_symbol_exposure_pct": _ENFORCED,
+        # Need a sector/family/correlation map Chronos does not have yet.
+        "max_sector_exposure_pct": _INERT,
+        "max_family_exposure_pct": _INERT,
+        "max_correlated_exposure_pct": _INERT,
+    },
+    "ActivityLimits": {
+        # Need durable per-session counters (M3).
+        "max_orders_per_session": _INERT,
+        "max_cancellations_per_session": _INERT,
+        "max_replacements_per_session": _INERT,
+        "max_turnover_usd_per_session": _INERT,
+    },
+    "MarketDataRequirements": {
+        "max_quote_age_seconds": _ENFORCED,
+        "permitted_data_qualities": _ENFORCED,
+        "max_relative_spread": _ENFORCED,
+        # Need option-chain evidence the supervisor does not gather yet.
+        "min_option_volume": _INERT,
+        "min_open_interest": _INERT,
+    },
+    "SessionPolicy": {
+        # Need a session clock in the supervisor; the orders plane has its own.
+        "permitted_sessions": _INERT,
+        "allow_overnight_holding": _INERT,
+    },
+}
+
+
+def test_every_mandate_limit_is_classified_enforced_or_inert() -> None:
+    """A mandate field cannot just appear — it must be declared one way or the other.
+
+    This is the guard the M2 review asked for: adding a limit to any of these
+    models without saying whether the kernel enforces it fails here, so the
+    published disclosure cannot silently fall behind the contract.
     """
+
+    from chronos.autonomy import mandate as mandate_module
+
+    for model_name, classified in _LIMIT_ENFORCEMENT.items():
+        model = getattr(mandate_module, model_name)
+        actual = set(model.model_fields)
+        declared = set(classified)
+        assert actual == declared, (
+            f"{model_name} fields changed: {sorted(actual ^ declared)}. Every mandate "
+            "limit must be classified ENFORCED or INERT in _LIMIT_ENFORCEMENT, and the "
+            "inert ones disclosed in admission.py's docstring."
+        )
+
+
+def test_the_classification_matches_what_the_kernel_actually_reads() -> None:
+    """Guard the guard: a classification nobody checks is just a comment."""
 
     import chronos.supervisor.admission as admission_module
     import chronos.supervisor.sizing as sizing_module
 
-    source = (admission_module.__doc__ or "") + inspect.getsource(sizing_module)
+    kernel = inspect.getsource(sizing_module) + inspect.getsource(admission_module)
+    for model_name, classified in _LIMIT_ENFORCEMENT.items():
+        for field, status in classified.items():
+            mentioned = field in kernel
+            if status == _INERT:
+                assert not mentioned, (
+                    f"{model_name}.{field} is classified INERT but the kernel now reads "
+                    "it — reclassify it and update admission.py's disclosure"
+                )
+            else:
+                assert mentioned, (
+                    f"{model_name}.{field} is classified ENFORCED but no kernel module mentions it"
+                )
 
-    inert_today = (
-        "max_session_loss_usd",
-        "max_daily_loss_usd",
-        "max_peak_to_trough_drawdown_usd",
-        "max_orders_per_session",
-        "max_turnover_usd_per_session",
-        "max_sector_exposure_pct",
-        "max_family_exposure_pct",
-        "max_correlated_exposure_pct",
-    )
-    for name in inert_today:
-        assert name not in inspect.getsource(sizing_module), (
-            f"{name} now appears enforced in sizing — update the disclosure in "
-            "admission.py's docstring and this pin"
-        )
-    # The disclosure must actually name the inert groups.
+
+def test_the_inert_groups_are_disclosed_where_a_reader_will_look() -> None:
+    import chronos.supervisor.admission as admission_module
+
+    disclosure = admission_module.__doc__ or ""
     for phrase in ("LossLimits", "ActivityLimits", "scope.exchanges", "contract_families"):
-        assert phrase in (admission_module.__doc__ or ""), (
-            f"admission.py must disclose that {phrase} is not enforced"
-        )
-    assert source  # sanity
+        assert phrase in disclosure, f"admission.py must disclose that {phrase} is not enforced"
 
 
 # ---------------------------------------------------------------------- sizing
@@ -525,6 +730,7 @@ def test_the_inert_mandate_limit_list_is_pinned() -> None:
 
 def test_the_models_requested_quantity_is_an_upper_bound_not_an_instruction() -> None:
     outcome = size_order(
+        decision_kind=DecisionKind.OPEN,
         mandate=_mandate(),
         asset_class=TradableAssetClass.EQUITY,
         reference_price=Decimal(100),
@@ -541,6 +747,7 @@ def test_the_models_requested_quantity_is_an_upper_bound_not_an_instruction() ->
 
 def test_sizing_never_exceeds_what_the_model_asked_for() -> None:
     outcome = size_order(
+        decision_kind=DecisionKind.OPEN,
         mandate=_mandate(),
         asset_class=TradableAssetClass.EQUITY,
         reference_price=Decimal(100),
@@ -556,6 +763,7 @@ def test_cash_floor_actually_reserves_capital() -> None:
     """A floor that is not subtracted is not a floor."""
 
     outcome = size_order(
+        decision_kind=DecisionKind.OPEN,
         mandate=_mandate(
             capital=CapitalLimits(
                 allocated_capital_usd=Decimal(1_000_000),
@@ -579,6 +787,7 @@ def test_cash_floor_actually_reserves_capital() -> None:
 
 def test_concentration_headroom_limits_size() -> None:
     outcome = size_order(
+        decision_kind=DecisionKind.OPEN,
         mandate=_mandate(
             concentration=ConcentrationLimits(max_symbol_exposure_pct=Decimal("0.10"))
         ),
@@ -600,6 +809,7 @@ def test_missing_or_absurd_contract_facts_refuse_rather_than_guess(
     price: Decimal, multiplier: Decimal
 ) -> None:
     outcome = size_order(
+        decision_kind=DecisionKind.OPEN,
         mandate=_mandate(),
         asset_class=TradableAssetClass.EQUITY,
         reference_price=price,
@@ -633,6 +843,7 @@ def test_a_zero_ceiling_authorizes_nothing_rather_than_everything() -> None:
     all_zero_ceilings = AutonomyMandate.model_construct(**fields)
 
     outcome = size_order(
+        decision_kind=DecisionKind.OPEN,
         mandate=all_zero_ceilings,
         asset_class=TradableAssetClass.EQUITY,
         reference_price=Decimal(100),
@@ -672,6 +883,7 @@ def test_sizing_works_without_a_requested_quantity_at_all() -> None:
     """The kernel can size from mandate limits alone; the model need not ask."""
 
     outcome = size_order(
+        decision_kind=DecisionKind.OPEN,
         mandate=_mandate(),
         asset_class=TradableAssetClass.EQUITY,
         reference_price=Decimal(100),
@@ -685,6 +897,7 @@ def test_sizing_works_without_a_requested_quantity_at_all() -> None:
 
 def test_option_contracts_use_the_contract_ceiling_and_multiplier() -> None:
     outcome = size_order(
+        decision_kind=DecisionKind.OPEN,
         mandate=_mandate(
             scope=InstrumentScope(
                 asset_classes=(TradableAssetClass.EQUITY_OPTION,),
@@ -716,3 +929,145 @@ def test_option_contracts_use_the_contract_ceiling_and_multiplier() -> None:
         requested_quantity=Decimal(50),
     )
     assert outcome.quantity == Decimal(3)  # max_contracts_per_order binds
+
+
+def test_allocated_capital_is_a_mandate_ceiling_not_a_per_order_one() -> None:
+    """Without subtracting what is deployed, the full allocation re-authorizes forever.
+
+    The M2 review found `allocated_capital_usd` applied as if each order were the
+    first: a $50,000 allocation authorized a $50,000 order on every pass, so N
+    passes deployed N x the allocation while every individual order looked
+    compliant.
+    """
+
+    outcome = size_order(
+        mandate=_mandate(),
+        decision_kind=DecisionKind.OPEN,
+        asset_class=TradableAssetClass.EQUITY,
+        reference_price=Decimal(100),
+        multiplier=Decimal(1),
+        evidence=_evidence(deployed_capital_usd=Decimal(49_500)),
+        requested_quantity=Decimal(100),
+    )
+    # 50_000 allocated - 49_500 deployed = 500 left -> 5 shares, not 100.
+    assert outcome.quantity == Decimal(5)
+    assert "less deployed" in outcome.binding_constraint
+
+
+def test_unknown_deployed_capital_refuses_rather_than_assuming_zero() -> None:
+    outcome = size_order(
+        mandate=_mandate(),
+        decision_kind=DecisionKind.OPEN,
+        asset_class=TradableAssetClass.EQUITY,
+        reference_price=Decimal(100),
+        multiplier=Decimal(1),
+        evidence=_evidence(deployed_capital_usd=None),
+        requested_quantity=Decimal(10),
+    )
+    assert outcome.quantity is None
+    assert "allocated_capital_usd" in outcome.refusal
+
+
+# --- risk-reducing sizing ---------------------------------------------------
+
+
+def test_an_account_over_its_ceiling_can_still_close() -> None:
+    """A limit must not trap you inside the breach it exists to prevent.
+
+    Exposure ceilings measure room to ADD. Applied to a CLOSE they give negative
+    headroom, so the account that most needs to reduce would be refused the only
+    order that reduces it. The M2 review found `size_order` had no notion of
+    decision kind at all, so this was unavoidable.
+    """
+
+    over_the_limit = _evidence(
+        gross_exposure_usd=Decimal(9_999_999),
+        net_exposure_usd=Decimal(9_999_999),
+        symbol_exposure_usd=Decimal(9_999_999),
+        position_notional_usd=Decimal(9_999_999),
+        position_quantity=Decimal(40),
+    )
+    refused = size_order(
+        mandate=_mandate(),
+        decision_kind=DecisionKind.OPEN,
+        asset_class=TradableAssetClass.EQUITY,
+        reference_price=Decimal(100),
+        multiplier=Decimal(1),
+        evidence=over_the_limit,
+        requested_quantity=Decimal(10),
+    )
+    assert refused.quantity is None, "opening more while over every ceiling must refuse"
+
+    allowed = size_order(
+        mandate=_mandate(),
+        decision_kind=DecisionKind.CLOSE,
+        asset_class=TradableAssetClass.EQUITY,
+        reference_price=Decimal(100),
+        multiplier=Decimal(1),
+        evidence=over_the_limit,
+        requested_quantity=Decimal(10),
+    )
+    assert allowed.quantity == Decimal(10)
+    assert allowed.risk_reducing is True
+
+
+def test_a_close_may_never_exceed_the_position_actually_held() -> None:
+    """Closing more than we hold opens the opposite position -- the reverse of reducing."""
+
+    outcome = size_order(
+        mandate=_mandate(),
+        decision_kind=DecisionKind.CLOSE,
+        asset_class=TradableAssetClass.EQUITY,
+        reference_price=Decimal(100),
+        multiplier=Decimal(1),
+        evidence=_evidence(position_quantity=Decimal(7)),
+        requested_quantity=Decimal(1_000),
+    )
+    assert outcome.quantity == Decimal(7)
+    assert outcome.was_clamped is True
+
+
+def test_a_short_position_is_closed_by_its_magnitude() -> None:
+    outcome = size_order(
+        mandate=_mandate(),
+        decision_kind=DecisionKind.CLOSE,
+        asset_class=TradableAssetClass.EQUITY,
+        reference_price=Decimal(100),
+        multiplier=Decimal(1),
+        evidence=_evidence(position_quantity=Decimal(-7)),
+        requested_quantity=None,
+    )
+    assert outcome.quantity == Decimal(7)
+
+
+def test_an_unknown_position_refuses_a_close_rather_than_guessing() -> None:
+    outcome = size_order(
+        mandate=_mandate(),
+        decision_kind=DecisionKind.REDUCE,
+        asset_class=TradableAssetClass.EQUITY,
+        reference_price=Decimal(100),
+        multiplier=Decimal(1),
+        evidence=_evidence(position_quantity=None),
+        requested_quantity=Decimal(5),
+    )
+    assert outcome.quantity is None
+    assert "position actually held" in outcome.refusal
+
+
+def test_risk_reducing_sizing_still_respects_the_per_order_unit_ceiling() -> None:
+    """Relaxing exposure headroom must not relax everything.
+
+    max_shares_per_order is an execution-hygiene ceiling, not an exposure one:
+    it bounds how much can leave in a single order regardless of direction.
+    """
+
+    outcome = size_order(
+        mandate=_mandate(),
+        decision_kind=DecisionKind.CLOSE,
+        asset_class=TradableAssetClass.EQUITY,
+        reference_price=Decimal(100),
+        multiplier=Decimal(1),
+        evidence=_evidence(position_quantity=Decimal(5_000)),
+        requested_quantity=None,
+    )
+    assert outcome.quantity == Decimal(100)  # max_shares_per_order
