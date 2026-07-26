@@ -111,14 +111,13 @@ builds a runtime only for the writer. The order matters:
 
 ## Honest residuals
 
-1. **The shell cannot authenticate itself.** ``/terminal/app`` is served without
-   the token (a browser cannot put a header on a document load), while every
-   route in this module requires it. The bundled client sends no token, so a
-   browser that loads the shell today gets ``401`` on every panel and renders
-   that refusal honestly rather than blank. Closing this needs a deliberate
-   browser-session decision — a cookie, or an operator-pasted token — and
-   inventing one here would be adding an unreviewed authorization surface in the
-   same change that adds the first one ADR-0018 already flagged.
+1. **The shell authenticates by session cookie** (M8b, R-41 closed). A browser
+   still cannot put a header on a document load, so ``POST /terminal/session``
+   trades the token for a cookie and every route here accepts either. The
+   security property is the cookie's ``path=/terminal`` scope: the browser will
+   not attach it to ``/orders/*``, so the terminal's ambient credential cannot
+   reach the order plane even from script running inside the page. Sessions are
+   in-memory and die with the process. See :mod:`chronos.api.terminal_session`.
 2. **Polling, not streaming** (ADR-0018 residual 2). Each panel is one request
    per interval against the process that holds the broker connection. Every read
    below is a single short transaction for that reason.
@@ -140,12 +139,19 @@ from __future__ import annotations
 import logging
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from pydantic import Field
 
-from chronos.api.auth import require_token
 from chronos.api.autonomy_wiring import load_persistent_mandate
 from chronos.api.dependencies import BackendState, get_state, require_writer
+from chronos.api.terminal_session import (
+    SESSION_COOKIE,
+    SESSION_PATH,
+    SESSION_TTL,
+    require_terminal_credential,
+    sessions_of,
+    verify_api_token,
+)
 from chronos.autonomy import AutonomyMandate
 from chronos.domain.models import ChronosModel
 from chronos.runtime import AppRuntime
@@ -158,7 +164,19 @@ from chronos.utils.time import utc_now
 
 _logger = logging.getLogger("chronos.api.terminal")
 
-router = APIRouter(dependencies=[Depends(require_token)])
+#: Every data route accepts either the API token header or a terminal session
+#: cookie (M8b). The two are the same claim made by different callers — a script
+#: sends the header it holds, a browser sends the cookie it was given in exchange
+#: for that same header. Nothing here grants authority; ``require_writer`` still
+#: gates the mutations on its own.
+router = APIRouter(dependencies=[Depends(require_terminal_credential)])
+
+#: The login route cannot sit behind the credential it issues, so it lives on its
+#: own router with no dependency and authenticates from its **body** instead.
+#: Keeping it on a separate object is what makes that exemption visible: a route
+#: added to ``router`` above inherits the check, and only a route deliberately
+#: placed here does not.
+session_router = APIRouter()
 
 StateDep = Annotated[BackendState, Depends(get_state)]
 WriterDep = Annotated[BackendState, Depends(require_writer)]
@@ -236,6 +254,105 @@ class RevokeResult(ChronosModel):
     revoked: bool
     mandate_id: str | None = None
     detail: str = ""
+
+
+class SessionRequest(ChronosModel):
+    """The token the operator already holds, presented once to trade for a cookie."""
+
+    token: str = ""
+
+
+class SessionResult(ChronosModel):
+    """What the login did. Deliberately says nothing a prober could use.
+
+    No session id (it is in the cookie, and the browser is the only thing that
+    needs it), no token echo, and no hint about *why* a refusal happened.
+    """
+
+    authenticated: bool
+    expires_in_seconds: int = 0
+    detail: str = ""
+
+
+@session_router.post(
+    "/terminal/session",
+    response_model=SessionResult,
+    status_code=status.HTTP_201_CREATED,
+)
+def open_session(request: Request, response: Response, body: SessionRequest) -> SessionResult:
+    """Exchange the local API token for a terminal session cookie (M8b).
+
+    This is the one route in the terminal surface that is not behind the terminal
+    credential, because it is what issues it. It authenticates from its **body**
+    instead — the same constant-time comparison against the same token, moved
+    from the header because a browser cannot set one on a document load.
+
+    The cookie it sets is scoped to ``/terminal``. That scoping is the security
+    property, not a nicety: it is what keeps this page's ambient credential away
+    from ``/orders/*``, so a script injected into the terminal cannot ride it to
+    the order plane the way a ``path=/`` cookie would let it (see
+    :mod:`chronos.api.terminal_session`).
+
+    A refusal is a flat 401 that names no cause. There is exactly one way to be
+    wrong here, and describing it would only help something that is guessing.
+    """
+
+    if not verify_api_token(request, body.token):
+        # Logged because a *local* process guessing the token is worth an
+        # operator knowing about, and never with any part of what was presented.
+        _logger.warning(
+            "Rejected a terminal session request with an invalid token",
+            extra={"event": "terminal_session_refused"},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="invalid token",
+        )
+
+    sessions = sessions_of(request)
+    session_id = sessions.create(now=utc_now())
+    response.set_cookie(
+        SESSION_COOKIE,
+        session_id,
+        max_age=int(SESSION_TTL.total_seconds()),
+        # The three flags that make an ambient credential tolerable here. `path`
+        # is the load-bearing one; see the module docstring on why `httponly`
+        # alone would not be.
+        path=SESSION_PATH,
+        httponly=True,
+        samesite="strict",
+        # Not `secure`: the backend binds to loopback and speaks http there, so
+        # requiring a secure context would refuse the only transport this app
+        # has. The traffic never leaves the loopback interface.
+        secure=False,
+    )
+    return SessionResult(
+        authenticated=True,
+        expires_in_seconds=int(SESSION_TTL.total_seconds()),
+        detail=(
+            "this session authenticates the terminal's own routes only; the order "
+            "plane still requires the token header, and writer-gated actions still "
+            "require the single-writer lease"
+        ),
+    )
+
+
+@session_router.delete("/terminal/session", response_model=SessionResult)
+def close_session(request: Request, response: Response) -> SessionResult:
+    """Drop this browser's session. Idempotent, and never an error.
+
+    Deleting the cookie is not enough on its own — a cookie the browser forgot is
+    still a session this process would honour — so the store is the thing that
+    forgets, and the cookie is cleared as a courtesy to the browser.
+    """
+
+    cookie = request.cookies.get(SESSION_COOKIE, "")
+    dropped = sessions_of(request).revoke(cookie) if cookie else False
+    response.delete_cookie(SESSION_COOKIE, path=SESSION_PATH)
+    return SessionResult(
+        authenticated=False,
+        detail="session closed" if dropped else "there was no session to close",
+    )
 
 
 @router.get("/terminal/commands", response_model=CommandRegistry)

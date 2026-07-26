@@ -76,9 +76,10 @@ persistent auto-activating mandate, model self-sizing under an explicit
 app-plane wiring that assembles facts, mandate, runtime, and the order-plane handoff in
 the backend lifespan; and **M8a (ADR-0018)** the operator terminal — a command registry and
 panel read-models in Python (`chronos.terminal`) served as JSON to a build-free browser
-client, mounted same-origin at `/terminal/app`. Remaining: per-family live promotions, a
-browser credential so the client's panels can authenticate (R-41), and the deferred terminal
-work — per-holding theses, mandate authoring, charts, and streaming.
+client, mounted same-origin at `/terminal/app`. **M8b** added the session cookie that lets that client authenticate (`POST /terminal/session`
+exchanges the local API token for an httpOnly cookie scoped to `/terminal`, so the browser
+never attaches it to the order plane). Remaining: per-family live promotions and the
+deferred terminal work — per-holding theses, mandate authoring, charts, and streaming.
 
 No order is placed by any test, CI run, or development path. The one and only `transmit=True`
 in the order pipeline lives at the submission boundary and is reachable only after the full
@@ -165,6 +166,11 @@ Bullets marked **[contract]** are structural guarantees of the contract types.
 - **[enforced] Model narrative can be seen, never act.** Every server string reaches the DOM
   through `textContent`; a structural test reads the shipped client and fails on any HTML or
   eval sink, and a Content-Security-Policy over `/terminal/*` makes the next one inert.
+- **[enforced] The terminal's own credential cannot reach the order plane.** The browser
+  session cookie (M8b) is scoped to `path=/terminal`, so it is never attached to `/orders/*`
+  — asserted at the server, not by trusting the browser: an order route asked with the
+  session and no token header still refuses. Sessions live in memory only, so a restart
+  signs every terminal out, and signing in grants no writer authority.
 - Chronos never asks for or stores an IBKR username or password.
 - Missing broker data is represented as missing; it is never fabricated.
 - **Crypto is disabled by default** (empty `CRYPTO_ALLOWLIST`); long-only spot, fractional,

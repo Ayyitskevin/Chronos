@@ -13,12 +13,15 @@ because both are easy to lose in a later edit:
 - **The shell is served without the API token; the data behind it is not.** A
   browser cannot put a header on a document load, so ``/terminal/app`` is
   reachable unauthenticated — on loopback, from this process, from files that
-  ship with the package. Every ``/terminal/*`` data route still requires
-  ``X-Chronos-Token``. The honest consequence, disclosed rather than papered
-  over: the bundled client sends no token today, so a browser that loads the
-  shell gets ``401`` on every panel until a deliberate browser-session decision
-  is made. That decision is an authorization change and does not belong in the
-  same commit that first exposes mandate revocation.
+  ship with the package. Every ``/terminal/*`` data route still requires a
+  credential. Since M8b that credential may be either the ``X-Chronos-Token``
+  header, as before, or a session cookie obtained by presenting that same token
+  to ``POST /terminal/session`` — which is how the shell authenticates itself
+  once loaded. **The cookie is scoped to ``/terminal``**, so the browser never
+  attaches it to the order plane; that scope is the property that makes an
+  ambient credential acceptable in this process at all, and
+  :mod:`chronos.api.terminal_session` explains why the other flags do not
+  substitute for it.
 - **Same-origin serving is what removes CORS from the picture entirely.** There
   is no cross-origin request to permit, no preflight, and no credential handed
   to JavaScript loaded from somewhere else. The loopback binding and the
@@ -54,6 +57,7 @@ from chronos.api.routes.live import router as live_router
 from chronos.api.routes.orders import router as orders_router
 from chronos.api.routes.strategy import router as strategy_router
 from chronos.api.routes.terminal import router as terminal_router
+from chronos.api.routes.terminal import session_router as terminal_session_router
 from chronos.runtime import build_runtime
 from chronos.utils.locking import WriterLease
 
@@ -82,12 +86,12 @@ _TERMINAL_CLIENT_DIR = Path(__file__).resolve().parent.parent / "terminal" / "st
 #: Why it exists when the client already assigns nothing but ``textContent``:
 #: that property is enforced by a structural test over hand-written DOM code, and
 #: a test is a claim about the file as it stands today. The header is what makes
-#: the *next* ``innerHTML`` inert rather than exploitable. That distinction is
-#: worth paying for here because a browser session credential is a planned
-#: follow-up (see the module docstring): today injected script could not reach
-#: ``/orders/*`` because this page holds no credential, but the moment one
-#: exists, same-origin script execution in this page is order submission from the
-#: process that holds the broker session.
+#: the *next* ``innerHTML`` inert rather than exploitable. That distinction earns
+#: its keep as of M8b: this page now **does** hold a credential, so script
+#: executing here can act as the operator against ``/terminal/*``. Two things
+#: bound what that is worth to an attacker — the session cookie's ``/terminal``
+#: path scope, which keeps it away from ``/orders/*`` entirely, and this policy,
+#: which is what stops the script from running in the first place.
 #:
 #: ``nosniff`` is here for the same reason one layer down. The terminal serves
 #: operator-authored notes and worker-derived narrative inside JSON, and a
@@ -363,6 +367,10 @@ def create_app() -> FastAPI:
     app.include_router(live_router)
     app.include_router(autonomy_router)
     app.include_router(terminal_router)
+    # The login route that issues the terminal's session cookie. It is a
+    # separate router because it cannot sit behind the credential it hands
+    # out; it authenticates from its body instead (M8b).
+    app.include_router(terminal_session_router)
 
     # The terminal client is served from this process, same-origin with the data
     # it draws — which is the whole reason there is no CORS middleware, no

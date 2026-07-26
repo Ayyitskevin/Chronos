@@ -1,5 +1,55 @@
 # CHANGELOG
 
+## [Unreleased] — M8b: the terminal can log in (2026-07-26)
+
+M8a shipped a terminal whose panels all answered `401`: a browser cannot put a header
+on a document load, so the client held no credential (R-41). That was disclosed rather
+than papered over, and deliberately left for its own change — inventing an
+authorization surface in the commit that first exposed mandate revocation would have
+been exactly the wrong place. The owner chose the session-cookie route from three
+options.
+
+### `POST /terminal/session` — the token, once, for a cookie
+- Every `/terminal/*` route now accepts **either** the session cookie or the existing
+  `X-Chronos-Token` header, so `curl`, scripts, and any future CLI are untouched.
+- The login route is on its own router with no credential dependency — it cannot sit
+  behind the credential it issues — and authenticates from its **body** instead, with
+  the same constant-time comparison. Keeping it on a separate object is what makes
+  that exemption visible: a route added to the main router inherits the check.
+- A refusal is a flat 401 saying only `invalid token`. There is one way to be wrong
+  here and elaborating would only help something that is guessing. Failures are logged
+  (a *local* process probing the token is worth knowing about) and never echo any part
+  of what was presented.
+
+### The scope is the security property, not a nicety
+`path=/terminal`. The browser never attaches the cookie to `/orders/*`, so the M8a
+injection review's named worst case — script in this page riding an ambient credential
+into order submission from the process holding the broker connection — is closed
+structurally. It is **verified at the server**, not by trusting the browser to honour
+the path: an order route asked with the session and no header still refuses.
+
+What the other flags do, and what they do not: `httpOnly` stops script *reading* the
+cookie but not *using* it in place, which is why the CSP (R-40) exists alongside it;
+`SameSite=strict` keeps other origins from triggering it; sessions are **in memory
+only**, so a restart signs every terminal out, because a credential outliving the
+process it authenticates to is what this project refuses everywhere else. Ids are
+stored as digests, the TTL is checked on every use rather than only on sweep, and the
+32-session ceiling refuses the *new* login rather than evicting an old one — evicting
+would let anyone holding the token sign the operator out.
+
+**A session is not authority.** `require_writer` still gates every mutation
+independently: a demoted backend accepts the login and still refuses the revoke.
+
+### The client
+A sign-in gate that appears only when a route answers 401 — including mid-session, when
+a TTL lapses or the backend restarts. The token is read from the field, sent, and the
+field cleared: no copy in `state`, none in `localStorage`, and none readable back out
+of the httpOnly cookie. Panels behind the gate keep their last reading, correctly
+marked stale, rather than being blanked — what expired is the credential, not the
+knowledge of what was true a moment ago.
+
+Gates: ruff clean, mypy strict clean (215 files), **2384 passed**, 1 skipped.
+
 ## [Unreleased] — M8a / ADR-0018: the operator terminal (2026-07-26)
 
 The experience layer `docs/LECTURE_134_ANALYSIS.md` §4 said Chronos owed: a surface that
