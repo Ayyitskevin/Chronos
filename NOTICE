@@ -1,0 +1,39 @@
+Chronos
+Copyright (c) 2026 Kevin Lee
+
+This product includes design and, where noted in source, code derived from:
+
+-------------------------------------------------------------------------------
+Tyche — https://github.com/ayyitskevin/tyche
+Licensed under the Apache License, Version 2.0.
+
+Chronos's operator terminal (`chronos.terminal`, added in ADR-0018) adapts
+Tyche's command-terminal design: the tolerant command grammar in which the last
+registry-resolving token wins, a validated command registry serving as the single
+source of truth for the panel surface and its help text, and capability gating in
+which an unavailable data source renders a named, honest empty state rather than
+an error or a blank.
+
+The Chronos implementation is an independent rewrite in Python — the registry and
+every panel read-model are server-side, which Tyche's design is not — but the
+grammar and registry-as-truth ideas are Tyche's and are acknowledged here as the
+Apache-2.0 license asks.
+
+A copy of the Apache License, Version 2.0 is available at
+http://www.apache.org/licenses/LICENSE-2.0
+
+-------------------------------------------------------------------------------
+Midas — https://github.com/ayyitskevin/midas
+Licensed under the GNU Affero General Public License v3.0 only.
+
+**No Midas code is used in Chronos.** Midas was read as a design reference only,
+and the influence is limited to unprotectable ideas and facts: the operator
+command vocabulary (positions, orders, fills, balances, system status, alerts),
+the notion of an always-visible supervision status bar, the "data honesty"
+doctrine of labeling every displayed value live, stale, or unavailable, and the
+conventional dark-terminal color values. This is deliberate — Chronos is
+MIT-licensed and copying AGPL-licensed code into it would be incompatible.
+
+This acknowledgement is a courtesy to the author, not an admission that any
+AGPL-covered work is included, because none is.
+-------------------------------------------------------------------------------
