@@ -148,6 +148,11 @@ class CycleOutcome:
     refusal: str = ""
     detail: str = ""
     decision_id: str = ""
+    #: The decision this cycle judged, when one was successfully parsed. Carried
+    #: so the journal can record what the model actually proposed and why —
+    #: ADR-0016 §5 says narrative is "recorded, displayed, and audited", and
+    #: before M8d none of the three was true of it (see `_record`).
+    decision: AITradeDecision | None = None
     admission: AdmissionOutcome | None = None
     sizing: SizingOutcome | None = None
     compilation: CompilationOutcome | None = None
@@ -230,6 +235,7 @@ def run_cycle(
                 refusal="NO_ACTIVE_MANDATE",
                 detail="no AutonomyMandate is in force; the model has no trade-time authority",
                 decision_id=decision.decision_id,
+                decision=decision,
             ),
         )
     try:
@@ -255,6 +261,7 @@ def run_cycle(
                 refusal="ADMISSION_FAILED",
                 detail=f"admission raised {type(error).__name__}",
                 decision_id=decision.decision_id,
+                decision=decision,
             ),
         )
 
@@ -283,6 +290,7 @@ def run_cycle(
                 refusal=admission.refusal.value if admission.refusal else "REFUSED",
                 detail=admission.detail,
                 decision_id=decision.decision_id,
+                decision=decision,
                 admission=admission,
                 alerts_raised=alert_kinds,
             ),
@@ -311,6 +319,7 @@ def run_cycle(
                         "never priced with another instrument's facts"
                     ),
                     decision_id=decision.decision_id,
+                    decision=decision,
                     admission=admission,
                     alerts_raised=alert_kinds,
                 ),
@@ -339,6 +348,7 @@ def run_cycle(
                 refusal="NO_EXECUTABLE_SIZE",
                 detail=sizing.refusal,
                 decision_id=decision.decision_id,
+                decision=decision,
                 admission=admission,
                 sizing=sizing,
                 alerts_raised=alert_kinds,
@@ -363,6 +373,7 @@ def run_cycle(
                 refusal=compilation.refusal,
                 detail=compilation.detail,
                 decision_id=decision.decision_id,
+                decision=decision,
                 admission=admission,
                 sizing=sizing,
                 compilation=compilation,
@@ -382,6 +393,7 @@ def run_cycle(
                 refusal="NO_SUBMISSION_CONFIGURED",
                 detail="the cycle ran in shadow: an intent was compiled and nothing was sent",
                 decision_id=decision.decision_id,
+                decision=decision,
                 admission=admission,
                 sizing=sizing,
                 compilation=compilation,
@@ -403,6 +415,7 @@ def run_cycle(
                 refusal="ORDER_PLANE_REFUSED",
                 detail=f"the order plane raised {type(error).__name__}",
                 decision_id=decision.decision_id,
+                decision=decision,
                 admission=admission,
                 sizing=sizing,
                 compilation=compilation,
@@ -429,6 +442,7 @@ def run_cycle(
         CycleOutcome(
             stage=CycleStage.COMPLETE,
             decision_id=decision.decision_id,
+            decision=decision,
             admission=admission,
             sizing=sizing,
             compilation=compilation,
@@ -452,6 +466,31 @@ def _record(session: Session, facts: CycleFacts, outcome: CycleOutcome) -> Cycle
     Recording refusals is the point. "Why did it not trade" is asked far more
     often than its opposite, and a system that journaled only its actions could
     never answer it.
+
+    ## The narrative, and a claim that was not true until M8d
+
+    ADR-0016 §5 says the model's ``thesis``, ``rationale``, ``key_uncertainties``
+    and ``invalidation_conditions`` "are recorded, displayed, and audited". Of
+    those three, only the first was even arguably true: the raw proposal payload
+    persists in ``autonomy_proposal_queue``, so the bytes survived — but as an
+    opaque blob nothing read back, indexed by nothing, and outside the
+    hash chain that makes the rest of this journal tamper-evident. Nothing
+    displayed it and nothing audited it.
+
+    So the narrative is journaled here, next to the outcome it explains. It also
+    carries the **symbol**, which the payload above did not expose either, and
+    which is what lets a per-holding view answer "what does the system believe
+    about this position, and why".
+
+    Two properties this deliberately keeps:
+
+    - **It is recorded verbatim, not summarized.** An audit record that
+      paraphrases is a record of someone's reading rather than of what was said.
+      Bounding happens at display time, where truncation can be labelled.
+    - **It stays inert.** This text originates outside Chronos and is an
+      injection surface (R-30). Writing it to an append-only chain is recording,
+      not executing; nothing in the pipeline parses it into an order parameter,
+      and the terminal renders it as text and never as markup.
     """
 
     import contextlib
@@ -473,7 +512,30 @@ def _record(session: Session, facts: CycleFacts, outcome: CycleOutcome) -> Cycle
                 "decision_id": outcome.decision_id,
                 "quantity": str(outcome.sizing.quantity) if outcome.sizing else None,
                 "limit_price": str(outcome.intent.limit_price) if outcome.intent else None,
+                **_narrative_of(outcome.decision),
             },
             recorded_at=facts.now,
         )
     return outcome
+
+
+def _narrative_of(decision: AITradeDecision | None) -> dict[str, Any]:
+    """What the model said it was doing, for the journal.
+
+    Empty when the cycle failed before a decision existed — an ingress refusal
+    has no thesis, and inventing empty strings for one would make "the model said
+    nothing" indistinguishable from "there was no model output to record".
+    """
+
+    if decision is None:
+        return {}
+    return {
+        "symbol": decision.symbol,
+        "kind": decision.kind.value,
+        "asset_class": decision.asset_class.value,
+        "confidence": str(decision.confidence),
+        "thesis": decision.thesis,
+        "rationale": decision.rationale,
+        "key_uncertainties": list(decision.key_uncertainties),
+        "invalidation_conditions": list(decision.invalidation_conditions),
+    }

@@ -985,3 +985,171 @@ def bars_view(
         refusal=refusal,
         generated_at=now.isoformat(),
     )
+
+
+# --------------------------------------------------------------------- theses
+
+#: How much narrative one panel row shows before it is cut. The journal keeps
+#: the full text (an audit record that paraphrases is a record of someone's
+#: reading), so truncation belongs here, where it can be labelled.
+MAX_NARRATIVE_CHARS = 1200
+
+#: How far back the theses scan reads. The stream is append-only and a thesis is
+#: only interesting while it is the latest one for its symbol, so a bounded scan
+#: answers the question at a bounded cost.
+DEFAULT_THESES_SCAN = 400
+MAX_THESES_SCAN = 2000
+
+
+class ThesisView(ChronosModel):
+    """What the system last said about one symbol, and whether it acted on it."""
+
+    symbol: str
+    kind: str
+    asset_class: str
+    confidence: str | None
+    thesis: str
+    thesis_truncated: bool
+    rationale: str
+    rationale_truncated: bool
+    key_uncertainties: tuple[str, ...]
+    invalidation_conditions: tuple[str, ...]
+    recorded_at: str
+    stage: str
+    refusal: str
+    #: ``None`` means positions could not be read at all — never "not held".
+    held: bool | None
+    held_quantity: str | None
+
+
+class ThesesView(ChronosModel):
+    """Per-symbol beliefs, and the holdings the system has never spoken about.
+
+    ``silent_holdings`` is the field this panel exists for. Listing only the
+    symbols with a thesis would let a position the model has never mentioned
+    disappear from the one view whose whole job is "what does the system believe
+    about what it is holding". A holding with nothing on record is the single
+    most interesting row here, so it is carried separately rather than omitted.
+
+    ``positions_observed`` is ``False`` when the broker could not be read. Every
+    ``held`` then reads ``None``, because "we could not ask" and "not held" are
+    different facts and only one of them is reassuring.
+    """
+
+    theses: tuple[ThesisView, ...]
+    silent_holdings: tuple[str, ...]
+    positions_observed: bool
+    scanned: int
+    stream_present: bool
+    account_fingerprint: str | None
+    generated_at: str
+
+
+def theses_view(
+    session: Session,
+    *,
+    account_fingerprint: str,
+    now: datetime,
+    positions: dict[str, Decimal] | None,
+    scan: int = DEFAULT_THESES_SCAN,
+) -> ThesesView:
+    """The latest belief per symbol, joined to what is actually held.
+
+    ``positions`` is passed in rather than fetched: this module reads the
+    database and nothing else, and a read-model that could reach a broker would
+    be a read-model that can be slow in ways its caller cannot see.
+    """
+
+    bounded = _bounded(scan, maximum=MAX_THESES_SCAN)
+    scoped = _scope(account_fingerprint)
+    if scoped is None:
+        return ThesesView(
+            theses=(),
+            silent_holdings=(),
+            positions_observed=positions is not None,
+            scanned=0,
+            stream_present=False,
+            account_fingerprint=None,
+            generated_at=_iso(now),
+        )
+
+    stream = durable.stream_for(CYCLE_STREAM, scoped)
+    rows = list(
+        session.scalars(
+            select(HashChainRow)
+            .where(HashChainRow.stream == stream)
+            .order_by(HashChainRow.sequence.desc())
+            .limit(bounded)
+        )
+    )
+
+    seen: dict[str, ThesisView] = {}
+    for row in rows:
+        entry = _thesis_of(row, positions=positions)
+        # Newest first, so the first sighting of a symbol is its latest belief.
+        if entry is not None and entry.symbol not in seen:
+            seen[entry.symbol] = entry
+
+    spoken = set(seen)
+    silent = tuple(sorted(symbol for symbol in (positions or {}) if symbol not in spoken))
+    return ThesesView(
+        theses=tuple(seen[symbol] for symbol in sorted(seen)),
+        silent_holdings=silent,
+        positions_observed=positions is not None,
+        scanned=len(rows),
+        stream_present=bool(rows),
+        account_fingerprint=scoped,
+        generated_at=_iso(now),
+    )
+
+
+def _thesis_of(row: HashChainRow, *, positions: dict[str, Decimal] | None) -> ThesisView | None:
+    """One journal record as a belief, or ``None`` when it carries no narrative.
+
+    Records written before M8d have no symbol and no thesis, and cycles that
+    failed at the ingress never had a decision to describe. Both are skipped
+    rather than rendered as a symbol-less blank row.
+    """
+
+    try:
+        payload = hash_chain.payload_of(row)
+    except (ValueError, TypeError):
+        return None
+    symbol = _text(payload.get("symbol"))
+    if not symbol:
+        return None
+
+    thesis = _text(payload.get("thesis"))
+    rationale = _text(payload.get("rationale"))
+    held: bool | None = None
+    quantity: str | None = None
+    if positions is not None:
+        size = positions.get(symbol)
+        held = size is not None and size != 0
+        quantity = _decimal(size) if size is not None else None
+
+    return ThesisView(
+        symbol=symbol,
+        kind=_text(payload.get("kind")),
+        asset_class=_text(payload.get("asset_class")),
+        confidence=_optional_text(payload.get("confidence")),
+        thesis=thesis[:MAX_NARRATIVE_CHARS],
+        thesis_truncated=len(thesis) > MAX_NARRATIVE_CHARS,
+        rationale=rationale[:MAX_NARRATIVE_CHARS],
+        rationale_truncated=len(rationale) > MAX_NARRATIVE_CHARS,
+        key_uncertainties=_string_tuple(payload.get("key_uncertainties")),
+        invalidation_conditions=_string_tuple(payload.get("invalidation_conditions")),
+        recorded_at=_iso(row.recorded_at),
+        stage=_text(payload.get("stage")) or row.kind,
+        refusal=_text(payload.get("refusal")),
+        held=held,
+        held_quantity=quantity,
+    )
+
+
+def _string_tuple(value: object) -> tuple[str, ...]:
+    """A journal list as strings. Anything else reads as empty, never as garbage."""
+
+    if not isinstance(value, list):
+        return ()
+    return tuple(_text(item) for item in value if _text(item))

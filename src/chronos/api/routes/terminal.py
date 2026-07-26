@@ -137,6 +137,7 @@ builds a runtime only for the writer. The order matters:
 from __future__ import annotations
 
 import logging
+from decimal import Decimal
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
@@ -489,6 +490,55 @@ def bars(
         refusal=answer.refusal,
         now=now,
     )
+
+
+@router.get("/terminal/theses", response_model=views.ThesesView)
+def theses(
+    state: StateDep,
+    scan: int = Query(default=views.DEFAULT_THESES_SCAN, ge=1, le=views.MAX_THESES_SCAN),
+) -> views.ThesesView:
+    """What the system believes about each symbol, joined to what it holds.
+
+    The Lecture 134 analysis §4 listed this as one of the things Chronos owed the
+    experience it is modelled on: the decision contract has carried ``thesis``,
+    ``rationale``, ``key_uncertainties`` and ``invalidation_conditions`` since
+    M1, and no view ever presented "here is what the system believes about each
+    holding and why". Since M8d the cycle journal records them, and this reads
+    them back.
+
+    Positions are read from the broker here and passed *into* the assembler, so
+    the read-model stays a pure function of the database. A failure to read them
+    is not a failure of the panel: the theses still render, ``positions_observed``
+    goes false, and every ``held`` reads unknown rather than "not held" — which
+    would be a reassuring answer derived from a question nobody managed to ask.
+    """
+
+    runtime = state.runtime
+    positions: dict[str, Decimal] | None
+    try:
+        held = runtime.connection.run(runtime.broker.positions())
+        positions = {}
+        for position in held:
+            symbol = getattr(position.contract, "symbol", "")
+            if symbol:
+                positions[symbol] = positions.get(symbol, Decimal(0)) + position.quantity
+    except Exception:
+        # Deliberately broad: any failure to read positions is the same fact to
+        # this panel, and a chart of beliefs is still worth showing without it.
+        _logger.warning(
+            "Could not read positions for the theses panel",
+            extra={"event": "theses_positions_unavailable"},
+        )
+        positions = None
+
+    with runtime.database.sessions.begin() as session:
+        return views.theses_view(
+            session,
+            account_fingerprint=_fingerprint_of(runtime),
+            now=utc_now(),
+            positions=positions,
+            scan=scan,
+        )
 
 
 @router.get("/terminal/journal", response_model=views.JournalView)

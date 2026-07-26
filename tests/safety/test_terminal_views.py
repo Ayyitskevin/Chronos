@@ -37,10 +37,14 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from chronos.autonomy import (
     ActivityLimits,
+    AITradeDecision,
     AutonomyMandate,
     AutonomyMode,
     CapitalLimits,
     ConcentrationLimits,
+    DecisionKind,
+    DecisionProvenance,
+    EvidenceCitation,
     FamilyPromotion,
     InstrumentScope,
     LossLimits,
@@ -1294,3 +1298,206 @@ def test_assemblers_only_read(sessions: sessionmaker[Session]) -> None:
         assert proposals.pending_depth(session, account_fingerprint=_FINGERPRINT) == 1
         counters = views.counters_view(session, account_fingerprint=_FINGERPRINT, now=_NOW)
         assert counters.counters_recorded is False
+
+
+# --------------------------------------------------------------------- theses
+
+
+def _thesis_decision(**overrides: Any) -> AITradeDecision:
+    base: dict[str, Any] = {
+        "decision_id": "d-thesis-1",
+        "kind": DecisionKind.OPEN,
+        "asset_class": TradableAssetClass.EQUITY,
+        "symbol": "SPY",
+        "requested_strategy": StrategyForm.LONG_EQUITY,
+        "thesis": "Regime is trending and breadth confirms it.",
+        "rationale": "Twenty-day slope positive, drawdown inside tolerance.",
+        "key_uncertainties": ("breadth could roll over",),
+        "evidence": (
+            EvidenceCitation(evidence_id="ev-1", kind="quote", as_of=_NOW, digest="c" * 64),
+        ),
+        "invalidation_conditions": ("closes below the 50-day",),
+        "provenance": DecisionProvenance(
+            provider="anthropic",
+            model_id="model-x",
+            model_version="1",
+            prompt_version="1",
+            tool_schema_version="1",
+            decision_schema_version="1",
+            policy_version="1",
+            evidence_bundle_id="eb-1",
+            evidence_bundle_digest="b" * 64,
+            produced_at=_NOW,
+        ),
+    }
+    base.update(overrides)
+    return AITradeDecision(**base)
+
+
+def test_the_journal_now_records_the_narrative_it_always_claimed_to(
+    sessions: sessionmaker[Session],
+) -> None:
+    """ADR-0016 §5 said thesis and rationale are "recorded, displayed, and
+    audited". Before M8d the bytes survived only inside the opaque queued
+    payload — nothing read it, nothing displayed it, and it was outside the hash
+    chain that makes the rest of this journal tamper-evident.
+
+    Driven through the real recorder rather than by writing a payload by hand,
+    so the writer and this reader cannot drift apart.
+    """
+
+    with sessions.begin() as session:
+        _record(
+            session,
+            _facts(),
+            CycleOutcome(
+                stage=CycleStage.COMPLETE,
+                decision_id="d-thesis-1",
+                decision=_thesis_decision(),
+            ),
+        )
+        view = views.theses_view(
+            session, account_fingerprint=_FINGERPRINT, now=_NOW, positions=None
+        )
+
+    assert len(view.theses) == 1
+    entry = view.theses[0]
+    assert entry.symbol == "SPY"
+    assert entry.thesis == "Regime is trending and breadth confirms it."
+    assert entry.rationale.startswith("Twenty-day slope")
+    assert entry.key_uncertainties == ("breadth could roll over",)
+    assert entry.invalidation_conditions == ("closes below the 50-day",)
+
+
+def test_a_holding_the_system_never_spoke_about_is_listed_not_omitted(
+    sessions: sessionmaker[Session],
+) -> None:
+    """The row this panel exists for.
+
+    Rendering only symbols that have something to say would let a position the
+    model has never mentioned disappear from the one view whose job is to
+    explain the holdings.
+    """
+
+    with sessions.begin() as session:
+        _record(
+            session,
+            _facts(),
+            CycleOutcome(stage=CycleStage.COMPLETE, decision_id="d-1", decision=_thesis_decision()),
+        )
+        view = views.theses_view(
+            session,
+            account_fingerprint=_FINGERPRINT,
+            now=_NOW,
+            positions={"SPY": Decimal(10), "TSLA": Decimal(5)},
+        )
+
+    assert view.silent_holdings == ("TSLA",)
+    assert [entry.symbol for entry in view.theses] == ["SPY"]
+    assert view.theses[0].held is True
+    assert view.theses[0].held_quantity == "10"
+
+
+def test_unreadable_positions_never_render_as_not_held(
+    sessions: sessionmaker[Session],
+) -> None:
+    """ "We could not ask" and "not held" are different facts, and only one of
+    them is reassuring."""
+
+    with sessions.begin() as session:
+        _record(
+            session,
+            _facts(),
+            CycleOutcome(stage=CycleStage.COMPLETE, decision_id="d-1", decision=_thesis_decision()),
+        )
+        view = views.theses_view(
+            session, account_fingerprint=_FINGERPRINT, now=_NOW, positions=None
+        )
+
+    assert view.positions_observed is False
+    assert view.theses[0].held is None
+    assert view.theses[0].held_quantity is None
+    assert view.silent_holdings == ()
+
+
+def test_only_the_latest_belief_per_symbol_is_shown(
+    sessions: sessionmaker[Session],
+) -> None:
+    with sessions.begin() as session:
+        facts = _facts()
+        _record(
+            session,
+            facts,
+            CycleOutcome(
+                stage=CycleStage.COMPLETE,
+                decision_id="d-1",
+                decision=_thesis_decision(thesis="the older view"),
+            ),
+        )
+        _record(
+            session,
+            facts,
+            CycleOutcome(
+                stage=CycleStage.COMPLETE,
+                decision_id="d-2",
+                decision=_thesis_decision(thesis="the newer view"),
+            ),
+        )
+        view = views.theses_view(session, account_fingerprint=_FINGERPRINT, now=_NOW, positions={})
+
+    assert len(view.theses) == 1
+    assert view.theses[0].thesis == "the newer view"
+
+
+def test_a_cycle_with_no_decision_contributes_no_thesis(
+    sessions: sessionmaker[Session],
+) -> None:
+    """An ingress refusal has no narrative, and rendering a symbol-less blank row
+    would suggest the model said nothing when in fact there was no model output
+    to record. Older records, written before M8d, are skipped for the same reason.
+    """
+
+    with sessions.begin() as session:
+        _record(
+            session,
+            _facts(),
+            CycleOutcome(stage=CycleStage.INGRESS, refusal="MALFORMED_PROPOSAL"),
+        )
+        view = views.theses_view(session, account_fingerprint=_FINGERPRINT, now=_NOW, positions={})
+
+    assert view.theses == ()
+    assert view.stream_present is True
+
+
+def test_long_narrative_is_truncated_for_display_and_says_so(
+    sessions: sessionmaker[Session],
+) -> None:
+    """The journal keeps the full text; the panel is what cuts it, and labels the cut."""
+
+    long_thesis = "x" * (views.MAX_NARRATIVE_CHARS + 500)
+    with sessions.begin() as session:
+        _record(
+            session,
+            _facts(),
+            CycleOutcome(
+                stage=CycleStage.COMPLETE,
+                decision_id="d-1",
+                decision=_thesis_decision(thesis=long_thesis),
+            ),
+        )
+        view = views.theses_view(session, account_fingerprint=_FINGERPRINT, now=_NOW, positions={})
+
+    assert view.theses[0].thesis_truncated is True
+    assert len(view.theses[0].thesis) == views.MAX_NARRATIVE_CHARS
+
+
+def test_an_unscoped_backend_claims_no_theses_and_no_holdings(
+    sessions: sessionmaker[Session],
+) -> None:
+    with sessions.begin() as session:
+        view = views.theses_view(session, account_fingerprint="", now=_NOW, positions={})
+
+    assert view.theses == ()
+    assert view.silent_holdings == ()
+    assert view.stream_present is False
+    assert view.account_fingerprint is None

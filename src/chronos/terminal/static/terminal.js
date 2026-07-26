@@ -78,6 +78,7 @@ const API = {
   acknowledge: (id) => `/terminal/alerts/${encodeURIComponent(id)}/acknowledge`,
   revoke: "/terminal/mandate/revoke",
   session: "/terminal/session",
+  theses: "/terminal/theses",
   bars: (symbol, lookback) =>
     `/terminal/bars?symbol=${encodeURIComponent(symbol)}&interval=1d&lookback=${lookback}`,
 };
@@ -134,6 +135,12 @@ const SYMBOL_RE = /^\/?[A-Z][A-Z0-9]*(?:[./][A-Z0-9]+)*$/;
  * terminal makes about its own ignorance in one screen.
  */
 const COPY = {
+  silentHolding:
+    "Held, with nothing on record. The system has not said why it holds this — either the position predates the journal, or it was opened outside the autonomy path. The most interesting row on this panel.",
+  noTheses:
+    "No decision on record carries a thesis. Cycles journaled before M8d recorded the outcome but not the narrative, so an older journal reads empty here rather than wrong.",
+  positionsUnknown:
+    "Positions could not be read, so whether any of these symbols is actually held is unknown — not 'no'. The beliefs below are still what the system last recorded.",
   noBars:
     "The broker returned no bars for this symbol and window. That is a statement about the request, not about the instrument — a wrong symbol, a window with no sessions, or a contract this account cannot see all look like this.",
   syntheticBars:
@@ -896,6 +903,93 @@ function drawCandles(canvas, bars) {
   });
 }
 
+/**
+ * What the system believes, per symbol.
+ *
+ * The panel closes the last gap `docs/LECTURE_134_ANALYSIS.md` §4 named: the
+ * decision contract has carried thesis and rationale since M1 and no view ever
+ * showed them.
+ *
+ * Two honesty rules shape the layout rather than decorate it:
+ *
+ * - **A holding with no thesis is rendered first, not omitted.** Listing only
+ *   symbols that have something to say would let a position the model has never
+ *   mentioned vanish from the one panel whose job is to explain the holdings.
+ * - **Unknown held-ness is not "not held".** When positions could not be read
+ *   the panel says so once, at the top, and every row's held chip reads unknown.
+ *
+ * All narrative here originates outside Chronos and is untrusted (R-30). It
+ * reaches the DOM through `textContent` like everything else, and is never
+ * interpreted as markup.
+ */
+function renderTheses(data, body) {
+  if (!data) return;
+
+  if (!data.positions_observed) {
+    append(body, stateBlock("warn", "POSITIONS UNREADABLE", COPY.positionsUnknown));
+  }
+
+  for (const symbol of data.silent_holdings || []) {
+    append(body, stateBlock("warn", `${symbol} — HELD, NO THESIS`, COPY.silentHolding));
+  }
+
+  const theses = Array.isArray(data.theses) ? data.theses : [];
+  if (!theses.length) {
+    if (!(data.silent_holdings || []).length) {
+      append(body, stateBlock("warn", "NOTHING ON RECORD", COPY.noTheses));
+    }
+    return;
+  }
+
+  for (const entry of theses) {
+    const article = append(body, el("article", "thesis"));
+    const head = append(article, el("div", "thesis-head"));
+    append(head, el("span", "thesis-sym", entry.symbol));
+    append(head, el("span", "thesis-kind", `${entry.kind || "?"} · ${entry.asset_class || "?"}`));
+    append(head, heldChip(entry));
+    if (entry.refusal) append(head, chip(entry.refusal, "warn"));
+
+    const list = append(article, el("dl", "kv"));
+    kv(list, "recorded", entry.recorded_at);
+    kv(list, "stage", entry.stage || "unknown");
+    kv(list, "confidence", entry.confidence === null || entry.confidence === undefined
+      ? unknown("not stated")
+      : String(entry.confidence));
+
+    narrativeBlock(article, "thesis", entry.thesis, entry.thesis_truncated);
+    narrativeBlock(article, "rationale", entry.rationale, entry.rationale_truncated);
+    bulletBlock(article, "uncertainties", entry.key_uncertainties);
+    bulletBlock(article, "invalidated if", entry.invalidation_conditions);
+  }
+
+  append(body, note(`Latest belief per symbol from the last ${data.scanned} journal records.`));
+}
+
+/** Held / not held / unknown — never a blank where a fact was not established. */
+function heldChip(entry) {
+  if (entry.held === null || entry.held === undefined) {
+    return chip("HELD UNKNOWN", "unknown", "positions could not be read");
+  }
+  if (!entry.held) return chip("NOT HELD", "muted");
+  return chip(`HELD ${entry.held_quantity || ""}`.trim(), "ok");
+}
+
+function narrativeBlock(parent, label, text, truncated) {
+  if (!text) return;
+  append(parent, el("div", "thesis-label", label));
+  // textContent, always: this string came from outside Chronos.
+  append(parent, el("p", "thesis-text", text));
+  if (truncated) append(parent, note("… truncated for display; the journal holds the full text."));
+}
+
+function bulletBlock(parent, label, items) {
+  const values = Array.isArray(items) ? items.filter(Boolean) : [];
+  if (!values.length) return;
+  append(parent, el("div", "thesis-label", label));
+  const list = append(parent, el("ul", "thesis-list"));
+  for (const value of values) append(list, el("li", null, value));
+}
+
 function renderHelp(_data, body) {
   if (!state.registry.length) {
     return append(body, stateBlock("bad", "REGISTRY UNAVAILABLE", state.registryError || "the command registry has not loaded"));
@@ -923,6 +1017,7 @@ const PANELS = {
   counters: { endpoint: () => API.counters, render: renderCounters },
   queue: { endpoint: () => API.queue, render: renderQueue },
   alerts: { endpoint: () => API.alerts, render: renderAlerts },
+  theses: { endpoint: () => API.theses, render: renderTheses },
   chart: { endpoint: (panel) => API.bars(panel.symbol, CHART_LOOKBACK_DAYS), render: renderChart, interval: CHART_POLL_MS },
   help: { local: true, render: renderHelp },
 };

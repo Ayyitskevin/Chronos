@@ -890,3 +890,61 @@ input {
   background: var(--bg);
   border: 1px solid var(--border);
 }
+
+/* ------------------------------------------------------------------ theses */
+.thesis {
+  border-top: 1px solid var(--border);
+  padding: 0.5rem 0;
+}
+
+.thesis:first-of-type {
+  border-top: none;
+}
+
+.thesis-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 0.25rem;
+}
+
+.thesis-sym {
+  color: var(--amber);
+  font-size: 0.8125rem;
+  letter-spacing: 0.04em;
+}
+
+.thesis-kind {
+  color: var(--muted);
+  font-size: 0.6875rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.thesis-label {
+  color: var(--dim);
+  font-size: 0.625rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-top: 0.4rem;
+}
+
+/* Model narrative. Comfortable to read but visually distinct from Chronos's own
+ * copy, because the operator should always be able to tell which they are
+ * looking at. */
+.thesis-text {
+  color: var(--text);
+  font-size: 0.75rem;
+  line-height: 1.55;
+  margin: 0.15rem 0 0;
+  white-space: pre-wrap;
+}
+
+.thesis-list {
+  margin: 0.15rem 0 0;
+  padding-left: 1.1rem;
+  color: var(--text);
+  font-size: 0.75rem;
+  line-height: 1.55;
+}

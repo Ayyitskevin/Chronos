@@ -858,6 +858,16 @@ def test_no_deterministic_module_reads_a_narrative_attribute() -> None:
     compiled into a stop, would be exactly the "free-form text becomes an order"
     path the directive forbids. Attribute *access* is the reachable failure, so
     that is what is asserted — anywhere in the deterministic tree.
+
+    **Narrowed in M8d, and worth reading why.** Until M8d this test forbade
+    narrative access *everywhere* outside the contract — which made the ADR's own
+    "recorded, displayed and audited" promise unimplementable, and that is
+    exactly why it was never true: the bytes survived only inside the opaque
+    queued payload, unread and outside the hash chain. Recording requires
+    reading. So the modules that genuinely record it are exempted **by name**
+    here, and `test_a_narrative_recorder_only_copies_it` holds them to a stricter
+    rule than this test could express: the access must sit inside one named
+    function that does nothing but copy the text into a record.
     """
 
     narrative = {"thesis", "rationale", "key_uncertainties", "invalidation_conditions"}
@@ -865,6 +875,8 @@ def test_no_deterministic_module_reads_a_narrative_attribute() -> None:
     for path in sorted(_SRC.rglob("*.py")):
         # The contract module defines these fields; it is allowed to name them.
         if path.is_relative_to(_SRC / "autonomy"):
+            continue
+        if str(path.relative_to(_SRC)) in _NARRATIVE_RECORDERS:
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
@@ -874,3 +886,85 @@ def test_no_deterministic_module_reads_a_narrative_attribute() -> None:
         "a deterministic module reads model narrative, which must never become an "
         f"order parameter: {offenders}"
     )
+
+
+#: Modules permitted to *read* model narrative, each mapped to the single
+#: function allowed to do it. Recording is not parsing — ADR-0016 §5 requires the
+#: thesis to be recorded and audited, and the M8d journal is where that happens —
+#: but the exemption is deliberately per-function rather than per-module, because
+#: "this file may touch narrative" is a much larger grant than "this eight-line
+#: copier may". The condition below is what makes it small.
+_NARRATIVE_RECORDERS = {"supervisor/loop.py": "_narrative_of"}
+
+#: Node types a recorder may contain. Anything else — a comparison, arithmetic, a
+#: subscript, a conditional on the text — is the beginning of narrative
+#: influencing a decision rather than being written down.
+#: Only the function BODY is walked, never its signature — a return annotation of
+#: ``dict[str, Any]`` is a `Subscript`, and permitting Subscript here would also
+#: permit slicing the thesis itself, which is the opposite of the point.
+_COPY_ONLY_NODES = (
+    # The docstring: an `Expr` wrapping a `Constant`.
+    ast.Expr,
+    ast.Constant,
+    ast.Return,
+    # `if decision is None: return {}` — a guard on presence, not on content.
+    ast.If,
+    ast.Compare,
+    ast.Is,
+    ast.Name,
+    ast.Load,
+    ast.Attribute,
+    ast.Dict,
+    ast.Call,
+)
+
+
+def test_a_narrative_recorder_only_copies_it() -> None:
+    """The condition on the exemption above.
+
+    A module may read the thesis to write it down. It may not branch on it,
+    compare it, slice it, or do arithmetic with it — those are the first steps of
+    free-form prose reaching a number, which is the whole hazard ADR-0016 §5
+    names. So the reader is pinned to one function, and that function is pinned
+    to a copying shape: build a dict of the fields, return it.
+
+    The permitted calls are checked by name rather than by type, because
+    ``list()`` and ``str()`` are how a tuple field becomes JSON, while any other
+    call is a place logic could hide.
+    """
+
+    permitted_calls = {"list", "str"}
+    narrative = {"thesis", "rationale", "key_uncertainties", "invalidation_conditions"}
+    for relative, function_name in sorted(_NARRATIVE_RECORDERS.items()):
+        path = _SRC / relative
+        assert path.exists(), f"{relative} is exempted but does not exist"
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+
+        recorders = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == function_name
+        ]
+        assert len(recorders) == 1, f"{relative} must define exactly one {function_name}"
+        recorder = recorders[0]
+
+        # Every narrative read in the file is inside that one function.
+        inside = {id(node) for statement in recorder.body for node in ast.walk(statement)}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and node.attr in narrative:
+                assert id(node) in inside, (
+                    f"{relative}:{node.lineno} reads .{node.attr} outside {function_name}"
+                )
+
+        # And that function's body only copies.
+        for node in (n for statement in recorder.body for n in ast.walk(statement)):
+            assert isinstance(node, _COPY_ONLY_NODES), (
+                f"{relative}:{function_name} contains {type(node).__name__}, which is more "
+                "than copying narrative into a record"
+            )
+            if isinstance(node, ast.Call):
+                name = getattr(node.func, "id", "")
+                assert name in permitted_calls, (
+                    f"{relative}:{function_name} calls {name or '<expr>'}(); a recorder may "
+                    f"only call {sorted(permitted_calls)}"
+                )
