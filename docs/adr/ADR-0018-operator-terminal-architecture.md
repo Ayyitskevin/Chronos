@@ -3,10 +3,14 @@
 Status: accepted (2026-07-26) — decision recorded ahead of the code it governs
 Date: 2026-07-26
 Index entry: DECISIONS.md **D-18**.
-Implementation status: this ADR records the *decision*. The code it describes lands
-in milestone **M8a** (`chronos.terminal`, the `/terminal/*` routes, and the browser
-client). Read every design statement below as "what M8a is being built to be", not
-as a claim that it already exists — until M8a merges, no terminal ships.
+Implementation status: **implemented.** This ADR was written before its code, and
+the note here originally warned that no terminal shipped yet; that warning has been
+kept rather than deleted because the distinction it drew is the useful part. What
+has since landed: **M8a** — `chronos.terminal` (command registry and panel
+read-models), the `/terminal/*` routes, and the browser client — and **M8b**, the
+session cookie that lets that client authenticate (see the amendment before the
+residuals). Design statements below now describe code that exists; the residuals
+at the end are the honest list of what still does not.
 Resolves: the ADR-0016 §"Milestone sequencing" / AI_QUANT_GAME_PLAN §E2 contradiction
 about whether the terminal may confirm orders (see §4).
 Depends on: ADR-0016 (authority split, one gateway, no second submission path),
@@ -202,6 +206,42 @@ Consequences, all of them the point:
 - Cost accepted: writing a renderer without a framework means more explicit DOM
   code than React would need. Bounded by keeping panels small and declarative, and
   by the registry living server-side.
+
+## Amendment (M8b, 2026-07-26): how the browser authenticates
+
+§6 above put the client behind same-origin serving and left *how it presents a
+credential* unstated, which M8a then discovered the hard way: a browser cannot
+put a header on a document load, so the shipped client held nothing and every
+panel answered `401` (R-41). The owner chose the session-cookie route from three
+options (pasted token in `sessionStorage`, session cookie, exempting loopback
+reads).
+
+`POST /terminal/session` exchanges the local API token for an httpOnly cookie,
+and every `/terminal/*` route accepts **either** that cookie or the existing
+`X-Chronos-Token` header — so every non-browser caller is unchanged.
+
+**The cookie is scoped to `path=/terminal`, and that scope is the whole reason a
+cookie is acceptable in this process.** An ambient credential here is a genuine
+hazard: the M8a injection review observed that the moment this page holds one,
+same-origin script execution becomes able to act with it, in the process that
+holds the broker connection. A `path=/` cookie would let injected script reach
+`/orders/*` with the browser authenticating for it. The narrow scope makes that
+structurally impossible, and it is verified server-side rather than by trusting
+the browser to honour the path — an order route asked with the session and no
+header still refuses.
+
+What the other properties do, and honestly what they do not:
+
+- `httpOnly` stops script *reading* the cookie, so it cannot be exfiltrated. It
+  does **not** stop script *using* it in place on `/terminal/*`; the CSP (R-40)
+  is the layer that addresses that, which is why both exist.
+- `SameSite=strict` keeps another origin from causing the browser to send it.
+- Sessions live **in memory only**, so a restart signs every terminal out. A
+  durable session store would be a credential outliving the process it
+  authenticates to.
+- A session is **not authority**. It proves the caller held the token and grants
+  nothing further: `require_writer` still gates every mutation on its own, and
+  signing in on a demoted backend buys inspection and nothing else.
 
 ## Known limitations and residuals
 

@@ -39,10 +39,12 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from chronos.api.auth import load_or_create_token
 from chronos.api.main import create_app
+from chronos.api.terminal_session import SESSION_COOKIE
 from chronos.autonomy import (
     AutonomyMandate,
     AutonomyMode,
@@ -761,3 +763,143 @@ def test_no_terminal_route_calls_the_order_plane(
         ).status_code
         == 200
     )
+
+
+# ---------------------------------------------------------------- the session
+
+
+def test_a_valid_token_buys_a_session_cookie(client: TestClient, headers: dict[str, str]) -> None:
+    """The exchange M8b exists to make: a token the operator holds, for a cookie
+    a browser can actually send on a document-initiated request."""
+
+    opened = client.post("/terminal/session", json={"token": headers["X-Chronos-Token"]})
+    assert opened.status_code == 201
+    assert opened.json()["authenticated"] is True
+    assert SESSION_COOKIE in opened.cookies
+
+    # And the cookie alone now answers a data route, with no header anywhere.
+    assert client.get("/terminal/system").status_code == 200
+
+
+def test_the_session_cookie_is_scoped_to_the_terminal(
+    client: TestClient, headers: dict[str, str]
+) -> None:
+    """The security property the whole design rests on.
+
+    An ambient credential in this page is only acceptable because the browser
+    will not attach it to the order plane. If this scope ever widened to ``/``,
+    script injected into the terminal could reach ``/orders/*`` with the browser
+    authenticating for it — the M8a injection review's named worst case, and the
+    reason ADR-0018's terminal is a window rather than a gateway.
+    """
+
+    opened = client.post("/terminal/session", json={"token": headers["X-Chronos-Token"]})
+    assert opened.status_code == 201
+
+    cookie = next(c for c in client.cookies.jar if c.name == SESSION_COOKIE)
+    assert cookie.path == "/terminal"
+
+    # Set-Cookie carries the flags that make it non-readable and non-cross-site.
+    raw = opened.headers["set-cookie"].lower()
+    assert "httponly" in raw
+    assert "samesite=strict" in raw
+
+
+def test_the_session_does_not_authenticate_the_order_plane(
+    client: TestClient, headers: dict[str, str]
+) -> None:
+    """Holding a terminal session must not be holding an order-plane credential.
+
+    Asserted at the *server*, not merely by trusting the browser to honour the
+    cookie's path: an order route asked with the session and no header still
+    refuses, so even a client that sent the cookie everywhere would gain nothing.
+    """
+
+    assert (
+        client.post("/terminal/session", json={"token": headers["X-Chronos-Token"]}).status_code
+        == 201
+    )
+    assert client.get("/terminal/system").status_code == 200
+
+    for path in ("/orders/intents", "/account/summary", "/live/status"):
+        answered = client.get(path)
+        assert answered.status_code == 401, f"{path} accepted the terminal session"
+
+
+def test_a_wrong_token_buys_nothing_and_explains_nothing(client: TestClient) -> None:
+    """One way to be wrong, and no detail a prober could use to get warmer."""
+
+    refused = client.post("/terminal/session", json={"token": "not-the-token"})
+    assert refused.status_code == 401
+    assert SESSION_COOKIE not in refused.cookies
+    assert refused.json()["detail"] == "invalid token"
+    assert client.get("/terminal/system").status_code == 401
+
+
+def test_closing_a_session_stops_it_working(client: TestClient, headers: dict[str, str]) -> None:
+    """Logging out has to forget the session server-side.
+
+    Clearing the cookie alone would leave a credential this process still
+    honoured, which is the difference between signing out and hiding the badge.
+    """
+
+    assert (
+        client.post("/terminal/session", json={"token": headers["X-Chronos-Token"]}).status_code
+        == 201
+    )
+    assert client.get("/terminal/system").status_code == 200
+
+    closed = client.delete("/terminal/session")
+    assert closed.status_code == 200
+    assert client.get("/terminal/system").status_code == 401
+
+
+def test_an_expired_session_is_refused(client: TestClient, headers: dict[str, str]) -> None:
+    """The TTL binds even if nothing swept recently."""
+
+    from chronos.api.terminal_session import TerminalSessions
+
+    store = TerminalSessions(ttl=timedelta(seconds=30))
+    minted = store.create(now=datetime(2026, 7, 26, 12, 0, tzinfo=UTC))
+    assert store.validate(minted, now=datetime(2026, 7, 26, 12, 0, 29, tzinfo=UTC)) is True
+    assert store.validate(minted, now=datetime(2026, 7, 26, 12, 0, 31, tzinfo=UTC)) is False
+
+
+def test_live_sessions_are_bounded(client: TestClient) -> None:
+    """A caller who knows the token still cannot grow this process without bound.
+
+    Refusing the new login rather than evicting an old one is deliberate:
+    evicting would let anyone holding the token sign the operator out.
+    """
+
+    from chronos.api.terminal_session import TerminalSessions
+
+    now = datetime(2026, 7, 26, 12, 0, tzinfo=UTC)
+    store = TerminalSessions(max_sessions=2)
+    first = store.create(now=now)
+    store.create(now=now)
+    with pytest.raises(HTTPException) as refused:
+        store.create(now=now)
+    assert refused.value.status_code == 429
+    assert store.validate(first, now=now) is True
+
+
+def test_the_header_still_works_exactly_as_before(
+    client: TestClient, headers: dict[str, str]
+) -> None:
+    """Every non-browser caller — curl, a script, a future CLI — is untouched."""
+
+    assert client.get("/terminal/system", headers=headers).status_code == 200
+    assert SESSION_COOKIE not in client.cookies
+
+
+def test_the_session_grants_no_writer_authority(
+    read_only_client: TestClient, demo_env: Path
+) -> None:
+    """Signing in is not arming. A demoted backend still refuses the mutations."""
+
+    token = load_or_create_token(demo_env / "backend_api_token")
+    assert read_only_client.post("/terminal/session", json={"token": token}).status_code == 201
+    assert read_only_client.get("/terminal/system").status_code == 200
+    refused = read_only_client.post("/terminal/mandate/revoke", json={"reason": "test"})
+    assert refused.status_code == 409

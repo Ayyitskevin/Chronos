@@ -75,6 +75,7 @@ const API = {
   alerts: "/terminal/alerts",
   acknowledge: (id) => `/terminal/alerts/${encodeURIComponent(id)}/acknowledge`,
   revoke: "/terminal/mandate/revoke",
+  session: "/terminal/session",
 };
 
 const POLL_MS = 5000;
@@ -123,6 +124,10 @@ const SYMBOL_RE = /^\/?[A-Z][A-Z0-9]*(?:[./][A-Z0-9]+)*$/;
  * terminal makes about its own ignorance in one screen.
  */
 const COPY = {
+  gateDefault:
+    "This terminal needs the local API token once, to exchange it for a session. The token is not stored by this page.",
+  gateExpired:
+    "The backend refused this session. It has either expired, or the backend restarted — sessions are held in memory and do not survive a restart, so a bounce signs every terminal out. Panels keep their last reading, marked stale.",
   noMandate:
     "This backend has no mandate in force, so no authority has been established. That is not the same as a mandate granting nothing — nothing has been granted or refused.",
   mandateActive:
@@ -154,6 +159,10 @@ const COPY = {
 };
 
 const state = {
+  // null until a route has answered either way. `false` raises the sign-in
+  // gate; the tri-state matters because "not signed in" and "not asked yet"
+  // must not look the same to the boot path.
+  authenticated: null,
   registry: [],
   registryAt: null,
   registryError: "",
@@ -185,6 +194,12 @@ const dom = {
   emptyKeys: document.getElementById("empty-keys"),
   panels: document.getElementById("st-panels"),
   reset: document.getElementById("st-reset"),
+  gate: document.getElementById("gate"),
+  gateForm: document.getElementById("gate-form"),
+  gateToken: document.getElementById("gate-token"),
+  gateWhy: document.getElementById("gate-why"),
+  gateResult: document.getElementById("gate-result"),
+  gateSubmit: document.getElementById("gate-submit"),
 };
 
 // ---------------------------------------------------------------- DOM helpers
@@ -317,7 +332,11 @@ async function getJSON(path) {
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
     const latencyMs = Math.round(performance.now() - started);
-    if (!response.ok) return { ok: false, status: response.status, error: await errorText(response), latencyMs };
+    if (!response.ok) {
+      if (response.status === 401) noteUnauthorized();
+      return { ok: false, status: response.status, error: await errorText(response), latencyMs };
+    }
+    if (state.authenticated !== true) hideGate();
     return { ok: true, status: response.status, data: await response.json(), latencyMs };
   } catch (error) {
     return { ok: false, status: 0, error: unreachable(error), latencyMs: Math.round(performance.now() - started) };
@@ -343,11 +362,92 @@ async function postJSON(path, body) {
       credentials: "same-origin",
       body: JSON.stringify(body),
     });
-    if (!response.ok) return { ok: false, status: response.status, error: await errorText(response) };
+    if (!response.ok) {
+      // The sign-in route answers 401 for a bad token, and raising the gate on
+      // top of the gate would be noise — it is already open.
+      if (response.status === 401 && path !== API.session) noteUnauthorized();
+      return { ok: false, status: response.status, error: await errorText(response) };
+    }
     return { ok: true, status: response.status, data: await response.json().catch(() => null) };
   } catch (error) {
     return { ok: false, status: 0, error: unreachable(error) };
   }
+}
+
+// ------------------------------------------------------------------ sign-in
+
+/**
+ * The sign-in gate (M8b).
+ *
+ * A browser cannot put a header on a document load, so the shell arrives with no
+ * credential and finds out it needs one the only way it can: by being refused.
+ * Every read and every action funnels its 401 through `noteUnauthorized`, which
+ * raises this gate; signing in POSTs the operator's token once and the backend
+ * answers with an httpOnly cookie scoped to `/terminal`.
+ *
+ * What this page deliberately never does is *keep* the token. It is read out of
+ * the field, sent, and the field is cleared. There is no copy in `state`, none
+ * in `localStorage`, and none the page could read back out of the cookie — so a
+ * script that got into this page after sign-in inherits the ability to call
+ * `/terminal/*` (which the CSP exists to prevent, and which the cookie's path
+ * scope keeps away from the order plane) but never learns the credential itself
+ * and so cannot carry it anywhere this page cannot already reach.
+ */
+function showGate(why) {
+  if (!dom.gate) return;
+  state.authenticated = false;
+  dom.gate.hidden = false;
+  setText(dom.gateWhy, why || COPY.gateDefault);
+  setText(dom.gateResult, "");
+  if (dom.gateToken) dom.gateToken.focus();
+}
+
+function hideGate() {
+  if (!dom.gate) return;
+  state.authenticated = true;
+  dom.gate.hidden = true;
+  if (dom.gateToken) dom.gateToken.value = "";
+  setText(dom.gateResult, "");
+}
+
+/**
+ * Called for every 401 the backend returns.
+ *
+ * A session can lapse mid-use — the TTL runs out, or the backend restarts and
+ * forgets every session it had — and the honest response to that is the same as
+ * to never having signed in. Panels keep whatever they last drew, correctly
+ * marked stale by their own freshness rule, rather than being blanked: what
+ * expired is the credential, not the knowledge of what was true a moment ago.
+ */
+function noteUnauthorized() {
+  if (state.authenticated === false) return;
+  showGate(COPY.gateExpired);
+}
+
+async function signIn(token) {
+  if (!token) {
+    setText(dom.gateResult, "enter the token first");
+    return false;
+  }
+  if (dom.gateSubmit) dom.gateSubmit.disabled = true;
+  setText(dom.gateResult, "signing in…");
+  const outcome = await postJSON(API.session, { token });
+  if (dom.gateSubmit) dom.gateSubmit.disabled = false;
+  if (!outcome.ok) {
+    // The backend deliberately says only "invalid token" — there is one way to
+    // be wrong here and elaborating would only help something that is guessing.
+    setText(dom.gateResult, `refused: ${outcome.error || `HTTP ${outcome.status}`}`);
+    return false;
+  }
+  hideGate();
+  message("signed in");
+  pollSystem();
+  loadRegistry().then((loaded) => {
+    if (loaded) restoreWorkspace();
+    syncChrome();
+  });
+  refreshAll();
+  return true;
 }
 
 function unreachable(error) {
@@ -1512,6 +1612,12 @@ function boot() {
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible") refreshAll();
   });
+  if (dom.gateForm) {
+    dom.gateForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      signIn(dom.gateToken ? dom.gateToken.value.trim() : "");
+    });
+  }
 
   syncChrome();
   drawStatus();

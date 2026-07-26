@@ -93,6 +93,39 @@
       <button class="st-btn" id="st-reset" type="button" title="Close every panel">RESET</button>
     </footer>
 
+    <!--
+      The sign-in gate. Hidden until a route answers 401, because the usual case
+      is a session already established and a login prompt in front of a working
+      terminal would be noise. The token is typed into a password field so it is
+      not left legible on a shared screen, and it is POSTed to
+      /terminal/session and never stored by the page — the browser holds the
+      httpOnly cookie the backend returns, and this page cannot read it back.
+    -->
+    <div class="gate" id="gate" hidden>
+      <form class="gate-box" id="gate-form">
+        <div class="gate-title">CHRONOS — sign in</div>
+        <p class="gate-why" id="gate-why"></p>
+        <label class="gate-label" for="gate-token">local API token</label>
+        <input
+          class="gate-input"
+          id="gate-token"
+          type="password"
+          autocomplete="off"
+          spellcheck="false"
+          aria-describedby="gate-hint"
+        />
+        <p class="gate-hint" id="gate-hint">
+          The value in your backend token file (BACKEND_TOKEN_FILE, by default
+          data/backend_api_token). It is exchanged for a session cookie scoped to
+          /terminal and is not kept by this page.
+        </p>
+        <div class="gate-actions">
+          <button class="gate-btn" id="gate-submit" type="submit">SIGN IN</button>
+          <span class="gate-result" id="gate-result" role="status" aria-live="polite"></span>
+        </div>
+      </form>
+    </div>
+
     <script type="module" src="/terminal/static/terminal.js"></script>
   </body>
 </html>

@@ -770,3 +770,107 @@ input {
     animation: none;
   }
 }
+
+/* ------------------------------------------------------------------ sign-in
+ *
+ * The gate the terminal raises when a route answers 401 (M8b). It covers the
+ * workspace rather than replacing it: behind the overlay the panels keep their
+ * last reading, correctly marked stale by their own freshness rule, because
+ * what expired is the credential and not the knowledge of what was true a
+ * moment ago. Blanking them would throw away the operator's last good picture
+ * at the moment they are least able to refresh it.
+ */
+.gate {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* Opaque enough to own the screen, translucent enough that the workspace
+   * behind it still reads as present rather than gone. */
+  background: rgba(10, 10, 11, 0.88);
+}
+
+.gate[hidden] {
+  display: none;
+}
+
+.gate-box {
+  width: min(30rem, calc(100vw - 2rem));
+  padding: 1.25rem 1.25rem 1rem;
+  background: var(--panel);
+  border: 1px solid var(--border-bright);
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.gate-title {
+  color: var(--amber);
+  letter-spacing: 0.08em;
+  font-size: 0.8125rem;
+}
+
+.gate-why {
+  color: var(--text);
+  font-size: 0.75rem;
+  line-height: 1.5;
+  margin: 0;
+}
+
+.gate-label {
+  color: var(--muted);
+  font-size: 0.6875rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.gate-input {
+  font-family: var(--mono);
+  font-size: 0.8125rem;
+  padding: 0.4rem 0.5rem;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border-bright);
+}
+
+.gate-input:focus {
+  outline: 2px solid var(--amber);
+  outline-offset: 1px;
+}
+
+.gate-hint {
+  color: var(--dim);
+  font-size: 0.6875rem;
+  line-height: 1.5;
+  margin: 0;
+}
+
+.gate-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 0.25rem;
+}
+
+.gate-btn {
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  letter-spacing: 0.06em;
+  padding: 0.35rem 0.9rem;
+  color: var(--bg);
+  background: var(--amber);
+  border: none;
+  cursor: pointer;
+}
+
+.gate-btn:disabled {
+  background: var(--amber-dim);
+  cursor: default;
+}
+
+.gate-result {
+  color: var(--muted);
+  font-size: 0.6875rem;
+}
