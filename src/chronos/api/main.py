@@ -5,6 +5,30 @@ the sole order-writing authority. It binds to loopback only; every endpoint
 except ``/health`` requires the local API token. If another backend already
 holds the single-writer lease for the configured database, this instance
 starts **read-only** with inspection available and mutation refused.
+
+From M8a it also serves the operator terminal's browser client as static files
+(ADR-0018 §6). Two properties of that are worth stating where the app is built,
+because both are easy to lose in a later edit:
+
+- **The shell is served without the API token; the data behind it is not.** A
+  browser cannot put a header on a document load, so ``/terminal/app`` is
+  reachable unauthenticated — on loopback, from this process, from files that
+  ship with the package. Every ``/terminal/*`` data route still requires
+  ``X-Chronos-Token``. The honest consequence, disclosed rather than papered
+  over: the bundled client sends no token today, so a browser that loads the
+  shell gets ``401`` on every panel until a deliberate browser-session decision
+  is made. That decision is an authorization change and does not belong in the
+  same commit that first exposes mandate revocation.
+- **Same-origin serving is what removes CORS from the picture entirely.** There
+  is no cross-origin request to permit, no preflight, and no credential handed
+  to JavaScript loaded from somewhere else. The loopback binding and the
+  existing token posture are unchanged by the terminal existing.
+- **The browser is told what the page is allowed to do, not just trusted to
+  behave.** Every ``/terminal`` response carries a Content-Security-Policy and
+  ``nosniff`` (:class:`_TerminalSecurityHeaders`). The client already refuses
+  every HTML sink, but that refusal lives in hand-written DOM code and a
+  structural test over it; the header is the layer that survives the day one of
+  those regresses.
 """
 
 from __future__ import annotations
@@ -13,8 +37,12 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
+from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from chronos.api.auth import load_or_create_token
 from chronos.api.autonomy_wiring import autonomy_tick_task, build_autonomy_runtime
@@ -25,10 +53,56 @@ from chronos.api.routes.health import router as health_router
 from chronos.api.routes.live import router as live_router
 from chronos.api.routes.orders import router as orders_router
 from chronos.api.routes.strategy import router as strategy_router
+from chronos.api.routes.terminal import router as terminal_router
 from chronos.runtime import build_runtime
 from chronos.utils.locking import WriterLease
 
 _logger = logging.getLogger("chronos.api")
+
+#: The terminal client's directory, derived from this file's own location and
+#: from nothing else. It is not a setting, not an environment variable, and not
+#: influenced by any request — so there is no operator-supplied path to validate
+#: and no traversal input to sanitize. ``StaticFiles`` additionally refuses any
+#: resolved path outside the directory it was given, which is the guarantee that
+#: matters once a URL is in play.
+_TERMINAL_CLIENT_DIR = Path(__file__).resolve().parent.parent / "terminal" / "static"
+
+#: The security headers every ``/terminal`` response carries, pre-encoded because
+#: they are constants and the middleware below runs on every one of those
+#: responses.
+#:
+#: The policy is as closed as a policy can be while still describing this page.
+#: The shell loads one stylesheet and one module, both from this origin, and
+#: nothing else — ``index.html`` says so in its own header and
+#: ``tests/safety/test_terminal_client_has_no_html_sinks.py`` proves it — so
+#: ``default-src 'none'`` with ``'self'`` for script, style and connect costs
+#: exactly zero functionality, and ``img-src``, ``base-uri``, ``form-action`` and
+#: ``frame-ancestors`` close surfaces the page never uses at all.
+#:
+#: Why it exists when the client already assigns nothing but ``textContent``:
+#: that property is enforced by a structural test over hand-written DOM code, and
+#: a test is a claim about the file as it stands today. The header is what makes
+#: the *next* ``innerHTML`` inert rather than exploitable. That distinction is
+#: worth paying for here because a browser session credential is a planned
+#: follow-up (see the module docstring): today injected script could not reach
+#: ``/orders/*`` because this page holds no credential, but the moment one
+#: exists, same-origin script execution in this page is order submission from the
+#: process that holds the broker session.
+#:
+#: ``nosniff`` is here for the same reason one layer down. The terminal serves
+#: operator-authored notes and worker-derived narrative inside JSON, and a
+#: browser that sniffed one of those bodies into ``text/html`` would render it as
+#: a document on this origin, which is where the policy above would then apply.
+_TERMINAL_SECURITY_HEADERS: tuple[tuple[bytes, bytes], ...] = (
+    (
+        b"content-security-policy",
+        b"default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; "
+        b"img-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+    ),
+    (b"x-content-type-options", b"nosniff"),
+)
+
+_TERMINAL_SECURITY_HEADER_NAMES = frozenset(name for name, _ in _TERMINAL_SECURITY_HEADERS)
 
 #: The lease is renewed this many times per TTL, so the renewal interval is a
 #: third of the TTL and ordinary scheduling jitter cannot let the lease lapse.
@@ -212,6 +286,64 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         runtime.close()
 
 
+def _is_terminal_path(path: str) -> bool:
+    """Whether a request path belongs to the terminal.
+
+    Spelled out rather than ``path.startswith("/terminal")`` so that a future
+    ``/terminals`` or ``/terminal-export`` route does not silently inherit a
+    policy written for a document it is not.
+    """
+
+    return path == "/terminal" or path.startswith("/terminal/")
+
+
+class _TerminalSecurityHeaders:
+    """Attach :data:`_TERMINAL_SECURITY_HEADERS` to every ``/terminal`` response.
+
+    A pure ASGI wrapper rather than ``BaseHTTPMiddleware``: the whole job is two
+    response headers, and ``BaseHTTPMiddleware`` would buy that by putting an
+    anyio task pair around every request in the application, including the order
+    routes that have nothing to do with the terminal.
+
+    Two alternatives were considered and rejected. A ``StaticFiles`` subclass
+    overriding its response headers is narrower still, but it covers the assets
+    and misses the shell route — and the shell is the one response a browser
+    parses as a document, which is the only place a CSP does any work. Applying
+    the headers app-wide was the other, and the headers would do no harm on the
+    JSON routes; but ``default-src 'none'`` is a statement about a page, and a
+    header nobody can point at a rendered document is a header nobody maintains.
+
+    The path test happens before the response is touched, so a request outside
+    ``/terminal`` passes through this object unchanged apart from one string
+    comparison.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self._app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http" or not _is_terminal_path(scope.get("path", "")):
+            await self._app(scope, receive, send)
+            return
+
+        async def _send(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                # Replace rather than append, so exactly one of each header is
+                # emitted. Two ``Content-Security-Policy`` headers are enforced
+                # as their intersection, which is a policy no reader of this file
+                # ever wrote down.
+                headers: list[tuple[bytes, bytes]] = [
+                    (name, value)
+                    for name, value in message.get("headers", ())
+                    if name.lower() not in _TERMINAL_SECURITY_HEADER_NAMES
+                ]
+                headers.extend(_TERMINAL_SECURITY_HEADERS)
+                message = {**message, "headers": headers}
+            await send(message)
+
+        await self._app(scope, receive, _send)
+
+
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Chronos Backend",
@@ -230,4 +362,53 @@ def create_app() -> FastAPI:
     app.include_router(orders_router)
     app.include_router(live_router)
     app.include_router(autonomy_router)
+    app.include_router(terminal_router)
+
+    # The terminal client is served from this process, same-origin with the data
+    # it draws — which is the whole reason there is no CORS middleware, no
+    # preflight, and no bearer token handed to JavaScript from another origin
+    # (ADR-0018 §6). Neither the shell route nor the asset mount below carries a
+    # token dependency, on purpose: a browser cannot put a header on a document
+    # load, and the module docstring states plainly what that costs.
+    #
+    # What the browser *is* told is what this page may do — see
+    # ``_TERMINAL_SECURITY_HEADERS`` for why that header exists behind a client
+    # that already refuses every HTML sink.
+    app.add_middleware(_TerminalSecurityHeaders)
+
+    # No path under /terminal redirects, and that is the point rather than a
+    # detail. ``StaticFiles(html=True)`` used to serve the shell as a directory,
+    # so ``GET /terminal/app`` answered 307 with an absolute ``Location`` built
+    # from the request's ``Host`` header — path preserved and a slash appended,
+    # so never an attacker-chosen destination, but the claim that the mount
+    # "cannot be redirected by user input" was not true as written. A route that
+    # returns one named file has no directory to resolve and nothing to redirect
+    # to. Both spellings are registered because the entry point has been written
+    # down with and without the trailing slash; a second route entry is cheaper
+    # than a redirect and says less.
+    def terminal_shell() -> FileResponse:
+        """The shell document, addressed by name — never by resolving a directory."""
+
+        return FileResponse(_TERMINAL_CLIENT_DIR / "index.html", media_type="text/html")
+
+    for path in ("/terminal/app", "/terminal/app/"):
+        app.add_api_route(path, terminal_shell, methods=["GET"], include_in_schema=False)
+
+    # ``redirect_slashes`` goes with it. No route in this application is declared
+    # with a trailing slash, so all it ever did was turn a mistyped URL into that
+    # same Host-derived 307 — including ``GET /terminal/static``, which the shell
+    # route above would otherwise have left behind. A URL that does not exist now
+    # gets a 404, which is what it is.
+    app.router.redirect_slashes = False
+
+    # ``index.html`` hard-codes this prefix absolutely, and it must stay absolute:
+    # a relative href resolves against the URL the *document* was served at, so it
+    # would break under one of the two shell spellings above. ``html=False`` so
+    # that no request resolves to a directory here either — ``/terminal/static/``
+    # is not a page, and the shell has its own address.
+    app.mount(
+        "/terminal/static",
+        StaticFiles(directory=_TERMINAL_CLIENT_DIR),
+        name="terminal-static",
+    )
     return app

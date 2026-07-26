@@ -1,6 +1,6 @@
 """The terminal's command registry and grammar (M8a, ADR-0018 §§5-6).
 
-Two things are pinned here, and they fail differently.
+Three things are pinned here, and they fail differently.
 
 The **registry** is the single source of truth for the panel surface, the help
 text, and the client's completions. Its invariants are therefore asserted
@@ -9,6 +9,13 @@ test that enumerates the registry only proves the registry equals itself. What i
 checked is that no code repeats, no alias is claimed twice, every entry can feed a
 panel, and every advertised example actually parses back to the command that
 advertises it.
+
+The **summaries** are the registry's only claim about something it cannot see.
+HELP renders them verbatim, so a clause naming a fact
+the panel's read model does not carry is the command surface drifting from what
+the backend can answer, with nothing else in the system reading the sentence
+closely enough to notice. The checks below are deliberately narrow — they cover
+the clauses that name a field, not the prose around them.
 
 The **grammar** is the only thing standing between an operator's typing and a
 blank screen, so its failure mode matters more than its success: it must never
@@ -27,6 +34,7 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+from chronos.terminal import views
 from chronos.terminal.commands import (
     COMMANDS,
     ParsedCommand,
@@ -172,6 +180,87 @@ def test_a_command_declaring_a_symbol_must_show_one_in_an_example() -> None:
             continue
         assert any(parse(example).symbol for example in command.examples), (
             f"{command.code} claims to take a symbol but never shows one being given"
+        )
+
+
+# --------------------------------------------------------------------------- #
+# The summaries, against the read models they describe
+# --------------------------------------------------------------------------- #
+
+
+#: One phrase a summary uses to name a specific fact, and the read-model field
+#: that makes it true. Each entry is asserted from both sides, so it fails when
+#: the phrase goes as loudly as when the field does. This is not a prose
+#: checker: it covers the clauses that name a field, which is where drift is
+#: silent and consequential.
+_SUMMARY_CLAIMS: tuple[tuple[str, str, str], ...] = (
+    ("SYS", "proposal-queue depth", "queue_depth"),
+    ("SYS", "unacknowledged alert count", "alerts_unacknowledged"),
+    ("SYS", "kill switch", "kill_switch_engaged"),
+    ("SYS", "live arming", "live_armed"),
+    ("MAND", "promotion level", "promotions"),
+    ("MAND", "when it expires", "expires_at"),
+    ("JRNL", "the cycle stage reached", "stage"),
+    ("JRNL", "the refusal recorded", "refusal"),
+    ("CNTR", "realized loss", "realized_loss_usd"),
+    ("CNTR", "peak-to-trough drawdown", "drawdown_usd"),
+    ("CNTR", "turnover", "turnover_usd"),
+    ("QUE", "how many proposals are waiting", "pending_depth"),
+    ("ALRT", "whether it was actually delivered", "delivered"),
+    ("ALRT", "how many times the condition recurred", "occurrences"),
+)
+
+#: The fields each command's panel can actually answer with, entry models
+#: folded into their container because a summary describes the panel whole.
+_PANEL_FIELDS: dict[str, frozenset[str]] = {
+    "SYS": frozenset(views.SystemView.model_fields),
+    "MAND": frozenset(views.MandateView.model_fields),
+    "JRNL": frozenset(views.JournalView.model_fields)
+    | frozenset(views.JournalEntryView.model_fields),
+    "CNTR": frozenset(views.CountersView.model_fields),
+    "QUE": frozenset(views.QueueView.model_fields) | frozenset(views.QueueEntryView.model_fields),
+    "ALRT": frozenset(views.AlertsView.model_fields) | frozenset(views.AlertEntryView.model_fields),
+}
+
+
+def _command(code: str) -> TerminalCommand:
+    found = resolve(code)
+    assert found is not None, f"{code} is not in the registry"
+    return found
+
+
+def test_no_summary_promises_a_fact_its_read_model_does_not_carry() -> None:
+    """HELP is rendered from these summaries, so they are claims, not blurbs.
+
+    ADR-0018 makes the registry the single source of truth for the panel
+    surface. A summary describing a fact the read model does not carry is
+    therefore the surface drifting from what the backend can answer — silently,
+    because nothing else in the system reads the sentence.
+    """
+
+    for code, phrase, field in _SUMMARY_CLAIMS:
+        summary = _command(code).summary.lower()
+        assert phrase in summary, f"the {code} summary no longer says {phrase!r}"
+        assert field in _PANEL_FIELDS[code], (
+            f"the {code} summary promises {phrase!r}, but no field named {field!r} carries it"
+        )
+
+
+def test_the_status_summary_describes_no_tick_it_cannot_report() -> None:
+    """SYS promised "last tick and its outcome"; nothing records a tick that ran.
+
+    ``SystemView`` answers whether autonomy is configured, whether the runtime
+    stopped, and how long until the *next* tick. Both halves are asserted so the
+    pin fails in whichever direction it is broken: restore the clause and the
+    summary check fails, land a real last-tick field and the field check fails —
+    which is the reminder to describe it.
+    """
+
+    summary = _command("SYS").summary.lower()
+    assert not any(name.startswith("last_tick") for name in views.SystemView.model_fields)
+    for phrase in ("last tick", "its outcome", "tick outcome"):
+        assert phrase not in summary, (
+            f"the SYS summary promises {phrase!r}, which no SystemView field carries"
         )
 
 

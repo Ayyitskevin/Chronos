@@ -131,7 +131,11 @@ class TerminalCommand:
     #: board in M8a — see the module docstring; this is a claim about what the
     #: stored rows can be filtered by, not about what the grammar can parse.
     takes_symbol: bool = False
-    #: What the panel answers, in the operator's terms. Rendered by HELP.
+    #: What the panel answers, in the operator's terms. Rendered by HELP, which
+    #: makes it a claim about the read model behind ``panel`` and not a blurb: a
+    #: clause naming a fact that model does not carry is the panel surface
+    #: drifting from what the backend can answer, which is the drift keeping the
+    #: registry in Python was meant to make impossible.
     summary: str = ""
     #: Lines that work *today*. Since no panel takes an argument yet, that is
     #: the code and its aliases; inventing an example with an argument nothing
@@ -148,9 +152,9 @@ COMMANDS: tuple[TerminalCommand, ...] = (
         panel="system",
         aliases=("STATUS", "SYSTEM"),
         summary=(
-            "Whether the supervisor is awake and whether it is allowed to act: last tick and "
-            "its outcome, proposal-queue depth, unacknowledged alert count, kill switch, and "
-            "live arming. An unknown value is shown as unknown, never as zero."
+            "Whether the supervisor is awake and whether it is allowed to act: proposal-queue "
+            "depth, unacknowledged alert count, kill switch, and live arming. An unknown value "
+            "is shown as unknown, never as zero."
         ),
         examples=("SYS", "STATUS"),
     ),

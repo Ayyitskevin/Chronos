@@ -36,6 +36,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from chronos.autonomy import (
+    ActivityLimits,
     AutonomyMandate,
     AutonomyMode,
     CapitalLimits,
@@ -294,6 +295,60 @@ def test_system_view_serializes_without_a_non_finite_float(
     assert round_tripped["seconds_until_next_tick"] is None
 
 
+def test_mandate_active_is_unknown_until_the_activation_can_be_looked_up(
+    sessions: sessionmaker[Session],
+) -> None:
+    """SYS and MAND answer from one lookup, so they may not disagree about it.
+
+    With no account binding there is no activation row to load, and the status
+    bar saying ``inactive`` beside a mandate panel saying ``unknown`` — both
+    drawn in the same request cycle — would be a positive claim derived from a
+    query nobody ran. Scoped, the lookup really happens and both may answer.
+    """
+
+    mandate = _mandate()
+    with sessions.begin() as session:
+        unscoped = views.system_view(
+            session, account_fingerprint="", now=_NOW, read_only=False, mandate=mandate
+        )
+        unscoped_grant = views.mandate_view(
+            session, account_fingerprint="", now=_NOW, mandate=mandate
+        )
+        scoped = views.system_view(
+            session,
+            account_fingerprint=_FINGERPRINT,
+            now=_NOW,
+            read_only=False,
+            mandate=mandate,
+        )
+        durable.activate(
+            session,
+            account_fingerprint=_FINGERPRINT,
+            mandate=mandate,
+            owner_event_id="owner-event-sys",
+            now=_NOW - timedelta(minutes=1),
+            process_generation=1,
+        )
+        activated = views.system_view(
+            session,
+            account_fingerprint=_FINGERPRINT,
+            now=_NOW,
+            read_only=False,
+            mandate=mandate,
+        )
+        activated_grant = views.mandate_view(
+            session, account_fingerprint=_FINGERPRINT, now=_NOW, mandate=mandate
+        )
+
+    assert unscoped.mandate_id == mandate.mandate_id
+    assert unscoped.mandate_active is None
+    assert unscoped_grant.active is None
+    # Scoped and unactivated is a fact the lookup established, so it is stated.
+    assert scoped.mandate_active is False
+    assert activated.mandate_active is True
+    assert activated_grant.active is True
+
+
 # ------------------------------------------------------------------- counters
 
 
@@ -311,6 +366,7 @@ def test_counters_view_states_that_no_row_exists(sessions: sessionmaker[Session]
 
     assert zeroed.realized_loss_usd == Decimal(0)
     assert view.counters_recorded is False
+    assert view.equity_observed is False
     assert view.session_date == _NOW.date().isoformat()
     assert view.realized_loss_usd is None
     assert view.drawdown_usd is None
@@ -343,10 +399,12 @@ def test_counters_view_reports_a_recorded_session(sessions: sessionmaker[Session
         view = views.counters_view(session, account_fingerprint=_FINGERPRINT, now=_NOW)
 
     assert view.counters_recorded is True
+    assert view.equity_observed is True
     assert view.realized_loss_usd == "30.25"
     assert view.peak_equity_usd == "120"
     assert view.trough_equity_usd == "90"
     assert view.drawdown_usd == "30"
+    assert view.drawdown_pct == "0.25"
     assert view.orders_submitted == 2
     assert view.cancellations == 1
     assert view.replacements == 0
@@ -365,6 +423,67 @@ def test_counters_recorded_distinguishes_an_all_zero_session(
     assert view.counters_recorded is True
     assert view.realized_loss_usd == "0"
     assert view.orders_submitted == 0
+
+
+def test_activity_without_an_equity_snapshot_leaves_the_drawdown_unknown(
+    sessions: sessionmaker[Session],
+) -> None:
+    """A counter row is not an equity observation, and the panel must not merge them.
+
+    ``_ensure_counter_row`` seeds ``peak_equity_usd`` at zero as the sentinel for
+    "nothing has been snapshotted", and ``SessionCounters`` reports drawdown as
+    zero for exactly that state because admission needs a number to compare. A
+    panel that copied all four figures through would caption them "what the
+    supervisor itself observed this session" while the supervisor observed no
+    equity at all — the module's own named inversion, one level down and in the
+    reassuring direction. ``counters_recorded`` guards the row;
+    ``equity_observed`` guards the figures inside it.
+    """
+
+    with sessions.begin() as session:
+        durable.record_activity(
+            session, account_fingerprint=_FINGERPRINT, now=_NOW, orders_submitted=3
+        )
+        stored = durable.load_counters(session, account_fingerprint=_FINGERPRINT, now=_NOW)
+        view = views.counters_view(session, account_fingerprint=_FINGERPRINT, now=_NOW)
+
+    assert stored.peak_equity_usd == Decimal(0)
+    assert stored.drawdown_usd == Decimal(0)
+    assert stored.drawdown_pct == Decimal(0)
+
+    assert view.counters_recorded is True
+    assert view.equity_observed is False
+    assert view.orders_submitted == 3
+    assert view.realized_loss_usd == "0"
+    assert view.peak_equity_usd is None
+    assert view.trough_equity_usd is None
+    assert view.drawdown_usd is None
+    assert view.drawdown_pct is None
+
+
+def test_the_first_equity_snapshot_turns_the_drawdown_figures_on(
+    sessions: sessionmaker[Session],
+) -> None:
+    """The gate is the recorded peak, not the presence of the row it lives in."""
+
+    with sessions.begin() as session:
+        durable.record_activity(
+            session, account_fingerprint=_FINGERPRINT, now=_NOW, orders_submitted=1
+        )
+        before = views.counters_view(session, account_fingerprint=_FINGERPRINT, now=_NOW)
+        durable.record_equity(
+            session, account_fingerprint=_FINGERPRINT, equity_usd=Decimal(500), now=_NOW
+        )
+        after = views.counters_view(session, account_fingerprint=_FINGERPRINT, now=_NOW)
+
+    assert before.equity_observed is False
+    assert before.drawdown_usd is None
+    assert after.equity_observed is True
+    assert after.peak_equity_usd == "500"
+    assert after.trough_equity_usd == "500"
+    # A measured drawdown of zero is a real observation and is shown as one.
+    assert after.drawdown_usd == "0"
+    assert after.drawdown_pct == "0"
 
 
 def test_money_is_rendered_exactly_and_without_exponents(
@@ -523,6 +642,65 @@ def test_set_ceilings_bind_and_carry_their_value(sessions: sessionmaker[Session]
     assert (loss.value, loss.effect) == ("50", "BINDS")
     concentration = _limit(view, "concentration.max_symbol_exposure_pct")
     assert (concentration.value, concentration.effect) == ("0.25", "BINDS")
+
+
+def test_a_limit_authored_in_exponent_form_is_rendered_as_a_number(
+    sessions: sessionmaker[Session],
+) -> None:
+    """This is the panel where the owner checks their own authorization.
+
+    A mandate is authored as JSON, and a Decimal parsed from ``"1E+5"`` keeps
+    that form — ``str()`` renders it straight back as literal ``1E+5``. The
+    counters already went through a renderer for the same reason (``0E-8`` is a
+    zero an operator reads as a code); the limits were bypassing it. All three
+    limit paths are exercised, because they are three separate call sites.
+    """
+
+    capital = CapitalLimits.model_validate_json(
+        '{"model_discretion": true, "max_order_notional_usd": "1E+5", '
+        '"max_contracts_per_order": 5, "min_cash_floor_usd": "1E+2", '
+        '"min_buying_power_usd": "1E+1"}'
+    )
+    loss = LossLimits.model_validate_json('{"max_session_loss_usd": "2E+3"}')
+    activity = ActivityLimits.model_validate_json(
+        '{"max_turnover_usd_per_session": "5E+4", "max_orders_per_session": 10}'
+    )
+    # The premise: without a renderer these are what the operator would read.
+    assert str(capital.max_order_notional_usd) == "1E+5"
+    assert str(loss.max_session_loss_usd) == "2E+3"
+    assert str(capital.min_cash_floor_usd) == "1E+2"
+
+    mandate = _mandate(capital=capital, loss=loss, activity=activity)
+    with sessions.begin() as session:
+        view = views.mandate_view(
+            session, account_fingerprint=_FINGERPRINT, now=_NOW, mandate=mandate
+        )
+
+    assert _limit(view, "capital.max_order_notional_usd").value == "100000"
+    assert _limit(view, "loss.max_session_loss_usd").value == "2000"
+    assert _limit(view, "capital.min_cash_floor_usd").value == "100"
+    assert _limit(view, "activity.max_turnover_usd_per_session").value == "50000"
+    # Counts have no exponent form and are not money; they stay as they are.
+    assert _limit(view, "capital.max_contracts_per_order").value == "5"
+    assert _limit(view, "activity.max_orders_per_session").value == "10"
+
+    exact: dict[str, Decimal] = {
+        "capital.max_order_notional_usd": capital.max_order_notional_usd,
+        "capital.min_cash_floor_usd": capital.min_cash_floor_usd,
+        "capital.min_buying_power_usd": capital.min_buying_power_usd,
+        "loss.max_session_loss_usd": loss.max_session_loss_usd,
+        "activity.max_turnover_usd_per_session": activity.max_turnover_usd_per_session,
+    }
+    for name, value in exact.items():
+        text = _limit(view, name).value
+        assert text is not None
+        assert Decimal(text) == value, f"{name} rendered {text!r}, which is not {value!r}"
+
+    for item in (view.ceilings or ()) + (view.floors or ()):
+        if item.value is not None:
+            assert "E" not in item.value.upper(), (
+                f"{item.name} rendered as {item.value!r}, which is an exponent, not a figure"
+            )
 
 
 def test_mandate_view_with_no_mandate_claims_nothing(sessions: sessionmaker[Session]) -> None:

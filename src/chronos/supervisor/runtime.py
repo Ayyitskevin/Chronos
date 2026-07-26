@@ -197,6 +197,24 @@ class AutonomyRuntime:
     def stopped(self) -> bool:
         return self._stopped
 
+    @property
+    def mandate(self) -> AutonomyMandate | None:
+        """The grant this runtime is judging against, as its own source reports it.
+
+        Added for the operator terminal (ADR-0018 §6), which must show the
+        authority the tick is *actually* applying. A route that re-read the
+        mandate file instead would show what is on disk, so an owner who edited
+        the file after boot would be shown a grant this runtime is not using —
+        a panel that looks safer than the process it describes.
+
+        Read-only by construction: it returns what ``mandate_source`` returns and
+        cannot set, replace, or activate anything. ``None`` means the source has
+        no mandate to give, which every caller must read as *no authority
+        established* rather than as an error.
+        """
+
+        return self._mandate_source()
+
     def seconds_until_next_tick(self, now: datetime) -> float:
         """How long to wait. The floor applies whether or not an event arrived."""
 
