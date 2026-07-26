@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from collections.abc import Callable, Sequence
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 
 from chronos.broker.base import (
@@ -44,6 +45,7 @@ from chronos.domain.models import (
     OrderSubmission,
     UnderlyingContract,
 )
+from chronos.marketdata.bars import Bar, BarInterval, BarSeries, BarStatus
 
 DEMO_ACCOUNT_ID = "DU1234567"
 DEMO_NOW = datetime(2026, 7, 15, 15, 30, tzinfo=UTC)
@@ -301,6 +303,74 @@ class DemoBroker:
             "Demo market data cancelled",
             extra={"event": "market_data_cancelled", "contract_ids": tuple(contract_ids)},
         )
+
+    async def historical_bars(
+        self,
+        contract: UnderlyingContract,
+        *,
+        interval: BarInterval = BarInterval.DAY_1,
+        lookback_days: int = 180,
+    ) -> BarSeries:
+        """Deterministic synthetic bars — a shape, never a market.
+
+        Seeded from the symbol alone, so the same symbol draws the same chart on
+        every run and in every test. That determinism is the point: a demo series
+        that wandered would make a chart regression indistinguishable from a
+        different random draw.
+
+        These numbers describe nothing real, and the source is stamped ``demo``
+        so the terminal can say so on the panel rather than presenting a
+        synthetic series in the same visual register as a live one. The demo
+        adapter has always been the place where Chronos shows its shapes without
+        pretending they are observations.
+        """
+
+        self._require_connection()
+        if interval is not BarInterval.DAY_1:
+            raise BrokerDataError(
+                f"the demo adapter only generates daily bars; {interval.value} was requested"
+            )
+        if lookback_days < 1:
+            raise BrokerDataError("lookback_days must be at least 1")
+
+        # A stable per-symbol seed. Not `hash()`, which is randomized per process
+        # and would make the "same symbol, same chart" property hold only within
+        # a single run — exactly the kind of test flake this avoids.
+        seed = int(hashlib.sha256(contract.symbol.encode("utf-8")).hexdigest()[:8], 16)
+        base = 50.0 + (seed % 400)
+        today = self._clock().date()
+
+        bars: list[Bar] = []
+        level = base
+        for offset in range(lookback_days - 1, -1, -1):
+            session = today - timedelta(days=offset)
+            # Weekends carry no daily bar. Skipping them keeps the series shaped
+            # like a real trading calendar without inventing a holiday calendar
+            # this adapter has no business asserting.
+            if session.weekday() >= 5:
+                continue
+            step = ((seed + offset * 2654435761) % 2000) / 1000.0 - 1.0
+            level = max(1.0, level * (1.0 + step * 0.01))
+            spread = level * 0.004
+            open_price = level - step * spread
+            close_price = level
+            bars.append(
+                Bar(
+                    symbol=contract.symbol,
+                    source="demo",
+                    exchange=contract.exchange or "SMART",
+                    interval=BarInterval.DAY_1,
+                    session_date=session,
+                    timestamp_utc=datetime.combine(session, time(21, 0), tzinfo=UTC),
+                    open=round(open_price, 4),
+                    high=round(max(open_price, close_price) + spread, 4),
+                    low=round(min(open_price, close_price) - spread, 4),
+                    close=round(close_price, 4),
+                    volume=float(1_000_000 + (seed + offset) % 500_000),
+                    status=BarStatus.CLOSED,
+                )
+            )
+        return BarSeries(symbol=contract.symbol, interval=BarInterval.DAY_1, bars=tuple(bars))
 
     async def preview_order(self, request: OrderRequest) -> OrderPreview:
         self._require_connection()

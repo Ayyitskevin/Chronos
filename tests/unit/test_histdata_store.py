@@ -16,7 +16,6 @@ from tests.support.histdata_fakes import FakeHistoricalDataClient
 
 from chronos.histdata.backfill import backfill_symbol, backfill_symbols
 from chronos.histdata.corporate_actions import ActionKind, CorporateAction
-from chronos.histdata.pacing import PacingController
 from chronos.histdata.store import (
     StoreConflictError,
     StoreError,
@@ -27,6 +26,7 @@ from chronos.histdata.store import (
     write_bars,
 )
 from chronos.marketdata.bars import Bar, BarInterval, BarSeries
+from chronos.marketdata.pacing import PacingController
 
 _CAPTURED = "2024-06-01T00:00:00+00:00"
 

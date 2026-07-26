@@ -1,4 +1,4 @@
-"""Pacing controller for historical requests (ADR-0011 §5).
+"""Pacing controller for historical requests (ADR-0011 §5; shared since M8c).
 
 IBKR rate-limits ``reqHistoricalData`` (documented: no more than ~60 historical
 requests in any rolling 10-minute window, and identical requests must not repeat
@@ -15,9 +15,20 @@ Usage in the data process (the only place a real sleep happens)::
     pacing.record(key, now)
     # ... issue the request ...
 
-Honesty (ADR-0011 §5): this self-paces one process under its own client id; a
-shared budget across the trading backend and the data process is not wired, and
-the limits cannot be validated without a live gateway.
+Honesty (ADR-0011 §5): this self-paces **one process under its own client id**.
+A shared budget across the trading backend and the data process is still not
+wired, and the limits cannot be validated without a live gateway.
+
+That residual is why this module lives in ``chronos.marketdata`` rather than in
+``chronos.histdata`` where it started. Since M8c the operator terminal's chart
+also asks IBKR for bars, from the backend process, under a *different* client id
+— so there are now two self-pacing callers instead of one. Sharing the
+implementation at least means they enforce the same rule and a fix lands in one
+place; it does not make their budgets one budget, and pretending otherwise by
+leaving a second copy in the API plane would have hidden the gap instead of
+naming it. The move is deliberate: ``chronos.marketdata`` is the neutral
+vocabulary both the research plane and the trading plane already share, so
+neither has to import the other to pace itself.
 """
 
 from __future__ import annotations

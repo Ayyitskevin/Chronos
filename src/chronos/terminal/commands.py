@@ -219,6 +219,20 @@ COMMANDS: tuple[TerminalCommand, ...] = (
         examples=("ALRT", "ALERTS"),
     ),
     TerminalCommand(
+        code="GP",
+        title="Price graph",
+        panel="chart",
+        aliases=("CHART", "GRAPH"),
+        takes_symbol=True,
+        summary=(
+            "Closed daily bars for one symbol, drawn as candles. The first command here that "
+            "narrows by symbol, and the only panel whose data comes from the broker rather "
+            "than from this database — so it is also the only one that can be refused because "
+            "historical requests are paced."
+        ),
+        examples=("SPY GP", "AAPL CHART"),
+    ),
+    TerminalCommand(
         code="HELP",
         title="Command reference",
         panel="help",

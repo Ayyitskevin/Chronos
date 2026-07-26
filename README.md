@@ -78,8 +78,10 @@ the backend lifespan; and **M8a (ADR-0018)** the operator terminal — a command
 panel read-models in Python (`chronos.terminal`) served as JSON to a build-free browser
 client, mounted same-origin at `/terminal/app`. **M8b** added the session cookie that lets that client authenticate (`POST /terminal/session`
 exchanges the local API token for an httpOnly cookie scoped to `/terminal`, so the browser
-never attaches it to the order plane). Remaining: per-family live promotions and the
-deferred terminal work — per-holding theses, mandate authoring, charts, and streaming.
+never attaches it to the order plane). **M8c (ADR-0019)** added the chart: `Broker.historical_bars`, a cached and
+self-pacing bars plane, and a dependency-free candle panel. Remaining: per-family live
+promotions and the deferred terminal work — per-holding theses, mandate authoring, and
+streaming.
 
 No order is placed by any test, CI run, or development path. The one and only `transmit=True`
 in the order pipeline lives at the submission boundary and is reachable only after the full

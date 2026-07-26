@@ -874,3 +874,19 @@ input {
   color: var(--muted);
   font-size: 0.6875rem;
 }
+
+/* ------------------------------------------------------------------- chart
+ *
+ * The canvas scales to the panel while keeping its fixed backing resolution
+ * (see `drawCandles`): the alternative is measuring a container that has no
+ * layout in the headless test harness, which would make the renderer
+ * untestable to buy sharpness nobody is looking that closely for.
+ */
+.chart-canvas {
+  display: block;
+  width: 100%;
+  height: auto;
+  margin: 0.5rem 0 0.25rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+}
