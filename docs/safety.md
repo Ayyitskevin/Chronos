@@ -35,17 +35,23 @@ The model's authority is narrow by construction:
   only deterministic risk-reducing behavior allowed by policy, records the denial, and alerts
   the owner.
 
-**Status:** Milestone 1 landed this governance and the typed contracts only. The gateway, the
-model worker, and every autonomous execution path are Milestones 2 onward, and nothing in
-`chronos.autonomy` is wired into a runtime path today.
+**Status:** the stack is built and wired (M1 contracts through M7.5's app-plane wiring,
+ADR-0017). A backend booted with a valid `AUTONOMY_MANDATE_FILE` auto-activates it and
+drives the autonomy tick; without one, autonomy is inert and nothing is constructed. The
+model worker remains a separate process calling in over the ingress (R-35) — Chronos ships
+no model, no provider SDK, and no API key in the broker-holding process.
 
 ## Hard boundaries
 
 Live transmission is a gated *capability*, not an impossibility (ADR-0009, Milestone 7): it
-requires the full configuration conjunction plus the ten-gate live stack, and under ADR-0016
-live autonomous operation additionally requires an active owner mandate. An environment
-variable alone is insufficient for either. Market orders are rejected — every order is a
-positive-price limit, and the autonomy vocabulary has no `MARKET` order form. Uncovered short
+requires the full configuration conjunction plus the ten-gate live stack, and autonomous
+operation additionally requires an owner-authored AutonomyMandate. Under ADR-0017 that
+mandate is a **persistent file** (`AUTONOMY_MANDATE_FILE`) auto-activated on boot — the
+file's owner-authored content is the grant; the variable only points at it, an invalid or
+wrong-account file boots inert, and a revoked mandate stays revoked across restarts. Every
+order is a positive-price limit — including the autonomy vocabulary's ADR-0017 `MARKET`
+form, which compiles to a **protected** collared limit (quote±1%) and must be granted in the
+mandate; a literally unbounded venue market order remains unexpressible. Uncovered short
 options are not expressible in the strategy vocabulary, so no mandate can authorize one.
 Automated exercise, assignment handling, and broker-wide global cancellation are not
 implemented; rolling is a decision kind the gateway will compile as cancel-and-re-propose.

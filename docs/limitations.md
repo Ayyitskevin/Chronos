@@ -1,13 +1,15 @@
 # Chronos — limitations
 
 The honest, consolidated list of what Chronos does NOT do, cannot yet prove, or defers to an
-owner action. Chronos is pre-release, local-first software being built toward controlled
-autonomous trading (ADR-0016 / D-16); **it does not trade autonomously today** — see the
-autonomy section below for exactly what has and has not been delivered. It is not an
-investment adviser or a promise of profitable trading. Equities, futures, options, and crypto
-can produce rapid, substantial losses, and an autonomous system can produce them without
-waiting for you. This document is the single source of truth for limitations referenced by
-the README and the runbooks.
+owner action. Chronos is pre-release, local-first software built for autonomous trading
+(ADR-0016 / D-16, maximal under ADR-0017 / D-17); **whether it trades autonomously is an
+owner configuration fact** — a backend with a valid `AUTONOMY_MANDATE_FILE` auto-activates
+and trades inside that mandate; without one, autonomy is inert. See the autonomy section
+below for exactly what has and has not been delivered. It is not an investment adviser or a
+promise of profitable trading. Equities, futures, options, and crypto can produce rapid,
+substantial losses, and an autonomous system can produce them without waiting for you. This
+document is the single source of truth for limitations referenced by the README and the
+runbooks.
 
 ## Broker integration
 
@@ -163,13 +165,22 @@ the README and the runbooks.
 - Backtests and shadow scans describe would-be intents only; paper fills do not prove live
   execution quality, and past behavior does not predict future results.
 
-## Autonomous model authority (ADR-0016 / D-16)
+## Autonomous model authority (ADR-0016 / D-16, ADR-0017 / D-17)
 
-- **Chronos does not trade autonomously today.** Milestone 1 delivered governance and the
-  typed `AITradeDecision` / `AutonomyMandate` contracts and **no broker behavior**. The
-  deterministic ModelDecisionGateway, mandate validation, decision admission, sizing, the
-  model worker, tools, and every autonomous execution path are Milestones 2 onward. A test
-  asserts that nothing outside `chronos.autonomy` imports the contracts.
+- **The autonomy stack is built and wired (M1–M7.5).** Contracts, gateway, durable state,
+  compiler, queue, counters, alert delivery, the tick runtime, and — since ADR-0017 — the
+  app-plane wiring (`chronos.api.autonomy_wiring`) that assembles them in the backend
+  lifespan. A backend booted with a valid `AUTONOMY_MANDATE_FILE` auto-activates it and
+  judges proposals arriving over the ingress; with no mandate file configured, autonomy is
+  inert (no runtime is constructed). The consumer-isolation test now names the wiring
+  module as the single permitted app-plane consumer of the contracts.
+- **ADR-0017 changed the envelope, not the gates.** Owner-directed supersessions: the
+  persistent auto-activating mandate (revocation still survives restart; invalid or
+  wrong-account files boot inert with a CRITICAL alert), the live ceiling at 365 days,
+  `RESUME_UNTIL_EXPIRY` as the restart default, capital ceilings owner-optional under an
+  explicit `model_discretion` grant (floors still required in every mode), a protected
+  `MARKET` order form compiled as a collared limit, and most-aggressive-granted-form
+  selection. Every ADR-0016 §8 execution-correctness guarantee stands unweakened.
 - **A type that cannot express an order is necessary, not sufficient.** The decision contract
   carries no account, broker, routing, or transmit field, and the mandate is frozen, expiring,
   and deny-by-default. The deterministic gateway that actually judges a decision landed in
@@ -414,6 +425,15 @@ the store beneath it:
   assertion that no production module constructs the adapter, and a construction guard
   requiring `quarantine_ack=True` — which nothing in `src/` passes. An accidental wiring now
   fails loudly at construction instead of quietly acquiring an ungated broker path.
-- **The 30-day live-mandate ceiling is a judgment, not a derived number.**
+- **The live-mandate ceiling (365 days since ADR-0017; previously 30) is a judgment, not a
+  derived number.** Longer, not infinite, on purpose: renewal at the boundary is still a
+  fresh owner action.
+- **Options refuse at the autonomy instrument seam.** The ADR-0017 wiring resolves
+  equities and crypto; an option decision refuses rather than pricing against a guessed
+  strike/expiry, because chain selection is not built. Autonomous options stay gated on
+  that work and on R-27, regardless of what a mandate lists.
+- **The 1% market-protection collar is a judgment, not a derived number.** Wide enough to
+  fill through a normal spread, narrow enough to refuse a broken print; per-instrument
+  collars are a possible refinement.
 - **No futures capability of any kind exists yet** (no contract model, no adapter support);
   futures options are refused outright by the mandate validator in this release.

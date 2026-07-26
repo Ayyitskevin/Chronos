@@ -1,19 +1,24 @@
 # Chronos
 
 Chronos is a local-first, model-driven trading system for Interactive Brokers. Its
-mission (owner directive, 2026-07-25) is **controlled autonomous trading** across
-equities and ETFs, exchange-traded futures, and listed equity and index options: after
-the owner activates an approved AutonomyMandate, an approved model may originate trading
-decisions without per-order human approval, inside boundaries the owner sets at policy
-time. See [ADR-0016](docs/adr/ADR-0016-controlled-autonomous-model-authority.md) and
-DECISIONS.md **D-16**, which supersede ADR-0004 §5 / D-11.
+mission (owner directive, 2026-07-25) is **autonomous trading** across equities and
+ETFs, exchange-traded futures, and listed equity and index options: an approved model
+originates trading decisions without per-order human approval, inside boundaries the
+owner sets at policy time. See
+[ADR-0016](docs/adr/ADR-0016-controlled-autonomous-model-authority.md) (D-16, which
+superseded ADR-0004 §5 / D-11) and
+[ADR-0017](docs/adr/ADR-0017-owner-directed-maximal-autonomy.md) (D-17, the
+owner-directed maximal-autonomy supersession of parts of ADR-0016).
 
-**Where that stands today (be precise about this):** the governance and the typed
-contracts have landed (Milestone 1). The deterministic decision gateway, the model
-worker, and every autonomous execution path have **not** — they are Milestones 2 onward.
-Nothing in `chronos.autonomy` is wired into any runtime path, and the shipped order
-pipeline is still the human-confirmed one described below. Chronos does not trade
-autonomously today.
+**Where that stands today (be precise about this):** the whole autonomy stack is built
+and wired — contracts (M1), gateway/admission/sizing (M2), durable state (M3), the
+compiler and queue (M4), session counters (M5), alert delivery (M6), the tick runtime
+(M7), and the app-plane wiring (M7.5/ADR-0017). A backend booted with a valid
+`AUTONOMY_MANDATE_FILE` auto-activates it and drives the autonomy tick; proposals
+arriving over the ingress are judged, sized, compiled, and handed to the same
+propose → preview → confirm → submit pipeline every human order walks. With **no**
+mandate file configured, autonomy is inert and the pipeline is the human-confirmed
+one described below.
 
 The repository contains two subsystems:
 
@@ -60,13 +65,16 @@ engine, the dashboard cutover, the paper order-management pipeline (M5), the liv
 fractional, allowlist-gated, off by default). Final hardening (chaos, CI migration checks, docs)
 is M8.
 
-**Autonomy programme (ADR-0016).** M0 delivered a read-only autonomy gap audit. **M1 (this
-milestone)** delivered the governance reset and the typed contracts —
-`chronos.autonomy.AITradeDecision` and `chronos.autonomy.AutonomyMandate` — and **added no
-broker behavior**; a test asserts nothing outside the package imports them. Still to come:
-M2 the deterministic decision gateway and mandate validation, M3 the persistent brain, M4
-the agent and tool layer, M5 the terminal and scheduler, and M6-M10 the per-family
-promotions from paper to capped live. Each milestone stops for owner approval.
+**Autonomy programme (ADR-0016/ADR-0017).** M0 delivered a read-only gap audit; M1 the
+governance reset and typed contracts (`AITradeDecision`, `AutonomyMandate`); M2 the
+deterministic gateway, admission, and sizing; M3 durable supervisor state; M4 the
+compiler, decision queue, and injection tests; M5 market-local session counters; M6
+owner-alert delivery; M7 the time-driven tick runtime (events coalesce into hints, never
+triggers); and **M7.5 (ADR-0017)** the owner-directed maximal-autonomy supersession: the
+persistent auto-activating mandate, model self-sizing under an explicit
+`model_discretion` grant, protected (collared, never unbounded) market orders, and the
+app-plane wiring that assembles facts, mandate, runtime, and the order-plane handoff in
+the backend lifespan. Remaining: per-family live promotions and the M8 terminal.
 
 No order is placed by any test, CI run, or development path. The one and only `transmit=True`
 in the order pipeline lives at the submission boundary and is reachable only after the full
@@ -77,12 +85,13 @@ is an owner action through the finished app.
 
 Autonomy changes **who decides**, not **what gates**. Under ADR-0016 the model gains
 trade-time authority inside an owner-authored mandate; the deterministic kernel keeps
-unconditional veto authority.
+unconditional veto authority. Under ADR-0017 the owner directed the envelope itself to
+be maximal — a persistent auto-activating mandate, self-sizing under an explicit
+`model_discretion` grant, protected market orders — while every execution-correctness
+gate below stands unweakened.
 
 Bullets marked **[enforced]** are live controls with code and tests behind them today.
-Bullets marked **[contract]** are guarantees of the M1 contract types, which are wired
-into nothing yet. Bullets marked **[M2+]** are requirements ADR-0016 places on machinery
-that is **not yet built**. Nothing below is a claim that Chronos trades autonomously now.
+Bullets marked **[contract]** are structural guarantees of the contract types.
 
 - **[enforced] One reachable transmit site.** Exactly one `transmit=True` exists in
   `chronos.orders` (the submission boundary); a structural test enforces it. `chronos.orders`
@@ -101,19 +110,29 @@ that is **not yet built**. Nothing below is a claim that Chronos trades autonomo
   broker, routing, or transmit field anywhere in its nested tree, refuses smuggled fields,
   cannot name a broker order id, and cannot name the mandate it is judged against.
 - **[contract] The model cannot authorize itself.** The `AutonomyMandate` is owner-authored,
-  frozen (including against `model_copy`), expiring (live ≤ 30 days), deny-by-default, and
+  frozen (including against `model_copy`), expiring (live ≤ 365 days under ADR-0017), and
   promoted per asset family. The model plane has no tool that writes it, changes policy, or
-  arms the system — and no such tool exists yet, because the tool layer is M4.
+  arms the system. Scope stays deny-by-default; capital **ceilings** invert to
+  owner-optional only under an explicit `model_discretion` grant, and the cash/buying-power
+  **floors** are required in every mode — discretion over size is not discretion over the
+  reserve (ADR-0017 §2).
 - **[enforced] Demo is the default** and needs no brokerage account; paper and live are
-  opt-in config. **[contract]** The autonomy vocabulary's default mode constant is `SHADOW`;
-  there is no autonomy startup path yet to read it, and ADR-0016 requires that when one is
-  built, an environment variable alone can never activate live autonomous trading.
+  opt-in config. **[enforced]** With no `AUTONOMY_MANDATE_FILE` configured, autonomy is
+  inert — no runtime is constructed at all. With one configured, ADR-0017 supersedes the
+  old env-var rule: a valid, account-matching mandate file **auto-activates on boot**
+  (digest-stamped, so the audit trail records which text granted authority). A revoked
+  mandate stays revoked across restart; an invalid or wrong-account file boots inert with
+  a CRITICAL alert.
 - **[enforced] Live is fail-closed and gated**, never assumed: a ten-check live stack —
   config, connection, reconciliation, data, risk, preview, session arming, per-order
   confirmation, a durable kill switch, and a session-drawdown breaker — each proven to block
   independently.
-- **[enforced] Market orders are impossible by construction** — every order is a
-  positive-price limit. **[contract]** The autonomy vocabulary has no `MARKET` order form.
+- **[enforced] Every order is a positive-price limit — including "market" orders.**
+  ADR-0017 added `OrderForm.MARKET` to the autonomy vocabulary, but it compiles to a
+  **protected** marketable limit (quote ± a 1% collar): market-order fill behavior on any
+  ordinary day, a price ceiling on the catastrophic one. It must be granted in the
+  mandate's `order_forms` to be selectable, and a literally unbounded venue market order
+  remains unexpressible anywhere in the system.
 - **[enforced] Cash-secured puts only; no uncovered short options** — enforced today by the
   orders-plane risk engine (`cash_secured_put`, `covered_call_coverage`). **[contract]** The
   autonomy strategy vocabulary additionally cannot express an uncovered short option, so no
@@ -125,12 +144,12 @@ that is **not yet built**. Nothing below is a claim that Chronos trades autonomo
   proceed — refusing a close because a quote feed went stale would trap the position at
   exactly the wrong moment — unless the degradation is one that leaves position truth
   unknown, in which case nothing proceeds. Each reason declares which kind it is and
-  **defaults to the blocking kind**. Owner alerting is M3, and is not yet built.
-- **[M2+] The gateway is not yet routed to.** Admission and sizing exist and are tested, but
-  nothing converts an admitted, sized decision into an order intent — deterministic contract
-  resolution, qualification, and order-form selection are M4. Until that lands the supervisor
-  is a gate with nothing flowing through it, which is why no bullet above claims Chronos
-  trades autonomously today.
+  **defaults to the blocking kind**. Facts the wiring cannot gather are never invented;
+  a tick without facts refuses to run and alerts the owner.
+- **[enforced] The autonomous path is the human path.** An admitted, sized, compiled
+  decision is handed to `order_plane_handoff`, which walks the full existing pipeline —
+  propose → risk → preview → confirm → submit. Nothing is skipped; a refusal at any
+  surface returns to the cycle as a refusal. Autonomy added a gate stack and removed none.
 - Chronos never asks for or stores an IBKR username or password.
 - Missing broker data is represented as missing; it is never fabricated.
 - **Crypto is disabled by default** (empty `CRYPTO_ALLOWLIST`); long-only spot, fractional,

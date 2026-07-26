@@ -536,12 +536,32 @@ def test_a_revoked_mandate_is_refused() -> None:
     assert outcome.refusal is AdmissionRefusal.MANDATE_REVOKED
 
 
-def test_restart_requires_reactivation_by_default() -> None:
-    """RestartBehavior.REQUIRE_REACTIVATION is now enforced, not inert."""
+def test_require_reactivation_is_enforced_when_the_mandate_asks_for_it() -> None:
+    """RestartBehavior.REQUIRE_REACTIVATION is enforced, not inert.
 
-    outcome = admit(_decision(), _mandate(), _state(activation=_activation(process_generation=6)))
+    ADR-0017 flipped the *default* to RESUME_UNTIL_EXPIRY (the owner chose a
+    persistent mandate), but the strict behavior is unchanged when a mandate
+    asks for it — the vocabulary lost nothing, only its default moved.
+    """
+
+    from chronos.autonomy import RestartBehavior
+
+    strict = _mandate(restart_behavior=RestartBehavior.REQUIRE_REACTIVATION)
+    outcome = admit(_decision(), strict, _state(activation=_activation(process_generation=6)))
     assert outcome.admitted is False
     assert outcome.refusal is AdmissionRefusal.MANDATE_NOT_ACTIVATED
+
+
+def test_the_default_mandate_resumes_across_a_restart() -> None:
+    """ADR-0017: the persistent default trades on a fresh process generation.
+
+    A restart advances the process generation; a RESUME_UNTIL_EXPIRY mandate —
+    now the default — stays in force against it, which is exactly what makes
+    "bring the process up and it trades" true.
+    """
+
+    outcome = admit(_decision(), _mandate(), _state(activation=_activation(process_generation=6)))
+    assert outcome.admitted is True
 
 
 def test_an_unknown_evidence_bundle_refuses_and_is_recorded_unevaluated() -> None:
@@ -626,6 +646,10 @@ _INERT = "INERT"
 
 _LIMIT_ENFORCEMENT: dict[str, dict[str, str]] = {
     "CapitalLimits": {
+        # ADR-0017: the owner's model-self-sizing grant. Read by sizing (it
+        # decides whether an unset ceiling binds), so it is ENFORCED in the
+        # sense this pin means — the kernel consults it.
+        "model_discretion": _ENFORCED,
         "allocated_capital_usd": _ENFORCED,
         "max_order_notional_usd": _ENFORCED,
         "max_position_notional_usd": _ENFORCED,

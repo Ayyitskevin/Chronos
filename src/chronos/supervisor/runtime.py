@@ -64,7 +64,14 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from chronos.autonomy import AutonomyMandate
 from chronos.supervisor import alerts, delivery, proposals, queue
-from chronos.supervisor.loop import CycleFacts, CycleOutcome, CycleStage, Handoff, run_cycle
+from chronos.supervisor.loop import (
+    CycleFacts,
+    CycleOutcome,
+    CycleStage,
+    Handoff,
+    InstrumentGatherer,
+    run_cycle,
+)
 
 _logger = logging.getLogger("chronos.supervisor.runtime")
 
@@ -157,12 +164,14 @@ class AutonomyRuntime:
         gather_facts: FactGatherer,
         sinks: tuple[delivery.AlertSink, ...] = (),
         submit: Handoff | None = None,
+        gather_instrument: InstrumentGatherer | None = None,
     ) -> None:
         self._sessions = sessions
         self._config = config
         self._identity = identity
         self._mandate_source = mandate_source
         self._gather_facts = gather_facts
+        self._gather_instrument = gather_instrument
         self._sinks = sinks or delivery.default_sinks()
         self._submit = submit
         self._wake_early = False
@@ -290,6 +299,7 @@ class AutonomyRuntime:
                 identity=self._identity,
                 facts=facts,
                 submit=self._submit,
+                gather_instrument=self._gather_instrument,
             )
             proposals.mark_processed(
                 session,

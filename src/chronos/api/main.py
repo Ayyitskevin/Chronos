@@ -17,6 +17,7 @@ from contextlib import asynccontextmanager, suppress
 from fastapi import FastAPI
 
 from chronos.api.auth import load_or_create_token
+from chronos.api.autonomy_wiring import autonomy_tick_task, build_autonomy_runtime
 from chronos.api.dependencies import BackendState
 from chronos.api.routes.account import router as account_router
 from chronos.api.routes.autonomy import router as autonomy_router
@@ -167,13 +168,41 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         runtime.close()
         raise
     heartbeat: asyncio.Task[None] | None = None
+    autonomy_task: asyncio.Task[None] | None = None
     if not read_only:
         # R-24: without this the lease silently lapses after its TTL.
         period = lease.ttl.total_seconds() / _RENEWALS_PER_TTL
         heartbeat = asyncio.create_task(_heartbeat_lease(app.state.backend, lease, period))
+        # ADR-0017: the persistent mandate is the owner's standing grant. When
+        # one is configured and valid, the autonomy runtime starts with the
+        # backend — no per-boot ritual. No grant (the default) boots inert, and
+        # a broken grant alerts and boots inert: absence of the owner act is
+        # absence of the authority, never a crash of the process that can still
+        # close positions.
+        try:
+            autonomy = build_autonomy_runtime(
+                runtime, process_generation=int(app.state.backend.lease is not None)
+            )
+        except Exception:
+            _logger.exception(
+                "Autonomy wiring failed; the backend continues without it",
+                extra={"event": "autonomy_wiring_failed"},
+            )
+            autonomy = None
+        if autonomy is not None:
+            app.state.autonomy = autonomy
+            autonomy_task = asyncio.create_task(autonomy_tick_task(autonomy))
+            _logger.info(
+                "Autonomy runtime started under the persistent mandate",
+                extra={"event": "autonomy_started"},
+            )
     try:
         yield
     finally:
+        if autonomy_task is not None:
+            autonomy_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await autonomy_task
         if heartbeat is not None:
             heartbeat.cancel()
             with suppress(asyncio.CancelledError):

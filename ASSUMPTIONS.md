@@ -90,12 +90,19 @@ the deny-by-default posture behind all of them is unchanged.)*
   deterministic platform (`chronos.execution`) remains hard-refused in code.
 - Live account allowlist: empty. Live capital authorization: USD 0. Live risk limits: 0.
   AutonomyMandate limits likewise default to zero and its scopes to empty, so a mandate
-  authorizes nothing until the owner enumerates what it permits.
-- Autonomy startup defaults to a non-live mode (`SHADOW`); an environment variable alone can
-  never activate live autonomous trading.
-- Short selling, margin, market orders, averaging down, pyramiding: disabled. Uncovered short
-  options are not expressible in the autonomy strategy vocabulary at all. Options execution
-  exists in the `chronos.orders` plane, gated.
+  authorizes nothing until the owner enumerates what it permits. *(ADR-0017: an owner may
+  enumerate `model_discretion`, making unset capital **ceilings** mean "affordability is the
+  bound" — that flag is itself the owner enumerating; silence still grants nothing, and the
+  floors are still required.)*
+- Autonomy activation is a persistent owner-authored mandate file auto-activated on boot
+  (ADR-0017, superseding the SHADOW-default/env-var rule); no file → autonomy inert, an
+  invalid or wrong-account file boots inert with a CRITICAL alert, and revocation survives
+  restart.
+- Short selling, margin, averaging down, pyramiding: disabled. Uncovered short options are
+  not expressible in the autonomy strategy vocabulary at all. Market orders exist only as
+  the autonomy plane's mandate-granted, **protected** collared-limit form (ADR-0017); an
+  unbounded venue market order is unexpressible repository-wide. Options execution exists
+  in the `chronos.orders` plane, gated.
 - Paper-order transmission also defaults OFF and requires explicit multi-condition opt-in.
 - All promotion gates require manual owner action; nothing auto-promotes, and promotion is
   per asset family (a stock promotion authorizes neither futures nor options).
