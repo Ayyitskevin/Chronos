@@ -40,6 +40,11 @@ are structural rather than procedural:
   there too — ``AutonomyRuntime`` returns infinity, which is not JSON, and
   clamping it to a large float would invent a schedule. ``autonomy_stopped``
   carries the distinction.
+- A counter row is not an equity observation. Peak equity is seeded at zero and
+  only a snapshot moves it, so on a row written by activity alone the peak, the
+  trough and both drawdowns are ``None`` and ``equity_observed`` is ``False``.
+  A zero drawdown is the most reassuring figure the counters panel can show,
+  and it is only shown when something actually measured one.
 
 ## Why the assemblers take plain values rather than handles
 
@@ -284,10 +289,27 @@ class CountersView(ChronosModel):
     against; a display that copied that would turn "no authority established"
     into "no losses yet", which is the exact inversion doctrine forbids. When
     the row is absent every figure below is ``None``.
+
+    ``equity_observed`` draws the same line *inside* a row that does exist.
+    ``durable._ensure_counter_row`` seeds ``peak_equity_usd`` at zero and only
+    ``record_equity`` ever moves it, so a row written by ``record_activity``
+    alone describes a session whose equity was never read — and
+    ``SessionCounters.drawdown_usd``/``drawdown_pct`` return zero for precisely
+    that state, again because admission needs a number. Copying the four
+    equity-derived figures through would print "drawdown 0 · peak equity 0" for
+    a session in which the supervisor observed no equity at all, under a caption
+    saying these are the supervisor's own observations. So they are ``None``
+    unless a peak was actually recorded, and this flag says which case it is.
+
+    An account whose equity genuinely *is* zero also reads as unobserved. The
+    sentinel cannot separate the two, and ``SessionCounters`` already treats a
+    non-positive peak as nothing to measure a drawdown against — inventing a
+    distinction the stored row does not carry would be the worse answer.
     """
 
     session_date: str
     counters_recorded: bool
+    equity_observed: bool
     realized_loss_usd: str | None = None
     drawdown_usd: str | None = None
     drawdown_pct: str | None = None
@@ -383,14 +405,19 @@ def system_view(
     and the panel reports "unavailable" instead of the reassuring answer. This
     is also what keeps the module free of ``chronos.orders`` — see the module
     docstring.
+
+    ``mandate_active`` needs both a mandate *and* an account to have activated
+    it against. A backend bound to no account never performs the activation
+    lookup, so ``False`` there would be a positive claim derived from a query
+    nobody ran — and since both panels are assembled in the same request cycle,
+    it would be a claim contradicting the ``unknown`` :func:`mandate_view` draws
+    from the identical condition.
     """
 
     scoped = _scope(account_fingerprint)
-    activation = None
+    mandate_active: bool | None = None
     if mandate is not None and scoped is not None:
         activation = durable.load_activation(session, account_fingerprint=scoped, mandate=mandate)
-    mandate_active: bool | None = None
-    if mandate is not None:
         mandate_active = (
             activation is not None and not activation.revoked and mandate.covers_instant(now)
         )
@@ -519,6 +546,11 @@ def counters_view(
     so asking it whether one exists is impossible, and re-deriving the field
     mapping here would create a second place that has to learn about a new
     counter. One authority for the values, one narrow query for existence.
+
+    There are two gates, not one, because there are two ways for a figure to be
+    unmeasured. ``counters_recorded`` says a row exists; ``equity_observed``
+    says something ever wrote an equity snapshot into it. See
+    :class:`CountersView` for why the second matters as much as the first.
     """
 
     key = durable.session_key(now, market_timezone=market_timezone)
@@ -527,6 +559,7 @@ def counters_view(
         return CountersView(
             session_date=key,
             counters_recorded=False,
+            equity_observed=False,
             account_fingerprint=scoped,
             generated_at=_iso(now),
         )
@@ -536,14 +569,20 @@ def counters_view(
         now=now,
         market_timezone=market_timezone,
     )
+    # The row exists, so this peak is the row's own — the seeded zero that
+    # ``record_equity`` has not yet displaced, or a real observation. Every
+    # equity figure the drawdown ceiling is measured against hangs off it, so
+    # they stand or fall together rather than being copied through one by one.
+    equity_observed = counters.peak_equity_usd > 0
     return CountersView(
         session_date=counters.session_date,
         counters_recorded=True,
+        equity_observed=equity_observed,
         realized_loss_usd=_decimal(counters.realized_loss_usd),
-        drawdown_usd=_decimal(counters.drawdown_usd),
-        drawdown_pct=_decimal(counters.drawdown_pct),
-        peak_equity_usd=_decimal(counters.peak_equity_usd),
-        trough_equity_usd=_decimal(counters.trough_equity_usd),
+        drawdown_usd=_decimal(counters.drawdown_usd) if equity_observed else None,
+        drawdown_pct=_decimal(counters.drawdown_pct) if equity_observed else None,
+        peak_equity_usd=_decimal(counters.peak_equity_usd) if equity_observed else None,
+        trough_equity_usd=_decimal(counters.trough_equity_usd) if equity_observed else None,
         orders_submitted=counters.orders_submitted,
         cancellations=counters.cancellations,
         replacements=counters.replacements,
@@ -832,20 +871,35 @@ def _mandate_ceilings(mandate: AutonomyMandate) -> tuple[MandateLimitView, ...]:
     ) + tuple(_breach_ceiling(name, value) for name, value in breach)
 
 
+def _limit_text(value: Decimal | int) -> str:
+    """A mandate limit as text: money through :func:`_decimal`, counts as counts.
+
+    A limit is not read from a fixed-scale column, so it reaches here in
+    whatever form the mandate was written in — a mandate authored as JSON keeps
+    ``"1E+5"`` as ``Decimal("1E+5")``, which ``str()`` renders back as literal
+    ``1E+5``. This is the panel whose whole purpose is letting the owner check
+    their own authorization, so it is the last place a figure should need
+    decoding. Counts are ``int``, have no exponent form, and would only be
+    obscured by a Decimal path.
+    """
+
+    return _decimal(value) if isinstance(value, Decimal) else str(value)
+
+
 def _sizing_ceiling(name: str, value: Decimal | int, *, model_discretion: bool) -> MandateLimitView:
     if value > 0:
-        return MandateLimitView(name=name, value=str(value), effect="BINDS")
+        return MandateLimitView(name=name, value=_limit_text(value), effect="BINDS")
     effect: LimitEffect = "NO_CEILING" if model_discretion else "AUTHORIZES_NOTHING"
     return MandateLimitView(name=name, effect=effect)
 
 
 def _breach_ceiling(name: str, value: Decimal | int) -> MandateLimitView:
     if value > 0:
-        return MandateLimitView(name=name, value=str(value), effect="BINDS")
+        return MandateLimitView(name=name, value=_limit_text(value), effect="BINDS")
     return MandateLimitView(name=name, effect="NOT_ENFORCED")
 
 
 def _floor(name: str, value: Decimal) -> MandateLimitView:
     if value > 0:
-        return MandateLimitView(name=name, value=str(value), effect="BINDS")
+        return MandateLimitView(name=name, value=_limit_text(value), effect="BINDS")
     return MandateLimitView(name=name, effect="NO_FLOOR")

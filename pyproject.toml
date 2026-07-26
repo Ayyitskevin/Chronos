@@ -49,6 +49,15 @@ chronos = "chronos.app:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# The operator terminal's browser client (ADR-0018 §6) is data, not code: three
+# files with no .py extension, which `packages.find` would leave out of a built
+# wheel. The backend mounts them from the installed package directory, so
+# without this an installed Chronos would serve 404 where the terminal should
+# be — and would do it only in the installed case, which is the worst place for
+# a defect to first appear.
+[tool.setuptools.package-data]
+"chronos.terminal" = ["static/*.html", "static/*.css", "static/*.js"]
+
 [tool.pytest.ini_options]
 addopts = "--strict-config --strict-markers -ra"
 asyncio_mode = "auto"

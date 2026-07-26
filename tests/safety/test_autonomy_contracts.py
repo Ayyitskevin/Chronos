@@ -367,7 +367,13 @@ def test_only_the_supervisor_consumes_the_contracts() -> None:
 #: consumer of model decisions. Naming them individually keeps that narrowness
 #: reviewable; a directory prefix would have granted it to anything later added
 #: beside them.
-_MANDATE_ONLY_MODULES = {"terminal/views.py"}
+#:
+#: ``api/routes/terminal.py`` holds the same exemption for the same two reasons:
+#: it serves the mandate read-model, and revoking a mandate requires naming the
+#: one in force. Note what it is *not* allowed to do — the condition below still
+#: binds it, so the route that can withdraw authority still cannot read a model
+#: decision. Withdrawing authority and judging a proposal stay different planes.
+_MANDATE_ONLY_MODULES = {"terminal/views.py", "api/routes/terminal.py"}
 
 
 def _decision_contract_names() -> frozenset[str]:

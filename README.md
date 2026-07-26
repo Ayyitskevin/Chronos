@@ -74,7 +74,11 @@ triggers); and **M7.5 (ADR-0017)** the owner-directed maximal-autonomy supersess
 persistent auto-activating mandate, model self-sizing under an explicit
 `model_discretion` grant, protected (collared, never unbounded) market orders, and the
 app-plane wiring that assembles facts, mandate, runtime, and the order-plane handoff in
-the backend lifespan. Remaining: per-family live promotions and the M8 terminal.
+the backend lifespan; and **M8a (ADR-0018)** the operator terminal — a command registry and
+panel read-models in Python (`chronos.terminal`) served as JSON to a build-free browser
+client, mounted same-origin at `/terminal/app`. Remaining: per-family live promotions, a
+browser credential so the client's panels can authenticate (R-41), and the deferred terminal
+work — per-holding theses, mandate authoring, charts, and streaming.
 
 No order is placed by any test, CI run, or development path. The one and only `transmit=True`
 in the order pipeline lives at the submission boundary and is reachable only after the full
@@ -150,6 +154,17 @@ Bullets marked **[contract]** are structural guarantees of the contract types.
   decision is handed to `order_plane_handoff`, which walks the full existing pipeline —
   propose → risk → preview → confirm → submit. Nothing is skipped; a refusal at any
   surface returns to the cycle as a refusal. Autonomy added a gate stack and removed none.
+- **[enforced] The terminal shows and asks; it never decides.** `chronos.terminal` imports
+  nothing from the broker, order, or execution planes, and its read routes are deliberately
+  *not* writer-gated so a demoted backend still shows state rather than going dark. Its two
+  owner actions (acknowledge an alert, revoke a mandate) are writer-gated, token-gated, and
+  require a typed confirmation; revocation additionally requires a reason and binds to the
+  grant the owner was shown. **Unknown renders as unknown, never as a plausible zero** — an
+  unset ceiling under `model_discretion` is shown as *no ceiling*, never as `0`, and an
+  unobserved drawdown is shown as unknown, never as no drawdown.
+- **[enforced] Model narrative can be seen, never act.** Every server string reaches the DOM
+  through `textContent`; a structural test reads the shipped client and fails on any HTML or
+  eval sink, and a Content-Security-Policy over `/terminal/*` makes the next one inert.
 - Chronos never asks for or stores an IBKR username or password.
 - Missing broker data is represented as missing; it is never fabricated.
 - **Crypto is disabled by default** (empty `CRYPTO_ALLOWLIST`); long-only spot, fractional,

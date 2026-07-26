@@ -41,6 +41,11 @@
  *   panel re-polls. The owner is entitled to see that the write landed.
  * - **Hiding owner actions on a read-only backend.** They render disabled with
  *   the reason stated: a button that vanishes teaches nothing.
+ * - **A timeout on owner actions.** Reads abort after `FETCH_TIMEOUT_MS` so a
+ *   hung backend cannot freeze a panel while it still looks live. Owner POSTs
+ *   have no timeout: aborting one tells this client nothing about whether the
+ *   backend applied it, and "refused" would be a claim it is not in a position
+ *   to make.
  *
  * ## Honest residuals
  *
@@ -77,6 +82,30 @@ const STATUS_MS = 5000;
 const CLOCK_MS = 1000;
 /** Multiples of a panel's own interval after which its data is stale even if no fetch failed. */
 const STALE_INTERVALS = 3;
+/**
+ * How long a read may hang before it counts as a failure.
+ *
+ * `fetch` has no default timeout. A request the backend accepts and never
+ * answers suspends its caller forever, and a suspended `pollSystem` is a status
+ * bar frozen on whatever it last drew while the clock beside it keeps ticking —
+ * the page at its most convincing and least true. Two poll intervals is long
+ * enough that a merely slow backend is not demoted on every read.
+ *
+ * What this timeout does NOT do, because an earlier revision of this comment
+ * claimed it and a reviewer disproved it: it does not demote the bar during a
+ * *sustained* hang. Polls start every `STATUS_MS` while each one takes
+ * `FETCH_TIMEOUT_MS` to give up, so by the time a timed-out read resolves a
+ * newer poll has already claimed `systemSeq` and the sequence guard in
+ * `pollSystem` discards the older answer before it can write a status. In that
+ * case the age rule in `tickClock` is the only thing that demotes.
+ *
+ * So the two mechanisms are complementary, not redundant: the timeout bounds a
+ * single read and frees its caller, and the age rule is what the operator's
+ * safety actually rests on when nothing is answering. Deleting the age rule as
+ * duplicated cover would regress the hang case silently — which is why the
+ * relationship is written down here instead of being left to be re-derived.
+ */
+const FETCH_TIMEOUT_MS = STATUS_MS * 2;
 const HISTORY_MAX = 50;
 const SUGGEST_MAX = 7;
 const JOURNAL_LIMIT = 40;
@@ -113,6 +142,9 @@ const COPY = {
     "A field shown as unknown was not observable by this backend. It is not zero, and an unknown kill switch is not a disengaged one.",
   acknowledging:
     "Acknowledging records that the owner saw the condition. It never deletes the alert and never clears what raised it.",
+  noEquityFigure: "unknown — no equity was observed this session",
+  noEquity:
+    "No equity snapshot was taken this session, so peak, trough and both drawdowns have nothing to be derived from. They are unknown, not zero: an unobserved drawdown is not a drawdown of nothing.",
   readOnly:
     "this backend is read-only (it does not hold the writer lease); owner actions are refused here",
   statusUnknown:
@@ -137,6 +169,8 @@ const state = {
   systemStatus: "loading",
   systemError: "",
   systemAt: null,
+  /** Monotonic token: the answer to any status poll but the newest is discarded. */
+  systemSeq: 0,
   latencyMs: null,
 };
 
@@ -272,10 +306,16 @@ function fingerprintNode(fingerprint) {
 
 // ------------------------------------------------------------------ transport
 
+/** Every read. Bounded by `FETCH_TIMEOUT_MS`, because a read that never returns never fails. */
 async function getJSON(path) {
   const started = performance.now();
   try {
-    const response = await fetch(path, { headers: { Accept: "application/json" }, cache: "no-store", credentials: "same-origin" });
+    const response = await fetch(path, {
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+      credentials: "same-origin",
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
     const latencyMs = Math.round(performance.now() - started);
     if (!response.ok) return { ok: false, status: response.status, error: await errorText(response), latencyMs };
     return { ok: true, status: response.status, data: await response.json(), latencyMs };
@@ -284,6 +324,16 @@ async function getJSON(path) {
   }
 }
 
+/**
+ * Every owner action. Deliberately *not* on the read timeout.
+ *
+ * Aborting a POST abandons the browser's half of it and does nothing to the
+ * backend, so a timed-out revocation would be reported to the owner as refused
+ * while quite possibly having landed. "Refused" is a claim about the backend,
+ * and this client would not be in a position to make it. A confirmation left
+ * waiting is worse ergonomics and better honesty; the panel behind it re-reads
+ * on the next poll and the durable state is where the answer actually is.
+ */
 async function postJSON(path, body) {
   try {
     const response = await fetch(path, {
@@ -301,6 +351,12 @@ async function postJSON(path, body) {
 }
 
 function unreachable(error) {
+  // A timeout is not the same failure as a refused connection: the request may
+  // have been accepted and be running still. Naming it keeps the status bar's
+  // hover from calling a hung backend an absent one.
+  if (error && error.name === "TimeoutError") {
+    return `no answer within ${Math.round(FETCH_TIMEOUT_MS / 1000)}s — the backend accepted the read and has not answered it`;
+  }
   return `backend unreachable (${error && error.message ? error.message : "network error"})`;
 }
 
@@ -438,8 +494,24 @@ function limitsSection(body, title, limits) {
 }
 
 function renderJournal(data, body) {
+  const list = el("dl", "kv");
+  kv(list, "account", fingerprintNode(data.account_fingerprint));
+  kv(list, "generated", timeNode(data.generated_at));
+  append(body, list);
   append(body, note(`${data.entries.length} record${data.entries.length === 1 ? "" : "s"}, newest first · limit ${data.limit}`));
-  if (!data.stream_present) return append(body, stateBlock("warn", "NO CYCLES RECORDED", COPY.noCycles));
+  // `journal_view` answers `stream_present: false` for two different facts: an
+  // account whose cycle stream is empty, and a backend bound to no account,
+  // which could not look. Only the first is "no cycles"; the second is "we did
+  // not ask", and rendering it as calm is the failure the queue and alerts
+  // panels already branch on `account_fingerprint` to avoid.
+  if (!data.stream_present) {
+    return append(
+      body,
+      data.account_fingerprint
+        ? stateBlock("warn", "NO CYCLES RECORDED", COPY.noCycles)
+        : stateBlock("warn", "SCOPE UNKNOWN", COPY.unscoped),
+    );
+  }
 
   for (const entry of data.entries) {
     const article = el("article", "entry");
@@ -460,10 +532,22 @@ function renderJournal(data, body) {
       if (entry.detail_truncated) append(article, chip("detail truncated by the backend", "warn"));
     }
 
-    const facts = entry.decision_id ? [`decision ${entry.decision_id}`] : [];
-    facts.push(entry.quantity === null ? "quantity: not sized" : `quantity ${entry.quantity}`);
-    facts.push(entry.limit_price === null ? "limit: not compiled" : `limit ${entry.limit_price}`);
-    append(body, append(article, note(facts.join(" · "))));
+    // "not sized" and "not compiled" are assertions about what the cycle did.
+    // An undecodable payload cannot support them: `_journal_entry` returns
+    // `quantity: null` there because *nothing could be read*, not because the
+    // cycle stopped before sizing, and this client cannot tell those apart from
+    // the field alone. Printing the confident sentence under a record already
+    // chipped PAYLOAD UNDECODABLE would have the panel contradict itself.
+    const facts = el("p", "note");
+    if (entry.decision_id) append(facts, el("span", null, `decision ${entry.decision_id} · `));
+    if (entry.decoded) {
+      const sized = entry.quantity === null ? "quantity: not sized" : `quantity ${entry.quantity}`;
+      const priced = entry.limit_price === null ? "limit: not compiled" : `limit ${entry.limit_price}`;
+      append(facts, el("span", null, `${sized} · ${priced}`));
+    } else {
+      append(facts, unknown("quantity and limit: unknown — the payload would not decode"));
+    }
+    append(body, append(article, facts));
   }
   return body;
 }
@@ -474,17 +558,35 @@ const COUNTER_FIELDS = [
   ["cancellations", "cancellations"], ["replacements", "replacements"], ["turnover", "turnover_usd"],
 ];
 
+/**
+ * The four figures that exist only once equity has been looked at.
+ *
+ * A counter row can be recorded — orders counted, turnover accumulated — with
+ * no equity snapshot ever taken, and then peak, trough and both drawdowns are
+ * `null`. A zero drawdown is the most reassuring number on this panel and "we
+ * never looked" is the least, so `CountersView.equity_observed` turns the
+ * absence into a labelled unknown rather than letting `value()` render the
+ * generic word beside eight figures that *were* measured.
+ */
+const EQUITY_DERIVED = new Set(["drawdown_usd", "drawdown_pct", "peak_equity_usd", "trough_equity_usd"]);
+
 function renderCounters(data, body) {
   const list = el("dl", "kv");
   kv(list, "session", value(data.session_date));
+  const noEquity = data.equity_observed === false;
   if (!data.counters_recorded) {
     append(body, stateBlock("warn", "NO COUNTERS RECORDED", COPY.noCounters(data.session_date)));
   } else {
-    for (const [label, key] of COUNTER_FIELDS) kv(list, label, value(data[key]));
+    for (const [label, key] of COUNTER_FIELDS) {
+      const absent = noEquity && EQUITY_DERIVED.has(key) ? COPY.noEquityFigure : "unknown";
+      kv(list, label, value(data[key], { absent }));
+    }
   }
   kv(list, "account", fingerprintNode(data.account_fingerprint));
   kv(list, "generated", timeNode(data.generated_at));
-  return append(body, list, data.counters_recorded ? note("Figures are what the supervisor itself observed this session, in USD.") : null);
+  append(body, list);
+  if (!data.counters_recorded) return body;
+  return append(body, note("Figures are what the supervisor itself observed this session, in USD."), noEquity ? note(COPY.noEquity) : null);
 }
 
 function renderQueue(data, body) {
@@ -621,7 +723,12 @@ function confirmForm({ heading, why, phrase, noteLabel, noteRequired, submitLabe
     const outcome = await submit(noteField.value.trim());
     if (outcome.ok) {
       result.className = "confirm-result ok";
-      setText(result, "accepted by the backend — re-reading state");
+      // The route's own words, carried out verbatim. `RevokeResult.detail` says
+      // which cycle is still allowed to finish and `AcknowledgeResult.detail`
+      // says what an acknowledgement did *not* do; paraphrasing either here
+      // would make this file a second declaration of what the backend decided.
+      const detail = outcome.data && typeof outcome.data.detail === "string" ? outcome.data.detail : "";
+      setText(result, `accepted by the backend — re-reading state${detail ? `. ${detail}` : ""}`);
       done(true);
       return;
     }
@@ -635,10 +742,24 @@ function confirmForm({ heading, why, phrase, noteLabel, noteRequired, submitLabe
   return form;
 }
 
-/** Why an owner action cannot be offered right now, or an empty string. */
+/**
+ * Why an owner action cannot be offered right now, or an empty string.
+ *
+ * Authority must be *positively observed* before a button is live, not merely
+ * un-refuted. `boot` fires the status poll and the registry load concurrently
+ * and `/terminal/commands` touches no database while `/terminal/system` opens a
+ * session, so the registry routinely wins and `restoreWorkspace` mounts the
+ * mandate panel while `state.system` is still null — an enabled REVOKE MANDATE
+ * on a backend this client has not yet learned is read-only. A stale status is
+ * the same problem with a longer fuse: `read_only` from minutes ago describes a
+ * lease this process may since have lost.
+ *
+ * The button still renders, disabled, with the reason stated. See the header:
+ * a button that vanishes teaches nothing.
+ */
 function actionBlockedReason() {
-  if (state.system && state.system.read_only === true) return COPY.readOnly;
-  if (state.systemStatus === "unavailable") return COPY.statusUnknown;
+  if (state.systemStatus !== "ok" || !state.system) return COPY.statusUnknown;
+  if (state.system.read_only === true) return COPY.readOnly;
   return "";
 }
 
@@ -696,8 +817,13 @@ function acknowledgeAction(alert) {
       heading: `Acknowledge alert #${alert.id}`,
       why: "This records that the owner has seen the condition. It does not resolve the condition, delete the alert, or stop it recurring.",
       phrase: `ACK ${alert.id}`,
-      noteLabel: "note (optional, recorded with the acknowledgement)",
-      noteRequired: false,
+      // `chronos.supervisor.alerts.acknowledge` raises on an empty note and the
+      // route turns that into a 422. Labelling the field optional here would be
+      // this client declaring the rule a second time and declaring it wrong —
+      // the operator would leave it blank as invited and read "refused: HTTP
+      // 422" for doing what the label said.
+      noteLabel: "note (required, recorded with the acknowledgement)",
+      noteRequired: true,
       submitLabel: "ACKNOWLEDGE",
       danger: false,
       done,
@@ -706,27 +832,69 @@ function acknowledgeAction(alert) {
   );
 }
 
+/**
+ * The revocation, named and then bound to the name.
+ *
+ * The confirmation used to quote `mandate.mandate_id` from the panel's last
+ * load while the request carried no id at all, leaving the route to re-derive
+ * whatever was in force when it arrived. A backend can restart under an edited
+ * grant and auto-activate it (ADR-0017) while the owner is still typing their
+ * reason, and the owner would then confirm a form naming M-1 while the chain
+ * recorded the revocation of M-2. The typed-confirmation gate exists precisely
+ * so the stated intent and the recorded act are the same act, so the id is sent
+ * and the backend refuses with a 409 if a different grant is in force by then —
+ * whose detail reaches the operator through the ordinary refusal path.
+ */
 function revokeAction(mandate) {
-  const named = mandate.mandate_id ? ` ${mandate.mandate_id}` : "";
+  const named = mandate.mandate_id
+    ? `This withdraws the owner's grant ${mandate.mandate_id}, and that id travels with the request: if a different grant is in force by the time it lands, the backend refuses rather than revoking one the owner did not name.`
+    : "This withdraws whatever grant this backend has in force. The panel could not name one, so this terminal cannot tell you which it will be.";
   return ownerAction("REVOKE MANDATE", true, (done) =>
     confirmForm({
       heading: "Revoke the active mandate",
-      why: `This withdraws the owner's grant${named}. The supervisor loses its authority to act and the revocation is audited. It cannot be undone from this terminal.`,
+      why: `${named} The supervisor loses its authority to act and the revocation is audited. It cannot be undone from this terminal.`,
       phrase: "REVOKE MANDATE",
       noteLabel: "reason (required, recorded)",
       noteRequired: true,
       submitLabel: "REVOKE",
       danger: true,
       done,
-      submit: (reason) => postJSON(API.revoke, { reason }),
+      submit: async (reason) => {
+        const outcome = await postJSON(API.revoke, { reason, mandate_id: mandate.mandate_id || null });
+        // `revoked: false` is a 200 by the route's deliberate choice — "an
+        // answer, not an error". It is not a *success* for the owner, who asked
+        // for authority to be gone and had nothing withdrawn, so it is carried
+        // out in the refusal style with the route's own detail as the text.
+        // Keying the outcome on HTTP status alone would report the one case the
+        // route designed a distinct answer for as if it had worked.
+        if (outcome.ok && outcome.data && outcome.data.revoked === false) {
+          const detail = outcome.data.detail || "nothing was in force here, so nothing was revoked";
+          return { ok: false, status: outcome.status, error: detail };
+        }
+        return outcome;
+      },
     }),
   );
 }
 
 // ------------------------------------------------------------- panel plumbing
 
+/**
+ * The renderer the backend named, or null.
+ *
+ * Own-property lookup rather than `PANELS[name]`: the panel id is a
+ * server-supplied string, and `constructor`, `toString` or `__proto__` would
+ * answer with an inherited `Object.prototype` member that passes a truthiness
+ * guard and then mounts a panel whose `endpoint` is undefined — a permanent
+ * LOADING tile throwing an unhandled rejection every five seconds. Registry
+ * text is allowed to be wrong; it is not allowed to reach through this table.
+ */
+function panelSpec(name) {
+  return Object.prototype.hasOwnProperty.call(PANELS, name) ? PANELS[name] : null;
+}
+
 function openPanel(command) {
-  const spec = PANELS[command.panel];
+  const spec = panelSpec(command.panel);
   if (!spec) return message(`the backend declares panel "${command.panel}", which this client cannot draw`, "bad");
   const existing = state.panels.find((panel) => panel.panel === command.panel);
   if (existing) {
@@ -746,6 +914,8 @@ function openPanel(command) {
     lastOkAt: null,
     timer: 0,
     frozen: false,
+    /** Monotonic token: the answer to any read but this panel's newest is discarded. */
+    reqSeq: 0,
   };
   state.panels.push(panel);
   mountPanel(panel);
@@ -791,8 +961,16 @@ async function refreshPanel(panel) {
     drawPanel(panel);
     return;
   }
+  // Reads are never serialized: the interval fires without waiting for the last
+  // one, `refreshAll` fires again on every return to the tab and after every
+  // accepted owner action, and each read may take up to `FETCH_TIMEOUT_MS`. So
+  // several are routinely in flight, and without a token the *slower* of two
+  // wins — older data applied last and stamped `lastOkAt: Date.now()`, which is
+  // a stale panel wearing a LIVE badge. The token makes the answer to anything
+  // but the newest request unusable rather than merely unlikely to matter.
+  const token = (panel.reqSeq += 1);
   const outcome = await getJSON(panel.spec.endpoint());
-  if (!state.panels.includes(panel) || panel.frozen) return;
+  if (!state.panels.includes(panel) || panel.frozen || token !== panel.reqSeq) return;
   if (outcome.ok) {
     Object.assign(panel, { data: outcome.data, lastOkAt: Date.now(), status: "ok", error: "" });
   } else {
@@ -918,11 +1096,18 @@ function restoreWorkspace() {
 // ------------------------------------------------------------------ status bar
 
 async function pollSystem() {
+  // Sequenced for the same reason `refreshPanel` is: the interval does not wait,
+  // `refreshAll` fires on top of it, and a slow answer applied after a fast one
+  // would restamp `systemAt` and make older authority look newly read.
+  const token = (state.systemSeq += 1);
   const outcome = await getJSON(API.system);
+  if (token !== state.systemSeq) return;
   state.latencyMs = outcome.latencyMs;
   if (outcome.ok) {
     Object.assign(state, { system: outcome.data, systemStatus: "ok", systemError: "", systemAt: Date.now() });
   } else {
+    // The last answer is kept only to tell STALE from UNAVAILABLE. Nothing reads
+    // it for a fact while the status is not "ok" — see `drawStatus`.
     state.systemStatus = state.system ? "stale" : "unavailable";
     state.systemError = outcome.error;
   }
@@ -948,34 +1133,52 @@ function drawStatus() {
   ];
   badge("st-conn", conn[0], conn[1], { title: `${state.systemError ? `${state.systemError} · ` : ""}last read ${seen}` });
 
-  const readOnly = system ? system.read_only : null;
+  // `state.system` is the last answer, not the current one. Anything but a
+  // successful poll therefore makes every fact below *unobserved* rather than
+  // cached — because the disengaged and disarmed renderings are hidden badges,
+  // and an absent badge is how this page says "clear". Reading a cached `false`
+  // would erase the kill-switch badge for as long as the backend stayed
+  // unreachable, which is the header's first rejected design reached from the
+  // other side: a cached "kill switch: clear" outliving an outage. A null
+  // renders the loud dashed badge-unknown and is never hidden.
+  const observed = status === "ok" ? system : null;
+
+  const readOnly = observed ? observed.read_only : null;
   const role = readOnly === null || readOnly === undefined ? ["ROLE UNKNOWN", "st st-warn"] : readOnly ? ["READ-ONLY", "st st-warn"] : ["WRITER", "st st-ok"];
   badge("st-role", role[0], role[1], { title: "whether this backend holds the single-writer lease" });
 
   let autonomy = ["AUTONOMY UNKNOWN", "st st-warn"];
-  if (system && !system.autonomy_configured) autonomy = ["AUTONOMY NOT CONFIGURED", "st st-dim"];
-  else if (system && system.autonomy_stopped === true) autonomy = ["AUTONOMY STOPPED", "st st-warn"];
-  else if (system && system.autonomy_stopped === false) autonomy = ["AUTONOMY RUNNING", "st st-ok"];
+  if (observed && !observed.autonomy_configured) autonomy = ["AUTONOMY NOT CONFIGURED", "st st-dim"];
+  else if (observed && observed.autonomy_stopped === true) autonomy = ["AUTONOMY STOPPED", "st st-warn"];
+  else if (observed && observed.autonomy_stopped === false) autonomy = ["AUTONOMY RUNNING", "st st-ok"];
   badge("st-autonomy", autonomy[0], autonomy[1]);
 
   // Engaged is loud and unknown is nearly as loud; only a positively observed
   // "disengaged" is allowed to be silent.
-  const kill = system ? system.kill_switch_engaged : null;
+  const kill = observed ? observed.kill_switch_engaged : null;
   badge("st-kill", kill ? "KILL SWITCH ENGAGED" : "KILL SWITCH UNKNOWN", kill ? "st badge-kill" : "st badge-unknown", {
     hidden: kill === false,
     title: "the durable kill switch",
   });
 
-  const armed = system ? system.live_armed : null;
+  const armed = observed ? observed.live_armed : null;
   badge("st-armed", armed ? "LIVE ARMED" : "ARM STATE UNKNOWN", armed ? "st badge-armed" : "st badge-unknown", {
     hidden: armed === false,
     title: "whether the live session is armed",
   });
 
-  const pending = system ? system.alerts_unacknowledged : null;
-  const critical = system ? system.alerts_critical : null;
-  const alertsText = pending === null || pending === undefined ? "ALERTS UNKNOWN" : `${pending} ALERT${pending === 1 ? "" : "S"}${critical ? ` · ${critical} CRITICAL` : ""}`;
-  const alertsTone = critical ? "st-bad" : pending ? "st-warn" : pending === 0 ? "st-dim" : "st-warn";
+  // A null critical count is not a measured zero: `_alert_counts` answers null
+  // for an unscoped backend that could not ask. `alertCountNode` says so in the
+  // panel, and a bar that silently dropped the suffix would leave the two
+  // surfaces disagreeing about the same field with the quieter one wrong.
+  const pending = observed ? observed.alerts_unacknowledged : null;
+  const critical = observed ? observed.alerts_critical : null;
+  const criticalKnown = critical !== null && critical !== undefined;
+  const criticalText = criticalKnown ? (critical > 0 ? ` · ${critical} CRITICAL` : "") : " · CRITICAL UNKNOWN";
+  const alertsText = pending === null || pending === undefined ? "ALERTS UNKNOWN" : `${pending} ALERT${pending === 1 ? "" : "S"}${criticalText}`;
+  let alertsTone = "st-warn";
+  if (criticalKnown && critical > 0) alertsTone = "st-bad";
+  else if (criticalKnown && pending === 0) alertsTone = "st-dim";
   badge("st-alerts", alertsText, `st ${alertsTone}`, { title: "unacknowledged owner alerts" });
 
   const slow = state.latencyMs !== null && state.latencyMs > 500;
@@ -984,11 +1187,31 @@ function drawStatus() {
   });
 }
 
+/**
+ * The clock, and the ageing rule that keeps the bar beside it honest.
+ *
+ * The status bar gets the demotion `updateFreshness` already applies to panels,
+ * and for the same reasons: a throttled tab, a suspended laptop and a poll the
+ * backend accepted but never answered all leave `state.systemAt` behind without
+ * any fetch having failed. Without this the bar would keep drawing the role,
+ * the autonomy state and the authority badges from whenever the last answer
+ * arrived while the clock next to them ticked on — the page at its most
+ * convincing and least true.
+ */
 function tickClock() {
   const now = new Date();
   const node = document.getElementById("st-clock");
   setText(node, utcStamp(now));
   node.title = now.toISOString();
+  // Only a bar that still believes it is current gets demoted here. One that a
+  // failed poll already demoted keeps that poll's own words — "HTTP 401" says
+  // more about what to do next than the age does.
+  const aged = state.systemAt && Date.now() - state.systemAt > STATUS_MS * STALE_INTERVALS;
+  if (aged && state.systemStatus === "ok") {
+    state.systemStatus = state.system ? "stale" : "unavailable";
+    state.systemError = `no successful status read in ${Math.round((Date.now() - state.systemAt) / 1000)}s`;
+  }
+  drawStatus();
   for (const panel of state.panels) updateFreshness(panel);
 }
 

@@ -1,5 +1,74 @@
 # CHANGELOG
 
+## [Unreleased] — M8a / ADR-0018: the operator terminal (2026-07-26)
+
+The experience layer `docs/LECTURE_134_ANALYSIS.md` §4 said Chronos owed: a surface that
+renders the decision journal, cycle outcomes, mandate state, session counters, and alerts as
+a product rather than as tables nobody reads. Two existing owner-built terminals were
+evaluated as candidates and both rejected on evidence (ADR-0018); the deciding fact was that
+the dominant cost is Chronos-side and identical under every option, so a second runtime would
+have bought shell code whose trading surface we would have written from scratch anyway.
+
+### `chronos.terminal` — the contract lives in Python
+- `commands.py` is the command registry and the tolerant grammar: the last registry-resolving
+  token wins, symbol-shaped tokens before it become the symbol, and nothing resolving is an
+  answer rather than an error. It never folds the operator's text — only a copy, for lookup —
+  because upper-casing the line destroys IBKR option and future symbols. Registry coherence
+  (duplicate codes, aliases shadowing codes, empty panels) raises at **import**: a terminal
+  whose tokens mean two things is worse than one that does not start.
+- `views.py` is every panel's read model. `MandateLimitView` refuses to render an unset limit
+  as a number, because zero lies three different ways here — "nothing permitted" under
+  ADR-0016 deny-by-default, "no ceiling at all" under ADR-0017 `model_discretion`, and "not
+  enforced" where `durable.limit_breaches` reads zero as unset. Showing `0` for all three
+  would tell the owner they have **no** authority at the moment they have **unlimited**.
+- Data honesty is the module's organizing rule, and it is enforced one level deeper than the
+  obvious: `counters_recorded` separates a missing row from an all-zero row, and
+  `equity_observed` separates a measured drawdown from the `Decimal(0)` sentinel that means no
+  equity snapshot was ever taken. An unobserved drawdown is not a drawdown of nothing.
+
+### The browser client — no framework, no build step, no npm, no CDN
+- Works offline; adds nothing to the dependency surface (R-15 does not grow). Served
+  **same-origin** by FastAPI, which is what removes CORS from the picture entirely.
+- Panels carry their own freshness and demote to STALE on age, and the supervision status bar
+  now does the same. A cached `kill_switch_engaged: false` can no longer keep the badge hidden
+  after a failed poll — absence is how this page says "clear", so unobserved must be loud.
+
+### Adversarial review found three HIGH defects; all are closed and pinned
+Every one was the same species — the terminal claiming a safer state than it could verify:
+counters rendering sentinel zeros under the caption "what the supervisor observed"; safety
+badges outliving a backend outage; and a hung `fetch` (no timeout) leaving the bar reading
+"BACKEND OK" while the clock ticked. Reproduced before fixing and re-verified after against
+running code, not against diffs.
+
+The regression tests for two of them were then found to be **weaker than they looked** — they
+hand-set the status and asserted what `drawStatus` drew, so a `pollSystem` that stopped
+demoting on failure would have kept them green. `a_failing_poll_demotes_the_bar_without_being_told`
+drives a real answer then a real rejection and names no status; breaking the demotion was
+confirmed to fail it while both older tests still passed.
+
+### Structural where a comment used to be
+- The no-HTML-sinks property was only a comment, and no test read the client at all.
+  `tests/safety/test_terminal_client_has_no_html_sinks.py` now scans the shipped file
+  (comments stripped first, so its own honest description of what it avoids cannot satisfy it)
+  and pins the no-external-origin property too.
+- A **Content-Security-Policy** over `/terminal/*` makes the next `innerHTML` inert, so the
+  guarantee no longer rests on ~1300 lines of hand-written DOM code never regressing.
+- The autonomy contract isolation test gained a **narrower** tier rather than a wider
+  exemption: modules that may name the mandate and nothing else, with the decision-type
+  forbidden set derived from `chronos.autonomy.decision`'s own members so a type added later
+  is covered without anyone remembering.
+
+### Disclosed, not buried
+`AUTONOMY_MANDATE_FILE`'s grant is now visible and revocable from a browser — a new
+authorization surface (R-39), bounded by a required reason, writer gating, and a `mandate_id`
+that binds the recorded act to the grant the owner was actually shown. The client **sends no
+token**, so panels 401 until a browser-session decision is made (R-41): the terminal is not
+yet usable end to end, and that choice does not belong in the commit that first exposes
+revocation. No charts (no historical-bar route exists, so one would have nothing honest to
+draw), no streaming (polling first — nobody has measured SSE contention against the tick).
+
+Gates: ruff clean, mypy strict clean (214 files), **2375 passed**, 1 skipped. No test sends an order.
+
 ## [Unreleased] — M7.5 / ADR-0017: owner-directed maximal autonomy, wired (2026-07-25)
 
 The owner directed Chronos to be as close to fully autonomous as possible, modeled on the
