@@ -97,6 +97,7 @@ from sqlalchemy.orm import Session
 
 from chronos.autonomy import AutonomyMandate
 from chronos.domain.models import ChronosModel
+from chronos.marketdata.bars import BarSeries
 from chronos.persistence import hash_chain
 from chronos.persistence.schema import (
     AutonomyOwnerAlertRow,
@@ -903,3 +904,84 @@ def _floor(name: str, value: Decimal) -> MandateLimitView:
     if value > 0:
         return MandateLimitView(name=name, value=_limit_text(value), effect="BINDS")
     return MandateLimitView(name=name, effect="NO_FLOOR")
+
+
+# ----------------------------------------------------------------------- bars
+
+
+class BarView(ChronosModel):
+    """One OHLCV bar, rendered for a chart.
+
+    Prices are floats here, not ``Decimal``. That is a deliberate exception to
+    this module's usual rule and it is safe for exactly one reason: nothing
+    downstream of a chart is an order parameter. ``chronos.marketdata.bars``
+    already holds bars as float for Pine parity, and re-quantizing them here
+    would imply a precision the source never had. Every value that *does* reach
+    an order still goes through ``Decimal`` at the execution boundary.
+    """
+
+    session_date: str
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
+
+
+class BarsView(ChronosModel):
+    """A chart's whole answer, including the reasons it might be a poor one.
+
+    ``refusal`` non-empty means there is nothing to draw and the panel says why.
+    ``stale`` means the bars are real but were not re-fetched — the request was
+    paced out — and the chart must be labelled rather than silently trusted.
+
+    ``source`` matters more here than on other panels: the demo adapter emits a
+    deterministic synthetic series, and a synthetic chart drawn in the same
+    register as a live one would be the most convincing lie this terminal could
+    tell. The client renders anything that is not ``ibkr`` as an explicit banner.
+    """
+
+    symbol: str
+    interval: str
+    lookback_days: int
+    bars: tuple[BarView, ...]
+    source: str
+    fetched_at: str | None
+    stale: bool
+    refusal: str
+    generated_at: str
+
+
+def bars_view(
+    series: BarSeries,
+    *,
+    lookback_days: int,
+    source: str,
+    fetched_at: datetime | None,
+    stale: bool,
+    refusal: str,
+    now: datetime,
+) -> BarsView:
+    """Assemble the chart payload. Takes primitives, so it imports no app plane."""
+
+    return BarsView(
+        symbol=series.symbol,
+        interval=series.interval.value,
+        lookback_days=lookback_days,
+        bars=tuple(
+            BarView(
+                session_date=bar.session_date.isoformat(),
+                open=bar.open,
+                high=bar.high,
+                low=bar.low,
+                close=bar.close,
+                volume=bar.volume,
+            )
+            for bar in series.bars
+        ),
+        source=source,
+        fetched_at=fetched_at.isoformat() if fetched_at is not None else None,
+        stale=stale,
+        refusal=refusal,
+        generated_at=now.isoformat(),
+    )

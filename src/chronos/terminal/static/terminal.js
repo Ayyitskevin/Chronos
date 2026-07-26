@@ -59,8 +59,10 @@
  * 3. **The workspace persists panels, not data.** After a reload every panel is
  *    UNAVAILABLE until its first fetch returns. Nothing in `localStorage` is
  *    evidence of anything current.
- * 4. **One panel per panel id.** Re-running a command focuses the open panel;
- *    no panel takes a symbol yet, so a second would differ only in position.
+ * 4. **One panel per (panel id, symbol).** Re-running a command focuses the open
+ *    panel rather than stacking duplicates. Since GP the symbol is part of that
+ *    key: `SPY GP` and `AAPL GP` are different questions and get their own
+ *    panels, while a second `SPY GP` focuses the one already showing SPY.
  */
 
 // ------------------------------------------------------------------- contract
@@ -76,6 +78,8 @@ const API = {
   acknowledge: (id) => `/terminal/alerts/${encodeURIComponent(id)}/acknowledge`,
   revoke: "/terminal/mandate/revoke",
   session: "/terminal/session",
+  bars: (symbol, lookback) =>
+    `/terminal/bars?symbol=${encodeURIComponent(symbol)}&interval=1d&lookback=${lookback}`,
 };
 
 const POLL_MS = 5000;
@@ -110,6 +114,12 @@ const FETCH_TIMEOUT_MS = STATUS_MS * 2;
 const HISTORY_MAX = 50;
 const SUGGEST_MAX = 7;
 const JOURNAL_LIMIT = 40;
+const CHART_LOOKBACK_DAYS = 180;
+// Bars are not a five-second quantity. A closed daily bar never changes, so the
+// chart polls far slower than the state panels — and that is a pacing decision
+// as much as a display one: every miss behind this interval is a historical
+// request on the connection the order pipeline shares.
+const CHART_POLL_MS = 120000;
 const MAX_SYMBOL_LENGTH = 32;
 const WORKSPACE_KEY = "chronos.terminal.workspace.v1";
 /** Conventional ticker form, kept identical to `_SYMBOL_PATTERN` in commands.py. */
@@ -124,6 +134,12 @@ const SYMBOL_RE = /^\/?[A-Z][A-Z0-9]*(?:[./][A-Z0-9]+)*$/;
  * terminal makes about its own ignorance in one screen.
  */
 const COPY = {
+  noBars:
+    "The broker returned no bars for this symbol and window. That is a statement about the request, not about the instrument — a wrong symbol, a window with no sessions, or a contract this account cannot see all look like this.",
+  syntheticBars:
+    "These candles are generated, not observed. The demo adapter draws a deterministic shape so the panel can be exercised without a gateway; no price here was printed by any venue.",
+  barsNote:
+    "Only closed bars are shown. Today's session does not appear until it settles, so the newest candle is the last completed one rather than a partial.",
   gateDefault:
     "This terminal needs the local API token once, to exchange it for a session. The token is not stored by this page.",
   gateExpired:
@@ -739,6 +755,147 @@ function renderAlerts(data, body) {
   return append(body, note(COPY.acknowledging));
 }
 
+/**
+ * The price chart: closed daily candles on a canvas.
+ *
+ * Canvas rather than SVG-per-bar because 180 candles is 180 nodes the DOM would
+ * carry for no benefit, and canvas rather than a charting library because
+ * ADR-0018 §6 buys its no-build-step property by not having dependencies.
+ *
+ * The honesty rules the rest of the terminal follows apply here and are easy to
+ * get wrong on a chart, because a chart is the surface an operator trusts most
+ * on the least evidence:
+ *
+ * - A **synthetic** series (the demo adapter) is banner-labelled. Drawing demo
+ *   candles in the same register as live ones would be the most convincing false
+ *   thing this page could show.
+ * - **Stale** bars — served because a re-fetch was paced out — say so, with the
+ *   time they were actually fetched.
+ * - A **refusal** draws nothing and states the reason. An empty chart area with
+ *   no explanation reads as "this instrument is flat".
+ */
+function renderChart(data, body) {
+  if (!data) return;
+  if (data.refusal) {
+    append(body, stateBlock("warn", "NO BARS", data.refusal));
+    return;
+  }
+  const bars = Array.isArray(data.bars) ? data.bars : [];
+  if (!bars.length) {
+    append(body, stateBlock("warn", "NO BARS", COPY.noBars));
+    return;
+  }
+
+  if (data.source && data.source !== "ibkr") {
+    append(
+      body,
+      stateBlock(
+        "warn",
+        `SYNTHETIC SERIES — source "${data.source}"`,
+        COPY.syntheticBars,
+      ),
+    );
+  }
+  if (data.stale) {
+    append(
+      body,
+      stateBlock(
+        "warn",
+        "STALE BARS",
+        `Served from cache; a refresh was paced out. Fetched ${data.fetched_at || "unknown"}.`,
+      ),
+    );
+  }
+
+  const first = bars[0];
+  const last = bars[bars.length - 1];
+  const change = last.close - first.close;
+  const pct = first.close ? (change / first.close) * 100 : 0;
+  const facts = append(body, el("dl", "kv"));
+  kv(facts, "last", last.close.toFixed(2));
+  kv(facts, "change", `${change >= 0 ? "+" : ""}${change.toFixed(2)} (${pct.toFixed(2)}%)`);
+  kv(facts, "bars", String(bars.length));
+  kv(facts, "session", last.session_date);
+
+  const canvas = document.createElement("canvas");
+  canvas.className = "chart-canvas";
+  // Fixed backing size: the fake DOM in the test harness has no layout, and a
+  // renderer that measured its container would be untestable headlessly for no
+  // gain — the CSS scales the element, the drawing stays crisp enough.
+  canvas.width = 720;
+  canvas.height = 260;
+  body.appendChild(canvas);
+  drawCandles(canvas, bars);
+
+  append(body, note(`Closed daily bars, source ${data.source || "unknown"}. ${COPY.barsNote}`));
+}
+
+/** Paint OHLC candles. Pure: reads bars, writes pixels, touches no state. */
+function drawCandles(canvas, bars) {
+  const ctx = typeof canvas.getContext === "function" ? canvas.getContext("2d") : null;
+  // The headless harness has no canvas context. Returning quietly keeps the
+  // rest of the panel (the numbers, which are what a test asserts on)
+  // renderable without pretending a drawing happened.
+  if (!ctx) return;
+
+  const width = canvas.width;
+  const height = canvas.height;
+  const padL = 8;
+  const padR = 54;
+  const padT = 8;
+  const padB = 18;
+  const plotW = width - padL - padR;
+  const plotH = height - padT - padB;
+
+  let hi = -Infinity;
+  let lo = Infinity;
+  for (const bar of bars) {
+    if (bar.high > hi) hi = bar.high;
+    if (bar.low < lo) lo = bar.low;
+  }
+  if (!isFinite(hi) || !isFinite(lo) || hi <= lo) return;
+  const pad = (hi - lo) * 0.05;
+  hi += pad;
+  lo -= pad;
+
+  const y = (price) => padT + (1 - (price - lo) / (hi - lo)) * plotH;
+  const slot = plotW / bars.length;
+  const bodyW = Math.max(1, Math.min(9, slot * 0.7));
+
+  ctx.clearRect(0, 0, width, height);
+
+  ctx.strokeStyle = "#26262d";
+  ctx.lineWidth = 1;
+  ctx.font = "10px ui-monospace, monospace";
+  ctx.fillStyle = "#7a7f87";
+  for (let i = 0; i <= 4; i += 1) {
+    const price = lo + ((hi - lo) * i) / 4;
+    const gy = Math.round(y(price)) + 0.5;
+    ctx.beginPath();
+    ctx.moveTo(padL, gy);
+    ctx.lineTo(padL + plotW, gy);
+    ctx.stroke();
+    ctx.fillText(price.toFixed(2), padL + plotW + 6, gy + 3);
+  }
+
+  bars.forEach((bar, index) => {
+    const cx = padL + slot * (index + 0.5);
+    const up = bar.close >= bar.open;
+    const colour = up ? "#26c281" : "#ef4d56";
+    ctx.strokeStyle = colour;
+    ctx.fillStyle = colour;
+
+    ctx.beginPath();
+    ctx.moveTo(Math.round(cx) + 0.5, y(bar.high));
+    ctx.lineTo(Math.round(cx) + 0.5, y(bar.low));
+    ctx.stroke();
+
+    const top = y(Math.max(bar.open, bar.close));
+    const bottom = y(Math.min(bar.open, bar.close));
+    ctx.fillRect(cx - bodyW / 2, top, bodyW, Math.max(1, bottom - top));
+  });
+}
+
 function renderHelp(_data, body) {
   if (!state.registry.length) {
     return append(body, stateBlock("bad", "REGISTRY UNAVAILABLE", state.registryError || "the command registry has not loaded"));
@@ -766,6 +923,7 @@ const PANELS = {
   counters: { endpoint: () => API.counters, render: renderCounters },
   queue: { endpoint: () => API.queue, render: renderQueue },
   alerts: { endpoint: () => API.alerts, render: renderAlerts },
+  chart: { endpoint: (panel) => API.bars(panel.symbol, CHART_LOOKBACK_DAYS), render: renderChart, interval: CHART_POLL_MS },
   help: { local: true, render: renderHelp },
 };
 
@@ -993,10 +1151,16 @@ function panelSpec(name) {
   return Object.prototype.hasOwnProperty.call(PANELS, name) ? PANELS[name] : null;
 }
 
-function openPanel(command) {
+function openPanel(command, symbol = "") {
   const spec = panelSpec(command.panel);
   if (!spec) return message(`the backend declares panel "${command.panel}", which this client cannot draw`, "bad");
-  const existing = state.panels.find((panel) => panel.panel === command.panel);
+  // A symbol-taking command without one would ask the backend for bars of ""
+  // and get a refusal it could have predicted. Say so instead of drawing it.
+  if (command.takes_symbol && !symbol) {
+    return message(`${command.code} needs a symbol — try "${(command.examples || ["SPY " + command.code])[0]}"`, "warn");
+  }
+  const held = command.takes_symbol ? symbol : "";
+  const existing = state.panels.find((panel) => panel.panel === command.panel && panel.symbol === held);
   if (existing) {
     focusPanel(existing.id);
     return refreshPanel(existing);
@@ -1005,9 +1169,10 @@ function openPanel(command) {
     id: `panel-${++state.seq}`,
     panel: command.panel,
     code: command.code,
-    title: command.title,
+    symbol: held,
+    title: held ? `${held} · ${command.title}` : command.title,
     spec,
-    interval: POLL_MS,
+    interval: spec.interval || POLL_MS,
     data: null,
     status: "loading",
     error: "",
@@ -1069,7 +1234,7 @@ async function refreshPanel(panel) {
   // a stale panel wearing a LIVE badge. The token makes the answer to anything
   // but the newest request unusable rather than merely unlikely to matter.
   const token = (panel.reqSeq += 1);
-  const outcome = await getJSON(panel.spec.endpoint());
+  const outcome = await getJSON(panel.spec.endpoint(panel));
   if (!state.panels.includes(panel) || panel.frozen || token !== panel.reqSeq) return;
   if (outcome.ok) {
     Object.assign(panel, { data: outcome.data, lastOkAt: Date.now(), status: "ok", error: "" });
@@ -1172,7 +1337,7 @@ function syncChrome() {
 
 function saveWorkspace() {
   try {
-    window.localStorage.setItem(WORKSPACE_KEY, JSON.stringify({ version: 1, panels: state.panels.map((panel) => panel.panel) }));
+    window.localStorage.setItem(WORKSPACE_KEY, JSON.stringify({ version: 2, panels: state.panels.map((panel) => ({ panel: panel.panel, symbol: panel.symbol || "" })) }));
   } catch {
     /* Storage can be absent or full. A workspace that cannot be saved is not a
        reason to stop supervising. */
@@ -1187,9 +1352,14 @@ function restoreWorkspace() {
     stored = null;
   }
   if (!stored || !Array.isArray(stored.panels)) return;
-  for (const id of stored.panels) {
+  for (const saved of stored.panels) {
+    // v1 stored bare panel ids; v2 stores {panel, symbol}. Read both rather than
+    // discarding a workspace on upgrade — the cost is one branch, and the
+    // alternative is an operator's desk silently emptying after a deploy.
+    const id = typeof saved === "string" ? saved : saved && saved.panel;
+    const symbol = typeof saved === "string" ? "" : (saved && saved.symbol) || "";
     const command = state.registry.find((entry) => entry.panel === id);
-    if (command) openPanel(command);
+    if (command) openPanel(command, symbol);
   }
 }
 
@@ -1486,10 +1656,10 @@ function runLine(line) {
     message(`${why}; type HELP for the registry`, "warn");
     return;
   }
-  openPanel(parsed.command);
+  openPanel(parsed.command, parsed.symbol);
   message(
     parsed.symbol && !parsed.command.takes_symbol
-      ? `${parsed.command.code} opened · ${parsed.symbol} held, but no panel filters by symbol yet`
+      ? `${parsed.command.code} opened · ${parsed.symbol} held, but that panel does not narrow by symbol`
       : `${parsed.command.code} opened`,
   );
 }

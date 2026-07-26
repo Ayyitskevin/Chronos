@@ -32,7 +32,7 @@ from chronos.histdata.official_client import OfficialIBKRHistoricalClient
 from chronos.histdata.official_options_client import OfficialIBKROptionClient
 from chronos.histdata.options_capture import capture_symbols
 from chronos.histdata.options_client import OptionSnapshotError
-from chronos.histdata.pacing import PacingController
+from chronos.marketdata.pacing import PacingController
 
 HISTORY_ROOT = Path(__file__).resolve().parents[3] / "research/data/history"
 

@@ -37,7 +37,7 @@ from chronos.histdata.options_client import (
     OptionSnapshotClient,
     OptionSnapshotError,
 )
-from chronos.histdata.pacing import PacingController
+from chronos.marketdata.pacing import PacingController
 
 __all__ = [
     "ActionKind",

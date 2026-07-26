@@ -22,9 +22,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import threading
 from collections.abc import Callable, Sequence
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from typing import Any, Protocol
 
@@ -69,7 +70,10 @@ from chronos.domain.models import (
     OrderSubmission,
     UnderlyingContract,
 )
+from chronos.marketdata.bars import Bar, BarInterval, BarSeries, BarStatus
 from chronos.orders.tracker import broker_status_to_lifecycle
+
+_logger = logging.getLogger("chronos.broker.official_ibkr")
 
 
 class _KillSwitchLike(Protocol):
@@ -93,9 +97,97 @@ def _maybe_float(value: Any) -> float | None:
     return result if abs(result) < 1e300 else None
 
 
+def _parse_ibkr_bar(
+    raw: Any,
+    *,
+    contract: UnderlyingContract,
+    interval: BarInterval,
+) -> Bar | None:
+    """One ``ibapi.common.BarData`` to a Chronos :class:`Bar`, or ``None``.
+
+    Returns ``None`` rather than raising, and the caller drops it with a warning.
+    That is the deliberate choice: one malformed row in a 180-bar response should
+    cost that row, not the chart. The inverse — inventing a plausible bar to keep
+    the series contiguous — would put a price on screen that no venue printed,
+    which is the one thing the terminal's data-honesty rule forbids outright.
+
+    Daily bars arrive as ``YYYYMMDD`` under ``formatDate=1``; intraday bars come
+    as epoch seconds. Both are handled, and anything else is unparseable rather
+    than assumed.
+    """
+
+    try:
+        stamp = str(raw.date).strip()
+        open_price = float(raw.open)
+        high = float(raw.high)
+        low = float(raw.low)
+        close = float(raw.close)
+        volume = float(raw.volume)
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+    session: date
+    moment: datetime
+    if len(stamp) == 8 and stamp.isdigit():
+        try:
+            session = date(int(stamp[0:4]), int(stamp[4:6]), int(stamp[6:8]))
+        except ValueError:
+            return None
+        # 21:00Z is the conventional US equity close stamp this codebase already
+        # uses for daily bars; `session_date` is the field that carries the
+        # exchange trading date unambiguously (chronos.marketdata.bars).
+        moment = datetime.combine(session, _DAILY_CLOSE_UTC, tzinfo=UTC)
+    else:
+        try:
+            moment = datetime.fromtimestamp(int(stamp), tz=UTC)
+        except (OverflowError, OSError, ValueError):
+            return None
+        session = moment.date()
+
+    if volume < 0 or min(open_price, high, low, close) <= 0 or high < low:
+        return None
+
+    try:
+        return Bar(
+            symbol=contract.symbol,
+            source="ibkr",
+            exchange=contract.exchange or "SMART",
+            interval=interval,
+            session_date=session,
+            timestamp_utc=moment,
+            open=open_price,
+            high=high,
+            low=low,
+            close=close,
+            volume=volume,
+            status=BarStatus.CLOSED,
+        )
+    except ValueError:
+        # `Bar.__post_init__` rejects a non-alphanumeric symbol; a contract that
+        # cannot be named is not one this series should silently carry.
+        return None
+
+
+_DAILY_CLOSE_UTC = time(21, 0)
+
 _CONNECT_TIMEOUT_S = 15.0
 _REQUEST_TIMEOUT_S = 20.0
 _QUOTE_TIMEOUT_S = 15.0
+#: Historical requests are answered as a burst of callbacks terminated by
+#: ``historicalDataEnd``, and a long lookback over a busy gateway is legitimately
+#: slower than a quote snapshot. Still bounded: an unanswered request must fail
+#: rather than hold a slot on a connection the order pipeline shares.
+_HISTORICAL_TIMEOUT_S = 60.0
+
+#: Chronos bar intervals to IBKR's ``barSizeSetting`` vocabulary. A missing entry
+#: refuses rather than falling back, because guessing a bar size silently returns
+#: a series that is not the one that was asked for.
+_IBKR_BAR_SIZE: dict[BarInterval, str] = {
+    BarInterval.DAY_1: "1 day",
+    BarInterval.HOUR_1: "1 hour",
+    BarInterval.MIN_5: "5 mins",
+    BarInterval.MIN_1: "1 min",
+}
 
 _PAPER_PORTS = frozenset({7497, 4002})
 _LIVE_PORTS = frozenset({7496, 4001})
@@ -189,6 +281,18 @@ def _make_app(bridge: CallbackBridge) -> Any:
 
         def contractDetailsEnd(self, reqId: int) -> None:
             bridge.on_contract_details_end(int(reqId))
+
+        def historicalData(self, reqId: int, bar: Any) -> None:
+            # Straight into the registry's generic accumulation rather than into
+            # bridge state: a historical response is an append-only sequence that
+            # ends with an explicit terminator, which is exactly the shape
+            # `RequestRegistry` already models. Quotes need bridge state because
+            # their ticks merge into one mutable snapshot; bars do not.
+            bridge.registry.add(int(reqId), bar)
+
+        def historicalDataEnd(self, reqId: int, start: str, end: str) -> None:
+            del start, end
+            bridge.registry.finish(int(reqId))
 
         def securityDefinitionOptionParameter(
             self,
@@ -984,6 +1088,67 @@ class OfficialIBKRBroker:
     async def cancel_market_data(self, contract_ids: Sequence[int]) -> None:
         # Snapshot requests self-terminate; nothing persistent to cancel.
         del contract_ids
+
+    async def historical_bars(
+        self,
+        contract: UnderlyingContract,
+        *,
+        interval: BarInterval = BarInterval.DAY_1,
+        lookback_days: int = 180,
+    ) -> BarSeries:
+        """One ``reqHistoricalData`` call, returned as closed bars.
+
+        ``keepUpToDate=False`` and ``useRTH=1``: a streaming subscription would
+        hold a request slot open against a pacing budget this connection shares
+        with the order pipeline, and extended-hours prints would put bars on the
+        chart that the regular-session close does not reflect.
+
+        ``formatDate=1`` asks IBKR for ``YYYYMMDD`` strings on daily bars, which
+        is what :func:`_parse_ibkr_bar` expects. A bar that does not parse is
+        **dropped with a warning rather than guessed at** — a chart missing a day
+        is visibly wrong, while a chart with a fabricated day is not.
+        """
+
+        app = self._require_app()
+        _, _, Contract, _ = _load_ibapi()
+        if lookback_days < 1:
+            raise BrokerDataError("lookback_days must be at least 1")
+        bar_size = _IBKR_BAR_SIZE.get(interval)
+        if bar_size is None:
+            raise BrokerDataError(f"unsupported bar interval {interval.value}")
+
+        ib_contract = Contract()
+        ib_contract.conId = contract.con_id
+        ib_contract.exchange = contract.exchange or "SMART"
+
+        request_id = self.registry.open()
+        app.reqHistoricalData(
+            request_id,
+            ib_contract,
+            "",  # endDateTime empty = up to now
+            f"{lookback_days} D",
+            bar_size,
+            "TRADES",
+            1,  # useRTH
+            1,  # formatDate
+            False,  # keepUpToDate
+            [],
+        )
+        raw = await self.registry.wait(request_id, timeout=_HISTORICAL_TIMEOUT_S)
+
+        bars: list[Bar] = []
+        for item in raw:
+            parsed = _parse_ibkr_bar(item, contract=contract, interval=interval)
+            if parsed is None:
+                _logger.warning(
+                    "Dropped an unparseable historical bar for %s",
+                    contract.symbol,
+                    extra={"event": "historical_bar_unparseable"},
+                )
+                continue
+            bars.append(parsed)
+        bars.sort(key=lambda bar: bar.timestamp_utc)
+        return BarSeries(symbol=contract.symbol, interval=interval, bars=tuple(bars))
 
     # ------------------------------------------------------------------ #
     # Order surface (M7, ADR-0009 §8). Wiring is validated against a fake

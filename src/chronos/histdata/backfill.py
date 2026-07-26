@@ -19,8 +19,8 @@ from datetime import date, datetime
 from pathlib import Path
 
 from chronos.histdata.client import HistoricalDataClient
-from chronos.histdata.pacing import PacingController
 from chronos.histdata.store import WriteResult, write_bars
+from chronos.marketdata.pacing import PacingController
 
 
 @dataclass(frozen=True, slots=True)

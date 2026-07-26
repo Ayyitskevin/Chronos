@@ -142,6 +142,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from pydantic import Field
 
+from chronos.api import bars as bar_plane
 from chronos.api.autonomy_wiring import load_persistent_mandate
 from chronos.api.dependencies import BackendState, get_state, require_writer
 from chronos.api.terminal_session import (
@@ -154,6 +155,7 @@ from chronos.api.terminal_session import (
 )
 from chronos.autonomy import AutonomyMandate
 from chronos.domain.models import ChronosModel
+from chronos.marketdata.bars import BarInterval, BarSeries
 from chronos.runtime import AppRuntime
 from chronos.supervisor import alerts as alert_module
 from chronos.supervisor import durable
@@ -426,6 +428,67 @@ def mandate(request: Request, state: StateDep) -> views.MandateView:
             now=utc_now(),
             mandate=_mandate_in_force(runtime, autonomy),
         )
+
+
+@router.get("/terminal/bars", response_model=views.BarsView)
+def bars(
+    state: StateDep,
+    symbol: str = Query(min_length=1, max_length=32),
+    interval: str = Query(default="1d"),
+    lookback: int = Query(default=180, ge=1, le=bar_plane.MAX_LOOKBACK_DAYS),
+) -> views.BarsView:
+    """Closed bars for a chart, from a cache that paces itself.
+
+    The only route in this module that can reach the **broker** rather than the
+    database, which is why it is the only one that can be refused for a reason
+    that is nobody's fault: historical requests are rate-limited by IBKR, this
+    process shares one connection with the order pipeline and the autonomy tick,
+    and :mod:`chronos.api.bars` would rather answer "paced, try shortly" than
+    make an operator's chart compete with a submission.
+
+    Not writer-gated, like every other read here — a demoted backend can still
+    draw a chart, and refusing to would hide market context at the moment an
+    operator is most likely to want it.
+
+    A refusal comes back as a **200 with an empty series and a stated reason**,
+    not a 4xx. The panel always has something honest to render, and "why is this
+    chart empty" is a question the payload should answer rather than one the
+    operator has to take to a log.
+    """
+
+    try:
+        wanted = BarInterval(interval)
+    except ValueError:
+        wanted = BarInterval.DAY_1
+        answer = None
+    else:
+        answer = bar_plane.provider_for(state.runtime, state).bars(
+            symbol, interval=wanted, lookback_days=lookback
+        )
+
+    now = utc_now()
+    if answer is None:
+        return views.bars_view(
+            BarSeries(symbol=symbol.strip().upper(), interval=wanted, bars=()),
+            lookback_days=lookback,
+            source="",
+            fetched_at=None,
+            stale=False,
+            refusal=(
+                f"{interval!r} is not a bar interval; "
+                f"known intervals are {', '.join(i.value for i in BarInterval)}"
+            ),
+            now=now,
+        )
+    return views.bars_view(
+        answer.series,
+        lookback_days=lookback,
+        source=answer.source,
+        fetched_at=answer.fetched_at,
+        stale=answer.stale,
+        refusal=answer.refusal,
+        now=now,
+    )
 
 
 @router.get("/terminal/journal", response_model=views.JournalView)

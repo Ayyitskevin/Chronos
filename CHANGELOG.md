@@ -1,5 +1,63 @@
 # CHANGELOG
 
+## [Unreleased] — M8c / ADR-0019: the chart (2026-07-26)
+
+ADR-0018 shipped the terminal without a chart and said why: no historical-bar route
+existed and the `Broker` protocol had no bars method, so a chart would have had nothing
+honest to draw. This closes that.
+
+### Bars come from the broker, and the cheap option was rejected on the data
+Serving the chart from `chronos.histdata`'s existing store would have cost no broker load
+at all. It was rejected after actually reading the corpus: **SPY ends 2019-11-14**, IWM
+covers 2019–2021, and R-08 records the symbols are heterogeneous — some dividend-adjusted,
+some nominal, some transcribed to two decimals. That is backtest material, and a chart of
+SPY ending seven years ago is not a chart. Reading it would also have dragged ADR-0013's
+holdout question into a display surface, which is a question worth never having to answer.
+
+### `Broker.historical_bars`
+Closed bars only — a forming bar is a number that changes while it is being read.
+`official_ibkr` implements it through the existing `RequestRegistry` (a historical response
+is an append-only sequence terminated by `historicalDataEnd`, exactly the shape the
+registry already models, so no new bridge state was needed). `demo` emits a deterministic
+series seeded from the symbol, stamped `source="demo"` and banner-labelled by the panel.
+`ib_async` refuses and points at the official adapter, the same way it already does for
+crypto. An unparseable bar is **dropped with a warning, never guessed at**.
+
+### Pacing degrades — it never blocks
+The load-bearing decision. IBKR paces historical requests harder than anything else it
+serves, and this process holds **one** connection shared with the order pipeline and the
+autonomy tick.
+
+`chronos.api.bars.BarProvider` caches by `(symbol, interval)` and remembers how much
+history it holds, so a 30-day request is sliced from a cached 180-day series rather than
+spending a paced request on a subset of what is already in memory. A paced-out request
+**serves the cache labelled stale, or refuses** — it never sleeps, because sleeping in a
+request handler on this event loop would put a chart in front of an order submission. It
+holds no lock across a broker call. The chart panel polls at **two minutes**, not five
+seconds, which is a pacing decision as much as a display one.
+
+**A real bug, caught by its own test:** the first implementation recorded pacing budget
+only after a *successful* fetch, so a symbol that always failed would retry on every poll
+with nothing throttling it. Budget is now recorded before the call — the gateway sees the
+request either way.
+
+### `PacingController` moved to `chronos.marketdata`
+It began in `chronos.histdata`, whose package `__init__` pulls in the whole research plane
+including the holdout machinery — too much to import into the broker-holding process for a
+forty-line utility. Duplicating it would have been worse: two implementations of a rate
+limit is two places for it to be wrong. `chronos.marketdata` is the neutral vocabulary both
+planes already share.
+
+### The terminal
+`GP` is the first command that narrows by symbol, so panel dedupe changed from "one per
+panel id" to **one per (panel id, symbol)** — `SPY GP` and `AAPL GP` are different
+questions. Saved workspaces gained a version and still read the old shape, so an upgrade
+does not silently empty a desk. The chart is candles on a canvas with a price axis and no
+dependencies; synthetic series get a banner, stale bars say when they were fetched, and a
+refusal states its reason rather than drawing an empty plot that reads as "flat".
+
+Gates: ruff clean, mypy strict clean (216 files), **2399 passed**, 1 skipped. No test sends an order.
+
 ## [Unreleased] — M8b: the terminal can log in (2026-07-26)
 
 M8a shipped a terminal whose panels all answered `401`: a browser cannot put a header

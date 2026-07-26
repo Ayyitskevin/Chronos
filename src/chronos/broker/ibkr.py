@@ -74,6 +74,7 @@ from chronos.domain.models import (
     OrderSubmission,
     UnderlyingContract,
 )
+from chronos.marketdata.bars import BarInterval, BarSeries
 from chronos.utils.logging import mask_account_id
 
 _OPTION_GENERIC_TICKS = "100,101,106"
@@ -588,6 +589,29 @@ class IBKRBroker:
         if not contracts:
             return ()
         return await self._request_quotes(tuple(contracts))
+
+    async def historical_bars(
+        self,
+        contract: UnderlyingContract,
+        *,
+        interval: BarInterval = BarInterval.DAY_1,
+        lookback_days: int = 180,
+    ) -> BarSeries:
+        """Refused here, the same way crypto is, and for the same reason.
+
+        ``official_ibkr`` is the production adapter and the one whose historical
+        path is wired and tested; this one is the optional secondary. Adding a
+        second bar implementation would mean two request-pacing behaviours and
+        two parsers against a gateway neither can be verified against from here,
+        and a chart that silently differed by adapter is worse than one that says
+        which adapter it needs.
+        """
+
+        del contract, interval, lookback_days
+        raise BrokerSafetyError(
+            "the ib_async adapter does not serve historical bars; the official "
+            "adapter is the historical path (BROKER_ADAPTER=official_ibkr)"
+        )
 
     async def cancel_market_data(self, contract_ids: Sequence[int]) -> None:
         self._require_connection()

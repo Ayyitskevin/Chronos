@@ -25,6 +25,7 @@ from chronos.domain.models import (
     OrderSubmission,
     UnderlyingContract,
 )
+from chronos.marketdata.bars import BarInterval, BarSeries
 
 
 class BrokerError(RuntimeError):
@@ -114,6 +115,29 @@ class Broker(Protocol):
     ) -> tuple[MarketQuote, ...]: ...
 
     async def cancel_market_data(self, contract_ids: Sequence[int]) -> None: ...
+
+    async def historical_bars(
+        self,
+        contract: UnderlyingContract,
+        *,
+        interval: BarInterval = BarInterval.DAY_1,
+        lookback_days: int = 180,
+    ) -> BarSeries:
+        """Closed OHLCV bars for a qualified underlying (M8c, ADR-0019).
+
+        Read-only and idempotent, but **not free**: IBKR paces historical
+        requests far more tightly than quotes, and this connection is shared with
+        the order pipeline and the autonomy tick. Callers go through
+        :mod:`chronos.api.bars`, which caches and paces; nothing should call this
+        method directly on a schedule.
+
+        The series contains **closed bars only**. A forming bar is a number that
+        changes while it is being read, and everything downstream of this — a
+        chart, a moving average, an operator's judgement — is better served by a
+        series that is complete as far as it goes than by one whose last element
+        is provisional and unlabelled.
+        """
+        ...
 
     async def preview_order(self, request: OrderRequest) -> OrderPreview: ...
 
