@@ -343,7 +343,11 @@ def test_only_the_supervisor_consumes_the_contracts() -> None:
         if path.is_relative_to(_SRC / "autonomy"):
             continue
         relative = str(path.relative_to(_SRC))
-        if relative.startswith(permitted_prefixes) or relative in permitted_modules:
+        if (
+            relative.startswith(permitted_prefixes)
+            or relative in permitted_modules
+            or relative in _MANDATE_ONLY_MODULES
+        ):
             continue
         for name in _imported_names(path.read_text(encoding="utf-8")):
             if name == "chronos.autonomy" or name.startswith("chronos.autonomy."):
@@ -351,6 +355,64 @@ def test_only_the_supervisor_consumes_the_contracts() -> None:
     assert importers == [], (
         f"only chronos.supervisor (and the named app-plane wiring) may consume model "
         f"decisions, but {sorted(set(importers))} import the autonomy contracts"
+    )
+
+
+#: Modules that may name the **mandate** contract and nothing else in the
+#: package. ADR-0018's operator terminal has to render what the owner granted —
+#: mode, scope, floors, ceilings, expiry — so a mandate-shaped read-model is
+#: unavoidable there. Its exemption is deliberately narrower than
+#: ``api/autonomy_wiring.py``'s: the guard below asserts these modules import no
+#: decision type at all, so a display surface cannot quietly become a second
+#: consumer of model decisions. Naming them individually keeps that narrowness
+#: reviewable; a directory prefix would have granted it to anything later added
+#: beside them.
+_MANDATE_ONLY_MODULES = {"terminal/views.py"}
+
+
+def _decision_contract_names() -> frozenset[str]:
+    """Every name that *is* a model decision, derived rather than listed.
+
+    Taken from ``chronos.autonomy.decision``'s own members plus the two decision
+    enums, so a decision type added later is covered without anyone remembering
+    to update this test — the failure mode a hand-maintained list has.
+    """
+
+    from chronos.autonomy import decision as decision_module
+
+    defined = {
+        name
+        for name, member in vars(decision_module).items()
+        if not name.startswith("_")
+        and getattr(member, "__module__", None) == decision_module.__name__
+    }
+    return frozenset(defined | {"DecisionKind", "DecisionDirection"})
+
+
+def test_display_surfaces_read_the_mandate_but_never_a_decision() -> None:
+    """A panel may show the grant. It may not touch what the model proposed.
+
+    ADR-0018 §4: the terminal is a window and a set of owner buttons, never a
+    gateway. Reading ``AutonomyMandate`` to render the authorization panel is
+    within that; importing ``AITradeDecision`` would put a second module in the
+    decision path, which is the exact thing ``test_only_the_supervisor_consumes_
+    the_contracts`` exists to prevent. So the exemption those modules hold is
+    conditional, and this is the condition.
+    """
+
+    forbidden = _decision_contract_names()
+    offenders: list[str] = []
+    for relative in sorted(_MANDATE_ONLY_MODULES):
+        path = _SRC / relative
+        assert path.exists(), f"{relative} is exempted but does not exist"
+        for name in _imported_names(path.read_text(encoding="utf-8")):
+            if not name.startswith("chronos.autonomy"):
+                continue
+            imported = name.rsplit(".", 1)[-1]
+            if imported in forbidden:
+                offenders.append(f"{relative} imports the decision contract {imported}")
+    assert offenders == [], (
+        f"a mandate-only display module reached for a model decision: {offenders}"
     )
 
 

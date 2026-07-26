@@ -1,0 +1,772 @@
+/*
+ * Chronos operator terminal — presentation (M8a, ADR-0018).
+ *
+ * The palette is midas's `term.*` scale (apps/web/tailwind.config.js), lifted as
+ * plain custom properties rather than as a Tailwind config: this page has no
+ * build step, so a utility framework would have to arrive as a CDN import, and a
+ * CDN import breaks both the offline requirement and the loopback-only posture.
+ * Hand-written CSS is the cost of that, and it is a cost worth paying once.
+ *
+ * Three rules govern everything below.
+ *
+ * 1. Density over decoration. This is a supervision surface read at a glance by
+ *    one operator; whitespace that would flatter a marketing page here costs a
+ *    row of the journal.
+ * 2. Colour carries meaning, never mood. `--down` marks danger (kill switch,
+ *    an unbounded ceiling, a failed load), `--amber` marks something the
+ *    operator must resolve (stale, unknown, undelivered), `--up` marks a bound
+ *    that is actually in force. A value with no colour is a value with no claim
+ *    attached.
+ * 3. Unknown never looks like zero. `.unknown` is deliberately styled as prose
+ *    — italic, dim, lower-case — so it can never be mistaken for a figure at a
+ *    glance. That is the visual half of the doctrine the read-models enforce in
+ *    Python: an absent counter reads "no authority established", not "no losses
+ *    yet".
+ */
+
+:root {
+  --bg: #0a0a0b;
+  --panel: #111114;
+  --header: #17171c;
+  --border: #26262d;
+  --border-bright: #3a3a44;
+  --text: #cfd2d6;
+  --muted: #7a7f87;
+  --dim: #565b63;
+  --amber: #ffb000;
+  --amber-dim: #b8851f;
+  --up: #26c281;
+  --down: #ef4d56;
+  --accent: #4cc2ff;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.45;
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+}
+
+button,
+input {
+  font: inherit;
+  color: inherit;
+  font-variant-numeric: inherit;
+}
+
+:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
+::selection {
+  background: var(--amber-dim);
+  color: #000;
+}
+
+/* ------------------------------------------------------------------ top bar */
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  background: var(--header);
+  border-bottom: 1px solid var(--border);
+}
+
+.brand {
+  color: var(--amber);
+  font-weight: 700;
+  letter-spacing: 0.28em;
+}
+
+.brand-sub {
+  color: var(--dim);
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+.cmdwrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+  border: 1px solid var(--border-bright);
+  background: var(--bg);
+  padding: 3px 8px;
+}
+
+.cmd-caret {
+  color: var(--amber);
+}
+
+.cmd-symbol {
+  color: var(--accent);
+  border: 1px solid var(--border);
+  padding: 0 5px;
+  white-space: nowrap;
+}
+
+.cmd-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: transparent;
+  border: 0;
+  color: var(--text);
+  padding: 2px 0;
+}
+
+.cmd-input::placeholder {
+  color: var(--dim);
+}
+
+.cmd-input:focus {
+  outline: none;
+}
+
+.cmdwrap:focus-within {
+  border-color: var(--amber-dim);
+}
+
+.suggest {
+  position: absolute;
+  top: 100%;
+  left: -1px;
+  right: -1px;
+  z-index: 40;
+  margin: 2px 0 0;
+  padding: 2px;
+  list-style: none;
+  background: var(--panel);
+  border: 1px solid var(--border-bright);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 55%);
+  max-height: 46vh;
+  overflow: auto;
+}
+
+.suggest-item {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  padding: 3px 6px;
+  cursor: pointer;
+}
+
+.suggest-item[aria-selected="true"] {
+  background: var(--header);
+  outline: 1px solid var(--amber-dim);
+}
+
+.suggest-line {
+  color: var(--amber);
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.suggest-hint {
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cmd-msg {
+  flex: 0 1 auto;
+  max-width: 38ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+}
+
+.cmd-msg.warn {
+  color: var(--amber);
+}
+
+.cmd-msg.bad {
+  color: var(--down);
+}
+
+/* ------------------------------------------------------------------- panels */
+
+.grid {
+  overflow: auto;
+  padding: 8px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(370px, 1fr));
+  gap: 8px;
+  align-content: start;
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  max-height: 48vh;
+  background: var(--panel);
+  border: 1px solid var(--border);
+}
+
+.panel.focused {
+  border-color: var(--border-bright);
+}
+
+.panel:focus-visible {
+  outline-offset: -1px;
+}
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 6px;
+  background: var(--header);
+  border-bottom: 1px solid var(--border);
+}
+
+.panel.focused .panel-head {
+  border-bottom-color: var(--amber-dim);
+}
+
+.panel-num {
+  flex: 0 0 auto;
+  min-width: 18px;
+  background: transparent;
+  border: 1px solid var(--border-bright);
+  color: var(--dim);
+  cursor: pointer;
+  padding: 0 4px;
+}
+
+.panel.focused .panel-num {
+  color: var(--amber);
+  border-color: var(--amber-dim);
+}
+
+.panel-code {
+  color: var(--amber);
+  font-weight: 700;
+}
+
+.panel-title {
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.panel-meta {
+  margin-left: auto;
+  color: var(--dim);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.panel-close {
+  flex: 0 0 auto;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0 5px;
+}
+
+.panel-close:hover {
+  color: var(--down);
+  border-color: var(--border-bright);
+}
+
+.panel-body {
+  overflow: auto;
+  padding: 6px 8px 8px;
+}
+
+/* --------------------------------------------------------------- value grid */
+
+.kv {
+  display: grid;
+  grid-template-columns: minmax(9ch, max-content) minmax(0, 1fr);
+  gap: 1px 10px;
+  margin: 0;
+}
+
+.kv dt {
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.kv dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.section {
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+}
+
+.section-title {
+  color: var(--dim);
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  margin-bottom: 3px;
+}
+
+.note {
+  color: var(--dim);
+  font-size: 11px;
+  margin-top: 6px;
+}
+
+.unknown {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.fingerprint {
+  color: var(--muted);
+  cursor: help;
+}
+
+.wrap {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+}
+
+/* --------------------------------------------------------------------- chips */
+
+.chip {
+  display: inline-block;
+  padding: 0 5px;
+  border: 1px solid var(--border-bright);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.chip-ok {
+  color: var(--up);
+  border-color: color-mix(in srgb, var(--up) 45%, transparent);
+}
+
+.chip-warn {
+  color: var(--amber);
+  border-color: var(--amber-dim);
+}
+
+.chip-danger {
+  color: var(--down);
+  border-color: color-mix(in srgb, var(--down) 55%, transparent);
+}
+
+.chip-info {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+.chip-muted {
+  color: var(--dim);
+}
+
+.chip-unknown {
+  color: var(--muted);
+  font-style: italic;
+  border-style: dashed;
+}
+
+/* -------------------------------------------------------------- state blocks */
+
+.state {
+  border: 1px solid var(--border-bright);
+  border-left-width: 3px;
+  padding: 6px 8px;
+  margin-bottom: 6px;
+}
+
+.state-title {
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.state-body {
+  color: var(--muted);
+  margin-top: 2px;
+}
+
+.state-warn {
+  border-left-color: var(--amber);
+}
+
+.state-warn .state-title {
+  color: var(--amber);
+}
+
+.state-bad {
+  border-left-color: var(--down);
+}
+
+.state-bad .state-title {
+  color: var(--down);
+}
+
+.state-info {
+  border-left-color: var(--accent);
+}
+
+.state-info .state-title {
+  color: var(--accent);
+}
+
+/* ------------------------------------------------------------------- tables */
+
+.tbl-wrap {
+  overflow-x: auto;
+}
+
+.tbl {
+  width: 100%;
+  border-collapse: collapse;
+  white-space: nowrap;
+}
+
+.tbl th {
+  text-align: left;
+  color: var(--dim);
+  font-weight: 400;
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  border-bottom: 1px solid var(--border);
+  padding: 1px 8px 2px 0;
+}
+
+.tbl td {
+  padding: 1px 8px 1px 0;
+  vertical-align: top;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+}
+
+.tbl td.wrapcell {
+  white-space: normal;
+  min-width: 22ch;
+}
+
+/* -------------------------------------------------------------- journal rows */
+
+.entry {
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  padding: 3px 0;
+}
+
+.entry-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.entry-seq {
+  color: var(--dim);
+}
+
+/*
+ * Model- and worker-derived narrative. Rendered pre-wrap so the operator sees
+ * exactly the bytes that were stored — including any markup, which stays inert
+ * because it arrives through textContent and never through innerHTML.
+ */
+.narrative {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  margin: 2px 0 0;
+  padding-left: 8px;
+  border-left: 1px solid var(--border);
+}
+
+/* --------------------------------------------------------- owner confirmation */
+
+.actions {
+  margin-top: 8px;
+}
+
+.btn {
+  background: transparent;
+  border: 1px solid var(--border-bright);
+  color: var(--text);
+  cursor: pointer;
+  padding: 1px 8px;
+}
+
+.btn:hover:not(:disabled) {
+  border-color: var(--amber-dim);
+  color: var(--amber);
+}
+
+.btn:disabled {
+  color: var(--dim);
+  border-color: var(--border);
+  cursor: not-allowed;
+}
+
+.btn-danger {
+  border-color: color-mix(in srgb, var(--down) 55%, transparent);
+  color: var(--down);
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: var(--down);
+  border-color: var(--down);
+  color: #000;
+}
+
+.confirm {
+  margin-top: 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--border-bright);
+  border-left: 3px solid var(--amber);
+}
+
+.confirm-danger {
+  border-left-color: var(--down);
+}
+
+.confirm-head {
+  font-weight: 700;
+  color: var(--amber);
+  letter-spacing: 0.08em;
+}
+
+.confirm-danger .confirm-head {
+  color: var(--down);
+}
+
+.confirm-why {
+  color: var(--muted);
+  margin: 2px 0 6px;
+}
+
+.confirm label {
+  display: block;
+  color: var(--dim);
+  font-size: 11px;
+  margin-top: 4px;
+}
+
+.confirm input {
+  width: 100%;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 2px 6px;
+}
+
+.confirm input:focus {
+  border-color: var(--accent);
+}
+
+.confirm-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.confirm-result {
+  margin-top: 6px;
+  color: var(--muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.confirm-result.bad {
+  color: var(--down);
+}
+
+.confirm-result.ok {
+  color: var(--up);
+}
+
+/* --------------------------------------------------------------- empty state */
+
+.empty {
+  grid-column: 1 / -1;
+  align-self: center;
+  justify-self: center;
+  max-width: 62ch;
+  text-align: center;
+  color: var(--muted);
+  padding: 24px;
+}
+
+.empty-brand {
+  color: var(--amber);
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: 0.34em;
+}
+
+.empty-sub {
+  color: var(--dim);
+  font-size: 11px;
+  letter-spacing: 0.28em;
+  text-transform: uppercase;
+  margin-top: 4px;
+}
+
+.empty-hint {
+  margin-top: 14px;
+}
+
+.empty-keys {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: center;
+  margin-top: 10px;
+}
+
+/* ---------------------------------------------------------------- status bar */
+
+.statusbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 3px 10px;
+  background: var(--header);
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.statusbar .spacer {
+  margin-left: auto;
+}
+
+.st {
+  white-space: nowrap;
+}
+
+.st-ok {
+  color: var(--up);
+}
+
+.st-warn {
+  color: var(--amber);
+}
+
+.st-bad {
+  color: var(--down);
+}
+
+.st-dim {
+  color: var(--dim);
+}
+
+/*
+ * The kill switch is the loudest thing on the page when it is engaged, and the
+ * second loudest when its state is unknown — an unknown kill switch must never
+ * be quieter than a disengaged one, because "we could not read it" and "it is
+ * off" are the two facts an operator must not confuse.
+ */
+.badge-kill {
+  background: var(--down);
+  color: #000;
+  font-weight: 700;
+  padding: 0 6px;
+  letter-spacing: 0.1em;
+  animation: pulse 1.6s ease-in-out infinite;
+}
+
+.badge-armed {
+  background: var(--amber);
+  color: #000;
+  font-weight: 700;
+  padding: 0 6px;
+  letter-spacing: 0.1em;
+}
+
+.badge-unknown {
+  border: 1px dashed var(--amber-dim);
+  color: var(--amber);
+  padding: 0 6px;
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.45;
+  }
+}
+
+.st-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0 6px;
+}
+
+.st-btn:hover {
+  color: var(--down);
+  border-color: var(--border-bright);
+}
+
+/* ---------------------------------------------------------------- scrollbars */
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-bright) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-bright);
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  /* The badge must stay loud without motion: a solid block, not a pulse. */
+  .badge-kill {
+    animation: none;
+  }
+}
