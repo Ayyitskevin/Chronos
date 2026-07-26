@@ -48,18 +48,22 @@ bare symbol therefore parses to ``command=None`` with the symbol **kept**, so th
 client can hold it as the pending symbol rather than silently discarding what the
 operator typed.
 
-**A symbol narrowing on any panel.** Every command ships ``takes_symbol=False``,
-and that is a statement about storage, not about the grammar. The rows behind
-these panels are keyed by account fingerprint, not by instrument:
-``AutonomyProposalQueueRow`` — which feeds both JRNL and QUE — stores the raw
-payload plus a stage and a refusal and has no symbol column at all;
-``AutonomyOwnerAlertRow`` and ``AutonomySessionCounterRow`` likewise. A panel
-advertising ``SPY JRNL`` today would be advertising a filter the database cannot
-serve, and a filter that silently does nothing is worse than no filter. The
-grammar still extracts the symbol, and the field still exists, so that when a
-symbol-keyed read model lands, flipping one boolean turns the narrowing on across
-the grammar, the JSON payload, the help text, and the client at once. That is the
-whole reason the registry is the single source of truth.
+**A symbol narrowing on the state panels.** ``takes_symbol`` is a statement about
+storage, not about the grammar, and it is still ``False`` for SYS, MAND, JRNL,
+CNTR, QUE, ALRT and THESIS. The rows behind those panels are keyed by account
+fingerprint, not by instrument: ``AutonomyProposalQueueRow`` — which feeds both
+JRNL and QUE — stores the raw payload plus a stage and a refusal and has no
+symbol column; ``AutonomyOwnerAlertRow`` and ``AutonomySessionCounterRow``
+likewise. A panel advertising ``SPY JRNL`` would be advertising a filter the
+database cannot serve, and a filter that silently does nothing is worse than no
+filter.
+
+``GP`` is the exception, and it earned it (M8c): its bars come from the broker,
+keyed by the symbol, so the narrowing is real. That is exactly the mechanism this
+design was built for — a symbol-keyed source landed, one boolean flipped, and the
+narrowing turned on across the grammar, the JSON payload, the help text, and the
+client at once. THESIS is symbol-*organized* but not symbol-narrowed: it answers
+"every symbol at once", which is the question worth asking of it.
 
 ## What this module is not
 
@@ -77,9 +81,10 @@ is displayed as text and never as markup (ADR-0018 residual 6).
 ## Honest residuals
 
 1. **A command token shadows an identically-named ticker.** ``ALRT`` is a
-   command, so it can never be read as a symbol. Harmless while no panel takes a
-   symbol; it becomes a real collision the day one does, and the fix is an escape
-   form, not a rename.
+   command, so it can never be read as a symbol. Live since ``GP`` (M8c): a
+   symbol colliding with a command code cannot be charted, and the fix would be
+   an escape form rather than a rename. No current code collides with a symbol an
+   operator of this account is likely to want.
 2. **A lowercase ticker is not a symbol.** ``spy sys`` yields no symbol. Symbol
    recognition requires the conventional upper-case ticker form, because the
    alternative — promoting any bare word — makes every typo an instrument.
@@ -217,6 +222,19 @@ COMMANDS: tuple[TerminalCommand, ...] = (
             "Acknowledging is an owner action, and it never deletes the alert."
         ),
         examples=("ALRT", "ALERTS"),
+    ),
+    TerminalCommand(
+        code="THESIS",
+        title="Beliefs per symbol",
+        panel="theses",
+        aliases=("THESES", "WHY"),
+        summary=(
+            "What the model last said about each symbol — thesis, rationale, uncertainties and "
+            "invalidation conditions — beside whether that symbol is actually held. Holdings "
+            "with nothing on record are listed separately, because a position the system has "
+            "never spoken about is the most interesting row on this panel."
+        ),
+        examples=("THESIS", "WHY"),
     ),
     TerminalCommand(
         code="GP",

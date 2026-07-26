@@ -187,6 +187,21 @@ carry concise, decision-relevant reasoning and citations. They are recorded,
 displayed, and audited; nothing in the runtime pipeline parses them into an
 order parameter.
 
+*[Corrected in M8d, 2026-07-26. "Recorded, displayed, and audited" was written at
+M1 and was not true until M8d. The narrative survived only inside the opaque
+queued proposal payload — unread, unindexed, and outside the hash chain that
+makes the rest of the journal tamper-evident; nothing displayed it and nothing
+audited it. The cause is worth recording: the safety test enforcing the second
+half of this sentence (`test_no_deterministic_module_reads_a_narrative_attribute`)
+forbade **any** access to these fields outside the contract, and recording
+requires reading — so the guard made this promise unimplementable, and a test and
+a published claim contradicted each other for four milestones because nothing had
+tried to do it. M8d journals the narrative into the hash chain beside the outcome
+it explains, and narrows the guard to a named recorder whose body may only copy
+(see `test_a_narrative_recorder_only_copies_it`). The second half of the sentence
+— nothing parses them into an order parameter — was true throughout and is now
+enforced more precisely than before, not less.]*
+
 An exposure-creating decision (OPEN, INCREASE, HEDGE, ROLL, REPLACE) must cite
 at least one evidence id and state its invalidation conditions, or it fails
 validation.

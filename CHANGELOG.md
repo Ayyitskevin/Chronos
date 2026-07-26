@@ -1,5 +1,64 @@
 # CHANGELOG
 
+## [Unreleased] — M8d: the theses, and a claim that was not true (2026-07-26)
+
+`docs/LECTURE_134_ANALYSIS.md` §4 listed five things Chronos owed the experience it is
+modelled on. This closes the last substantive one: *"no view presents here is what the
+system believes about each holding and why."*
+
+### The claim that was not true
+
+ADR-0016 §5 has said since M1 that `thesis`, `rationale`, `key_uncertainties` and
+`invalidation_conditions` are **"recorded, displayed, and audited"**. Grepping `src/` for
+`thesis` returns the contract that defines it and two comments explaining it is *excluded*
+from the decision digest — and nothing else. The bytes survived only inside the opaque
+proposal payload: unread, unindexed, and outside the hash chain that makes the rest of the
+journal tamper-evident. Of the three verbs, one was arguable and two were false.
+
+**The reason it was never true is the interesting part.**
+`test_no_deterministic_module_reads_a_narrative_attribute` forbade *any* access to those
+fields anywhere outside the contract. Recording requires reading, so the guard made the
+ADR's own promise unimplementable. A test and a published claim had been contradicting each
+other since M1 and nothing forced the question, because nothing had tried to do the thing.
+
+### Narrowed, not weakened
+
+The guard now exempts modules **by name**, mapped to the single function allowed to touch
+narrative — and a new test, `test_a_narrative_recorder_only_copies_it`, holds them to a
+stricter rule than the old one could express: the access must live in one named function
+whose body contains nothing but a presence guard and a dict of the fields. No comparison, no
+arithmetic, no subscript, no call other than `list()`/`str()`. Only the body is walked, so a
+`dict[str, Any]` annotation does not smuggle in permission to slice the thesis.
+
+Verified by breaking it: adding `len(decision.thesis) * 100` to the recorder — narrative
+influencing a number, the exact hazard ADR-0016 §5 names — fails the new test.
+
+### The journal records what the model said
+
+`_record` now writes the symbol, kind, asset class, confidence and full narrative alongside
+the outcome, verbatim rather than summarized (an audit record that paraphrases is a record
+of someone's reading). It stays inert: written to an append-only chain, never parsed, and
+rendered by the terminal as text and never as markup.
+
+### `THESIS`
+
+A panel of the latest belief per symbol, joined to what is actually held. Two rules shape it:
+
+- **A holding with nothing on record is listed first, not omitted.** `silent_holdings`
+  carries positions the model has never mentioned — the single most interesting row on a
+  panel whose job is explaining the holdings, and the one a naive implementation drops.
+- **Unreadable positions never render as "not held".** If the broker read fails, the panel
+  says so once and every `held` reads unknown; "we could not ask" and "no" are different
+  facts and only one of them is reassuring.
+
+Positions are read in the route and passed *into* the assembler, so the read-model stays a
+pure function of the database.
+
+Also corrected: `commands.py` still claimed "every command ships `takes_symbol=False`",
+falsified by `GP` in M8c.
+
+Gates: ruff clean, mypy strict clean (216 files), **2407 passed**, 1 skipped.
+
 ## [Unreleased] — M8c / ADR-0019: the chart (2026-07-26)
 
 ADR-0018 shipped the terminal without a chart and said why: no historical-bar route
