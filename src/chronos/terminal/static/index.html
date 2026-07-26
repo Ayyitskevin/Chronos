@@ -1,0 +1,98 @@
+<!doctype html>
+<!--
+  Chronos operator terminal — the shell (M8a, ADR-0018 §6).
+
+  This document is deliberately almost empty. Everything with a value in it is
+  drawn by terminal.js from what the backend declares: the command registry
+  comes from GET /terminal/commands, and every panel comes from its own read
+  model. Hard-coding a command, a panel title, or a figure here would create a
+  second place the terminal's surface is defined, which is the exact drift
+  ADR-0018 §6 moves the registry into Python to prevent.
+
+  What *is* hard-coded here is structure the backend has no opinion about: the
+  command bar, the panel grid, and the fixed slots of the supervision status
+  bar. Their text content is set from JavaScript so that no server string is
+  ever interpolated into markup.
+
+  Asset paths are absolute under /terminal/static/ rather than relative. A
+  relative href resolves against the URL the document was *served* at, so it
+  breaks the moment the shell is served from /terminal (no trailing slash)
+  instead of /terminal/. Absolute paths work under either mount, and they state
+  the integration contract plainly: these three files live at
+  /terminal/static/{index.html,terminal.css,terminal.js}.
+
+  No script or style is loaded from anywhere but this origin. The page must work
+  with the machine offline, and a CDN request would be an outbound connection
+  from the process that holds the broker session.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <meta name="color-scheme" content="dark" />
+    <title>CHRONOS — operator terminal</title>
+    <link rel="stylesheet" href="/terminal/static/terminal.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <span class="brand">CHRONOS</span>
+      <span class="brand-sub">operator terminal</span>
+
+      <form class="cmdwrap" id="cmdform" autocomplete="off" role="search">
+        <span class="cmd-caret" aria-hidden="true">&gt;</span>
+        <span class="cmd-symbol" id="cmd-symbol" hidden></span>
+        <input
+          id="cmd"
+          class="cmd-input"
+          type="text"
+          role="combobox"
+          aria-expanded="false"
+          aria-controls="suggest"
+          aria-autocomplete="list"
+          aria-label="Command"
+          placeholder="type a command — HELP lists every one"
+          spellcheck="false"
+          autocapitalize="off"
+          autocorrect="off"
+          autocomplete="off"
+        />
+        <ul class="suggest" id="suggest" role="listbox" aria-label="Completions" hidden></ul>
+      </form>
+
+      <span class="cmd-msg" id="cmd-msg" role="status" aria-live="polite"></span>
+    </header>
+
+    <main class="grid" id="grid" aria-label="Panels">
+      <section class="empty" id="empty">
+        <div class="empty-brand">CHRONOS</div>
+        <div class="empty-sub">operator terminal</div>
+        <p class="empty-hint">
+          No panels open. Type a command — the registry is served by the backend, so what you
+          can open is exactly what it can answer.
+        </p>
+        <div class="empty-keys" id="empty-keys"></div>
+        <p class="note">
+          Every panel states when it last loaded, and says STALE or UNAVAILABLE rather than
+          showing a number it can no longer vouch for.
+        </p>
+      </section>
+    </main>
+
+    <footer class="statusbar" id="statusbar" aria-label="Supervision status" aria-live="polite">
+      <span class="st" id="st-conn">backend …</span>
+      <span class="st" id="st-role">role …</span>
+      <span class="st" id="st-autonomy">autonomy …</span>
+      <span class="st" id="st-kill" hidden></span>
+      <span class="st" id="st-armed" hidden></span>
+      <span class="st" id="st-alerts">alerts …</span>
+      <span class="spacer"></span>
+      <span class="st st-dim" id="st-panels">0 panels</span>
+      <span class="st st-dim" id="st-latency">— ms</span>
+      <span class="st" id="st-clock">--:--:--Z</span>
+      <button class="st-btn" id="st-reset" type="button" title="Close every panel">RESET</button>
+    </footer>
+
+    <script type="module" src="/terminal/static/terminal.js"></script>
+  </body>
+</html>
