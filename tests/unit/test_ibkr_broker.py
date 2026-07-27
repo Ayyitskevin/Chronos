@@ -149,6 +149,10 @@ class FakeIB:
         self.option_underlying_con_id = 101
         self.option_currency = "USD"
         self.option_exchange = "SMART"
+        # A real gateway returns these on every option ContractDetails; the
+        # deliverable screen reads them (M11, R-27).
+        self.option_underlying_symbol = "AAPL"
+        self.option_underlying_sec_type = "STK"
         self.account_values = [
             AccountValue(ACCOUNT_ID, "NetLiquidation", "250000.25", "USD", ""),
             AccountValue(ACCOUNT_ID, "TotalCashValue", "125000.50", "USD", ""),
@@ -246,6 +250,8 @@ class FakeIB:
                 contract=contract,
                 minTick=self.min_tick,
                 underConId=self.option_underlying_con_id,
+                underSymbol=self.option_underlying_symbol,
+                underSecType=self.option_underlying_sec_type,
             )
         ]
 
@@ -589,7 +595,13 @@ async def test_qualification_chain_and_contract_details_are_authoritative() -> N
     assert options[0].con_id == 202
     assert options[0].underlying_con_id == underlying.con_id
     assert options[0].min_tick == Decimal("0.05")
-    assert options[0].deliverable_verified is False
+    # The assertion that could not have been written before M11. This line read
+    # `is False` for six milestones, and it was pinning R-27: neither IBKR
+    # adapter set the flag, so `standard_deliverable_verified` FAILed every
+    # option order against a real gateway.
+    assert options[0].deliverable_verified is True
+    assert options[0].deliverable_shares == Decimal("100")
+    assert options[0].has_verified_standard_deliverable is True
 
     client.min_tick = 0
     with pytest.raises(BrokerDataError, match="minimum tick"):

@@ -115,6 +115,15 @@ Dispatch OPTION → STOCK → CRYPTO. Checks:
   `BrokerRiskEvidenceProvider` actually wires `opening_orders_today` (it never has —
   a latent stock gap fixed here).
 
+  > **Correction (2026-07-27, M10).** Neither half of that sentence was true when
+  > it was written, and the paragraph stayed wrong for five milestones. The side
+  > filter was not extended and the provider did not wire the field; the cap
+  > therefore never refused anything, for any family, including the crypto family
+  > this ADR governs. Both defects are fixed in M10 and R-25 is where the corrected
+  > account lives. The claim is left standing above rather than edited away, because
+  > an ADR that quietly rewrites its own history is worth less than one that shows
+  > where it was wrong.
+
 Evidence decontamination (unchanged) now explicitly includes
 `services/reconciliation.py` (panel ris-7): the coordinator receives the union of
 both allowlists with a family-aware representation, so a held crypto position is

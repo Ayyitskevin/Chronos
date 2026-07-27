@@ -120,6 +120,8 @@ class _CryptoEvidence:
             current_crypto_allocation=self._allocation,
             crypto_allocation_marked=self._marked,
             pending_crypto_buy_notional=self._pending,
+            # Stated, not defaulted (R-25): unknown is a refusal since M10.
+            opening_orders_today=0,
         )
 
 

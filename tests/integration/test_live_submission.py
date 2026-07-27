@@ -162,6 +162,10 @@ class _CannedEvidence:
             reconciliation_session_id=readiness.session_id,
             session=session_for(ProductFamily.OPTION, now=now, broker_confirms_open=True),
             wheel_eligible_action=OrderIntent.OPEN_SHORT_PUT,
+            # Stated, not defaulted (R-25): an unknown opening count is a
+            # refusal since M10, and these tests are about the transmit
+            # boundary, not the daily cap.
+            opening_orders_today=0,
         )
 
 

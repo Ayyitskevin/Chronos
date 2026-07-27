@@ -245,8 +245,10 @@ explicitly hand to the model's discretion.
 2. **Options still refuse at the instrument seam.** `BackendGatherers.instrument_facts`
    resolves equities and crypto; an option decision refuses rather than pricing
    against a guessed strike/expiry, because chain resolution needs selection this
-   wiring does not own. Autonomous options remain gated on that work (and on
-   R-27), regardless of what a mandate lists.
+   wiring does not own. Autonomous options remain gated on that work, regardless
+   of what a mandate lists. R-27 was listed here as a second gate; it was
+   mitigated in M11, so chain selection is now the whole of what stands in the
+   way — and it is the larger half.
 3. **The 1% protection collar is a judgment, not a derived number.** It is wide
    enough to fill through a normal spread and narrow enough to refuse a broken
    print. A per-instrument collar (tighter for liquid large-caps, wider for thin

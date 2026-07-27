@@ -74,6 +74,10 @@ class _CannedEvidence:
             reconciliation_session_id=readiness.session_id,
             session=session,
             wheel_eligible_action=OrderIntent.OPEN_SHORT_PUT,
+            # Stated, not defaulted: since M10 the daily cap refuses an intent
+            # whose opening count is unknown, so a canned provider has to say
+            # what the count is (R-25).
+            opening_orders_today=0,
         )
 
 

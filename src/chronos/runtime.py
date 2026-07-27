@@ -402,6 +402,10 @@ def _build_order_management(
             connection=connection,
             settings=settings,
             reconciliation_readiness=reconciliation_readiness,
+            # The repository that makes `max_opening_orders_per_day` real (R-25).
+            # Same instance the submission boundary writes intents through, so
+            # the cap counts the rows this process is creating.
+            intents=intents,
         ),
         risk_engine=OrderRiskEngine(settings),
         preview_service=OrderPreviewService(connection),

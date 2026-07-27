@@ -136,9 +136,15 @@ development path can transmit an order. The M0 audit recorded four kernel defect
 unattended operation makes more dangerous (RISK_REGISTER R-24…R-27). After M2: **R-24 is
 MITIGATED with a live residual** — the lease is renewed on a heartbeat and re-checked in
 the database immediately before transmit, but IBKR accepts an order without knowing about
-our lease, so broker-side fencing remains unavailable. **R-25, R-26 and R-27 remain open**,
-and each must be closed before the asset family it governs is promoted. The dormant second
-submission path (R-28) is **quarantined**, not retired.
+our lease, so broker-side fencing remains unavailable. **R-26 was MITIGATED in M9** (IBKR
+`liquidHours` now supplies the equity/option session gate) and **R-25 in M10** (the daily
+opening cap now gathers its evidence, counts openings of any side since market-local
+midnight, and blocks rather than passes when the count cannot be taken). **R-27 was
+MITIGATED in M11** — both IBKR adapters now screen each qualified option's deliverable, and
+`standard_deliverable_verified` passes for the first time. All four kernel defects are now
+mitigated and **none is closed**: each carries a disclosed live residual, and per-family
+promotion still requires owner verification against a real gateway (R-04). The dormant
+second submission path (R-28) is **quarantined**, not retired.
 
 **What M2 built, and what it did not.** `chronos.supervisor` admits or refuses a decision
 and independently derives its size; both are tested and both have been through an

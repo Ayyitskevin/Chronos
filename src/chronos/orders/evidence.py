@@ -14,8 +14,11 @@ rules.
 
 from __future__ import annotations
 
-from datetime import datetime
+import logging
+from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Protocol
+from zoneinfo import ZoneInfo
 
 from chronos.broker.connection import BrokerConnectionManager
 from chronos.config.settings import Settings
@@ -30,7 +33,22 @@ from chronos.domain.models import (
 from chronos.orders.intent import WheelOrderIntent
 from chronos.orders.reconciliation_readiness import ReconciliationReadiness
 from chronos.orders.risk import RiskEvidence
+from chronos.services.liquid_hours import parse_liquid_hours
 from chronos.services.trading_hours import session_for
+
+_logger = logging.getLogger(__name__)
+
+
+class _OpeningCounter(Protocol):
+    """The single repository method the daily opening cap needs.
+
+    Structural rather than nominal so :mod:`chronos.orders` keeps not importing
+    :mod:`chronos.persistence` — the same one-directional layering the rest of
+    this module holds to, and the reason wiring the cap needed no new
+    dependency edge.
+    """
+
+    def count_opening_since(self, *, current_account_id: str, since: datetime) -> int: ...
 
 
 class BrokerRiskEvidenceProvider:
@@ -42,10 +60,15 @@ class BrokerRiskEvidenceProvider:
         connection: BrokerConnectionManager,
         settings: Settings,
         reconciliation_readiness: ReconciliationReadiness | None = None,
+        intents: _OpeningCounter | None = None,
     ) -> None:
         self._connection = connection
         self._settings = settings
         self._reconciliation_readiness = reconciliation_readiness or ReconciliationReadiness()
+        # Optional so every existing test double keeps constructing. Absent, the
+        # daily-opening count is UNKNOWN rather than zero — see `_opening_today`,
+        # where the difference decides whether the cap binds or evaporates.
+        self._intents = intents
 
     def gather(self, intent: WheelOrderIntent, *, now: datetime) -> RiskEvidence:
         readiness_before = self._reconciliation_readiness.snapshot()
@@ -59,6 +82,8 @@ class BrokerRiskEvidenceProvider:
             and readiness_before.session_id == readiness_after.session_id
             and readiness_before.generation == readiness_after.generation
         )
+
+        opening_today = self._opening_today(intent, now=now)
 
         existing_short_put_obligation = _short_put_obligation(positions)
         pending_open_put_obligation = _pending_put_obligation(open_orders)
@@ -86,7 +111,7 @@ class BrokerRiskEvidenceProvider:
         session = session_for(
             intent.product_family,
             now=now,
-            broker_confirms_open=self._broker_confirms_open(now),
+            broker_confirms_open=self._broker_confirms_open(intent, now),
         )
         return RiskEvidence(
             account=account,
@@ -102,6 +127,7 @@ class BrokerRiskEvidenceProvider:
                 readiness_after.session_id if evidence_provenance_is_current else None
             ),
             session=session,
+            opening_orders_today=opening_today,
             existing_short_put_obligation=existing_short_put_obligation,
             pending_open_put_obligation=pending_open_put_obligation,
             active_short_option_contracts=active_short_option_contracts,
@@ -118,11 +144,71 @@ class BrokerRiskEvidenceProvider:
             pending_crypto_buy_notional=pending_crypto_buy_notional,
         )
 
-    def _broker_confirms_open(self, now: datetime) -> bool | None:
-        # liquidHours-derived session evidence is threaded in via the adapter's
-        # qualified contract details; until an adapter surfaces it, equities stay
-        # AMBIGUOUS (fail-closed) and crypto is always open.
-        return None
+    def _opening_today(self, intent: WheelOrderIntent, *, now: datetime) -> int | None:
+        """Opening intents created so far in this market-local day (R-25).
+
+        Before M10 nothing set this at all, so ``RiskEvidence.opening_orders_today``
+        took its ``0`` default and ``max_opening_orders_per_day`` passed
+        unconditionally — a configured limit that had never once refused
+        anything. ADR-0010 §4 claimed it was wired; it was not.
+
+        **The day is the market's, not UTC's.** 22:00 in New York is already
+        tomorrow in UTC, so a UTC boundary would split one trading afternoon
+        across two counters and silently double the cap for anyone trading the
+        close. This is the same reasoning R-34 applied to the autonomy session
+        counters, using the timezone `chronos.orders` already validates and
+        already uses for its other session-day boundaries.
+
+        Returns ``None`` when the count cannot be taken, which the caller turns
+        into a refusal rather than a zero: a cap that reads "0 used" because the
+        repository was unavailable is a cap that has quietly stopped existing.
+        """
+
+        if self._intents is None:
+            return None
+        zone = ZoneInfo(self._settings.market_timezone)
+        local_midnight = now.astimezone(zone).replace(hour=0, minute=0, second=0, microsecond=0)
+        try:
+            return self._intents.count_opening_since(
+                current_account_id=intent.account_id,
+                since=local_midnight.astimezone(UTC),
+            )
+        except Exception:
+            _logger.exception(
+                "Could not count today's opening intents; the daily cap will refuse",
+                extra={"event": "opening_count_unavailable"},
+            )
+            return None
+
+    def _broker_confirms_open(self, intent: WheelOrderIntent, now: datetime) -> bool | None:
+        """Broker session evidence for this intent's contract, or ``None`` (M9, R-26).
+
+        From Milestone 5 until M9 this hard-returned ``None``, so every equity
+        and option instant inside regular trading hours resolved to AMBIGUOUS and
+        blocked. Fail-closed, so never a money hazard — but it also meant the
+        session gate had never been exercised and no live equity or option order
+        could pass risk at all.
+
+        The evidence now comes from ``liquidHours`` on the qualified contract, so
+        this costs **no broker round-trip**: it is contract detail IBKR already
+        returned during qualification, carried on the instrument the intent was
+        built from. Putting a gateway call here would have added latency to the
+        order path for a fact that was already in hand.
+
+        Absent or unparseable hours stay ``None``, which is still AMBIGUOUS and
+        still blocks. That is the direction every failure here degrades in, and
+        :mod:`chronos.services.liquid_hours` is where the reasoning lives.
+        """
+
+        contract = intent.contract
+        raw = getattr(contract, "liquid_hours", "")
+        zone = getattr(contract, "time_zone_id", "")
+        if not raw or not zone:
+            return None
+        hours = parse_liquid_hours(raw, time_zone_id=zone)
+        if hours is None:
+            return None
+        return hours.confirms_open(now)
 
 
 def _short_put_obligation(positions: tuple[BrokerPosition, ...]) -> Decimal:

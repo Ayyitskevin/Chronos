@@ -412,11 +412,24 @@ the store beneath it:
     database immediately before the transmit line. It is **not closed**: IBKR accepts an order
     without knowing about our lease, so broker-side fencing is unavailable and a sufficiently
     unlucky pause between the check and the wire cannot be defended from here.
-  - **R-25** (`max_opening_orders_per_day` inert — its evidence is never gathered),
-    **R-26** (broker session evidence is never supplied, so `market_open` is permanently
-    ambiguous; fail-closed today, meaning no live equity/option order can currently pass
-    risk), and **R-27** (option deliverable verification set only by the demo broker) remain
-    **OPEN**. Each must be closed before the asset family it governs is promoted.
+  - **R-25 (`max_opening_orders_per_day` inert) — MITIGATED in M10.** The cap had never
+    refused an order in its life: `gather` never gathered the count, and the repository
+    method that would have supplied it had zero callers *and* a side filter that hid every
+    stock and crypto opening. Both are fixed, the day boundary is the market's rather than
+    UTC's (a UTC midnight would have handed out a second allowance every evening), and an
+    uncountable day now reads UNKNOWN and blocks instead of passing as zero.
+  - **R-26 (broker session evidence never supplied) — MITIGATED in M9.** The gate now reads
+    IBKR's own `liquidHours` off the qualified contract, and was exercised end to end for
+    the first time. Residual: parsed against fixtures, not a live gateway.
+  - **R-27 (option deliverable verification set only by the demo broker) — MITIGATED in
+    M11.** Both IBKR adapters now screen each qualified option on five necessary,
+    conjunctive conditions, and `standard_deliverable_verified` passes for the first time.
+    Residual, and the reason it is not closed: the TWS API does not expose OCC's deliverable
+    schedule, so this infers the *absence of an adjustment* from OCC's root-naming
+    convention. It is a non-standard **detector**, not a deliverable **reader**.
+  - **All four M0 kernel defects are now mitigated, none are closed.** Each carries a
+    disclosed live residual, and per-family promotion still requires owner verification
+    against a real gateway (R-04) — mitigation is not the same as proof.
 - **The dormant second submission path is QUARANTINED (R-28), not retired.**
   `chronos/execution/brokers/ibkr_paper.py` contains a working `placeOrder` with a hardcoded
   `order.transmit = True`. Because that is an *attribute assignment* outside `chronos.orders`,
@@ -431,7 +444,8 @@ the store beneath it:
 - **Options refuse at the autonomy instrument seam.** The ADR-0017 wiring resolves
   equities and crypto; an option decision refuses rather than pricing against a guessed
   strike/expiry, because chain selection is not built. Autonomous options stay gated on
-  that work and on R-27, regardless of what a mandate lists.
+  that work, regardless of what a mandate lists. R-27 no longer blocks it (M11), but chain
+  selection does, and that is the larger of the two.
 - **The 1% market-protection collar is a judgment, not a derived number.** Wide enough to
   fill through a normal spread, narrow enough to refuse a broken print; per-instrument
   collars are a possible refinement.

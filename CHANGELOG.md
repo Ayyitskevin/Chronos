@@ -1,5 +1,182 @@
 # CHANGELOG
 
+## [Unreleased] — M11: the option deliverable, and the last kernel defect (2026-07-27)
+
+Closes RISK_REGISTER **R-27**, the last of the four defects the M0 audit found. The pattern
+held to the end: a control that was configured, documented, and structurally incapable of
+passing.
+
+### What was actually wrong
+
+`standard_deliverable_verified` gates every option order on
+`OptionContract.deliverable_verified`, and exactly one thing in the codebase set that flag —
+`DemoBroker`, by fiat. Neither IBKR adapter populated it, so the check FAILed every option
+order against a real gateway and the entire option path was unproven outside demo. A line in
+`tests/unit/test_ibkr_broker.py` asserted `deliverable_verified is False` for six milestones;
+it was pinning the defect.
+
+### Why the deliverable is worth a milestone
+
+A short put's obligation is computed as `strike × multiplier × contracts`. That is true only
+for a **standard** contract. When OCC adjusts a series — a split that is not whole-share, a
+spinoff, a merger, a special cash dividend — the deliverable becomes something else: 150
+shares, or shares plus cash, or another issuer's stock. Sell a put on an adjusted series
+while assuming 100 shares and the cash reserved is the wrong number, in the direction that
+leaves the account short at assignment.
+
+### `chronos.services.option_deliverable`
+
+Five **necessary, conjunctive** conditions: the broker named the underlying contract; the
+underlying is `STK`; the underlying symbol is the option root; the OCC root still equals the
+symbol; the multiplier is 100. Any one missing or contradicted refuses, with reasons —
+"your option was blocked" without a why is how a safety control ends up switched off.
+
+Same failure mode as R-26 one layer over: `underConId`, `underSymbol` and `underSecType`
+live on `ContractDetails`, not on the `Contract` inside it, so `instrument_from_contract`
+had never seen them.
+
+A contract that fails the screen is returned **unchanged** — still unverified, still refused,
+exactly the pre-M11 state. Failing the screen is never worse than not having run it.
+
+### What this is not
+
+**A non-standard detector, not a deliverable reader.** The TWS API does not expose OCC's
+deliverable schedule; no field says how many shares of what a contract delivers. The screen
+infers the *absence of an adjustment* from OCC's convention that any deliverable change
+produces a new root with a numeric suffix (`AAPL1`, `SPY7`). That is inference from a naming
+convention, and R-27 stays MITIGATED rather than CLOSED because of it.
+
+### One deliberate asymmetry
+
+An unparseable local symbol is **not** held against the contract: the OSI root carries no
+information the trading class does not already carry, so its absence is not evidence about
+the deliverable, and refusing every option over an unverified cosmetic field would have made
+this control inert in exactly the way R-25 and R-26 were. A local symbol that parses and
+*contradicts* the OCC root is different — that is IBKR's own fields disagreeing, and it
+refuses.
+
+### Exercised, not just supplied
+
+`tests/safety/test_option_deliverable.py` (30) drives `ContractDetails` through the screen,
+into the qualified contract, into the risk check — and asserts the outcome that had never
+happened: PASS. Each condition was then deleted in turn to confirm a distinct test fails.
+The `is False` assertion in the adapter tests is now `is True`.
+
+All four M0 kernel defects are now mitigated. **None is closed** — each keeps a disclosed
+live residual, and per-family promotion still requires owner verification against a real
+gateway.
+
+Gates: ruff clean, mypy strict clean (218 files), **2489 passed**, 1 skipped.
+
+## [Unreleased] — M10: the daily cap, which had never refused anything (2026-07-27)
+
+Closes RISK_REGISTER **R-25**. `max_opening_orders_per_day` shipped in Milestone 5, is
+surfaced in the settings page, is documented as a control, and had never once refused an
+order.
+
+### Two defects, each sufficient on its own
+
+`BrokerRiskEvidenceProvider.gather` never set `opening_orders_today`, so the field took its
+`0` default and the check evaluated `0 + 1 <= limit` on every call, forever. That alone made
+it inert. Independently, `OrderIntentRepository.count_opening_since` — the method that would
+have supplied the number, which had **zero callers** — also filtered `action == SELL`.
+Intersect the two predicates and the gap is exact: `OPEN ∧ SELL` is
+`{OPEN_SHORT_PUT, OPEN_COVERED_CALL}`, so `OPEN_LONG_STOCK` and `OPEN_LONG_CRYPTO` were
+invisible to the cap and would have stayed invisible even after it was wired.
+
+ADR-0010 §4 asserted both halves had been fixed. Neither had. That claim is corrected in
+place, at its source, rather than edited away.
+
+### The day belongs to the market, not to UTC
+
+22:00 in New York is already tomorrow in UTC. A UTC day boundary would split one trading
+afternoon across two counters and hand out a second full allowance every evening — and
+crypto trades 24/7, so "the evening" is not a corner case. The boundary is market-local
+midnight, using the timezone `chronos.orders` already validates, which is the same reasoning
+R-34 applied to the autonomy session counters.
+
+### Counted at creation, not at fill
+
+An intent that was created and then refused still consumes the allowance. The limit exists
+to bound an unthrottled decision loop; a loop that could mint a thousand rejected intents
+without moving the counter would be bounded by nothing at all.
+
+### Unknown is not zero
+
+`RiskEvidence.opening_orders_today` is now `int | None`, defaulting to `None`, and a count
+that cannot be taken — no repository, or one that just died — is **UNKNOWN → blocked**
+rather than a passing zero. A cap that reports full headroom precisely when it cannot see
+has quietly stopped existing. The old `int = 0` default was half of why this never fired, so
+it is gone; every canned test provider now has to state its count rather than inherit an
+empty trading day. Closing intents remain uncapped: throttling the orders that *reduce*
+exposure would be backwards, and hardest on the day the loop had been busiest.
+
+The provider takes the repository through a structural `_OpeningCounter` protocol, so
+wiring the cap added no import edge from `chronos.orders` into `chronos.persistence`.
+
+### Verified by breaking it
+
+`tests/safety/test_opening_cap_exercised.py` (14) drives intents through a real repository,
+into the provider that computes the boundary, into the check that refuses. Each half of the
+fix was then reverted in turn to confirm a distinct test fails — including the one defect
+that only a real `gather` call can see: every other test in the file would still pass if
+`gather` computed the count and dropped it, which is exactly what the code did for five
+milestones.
+
+Gates: ruff clean, mypy strict clean (217 files), **2459 passed**, 1 skipped.
+
+## [Unreleased] — M9: the session gate, supplied and exercised (2026-07-26)
+
+Closes RISK_REGISTER **R-26**, which had been open since Milestone 5 and was the sharpest
+of the three kernel defects blocking per-family promotion.
+
+### What was actually wrong
+
+`BrokerRiskEvidenceProvider._broker_confirms_open` hard-returned `None`. The tri-state
+session logic in `chronos.services.trading_hours` was complete and correct the whole time
+and had no supplier, so every equity and option instant **inside** regular trading hours
+resolved to `AMBIGUOUS` — which blocks. Fail-closed, so never a live-money hazard. But it
+also meant **no live equity or option order could pass the risk engine at all**, and the
+gate had never once been observed saying `OPEN`.
+
+The evidence was arriving on **every qualification** and being dropped one attribute short
+of the code that needed it: `liquidHours` and `timeZoneId` live on IBKR's `ContractDetails`,
+not on the `Contract` inside it, so `instrument_from_contract` never saw them.
+
+### `chronos.services.liquid_hours`
+
+A pure parser: both IBKR format vintages, the `;`/`,` separator difference, overnight
+windows that name the next date on the close, and `2400` as midnight. `UnderlyingContract`
+and `OptionContract` now carry the evidence, and the provider reads it off `intent.contract`
+— so the session answer costs **no broker round-trip**, because the fact was already in hand.
+
+**The load-bearing token is `CLOSED`.** That is the venue telling you a normal-looking
+Friday is not a trading day, and it is precisely the fact a weekday-and-clock calendar can
+never derive. 2026-07-03 is a Friday at 11:00 New York, passes every local check, and the
+exchange is shut.
+
+### The asymmetry that shapes the tests
+
+A spurious `True` is the only output in this chain that can open a gate which should have
+held. A spurious `False` or `None` blocks an order that could have gone — visible and safe.
+So every failure mode degrades toward blocking: unresolvable timezone, unparseable string,
+a day the schedule never covered, a contract with no hours. The malformed-input cases
+outnumber the happy path deliberately.
+
+One asymmetry inside the parser is worth naming: a **whole** unparseable string returns
+`None`, but a **single** bad segment inside an otherwise good string is skipped with a
+warning. One unreadable day should not discard a week of real evidence, and the skipped day
+degrades to unknown rather than to anything permissive.
+
+### Exercised, not just supplied
+
+`tests/safety/test_session_gate_exercised.py` drives the whole path — qualified contract →
+provider → session decision — and asserts all three outcomes including the one that had
+never happened: `OPEN`. It also pins that a contract *without* hours lands back on exactly
+the pre-M9 behaviour, so this milestone cannot have quietly turned "unknown" into "go".
+
+Gates: ruff clean, mypy strict clean (217 files), **2445 passed**, 1 skipped.
+
 ## [Unreleased] — M8d: the theses, and a claim that was not true (2026-07-26)
 
 `docs/LECTURE_134_ANALYSIS.md` §4 listed five things Chronos owed the experience it is

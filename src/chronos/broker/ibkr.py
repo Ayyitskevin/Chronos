@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable, Iterable, Sequence
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Protocol, cast
@@ -75,7 +76,10 @@ from chronos.domain.models import (
     UnderlyingContract,
 )
 from chronos.marketdata.bars import BarInterval, BarSeries
+from chronos.services.option_deliverable import assess_standard_deliverable
 from chronos.utils.logging import mask_account_id
+
+_LOGGER = logging.getLogger("chronos.broker.ibkr")
 
 _OPTION_GENERIC_TICKS = "100,101,106"
 _IB_UNSET_DOUBLE = Decimal(str(UNSET_DOUBLE))
@@ -90,6 +94,20 @@ def utc_now() -> datetime:
     """Return an aware UTC observation timestamp."""
 
     return datetime.now(tz=UTC)
+
+
+@dataclass(frozen=True, slots=True)
+class _OptionDetails:
+    """The ``ContractDetails`` fields option qualification needs.
+
+    Grouped rather than returned as a widening tuple because M11 added two of
+    them, and the next reader should be able to tell which is which.
+    """
+
+    min_tick: Decimal
+    underlying_con_id: int
+    underlying_symbol: str
+    underlying_security_type: str
 
 
 IBErrorHandler = Callable[[int, int, str, Contract | None], None]
@@ -540,11 +558,9 @@ class IBKRBroker:
         qualified = await self._qualify(requested)
         mapped: list[OptionContract] = []
         for specification, contract in zip(contracts, qualified, strict=True):
-            min_tick, underlying_con_id = await self._option_details(contract)
             option = self._option_from_ib(
                 contract,
-                min_tick=min_tick,
-                underlying_con_id=underlying_con_id,
+                details=await self._option_details(contract),
             )
             if (
                 option.symbol != specification.symbol
@@ -794,11 +810,9 @@ class IBKRBroker:
         if contract.secType == SecurityType.STOCK.value:
             mapped: Instrument = self._underlying_from_ib(contract)
         elif contract.secType == SecurityType.OPTION.value:
-            min_tick, underlying_con_id = await self._option_details(contract)
             mapped = self._option_from_ib(
                 contract,
-                min_tick=min_tick,
-                underlying_con_id=underlying_con_id,
+                details=await self._option_details(contract),
             )
         else:
             raise BrokerDataError(
@@ -820,7 +834,7 @@ class IBKRBroker:
             tradingClass=specification.trading_class,
         )
 
-    async def _option_details(self, contract: Contract) -> tuple[Decimal, int]:
+    async def _option_details(self, contract: Contract) -> _OptionDetails:
         try:
             details = await self._client.reqContractDetailsAsync(contract)
         except Exception as error:
@@ -837,9 +851,14 @@ class IBKRBroker:
             raise BrokerDataError(
                 "IBKR option contract details are missing the underlying contract identifier"
             )
-        return (
-            self._required_positive_decimal(exact[0].minTick, "option minimum tick"),
-            underlying_con_id,
+        return _OptionDetails(
+            min_tick=self._required_positive_decimal(exact[0].minTick, "option minimum tick"),
+            underlying_con_id=underlying_con_id,
+            # Absent rather than raising: these feed the deliverable screen,
+            # which refuses on absence anyway (M11, R-27). A gateway that answers
+            # without them yields an unverified contract, not an exception.
+            underlying_symbol=str(getattr(exact[0], "underSymbol", "") or ""),
+            underlying_security_type=str(getattr(exact[0], "underSecType", "") or ""),
         )
 
     @classmethod
@@ -847,8 +866,7 @@ class IBKRBroker:
         cls,
         contract: Contract,
         *,
-        min_tick: Decimal,
-        underlying_con_id: int,
+        details: _OptionDetails,
     ) -> OptionContract:
         if contract.conId <= 0 or contract.secType != SecurityType.OPTION.value:
             raise BrokerDataError("IBKR option contract is incomplete or unsupported")
@@ -858,19 +876,43 @@ class IBKRBroker:
             right = OptionRight(contract.right.upper()[0])
         except (ValueError, IndexError) as error:
             raise BrokerDataError("IBKR option contract has an invalid right") from error
-        return OptionContract(
+        multiplier = cls._required_positive_decimal(contract.multiplier, "option multiplier")
+        option = OptionContract(
             con_id=contract.conId,
             symbol=contract.symbol,
-            underlying_con_id=underlying_con_id,
+            underlying_con_id=details.underlying_con_id,
             expiration=cls._expiration(contract.lastTradeDateOrContractMonth),
             strike=cls._required_positive_decimal(contract.strike, "option strike"),
             right=right,
             exchange=contract.exchange,
             currency=contract.currency,
-            multiplier=cls._required_positive_decimal(contract.multiplier, "option multiplier"),
+            multiplier=multiplier,
             trading_class=contract.tradingClass,
             local_symbol=contract.localSymbol,
-            min_tick=min_tick,
+            min_tick=details.min_tick,
+        )
+        # M11 (R-27). An option that fails the screen is returned exactly as it
+        # was built — unverified, and refused by the risk engine, which is what
+        # happened to every option on this adapter before M11.
+        assessment = assess_standard_deliverable(
+            symbol=option.symbol,
+            trading_class=option.trading_class,
+            local_symbol=option.local_symbol,
+            multiplier=option.multiplier,
+            underlying_con_id=details.underlying_con_id,
+            underlying_symbol=details.underlying_symbol,
+            underlying_security_type=details.underlying_security_type,
+        )
+        if not assessment.standard:
+            _LOGGER.warning(
+                "Option %s refused a standard deliverable: %s",
+                option.local_symbol,
+                "; ".join(assessment.reasons),
+                extra={"event": "option_deliverable_not_standard"},
+            )
+            return option
+        return option.model_copy(
+            update={"deliverable_shares": multiplier, "deliverable_verified": True}
         )
 
     @staticmethod

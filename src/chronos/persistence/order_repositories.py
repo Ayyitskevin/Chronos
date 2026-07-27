@@ -283,7 +283,25 @@ class OrderIntentRepository:
             return tuple(_intent_row_to_record(row) for row in rows)
 
     def count_opening_since(self, *, current_account_id: str, since: datetime) -> int:
-        """Count opening (short-option SELL) intents created on/after ``since``."""
+        """Count opening intents created on/after ``since``, whatever their side.
+
+        **The side filter this used to carry was a bug (R-25).** It matched
+        ``action == SELL``, which was correct when the only way to open anything
+        was a short put — and silently wrong from the moment stocks and crypto
+        arrived, because those open with a BUY. Intersecting the two intent sets
+        makes the gap exact: ``OPEN ∧ SELL`` is ``{OPEN_SHORT_PUT,
+        OPEN_COVERED_CALL}``, so ``OPEN_LONG_STOCK`` and ``OPEN_LONG_CRYPTO``
+        were invisible to the daily cap. ``open_close_effect`` is the only
+        predicate that means "this creates exposure", and it is the only one
+        used now.
+
+        **Created, not filled.** An intent that was created and then refused
+        still counts. The limit exists to bound an unthrottled decision loop
+        (R-25), and a loop that could mint a thousand rejected intents without
+        moving the counter would be bounded by nothing at all. Counting
+        *attempts to open* is the conservative reading and the one that matches
+        what the limit is for.
+        """
 
         fingerprint = account_fingerprint(current_account_id)
         with self._sessions() as session:
@@ -293,7 +311,6 @@ class OrderIntentRepository:
                 .select_from(OrderIntentRow)
                 .where(OrderIntentRow.account_fingerprint == fingerprint)
                 .where(OrderIntentRow.open_close_effect == "OPEN")
-                .where(OrderIntentRow.action == OrderSide.SELL.value)
                 .where(OrderIntentRow.created_at >= since)
             )
             return int(count or 0)
