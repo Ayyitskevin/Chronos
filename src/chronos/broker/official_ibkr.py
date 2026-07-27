@@ -205,6 +205,28 @@ _INSTALL_GUIDANCE = (
 )
 
 
+def _with_session_evidence[T: (UnderlyingContract, OptionContract)](
+    instrument: T, details: Any
+) -> T:
+    """Carry ``liquidHours``/``timeZoneId`` from ContractDetails onto the contract.
+
+    These live on the *details* object, not on the ``Contract`` inside it, which
+    is why ``instrument_from_contract`` never saw them and why R-26 stayed open
+    for four milestones: the evidence was arriving on every qualification and
+    being dropped one attribute short of where it was needed.
+
+    Absent fields leave the contract unchanged, which reads downstream as
+    *unknown* and keeps the session gate blocking. A gateway that answers without
+    details must not look like a gateway that answered "no restrictions".
+    """
+
+    raw = str(getattr(details, "liquidHours", "") or "")
+    zone = str(getattr(details, "timeZoneId", "") or "")
+    if not raw or not zone:
+        return instrument
+    return instrument.model_copy(update={"liquid_hours": raw, "time_zone_id": zone})
+
+
 def _load_ibapi() -> tuple[Any, Any, Any, Any]:
     try:
         from ibapi.client import EClient
@@ -962,7 +984,7 @@ class OfficialIBKRBroker:
         instrument = instrument_from_contract(getattr(first, "contract", first))
         if not isinstance(instrument, UnderlyingContract):
             raise BrokerDataError(f"underlying qualification returned a non-stock for {symbol!r}")
-        return instrument
+        return _with_session_evidence(instrument, first)
 
     async def qualify_crypto(self, symbol: str) -> CryptoContract:
         """Qualify a spot-crypto contract (ADR-0010): secType CRYPTO, PAXOS venue.
@@ -1043,7 +1065,9 @@ class OfficialIBKRBroker:
                         instrument = instrument.model_copy(
                             update={"min_tick": Decimal(str(min_tick_raw))}
                         )
-                    qualified.append(instrument)
+                    # Options observe the equity holiday calendar, so this is the
+                    # family that most needs a holiday told to it (M9, R-26).
+                    qualified.append(_with_session_evidence(instrument, detail))
         return tuple(qualified)
 
     async def request_underlying_quote(self, contract: UnderlyingContract) -> MarketQuote:

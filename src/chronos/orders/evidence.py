@@ -30,6 +30,7 @@ from chronos.domain.models import (
 from chronos.orders.intent import WheelOrderIntent
 from chronos.orders.reconciliation_readiness import ReconciliationReadiness
 from chronos.orders.risk import RiskEvidence
+from chronos.services.liquid_hours import parse_liquid_hours
 from chronos.services.trading_hours import session_for
 
 
@@ -86,7 +87,7 @@ class BrokerRiskEvidenceProvider:
         session = session_for(
             intent.product_family,
             now=now,
-            broker_confirms_open=self._broker_confirms_open(now),
+            broker_confirms_open=self._broker_confirms_open(intent, now),
         )
         return RiskEvidence(
             account=account,
@@ -118,11 +119,35 @@ class BrokerRiskEvidenceProvider:
             pending_crypto_buy_notional=pending_crypto_buy_notional,
         )
 
-    def _broker_confirms_open(self, now: datetime) -> bool | None:
-        # liquidHours-derived session evidence is threaded in via the adapter's
-        # qualified contract details; until an adapter surfaces it, equities stay
-        # AMBIGUOUS (fail-closed) and crypto is always open.
-        return None
+    def _broker_confirms_open(self, intent: WheelOrderIntent, now: datetime) -> bool | None:
+        """Broker session evidence for this intent's contract, or ``None`` (M9, R-26).
+
+        From Milestone 5 until M9 this hard-returned ``None``, so every equity
+        and option instant inside regular trading hours resolved to AMBIGUOUS and
+        blocked. Fail-closed, so never a money hazard — but it also meant the
+        session gate had never been exercised and no live equity or option order
+        could pass risk at all.
+
+        The evidence now comes from ``liquidHours`` on the qualified contract, so
+        this costs **no broker round-trip**: it is contract detail IBKR already
+        returned during qualification, carried on the instrument the intent was
+        built from. Putting a gateway call here would have added latency to the
+        order path for a fact that was already in hand.
+
+        Absent or unparseable hours stay ``None``, which is still AMBIGUOUS and
+        still blocks. That is the direction every failure here degrades in, and
+        :mod:`chronos.services.liquid_hours` is where the reasoning lives.
+        """
+
+        contract = intent.contract
+        raw = getattr(contract, "liquid_hours", "")
+        zone = getattr(contract, "time_zone_id", "")
+        if not raw or not zone:
+            return None
+        hours = parse_liquid_hours(raw, time_zone_id=zone)
+        if hours is None:
+            return None
+        return hours.confirms_open(now)
 
 
 def _short_put_obligation(positions: tuple[BrokerPosition, ...]) -> Decimal:

@@ -66,6 +66,15 @@ class UnderlyingContract(ChronosModel):
     exchange: str = "SMART"
     primary_exchange: str | None = None
     currency: str = "USD"
+    #: IBKR contract-detail session evidence (M9, closes R-26). Empty when the
+    #: adapter did not supply it — the demo broker, an older qualification path,
+    #: a gateway that answered without details. Absent evidence must read as
+    #: *unknown*, which leaves the session gate AMBIGUOUS and blocking; it must
+    #: never be mistaken for "no restrictions".
+    liquid_hours: str = ""
+    #: The zone ``liquid_hours`` is expressed in, as IBKR names it (``US/Eastern``).
+    #: Useless without the hours and vice versa, so they travel together.
+    time_zone_id: str = ""
 
     @field_validator("symbol", "exchange", "currency")
     @classmethod
@@ -110,6 +119,11 @@ class OptionContract(OptionContractSpec):
     con_id: PositiveInt
     security_type: Literal[SecurityType.OPTION] = SecurityType.OPTION
     local_symbol: str
+    #: Session evidence, as on :class:`UnderlyingContract` and for the same
+    #: reason (M9, R-26). Options observe the equity holiday calendar, so the
+    #: family that most needs a holiday told to it is this one.
+    liquid_hours: str = ""
+    time_zone_id: str = ""
     min_tick: Decimal = Field(gt=0, default=Decimal("0.01"))
     deliverable_shares: Decimal | None = Field(
         default=None,

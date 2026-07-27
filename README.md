@@ -79,9 +79,10 @@ panel read-models in Python (`chronos.terminal`) served as JSON to a build-free 
 client, mounted same-origin at `/terminal/app`. **M8b** added the session cookie that lets that client authenticate (`POST /terminal/session`
 exchanges the local API token for an httpOnly cookie scoped to `/terminal`, so the browser
 never attaches it to the order plane). **M8c (ADR-0019)** added the chart: `Broker.historical_bars`, a cached and
-self-pacing bars plane, and a dependency-free candle panel. Remaining: per-family live
-promotions and the deferred terminal work — per-holding theses, mandate authoring, and
-streaming.
+self-pacing bars plane, and a dependency-free candle panel. **M9** closed R-26: IBKR `liquidHours` now supplies the equity/option session gate, which
+had been permanently ambiguous — and therefore permanently blocking — since M5. Remaining:
+per-family live promotions (R-25, R-27 still open) and the deferred terminal work —
+mandate authoring and streaming.
 
 No order is placed by any test, CI run, or development path. The one and only `transmit=True`
 in the order pipeline lives at the submission boundary and is reachable only after the full

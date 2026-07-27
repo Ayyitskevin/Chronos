@@ -1,5 +1,57 @@
 # CHANGELOG
 
+## [Unreleased] — M9: the session gate, supplied and exercised (2026-07-26)
+
+Closes RISK_REGISTER **R-26**, which had been open since Milestone 5 and was the sharpest
+of the three kernel defects blocking per-family promotion.
+
+### What was actually wrong
+
+`BrokerRiskEvidenceProvider._broker_confirms_open` hard-returned `None`. The tri-state
+session logic in `chronos.services.trading_hours` was complete and correct the whole time
+and had no supplier, so every equity and option instant **inside** regular trading hours
+resolved to `AMBIGUOUS` — which blocks. Fail-closed, so never a live-money hazard. But it
+also meant **no live equity or option order could pass the risk engine at all**, and the
+gate had never once been observed saying `OPEN`.
+
+The evidence was arriving on **every qualification** and being dropped one attribute short
+of the code that needed it: `liquidHours` and `timeZoneId` live on IBKR's `ContractDetails`,
+not on the `Contract` inside it, so `instrument_from_contract` never saw them.
+
+### `chronos.services.liquid_hours`
+
+A pure parser: both IBKR format vintages, the `;`/`,` separator difference, overnight
+windows that name the next date on the close, and `2400` as midnight. `UnderlyingContract`
+and `OptionContract` now carry the evidence, and the provider reads it off `intent.contract`
+— so the session answer costs **no broker round-trip**, because the fact was already in hand.
+
+**The load-bearing token is `CLOSED`.** That is the venue telling you a normal-looking
+Friday is not a trading day, and it is precisely the fact a weekday-and-clock calendar can
+never derive. 2026-07-03 is a Friday at 11:00 New York, passes every local check, and the
+exchange is shut.
+
+### The asymmetry that shapes the tests
+
+A spurious `True` is the only output in this chain that can open a gate which should have
+held. A spurious `False` or `None` blocks an order that could have gone — visible and safe.
+So every failure mode degrades toward blocking: unresolvable timezone, unparseable string,
+a day the schedule never covered, a contract with no hours. The malformed-input cases
+outnumber the happy path deliberately.
+
+One asymmetry inside the parser is worth naming: a **whole** unparseable string returns
+`None`, but a **single** bad segment inside an otherwise good string is skipped with a
+warning. One unreadable day should not discard a week of real evidence, and the skipped day
+degrades to unknown rather than to anything permissive.
+
+### Exercised, not just supplied
+
+`tests/safety/test_session_gate_exercised.py` drives the whole path — qualified contract →
+provider → session decision — and asserts all three outcomes including the one that had
+never happened: `OPEN`. It also pins that a contract *without* hours lands back on exactly
+the pre-M9 behaviour, so this milestone cannot have quietly turned "unknown" into "go".
+
+Gates: ruff clean, mypy strict clean (217 files), **2445 passed**, 1 skipped.
+
 ## [Unreleased] — M8d: the theses, and a claim that was not true (2026-07-26)
 
 `docs/LECTURE_134_ANALYSIS.md` §4 listed five things Chronos owed the experience it is
