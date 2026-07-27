@@ -86,8 +86,16 @@ gathered *and* the repository method that would have supplied it counted SELLs o
 every stock and crypto opening. The cap now counts openings of any side since **market-local**
 midnight (a UTC boundary would hand out a second allowance every evening), counts them at
 creation rather than at fill, and treats an uncountable day as UNKNOWN → blocked rather than
-as a passing zero. Remaining: per-family live promotion (R-27 still open) and the deferred
-terminal work — mandate authoring and streaming.
+as a passing zero. **M11** closed the last of the four M0 kernel defects, R-27: option
+deliverable verification had exactly one setter — the demo broker, by fiat — so
+`standard_deliverable_verified` FAILed every option order against a real gateway and the
+option path was unproven outside demo. Both IBKR adapters now screen each qualified option
+on five necessary, conjunctive conditions, the strongest being that the OCC root still
+equals the symbol (a suffixed root is how OCC marks an adjusted deliverable). All four
+kernel defects are now mitigated and **none is closed** — each keeps a disclosed residual,
+and per-family live promotion still needs owner verification against a real gateway.
+Remaining: the deferred terminal work — mandate authoring and streaming — and option chain
+selection, which is what actually gates autonomous options.
 
 No order is placed by any test, CI run, or development path. The one and only `transmit=True`
 in the order pipeline lives at the submission boundary and is reachable only after the full

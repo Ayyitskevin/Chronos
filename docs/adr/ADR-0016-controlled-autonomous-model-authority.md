@@ -393,8 +393,10 @@ graduated per-family promotions. Every milestone stops for owner approval.
      authorises. R-25 mattered most here: this document's whole safety argument
      leans on deterministic caps bounding what the model can do, and the one cap
      that bounds *decision volume* had never refused anything. **R-27** (option
-     deliverable verification set only by the demo broker) remains **OPEN** and
-     must be closed before the option family is promoted.
+     deliverable verification set only by the demo broker) was **MITIGATED in
+     M11**. All four kernel defects are now mitigated and **none is closed** —
+     each keeps a disclosed live residual, and this ADR's safety argument should
+     be read against the residuals rather than against the status word.
 3. **The dormant second submission path is QUARANTINED (R-28), not retired.**
    `chronos/execution/brokers/ibkr_paper.py` contains a functioning `placeOrder`
    with a hardcoded `order.transmit = True`. Because that is an *attribute

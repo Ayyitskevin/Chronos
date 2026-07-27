@@ -72,6 +72,7 @@ from chronos.domain.models import (
 )
 from chronos.marketdata.bars import Bar, BarInterval, BarSeries, BarStatus
 from chronos.orders.tracker import broker_status_to_lifecycle
+from chronos.services.option_deliverable import assess_standard_deliverable
 
 _logger = logging.getLogger("chronos.broker.official_ibkr")
 
@@ -225,6 +226,47 @@ def _with_session_evidence[T: (UnderlyingContract, OptionContract)](
     if not raw or not zone:
         return instrument
     return instrument.model_copy(update={"liquid_hours": raw, "time_zone_id": zone})
+
+
+def _with_deliverable_evidence(instrument: OptionContract, details: Any) -> OptionContract:
+    """Screen the option's deliverable and, if it passes, record the evidence (M11, R-27).
+
+    Same shape as the session evidence above and for the same reason: the facts
+    are on ``ContractDetails`` (``underConId``, ``underSymbol``, ``underSecType``),
+    not on the ``Contract`` inside it, so nothing downstream could ever have seen
+    them.
+
+    A contract that does not pass is returned **unchanged** — still
+    ``deliverable_verified=False``, still refused by the risk engine, exactly as
+    every option was before M11. Failing the screen must never be worse than not
+    having run it.
+    """
+
+    under_con_id = int(getattr(details, "underConId", 0) or 0)
+    assessment = assess_standard_deliverable(
+        symbol=instrument.symbol,
+        trading_class=instrument.trading_class,
+        local_symbol=instrument.local_symbol,
+        multiplier=instrument.multiplier,
+        underlying_con_id=under_con_id or None,
+        underlying_symbol=str(getattr(details, "underSymbol", "") or ""),
+        underlying_security_type=str(getattr(details, "underSecType", "") or ""),
+    )
+    if not assessment.standard:
+        _logger.warning(
+            "Option %s refused a standard deliverable: %s",
+            instrument.local_symbol,
+            "; ".join(assessment.reasons),
+            extra={"event": "option_deliverable_not_standard"},
+        )
+        return instrument
+    return instrument.model_copy(
+        update={
+            "underlying_con_id": under_con_id,
+            "deliverable_shares": instrument.multiplier,
+            "deliverable_verified": True,
+        }
+    )
 
 
 def _load_ibapi() -> tuple[Any, Any, Any, Any]:
@@ -1067,7 +1109,8 @@ class OfficialIBKRBroker:
                         )
                     # Options observe the equity holiday calendar, so this is the
                     # family that most needs a holiday told to it (M9, R-26).
-                    qualified.append(_with_session_evidence(instrument, detail))
+                    instrument = _with_session_evidence(instrument, detail)
+                    qualified.append(_with_deliverable_evidence(instrument, detail))
         return tuple(qualified)
 
     async def request_underlying_quote(self, contract: UnderlyingContract) -> MarketQuote:

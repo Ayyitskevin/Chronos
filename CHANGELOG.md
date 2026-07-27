@@ -1,5 +1,73 @@
 # CHANGELOG
 
+## [Unreleased] — M11: the option deliverable, and the last kernel defect (2026-07-27)
+
+Closes RISK_REGISTER **R-27**, the last of the four defects the M0 audit found. The pattern
+held to the end: a control that was configured, documented, and structurally incapable of
+passing.
+
+### What was actually wrong
+
+`standard_deliverable_verified` gates every option order on
+`OptionContract.deliverable_verified`, and exactly one thing in the codebase set that flag —
+`DemoBroker`, by fiat. Neither IBKR adapter populated it, so the check FAILed every option
+order against a real gateway and the entire option path was unproven outside demo. A line in
+`tests/unit/test_ibkr_broker.py` asserted `deliverable_verified is False` for six milestones;
+it was pinning the defect.
+
+### Why the deliverable is worth a milestone
+
+A short put's obligation is computed as `strike × multiplier × contracts`. That is true only
+for a **standard** contract. When OCC adjusts a series — a split that is not whole-share, a
+spinoff, a merger, a special cash dividend — the deliverable becomes something else: 150
+shares, or shares plus cash, or another issuer's stock. Sell a put on an adjusted series
+while assuming 100 shares and the cash reserved is the wrong number, in the direction that
+leaves the account short at assignment.
+
+### `chronos.services.option_deliverable`
+
+Five **necessary, conjunctive** conditions: the broker named the underlying contract; the
+underlying is `STK`; the underlying symbol is the option root; the OCC root still equals the
+symbol; the multiplier is 100. Any one missing or contradicted refuses, with reasons —
+"your option was blocked" without a why is how a safety control ends up switched off.
+
+Same failure mode as R-26 one layer over: `underConId`, `underSymbol` and `underSecType`
+live on `ContractDetails`, not on the `Contract` inside it, so `instrument_from_contract`
+had never seen them.
+
+A contract that fails the screen is returned **unchanged** — still unverified, still refused,
+exactly the pre-M11 state. Failing the screen is never worse than not having run it.
+
+### What this is not
+
+**A non-standard detector, not a deliverable reader.** The TWS API does not expose OCC's
+deliverable schedule; no field says how many shares of what a contract delivers. The screen
+infers the *absence of an adjustment* from OCC's convention that any deliverable change
+produces a new root with a numeric suffix (`AAPL1`, `SPY7`). That is inference from a naming
+convention, and R-27 stays MITIGATED rather than CLOSED because of it.
+
+### One deliberate asymmetry
+
+An unparseable local symbol is **not** held against the contract: the OSI root carries no
+information the trading class does not already carry, so its absence is not evidence about
+the deliverable, and refusing every option over an unverified cosmetic field would have made
+this control inert in exactly the way R-25 and R-26 were. A local symbol that parses and
+*contradicts* the OCC root is different — that is IBKR's own fields disagreeing, and it
+refuses.
+
+### Exercised, not just supplied
+
+`tests/safety/test_option_deliverable.py` (30) drives `ContractDetails` through the screen,
+into the qualified contract, into the risk check — and asserts the outcome that had never
+happened: PASS. Each condition was then deleted in turn to confirm a distinct test fails.
+The `is False` assertion in the adapter tests is now `is True`.
+
+All four M0 kernel defects are now mitigated. **None is closed** — each keeps a disclosed
+live residual, and per-family promotion still requires owner verification against a real
+gateway.
+
+Gates: ruff clean, mypy strict clean (218 files), **2489 passed**, 1 skipped.
+
 ## [Unreleased] — M10: the daily cap, which had never refused anything (2026-07-27)
 
 Closes RISK_REGISTER **R-25**. `max_opening_orders_per_day` shipped in Milestone 5, is
