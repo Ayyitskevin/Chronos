@@ -83,6 +83,9 @@ def _evidence(**overrides: object) -> RiskEvidence:
         "reconciliation_generation": 0,
         "reconciliation_session_id": "crypto-risk-test-session",
         "session": session_for(ProductFamily.CRYPTO, now=_NOW),
+        # Explicit: unknown is a refusal since M10, so the default cannot carry
+        # these cases (R-25).
+        "opening_orders_today": 0,
     }
     base.update(overrides)
     return RiskEvidence(**base)  # type: ignore[arg-type]

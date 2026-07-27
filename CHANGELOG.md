@@ -1,5 +1,62 @@
 # CHANGELOG
 
+## [Unreleased] — M10: the daily cap, which had never refused anything (2026-07-27)
+
+Closes RISK_REGISTER **R-25**. `max_opening_orders_per_day` shipped in Milestone 5, is
+surfaced in the settings page, is documented as a control, and had never once refused an
+order.
+
+### Two defects, each sufficient on its own
+
+`BrokerRiskEvidenceProvider.gather` never set `opening_orders_today`, so the field took its
+`0` default and the check evaluated `0 + 1 <= limit` on every call, forever. That alone made
+it inert. Independently, `OrderIntentRepository.count_opening_since` — the method that would
+have supplied the number, which had **zero callers** — also filtered `action == SELL`.
+Intersect the two predicates and the gap is exact: `OPEN ∧ SELL` is
+`{OPEN_SHORT_PUT, OPEN_COVERED_CALL}`, so `OPEN_LONG_STOCK` and `OPEN_LONG_CRYPTO` were
+invisible to the cap and would have stayed invisible even after it was wired.
+
+ADR-0010 §4 asserted both halves had been fixed. Neither had. That claim is corrected in
+place, at its source, rather than edited away.
+
+### The day belongs to the market, not to UTC
+
+22:00 in New York is already tomorrow in UTC. A UTC day boundary would split one trading
+afternoon across two counters and hand out a second full allowance every evening — and
+crypto trades 24/7, so "the evening" is not a corner case. The boundary is market-local
+midnight, using the timezone `chronos.orders` already validates, which is the same reasoning
+R-34 applied to the autonomy session counters.
+
+### Counted at creation, not at fill
+
+An intent that was created and then refused still consumes the allowance. The limit exists
+to bound an unthrottled decision loop; a loop that could mint a thousand rejected intents
+without moving the counter would be bounded by nothing at all.
+
+### Unknown is not zero
+
+`RiskEvidence.opening_orders_today` is now `int | None`, defaulting to `None`, and a count
+that cannot be taken — no repository, or one that just died — is **UNKNOWN → blocked**
+rather than a passing zero. A cap that reports full headroom precisely when it cannot see
+has quietly stopped existing. The old `int = 0` default was half of why this never fired, so
+it is gone; every canned test provider now has to state its count rather than inherit an
+empty trading day. Closing intents remain uncapped: throttling the orders that *reduce*
+exposure would be backwards, and hardest on the day the loop had been busiest.
+
+The provider takes the repository through a structural `_OpeningCounter` protocol, so
+wiring the cap added no import edge from `chronos.orders` into `chronos.persistence`.
+
+### Verified by breaking it
+
+`tests/safety/test_opening_cap_exercised.py` (14) drives intents through a real repository,
+into the provider that computes the boundary, into the check that refuses. Each half of the
+fix was then reverted in turn to confirm a distinct test fails — including the one defect
+that only a real `gather` call can see: every other test in the file would still pass if
+`gather` computed the count and dropped it, which is exactly what the code did for five
+milestones.
+
+Gates: ruff clean, mypy strict clean (217 files), **2459 passed**, 1 skipped.
+
 ## [Unreleased] — M9: the session gate, supplied and exercised (2026-07-26)
 
 Closes RISK_REGISTER **R-26**, which had been open since Milestone 5 and was the sharpest

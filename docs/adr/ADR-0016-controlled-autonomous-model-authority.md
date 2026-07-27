@@ -387,11 +387,14 @@ graduated per-family promotions. Every milestone stops for owner approval.
      while RISK_REGISTER recorded MITIGATED with a live residual; the M2 review
      flagged the disagreement and this is the corrected, weaker claim. A risk
      with a live residual is not closed.
-   - **R-25** (`max_opening_orders_per_day` inert — its evidence is never
-     gathered), **R-26** (`market_open` permanently ambiguous because broker
-     session evidence is never supplied; fail-closed today), and **R-27** (option
-     deliverable verification set only by the demo broker) remain **OPEN**. Each
-     must be closed before the asset family it governs is promoted.
+   - **R-25** (`max_opening_orders_per_day` inert) and **R-26** (`market_open`
+     permanently ambiguous) were **MITIGATED in M10 and M9** respectively — after
+     this ADR was written, and both were prerequisites for the autonomy it
+     authorises. R-25 mattered most here: this document's whole safety argument
+     leans on deterministic caps bounding what the model can do, and the one cap
+     that bounds *decision volume* had never refused anything. **R-27** (option
+     deliverable verification set only by the demo broker) remains **OPEN** and
+     must be closed before the option family is promoted.
 3. **The dormant second submission path is QUARANTINED (R-28), not retired.**
    `chronos/execution/brokers/ibkr_paper.py` contains a functioning `placeOrder`
    with a hardcoded `order.transmit = True`. Because that is an *attribute

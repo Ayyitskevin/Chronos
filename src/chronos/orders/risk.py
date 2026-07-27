@@ -101,7 +101,10 @@ class RiskEvidence(ChronosModel):
     current_symbol_allocation: Decimal = Field(default=Decimal("0"), ge=0)
     current_total_wheel_allocation: Decimal = Field(default=Decimal("0"), ge=0)
     active_short_option_contracts: int = Field(default=0, ge=0)
-    opening_orders_today: int = Field(default=0, ge=0)
+    # None ⇒ the count could not be taken ⇒ UNKNOWN ⇒ opening blocked (R-25).
+    # Deliberately NOT `int = 0`: a cap whose evidence defaults to "none used"
+    # is a cap that reports full headroom precisely when it cannot see.
+    opening_orders_today: int | None = Field(default=None, ge=0)
     settled_long_shares: Decimal = Field(default=Decimal("0"), ge=0)
     shares_covering_short_calls: Decimal = Field(default=Decimal("0"), ge=0)
     shares_reserved_for_pending_calls: Decimal = Field(default=Decimal("0"), ge=0)
@@ -253,14 +256,21 @@ class OrderRiskEngine:
 
     def _check_opening_count(self, evidence: RiskEvidence) -> OrderRiskCheck:
         limit = self._settings.max_opening_orders_per_day
-        if evidence.opening_orders_today + 1 <= limit:
-            return _passed(
+        used = evidence.opening_orders_today
+        if used is None:
+            # "We could not ask" is not "no". Until M10 this check could not
+            # reach this branch at all, because the evidence was never gathered
+            # and the field's 0 default made every call read as full headroom —
+            # the cap had never refused anything in its life (R-25).
+            return _unknown(
                 "max_opening_orders_per_day",
-                f"{evidence.opening_orders_today + 1} <= {limit}",
+                f"today's opening count is unavailable, so the {limit} daily cap cannot be applied",
             )
+        if used + 1 <= limit:
+            return _passed("max_opening_orders_per_day", f"{used + 1} <= {limit}")
         return _failed(
             "max_opening_orders_per_day",
-            f"{evidence.opening_orders_today + 1} would exceed the {limit} daily cap",
+            f"{used + 1} would exceed the {limit} daily cap",
         )
 
     def _option_checks(

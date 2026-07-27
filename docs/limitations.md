@@ -412,11 +412,17 @@ the store beneath it:
     database immediately before the transmit line. It is **not closed**: IBKR accepts an order
     without knowing about our lease, so broker-side fencing is unavailable and a sufficiently
     unlucky pause between the check and the wire cannot be defended from here.
-  - **R-25** (`max_opening_orders_per_day` inert — its evidence is never gathered),
-    **R-26** (broker session evidence is never supplied, so `market_open` is permanently
-    ambiguous; fail-closed today, meaning no live equity/option order can currently pass
-    risk), and **R-27** (option deliverable verification set only by the demo broker) remain
-    **OPEN**. Each must be closed before the asset family it governs is promoted.
+  - **R-25 (`max_opening_orders_per_day` inert) — MITIGATED in M10.** The cap had never
+    refused an order in its life: `gather` never gathered the count, and the repository
+    method that would have supplied it had zero callers *and* a side filter that hid every
+    stock and crypto opening. Both are fixed, the day boundary is the market's rather than
+    UTC's (a UTC midnight would have handed out a second allowance every evening), and an
+    uncountable day now reads UNKNOWN and blocks instead of passing as zero.
+  - **R-26 (broker session evidence never supplied) — MITIGATED in M9.** The gate now reads
+    IBKR's own `liquidHours` off the qualified contract, and was exercised end to end for
+    the first time. Residual: parsed against fixtures, not a live gateway.
+  - **R-27** (option deliverable verification set only by the demo broker) remains **OPEN**,
+    and must be closed before the option family is promoted.
 - **The dormant second submission path is QUARANTINED (R-28), not retired.**
   `chronos/execution/brokers/ibkr_paper.py` contains a working `placeOrder` with a hardcoded
   `order.transmit = True`. Because that is an *attribute assignment* outside `chronos.orders`,

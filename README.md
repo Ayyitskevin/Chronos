@@ -80,9 +80,14 @@ client, mounted same-origin at `/terminal/app`. **M8b** added the session cookie
 exchanges the local API token for an httpOnly cookie scoped to `/terminal`, so the browser
 never attaches it to the order plane). **M8c (ADR-0019)** added the chart: `Broker.historical_bars`, a cached and
 self-pacing bars plane, and a dependency-free candle panel. **M9** closed R-26: IBKR `liquidHours` now supplies the equity/option session gate, which
-had been permanently ambiguous — and therefore permanently blocking — since M5. Remaining:
-per-family live promotions (R-25, R-27 still open) and the deferred terminal work —
-mandate authoring and streaming.
+had been permanently ambiguous — and therefore permanently blocking — since M5. **M10** closed
+R-25: `max_opening_orders_per_day` had never refused an order, because its evidence was never
+gathered *and* the repository method that would have supplied it counted SELLs only, hiding
+every stock and crypto opening. The cap now counts openings of any side since **market-local**
+midnight (a UTC boundary would hand out a second allowance every evening), counts them at
+creation rather than at fill, and treats an uncountable day as UNKNOWN → blocked rather than
+as a passing zero. Remaining: per-family live promotion (R-27 still open) and the deferred
+terminal work — mandate authoring and streaming.
 
 No order is placed by any test, CI run, or development path. The one and only `transmit=True`
 in the order pipeline lives at the submission boundary and is reachable only after the full
