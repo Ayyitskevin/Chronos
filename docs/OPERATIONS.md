@@ -149,7 +149,44 @@ against broker open orders (`SqliteLedger.working_intent_ids`).
 | Backtest throwaway halt files | `data/backtest_halt_*.json` (safe to delete when idle) |
 | Wheel dashboard rotating log | `logs/chronos.log` (`LOG_FILE` setting) |
 | Wheel dashboard ledger | `data/chronos.db` (`DATABASE_URL` setting) |
+| Autonomous option receipts | account-scoped `autonomy.option-selections` hash-chain stream in the Wheel database |
+| Autonomous owner-alert file (when configured) | `AUTONOMY_ALERT_FILE` (default `data/owner_alerts.jsonl`) |
 | Platform notifications | logger `chronos.notifications` (console/log only; no external channel is implemented) |
+
+## Autonomous option receipt inspection (ADR-0020)
+
+This section belongs to the live-wheel/autonomy backend rather than the
+deterministic strategy platform described above. Inspect option-selection
+history through the authenticated terminal or bounded
+`GET /terminal/option-selections`; v1 intentionally ships no option-replay CLI.
+The view reports the full account-scoped hash-chain result separately from
+whole-stream semantic validity (every envelope replays and each decision ID is
+unique), plus verification for each returned canonical receipt. A truncated
+page never turns an earlier chain break or duplicate decision into a
+valid-looking tail. Invalid receipt text above the inspection byte bound is not
+echoed back; neither are oversized, malformed, deeply nested, noncanonical, or
+invalid-storage sequence/time/kind/payload/hash fields. The entry retains typed
+invalidity detail instead. Full-history semantic inspection streams one
+SQL-bounded row at a time while retaining at most the newest 25 receipts and
+decision IDs. Exact duplicate detection retains one bounded decision ID per
+historical receipt, so its memory grows with stream length even though receipt
+bodies and driver batches do not.
+
+Treat any invalid chain/receipt, duplicate decision receipt, status/digest/time
+mismatch, or `option_selection.system_failure` alert as a stop condition. Do not
+edit the SQLite rows or regenerate a digest. Preserve the database, engage the
+kill switch if live authority exists, and investigate the first invalid record
+and its source evidence. Ordinary candidate-economics refusals remain visible as
+typed `NO_TRADE` receipts but do not raise a system alert. Missing, conflicting,
+unknown, identity-invalid, stale/future, and source-quality evidence does raise
+that deduplicated alert; numeric misses for DTE, moneyness, delta range, spread,
+volume, or open-interest floors do not.
+
+`ENABLE_AUTONOMY_OPTION_SELECTION` defaults false. It enables evaluation only;
+it does not create live authority. A live resolver-promotion artifact is a
+separate owner action for exactly one CANARY/LIVE autonomy mode, and Chronos has
+no command that creates it. No artifact is shipped by ADR-0020. Real IBKR will
+continue to record `NO_TRADE` until an authoritative deliverable source exists.
 
 ## Halt / rearm discipline
 

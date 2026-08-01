@@ -13,6 +13,10 @@
 >    CANARY_LIVE_AUTONOMOUS → CAPPED_LIVE_AUTONOMOUS) and its own frozen criteria, in
 >    ADR-0016 §7. Use that ladder for anything autonomous; use this checklist for the
 >    deterministic platform.
+> 3. ADR-0020 adds a default-off deterministic option-selection gate for opening
+>    equity-option cash-secured puts and covered calls. It does not mark that
+>    capability live-ready: real IBKR remains `NO_TRADE` without authoritative
+>    deliverable evidence, and no live resolver-promotion artifact has been created.
 >
 > The reviewed-release doctrine this document establishes — criteria frozen before results,
 > single-step promotion, independent adversarial review before any live rung — is retained
@@ -37,6 +41,25 @@ strategy currently has a demonstrated edge** (docs/STRATEGY_SELECTION.md). Gates
 paper) therefore have no eligible candidate to carry through them yet; the machinery to do so
 exists and is tested, but exercising it today would be theater, not evidence. Gates 4 and 5 (live)
 remain refused in code regardless.
+
+## ADR-0020 autonomous-option overlay — not live eligible
+
+- [DONE IN CODE] Bounded read-only acquisition, deterministic selection, receipt-bound
+  limit derivation, compiler reproduction, durable account-scoped receipt chain, semantic
+  replay, owner alerts, and authenticated GET-only receipt inspection.
+- [DONE IN CODE] `ENABLE_AUTONOMY_OPTION_SELECTION=false` by default. Runtime can only load
+  and validate a resolver promotion; it cannot create or modify one.
+- [NOT DONE] Authoritative real-broker deliverable source. Both shipped IBKR adapters return
+  explicit non-authoritative evidence, so every real IBKR candidate is `NO_TRADE`.
+- [OWNER] Run the read-only gateway smoke, verify option-chain completion provenance,
+  contract exact-set behavior, quotes/Greeks/volume/open interest permissions, market-rule
+  schedules, and `liquidHours` against the actual gateway. A passing smoke is evidence only,
+  not promotion.
+- [OWNER / HUMAN SIGN-OFF] Only after the missing authoritative source is integrated and the
+  complete offline/gateway evidence is reviewed may the owner author a fresh resolver
+  promotion. It must name exactly one live autonomy mode and match the canonical mandate,
+  policy, account fingerprint, effective window, implementation digest, and version set.
+  This repository creates and ships no such artifact.
 
 ## Gate 0 — Foundation (prerequisite to everything)
 

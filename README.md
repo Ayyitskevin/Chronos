@@ -8,7 +8,9 @@ owner sets at policy time. See
 [ADR-0016](docs/adr/ADR-0016-controlled-autonomous-model-authority.md) (D-16, which
 superseded ADR-0004 §5 / D-11) and
 [ADR-0017](docs/adr/ADR-0017-owner-directed-maximal-autonomy.md) (D-17, the
-owner-directed maximal-autonomy supersession of parts of ADR-0016).
+owner-directed maximal-autonomy supersession of parts of ADR-0016), and
+[ADR-0020](docs/adr/ADR-0020-deterministic-option-selection-and-evidence-receipts.md)
+(D-20, deterministic option selection and receipts).
 
 **Where that stands today (be precise about this):** the whole autonomy stack is built
 and wired — contracts (M1), gateway/admission/sizing (M2), durable state (M3), the
@@ -94,8 +96,15 @@ on five necessary, conjunctive conditions, the strongest being that the OCC root
 equals the symbol (a suffixed root is how OCC marks an adjusted deliverable). All four
 kernel defects are now mitigated and **none is closed** — each keeps a disclosed residual,
 and per-family live promotion still needs owner verification against a real gateway.
-Remaining: the deferred terminal work — mandate authoring and streaming — and option chain
-selection, which is what actually gates autonomous options.
+**ADR-0020** now implements the first autonomous option-selection scope:
+`OPEN` equity-option cash-secured puts and covered calls resolve through bounded read-only
+chain/contract/quote/market-rule/session/deliverable evidence into a deterministic,
+hash-chained `SELECTED` or typed `NO_TRADE` receipt. The selector derives a receipt-bound
+tick-conforming limit and the existing compiler must reproduce it exactly. The feature is
+off by default; no live resolver-promotion artifact is shipped. Both real IBKR adapters
+still return non-authoritative deliverable facts, so real IBKR selection remains
+`NO_TRADE` until an authoritative schedule source exists. Broader option shapes and the
+deferred terminal mandate-authoring/streaming work remain.
 
 No order is placed by any test, CI run, or development path. The one and only `transmit=True`
 in the order pipeline lives at the submission boundary and is reachable only after the full
@@ -127,6 +136,13 @@ Bullets marked **[contract]** are structural guarantees of the contract types.
 - **[enforced] The model cannot reach a broker.** `chronos.autonomy` imports nothing from the
   order, broker, execution, risk, api, or persistence planes — asserted by an AST walk and a
   subprocess import probe.
+- **[enforced] Opening option identity is selected, never model-authored.** For ADR-0020's
+  cash-secured-put and covered-call scope, the model cannot name a right, strike, expiry,
+  route, trading class, or `conId`; strategy deterministically derives the request's right.
+  Bounded exact-set reads produce one canonical receipt, which is durably committed and
+  semantically replayed before handoff. Missing volume/open interest, completion provenance,
+  authoritative deliverables, or any other required fact is typed `NO_TRADE`; system-data
+  failures alert the owner.
 - **[contract] A decision cannot express an order.** `AITradeDecision` carries no account,
   broker, routing, or transmit field anywhere in its nested tree, refuses smuggled fields,
   cannot name a broker order id, and cannot name the mandate it is judged against.
@@ -222,6 +238,13 @@ approval-rehearsal path. Demo can never submit.
 `IB_ACCOUNT_ID`/`IB_ACCOUNT_ALLOWLIST`); `ALLOW_ORDER_TRANSMIT=true` enables the paper submission
 boundary. Paper trades options and stocks — **not crypto** (IBKR paper has no crypto).
 
+Autonomous option **evaluation** is a separate default-off capability:
+`ENABLE_AUTONOMY_OPTION_SELECTION=true`. That flag creates no live authority. CANARY/LIVE
+also require an owner-authored, exact-mode resolver promotion at
+`AUTONOMY_OPTION_RESOLVER_PROMOTION_FILE`, and Chronos ships no creator for that artifact.
+None has been created by this release. Real IBKR evaluation remains `NO_TRADE` until an
+authoritative option-deliverable source is integrated.
+
 **Live.** Live transmission requires the strict conjunction documented in
 [docs/live_trading_runbook.md](docs/live_trading_runbook.md) (official adapter + LIVE + a
 U-pattern account on a non-empty allowlist + the transmit switch + arming/typed-confirmation
@@ -256,6 +279,7 @@ marked IBKR smoke test is skipped by default and remains strictly read-only.
 
 - [ADR-0016 — Controlled Autonomous Model Authority](docs/adr/ADR-0016-controlled-autonomous-model-authority.md)
   (the authority model, model isolation, the mandate, the promotion ladder)
+- [ADR-0020 — Deterministic Option Selection and Evidence Receipts](docs/adr/ADR-0020-deterministic-option-selection-and-evidence-receipts.md)
 - [Live Wheel game plan & status](docs/LIVE_WHEEL_GAME_PLAN.md)
 - [Live trading runbook](docs/live_trading_runbook.md) (gates, arming, kill switch, per-family notes)
 - [Limitations](docs/limitations.md)

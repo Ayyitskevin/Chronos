@@ -1,5 +1,45 @@
 # CHANGELOG
 
+## [Unreleased] — Deterministic Option-Chain Selection + Evidence Receipts v1 (2026-08-01)
+
+ADR-0020 closes the categorical option-selection seam for one exact autonomous
+scope: `OPEN` equity-option cash-secured puts and covered calls. The model still
+cannot name an option right or any broker contract identity. Strategy derives
+`PUT`/`CALL`; owner policy supplies DTE, delta, liquidity, routing, session,
+multiplier, order-form, and scoring constraints.
+
+The app plane now acquires a bounded exact set of underlying, explicit
+chain-completion, qualification, quote/Greeks/liquidity, market-rule, session, and
+authoritative-deliverable facts. The pure resolver records every considered
+candidate and typed refusal, uses a pinned Decimal context and documented total
+order, and derives the receipt-bound tick-conforming limit. The existing
+compiler independently reproduces the contract and price; a mismatch stops
+before the order plane. Missing volume/open interest, incomplete or truncated
+completion, partial exact-set responses, stale/conflicting identity or time,
+and non-authoritative deliverables all fail closed.
+
+Each `SELECTED` or `NO_TRADE` result is canonical and replayable. Before any
+downstream use, the receipt is bounded, appended to the account-scoped
+`autonomy.option-selections` hash chain, committed, and read back through a
+full cryptographic plus semantic-envelope verification. The same receipt/stream
+check runs again immediately before handoff. The authenticated bounded
+`GET /terminal/option-selections` view exposes chain and semantic status without
+an action surface; local replay is the receipt model's `verifies()` method, not
+a new CLI. System/evidence refusals raise a deduplicated owner alert.
+
+Activation remains default-off. Every live autonomy mode requires a separate
+owner-authored resolver artifact for exactly that mode, bound to the canonical
+mandate, policy, account, versions, effective window, and material-source digest
+at initial, post-acquisition, and pre-handoff checks. Runtime code has no
+artifact writer, and this release creates none.
+
+**Residual:** both real IBKR adapters return explicit non-authoritative
+deliverable evidence because TWS exposes no OCC deliverable schedule. Real IBKR
+therefore remains `NO_TRADE` until an authoritative source is integrated and
+owner gateway verification plus human sign-off are complete. Tests and CI use
+only offline fakes; no credential, broker connection, order, promotion, push, or
+deployment is part of this change.
+
 ## [Unreleased] — M11: the option deliverable, and the last kernel defect (2026-07-27)
 
 Closes RISK_REGISTER **R-27**, the last of the four defects the M0 audit found. The pattern

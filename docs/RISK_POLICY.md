@@ -67,13 +67,16 @@ original problem.
 
 ## Options
 
-**This deterministic platform** trades no options, and that is unchanged. The claim
-that "no options execution path exists anywhere in the repository" was true when
-written and is now stale: the `chronos.orders` plane gained a gated options path in
-Milestones 5-7 (cash-secured puts, covered calls, buy-to-close), with its own tri-state
-risk engine and Decimal scenario math. ADR-0016 scopes autonomous options trading to
-Milestone 8 — long calls and puts, cash-secured puts, covered calls, and defined-risk
-verticals, never uncovered short options. Corrected 2026-07-25.
+**This deterministic strategy platform** trades no options, and that is unchanged. The
+repository-wide claim that no option path exists is stale: `chronos.orders` has the
+gated manual options path, and ADR-0020 now adds deterministic autonomous selection for
+opening equity-option cash-secured puts and covered calls only. The model cannot name
+contract identity; bounded complete broker evidence produces a durable `SELECTED` or
+typed `NO_TRADE` receipt, and the existing compiler/risk/order gates still decide whether
+anything proceeds. The feature defaults off. Real IBKR remains `NO_TRADE` until an
+authoritative deliverable schedule source exists, and no live resolver promotion is
+created by this release. ADR-0016's broader option matrix remains programme direction,
+not current executable scope. Corrected 2026-08-01 by ADR-0020.
 
 ## Files
 

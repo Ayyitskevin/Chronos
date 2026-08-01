@@ -242,13 +242,15 @@ explicitly hand to the model's discretion.
    "maximal autonomy," because an unbounded order is a correctness/catastrophe
    surface, not a friction ceiling. Flagged here so the choice is visible and
    was made, not defaulted.
-2. **Options still refuse at the instrument seam.** `BackendGatherers.instrument_facts`
-   resolves equities and crypto; an option decision refuses rather than pricing
-   against a guessed strike/expiry, because chain resolution needs selection this
-   wiring does not own. Autonomous options remain gated on that work, regardless
-   of what a mandate lists. R-27 was listed here as a second gate; it was
-   mitigated in M11, so chain selection is now the whole of what stands in the
-   way — and it is the larger half.
+2. **Historical option limitation — superseded for the ADR-0020 v1 scope.** At
+   ADR-0017 acceptance, `BackendGatherers.instrument_facts` resolved equities and
+   crypto only; an option decision refused rather than pricing against a guessed
+   strike/expiry because this wiring did not own chain selection. ADR-0020 now
+   supplies a deterministic, receipt-bound path for opening equity-option
+   cash-secured puts and covered calls. Every broader option shape remains
+   unavailable. The feature defaults off, and real IBKR still produces
+   `NO_TRADE` because neither adapter supplies an authoritative deliverable
+   schedule; no live resolver promotion was created.
 3. **The 1% protection collar is a judgment, not a derived number.** It is wide
    enough to fill through a normal spread and narrow enough to refuse a broken
    print. A per-instrument collar (tighter for liquid large-caps, wider for thin

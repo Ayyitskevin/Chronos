@@ -3,7 +3,9 @@
 Chronos supports two IBKR adapters behind one broker abstraction (selected by
 `BROKER_ADAPTER`): the **official TWS API adapter** (`official_ibkr`, the
 production default) and the optional `ib_async` adapter. Both are read-only
-until the Milestone 5-7 order service exists.
+for the acquisition and smoke procedures in this document. Order mutation, where
+configured, remains behind the separate existing order service and its full gate
+stack; the smoke path never enters it.
 
 ## Installing the official TWS API (production default)
 
@@ -62,11 +64,25 @@ data, option Greeks, volume, and open interest depend on the account's subscript
 permissions. Missing permissions produce an explicit missing-data state rather than fabricated
 values.
 
-IBKR contract details used by this milestone prove the option and underlying contract IDs, but
-the adapter does not treat multiplier metadata as proof of a complete standard share deliverable.
-Every new short-put and covered-call candidate therefore remains `NO_TRADE` until a later evidence
-source verifies a share-only deliverable equal to the premium multiplier and tied to the exact
-underlying. Chronos does not guess that any contract delivers 100 shares after a corporate action.
+IBKR contract details prove option and underlying identities and support the legacy M11
+root/multiplier non-standard-contract detector. They do **not** expose OCC's authoritative
+deliverable schedule. ADR-0020 therefore requires both real adapters to report autonomous
+deliverable facts as `authoritative=False`; every real-IBKR autonomous short-put or covered-call
+selection remains `NO_TRADE` until a later source proves the exact share, cash, and other-asset
+deliverable for the exact contract and underlying. Chronos does not guess that any contract
+delivers 100 shares after a corporate action.
+
+Autonomous option evaluation is separately default-off:
+
+```dotenv
+ENABLE_AUTONOMY_OPTION_SELECTION=false
+# AUTONOMY_OPTION_RESOLVER_PROMOTION_FILE=data/option_resolver_promotion.json
+```
+
+Enabling evaluation is not a live promotion. Each CANARY/LIVE autonomy mode additionally needs
+an owner-created artifact for exactly that mode, bound to the canonical mandate, policy,
+account fingerprint, effective window, resolver/source digest, and version set. Chronos ships
+only a loader/verifier, no creator; this release creates no artifact.
 
 Start from `.env.example` and keep these safety settings unchanged:
 
@@ -116,7 +132,8 @@ The test performs, in order:
 2. Read timezone-aware server time.
 3. Read the selected account summary.
 4. Qualify the first allowlisted underlying.
-5. Retrieve non-empty option-chain metadata for that underlying.
+5. Retrieve non-empty option-chain metadata for that underlying and require the adapter's
+   explicit complete/non-truncated terminal marker, observation time, and source.
 6. Request one underlying quote through the bounded market-data manager and verify that real
    price data was returned.
 7. Have that same manager operation cancel market data for the one contract.
@@ -125,7 +142,8 @@ The test performs, in order:
 The market-data manager owns quote cancellation, and a `finally` block always attempts disconnect
 even when a read fails. The smoke test never calls `preview_order`, `submit_order`, `modify_order`,
 or `cancel_order`. A passing smoke test proves only that the configured read path works; it does not
-prove order safety, fill quality, or live execution quality.
+prove option-deliverable authority, autonomous-selection eligibility, promotion, order safety,
+fill quality, or live execution quality.
 
 ## Data quality
 

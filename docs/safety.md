@@ -41,6 +41,38 @@ drives the autonomy tick; without one, autonomy is inert and nothing is construc
 model worker remains a separate process calling in over the ingress (R-35) — Chronos ships
 no model, no provider SDK, and no API key in the broker-holding process.
 
+### Autonomous option selection (ADR-0020, 2026-08-01)
+
+The first executable autonomous option scope is deliberately smaller than
+ADR-0016's programme matrix: opening equity-option cash-secured puts and covered
+calls only. The model still cannot name an option right or any broker identity;
+the admitted strategy derives `PUT` or `CALL`, and bounded read-only evidence
+must exactly qualify the underlying, complete chain, candidate contracts,
+quotes/Greeks/liquidity, session, market rules, and authoritative deliverable.
+Unknown volume or open interest always blocks. Missing, partial, truncated,
+stale, future, duplicated, unexpected, or contradictory evidence becomes a
+typed `NO_TRADE` receipt.
+
+The selector derives the receipt-bound tick-conforming sell limit. The existing
+compiler independently derives it again, and an exact contract/price mismatch
+blocks before the order plane. Every receipt is committed to an account-scoped
+hash chain, then the complete chain and every semantic receipt are replayed from
+durable state before use and again before handoff. System/evidence refusals raise
+a deduplicated owner alert. The authenticated bounded
+`GET /terminal/option-selections` view is read-only and exposes replay/chain
+status; SQL storage-type/length/prefix projections prevent corrupt durable text
+from being materialized or echoed before validation. The outer envelope itself
+must be byte-canonical, and durable timestamps are UTC-normalized before
+hashing. There is no replay or promotion CLI.
+
+This capability is **off by default**. CANARY/LIVE additionally requires an
+owner-authored resolver promotion for exactly one live mode, bound to the
+canonical mandate, exact policy, versions, and material-source digest and
+revalidated after acquisition and immediately before handoff. Runtime code
+cannot create that artifact, and this release creates none. Both real IBKR
+adapters report deliverable evidence as non-authoritative, so they intentionally
+remain `NO_TRADE` until an authoritative schedule source exists.
+
 ## Hard boundaries
 
 Live transmission is a gated *capability*, not an impossibility (ADR-0009, Milestone 7): it

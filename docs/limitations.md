@@ -426,7 +426,10 @@ the store beneath it:
     conjunctive conditions, and `standard_deliverable_verified` passes for the first time.
     Residual, and the reason it is not closed: the TWS API does not expose OCC's deliverable
     schedule, so this infers the *absence of an adjustment* from OCC's root-naming
-    convention. It is a non-standard **detector**, not a deliverable **reader**.
+    convention. It is a non-standard **detector**, not a deliverable **reader**. ADR-0020
+    deliberately does not promote that inference into autonomous authority: both real adapters
+    return `authoritative=False` deliverable facts to the autonomous selector, so real IBKR
+    selection remains `NO_TRADE` until a schedule source exists.
   - **All four M0 kernel defects are now mitigated, none are closed.** Each carries a
     disclosed live residual, and per-family promotion still requires owner verification
     against a real gateway (R-04) — mitigation is not the same as proof.
@@ -441,11 +444,15 @@ the store beneath it:
 - **The live-mandate ceiling (365 days since ADR-0017; previously 30) is a judgment, not a
   derived number.** Longer, not infinite, on purpose: renewal at the boundary is still a
   fresh owner action.
-- **Options refuse at the autonomy instrument seam.** The ADR-0017 wiring resolves
-  equities and crypto; an option decision refuses rather than pricing against a guessed
-  strike/expiry, because chain selection is not built. Autonomous options stay gated on
-  that work, regardless of what a mandate lists. R-27 no longer blocks it (M11), but chain
-  selection does, and that is the larger of the two.
+- **Autonomous option selection exists only inside ADR-0020's narrow, default-off scope.**
+  Opening equity-option cash-secured puts and covered calls now use a deterministic bounded
+  chain resolver and a durable semantic evidence receipt; broader option decisions still
+  refuse. The model cannot choose identity, and a `SELECTED` receipt still faces independent
+  compilation, risk, reconciliation, lease, and order-plane gates. Real IBKR remains
+  `NO_TRADE`: the TWS API exposes no authoritative deliverable schedule, and the legacy
+  root/multiplier detector is intentionally insufficient. `ENABLE_AUTONOMY_OPTION_SELECTION`
+  defaults false, CANARY/LIVE requires a separate exact-mode owner artifact, and this release
+  creates none.
 - **The 1% market-protection collar is a judgment, not a derived number.** Wide enough to
   fill through a normal spread, narrow enough to refuse a broken print; per-instrument
   collars are a possible refinement.

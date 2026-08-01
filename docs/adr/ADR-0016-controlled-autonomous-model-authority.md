@@ -241,6 +241,12 @@ versioned capability matrix expressed in the mandate's scope. Initial scope:
   expiration, exercise, assignment, pin, dividend, and early-assignment controls;
   aggregate delta, gamma, vega, theta, and underlying-equivalent exposure; exact
   conId, expiry, strike, right, multiplier, trading class, and deliverable.
+  *[Narrowed by ADR-0020 for the first executable release: deterministic
+  selection now exists only for opening equity-option cash-secured puts and
+  covered calls. Long options, index options, spreads, combos, rolls, and every
+  other shape in this programme-level matrix remain unavailable. The feature is
+  default-off, and real IBKR evidence still resolves `NO_TRADE` without an
+  authoritative deliverable schedule.]*
 - **Futures** — long and short; explicit root, exchange, and contract-month
   allowlists; qualified tradable contracts only; continuous contracts are
   data-only and never submitted; exact conId, local symbol, multiplier,
