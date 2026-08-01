@@ -199,6 +199,12 @@ def _live_data() -> MarketDataRequirements:
     )
 
 
+@pytest.mark.parametrize("field", ("max_quote_age_seconds", "max_relative_spread"))
+def test_market_data_requirements_reject_unbounded_decimal_rendering(field: str) -> None:
+    with pytest.raises(ValidationError, match="market-data requirement"):
+        MarketDataRequirements(**{field: Decimal("1E-1000000")})
+
+
 def _live_capital() -> CapitalLimits:
     """A minimally complete capital block: every ceiling a submitting mandate needs.
 

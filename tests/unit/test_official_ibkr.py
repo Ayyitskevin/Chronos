@@ -264,6 +264,17 @@ class TestChainAndQuoteNormalizers:
         assert [e.isoformat() for e in params.expirations] == ["2026-08-21", "2026-09-18"]
         assert params.strikes == (Decimal("180"), Decimal("185"), Decimal("190"))
 
+    @pytest.mark.parametrize("field", ("exchange", "trading_class"))
+    def test_chain_callback_rejects_oversized_identity_before_normalization(
+        self,
+        field: str,
+    ) -> None:
+        row = ["SMART", 265598, "AAPL", "100", ["20260821"], [190.0]]
+        row[0 if field == "exchange" else 2] = "x" * 10_000
+
+        with pytest.raises(BrokerDataError, match="identity exceeds"):
+            official_ibkr_module._bounded_chain_callback_row(tuple(row))
+
     def test_quote_from_state_greeks_and_quality(self) -> None:
         underlying = UnderlyingContract(con_id=5, symbol="SPY")
         state = QuoteState(
@@ -283,6 +294,22 @@ class TestChainAndQuoteNormalizers:
         quote = quote_from_state(QuoteState(), contract=underlying, timestamp=NOW)
         assert quote.greeks is None
         assert quote.bid is None  # missing stays missing — never invented
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (("liquidHours", "x" * 10_000), ("timeZoneId", "x" * 1_000)),
+)
+def test_session_evidence_rejects_oversized_tws_text_before_model_copy(
+    field: str,
+    value: str,
+) -> None:
+    instrument = UnderlyingContract(con_id=5, symbol="SPY")
+    details = SimpleNamespace(liquidHours="20260803:0930-20260803:1600", timeZoneId="US/Eastern")
+    setattr(details, field, value)
+
+    with pytest.raises(BrokerDataError, match="session evidence exceeds"):
+        official_ibkr_module._with_session_evidence(instrument, details)
 
 
 class _DisconnectableApp:

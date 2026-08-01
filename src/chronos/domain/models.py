@@ -16,6 +16,14 @@ from pydantic import (
     model_validator,
 )
 
+from chronos.config.limits import (
+    MAX_BROKER_CODE_CHARS,
+    MAX_BROKER_LOCAL_SYMBOL_CHARS,
+    MAX_BROKER_SESSION_CHARS,
+    MAX_BROKER_TIME_ZONE_CHARS,
+    MAX_OPTION_DELIVERABLE_ASSET_CHARS,
+    MAX_OPTION_SELECTION_OTHER_ASSETS,
+)
 from chronos.domain.enums import (
     ConnectionState,
     DataQuality,
@@ -61,20 +69,24 @@ class AccountSummary(ChronosModel):
 
 class UnderlyingContract(ChronosModel):
     con_id: PositiveInt
-    symbol: str
+    symbol: str = Field(min_length=1, max_length=MAX_BROKER_CODE_CHARS)
     security_type: Literal[SecurityType.STOCK] = SecurityType.STOCK
-    exchange: str = "SMART"
-    primary_exchange: str | None = None
-    currency: str = "USD"
+    exchange: str = Field(default="SMART", min_length=1, max_length=MAX_BROKER_CODE_CHARS)
+    primary_exchange: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=MAX_BROKER_CODE_CHARS,
+    )
+    currency: str = Field(default="USD", min_length=1, max_length=MAX_BROKER_CODE_CHARS)
     #: IBKR contract-detail session evidence (M9, closes R-26). Empty when the
     #: adapter did not supply it — the demo broker, an older qualification path,
     #: a gateway that answered without details. Absent evidence must read as
     #: *unknown*, which leaves the session gate AMBIGUOUS and blocking; it must
     #: never be mistaken for "no restrictions".
-    liquid_hours: str = ""
+    liquid_hours: str = Field(default="", max_length=MAX_BROKER_SESSION_CHARS)
     #: The zone ``liquid_hours`` is expressed in, as IBKR names it (``US/Eastern``).
     #: Useless without the hours and vice versa, so they travel together.
-    time_zone_id: str = ""
+    time_zone_id: str = Field(default="", max_length=MAX_BROKER_TIME_ZONE_CHARS)
 
     @field_validator("symbol", "exchange", "currency")
     @classmethod
@@ -96,15 +108,15 @@ class UnderlyingContract(ChronosModel):
 
 
 class OptionContractSpec(ChronosModel):
-    symbol: str
+    symbol: str = Field(min_length=1, max_length=MAX_BROKER_CODE_CHARS)
     underlying_con_id: PositiveInt | None = None
     expiration: date
     strike: Decimal = Field(gt=0)
     right: OptionRight
-    exchange: str = "SMART"
-    currency: str = "USD"
+    exchange: str = Field(default="SMART", min_length=1, max_length=MAX_BROKER_CODE_CHARS)
+    currency: str = Field(default="USD", min_length=1, max_length=MAX_BROKER_CODE_CHARS)
     multiplier: Decimal = Field(gt=0)
-    trading_class: str
+    trading_class: str = Field(min_length=1, max_length=MAX_BROKER_CODE_CHARS)
 
     @field_validator("symbol", "exchange", "currency", "trading_class")
     @classmethod
@@ -118,12 +130,12 @@ class OptionContractSpec(ChronosModel):
 class OptionContract(OptionContractSpec):
     con_id: PositiveInt
     security_type: Literal[SecurityType.OPTION] = SecurityType.OPTION
-    local_symbol: str
+    local_symbol: str = Field(min_length=1, max_length=MAX_BROKER_LOCAL_SYMBOL_CHARS)
     #: Session evidence, as on :class:`UnderlyingContract` and for the same
     #: reason (M9, R-26). Options observe the equity holiday calendar, so the
     #: family that most needs a holiday told to it is this one.
-    liquid_hours: str = ""
-    time_zone_id: str = ""
+    liquid_hours: str = Field(default="", max_length=MAX_BROKER_SESSION_CHARS)
+    time_zone_id: str = Field(default="", max_length=MAX_BROKER_TIME_ZONE_CHARS)
     min_tick: Decimal = Field(gt=0, default=Decimal("0.01"))
     deliverable_shares: Decimal | None = Field(
         default=None,
@@ -163,6 +175,117 @@ class OptionContract(OptionContractSpec):
             and self.underlying_con_id is not None
             and self.deliverable_shares is not None
             and self.deliverable_shares == self.multiplier
+        )
+
+
+class OptionPriceIncrement(ChronosModel):
+    """One broker-observed price band from an option market rule.
+
+    ``low_edge`` is inclusive.  A complete rule is evaluated by selecting the
+    band with the greatest edge not exceeding the proposed price; callers must
+    not collapse a banded rule into one guessed scalar tick.
+    """
+
+    low_edge: Decimal = Field(ge=0)
+    increment: Decimal = Field(gt=0)
+
+    @field_validator("low_edge", "increment")
+    @classmethod
+    def require_finite_increment(cls, value: Decimal) -> Decimal:
+        if not value.is_finite():
+            raise ValueError("option price increments must be finite")
+        return value
+
+
+class OptionMarketRule(ChronosModel):
+    """Exact read-only market-rule evidence for one qualified option."""
+
+    con_id: PositiveInt
+    exchange: str = Field(min_length=1, max_length=MAX_BROKER_CODE_CHARS)
+    market_rule_id: PositiveInt
+    price_increments: tuple[OptionPriceIncrement, ...]
+    source: str = Field(min_length=1, max_length=128)
+
+    @field_validator("exchange")
+    @classmethod
+    def normalize_market_rule_exchange(cls, value: str) -> str:
+        normalized = value.strip().upper()
+        if not normalized:
+            raise ValueError("market-rule exchange must not be blank")
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_price_bands(self) -> OptionMarketRule:
+        if not self.price_increments:
+            raise ValueError("an option market rule must carry at least one price increment")
+        edges = tuple(item.low_edge for item in self.price_increments)
+        if edges[0] != 0:
+            raise ValueError("an option market rule must begin at low_edge 0")
+        if edges != tuple(sorted(set(edges))):
+            raise ValueError("option market-rule low edges must be unique and increasing")
+        return self
+
+
+class OptionDeliverableFacts(ChronosModel):
+    """Authoritative-or-unknown deliverable facts for one exact option.
+
+    This deliberately does not reuse ``OptionContract.deliverable_verified``.
+    That legacy flag is currently populated from an OCC naming convention,
+    which is useful as a negative screen but is not an authoritative reading of
+    the deliverable schedule.  Autonomous option selection requires
+    ``authoritative=True`` plus complete share/cash/other-asset fields.
+    """
+
+    con_id: PositiveInt
+    authoritative: bool
+    source: str = Field(min_length=1, max_length=128)
+    underlying_con_id: PositiveInt | None = None
+    share_quantity: Decimal | None = Field(default=None, ge=0)
+    cash_amount: Decimal | None = Field(default=None, ge=0)
+    other_assets: tuple[str, ...] | None = None
+
+    @field_validator("share_quantity", "cash_amount")
+    @classmethod
+    def require_finite_deliverable_number(cls, value: Decimal | None) -> Decimal | None:
+        if value is not None and not value.is_finite():
+            raise ValueError("deliverable quantities must be finite")
+        return value
+
+    @field_validator("other_assets")
+    @classmethod
+    def bound_other_assets(cls, value: tuple[str, ...] | None) -> tuple[str, ...] | None:
+        if value is None:
+            return None
+        if len(value) > MAX_OPTION_SELECTION_OTHER_ASSETS:
+            raise ValueError("option deliverable assets exceed the hard evidence bound")
+        if any(len(item) > MAX_OPTION_DELIVERABLE_ASSET_CHARS for item in value):
+            raise ValueError("option deliverable asset text exceeds the hard evidence bound")
+        return value
+
+    @model_validator(mode="after")
+    def validate_authoritative_shape(self) -> OptionDeliverableFacts:
+        if self.authoritative and (
+            self.underlying_con_id is None
+            or self.share_quantity is None
+            or self.cash_amount is None
+            or self.other_assets is None
+        ):
+            raise ValueError(
+                "authoritative deliverable facts require underlying, shares, cash, and "
+                "other-assets evidence"
+            )
+        return self
+
+    def is_standard_for(self, contract: OptionContract) -> bool:
+        """Whether exact evidence proves a share-only standard deliverable."""
+
+        return (
+            self.authoritative
+            and self.con_id == contract.con_id
+            and self.underlying_con_id == contract.underlying_con_id
+            and self.share_quantity == contract.multiplier
+            and self.cash_amount == 0
+            and self.other_assets == ()
         )
 
 
@@ -225,9 +348,9 @@ class MarketQuote(ChronosModel):
 
 
 class OptionChainParameters(ChronosModel):
-    exchange: str
+    exchange: str = Field(min_length=1, max_length=MAX_BROKER_CODE_CHARS)
     underlying_con_id: PositiveInt
-    trading_class: str
+    trading_class: str = Field(min_length=1, max_length=MAX_BROKER_CODE_CHARS)
     multiplier: Decimal = Field(gt=0)
     expirations: tuple[date, ...]
     strikes: tuple[Decimal, ...]

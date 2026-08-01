@@ -8,11 +8,15 @@ implemented in a later milestone.
 from __future__ import annotations
 
 import asyncio
+import heapq
 import logging
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Sequence
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
+from functools import partial
 from typing import Protocol, cast
 
 from ib_async import (
@@ -38,11 +42,20 @@ from chronos.broker.base import (
     BrokerDataError,
     BrokerSafetyError,
     BrokerSendGuard,
+    OptionChainResponse,
 )
 from chronos.broker.market_data import (
+    MarketDataCancellationError,
     MarketDataPacingError,
     MarketDataPermissionError,
     MarketDataUnavailableError,
+)
+from chronos.config.limits import (
+    MAX_CANDIDATE_REQUEST_CONTRACTS,
+    MAX_OPTION_CHAIN_EXPIRATIONS_PER_ROW,
+    MAX_OPTION_CHAIN_ROWS,
+    MAX_OPTION_CHAIN_STRIKES_PER_ROW,
+    MAX_OPTION_MARKET_RULE_INCREMENTS,
 )
 from chronos.config.settings import Settings
 from chronos.domain.enums import (
@@ -69,6 +82,9 @@ from chronos.domain.models import (
     OptionChainParameters,
     OptionContract,
     OptionContractSpec,
+    OptionDeliverableFacts,
+    OptionMarketRule,
+    OptionPriceIncrement,
     OrderModification,
     OrderPreview,
     OrderRequest,
@@ -81,19 +97,143 @@ from chronos.utils.logging import mask_account_id
 
 _LOGGER = logging.getLogger("chronos.broker.ibkr")
 
-_OPTION_GENERIC_TICKS = "100,101,106"
+_OPTION_GENERIC_TICKS = "100,101"
 _IB_UNSET_DOUBLE = Decimal(str(UNSET_DOUBLE))
 _MARKET_DATA_PACING_CODES = frozenset({100, 420})
 _MARKET_DATA_CAPACITY_CODES = frozenset({101})
 _MARKET_DATA_PERMISSION_CODES = frozenset({354, 10089, 10090, 10091, 10186, 10189, 10197})
 _CONNECTION_UNCERTAIN_CODES = frozenset({1100, 1101, 1102, 1300, 2110})
 _PRICE_TICK_TYPES = frozenset({1, 2, 4, 9, 66, 67, 68, 75})
+_BID_TICK_TYPES = frozenset({1, 66})
+_ASK_TICK_TYPES = frozenset({2, 67})
+_VOLUME_TICK_TYPES = frozenset({8, 74})
+_CALL_OPEN_INTEREST_TICK = 27
+_PUT_OPEN_INTEREST_TICK = 28
+_CALL_VOLUME_TICK = 29
+_PUT_VOLUME_TICK = 30
 
 
 def utc_now() -> datetime:
     """Return an aware UTC observation timestamp."""
 
     return datetime.now(tz=UTC)
+
+
+def _attach_quote_observations(
+    error: BaseException,
+    quotes: Sequence[MarketQuote],
+    *,
+    contract_ids: Sequence[int],
+    observed_at: datetime,
+) -> BaseException:
+    ordered = tuple(
+        sorted(
+            quotes,
+            key=lambda quote: (
+                quote.contract.con_id,
+                quote.timestamp,
+                quote.bid if quote.bid is not None else Decimal("-1"),
+                quote.ask if quote.ask is not None else Decimal("-1"),
+                quote.model_dump_json(),
+            ),
+        )
+    )
+    vars(error).update(
+        observed_values=ordered[:MAX_CANDIDATE_REQUEST_CONTRACTS],
+        observed_at=observed_at,
+        truncated=len(ordered) > MAX_CANDIDATE_REQUEST_CONTRACTS,
+        contract_ids=tuple(sorted(set(contract_ids))),
+    )
+    return error
+
+
+def _attach_rule_observations(
+    error: BaseException,
+    observations: Sequence[object],
+    *,
+    contract_ids: Sequence[int],
+    observed_at: datetime,
+    truncated: bool = False,
+    include_existing: bool = True,
+) -> BaseException:
+    existing = tuple(getattr(error, "observed_values", ())) if include_existing else ()
+
+    def observation_key(value: object) -> tuple[object, ...]:
+        payload = (
+            value.model_dump_json() if hasattr(value, "model_dump_json") else type(value).__name__
+        )
+        return (
+            type(value).__name__,
+            int(getattr(value, "con_id", 0) or 0),
+            getattr(value, "low_edge", Decimal("-1")),
+            payload,
+        )
+
+    ordered = tuple(sorted((*existing, *observations), key=observation_key))
+    limit = MAX_CANDIDATE_REQUEST_CONTRACTS + MAX_OPTION_MARKET_RULE_INCREMENTS
+    existing_ids = tuple(getattr(error, "contract_ids", ()))
+    vars(error).update(
+        observed_values=ordered[:limit],
+        observed_at=observed_at,
+        truncated=(truncated or bool(getattr(error, "truncated", False)) or len(ordered) > limit),
+        contract_ids=tuple(sorted(set((*existing_ids, *contract_ids)))),
+    )
+    return error
+
+
+def _preferred_market_data_error(errors: Sequence[BaseException]) -> BaseException:
+    for error_type in (
+        MarketDataCancellationError,
+        MarketDataPermissionError,
+        MarketDataPacingError,
+        MarketDataUnavailableError,
+        BrokerDataError,
+    ):
+        matching = next((error for error in errors if isinstance(error, error_type)), None)
+        if matching is not None:
+            return matching
+    return errors[0]
+
+
+def _clone_market_data_error(error: BrokerDataError) -> BrokerDataError:
+    if isinstance(error, MarketDataPermissionError):
+        cloned: BrokerDataError = MarketDataPermissionError(str(error))
+    elif isinstance(error, MarketDataPacingError):
+        cloned = MarketDataPacingError(str(error))
+    elif isinstance(error, MarketDataUnavailableError):
+        cloned = MarketDataUnavailableError(
+            str(error),
+            contract_ids=getattr(error, "contract_ids", ()),
+            observed_values=getattr(error, "observed_values", ()),
+            observed_at=getattr(error, "observed_at", None),
+            truncated=bool(getattr(error, "truncated", False)),
+            chain_response=getattr(error, "chain_response", None),
+        )
+    else:
+        cloned = BrokerDataError(str(error))
+    vars(cloned).update(vars(error))
+    return cloned
+
+
+def _bounded_smallest(
+    values: Iterable[object],
+    *,
+    limit: int,
+    normalize: Callable[[object], object],
+) -> tuple[tuple[object, ...], bool]:
+    retained = heapq.nsmallest(limit + 1, (normalize(value) for value in values))
+    return tuple(retained[:limit]), len(retained) > limit
+
+
+def _ib_async_chain_key(chain: OptionChainParameters) -> tuple[object, ...]:
+    return (
+        chain.underlying_con_id,
+        chain.exchange,
+        chain.trading_class,
+        chain.multiplier,
+        chain.expirations,
+        chain.strikes,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,9 +248,16 @@ class _OptionDetails:
     underlying_con_id: int
     underlying_symbol: str
     underlying_security_type: str
+    liquid_hours: str
+    time_zone_id: str
 
 
 IBErrorHandler = Callable[[int, int, str, Contract | None], None]
+
+
+class _MarketRuleIncrement(Protocol):
+    lowEdge: object
+    increment: object
 
 
 class IBErrorEvent(Protocol):
@@ -171,6 +318,8 @@ class IBClient(Protocol):
         underlyingConId: int,
     ) -> list[OptionChain]: ...
 
+    async def reqMarketRuleAsync(self, marketRuleId: int) -> Sequence[object] | None: ...
+
     def reqMktData(
         self,
         contract: Contract,
@@ -192,18 +341,14 @@ class IBKRBroker:
         client: IBClient | None = None,
         clock: Callable[[], datetime] = utc_now,
         quote_timeout_seconds: float = 5.0,
-        quote_settle_seconds: float = 0.1,
         on_connection_uncertain: Callable[[str], object] | None = None,
     ) -> None:
         if quote_timeout_seconds <= 0:
             raise ValueError("quote_timeout_seconds must be positive")
-        if quote_settle_seconds < 0:
-            raise ValueError("quote_settle_seconds must be non-negative")
         self._settings = settings
         self._client = client if client is not None else cast(IBClient, IB())
         self._clock = clock
         self._quote_timeout_seconds = quote_timeout_seconds
-        self._quote_settle_seconds = quote_settle_seconds
         self._account_id: str | None = None
         self._last_sync: datetime | None = None
         self._data_quality = DataQuality.UNKNOWN
@@ -214,6 +359,10 @@ class IBKRBroker:
         self._market_data_waiters: dict[int, asyncio.Future[datetime]] = {}
         self._market_data_errors: dict[int, BrokerDataError] = {}
         self._global_market_data_error: BrokerDataError | None = None
+        self._option_evidence_error_waiters: set[asyncio.Future[BrokerDataError]] = set()
+        self._option_evidence_scope_waiter: ContextVar[asyncio.Future[BrokerDataError] | None] = (
+            ContextVar(f"chronos_option_evidence_waiter_{id(self)}", default=None)
+        )
         self._logger = logging.getLogger("chronos.broker.ibkr")
         self._on_connection_uncertain = on_connection_uncertain
         self._client.errorEvent.connect(self._on_ib_error)
@@ -236,6 +385,7 @@ class IBKRBroker:
         self._market_data_waiters.clear()
         self._market_data_errors.clear()
         self._global_market_data_error = None
+        self._option_evidence_error_waiters.clear()
         self._ib_contracts.clear()
         self._domain_contracts.clear()
         configured_account = self._settings.ib_account_id.strip()
@@ -290,6 +440,7 @@ class IBKRBroker:
         self._market_data_waiters.clear()
         self._market_data_errors.clear()
         self._global_market_data_error = None
+        self._option_evidence_error_waiters.clear()
         self._ib_contracts.clear()
         self._domain_contracts.clear()
         self._account_id = None
@@ -476,15 +627,32 @@ class IBKRBroker:
         if normalized_symbol not in self._settings.symbol_allowlist:
             raise BrokerSafetyError("Underlying symbol is not in SYMBOL_ALLOWLIST")
         requested = Stock(normalized_symbol, "SMART", "USD")
-        contract = (await self._qualify((requested,)))[0]
-        if (
-            contract.secType != SecurityType.STOCK.value
-            or contract.symbol != normalized_symbol
-            or contract.exchange != requested.exchange
-            or contract.currency != requested.currency
-        ):
-            raise BrokerDataError("IBKR qualified an unexpected underlying contract")
-        mapped = self._underlying_from_ib(contract)
+        try:
+            contract = (await self._qualify((requested,)))[0]
+        except BrokerDataError as error:
+            qualified = cast(tuple[Contract, ...], getattr(error, "qualified_contracts", ()))
+            if len(qualified) != 1:
+                raise
+            try:
+                mapped = self._qualified_underlying(
+                    qualified[0],
+                    requested=requested,
+                    symbol=normalized_symbol,
+                )
+            except BrokerDataError as evidence_error:
+                raise error from evidence_error
+            vars(error).update(
+                observed_values=(mapped,),
+                observed_at=self._now(),
+                truncated=False,
+                contract_ids=(),
+            )
+            raise
+        mapped = self._qualified_underlying(
+            contract,
+            requested=requested,
+            symbol=normalized_symbol,
+        )
         self._cache_contract(contract, mapped)
         self._last_sync = self._now()
         return mapped
@@ -499,15 +667,44 @@ class IBKRBroker:
     async def option_chain_parameters(
         self,
         underlying: UnderlyingContract,
-    ) -> tuple[OptionChainParameters, ...]:
+    ) -> OptionChainResponse:
+        async with self._option_evidence_scope():
+            response = await self._option_chain_parameters(underlying)
+            if error := self._current_option_evidence_error():
+                vars(error).update(
+                    contract_ids=(underlying.con_id,),
+                    observed_at=response.observed_at,
+                    truncated=response.truncated,
+                    chain_response=response,
+                )
+                raise error
+            return response
+
+    async def _option_chain_parameters(
+        self,
+        underlying: UnderlyingContract,
+    ) -> OptionChainResponse:
         self._require_connection()
+        classified_error: BrokerDataError | None = None
         try:
-            chains = await self._client.reqSecDefOptParamsAsync(
-                underlying.symbol,
-                "",
-                SecurityType.STOCK.value,
-                underlying.con_id,
+            chains = await self._await_option_evidence(
+                lambda: self._client.reqSecDefOptParamsAsync(
+                    underlying.symbol,
+                    "",
+                    SecurityType.STOCK.value,
+                    underlying.con_id,
+                )
             )
+        except BrokerDataError as error:
+            existing_ids = tuple(getattr(error, "contract_ids", ()))
+            vars(error).update(
+                contract_ids=tuple(sorted(set((*existing_ids, underlying.con_id)))),
+                observed_at=getattr(error, "observed_at", None) or self._now(),
+            )
+            if "completed_result" not in vars(error):
+                raise
+            classified_error = error
+            chains = cast(list[OptionChain], vars(error)["completed_result"])
         except Exception as error:
             raise BrokerDataError(
                 f"IBKR option-chain metadata is unavailable for {underlying.symbol}"
@@ -516,24 +713,33 @@ class IBKRBroker:
             raise BrokerDataError(f"IBKR returned no option chains for {underlying.symbol}")
 
         mapped: list[OptionChainParameters] = []
-        for chain in chains:
-            if chain.underlyingConId != underlying.con_id:
-                raise BrokerDataError("IBKR option-chain metadata references another underlying")
-            if not chain.tradingClass or not chain.exchange:
-                raise BrokerDataError("IBKR option-chain metadata is missing routing identity")
-            expirations = tuple(sorted({self._expiration(value) for value in chain.expirations}))
-            strikes = tuple(
-                sorted(
-                    {
-                        self._required_positive_decimal(value, "option-chain strike")
-                        for value in chain.strikes
-                    }
+        truncated = False
+        try:
+            for chain in chains:
+                if chain.underlyingConId != underlying.con_id:
+                    raise BrokerDataError(
+                        "IBKR option-chain metadata references another underlying"
+                    )
+                if not chain.tradingClass or not chain.exchange:
+                    raise BrokerDataError("IBKR option-chain metadata is missing routing identity")
+                raw_expirations, expiration_overflow = _bounded_smallest(
+                    chain.expirations,
+                    limit=MAX_OPTION_CHAIN_EXPIRATIONS_PER_ROW,
+                    normalize=lambda value: self._expiration(str(value)),
                 )
-            )
-            if not expirations or not strikes:
-                raise BrokerDataError("IBKR option-chain metadata is incomplete")
-            mapped.append(
-                OptionChainParameters(
+                raw_strikes, strike_overflow = _bounded_smallest(
+                    chain.strikes,
+                    limit=MAX_OPTION_CHAIN_STRIKES_PER_ROW,
+                    normalize=lambda value: self._required_positive_decimal(
+                        value, "option-chain strike"
+                    ),
+                )
+                expirations = tuple(cast(date, value) for value in raw_expirations)
+                strikes = tuple(cast(Decimal, value) for value in raw_strikes)
+                truncated = truncated or expiration_overflow or strike_overflow
+                if not expirations or not strikes:
+                    raise BrokerDataError("IBKR option-chain metadata is incomplete")
+                normalized = OptionChainParameters(
                     exchange=chain.exchange,
                     underlying_con_id=chain.underlyingConId,
                     trading_class=chain.tradingClass,
@@ -543,11 +749,88 @@ class IBKRBroker:
                     expirations=expirations,
                     strikes=strikes,
                 )
+                if len(mapped) < MAX_OPTION_CHAIN_ROWS:
+                    mapped.append(normalized)
+                    continue
+                truncated = True
+                worst_index = max(
+                    range(len(mapped)),
+                    key=lambda index: _ib_async_chain_key(mapped[index]),
+                )
+                if _ib_async_chain_key(normalized) < _ib_async_chain_key(mapped[worst_index]):
+                    mapped[worst_index] = normalized
+        except (BrokerDataError, InvalidOperation, TypeError, ValueError) as parse_error:
+            observed_at = self._now()
+            response = OptionChainResponse(
+                parameters=tuple(sorted(mapped, key=_ib_async_chain_key)),
+                complete=True,
+                truncated=truncated,
+                completion_marker="securityDefinitionOptionParameterEnd",
+                observed_at=observed_at,
+                source="ib_async-v1",
             )
-        self._last_sync = self._now()
-        return tuple(mapped)
+            chain_error = classified_error or MarketDataUnavailableError(
+                f"IBKR option-chain metadata is malformed for {underlying.symbol}"
+            )
+            vars(chain_error).update(
+                contract_ids=(underlying.con_id,),
+                observed_at=observed_at,
+                truncated=truncated,
+                chain_response=response,
+            )
+            raise chain_error from parse_error
+        observed_at = self._now()
+        self._last_sync = observed_at
+        response = OptionChainResponse(
+            parameters=tuple(sorted(mapped, key=_ib_async_chain_key)),
+            complete=True,
+            truncated=truncated,
+            completion_marker="securityDefinitionOptionParameterEnd",
+            observed_at=observed_at,
+            source="ib_async-v1",
+        )
+        if classified_error is not None:
+            vars(classified_error).update(
+                contract_ids=(underlying.con_id,),
+                observed_at=observed_at,
+                truncated=truncated,
+                chain_response=response,
+            )
+            raise classified_error
+        if truncated:
+            raise MarketDataUnavailableError(
+                f"IBKR option-chain metadata exceeded its hard evidence bound for "
+                f"{underlying.symbol}",
+                contract_ids=(underlying.con_id,),
+                observed_at=observed_at,
+                truncated=True,
+                chain_response=response,
+            )
+        return response
 
     async def qualify_option_contracts(
+        self,
+        contracts: Sequence[OptionContractSpec],
+    ) -> tuple[OptionContract, ...]:
+        async with self._option_evidence_scope():
+            qualified = await self._qualify_option_contracts(contracts)
+            if error := self._current_option_evidence_error():
+                ordered = tuple(
+                    sorted(
+                        qualified,
+                        key=lambda item: (item.con_id, item.model_dump_json()),
+                    )
+                )
+                vars(error).update(
+                    observed_values=ordered[:MAX_CANDIDATE_REQUEST_CONTRACTS],
+                    observed_at=self._now(),
+                    truncated=len(ordered) > MAX_CANDIDATE_REQUEST_CONTRACTS,
+                    contract_ids=(),
+                )
+                raise error
+            return qualified
+
+    async def _qualify_option_contracts(
         self,
         contracts: Sequence[OptionContractSpec],
     ) -> tuple[OptionContract, ...]:
@@ -558,29 +841,367 @@ class IBKRBroker:
         qualified = await self._qualify(requested)
         mapped: list[OptionContract] = []
         for specification, contract in zip(contracts, qualified, strict=True):
-            option = self._option_from_ib(
-                contract,
-                details=await self._option_details(contract),
-            )
-            if (
-                option.symbol != specification.symbol
-                or (
-                    specification.underlying_con_id is not None
-                    and option.underlying_con_id != specification.underlying_con_id
+            try:
+                option = self._option_from_ib(
+                    contract,
+                    details=await self._option_details(contract),
                 )
-                or option.expiration != specification.expiration
-                or option.strike != specification.strike
-                or option.right is not specification.right
-                or option.exchange != specification.exchange
-                or option.currency != specification.currency
-                or option.multiplier != specification.multiplier
-                or option.trading_class != specification.trading_class
-            ):
-                raise BrokerDataError("IBKR qualified an option different from the request")
+                if (
+                    option.symbol != specification.symbol
+                    or (
+                        specification.underlying_con_id is not None
+                        and option.underlying_con_id != specification.underlying_con_id
+                    )
+                    or option.expiration != specification.expiration
+                    or option.strike != specification.strike
+                    or option.right is not specification.right
+                    or option.exchange != specification.exchange
+                    or option.currency != specification.currency
+                    or option.multiplier != specification.multiplier
+                    or option.trading_class != specification.trading_class
+                ):
+                    raise BrokerDataError("IBKR qualified an option different from the request")
+            except asyncio.CancelledError as cancellation:
+                error = MarketDataUnavailableError(
+                    "ib_async option qualification was interrupted",
+                    contract_ids=(contract.conId,),
+                    observed_values=tuple(mapped),
+                    observed_at=self._now(),
+                )
+                raise error from cancellation
+            except BrokerDataError as error:
+                vars(error).update(
+                    observed_values=tuple(
+                        sorted(mapped, key=lambda item: (item.con_id, item.model_dump_json()))
+                    )[:MAX_CANDIDATE_REQUEST_CONTRACTS],
+                    observed_at=self._now(),
+                    truncated=len(mapped) > MAX_CANDIDATE_REQUEST_CONTRACTS,
+                    contract_ids=(contract.conId,),
+                )
+                raise
             self._cache_contract(contract, option)
             mapped.append(option)
         self._last_sync = self._now()
         return tuple(mapped)
+
+    async def option_market_rules(
+        self,
+        contracts: Sequence[OptionContract],
+    ) -> tuple[OptionMarketRule, ...]:
+        """Read complete price-band schedules for exact qualified routes."""
+
+        async with self._option_evidence_scope():
+            rules = await self._option_market_rules(contracts)
+            if error := self._current_option_evidence_error():
+                _attach_rule_observations(
+                    error,
+                    rules,
+                    contract_ids=(),
+                    observed_at=self._now(),
+                    include_existing=False,
+                )
+                raise error
+            return rules
+
+    async def _option_market_rules(
+        self,
+        contracts: Sequence[OptionContract],
+    ) -> tuple[OptionMarketRule, ...]:
+        self._require_connection()
+        if len({option.con_id for option in contracts}) != len(contracts):
+            raise BrokerDataError("option market-rule request contains duplicate conIds")
+
+        ib_contracts: list[Contract] = []
+        for option in contracts:
+            ib_contract = self._ib_contracts.get(option.con_id)
+            if ib_contract is None:
+                raise BrokerDataError(
+                    f"option conId {option.con_id} was not qualified in this broker session"
+                )
+            ib_contracts.append(ib_contract)
+        try:
+            detail_results = await asyncio.gather(
+                *(
+                    self._await_option_evidence(
+                        partial(self._client.reqContractDetailsAsync, contract)
+                    )
+                    for contract in ib_contracts
+                ),
+                return_exceptions=True,
+            )
+        except asyncio.CancelledError as cancellation:
+            raise MarketDataUnavailableError(
+                "ib_async market-rule contract-detail batch was interrupted",
+                contract_ids=tuple(option.con_id for option in contracts),
+            ) from cancellation
+
+        rule_ids_by_contract: dict[int, int] = {}
+        for option, detail_result in zip(contracts, detail_results, strict=True):
+            if isinstance(detail_result, BaseException):
+                if isinstance(detail_result, BrokerDataError) and "completed_result" in vars(
+                    detail_result
+                ):
+                    details = cast(list[ContractDetails], vars(detail_result)["completed_result"])
+                elif isinstance(detail_result, BrokerDataError):
+                    existing_ids = tuple(getattr(detail_result, "contract_ids", ()))
+                    vars(detail_result).update(
+                        contract_ids=tuple(sorted(set((*existing_ids, option.con_id)))),
+                        observed_at=getattr(detail_result, "observed_at", None) or self._now(),
+                    )
+                    raise detail_result
+                raise BrokerDataError(
+                    "IBKR market-rule contract details are unavailable"
+                ) from detail_result
+            else:
+                details = detail_result
+            exact = [
+                detail
+                for detail in details
+                if detail.contract is not None and detail.contract.conId == option.con_id
+            ]
+            if len(exact) != 1:
+                raise BrokerDataError("IBKR market-rule contract details are missing or ambiguous")
+            exchanges = tuple(
+                value.strip().upper()
+                for value in str(getattr(exact[0], "validExchanges", "") or "").split(",")
+                if value.strip()
+            )
+            raw_ids = tuple(
+                value.strip()
+                for value in str(getattr(exact[0], "marketRuleIds", "") or "").split(",")
+                if value.strip()
+            )
+            if len(exchanges) != len(raw_ids):
+                raise BrokerDataError("IBKR market-rule routing metadata is incomplete")
+            try:
+                matching_ids = {
+                    int(rule_id)
+                    for exchange, rule_id in zip(exchanges, raw_ids, strict=True)
+                    if exchange == option.exchange and int(rule_id) > 0
+                }
+            except ValueError as error:
+                raise BrokerDataError("IBKR market-rule identifier is invalid") from error
+            if len(matching_ids) != 1:
+                raise BrokerDataError("IBKR market rule for the qualified route is ambiguous")
+            rule_ids_by_contract[option.con_id] = matching_ids.pop()
+
+        rule_ids = tuple(sorted(set(rule_ids_by_contract.values())))
+        rule_tasks = {
+            rule_id: asyncio.ensure_future(
+                self._await_option_evidence(partial(self._client.reqMarketRuleAsync, rule_id))
+            )
+            for rule_id in rule_ids
+        }
+        interruption: asyncio.CancelledError | None = None
+        rule_results: list[object]
+        try:
+            rule_results = list(
+                await asyncio.gather(
+                    *rule_tasks.values(),
+                    return_exceptions=True,
+                )
+            )
+            result_rule_ids = rule_ids
+        except asyncio.CancelledError as cancellation:
+            interruption = cancellation
+            completed_results: list[object] = []
+            completed_rule_ids: list[int] = []
+            for rule_id, task in rule_tasks.items():
+                if not task.done() or task.cancelled():
+                    continue
+                completed_rule_ids.append(rule_id)
+                try:
+                    completed_results.append(task.result())
+                except BaseException as error:
+                    completed_results.append(error)
+            rule_results = completed_results
+            result_rule_ids = tuple(completed_rule_ids)
+        schedules: dict[int, tuple[OptionPriceIncrement, ...]] = {}
+        rule_errors: list[tuple[int, BaseException]] = []
+        for rule_id, rule_result in zip(result_rule_ids, rule_results, strict=True):
+            simultaneous_error: BrokerDataError | None = None
+            if isinstance(rule_result, BaseException):
+                if isinstance(rule_result, BrokerDataError) and "completed_result" in vars(
+                    rule_result
+                ):
+                    simultaneous_error = rule_result
+                    rule_result = vars(rule_result)["completed_result"]
+                elif isinstance(rule_result, BrokerDataError):
+                    result_error: BaseException = rule_result
+                else:
+                    result_error = BrokerDataError(f"IBKR market rule {rule_id} is unavailable")
+                    result_error.__cause__ = rule_result
+                if simultaneous_error is None:
+                    rule_errors.append((rule_id, result_error))
+                    continue
+            if rule_result is None:
+                # ib_async returns None when its internal market-rule timeout
+                # expires; that is missing evidence, never an empty schedule.
+                rule_errors.append(
+                    (
+                        rule_id,
+                        MarketDataUnavailableError(f"IBKR market rule {rule_id} did not complete"),
+                    )
+                )
+                if simultaneous_error is not None:
+                    rule_errors.append((rule_id, simultaneous_error))
+                continue
+            parsed_items: list[OptionPriceIncrement] = []
+            truncated = False
+            try:
+                for index, item in enumerate(cast(Iterable[object], rule_result)):
+                    if index >= MAX_OPTION_MARKET_RULE_INCREMENTS:
+                        truncated = True
+                        raise ValueError(
+                            "the price increment schedule exceeded its hard evidence bound"
+                        )
+                    raw_item = cast(_MarketRuleIncrement, item)
+                    low_edge = raw_item.lowEdge
+                    increment = raw_item.increment
+                    if low_edge is None or increment is None:
+                        raise ValueError("market-rule row is missing a required field")
+                    parsed_items.append(
+                        OptionPriceIncrement(
+                            low_edge=Decimal(str(low_edge)),
+                            increment=Decimal(str(increment)),
+                        )
+                    )
+                if not parsed_items:
+                    raise ValueError("the response contained no price increments")
+                parsed = tuple(sorted(parsed_items, key=lambda item: item.low_edge))
+                # Constructing the rule here validates the whole schedule (zero
+                # first edge, unique increasing bands) before any candidate can
+                # consume it.
+                representative = next(
+                    option for option in contracts if rule_ids_by_contract[option.con_id] == rule_id
+                )
+                validated = OptionMarketRule(
+                    con_id=representative.con_id,
+                    exchange=representative.exchange,
+                    market_rule_id=rule_id,
+                    price_increments=parsed,
+                    source="ibkr-tws-market-rule-v1",
+                )
+            except (AttributeError, InvalidOperation, TypeError, ValueError) as parse_error:
+                malformed = BrokerDataError(f"IBKR market rule {rule_id} is malformed")
+                malformed.__cause__ = parse_error
+                contract_ids = tuple(
+                    option.con_id
+                    for option in contracts
+                    if rule_ids_by_contract[option.con_id] == rule_id
+                )
+                _attach_rule_observations(
+                    malformed,
+                    parsed_items,
+                    contract_ids=contract_ids,
+                    observed_at=self._now(),
+                    truncated=truncated,
+                    include_existing=False,
+                )
+                rule_errors.append((rule_id, malformed))
+                if simultaneous_error is not None:
+                    rule_errors.append((rule_id, simultaneous_error))
+                continue
+            schedules[rule_id] = validated.price_increments
+            if simultaneous_error is not None:
+                rule_errors.append((rule_id, simultaneous_error))
+
+        complete_rules = tuple(
+            OptionMarketRule(
+                con_id=option.con_id,
+                exchange=option.exchange,
+                market_rule_id=rule_ids_by_contract[option.con_id],
+                price_increments=schedules[rule_ids_by_contract[option.con_id]],
+                source="ibkr-tws-market-rule-v1",
+            )
+            for option in contracts
+            if rule_ids_by_contract[option.con_id] in schedules
+        )
+        if interruption is not None:
+            missing_rule_ids = set(rule_ids) - set(schedules)
+            fallback = MarketDataUnavailableError(
+                "ib_async market-rule batch was interrupted",
+                contract_ids=tuple(
+                    option.con_id
+                    for option in contracts
+                    if rule_ids_by_contract[option.con_id] in missing_rule_ids
+                ),
+            )
+            preferred = _preferred_market_data_error(
+                (*tuple(error for _rule_id, error in rule_errors), fallback)
+            )
+            retained = tuple(
+                observation
+                for _rule_id, error in rule_errors
+                for observation in getattr(error, "observed_values", ())
+            )
+            _attach_rule_observations(
+                preferred,
+                (*complete_rules, *retained),
+                contract_ids=tuple(
+                    option.con_id
+                    for option in contracts
+                    if rule_ids_by_contract[option.con_id] in missing_rule_ids
+                ),
+                observed_at=self._now(),
+                truncated=any(
+                    bool(getattr(error, "truncated", False)) for _rule_id, error in rule_errors
+                ),
+                include_existing=False,
+            )
+            vars(preferred).update(
+                request_completed=False,
+                failure_kind="interrupted",
+            )
+            raise preferred from interruption
+        if rule_errors:
+            preferred = _preferred_market_data_error(
+                tuple(error for _rule_id, error in rule_errors)
+            )
+            failed_rule_ids = {
+                rule_id for rule_id, _error in rule_errors if rule_id not in schedules
+            }
+            failed_contract_ids = tuple(
+                option.con_id
+                for option in contracts
+                if rule_ids_by_contract[option.con_id] in failed_rule_ids
+            )
+            retained = tuple(
+                observation
+                for _rule_id, error in rule_errors
+                for observation in getattr(error, "observed_values", ())
+            )
+            _attach_rule_observations(
+                preferred,
+                (*complete_rules, *retained),
+                contract_ids=failed_contract_ids,
+                observed_at=self._now(),
+                truncated=any(
+                    bool(getattr(error, "truncated", False)) for _rule_id, error in rule_errors
+                ),
+                include_existing=False,
+            )
+            raise preferred
+
+        self._last_sync = self._now()
+        return complete_rules
+
+    async def option_deliverable_facts(
+        self,
+        contracts: Sequence[OptionContract],
+    ) -> tuple[OptionDeliverableFacts, ...]:
+        """Return explicit UNKNOWN until a schedule source exists."""
+
+        self._require_connection()
+        self._raise_market_data_error(tuple(contract.con_id for contract in contracts))
+        return tuple(
+            OptionDeliverableFacts(
+                con_id=contract.con_id,
+                authoritative=False,
+                source="ibkr-tws-no-deliverable-schedule-v1",
+            )
+            for contract in contracts
+        )
 
     async def request_underlying_quote(
         self,
@@ -650,8 +1271,10 @@ class IBKRBroker:
                 extra={"event": "market_data_cancel_sent", "contract_id": contract_id},
             )
         if failures:
-            raise BrokerDataError(
-                "IBKR could not issue a cancellation request for one or more Chronos subscriptions"
+            raise MarketDataCancellationError(
+                "IBKR could not issue a cancellation request for one or more Chronos subscriptions",
+                contract_ids=tuple(failures),
+                observed_at=self._now(),
             )
 
     async def preview_order(self, request: OrderRequest) -> OrderPreview:
@@ -774,20 +1397,60 @@ class IBKRBroker:
         return None
 
     async def _qualify(self, contracts: Sequence[Contract]) -> tuple[Contract, ...]:
+        classified_error: BrokerDataError | None = None
         try:
-            results = await self._client.qualifyContractsAsync(*contracts)
+            results = await self._await_option_evidence(
+                lambda: self._client.qualifyContractsAsync(*contracts)
+            )
+        except BrokerDataError as error:
+            if "completed_result" not in vars(error):
+                raise
+            classified_error = error
+            results = cast(
+                list[Contract | list[Contract | None] | None],
+                vars(error)["completed_result"],
+            )
         except Exception as error:
             raise BrokerDataError("IBKR contract qualification failed") from error
-        if len(results) != len(contracts):
-            raise BrokerDataError("IBKR returned an incomplete contract-qualification result")
-        qualified: list[Contract] = []
-        for result in results:
-            if result is None or isinstance(result, list):
-                raise BrokerDataError("IBKR contract qualification was missing or ambiguous")
-            if result.conId <= 0:
-                raise BrokerDataError("IBKR qualified contract has no valid identifier")
-            qualified.append(result)
+        try:
+            if len(results) != len(contracts):
+                raise BrokerDataError("IBKR returned an incomplete contract-qualification result")
+            qualified: list[Contract] = []
+            for result in results:
+                if result is None or isinstance(result, list):
+                    raise BrokerDataError("IBKR contract qualification was missing or ambiguous")
+                if result.conId <= 0:
+                    raise BrokerDataError("IBKR qualified contract has no valid identifier")
+                qualified.append(result)
+        except BrokerDataError as evidence_error:
+            if classified_error is not None:
+                raise classified_error from evidence_error
+            raise
+        if classified_error is not None:
+            vars(classified_error).update(
+                qualified_contracts=tuple(qualified),
+                contract_ids=tuple(sorted(contract.conId for contract in qualified)),
+                observed_at=getattr(classified_error, "observed_at", None) or self._now(),
+            )
+            raise classified_error
         return tuple(qualified)
+
+    @classmethod
+    def _qualified_underlying(
+        cls,
+        contract: Contract,
+        *,
+        requested: Contract,
+        symbol: str,
+    ) -> UnderlyingContract:
+        if (
+            contract.secType != SecurityType.STOCK.value
+            or contract.symbol != symbol
+            or contract.exchange != requested.exchange
+            or contract.currency != requested.currency
+        ):
+            raise BrokerDataError("IBKR qualified an unexpected underlying contract")
+        return cls._underlying_from_ib(contract)
 
     @staticmethod
     def _underlying_from_ib(contract: Contract) -> UnderlyingContract:
@@ -836,7 +1499,11 @@ class IBKRBroker:
 
     async def _option_details(self, contract: Contract) -> _OptionDetails:
         try:
-            details = await self._client.reqContractDetailsAsync(contract)
+            details = await self._await_option_evidence(
+                lambda: self._client.reqContractDetailsAsync(contract)
+            )
+        except BrokerDataError:
+            raise
         except Exception as error:
             raise BrokerDataError("IBKR option contract details are unavailable") from error
         exact = [
@@ -859,6 +1526,8 @@ class IBKRBroker:
             # without them yields an unverified contract, not an exception.
             underlying_symbol=str(getattr(exact[0], "underSymbol", "") or ""),
             underlying_security_type=str(getattr(exact[0], "underSecType", "") or ""),
+            liquid_hours=str(getattr(exact[0], "liquidHours", "") or ""),
+            time_zone_id=str(getattr(exact[0], "timeZoneId", "") or ""),
         )
 
     @classmethod
@@ -889,6 +1558,8 @@ class IBKRBroker:
             multiplier=multiplier,
             trading_class=contract.tradingClass,
             local_symbol=contract.localSymbol,
+            liquid_hours=details.liquid_hours,
+            time_zone_id=details.time_zone_id,
             min_tick=details.min_tick,
         )
         # M11 (R-27). An option that fails the screen is returned exactly as it
@@ -975,6 +1646,24 @@ class IBKRBroker:
                 asyncio.Future[datetime],
             ]
         ] = []
+
+        def completed_quotes() -> tuple[MarketQuote, ...]:
+            retained: list[MarketQuote] = []
+            for domain_contract, ticker, _handler, waiter in started:
+                if not waiter.done() or waiter.cancelled():
+                    continue
+                try:
+                    observed_at = waiter.result()
+                except BaseException:
+                    continue
+                try:
+                    retained.append(self._quote_from_ticker(domain_contract, ticker, observed_at))
+                except Exception:
+                    # Evidence collection must not mask the primary request
+                    # failure or prevent cancellation cleanup.
+                    continue
+            return tuple(retained)
+
         try:
             for domain_contract in contracts:
                 if domain_contract.con_id in self._active_market_data:
@@ -1003,9 +1692,10 @@ class IBKRBroker:
                     updated: Ticker,
                     *,
                     contract_id: int = domain_contract.con_id,
+                    expected_contract: Instrument = domain_contract,
                     request_started_at: datetime = requested_at,
                 ) -> None:
-                    if not self._has_price_update(updated):
+                    if not self._quote_is_complete(expected_contract, updated):
                         return
                     observed_at = self._now()
                     if observed_at < request_started_at:
@@ -1033,12 +1723,23 @@ class IBKRBroker:
                     timeout=self._quote_timeout_seconds,
                 )
             except TimeoutError as error:
-                raise MarketDataUnavailableError(
-                    "IBKR did not provide a current price update before the bounded timeout",
-                    contract_ids=contract_ids,
-                ) from error
-            if self._quote_settle_seconds:
-                await asyncio.sleep(self._quote_settle_seconds)
+                timeout_error = MarketDataUnavailableError(
+                    "IBKR did not provide every required quote callback before the bounded timeout",
+                    contract_ids=tuple(
+                        contract_id
+                        for contract_id, waiter in (
+                            (contract.con_id, waiter) for contract, *_prefix, waiter in started
+                        )
+                        if waiter.cancelled() or not waiter.done()
+                    ),
+                )
+                _attach_quote_observations(
+                    timeout_error,
+                    completed_quotes(),
+                    contract_ids=timeout_error.contract_ids,
+                    observed_at=self._now(),
+                )
+                raise timeout_error from error
             self._raise_market_data_error(contract_ids)
             quotes = tuple(
                 self._quote_from_ticker(contract, ticker, observed_at)
@@ -1048,13 +1749,44 @@ class IBKRBroker:
                     strict=True,
                 )
             )
-        except BaseException as request_error:
+        except BaseException as request_failure:
+            request_cancellation = (
+                request_failure if isinstance(request_failure, asyncio.CancelledError) else None
+            )
+            request_error: BaseException = (
+                MarketDataUnavailableError(
+                    "ib_async option-quote batch was interrupted before completion"
+                )
+                if request_cancellation is not None
+                else request_failure
+            )
+            observed = completed_quotes()
+            if isinstance(request_error, BrokerDataError):
+                observed_ids = {quote.contract.con_id for quote in observed}
+                _attach_quote_observations(
+                    request_error,
+                    observed,
+                    contract_ids=tuple(
+                        contract.con_id
+                        for contract, *_rest in started
+                        if contract.con_id not in observed_ids
+                    ),
+                    observed_at=self._now(),
+                )
             try:
                 self._cancel_started_market_data(
                     tuple(contract.con_id for contract, *_rest in started)
                 )
             except BrokerDataError as cleanup_error:
+                _attach_quote_observations(
+                    cleanup_error,
+                    observed,
+                    contract_ids=tuple(contract.con_id for contract, *_rest in started),
+                    observed_at=self._now(),
+                )
                 raise cleanup_error from request_error
+            if request_cancellation is not None:
+                raise request_error from request_cancellation
             raise
         finally:
             for contract, ticker, handler, waiter in started:
@@ -1093,6 +1825,29 @@ class IBKRBroker:
     def _has_price_update(ticker: Ticker) -> bool:
         return any(tick.tickType in _PRICE_TICK_TYPES for tick in ticker.ticks)
 
+    @classmethod
+    def _quote_is_complete(cls, contract: Instrument, ticker: Ticker) -> bool:
+        if not isinstance(contract, OptionContract):
+            return cls._has_price_update(ticker)
+
+        tick_types = {tick.tickType for tick in ticker.ticks}
+        right_volume = _CALL_VOLUME_TICK if contract.right is OptionRight.CALL else _PUT_VOLUME_TICK
+        right_open_interest = (
+            _CALL_OPEN_INTEREST_TICK
+            if contract.right is OptionRight.CALL
+            else _PUT_OPEN_INTEREST_TICK
+        )
+        return all(
+            (
+                bool(tick_types & _BID_TICK_TYPES),
+                bool(tick_types & _ASK_TICK_TYPES),
+                bool(tick_types & _VOLUME_TICK_TYPES) or right_volume in tick_types,
+                right_open_interest in tick_types,
+                ticker.modelGreeks is not None,
+                ticker.marketDataType in {1, 2, 3, 4},
+            )
+        )
+
     def _cancel_started_market_data(self, contract_ids: Sequence[int]) -> None:
         failures: list[int] = []
         for contract_id in contract_ids:
@@ -1113,7 +1868,11 @@ class IBKRBroker:
                 "IBKR cleanup of a failed market-data request did not complete",
                 extra={"event": "market_data_cleanup_failed"},
             )
-            raise BrokerDataError("IBKR could not clean up one or more failed market-data requests")
+            raise MarketDataCancellationError(
+                "IBKR could not clean up one or more failed market-data requests",
+                contract_ids=tuple(failures),
+                observed_at=self._now(),
+            )
 
     def _on_connected(self, *_args: object) -> None:
         del _args
@@ -1157,6 +1916,10 @@ class IBKRBroker:
             error = MarketDataUnavailableError("IBKR market-data line capacity is exhausted")
         else:
             return
+        vars(error).update(
+            broker_error_code=error_code,
+            observed_at=self._now(),
+        )
 
         contract_id = contract.conId if contract is not None else 0
         if contract_id > 0:
@@ -1173,18 +1936,23 @@ class IBKRBroker:
                     },
                 )
                 return
-            waiter = self._market_data_waiters.get(contract_id)
-            if waiter is not None and not waiter.done():
-                waiter.set_exception(error)
+            quote_waiter = self._market_data_waiters.get(contract_id)
+            if quote_waiter is not None and not quote_waiter.done():
+                quote_waiter.set_exception(_clone_market_data_error(error))
             else:
                 self._market_data_errors[contract_id] = error
         else:
             pending_waiters = tuple(
                 waiter for waiter in self._market_data_waiters.values() if not waiter.done()
             )
-            if pending_waiters:
-                for waiter in pending_waiters:
-                    waiter.set_exception(error)
+            pending_evidence_waiters = tuple(
+                waiter for waiter in self._option_evidence_error_waiters if not waiter.done()
+            )
+            if pending_waiters or pending_evidence_waiters:
+                for quote_waiter in pending_waiters:
+                    quote_waiter.set_exception(_clone_market_data_error(error))
+                for evidence_waiter in pending_evidence_waiters:
+                    evidence_waiter.set_result(_clone_market_data_error(error))
             else:
                 self._global_market_data_error = error
         self._logger.warning(
@@ -1216,6 +1984,77 @@ class IBKRBroker:
             if matching is not None:
                 raise matching
         raise errors[0]
+
+    async def _await_option_evidence[T](
+        self,
+        operation_call: Callable[[], Awaitable[T]],
+    ) -> T:
+        """Race one option-evidence read against an id-less classified error."""
+
+        error_waiter = self._option_evidence_scope_waiter.get()
+        if error_waiter is None:
+            async with self._option_evidence_scope():
+                return await self._await_option_evidence(operation_call)
+        if error_waiter.done():
+            raise _clone_market_data_error(error_waiter.result())
+
+        operation_task: asyncio.Future[T] | None = None
+        try:
+            operation_task = asyncio.ensure_future(operation_call())
+            done, _pending = await asyncio.wait(
+                (operation_task, error_waiter),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if error_waiter in done:
+                classified = _clone_market_data_error(error_waiter.result())
+                if operation_task in done and not operation_task.cancelled():
+                    operation_error = operation_task.exception()
+                    if operation_error is None:
+                        vars(classified).update(completed_result=operation_task.result())
+                else:
+                    operation_task.cancel()
+                    await asyncio.gather(operation_task, return_exceptions=True)
+                raise classified
+            return await operation_task
+        except BaseException:
+            if operation_task is not None and not operation_task.done():
+                operation_task.cancel()
+                await asyncio.gather(operation_task, return_exceptions=True)
+            raise
+
+    def _current_option_evidence_error(self) -> BrokerDataError | None:
+        error_waiter = self._option_evidence_scope_waiter.get()
+        if error_waiter is None or not error_waiter.done():
+            return None
+        return _clone_market_data_error(error_waiter.result())
+
+    @asynccontextmanager
+    async def _option_evidence_scope(self) -> AsyncIterator[None]:
+        """Keep one global-error signal alive across a logical option read."""
+
+        inherited = self._option_evidence_scope_waiter.get()
+        if inherited is not None:
+            yield
+            return
+
+        # A classified error received while idle belongs to the next evidence
+        # request. Check before registering or constructing any broker coroutine.
+        self._raise_market_data_error(())
+        error_waiter: asyncio.Future[BrokerDataError] = asyncio.get_running_loop().create_future()
+        token = self._option_evidence_scope_waiter.set(error_waiter)
+        self._option_evidence_error_waiters.add(error_waiter)
+        try:
+            yield
+        except BaseException:
+            raise
+        else:
+            if error := self._current_option_evidence_error():
+                raise error
+        finally:
+            self._option_evidence_scope_waiter.reset(token)
+            self._option_evidence_error_waiters.discard(error_waiter)
+            if not error_waiter.done():
+                error_waiter.cancel()
 
     def _quote_from_ticker(
         self,

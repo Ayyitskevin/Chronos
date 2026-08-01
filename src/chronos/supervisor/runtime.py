@@ -285,8 +285,16 @@ class AutonomyRuntime:
                     now=now,
                 )
             else:
-                self._drain(session, mandate, facts, now, report)
+                batch = proposals.claim_batch(
+                    session,
+                    account_fingerprint=self._config.account_fingerprint,
+                    limit=self._config.proposals_per_tick,
+                )
 
+        if facts is not None:
+            self._drain(batch, mandate, facts, now, report)
+
+        with self._sessions.begin() as session:
             delivered = delivery.deliver_pending(
                 session,
                 account_fingerprint=self._config.account_fingerprint,
@@ -298,34 +306,35 @@ class AutonomyRuntime:
 
     def _drain(
         self,
-        session: Session,
+        batch: tuple[proposals.QueuedProposal, ...],
         mandate: AutonomyMandate | None,
         facts: CycleFacts,
         now: datetime,
         report: TickReport,
     ) -> None:
-        batch = proposals.claim_batch(
-            session,
-            account_fingerprint=self._config.account_fingerprint,
-            limit=self._config.proposals_per_tick,
-        )
         for item in batch:
-            outcome = run_cycle(
-                item.payload,
-                session=session,
-                mandate=mandate,
-                identity=self._identity,
-                facts=facts,
-                submit=self._submit,
-                gather_instrument=self._gather_instrument,
-            )
-            proposals.mark_processed(
-                session,
-                queue_id=item.id,
-                stage=outcome.stage.value,
-                refusal=outcome.refusal,
-                now=now,
-            )
+            with self._sessions() as session:
+                try:
+                    outcome = run_cycle(
+                        item.payload,
+                        session=session,
+                        mandate=mandate,
+                        identity=self._identity,
+                        facts=facts,
+                        submit=self._submit,
+                        gather_instrument=self._gather_instrument,
+                    )
+                    proposals.mark_processed(
+                        session,
+                        queue_id=item.id,
+                        stage=outcome.stage.value,
+                        refusal=outcome.refusal,
+                        now=now,
+                    )
+                    session.commit()
+                except BaseException:
+                    session.rollback()
+                    raise
             report.outcomes.append(outcome)
             report.proposals_judged += 1
             if outcome.stage is CycleStage.COMPLETE:

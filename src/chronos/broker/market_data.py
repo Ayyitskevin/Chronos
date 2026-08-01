@@ -16,11 +16,15 @@ from decimal import Decimal
 from functools import partial
 from typing import TypeVar
 
-from chronos.broker.base import Broker, BrokerDataError
+from chronos.broker.base import Broker, BrokerDataError, OptionChainResponse
 from chronos.config.limits import (
     MAX_CANDIDATE_EXPIRATIONS,
     MAX_CANDIDATE_REQUEST_CONTRACTS,
     MAX_CANDIDATE_STRIKES_PER_EXPIRATION,
+    MAX_OPTION_CHAIN_EXPIRATIONS_PER_ROW,
+    MAX_OPTION_CHAIN_ROWS,
+    MAX_OPTION_CHAIN_STRIKES_PER_ROW,
+    MAX_OPTION_MARKET_RULE_INCREMENTS,
 )
 from chronos.domain.enums import DataQuality, OptionRight
 from chronos.domain.models import (
@@ -29,6 +33,8 @@ from chronos.domain.models import (
     OptionChainParameters,
     OptionContract,
     OptionContractSpec,
+    OptionDeliverableFacts,
+    OptionMarketRule,
     UnderlyingContract,
 )
 
@@ -46,24 +52,72 @@ class MarketDataPacingError(BrokerDataError):
 
 
 class MarketDataUnavailableError(BrokerDataError):
-    """The broker omitted or mismatched requested market data."""
+    """The broker omitted or mismatched requested market data.
 
-    def __init__(self, message: str, *, contract_ids: Sequence[int] = ()) -> None:
+    ``observed_values`` retains the bounded prefix the broker did return.  A
+    fail-closed caller must not turn a partial response into success, but the
+    evidence receipt must still say what was actually observed.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        contract_ids: Sequence[int] = (),
+        observed_values: Sequence[object] = (),
+        observed_at: datetime | None = None,
+        truncated: bool = False,
+        chain_response: OptionChainResponse | None = None,
+    ) -> None:
         super().__init__(message)
         self.contract_ids = tuple(contract_ids)
+        self.observed_values = tuple(observed_values)
+        self.observed_at = observed_at
+        self.truncated = truncated
+        self.chain_response = chain_response
 
 
 class MarketDataPacingExhaustedError(BrokerDataError):
     """All bounded attempts failed with classified pacing violations."""
 
-    def __init__(self, operation: str, attempts: int) -> None:
+    def __init__(
+        self,
+        operation: str,
+        attempts: int,
+        *,
+        contract_ids: Sequence[int] = (),
+        observed_values: Sequence[object] = (),
+        observed_at: datetime | None = None,
+        truncated: bool = False,
+        chain_response: OptionChainResponse | None = None,
+    ) -> None:
         super().__init__(f"{operation} exhausted {attempts} pacing-limited attempts")
         self.operation = operation
         self.attempts = attempts
+        self.contract_ids = tuple(contract_ids)[:MAX_CANDIDATE_REQUEST_CONTRACTS]
+        self.observed_values = tuple(observed_values)[:MAX_CANDIDATE_REQUEST_CONTRACTS]
+        self.observed_at = observed_at
+        self.truncated = truncated
+        self.chain_response = chain_response
 
 
 class MarketDataCancellationError(BrokerDataError):
-    """A requested market-data subscription could not be cancelled cleanly."""
+    """A subscription could not be cancelled; any observed values stay attached."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        contract_ids: Sequence[int] = (),
+        observed_values: Sequence[object] = (),
+        observed_at: datetime | None = None,
+        truncated: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.contract_ids = tuple(contract_ids)
+        self.observed_values = tuple(observed_values)
+        self.observed_at = observed_at
+        self.truncated = truncated
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +129,11 @@ class OptionChainSnapshot:
     observed_at: datetime
     from_cache: bool
     fresh: bool
+    complete: bool
+    truncated: bool
+    completion_marker: str
+    completion_observed_at: datetime
+    completion_source: str
 
     @property
     def cache_age_seconds(self) -> float:
@@ -201,7 +260,7 @@ class MarketDataManager:
         self._subscription_limiter = _SubscriptionLimiter(max_active_subscriptions)
         self._quote_operation_lock = asyncio.Lock()
         self._cancellation_failure: MarketDataCancellationError | None = None
-        self._chain_cache: dict[int, _CacheEntry[tuple[OptionChainParameters, ...]]] = {}
+        self._chain_cache: dict[int, _CacheEntry[OptionChainResponse]] = {}
         self._contract_cache: dict[tuple[object, ...], _CacheEntry[OptionContract]] = {}
         self._quote_cache: dict[int, _CacheEntry[MarketQuote]] = {}
 
@@ -223,6 +282,32 @@ class MarketDataManager:
         """Return the number of live cache entries for local diagnostics."""
 
         return len(self._chain_cache) + len(self._contract_cache) + len(self._quote_cache)
+
+    async def qualify_underlying(self, symbol: str) -> UnderlyingContract:
+        """Qualify one stock through the manager's bounded read discipline."""
+
+        normalized_symbol = symbol.strip().upper()
+        if not normalized_symbol:
+            raise ValueError("underlying symbol must not be blank")
+        self._raise_if_quarantined()
+        try:
+            async with self._request_limiter:
+                contract = await self._with_pacing_retry(
+                    lambda: self._broker.qualify_underlying(normalized_symbol),
+                    operation=f"underlying qualification for {normalized_symbol}",
+                )
+        except TimeoutError as error:
+            raise MarketDataUnavailableError(
+                f"Broker underlying qualification timed out for {normalized_symbol}"
+            ) from error
+        if contract.symbol != normalized_symbol:
+            raise MarketDataUnavailableError(
+                f"Broker qualified a mismatched underlying for {normalized_symbol}",
+                contract_ids=(contract.con_id,),
+                observed_values=(contract,),
+                observed_at=self._now(),
+            )
+        return contract
 
     async def option_chain_parameters(
         self,
@@ -246,36 +331,79 @@ class MarketDataManager:
             )
         ):
             return OptionChainSnapshot(
-                parameters=cached.value,
+                parameters=cached.value.parameters,
                 fetched_at=cached.fetched_at,
                 observed_at=observed_at,
                 from_cache=True,
                 fresh=True,
+                complete=cached.value.complete,
+                truncated=cached.value.truncated,
+                completion_marker=cached.value.completion_marker,
+                completion_observed_at=cached.value.observed_at,
+                completion_source=cached.value.source,
             )
 
         async with self._request_limiter:
-            parameters = await self._with_pacing_retry(
+            response = await self._with_pacing_retry(
                 lambda: self._broker.option_chain_parameters(underlying),
                 operation=f"option chain for {underlying.symbol}",
             )
-        if not parameters:
+        if not isinstance(response, OptionChainResponse):
+            raise MarketDataUnavailableError(
+                f"Broker returned option-chain metadata without completion evidence for "
+                f"{underlying.symbol}",
+                contract_ids=(underlying.con_id,),
+            )
+        bounded_response = self._bounded_chain_response(response)
+        if not response.complete or response.truncated:
+            raise MarketDataUnavailableError(
+                f"Broker returned a partial or truncated option chain for {underlying.symbol}",
+                contract_ids=(underlying.con_id,),
+                observed_at=self._now(),
+                truncated=bounded_response.truncated,
+                chain_response=bounded_response,
+            )
+        if len(response.parameters) > MAX_OPTION_CHAIN_ROWS or any(
+            len(value.expirations) > MAX_OPTION_CHAIN_EXPIRATIONS_PER_ROW
+            or len(value.strikes) > MAX_OPTION_CHAIN_STRIKES_PER_ROW
+            for value in response.parameters
+        ):
+            raise MarketDataUnavailableError(
+                f"Broker returned option-chain metadata beyond the hard evidence bound for "
+                f"{underlying.symbol}",
+                contract_ids=(underlying.con_id,),
+                observed_at=self._now(),
+                truncated=True,
+                chain_response=bounded_response,
+            )
+        if not response.parameters:
             raise MarketDataUnavailableError(
                 f"Broker returned no option-chain metadata for {underlying.symbol}",
                 contract_ids=(underlying.con_id,),
+                observed_at=self._now(),
+                chain_response=bounded_response,
             )
-        if any(value.underlying_con_id != underlying.con_id for value in parameters):
+        if any(value.underlying_con_id != underlying.con_id for value in response.parameters):
             raise MarketDataUnavailableError(
                 f"Broker returned mismatched option-chain metadata for {underlying.symbol}",
                 contract_ids=(underlying.con_id,),
+                observed_at=self._now(),
+                truncated=bounded_response.truncated,
+                chain_response=bounded_response,
             )
         fetched_at = self._now()
-        self._chain_cache[underlying.con_id] = _CacheEntry(parameters, fetched_at)
+        self._chain_cache[underlying.con_id] = _CacheEntry(response, fetched_at)
         return OptionChainSnapshot(
-            parameters=parameters,
+            parameters=response.parameters,
             fetched_at=fetched_at,
             observed_at=fetched_at,
             from_cache=False,
             fresh=True,
+            complete=response.complete,
+            truncated=response.truncated,
+            completion_marker=response.completion_marker,
+            completion_observed_at=response.observed_at,
+            completion_source=response.source,
         )
 
     @staticmethod
@@ -361,6 +489,7 @@ class MarketDataManager:
         self._raise_if_quarantined()
         self._prune_expired_caches(observed_at)
         resolved: dict[tuple[object, ...], OptionContract] = {}
+        freshly_resolved: dict[tuple[object, ...], OptionContract] = {}
         missing: list[OptionContractSpec] = []
         for spec in specs:
             key = self._spec_key(spec)
@@ -379,25 +508,165 @@ class MarketDataManager:
                 missing.append(spec)
 
         for batch in self._batches(tuple(missing)):
-            async with self._request_limiter:
-                qualified = await self._with_pacing_retry(
-                    partial(self._broker.qualify_option_contracts, batch),
-                    operation="option contract qualification",
+            try:
+                async with self._request_limiter:
+                    qualified = await self._with_pacing_retry(
+                        partial(self._broker.qualify_option_contracts, batch),
+                        operation="option contract qualification",
+                    )
+            except BaseException as error:
+                observed = tuple(
+                    sorted(
+                        (
+                            *freshly_resolved.values(),
+                            *(
+                                item
+                                for item in getattr(error, "observed_values", ())
+                                if isinstance(item, OptionContract)
+                            ),
+                        ),
+                        key=lambda contract: (
+                            self._spec_key(contract),
+                            contract.con_id,
+                            contract.local_symbol,
+                            contract.model_dump_json(),
+                        ),
+                    )
                 )
+                vars(error).update(
+                    observed_values=observed[:MAX_CANDIDATE_REQUEST_CONTRACTS],
+                    observed_at=(
+                        getattr(error, "observed_at", None)
+                        if isinstance(getattr(error, "observed_at", None), datetime)
+                        else self._now()
+                    ),
+                    truncated=(
+                        bool(getattr(error, "truncated", False))
+                        or len(observed) > MAX_CANDIDATE_REQUEST_CONTRACTS
+                    ),
+                )
+                raise
             returned = {self._spec_key(contract): contract for contract in qualified}
             expected = {self._spec_key(spec) for spec in batch}
             missing_keys = expected - returned.keys()
             unexpected_keys = returned.keys() - expected
             if missing_keys or unexpected_keys or len(returned) != len(qualified):
+                observed = tuple(
+                    sorted(
+                        (*freshly_resolved.values(), *qualified),
+                        key=lambda contract: (
+                            self._spec_key(contract),
+                            contract.con_id,
+                            contract.local_symbol,
+                            contract.model_dump_json(),
+                        ),
+                    )
+                )
                 raise MarketDataUnavailableError(
-                    "Broker returned incomplete or mismatched qualified option contracts"
+                    "Broker returned incomplete or mismatched qualified option contracts",
+                    observed_values=observed[:MAX_CANDIDATE_REQUEST_CONTRACTS],
+                    observed_at=self._now(),
+                    truncated=len(observed) > MAX_CANDIDATE_REQUEST_CONTRACTS,
                 )
             fetched_at = self._now()
             for key, contract in returned.items():
                 resolved[key] = contract
+                freshly_resolved[key] = contract
                 self._contract_cache[key] = _CacheEntry(contract, fetched_at)
 
         return tuple(resolved[self._spec_key(spec)] for spec in specs)
+
+    async def option_market_rules(
+        self,
+        contracts: Sequence[OptionContract],
+    ) -> tuple[OptionMarketRule, ...]:
+        """Fetch a complete, exactly aligned set of read-only price rules."""
+
+        if len(contracts) > MAX_CANDIDATE_REQUEST_CONTRACTS:
+            raise ValueError("option market-rule request exceeds the hard request bound")
+        if not contracts:
+            return ()
+        self._require_unique_contract_ids(contracts, operation="option market-rule request")
+        self._raise_if_quarantined()
+        async with self._request_limiter:
+            rules = await self._with_pacing_retry(
+                lambda: self._broker.option_market_rules(contracts),
+                operation="option market-rule evidence",
+            )
+        requested = {contract.con_id: contract for contract in contracts}
+        returned = {rule.con_id: rule for rule in rules}
+        if any(len(rule.price_increments) > MAX_OPTION_MARKET_RULE_INCREMENTS for rule in rules):
+            bounded_rules = tuple(
+                rule.model_copy(
+                    update={
+                        "price_increments": rule.price_increments[
+                            :MAX_OPTION_MARKET_RULE_INCREMENTS
+                        ]
+                    }
+                )
+                for rule in sorted(rules, key=lambda item: item.con_id)[
+                    :MAX_CANDIDATE_REQUEST_CONTRACTS
+                ]
+            )
+            raise MarketDataUnavailableError(
+                "Broker returned an option market rule beyond the hard evidence bound",
+                observed_values=bounded_rules,
+                observed_at=self._now(),
+                truncated=True,
+            )
+        if set(returned) != set(requested) or len(returned) != len(rules):
+            raise MarketDataUnavailableError(
+                "Broker returned incomplete or mismatched option market rules",
+                contract_ids=tuple(sorted(set(requested) - set(returned))),
+                observed_values=tuple(sorted(rules, key=lambda rule: rule.con_id))[
+                    :MAX_CANDIDATE_REQUEST_CONTRACTS
+                ],
+                observed_at=self._now(),
+                truncated=len(rules) > MAX_CANDIDATE_REQUEST_CONTRACTS,
+            )
+        for con_id, rule in returned.items():
+            if rule.exchange != requested[con_id].exchange:
+                raise MarketDataUnavailableError(
+                    "Broker returned a market rule for the wrong option route",
+                    contract_ids=(con_id,),
+                    observed_values=tuple(sorted(rules, key=lambda item: item.con_id))[
+                        :MAX_CANDIDATE_REQUEST_CONTRACTS
+                    ],
+                    observed_at=self._now(),
+                    truncated=len(rules) > MAX_CANDIDATE_REQUEST_CONTRACTS,
+                )
+        return tuple(returned[contract.con_id] for contract in contracts)
+
+    async def option_deliverable_facts(
+        self,
+        contracts: Sequence[OptionContract],
+    ) -> tuple[OptionDeliverableFacts, ...]:
+        """Fetch an exactly aligned deliverable fact for every candidate."""
+
+        if len(contracts) > MAX_CANDIDATE_REQUEST_CONTRACTS:
+            raise ValueError("option deliverable request exceeds the hard request bound")
+        if not contracts:
+            return ()
+        self._require_unique_contract_ids(contracts, operation="option deliverable request")
+        self._raise_if_quarantined()
+        async with self._request_limiter:
+            facts = await self._with_pacing_retry(
+                lambda: self._broker.option_deliverable_facts(contracts),
+                operation="option deliverable evidence",
+            )
+        requested_ids = {contract.con_id for contract in contracts}
+        returned = {fact.con_id: fact for fact in facts}
+        if set(returned) != requested_ids or len(returned) != len(facts):
+            raise MarketDataUnavailableError(
+                "Broker returned incomplete or mismatched option deliverable facts",
+                contract_ids=tuple(sorted(requested_ids - set(returned))),
+                observed_values=tuple(sorted(facts, key=lambda fact: fact.con_id))[
+                    :MAX_CANDIDATE_REQUEST_CONTRACTS
+                ],
+                observed_at=self._now(),
+                truncated=len(facts) > MAX_CANDIDATE_REQUEST_CONTRACTS,
+            )
+        return tuple(returned[contract.con_id] for contract in contracts)
 
     async def underlying_quote(
         self,
@@ -432,6 +701,8 @@ class MarketDataManager:
             raise MarketDataUnavailableError(
                 f"Broker returned a mismatched quote for {contract.symbol}",
                 contract_ids=(contract.con_id,),
+                observed_values=(quote,),
+                observed_at=self._now(),
             )
         fetched_at = self._now()
         entry = _CacheEntry(quote, fetched_at)
@@ -471,6 +742,8 @@ class MarketDataManager:
             raise MarketDataUnavailableError(
                 f"Broker returned a mismatched quote for {contract.symbol}",
                 contract_ids=(contract.con_id,),
+                observed_values=(quote,),
+                observed_at=self._now(),
             )
         fetched_at = self._now()
         entry = _CacheEntry(quote, fetched_at)
@@ -512,14 +785,46 @@ class MarketDataManager:
         tasks = [asyncio.create_task(self._request_option_batch(batch)) for batch in batches]
         if tasks:
             results = await asyncio.gather(*tasks, return_exceptions=True)
+            completed_quotes: list[MarketQuote] = []
+            failures: list[BaseException] = []
             for result in results:
                 if isinstance(result, BaseException):
-                    raise result
-                fetched_at = self._now()
-                for quote in result:
-                    entry = _CacheEntry(quote, fetched_at)
-                    self._quote_cache[quote.contract.con_id] = entry
-                    entries[quote.contract.con_id] = (entry, False)
+                    failures.append(result)
+                else:
+                    completed_quotes.extend(result)
+            if failures:
+                observed_quotes = [entry.value for entry, _ in entries.values()]
+                observed_quotes.extend(completed_quotes)
+                for failure in failures:
+                    observed_quotes.extend(
+                        item
+                        for item in getattr(failure, "observed_values", ())
+                        if isinstance(item, MarketQuote)
+                    )
+                observed_quotes.sort(
+                    key=lambda quote: (
+                        quote.contract.con_id,
+                        quote.timestamp,
+                        quote.bid if quote.bid is not None else Decimal("-1"),
+                        quote.ask if quote.ask is not None else Decimal("-1"),
+                    )
+                )
+                first_failure = failures[0]
+                bounded = tuple(observed_quotes[:MAX_CANDIDATE_REQUEST_CONTRACTS])
+                vars(first_failure).update(
+                    observed_values=bounded,
+                    observed_at=self._now(),
+                    truncated=(
+                        bool(getattr(first_failure, "truncated", False))
+                        or len(observed_quotes) > MAX_CANDIDATE_REQUEST_CONTRACTS
+                    ),
+                )
+                raise first_failure
+            fetched_at = self._now()
+            for quote in completed_quotes:
+                entry = _CacheEntry(quote, fetched_at)
+                self._quote_cache[quote.contract.con_id] = entry
+                entries[quote.contract.con_id] = (entry, False)
 
         absent = tuple(contract.con_id for contract in contracts if contract.con_id not in entries)
         if absent:
@@ -555,6 +860,19 @@ class MarketDataManager:
             raise MarketDataUnavailableError(
                 "Broker returned incomplete or mismatched option quotes",
                 contract_ids=missing or contract_ids,
+                observed_values=tuple(
+                    sorted(
+                        quotes,
+                        key=lambda quote: (
+                            quote.contract.con_id,
+                            quote.timestamp,
+                            quote.bid if quote.bid is not None else Decimal("-1"),
+                            quote.ask if quote.ask is not None else Decimal("-1"),
+                        ),
+                    )
+                )[:MAX_CANDIDATE_REQUEST_CONTRACTS],
+                observed_at=self._now(),
+                truncated=len(quotes) > MAX_CANDIDATE_REQUEST_CONTRACTS,
             )
         return tuple(returned[contract_id] for contract_id in contract_ids)
 
@@ -586,8 +904,27 @@ class MarketDataManager:
         if cancellation_error is None:
             await self._subscription_limiter.release(len(contract_ids))
         else:
+            observed_values: tuple[object, ...]
+            evidence_error = primary_error or cancellation_error
+            if result is not None and isinstance(result, tuple):
+                observed_values = result[:MAX_CANDIDATE_REQUEST_CONTRACTS]
+            elif result is not None:
+                observed_values = (result,)
+            else:
+                observed_values = tuple(getattr(evidence_error, "observed_values", ()))[
+                    :MAX_CANDIDATE_REQUEST_CONTRACTS
+                ]
+            evidence_observed_at = getattr(evidence_error, "observed_at", None)
             quarantine = MarketDataCancellationError(
-                "Market-data cleanup failed; requests are locked until the runtime reconnects"
+                "Market-data cleanup failed; requests are locked until the runtime reconnects",
+                contract_ids=contract_ids,
+                observed_values=observed_values,
+                observed_at=(
+                    evidence_observed_at
+                    if isinstance(evidence_observed_at, datetime)
+                    else self._now()
+                ),
+                truncated=bool(getattr(evidence_error, "truncated", False)),
             )
             self._cancellation_failure = quarantine
             self._logger.critical(
@@ -637,7 +974,19 @@ class MarketDataManager:
                 )
                 await self._sleep(delay)
 
-        exhausted = MarketDataPacingExhaustedError(operation, self._max_attempts)
+        # A retry is a new snapshot, not an additive stream. Preserve the
+        # bounded evidence from the final attempt only: merging observations
+        # across attempts could manufacture a complete-looking set whose
+        # members were never simultaneously true.
+        exhausted = MarketDataPacingExhaustedError(
+            operation,
+            self._max_attempts,
+            contract_ids=getattr(last_error, "contract_ids", ()),
+            observed_values=getattr(last_error, "observed_values", ()),
+            observed_at=getattr(last_error, "observed_at", None),
+            truncated=bool(getattr(last_error, "truncated", False)),
+            chain_response=getattr(last_error, "chain_response", None),
+        )
         raise exhausted from last_error
 
     def _usable_cached_quote(
@@ -705,6 +1054,17 @@ class MarketDataManager:
         if self._cancellation_failure is not None:
             raise self._cancellation_failure
 
+    @staticmethod
+    def _require_unique_contract_ids(
+        contracts: Sequence[OptionContract], *, operation: str
+    ) -> None:
+        contract_ids = tuple(contract.con_id for contract in contracts)
+        if len(set(contract_ids)) != len(contract_ids):
+            raise MarketDataUnavailableError(
+                f"{operation} contains duplicate contract identifiers",
+                contract_ids=contract_ids,
+            )
+
     def _prune_expired_caches(self, observed_at: datetime) -> None:
         self._chain_cache = {
             key: entry
@@ -735,6 +1095,48 @@ class MarketDataManager:
         return tuple(
             values[index : index + self._batch_size]
             for index in range(0, len(values), self._batch_size)
+        )
+
+    @staticmethod
+    def _bounded_chain_response(response: OptionChainResponse) -> OptionChainResponse:
+        """Retain a deterministic bounded prefix even when the broker over-returns."""
+
+        ordered_rows = tuple(
+            sorted(
+                response.parameters,
+                key=lambda row: (
+                    row.underlying_con_id,
+                    row.exchange,
+                    row.trading_class,
+                    row.multiplier,
+                    tuple(sorted(row.expirations)),
+                    tuple(sorted(row.strikes)),
+                ),
+            )
+        )
+        parameters = tuple(
+            row.model_copy(
+                update={
+                    "expirations": tuple(
+                        sorted(row.expirations)[:MAX_OPTION_CHAIN_EXPIRATIONS_PER_ROW]
+                    ),
+                    "strikes": tuple(sorted(row.strikes)[:MAX_OPTION_CHAIN_STRIKES_PER_ROW]),
+                }
+            )
+            for row in ordered_rows[:MAX_OPTION_CHAIN_ROWS]
+        )
+        was_bounded = len(parameters) != len(response.parameters) or any(
+            len(retained.expirations) != len(original.expirations)
+            or len(retained.strikes) != len(original.strikes)
+            for retained, original in zip(parameters, ordered_rows, strict=False)
+        )
+        return OptionChainResponse(
+            parameters=parameters,
+            complete=response.complete,
+            truncated=response.truncated or was_bounded,
+            completion_marker=response.completion_marker,
+            observed_at=response.observed_at,
+            source=response.source,
         )
 
     def _now(self) -> datetime:

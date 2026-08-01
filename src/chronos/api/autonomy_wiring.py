@@ -61,7 +61,16 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from chronos.autonomy import AITradeDecision, AutonomyMandate, TradableAssetClass
+from chronos.api.option_selection import AutonomousOptionSelectionService
+from chronos.autonomy import (
+    AITradeDecision,
+    AutonomyMandate,
+    DecisionKind,
+    OrderForm,
+    StrategyForm,
+    TradableAssetClass,
+)
+from chronos.domain.enums import OptionRight
 from chronos.domain.models import Instrument, MarketQuote
 from chronos.orders.intent import WheelOrderIntent
 from chronos.runtime import AppRuntime
@@ -69,6 +78,11 @@ from chronos.supervisor import alerts, delivery, durable, queue
 from chronos.supervisor.admission import MarketDataEvidence
 from chronos.supervisor.compiler import QuoteEvidence
 from chronos.supervisor.loop import CycleFacts, Handoff, InstrumentFacts
+from chronos.supervisor.option_selection import (
+    OptionSelectionPolicy,
+    OptionSelectionRequest,
+    canonical_digest,
+)
 from chronos.supervisor.runtime import AutonomyRuntime, FactGatherer, RuntimeConfig
 from chronos.supervisor.sizing import AccountEvidence
 from chronos.utils.identifiers import account_fingerprint
@@ -205,13 +219,104 @@ def order_plane_handoff(runtime: AppRuntime) -> Handoff:
     return _submit
 
 
+def _request_for(decision: AITradeDecision, runtime: AppRuntime) -> OptionSelectionRequest:
+    """Translate authorized economics; broker identity remains unexpressible."""
+
+    del runtime
+    strategy = decision.requested_strategy or StrategyForm.LONG_PUT
+    right = {
+        StrategyForm.CASH_SECURED_PUT: OptionRight.PUT,
+        StrategyForm.COVERED_CALL: OptionRight.CALL,
+        StrategyForm.LONG_CALL: OptionRight.CALL,
+    }.get(strategy, OptionRight.PUT)
+    return OptionSelectionRequest(
+        decision_id=decision.decision_id,
+        symbol=decision.symbol,
+        strategy=strategy,
+        right=right,
+        requested_contracts=decision.requested_quantity,
+    )
+
+
+def _policy_for(
+    decision: AITradeDecision,
+    mandate: AutonomyMandate,
+    runtime: AppRuntime,
+) -> OptionSelectionPolicy:
+    """Intersect runtime evidence settings with the exact owner mandate."""
+
+    del decision
+    settings = runtime.settings
+    mandate_age = mandate.market_data.max_quote_age_seconds
+    max_quote_age = min(
+        Decimal(settings.max_quote_age_seconds),
+        mandate_age if mandate_age > 0 else Decimal(settings.max_quote_age_seconds),
+    )
+    mandate_spread = mandate.market_data.max_relative_spread
+    max_spread = (
+        min(settings.max_relative_spread, mandate_spread) if mandate_spread > 0 else Decimal(0)
+    )
+    order_form = next(
+        (
+            item
+            for item in (OrderForm.MARKET, OrderForm.MARKETABLE_LIMIT, OrderForm.LIMIT)
+            if item in mandate.scope.order_forms
+        ),
+        OrderForm.LIMIT,
+    )
+    return OptionSelectionPolicy(
+        max_quote_age_seconds=max_quote_age,
+        max_chain_age_seconds=Decimal("3600"),
+        max_candidate_expirations=settings.max_expirations,
+        max_strikes_per_expiration=settings.max_strikes_per_expiration,
+        min_dte=settings.min_dte,
+        target_dte=settings.target_dte,
+        max_dte=settings.max_dte,
+        min_abs_delta=settings.min_abs_delta,
+        target_abs_delta=settings.target_abs_delta,
+        max_abs_delta=settings.max_abs_delta,
+        permitted_data_qualities=mandate.market_data.permitted_data_qualities,
+        min_option_volume=max(settings.min_option_volume, mandate.market_data.min_option_volume),
+        min_open_interest=max(
+            settings.min_open_interest,
+            mandate.market_data.min_open_interest,
+        ),
+        max_relative_spread=max_spread,
+        permitted_exchanges=mandate.scope.exchanges,
+        permitted_trading_classes=mandate.scope.contract_families,
+        permitted_sessions=mandate.sessions.permitted_sessions,
+        required_multiplier=Decimal("100"),
+        order_form=order_form,
+        market_timezone=settings.market_timezone,
+        delta_weight=settings.delta_weight,
+        spread_weight=settings.spread_weight,
+        dte_weight=settings.dte_weight,
+        liquidity_weight=settings.liquidity_weight,
+    )
+
+
 class BackendGatherers:
     """Facts from the running backend, per tick and per decision."""
 
-    def __init__(self, runtime: AppRuntime, fingerprint: str, generation: int) -> None:
+    def __init__(
+        self,
+        runtime: AppRuntime,
+        fingerprint: str,
+        generation: int,
+        *,
+        mandate: AutonomyMandate,
+        mandate_digest: str,
+    ) -> None:
         self._runtime = runtime
         self._fingerprint = fingerprint
         self._generation = generation
+        self._mandate = mandate
+        self._option_selection = AutonomousOptionSelectionService(
+            runtime,
+            autonomy_mode=mandate.mode.value,
+            mandate_digest=mandate_digest,
+            account_fingerprint=fingerprint,
+        )
 
     def _probe_symbol(self, mandate: AutonomyMandate) -> str:
         symbols = mandate.scope.symbols
@@ -259,15 +364,17 @@ class BackendGatherers:
     def instrument_facts(self, decision: AITradeDecision) -> InstrumentFacts | None:
         """Qualify and quote the decision's own instrument, fresh.
 
-        Equities and crypto resolve here. Options do not yet: chain resolution
-        needs strike/expiry selection this wiring does not own, so an option
-        decision refuses at this seam rather than pricing against a guess —
-        disclosed in ADR-0017's residuals.
+        Equities and crypto use their existing direct qualification path.
+        Opening equity options use the read-only evidence service and carry its
+        canonical receipt back to the cycle. The cycle persists and verifies
+        that receipt before it uses the selected contract.
         """
 
         runtime = self._runtime
         contract: Instrument
         quote: MarketQuote
+        option_request: OptionSelectionRequest | None = None
+        option_policy: OptionSelectionPolicy | None = None
         try:
             if decision.asset_class is TradableAssetClass.EQUITY:
                 equity = runtime.connection.run(runtime.broker.qualify_underlying(decision.symbol))
@@ -277,10 +384,70 @@ class BackendGatherers:
                 crypto = runtime.connection.run(runtime.broker.qualify_crypto(decision.symbol))
                 quote = runtime.connection.run(runtime.broker.request_crypto_quote(crypto))
                 contract = crypto
+            elif (
+                decision.asset_class is TradableAssetClass.EQUITY_OPTION
+                and decision.kind is DecisionKind.OPEN
+            ):
+                option_request = _request_for(decision, runtime)
+                option_policy = _policy_for(decision, self._mandate, runtime)
+                receipt = self._option_selection.resolve(
+                    request=option_request,
+                    policy=option_policy,
+                ).receipt
+                selected = receipt.selected
+                if selected is None:
+                    return InstrumentFacts(
+                        contract=None,
+                        quote=None,
+                        reference_price=Decimal(0),
+                        multiplier=Decimal(1),
+                        selection_receipt=receipt,
+                        selection_activation_validator=self._option_selection.validate_handoff,
+                    )
+                selected_quote = _quote_evidence(selected.quote)
+                if selected_quote is None:
+                    return InstrumentFacts(
+                        contract=None,
+                        quote=None,
+                        reference_price=Decimal(0),
+                        multiplier=Decimal(1),
+                        selection_receipt=receipt,
+                        selection_activation_validator=self._option_selection.validate_handoff,
+                    )
+                return InstrumentFacts(
+                    contract=selected.contract,
+                    quote=selected_quote,
+                    reference_price=selected.sizing_reference_price,
+                    multiplier=selected.deliverable_shares,
+                    selection_receipt=receipt,
+                    selection_activation_validator=self._option_selection.validate_handoff,
+                )
             else:
                 return None
-        except Exception:
+        except Exception as error:
             _logger.exception("Instrument fact gathering failed for %s", decision.symbol or "?")
+            if (
+                decision.asset_class is TradableAssetClass.EQUITY_OPTION
+                and decision.kind is DecisionKind.OPEN
+                and option_request is not None
+                and option_policy is not None
+            ):
+                try:
+                    receipt = self._option_selection.refusal_for_exception(
+                        option_request,
+                        option_policy,
+                        error,
+                    ).receipt
+                    return InstrumentFacts(
+                        contract=None,
+                        quote=None,
+                        reference_price=Decimal(0),
+                        multiplier=Decimal(1),
+                        selection_receipt=receipt,
+                        selection_activation_validator=self._option_selection.validate_handoff,
+                    )
+                except Exception:
+                    _logger.exception("Could not canonicalize the option resolver failure")
             return None
         reference = _reference_price(quote)
         if reference <= 0:
@@ -349,8 +516,14 @@ def build_autonomy_runtime(
     ):
         return None
 
-    gatherers = BackendGatherers(runtime, fingerprint, process_generation)
     mandate = loaded.mandate
+    gatherers = BackendGatherers(
+        runtime,
+        fingerprint,
+        process_generation,
+        mandate=mandate,
+        mandate_digest=canonical_digest(mandate),
+    )
     return AutonomyRuntime(
         sessions=runtime.database.sessions,
         config=RuntimeConfig(

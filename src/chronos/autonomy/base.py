@@ -32,10 +32,14 @@ class AutonomyModel(ChronosModel):
     """Immutable contract model whose validators also run on ``model_copy``."""
 
     def model_copy(self, *, update: Mapping[str, Any] | None = None, deep: bool = False) -> Self:
-        copied = super().model_copy(update=update, deep=deep)
+        copied = super().model_copy(deep=deep)
         if not update:
             return copied
         # Round-trip through the validator so an updated copy is held to the
-        # same invariants as a constructed instance. `model_dump()` in python
-        # mode preserves Decimal/datetime/enum types, so nothing is coerced.
-        return type(self).model_validate(copied.model_dump())
+        # same invariants as a constructed instance. Merge the update into the
+        # dumped data *before* validation: passing unknown fields through
+        # Pydantic's unchecked copy first can make them disappear on dump,
+        # silently turning ``extra='forbid'`` into ``extra='ignore'``.
+        data = copied.model_dump(mode="python")
+        data.update(update)
+        return type(self).model_validate(data)

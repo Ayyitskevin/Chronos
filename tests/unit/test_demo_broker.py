@@ -75,7 +75,8 @@ async def test_empty_account_profile_has_honest_fixture_and_reachable_aapl_chain
 
     snapshot = await broker.snapshot()
     underlying = await broker.qualify_underlying("AAPL")
-    chain = (await broker.option_chain_parameters(underlying))[0]
+    chain_response = await broker.option_chain_parameters(underlying)
+    chain = chain_response[0]
     requested = OptionContractSpec(
         symbol="AAPL",
         underlying_con_id=underlying.con_id,
@@ -87,6 +88,8 @@ async def test_empty_account_profile_has_honest_fixture_and_reachable_aapl_chain
     )
     qualified = await broker.qualify_option_contracts((requested,))
     quotes = await broker.request_option_quotes(qualified)
+    market_rules = await broker.option_market_rules(qualified)
+    deliverables = await broker.option_deliverable_facts(qualified)
 
     assert broker.profile is DemoProfile.EMPTY_ACCOUNT
     assert snapshot.positions == ()
@@ -96,10 +99,17 @@ async def test_empty_account_profile_has_honest_fixture_and_reachable_aapl_chain
         ("AAPL", DemoCase.FLAT_PUT)
     ]
     assert "whole account is empty" in broker.fixture_cases[0].explanation
+    assert chain_response.complete is True
+    assert chain_response.truncated is False
+    assert chain_response.completion_marker == "demo-option-chain-fixture-complete"
+    assert chain_response.source == "demo-fixture-v1"
+    assert chain_response.observed_at == FIXED_NOW
     assert chain.expirations == (qualified[0].expiration,)
     assert chain.strikes == (Decimal("185"),)
     assert qualified[0].con_id == 2002
     assert quotes[0].greeks is not None
+    assert market_rules[0].price_increments[-1].increment == Decimal("0.05")
+    assert deliverables[0].is_standard_for(qualified[0])
 
 
 @pytest.mark.asyncio
