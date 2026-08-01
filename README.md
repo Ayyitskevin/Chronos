@@ -1,5 +1,12 @@
 # Chronos
 
+> **AI agents and contributors: start here.** Read the repository contract in
+> [AGENTS.md](AGENTS.md) and the canonical
+> [Vision Completion Plan](docs/VISION_COMPLETION_PLAN.md) before proposing or changing
+> Chronos. The plan defines the two independent 10/10 outcomes, build order, scorecard, and
+> evidence-bound promotion gates. Historical game plans remain useful context but are not
+> current roadmap authority when they conflict with that plan.
+
 Chronos is a local-first, model-driven trading system for Interactive Brokers. Its
 mission (owner directive, 2026-07-25) is **autonomous trading** across equities and
 ETFs, exchange-traded futures, and listed equity and index options: an approved model
@@ -254,6 +261,8 @@ marked IBKR smoke test is skipped by default and remains strictly read-only.
 
 ## Documentation
 
+- [Repository contract for AI agents and contributors](AGENTS.md)
+- [Canonical Vision Completion Plan](docs/VISION_COMPLETION_PLAN.md)
 - [ADR-0016 — Controlled Autonomous Model Authority](docs/adr/ADR-0016-controlled-autonomous-model-authority.md)
   (the authority model, model isolation, the mandate, the promotion ladder)
 - [Live Wheel game plan & status](docs/LIVE_WHEEL_GAME_PLAN.md)

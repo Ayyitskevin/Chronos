@@ -1,5 +1,10 @@
 # TASKS
 
+> **Legacy board.** This file primarily tracks the deterministic strategy-platform build
+> and is not repository-wide current truth. All new work must be sequenced and judged
+> against [docs/VISION_COMPLETION_PLAN.md](docs/VISION_COMPLETION_PLAN.md); verify every
+> open/done claim against the live commit before relying on it.
+
 Working task board for the platform build. Historical wheel-dashboard
 milestones (M1–M10) are documented in README.md and docs/architecture.md.
 

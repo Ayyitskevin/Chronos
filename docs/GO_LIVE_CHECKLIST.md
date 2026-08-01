@@ -1,5 +1,10 @@
 # Go-Live Checklist
 
+> **Current roadmap relationship (2026-08-01).** Retain this document for the
+> deterministic-platform checklist and reviewed-release doctrine. Use
+> [VISION_COMPLETION_PLAN.md](VISION_COMPLETION_PLAN.md) for repository-wide sequencing,
+> autonomous scorecards, and the evidence required for each family promotion.
+
 > **Scope note (2026-07-25).** This checklist governs the **deterministic strategy platform**
 > (`chronos.execution`/`chronos.risk`) and its `TradingMode` ladder. Gates 4-5 below remain
 > accurate for that plane: `resolve_mode_lock` still hard-denies CANARY_LIVE/LIVE, and

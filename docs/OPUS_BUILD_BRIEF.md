@@ -1,5 +1,11 @@
 # Chronos — Autonomous Continuation Brief (for Claude Opus 4.8)
 
+> **ARCHIVED (2026-08-01).** This brief contains point-in-time branch, test-count, and
+> capability claims that are no longer current. Agents must start with `../AGENTS.md` and
+> [VISION_COMPLETION_PLAN.md](VISION_COMPLETION_PLAN.md), then verify live repository state.
+> Preserve this file for historical rationale; do not use it as task or completion
+> authority.
+
 You are taking over **Chronos**: a deterministic, safety-first trading
 research platform for Interactive Brokers, built from the owner's Pine
 Script corpus, targeting an eventual ~USD 3,000 account. A complete first

@@ -4,7 +4,9 @@
 > partly stale.** Since it was written: Milestones 5-7C delivered the gated paper and live
 > order pipeline in `chronos.orders` (ADR-0009, ADR-0010), and ADR-0016/D-16 (2026-07-25)
 > re-scoped Chronos as a controlled-autonomous, model-driven system. For current state read
-> README.md, [ADR-0016](docs/adr/ADR-0016-controlled-autonomous-model-authority.md),
+> [the repository contract](AGENTS.md),
+> [the canonical vision-completion plan](docs/VISION_COMPLETION_PLAN.md), README.md,
+> [ADR-0016](docs/adr/ADR-0016-controlled-autonomous-model-authority.md),
 > [docs/safety.md](docs/safety.md), and [docs/limitations.md](docs/limitations.md).
 
 ## Current state

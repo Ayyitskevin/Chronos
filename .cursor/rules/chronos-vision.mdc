@@ -1,0 +1,11 @@
+---
+description: Chronos canonical vision-completion contract
+globs:
+alwaysApply: true
+---
+
+Before proposing or changing Chronos, read @AGENTS.md and
+@docs/VISION_COMPLETION_PLAN.md completely. They define the repository contract, current
+north star, evidence gates, and document precedence. Never lower a safety, research, or
+promotion gate to manufacture progress, and never infer current state from a historical
+task board or handoff without re-verifying it.

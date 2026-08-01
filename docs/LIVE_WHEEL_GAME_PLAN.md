@@ -1,5 +1,10 @@
 # Chronos Live Wheel — Game Plan (start → completion)
 
+> **Programme status (2026-08-01): delivered milestone history and subordinate
+> asset-family detail.** Use [VISION_COMPLETION_PLAN.md](VISION_COMPLETION_PLAN.md) for the
+> current repository-wide build order, scorecard, and evidence gates. Accepted ADRs and
+> `DECISIONS.md` remain authoritative for implemented architecture.
+
 > **⚠ SUPERSEDED IN PART (2026-07-25) — see
 > [ADR-0016](adr/ADR-0016-controlled-autonomous-model-authority.md) / DECISIONS.md D-16.**
 > This plan's "the owner makes every trading decision" premise, and its

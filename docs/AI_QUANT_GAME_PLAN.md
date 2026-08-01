@@ -1,5 +1,11 @@
 # CHRONOS AI QUANT GAME PLAN
 
+> **Roadmap status (2026-08-01): historical strategy rationale and phase record.** The
+> canonical current build order, scorecards, and completion/promotion gates live in
+> [VISION_COMPLETION_PLAN.md](VISION_COMPLETION_PLAN.md). This document remains useful for
+> technical rationale, but its roadmap ordering and superseded capability language do not
+> override that plan, accepted ADRs, or `DECISIONS.md`.
+
 Owner directive (2026-07-18): *"Make this an AI trading bot that has knowledge of all the
 Pine scripts and strategies I have a library for, as a reference. Continuously build this
 project so it can be a competitive AI quant."*

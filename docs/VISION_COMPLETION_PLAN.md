@@ -1,0 +1,374 @@
+# Chronos Vision Completion Plan
+
+**Status:** canonical execution plan
+
+**Effective:** 2026-08-01
+
+**Applies to:** every Chronos agent, contributor, review, and promotion decision
+
+**Owner:** Kevin; owner approval remains mandatory wherever this plan says `OWNER GATE`
+
+This document turns “10/10” into build order and measurable release gates. It is not an
+ADR and does not silently change accepted architecture. `DECISIONS.md` and accepted ADRs
+govern implemented authority; this plan governs what gets built next and what evidence is
+required before Chronos may claim completion.
+
+If a live repository fact conflicts with this plan, record the discrepancy and correct the
+plan or implementation through review. Do not blend contradictory states.
+
+## 1. The two independent definitions of done
+
+### Platform and safety: 10/10
+
+Chronos is one coherent, installable, observable, recoverable trading system whose
+declared capabilities exactly match executable behavior. It has one execution authority,
+complete broker-truth accounting, mechanical enforcement of every authority/risk field,
+real-gateway conformance evidence, secure model isolation, tested recovery, and no
+unresolved Critical/High control defect.
+
+A 10/10 platform may correctly remain `NO_TRADE`. That is a valid safety result.
+
+### Proven autonomous trader: 10/10
+
+Every asset family promised by the declared product scope has at least one exact
+strategy-policy configuration that independently clears:
+
+`research -> replay -> shadow -> supervised paper -> autonomous paper -> live canary -> capped live`
+
+The proof must be prospective, net of all costs, attributable, reconciled to broker truth,
+inside owner-frozen loss limits, and bound to exact code, model, prompt, tools, policy,
+compiler, resolver, data, and configuration versions.
+
+“Uncapped autonomy,” guaranteed profitability, and zero residual market risk are not valid
+completion targets.
+
+Until the owner explicitly changes the mission declared in `README.md`, repository-wide
+10/10 therefore requires independently proven equities/ETFs, exchange-traded futures,
+listed equity options, and listed index options. Completing the recommended equities/ETF
+wedge earns a 10/10 family lane; it does not by itself complete the whole stated vision.
+
+## 2. Current truth snapshot
+
+This snapshot is context, not remembered state. Reverify it before building on it.
+
+- GitHub default branch observed on 2026-08-01: `feat/wheel-dashboard-mvp` at `06fcee6`.
+  No remote `main` branch existed. That branch-name mismatch is repository debt; it is not
+  permission for an agent to rename or rewrite shared history.
+- The fail-closed autonomy and order kernel is substantial, but no real gateway, paper
+  order, or live order has supplied operational evidence.
+- Zero strategies are selected for promotion; insufficient evidence remains a correct
+  result (`docs/STRATEGY_SELECTION.md`).
+- Real historical and option stores are not populated as a trusted research corpus; one
+  QQQ holdout was consumed and must not be treated as clean.
+- Futures and index-option execution are absent. Options support is narrow and must remain
+  family-gated.
+- The option-chain evidence-boundary work was observed separately on
+  `codex/chronos-option-chain-selection-v1` at `ae9d256`; do not assume it is present on the
+  default branch until it is actually integrated.
+- The last documented account snapshot was approximately USD 110. That makes cash-secured
+  options and most futures economically unavailable without a separate owner capital
+  decision. Engineering must not disguise that constraint.
+
+## 3. Build strategy: one complete vertical first
+
+The first end-to-end production wedge is **liquid U.S. equities/ETFs**. It is closest to
+the current executable capability and can accumulate evidence without first building the
+distinct lifecycle semantics of derivatives.
+
+```text
+Scope and risk constitution
+           |
+           v
+Authority correctness -> broker truth -> operations and recovery
+           |                                |
+           +-------------+------------------+
+                         v
+Certified data -> eligible strategy -> deterministic replay
+                         |
+                         v
+Shadow -> supervised paper -> autonomous paper
+                         |
+                         v
+Minimum live canary -> capped-live evidence
+                         |
+                         v
+Repeat the entire ladder for each additional asset family
+```
+
+Feature breadth that does not advance this dependency chain does not advance either 10/10
+score.
+
+## 4. Primary scorecard
+
+These are hard gates. A red gate cannot be averaged away by strength elsewhere.
+
+| Primary KPI | Definition | 10/10 gate |
+|---|---|---|
+| Safety integrity | Unintended broker mutations, duplicate economic orders, authority bypasses, unauthorized exposure, and severe safety incidents | Zero; any Critical breach fails and demotes the rung |
+| Broker truth and operations | Positions, orders, executions, commissions, cash, ownership, alerts, and recovery reconciled within frozen SLOs | 100% critical facts accounted for; zero unresolved unknown submissions or unexplained exposure |
+| Net-edge confidence | Preregistered post-cost expectancy and benchmark evidence after multiple-testing and concentration controls | Frozen statistical gates pass in holdout and prospective live evidence while loss/drawdown guardrails remain intact |
+
+Required driver and guardrail metrics include evidence completeness/freshness, decision and
+receipt coverage, reconciliation age, alert delivery/acknowledgement, scheduler availability,
+implementation shortfall, commission-model error, tracking error, drawdown/CVaR, exposure,
+turnover, concentration, abstention/veto rate, incident count, and version drift.
+
+## 5. Phase 0 — Constitution and document truth
+
+**Target:** 1–2 weeks.
+
+**Purpose:** eliminate scope ambiguity before more implementation.
+
+Deliver:
+
+- A machine-readable capability matrix for asset family x decision kind x strategy shape x
+  broker adapter x mode x evidence source x promotion status.
+- A frozen v1 scope, with equities/ETFs first and explicit include/exclude decisions for
+  short equity, equity-option structures, futures roots, index options, and crypto.
+- Owner-approved benchmark, minimum useful edge, capital envelope, loss/drawdown/CVaR and
+  concentration limits, data budget, incident availability, and legal/tax review needs.
+- A content-addressed research constitution: universe, costs, trial family, power analysis,
+  contamination map, holdouts, acceptance criteria, model stack, and change/reset rules.
+- One generated current-state page. Historical documents retain history but cannot present
+  old milestone state as current truth.
+
+**EXIT:** no unresolved scope contradiction; no clean holdout has been opened; owner gates
+and criteria are recorded before observation.
+
+## 6. Phase 1 — Authority and lifecycle coherence
+
+The following findings were observed during the 2026-08-01 review. Reverify each against
+the live commit and coordinate with any branch already addressing it before editing.
+
+1. Reconciliation readiness is consumed after one opening submission, while a complete
+   supervised callback consumer and bounded periodic convergence loop were not found
+   (`src/chronos/orders/reconciliation_readiness.py`).
+2. The incident runbook invokes the deterministic-platform halt while the live order plane
+   has a separate kill switch (`docs/INCIDENT_RESPONSE.md`,
+   `src/chronos/orders/kill_switch.py`).
+3. Restore guidance overstates safety: a missing live kill-switch file defaults disengaged.
+   Recovery must always boot kill-engaged, read-only, and unreconciled.
+4. Standing-authority prose says the mandate replaces arming, while submission still
+   requires a current arm (`src/chronos/api/autonomy_wiring.py`,
+   `src/chronos/orders/submission.py`). Choose and implement one reviewed authority model.
+5. The supervisor treats any non-exception handoff return as `COMPLETE`, although
+   `SubmissionOutcome(submitted=False)` represents refusal, ambiguity, or rejection
+   (`src/chronos/supervisor/loop.py`, `src/chronos/orders/submission.py`).
+6. External-worker provenance is static and its credential is not proposal-only. The
+   worker needs a narrow job/evidence/response protocol bound to job ID, evidence digest,
+   worker identity, model/prompt/tool versions, and expiry.
+7. Several economic-looking fields do not mechanically affect execution. Every field must
+   be enforced, explicitly advisory, or forbidden; deterministic exits/protection require
+   a durable position-management lifecycle.
+8. Promotion is not mechanically bound to the strategy and evidence that earned the prior
+   rung. Replace self-declared family levels with signed, expiring evidence artifacts.
+
+Required design outcomes:
+
+- Exactly one transmit-enabling site and no dormant second broker-capable authority path.
+- One immutable per-decision evidence snapshot used by both the model and gateway.
+- Complete account evidence, exact Chronos ownership resolution, and decision-specific
+  contract/quote facts.
+- Proposal-only model-worker credentials; no order, live, policy, mandate, or promotion
+  authority.
+- Typed outcomes for not-sent refusal, ambiguous send, venue rejection, accepted order,
+  partial fill, full fill, cancellation, and late commission.
+
+**EXIT:** full safety suite plus property, fuzz, mutation, and chaos coverage; fresh install,
+migrations, restore, kill/rearm, clock/disk/gateway failure tests; independent review finds
+no unresolved Critical/High issue; `OWNER GATE` for money/security authority changes.
+
+## 7. Phase 2 — Canonical broker and operations plane
+
+Deliver:
+
+- Idempotent persistence of broker order ID, permanent ID, client ID, `orderRef`, execution
+  IDs, fills, commissions, state transitions, positions, cash, and buying power.
+- Exact allocation provenance for stock lots, option assignments/exercises, manual or
+  foreign positions, working orders, and commissions.
+- Startup, reconnect, order/fill-triggered, and bounded periodic reconciliation with a
+  maximum evidence age.
+- P&L attribution, drawdown, exposure, commissions, slippage, and tracking error by exact
+  strategy policy and family.
+- Atomic reservations, position netting, and conflict resolution across proposals.
+- Separate liveness, service readiness, and trading-capability health.
+- Off-host alert sidecar, encrypted backups, external audit-chain anchor, automatic clock
+  health, watchdogs, dead-man monitoring, measured RPO/RTO, and isolated restore drills.
+- Reproducible package/release validation: clean venv install, all migrations, static
+  assets, entry points, dependency/secret/static scans, SBOM, and signed artifacts.
+
+### Real-gateway read-only gate
+
+The owner installs and pins the official IB API, supplies a paper account and market-data
+permissions, enables read-only mode, and keeps every transmit/live flag false.
+
+For at least five sessions, including a gateway restart/reset, capture sanitized evidence
+for exact account scope, server time, account summary, positions, executions, open and
+completed orders, contract qualification, option chains, market rules/minimum ticks,
+trading sessions, quote permissions, pacing, callbacks, and subscription cancellation.
+
+**EXIT:** no mutation call; no leaked subscription, account drift, unexplained callback, or
+pacing failure; captured fixtures replay offline exactly.
+
+## 8. Phase 3 — Certified data and anti-overfit research factory
+
+Begin forward option capture immediately; missed days cannot be recreated from IBKR.
+
+Deliver:
+
+- Uniform, point-in-time daily and hourly data across at least 6–10 liquid instruments,
+  with exchange calendars, unadjusted prices, corporate actions, delistings where relevant,
+  corrections, source receipts, and immutable dataset versions.
+- Fresh, declared holdouts that are inaccessible through ordinary research paths.
+- One brokered research reader. Every data touch writes `trial_started` before bytes are
+  returned; completed and failed trials both count toward multiplicity.
+- Order-invariant campaign scoring using one final global trial count and a reviewed
+  cross-trial variance estimate. Candidate order or renaming must not alter a verdict.
+- Full-campaign byte-identical replay from one manifest. Criteria/data/code/model changes
+  invalidate the campaign.
+- Point-in-time model evidence, deterministic cache, exact prompt/tool/provider identity,
+  and comparison against deterministic baselines.
+- Complete Wheel/options lifecycle simulation before an option strategy can qualify.
+
+Starting data-quality gates, frozen before collection:
+
+- At least 99.5% expected-session coverage.
+- Every gap and extreme move classified; zero unresolved economically material conflicts.
+- Corporate actions independently sampled and reconciled.
+- Clean/seen/burned holdout map complete and content-addressed.
+
+Starting strategy gates, subject only to stricter preregistered power requirements:
+
+- Sample floor: `max(power-required N, 100 out-of-sample closed trades)`.
+- Net expectancy and benchmark-alpha 95% lower bounds above zero after commission, spread,
+  slippage, funding/borrow, model, and data costs.
+- Deflated Sharpe probability at least 0.95; family-wise error or FDR `q <= 0.05`;
+  probability of backtest overfitting at most 10% when applicable.
+- Evidence across at least three instruments and two materially different regimes.
+- Positive after removing the best trade and best month, and under doubled commissions plus
+  stressed slippage.
+- Parameter response is a plateau, not an isolated optimum; neighboring variants meet a
+  preregistered stability fraction.
+- Drawdown/CVaR inside owner-frozen limits; no instrument, trade, or period dominates the
+  result beyond the frozen concentration bound.
+- One untouched holdout passes unchanged. Failure means rejection, not tuning.
+
+**EXIT:** at least one exact strategy-policy earns an immutable promotion artifact, or the
+honest result remains zero selected.
+
+## 9. Phase 4 — Evidence-bound autonomy ladder
+
+The thresholds below are the proposed minimum 10/10 standard. Phase 0 must freeze them
+before observation. Power analysis may increase a sample requirement; it cannot lower one
+after results are seen.
+
+| Rung | Minimum evidence before promotion |
+|---|---|
+| Replay | Byte-identical decisions and state over the complete evaluation/stress corpus; 100% decision/receipt coverage; zero unexplained research/runtime difference |
+| Shadow | `max(90 calendar days, power-required decision opportunities)`; at least 99.5% scheduled-cycle/data availability; zero duplicate/illegal intents, unresolved reconciliation, or Sev-1/Sev-2 incidents; restart, stale-data, disconnect, clock, alert, and restore drills pass |
+| Supervised paper | `max(90 days, 50 completed round trips, power-required N)` and at least 100 controlled order lifecycles across 20 sessions; 100% fill/commission/account reconciliation; implementation shortfall and cost-model error inside frozen bands |
+| Autonomous paper | At least 60 trading days and 100 eligible lifecycles with the exact live candidate stack; at least 99.9% scheduler availability; no unplanned rescue, duplicate, unbounded order, unknown exposure, unresolved incident, or severe safety event |
+| Live canary | `max(6 months, 50 round trips)` at minimum economically meaningful size under an absolute owner-approved loss budget; real fill/fee/slippage and tracking error stay inside frozen bands; independent review before each cap increase |
+| Capped live | `max(12 months, 100 independent completed trades, power-required N)` across at least two regimes; post-cost live expectancy and benchmark-alpha lower bounds above zero; 100% broker attribution/reconciliation; zero severe safety incidents or unauthorized exposure |
+
+Every promotion artifact binds the exact account, commit, dependencies, configuration,
+mandate, strategy-policy, model/prompt/tools, compiler/resolver, evidence/data versions,
+criteria digest, incidents, approval, expiry, and rollback plan.
+
+Any material change or statistical/operational health breach automatically demotes the
+family to the appropriate earlier rung. Paper evidence proves machinery, not real liquidity
+or alpha.
+
+## 10. Phase 5 — Expand one asset family at a time
+
+Success in one family never promotes another.
+
+1. **Equities/ETFs:** close/protection/ownership semantics, one complete evidence ladder.
+2. **Equity options:** authoritative deliverables and corporate-action adjustments;
+   assignment/exercise, ex-dividend, expiration, cash-in-lieu, and exact lifecycle
+   accounting. Multi-leg structures, if admitted, use one atomic combo order—never
+   sequential naked legs.
+3. **Futures:** contract/root model, deterministic front-contract and roll receipts,
+   exchange calendars and overnight sessions, tick/multiplier/price-limit facts, initial
+   and maintenance margin, daily settlement, first notice, expiry/delivery, and exact
+   contract reconciliation.
+4. **Index options:** a distinct capability with cash settlement, exercise style, AM/PM
+   settlement, special opening quotes, multipliers, expiry, and package-level risk. SPY
+   semantics do not transfer to SPX.
+5. **Crypto, only if retained by Phase 0:** keep long-only spot unless explicitly widened;
+   use a broker sandbox or separately reviewed paper-equivalent rung. Never silently skip
+   the missing IBKR paper capability.
+
+An honestly narrow declared scope can be 10/10 only after the owner explicitly changes the
+declared product mission. A broad vocabulary with unimplemented or unproven families
+cannot.
+
+## 11. Owner gates
+
+Only the owner may supply or approve:
+
+- Broker credentials, 2FA, account configuration, API permissions, and gateway access.
+- Market-data subscriptions and option-reference-data licensing/legal terms.
+- Capital, loss, drawdown, CVaR, concentration, turnover, exposure, and incident-response
+  availability decisions.
+- Holdout unlock, paper mandate, canary authorization, live promotion, and every cap
+  increase.
+- Manual broker resolution of unknown orders, positions, assignments, or ambiguous sends.
+- Tax, regulatory, and account-structure review.
+
+No test result, backtest, backup, or agent recommendation substitutes for an owner gate.
+
+## 12. Rough planning horizon
+
+These are estimates, not promises:
+
+- Engineering-complete first-family platform: approximately 6–9 months for one focused
+  owner working with agents.
+- Shadow/paper operational proof: another 2–4 months, partly overlapping engineering.
+- The proposed canary plus capped-live standard requires at least 18 months of prospective
+  evidence after a strategy is frozen.
+- From the 2026-08-01 baseline, one-family proven-autonomy 10/10 is realistically a
+  24–36+ month objective. Full multi-family completion is longer.
+- Without licensed expired-options history, option validation becomes calendar-bound and
+  can take multiple years.
+
+The critical path is authority coherence, model/evidence provenance, broker reconciliation,
+trusted data, an eligible strategy, and calendar-time operational evidence—not more UI or
+unsupported asset vocabulary.
+
+## 13. Agent task contract
+
+Every implementation or review must state:
+
+```yaml
+plan_phase: <0-5>
+primary_kpi: safety_integrity | broker_truth | net_edge_confidence
+gate_advanced: <exact acceptance gate or "none">
+files: <declared working set>
+verification: <rerunnable commands and observed result>
+evidence_artifact: <path or "none; code-only change">
+owner_gate: <required, satisfied, or not applicable>
+open: <remaining risks, conflicts, and deferred work>
+```
+
+Do not edit a frozen criterion after seeing its evidence. Do not claim plan completion from
+code coverage alone. Update this document only when live state, scope, sequencing, or a gate
+actually changes; record the evidence and commit that caused the change.
+
+Agents may make evidence-backed factual-status updates with rerunnable verification. Agents
+may only **propose** changes to product scope, either 10/10 definition, KPI or promotion
+thresholds, owner gates, document precedence, or the rule that a material change resets
+evidence. Those governance changes require explicit owner approval before merge; an agent
+cannot approve its own easier definition of completion.
+
+## 14. External control references
+
+- [IBKR TWS API documentation](https://www.interactivebrokers.com/docs/tws-api/doc/introduction)
+- [IBKR paper-account limitations](https://ibkrcampus.com/campus/glossary-terms/paper-trading-account/)
+- [OCC product/series data](https://www.theocc.com/market-data/market-data-reports/other-market-data-info/data-sales)
+- [OCC contract-adjustment memos](https://infomemo.theocc.com/infomemo/search)
+- [FINRA algorithmic-trading control practices](https://www.finra.org/rules-guidance/notices/15-09) — a useful engineering benchmark, not a claim about Chronos's regulatory status
+- [NIST AI Risk Management Framework](https://airc.nist.gov/airmf-resources/airmf/5-sec-core/)
+- [OWASP prompt-injection guidance](https://genai.owasp.org/llmrisk/llm01-prompt-injection/)
+- [The Deflated Sharpe Ratio](https://papers.ssrn.com/sol3/Delivery.cfm/SSRN_ID2460551_code87814.pdf?abstractid=2460551)
+- [A Reality Check for Data Snooping](https://doi.org/10.1111/1468-0262.00152)
