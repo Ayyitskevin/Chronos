@@ -138,7 +138,7 @@ bars (:116-118); OOS chopped into fixed disjoint `test_window`-bar segments defi
 front (`_windows`, :233-257); pooled trades = closed trades whose entry_date falls in
 the OOS span (:121-125). For the current fixed-rule strategies a "fold" is a causal
 replay — nothing is re-fit, so purged CV does not bind (`requires_purging` returns False
-for fixed-rule replays, src/chronos/research/purged_cv.py:44-48; the report records
+for fixed-rule replays, src/chronos/research/purged_cv.py:44-47; the report records
 `purged_cv: "not applicable (fixed-rule replay)"`, walkforward.py:181). `purged_kfold`
 exists and is tested for future fitted workflows (purged_cv.py:25-41).
 

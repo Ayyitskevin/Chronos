@@ -356,7 +356,7 @@ ADR. If a task would touch a row, stop and route through
 | Expiry required; live ceiling 365d; renewal a fresh owner act | ADR-0017 §1 | mandate.py:69, 399-407 |
 | Degraded state: no new exposure; risk-reduction only with position truth intact; AI failure ≠ permission | ADR-0016 §8; ADR-0017 §5 verbatim | admission.py:435-485 |
 | Handoff walks the FULL order pipeline; adds gates, removes none | ADR-0017 §4 | autonomy_wiring.py:185-205 |
-| Network alert channel (alerts leave the machine) | none — local-only by structural test (R-32); a networked channel needs its own ADR (limitations.md) | tests pin local-only delivery (see `chronos-config-and-flags` for sinks) |
+| Network alert channel (alerts leave the machine) | R-32 — local sinks only was a deliberate decision; "adding a networked channel needs an ADR" (the test's own message) | tests/safety/test_alert_delivery.py::test_the_delivery_module_has_no_network_capability (:82-116) |
 | Registry access from ANY automated-tree module | ADR-0013 §7 | test_registry_no_automated_unlock.py (dirs list :37-47) |
 | `chronos.control.modes` plane stays live-incapable and model-free | ADR-0007, untouched by 0016/0017 | enums.py:1-8; control/modes.py |
 | Owner gates: capital, holdout unlock, mandates, canary, promotion, cap increases | AGENTS.md:33-34; VISION_COMPLETION_PLAN §11 | doc-level contract — see `chronos-change-control` |
