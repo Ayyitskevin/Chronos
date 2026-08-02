@@ -347,8 +347,11 @@ docs above are rules.
   `claude/chronos-autonomous-governance-jhgfat`), `agent/<topic>`
   (`agent/reconciliation-readiness`), `feat/<topic>` (`feat/research-run-repro`),
   `codex/<topic>` (`codex/chronos-option-chain-selection-v1`). Integration branch:
-  `feat/wheel-dashboard-mvp` (the GitHub default; no `main` exists — that mismatch is
-  recorded repo debt, not permission to rename, VISION_COMPLETION_PLAN.md:54-56).
+  `feat/wheel-dashboard-mvp` (still the GitHub default — target PRs there). A remote
+  `main` was created 2026-08-02 at the same tip on owner request, but the default-branch
+  flip is a repository setting the owner has not yet made, so `main` is not yet the
+  integration target. Renaming or rewriting shared history remains out of bounds either
+  way (VISION_COMPLETION_PLAN.md §2).
 - Commit subjects: predominantly milestone-prefixed narrative ("M11: the option
   deliverable, and the last kernel defect (closes R-27)"); conventional-commit prefixes
   (`docs:`, `fix:`, `feat:`, `chore:`) are the minority (~10 of 150).

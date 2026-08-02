@@ -52,8 +52,17 @@ wedge earns a 10/10 family lane; it does not by itself complete the whole stated
 This snapshot is context, not remembered state. Reverify it before building on it.
 
 - GitHub default branch observed on 2026-08-01: `feat/wheel-dashboard-mvp` at `06fcee6`.
-  No remote `main` branch existed. That branch-name mismatch is repository debt; it is not
-  permission for an agent to rename or rewrite shared history.
+  ~~No remote `main` branch existed.~~ **Updated 2026-08-02 (owner request):** a remote
+  `main` now exists, created from the tip of `feat/wheel-dashboard-mvp` at `46b2ad0` — a
+  new ref only; no history was renamed or rewritten. **The GitHub default branch is still
+  `feat/wheel-dashboard-mvp`**: changing it is a repository setting, not a git operation,
+  and only the owner can make it. Until that flip happens, PRs continue to target
+  `feat/wheel-dashboard-mvp`. Two follow-ups are owner decisions and are deliberately
+  unresolved here: whether `feat/wheel-dashboard-mvp` is retired or kept alongside `main`,
+  and re-adding any branch protection, which does **not** follow the default branch. CI is
+  unaffected either way — `.github/workflows/ci.yml` triggers on bare `push:`/
+  `pull_request:` with no branch filter. Re-verify with
+  `git ls-remote --symref origin HEAD`.
 - The fail-closed autonomy and order kernel is substantial, but no real gateway, paper
   order, or live order has supplied operational evidence.
 - Zero strategies are selected for promotion; insufficient evidence remains a correct
