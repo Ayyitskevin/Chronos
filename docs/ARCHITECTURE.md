@@ -25,8 +25,20 @@ model may originate runtime trading decisions, but only as a typed
 inside an active owner-authored AutonomyMandate. The model cannot access IBKR
 directly, change its authorization, weaken policy, or bypass any deterministic
 gate. ADR-0004 §§1-4 — the structural separation of authority below — are
-**preserved** and are what make that safe. The gateway is Milestone 2; as of
-Milestone 1 the contracts (`chronos.autonomy`) exist and are wired into nothing.
+**preserved** and are what make that safe. ~~The gateway is Milestone 2; as of
+Milestone 1 the contracts (`chronos.autonomy`) exist and are wired into nothing.~~
+
+*(Corrected 2026-08-02 — the paragraph above was frozen at Milestone 1.)* The stack is
+built and wired through M7.5/ADR-0017: the deterministic gateway, admission and sizing
+(M2), durable supervisor state (M3), the order compiler and decision queue (M4),
+market-local session counters (M5), owner-alert delivery (M6), the time-driven tick
+runtime (M7), and the app-plane wiring that auto-activates a valid
+`AUTONOMY_MANDATE_FILE` on boot (M7.5). See README "Current status" and
+`chronos.api.autonomy_wiring`. Two honest qualifications: **no model worker ships in
+this repository** — `chronos.supervisor.ingress` accepts proposals from a separate
+process, so an unconfigured deployment produces no decisions — and autonomous **live**
+submission is still blocked by the unresolved arming contradiction (open finding 4,
+`docs/VISION_COMPLETION_PLAN.md` §6; details in `docs/live_trading_runbook.md`).
 
 ## Three planes (ADR-0004)
 

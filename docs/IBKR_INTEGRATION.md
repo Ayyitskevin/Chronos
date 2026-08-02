@@ -14,7 +14,7 @@ running TWS/Gateway, then exercise the paper adapter under supervision.
 | Adapter | File | Capability |
 |---|---|---|
 | Wheel dashboard adapter | `src/chronos/broker/ibkr.py` | Read-only. Every order method (`preview_order`, `submit_order`, `modify_order`, `cancel_order`) raises `BrokerSafetyError` unconditionally. |
-| Platform paper adapter | `src/chronos/execution/brokers/ibkr_paper.py` | The ONLY code path in the repository that can hand an equity order to IBKR, and only to a verified paper account. |
+| Platform paper adapter | `src/chronos/execution/brokers/ibkr_paper.py` | ~~The ONLY code path in the repository that can hand an equity order to IBKR~~ **Corrected 2026-08-02: false since Milestone 5-7.** This adapter is **quarantined** (R-28): it refuses construction unless passed `quarantine_ack=True`, which no module in `src/` passes, and an AST test asserts no production module constructs it. The one reachable path that can hand an order to IBKR is the `chronos.orders` submission boundary — the repository's single `transmit=True` site (`src/chronos/orders/submission.py:745`), pinned by `tests/safety/test_single_transmit_site.py` and the repo-wide inventory in `tests/safety/test_broker_mutation_inventory.py`. |
 
 They share the `ib_async` dependency (ADR-0002) but no state.
 

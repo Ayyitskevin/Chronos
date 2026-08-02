@@ -5,20 +5,46 @@ root on Python 3.12 (`.venv`). Statuses use the plan's vocabulary:
 PASSED / FAILED / SKIPPED / NOT RUNNABLE WITHOUT CREDENTIALS /
 NOT IMPLEMENTED / REQUIRES OWNER ACTION.
 
-## Summary (current — M2a, 2026-07-25)
+## Summary (current — re-measured 2026-08-02)
+
+Measured on this date against the merge commit `7f2d208`, Python 3.12, all four gates run
+in CI order. **These numbers drift with every merged test** — re-run before citing them;
+the authoritative live command is the first row.
 
 | Command | Result |
 |---|---|
-| `.venv/bin/pytest -q` | **1901 passed, 1 skipped** (~61 s) |
+| `.venv/bin/pytest -q` | **2489 passed, 1 skipped** (~89 s; 2490 collected) |
+| `.venv/bin/ruff check .` | clean |
+| `.venv/bin/ruff format --check .` | clean (379 files) |
+| `.venv/bin/mypy src/chronos` | clean, strict (218 source files) |
+| GitHub Actions `quality` job | verify on the current PR |
+
+The single skip is the opt-in, read-only IBKR smoke test
+(`tests/integration/test_ibkr_smoke.py`, marker `ibkr`, enabled with
+`CHRONOS_RUN_IBKR_SMOKE=1`). It is skipped because **no real gateway has ever been
+connected** — not because it fails.
+
+A green suite proves the code behaves as its tests specify. It does **not** prove
+gateway conformance, live-execution quality, or strategy edge: every adapter path is
+fixture-verified only, and zero strategies have cleared the promotion ladder
+(`docs/VISION_COMPLETION_PLAN.md` §2).
+
+## Summary (historical — M2a, 2026-07-25, superseded)
+
+*(Relabeled 2026-08-02: this section was headed "current" while reporting the M2a
+counts, ~588 tests behind reality.)*
+
+| Command | Result |
+|---|---|
+| `.venv/bin/pytest -q` | 1901 passed, 1 skipped (~61 s) |
 | `.venv/bin/ruff check .` | clean |
 | `.venv/bin/ruff format --check .` | clean (324 files) |
 | `.venv/bin/mypy src/chronos` | clean, strict (190 source files) |
-| GitHub Actions `quality` job | verify on the current PR |
 
-`tests/safety/` now holds ~90 tests, including
-`test_autonomy_contracts.py` (the ADR-0016 / D-16 structural suite: model-plane import
-isolation, decision order-incapability, mandate immutability under `model_copy`,
-per-family promotion, floors, and the M1 milestone guard).
+At that date `tests/safety/` held ~90 tests, including `test_autonomy_contracts.py`
+(the ADR-0016 / D-16 structural suite: model-plane import isolation, decision
+order-incapability, mandate immutability under `model_copy`, per-family promotion,
+floors, and the M1 milestone guard).
 
 ## Summary (historical — post-M5 snapshot, superseded)
 

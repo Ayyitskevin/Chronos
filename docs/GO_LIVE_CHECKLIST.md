@@ -176,7 +176,10 @@ be submitted anywhere (`src/chronos/control/modes.py`).
   neither is even representable in today's schema), new tests, a new independent review, and
   explicit owner approval. None of that exists, and this document confers none of it.
 - [OWNER] Everything above, sustained: a clean paper record, incident-free operations, and a
-  considered decision that a ~USD 3,000 cash account should trade this system at all.
+  considered decision that ~~a ~USD 3,000 cash account~~ **the account as actually funded**
+  should trade this system at all. *(Corrected 2026-08-02: the last documented snapshot is
+  ≈ USD 110, not ~USD 3,000 — `docs/VISION_COMPLETION_PLAN.md` §2. The capital decision
+  itself is open and owner-only; see ASSUMPTIONS A-10.)*
 
 ## Gate 5 — LIVE
 

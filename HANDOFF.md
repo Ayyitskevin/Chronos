@@ -19,8 +19,16 @@
   **HALTED** on any fresh deployment (fail-closed) and every live-capable mode is refused in
   code — ADR-0016 does not change this. SHADOW is structurally `NO_ORDERS`.
 - **Operating capability (orders plane):** DEMO by default; paper and live are gated
-  capabilities (ADR-0009). Autonomous operation is **not** yet implemented — M1 delivered
-  the governance and the `chronos.autonomy` contracts only, wired into nothing.
+  capabilities (ADR-0009). ~~Autonomous operation is **not** yet implemented — M1 delivered
+  the governance and the `chronos.autonomy` contracts only, wired into nothing.~~
+  *(Corrected 2026-08-02: this described the M1 build and contradicted this file's own later
+  M11 sections.)* The autonomy stack is built and wired through M7.5/ADR-0017 — gateway,
+  admission, sizing, durable state, compiler, queue, session counters, alert delivery, tick
+  runtime, and boot-time mandate auto-activation. Two qualifications: **no model worker
+  ships here** (proposals arrive from a separate process via
+  `chronos.supervisor.ingress`), and autonomous **live** submission remains blocked by the
+  open arming contradiction (finding 4, `docs/VISION_COMPLETION_PLAN.md` §6). See
+  `docs/ARCHITECTURE.md` and `docs/live_trading_runbook.md`.
 - **Tests:** 1885 passed, 1 credential-gated skip (2026-07-25). `ruff`, `ruff format`, and
   `mypy --strict` clean. CI installs from a hash-verified lockfile.
 
@@ -118,8 +126,12 @@ defensible edge on the available data.
    gateway.
 4. Decide whether short selling should ever be enabled (BEAR+ translation is
    parked behind this decision).
-5. Decide whether a ~USD 3,000 cash account should pursue automated trading
-   at all given the cost economics documented in RESEARCH_REPORT.
+5. Decide whether the account should pursue automated trading at all given the
+   cost economics documented in RESEARCH_REPORT. *(Corrected 2026-08-02: this
+   read "a ~USD 3,000 cash account"; the last documented snapshot is ≈ USD 110 —
+   `docs/VISION_COMPLETION_PLAN.md` §2 — which makes the economics materially
+   worse than RESEARCH_REPORT models. Funding level is itself part of this open
+   owner decision; see ASSUMPTIONS A-10.)*
 
 ## Safety posture (restated 2026-07-25)
 

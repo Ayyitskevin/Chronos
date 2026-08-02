@@ -71,7 +71,7 @@ stale claims), `2` = could not run (repo root not found). Optional env vars:
 | Before AND after a backup restore | `state_inventory.py` | The restore docs overstate safety: a restore that omits `data/live_kill_switch.json` boots the live plane DISENGAGED. Compare before/after reports |
 | Before any live-adjacent work (orders, kill switch, mandate, `.env`, arming) | `state_inventory.py` | Confirms what is armed/disarmed/present before you change it |
 | Before answering "is it safe to restart?" | `state_inventory.py` | Restart clears arming + terminal sessions (process memory) but a set `AUTONOMY_MANDATE_FILE` auto-activates on boot — the report shows both |
-| After ANY documentation edit | `doc_drift_check.py` | Confirms which ledger entries your edit actually fixed (ABSENT) vs left (PRESENT) |
+| After ANY documentation edit | `doc_drift_check.py` | Confirms which ledger entries your edit actually fixed (`CORRECTED`/`ABSENT`) vs left (`PRESENT`) |
 | Fresh machine / build trouble / before running `make` anything | `env_check.py` | Catches the 3.11-default-python trap and the missing `.venv` before they waste an hour |
 
 ## Interpretation guide — state_inventory.py
@@ -98,10 +98,30 @@ NOT stop the live order plane; `POST /live/kill` does.
 
 ## Interpretation guide — doc_drift_check.py
 
-Verdicts per rule: `PRESENT` = the stale claim is still in the doc (finding);
-`ABSENT` = fixed after 2026-08-02; `FILE-MISSING` = the doc is gone (retire or
-repoint the rule). On 2026-08-02 all 20 rules were PRESENT — that is the
-honest baseline, not an error.
+Verdicts per rule: `PRESENT` = the stale claim is still there, uncorrected (a
+finding); `CORRECTED` = the original wording is still on the page but every
+occurrence sits beside a dated in-place correction (counted as fixed);
+`ABSENT` = the text is gone entirely; `FILE-MISSING` = the doc is gone (retire
+or repoint the rule).
+
+**Why `CORRECTED` exists** (added 2026-08-02, after the first correction pass):
+this repository corrects documents *in place* — strikethrough plus a dated
+"Corrected"/"Amended" note, so history stays visible (house style, see
+chronos-docs-map). A plain substring check therefore keeps matching the original
+wording forever and reports a correctly-repaired document as still stale. The
+script now looks for a dated correction marker within 25 lines of every match.
+A rule can refuse that verdict with `annotation_is_not_a_fix=True`: where the
+real resolution is an **owner decision** an agent may not take — flipping an ADR
+status line, for instance — writing a note about the problem is not fixing it,
+and the rule stays PRESENT until the text itself changes.
+
+Baselines: on 2026-08-02 all 20 original rules were PRESENT — the honest
+starting state, not an error. After that day's correction pass the ledger holds
+**22 rules** reading **2 PRESENT / 14 CORRECTED / 6 ABSENT**. The two remaining
+PRESENT entries (`ADR0014-PROPOSED`, `ADR0015-PROPOSED`) are deliberate: neither
+ADR has a `DECISIONS.md` row, so their acceptance is recorded nowhere and only
+the owner can resolve it. **A PRESENT count of 2 is currently the correct
+result** — do not "fix" it by flipping those status lines.
 
 The rules ledger (`RULES` tuple at the top of the script) is data: each rule
 carries id, file, regex, why-stale, and fixed-when. Extend it by APPENDING a
