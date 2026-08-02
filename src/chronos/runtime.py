@@ -209,7 +209,16 @@ def build_runtime(*, register_atexit: bool = True) -> AppRuntime:
     connection: BrokerConnectionManager | None = None
     try:
         database.initialize()
-        reconciliation_readiness = ReconciliationReadiness()
+        # ADR-0020: the owner-frozen maximum evidence age. Wired here, in the same
+        # change that starts the refresher — expiry without a refresher would
+        # tighten with nothing to re-arm it and block the submission path harder
+        # than leaving the defect in place. Expiry is evaluated inside
+        # `snapshot()`, so a proof stops being trusted whether or not the
+        # refresher is alive.
+        reconciliation_readiness = ReconciliationReadiness(
+            max_evidence_age=timedelta(seconds=settings.reconciliation_max_evidence_age_seconds),
+            clock=utc_now,
+        )
         # ADR-0009: ONE durable kill-switch instance shared by the broker
         # adapter's last-line check, the submission boundary, and the /live API.
         live_kill_switch = LiveKillSwitch(
