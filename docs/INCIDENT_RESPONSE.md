@@ -24,11 +24,24 @@ SEV-1/SEV-2: do not trade (do not rearm) until the incident is explained and doc
 
 1. **Stop the live order plane — do this FIRST if any live/paper capability is configured.**
    The kill switch is deliberately reachable without the writer lease, because an emergency
-   stop must always work:
+   stop must always work — including on a demoted, read-only backend.
+
+   **From the terminal (preferred):** the system panel at `/terminal/app` carries an
+   **ENGAGE KILL SWITCH** button and a **DISARM LIVE SESSION** button. Both require a typed
+   confirmation phrase, the kill switch requires a reason, and both stay enabled when the
+   backend is read-only. *(Added 2026-08-02; before that the terminal had no stop button and
+   this step was curl-only.)*
+
+   **By curl (equivalent, and the only path if the browser is unavailable):**
    ```bash
    curl -fsS -X POST http://127.0.0.1:8765/live/kill \
-     -H "X-Chronos-Token: $CHRONOS_API_TOKEN"
+     -H "X-Chronos-Token: $CHRONOS_API_TOKEN" \
+     -H 'Content-Type: application/json' \
+     -d '{"reason":"SEV-n: <one line>"}'
    ```
+   Re-enabling trading is deliberately **not** available from the terminal: disengaging the
+   kill switch and arming a live session grant authority, and both remain token-and-lease
+   actions (`POST /live/kill/disengage`, `POST /live/arm`).
    It persists to `data/live_kill_switch.json` (`live_kill_switch_file`) and is cleared only
    by an explicit `POST /live/kill/disengage`. **Verify the file exists afterwards** — see
    the warning below.

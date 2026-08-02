@@ -31,8 +31,14 @@ zero / empty / disabled / deny.
   documented account snapshot is approximately **USD 110**
   (`docs/VISION_COMPLETION_PLAN.md` §2). Whether the account is funded toward the original
   premise, or the scope is cut to match ~USD 110, is a **live, unresolved owner decision**
-  (plan §11 owner gates) — this file records the snapshot, it does not settle the decision,
-  and no work should quietly assume either number. At ~USD 110, cash-secured options and
+  (plan §11 owner gates). **Owner direction, 2026-08-02: fund toward the original premise
+  rather than descope** — the ≈USD 110 snapshot is a temporary state, not a design
+  constraint, so sizing defaults (`MIN_CASH_BUFFER_USD`, the `--equity`/`--cash` CLI
+  defaults) stay as they are pending the funded balance. **The exact capital envelope is
+  still unfrozen** and remains a Phase 0 deliverable (plan §5: the owner-approved capital
+  envelope, loss/drawdown/CVaR and concentration limits must be frozen *before* the
+  evidence they judge). Until that number exists, no work may quietly assume any
+  particular balance, and any run against the live account must pass its own `--equity`. At ~USD 110, cash-secured options and
   most futures are economically unavailable, and the default `MIN_CASH_BUFFER_USD` of 5000
   alone makes every cash-secured put unaffordable. The rest of the assumption is unchanged
   and still binding: pattern-day-trading rules make intraday strategies impractical below

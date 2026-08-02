@@ -137,6 +137,7 @@ builds a runtime only for the writer. The order matters:
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from decimal import Decimal
 from typing import Annotated
 
@@ -215,6 +216,50 @@ class AcknowledgeResult(ChronosModel):
     acknowledged: bool
     alert_id: int
     detail: str = ""
+
+
+class TerminalKillResult(ChronosModel):
+    """What the emergency stop did, in this module's own vocabulary.
+
+    Declared here rather than reusing ``chronos.orders.kill_switch.KillSwitchState``
+    because :func:`test_the_terminal_routes_do_not_import_the_order_plane` states
+    ADR-0018 §4 as an import graph: this module may *read* the two safety-layer
+    states through ``AppRuntime``, but it may not name the order plane. The
+    fields are copied across explicitly, which is the same thing
+    ``chronos.terminal.views`` does when it takes ``kill_switch_engaged`` as a
+    plain bool.
+
+    ``initiated_by`` and ``note`` are deliberately not carried: the terminal is
+    the only caller here, so the first is always "operator", and the second
+    belongs to disengagement, which this router does not offer.
+    """
+
+    engaged: bool
+    reason: str = ""
+    engaged_at: datetime | None = None
+
+
+class TerminalArmResult(ChronosModel):
+    """The arm state after disarming. Same reason for existing as above.
+
+    The arm *phrase* is never a field here, as it is never a field on the live
+    router's responses either — those responses carry the arm STATE only.
+    """
+
+    armed: bool
+    expires_at: datetime | None = None
+
+
+class TerminalKillRequest(ChronosModel):
+    """Why the owner is stopping the live plane.
+
+    Mirrors ``chronos.api.routes.live.KillRequest`` rather than reusing it: this
+    route additionally refuses an empty or whitespace-only reason before writing
+    anything, the same rule :class:`RevokeRequest` carries and for the same
+    reason. The field is never echoed into an error body.
+    """
+
+    reason: str
 
 
 class RevokeRequest(ChronosModel):
@@ -697,6 +742,84 @@ def acknowledge_alert(
             "alert is unchanged and may raise it again"
         ),
     )
+
+
+@router.post("/terminal/live/kill", response_model=TerminalKillResult)
+def terminal_engage_kill_switch(body: TerminalKillRequest, state: StateDep) -> TerminalKillResult:
+    """The emergency stop, reachable from the operator's browser.
+
+    ADR-0018 §4 already grants the terminal this action ("engage and disengage
+    the durable kill switch"). What was missing is a route the *browser* can
+    reach: the M8b session cookie is scoped ``path=/terminal``, so the client
+    cannot call ``POST /live/kill``, and
+    ``test_the_session_does_not_authenticate_the_order_plane`` pins that on
+    purpose. Until this route existed the terminal's only emergency stop was
+    curl with the raw API token — the worst possible ergonomics for the one
+    action taken under stress. ``docs/INCIDENT_RESPONSE.md`` step 1 is this.
+
+    Deliberately **not** writer-gated, mirroring ``POST /live/kill`` exactly and
+    for the same reason: a backend that lost its lease is the backend whose
+    operator most needs the stop, and refusing here would be the one refusal
+    that increases risk. This does not weaken the session's boundary — the
+    cookie still cannot reach ``/orders/*``, ``/account/*`` or ``/live/*``; it
+    gains exactly one monotonically-restricting action and nothing else.
+
+    Only the **removing** half of ADR-0018 §4's grant is exposed here.
+    ``/live/kill/disengage`` and ``/live/arm`` *grant* authority, and putting
+    those behind a browser session is a different posture question than putting
+    an emergency stop there. They stay token-and-lease-only pending an owner
+    decision; see the module docstring's authorization-surface note.
+
+    A reason is required and recorded, for the same reason revocation demands
+    one: a stop nobody explained cannot be told apart from a stray request in
+    the audit trail.
+    """
+
+    reason = body.reason.strip()
+    if not reason:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "engaging the kill switch requires a reason; an unexplained emergency stop "
+                "cannot be told apart from a stray request in the audit trail"
+            ),
+        )
+    try:
+        result = state.runtime.live_kill_switch.engage(
+            reason=reason, initiated_by="operator", now=utc_now()
+        )
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)
+        ) from error
+    _logger.warning(
+        "terminal engaged the live kill switch",
+        extra={"event": "terminal_kill_switch_engaged"},
+    )
+    return TerminalKillResult(
+        engaged=result.engaged, reason=result.reason, engaged_at=result.engaged_at
+    )
+
+
+@router.post("/terminal/live/disarm", response_model=TerminalArmResult)
+def terminal_disarm(state: StateDep) -> TerminalArmResult:
+    """Drop the live session arm from the browser. Only ever removes authority.
+
+    The companion to the kill switch above and the second half of what an
+    operator needs in a hurry. Not writer-gated, mirroring ``POST /live/disarm``.
+
+    Arming is *not* offered here: it grants authority, and the asymmetry between
+    the two is the whole design of ``chronos.api.routes.live``. Disarming an
+    already-disarmed session is not an error — the owner asked for the authority
+    to be gone and it is gone.
+    """
+
+    result = state.runtime.live_arming.revoke(now=utc_now())
+    _logger.warning(
+        "terminal disarmed the live session",
+        extra={"event": "terminal_live_disarmed"},
+    )
+    return TerminalArmResult(armed=result.armed, expires_at=result.expires_at)
 
 
 @router.post("/terminal/mandate/revoke", response_model=RevokeResult)

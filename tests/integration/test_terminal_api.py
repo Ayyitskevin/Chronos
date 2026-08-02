@@ -903,3 +903,99 @@ def test_the_session_grants_no_writer_authority(
     assert read_only_client.get("/terminal/system").status_code == 200
     refused = read_only_client.post("/terminal/mandate/revoke", json={"reason": "test"})
     assert refused.status_code == 409
+
+
+# --------------------------------------------------------------- the stop buttons
+#
+# ADR-0018 §4 grants the terminal "engage and disengage the durable kill switch"
+# and "arm and disarm the live session". Until these routes existed the browser
+# could do none of it: the M8b session cookie is scoped ``path=/terminal``, so
+# the client cannot reach ``POST /live/kill`` — asserted by
+# ``test_the_session_does_not_authenticate_the_order_plane`` — and the operator's
+# only emergency stop was curl with the raw API token.
+#
+# Only the authority-REMOVING half is exposed here. That asymmetry is the whole
+# design of ``chronos.api.routes.live`` and these tests pin it: engaging the stop
+# and dropping the arm must work on a demoted backend, and neither granting
+# counterpart may appear under ``/terminal``.
+
+
+def test_the_terminal_can_engage_the_kill_switch(
+    client: TestClient, headers: dict[str, str]
+) -> None:
+    """The emergency stop is reachable from the surface the operator is looking at."""
+
+    response = client.post(
+        "/terminal/live/kill", json={"reason": "smoke: operator stopped it"}, headers=headers
+    )
+    assert response.status_code == 200
+    assert response.json()["engaged"] is True
+    assert client.get("/live/status", headers=headers).json()["kill_switch"]["engaged"] is True
+
+
+def test_engaging_the_kill_switch_requires_a_reason(
+    client: TestClient, headers: dict[str, str]
+) -> None:
+    """An unexplained stop is indistinguishable from a stray request in the audit trail."""
+
+    for body in ({"reason": ""}, {"reason": "   "}):
+        refused = client.post("/terminal/live/kill", json=body, headers=headers)
+        assert refused.status_code == 422
+    assert client.get("/live/status", headers=headers).json()["kill_switch"]["engaged"] is False
+
+
+def test_the_stop_buttons_work_on_a_demoted_backend(
+    read_only_client: TestClient, headers: dict[str, str]
+) -> None:
+    """The point of the whole asymmetry, and the reason these are not writer-gated.
+
+    A backend that lost the single-writer lease is exactly the backend whose
+    operator most needs the stop. ``/terminal/mandate/revoke`` answers 409 here
+    (see ``test_the_session_grants_no_writer_authority``); these two must not.
+    """
+
+    engaged = read_only_client.post(
+        "/terminal/live/kill", json={"reason": "demoted: stop anyway"}, headers=headers
+    )
+    assert engaged.status_code == 200
+    assert engaged.json()["engaged"] is True
+
+    disarmed = read_only_client.post("/terminal/live/disarm", headers=headers)
+    assert disarmed.status_code == 200
+    assert disarmed.json()["armed"] is False
+
+
+def test_disarming_an_unarmed_session_is_not_an_error(
+    client: TestClient, headers: dict[str, str]
+) -> None:
+    """The owner asked for the authority to be gone; it already was."""
+
+    response = client.post("/terminal/live/disarm", headers=headers)
+    assert response.status_code == 200
+    assert response.json()["armed"] is False
+
+
+def test_the_stop_buttons_still_require_a_credential(client: TestClient) -> None:
+    """Not writer-gated is not ungated."""
+
+    assert client.post("/terminal/live/kill", json={"reason": "no token"}).status_code == 401
+    assert client.post("/terminal/live/disarm").status_code == 401
+
+
+def test_the_terminal_offers_no_route_that_grants_live_authority() -> None:
+    """Arming and disengaging are absent from ``/terminal`` **on purpose**.
+
+    ADR-0018 §4 permits them, so this is a scoping decision rather than a
+    prohibition, and it is recorded as one: putting an authority-GRANTING action
+    behind a browser session cookie is a different posture question than putting
+    an emergency stop there, and it is the owner's to answer. If that answer ever
+    arrives, this test is the thing to delete — deliberately, not by accident.
+    """
+
+    from chronos.api.routes.terminal import router
+
+    paths = {route.path for route in router.routes}  # type: ignore[attr-defined]
+    assert "/terminal/live/kill" in paths
+    assert "/terminal/live/disarm" in paths
+    assert "/terminal/live/arm" not in paths
+    assert "/terminal/live/kill/disengage" not in paths

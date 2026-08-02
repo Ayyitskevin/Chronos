@@ -164,11 +164,13 @@ available; do not work around them:
 Genuinely useful platform work that needs no gateway and no owner economics — good
 tasks when the queue above is blocked:
 
-- **Terminal client gaps**: the browser client knows exactly two mutating routes
-  (acknowledge alert, revoke mandate). Kill-switch engage/disengage and arm/disarm
-  exist only as backend routes reachable by curl with the API token — there is no
-  emergency-stop button in the UI today. Adding owner buttons is within ADR-0018 §4's
-  already-granted permission (procedures: `chronos-run-and-operate`).
+- ~~**Terminal client gaps**: there is no emergency-stop button in the UI today.~~
+  **DONE 2026-08-02 (R-43).** The system panel now carries ENGAGE KILL SWITCH and
+  DISARM LIVE SESSION, both typed-confirmed and both working on a demoted backend.
+  **Still open, and deliberately so:** arming and kill-disengage have no buttons —
+  they *grant* authority, and whether a browser session should hold that is an owner
+  posture decision (ADR-0018 §4 permits it). Also still open: mandate authoring in
+  the terminal, and streaming instead of the 5 s poll.
 - **Mandate authoring aid**: the owner hand-writes raw mandate JSON validated only at
   boot; a validate/preview tool (read-only, no authority change) would prevent
   boots-inert surprises.
