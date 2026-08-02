@@ -31,49 +31,12 @@ RISK_REGISTER.md:31-35). Every instance was caught ONLY by the M0 adversarial au
 production, because there has never been any production. Your job at this boundary is
 to not create the fifth instance.
 
-**R-24 — writer lease never renewed.** `WriterLease.renew()` had zero production
-callers, so the 30-second single-writer lease silently expired mid-session while the
-backend still believed it held it, and the token was never checked by DB writes or the
-broker send — an advisory lock, not a fencing token. Fixed M2 (`f8d4150`): a lifespan
-heartbeat renews at TTL/3, any renewal failure permanently demotes the process to
-read-only, and the boundary re-checks ownership in the database immediately before the
-transmit line. Disclosed residual: IBKR does not know about the lease, so broker-side
-fencing is impossible (RISK_REGISTER.md:31-32). Details of the lease invariant live in
-chronos-architecture-contract.
-
-**R-25 — daily opening cap: evidence never gathered, counter never called.** Two
-independent defects, each sufficient: (1) `gather` never set
-`RiskEvidence.opening_orders_today`, so the field's `0` default made `0 + 1 <= limit`
-pass on every call, forever; (2) `count_opening_since` — which had **zero callers** —
-also filtered `action == SELL`, and OPEN ∧ SELL is exactly {OPEN_SHORT_PUT,
-OPEN_COVERED_CALL}, so every stock and crypto opening would have been invisible even
-once wired. This is the **only fail-OPEN instance**: the cap passed everything, so
-nothing was ever refused and nothing alarmed. ADR-0010 §4 claimed it was fixed;
-neither half was. Fixed M10 (`654f842`): `opening_orders_today: int | None = None`
-(risk.py:104-107), market-local midnight, counted at intent creation, UNKNOWN blocks
-(RISK_REGISTER.md:33).
-
-**R-26 — session gate permanently AMBIGUOUS.** The tri-state market-session gate was
-complete, correct, and tested — but its only evidence supplier,
-`BrokerRiskEvidenceProvider._broker_confirms_open`, hard-returned `None`, so every
-equity/option instant inside regular trading hours resolved AMBIGUOUS and blocked.
-The mechanism: **`liquidHours` and `timeZoneId` live on IBKR's `ContractDetails`, not
-on the `Contract` nested inside it, and `instrument_from_contract` only ever read the
-inner `Contract`** — the evidence "was arriving on every qualification and being
-dropped one attribute short of the code that needed it." Fail-closed, so never a money
-hazard — and invisible for exactly that reason. Fixed M9 (`701ebf4`): the
-`chronos.services.liquid_hours` parser plus qualification-time enrichment; the tests
-weight malformed input 13-vs-5 over happy path (RISK_REGISTER.md:34).
-
-**R-27 — option-deliverable verification set only by the demo fake.** Exactly one
-thing in the codebase set `deliverable_verified=True`: `DemoBroker`, by fiat. Neither
-IBKR adapter populated it, so the check FAILed every option order against a real
-gateway. Same wrong-object read one layer over: **`underConId`, `underSymbol`,
-`underSecType` live on `ContractDetails`, not on the `Contract` inside it.** Most
-damning: a line in `tests/unit/test_ibkr_broker.py` asserted
-`deliverable_verified is False` for six milestones — **a passing test that was pinning
-the defect** (it now asserts `is True`, tests/unit/test_ibkr_broker.py:599-604). Fixed
-M11 (`c72a8e5`) with the five-condition deliverable screen (RISK_REGISTER.md:35).
+| Defect | Mechanism | The prevention lesson | Fixed by |
+|---|---|---|---|
+| **R-24** — writer lease never renewed | `WriterLease.renew()` had zero production callers; the 30 s lease expired silently while the backend still believed it held it, and no DB write or broker send checked the token — advisory lock, not fencing token | A control nobody calls is inert; wire AND exercise every conjunct. Residual: IBKR knows nothing of the lease — no broker-side fencing (RISK_REGISTER.md:31-32) | M2 `f8d4150` (heartbeat at TTL/3; one failed renewal demotes read-only; pre-transmit `holds()` re-check) |
+| **R-25** — daily opening cap inert (the ONLY fail-OPEN one) | Evidence never gathered (the field's `0` default made `0 + 1 <= limit` pass forever) AND the counter `count_opening_since` had zero callers and mis-filtered `action == SELL` | Absent evidence must block, never default: `opening_orders_today: int \| None = None`, UNKNOWN ⇒ blocked (risk.py:104-107). ADR-0010 §4 had falsely claimed it fixed | M10 `654f842` (market-local midnight; counted at intent creation; RISK_REGISTER.md:33) |
+| **R-26** — session gate permanently AMBIGUOUS | `liquidHours`/`timeZoneId` live on `ContractDetails`, NOT on the nested `Contract`; `instrument_from_contract` read only the inner object, so the gate's evidence supplier hard-returned `None` and everything in-hours blocked | The wrong-nested-object read — this skill's §2 map and §3 checklist exist because of it. Fail-closed masked the inertness: everything blocked, nothing alarmed | M9 `701ebf4` (liquid-hours parser + qualification-time enrichment; malformed-input tests 13-vs-5; RISK_REGISTER.md:34) |
+| **R-27** — deliverable verification set only by the demo fake | Same wrong-object read one layer over (`underConId`/`underSymbol`/`underSecType` are details-level); only `DemoBroker` set `deliverable_verified=True`, by fiat — and a passing unit test pinned `is False` for six milestones | Never let a fixture set a verification flag by fiat; a test pinning current behavior pins current bugs (it now asserts `is True`, tests/unit/test_ibkr_broker.py:599-604) | M11 `c72a8e5` (five-condition deliverable screen; RISK_REGISTER.md:35) |
 
 **The signature mechanism (R-26/R-27):** IBKR's `reqContractDetails` returns
 `ContractDetails` objects; enrichment read only the inner `.contract`; every consumer
@@ -81,9 +44,9 @@ downstream saw `None`/`False`; and the fail-closed posture **masked the inertnes
 everything blocked, nothing alarmed, no test failed. Fail-closed hid two bugs
 (R-26/R-27); fail-open hid one (R-25). Neither direction screams.
 
-Full chronicle — timeline, commit messages, review culture, the other settled battles
-— lives in **chronos-failure-archaeology**. This skill owns the current-code
-prevention pattern and the touchpoint map.
+Full chronicle — symptom narratives, timeline, commit messages, review culture, the
+other settled battles — lives in **chronos-failure-archaeology §1**. This skill owns
+the current-code prevention pattern and the touchpoint map.
 
 ## 2. The nested-object map (the domain reference)
 
@@ -331,8 +294,9 @@ nothing in this skill authorizes connecting as "verification".
 
 ## Provenance and maintenance
 
-Everything above verified against the working tree on **2026-08-02** (branch
-claude/chronos-skills-library-bfbj29 = feat/wheel-dashboard-mvp tip, 47a8d72). All
+Everything above verified against the working tree on **2026-08-02** — content verified
+against `47a8d72`, the tip of feat/wheel-dashboard-mvp (the skill branch
+claude/chronos-skills-library-bfbj29 carries additional skill-only checkpoints). All
 re-verification commands are read-only; run from the repo root with the project venv
 (`.venv/bin/...`, per README Setup).
 

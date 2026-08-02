@@ -103,7 +103,8 @@ functions).
 ## 3. Option-deliverable verification (the R-27 fix)
 
 **Why it exists.** Assignment math is `strike × multiplier × contracts` — true only for a
-STANDARD deliverable. When OCC adjusts a series (non-whole-share split, spinoff, merger,
+STANDARD deliverable. When OCC (the Options Clearing Corporation, the US options
+clearing house) adjusts a series (non-whole-share split, spinoff, merger,
 special dividend) the contract delivers something else: 150 shares, shares plus cash,
 another issuer's stock. Sizing an adjusted series as 100 shares reserves the wrong number
 "in the direction that leaves the account short at assignment"

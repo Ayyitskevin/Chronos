@@ -47,7 +47,7 @@ ADR (authoring mechanics in §6).
 | Test addition | AI session | Suite green; the test must not place orders or contact a broker/network — "No order is placed by any test, CI run, or development path" | AGENTS.md:33-34; README.md:107 |
 | Doc factual-status update | AI session, evidence-backed only | Rerunnable verification of the fact; supersede/correct in place, never silently rewrite (§6) | VISION_COMPLETION_PLAN.md:358 ("Agents may make evidence-backed factual-status updates with rerunnable verification") |
 | Config default change (any economic-looking or safety-relevant field) | Owner review | Classification of the field as mechanically enforced / explicitly advisory / forbidden; direction-of-failure analysis (must stay fail-closed) | AGENTS.md:29-30 (inert fields are release blockers); AGENTS.md:33-34 (capital/risk-limit changes need explicit owner review) |
-| Schema / migration | AI session (owner merges the PR) | New Alembic revision in `src/chronos/persistence/migrations/versions/` (head `0006_proposal_queue.py` as of 2026-08-02) + the completeness tests in `tests/integration/test_migrations.py` (v2/v3/v4→head upgrades, `test_models_have_no_untracked_tables`, `test_migration_chain_builds_exactly_the_current_models`) green | Observed practice + README.md:258-259 ("Migration verification ... runs inside the pytest step"). No looser written rule exists — treat drift-guard failures as blockers |
+| Schema / migration | AI session (owner merges the PR) — EXCEPT migrations touching safety/authority durable state (lease, kill events, counters, activations, order/risk tables): those take the owner-review row (AGENTS.md:33-34) | New Alembic revision in `src/chronos/persistence/migrations/versions/` (head `0006_proposal_queue.py` as of 2026-08-02) + the completeness tests in `tests/integration/test_migrations.py` (v2/v3/v4→head upgrades, `test_models_have_no_untracked_tables`, `test_migration_chain_builds_exactly_the_current_models`) green | Observed practice + README.md:258-259 ("Migration verification ... runs inside the pytest step"). No looser written rule exists — treat drift-guard failures as blockers |
 | New safety control (adds a refusal; fail-closed direction) | AI session builds; owner review at merge (money-critical) | An `*_exercised`-style test proving the control fires end-to-end, asserting the never-before-seen outcome; revert-the-fix proof per half (the M9-M11 pattern, RISK_REGISTER.md:33-35); a RISK_REGISTER row with disclosed residuals | AGENTS.md:33-34; house proof pattern in chronos-validation-and-qa |
 | Safety-mechanism MODIFICATION (touching an existing gate, check, refusal, or default) | Owner review, explicit — and never in the weakening direction to make progress | Proof the blocking direction is preserved; updated RISK_REGISTER row; if the change weakens anything, it is an autonomy-authority change (next row) | AGENTS.md:23-24 ("Never weaken a gate to manufacture progress"); AGENTS.md:33-34; ADR-0017:50-65 (execution-correctness mechanisms are untouchable) |
 | Autonomy-authority change: widening a mandate's scope, adding an order form, raising a ceiling, adding a network channel | Owner-only + NEW ADR. Agents propose; the owner decides | A new numbered ADR with explicit scope + a DECISIONS.md row + in-place supersession annotations on whatever it overrides (§6) | The D-11→D-16→D-17 precedent (DECISIONS.md:18,23,26); ADR-0016 §6's own rule that growing `OrderForm` needs an "instrument-specific ADR, tests, and mandate permission" (quoted at ADR-0017:9-11); R-32: an out-of-band alert channel "needs a networked channel and its own ADR" (RISK_REGISTER.md:41) |
@@ -79,16 +79,15 @@ When repository documents disagree (AGENTS.md:41-52), higher tier wins:
 
 ### Worked example — a real contradiction, resolved
 
-Claim in prose (tiers 3/6): the autonomy mandate replaces session arming.
-`docs/live_trading_runbook.md:21-24`: "an active owner-authored **AutonomyMandate**
-replaces gates 7 (session arming) and 8 (per-order confirmation) — **and only those
-two**". ADR-0017:83-84: "A running backend plus a valid mandate file is now sufficient to
-trade; there is no per-boot ritual."
+Claim in prose (tiers 3/6): the standing-authority docs say an active owner-authored
+mandate substitutes for live gates 7 (session arming) and 8 (per-order confirmation),
+with no per-boot ritual (docs/live_trading_runbook.md:21-24; ADR-0017:83-84 — both
+sides quoted verbatim in **chronos-autonomy-and-mandates §9**, the technical home).
 
-Fact in code (tier 2): the live gate walk unconditionally requires a current arm —
-`src/chronos/orders/submission.py:441`: `armed = self._live_arming.is_armed(now=fresh_now)`
-— and `grep -rn "mandate" src/chronos/orders/` returns zero matches. The order plane does
-not know mandates exist.
+Fact in code (tier 2): the live gate walk unconditionally requires a current session
+arm (src/chronos/orders/submission.py:441), and `grep -rn "mandate"
+src/chronos/orders/` returns zero matches — the order plane does not know mandates
+exist.
 
 Resolution by the ladder: tier 2 beats tier 3. The code IS the current fact — autonomous
 LIVE submission is blocked without a session arm; the prose overstates operability, not
@@ -97,7 +96,9 @@ That would weaken a gate to match prose — an autonomy-authority change (owner-
 ADR, §1). What the repo actually did: recorded the conflict as an open Phase 1 defect —
 "Choose and implement one reviewed authority model" (VISION_COMPLETION_PLAN.md:151-153) —
 i.e. it stopped and surfaced. Do the same: name both sides with file:line in your task
-close and in the owner-decision queue (chronos-priorities-and-roadmap).
+close and in the owner-decision queue (chronos-priorities-and-roadmap). Full both-sides
+quotes: **chronos-autonomy-and-mandates §9** (technical) and **chronos-docs-map**
+ledger #2 (ledger entry).
 
 ### Reverify point-in-time findings
 
@@ -272,7 +273,7 @@ blockquote-annotate, date it, name the superseding authority, leave the original
   (`src/chronos/research/walkforward.py`, `stats.py`, `campaign.py`;
   `python -m chronos.histdata options`). Status lines were never flipped. Do not read
   "proposed" as "unbuilt" or "accepted" as "verified" — check the code, and see
-  chronos-docs-map's contradiction ledger (entry #12f) for the full list.
+  chronos-docs-map's contradiction ledger (entry #12b) for the full list.
 - An ADR records the decision, its scope, what it supersedes IN PLACE, what it explicitly
   does NOT supersede (ADR-0017's "Not superseded" list is the model — DECISIONS.md:26),
   the residuals it accepts, and the owner as authority when it is an owner directive.
@@ -378,9 +379,10 @@ docs above are rules.
 
 ## Provenance and maintenance
 
-Written 2026-08-02 against HEAD `47a8d72` (branch `claude/chronos-skills-library-bfbj29`,
-same tip as `feat/wheel-dashboard-mvp`). All file:line citations were verified on that
-commit. Line numbers drift; re-verify before quoting onward:
+Written 2026-08-02; content verified against `47a8d72`, the tip of
+`feat/wheel-dashboard-mvp` (the skill branch `claude/chronos-skills-library-bfbj29`
+carries additional skill-only checkpoint commits). All file:line citations were verified
+on that commit. Line numbers drift; re-verify before quoting onward:
 
 | Volatile fact | Re-verify with (read-only) |
 |---|---|
@@ -391,7 +393,7 @@ commit. Line numbers drift; re-verify before quoting onward:
 | ADR-0017 scoping quotes | `grep -n "owner-optional ceilings\|None of these is touched" docs/adr/ADR-0017-owner-directed-maximal-autonomy.md` |
 | ADR-0010 §4 in-place correction | `grep -n "Correction (2026-07-27, M10)" docs/adr/ADR-0010-crypto-family.md` |
 | ADR-0012/0014/0015 still "proposed" | `grep -n "^Status" docs/adr/ADR-001[245]*.md` |
-| Highest ADR number (0019 as of 2026-08-02) | `ls docs/adr/ | sort | tail -1` |
+| Highest ADR number (0019 as of 2026-08-02) | `ls docs/adr/ \| sort \| tail -1` |
 | "none is closed" + [enforced]/[contract] key | `grep -n "none is closed\|Bullets marked" README.md` |
 | Kernel-defect rows R-24..R-27 all MITIGATED | `grep -n "R-2[4-7] " RISK_REGISTER.md` |
 | Arming still unconditional; orders plane mandate-free | `grep -n "is_armed" src/chronos/orders/submission.py; grep -rn "mandate" src/chronos/orders/ \| wc -l` (expect 0) |

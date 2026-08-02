@@ -7,13 +7,10 @@ description: >
   "CI failing", "pytest failing", "add coverage", "did this control actually work", "what
   counts as evidence", "can I claim this is done", "verify a fix", "revert the fix",
   "structural test", "AST test", "exercised test", "mutation/property/fuzz tests",
-  "SAFETY TRIPWIRE failure", "which tests protect X". It defines the claim-evidence ladder
-  (what you may say vs what evidence you hold), maps every test directory and the
-  load-bearing safety suites, and teaches the house proof patterns (structural/AST
-  inventories, exercised-not-just-present tests, revert-the-fix verification, fail-closed
-  weighting). NOT for statistical strategy-evidence gates (chronos-research-methodology),
-  environment setup (chronos-build-and-env), or what documents may claim
-  (chronos-change-control).
+  "SAFETY TRIPWIRE failure", "which tests protect X". Home of the claim-evidence
+  ladder, the test-suite map, and the house proof patterns. NOT for statistical
+  strategy-evidence gates (chronos-research-methodology), environment setup
+  (chronos-build-and-env), or what documents may claim (chronos-change-control).
 ---
 
 # Chronos validation and QA: what counts as evidence
@@ -65,7 +62,12 @@ Vocabulary that encodes the ladder — use it, never blur it:
 ## 2. Test-suite map
 
 Verified 2026-08-02: `pytest -q` → **2489 passed, 1 skipped, ~2 minutes** (2490
-collected). Layout under `/home/user/Chronos/tests/`:
+collected). Companion gate baselines, same date: `mypy src/chronos` → "Success: no
+issues found in **218** source files"; `ruff format --check .` → "**379** files already
+formatted" (the count includes the five `.claude/skills` scripts, which sit inside
+`ruff`'s repo-wide scope). This section is the authoritative numeric baseline — other
+skills state the loose shape and cross-reference here. Layout under
+`/home/user/Chronos/tests/`:
 
 | Directory | Collected | What lives there |
 |---|---|---|
@@ -104,7 +106,7 @@ ambient settings are live-capable` means your repo-root `.env`, not the code.
 | `tests/safety/test_option_deliverable.py` (30) | R-27: the five conjunctive deliverable conditions, each verified by reverting it and confirming a DISTINCT failure; asserts the first-ever PASS. Companion: `tests/unit/test_ibkr_broker.py:600-602`, the line that asserted `deliverable_verified is False` for six milestones (pinning the defect) and now asserts `is True`. |
 | `tests/safety/test_autonomy_contracts.py` (46) | Model-plane isolation: AST walk over `chronos.autonomy` against a forbidden import set (orders/broker/execution/risk/api/persistence/services/control, ib_async, ibapi, sqlalchemy) including `from chronos import autonomy` aliases, PLUS a subprocess `sys.modules` probe; forbidden field names on the decision contract; only the supervisor + the named wiring module consume the contracts. |
 | `tests/safety/test_autonomy_wiring.py` (18) | The ADR-0017 assembly seam: valid mandate file auto-activates; revocation survives restart; wrong-account/broken mandate boots inert; the handoff walks the full propose→preview→confirm→submit pipeline, not a shortcut. |
-| `tests/safety/test_supervisor_gateway.py` (49) | The 15 admission checks fail closed (unevaluated ⇒ not passed), and the **ENFORCED/INERT pin**: every mandate limit field is classified, the classification is compared against the model fields (a new field must be classified or the suite fails) AND against kernel source (an INERT field the kernel starts reading fails; an ENFORCED field nothing reads fails) — test_supervisor_gateway.py:634-751. |
+| `tests/safety/test_supervisor_gateway.py` (49 functions; 61 collected) | The 15 admission checks fail closed (unevaluated ⇒ not passed), and the **ENFORCED/INERT pin**: every mandate limit field is classified, the classification is compared against the model fields (a new field must be classified or the suite fails) AND against kernel source (an INERT field the kernel starts reading fails; an ENFORCED field nothing reads fails) — test_supervisor_gateway.py:634-751. |
 | `tests/safety/test_supervisor_compiler.py` | MARKET order form compiles to a quote-derived collared limit (`test_a_market_form_compiles_to_a_collared_limit`, :480); no unbounded market order is expressible. |
 | `tests/safety/test_terminal_client.py` (17) | Runs the REAL `terminal.js` inside a `node:vm` fake-DOM harness (`tests/support/terminal_harness.js`) and asserts on rendered claims — no fabricated calm (cached kill switch, null rendered as zero), no actions the backend will refuse. Missing `node`: **skip locally, hard FAIL when `CI` env var is set** (:57-68). |
 | `tests/safety/test_terminal_client_has_no_html_sinks.py` | Source scan of the shipped client with comments stripped (the honest comment names the sinks, so raw-text scanning would false-fail): no `innerHTML`/`outerHTML`/`insertAdjacentHTML`/`document.write`/`eval`/`Function`/`javascript:`/`on*` attributes, no external origins. Also asserts the stripper still surfaces a planted sink — a scanner that quietly stops finding things is itself the failure class. |
@@ -369,6 +371,7 @@ facts and how to re-verify each (all read-only):
 | Volatile fact | Re-verify with |
 |---|---|
 | 2489 passed / 1 skipped, ~2 min | `.venv/bin/python -m pytest -q` (per README Setup) |
+| mypy 218 source files; format 379 files (incl. the 5 `.claude/skills` scripts) | `.venv/bin/mypy src/chronos` ; `.venv/bin/ruff format --check .` |
 | Per-directory counts (1461/202/561/226/27/13) | `.venv/bin/python -m pytest tests/<dir> --collect-only -q \| tail -1` |
 | The single skip is the IBKR smoke test | `.venv/bin/python -m pytest -q -ra \| grep -A1 SKIPPED` |
 | Four CI gates and CI env | `sed -n '1,50p' .github/workflows/ci.yml` |

@@ -175,7 +175,7 @@ standalone document; its findings live as the `-orig` rows in RISK_REGISTER.md (
 4. **Docs and tests can both lie in the comfortable direction.** ADR-0010 §4 claimed a fix
    that didn't exist (1.2); a unit test pinned R-27's defect for six milestones (1.4).
 5. **All four are MITIGATED, none is CLOSED** — "each keeps a disclosed residual, and
-   per-family promotion still requires owner verification against a real gateway"
+   per-family live promotion still needs owner verification against a real gateway"
    (README.md:102-103; final paragraph of `c72a8e5`). Every fix is fixture-verified only.
    Do not describe any of them as "closed" or "gateway-proven."
 
@@ -242,14 +242,11 @@ would pass the whole suite"), closed with 12 per-limit breach tests.
   `--stage all` had computed and committed final-window results, consuming QQQ's one-shot
   holdout (INDEPENDENT_REVIEW_M5.md:28). Process fixes: `--stage all` no longer includes
   `final`; ADR-0013/D-15 built the hash-chained trial registry + holdout guardian so a
-  burned window is *detected and refused*, not merely remembered. **The residual trap
-  (2026-08-02, verified live):** the registry **ships empty** — `research/registry/` does
-  not exist on disk and `research/data/history/HOLDOUTS.json` declares zero windows — so
-  `chronos.cli holdout status` reports `burned_windows: []` **while QQQ 2022-01-03..
-  2024-01-10 IS burned**: `research/results/research_all.json` contains five `tag=="final"`
-  QQQ runs over exactly that window, and docs/VISION_COMPLETION_PLAN.md:61-62 makes it
-  canonical. Never infer holdout cleanliness from the empty ledger. Mechanics and the full
-  holdout discipline: **chronos-research-methodology**.
+  burned window is *detected and refused*, not merely remembered. **The residual trap,
+  in one line (2026-08-02): the registry ledger ships EMPTY while the QQQ
+  2022-01-03..2024-01-10 holdout IS burned — never infer holdout cleanliness from the
+  empty ledger.** Full current state (CLI outputs, the documentary burn records) and the
+  holdout discipline: **chronos-research-methodology §7**.
 
 ---
 
@@ -317,8 +314,10 @@ others); the per-line ledger of which docs are stale is owned by **chronos-docs-
 
 ## 6. Archaeology limits and traps — read before citing history
 
-1. **This is a SHALLOW clone.** `git rev-parse --is-shallow-repository` → `true`; only
-   **150 commits** are visible; the apparent first commit `a65c7b3` (2026-07-16) is a
+1. **This is a SHALLOW clone.** `git rev-parse --is-shallow-repository` → `true`;
+   only **~150 commits** were visible at authoring (2026-08-02; the count grows with
+   skill-library checkpoint commits — re-verify with `git log --oneline | wc -l`); the
+   apparent first commit `a65c7b3` (2026-07-16) is a
    **graft point** that "adds" the entire pre-existing tree, not the real repo root. The
    original wheel-dashboard M1-M10 build history is **unexcavatable locally** — README.md
    and docs/architecture.md prose (banner: "read it as the historical M1-M10 posture",

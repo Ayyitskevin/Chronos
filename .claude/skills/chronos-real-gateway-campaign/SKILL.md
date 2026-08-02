@@ -145,8 +145,9 @@ not silently edit mid-campaign).
 make gates    # = ruff check, ruff format --check, mypy src/chronos, pytest -q
 ```
 
-- EXPECTED (measured 2026-08-02): all four pass; pytest `2489 passed, 1 skipped` — the
-  one skip IS the gateway smoke test. Counts drift; re-measure, don't quote.
+- EXPECTED: all four pass; pytest green with exactly one skip — the one skip IS the
+  gateway smoke test (expect ~2489 passed as of 2026-08-02; authoritative baseline:
+  chronos-validation-and-qa §2). Counts drift; re-measure, don't quote.
 - If the whole suite fails with "SAFETY TRIPWIRE: ambient settings are live-capable" →
   your repo-root `.env` sets a live-capable combination; the suite refuses by design
   (tests/conftest.py:17-52). Fix `.env` (see 1.2). Other failures → stop the campaign;
@@ -269,7 +270,9 @@ A passing smoke test proves the read path works — nothing more (docs/ibkr_setu
 ```
 
 The harness refuses to start unless both transmit flags are false AND
-`AUTONOMY_MANDATE_FILE` is unset. It captures into sanitized canonical JSON
+`AUTONOMY_MANDATE_FILE` is unset, and refuses with the ibapi install guidance (exit 2,
+nothing written) if the configured broker adapter cannot be constructed — e.g. Phase 0.1
+not done. It captures into sanitized canonical JSON
 (`capture.json`, `derived_liquid_hours.json`, `manifest.json` with sha256 per file). Map
 to the §7 capture list:
 
@@ -368,9 +371,10 @@ Per-session checklist (every session, no exceptions):
 3. Run a second capture in the same sitting → `…-session-<N>-post-restart`.
 4. Record: reconnect behavior with the SAME `IB_CLIENT_ID` (clean reconnect vs "client id
    in use" — docs/ibkr_setup.md:148), all connection-uncertain callback codes observed
-   (1100/1102/1300/2110 are the fixture-era expectations, callbacks.py:38 — record what
-   ACTUALLY arrives), server-time continuity, and whether account/positions survive
-   identically. These are BASELINES; no expected values exist yet.
+   (1100/1101/1102/1300/2110 are the fixture-era expectations, callbacks.py:38 — record
+   what ACTUALLY arrives; note 1101/1102 also appear in the benign set at callbacks.py:35,
+   so an overlap is classified, not "unclassifiable"), server-time continuity, and whether
+   account/positions survive identically. These are BASELINES; no expected values exist yet.
 5. Both captures + the restart narrative count as the §7 "including a gateway
    restart/reset" evidence.
 
@@ -493,8 +497,11 @@ claim-evidence ladder).
 
 Compiled 2026-08-02 from the live repo (branch `claude/chronos-skills-library-bfbj29`).
 The demo rehearsal, refusal guards, sanitization, tamper detection, and replay checks of
-the shipped scripts were executed and verified in this environment on 2026-08-02. No
-gateway was contacted (none exists here — that is the campaign's job).
+the shipped scripts were executed and verified in this environment on 2026-08-02
+(re-verified the same day after the fixer pass added argparse `--help` handling to
+`replay_check.py` and the labeled no-ibapi refusal to `capture_readonly.py` — exit
+contract 0/1/2 unchanged). No gateway was contacted (none exists here — that is the
+campaign's job).
 
 Volatile facts → re-verify before trusting (all read-only):
 

@@ -7,12 +7,8 @@ description: >
   "fresh clone", "venv", "pip", "lockfile", "requirements-dev.lock", "CI environment",
   "make test fails", "No such file or directory: .venv", "environment broken",
   "dependencies", "python version", "requires-python", "ModuleNotFoundError: chronos",
-  "ibapi not installed", "hash mismatch", "alembic", "initialize_database". It documents
-  the two sanctioned setup routes (README quickstart vs the CI/deploy-faithful lockfile
-  route), every Makefile target, the exact CI job, lockfile discipline, database
-  initialization, and the known traps (3.11 default python, no shipped .venv, ibapi
-  deliberately absent from PyPI, the misleading `chronos` console script). NOT for
-  day-to-day running of the app (chronos-run-and-operate), config meanings
+  "ibapi not installed", "hash mismatch", "alembic", "initialize_database". NOT for
+  running the app (chronos-run-and-operate), config meanings
   (chronos-config-and-flags), or test-writing (chronos-validation-and-qa).
 ---
 
@@ -152,7 +148,7 @@ one-line conveniences, not authorities.
 
 ## 3. Makefile — every target
 
-/home/user/Chronos/Makefile (30 lines). Line 2: `PY := .venv/bin/python`. **Every target
+/home/user/Chronos/Makefile (29 lines). Line 2: `PY := .venv/bin/python`. **Every target
 hard-codes `.venv/bin/…`; nothing falls back to system python; every target fails with
 "No such file or directory" until `.venv` exists.**
 
@@ -228,7 +224,7 @@ Route B on Python 3.12 before concluding anything about the code. The second wor
 
 ## 6. Databases and directories the environment creates
 
-- `scripts/initialize_database.py` (25 lines): constructs
+- `scripts/initialize_database.py` (24 lines): constructs
   `Database(DATABASE_URL)` and calls `database.initialize()` — **create or verify** the
   current wheel-dashboard SQLite schema, then prints "Chronos schema version 7 is
   initialized" (`SCHEMA_VERSION = 7`, src/chronos/persistence/database.py:20). Optional
@@ -265,14 +261,15 @@ Run the four gates from the repo root (this is `make gates`, and it is CI):
 .venv/bin/python -m pytest -q
 ```
 
-Expected output **as of 2026-08-02** (all four re-run and verified during authoring):
+Expected SHAPE as of 2026-08-02 (all four re-run and verified; the authoritative
+numeric baseline lives in **chronos-validation-and-qa §2** — re-measure, don't quote):
 
-| Gate | Expected |
+| Gate | Expected shape |
 |---|---|
 | `ruff check .` | `All checks passed!` |
-| `ruff format --check .` | `374 files already formatted` |
-| `mypy src/chronos` | `Success: no issues found in 218 source files` |
-| `pytest -q` | `2489 passed, 1 skipped, 5 warnings` in ~98-115 s |
+| `ruff format --check .` | `N files already formatted`, exit 0 (~379 as of 2026-08-02; the `.claude/skills` scripts are in scope) |
+| `mypy src/chronos` | `Success: no issues found in N source files`, exit 0 (~218) |
+| `pytest -q` | green with exactly 1 skip and 5 warnings (~2489 passed as of 2026-08-02) in ~98-115 s |
 
 The 1 skip is always tests/integration/test_ibkr_smoke.py (opt-in via
 `CHRONOS_RUN_IBKR_SMOKE=1`; marker `ibkr`; lines 15-23). The 5 warnings are Starlette
@@ -314,8 +311,7 @@ All facts verified 2026-08-02 against branch `claude/chronos-skills-library-bfbj
 
 | Volatile fact (2026-08-02) | Re-verify with |
 |---|---|
-| Gate baseline: 2489 passed / 1 skipped / 5 warnings, ~98-115 s | `.venv/bin/python -m pytest -q` |
-| mypy: 218 source files; format: 374 files | `.venv/bin/mypy src/chronos` ; `.venv/bin/ruff format --check .` |
+| Gate baselines (~2489 passed / 1 skipped; mypy ~218; format ~379 — authoritative home: chronos-validation-and-qa §2) | `.venv/bin/python -m pytest -q` ; `.venv/bin/mypy src/chronos` ; `.venv/bin/ruff format --check .` |
 | Key pins (ib-async 2.1.0, fastapi 0.139.2, …) | `grep -E "^(ib-async\|fastapi\|streamlit\|pandas\|sqlalchemy\|alembic)==" requirements-dev.lock` |
 | Lock generation command | `head -2 requirements-dev.lock` |
 | CI steps / forced env / Python 3.12 / 10-min timeout | `cat .github/workflows/ci.yml` |

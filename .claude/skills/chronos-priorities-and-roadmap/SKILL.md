@@ -64,7 +64,7 @@ update your understanding, not the gate.
 | 2 | **Zero strategies selected for promotion.** Best cell: `regime_trend_v1`/QQQ, **18 closed trades** on the validation window vs the frozen ≥20 floor (C4). Frozen before observation; not editable after. | `grep -n "Selected candidates" docs/STRATEGY_SELECTION.md` (→ NONE); `grep -n "maximum is 18" docs/RESEARCH_REPORT.md` |
 | 3 | **The wheel has ZERO backtest evidence and no options simulator exists.** Expired-option history is unobtainable at any spend (ADR-0012); validation is forward-capture-bound. | `grep -rn "option" src/chronos/backtest src/chronos/strategies \| wc -l` (→ 0) |
 | 4 | **Account snapshot ≈ USD 110** vs the ~USD 3,000 premise still carried by ~25 doc/config sites. This is a LIVE, UNRESOLVED owner decision — never quietly assume either number. | `sed -n '68,70p' docs/VISION_COMPLETION_PLAN.md` |
-| 5 | Full suite: **2489 passed, 1 skipped** (the opt-in IBKR smoke test); ruff/format/mypy-strict clean. 2490 collected as of 2026-08-02. | `.venv/bin/pytest -q` (~100 s), or `grep -n "2489 passed" CHANGELOG.md` |
+| 5 | Suite green with exactly one skip (the opt-in IBKR smoke test); ruff/format/mypy-strict clean. Expect ~2489 passed as of 2026-08-02 — authoritative baseline and suite map: `chronos-validation-and-qa` §2. | `.venv/bin/pytest -q` (~100 s) |
 | 6 | **Option-chain selection work lives on `codex/chronos-option-chain-selection-v1` @ ae9d256 and is NOT assumed integrated** into the default branch. | `sed -n '65,67p' docs/VISION_COMPLETION_PLAN.md`; `git log --oneline --all \| grep -ci "option-chain"` (→ 0 locally) |
 | 7 | **Default branch is `feat/wheel-dashboard-mvp`; no `main` exists.** Repository debt, not permission to rename or rewrite history. | `git branch -a -v` |
 | 8 | Experiment-registry ledger **ships empty** (0 records, 0 trials); the burned QQQ 2022-2024 holdout is documented ONLY in docs/results, not the ledger — never infer holdout cleanliness from the empty ledger. | `ls research/registry/` (→ does not exist); `grep -n "must not be treated as clean" docs/VISION_COMPLETION_PLAN.md` |
@@ -98,13 +98,17 @@ live commit before editing, and check no branch already addresses it (plan §6 p
 | 7 | **Dead economic fields on the decision contract**: `exit_plan`, `protective_order_required`, `max_acceptable_loss_usd`, `requested_risk_budget_usd` affect nothing but the dedup fingerprint. Violates AGENTS.md:29-30 ("inert authority, risk, exit, or protection fields are release blockers"). | Only readers in src/ are `autonomy/decision.py` (definition) and `supervisor/queue.py` (fingerprint). OPEN. | `grep -rln "exit_plan\|max_acceptable_loss_usd" src/chronos --include='*.py'` (→ those two files only) |
 | 8 | **Promotion is not evidence-bound**: `FamilyPromotion` rungs are self-declared in the owner's mandate JSON; no signed/expiring evidence artifact, no grant/demote code, nothing binds a rung to the evidence that earned it. | Only carriers: `autonomy/mandate.py` (+ consistency checks in admission, display in terminal views). OPEN. | `grep -rln "FamilyPromotion" src/chronos --include='*.py'` |
 
-How to work this list: items 1, 2, 3, 5 and the doc halves of everything are code+doc
-work an AI session CAN do under the normal task contract (plan §13). Items 4, 6, 7, 8
-involve authority-model choices (which arming model wins; what a worker credential
-may do; whether a dead field becomes enforced or forbidden; what a promotion artifact
-attests) — **those are owner gates**. Classify and route every one of them through
-`chronos-change-control` before touching code. Fixing prose toward the weaker, true
-statement is always safe; fixing code toward the stronger prose is an authority change.
+How to work this list: items 1 and 2, plus the DOC halves of all eight findings, are
+work an AI session CAN do under the normal task contract (plan §13). The CODE halves of
+item 3 (making recovery boot kill-engaged — a pinned-by-test safety-mechanism
+modification) and item 5 (typed handoff outcomes for the supervisor) require explicit
+owner review per `chronos-change-control` §1 (the "Safety-mechanism MODIFICATION" row).
+Items 4, 6, 7, 8 involve authority-model choices (which arming model wins; what a worker
+credential may do; whether a dead field becomes enforced or forbidden; what a promotion
+artifact attests) — **those are owner gates**. Classify and route every one of them
+through `chronos-change-control` before touching code. Fixing prose toward the weaker,
+true statement is always safe; fixing code toward the stronger prose is an authority
+change.
 
 ### 3b. THEN: the real-gateway read-only evidence gate — THE campaign
 
@@ -148,8 +152,9 @@ available; do not work around them:
    prerequisite for the gateway campaign to produce quote/chain evidence.
 6. **The real-gateway session itself** — credentials, ibapi install, paper account
    (§3b; owner-only by definition).
-7. **TradingView parity exports** — `fixtures/tradingview/` is empty; parity remains
-   spec-level until the owner exports references (TASKS.md:51-52, A-03).
+7. **TradingView parity exports** — `fixtures/tradingview/` holds only a README, no
+   reference exports; parity remains spec-level until the owner exports references
+   (TASKS.md:51-52, A-03).
 8. **Option-chain branch** — integrate, rework, or drop
    `codex/chronos-option-chain-selection-v1` (fact #6). Until decided, do not build
    on the assumption it lands.
@@ -271,10 +276,10 @@ canonical", 2026-08-01). Grounding documents: `docs/VISION_COMPLETION_PLAN.md`
 
 | Volatile fact (as of 2026-08-02) | Re-verify |
 |---|---|
-| HEAD is `47a8d72`; both branches at the same tip; no `main` | `git log -1 --oneline && git branch -a -v` |
+| Compiled against `47a8d72` (last non-skill commit, tip of `feat/wheel-dashboard-mvp`); the skill-library branch runs ahead of it by its own checkpoint commits; no `main` | `git log -1 --oneline && git branch -a -v` |
 | Plan still canonical / effective 2026-08-01 | `sed -n '1,6p' docs/VISION_COMPLETION_PLAN.md` |
 | All 8 Phase-1 findings still open | run the per-row commands in §3a |
-| Suite 2489 passed / 1 skipped | `.venv/bin/pytest -q` |
+| Suite green, 1 skip (~2489 passed as of 2026-08-02; baseline home: `chronos-validation-and-qa` §2) | `.venv/bin/pytest -q` |
 | Zero strategies selected; best cell 18 trades | `grep -n "Selected candidates" docs/STRATEGY_SELECTION.md` |
 | No gateway evidence yet; capture store empty | `ls research/data/history/` |
 | Account ≈ USD 110 decision still unresolved | `sed -n '68,70p' docs/VISION_COMPLETION_PLAN.md` |

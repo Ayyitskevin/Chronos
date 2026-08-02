@@ -9,12 +9,9 @@ description: >
   state "before restore" / after restoring a backup. Also load it at the start
   of any session that will touch live-adjacent code (orders, kill switch,
   mandate, .env), and after any documentation edit to confirm which known-stale
-  claims are fixed. Ships three runnable scripts: state_inventory.py (safety-
-  state snapshot: kill switch, halt, mandate, DBs, migrations, .env, git),
-  doc_drift_check.py (20-rule stale-claim detector from the contradiction
-  ledger), env_check.py (interpreter/venv/lockfile/node sanity). NOT for
-  fixing what they find (chronos-run-and-operate, chronos-docs-map,
-  chronos-build-and-env) or deep debugging (chronos-debugging-playbook).
+  claims are fixed. NOT for fixing what the scripts find
+  (chronos-run-and-operate, chronos-docs-map, chronos-build-and-env) or deep
+  debugging (chronos-debugging-playbook).
 ---
 
 # chronos-diagnostics — measure, don't eyeball
@@ -92,7 +89,7 @@ reported inside INFO lines, `[WARN]`/`[CRIT]` findings (non-zero exit),
 | Migrations vs SCHEMA_VERSION | `N revisions + baseline => vN+1` consistent (6 => v7 as of 2026-08-02) | MISMATCH = a migration or schema bump landed without its counterpart; do not run `alembic upgrade` until understood | chronos-build-and-env |
 | .env live-capability | `.env NOT PRESENT` or only safe values (`demo`, `paper`, `false`, empty) | Any live-capable var set (BROKER_MODE!=demo, ALLOW_ORDER_TRANSMIT, ALLOW_LIVE_TRADING, IB_ACCOUNT_ID, AUTONOMY_MANDATE_FILE, ...) — also note: a live-capable `.env` makes the whole test suite fail by design (conftest tripwires) | chronos-config-and-flags (meanings), chronos-run-and-operate (procedures) |
 | Git state | Clean tree on a work branch | Dirty tree before you started = someone else's uncommitted state; know whose | chronos-change-control (branch discipline) |
-| Test collection | `2490` collected (2026-08-02 baseline) | Count DROPPED below baseline = tests disappeared; a green run proves less than you think | chronos-validation-and-qa |
+| Test collection | `2490` collected (2026-08-02 baseline; authoritative baseline home: chronos-validation-and-qa §2) | Count DROPPED below baseline = tests disappeared; a green run proves less than you think | chronos-validation-and-qa |
 
 The kill-switch/halt asymmetry in one line: **two stop mechanisms, opposite
 missing-file defaults** — platform halt missing = HALTED (safe); live

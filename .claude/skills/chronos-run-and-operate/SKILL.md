@@ -44,7 +44,7 @@ operator hazard — see "The two stop mechanisms" below before touching anything
 
 | Process | Start command | Needs | Can / cannot |
 |---|---|---|---|
-| Backend API (the ONLY broker-owning, order-writing process; also serves the terminal) | `make backend` → `.venv/bin/python scripts/run_backend.py` (uvicorn `chronos.api.main:create_app`) | `.env`, `data/` DB; binds loopback `127.0.0.1:8765` only (non-loopback `BACKEND_HOST` refuses at load, `settings.py:255-259`) | Owns the single writer lease; runs reconciliation at startup; auto-activates a valid `AUTONOMY_MANDATE_FILE` (`api/main.py:250-276`) |
+| Backend API (the ONLY broker-owning, order-writing process; also serves the terminal) | `make backend` → `.venv/bin/python scripts/run_backend.py` (uvicorn `chronos.api.main:create_app`) | `.env`, `data/` DB; binds loopback `127.0.0.1:8765` only (non-loopback `BACKEND_HOST` refuses at load, `settings.py:255-259`) | Owns the single writer lease (the single-writer DB lock — one process may write; invariant: chronos-architecture-contract inv. 3; demotion triage: chronos-debugging-playbook §5); runs reconciliation at startup; auto-activates a valid `AUTONOMY_MANDATE_FILE` (`api/main.py:250-276`) |
 | Backend-driven Streamlit UI | `make ui` → `scripts/run_ui.py` → `streamlit run src/chronos/ui/backend_app.py` | Backend must be up first (talks loopback HTTP) | Thin client; no broker handle |
 | Legacy in-process Streamlit app | `.venv/bin/streamlit run src/chronos/app.py`; forced-safe: `.venv/bin/python scripts/run_demo.py` | run_demo.py forces `BROKER_MODE=demo`, `ALLOW_ORDER_TRANSMIT=false`, `ALLOW_LIVE_TRADING=false` in the child env (`scripts/run_demo.py:12-19`) | In-process runtime; the pre-backend surface |
 | Operator terminal | NOT a separate process — served BY the backend at `http://127.0.0.1:8765/terminal/app` | A running backend + the API token | Read panels + acknowledge/revoke only (see Terminal section) |
@@ -85,7 +85,9 @@ paper-vs-live branch is selected purely by the frozen `ib_environment`
 the boundary (`submission.py:241-330`) — but the official adapter's last-line check
 still refuses any mutating call while the kill switch is engaged
 (`official_ibkr.py:1248-1253`), so engaging the kill switch stops paper submissions
-too, one layer down. NOTE: no real gateway (paper or live) has EVER been connected in
+too, one layer down. Enabling `ALLOW_ORDER_TRANSMIT` for the first time is an owner
+decision (chronos-config-and-flags §2); the read-only real-gateway campaign precedes
+any paper order. NOTE: no real gateway (paper or live) has EVER been connected in
 this project's history — see chronos-real-gateway-campaign before any gateway session.
 
 **Live.** NEVER walk a reader toward live casually — live acceptance is an owner

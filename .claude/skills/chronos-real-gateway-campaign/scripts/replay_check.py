@@ -21,13 +21,15 @@ replay_check.py fixtures/ibkr/2026-08-XX-session-1 [more session dirs...]
 
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 from hashlib import sha256
 from pathlib import Path
 
+sys.dont_write_bytecode = True  # keep the skill dir cache-free (no __pycache__ from this import)
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from capture_readonly import canonical_json, derive_liquid_hours
+from capture_readonly import canonical_json, derive_liquid_hours  # noqa: E402
 
 _MUTATION_TOKENS = ("submit_order", "preview_order", "modify_order", "cancel_order")
 
@@ -76,15 +78,29 @@ def check_session(directory: Path, *, allow_demo: bool = False) -> list[str]:
 
 
 def main() -> int:
-    arguments = [argument for argument in sys.argv[1:] if argument != "--allow-demo"]
-    allow_demo = "--allow-demo" in sys.argv[1:]
-    if not arguments:
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "directories",
+        nargs="*",
+        metavar="SESSION_DIR",
+        help="captured session directory to check (repeatable)",
+    )
+    parser.add_argument(
+        "--allow-demo",
+        action="store_true",
+        help="validate a demo rehearsal (manifest gateway_evidence=false) instead of refusing it",
+    )
+    args = parser.parse_args()
+    if not args.directories:
         print(__doc__)
         return 2
     all_failures: list[str] = []
-    for argument in arguments:
+    for argument in args.directories:
         directory = Path(argument)
-        failures = check_session(directory, allow_demo=allow_demo)
+        failures = check_session(directory, allow_demo=args.allow_demo)
         status = "PASS" if not failures else "FAIL"
         print(f"[{status}] {directory}")
         all_failures.extend(failures)

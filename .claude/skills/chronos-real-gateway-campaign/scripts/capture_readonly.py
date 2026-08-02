@@ -340,7 +340,18 @@ def main() -> int:
         return 2
 
     args.account_ids = {settings.ib_account_id} if settings.ib_account_id.strip() else set()
-    capture = asyncio.run(run_capture(settings, args))
+
+    from chronos.broker.base import BrokerError
+
+    try:
+        capture = asyncio.run(run_capture(settings, args))
+    except BrokerError as error:
+        # Adapter construction failed before any capture step ran (e.g. BROKER_MODE=ibkr
+        # with the official adapter and no ibapi installed). Refuse with the guidance
+        # instead of a raw traceback; nothing has been written.
+        print(f"REFUSED: cannot construct the configured broker adapter: {error}")
+        print("(nothing was written; see chronos-real-gateway-campaign Phase 0.1)")
+        return 2
     derived = derive_liquid_hours(capture)
 
     out_dir = Path(args.out)

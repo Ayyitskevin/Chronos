@@ -133,8 +133,8 @@ equity/option instant judged AMBIGUOUS and blocked (R-26). The gate was complete
 correct, documented, and tested — and had never once said OPEN. The evidence was
 arriving on every qualification and being dropped one attribute short:
 `liquidHours`/`timeZoneId` live on IBKR's `ContractDetails`, not on the `Contract`
-inside it (fix: 701ebf4; current read: evidence.py:183-211 off the qualified
-contract). Cross-ref chronos-ibkr-boundary for the full nested-object map.
+inside it (fix: 701ebf4; current read: src/chronos/orders/evidence.py:183-211 off the
+qualified contract). Cross-ref chronos-ibkr-boundary for the full nested-object map.
 
 So when a gate blocks *everything*, ask two separate questions:
 
@@ -267,7 +267,7 @@ stray one before restarting; do not delete the lease row.
 | Terminal-client tests skip locally / fail in CI | `node` not on PATH: skip locally, hard AssertionError when `CI` is set (tests/safety/test_terminal_client.py:57-68) | Install node locally; never strip node from a CI image |
 | Collection error on a new `@pytest.mark.<x>` | `--strict-markers` is on and exactly ONE marker is registered: `ibkr` (pyproject.toml:61-67) | Register the marker in pyproject; same for config keys (`--strict-config`) |
 | `ibapi` missing | Intentional — not on PyPI, not in the lock; adapters lazy-import with install guidance (official_ibkr.py:202-206). The whole suite passes without it | Nothing. Do not pip-install a package named `ibapi` |
-| `1 skipped` in a green run | `tests/integration/test_ibkr_smoke.py` — opt-in only via `CHRONOS_RUN_IBKR_SMOKE=1` | Expected. 2489 passed / 1 skipped was the verified-green baseline on 2026-08-02 |
+| `1 skipped` in a green run | `tests/integration/test_ibkr_smoke.py` — opt-in only via `CHRONOS_RUN_IBKR_SMOKE=1` | Expected. Green means exactly 1 skip (~2489 passed as of 2026-08-02; authoritative baseline: chronos-validation-and-qa §2) |
 
 ## 8. "Research says INSUFFICIENT_EVIDENCE / zero selected"
 
@@ -290,7 +290,7 @@ window — lives in chronos-research-methodology.
 
 | Symptom | Cause | Discriminating experiment / fix |
 |---|---|---|
-| Boot refusal: "already bound to a different broker scope; configure a separate DATABASE_URL" (database.py:199-200) | You pointed processes at a DB fingerprint-bound to a different (broker_mode, environment, account) | `SELECT broker_mode, environment, account_fingerprint FROM database_scope` (read-only peek, §0). Fix `DATABASE_URL` — one DB per scope. Never edit or delete the scope row |
+| Boot refusal: "already bound to a different broker scope; configure a separate DATABASE_URL" (database.py:199-200) | You pointed processes at a DB fingerprint-bound to a different (broker_mode, environment, account) | `SELECT broker_mode, environment, account_fingerprint FROM database_scope` (read-only peek — see the setup block at the top). Fix `DATABASE_URL` — one DB per scope. Never edit or delete the scope row |
 | Boot refusal: unsupported schema version / drift | DB version ≠ `SCHEMA_VERSION = 7` (database.py:20) or byte-level drift | `SELECT version FROM schema_version` and `PYTHONPATH=src .venv/bin/alembic heads` (→ `0006 (head)`; note the numberings differ: alembic head 0006 = schema v7). The refusal text itself says the fix: back up first, then `alembic upgrade head` (`make migrate`). Chronos never modifies such a DB itself. Fresh DBs never run alembic — `initialize()` creates v7 directly |
 | `python -m chronos.cli verify-audit-log` → FAILED | (a) crash-corrupted LAST record (append interrupted — the platform halts on this, fail closed); (b) mid-chain break = edit/corruption/tamper; (c) know the honest bound: hash chains are tamper-EVIDENT, not tamper-proof — a full consistent rewrite is undetectable without an external anchor (hash_chain.py:38-45; R-33, ACCEPTED) | The verifier reports where the chain broke. The registry ledger adds an on-host head anchor (`registry.head.json`) so tail truncation is detected: `python -m chronos.cli registry verify`. Treat any break as an incident to surface, not a file to repair in place |
 | `chronos.db-wal` / `-shm` files present | Normal: the DB *requires* `journal_mode=WAL` + `synchronous=FULL` and refuses to run without them (database.py:390-451). Recent commits live in `-wal` until checkpointed | Back up sidecars together with the DB (`sqlite3 .backup` online, or plain copy only while stopped); on restore, delete the dead instance's stale `-wal`/`-shm` per BACKUP_AND_RECOVERY.md:45-70. Never delete sidecars under a running process |
@@ -378,6 +378,6 @@ HEAD 47a8d72). Volatile facts and their re-verification commands:
 | Tick stop after 5 consecutive failures | `grep -n max_consecutive_failures src/chronos/supervisor/runtime.py` |
 | COMPLETE-on-refusal still open | `sed -n '405,455p' src/chronos/supervisor/loop.py` + VISION_COMPLETION_PLAN.md Phase 1 item 5 |
 | Schema v7 / alembic head 0006 | `grep -n SCHEMA_VERSION src/chronos/persistence/database.py`; `PYTHONPATH=src .venv/bin/alembic heads` |
-| Green baseline 2489 passed / 1 skipped | `.venv/bin/python -m pytest -q` |
+| Green baseline: 1 skip, ~2489 passed (home: chronos-validation-and-qa §2) | `.venv/bin/python -m pytest -q` |
 | Pacing 6/min + 15 s cooldown; TTLs (arm 15 m, confirm 20 s, risk 60 s, quote 5 s) | `grep -n _DEFAULT src/chronos/marketdata/pacing.py`; `grep -n "ttl\|_TTL" src/chronos/config/settings.py src/chronos/orders/risk.py` |
 | Scar commits exist | `git log --format='%h %s' -1 4b6bc9e 3199a17 654f842 c72a8e5 701ebf4` (one at a time) |

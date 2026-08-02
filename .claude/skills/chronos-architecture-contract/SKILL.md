@@ -24,8 +24,8 @@ deny-by-default stay the default posture everywhere; never weaken a safety mecha
 widen autonomous authority without a NEW ADR and an explicit owner decision; never claim
 anything "done/working/validated" without naming the exact evidence. MITIGATED ≠ CLOSED:
 every broker-adapter control is fixture-verified only — **no real IBKR gateway (paper or
-live) has ever been connected in this project's history** (docs/limitations.md:22-23;
-see chronos-real-gateway-campaign).
+live) has ever been connected in this project's history** (docs/limitations.md:18-23;
+docs/VISION_COMPLETION_PLAN.md:57-58; see chronos-real-gateway-campaign).
 
 ## 1. The system map
 
@@ -113,7 +113,7 @@ abbreviated to `…`.
 | 5 | A decision cannot express an order: `ProposedDecision` has no account/broker/routing/transmit/order-type/price fields, cannot author its own `decision_id`/`provenance` (stamped by the queue writer, …supervisor/queue.py:211-219), and every model must inherit `AutonomyModel` (validators re-run on `model_copy`, …autonomy/base.py:31-41) | The kernel computes and clamps; the model only requests. Closes the M1 `model_copy` escalation | …autonomy/decision.py (contract); …supervisor/ingress.py:73 (writer-owned fields refused) | tests/safety/test_autonomy_contracts.py:87-110 (forbidden field-name set) | A decision that names an account, price, or transmit flag is an order by another name — the gateway's veto becomes decorative |
 | 6 | Mandate is frozen, expiring, owner-authored: every mandate model frozen `extra="forbid"` (…autonomy/mandate.py:12); live ceiling `MAX_LIVE_MANDATE_DURATION` = 365d (mandate.py:69, enforced :402-407); authority IS the owner-authored JSON file named by `AUTONOMY_MANDATE_FILE`, digest-stamped at boot (…api/autonomy_wiring.py:318-367); revocation survives restart (:145-157); wrong-account/invalid file boots inert with a CRITICAL alert | Standing authority must be bounded in time, unforgeable in content, and revocable durably (ADR-0016 §4 as amended by ADR-0017 §1) | mandate.py validators (:399-473); autonomy_wiring.py:105-174 | tests/safety/test_autonomy_contracts.py (duration/immutability); tests/safety/test_supervisor_gateway.py:634-750 (ENFORCED/INERT pin per mandate field) | Perpetual or self-modifying authority. Note the inversion: `model_discretion` waives CAPITAL CEILINGS ONLY — floors, scopes, order forms, strategies, data qualities stay deny-by-default (ADR-0017 §2/§5; see chronos-autonomy-and-mandates) |
 | 7 | Deny-by-default risk everywhere: order-plane `OrderRiskEngine` passes only if EVERY check is PASS; UNKNOWN blocks (…orders/risk.py:165-169; `opening_orders_today: int \| None = None` at risk.py:107 — an uncountable day blocks); platform `chronos.risk` all-zero policy rejects everything; admission refuses any check whose evidence is absent (…supervisor/admission.py:11-14) | R-25 taught this: an `int = 0` default made the daily cap pass forever. Absent evidence must refuse, never default | risk.py:140-178; …risk/ (platform); admission.py:285-432 | tests/safety/test_opening_cap_exercised.py; tests/safety/test_safety_invariants.py:235 (all-zero policy); tests/safety/test_supervisor_gateway.py | Restoring a "safe-looking" default (0, False, empty-passes) silently disables a control — the signature Chronos defect class |
-| 8 | TWO SEPARATE STOP MECHANISMS with OPPOSITE missing-file defaults — see the boxed section below | — | …control/halt.py:102-117 vs …orders/kill_switch.py:83-92 | tests/safety/test_safety_invariants.py:198 (missing halt ⇒ HALTED); tests/unit/test_live_safety_layer.py:90 (`test_kill_switch_fresh_is_disengaged`) | Operator stops the wrong plane during an incident; a restore silently boots the live plane stoppable-by-nothing |
+| 8 | TWO SEPARATE STOP MECHANISMS with OPPOSITE missing-file defaults — see §3 below | — | …control/halt.py:102-117 vs …orders/kill_switch.py:83-92 | tests/safety/test_safety_invariants.py:198 (missing halt ⇒ HALTED); tests/unit/test_live_safety_layer.py:90 (`test_kill_switch_fresh_is_disengaged`) | Operator stops the wrong plane during an incident; a restore silently boots the live plane stoppable-by-nothing |
 | 9 | Mode lock: the deterministic platform refuses CANARY_LIVE/LIVE unconditionally — ADR-0007 untouched by ADR-0016/0017 | Zone 2's promotion vocabulary must never become a live path; autonomy's ladder is a DIFFERENT vocabulary on purpose | …control/modes.py:86-95 (`DENIED_LIVE_DISABLED`, "no configuration can enable them") | tests/safety/test_safety_invariants.py:123-134 | The quarantined R-28 adapter becomes reachable from a "promoted" platform mode |
 | 10 | Tamper-EVIDENT records, honestly bounded: hash-chained JSONL audit log (…auditlog/log.py), per-stream DB hash chains (…persistence/hash_chain.py), registry ledger + out-of-band head anchor `registry.head.json` (…registry/ledger.py:7-20) | Detect targeted edits, deletions, reordering, truncation (incl. un-burning a holdout) | append paths fsync + verify-before-trust | tests/unit/test_database.py, tests/safety/test_supervisor_durable_state.py; `python -m chronos.cli verify-audit-log`, `registry verify` | NOT tamper-PROOF (R-33, RISK_REGISTER.md:42): a writer who rewrites the whole chain (or ledger+anchor together) wins; no external/off-host anchor exists. Never claim otherwise |
 | 11 | Account-fingerprint DB binding: the DB is scope-bound to (broker_mode, environment, SHA-256 account pseudonym) — raw account ids never persisted (…utils/identifiers.py:17-24); rebinding a populated DB to a different scope refuses | Durable safety state (lease, kill events, counters, activations) must not silently apply to the wrong account | …persistence/database.py:161-201 (`bind_scope`) | tests/unit/test_database.py:190+ | Orders and safety history from account A silently govern account B; also: repointing `DATABASE_URL` detaches ALL durable safety state |
@@ -126,16 +126,16 @@ abbreviated to `…`.
 ## 3. TWO SEPARATE STOP MECHANISMS — read this twice
 
 This asymmetry is deliberate, disclosed, and the single most operator-hostile fact in
-the system. Procedures live in chronos-run-and-operate; the contract is:
+the system. The contract in one line: **a MISSING halt file ⇒ HALTED (safe;
+halt.py:102-109), but a MISSING live kill-switch file ⇒ DISENGAGED (trading-capable;
+kill_switch.py:83-85)** — opposite missing-file defaults; corrupt files fail closed on
+both sides (HALTED / ENGAGED). The full file/engage/release/defaults table and every
+operating procedure live in **chronos-run-and-operate** ("The two stop mechanisms") —
+work from that skill, not from memory of this section.
 
-| | Platform halt (zone 2) | Live kill switch (zone 1) |
-|---|---|---|
-| File | `data/platform_halt.json` | `data/live_kill_switch.json` |
-| Code | …control/halt.py (HaltStore) | …orders/kill_switch.py (LiveKillSwitch) |
-| Engage | `python -m chronos.cli halt --reason …` | `POST /live/kill` (deliberately NOT writer-gated, routes/live.py:105-121) |
-| Stops | ONLY the deterministic platform | ONLY the chronos.orders live plane |
-| **Missing file** | **⇒ HALTED** (NEVER_ARMED, halt.py:102-109) | **⇒ DISENGAGED** (kill_switch.py:83-85) |
-| Corrupt file | ⇒ HALTED (STATE_CORRUPTION, :110-117) | ⇒ ENGAGED (fail closed, :86-92) |
+Scope: the platform halt stops ONLY the deterministic platform; the kill switch stops
+the chronos.orders plane — the LIVE gate walk consults it directly, and PAPER mutating
+calls are still refused at the adapter's last line (official_ibkr.py:1248-1253).
 
 Consequences you must internalize: `chronos.cli halt` does NOT stop live trading.
 docs/INCIDENT_RESPONSE.md only knows the platform halt (Phase-1 finding 2). A restore

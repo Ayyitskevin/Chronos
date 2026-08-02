@@ -53,8 +53,9 @@ priorities and it does not grant change authority.
    capability boundaries, disclosed residuals. (Skip RISK_REGISTER R-01's frozen note;
    trust the dated R-24..R-42 rows after spot-checking code — see Ledger #12.)
 5. **README.md ("Where that stands today") + the CHANGELOG.md head entry** — the
-   freshest status narrative and the ONLY current test count (2489 passed, 1 skipped,
-   CHANGELOG.md:69, M11 2026-07-27).
+   freshest status narrative and the ONLY doc carrying the current test count
+   (CHANGELOG.md:69, M11 2026-07-27; live re-measured baseline:
+   chronos-validation-and-qa §2).
 
 ### The precedence ladder (AGENTS.md:41-54, restated verbatim in structure)
 
@@ -274,7 +275,7 @@ the internally-mixed eras).
 vs the real gate: "ruff clean, mypy strict clean (218 files), **2489 passed**, 1
 skipped" (CHANGELOG.md:69, M11 2026-07-27; suite re-verified green at 2489/1 on
 2026-08-02). The irony: TEST_RESULTS.md labels its OLDER table "Summary (historical —
-post-M5 snapshot, superseded)" (:24) — the discipline exists; the "current" header just
+post-M5 snapshot, superseded)" (:23) — the discipline exists; the "current" header just
 stopped being maintained after M2a. TEST_PLAN.md has the matching defect: ":4-5 results
 … being produced separately" (they exist) and frozen layer counts ("29 tests" for
 tests/safety/, :22, vs "~90" per TEST_RESULTS.md:18).
