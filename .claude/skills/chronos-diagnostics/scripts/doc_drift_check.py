@@ -38,7 +38,6 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 BASELINE_NOTE = "2490 collected / 2489 passed, 1 skipped (baseline 2026-08-02, CHANGELOG.md M11)"
 
@@ -48,10 +47,10 @@ class Rule:
     """One known-stale claim: where it lives, how to spot it, what fixed means."""
 
     rule_id: str
-    file: str          # path relative to repo root
-    pattern: str       # regex, matched against whole file text with re.MULTILINE
-    meaning: str       # why this text is stale/misleading (as of 2026-08-02)
-    fixed_when: str    # what the repaired document looks like
+    file: str  # path relative to repo root
+    pattern: str  # regex, matched against whole file text with re.MULTILINE
+    meaning: str  # why this text is stale/misleading (as of 2026-08-02)
+    fixed_when: str  # what the repaired document looks like
 
 
 # ---------------------------------------------------------------------------
@@ -61,21 +60,27 @@ class Rule:
 RULES: tuple[Rule, ...] = (
     # -- "wired into nothing" class: autonomy stack described as M1-era ------
     Rule(
-        "ARCH-AUTONOMY-M1", "docs/ARCHITECTURE.md", r"wired into nothing",
+        "ARCH-AUTONOMY-M1",
+        "docs/ARCHITECTURE.md",
+        r"wired into nothing",
         "Autonomy paragraph frozen at Milestone 1; the whole stack is built and "
         "wired through M7.5/ADR-0017 (README 'Current status').",
         "Paragraph rewritten to the current autonomy posture, or a dated "
         "staleness banner added scoping it to M1 history.",
     ),
     Rule(
-        "HANDOFF-AUTONOMY-M1", "HANDOFF.md", r"wired into nothing",
+        "HANDOFF-AUTONOMY-M1",
+        "HANDOFF.md",
+        r"wired into nothing",
         "HANDOFF body still claims M1 'contracts only, wired into nothing' "
         "beside its own M11 updates — internally contradictory.",
         "Body updated or the banner re-scoped to name which sections are stale.",
     ),
     # -- Test-count staleness ------------------------------------------------
     Rule(
-        "TESTRESULTS-STALE-COUNT", "docs/TEST_RESULTS.md", r"1901 passed",
+        "TESTRESULTS-STALE-COUNT",
+        "docs/TEST_RESULTS.md",
+        r"1901 passed",
         "The section labeled 'current' reports the M2a count (1901); reality "
         f"as of 2026-08-02 is {BASELINE_NOTE}.",
         "The 'current' summary re-run and updated, or the section relabeled "
@@ -83,7 +88,9 @@ RULES: tuple[Rule, ...] = (
     ),
     # -- The ~USD 3,000 capital premise (live owner decision: ~USD 110) ------
     Rule(
-        "ASSUMPTIONS-A10-3K", "ASSUMPTIONS.md", r"A-10[^\n]*\n?[^\n]*USD 3,000",
+        "ASSUMPTIONS-A10-3K",
+        "ASSUMPTIONS.md",
+        r"A-10[^\n]*\n?[^\n]*USD 3,000",
         "A-10 still assumes a ~USD 3,000 cash account; the verified snapshot "
         "is ~USD 110 (VISION_COMPLETION_PLAN.md section 2). Capital question "
         "is a LIVE, unresolved owner decision — never quietly assume either.",
@@ -91,24 +98,31 @@ RULES: tuple[Rule, ...] = (
         "the ~USD 110 reality and reference the open owner decision.",
     ),
     Rule(
-        "RISKREG-R10-3K", "RISK_REGISTER.md", r"USD 3k account economics",
+        "RISKREG-R10-3K",
+        "RISK_REGISTER.md",
+        r"USD 3k account economics",
         "R-10 accepts USD 3k economics; at ~USD 110 the economics are ~27x "
         "worse — stale in the conservative direction but still stale.",
         "R-10 restated against the ~USD 110 snapshot with a dated note.",
     ),
     Rule(
-        "GOLIVE-3K", "docs/GO_LIVE_CHECKLIST.md", r"USD 3,000 cash account",
+        "GOLIVE-3K",
+        "docs/GO_LIVE_CHECKLIST.md",
+        r"USD 3,000 cash account",
         "Gate 4 frames the owner decision around a ~USD 3,000 account.",
         "Framing updated to the ~USD 110 reality / open capital decision.",
     ),
     Rule(
-        "HANDOFF-3K", "HANDOFF.md", r"USD 3,000 cash account",
-        "Owner-action list still poses the automated-trading question for a "
-        "~USD 3,000 account.",
+        "HANDOFF-3K",
+        "HANDOFF.md",
+        r"USD 3,000 cash account",
+        "Owner-action list still poses the automated-trading question for a ~USD 3,000 account.",
         "Owner action restated against the ~USD 110 snapshot.",
     ),
     Rule(
-        "ADR0008-3K", "docs/adr/ADR-0008-executable-candidate-scope.md", r"USD 3,000",
+        "ADR0008-3K",
+        "docs/adr/ADR-0008-executable-candidate-scope.md",
+        r"USD 3,000",
         "ADR-0008's candidate scope is premised on ~USD 3,000. ADRs are "
         "historical records — the fix is an amendment note, not a rewrite.",
         "A dated amendment note referencing the ~USD 110 revision and the "
@@ -116,7 +130,9 @@ RULES: tuple[Rule, ...] = (
     ),
     # -- IBKR-integration staleness ------------------------------------------
     Rule(
-        "IBKRINT-ONLY-PATH", "docs/IBKR_INTEGRATION.md", r"ONLY code path",
+        "IBKRINT-ONLY-PATH",
+        "docs/IBKR_INTEGRATION.md",
+        r"ONLY code path",
         "Claims the quarantined platform paper adapter is 'The ONLY code path "
         "... that can hand an equity order to IBKR' — false since M5-M7: the "
         "chronos.orders plane holds the one reachable transmit site.",
@@ -124,31 +140,36 @@ RULES: tuple[Rule, ...] = (
         "GO_LIVE_CHECKLIST's) naming the chronos.orders submission boundary.",
     ),
     Rule(
-        "IBKRRUN-NO-SERVICE", "docs/IBKR_RUNBOOK.md",
+        "IBKRRUN-NO-SERVICE",
+        "docs/IBKR_RUNBOOK.md",
         r"no long-running shadow/paper service loop",
-        "Says no service loop exists; python -m chronos.service (M2) exists "
-        "and is tested.",
+        "Says no service loop exists; python -m chronos.service (M2) exists and is tested.",
         "Sentence removed or corrected to reference chronos.service.",
     ),
     # -- SECURITY.md's two stale claims --------------------------------------
     Rule(
-        "SECURITY-LIVE-RAISE", "docs/SECURITY.md", r"makes settings validation raise",
+        "SECURITY-LIVE-RAISE",
+        "docs/SECURITY.md",
+        r"makes settings validation raise",
         "Says ALLOW_LIVE_TRADING=true makes settings validation raise; since "
         "Milestone 7 the flag is honored under the full ADR-0009 conjunction.",
         "Claim corrected to describe the ADR-0009 live conjunction "
         "(DEPLOYMENT.md:78 already carries the 2026-07-25 correction).",
     ),
     Rule(
-        "SECURITY-NO-AUTH", "docs/SECURITY.md", r"Neither system implements remote access",
+        "SECURITY-NO-AUTH",
+        "docs/SECURITY.md",
+        r"Neither system implements remote access",
         "Says no remote access/authentication exists; the FastAPI backend "
         "listens on loopback 8765 with token auth + terminal cookie sessions. "
         "Reality is STRONGER than the doc, but the doc is wrong.",
-        "Section rewritten to describe the backend token + terminal-session "
-        "model.",
+        "Section rewritten to describe the backend token + terminal-session model.",
     ),
     # -- DEPLOYMENT.md denies the service entry point ------------------------
     Rule(
-        "DEPLOY-SERVICE-DENIAL", "docs/DEPLOYMENT.md", r"no such entry point exists",
+        "DEPLOY-SERVICE-DENIAL",
+        "docs/DEPLOYMENT.md",
+        r"no such entry point exists",
         "'FUTURE WORK — no such entry point exists' about "
         "python -m chronos.service, which exists and is tested "
         "(tests/platform_unit/test_service.py).",
@@ -156,7 +177,9 @@ RULES: tuple[Rule, ...] = (
     ),
     # -- Mandate-replaces-arming trio (code: every LIVE submit needs an arm) --
     Rule(
-        "MANDATE-ARMING-RUNBOOK", "docs/live_trading_runbook.md", r"replaces gates 7",
+        "MANDATE-ARMING-RUNBOOK",
+        "docs/live_trading_runbook.md",
+        r"replaces gates 7",
         "Claims an active AutonomyMandate replaces gates 7+8. Code disagrees: "
         "submission.py:441 unconditionally requires a current arm; grep for "
         "'mandate' in src/chronos/orders/ returns nothing. Open Phase-1 "
@@ -165,20 +188,23 @@ RULES: tuple[Rule, ...] = (
         "decision) and prose stays, or the prose is corrected to match code.",
     ),
     Rule(
-        "MANDATE-ARMING-GAMEPLAN", "docs/AI_QUANT_GAME_PLAN.md",
+        "MANDATE-ARMING-GAMEPLAN",
+        "docs/AI_QUANT_GAME_PLAN.md",
         r"only gate autonomy replaces",
         "Same contradiction, third variant of the story (banner-protected "
         "historical doc, but the claim is load-bearing prose).",
         "Same resolution as MANDATE-ARMING-RUNBOOK, mirrored here.",
     ),
     Rule(
-        "MANDATE-ARMING-WHEELPLAN", "docs/LIVE_WHEEL_GAME_PLAN.md",
+        "MANDATE-ARMING-WHEELPLAN",
+        "docs/LIVE_WHEEL_GAME_PLAN.md",
         r"mandate replaces per-order\s+confirmation and session arming",
         "Same contradiction (the phrase wraps across lines in this file).",
         "Same resolution as MANDATE-ARMING-RUNBOOK, mirrored here.",
     ),
     Rule(
-        "ADR17-NO-RITUAL", "docs/adr/ADR-0017-owner-directed-maximal-autonomy.md",
+        "ADR17-NO-RITUAL",
+        "docs/adr/ADR-0017-owner-directed-maximal-autonomy.md",
         r"sufficient to trade; there is no per-boot ritual",
         "ADR-0017 says a running backend + valid mandate suffices to trade; "
         "false for LIVE while gate 7 (session arming, TTL <= 120 min process "
@@ -187,21 +213,24 @@ RULES: tuple[Rule, ...] = (
     ),
     # -- ADR status lines never flipped --------------------------------------
     Rule(
-        "ADR0012-PROPOSED", "docs/adr/ADR-0012-options-forward-capture.md",
+        "ADR0012-PROPOSED",
+        "docs/adr/ADR-0012-options-forward-capture.md",
         r"^Status: proposed",
         "Status still 'proposed' while DECISIONS D-14 records the decision and "
         "chronos.histdata options is shipped.",
         "Status line flipped to accepted/implemented with a date.",
     ),
     Rule(
-        "ADR0014-PROPOSED", "docs/adr/ADR-0014-walkforward-and-statistics.md",
+        "ADR0014-PROPOSED",
+        "docs/adr/ADR-0014-walkforward-and-statistics.md",
         r"^Status: proposed",
         "Status 'proposed (design-review pending)' while "
         "src/chronos/research/walkforward.py and stats.py exist and run.",
         "Status line flipped to accepted/implemented with a date.",
     ),
     Rule(
-        "ADR0015-PROPOSED", "docs/adr/ADR-0015-revalidation-campaign.md",
+        "ADR0015-PROPOSED",
+        "docs/adr/ADR-0015-revalidation-campaign.md",
         r"^Status: proposed",
         "Status 'proposed (design-review pending)' while "
         "src/chronos/research/campaign.py exists and 'research campaign' runs.",
@@ -210,7 +239,7 @@ RULES: tuple[Rule, ...] = (
 )
 
 
-def find_repo_root() -> Optional[Path]:
+def find_repo_root() -> Path | None:
     override = os.environ.get("CHRONOS_REPO_ROOT")
     if override:
         root = Path(override)
@@ -237,7 +266,7 @@ def check_rule(root: Path, rule: Rule) -> tuple[str, str]:
     if not matches:
         return "ABSENT", "pattern no longer matches — claim fixed/removed since 2026-08-02"
     lines = ", ".join(str(line_of_offset(text, m.start())) for m in matches[:5])
-    first = text[matches[0].start(): matches[0].end()].replace("\n", " ")
+    first = text[matches[0].start() : matches[0].end()].replace("\n", " ")
     return "PRESENT", f"line(s) {lines}: ...{first[:70]}..."
 
 
@@ -254,15 +283,23 @@ def live_collection_count(root: Path) -> None:
     try:
         proc = subprocess.run(
             [candidate, "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider"],
-            cwd=root, capture_output=True, text=True, timeout=300, env=env,
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=300,
+            env=env,
         )
         match = re.search(r"(\d+)\s+tests?\s+collected", proc.stdout)
         if match:
-            print(f"[INFO] live pytest --collect-only: {match.group(1)} tests "
-                  f"(baseline: {BASELINE_NOTE})")
+            print(
+                f"[INFO] live pytest --collect-only: {match.group(1)} tests "
+                f"(baseline: {BASELINE_NOTE})"
+            )
         else:
-            print(f"[WARN] could not parse pytest output (rc={proc.returncode}); "
-                  f"baseline: {BASELINE_NOTE}")
+            print(
+                f"[WARN] could not parse pytest output (rc={proc.returncode}); "
+                f"baseline: {BASELINE_NOTE}"
+            )
     except (OSError, subprocess.SubprocessError) as error:
         print(f"[WARN] pytest collection failed: {error}")
 
@@ -270,8 +307,7 @@ def live_collection_count(root: Path) -> None:
 def main() -> int:
     root = find_repo_root()
     if root is None:
-        print("[CRIT] cannot locate Chronos repo root (no AGENTS.md); "
-              "set CHRONOS_REPO_ROOT")
+        print("[CRIT] cannot locate Chronos repo root (no AGENTS.md); set CHRONOS_REPO_ROOT")
         return 2
     print("CHRONOS DOC-DRIFT CHECK (read-only) — repo:", root)
     print(f"{len(RULES)} rules from the 2026-08-02 contradiction ledger\n")
@@ -293,8 +329,10 @@ def main() -> int:
 
     live_collection_count(root)
 
-    print(f"\n== SUMMARY: {present} PRESENT (still stale), {absent} ABSENT (fixed), "
-          f"{missing} FILE-MISSING ==")
+    print(
+        f"\n== SUMMARY: {present} PRESENT (still stale), {absent} ABSENT (fixed), "
+        f"{missing} FILE-MISSING =="
+    )
     print("PRESENT entries are documentation findings — route fixes via the")
     print("chronos-docs-map skill (doc authority + house style), under")
     print("chronos-change-control rules. Do NOT bulk-edit docs from this output.")

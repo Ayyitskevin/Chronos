@@ -161,7 +161,7 @@ async def run_capture(settings: Any, args: argparse.Namespace) -> dict[str, Any]
     async def step(name: str, coroutine: Any) -> Any:
         try:
             result = await asyncio.wait_for(coroutine, timeout=STEP_TIMEOUT_S)
-        except Exception as error:  # noqa: BLE001 - record every failure, keep capturing
+        except Exception as error:
             steps[name] = {"error": f"{type(error).__name__}: {error}"}
             return None
         steps[name] = to_jsonable(result)
@@ -174,7 +174,7 @@ async def run_capture(settings: Any, args: argparse.Namespace) -> dict[str, Any]
             await asyncio.wait_for(broker.connect(), timeout=STEP_TIMEOUT_S)
             connected = True
             steps["connect"] = {"ok": True}
-        except Exception as error:  # noqa: BLE001
+        except Exception as error:
             steps["connect"] = {"error": f"{type(error).__name__}: {error}"}
             return capture
 
@@ -201,7 +201,9 @@ async def run_capture(settings: Any, args: argparse.Namespace) -> dict[str, Any]
         symbols = list(args.symbols or settings.symbol_allowlist)[: args.max_symbols]
         for symbol in symbols:
             prefix = f"symbol:{symbol}"
-            underlying = await step(f"{prefix}:qualify_underlying", broker.qualify_underlying(symbol))
+            underlying = await step(
+                f"{prefix}:qualify_underlying", broker.qualify_underlying(symbol)
+            )
             if underlying is None:
                 continue
             managed = await step(
@@ -258,10 +260,18 @@ async def run_capture(settings: Any, args: argparse.Namespace) -> dict[str, Any]
                 continue
             steps[f"{prefix}:option_specs"] = to_jsonable(specs)
             if specs:
-                await step(
+                batch = await step(
                     f"{prefix}:qualify_option_contracts",
                     manager.qualify_option_contracts(specs, force_refresh=True),
                 )
+                if batch is None:
+                    # Isolate which spec failed: qualify one at a time and record each
+                    # outcome (the manager refuses a batch on any incomplete return).
+                    for spec in specs:
+                        await step(
+                            f"{prefix}:qualify_option:{spec.expiration}:{spec.strike}:{spec.right.value}",
+                            manager.qualify_option_contracts([spec], force_refresh=True),
+                        )
 
         if not args.skip_bars and symbols:
             first = steps.get(f"symbol:{symbols[0]}:qualify_underlying")
@@ -283,7 +293,7 @@ async def run_capture(settings: Any, args: argparse.Namespace) -> dict[str, Any]
             try:
                 await asyncio.wait_for(broker.disconnect(), timeout=STEP_TIMEOUT_S)
                 steps["disconnect"] = {"ok": True}
-            except Exception as error:  # noqa: BLE001
+            except Exception as error:
                 steps["disconnect"] = {"error": f"{type(error).__name__}: {error}"}
 
     await step("final_connection_status", broker.connection_status())
@@ -351,8 +361,14 @@ def main() -> int:
         manifest["files"][name] = sha256(text.encode("utf-8")).hexdigest()
     (out_dir / "manifest.json").write_text(canonical_json(manifest), encoding="utf-8")
 
-    errors = [name for name, value in capture["steps"].items() if isinstance(value, dict) and "error" in value]
-    print(f"capture written to {out_dir} ({len(capture['steps'])} steps, {len(errors)} with errors)")
+    errors = [
+        name
+        for name, value in capture["steps"].items()
+        if isinstance(value, dict) and "error" in value
+    ]
+    print(
+        f"capture written to {out_dir} ({len(capture['steps'])} steps, {len(errors)} with errors)"
+    )
     for name in errors:
         print(f"  step with error: {name}: {capture['steps'][name]['error']}")
     print("errors are observations, not failures: record them in the session evidence doc")

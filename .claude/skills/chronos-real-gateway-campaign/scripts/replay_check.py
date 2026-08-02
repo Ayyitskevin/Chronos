@@ -27,12 +27,12 @@ from hashlib import sha256
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from capture_readonly import canonical_json, derive_liquid_hours  # noqa: E402
+from capture_readonly import canonical_json, derive_liquid_hours
 
 _MUTATION_TOKENS = ("submit_order", "preview_order", "modify_order", "cancel_order")
 
 
-def check_session(directory: Path) -> list[str]:
+def check_session(directory: Path, *, allow_demo: bool = False) -> list[str]:
     failures: list[str] = []
     manifest_path = directory / "manifest.json"
     if not manifest_path.is_file():
@@ -66,22 +66,25 @@ def check_session(directory: Path) -> list[str]:
     else:
         failures.append(f"{directory}: capture.json or derived_liquid_hours.json missing")
 
-    if not manifest.get("gateway_evidence", False):
+    if not manifest.get("gateway_evidence", False) and not allow_demo:
         failures.append(
             f"{directory}: manifest says gateway_evidence=false (demo rehearsal) — "
-            "this directory cannot count toward the section 7 gate"
+            "this directory cannot count toward the section 7 gate "
+            "(pass --allow-demo to validate a rehearsal)"
         )
     return failures
 
 
 def main() -> int:
-    if len(sys.argv) < 2:
+    arguments = [argument for argument in sys.argv[1:] if argument != "--allow-demo"]
+    allow_demo = "--allow-demo" in sys.argv[1:]
+    if not arguments:
         print(__doc__)
         return 2
     all_failures: list[str] = []
-    for argument in sys.argv[1:]:
+    for argument in arguments:
         directory = Path(argument)
-        failures = check_session(directory)
+        failures = check_session(directory, allow_demo=allow_demo)
         status = "PASS" if not failures else "FAIL"
         print(f"[{status}] {directory}")
         all_failures.extend(failures)

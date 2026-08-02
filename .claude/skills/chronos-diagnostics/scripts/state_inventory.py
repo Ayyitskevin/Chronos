@@ -44,7 +44,6 @@ import sqlite3
 import subprocess
 import sys
 from pathlib import Path
-from typing import Optional
 
 # --------------------------------------------------------------------------
 # Fallback defaults, valid as of 2026-08-02 (src/chronos/config/settings.py).
@@ -87,7 +86,7 @@ def detail(text: str) -> None:
     print(f"       {text}")
 
 
-def find_repo_root() -> Optional[Path]:
+def find_repo_root() -> Path | None:
     """Locate the Chronos repo root (env override, then script location)."""
     override = os.environ.get("CHRONOS_REPO_ROOT")
     if override:
@@ -139,9 +138,7 @@ def parse_settings_defaults(root: Path) -> tuple[dict[str, str], bool]:
     return defaults, True
 
 
-def resolve(
-    name: str, defaults: dict[str, str], dotenv: dict[str, str]
-) -> tuple[Optional[str], str]:
+def resolve(name: str, defaults: dict[str, str], dotenv: dict[str, str]) -> tuple[str | None, str]:
     """Resolve a setting the way pydantic-settings would: env > .env > default."""
     if name in os.environ:
         return os.environ[name], "process env"
@@ -152,7 +149,7 @@ def resolve(
     return None, "unset"
 
 
-def sqlite_ro_query(db_path: Path, query: str) -> Optional[list[tuple]]:
+def sqlite_ro_query(db_path: Path, query: str) -> list[tuple] | None:
     """Run one query against a SQLite file opened read-only; None on failure."""
     try:
         uri = f"file:{db_path.as_posix()}?mode=ro"
@@ -265,9 +262,7 @@ def report_databases(root: Path, defaults: dict, dotenv: dict) -> None:
                     emit("CRIT", "schema_version differs from SCHEMA_VERSION=7 — the")
                     detail("backend will refuse this DB at boot (fail closed).")
                     detail("Back up first, then: alembic upgrade head")
-            scope = sqlite_ro_query(
-                db_path, "SELECT broker_mode, environment FROM database_scope"
-            )
+            scope = sqlite_ro_query(db_path, "SELECT broker_mode, environment FROM database_scope")
             if scope:
                 emit("INFO", f"DB scope-bound: broker_mode={scope[0][0]} env={scope[0][1]}")
             elif rows:
@@ -326,7 +321,10 @@ def report_databases(root: Path, defaults: dict, dotenv: dict) -> None:
     # Other durable safety-relevant files (presence only).
     for label, rel in (
         ("owner alerts sink", defaults.get("AUTONOMY_ALERT_FILE", "data/owner_alerts.jsonl")),
-        ("session drawdown baseline", defaults.get("SESSION_BASELINE_FILE", "data/session_baseline.json")),
+        (
+            "session drawdown baseline",
+            defaults.get("SESSION_BASELINE_FILE", "data/session_baseline.json"),
+        ),
         ("backend API token", defaults.get("BACKEND_TOKEN_FILE", "data/backend_api_token")),
     ):
         path = root / rel
@@ -342,15 +340,19 @@ def report_migrations(root: Path) -> None:
         emit("CRIT", f"migrations dir NOT PRESENT: {versions_dir}")
         return
     revisions = sorted(p.name for p in versions_dir.glob("[0-9][0-9][0-9][0-9]_*.py"))
-    schema_version: Optional[int] = None
+    schema_version: int | None = None
     try:
         match = re.search(r"^SCHEMA_VERSION\s*=\s*(\d+)", database_py.read_text(), re.M)
         if match:
             schema_version = int(match.group(1))
     except OSError:
         pass
-    emit("INFO", f"{len(revisions)} migration revisions: {revisions[0]}..{revisions[-1]}"
-         if revisions else "no migration revisions found")
+    emit(
+        "INFO",
+        f"{len(revisions)} migration revisions: {revisions[0]}..{revisions[-1]}"
+        if revisions
+        else "no migration revisions found",
+    )
     emit("INFO", f"code SCHEMA_VERSION = {schema_version}")
     # Mapping (verified 2026-08-02): revision 000N produces schema v(N+1);
     # 0001 is the v2 baseline stamp. So SCHEMA_VERSION == len(revisions) + 1.
@@ -358,7 +360,9 @@ def report_migrations(root: Path) -> None:
         if schema_version == len(revisions) + 1:
             emit("OK", f"consistent: {len(revisions)} revisions + baseline => v{schema_version}")
         else:
-            emit("CRIT", f"MISMATCH: {len(revisions)} revisions but SCHEMA_VERSION={schema_version}")
+            emit(
+                "CRIT", f"MISMATCH: {len(revisions)} revisions but SCHEMA_VERSION={schema_version}"
+            )
             detail("Expected SCHEMA_VERSION == revision_count + 1 (0001 = v2 baseline).")
             detail("A new migration or schema bump landed without its counterpart.")
     else:
@@ -397,11 +401,14 @@ def report_dotenv(root: Path, dotenv: dict[str, str]) -> None:
 def report_git(root: Path) -> None:
     print("\n== Git state (read-only) ==")
 
-    def git(*args: str) -> Optional[str]:
+    def git(*args: str) -> str | None:
         try:
             out = subprocess.run(
                 ["git", "--no-optional-locks", *args],
-                cwd=root, capture_output=True, text=True, timeout=30,
+                cwd=root,
+                capture_output=True,
+                text=True,
+                timeout=30,
             )
             return out.stdout.strip() if out.returncode == 0 else None
         except (OSError, subprocess.SubprocessError):
@@ -418,8 +425,11 @@ def report_git(root: Path) -> None:
     else:
         lines = status.splitlines()
         untracked = sum(1 for line in lines if line.startswith("??"))
-        emit("INFO", f"working tree: {len(lines) - untracked} modified/staged, "
-             f"{untracked} untracked entries")
+        emit(
+            "INFO",
+            f"working tree: {len(lines) - untracked} modified/staged, "
+            f"{untracked} untracked entries",
+        )
 
 
 def report_test_collection(root: Path) -> None:
@@ -436,7 +446,11 @@ def report_test_collection(root: Path) -> None:
     try:
         proc = subprocess.run(
             [candidate, "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider"],
-            cwd=root, capture_output=True, text=True, timeout=300, env=env,
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=300,
+            env=env,
         )
     except (OSError, subprocess.SubprocessError) as error:
         emit("WARN", f"pytest collection failed to run: {error}")
@@ -450,22 +464,28 @@ def report_test_collection(root: Path) -> None:
             detail("Tests disappeared. Investigate before trusting any green run.")
     else:
         emit("WARN", f"could not parse collection output (rc={proc.returncode})")
-        detail((proc.stdout or proc.stderr).strip().splitlines()[-1] if (proc.stdout or proc.stderr) else "")
+        detail(
+            (proc.stdout or proc.stderr).strip().splitlines()[-1]
+            if (proc.stdout or proc.stderr)
+            else ""
+        )
 
 
 def main() -> int:
     root = find_repo_root()
     if root is None:
-        print("[CRIT] cannot locate Chronos repo root (no AGENTS.md found); "
-              "set CHRONOS_REPO_ROOT")
+        print("[CRIT] cannot locate Chronos repo root (no AGENTS.md found); set CHRONOS_REPO_ROOT")
         return 2
     print("CHRONOS STATE INVENTORY (read-only) — repo:", root)
     print(f"python: {sys.version.split()[0]}")
 
     defaults, parsed_ok = parse_settings_defaults(root)
     if not parsed_ok:
-        emit("WARN", "settings.py textual parse failed — using 2026-08-02 fallback "
-             "defaults (settings source has drifted; update this script)")
+        emit(
+            "WARN",
+            "settings.py textual parse failed — using 2026-08-02 fallback "
+            "defaults (settings source has drifted; update this script)",
+        )
     dotenv = parse_dotenv(root / ".env")
 
     report_kill_switch(root, defaults, dotenv)
