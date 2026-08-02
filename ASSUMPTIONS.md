@@ -25,11 +25,26 @@ zero / empty / disabled / deny.
 
 ## Account and instruments
 
-- **A-10 — Account type.** Assumed a small IBKR **cash account** (~USD 3,000), no margin, no
-  short selling, long-only equity/ETF positions. Pattern-day-trading rules make intraday
-  strategies impractical below USD 25,000 in a margin account; cash-account settlement further
-  constrains turnover. Consequence: only **daily-bar, long-only, non-leveraged** strategies are
-  candidates for eventual execution; intraday scripts are classified research-only.
+- **A-10 — Account type.** *(Amended 2026-08-02.)* As originally written: assumed a small
+  IBKR **cash account** (~USD 3,000), no margin, no short selling, long-only equity/ETF
+  positions. **The ~USD 3,000 premise is superseded as a statement of fact:** the last
+  documented account snapshot is approximately **USD 110**
+  (`docs/VISION_COMPLETION_PLAN.md` §2). Whether the account is funded toward the original
+  premise, or the scope is cut to match ~USD 110, is a **live, unresolved owner decision**
+  (plan §11 owner gates). **Owner direction, 2026-08-02: fund toward the original premise
+  rather than descope** — the ≈USD 110 snapshot is a temporary state, not a design
+  constraint, so sizing defaults (`MIN_CASH_BUFFER_USD`, the `--equity`/`--cash` CLI
+  defaults) stay as they are pending the funded balance. **The exact capital envelope is
+  still unfrozen** and remains a Phase 0 deliverable (plan §5: the owner-approved capital
+  envelope, loss/drawdown/CVaR and concentration limits must be frozen *before* the
+  evidence they judge). Until that number exists, no work may quietly assume any
+  particular balance, and any run against the live account must pass its own `--equity`. At ~USD 110, cash-secured options and
+  most futures are economically unavailable, and the default `MIN_CASH_BUFFER_USD` of 5000
+  alone makes every cash-secured put unaffordable. The rest of the assumption is unchanged
+  and still binding: pattern-day-trading rules make intraday strategies impractical below
+  USD 25,000 in a margin account; cash-account settlement further constrains turnover.
+  Consequence: only **daily-bar, long-only, non-leveraged** strategies are candidates for
+  eventual execution; intraday scripts are classified research-only.
 - **A-11 — Instruments.** Candidate universe restricted to highly liquid US-listed ETFs
   (SPY, QQQ, IWM, DIA, GLD, TLT) unless the owner approves otherwise. Single-stock candidates
   are research-only until approved.

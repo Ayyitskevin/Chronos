@@ -6,9 +6,18 @@ the 2026-08-02 contradiction ledger (see the chronos-docs-map skill). Each
 rule states the file, the pattern, why the claim is stale, and what "fixed"
 would look like. Per rule the verdict is:
 
-    PRESENT      the stale claim is still in the file (a finding)
-    ABSENT       the pattern no longer matches (fixed some time after 2026-08-02)
+    PRESENT      the stale claim is still in the file, uncorrected (a finding)
+    CORRECTED    the original wording is still present but every occurrence sits
+                 next to a dated in-place correction — this repo's house style
+                 keeps history visible, so a repaired document still matches the
+                 pattern (counted as fixed; added 2026-08-02)
+    ABSENT       the pattern no longer matches (text removed or rewritten)
     FILE-MISSING the document itself is gone (rule needs maintenance)
+
+A rule may set `annotation_is_not_a_fix=True` to refuse the CORRECTED verdict:
+where the real resolution is an OWNER decision an agent may not take (flipping
+an ADR status line, for example), writing a note about the problem is not
+fixing it, and the rule stays PRESENT until the text itself changes.
 
 Also prints the live pytest --collect-only count when a project venv exists
 (read-only invocation: -p no:cacheprovider + PYTHONDONTWRITEBYTECODE=1),
@@ -22,8 +31,8 @@ file text (re.MULTILINE), so multi-line stale phrases work.
 STRICTLY READ-ONLY: files are opened for reading only; nothing in the repo is
 created, modified, or deleted; no network access.
 
-Exit codes: 0 = all rules ABSENT (docs fixed), 1 = at least one PRESENT or
-FILE-MISSING, 2 = could not run.
+Exit codes: 0 = no rule is PRESENT (every rule ABSENT or CORRECTED), 1 = at
+least one PRESENT or FILE-MISSING, 2 = could not run.
 
 Usage:
     python3 .claude/skills/chronos-diagnostics/scripts/doc_drift_check.py
@@ -51,6 +60,20 @@ class Rule:
     pattern: str  # regex, matched against whole file text with re.MULTILINE
     meaning: str  # why this text is stale/misleading (as of 2026-08-02)
     fixed_when: str  # what the repaired document looks like
+    # Set True when a nearby dated note must NOT count as a repair.
+    #
+    # Added 2026-08-02 after the first correction pass. This repository corrects
+    # documents IN PLACE — strikethrough plus a dated "Corrected"/"Amended" note,
+    # so history stays visible (chronos-docs-map house style). A plain substring
+    # check therefore keeps matching the ORIGINAL wording forever and reports a
+    # correctly-repaired document as still stale. check_rule() now looks for a
+    # dated correction marker near each match and returns CORRECTED instead.
+    #
+    # A few rules must resist that: where the real resolution is an OWNER
+    # decision (e.g. flipping an ADR status line, which an agent may not do),
+    # annotating the problem is not fixing it. Those set this flag and stay
+    # PRESENT until the underlying text actually changes.
+    annotation_is_not_a_fix: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -225,16 +248,55 @@ RULES: tuple[Rule, ...] = (
         "docs/adr/ADR-0014-walkforward-and-statistics.md",
         r"^Status: proposed",
         "Status 'proposed (design-review pending)' while "
-        "src/chronos/research/walkforward.py and stats.py exist and run.",
-        "Status line flipped to accepted/implemented with a date.",
+        "src/chronos/research/walkforward.py and stats.py exist and run. "
+        "REFINED 2026-08-02: unlike ADR-0012 (accepted via DECISIONS.md D-14), this "
+        "ADR has NO DECISIONS.md row, so its acceptance is recorded nowhere and "
+        "'design-review pending' may be accurate rather than stale. A dated status "
+        "note was added to the ADR on 2026-08-02; the status itself is unresolved.",
+        "OWNER DECISION, not an edit: either record acceptance in DECISIONS.md and "
+        "flip the status line, or run the pending design review. An agent must not "
+        "mark an ADR accepted (AGENTS.md precedence, tier 3).",
+        annotation_is_not_a_fix=True,
     ),
     Rule(
         "ADR0015-PROPOSED",
         "docs/adr/ADR-0015-revalidation-campaign.md",
         r"^Status: proposed",
         "Status 'proposed (design-review pending)' while "
-        "src/chronos/research/campaign.py exists and 'research campaign' runs.",
-        "Status line flipped to accepted/implemented with a date.",
+        "src/chronos/research/campaign.py exists and 'research campaign' runs. "
+        "REFINED 2026-08-02: no DECISIONS.md row exists for this ADR either, so "
+        "acceptance is unrecorded. A dated status note was added on 2026-08-02.",
+        "OWNER DECISION, not an edit: record acceptance in DECISIONS.md and flip the "
+        "status line, or run the pending design review.",
+        annotation_is_not_a_fix=True,
+    ),
+    # -- Ledger #1: the two runbooks named only the deterministic platform's --
+    # -- halt. Corrected 2026-08-02; these rules guard against regression.  ---
+    Rule(
+        "INCIDENT-HALT-ONLY",
+        "docs/INCIDENT_RESPONSE.md",
+        r"1\. \*\*Halt\. Always safe, never harmful",
+        "Immediate actions opened with the deterministic platform's halt as step 1 "
+        "and never mentioned the live order plane's kill switch, so an operator "
+        "following it engaged the stop that does not cover the plane able to place "
+        "an order. Corrected 2026-08-02: the live kill switch is now step 1 and "
+        "mandate revocation step 3.",
+        "Step 1 stops the live plane (POST /live/kill); the platform halt is a "
+        "separate, explicitly-scoped step. Regression = this pattern reappearing.",
+    ),
+    Rule(
+        "BACKUP-RESTORE-GUARANTEE",
+        "docs/BACKUP_AND_RECOVERY.md",
+        r"the code guarantees it",
+        "The design premise claimed restore can never auto-resume trading and that "
+        "the code guarantees it. True for the deterministic platform; false for the "
+        "chronos.orders live plane, where a MISSING kill-switch file reads DISENGAGED "
+        "and a valid AUTONOMY_MANDATE_FILE auto-activates on boot. Corrected in place "
+        "2026-08-02; data/live_kill_switch.json and the mandate file were also added "
+        "to the backup table, which had omitted both.",
+        "The guarantee is scoped to the deterministic platform and the live-plane "
+        "exceptions are stated, OR open finding 3 lands (recovery boots kill-engaged, "
+        "read-only, unreconciled — an owner-reviewed code change, not a doc edit).",
     ),
 )
 
@@ -253,6 +315,38 @@ def line_of_offset(text: str, offset: int) -> int:
     return text.count("\n", 0, offset) + 1
 
 
+# A dated in-place correction, in any of the spellings this repo actually uses:
+# "Corrected 2026-08-02", "*(Amended 2026-07-25.)*", "Amendment note, 2026-08-02",
+# "Status correction, 2026-08-02", "Relabeled 2026-08-02", "restated 2026-08-02".
+_CORRECTION_MARKER = re.compile(
+    r"(?:Corrected|Amended|Amendment note|Status correction|Status note|Relabeled|[Rr]estated)"
+    r"[^\n]{0,20}?\d{4}-\d{2}-\d{2}"
+)
+
+# How far from the stale wording a correction note may sit and still be read as
+# annotating it. Generous enough for a struck-through block plus its replacement
+# paragraph; tight enough that an unrelated correction elsewhere in a long file
+# does not launder a different stale claim.
+_CORRECTION_WINDOW_LINES = 25
+
+
+def _corrected_near(text: str, matches: list[re.Match[str]]) -> bool:
+    """True when EVERY match sits within the correction window of a dated note.
+
+    Every match, not any: a file may repeat a stale claim in several places and
+    fixing one of them is not fixing the rule.
+    """
+    lines = text.splitlines()
+    marker_lines = {index for index, line in enumerate(lines) if _CORRECTION_MARKER.search(line)}
+    if not marker_lines:
+        return False
+    for match in matches:
+        match_line = line_of_offset(text, match.start()) - 1  # line_of_offset is 1-based
+        if not any(abs(marker - match_line) <= _CORRECTION_WINDOW_LINES for marker in marker_lines):
+            return False
+    return True
+
+
 def check_rule(root: Path, rule: Rule) -> tuple[str, str]:
     """Evaluate one rule. Returns (verdict, detail-line)."""
     path = root / rule.file
@@ -267,6 +361,12 @@ def check_rule(root: Path, rule: Rule) -> tuple[str, str]:
         return "ABSENT", "pattern no longer matches — claim fixed/removed since 2026-08-02"
     lines = ", ".join(str(line_of_offset(text, m.start())) for m in matches[:5])
     first = text[matches[0].start() : matches[0].end()].replace("\n", " ")
+    if not rule.annotation_is_not_a_fix and _corrected_near(text, matches):
+        return (
+            "CORRECTED",
+            f"line(s) {lines}: original wording retained under a dated in-place "
+            f"correction (house style — history stays visible)",
+        )
     return "PRESENT", f"line(s) {lines}: ...{first[:70]}..."
 
 
@@ -312,13 +412,15 @@ def main() -> int:
     print("CHRONOS DOC-DRIFT CHECK (read-only) — repo:", root)
     print(f"{len(RULES)} rules from the 2026-08-02 contradiction ledger\n")
 
-    present = missing = absent = 0
+    present = missing = absent = corrected = 0
     for rule in RULES:
         verdict, info = check_rule(root, rule)
         if verdict == "PRESENT":
             present += 1
         elif verdict == "FILE-MISSING":
             missing += 1
+        elif verdict == "CORRECTED":
+            corrected += 1
         else:
             absent += 1
         print(f"[{verdict:>12}] {rule.rule_id}  ({rule.file})")
@@ -330,7 +432,8 @@ def main() -> int:
     live_collection_count(root)
 
     print(
-        f"\n== SUMMARY: {present} PRESENT (still stale), {absent} ABSENT (fixed), "
+        f"\n== SUMMARY: {present} PRESENT (still stale), {corrected} CORRECTED "
+        f"(fixed in place, original wording retained), {absent} ABSENT (text removed), "
         f"{missing} FILE-MISSING =="
     )
     print("PRESENT entries are documentation findings — route fixes via the")

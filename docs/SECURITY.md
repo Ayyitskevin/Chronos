@@ -36,9 +36,14 @@ this is a single-operator local system (ASSUMPTIONS.md A-42).
 - Platform: `CANARY_LIVE`/`LIVE` resolve to `DENIED_LIVE_DISABLED` unconditionally
   (`src/chronos/control/modes.py`); the paper adapter is constructible only from a
   `PAPER_SUBMISSION` lock and only on paper ports {7497, 4002} with a `D[UF]\d{4,}` account.
-- Wheel dashboard: every IBKR order method raises `BrokerSafetyError`
-  (`src/chronos/broker/ibkr.py`); `ALLOW_LIVE_TRADING=true` makes settings validation raise
-  (`src/chronos/config/settings.py`).
+- Wheel dashboard: every IBKR order method on the `ib_async` adapter raises `BrokerSafetyError`
+  (`src/chronos/broker/ibkr.py`); ~~`ALLOW_LIVE_TRADING=true` makes settings validation raise~~
+  *(Corrected 2026-08-02: true only before Milestone 7. Since ADR-0009 the flag is **honored**
+  under the full nine-conjunct live configuration — official adapter, LIVE environment, a
+  `U\d{4,}` account on a non-empty allowlist, the transmit switch, and the arming/typed-confirmation
+  flags. Startup refuses and names every unmet conjunct otherwise; at run time an order still walks
+  the ten-gate live stack. See `src/chronos/config/settings.py:165-199` and
+  `docs/live_trading_runbook.md`. `docs/DEPLOYMENT.md` already carried this correction.)*
 - There is no `--force` flag in the operator CLI (`src/chronos/cli/main.py`), and no command that
   changes trading capability.
 
@@ -47,8 +52,17 @@ this is a single-operator local system (ASSUMPTIONS.md A-42).
 - The IBKR API socket is expected to be bound to loopback (operator-configured in TWS/Gateway;
   see docs/IBKR_RUNBOOK.md).
 - The wheel dashboard is run locally via Streamlit; the platform control surface is a local CLI.
-  Neither system implements remote access, authentication, or multi-user features — do not put
-  either behind a reverse proxy or expose ports.
+  ~~Neither system implements remote access, authentication, or multi-user features~~
+  *(Corrected 2026-08-02 — the reality is stronger than this text, but the text is wrong.)* Since
+  Milestone 5 the order-management surface is a **FastAPI backend** bound to loopback
+  (`backend_host` defaults to `127.0.0.1`, port `8765`, and a settings validator refuses any
+  non-loopback host — `src/chronos/config/settings.py:106-107, 255`). It **does** authenticate:
+  every mutating route requires the `X-Chronos-Token` header (`src/chronos/api/auth.py:21`), and
+  since M8b the operator terminal may instead present an httpOnly session cookie scoped
+  `path=/terminal`, so the browser never attaches it to `/orders/*`
+  (`src/chronos/api/terminal_session.py`). Sessions are in-memory only, so a restart signs every
+  terminal out, and a session grants no writer authority. Still no multi-user model and no remote
+  access is intended: **do not put any of these behind a reverse proxy or expose ports.**
 
 ### Tamper-evident audit log
 

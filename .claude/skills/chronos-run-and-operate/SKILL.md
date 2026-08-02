@@ -248,10 +248,21 @@ requires a current, unexpired arm for every LIVE submit regardless of mandate
 (`submission.py:441`; `live_gate.py` has no mandate input) — trust the code; details
 in chronos-autonomy-and-mandates.
 
-**Terminal client buttons are acknowledge + revoke ONLY** (`terminal.js:4-8, 78-80`).
-Arm/disarm/kill/disengage have no buttons today — they are curl-only with
-`X-Chronos-Token`. The terminal cookie is path-scoped to `/terminal` and structurally
-cannot reach `/live/*` or `/orders/*`.
+**Terminal client buttons (updated 2026-08-02):** acknowledge alert, revoke mandate,
+**ENGAGE KILL SWITCH**, and **DISARM LIVE SESSION** — the last two added via
+`POST /terminal/live/kill` and `POST /terminal/live/disarm` (R-43). Both require a typed
+confirmation, the kill switch also requires a reason, and both stay enabled on a
+read-only backend because the routes behind them are not writer-gated — a demoted
+backend is the one whose operator most needs the stop.
+
+**Arming and kill-disengage still have no buttons and remain curl-only** with
+`X-Chronos-Token`. That is deliberate, not an oversight: they *grant* authority, and
+`test_the_terminal_offers_no_route_that_grants_live_authority` pins their absence.
+ADR-0018 §4 permits them, so exposing them is an owner posture decision, not a bug.
+
+The terminal cookie is still path-scoped to `/terminal` and structurally cannot reach
+`/live/*` or `/orders/*` — the new routes live under `/terminal`, which is why the
+browser can call them at all.
 
 ## Terminal usage
 

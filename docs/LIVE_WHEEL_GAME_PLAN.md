@@ -129,9 +129,12 @@ workflow, ever; `transmit=True` assigned in exactly one authorized method.
 Amended: "no auto-transmit on candidate match", "no unattended trading", and
 "every live order is armed + typed-confirmed" applied to the human-in-the-loop
 product and still govern **manual** mode. Under an active AutonomyMandate,
-unattended operation is the intended behavior and the mandate replaces per-order
-confirmation and session arming — *only* those two gates, and only inside its
-bounds. Auto-transmit still never follows from a mere candidate match: a decision
+unattended operation is the intended behavior and the mandate ~~replaces~~ *is
+intended to replace* per-order confirmation and session arming — *only* those two
+gates, and only inside its bounds. *(Corrected 2026-08-02: not implemented —
+`src/chronos/orders/submission.py:441` still requires a current arm on every LIVE
+submit; see `docs/live_trading_runbook.md` and open finding 4 in
+`docs/VISION_COMPLETION_PLAN.md` §6.)* Auto-transmit still never follows from a mere candidate match: a decision
 must survive the deterministic gateway, the risk engine, and the full gate chain,
 any of which may veto or reduce it.
 

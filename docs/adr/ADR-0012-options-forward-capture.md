@@ -1,7 +1,16 @@
 # ADR-0012: Options chain/IV/greeks forward capture (Milestone C0)
 
-Status: proposed
+Status: accepted *(status line corrected 2026-08-02 — was "proposed")*
 Date: 2026-07-19
+
+> **Status correction, 2026-08-02.** This ADR's decision is recorded as accepted in
+> `DECISIONS.md` **D-14**, and the capability it specifies ships:
+> `python -m chronos.histdata options` with `src/chronos/histdata/options_capture.py`,
+> `options_client.py`, and `options_store.py`. Under the `AGENTS.md` precedence rule,
+> DECISIONS.md is the index of accepted authority, so the "proposed" line was stale
+> rather than an open question. Note that shipping ≠ exercised: **no real gateway has
+> ever been connected**, so the option-capture store is empty and every forward-capture
+> path is fixture-verified only (`docs/VISION_COMPLETION_PLAN.md` §2).
 
 ## Context
 

@@ -77,6 +77,8 @@ const API = {
   alerts: "/terminal/alerts",
   acknowledge: (id) => `/terminal/alerts/${encodeURIComponent(id)}/acknowledge`,
   revoke: "/terminal/mandate/revoke",
+  killSwitch: "/terminal/live/kill",
+  disarm: "/terminal/live/disarm",
   session: "/terminal/session",
   theses: "/terminal/theses",
   bars: (symbol, lookback) =>
@@ -511,6 +513,7 @@ function renderSystem(data, body) {
   kv(list, "account", fingerprintNode(data.account_fingerprint));
   kv(list, "generated", timeNode(data.generated_at));
   append(body, list, note(COPY.unknownFields));
+  append(body, killSwitchAction(data), disarmAction(data));
 }
 
 function autonomyChip(data) {
@@ -1126,11 +1129,20 @@ function actionBlockedReason() {
  * because a panel that has stopped refreshing must say so even when it stopped
  * on purpose.
  */
-function ownerAction(label, danger, buildForm) {
+function ownerAction(label, danger, buildForm, options) {
   const host = el("div", "actions");
   const button = el("button", danger ? "btn btn-danger" : "btn", label);
   button.type = "button";
-  const blocked = actionBlockedReason();
+  // `survivesDemotion` is for the two actions that only ever REMOVE authority.
+  // `actionBlockedReason` greys a button out on a read-only backend or when the
+  // system panel could not be read — correct for granting actions, and exactly
+  // backwards for the emergency stop: a demoted backend is the one whose
+  // operator most needs it, and "I cannot see the state" is a reason to stop,
+  // not a reason to refuse to. The routes behind these two are not writer-gated
+  // for the same reason (chronos.api.routes.live module docstring), so a
+  // disabled button here would be the client inventing a gate the server does
+  // not have.
+  const blocked = options && options.survivesDemotion ? "" : actionBlockedReason();
   if (blocked) {
     button.disabled = true;
     button.title = blocked;
@@ -1227,6 +1239,62 @@ function revokeAction(mandate) {
         return outcome;
       },
     }),
+  );
+}
+
+/**
+ * The emergency stop and the arm drop — the two owner actions that only remove
+ * authority, and the reason ADR-0018 §4's grant is only half-exposed.
+ *
+ * Arming and disengaging the kill switch are *granting* actions. ADR-0018 §4
+ * permits the terminal to do them, but putting them behind a browser session
+ * cookie is a posture question the owner has not answered, so they are absent
+ * here and `test_the_terminal_offers_no_route_that_grants_live_authority` pins
+ * their absence server-side. Re-engaging trading stays a token-and-lease act.
+ */
+function killSwitchAction(data) {
+  const already = data.kill_switch_engaged === true;
+  return ownerAction(
+    already ? "KILL SWITCH ENGAGED" : "ENGAGE KILL SWITCH",
+    true,
+    (done) =>
+      confirmForm({
+        heading: "Engage the live kill switch",
+        why: already
+          ? "The switch already reads ENGAGED. Engaging again is harmless and records a fresh reason; it is the durable stop either way."
+          : "This is the emergency stop for the live order plane. It is durable, survives restart, and is cleared only by an explicit disengage that this terminal deliberately does not offer. It does NOT stop the deterministic platform — that is a separate halt.",
+        phrase: "ENGAGE KILL SWITCH",
+        noteLabel: "reason (required, recorded)",
+        noteRequired: true,
+        submitLabel: "ENGAGE",
+        danger: true,
+        done,
+        submit: async (reason) => postJSON(API.killSwitch, { reason }),
+      }),
+    { survivesDemotion: true },
+  );
+}
+
+function disarmAction(data) {
+  const armed = data.live_armed === true;
+  return ownerAction(
+    "DISARM LIVE SESSION",
+    true,
+    (done) =>
+      confirmForm({
+        heading: "Drop the live session arm",
+        why: armed
+          ? "The session is armed. Dropping the arm removes one of the ten live gates, so no live order can pass until an operator arms again with the typed phrase — which is not done from this terminal."
+          : "The session already reads disarmed. Dropping it again is harmless: the owner asked for the authority to be gone and it is gone.",
+        phrase: "DISARM",
+        noteLabel: "note (optional, not recorded)",
+        noteRequired: false,
+        submitLabel: "DISARM",
+        danger: true,
+        done,
+        submit: async () => postJSON(API.disarm, {}),
+      }),
+    { survivesDemotion: true },
   );
 }
 

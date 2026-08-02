@@ -2,6 +2,17 @@
 
 Status: Accepted (2026-07-17). Index entry: DECISIONS.md D-12.
 
+> **Amendment note, 2026-08-02 (record, not a rewrite — this ADR stands as accepted).**
+> The capital premise below (~USD 3,000) is superseded as a statement of fact: the last
+> documented account snapshot is approximately **USD 110**
+> (`docs/VISION_COMPLETION_PLAN.md` §2). The decision this ADR records — daily-bar,
+> long-only ETF candidates only — is *strengthened*, not weakened, by a smaller account,
+> so nothing here is reopened. But the cost arithmetic quoted in Context and Consequences
+> (≈3.3 bps/side, whole-share drag on USD 3,000) understates the drag at the observed
+> balance by roughly 27x. Whether to fund toward the original premise or cut scope to
+> match is a **live, unresolved owner decision** (plan §11); see ASSUMPTIONS A-10 and
+> RISK_REGISTER R-10. Do not treat either figure as settled input for sizing or selection.
+
 ## Context
 
 The Pine corpus (42 audited script artifacts, ASSUMPTIONS.md A-01) contains intraday systems (ORB,
@@ -30,7 +41,8 @@ scripts remain studies (the wheel dashboard stays decision-support only, A-12).
 
 - Honesty over ambition: the platform ships with two executable strategy families, not 42.
 - Whole-share sizing on USD 3,000 produces meaningful rounding drag; it is modelled, not hidden
-  (A-22).
+  (A-22). *(Amended 2026-08-02 — see the amendment note at the top of this ADR: the last
+  documented account snapshot is ≈ USD 110, so this drag is materially understated here.)*
 - Research results must beat baselines net of the conservative cost floor (A-20/A-21) to matter;
   the quantitative validation report (TASKS.md "Next") is the evidence, and it does not exist yet.
 - Expanding scope (single stocks, intraday, options execution) requires owner approval, new data,

@@ -16,13 +16,60 @@ SEV-1/SEV-2: do not trade (do not rearm) until the incident is explained and doc
 
 ## Immediate actions (any incident)
 
-1. **Halt. Always safe, never harmful:**
+> **Corrected 2026-08-02 — this section previously named only the deterministic
+> platform's halt.** Chronos has **two independent stop mechanisms**, and the halt below
+> does not touch the plane that can actually place an order. Engage **both**. Full
+> procedures and the reasoning live in `docs/live_trading_runbook.md`; the two mechanisms
+> are compared there and in the `chronos-run-and-operate` skill.
+
+1. **Stop the live order plane — do this FIRST if any live/paper capability is configured.**
+   The kill switch is deliberately reachable without the writer lease, because an emergency
+   stop must always work — including on a demoted, read-only backend.
+
+   **From the terminal (preferred):** the system panel at `/terminal/app` carries an
+   **ENGAGE KILL SWITCH** button and a **DISARM LIVE SESSION** button. Both require a typed
+   confirmation phrase, the kill switch requires a reason, and both stay enabled when the
+   backend is read-only. *(Added 2026-08-02; before that the terminal had no stop button and
+   this step was curl-only.)*
+
+   **By curl (equivalent, and the only path if the browser is unavailable):**
+   ```bash
+   curl -fsS -X POST http://127.0.0.1:8765/live/kill \
+     -H "X-Chronos-Token: $CHRONOS_API_TOKEN" \
+     -H 'Content-Type: application/json' \
+     -d '{"reason":"SEV-n: <one line>"}'
+   ```
+   Re-enabling trading is deliberately **not** available from the terminal: disengaging the
+   kill switch and arming a live session grant authority, and both remain token-and-lease
+   actions (`POST /live/kill/disengage`, `POST /live/arm`).
+   It persists to `data/live_kill_switch.json` (`live_kill_switch_file`) and is cleared only
+   by an explicit `POST /live/kill/disengage`. **Verify the file exists afterwards** — see
+   the warning below.
+2. **Halt the deterministic platform. Always safe, never harmful:**
    ```bash
    python -m chronos.cli halt --reason "SEV-n: <one line>"
    ```
-   The halt persists across restarts and blocks all new order generation. Cancelling existing
-   working orders, if needed, is a manual action in TWS (the platform's DAY orders expire at end
-   of day regardless).
+   The halt persists across restarts and blocks all new order generation **in the
+   deterministic platform** (`chronos.execution`/`chronos.risk`). It does **not** stop the
+   `chronos.orders` live plane — that is step 1. Cancelling existing working orders, if
+   needed, is a manual action in TWS (the platform's DAY orders expire at end of day
+   regardless).
+3. **If an autonomy mandate is configured, revoke it or move the file aside.** A valid,
+   account-matching `AUTONOMY_MANDATE_FILE` **auto-activates on every boot** (ADR-0017), so
+   restarting is not a stop. Revocation survives restart:
+   ```bash
+   curl -fsS -X POST http://127.0.0.1:8765/terminal/mandate/revoke \
+     -H "X-Chronos-Token: $CHRONOS_API_TOKEN" \
+     -H 'Content-Type: application/json' \
+     -d '{"reason":"SEV-n: <one line>"}'
+   ```
+
+> **The two stop mechanisms fail in OPPOSITE directions — do not assume symmetry.** A
+> missing `data/platform_halt.json` reads as **HALTED** (safe;
+> `src/chronos/control/halt.py:102-109`). A missing `data/live_kill_switch.json` reads as
+> **DISENGAGED** (`src/chronos/orders/kill_switch.py:83-85`) — deleting or failing to
+> restore that file **disarms** the emergency stop. After engaging, confirm the file is
+> present; after any restore, engage it again before starting the backend.
 2. **Stop making changes.** No code edits, no config edits, no cleanup, until evidence is
    captured.
 

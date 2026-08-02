@@ -130,26 +130,48 @@ No Dockerfile or compose file is provided for the trading path, on purpose:
 If you containerize the research-only path yourself someday, never mount the same `data/`
 directory into more than one running instance (SQLite + halt-file semantics assume one process).
 
-## Future work — shadow/paper service (NOT IMPLEMENTED)
+## Shadow/paper service
 
-There is currently no long-running service entry point: nothing wires live bar ingestion, a broker
-adapter, reconciliation evidence gathering, and the mode lock into a daemon. What exists today is
-the one-shot `shadow-scan` CLI command above (run manually after the close). The CLI docstring
-references a separate paper-capable service entry point; it does not exist in this build. The
-components exist and are tested individually. When such a service is written and reviewed, a
-systemd user unit like the following would be the shape of it — do not create this unit today, it
-has nothing to run:
+*(Corrected 2026-08-02. This section previously read "Future work — shadow/paper service (NOT
+IMPLEMENTED)" and stated that no service entry point existed. That was true of an earlier build
+and is false today: `python -m chronos.service` ships and is tested —
+`src/chronos/service/__main__.py`, `tests/platform_unit/test_service.py`.)*
+
+The entry point runs the startup gate (halt read, ledger hydration, reconciliation) and then one
+or more decision cycles:
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--mode` | `shadow` | `shadow` or `paper` only. Live/canary are refused in code and not selectable. |
+| `--watch` | off | Loop instead of running once. Without it the process runs a single cycle and exits. |
+| `--interval` | `3600.0` | Seconds between cycles when `--watch` is set. |
+| `--symbols` | `SPY,QQQ` | Comma-separated. |
+| `--strategies` | `regime_trend_v1,mean_reversion_v1` | |
+| `--equity` | `3000.0` | **Carries the superseded ~USD 3,000 premise** — the last documented account snapshot is ≈ USD 110 and the capital question is an open owner decision (ASSUMPTIONS A-10). Pass `--equity` explicitly rather than accepting this default. |
+| `--policy` | `config/risk.example.yaml` | |
+| `--halt-file` / `--audit-file` / `--data-dir` | see `--help` | |
+
+Default mode is SHADOW (capability `NO_ORDERS`): the loop reports would-be intents and cannot
+submit. SIGINT/SIGTERM request a clean stop after the current cycle; an unexpected exception
+persists a `STRATEGY_EXCEPTION` halt and exits nonzero; a restart re-enters startup and never
+resumes trading automatically.
+
+What still does **not** exist is live bar ingestion wired into this loop, so it is not yet a
+substitute for supervised operation, and **no real gateway has ever been connected** in this
+project's history (`docs/VISION_COMPLETION_PLAN.md` §2). Daemonizing it is therefore a reviewed
+step, not a default. If and when that review happens, a systemd user unit would be the shape of
+it — the `ExecStart` line below is now a valid command:
 
 ```ini
-# FUTURE WORK — no such entry point exists in this build.
 # ~/.config/systemd/user/chronos-shadow.service
+# Do not enable without the review described above.
 [Unit]
-Description=Chronos shadow-mode service (future)
+Description=Chronos shadow-mode service
 After=network-online.target
 
 [Service]
 WorkingDirectory=%h/Chronos
-ExecStart=%h/Chronos/.venv/bin/python -m chronos.service --mode shadow   # does not exist
+ExecStart=%h/Chronos/.venv/bin/python -m chronos.service --mode shadow --watch
 Restart=on-failure
 # The process re-reads the persistent halt file on start; restart never clears a halt.
 
@@ -157,5 +179,5 @@ Restart=on-failure
 WantedBy=default.target
 ```
 
-Until then, everything is run manually in the foreground, which is appropriate for the current
+Everything else is run manually in the foreground, which remains appropriate for the current
 research/backtest phase.

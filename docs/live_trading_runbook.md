@@ -16,20 +16,41 @@ against a running gateway.
 
 This runbook describes the safety controls that gate every live order.
 
-## Autonomous operation (ADR-0016 / D-16) — not yet operable
+## Autonomous operation (ADR-0016 / D-16, ADR-0017 / D-17)
 
-Under ADR-0016 an active owner-authored **AutonomyMandate** replaces gates 7
+~~Under ADR-0016 an active owner-authored **AutonomyMandate** replaces gates 7
 (session arming) and 8 (per-order confirmation) — **and only those two** — inside
-its bounds. Every other gate in this runbook applies identically to an autonomous
-order, and the kill switch takes absolute precedence over any mandate.
+its bounds.~~ **Corrected 2026-08-02 — the order plane does not implement this
+substitution.** ADR-0016 §1 and ADR-0017 §1 *intend* an active owner-authored
+**AutonomyMandate** to stand in for gates 7 (session arming) and 8 (per-order
+confirmation), and only those two, inside its bounds. The code as of 2026-08-02
+does not honour it: `chronos.orders` contains no reference to a mandate at all,
+and `src/chronos/orders/submission.py:441` reads the live arming state
+unconditionally on every LIVE submit. **A live autonomous order therefore still
+requires a current session arm today.** This is open finding 4 in
+`docs/VISION_COMPLETION_PLAN.md` §6; choosing which authority model wins — prose
+or code — is an owner decision requiring a new ADR, not a documentation edit.
+Re-verify with `grep -rc "mandate" src/chronos/orders/` (zero matches) and
+`sed -n '441p' src/chronos/orders/submission.py`.
 
-Nothing here is operable yet. Milestone 1 delivered the mandate and decision
+Every other gate in this runbook applies identically to an autonomous order, and
+the kill switch takes absolute precedence over any mandate.
+
+~~Nothing here is operable yet. Milestone 1 delivered the mandate and decision
 contracts only; the deterministic gateway that admits a decision, the model
-worker, and the autonomous execution path are Milestones 2 onward. Until they
-ship, every live order still walks all ten gates including typed confirmation.
-When they do ship, this runbook gains the mandate lifecycle (author, activate,
-renew, revoke), and revoking a mandate — like engaging the kill switch — will be
-an immediate owner action that stops new autonomous exposure.
+worker, and the autonomous execution path are Milestones 2 onward.~~ **Corrected
+2026-08-02 — this described the Milestone 1 build.** The autonomy stack is built
+and wired through M7.5/ADR-0017: contracts, gateway, admission, sizing, durable
+state, compiler, decision queue, session counters, alert delivery, the tick
+runtime, and the app-plane wiring all ship (README "Current status"). A backend
+booted with a valid, account-matching `AUTONOMY_MANDATE_FILE` auto-activates it
+and drives the autonomy tick. What does **not** exist in this repository is a
+model worker: `chronos.supervisor.ingress` accepts proposals from an external
+process, and no such process ships here, so an unconfigured deployment produces
+no decisions. Autonomous **live** operation additionally remains blocked by the
+arming contradiction above. Revoking a mandate — like engaging the kill switch —
+is an immediate owner action that stops new autonomous exposure; the terminal
+exposes it at `POST /terminal/mandate/revoke`, and revocation survives restart.
 
 ## The ten live gates
 

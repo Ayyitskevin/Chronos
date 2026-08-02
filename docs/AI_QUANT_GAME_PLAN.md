@@ -259,9 +259,14 @@ because captured options history is unrecoverable. Default order is as listed.
    failure never becomes permission to trade.
 5. All safety machinery (mode lock, arming, per-order confirmation, kill switch,
    drawdown breaker, writer lease, halt) applies unchanged **except** that an active
-   AutonomyMandate replaces per-order human confirmation and session arming inside its
-   bounds — the substitution ADR-0016 §1 makes, and the concrete form of the envelope E3a
-   reserved. **That is the only gate autonomy replaces.** The kill switch, drawdown
+   AutonomyMandate ~~replaces~~ *is intended to replace* per-order human confirmation and
+   session arming inside its bounds — the substitution ADR-0016 §1 makes, and the concrete
+   form of the envelope E3a reserved. **That is the only gate autonomy replaces.**
+   *(Corrected 2026-08-02: the substitution was never implemented in the order plane —
+   `src/chronos/orders/submission.py:441` reads the arming state unconditionally on every
+   LIVE submit and `chronos.orders` has no mandate awareness, so a live autonomous order
+   still needs a session arm. Open finding 4 in `docs/VISION_COMPLETION_PLAN.md` §6;
+   current state is documented in `docs/live_trading_runbook.md`.)* The kill switch, drawdown
    breaker, mode lock, writer lease, halt, single transmit boundary, idempotency,
    reconciliation-to-broker-truth, contract qualification, and stale-data rejection apply
    identically at every rung and are enumerated in ADR-0016 §8 as explicitly
