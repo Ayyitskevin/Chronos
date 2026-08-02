@@ -113,6 +113,23 @@ class Settings(BaseSettings):
     live_kill_switch_file: Path = Path("data/live_kill_switch.json")
     session_baseline_file: Path = Path("data/session_baseline.json")
 
+    # Bounded periodic reconciliation (ADR-0020 / D-20). These are owner-frozen
+    # operational thresholds, not tuning knobs: the cadence is set by what can
+    # change the book without an order this system placed (a fill on a resting
+    # limit; overnight assignment), and bounded on the other side by the shared
+    # pacing budget, where headroom is a safety property because rate limit spent
+    # watching is rate limit unavailable to cancel. Widening them to make a
+    # symptom disappear is exactly the move the change-control rules forbid.
+    #
+    # The age is deliberately larger than one interval and smaller than two, so
+    # a single missed cycle is survivable and two consecutive misses fail closed
+    # without any failure detector. It is also what makes readiness unable to
+    # cross a session open (ADR-0020 §4).
+    reconciliation_interval_active_seconds: Annotated[float, Field(gt=0)] = 120.0
+    reconciliation_interval_idle_seconds: Annotated[float, Field(gt=0)] = 240.0
+    reconciliation_interval_closed_seconds: Annotated[float, Field(gt=0)] = 1800.0
+    reconciliation_max_evidence_age_seconds: Annotated[float, Field(gt=0)] = 300.0
+
     # Autonomy runtime (ADR-0017, owner-directed persistent authority). The
     # mandate file is the owner's standing grant: authored once, validated on
     # every boot, auto-activated when present. An empty path means no autonomy
@@ -159,6 +176,32 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///data/chronos.db"
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     log_file: Path = Path("logs/chronos.log")
+
+    @model_validator(mode="after")
+    def validate_reconciliation_cadence(self) -> Settings:
+        """The evidence age must outlast the refresh that keeps it warm (ADR-0020 §3).
+
+        If the age were shorter than an in-session interval, readiness would expire
+        before its own scheduled refresh with nothing failing — a permanently
+        blocked submission path that looks like a safety property and is actually a
+        misconfiguration. Refusing at startup is how that stays diagnosable.
+
+        The closed-market interval is deliberately exempt: while the market is
+        closed, readiness expiring and staying expired is the correct state.
+        """
+
+        age = self.reconciliation_max_evidence_age_seconds
+        for name, interval in (
+            ("reconciliation_interval_active_seconds", self.reconciliation_interval_active_seconds),
+            ("reconciliation_interval_idle_seconds", self.reconciliation_interval_idle_seconds),
+        ):
+            if interval >= age:
+                raise ValueError(
+                    f"{name}={interval}s must be shorter than "
+                    f"reconciliation_max_evidence_age_seconds={age}s, or reconciliation "
+                    "readiness expires before the refresh that would renew it"
+                )
+        return self
 
     @model_validator(mode="after")
     def validate_safety_and_ranges(self) -> Settings:

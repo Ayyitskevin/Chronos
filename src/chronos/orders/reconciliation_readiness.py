@@ -10,10 +10,10 @@ invalidates older evidence.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from threading import Condition, Lock
 
 from chronos.domain.enums import ReconciliationStatus
@@ -37,10 +37,38 @@ class ReconciliationReadinessSnapshot:
 class ReconciliationReadiness:
     """Thread-safe readiness latch bound to one broker connection generation."""
 
-    def __init__(self, *, session_id: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        session_id: str | None = None,
+        max_evidence_age: timedelta | None = None,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        """``max_evidence_age`` bounds how long a published proof may authorize.
+
+        ADR-0020. ``None`` keeps the pre-2026-08-02 behaviour — a published proof
+        never expires on its own — and remains the default so that constructing a
+        latch in a test or a script does not silently acquire a clock. Production
+        wiring passes the owner-frozen age.
+
+        Expiry is evaluated in :meth:`snapshot`, deliberately, rather than by the
+        task that refreshes it: a proof must stop being trusted **whether or not**
+        the refresher is alive, and correctness that depends on the health of the
+        component it guards is not correctness. Two consecutive missed refresh
+        cycles therefore fail closed by arithmetic alone.
+
+        The same rule subsumes ADR-0020 §4: a proof from before a regular-session
+        open cannot survive a 300-second age, so readiness never crosses the open
+        and no separate session-boundary mechanism is required.
+        """
+
         normalized_session_id = (session_id or uuid.uuid4().hex).strip()
         if not normalized_session_id:
             raise ValueError("reconciliation session_id must not be blank")
+        if max_evidence_age is not None and max_evidence_age <= timedelta(0):
+            raise ValueError("max_evidence_age must be positive when set")
+        self._max_evidence_age = max_evidence_age
+        self._clock = clock
         self._lock = Lock()
         self._session_id = normalized_session_id
         self._idle = Condition(self._lock)
@@ -55,7 +83,35 @@ class ReconciliationReadiness:
 
     def snapshot(self) -> ReconciliationReadinessSnapshot:
         with self._lock:
+            self._expire_stale_evidence_unlocked()
             return self._snapshot_unlocked()
+
+    def _expire_stale_evidence_unlocked(self) -> None:
+        """Demote a proof that has outlived the owner-frozen evidence age.
+
+        A no-op unless the latch was given both an age and a clock, and unless a
+        ``RECONCILED`` proof is actually in force. A submission in flight is left
+        alone: it already claimed this proof and ``submission_guard`` has set the
+        status to ``PENDING`` for everyone else, so there is nothing here to
+        demote and taking it away mid-send would invalidate a claim the sender is
+        entitled to finish.
+        """
+
+        if self._max_evidence_age is None or self._clock is None:
+            return
+        if self._status is not ReconciliationStatus.RECONCILED:
+            return
+        if self._reconciled_at is None or self._submissions_in_flight:
+            return
+        age = self._clock() - self._reconciled_at
+        if age <= self._max_evidence_age:
+            return
+        self._status = ReconciliationStatus.PENDING
+        self._reason = (
+            f"reconciliation evidence is {int(age.total_seconds())}s old, past the "
+            f"{int(self._max_evidence_age.total_seconds())}s maximum evidence age"
+        )
+        self._reconciled_at = None
 
     @contextmanager
     def reconciliation_session(self, reason: str) -> Iterator[int]:
