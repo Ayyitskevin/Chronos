@@ -187,10 +187,28 @@ Three traps that have already misled people:
 | PLATFORM_RISK_POLICY | risk policy path | CLI takes `--policy`; monitor reads CHRONOS_RISK_POLICY instead |
 | PAPER_ACCOUNT_ALLOWLIST | paper account gate | `resolve_mode_lock` argument no production caller populates from env (`src/chronos/control/modes.py:74-81`) |
 
-**OPEN question (do not resolve unilaterally):** whether these should be wired into
-Settings or deleted from `.env.example`. Either way it changes the config contract —
-route via chronos-change-control. Until then: never "configure" the platform through
-these names, and never cite them as evidence a control is set.
+**RESOLVED 2026-08-02 — all five were deleted from `.env.example`.** They were not
+wired: the platform's paths are CLI flags (`--halt-file`, `--audit-file`, `--policy`),
+so adding Settings fields would have created a second source of truth for values the
+CLI already owns.
+
+`PAPER_ACCOUNT_ALLOWLIST` was the one that mattered. The allowlist it appeared to set
+is real and load-bearing — `chronos.control.modes` refuses paper execution when it is
+empty — but that gate is fed from `settings.ib_account_allowlist`
+(`src/chronos/orders/submission.py:262`). An operator who set the phantom name and
+believed they had allowlisted an account had changed nothing. Fail-closed meant the
+worst case was a refusal rather than a wrong account, which is luck about the
+direction of the mistake, not a property of the design — R-25 was the fail-*open*
+member of that same family.
+
+`tests/safety/test_env_example_has_no_phantom_settings.py` now fails on any variable
+in `.env.example` that is neither a `Settings` field nor a direct `os.environ` read,
+so this class cannot recur silently. Direct-read variables (`DEMO_PROFILE`, the
+opt-in smoke-test switch, the monitor's own vars) pass by design.
+
+The standing rule is unchanged: never "configure" the platform through a name that
+is not in the tables above, and never cite an env var as evidence a control is set
+without confirming something reads it.
 
 ## 5. Client-id allocation — who connects to the gateway as whom
 
@@ -409,7 +427,7 @@ relying on any section after code changes, run its one-liner:
 | §3 halt default | `sed -n '102,117p' src/chronos/control/halt.py` |
 | §3 mandate auto-activation | `sed -n '318,350p' src/chronos/api/autonomy_wiring.py` and `sed -n '126,175p'` (revocation) |
 | §3 DB scope binding | `sed -n '161,201p' src/chronos/persistence/database.py` |
-| §4 inert vars | `grep -rn "PLATFORM_HALT_FILE\|PLATFORM_AUDIT_FILE\|PLATFORM_LEDGER_DB\|PLATFORM_RISK_POLICY\|PAPER_ACCOUNT_ALLOWLIST" --include="*.py" src/ scripts/` (expect ZERO matches) |
+| §4 phantom vars stay gone | `.venv/bin/pytest tests/safety/test_env_example_has_no_phantom_settings.py -q` (resolved 2026-08-02: the five were deleted and the test now guards the whole file) |
 | §5 client ids | `grep -n "ib_client_id\|ib_data_client_id" src/chronos/broker/official_ibkr.py src/chronos/histdata/official_client.py src/chronos/config/settings.py` |
 | §5 pacing budget | `sed -n '40,42p' src/chronos/marketdata/pacing.py` |
 | §6 risk schema | `sed -n '21,63p' src/chronos/risk/policy.py`; `cat config/risk.example.yaml config/risk.research.yaml` |
