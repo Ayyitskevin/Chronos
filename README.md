@@ -2,10 +2,7 @@
 
 > **AI agents and contributors: start here.** Read the repository contract in
 > [AGENTS.md](AGENTS.md) and the canonical
-> [Vision Completion Plan](docs/VISION_COMPLETION_PLAN.md) before proposing or changing
-> Chronos. The plan defines the two independent 10/10 outcomes, build order, scorecard, and
-> evidence-bound promotion gates. Historical game plans remain useful context but are not
-> current roadmap authority when they conflict with that plan.
+> [Vision Completion Plan](docs/VISION_COMPLETION_PLAN.md)
 
 Chronos is a local-first, model-driven trading system for Interactive Brokers. Its
 mission (owner directive, 2026-07-25) is **autonomous trading** across equities and
