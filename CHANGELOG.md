@@ -1,5 +1,128 @@
 # CHANGELOG
 
+## [Unreleased] — M12: the handoff library, document truth, and finding 1 (2026-08-02)
+
+Nine merged PRs across one day. The theme is not new capability — it is making the
+repository's own claims true, and building the structural guards that keep them true after
+the session that wrote them has ended.
+
+### The `.claude/skills/` library (PR #48)
+
+Sixteen repo-specific skills so a future session — human or model — can maintain and advance
+Chronos without re-deriving it. Produced by a discovery → authoring → three-lens review →
+fixer process: eight parallel investigations with file:line evidence for every claim, one
+author per skill, then factual, doctrine, and usability review over the complete set. Zero
+BLOCKING findings; eight IMPORTANT, all fixed.
+
+It earned its place the same day it landed. `test_the_terminal_routes_do_not_import_the_order_plane`
+caught the first draft of the terminal stop buttons reaching into the order plane, and the
+drift checker exposed a false-positive flaw in its own design once real corrections started
+landing. A library that catches its own author is doing the job.
+
+### Document truth (PRs #49, #52)
+
+Twenty-one documents corrected in the house style — original wording struck through in place
+beside a dated correction, so history stays visible. The two that mattered:
+
+- **`INCIDENT_RESPONSE.md`** named only the deterministic platform's halt. That halt does not
+  stop the plane that can place an order. An operator following the runbook under stress
+  would have engaged the wrong control. The live kill switch is now step 1, the platform halt
+  an explicitly-scoped step 2, and mandate revocation step 3 — because a valid mandate file
+  auto-activates on boot, so restarting is not a stop.
+- **`BACKUP_AND_RECOVERY.md`** claimed "restore must never auto-resume trading, and the code
+  guarantees it". True of the deterministic platform; false of the live plane, where a
+  **missing** `data/live_kill_switch.json` reads DISENGAGED — the opposite default. That file
+  and the mandate file were absent from the backup table entirely. A restore following the
+  documented procedure could have come up with the emergency stop disarmed.
+
+`doc_drift_check.py` gained a `CORRECTED` verdict: its substring matching reported
+correctly-repaired documents as still stale, because house-style corrections keep the
+original wording on the page. It was punishing the correct fix.
+
+### Terminal emergency stop (PR #49)
+
+ADR-0018 §4 already granted the terminal the kill switch and disarm; what was missing was a
+route the *browser* could reach, since the M8b session cookie is scoped `path=/terminal` and
+structurally cannot call `/live/kill`. `POST /terminal/live/kill` and
+`POST /terminal/live/disarm` close that, with typed confirmation and a required reason.
+
+Only the authority-**removing** half is exposed. Arming and kill-disengage *grant* authority,
+and whether a browser session should hold that is an owner posture question — their absence
+is pinned by a test. Both routes work on a demoted, read-only backend, mirroring
+`chronos.api.routes.live`'s deliberate asymmetry: the backend that lost its lease is the one
+whose operator most needs the stop. Recorded as R-43.
+
+### ADR-0020 — bounded periodic reconciliation, closing finding 1 (PRs #50, #51)
+
+`ReconciliationReadiness` is consumed by every opening submit and was re-established by
+exactly one caller: the startup call. So the first opening order of a process consumed
+readiness and **nothing ever re-armed it** — every later opening order blocked until restart.
+
+Shipped in two halves deliberately. The maximum evidence age landed first, unwired: switching
+expiry on without a refresher would have tightened with nothing to re-arm it. The refresher
+landed with the wiring.
+
+Owner-frozen thresholds — 120 s positioned in RTH, 240 s flat, 1800 s closed, 300 s maximum
+evidence age — set by what can change the book without an order this system placed (a fill on
+a resting limit; overnight assignment), and bounded by the shared pacing budget, where
+headroom is a safety property: rate limit spent watching is rate limit unavailable to cancel.
+
+Two properties worth keeping: expiry is evaluated in `snapshot()` rather than by the loop, so
+a proof stops being trusted whether or not the component guarding it is alive; and missed
+cycles fail closed **by arithmetic** rather than by a failure detector. The 300 s age also
+subsumes the session-open rule — a proof from before the open cannot survive it — so
+overnight assignment cannot be traded against on stale evidence. That fell out rather than
+being built.
+
+This change **widens**: today's state fails closed after one order, so re-arming makes
+submissions possible that are blocked now. Gated as a widening accordingly.
+
+### Phantom configuration (PR #53)
+
+Five `.env.example` variables were read by nothing — not a `Settings` field, not an
+`os.environ` lookup, and `extra="ignore"` swallowed them silently. `PAPER_ACCOUNT_ALLOWLIST`
+was the dangerous one: the allowlist it appeared to set is real and load-bearing, but is fed
+from `IB_ACCOUNT_ALLOWLIST`. An operator who set the phantom name and believed they had
+restricted which accounts could trade had changed nothing.
+
+Fail-closed meant the worst case was a refusal rather than a wrong account — luck about which
+direction the mistake pointed, not a property of the design. R-25 was the fail-*open* member
+of that same family. `tests/safety/test_env_example_has_no_phantom_settings.py` now fails on
+any advertised variable that nothing reads.
+
+### Decision memos (PRs #52, #54)
+
+ADR-0021, 0022, 0023 and 0024 — Phase-1 findings 7, 4, 6 and 8. All **proposed**; accepting an
+ADR is an owner act. Each was frozen behind analysis nobody had done, so the analysis is done
+and the owner's part is choosing rather than investigating. Three sharpened their own findings:
+
+- **Finding 4** is not "prose versus code" — it is inconsistent *between the two gates*. Gate 8
+  (typed confirmation) is already effectively replaced by the wiring calling `confirm()`
+  itself; gate 7 (arming) is not.
+- **Finding 6**'s two halves are one problem. The ingress correctly refuses worker-declared
+  provenance, so identity can only come from which credential authenticated — and a single
+  shared token cannot express that. `evidence_bundle_digest` is 64 literal zeros.
+- **Finding 8**'s maximally-fail-closed option is a trap: forbidding rungs above replay blocks
+  the rungs that must run to *produce* the evidence. A safety default whose exit condition is
+  unreachable is a deadlock, not a default.
+
+### Repository
+
+A remote `main` was created at the tip of `feat/wheel-dashboard-mvp`; the GitHub default branch
+is unchanged and remains an owner action.
+
+### Verification
+
+`pytest -q` 2489 → **2520 passed, 1 skipped**; `ruff check`, `ruff format --check` (382 files)
+and `mypy --strict` (219 files) clean throughout; CI green on every merge.
+
+### What this milestone did not do
+
+No real IBKR gateway was connected — none ever has been, and every adapter path remains
+fixture-verified only. No strategy was selected; the best candidate still sits at 18 closed
+trades against a frozen floor of 20. The wheel still has zero backtested evidence. Findings 3
+and 5 keep their code halves open, and 4, 6, 7 and 8 await owner decisions.
+
 ## [Unreleased] — M11: the option deliverable, and the last kernel defect (2026-07-27)
 
 Closes RISK_REGISTER **R-27**, the last of the four defects the M0 audit found. The pattern
