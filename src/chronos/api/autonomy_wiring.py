@@ -54,6 +54,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -182,7 +183,7 @@ class ConfirmationRefusedByOrderPlane(RuntimeError):
     """The order plane refused to confirm the intent."""
 
 
-def order_plane_handoff(runtime: AppRuntime) -> Handoff:
+def order_plane_handoff(runtime: AppRuntime, *, is_writer: Callable[[], bool]) -> Handoff:
     """The full existing pipeline, as one callable: propose → preview → confirm → submit.
 
     Nothing is skipped. An AI-compiled intent walks the same risk engine,
@@ -190,6 +191,27 @@ def order_plane_handoff(runtime: AppRuntime) -> Handoff:
     refusal at any of those surfaces back to the cycle as ORDER_PLANE_REFUSED —
     autonomy added a gate stack and removed none, which is the sentence that has
     governed every milestone since M2.
+
+    ``is_writer`` is read **per submission**, never captured as a value. Until
+    2026-08-05 this passed the literal ``True``, which was not a bypass — the
+    submission boundary re-checks lease ownership in the database inside the
+    CAS-to-transmit window (R-24), so a demoted process was still refused before
+    anything reached the broker. It was wrong in two smaller ways that were worth
+    fixing:
+
+    - **It refused late.** A backend demoted mid-session by the lease heartbeat
+      would run propose, preview and confirm — writing intent, preview and
+      confirmation state — before the final re-check turned it away. Gate 1
+      exists to stop that at the door.
+    - **It refused with the wrong reason.** The early gate answers
+      ``READ_ONLY_LEASE``; the late one does not, so the operator-facing
+      explanation for "this backend is read-only" was the least specific of the
+      available refusals.
+
+    The human path has always passed the live value (``state.writer`` in
+    ``chronos.api.routes.orders``). This makes the autonomous path identical,
+    which is the property ADR-0018 §4 and every milestone since M2 assert: the
+    autonomous path IS the human path.
     """
 
     def _submit(intent: WheelOrderIntent) -> object:
@@ -200,7 +222,7 @@ def order_plane_handoff(runtime: AppRuntime) -> Handoff:
             raise RiskRefusedByOrderPlane(proposal.risk.decision_id)
         service.preview(intent, now=utc_now())
         service.confirm(intent, risk_decision_id=proposal.risk.decision_id, now=utc_now())
-        return service.submit(intent, writer_lease_held=True, now=utc_now())
+        return service.submit(intent, writer_lease_held=is_writer(), now=utc_now())
 
     return _submit
 
@@ -316,7 +338,7 @@ def _market_evidence(quote: MarketQuote, now: datetime) -> MarketDataEvidence | 
 
 
 def build_autonomy_runtime(
-    runtime: AppRuntime, *, process_generation: int
+    runtime: AppRuntime, *, process_generation: int, is_writer: Callable[[], bool]
 ) -> AutonomyRuntime | None:
     """Assemble the whole autonomy stack from settings, or None when no grant exists.
 
@@ -363,7 +385,7 @@ def build_autonomy_runtime(
         gather_facts=gatherers.cycle_facts(mandate),
         gather_instrument=gatherers.instrument_facts,
         sinks=delivery.default_sinks(settings.autonomy_alert_file),
-        submit=order_plane_handoff(runtime),
+        submit=order_plane_handoff(runtime, is_writer=is_writer),
     )
 
 

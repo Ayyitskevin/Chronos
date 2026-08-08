@@ -265,8 +265,16 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         # absence of the authority, never a crash of the process that can still
         # close positions.
         try:
+            # `is_writer` is read per submission, never captured: the lease
+            # heartbeat can demote this process mid-session, and the autonomous
+            # path must see that at gate 1 exactly as the human path does
+            # (`state.writer` in routes/orders.py) rather than being turned away
+            # later by the CAS-window re-check.
+            autonomy_backend = app.state.backend
             autonomy = build_autonomy_runtime(
-                runtime, process_generation=int(app.state.backend.lease is not None)
+                runtime,
+                process_generation=int(app.state.backend.lease is not None),
+                is_writer=lambda: bool(autonomy_backend.writer),
             )
         except Exception:
             _logger.exception(
