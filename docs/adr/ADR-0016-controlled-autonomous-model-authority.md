@@ -357,8 +357,16 @@ graduated per-family promotions. Every milestone stops for owner approval.
    - Risk-reducing decision kinds could carry a full new-exposure payload
      (strategy, entry plan, size, direction). Now refused by kind.
    - "Deny-by-default" was false for **floors**: `min_cash_floor_usd`,
-     `min_buying_power_usd`, and `max_quote_age_seconds` default to zero, which
+     `min_buying_power_usd`, and ~~`max_quote_age_seconds`~~ default to zero, which
      is the *most* permissive value. Submitting mandates must now set them.
+     *(Corrected 2026-08-08, once admission existed to check the claim against:
+     `max_quote_age_seconds` is compared directly, so zero is the strictest
+     setting and refuses every quote rather than accepting any. The requirement
+     that submitting mandates set it stands — a zero mandate trades nothing —
+     but it is not a permissive default. The field that actually has this
+     property is `max_relative_spread`, which admission skips entirely at zero
+     and which nothing requires you to set. Full note in
+     `src/chronos/autonomy/mandate.py`.)*
    - A live mandate could license FROZEN/DELAYED_FROZEN/DEMO market data that
      the deterministic live gate already refuses. Now restricted to LIVE/DELAYED.
    - The AST import matcher was blind to `from chronos import autonomy`,

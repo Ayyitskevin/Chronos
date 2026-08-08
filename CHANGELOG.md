@@ -106,6 +106,50 @@ and the owner's part is choosing rather than investigating. Three sharpened thei
   the rungs that must run to *produce* the evidence. A safety default whose exit condition is
   unreachable is a deadlock, not a default.
 
+### `chronos mandate check` — reading the grant back to the owner (PR #59)
+
+A mandate can be valid, activate cleanly, appear complete, and still constrain nothing the
+owner thought it did. That is this repository's signature defect (R-24 … R-27) one level up
+from the kernel, and until now nothing looked for it.
+
+`python -m chronos.cli mandate check --file <path>` validates a mandate exactly as
+`load_persistent_mandate` does, then reports what it *actually* authorizes: which limits are
+inert, whether the account fingerprint matches this machine (a mismatch boots autonomy inert
+behind one log line), whether the version pins agree with the ingress stamp (a mismatch
+refuses every proposal *after* admission begins), and whether the window has closed. It exits
+1 on anything blocking; `--strict` also fails on important findings. `mandate template` prints
+a SHADOW skeleton to stdout and `mandate fingerprint` maps an account id to its pseudonym.
+
+It authors nothing. There is no write path, `test_no_mandate_command_writes_anything` asserts
+that over the filesystem rather than over the code, and the module holds the narrowest of the
+three `_MANDATE_ONLY_MODULES` exemptions.
+
+The ENFORCED/INERT classification moved out of `test_supervisor_gateway.py` into
+`chronos.autonomy.enforcement`, so the test pin and the owner-facing report read the same map.
+The pins are unchanged and still authoritative.
+
+### Four contract claims that were wrong (PR #59)
+
+Building the report meant checking each mandate field against the code that reads it. Four
+statements did not survive, and all four are corrected in place:
+
+- **`max_quote_age_seconds` was documented as a floor where zero is the most permissive
+  value.** Admission compares directly, so zero is the *strictest* setting and refuses every
+  quote. The rule requiring it positive stands; the reason was backwards.
+- **`max_relative_spread` is the field with that property, and was never listed.** Admission
+  skips the spread comparison entirely at zero, so this `max_` field imposes no ceiling at its
+  default and nothing requires it to be set. The report says so.
+- **`min_option_volume` / `min_open_interest` were called "advisory inputs to the kernel's own
+  liquidity checks".** They are inputs to nothing. The strike resolver reads the same-named
+  *settings*.
+- **`scope.exchanges` and `scope.contract_families` were disclosed as "not enforced anywhere,
+  pending contract compilation".** That compilation step landed in M4 —
+  `chronos.supervisor.compiler` refuses `EXCHANGE_NOT_PERMITTED` and `FAMILY_NOT_PERMITTED`.
+  The first draft of the new tool believed the stale disclosure and reported both as inert,
+  which would have told an owner a binding restriction was decoration — the same defect class
+  aimed the other way. Caught before merge and pinned by its own test, which scans the
+  compiler as well as admission, sizing and durable.
+
 ### Repository
 
 A remote `main` was created at the tip of `feat/wheel-dashboard-mvp`; the GitHub default branch
@@ -113,8 +157,8 @@ is unchanged and remains an owner action.
 
 ### Verification
 
-`pytest -q` 2489 → **2520 passed, 1 skipped**; `ruff check`, `ruff format --check` (382 files)
-and `mypy --strict` (219 files) clean throughout; CI green on every merge.
+`pytest -q` 2489 → **2543 passed, 1 skipped**; `ruff check`, `ruff format --check` (385 files)
+and `mypy --strict` (221 files) clean throughout; CI green on every merge.
 
 ### What this milestone did not do
 

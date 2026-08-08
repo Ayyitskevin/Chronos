@@ -178,6 +178,19 @@ Schema essentials in `references/contract-tables.md` §4. Lifecycle:
    Nothing in the model plane can write one (no write tools exist, §6), and
    `durable.activate` is called only by the wiring/owner path
    (durable.py:205-247).
+
+   **Read it back before trusting it:** `python -m chronos.cli mandate check
+   --file <path>` (`cli/mandate_check.py`) validates the file exactly as
+   `load_persistent_mandate` does and then reports what it *actually*
+   authorizes — which limits are INERT, whether the account fingerprint matches
+   this machine, whether the version pins agree with the ingress stamp, and
+   whether `max_relative_spread` was left at its no-ceiling default. It exits 1
+   on anything BLOCKING and `--strict` also fails on IMPORTANT. It writes
+   nothing and grants nothing; `mandate template` prints a SHADOW skeleton to
+   stdout and `mandate fingerprint` maps an account id to its pseudonym. Adding
+   a write path to that module would breach
+   `test_no_mandate_command_writes_anything` and the `_MANDATE_ONLY_MODULES`
+   exemption in `test_autonomy_contracts.py`.
 2. **Validation on every boot.** `AutonomyMandate.model_validate_json` runs the
    full validator stack (mandate.py:397-535): expiry after start; live window ≤
    `MAX_LIVE_MANDATE_DURATION` = **365 days** (:63-69, 402-407); explicit scope,

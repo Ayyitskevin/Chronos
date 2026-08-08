@@ -373,7 +373,19 @@ def test_only_the_supervisor_consumes_the_contracts() -> None:
 #: one in force. Note what it is *not* allowed to do — the condition below still
 #: binds it, so the route that can withdraw authority still cannot read a model
 #: decision. Withdrawing authority and judging a proposal stay different planes.
-_MANDATE_ONLY_MODULES = {"terminal/views.py", "api/routes/terminal.py"}
+#:
+#: ``cli/mandate_check.py`` is the third and the narrowest: an owner-facing
+#: read-only report on a mandate file. It has no write path of any kind — it
+#: cannot author, activate, renew, or revoke — so it holds strictly less than
+#: the terminal route does, and the same condition binds it: a tool that
+#: described what the model *proposed* would be a second consumer of decisions.
+#: Note it is the module, not the CLI: ``cli/main.py`` names the contracts
+#: nowhere and this guard still holds it to that.
+_MANDATE_ONLY_MODULES = {
+    "terminal/views.py",
+    "api/routes/terminal.py",
+    "cli/mandate_check.py",
+}
 
 
 def _decision_contract_names() -> frozenset[str]:
