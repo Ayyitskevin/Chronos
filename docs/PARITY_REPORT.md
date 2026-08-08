@@ -2,11 +2,15 @@
 
 ## Verification level: TRANSLATION VERIFIED AGAINST SPECIFICATION
 
-No TradingView strategy-tester exports or indicator series exports were
+### Catalog 00 Five-Tool status: TRADINGVIEW PARITY `UNVERIFIED`
+
+No owner-exported TradingView strategy-tester trades or indicator series were
 provided for this build (ASSUMPTIONS A-03), and TradingView is not reachable
 from this environment. Therefore **nothing in this repository claims
-"verified against TradingView."** The verification chain actually
-established is:
+"verified against TradingView."** In particular, the catalog `00` Five-Tool
+fixture under `tests/fixtures/tradingview_synthetic/` is explicitly marked
+`internal_spec`. It proves the strict import/comparison machinery, not Pine
+agreement. The verification chain actually established is:
 
 ```
 Pine source (SHA-256-pinned)
@@ -19,8 +23,32 @@ Pine source (SHA-256-pinned)
 Upgrading to true TradingView parity requires the owner to export, from the
 exact pinned script versions: bar-by-bar Data Window series for the
 `*_EXPORT` plots and the strategy tester trade list (symbol, timeframe,
-timestamps, side, prices, quantities). Fixture directories are prepared:
-`fixtures/tradingview/` (empty, with README).
+timestamps, side, prices, quantities). The owner-export directory and strict
+normalization procedure are prepared in `fixtures/tradingview/README.md`; no
+genuine export is present.
+
+## Catalog 00 strict parity infrastructure
+
+`chronos.research.tradingview` defines a closed schema for Five-Tool trace rows
+and metadata. The metadata pins catalog `00`, Pine SHA-256
+`e51d5a40d2e933bf86847c7432364ba8934fd2de653d6aec3d7205639248e45f`,
+all 219 Pine inputs for a genuine export, a canonical full-config digest, the
+exact CSV digest, symbol/timeframe, data source, chart timezone, and session.
+Unknown or missing metadata and CSV columns fail closed.
+
+Timestamp handling is causal: aware source timestamps are retained verbatim
+for diagnostics, normalized to UTC for identity, and required to be strictly
+increasing. The loader and comparator do not sort, forward-fill,
+nearest-neighbor align, or shift rows. Timestamps, regimes, booleans, counters,
+and entry/exit decisions compare exactly. Optional numeric warm-up values use
+explicit null semantics; present floats use named absolute and relative
+tolerances (`indicator`, `price`, and `account_value`).
+
+The first mismatch report includes the UTC timestamp, field, expected/actual
+values, expected/actual state digests, active gates on both sides, and the
+applicable tolerance. A synthetic exact match is deliberately reported as
+`UNVERIFIED`; only an exact/tolerance-compliant match whose reference metadata
+has genuine owner-export provenance can become `VERIFIED`.
 
 ## What was verified
 

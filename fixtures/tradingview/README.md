@@ -1,19 +1,82 @@
-# TradingView reference fixtures (empty — owner action required)
+# TradingView reference fixtures — owner export required
 
-To upgrade parity from "verified against specification" to "verified against
-TradingView" (docs/PARITY_REPORT.md), export from TradingView using the exact
-pinned script versions in `research/strategy_registry.yaml`:
+There is no genuine TradingView fixture in this directory.  Catalog `00`,
+**Five-Tool Confluence AIO v3.6**, remains TradingView parity `UNVERIFIED`.
+The deterministic fixture under `tests/fixtures/tradingview_synthetic/` has
+`provenance: internal_spec`; it tests the importer and comparator only and is
+not evidence about TradingView behavior.
 
-1. **Indicator series**: add the script to a chart (symbol + timeframe of
-   interest), open the Data Window, and export the `*_EXPORT` plots
-   (e.g. `PSTAY export`, `RSI2_EXPORT`, `MR_LONG_FLAG_EXPORT`) bar by bar
-   (chart → Export chart data → CSV). Save as
-   `fixtures/tradingview/<catalog>_<symbol>_<tf>_series.csv`.
-2. **Trade lists**: for strategy scripts, Strategy Tester → List of trades →
-   export CSV. Save as `fixtures/tradingview/<catalog>_<symbol>_<tf>_trades.csv`.
-3. Record for each export: script catalog number and SHA-256, symbol,
-   timeframe, data subscription type (adjusted?), export date, and the exact
-   input/settings values, in a sibling `<name>.meta.json`.
+The strict loader lives in `chronos.research.tradingview`.  It is pinned to:
 
-The parity suite will then compare bar-by-bar values and trade sequences and
-produce mismatch reports per docs/PARITY_REPORT.md.
+- catalog number: `00`
+- Pine SHA-256:
+  `e51d5a40d2e933bf86847c7432364ba8934fd2de653d6aec3d7205639248e45f`
+- Pine input count: `219`
+- trace schema: `chronos.five_tool_tradingview_trace.v1`
+
+An export from any other script revision fails closed.
+
+## Owner export procedure
+
+1. In TradingView, load the pinned catalog `00` script on the intended symbol,
+   timeframe, chart timezone, and session.  Record the data source/subscription
+   and every one of the 219 input values.
+2. Export chart data containing all catalog `00` Data Window `*_EXPORT` plots.
+   Export the Strategy Tester trade list as well.  Merge entry/exit events onto
+   their exact closed-bar timestamps; do not infer or shift an event to a nearby
+   bar.
+3. Normalize the export to the exact ordered `CSV_COLUMNS` tuple in
+   `src/chronos/research/tradingview.py`.  Pine's numeric regime values map to
+   `bear`, `neutral`, and `bull`; event fields use the documented enum strings;
+   booleans are exactly `true` or `false`.  Optional numeric warm-up values may
+   be empty, `na`, `NaN`, or `null`.  Infinite values are invalid.
+4. Save the normalized trace as
+   `fixtures/tradingview/00_<symbol>_<timeframe>_trace.csv` and its metadata as
+   `fixtures/tradingview/00_<symbol>_<timeframe>_trace.meta.json`.
+5. Populate every metadata key shown below.  `input_config_sha256` is SHA-256
+   over compact canonical JSON of the full `input_config` object (UTF-8,
+   recursively sorted keys, separators `,` and `:`, no NaN).  `trace_sha256` is
+   SHA-256 over the exact CSV bytes.  Set `provenance` to `genuine` only for an
+   owner-exported TradingView artifact.
+
+```json
+{
+  "schema_version": "chronos.five_tool_tradingview_trace.v1",
+  "provenance": "genuine",
+  "catalog_number": "00",
+  "pine_sha256": "e51d5a40d2e933bf86847c7432364ba8934fd2de653d6aec3d7205639248e45f",
+  "symbol": "SPY",
+  "timeframe": "1D",
+  "chart_timezone": "America/New_York",
+  "session": "0930-1600:23456",
+  "timestamp_semantics": "bar_close",
+  "data_source": "TradingView subscription/adjustment description",
+  "exported_at_utc": "2026-08-08T12:00:00Z",
+  "input_count": 219,
+  "input_config": {
+    "<every Pine input name>": "<exact typed value>"
+  },
+  "input_config_sha256": "<64 lowercase hex characters>",
+  "trace_sha256": "<64 lowercase hex characters>",
+  "row_count": 1234
+}
+```
+
+The loader preserves the chart timezone and session as metadata but normalizes
+every aware row timestamp to UTC.  Rows must already be strictly increasing.
+It never sorts, forward-fills, nearest-neighbor joins, or applies an off-by-one
+shift, so comparison is causal and exact by bar identity.
+
+## Comparison contract
+
+Timestamps, enums, booleans, counters, and entry/exit decisions compare
+exactly.  Optional numeric nulls match only nulls.  Present floats use the
+named absolute and relative tolerances in `FLOAT_TOLERANCES` (`indicator`,
+`price`, or `account_value`); the comparator rejects missing or extra tolerance
+definitions.
+
+A failure reports the first divergent timestamp and field, expected and actual
+values, both state digests, both active-gate sets, and the numeric tolerance if
+one applied.  A matching internal-spec fixture still returns parity status
+`UNVERIFIED`.  Only a matching fixture loaded with genuine provenance can
+return `VERIFIED`.
