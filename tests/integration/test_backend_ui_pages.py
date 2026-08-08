@@ -24,6 +24,26 @@ _REGIME_NOTE = (
 )
 
 
+# Streamlit ``AppTest`` timeout budget (raised 2026-08-08).
+#
+# The FIRST render in a process that reaches ``st.dataframe`` pays a one-time
+# serialization-stack import. Measured 2026-08-08: a monitor render with data
+# took 9.07s as the first in its process and 0.28s as the second, while the same
+# app with no data rendered in 1.13s cold. The domain logic is not the cost —
+# ``build_snapshot`` returns in under 0.01s in every configuration tested.
+#
+# That cost lands on whichever AppTest runs first, so a tight timeout is an
+# ORDER-DEPENDENT flake rather than a property of any one test. The monitor
+# suite's 15s budget gave 1.65x headroom over a 9s cold render and failed once in
+# six full-suite runs under CPU contention.
+#
+# 60s does not make a passing test slower — a warm render finishes in well under
+# a second. It is headroom, so that a green suite means "the page rendered" and
+# never "the machine happened to be quiet". The timeout exists to stop a hung
+# render blocking forever, and 60s serves that as well as 10s did.
+_APPTEST_TIMEOUT = 60
+
+
 def _canned(request: httpx.Request) -> httpx.Response:
     path = request.url.path
     if path == "/health":
@@ -150,7 +170,7 @@ def _run_order_workspace() -> None:
 def test_portfolio_renders_account_metrics(monkeypatch: pytest.MonkeyPatch) -> None:
     # Exercises the full backend_app navigation wiring + the default page.
     _patch_from_settings(monkeypatch, lambda *_a, **_k: _mock_client())
-    app = AppTest.from_file(_APP).run(timeout=20)
+    app = AppTest.from_file(_APP).run(timeout=_APPTEST_TIMEOUT)
     assert not app.exception
     metrics = {m.label: m.value for m in app.metric}
     assert metrics.get("Account") == "DEMO123"
@@ -160,14 +180,14 @@ def test_portfolio_renders_account_metrics(monkeypatch: pytest.MonkeyPatch) -> N
 def test_symbol_detail_shows_regime_disclaimer() -> None:
     # st.navigation callable pages can't be reached by switch_page, so render
     # the page directly inside a real ScriptRunContext.
-    app = AppTest.from_function(_run_symbol_detail).run(timeout=20)
+    app = AppTest.from_function(_run_symbol_detail).run(timeout=_APPTEST_TIMEOUT)
     assert not app.exception
     captions = " ".join(c.value for c in app.caption)
     assert "not a validated signal" in captions
 
 
 def test_order_workspace_has_no_submit_control() -> None:
-    app = AppTest.from_function(_run_order_workspace).run(timeout=20)
+    app = AppTest.from_function(_run_order_workspace).run(timeout=_APPTEST_TIMEOUT)
     assert not app.exception
     for button in app.button:
         label = button.label.lower()
@@ -183,6 +203,6 @@ def test_unreachable_backend_shows_error(monkeypatch: pytest.MonkeyPatch) -> Non
         raise ApiClientError("backend not reachable at http://127.0.0.1:8765")
 
     _patch_from_settings(monkeypatch, raising)
-    app = AppTest.from_file(_APP).run(timeout=20)
+    app = AppTest.from_file(_APP).run(timeout=_APPTEST_TIMEOUT)
     assert not app.exception
     assert any("not reachable" in e.value for e in app.error)
