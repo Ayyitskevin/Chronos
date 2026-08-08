@@ -1,9 +1,16 @@
 """``python -m chronos.cli`` — safe operator commands.
 
-Every command prints the mode banner first. There is no command that enables
+~~Every command prints the mode banner first.~~ *(Corrected 2026-08-08: the
+trading-plane commands do — status, halt, rearm, risk-show, verify-corpus,
+shadow-scan, monitor, backtest, and the research commands. ``verify-audit-log``,
+``skb``, ``registry``, ``holdout`` and ``mandate`` do not, and never did; they
+read artifacts rather than describe a trading posture.)* There is no command
+that enables
 live trading, no ``--force`` flag, and nothing here can bypass the risk
 engine, the halt store, or the mode lock. This CLI only inspects, researches,
-runs shadow scans, halts, and rearms. No paper-submitting service entry point
+runs shadow scans, halts, and rearms. ``mandate`` is inspection too: it reads a
+grant back to the owner and cannot author, activate, renew, or revoke one
+(``chronos.cli.mandate_check``). No paper-submitting service entry point
 exists in this build; when one is added it must be a deliberately
 differently-named command wired through the same mode lock, reconciliation
 gate, and risk engine (docs/GO_LIVE_CHECKLIST.md).
@@ -18,6 +25,7 @@ import sys
 from pathlib import Path
 
 from chronos.auditlog.log import verify_chain
+from chronos.cli.mandate_check import add_mandate_commands
 from chronos.control.halt import HaltReason, HaltStore
 from chronos.control.modes import TradingMode, resolve_mode_lock
 from chronos.risk.policy import load_risk_policy
@@ -456,6 +464,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_skb_commands(sub)
     _add_registry_commands(sub)
     _add_research_commands(sub)
+    add_mandate_commands(sub)
 
     return parser
 

@@ -47,6 +47,7 @@ from chronos.autonomy import (
     TradableAssetClass,
     VersionPins,
 )
+from chronos.autonomy.enforcement import ENFORCED, INERT, LIMIT_ENFORCEMENT
 from chronos.domain.enums import DataQuality
 from chronos.supervisor import (
     MAX_RESUBMISSIONS,
@@ -641,63 +642,16 @@ def test_no_check_is_ever_recorded_as_passed_without_being_evaluated() -> None:
 #: but not a field being *added* — a new limit could arrive inert and undisclosed
 #: without failing anything. This map is now compared against the models
 #: themselves, so an unclassified field is a test failure.
-_ENFORCED = "ENFORCED"
-_INERT = "INERT"
+#:
+#: It also moved out of this file. A classification only a test could read could
+#: not be shown to the owner authoring a mandate, so the map now lives in
+#: ``chronos.autonomy.enforcement`` and ``chronos.cli.mandate_check`` reports it
+#: at authoring time. The pins below are unchanged and still authoritative: what
+#: they now guard is the shared map rather than a private copy of it.
+_ENFORCED = ENFORCED
+_INERT = INERT
 
-_LIMIT_ENFORCEMENT: dict[str, dict[str, str]] = {
-    "CapitalLimits": {
-        # ADR-0017: the owner's model-self-sizing grant. Read by sizing (it
-        # decides whether an unset ceiling binds), so it is ENFORCED in the
-        # sense this pin means — the kernel consults it.
-        "model_discretion": _ENFORCED,
-        "allocated_capital_usd": _ENFORCED,
-        "max_order_notional_usd": _ENFORCED,
-        "max_position_notional_usd": _ENFORCED,
-        "max_gross_exposure_usd": _ENFORCED,
-        "max_net_exposure_usd": _ENFORCED,
-        "max_contracts_per_order": _ENFORCED,
-        "max_shares_per_order": _ENFORCED,
-        "max_leverage": _ENFORCED,
-        "max_margin_utilization_pct": _ENFORCED,
-        "min_buying_power_usd": _ENFORCED,
-        "min_cash_floor_usd": _ENFORCED,
-    },
-    "LossLimits": {
-        # M3: enforced against durable per-session counters in supervisor.durable,
-        # which turns a breach into a DegradedReason that stops new exposure.
-        "max_session_loss_usd": _ENFORCED,
-        "max_daily_loss_usd": _ENFORCED,
-        "max_peak_to_trough_drawdown_usd": _ENFORCED,
-        "max_peak_to_trough_drawdown_pct": _ENFORCED,
-    },
-    "ConcentrationLimits": {
-        "max_symbol_exposure_pct": _ENFORCED,
-        # Need a sector/family/correlation map Chronos does not have yet.
-        "max_sector_exposure_pct": _INERT,
-        "max_family_exposure_pct": _INERT,
-        "max_correlated_exposure_pct": _INERT,
-    },
-    "ActivityLimits": {
-        # M3: enforced against durable per-session counters (see LossLimits).
-        "max_orders_per_session": _ENFORCED,
-        "max_cancellations_per_session": _ENFORCED,
-        "max_replacements_per_session": _ENFORCED,
-        "max_turnover_usd_per_session": _ENFORCED,
-    },
-    "MarketDataRequirements": {
-        "max_quote_age_seconds": _ENFORCED,
-        "permitted_data_qualities": _ENFORCED,
-        "max_relative_spread": _ENFORCED,
-        # Need option-chain evidence the supervisor does not gather yet.
-        "min_option_volume": _INERT,
-        "min_open_interest": _INERT,
-    },
-    "SessionPolicy": {
-        # Need a session clock in the supervisor; the orders plane has its own.
-        "permitted_sessions": _INERT,
-        "allow_overnight_holding": _INERT,
-    },
-}
+_LIMIT_ENFORCEMENT = LIMIT_ENFORCEMENT
 
 
 def test_every_mandate_limit_is_classified_enforced_or_inert() -> None:

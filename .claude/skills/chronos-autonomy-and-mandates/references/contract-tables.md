@@ -109,11 +109,29 @@ CANARY_LIVE_AUTONOMOUS + LIVE_AUTONOMOUS, enums.py:189-191):
   never permitted in any mode (:78-85).
 
 **Trap (deny-by-default inverts for floors):** zero is the MOST permissive value
-for `min_*` floors and `max_quote_age_seconds`, which is why the validator forces
-them. When adding any mandate field, first decide whether zero is the safe or
-dangerous default, then classify it in `_LIMIT_ENFORCEMENT`
-(test_supervisor_gateway.py:647-700) or the suite fails — that failure is the
-control working.
+for `min_*` floors ~~and `max_quote_age_seconds`~~, which is why the validator
+forces them.
+
+*Corrected 2026-08-08 — checked against the only code that reads each field.
+The set was wrong in both directions:*
+
+- `max_quote_age_seconds` is **not** inverted. `admission.py` compares directly
+  (`evidence.quote_age_seconds > requirements.max_quote_age_seconds`), so zero
+  is the strictest setting and refuses every quote. The validator is still
+  right to force it positive — a zero mandate trades nothing — but the reason
+  is the opposite of what this said.
+- `max_relative_spread` **is** inverted and was missing. Admission skips the
+  spread comparison entirely when it is zero, so this `max_` field imposes no
+  ceiling at its default, and nothing requires it to be set.
+- `min_option_volume` / `min_open_interest` are read by nothing at all — the
+  strike resolver's liquidity check uses the same-named *settings*, not these.
+
+When adding any mandate field, first decide whether zero is the safe or
+dangerous default, then classify it in `LIMIT_ENFORCEMENT`
+(`src/chronos/autonomy/enforcement.py`, pinned by
+test_supervisor_gateway.py) or the suite fails — that failure is the control
+working. `python -m chronos.cli mandate check` reports the classification and
+the no-spread-ceiling default to the owner at authoring time.
 
 ## 5. Admission refusal codes
 
