@@ -44,6 +44,25 @@ from chronos.ui.rehearsal_state import (
 )
 from chronos.ui.session import get_runtime
 
+# Streamlit ``AppTest`` timeout budget (raised 2026-08-08).
+#
+# The FIRST render in a process that reaches ``st.dataframe`` pays a one-time
+# serialization-stack import. Measured 2026-08-08: a monitor render with data
+# took 9.07s as the first in its process and 0.28s as the second, while the same
+# app with no data rendered in 1.13s cold. The domain logic is not the cost —
+# ``build_snapshot`` returns in under 0.01s in every configuration tested.
+#
+# That cost lands on whichever AppTest runs first, so a tight timeout is an
+# ORDER-DEPENDENT flake rather than a property of any one test. The monitor
+# suite's 15s budget gave 1.65x headroom over a 9s cold render and failed once in
+# six full-suite runs under CPU contention.
+#
+# 60s does not make a passing test slower — a warm render finishes in well under
+# a second. It is headroom, so that a green suite means "the page rendered" and
+# never "the machine happened to be quiet". The timeout exists to stop a hung
+# render blocking forever, and 60s serves that as well as 10s did.
+_APPTEST_TIMEOUT = 60
+
 
 def test_demo_portfolio_and_symbol_pages_render_without_exceptions(
     monkeypatch: pytest.MonkeyPatch,
@@ -75,7 +94,7 @@ def test_demo_portfolio_and_symbol_pages_render_without_exceptions(
     monkeypatch.setattr(DemoBroker, "connection_status", track_connection_status)
 
     try:
-        app = AppTest.from_file("src/chronos/app.py").run(timeout=10)
+        app = AppTest.from_file("src/chronos/app.py").run(timeout=_APPTEST_TIMEOUT)
 
         assert not app.exception
         assert [title.value for title in app.title] == ["Chronos"]
@@ -108,7 +127,7 @@ def test_demo_portfolio_and_symbol_pages_render_without_exceptions(
         assert scope_source_calls == {"account_summary": 3, "connection_status": 3}
         assert any("Historical startup identity only" in caption.value for caption in app.caption)
 
-        app.radio[0].set_value("Symbol Detail & Order Workspace").run(timeout=10)
+        app.radio[0].set_value("Symbol Detail & Order Workspace").run(timeout=_APPTEST_TIMEOUT)
 
         assert not app.exception
         assert evaluate_calls == []
@@ -122,11 +141,11 @@ def test_demo_portfolio_and_symbol_pages_render_without_exceptions(
         assert "Last" not in detail_metrics
         assert app.selectbox[0].options == ["AAPL", "MSFT", "SPY"]
         assert app.button[0].label == "Run read-only evaluation"
-        app.run(timeout=10)
+        app.run(timeout=_APPTEST_TIMEOUT)
         assert evaluate_calls == []
         assert scope_source_calls == {"account_summary": 3, "connection_status": 3}
 
-        app.button[0].click().run(timeout=10)
+        app.button[0].click().run(timeout=_APPTEST_TIMEOUT)
 
         assert not app.exception
         assert evaluate_calls == ["AAPL"]
@@ -142,7 +161,7 @@ def test_demo_portfolio_and_symbol_pages_render_without_exceptions(
         assert "DU1234567" not in str(app)
         assert any("historical display only" in caption.value for caption in app.caption)
         assert any("EDT" in caption.value for caption in app.caption)
-        app.run(timeout=10)
+        app.run(timeout=_APPTEST_TIMEOUT)
         assert evaluate_calls == ["AAPL"]
     finally:
         try:
@@ -195,12 +214,12 @@ def test_explicit_candidate_evaluation_renders_locked_eligible_and_clears_stale_
     monkeypatch.setattr(ShortPutCandidateService, "evaluate", controlled_evaluation)
 
     try:
-        app = AppTest.from_file("src/chronos/app.py").run(timeout=10)
-        app.radio[0].set_value("Symbol Detail & Order Workspace").run(timeout=10)
+        app = AppTest.from_file("src/chronos/app.py").run(timeout=_APPTEST_TIMEOUT)
+        app.radio[0].set_value("Symbol Detail & Order Workspace").run(timeout=_APPTEST_TIMEOUT)
 
         assert not app.exception
         assert evaluate_calls == []
-        app.button[0].click().run(timeout=10)
+        app.button[0].click().run(timeout=_APPTEST_TIMEOUT)
 
         assert not app.exception
         assert evaluate_calls == ["AAPL"]
@@ -227,22 +246,22 @@ def test_explicit_candidate_evaluation_renders_locked_eligible_and_clears_stale_
         assert "DU1234567" not in str(app)
         assert "DU1234567" not in str(app.session_state.filtered_state)
 
-        app.run(timeout=10)
+        app.run(timeout=_APPTEST_TIMEOUT)
         assert evaluate_calls == ["AAPL"]
-        app.selectbox[0].set_value("MSFT").run(timeout=10)
+        app.selectbox[0].set_value("MSFT").run(timeout=_APPTEST_TIMEOUT)
         assert evaluate_calls == ["AAPL"]
         assert _CANDIDATE_EVALUATION_STATE_KEY not in app.session_state
         assert {metric.label: metric.value for metric in app.metric}["Candidate result"] == (
             "NOT_EVALUATED"
         )
 
-        app.selectbox[0].set_value("AAPL").run(timeout=10)
-        app.button[0].click().run(timeout=10)
+        app.selectbox[0].set_value("AAPL").run(timeout=_APPTEST_TIMEOUT)
+        app.button[0].click().run(timeout=_APPTEST_TIMEOUT)
         assert evaluate_calls == ["AAPL", "AAPL"]
         assert _CANDIDATE_EVALUATION_STATE_KEY in app.session_state
 
         fail_next = True
-        app.button[0].click().run(timeout=10)
+        app.button[0].click().run(timeout=_APPTEST_TIMEOUT)
         assert evaluate_calls == ["AAPL", "AAPL", "AAPL"]
         assert _CANDIDATE_EVALUATION_STATE_KEY not in app.session_state
         assert any(
@@ -313,15 +332,15 @@ def test_explicit_risk_preview_refreshes_evidence_and_invalidates_stale_output(
     monkeypatch.setattr(DemoBroker, "cancel_order", reject_cancel)
 
     try:
-        app = AppTest.from_file("src/chronos/app.py").run(timeout=10)
-        app.radio[0].set_value("Symbol Detail & Order Workspace").run(timeout=10)
+        app = AppTest.from_file("src/chronos/app.py").run(timeout=_APPTEST_TIMEOUT)
+        app.radio[0].set_value("Symbol Detail & Order Workspace").run(timeout=_APPTEST_TIMEOUT)
 
         assert not app.exception
         assert evaluate_calls == []
         assert len(app.text_input) == 0
         assert len(app.button) == 1
 
-        app.button[0].click().run(timeout=10)
+        app.button[0].click().run(timeout=_APPTEST_TIMEOUT)
 
         assert not app.exception
         assert evaluate_calls == ["AAPL"]
@@ -332,14 +351,14 @@ def test_explicit_risk_preview_refreshes_evidence_and_invalidates_stale_output(
         assert app.button[1].disabled is True
         assert _RISK_PREVIEW_STATE_KEY not in app.session_state
 
-        app.text_input[0].set_value("0.65").run(timeout=10)
+        app.text_input[0].set_value("0.65").run(timeout=_APPTEST_TIMEOUT)
 
         assert not app.exception
         assert evaluate_calls == ["AAPL"]
         assert app.button[1].disabled is False
         assert _RISK_PREVIEW_STATE_KEY not in app.session_state
 
-        app.button[1].click().run(timeout=10)
+        app.button[1].click().run(timeout=_APPTEST_TIMEOUT)
 
         assert not app.exception
         assert evaluate_calls == ["AAPL", "AAPL"]
@@ -374,21 +393,21 @@ def test_explicit_risk_preview_refreshes_evidence_and_invalidates_stale_output(
         assert any("historical display only" in caption.value for caption in app.caption)
         assert any("EDT" in caption.value for caption in app.caption)
 
-        app.run(timeout=10)
+        app.run(timeout=_APPTEST_TIMEOUT)
         assert evaluate_calls == ["AAPL", "AAPL"]
 
-        app.text_input[0].set_value("0.66").run(timeout=10)
+        app.text_input[0].set_value("0.66").run(timeout=_APPTEST_TIMEOUT)
         assert evaluate_calls == ["AAPL", "AAPL"]
         assert _RISK_PREVIEW_STATE_KEY not in app.session_state
         assert "Risk preview" not in {metric.label for metric in app.metric}
 
-        app.text_input[0].set_value("0.65").run(timeout=10)
-        app.button[1].click().run(timeout=10)
+        app.text_input[0].set_value("0.65").run(timeout=_APPTEST_TIMEOUT)
+        app.button[1].click().run(timeout=_APPTEST_TIMEOUT)
         assert evaluate_calls == ["AAPL", "AAPL", "AAPL"]
         assert _RISK_PREVIEW_STATE_KEY in app.session_state
 
         fail_next = True
-        app.button[1].click().run(timeout=10)
+        app.button[1].click().run(timeout=_APPTEST_TIMEOUT)
         assert evaluate_calls == ["AAPL", "AAPL", "AAPL", "AAPL"]
         assert _CANDIDATE_EVALUATION_STATE_KEY not in app.session_state
         assert _RISK_PREVIEW_STATE_KEY in app.session_state
@@ -420,7 +439,7 @@ def test_explicit_risk_preview_refreshes_evidence_and_invalidates_stale_output(
         assert "sensitive risk-refresh detail" not in log_text
         assert "DU1234567" not in log_text
 
-        app.run(timeout=10)
+        app.run(timeout=_APPTEST_TIMEOUT)
         assert _CANDIDATE_EVALUATION_STATE_KEY not in app.session_state
         assert _RISK_PREVIEW_STATE_KEY in app.session_state
         assert {metric.label: metric.value for metric in app.metric}["Risk preview"] == "WITHHELD"
@@ -475,14 +494,14 @@ def test_demo_what_if_rehearsal_refreshes_terms_without_persistence_or_submissio
     monkeypatch.setattr(DemoBroker, "cancel_order", reject_cancel)
 
     try:
-        app = AppTest.from_file("src/chronos/app.py").run(timeout=10)
-        app.radio[0].set_value("Symbol Detail & Order Workspace").run(timeout=10)
-        app.button[0].click().run(timeout=10)
+        app = AppTest.from_file("src/chronos/app.py").run(timeout=_APPTEST_TIMEOUT)
+        app.radio[0].set_value("Symbol Detail & Order Workspace").run(timeout=_APPTEST_TIMEOUT)
+        app.button[0].click().run(timeout=_APPTEST_TIMEOUT)
 
         assert not app.exception
         assert evaluate_calls == ["AAPL"]
-        app.text_input[0].set_value("0.65").run(timeout=10)
-        app.button[1].click().run(timeout=10)
+        app.text_input[0].set_value("0.65").run(timeout=_APPTEST_TIMEOUT)
+        app.button[1].click().run(timeout=_APPTEST_TIMEOUT)
 
         assert not app.exception
         assert evaluate_calls == ["AAPL", "AAPL"]
@@ -492,16 +511,16 @@ def test_demo_what_if_rehearsal_refreshes_terms_without_persistence_or_submissio
         assert app.button[2].disabled is True
         assert _DEMO_WHAT_IF_STATE_KEY not in app.session_state
 
-        app.text_input[1].set_value("1e400").run(timeout=10)
+        app.text_input[1].set_value("1e400").run(timeout=_APPTEST_TIMEOUT)
         assert app.button[2].disabled is True
         assert evaluate_calls == ["AAPL", "AAPL"]
         assert preview_calls == []
 
-        app.text_input[1].set_value("3.20").run(timeout=10)
+        app.text_input[1].set_value("3.20").run(timeout=_APPTEST_TIMEOUT)
         assert app.button[2].disabled is False
         assert evaluate_calls == ["AAPL", "AAPL"]
         assert preview_calls == []
-        app.button[2].click().run(timeout=10)
+        app.button[2].click().run(timeout=_APPTEST_TIMEOUT)
 
         assert not app.exception
         assert evaluate_calls == ["AAPL", "AAPL", "AAPL"]
@@ -550,19 +569,19 @@ def test_demo_what_if_rehearsal_refreshes_terms_without_persistence_or_submissio
             ):
                 assert session.scalar(select(func.count()).select_from(row_type)) == 0
 
-        app.run(timeout=10)
+        app.run(timeout=_APPTEST_TIMEOUT)
         assert evaluate_calls == ["AAPL", "AAPL", "AAPL"]
         assert len(preview_calls) == 1
         assert _DEMO_WHAT_IF_STATE_KEY in app.session_state
 
-        app.text_input[1].set_value("3.21").run(timeout=10)
+        app.text_input[1].set_value("3.21").run(timeout=_APPTEST_TIMEOUT)
         assert evaluate_calls == ["AAPL", "AAPL", "AAPL"]
         assert len(preview_calls) == 1
         assert _DEMO_WHAT_IF_STATE_KEY not in app.session_state
         assert "DEMO what-if" not in {metric.label for metric in app.metric}
 
-        app.text_input[0].set_value("0.66").run(timeout=10)
-        app.button[1].click().run(timeout=10)
+        app.text_input[0].set_value("0.66").run(timeout=_APPTEST_TIMEOUT)
+        app.button[1].click().run(timeout=_APPTEST_TIMEOUT)
         assert evaluate_calls == ["AAPL", "AAPL", "AAPL", "AAPL"]
         assert len(preview_calls) == 1
         assert len(app.text_input) == 2
@@ -634,12 +653,12 @@ def test_withheld_demo_what_if_rerun_clears_parent_panels_and_retains_result(
     monkeypatch.setattr(DemoBroker, "cancel_order", reject_cancel)
 
     try:
-        app = AppTest.from_file("src/chronos/app.py").run(timeout=10)
-        app.radio[0].set_value("Symbol Detail & Order Workspace").run(timeout=10)
-        app.button[0].click().run(timeout=10)
-        app.text_input[0].set_value("0.65").run(timeout=10)
-        app.button[1].click().run(timeout=10)
-        app.text_input[1].set_value("3.20").run(timeout=10)
+        app = AppTest.from_file("src/chronos/app.py").run(timeout=_APPTEST_TIMEOUT)
+        app.radio[0].set_value("Symbol Detail & Order Workspace").run(timeout=_APPTEST_TIMEOUT)
+        app.button[0].click().run(timeout=_APPTEST_TIMEOUT)
+        app.text_input[0].set_value("0.65").run(timeout=_APPTEST_TIMEOUT)
+        app.button[1].click().run(timeout=_APPTEST_TIMEOUT)
+        app.text_input[1].set_value("3.20").run(timeout=_APPTEST_TIMEOUT)
 
         assert not app.exception
         assert evaluate_calls == ["AAPL", "AAPL"]
@@ -650,7 +669,7 @@ def test_withheld_demo_what_if_rerun_clears_parent_panels_and_retains_result(
         assert app.button[2].label == "Refresh evidence & run locked DEMO what-if"
 
         fail_risk_refresh = True
-        app.button[2].click().run(timeout=10)
+        app.button[2].click().run(timeout=_APPTEST_TIMEOUT)
 
         assert not app.exception
         assert evaluate_calls == ["AAPL", "AAPL"]
@@ -690,7 +709,7 @@ def test_withheld_demo_what_if_rerun_clears_parent_panels_and_retains_result(
         assert "sensitive what-if risk-refresh detail" not in log_text
         assert "DU1234567" not in log_text
 
-        app.run(timeout=10)
+        app.run(timeout=_APPTEST_TIMEOUT)
         assert evaluate_calls == ["AAPL", "AAPL"]
         assert len(risk_preview_calls) == 2
         assert broker_preview_calls == []
@@ -756,13 +775,13 @@ def test_demo_approval_rehearsal_is_memoryless_lineage_bound_and_nontransmitting
     monkeypatch.setattr(DemoBroker, "cancel_order", reject_cancel)
 
     try:
-        app = AppTest.from_file("src/chronos/app.py").run(timeout=10)
-        app.radio[0].set_value("Symbol Detail & Order Workspace").run(timeout=10)
-        app.button[0].click().run(timeout=10)
-        app.text_input[0].set_value("0.65").run(timeout=10)
-        app.button[1].click().run(timeout=10)
-        app.text_input[1].set_value("3.20").run(timeout=10)
-        app.button[2].click().run(timeout=10)
+        app = AppTest.from_file("src/chronos/app.py").run(timeout=_APPTEST_TIMEOUT)
+        app.radio[0].set_value("Symbol Detail & Order Workspace").run(timeout=_APPTEST_TIMEOUT)
+        app.button[0].click().run(timeout=_APPTEST_TIMEOUT)
+        app.text_input[0].set_value("0.65").run(timeout=_APPTEST_TIMEOUT)
+        app.button[1].click().run(timeout=_APPTEST_TIMEOUT)
+        app.text_input[1].set_value("3.20").run(timeout=_APPTEST_TIMEOUT)
+        app.button[2].click().run(timeout=_APPTEST_TIMEOUT)
 
         assert not app.exception
         assert evaluate_calls == ["AAPL", "AAPL", "AAPL"]
@@ -780,21 +799,23 @@ def test_demo_approval_rehearsal_is_memoryless_lineage_bound_and_nontransmitting
         assert app.button[3].disabled is True
         assert _DEMO_APPROVAL_STATE_KEY not in app.session_state
 
-        app.text_input[2].set_value("aapl").run(timeout=10)
-        app.text_input[3].set_value("999999999999999999999999999999999").run(timeout=10)
+        app.text_input[2].set_value("aapl").run(timeout=_APPTEST_TIMEOUT)
+        app.text_input[3].set_value("999999999999999999999999999999999").run(
+            timeout=_APPTEST_TIMEOUT
+        )
         assert app.button[3].disabled is True
         assert approval_calls == []
         assert len(preview_calls) == 1
 
-        app.text_input[2].set_value("AAPL").run(timeout=10)
-        app.text_input[3].set_value("01").run(timeout=10)
+        app.text_input[2].set_value("AAPL").run(timeout=_APPTEST_TIMEOUT)
+        app.text_input[3].set_value("01").run(timeout=_APPTEST_TIMEOUT)
         assert app.button[3].disabled is True
         assert approval_calls == []
-        app.text_input[3].set_value("1").run(timeout=10)
-        app.checkbox[0].set_value(True).run(timeout=10)
+        app.text_input[3].set_value("1").run(timeout=_APPTEST_TIMEOUT)
+        app.checkbox[0].set_value(True).run(timeout=_APPTEST_TIMEOUT)
         assert app.button[3].disabled is False
         assert approval_calls == []
-        app.button[3].click().run(timeout=10)
+        app.button[3].click().run(timeout=_APPTEST_TIMEOUT)
 
         assert not app.exception
         assert evaluate_calls == ["AAPL", "AAPL", "AAPL", "AAPL"]
@@ -865,7 +886,7 @@ def test_demo_approval_rehearsal_is_memoryless_lineage_bound_and_nontransmitting
             ):
                 assert session.scalar(select(func.count()).select_from(row_type)) == 0
 
-        app.run(timeout=10)
+        app.run(timeout=_APPTEST_TIMEOUT)
         assert evaluate_calls == ["AAPL", "AAPL", "AAPL", "AAPL"]
         assert len(preview_calls) == 2
         assert len(approval_calls) == 1
@@ -888,7 +909,7 @@ def test_demo_approval_rehearsal_is_memoryless_lineage_bound_and_nontransmitting
 
         forged_session_record = approval_record.model_copy(update={"authority_created": True})
         app.session_state[_DEMO_APPROVAL_STATE_KEY] = forged_session_record
-        app.run(timeout=10)
+        app.run(timeout=_APPTEST_TIMEOUT)
         assert not app.exception
         assert _DEMO_APPROVAL_STATE_KEY not in app.session_state
         assert "Rehearsed contract" not in {metric.label: metric.value for metric in app.metric}
@@ -906,7 +927,7 @@ def test_demo_approval_rehearsal_is_memoryless_lineage_bound_and_nontransmitting
             }
         )
         app.session_state[_DEMO_APPROVAL_STATE_KEY] = portfolio_expiring_record
-        app.radio[0].set_value("Portfolio Dashboard").run(timeout=10)
+        app.radio[0].set_value("Portfolio Dashboard").run(timeout=_APPTEST_TIMEOUT)
         portfolio_expired_record = app.session_state[_DEMO_APPROVAL_STATE_KEY]
         assert isinstance(portfolio_expired_record, DemoApprovalSessionRecord)
         assert portfolio_expired_record.disposition is DemoApprovalDisposition.EXPIRED
@@ -917,10 +938,10 @@ def test_demo_approval_rehearsal_is_memoryless_lineage_bound_and_nontransmitting
         assert len(preview_calls) == 2
         assert unexpected_order_calls == []
 
-        app.radio[0].set_value("Symbol Detail & Order Workspace").run(timeout=10)
+        app.radio[0].set_value("Symbol Detail & Order Workspace").run(timeout=_APPTEST_TIMEOUT)
         app.session_state[_DEMO_APPROVAL_STATE_KEY] = approval_record
-        app.run(timeout=10)
-        app.selectbox[0].set_value("MSFT").run(timeout=10)
+        app.run(timeout=_APPTEST_TIMEOUT)
+        app.selectbox[0].set_value("MSFT").run(timeout=_APPTEST_TIMEOUT)
         symbol_superseded_record = app.session_state[_DEMO_APPROVAL_STATE_KEY]
         assert isinstance(symbol_superseded_record, DemoApprovalSessionRecord)
         assert symbol_superseded_record.disposition is DemoApprovalDisposition.SUPERSEDED
@@ -930,9 +951,9 @@ def test_demo_approval_rehearsal_is_memoryless_lineage_bound_and_nontransmitting
         assert len(preview_calls) == 2
         assert unexpected_order_calls == []
 
-        app.selectbox[0].set_value("AAPL").run(timeout=10)
+        app.selectbox[0].set_value("AAPL").run(timeout=_APPTEST_TIMEOUT)
         app.session_state[_DEMO_APPROVAL_STATE_KEY] = approval_record
-        app.run(timeout=10)
+        app.run(timeout=_APPTEST_TIMEOUT)
         boundary_record = DemoApprovalSessionRecord.model_validate(
             {
                 **approval_record.model_dump(),
@@ -952,7 +973,7 @@ def test_demo_approval_rehearsal_is_memoryless_lineage_bound_and_nontransmitting
         app.session_state[_DEMO_APPROVAL_STATE_KEY] = boundary_record
         with monkeypatch.context() as boundary_patch:
             boundary_patch.setattr("chronos.ui.dashboard.monotonic", boundary_clock)
-            app.run(timeout=10)
+            app.run(timeout=_APPTEST_TIMEOUT)
         exact_deadline_record = app.session_state[_DEMO_APPROVAL_STATE_KEY]
         assert isinstance(exact_deadline_record, DemoApprovalSessionRecord)
         assert exact_deadline_record.disposition is DemoApprovalDisposition.EXPIRED
@@ -969,13 +990,13 @@ def test_demo_approval_rehearsal_is_memoryless_lineage_bound_and_nontransmitting
         assert unexpected_order_calls == []
 
         app.session_state[_DEMO_APPROVAL_STATE_KEY] = approval_record
-        app.run(timeout=10)
+        app.run(timeout=_APPTEST_TIMEOUT)
         abandon_button = next(
             button
             for button in app.button
             if button.label == "Abandon historical DEMO rehearsal receipt"
         )
-        abandon_button.click().run(timeout=10)
+        abandon_button.click().run(timeout=_APPTEST_TIMEOUT)
         abandoned_record = app.session_state[_DEMO_APPROVAL_STATE_KEY]
         assert isinstance(abandoned_record, DemoApprovalSessionRecord)
         assert abandoned_record.disposition is DemoApprovalDisposition.ABANDONED
@@ -991,7 +1012,7 @@ def test_demo_approval_rehearsal_is_memoryless_lineage_bound_and_nontransmitting
         assert unexpected_order_calls == []
 
         app.session_state[_DEMO_APPROVAL_STATE_KEY] = approval_record
-        app.button[0].click().run(timeout=10)
+        app.button[0].click().run(timeout=_APPTEST_TIMEOUT)
         superseded_record = app.session_state[_DEMO_APPROVAL_STATE_KEY]
         assert isinstance(superseded_record, DemoApprovalSessionRecord)
         assert superseded_record.disposition is DemoApprovalDisposition.SUPERSEDED
@@ -1015,7 +1036,7 @@ def test_demo_approval_rehearsal_is_memoryless_lineage_bound_and_nontransmitting
             }
         )
         app.session_state[_DEMO_APPROVAL_STATE_KEY] = expiring_record
-        app.run(timeout=10)
+        app.run(timeout=_APPTEST_TIMEOUT)
         expired_record = app.session_state[_DEMO_APPROVAL_STATE_KEY]
         assert isinstance(expired_record, DemoApprovalSessionRecord)
         assert expired_record.disposition is DemoApprovalDisposition.EXPIRED
@@ -1088,16 +1109,16 @@ def test_withheld_demo_approval_rerun_clears_parent_panels_and_retains_safe_feed
     monkeypatch.setattr(DemoBroker, "cancel_order", reject_cancel)
 
     try:
-        app = AppTest.from_file("src/chronos/app.py").run(timeout=10)
-        app.radio[0].set_value("Symbol Detail & Order Workspace").run(timeout=10)
-        app.button[0].click().run(timeout=10)
-        app.text_input[0].set_value("0.65").run(timeout=10)
-        app.button[1].click().run(timeout=10)
-        app.text_input[1].set_value("3.20").run(timeout=10)
-        app.button[2].click().run(timeout=10)
-        app.text_input[2].set_value("AAPL").run(timeout=10)
-        app.text_input[3].set_value("1").run(timeout=10)
-        app.checkbox[0].set_value(True).run(timeout=10)
+        app = AppTest.from_file("src/chronos/app.py").run(timeout=_APPTEST_TIMEOUT)
+        app.radio[0].set_value("Symbol Detail & Order Workspace").run(timeout=_APPTEST_TIMEOUT)
+        app.button[0].click().run(timeout=_APPTEST_TIMEOUT)
+        app.text_input[0].set_value("0.65").run(timeout=_APPTEST_TIMEOUT)
+        app.button[1].click().run(timeout=_APPTEST_TIMEOUT)
+        app.text_input[1].set_value("3.20").run(timeout=_APPTEST_TIMEOUT)
+        app.button[2].click().run(timeout=_APPTEST_TIMEOUT)
+        app.text_input[2].set_value("AAPL").run(timeout=_APPTEST_TIMEOUT)
+        app.text_input[3].set_value("1").run(timeout=_APPTEST_TIMEOUT)
+        app.checkbox[0].set_value(True).run(timeout=_APPTEST_TIMEOUT)
 
         assert not app.exception
         assert evaluate_calls == ["AAPL", "AAPL", "AAPL"]
@@ -1113,7 +1134,7 @@ def test_withheld_demo_approval_rerun_clears_parent_panels_and_retains_safe_feed
         runtime.short_put_demo_approval._settings = runtime.settings.model_copy(
             update={"broker_mode": BrokerMode.IBKR}
         )
-        app.button[3].click().run(timeout=10)
+        app.button[3].click().run(timeout=_APPTEST_TIMEOUT)
 
         assert not app.exception
         assert evaluate_calls == ["AAPL", "AAPL", "AAPL"]
@@ -1142,7 +1163,7 @@ def test_withheld_demo_approval_rerun_clears_parent_panels_and_retains_safe_feed
         assert "DU1234567" not in str(app)
         assert "DU1234567" not in str(app.session_state.filtered_state)
 
-        app.run(timeout=10)
+        app.run(timeout=_APPTEST_TIMEOUT)
         assert evaluate_calls == ["AAPL", "AAPL", "AAPL"]
         assert len(preview_calls) == 1
         assert len(approval_calls) == 1
@@ -1208,7 +1229,7 @@ for runtime in runtimes:
         clear_rendered_evidence=lambda: None,
     )
 """
-    ).run(timeout=10)
+    ).run(timeout=_APPTEST_TIMEOUT)
 
     assert not app.exception
     assert any("real IBKR what-if" in message.value for message in app.error)
@@ -1246,9 +1267,9 @@ def test_risk_preview_rejects_unbounded_or_overprecise_commission_without_refres
     monkeypatch.setattr(ShortPutRiskPreviewService, "preview", track_preview)
 
     try:
-        app = AppTest.from_file("src/chronos/app.py").run(timeout=10)
-        app.radio[0].set_value("Symbol Detail & Order Workspace").run(timeout=10)
-        app.button[0].click().run(timeout=10)
+        app = AppTest.from_file("src/chronos/app.py").run(timeout=_APPTEST_TIMEOUT)
+        app.radio[0].set_value("Symbol Detail & Order Workspace").run(timeout=_APPTEST_TIMEOUT)
+        app.button[0].click().run(timeout=_APPTEST_TIMEOUT)
 
         assert not app.exception
         assert evaluate_calls == ["AAPL"]
@@ -1262,7 +1283,7 @@ def test_risk_preview_rejects_unbounded_or_overprecise_commission_without_refres
             "1.23000000000000000000",
             "000000000000000000000000000000001",
         ):
-            app.text_input[0].set_value(invalid_value).run(timeout=10)
+            app.text_input[0].set_value(invalid_value).run(timeout=_APPTEST_TIMEOUT)
 
             assert not app.exception
             assert app.button[1].disabled is True
@@ -1270,7 +1291,7 @@ def test_risk_preview_rejects_unbounded_or_overprecise_commission_without_refres
             assert preview_calls == []
             assert _RISK_PREVIEW_STATE_KEY not in app.session_state
 
-        app.text_input[0].set_value("1.23000").run(timeout=10)
+        app.text_input[0].set_value("1.23000").run(timeout=_APPTEST_TIMEOUT)
         assert not app.exception
         assert app.button[1].disabled is False
         assert evaluate_calls == ["AAPL"]
@@ -1340,15 +1361,15 @@ def test_disappeared_risk_contract_remains_visible_until_operator_changes_select
     monkeypatch.setattr(ShortPutCandidateService, "evaluate", controlled_evaluation)
 
     try:
-        app = AppTest.from_file("src/chronos/app.py").run(timeout=10)
-        app.radio[0].set_value("Symbol Detail & Order Workspace").run(timeout=10)
-        app.button[0].click().run(timeout=10)
+        app = AppTest.from_file("src/chronos/app.py").run(timeout=_APPTEST_TIMEOUT)
+        app.radio[0].set_value("Symbol Detail & Order Workspace").run(timeout=_APPTEST_TIMEOUT)
+        app.button[0].click().run(timeout=_APPTEST_TIMEOUT)
 
         assert not app.exception
         assert selected_contract_id is not None
         assert app.selectbox[1].value == selected_contract_id
-        app.text_input[0].set_value("0.65").run(timeout=10)
-        app.button[1].click().run(timeout=10)
+        app.text_input[0].set_value("0.65").run(timeout=_APPTEST_TIMEOUT)
+        app.button[1].click().run(timeout=_APPTEST_TIMEOUT)
 
         assert not app.exception
         assert evaluate_calls == ["AAPL", "AAPL"]
@@ -1361,7 +1382,7 @@ def test_disappeared_risk_contract_remains_visible_until_operator_changes_select
         )
         assert app.selectbox[1].value != selected_contract_id
 
-        app.run(timeout=10)
+        app.run(timeout=_APPTEST_TIMEOUT)
         assert evaluate_calls == ["AAPL", "AAPL"]
         assert _RISK_PREVIEW_STATE_KEY in app.session_state
         assert {metric.label: metric.value for metric in app.metric}["Risk preview"] == ("WITHHELD")
@@ -1370,7 +1391,7 @@ def test_disappeared_risk_contract_remains_visible_until_operator_changes_select
         current_replacement = app.selectbox[1].value
         new_replacement = selected_contract_id + 200
         assert new_replacement != current_replacement
-        app.selectbox[1].set_value(new_replacement).run(timeout=10)
+        app.selectbox[1].set_value(new_replacement).run(timeout=_APPTEST_TIMEOUT)
 
         assert not app.exception
         assert evaluate_calls == ["AAPL", "AAPL"]
