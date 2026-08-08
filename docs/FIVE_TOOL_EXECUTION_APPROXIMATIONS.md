@@ -3,9 +3,9 @@
 Status: **research-only; TradingView execution parity UNVERIFIED**.
 
 This document covers the boundary implemented by
-`chronos.research.five_tool.planning` and `chronos.research.five_tool.validation`.
-It does not authorize paper or live orders, and neither module imports a broker or
-production order path.
+`chronos.research.five_tool.planning`, `chronos.research.five_tool.replay`, and
+`chronos.research.five_tool.validation`. It does not authorize paper or live orders,
+and none of these modules imports a broker or production order path.
 
 ## Exact arithmetic carried from Pine
 
@@ -47,17 +47,66 @@ Every research replay must therefore record one of these policies:
 | `ohlc_target_first` | Fill the target. This is an optimistic sensitivity bound. |
 | `lower_timeframe_magnifier` | Traverse complete, chronological lower-timeframe bars. Within an ambiguous lowest-resolution bar, use stop-first. |
 
-The magnifier policy requires explicit parent/sub-bar start and end timestamps, one
-uniform lower resolution, chronological continuous coverage of the complete parent
-interval, and exact reproduction of parent open, high, low, and close. Any gap,
-stale bar, or identity ambiguity fails rather than falling back. It is still an
-approximation unless the supplied resolution captures the true event sequence; it
-is not a claim of TradingView parity.
+The magnifier policy requires this evidence for **every** replay bar, including bars
+with no active position or executable order: explicit parent/sub-bar start and end
+timestamps, one uniform lower resolution, chronological continuous coverage of the
+complete parent interval, matching symbol/source identity, and exact reproduction of
+parent open, high, low, and close. Any missing bar, gap, stale bar, or identity ambiguity
+fails rather than falling back. It is still an approximation unless the supplied
+resolution captures the true event sequence; it is not a claim of TradingView parity.
 
 Stop orders use explicit stop-market gap semantics: an adverse gap through the stop
 fills at the bar open. Target limits use price-improvement semantics: a favorable gap
 through the limit fills at the better open. A stop and target for one leg are OCO; the
 resolver emits at most one fill and records the cancelled sibling reason.
+
+## Causal signal-to-ledger replay
+
+`replay_five_tool` now connects the signal engine to the pure fill planner and the
+closed-leg validator. It replaces every caller-supplied account snapshot with replay-owned
+state, queues entries and discretionary exits at confirmed close, and fills them at the
+next bar's explicit open timestamp. Signal-time quantity and risk distance stay frozen;
+the later-bar stop and target ladder is rebased to the adverse next-open entry execution
+price. Every entry leg and closing leg has an explicit fill receipt, cost attribution,
+position id, setup/regime identity, and deterministic result digest.
+
+The entry bar has a distinct frozen order set that follows the checked Pine source's
+submission timing:
+
+- the absolute signal-time `PROT_*` stop is eligible for every leg on the entry bar;
+  a touch fills at the stop and an adverse gap fills at the explicit entry-bar open;
+- targets are inactive on the entry bar; after that bar, the stop/target ladder uses the
+  actual adverse next-open execution price without resizing signal-time quantity or risk;
+- target-1 evidence may arm breakeven, and close-time trailing may tighten a runner, only
+  for later bars. No within-bar order recalculation is inferred from chart OHLC.
+
+The source pins `calc_on_order_fills=false`, `process_orders_on_close=false`, and
+`use_bar_magnifier=true`. Chronos preserves the pre-submitted entry stop but remains an
+OHLC approximation: entry/stop event ordering inside the smallest supplied bar, target
+activation, and later stop updates have not been reconciled to TradingView fills.
+
+A queued close-time discretionary exit executes at the next open before protective
+resolution on that bar. On ordinary later bars, protective resolution precedes the new
+close-time signal evaluation. These priorities, entry-stop geometry, fill-rebased ladder,
+target-limit slippage toggle, terminal policy, costs, and full-origin replay scope are
+serialized in `FiveToolReplayPolicy.canonical_payload`; its SHA-256 is the campaign-bound
+replay-policy identity.
+
+These are Chronos research policies, not TradingView parity claims. A replay must freeze
+the OHLC priority policy, commission, slippage, tick/point/quantity settings, and terminal
+position policy. `require_flat` rejects pending, open, or partially closed terminal state.
+`exclude_incomplete` retains the partial evidence but excludes the entire affected
+position—including already closed legs—from economic-position statistics.
+
+Each result also binds an effective replay-input SHA-256 covering every primary and
+companion value/identity, every explicit primary open timestamp, and every lower-timeframe
+identity/OHLC record. Caller-supplied account snapshots are deliberately excluded from that
+input digest because the adapter overwrites them; the adapter-owned snapshots are present
+in the result and therefore in the result digest.
+
+Replay is full-from-origin only. Every call constructs a fresh engine and must begin
+exactly at `settings.history_start_utc`. There is no replay-ledger checkpoint/resume API;
+suffix or chunk continuation is unsupported rather than treated as equivalent evidence.
 
 ## Side ownership and sleeve reconciliation
 
@@ -119,8 +168,9 @@ promotion verdict.
   not a daily return-series CVaR. The basis is embedded in the report.
 - Lower-timeframe OHLC can narrow, but cannot eliminate, event-order ambiguity inside
   its smallest bar.
-- The signal engine, planner/fill model, and validation ledger are separate pure
-  components; no end-to-end engine-to-fill-to-`ClosedLeg` replay is implemented.
+- The pure engine-to-fill-to-`ClosedLeg` replay is implemented and deterministically
+  tested, but it is a Chronos approximation. It has not been reconciled to an
+  owner-exported TradingView trade list, so fill/execution parity remains **UNVERIFIED**.
 - Daily-loss halt behavior, alert delivery/de-duplication, and TradingView account-equity
   mark timing live outside this pure planning boundary and require separate parity
   traces.

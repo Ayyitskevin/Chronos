@@ -13,7 +13,7 @@ It is not a profitability claim, strategy promotion, or paper/live authorization
 | Pine SHA-256 | `e51d5a40d2e933bf86847c7432364ba8934fd2de653d6aec3d7205639248e45f` |
 | Logical lines / inputs | 2443 / 219 source-ordered inputs |
 | Input-contract digest | `93273762b1d01dade4133628a9a2cebf0a1364774fde654a9efc07c4ccf6d049` |
-| Semantic-declaration digest | `1c9f5b386d63732e8e9fab3e3e3e7173721590f84884101ef78817b8b3ab1531` |
+| Semantic-declaration digest | `c0d85a17b26b9da3c1e68dd16fd341288fd3710021a7dbf9a07c953c3a9fe196` |
 | Checkpoint schema | `five-tool-state-v2` |
 
 `specs/five_tool_confluence_v3_6.yaml` freezes every Pine input, timing rule,
@@ -48,17 +48,21 @@ not an independent oracle for the Python engine.
    chunking plus `state_to_json`/`state_from_json` is required to reproduce the same
    traces. That proves deterministic replay and checkpoint integrity, not independent
    formula agreement.
-5. `planning` and `validation` are separate pure research components for sizing,
-   three-leg plans, explicit fill milestones, OHLC fill policies, sleeve accounting,
-   closed-leg aggregation, and descriptive evidence. The signal engine does not drive
-   these components in an end-to-end replay. Account position/equity and fill outcomes
-   remain caller-supplied facts.
+5. `replay_five_tool` connects the signal engine to the pure sizing, three-leg planning,
+   OHLC fill, sleeve-accounting, and closed-leg validation components. It replaces
+   caller-supplied account facts, queues confirmed-close actions for next-open execution,
+   retains explicit fill/cost evidence, and produces complete economic positions only
+   from complete planned-leg closure. The replay is deterministic Chronos research
+   evidence, not an independent TradingView execution oracle; its frozen entry-bar,
+   lower-timeframe, slippage, and terminal-position policies remain explicit
+   approximations and execution parity is `UNVERIFIED`.
 
 No Five-Tool module is registered as a runtime strategy or imports broker/order,
 mandate, service, production persistence, or live promotion surfaces. The separate
-trial-control module owns an append-only, fsynced research ledger; it is not imported
-by the signal/planning package. That ledger is local to a caller-selected path and is
-not the canonical ADR-0013 global experiment registry.
+private trial-control harness still owns a caller-selected local ledger and is not the
+canonical ADR-0013 registry. Canonical start-before-read accounting, a manifest-bound
+ordinary reader, and retained replay objects now exist as separate infrastructure, but
+this blocked Five-Tool campaign has not been authorized or wired to them.
 
 ## Timing and causal identity
 
@@ -147,10 +151,12 @@ count/net/PF currently use the strict OOS set; the other metrics are full-sample
 Benchmark-alpha intervals, DSR, FWER/FDR, PBO, power, and fully OOS-native risk/cost
 gates are not implemented verdicts.
 
-The checked campaign manifest remains blocked before any reader, and there is no
-certified dataset capability or holdout guardian/unlock path. Public v1 validation
-refuses `ready_for_certified_research` even if a caller clears blocker strings and fills
-syntactically valid digests: readiness requires capabilities a manifest cannot grant.
+The checked campaign manifest remains blocked before any reader. A manifest-bound
+ordinary-data catalog, canonical trial registry, and replay object store now exist as
+separate infrastructure, while the owner-only holdout guardian remains a distinct path.
+Public v1 Five-Tool validation refuses `ready_for_certified_research` even if a caller
+clears blocker strings and fills syntactically valid digests: readiness requires reviewed
+data, evaluator, owner evidence, and wiring that a manifest cannot grant.
 
 The private synthetic lifecycle harness exists only to verify start-before-callback,
 data-return hashing, terminal accounting, interruption recovery, local sealing, and
@@ -159,8 +165,8 @@ preloaded or additional sources may be touched outside its observation. Its
 `ledger_trial_count` is path-local, evaluation artifact bytes are not retained in a
 replay store, and supplied variance evidence has no reviewer attestation here.
 Consequently it is neither a brokered data reader nor full-campaign replay evidence.
-Integration with the canonical ADR-0013 registry and a certified reader is required
-before Phase-3 multiplicity or final scores exist.
+The blocked campaign still requires explicit integration with those canonical
+capabilities before Phase-3 multiplicity or final scores exist.
 
 The engine currently retains complete observations/equity histories and recomputes
 history-dependent indicators. Its time cost is approximately quadratic and checkpoint

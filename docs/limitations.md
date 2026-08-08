@@ -145,11 +145,33 @@ runbooks.
   scripting the phrase into their *own* automation.
 - **Single-use is enforced under concurrency** by an OS file lock around the
   read-verify-append critical section; two processes cannot both consume one grant.
-- **The trial count is derived from *registered* runs.** The arithmetic is honest, but
-  completeness depends on every data-touching run being registered — the research runner
-  is not auto-wired to the registry in this milestone (a follow-on; also pointing it at
-  the C1 bars+actions dual hash instead of the legacy single-CSV sha). `register_run`
-  fails closed on null provenance.
+  Grants and consumes bind the canonical window definition, name-independent scope,
+  relevant stored-bar bytes, and full HOLDOUT set. Renamed/overlapping burned scopes and
+  any definition/data/set drift are refused; only the authorized window is selectively
+  unmasked while other holdouts stay masked. A legacy burn without scope evidence blocks
+  future unlocks until an explicit contamination/reset protocol exists.
+- **The canonical trial count is derived from *registered starts*, not all possible data
+  access on the machine.** `CanonicalTrialRegistry` records a durable `trial_started`
+  before the brokered reader opens bytes; completed, failed, retried, and interrupted
+  starts all count, and its head-bound snapshot includes legacy data-touching
+  `experiment_run` records. The shipped legacy campaign, walk-forward, generic runner,
+  and shadow paths are not migrated and still cannot claim complete canonical N.
+- **The certified-data boundary is capability-owned, not a sandbox.** A trusted catalog
+  digest pins exact ordinary/holdout classifications and content identities; public
+  metadata reveals no dataset path, ordinary reads are private to the broker, and holdouts
+  are categorically refused. Catalog construction also rejects any path or content digest
+  aliased across the ordinary/holdout boundary. The construction-time working directory,
+  catalog digest delivery, and reviewed evaluator identity remain operator trust boundaries;
+  the runner refuses registry/store capabilities rooted in different workspaces before a
+  start. Python evaluator code could independently open unrelated files if given ambient
+  authority.
+- **Replay retention proves bytes and identity, not strategy validity.** The CAS stores exact
+  input/output objects and an envelope binding start receipt, data, code, config, criteria,
+  and evaluator. The fixed-root store rejects symlink/replacement escape, and restart lookup
+  verifies the canonical terminal, envelope, and every referenced object by digest. A
+  completed terminal alone is not replay proof. This does not supply certified market data,
+  final-N scoring, a cross-trial variance estimate, an untouched holdout result, external
+  TradingView execution parity, or a promotion artifact.
 - **The budget policy is a first cut** (linear credits per accrued capture session);
   burns and *active* grants spend credits, expired-unused grants are refunded; it
   *rations* unlocks, it does not model statistical power (C3/C4). Empty store ⇒ zero

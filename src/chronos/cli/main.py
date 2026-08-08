@@ -736,41 +736,126 @@ REGISTRY_LEDGER_PATH = Path("research/registry/registry.jsonl")
 HISTORY_ROOT = Path("research/data/history")
 
 
-def cmd_registry_stats(args: argparse.Namespace) -> int:
-    from chronos.registry import RegistryLedger, burned_windows, trial_count
+def cmd_registry_stats(_args: argparse.Namespace) -> int:
+    """Report multiplicity from the one canonical registry capability."""
 
-    ledger = RegistryLedger(args.ledger)
-    ok, detail = ledger.verify()
+    from chronos.auditlog.log import AuditLogCorruptionError
+    from chronos.registry import (
+        CanonicalTrialError,
+        CanonicalTrialRegistry,
+        RegistryIntegrityError,
+    )
+
+    try:
+        registry = CanonicalTrialRegistry()
+        snapshot = registry.multiplicity_snapshot()
+    except (AuditLogCorruptionError, CanonicalTrialError, RegistryIntegrityError) as error:
+        print(json.dumps({"scope": "canonical", "error": str(error)}), file=sys.stderr)
+        return 1
     print(
         json.dumps(
             {
-                "ledger": str(args.ledger),
-                "records": len(ledger.records()),
-                "trials": trial_count(ledger),
-                "burned_windows": sorted(burned_windows(ledger)),
-                "chain_ok": ok,
-                "chain_detail": detail,
+                "scope": "canonical",
+                "ledger": str(registry.ledger_path),
+                "records": snapshot.record_count,
+                "trials": snapshot.count,
+                "head_hash": snapshot.head_hash,
+                "chain_ok": True,
+                "chain_detail": "chain + anchor + canonical lifecycle intact",
             },
             indent=2,
         )
     )
-    return 0 if ok else 1  # a broken/truncated ledger is a non-zero, actionable state
+    return 0
 
 
-def cmd_registry_verify(args: argparse.Namespace) -> int:
-    from chronos.registry import RegistryLedger
+def cmd_registry_verify(_args: argparse.Namespace) -> int:
+    """Verify the fixed canonical registry, including its lifecycle schemas."""
 
-    ok, detail = RegistryLedger(args.ledger).verify()
-    print("registry ledger OK" if ok else f"registry ledger FAILED: {detail}")
+    from chronos.auditlog.log import AuditLogCorruptionError
+    from chronos.registry import (
+        CanonicalTrialError,
+        CanonicalTrialRegistry,
+        RegistryIntegrityError,
+    )
+
+    try:
+        CanonicalTrialRegistry().multiplicity_snapshot()
+    except (AuditLogCorruptionError, CanonicalTrialError, RegistryIntegrityError) as error:
+        print(f"canonical registry ledger FAILED: {error}", file=sys.stderr)
+        return 1
+    print("canonical registry ledger OK")
+    return 0
+
+
+def cmd_registry_legacy_stats(args: argparse.Namespace) -> int:
+    """Report explicitly noncanonical multiplicity for a caller-selected ledger."""
+
+    from chronos.auditlog.log import AuditLogCorruptionError
+    from chronos.registry.ledger import (
+        KIND_CONSUME,
+        KIND_RUN,
+        RegistryIntegrityError,
+        verified_registry_records,
+    )
+
+    try:
+        records = verified_registry_records(args.ledger)
+    except (AuditLogCorruptionError, RegistryIntegrityError) as error:
+        print(json.dumps({"scope": "legacy_noncanonical", "error": str(error)}), file=sys.stderr)
+        return 1
+    legacy_trials = sum(
+        record.kind == KIND_RUN and bool(record.payload.get("touched_data", False))
+        for record in records
+    )
+    print(
+        json.dumps(
+            {
+                "scope": "legacy_noncanonical",
+                "ledger": str(args.ledger),
+                "records": len(records),
+                "legacy_trials": legacy_trials,
+                "burned_windows": sorted(
+                    str(record.payload["window"])
+                    for record in records
+                    if record.kind == KIND_CONSUME
+                ),
+                "chain_ok": True,
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
+def cmd_registry_legacy_verify(args: argparse.Namespace) -> int:
+    """Verify one explicitly noncanonical caller-selected legacy ledger."""
+
+    from chronos.auditlog.log import AuditLogCorruptionError
+    from chronos.registry import RegistryIntegrityError, RegistryLedger
+
+    try:
+        ok, detail = RegistryLedger(args.ledger).verify()
+    except (AuditLogCorruptionError, RegistryIntegrityError) as error:
+        print(f"legacy noncanonical registry ledger FAILED: {error}", file=sys.stderr)
+        return 1
+    print(
+        "legacy noncanonical registry ledger OK"
+        if ok
+        else f"legacy noncanonical registry ledger FAILED: {detail}"
+    )
     return 0 if ok else 1
 
 
 def cmd_holdout_status(args: argparse.Namespace) -> int:
     from datetime import UTC, datetime
 
+    from chronos.auditlog.log import AuditLogCorruptionError
     from chronos.config.settings import get_settings
     from chronos.histdata.holdout import load_holdouts
     from chronos.registry import (
+        HoldoutGuardianError,
+        RegistryIntegrityError,
         RegistryLedger,
         accrued_capture_sessions,
         available_budget,
@@ -778,38 +863,54 @@ def cmd_holdout_status(args: argparse.Namespace) -> int:
     )
 
     settings = get_settings()
-    ledger = RegistryLedger(args.ledger)
-    ok, detail = ledger.verify()
+    try:
+        ledger = RegistryLedger(args.ledger)
+        ok, detail = ledger.verify()
+    except (AuditLogCorruptionError, HoldoutGuardianError, RegistryIntegrityError) as error:
+        print(json.dumps({"error": str(error)}), file=sys.stderr)
+        return 1
+    if not ok:
+        print(
+            json.dumps({"error": f"registry ledger failed verification: {detail}"}), file=sys.stderr
+        )
+        return 1
     accrued = accrued_capture_sessions(args.history_root)
+    try:
+        payload = {
+            "declared_windows": [w.name for w in load_holdouts(args.history_root)],
+            "burned_windows": sorted(burned_windows(ledger)),
+            "accrued_sessions": accrued,
+            "available_unlock_budget": available_budget(
+                ledger,
+                now=datetime.now(UTC),
+                accrued_sessions=accrued,
+                sessions_per_unlock=settings.holdout_sessions_per_unlock,
+                max_outstanding_unlocks=settings.holdout_max_outstanding_unlocks,
+            ),
+            "chain_ok": ok,
+            "chain_detail": detail,
+        }
+    except (AuditLogCorruptionError, HoldoutGuardianError, RegistryIntegrityError) as error:
+        print(json.dumps({"error": str(error)}), file=sys.stderr)
+        return 1
     print(
         json.dumps(
-            {
-                "declared_windows": [w.name for w in load_holdouts(args.history_root)],
-                "burned_windows": sorted(burned_windows(ledger)),
-                "accrued_sessions": accrued,
-                "available_unlock_budget": available_budget(
-                    ledger,
-                    now=datetime.now(UTC),
-                    accrued_sessions=accrued,
-                    sessions_per_unlock=settings.holdout_sessions_per_unlock,
-                    max_outstanding_unlocks=settings.holdout_max_outstanding_unlocks,
-                ),
-                "chain_ok": ok,
-                "chain_detail": detail,
-            },
+            payload,
             indent=2,
         )
     )
-    return 0 if ok else 1
+    return 0
 
 
 def cmd_holdout_unlock(args: argparse.Namespace) -> int:
     import os
     from datetime import UTC, datetime
 
+    from chronos.auditlog.log import AuditLogCorruptionError
     from chronos.config.settings import get_settings
     from chronos.registry import (
         HoldoutGuardianError,
+        RegistryIntegrityError,
         RegistryLedger,
         accrued_capture_sessions,
         request_unlock,
@@ -837,7 +938,7 @@ def cmd_holdout_unlock(args: argparse.Namespace) -> int:
             sessions_per_unlock=settings.holdout_sessions_per_unlock,
             max_outstanding_unlocks=settings.holdout_max_outstanding_unlocks,
         )
-    except HoldoutGuardianError as error:
+    except (AuditLogCorruptionError, HoldoutGuardianError, RegistryIntegrityError) as error:
         print(json.dumps({"error": str(error)}), file=sys.stderr)
         return 1
     print(
@@ -852,13 +953,22 @@ def cmd_holdout_unlock(args: argparse.Namespace) -> int:
 def _add_registry_commands(sub: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
     registry = sub.add_parser("registry", help="experiment registry (read-only reporting)")
     registry_sub = registry.add_subparsers(dest="registry_command", required=True)
-    for name, func, helptext in (
-        ("stats", cmd_registry_stats, "records, trial count, and burned windows"),
-        ("verify", cmd_registry_verify, "verify the ledger hash chain (exit 1 on tamper)"),
-    ):
-        parser = registry_sub.add_parser(name, help=helptext)
-        parser.add_argument("--ledger", type=Path, default=REGISTRY_LEDGER_PATH)
-        parser.set_defaults(func=func)
+    stats = registry_sub.add_parser("stats", help="canonical records and trial multiplicity")
+    stats.set_defaults(func=cmd_registry_stats)
+    verify = registry_sub.add_parser("verify", help="verify the fixed canonical registry")
+    verify.set_defaults(func=cmd_registry_verify)
+    legacy_stats = registry_sub.add_parser(
+        "legacy-stats",
+        help="explicitly noncanonical stats for a caller-selected legacy ledger",
+    )
+    legacy_stats.add_argument("--ledger", type=Path, required=True)
+    legacy_stats.set_defaults(func=cmd_registry_legacy_stats)
+    legacy_verify = registry_sub.add_parser(
+        "legacy-verify",
+        help="verify a caller-selected legacy/noncanonical ledger",
+    )
+    legacy_verify.add_argument("--ledger", type=Path, required=True)
+    legacy_verify.set_defaults(func=cmd_registry_legacy_verify)
 
     holdout = sub.add_parser("holdout", help="holdout guardian (status + owner-typed unlock)")
     holdout_sub = holdout.add_subparsers(dest="holdout_command", required=True)

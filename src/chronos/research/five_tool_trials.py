@@ -3,20 +3,19 @@
 This module is intentionally additive.  It does not change the canonical ADR-0013
 registry, walk-forward, or campaign semantics.  Public v1 construction validates the
 checked blocked manifest but cannot authorize data access: certified-reader readiness,
-canonical global-registry integration, and replayable evidence artifacts do not exist
-in this slice.  A deliberately private synthetic-test seam exercises lifecycle logic
-with arbitrary reader/evaluator callbacks.  Those callbacks are not a certified reader
-or an execution authority.
+canonical global-registry integration, and replayable evidence artifacts exist as
+separate infrastructure but are not authorized or wired to this campaign. A deliberately
+private synthetic-test seam exercises lifecycle logic with arbitrary reader/evaluator
+callbacks. Those callbacks are not a certified reader or an execution authority.
 
 Inside that synthetic seam, ``FiveToolTrialBroker.run`` durably appends
 ``trial_started`` before invoking the supplied reader and appends one terminal outcome
 before a result is returned (or the original exception is re-raised).
 
-The ledger reuses the existing anchor-verified :class:`RegistryLedger`, but creates a
-fresh instance inside every locked critical section.  ``AuditLog`` caches its head at
-construction, so sharing a long-lived instance between concurrent writers would be
-unsafe.  A process-wide thread lock plus the registry's OS ``flock`` protect the full
-verify/append/fsync/verify transaction.
+The ledger reuses the existing anchor-verified :class:`RegistryLedger` through its
+descriptor-bound verified transaction. Every append, recovery, seal, and snapshot uses
+the directory actually protected by the registry's thread lock and OS ``flock``; no
+path-based reopen occurs inside that critical section.
 
 Research only: this module imports no broker, order, mandate, or live persistence code.
 It offers no holdout-unlock path.  Request metadata bearing a declared holdout identity
@@ -29,24 +28,33 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import os
 import re
-import threading
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import TypeVar, cast
 
-from chronos.auditlog.log import AuditRecord
-from chronos.registry.ledger import RegistryLedger, registry_lock
+from chronos.auditlog.log import AuditLogCorruptionError, AuditRecord
+from chronos.registry.ledger import (
+    RegistryIntegrityError,
+    RegistryLedger,
+    verified_registry_records,
+    verified_registry_transaction,
+)
 from chronos.research.five_tool.contract import (
     default_contract_path,
     default_source_path,
     input_contract_digest,
     semantic_contract_digest,
+)
+from chronos.research.five_tool.planning import FillPolicy
+from chronos.research.five_tool.replay import (
+    FiveToolReplayPolicy,
+    TerminalPositionPolicy,
 )
 
 KIND_TRIAL_STARTED = "trial_started"
@@ -63,8 +71,6 @@ _DEFAULT_HOLDOUT_PARTITIONS = frozenset(
 )
 _SHA256_HEX_LENGTH = 64
 _UNCLASSIFIED_CALLBACK_ERROR = "UnclassifiedCallbackError"
-_THREAD_LOCKS: dict[str, threading.Lock] = {}
-_THREAD_LOCKS_GUARD = threading.Lock()
 _START_PAYLOAD_KEYS = frozenset(
     {
         "schema_version",
@@ -417,8 +423,8 @@ class FiveToolTrialBroker:
         """Validate a blocked manifest without granting reader authority.
 
         ``ready_for_certified_research`` is intentionally rejected in public v1.  A
-        manifest is a claim, not the missing certified-reader/global-registry
-        capability.
+        manifest is a claim, not authorization to use the separate certified-reader,
+        replay-store, and canonical-registry capabilities.
         """
 
         binding = _validate_campaign_manifest(manifest)
@@ -428,7 +434,7 @@ class FiveToolTrialBroker:
         broker._bind_declared_holdouts(manifest)
         broker._execution_block_reason = (
             "campaign manifest is blocked_until_identity_locks_resolve; "
-            "no certified reader or ADR-0013 global-registry capability exists"
+            "certified reader and ADR-0013 global-registry infrastructure is not wired"
         )
         return broker
 
@@ -799,10 +805,7 @@ def _recover_interrupted_starts(
 ) -> tuple[str, ...]:
     """Append bounded FAILED terminals for orphan starts in the private harness."""
 
-    thread_lock = _thread_lock_for(ledger_path)
-    with thread_lock, registry_lock(ledger_path):
-        ledger = RegistryLedger(ledger_path)
-        _require_verified(ledger)
+    with _verified_local_transaction(ledger_path) as ledger:
         records = ledger.records()
         if any(record.kind == KIND_CAMPAIGN_SEALED for record in records):
             raise CampaignSealed("sealed synthetic evidence cannot be recovered")
@@ -833,9 +836,6 @@ def _recover_interrupted_starts(
             ledger.append(KIND_TRIAL_TERMINAL, payload)
             recovered.append(receipt.attempt_id)
         if recovered:
-            _fsync_path(ledger.anchor_path)
-            _fsync_directory(ledger_path.parent)
-            _require_verified(ledger)
             _validated_lifecycle_records(
                 ledger.records(),
                 binding,
@@ -887,10 +887,7 @@ def _seal_and_build_ledger_local_inputs(
     if not isinstance(reviewed_variance, ReviewedVarianceEvidence):
         raise TypeError("reviewed_variance must be ReviewedVarianceEvidence")
     reviewed_variance._require_valid()
-    thread_lock = _thread_lock_for(ledger_path)
-    with thread_lock, registry_lock(ledger_path):
-        ledger = RegistryLedger(ledger_path)
-        _require_verified(ledger)
+    with _verified_local_transaction(ledger_path) as ledger:
         records = ledger.records()
         seals = [record for record in records if record.kind == KIND_CAMPAIGN_SEALED]
         if seals:
@@ -927,9 +924,6 @@ def _seal_and_build_ledger_local_inputs(
                 "variance_evidence_digest": reviewed_variance.evidence_digest,
             },
         )
-        _fsync_path(ledger.anchor_path)
-        _fsync_directory(ledger_path.parent)
-        _require_verified(ledger)
         return _score_inputs_from_rows(
             score_rows,
             binding,
@@ -1370,6 +1364,7 @@ def _validate_campaign_manifest(
             "strategy",
             "data",
             "fill_policy",
+            "replay_policy",
             "costs",
             "hypothesis_ids",
             "campaign_cells",
@@ -1399,8 +1394,8 @@ def _validate_campaign_manifest(
     if ready and not _allow_synthetic_ready_for_tests:
         raise CampaignExecutionBlocked(
             "EXECUTION_READY is not implemented in public v1: a manifest cannot replace "
-            "the missing certified reader, replay artifacts, owner evidence, and ADR-0013 "
-            "global-registry capability"
+            "authorization and wiring for certified data, replay artifacts, owner evidence, "
+            "and the ADR-0013 global-registry capability"
         )
 
     strategy = _required_mapping(manifest, "strategy")
@@ -1628,6 +1623,11 @@ def _validate_campaign_manifest(
         _require_finite_nonnegative(f"costs.stress.{key}", stress.get(key))
     if stress.get("require_positive_after_stress") is not True:
         raise ValueError("costs.stress.require_positive_after_stress must be true")
+    replay_policy = _validate_replay_policy_lock(_required_mapping(manifest, "replay_policy"))
+    if replay_policy.commission_bps_per_fill != costs.get(
+        "commission_bps_per_fill"
+    ) or replay_policy.slippage_ticks_per_fill != costs.get("slippage_ticks_per_fill"):
+        raise ValueError("replay_policy costs must match the campaign base costs")
 
     hypotheses = manifest.get("hypothesis_ids")
     if (
@@ -1728,6 +1728,7 @@ def _validate_campaign_manifest(
         "history_start_utc",
         "benchmark_identity",
         "fill_policy",
+        "replay_policy_sha256",
         "cost_model",
         "criteria_digest",
         "code_commit",
@@ -1776,6 +1777,47 @@ def _validate_resolved_artifact_lock(lock: Mapping[str, object], name: str) -> N
         raise ValueError(f"{name}.status must be 'resolved'")
 
 
+def _validate_replay_policy_lock(lock: Mapping[str, object]) -> FiveToolReplayPolicy:
+    _require_exact_keys(lock, {"canonical", "sha256"}, "replay_policy")
+    canonical = _required_mapping(lock, "canonical")
+    expected_keys = set(FiveToolReplayPolicy().canonical_payload)
+    _require_exact_keys(canonical, expected_keys, "replay_policy.canonical")
+
+    initial_equity = canonical.get("initial_equity")
+    commission = canonical.get("commission_bps_per_fill")
+    slippage = canonical.get("slippage_ticks_per_fill")
+    target_slippage = canonical.get("apply_slippage_to_target_limits")
+    if isinstance(initial_equity, bool) or not isinstance(initial_equity, int | float):
+        raise ValueError("replay_policy initial_equity must be numeric")
+    if isinstance(commission, bool) or not isinstance(commission, int | float):
+        raise ValueError("replay_policy commission must be numeric")
+    if isinstance(slippage, bool) or not isinstance(slippage, int):
+        raise ValueError("replay_policy slippage ticks must be an integer")
+    if not isinstance(target_slippage, bool):
+        raise ValueError("replay_policy target-limit slippage must be boolean")
+    try:
+        policy = FiveToolReplayPolicy(
+            initial_equity=float(initial_equity),
+            parameter_variant=_required_string(canonical, "parameter_variant"),
+            fill_policy=FillPolicy(_required_string(canonical, "fill_policy")),
+            commission_bps_per_fill=float(commission),
+            slippage_ticks_per_fill=slippage,
+            apply_slippage_to_target_limits=target_slippage,
+            terminal_position_policy=TerminalPositionPolicy(
+                _required_string(canonical, "terminal_position_policy")
+            ),
+        )
+    except ValueError as error:
+        raise ValueError(f"replay_policy is invalid: {error}") from error
+    if _canonical_json(canonical) != _canonical_json(policy.canonical_payload):
+        raise ValueError("replay_policy canonical execution semantics do not match the adapter")
+    digest = _required_string(lock, "sha256")
+    _require_sha256("replay_policy.sha256", digest)
+    if digest != policy.digest:
+        raise ValueError("replay_policy.sha256 does not match its canonical policy")
+    return policy
+
+
 def _locked_append(
     ledger_path: Path,
     kind: str,
@@ -1783,53 +1825,27 @@ def _locked_append(
     *,
     validate: Callable[[RegistryLedger], None],
 ) -> AuditRecord:
-    thread_lock = _thread_lock_for(ledger_path)
-    with thread_lock, registry_lock(ledger_path):
-        # Fresh recovery under the lock is essential: AuditLog caches sequence/head.
-        ledger = RegistryLedger(ledger_path)
-        _require_verified(ledger)
+    with _verified_local_transaction(ledger_path) as ledger:
         validate(ledger)
-        record = ledger.append(kind, payload)
-        _fsync_path(ledger.anchor_path)
-        _fsync_directory(ledger_path.parent)
-        _require_verified(ledger)
-        return record
+        return ledger.append(kind, payload)
 
 
 def _verified_records(ledger_path: Path) -> tuple[AuditRecord, ...]:
-    thread_lock = _thread_lock_for(ledger_path)
-    with thread_lock, registry_lock(ledger_path):
-        ledger = RegistryLedger(ledger_path)
-        _require_verified(ledger)
-        return ledger.records()
-
-
-def _require_verified(ledger: RegistryLedger) -> None:
-    ok, detail = ledger.verify()
-    if not ok:
-        raise FiveToolTrialError(f"trial ledger failed verification: {detail}")
-
-
-def _thread_lock_for(path: Path) -> threading.Lock:
-    key = str(path.resolve(strict=False))
-    with _THREAD_LOCKS_GUARD:
-        return _THREAD_LOCKS.setdefault(key, threading.Lock())
-
-
-def _fsync_path(path: Path) -> None:
-    descriptor = os.open(path, os.O_RDONLY)
     try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
+        return verified_registry_records(ledger_path)
+    except (AuditLogCorruptionError, RegistryIntegrityError) as error:
+        raise FiveToolTrialError(f"trial ledger failed verification: {error}") from error
 
 
-def _fsync_directory(path: Path) -> None:
-    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+@contextmanager
+def _verified_local_transaction(ledger_path: Path) -> Iterator[RegistryLedger]:
+    """Translate the descriptor transaction into this harness's public error type."""
+
     try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
+        with verified_registry_transaction(ledger_path) as ledger:
+            yield ledger
+    except (AuditLogCorruptionError, RegistryIntegrityError) as error:
+        raise FiveToolTrialError(f"trial ledger failed verification: {error}") from error
 
 
 def _canonical_json(value: object) -> str:

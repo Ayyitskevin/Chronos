@@ -1,11 +1,13 @@
 """Experiment registry + holdout guardian (AI Quant plan C2, ADR-0013).
 
-A research-plane, tamper-evident ledger (built on the hash-chained
-:class:`chronos.auditlog.AuditLog`) that records every research run and every holdout
-event. The ledger is the single source of truth for the multiple-testing trial count
-and for which holdout windows are burned. The holdout guardian mediates every unmasking
-read behind an owner-typed, single-use, logged unlock, so the M5 "burned holdout"
-failure is structurally impossible.
+A research-plane, tamper-evident :class:`RegistryLedger` that records brokered attempts,
+explicitly registered legacy runs, and holdout events. Its record format and hashes stay
+compatible with the historical AuditLog format, while hardened descriptor-relative I/O,
+locking, and a durable head anchor protect the canonical registry boundary. The ledger is
+the single source of truth for registered multiplicity and for which holdout windows are
+burned. The holdout guardian mediates the sanctioned unmasking path behind an owner-typed,
+single-use, logged unlock, so the M5 "burned holdout" failure is detected and refused
+within that path.
 
 Exports are loaded lazily so importing ledger-only research code does not also grant or
 load the holdout-unlock capability. The package remains import-isolated from the trading
@@ -28,7 +30,14 @@ if TYPE_CHECKING:
         mediated_holdout_read,
         request_unlock,
     )
-    from chronos.registry.ledger import KIND_CONSUME, KIND_RUN, KIND_UNLOCK, RegistryLedger
+    from chronos.registry.ledger import (
+        CANONICAL_REGISTRY_LEDGER_PATH,
+        KIND_CONSUME,
+        KIND_RUN,
+        KIND_UNLOCK,
+        RegistryIntegrityError,
+        RegistryLedger,
+    )
     from chronos.registry.runs import (
         RunStage,
         current_commit,
@@ -36,15 +45,35 @@ if TYPE_CHECKING:
         register_run,
         trial_count,
     )
+    from chronos.registry.trials import (
+        KIND_TRIAL_STARTED,
+        KIND_TRIAL_TERMINAL,
+        TRIAL_SCHEMA_VERSION,
+        CanonicalTrialError,
+        CanonicalTrialReceipt,
+        CanonicalTrialRegistry,
+        CompletedTrialAttempt,
+        TrialMultiplicitySnapshot,
+    )
 
 _EXPORT_MODULE = {
+    "CANONICAL_REGISTRY_LEDGER_PATH": "chronos.registry.ledger",
     "KIND_CONSUME": "chronos.registry.ledger",
     "KIND_RUN": "chronos.registry.ledger",
+    "KIND_TRIAL_STARTED": "chronos.registry.trials",
+    "KIND_TRIAL_TERMINAL": "chronos.registry.trials",
     "KIND_UNLOCK": "chronos.registry.ledger",
     "REQUIRED_HOLDOUT_UNLOCK_PHRASE": "chronos.registry.holdout_guardian",
     "HoldoutGuardianError": "chronos.registry.holdout_guardian",
+    "CanonicalTrialError": "chronos.registry.trials",
+    "CanonicalTrialReceipt": "chronos.registry.trials",
+    "CanonicalTrialRegistry": "chronos.registry.trials",
+    "CompletedTrialAttempt": "chronos.registry.trials",
     "RegistryLedger": "chronos.registry.ledger",
+    "RegistryIntegrityError": "chronos.registry.ledger",
     "RunStage": "chronos.registry.runs",
+    "TRIAL_SCHEMA_VERSION": "chronos.registry.trials",
+    "TrialMultiplicitySnapshot": "chronos.registry.trials",
     "UnlockGrant": "chronos.registry.holdout_guardian",
     "accrued_capture_sessions": "chronos.registry.budget",
     "available_budget": "chronos.registry.budget",
@@ -59,13 +88,23 @@ _EXPORT_MODULE = {
 }
 
 __all__ = [
+    "CANONICAL_REGISTRY_LEDGER_PATH",
     "KIND_CONSUME",
     "KIND_RUN",
+    "KIND_TRIAL_STARTED",
+    "KIND_TRIAL_TERMINAL",
     "KIND_UNLOCK",
     "REQUIRED_HOLDOUT_UNLOCK_PHRASE",
+    "TRIAL_SCHEMA_VERSION",
+    "CanonicalTrialError",
+    "CanonicalTrialReceipt",
+    "CanonicalTrialRegistry",
+    "CompletedTrialAttempt",
     "HoldoutGuardianError",
+    "RegistryIntegrityError",
     "RegistryLedger",
     "RunStage",
+    "TrialMultiplicitySnapshot",
     "UnlockGrant",
     "accrued_capture_sessions",
     "available_budget",

@@ -12,8 +12,10 @@ from typing import Any, cast
 
 import pytest
 
+from chronos.auditlog.log import AuditRecord
 from chronos.registry.ledger import RegistryLedger
 from chronos.research.five_tool.contract import input_contract_digest
+from chronos.research.five_tool.replay import FiveToolReplayPolicy
 from chronos.research.five_tool_trials import (
     EXECUTION_READY,
     INTERRUPTED_ATTEMPT_ERROR,
@@ -281,6 +283,53 @@ def test_synthetic_harness_starts_durably_before_reader(tmp_path: Path) -> None:
         KIND_TRIAL_STARTED,
         KIND_TRIAL_TERMINAL,
     ]
+
+
+def test_synthetic_harness_refuses_parent_replacement_before_ledger_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = tmp_path / "locked-parent"
+    parent.mkdir()
+    displaced = tmp_path / "displaced-parent"
+    path = parent / "synthetic.jsonl"
+    manifest = _synthetic_ready_manifest_for_tests()
+    broker = _ready_broker(path, manifest)
+    original_records_of = RegistryLedger.records_of
+    replaced = False
+
+    def replace_parent_then_read(
+        ledger: RegistryLedger,
+        kind: str,
+    ) -> tuple[AuditRecord, ...]:
+        nonlocal replaced
+        if not replaced:
+            parent.rename(displaced)
+            parent.mkdir()
+            replaced = True
+        return original_records_of(ledger, kind)
+
+    monkeypatch.setattr(RegistryLedger, "records_of", replace_parent_then_read)
+
+    with pytest.raises(FiveToolTrialError, match="trial ledger failed verification"):
+        broker.run(
+            _definition(manifest),
+            _request(manifest),
+            reader=lambda _: _DATA,
+            evaluator=lambda _data, receipt: _evaluation(receipt),
+        )
+
+    assert replaced is True
+    assert not path.exists()
+    assert not (displaced / path.name).exists()
+
+
+def test_synthetic_harness_translates_malformed_ledger_refusal(tmp_path: Path) -> None:
+    path = tmp_path / "malformed-ledger.jsonl"
+    path.write_text("{not-json}\n", encoding="utf-8")
+
+    with pytest.raises(FiveToolTrialError, match="trial ledger failed verification"):
+        ledger_trial_multiplicity(path)
 
 
 @pytest.mark.parametrize(
@@ -982,9 +1031,52 @@ def test_hash_valid_existing_seal_rejects_boolean_scalars(
 def test_manifest_digest_binds_every_valid_policy_change() -> None:
     original = _checked_manifest()
     changed = copy.deepcopy(original)
+    changed_policy = FiveToolReplayPolicy(commission_bps_per_fill=4.0)
+    changed["replay_policy"] = {
+        "canonical": changed_policy.canonical_payload,
+        "sha256": changed_policy.digest,
+    }
     changed["costs"]["commission_bps_per_fill"] = 4.0
     validate_campaign_manifest(changed)
     assert campaign_manifest_digest(changed) != campaign_manifest_digest(original)
+
+
+def test_manifest_replay_policy_requires_exact_adapter_schema_and_digest() -> None:
+    base = _checked_manifest()
+    policy = FiveToolReplayPolicy()
+    assert base["replay_policy"] == {
+        "canonical": policy.canonical_payload,
+        "sha256": policy.digest,
+    }
+
+    mutations: list[tuple[str, Any]] = [
+        (
+            "unknown lock key",
+            lambda item: item["replay_policy"].__setitem__("unknown", True),
+        ),
+        (
+            "missing canonical key",
+            lambda item: item["replay_policy"]["canonical"].pop("entry_bar_stop"),
+        ),
+        (
+            "digest mismatch",
+            lambda item: item["replay_policy"].__setitem__("sha256", "0" * 64),
+        ),
+    ]
+    for _name, mutate in mutations:
+        changed = copy.deepcopy(base)
+        mutate(changed)
+        with pytest.raises(ValueError, match="replay_policy"):
+            validate_campaign_manifest(changed)
+
+    changed = copy.deepcopy(base)
+    canonical = changed["replay_policy"]["canonical"]
+    canonical["entry_bar_targets"] = "active"
+    changed["replay_policy"]["sha256"] = hashlib.sha256(
+        json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    with pytest.raises(ValueError, match="execution semantics"):
+        validate_campaign_manifest(changed)
 
 
 def test_manifest_rejects_material_identity_and_policy_mutations() -> None:

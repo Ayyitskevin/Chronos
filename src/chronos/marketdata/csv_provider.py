@@ -40,6 +40,27 @@ def load_daily_csv(path: Path, symbol: str, source: str, exchange: str = "ARCA")
     """Load one symbol's daily bars from a CSV file, fail-closed."""
 
     raw = path.read_bytes()
+    return load_daily_csv_bytes(
+        raw,
+        path=path,
+        symbol=symbol,
+        source=source,
+        exchange=exchange,
+    )
+
+
+def load_daily_csv_bytes(
+    raw: bytes,
+    *,
+    path: Path,
+    symbol: str,
+    source: str,
+    exchange: str = "ARCA",
+) -> LoadedSeries:
+    """Parse one immutable CSV byte snapshot using ``path`` only for diagnostics."""
+
+    if not isinstance(raw, bytes):
+        raise TypeError("raw CSV content must be bytes")
     digest = hashlib.sha256(raw).hexdigest()
     text = raw.decode("utf-8-sig")
     reader = csv.DictReader(text.splitlines())

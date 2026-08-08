@@ -17,11 +17,12 @@ cell, common rejection tests, and the identities whose change starts a new campa
 No campaign result exists in this document. The checked-in manifest is blocked until the
 certified dataset digest, power calculation, accessible partitions, code/criteria digests,
 and owner risk limits are frozen. QQQ 2022-01 through 2024-01 is already consumed and is
-not a clean holdout. The checked manifest broker refuses all data while blocked, and
-this slice contains no holdout guardian or unlock capability. Public v1 validation also
-refuses any manifest changed to `ready_for_certified_research`: prose and digests cannot
-stand in for the missing certified-reader, replay-artifact, owner-evidence, and canonical
-ADR-0013 registry capabilities.
+not a clean holdout. The checked manifest broker refuses all data while blocked, and no
+Five-Tool campaign path can invoke the repository's separately owner-gated holdout
+guardian. Public v1 validation also refuses any manifest changed to
+`ready_for_certified_research`: the new canonical trial registry, manifest-bound ordinary
+reader, replay object store, and causal fill adapter are infrastructure, not proof that
+this campaign's dataset, evaluator, owner limits, or readiness locks have been certified.
 
 ## Evidence the cited sources do and do not provide
 
@@ -173,6 +174,15 @@ and a supplied variance identity for lifecycle tests only. It cannot produce a P
 score or final verdict. Candidate display names and evaluation order remain excluded from
 the intended scoring identity.
 
+Chronos now also provides a separate brokered evidence path:
+`CanonicalTrialRegistry` writes a unique start to the fixed canonical registry,
+`CertifiedDatasetCatalog` opens only the exact authenticated ordinary partition after that
+start, `ReplayObjectStore` retains exact input/output bytes, and
+`BrokeredResearchTrialRunner` writes the terminal outcome only after a replay envelope is
+durable. Starts—not terminals—define the canonical multiplicity snapshot, so failed,
+interrupted, and repeated attempts remain counted. The Five-Tool manifest is not yet wired
+to this path, and the snapshot is not a final score seal or reviewed variance estimate.
+
 A cell cannot pass unless all applicable checks below pass unchanged:
 
 These are preregistered requirements, not an implemented campaign verdict. Benchmark-alpha
@@ -210,8 +220,19 @@ after observing a result.
 - TradingView bar magnifier can choose a different within-bar target/stop ordering than
   chart-timeframe OHLCV. Signal parity is reported separately; the Chronos approximation
   is conservative stop-first and labeled as such.
+- The entry bar resolves only the absolute signal-time stop pre-submitted for every leg;
+  targets remain inactive until later bars, when the ladder is rebased to actual adverse
+  next-open execution without resizing signal-time quantity or risk. This is frozen replay
+  policy, not a fill-parity claim.
+- Lower-timeframe magnifier mode requires complete, identity-matched sub-bar coverage that
+  reproduces parent OHLC for every replay bar, even while flat. Missing or incomplete
+  coverage fails closed; it never silently falls back to chart OHLC.
 - Expanding Markov/dwell state changes with loaded history. `history_start_utc` is identity,
-  and alternate starts are sensitivity trials, never a silent data-loader choice.
+  and alternate starts are sensitivity trials, never a silent data-loader choice. The
+  signal-to-ledger adapter is full-from-origin only and has no checkpoint/resume contract.
+- Result identity binds all effective primary/companion identities and values, explicit
+  primary open timestamps, and lower-timeframe identity/OHLC evidence. Caller account
+  snapshots are excluded only because replay overwrites them with result-bound owned state.
 - A three-leg position is not three independent hypotheses or necessarily three
   independent trades. Statistics disclose leg-level versus position-level accounting.
 - Exit reasons must be explicit events. A missing leg identifier is not by itself proof
@@ -231,18 +252,23 @@ after observing a result.
 
 Any change to one of the following ends this campaign identity: Pine SHA, executable
 input-contract/config digest, certified dataset digest, history start, benchmark, fill
-policy, cost model, criteria digest, or code commit. A changed identity receives a new
-campaign id. Before Phase 3 can run, both old and new attempts must be recorded in the
-canonical ADR-0013 registry so a new path or restart cannot erase prior multiplicity. The
-current Five-Tool ledger is path-local and does not provide that integration.
+policy, canonical replay-policy SHA-256 (including terminal policy, entry-stop/later-ladder
+timing, target-limit slippage, and discretionary/protective priority), cost model, criteria
+digest, or code commit. A changed identity receives a new campaign id. Before Phase 3 can
+run, both old and new attempts must be recorded through the fixed canonical ADR-0013
+capability so a new evidence path or restart cannot erase prior multiplicity. The private
+Five-Tool lifecycle harness remains path-local; the new canonical runner exists, but this
+blocked campaign has not been authorized or wired to it.
 
-No holdout guardian or unlock capability exists in this slice. Any future
-owner-authorized guardian may open the untouched holdout only after all
+No Five-Tool evaluator imports or exposes a holdout unlock capability. The repository's
+separate owner-authorized guardian may open an untouched holdout only after all
 development/validation choices are frozen. Failure on that one unchanged holdout means
 rejection, not a threshold edit, new ablation, or second “final” window under the old id.
 
 The private lifecycle harness accepts arbitrary reader and evaluator callbacks. A callback
 can preload data or touch undeclared sources, so its start-before-callback ordering is not
-proof that every underlying data touch was brokered. Evaluation artifacts are hashed but
-not retained in a content-addressed replay store, and a variance digest carries no reviewer
-attestation here. These are explicit test-harness boundaries, not certified evidence.
+proof that every underlying data touch was brokered. Its evaluation artifacts are hashed
+but not retained. The separate brokered runner removes the reader callback, retains its
+declared input/output objects, and binds them to canonical start/terminal hashes; it is not
+a Python sandbox, so only reviewed evaluators may be used. No campaign-ready Five-Tool
+evaluator, owner attestation, final-N seal, or reviewed variance evidence exists yet.

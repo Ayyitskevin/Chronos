@@ -209,6 +209,62 @@ def build_position_plan(
     if not all(math.isfinite(value) and value >= 0.0 for value in (target_1_r, target_2_r)):
         raise PlanningError("target R multiples must be finite and non-negative")
 
+    return _build_position_plan_at_entry(
+        quantity_plan,
+        entry_price=quantity_plan.request.entry_reference_price,
+        stop_price=quantity_plan.request.stop_price,
+        target_1_r=target_1_r,
+        target_2_r=target_2_r,
+    )
+
+
+def build_filled_position_plan(
+    quantity_plan: QuantityPlan,
+    *,
+    entry_fill_price: float,
+    target_1_r: float = 1.0,
+    target_2_r: float = 2.0,
+) -> PositionPlan:
+    """Rebase active stops and targets to a next-open entry fill.
+
+    The accepted quantity and signal-time risk distance are immutable facts.  A
+    gap at the next open therefore moves the active stop/target ladder without
+    re-running sizing against future price or equity.  This mirrors the Pine
+    position-management ladder's use of ``strategy.position_avg_price``.  The
+    replay adapter separately resolves the pre-submitted signal-time stop on
+    the entry bar before this rebased ladder becomes active.
+    """
+
+    if not quantity_plan.accepted or quantity_plan.stop_distance is None:
+        raise PlanningError("cannot build legs from a rejected quantity plan")
+    if not _positive_finite(entry_fill_price):
+        raise PlanningError("entry fill price must be finite and positive")
+    sign = 1.0 if quantity_plan.request.side is PositionSide.LONG else -1.0
+    stop_price = entry_fill_price - sign * quantity_plan.stop_distance
+    if not _positive_finite(stop_price):
+        raise PlanningError("fill-rebased stop price must be finite and positive")
+    return _build_position_plan_at_entry(
+        quantity_plan,
+        entry_price=entry_fill_price,
+        stop_price=stop_price,
+        target_1_r=target_1_r,
+        target_2_r=target_2_r,
+    )
+
+
+def _build_position_plan_at_entry(
+    quantity_plan: QuantityPlan,
+    *,
+    entry_price: float,
+    stop_price: float,
+    target_1_r: float,
+    target_2_r: float,
+) -> PositionPlan:
+    if not all(math.isfinite(value) and value >= 0.0 for value in (target_1_r, target_2_r)):
+        raise PlanningError("target R multiples must be finite and non-negative")
+    stop_distance = quantity_plan.stop_distance
+    if not quantity_plan.accepted or stop_distance is None:
+        raise PlanningError("cannot build legs from a rejected quantity plan")
     request = quantity_plan.request
     quantity = quantity_plan.quantity
     step = request.quantity_step
@@ -232,13 +288,8 @@ def build_position_plan(
     sign = 1.0 if request.side is PositionSide.LONG else -1.0
     effective_target_2_r = max(target_1_r, target_2_r)
     targets = (
-        (
-            request.entry_reference_price
-            + sign
-            * (target_1_r if can_split else effective_target_2_r)
-            * quantity_plan.stop_distance
-        ),
-        request.entry_reference_price + sign * effective_target_2_r * quantity_plan.stop_distance,
+        (entry_price + sign * (target_1_r if can_split else effective_target_2_r) * stop_distance),
+        entry_price + sign * effective_target_2_r * stop_distance,
         None,
     )
     reasons: tuple[ExitReason | None, ...] = (
@@ -250,7 +301,7 @@ def build_position_plan(
         PlannedLeg(
             leg_id=leg_id,
             quantity=leg_quantity,
-            stop_price=request.stop_price,
+            stop_price=stop_price,
             target_price=targets[index],
             target_reason=reasons[index],
         )
@@ -258,11 +309,13 @@ def build_position_plan(
         if leg_quantity >= minimum
     )
     planned = math.fsum(leg.quantity for leg in legs)
+    if any(leg.target_price is not None and not _positive_finite(leg.target_price) for leg in legs):
+        raise PlanningError("planned target price must be finite and positive")
     return PositionPlan(
         side=request.side,
-        entry_reference_price=request.entry_reference_price,
-        initial_stop_price=request.stop_price,
-        risk_distance=quantity_plan.stop_distance,
+        entry_reference_price=entry_price,
+        initial_stop_price=stop_price,
+        risk_distance=stop_distance,
         requested_quantity=quantity,
         planned_quantity=planned,
         unallocated_quantity=max(0.0, quantity - planned),
@@ -399,7 +452,7 @@ def resolve_exit_fill(
 
     if policy is FillPolicy.LOWER_TIMEFRAME_MAGNIFIER:
         subbars = tuple(lower_timeframe_bars or ())
-        _validate_magnifier_coverage(bar, subbars)
+        validate_magnifier_coverage(bar, subbars)
         for subbar in subbars:
             event = _resolve_ohlc(order, subbar, FillPolicy.OHLC_STOP_FIRST)
             if event is not None:
@@ -757,7 +810,13 @@ def _required_target_reason(order: ExitOrder) -> ExitReason:
     return order.target_reason
 
 
-def _validate_magnifier_coverage(parent: OhlcBar, subbars: tuple[OhlcBar, ...]) -> None:
+def validate_magnifier_coverage(
+    parent: OhlcBar,
+    lower_timeframe_bars: Sequence[OhlcBar],
+) -> None:
+    """Fail unless lower bars continuously and exactly reproduce one parent bar."""
+
+    subbars = tuple(lower_timeframe_bars)
     if not subbars:
         raise UnsupportedMagnifierError("magnifier policy requires lower-timeframe bars")
     if parent.symbol is None or parent.source is None or parent.interval is None:
@@ -771,6 +830,11 @@ def _validate_magnifier_coverage(parent: OhlcBar, subbars: tuple[OhlcBar, ...]) 
     if any((bar.symbol, bar.source) != (parent.symbol, parent.source) for bar in subbars):
         raise UnsupportedMagnifierError(
             "lower-timeframe symbol/source identity does not match the parent"
+        )
+    subbar_ids = tuple(bar.sequence_id for bar in subbars)
+    if len(set(subbar_ids)) != len(subbar_ids) or parent.sequence_id in subbar_ids:
+        raise UnsupportedMagnifierError(
+            "parent and lower-timeframe sequence identities must be distinct"
         )
     subbar_intervals = {bar.interval for bar in subbars}
     if len(subbar_intervals) != 1 or parent.interval in subbar_intervals:
