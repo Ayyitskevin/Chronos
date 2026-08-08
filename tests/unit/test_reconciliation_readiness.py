@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from threading import Event, Thread
 from time import monotonic, sleep
 
@@ -184,3 +184,152 @@ def test_process_sessions_do_not_share_generation_identity() -> None:
     second = ReconciliationReadiness(session_id="process-b")
 
     assert first.snapshot().generation == second.snapshot().generation
+
+
+# ---------------------------------------------------- maximum evidence age (ADR-0020)
+#
+# The age is evaluated in `snapshot()` rather than by the task that refreshes it:
+# a proof must stop being trusted whether or not the refresher is alive. These
+# tests drive a fake clock directly, so they prove the demotion happens with no
+# loop running at all — which is the property the design depends on.
+
+
+def _aged_latch(clock_holder: list[datetime], age_seconds: int = 300):
+    return ReconciliationReadiness(
+        max_evidence_age=timedelta(seconds=age_seconds), clock=lambda: clock_holder[0]
+    )
+
+
+def test_evidence_inside_the_age_still_authorizes() -> None:
+    now = [NOW]
+    latch = _aged_latch(now)
+    generation = latch.begin_reconciliation("startup")
+    assert latch.complete(
+        expected_generation=generation,
+        status=ReconciliationStatus.RECONCILED,
+        reason="reconciled",
+        reconciled_at=NOW,
+    )
+    now[0] = NOW + timedelta(seconds=299)
+    assert latch.snapshot().ready is True
+
+
+def test_evidence_past_the_age_reads_pending_with_no_loop_running() -> None:
+    """The whole point: expiry does not depend on the refresher being alive."""
+
+    now = [NOW]
+    latch = _aged_latch(now)
+    generation = latch.begin_reconciliation("startup")
+    latch.complete(
+        expected_generation=generation,
+        status=ReconciliationStatus.RECONCILED,
+        reason="reconciled",
+        reconciled_at=NOW,
+    )
+    now[0] = NOW + timedelta(seconds=301)
+    snapshot = latch.snapshot()
+    assert snapshot.ready is False
+    assert snapshot.status is ReconciliationStatus.PENDING
+    assert "maximum evidence age" in snapshot.reason
+    assert snapshot.reconciled_at is None
+
+
+def test_two_missed_active_cycles_fail_closed_by_arithmetic() -> None:
+    """120s cadence: one miss survivable (240s), two are not (360s > 300s)."""
+
+    now = [NOW]
+    latch = _aged_latch(now)
+    generation = latch.begin_reconciliation("startup")
+    latch.complete(
+        expected_generation=generation,
+        status=ReconciliationStatus.RECONCILED,
+        reason="reconciled",
+        reconciled_at=NOW,
+    )
+    now[0] = NOW + timedelta(seconds=240)
+    assert latch.snapshot().ready is True, "one missed cycle must still authorize"
+    now[0] = NOW + timedelta(seconds=360)
+    assert latch.snapshot().ready is False, "two missed cycles must fail closed"
+
+
+def test_one_missed_idle_cycle_fails_closed() -> None:
+    """240s cadence tolerates zero misses (480s > 300s) — stricter, and correct.
+
+    A flat book has no position to protect, so blocking early costs nothing. This
+    asymmetry with the active cadence is deliberate, not an oversight.
+    """
+
+    now = [NOW]
+    latch = _aged_latch(now)
+    generation = latch.begin_reconciliation("startup")
+    latch.complete(
+        expected_generation=generation,
+        status=ReconciliationStatus.RECONCILED,
+        reason="reconciled",
+        reconciled_at=NOW,
+    )
+    now[0] = NOW + timedelta(seconds=480)
+    assert latch.snapshot().ready is False
+
+
+def test_readiness_cannot_cross_a_session_open() -> None:
+    """ADR-0020 §4 needs no separate mechanism — the age already enforces it.
+
+    Overnight assignment is the event most likely to make the book differ from
+    what the system believes. A proof from before the open is hours old, so it is
+    stale by construction and the first order of the session must re-reconcile.
+    """
+
+    now = [NOW]
+    latch = _aged_latch(now)
+    generation = latch.begin_reconciliation("startup")
+    latch.complete(
+        expected_generation=generation,
+        status=ReconciliationStatus.RECONCILED,
+        reason="reconciled before the close",
+        reconciled_at=NOW,
+    )
+    now[0] = NOW + timedelta(hours=18)
+    assert latch.snapshot().ready is False
+
+
+def test_an_in_flight_submission_keeps_its_claim_when_evidence_ages_out() -> None:
+    """A sender that already claimed readiness is entitled to finish.
+
+    `submission_guard` has already set the status to PENDING for everyone else,
+    so there is nothing left to demote, and taking the claim away mid-send would
+    invalidate an authorization the sender legitimately holds.
+    """
+
+    now = [NOW]
+    latch = _aged_latch(now)
+    generation = latch.begin_reconciliation("startup")
+    latch.complete(
+        expected_generation=generation,
+        status=ReconciliationStatus.RECONCILED,
+        reason="reconciled",
+        reconciled_at=NOW,
+    )
+    with latch.submission_guard(expected_generation=generation) as acquired:
+        assert acquired
+        now[0] = NOW + timedelta(seconds=3600)
+        assert latch.submission_claim_is_current(expected_generation=generation) is True
+
+
+def test_the_age_is_opt_in_so_a_bare_latch_never_expires() -> None:
+    """Default construction keeps the pre-2026-08-02 behaviour, deliberately."""
+
+    latch = ReconciliationReadiness()
+    generation = latch.begin_reconciliation("startup")
+    latch.complete(
+        expected_generation=generation,
+        status=ReconciliationStatus.RECONCILED,
+        reason="reconciled",
+        reconciled_at=NOW,
+    )
+    assert latch.snapshot().ready is True
+
+
+def test_a_non_positive_age_is_refused_at_construction() -> None:
+    with pytest.raises(ValueError, match="max_evidence_age must be positive"):
+        ReconciliationReadiness(max_evidence_age=timedelta(0), clock=lambda: NOW)

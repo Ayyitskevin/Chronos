@@ -1,7 +1,16 @@
 # ADR-0015: Re-validation campaign (Milestone C4)
 
-Status: proposed (design-review pending)
+Status: proposed (design-review pending) — **see the status note below**
 Date: 2026-07-19
+
+> **Status note, 2026-08-02 (deliberately NOT flipped).** The campaign this ADR proposes is
+> implemented: `src/chronos/research/campaign.py` ships, and `research campaign` runs with
+> the 2022-01-01 holdout wall and fail-closed stage/commit resolution. As with ADR-0014,
+> **this ADR has no row in `DECISIONS.md`** (`grep -c "ADR-0015" DECISIONS.md` returns 0),
+> so its formal acceptance is unrecorded and "design-review pending" may be accurate rather
+> than stale. Marking an ADR accepted is an owner act, not an agent's.
+> **Owner decision required:** record acceptance in `DECISIONS.md` and flip this line, or
+> run the pending design review. Until then the code is authoritative for behavior.
 
 ## Context
 

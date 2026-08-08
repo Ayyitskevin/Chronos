@@ -50,6 +50,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from chronos.api.auth import load_or_create_token
 from chronos.api.autonomy_wiring import autonomy_tick_task, build_autonomy_runtime
 from chronos.api.dependencies import BackendState
+from chronos.api.reconciliation_loop import reconciliation_task
 from chronos.api.routes.account import router as account_router
 from chronos.api.routes.autonomy import router as autonomy_router
 from chronos.api.routes.health import router as health_router
@@ -247,10 +248,16 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         raise
     heartbeat: asyncio.Task[None] | None = None
     autonomy_task: asyncio.Task[None] | None = None
+    reconcile_task: asyncio.Task[None] | None = None
     if not read_only:
         # R-24: without this the lease silently lapses after its TTL.
         period = lease.ttl.total_seconds() / _RENEWALS_PER_TTL
         heartbeat = asyncio.create_task(_heartbeat_lease(app.state.backend, lease, period))
+        # ADR-0020: re-arm submission readiness on the owner-frozen cadence.
+        # Writer-only, because a read-only backend cannot persist recovery and
+        # must stay PENDING. Without this the first opening order of the process
+        # consumes readiness and nothing ever re-arms it.
+        reconcile_task = asyncio.create_task(reconciliation_task(runtime))
         # ADR-0017: the persistent mandate is the owner's standing grant. When
         # one is configured and valid, the autonomy runtime starts with the
         # backend — no per-boot ritual. No grant (the default) boots inert, and
@@ -258,8 +265,16 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         # absence of the authority, never a crash of the process that can still
         # close positions.
         try:
+            # `is_writer` is read per submission, never captured: the lease
+            # heartbeat can demote this process mid-session, and the autonomous
+            # path must see that at gate 1 exactly as the human path does
+            # (`state.writer` in routes/orders.py) rather than being turned away
+            # later by the CAS-window re-check.
+            autonomy_backend = app.state.backend
             autonomy = build_autonomy_runtime(
-                runtime, process_generation=int(app.state.backend.lease is not None)
+                runtime,
+                process_generation=int(app.state.backend.lease is not None),
+                is_writer=lambda: bool(autonomy_backend.writer),
             )
         except Exception:
             _logger.exception(
@@ -281,6 +296,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             autonomy_task.cancel()
             with suppress(asyncio.CancelledError):
                 await autonomy_task
+        if reconcile_task is not None:
+            reconcile_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await reconcile_task
         if heartbeat is not None:
             heartbeat.cancel()
             with suppress(asyncio.CancelledError):

@@ -37,10 +37,17 @@ That is corrected here, and the honest list is kept in one place:
   read those fields, and deliberately: routing them through the existing
   degraded lever means the "no new exposure, risk reduction still allowed" rule
   has exactly one implementation.
-- **Not enforced anywhere, pending contract compilation (M2 follow-on):**
-  ``scope.exchanges`` and ``scope.contract_families``. A decision names no
-  exchange by construction, so these can only be checked against a *qualified*
-  contract, and no compilation step exists yet.
+- **Enforced since M4, but not here.** ~~Not enforced anywhere, pending contract
+  compilation (M2 follow-on):~~ ``scope.exchanges`` and
+  ``scope.contract_families``. A decision names no exchange by construction, so
+  these can only be checked against a *qualified* contract ~~and no compilation
+  step exists yet~~. *(Corrected 2026-08-08: the compilation step landed in M4.
+  :mod:`chronos.supervisor.compiler` refuses ``EXCHANGE_NOT_PERMITTED`` and
+  ``FAMILY_NOT_PERMITTED`` against the qualified contract;
+  ``docs/limitations.md`` already carried this correction. Admission itself
+  still does not read them, which is what this section is about — but they are
+  not inert, and a reader who took "not enforced anywhere" at face value would
+  have believed a binding restriction was decoration.)*
 - **Not enforced by admission; deferred to the orders-plane risk engine and the
   ten-gate live stack, which run on every proposal:** margin, buying power,
   cash-secured collateral, and market-open session checks.

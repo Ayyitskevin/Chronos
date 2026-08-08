@@ -1,7 +1,19 @@
 # ADR-0014: Walk-forward + statistics upgrade (Milestone C3)
 
-Status: proposed (design-review pending)
+Status: proposed (design-review pending) — **see the status note below**
 Date: 2026-07-19
+
+> **Status note, 2026-08-02 (deliberately NOT flipped).** The design this ADR proposes is
+> implemented and running: `src/chronos/research/walkforward.py` and
+> `src/chronos/research/stats.py` ship the walk-forward harness, the deflated Sharpe ratio
+> (threshold 0.95, trial count taken from the registry ledger), and the stationary
+> block bootstrap. Unlike ADR-0012 (accepted via `DECISIONS.md` D-14), **this ADR has no
+> row in `DECISIONS.md`** — `grep -c "ADR-0014" DECISIONS.md` returns 0 — so its formal
+> acceptance is recorded nowhere, and the "design-review pending" clause may be accurate
+> rather than stale. An agent cannot resolve this: marking an ADR accepted is an owner act
+> (`AGENTS.md` precedence, tier 3). **Owner decision required:** either record acceptance
+> in `DECISIONS.md` and flip this line, or run the pending design review. Until then, treat
+> the code as authoritative for behavior and this ADR as a proposal it happens to match.
 
 ## Context
 

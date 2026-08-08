@@ -294,7 +294,7 @@ def test_no_mandate_file_boots_inert(database: Database, tmp_path: Path) -> None
     """The one default that stays non-maximal on purpose: no grant, no runtime."""
 
     runtime = _runtime(database, tmp_path, mandate_file=None)
-    assert build_autonomy_runtime(runtime, process_generation=1) is None
+    assert build_autonomy_runtime(runtime, process_generation=1, is_writer=lambda: True) is None
     assert _activation_count(database.sessions) == 0
 
 
@@ -305,7 +305,7 @@ def test_an_invalid_mandate_file_boots_inert_with_a_critical_alert(
     path.write_text("{ not a mandate")
     runtime = _runtime(database, tmp_path, mandate_file=path)
 
-    assert build_autonomy_runtime(runtime, process_generation=1) is None
+    assert build_autonomy_runtime(runtime, process_generation=1, is_writer=lambda: True) is None
     with database.sessions.begin() as session:
         raised = alerts.unacknowledged(session, account_fingerprint=_FINGERPRINT)
     assert any(
@@ -321,7 +321,7 @@ def test_a_mandate_for_another_account_boots_inert(database: Database, tmp_path:
     path = _write_mandate(tmp_path, stranger)
     runtime = _runtime(database, tmp_path, mandate_file=path)
 
-    assert build_autonomy_runtime(runtime, process_generation=1) is None
+    assert build_autonomy_runtime(runtime, process_generation=1, is_writer=lambda: True) is None
     assert _activation_count(database.sessions) == 0
     with database.sessions.begin() as session:
         raised = alerts.unacknowledged(session, account_fingerprint=_FINGERPRINT)
@@ -332,7 +332,7 @@ def test_a_matching_mandate_assembles_a_live_runtime(database: Database, tmp_pat
     path = _write_mandate(tmp_path, _mandate())
     runtime = _runtime(database, tmp_path, mandate_file=path)
 
-    autonomy = build_autonomy_runtime(runtime, process_generation=9)
+    autonomy = build_autonomy_runtime(runtime, process_generation=9, is_writer=lambda: True)
     assert isinstance(autonomy, AutonomyRuntime)
     # Assembly is also activation — the mandate is now in force.
     assert _activation_count(database.sessions) == 1
@@ -370,7 +370,7 @@ def test_a_revoked_persistent_mandate_stays_inert_after_restart(
 
     path = _write_mandate(tmp_path, mandate)
     runtime = _runtime(database, tmp_path, mandate_file=path)
-    assert build_autonomy_runtime(runtime, process_generation=2) is None
+    assert build_autonomy_runtime(runtime, process_generation=2, is_writer=lambda: True) is None
 
 
 # ------------------------------------------------------------- order_plane_handoff
@@ -407,7 +407,7 @@ def test_the_handoff_walks_the_full_pipeline_in_order() -> None:
 
     service = _RecordingService(approved=True)
     runtime = SimpleNamespace(order_management=service)
-    handoff = order_plane_handoff(runtime)
+    handoff = order_plane_handoff(runtime, is_writer=lambda: True)
 
     receipt = handoff(object())
     assert service.calls == ["propose", "preview", "confirm", "submit"]
@@ -420,7 +420,7 @@ def test_a_risk_refusal_raises_and_never_submits() -> None:
 
     service = _RecordingService(approved=False)
     runtime = SimpleNamespace(order_management=service)
-    handoff = order_plane_handoff(runtime)
+    handoff = order_plane_handoff(runtime, is_writer=lambda: True)
 
     with pytest.raises(RiskRefusedByOrderPlane):
         handoff(object())
@@ -482,3 +482,34 @@ def test_confirmation_refused_is_a_distinct_error_type() -> None:
     assert issubclass(RiskRefusedByOrderPlane, RuntimeError)
     assert issubclass(ConfirmationRefusedByOrderPlane, RuntimeError)
     assert RiskRefusedByOrderPlane is not ConfirmationRefusedByOrderPlane
+
+
+def test_the_handoff_passes_the_live_writer_state_not_a_literal() -> None:
+    """A demoted backend must reach `submit` as a NON-writer (2026-08-05).
+
+    Until this test existed the handoff passed the literal ``True``. That was not
+    a bypass — the submission boundary re-checks lease ownership in the database
+    inside the CAS-to-transmit window (R-24) — but it meant a process demoted
+    mid-session by the lease heartbeat was turned away *late*, after propose,
+    preview and confirm had already written state, and with a less specific
+    refusal than gate 1's ``READ_ONLY_LEASE``.
+
+    The predicate is read per submission rather than captured, because demotion
+    happens while the runtime is alive.
+    """
+
+    service = _RecordingService(approved=True)
+    runtime = SimpleNamespace(order_management=service)
+    writer = {"value": True}
+    handoff = order_plane_handoff(runtime, is_writer=lambda: writer["value"])
+
+    handoff(object())
+    assert service.submit_lease is True, "a writer must submit as a writer"
+
+    # The heartbeat demotes this process mid-session.
+    writer["value"] = False
+    handoff(object())
+    assert service.submit_lease is False, (
+        "after demotion the handoff must pass the live writer state, so the order "
+        "plane refuses at gate 1 with READ_ONLY_LEASE rather than at the CAS re-check"
+    )

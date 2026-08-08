@@ -1,16 +1,38 @@
 # Backup and Recovery
 
-What to back up, how to do it safely with SQLite, and how to restore. The design premise: restore
-must never auto-resume trading, and the code guarantees it — a restored (or missing) halt file
-reads as HALTED (`src/chronos/control/halt.py`), and submission is refused until reconciliation
-passes again (`src/chronos/execution/engine.py`).
+What to back up, how to do it safely with SQLite, and how to restore. ~~The design premise:
+restore must never auto-resume trading, and the code guarantees it — a restored (or missing) halt
+file reads as HALTED (`src/chronos/control/halt.py`), and submission is refused until
+reconciliation passes again (`src/chronos/execution/engine.py`).~~
+
+> **Corrected 2026-08-02 — that guarantee holds for the deterministic platform only.** It is
+> true and unchanged for `chronos.execution`/`chronos.risk`: a restored or missing
+> `data/platform_halt.json` reads as HALTED, and submission is refused until reconciliation
+> passes. It is **not** true of the `chronos.orders` live plane, which is the plane that can
+> place an order:
+>
+> - A **missing** `data/live_kill_switch.json` reads as **DISENGAGED**
+>   (`src/chronos/orders/kill_switch.py:83-85`) — the opposite default. Restoring a backup
+>   that omits this file therefore comes up with the emergency stop **disarmed**. (A
+>   *corrupt* file reads as ENGAGED, so only absence is dangerous.)
+> - A valid, account-matching `AUTONOMY_MANDATE_FILE` **auto-activates on boot** (ADR-0017),
+>   so restoring one and starting the backend re-arms autonomy without any operator action.
+>   Revocation, by contrast, survives restart.
+>
+> The vision plan's required end state is that recovery always boots kill-engaged,
+> read-only, and unreconciled (`docs/VISION_COMPLETION_PLAN.md` §6, finding 3 — **open**;
+> the code does not do this yet). Until that lands, the manual step in the restore procedure
+> below is the compensating control. Changing the code's boot defaults is a
+> safety-mechanism modification requiring owner review, not a documentation fix.
 
 ## What to back up
 
 | Path | What it is | Loss impact |
 |---|---|---|
 | `data/platform_ledger.db` | Platform order ledger (intents, transitions, fills) | Lose the platform's own order history; reconciliation can no longer explain broker state |
-| `data/platform_halt.json` | Persistent halt state | Low (missing file fails closed to HALTED), but back it up to preserve the recorded reason/note |
+| `data/platform_halt.json` | Persistent halt state (deterministic platform) | Low (missing file fails closed to HALTED), but back it up to preserve the recorded reason/note |
+| `data/live_kill_switch.json` | **Live order-plane kill switch** (`live_kill_switch_file`) — *added 2026-08-02, previously missing from this table* | **HIGH, and inverted from the row above: a missing file reads as DISENGAGED**, so restoring without it brings the system up with the emergency stop disarmed. Always restore it, or engage the kill switch again before starting the backend. |
+| your `AUTONOMY_MANDATE_FILE` (if configured) | Owner-authored autonomy grant — *added 2026-08-02* | Restoring it **re-arms autonomy on the next boot** (ADR-0017 auto-activation). Treat it as an authority document: back it up securely, and move it aside during any recovery you do not intend to resume trading from. |
 | `data/platform_audit.jsonl` | Hash-chained audit trail | Lose the tamper-evident record of decisions and operator actions |
 | `config/` | Risk policies (`risk.example.yaml` plus your local `risk.yaml`) | Lose the exact limits runs were made under; policy hashes in results become unverifiable |
 | `specs/` | Canonical strategy specifications | Versioned in git, but back up local edits |
@@ -69,8 +91,26 @@ off-machine copy to compare against (docs/SECURITY.md).
    restored from `.backup` snapshots, just put the `.db` file in place; delete any leftover
    `-wal`/`-shm` sidecars from the dead instance so they cannot be replayed over the restored
    snapshot.
-3. **The process starts HALTED — by design.** Whatever the halt file says now stands; if the halt
-   file was not restored, the missing file reads as HALTED (`NEVER_ARMED`). Nothing trades.
+3. **The deterministic platform starts HALTED — by design.** Whatever the halt file says now
+   stands; if the halt file was not restored, the missing file reads as HALTED (`NEVER_ARMED`).
+   Nothing trades **in that plane**.
+
+   **BEFORE starting the backend, do these three by hand** *(added 2026-08-02 — the live plane
+   does not fail closed on its own; see the corrected premise at the top of this document)*:
+
+   ```bash
+   # a. Confirm the live kill switch exists; a MISSING file means DISENGAGED.
+   ls -l data/live_kill_switch.json || echo "MISSING → emergency stop is DISARMED"
+   # b. Move any autonomy mandate aside so boot cannot auto-activate it.
+   #    (Restore it deliberately, later, when you intend to resume.)
+   grep -n '^AUTONOMY_MANDATE_FILE' .env || echo "no mandate configured — nothing to move"
+   # c. Take a read-only state inventory before the process runs.
+   python3 .claude/skills/chronos-diagnostics/scripts/state_inventory.py
+   ```
+
+   If the kill-switch file is missing, engage the kill switch immediately after the backend
+   starts (`POST /live/kill`, see `docs/INCIDENT_RESPONSE.md`) and confirm the file appears —
+   or start with live capability unconfigured until you have.
 4. **Verify the audit chain:**
    ```bash
    python -m chronos.cli verify-audit-log
@@ -93,10 +133,29 @@ off-machine copy to compare against (docs/SECURITY.md).
    python -m chronos.cli rearm --note "restore from backup <date>; audit chain OK; recon clean: <evidence>"
    ```
 
-## Restore never auto-resumes trading
+## Restore never auto-resumes trading — in the deterministic platform
 
-Stated explicitly: restoring from backup NEVER re-enables order generation on its own. Fail-closed
-halt reads, the mandatory operator rearm with note, the mode lock's evidence requirements, and the
-reconciliation gate each independently block it. If you ever observe a restored system generating
-orders without a fresh rearm, that is a critical bug — halt, capture evidence, and stop using the
-build.
+*(Scoped 2026-08-02. This section was written for `chronos.execution`/`chronos.risk` and stated
+as a repository-wide guarantee; it is not one.)*
+
+For the **deterministic platform**, restoring from backup NEVER re-enables order generation on
+its own. Fail-closed halt reads, the mandatory operator rearm with note, the mode lock's evidence
+requirements, and the reconciliation gate each independently block it. If you ever observe a
+restored deterministic platform generating orders without a fresh rearm, that is a critical bug —
+halt, capture evidence, and stop using the build.
+
+For the **`chronos.orders` live plane**, the equivalent claim is **not** true today and must not
+be relied on:
+
+| Restored artifact | Effect on boot |
+|---|---|
+| `data/live_kill_switch.json` present + engaged | Stop holds (correct). |
+| `data/live_kill_switch.json` **absent** | Reads **DISENGAGED** — the stop is disarmed. |
+| Valid `AUTONOMY_MANDATE_FILE` present | Autonomy **auto-activates** (ADR-0017). |
+| Mandate previously revoked | Stays revoked across restart (correct). |
+
+Live submission still requires the full ADR-0009 conjunction, a current session arm,
+reconciliation, and the writer lease — so a restore alone does not place an order. But "the code
+guarantees a restored system cannot resume" is false for this plane, and the manual steps in the
+restore procedure above are what close the gap. Making recovery boot kill-engaged, read-only, and
+unreconciled is open finding 3 in `docs/VISION_COMPLETION_PLAN.md` §6 and requires owner review.

@@ -83,6 +83,16 @@ records *which text* granted the authority and an edited file writes a new,
 distinguishable activation. A running backend plus a valid mandate file is now
 sufficient to trade; there is no per-boot ritual.
 
+> **Amendment note, 2026-08-02 (record, not a rewrite — this ADR stands as
+> written).** The sentence above holds for the PAPER submission branch. It does
+> **not** hold for LIVE: gate 7 (session arming) was never removed from the order
+> plane, so a LIVE autonomous submit still requires a current, in-process arm
+> (`src/chronos/orders/submission.py:441`; `grep -rc "mandate" src/chronos/orders/`
+> returns zero). The intended substitution is therefore unimplemented for live
+> trading. This is open finding 4 in `docs/VISION_COMPLETION_PLAN.md` §6, and
+> resolving it — whether the code moves to the ADR or the ADR moves to the code —
+> is an owner decision requiring a new ADR. It is deliberately not resolved here.
+
 Two supporting defaults moved:
 
 - `MAX_LIVE_MANDATE_DURATION` 30 days → **365 days**. For a single-operator

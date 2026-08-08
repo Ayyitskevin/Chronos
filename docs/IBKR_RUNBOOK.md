@@ -5,11 +5,16 @@ operating a paper account from a local Linux machine. Companion documents: docs/
 (design), docs/ibkr_setup.md (wheel-dashboard read-only smoke test), docs/OPERATIONS.md (daily
 routine), docs/INCIDENT_RESPONSE.md (when something is wrong).
 
-Reality check before you start: the platform's paper adapter has never been run against a real
-gateway from the build environment, and no long-running shadow/paper service loop exists yet (see
-docs/DEPLOYMENT.md). Today the concrete things you can run against a gateway are the read-only
-smoke test and the wheel dashboard. This runbook still documents the full procedures because the
-halt/reconciliation discipline applies to all of them.
+Reality check before you start: **no real IBKR gateway, paper or live, has ever been connected in
+this project's history** — every adapter path is verified against fixtures only
+(`docs/VISION_COMPLETION_PLAN.md` §2). ~~No long-running shadow/paper service loop exists yet.~~
+*(Corrected 2026-08-02: `python -m chronos.service` exists and is tested —
+`src/chronos/service/__main__.py`, `tests/platform_unit/test_service.py`. It defaults to shadow
+mode and has no live flag.)* The platform's paper adapter is separately **quarantined** (R-28) and
+constructed nowhere in production. Today the concrete things you can run against a gateway are the
+opt-in read-only smoke test and the wheel dashboard. Closing the gateway-evidence gap is a
+numbered, owner-gated campaign — see `docs/VISION_COMPLETION_PLAN.md` §7. This runbook still
+documents the full procedures because the halt/reconciliation discipline applies to all of them.
 
 ## 1. Install TWS or IB Gateway
 

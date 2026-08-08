@@ -22,15 +22,38 @@ a test:
 3. **Deny-by-default — with one honest caveat.** Every *ceiling* defaults to
    zero and every scope tuple to empty, so a default-constructed mandate
    authorizes nothing. But some fields are **floors** — ``min_cash_floor_usd``,
-   ``min_buying_power_usd``, ``max_quote_age_seconds`` (read as a freshness
+   ``min_buying_power_usd``, ~~``max_quote_age_seconds`` (read as a freshness
    floor), and the liquidity minimums ``min_option_volume`` /
-   ``min_open_interest`` — where zero is the *most* permissive value, not the
+   ``min_open_interest``~~ — where zero is the *most* permissive value, not the
    most restrictive. Defaulting a floor to zero is therefore not
    deny-by-default, so a submitting mandate must set the three load-bearing
-   ones explicitly (see ``_validate_submitting_floors``); the two liquidity
+   ones explicitly (see ``_validate_submitting_floors``); ~~the two liquidity
    minimums stay advisory inputs to the kernel's own liquidity checks rather
-   than mandate-level gates. The M1 adversarial review caught the original text
+   than mandate-level gates~~. The M1 adversarial review caught the original text
    claiming deny-by-default across the board.
+
+   *Corrected 2026-08-08 — the list of inverted fields was wrong in both
+   directions. Checked against the only code that reads each one:*
+
+   - ``max_quote_age_seconds`` **is not one of them.** Admission compares
+     directly (``evidence.quote_age_seconds > requirements.max_quote_age_
+     seconds``, ``chronos/supervisor/admission.py``), so zero is the *most*
+     restrictive setting and would refuse every quote, not accept any. The
+     requirement below that a submitting mandate set it positive is still
+     right; the stated reason was backwards, and a reader who believed it
+     would think an unset value was permissive when it fails closed.
+   - ``min_option_volume`` / ``min_open_interest`` are not advisory inputs to
+     anything. The strike resolver's liquidity check reads
+     ``settings.min_option_volume`` / ``settings.min_open_interest``
+     (``chronos/strategy/strike_resolver.py``) — different values from a
+     different source. Nothing anywhere reads the mandate's copies, so raising
+     them tightens nothing. They are classified INERT in
+     :mod:`chronos.autonomy.enforcement`.
+   - ``max_relative_spread`` **is** one of them and was never listed. Admission
+     skips the spread comparison entirely when it is zero, so this ``max_``
+     field at its default imposes no ceiling at all. A submitting mandate that
+     means to bound the spread must say so; ``chronos mandate check`` reports
+     the omission.
 
 The model may *read* a mandate. It can neither author one nor raise its own
 limits: no tool in the model plane writes this type (ADR-0016 §3).
@@ -305,11 +328,27 @@ class ActivityLimits(AutonomyModel):
 
 
 class MarketDataRequirements(AutonomyModel):
-    """Freshness and liquidity floors below which the kernel creates no exposure.
+    """Freshness and liquidity requirements. Only one of them binds by default.
 
-    Note these are **floors**: ``max_quote_age_seconds`` of zero would accept a
+    ~~Note these are **floors**: ``max_quote_age_seconds`` of zero would accept a
     quote of any age were it read as "no requirement", so a submitting mandate
-    must set it, and the mandate validator enforces that.
+    must set it, and the mandate validator enforces that.~~
+
+    *Corrected 2026-08-08 against the code that reads each field — see the
+    module docstring for the full note. In short, the three fields behave three
+    different ways:*
+
+    - ``max_quote_age_seconds`` is compared directly, so **zero is the
+      strictest** setting and refuses every quote. A submitting mandate must
+      still set it positive, but because zero trades nothing, not because zero
+      accepts anything.
+    - ``max_relative_spread`` is skipped entirely at zero, so **zero is no
+      ceiling**. It is the field where the permissive-default hazard is real,
+      and nothing requires it to be set.
+    - ``min_option_volume`` / ``min_open_interest`` are read by **nothing**.
+      The strike resolver's liquidity check uses the same-named *settings*,
+      not these. They are classified INERT in
+      :mod:`chronos.autonomy.enforcement`.
     """
 
     max_quote_age_seconds: Decimal = Field(default=Decimal(0), ge=0)
@@ -465,7 +504,12 @@ class AutonomyMandate(AutonomyModel):
         if self.market_data.max_quote_age_seconds <= 0:
             raise ValueError(
                 f"mode {self.mode.value} requires a positive max_quote_age_seconds; "
-                "zero would accept a quote of any age"
+                # Corrected 2026-08-08: the original said "zero would accept a
+                # quote of any age". It would do the opposite — admission
+                # compares directly, so zero refuses every quote. The rule is
+                # unchanged and the mandate is still unusable at zero; only the
+                # direction of the failure was stated wrongly.
+                "zero refuses every quote, so a submitting mandate would trade nothing"
             )
         if self.capital.min_cash_floor_usd <= 0:
             raise ValueError(f"mode {self.mode.value} requires a positive min_cash_floor_usd")
