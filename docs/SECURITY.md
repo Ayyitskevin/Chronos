@@ -126,6 +126,24 @@ env pins (`BROKER_MODE=demo`, `ALLOW_ORDER_TRANSMIT=false`, `ALLOW_LIVE_TRADING=
   and review the diff before committing. `requirements.txt` remains `-e .` for a quick editable
   dev install; the lock is the reproducible, verified path used by CI and recommended for
   deployment.
+- **Regenerate INTO the existing lock, never into a fresh file** *(added 2026-08-08)*. The
+  command above writes to `requirements-dev.lock` and `uv` treats the pins already in that file
+  as preferred, so an unrelated addition stays an addition. Compiling to a new path instead —
+  `-o new.lock` — gives the resolver no prior pins to respect and it re-solves everything from
+  the declared ranges.
+
+  Measured on 2026-08-08 while evaluating one dev-only test tool: compiling to a fresh file
+  produced **17 version changes** across the runtime stack, including `fastapi` 0.139.2 → 0.141.1,
+  `streamlit` 1.59.2 → 1.61.1, `pydantic-settings` 2.14.2 → 2.15.0 (the package that validates
+  the ADR-0009 live-transmission conjunction), plus `alembic`, `uvicorn`, `mako`, `greenlet` and
+  `ruff` — and it silently *dropped* four packages a `streamlit` minor had stopped requiring.
+  Compiling into the existing lock produced **zero** version changes and zero removals.
+
+  The hazard is that both commands succeed, both produce a valid hash-pinned lock, and only the
+  diff distinguishes "added a dev tool" from "upgraded the framework the order plane runs on".
+  A reviewer skimming a 1600-line generated file for an expected addition will not see the
+  seventeen. If a broad upgrade is actually intended, do it as its own reviewed change with the
+  suite re-run against it — never as a side effect of adding something else.
 
 ### Log and notification redaction posture
 

@@ -210,9 +210,32 @@ Route B on Python 3.12 before concluding anything about the code. The second wor
   ```
 
 - **Regenerating the lock is an owner-reviewed change**, not a casual one: docs/
-  SECURITY.md:111-114 — "Maintenance (owner action): regenerate the lock with the command
+  SECURITY.md — "Maintenance (owner action): regenerate the lock with the command
   above when bumping a bound, and review the diff before committing." If you bump a bound
   in pyproject.toml without regenerating, CI's `--require-hashes` install fails.
+- **Write to `requirements-dev.lock` itself — NEVER to a fresh path** *(measured
+  2026-08-08)*. `uv` prefers the pins already present in the output file, so compiling into
+  the existing lock keeps an addition an addition. Compiling to `-o new.lock` gives the
+  resolver nothing to respect and it re-solves every range from scratch.
+
+  Adding one dev-only test tool, measured both ways on 2026-08-08:
+
+  | Compiled to | Added | Version changes | Removed |
+  |---|---|---|---|
+  | `requirements-dev.lock` (existing) | 12 | **0** | **0** |
+  | `new.lock` (fresh path) | 12 | **17** | 4 |
+
+  The 17 included `fastapi`, `streamlit`, `pydantic-settings` (which validates the ADR-0009
+  live conjunction), `alembic`, `uvicorn` and `ruff`. Both commands succeed and both emit a
+  valid hash-pinned lock — only the diff tells them apart, and a reviewer scanning a
+  1600-line generated file for one expected addition will not spot seventeen. Full reasoning
+  in docs/SECURITY.md.
+- **Before proposing a new dev dependency, measure its footprint first.** Compile into a
+  copy of the lock in a temp directory and diff the package set. On 2026-08-08 a mutation-
+  testing tool resolved to **12** new packages — six of them a terminal-UI stack
+  (`textual`, `rich`, `markdown-it-py`, `mdurl`, `mdit-py-plugins`, `linkify-it-py`) needed
+  only for an interactive browser this project would not use. That measurement is cheap,
+  touches nothing, and is what an owner needs to review the request rather than the result.
 - **Known residuals of the hash gate** (docs/SECURITY.md:106-110): it covers the
   runtime+dev closure but NOT (a) the PEP 517 *build backend* — `pip install -e .` still
   fetches `setuptools`/`wheel` unpinned inside pip's isolated build env — and NOT (b) pip
