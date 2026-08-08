@@ -17,8 +17,11 @@ cell, common rejection tests, and the identities whose change starts a new campa
 No campaign result exists in this document. The checked-in manifest is blocked until the
 certified dataset digest, power calculation, accessible partitions, code/criteria digests,
 and owner risk limits are frozen. QQQ 2022-01 through 2024-01 is already consumed and is
-not a clean holdout. The declared future holdout is inaccessible through the ordinary
-Five-Tool trial API.
+not a clean holdout. The checked manifest broker refuses all data while blocked, and
+this slice contains no holdout guardian or unlock capability. Public v1 validation also
+refuses any manifest changed to `ready_for_certified_research`: prose and digests cannot
+stand in for the missing certified-reader, replay-artifact, owner-evidence, and canonical
+ADR-0013 registry capabilities.
 
 ## Evidence the cited sources do and do not provide
 
@@ -28,8 +31,8 @@ These sources motivate tests; none validates Five-Tool v3.6 or its exact paramet
 |---|---|---|
 | Moskowitz, Ooi & Pedersen, “Time Series Momentum,” *JFE* (the supplied [ScienceDirect record](https://www.sciencedirect.com/science/article/pii/S0304405X11002613)) | Historical evidence for continuation/trend effects across a broad futures panel, with explicit portfolio construction and volatility scaling in that study | The Pine z-score regime, EMA/AVWAP gates, Mansfield formula, RSI/MFI divergence, three-leg exits, current ETF panel, current costs, or future performance |
 | Moreira & Muir, “Volatility-Managed Portfolios,” [NBER Working Paper 22208](https://www.nber.org/papers/w22208) | Empirical motivation to test state-dependent exposure scaled by observed variance in the paper's factor/portfolio setting | The Pine ATR/vol-percentile multiplier, a claim that scaling improves every strategy, intraday execution, or a causal guarantee |
-| Antonacci, “Absolute Momentum,” [JPM 40(5)](https://doi.org/10.3905/jpm.2014.40.5.094) | Practitioner evidence and a concrete absolute-momentum/trend-overlay construction worth treating as a benchmark | Peer-reviewed validation of Five-Tool's score, cross-sectional Mansfield RS, divergence, Markov dwell gates, or any default threshold |
-| Supplied [Econometrica DOI](https://doi.org/10.1111/1468-0262.00152) | Recorded as a starting citation for independent review | No Chronos gate relies on it yet: bibliographic metadata and relevance have not been independently verified in this offline implementation slice |
+| Antonacci, “Absolute Momentum,” [SSRN 2244633](https://doi.org/10.2139/ssrn.2244633) | Practitioner evidence and a concrete absolute-momentum/trend-overlay construction worth treating as a benchmark | Peer-reviewed validation of Five-Tool's score, cross-sectional Mansfield RS, divergence, Markov dwell gates, or any default threshold |
+| White, “A Reality Check for Data Snooping,” *Econometrica* ([publisher DOI](https://doi.org/10.1111/1468-0262.00152)) | Motivates treating selection across many tried rules as a multiple-testing problem and evaluating whether an apparent best rule survives a data-snooping-aware null | The exact Chronos DSR/FDR/PBO thresholds, independence of Five-Tool trials, the selected bootstrap design, or evidence that any Five-Tool component has edge |
 | TradingView [execution model](https://www.tradingview.com/pine-script-docs/language/execution-model/), [repainting](https://www.tradingview.com/pine-script-docs/concepts/repainting/), and [strategy FAQ](https://www.tradingview.com/pine-script-docs/faq/strategies/) | Platform authority for confirmed-bar execution, repaint/lookahead analysis, and strategy/fill semantics used by parity work | Any claim of predictive edge or economic validity |
 | `research/pine/00_five_tool_confluence_aio.pine` at SHA-256 `e51d5a40d2e933bf86847c7432364ba8934fd2de653d6aec3d7205639248e45f` | Exact implementation authority for the strategy being translated | Independent evidence that any component works |
 
@@ -148,7 +151,8 @@ optional external Pine source is excluded unless independently content-addressed
 loss-CVaR/drawdown fails owner bounds, if benefit vanishes under equalized exposure, if it
 is concentrated in one named regime/instrument/period, if a shifted history start changes
 the conclusion, or if neighboring lookback/entry/exit thresholds fail the 67% plateau.
-Best-trade and best-month removal, base/stressed costs, and global multiplicity still bind.
+Best-trade and best-month removal, base/stressed costs, and the future canonical ADR-0013
+registry multiplicity still bind.
 
 **Source boundary.** The supplied sources do not validate this z-score hysteresis,
 transition estimator, maturity ceiling, dwell percentile, or Markov independence
@@ -156,22 +160,31 @@ assumption. They are strategy-specific mechanisms that must earn evidence from z
 
 ## Common campaign tests (all cells)
 
-Every attempted parameterization, ablation, retry, reader failure, and evaluator failure
-gets a unique durable `trial_started` record before the reader returns bytes.
-Multiplicity is the count of unique start `attempt_id` values, not completed winners.
+The private synthetic lifecycle harness gives every attempted parameterization, ablation,
+retry, reader failure, and evaluator failure a unique durable `trial_started` record
+before its callback reader is invoked. Its multiplicity is only the count of unique start
+`attempt_id` values in that caller-selected ledger. It is deliberately named a
+**ledger-local trial count**, not the canonical research multiplicity.
 
-Raw evidence is collected first for every cell. Only after collection closes may the
-campaign bind all candidates to one final ledger-derived N and one independently reviewed
-cross-trial Sharpe variance. Candidate display names and evaluation order do not enter
-the scoring identity.
+The future certified campaign must collect raw evidence for every cell before binding all
+candidates to one final ADR-0013 registry-derived multiplicity and independently reviewed
+cross-trial Sharpe variance. The current private harness can seal ledger-local evidence
+and a supplied variance identity for lifecycle tests only. It cannot produce a Phase-3
+score or final verdict. Candidate display names and evaluation order remain excluded from
+the intended scoring identity.
 
 A cell cannot pass unless all applicable checks below pass unchanged:
 
-1. `max(preregistered power-required N, 100 OOS closed trades)` and sufficient bars for
-   the declared warm-up/history start.
+These are preregistered requirements, not an implemented campaign verdict. Benchmark-alpha
+confidence intervals, DSR scoring, FWER/FDR, PBO, power, and fully OOS-native cost/risk
+evidence remain unimplemented and therefore blocking.
+
+1. `max(preregistered power-required N, 100 OOS economic positions)`; closed legs are
+   reported separately, with sufficient bars for the declared warm-up/history start.
 2. Post-cost expectancy and benchmark-alpha 95% lower bounds above zero.
-3. Deflated-Sharpe probability at least 0.95 using final global N; FWER or FDR
-   `q <= 0.05`; probability of backtest overfitting at most 10% when estimable.
+3. Deflated-Sharpe probability at least 0.95 using the final canonical-registry trial
+   multiplicity; FWER or FDR `q <= 0.05`; probability of backtest overfitting at most
+   10% when estimable. The implemented ledger-local count cannot satisfy this gate.
 4. Evidence on at least three instruments and two materially different regimes. Each
    instrument/regime result is shown; pooling cannot conceal a negative dominant cell.
 5. Base commission, slippage, spread, funding/borrow, model, and data costs are applied
@@ -219,9 +232,17 @@ after observing a result.
 Any change to one of the following ends this campaign identity: Pine SHA, executable
 input-contract/config digest, certified dataset digest, history start, benchmark, fill
 policy, cost model, criteria digest, or code commit. A changed identity receives a new
-campaign id and its attempts add to global research multiplicity; it does not overwrite or
-rename old attempts.
+campaign id. Before Phase 3 can run, both old and new attempts must be recorded in the
+canonical ADR-0013 registry so a new path or restart cannot erase prior multiplicity. The
+current Five-Tool ledger is path-local and does not provide that integration.
 
-An untouched holdout is opened only through the separately owner-authorized guardian after
-all development/validation choices are frozen. Failure on that one unchanged holdout means
+No holdout guardian or unlock capability exists in this slice. Any future
+owner-authorized guardian may open the untouched holdout only after all
+development/validation choices are frozen. Failure on that one unchanged holdout means
 rejection, not a threshold edit, new ablation, or second “final” window under the old id.
+
+The private lifecycle harness accepts arbitrary reader and evaluator callbacks. A callback
+can preload data or touch undeclared sources, so its start-before-callback ordering is not
+proof that every underlying data touch was brokered. Evaluation artifacts are hashed but
+not retained in a content-addressed replay store, and a variance digest carries no reviewer
+attestation here. These are explicit test-harness boundaries, not certified evidence.

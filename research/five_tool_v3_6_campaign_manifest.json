@@ -6,6 +6,11 @@
   "execution_state": "blocked_until_identity_locks_resolve",
   "performance_claims": [],
   "promotion_authority": "none",
+  "code_commit_lock": {
+    "git_commit": null,
+    "status": "pending_resolution",
+    "required_before_execution": true
+  },
   "strategy": {
     "strategy_id": "five_tool_confluence_v3_6",
     "version": "3.6",
@@ -23,8 +28,8 @@
     },
     "semantic_config": {
       "path": "specs/five_tool_confluence_v3_6.yaml",
-      "sha256": "93273762b1d01dade4133628a9a2cebf0a1364774fde654a9efc07c4ccf6d049",
-      "digest_scope": "runtime executable-contract identity",
+      "sha256": "1c9f5b386d63732e8e9fab3e3e3e7173721590f84884101ef78817b8b3ab1531",
+      "digest_scope": "source-bound timing/dependency/warmup/deviation identity",
       "status": "resolved",
       "required_before_execution": true
     }
@@ -155,7 +160,7 @@
     }
   ],
   "statistics": {
-    "sample_floor": "max(preregistered power-required N, 100 out-of-sample closed trades)",
+    "sample_floor": "max(preregistered power-required N, 100 out-of-sample economic positions); closed legs reported separately",
     "instruments_required": 3,
     "materially_different_regimes_required": 2,
     "expectancy_and_benchmark_alpha_95pct_lower_bound": "> 0 after all applicable costs",
@@ -166,16 +171,22 @@
     "best_trade_removal": "net result must remain positive",
     "best_month_removal": "net result must remain positive",
     "drawdown_cvar_concentration_limits": "owner-frozen limits required before data access",
-    "two_phase_scoring": "collect raw evidence for every cell first; then bind every score to one ledger-derived global N and one reviewed cross-trial variance"
+    "two_phase_scoring": "future certified campaign: collect raw evidence for every cell first, then bind every score to the canonical ADR-0013 registry-derived multiplicity and reviewed cross-trial variance; the current private harness exposes only a non-final ledger-local count"
   },
   "trial_accounting": {
     "record_kind_start": "trial_started",
     "start_must_precede_reader": true,
     "reader_and_evaluator_failures_count": true,
-    "multiplicity": "number of unique durable attempt_id values in trial_started records",
+    "multiplicity": "private test harness only: number of unique durable attempt_id values in one caller-selected ledger; not the canonical ADR-0013 global research multiplicity and not sufficient for final scores",
     "candidate_order_or_display_rename_changes_verdict": false
   },
   "criteria_document": "docs/FIVE_TOOL_RESEARCH_HYPOTHESES.md",
+  "criteria_lock": {
+    "path": "docs/FIVE_TOOL_RESEARCH_HYPOTHESES.md",
+    "sha256": null,
+    "status": "pending_resolution",
+    "required_before_execution": true
+  },
   "identity_changes_that_invalidate_campaign": [
     "pine_source_sha256",
     "input_contract_sha256",
@@ -190,6 +201,9 @@
   ],
   "blocked_before_first_data_read": [
     "Resolve and review the certified dataset-version SHA-256.",
+    "Replace the placeholder history start with the certified dataset's exact first bar-close timestamp.",
+    "Integrate every attempt with the canonical ADR-0013 global experiment registry; caller-selected ledger paths cannot supply final multiplicity.",
+    "Replace arbitrary reader/evaluator callbacks with a certified broker-owned reader and content-addressed replay artifacts.",
     "Freeze owner drawdown, CVaR, turnover, and concentration limits.",
     "Freeze the power calculation, accessible date partitions, code commit, and criteria digest.",
     "Confirm every campaign cell maps to an executable semantic overlay rather than a prose-only label."
