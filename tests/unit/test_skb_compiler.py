@@ -51,6 +51,14 @@ def _copy_corpus(dst: Path) -> Path:
     return dst
 
 
+def _first_strategy_spec(root: Path) -> Path:
+    for path in sorted((root / "specs").glob("*.yaml")):
+        document = yaml.safe_load(path.read_text(encoding="utf-8"))
+        if document.get("document_kind", "strategy_spec") == "strategy_spec":
+            return path
+    raise AssertionError("test corpus has no executable strategy spec")
+
+
 def test_compile_joins_the_full_corpus() -> None:
     store = compile_skb()
     assert store.pine_script_count == 42
@@ -172,7 +180,7 @@ def test_fail_closed_on_out_of_vocab_finding(tmp_path: Path) -> None:
 
 def test_fail_closed_on_unresolvable_spec_reference(tmp_path: Path) -> None:
     root = _copy_corpus(tmp_path)
-    spec_path = next((root / "specs").glob("*.yaml"))
+    spec_path = _first_strategy_spec(root)
     spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
     spec["pine_references"] = [{"catalog_number": "77", "filename": "77_ghost.pine", "sha256": "z"}]
     spec_path.write_text(yaml.safe_dump(spec), encoding="utf-8")

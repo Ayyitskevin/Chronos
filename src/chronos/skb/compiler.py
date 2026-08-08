@@ -114,11 +114,21 @@ def compile_skb(root: Path = REPO_ROOT) -> SKBStore:
 
     # --- specs: which catalog numbers are ported, and the derived strategies --
     spec_docs: list[dict[str, Any]] = []
+    strategy_spec_paths: list[Path] = []
     ported_catalog_numbers: set[str] = set()
     for spec_path in sorted(specs_dir.glob("*.yaml")):
         spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
         if not isinstance(spec, dict):
             raise SKBCompileError(f"{spec_path.name}: spec must be a mapping")
+        document_kind = str(spec.get("document_kind", "strategy_spec"))
+        if document_kind == "pine_input_contract":
+            # Input contracts share the human-facing specs directory but are not
+            # executable derived-strategy specs.  Including one in the SKB would
+            # silently mark a research-only capability as runtime-portable.
+            continue
+        if document_kind != "strategy_spec":
+            raise SKBCompileError(f"{spec_path.name}: unsupported document_kind {document_kind!r}")
+        strategy_spec_paths.append(spec_path)
         spec["__path__"] = spec_path.name
         spec_docs.append(spec)
         for ref in spec.get("pine_references", ()) or ():
@@ -215,7 +225,7 @@ def compile_skb(root: Path = REPO_ROOT) -> SKBStore:
         pine_findings_json=_sha256_file(findings_path),
         selection_manifest_json=_sha256_file(manifest_path),
         results_json={results_path.name: _sha256_file(results_path)},
-        spec_yaml={path.name: _sha256_file(path) for path in sorted(specs_dir.glob("*.yaml"))},
+        spec_yaml={path.name: _sha256_file(path) for path in strategy_spec_paths},
     )
 
     return SKBStore(

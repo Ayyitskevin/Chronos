@@ -1,6 +1,7 @@
 """Merge the registry and audit findings into the Phase 1/2 documents.
 
-Inputs:  research/strategy_registry.yaml, research/pine_findings.json
+Inputs:  research/strategy_registry.yaml, research/pine_findings.json,
+         research/strategy_catalog_analysis.md
 Outputs: docs/STRATEGY_CATALOG.md, docs/PINE_AUDIT.md
 
 Usage: .venv/bin/python scripts/build_audit_docs.py
@@ -15,14 +16,29 @@ from pathlib import Path
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
+CATALOG_ANALYSIS_HEADING = "## Corpus composition and duplication analysis"
 
 
-def main() -> int:
+def _catalog_analysis(root: Path) -> str:
+    """Load the reviewed manual catalog analysis from its explicit source."""
+
+    path = root / "research" / "strategy_catalog_analysis.md"
+    analysis = path.read_text(encoding="utf-8").rstrip()
+    if not analysis.startswith(f"{CATALOG_ANALYSIS_HEADING}\n"):
+        raise ValueError("strategy catalog analysis has an invalid heading")
+    return analysis
+
+
+def render_documents(root: Path = ROOT) -> tuple[str, str, int, dict[str, int]]:
+    """Render both documents solely from their declared tracked inputs."""
+
+    catalog_analysis = _catalog_analysis(root)
+    catalog_analysis_block = f"\n\n{catalog_analysis}"
     registry = yaml.safe_load(
-        (ROOT / "research" / "strategy_registry.yaml").read_text(encoding="utf-8")
+        (root / "research" / "strategy_registry.yaml").read_text(encoding="utf-8")
     )
     findings_raw = json.loads(
-        (ROOT / "research" / "pine_findings.json").read_text(encoding="utf-8")
+        (root / "research" / "pine_findings.json").read_text(encoding="utf-8")
     )
     findings = {f["filename"].split("/")[-1]: f for f in findings_raw["findings"]}
     scripts = registry["scripts"]
@@ -116,7 +132,7 @@ See ASSUMPTIONS.md A-01.
 
 | # | Title | Kind | Family | Direction | Pine | Lines | Integrity |
 |---|-------|------|--------|-----------|------|-------|-----------|
-{chr(10).join(catalog_rows)}
+{chr(10).join(catalog_rows)}{catalog_analysis_block}
 
 Detailed per-script findings: [PINE_AUDIT.md](PINE_AUDIT.md).
 """
@@ -147,9 +163,14 @@ defect: it marks tools with no trading rules.
 {chr(10).join(audit_sections)}
 """
 
+    return catalog, audit, len(scripts), dict(by_status)
+
+
+def main() -> int:
+    catalog, audit, script_count, statuses = render_documents()
     (ROOT / "docs" / "STRATEGY_CATALOG.md").write_text(catalog, encoding="utf-8")
     (ROOT / "docs" / "PINE_AUDIT.md").write_text(audit, encoding="utf-8")
-    print(f"catalog + audit written for {len(scripts)} scripts; statuses: {dict(by_status)}")
+    print(f"catalog + audit written for {script_count} scripts; statuses: {statuses}")
     return 0
 
 
