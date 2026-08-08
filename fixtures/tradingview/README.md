@@ -21,10 +21,13 @@ An export from any other script revision fails closed.
 1. In TradingView, load the pinned catalog `00` script on the intended symbol,
    timeframe, chart timezone, and session.  Record the data source/subscription
    and every one of the 219 input values.
-2. Export chart data containing all catalog `00` Data Window `*_EXPORT` plots.
-   Export the Strategy Tester trade list as well.  Merge entry/exit events onto
-   their exact closed-bar timestamps; do not infer or shift an event to a nearby
-   bar.
+2. Export chart data containing all catalog `00` Data Window `*_EXPORT` plots and
+   preserve the Strategy Tester trade list as a separate artifact. The current Pine
+   telemetry does not directly export `regime_flip`, `entry_decision`,
+   `exit_decision`, or `position_side`; Strategy Tester fills also occur on a
+   different clock from signal-bar decisions. Do not infer or shift these fields.
+   A reviewed, content-addressed normalizer or additional pinned Pine telemetry is
+   required before the v1 schema can be treated as genuine parity evidence.
 3. Normalize the export to the exact ordered `CSV_COLUMNS` tuple in
    `src/chronos/research/tradingview.py`.  Pine's numeric regime values map to
    `bear`, `neutral`, and `bull`; event fields use the documented enum strings;
@@ -33,11 +36,18 @@ An export from any other script revision fails closed.
 4. Save the normalized trace as
    `fixtures/tradingview/00_<symbol>_<timeframe>_trace.csv` and its metadata as
    `fixtures/tradingview/00_<symbol>_<timeframe>_trace.meta.json`.
-5. Populate every metadata key shown below.  `input_config_sha256` is SHA-256
+5. Populate every metadata key shown below. Preserve `input_config` in the exact
+   Pine source order and native runtime types: in particular, `input.time` values are
+   signed UNIX-millisecond integers, not formatted timestamp strings.
+   `input_config_sha256` is SHA-256
    over compact canonical JSON of the full `input_config` object (UTF-8,
    recursively sorted keys, separators `,` and `:`, no NaN).  `trace_sha256` is
    SHA-256 over the exact CSV bytes.  Set `provenance` to `genuine` only for an
-   owner-exported TradingView artifact.
+   owner-exported TradingView artifact. Create a detached owner-attestation file
+   that binds the export, normalizer, and preserved trade-list identities. Obtain
+   its trusted SHA-256 through an independent owner-reviewed channel; do not copy
+   the trusted value from fixture metadata. The loader verifies bytes and digests,
+   but does not authenticate a signer or interpret the attestation contents.
 
 ```json
 {
@@ -58,9 +68,14 @@ An export from any other script revision fails closed.
   },
   "input_config_sha256": "<64 lowercase hex characters>",
   "trace_sha256": "<64 lowercase hex characters>",
-  "row_count": 1234
+  "row_count": 1234,
+  "owner_attestation_sha256": "<SHA-256 of detached attestation bytes>"
 }
 ```
+
+Load a genuine fixture only by supplying both `owner_attestation_path` and the
+independently obtained `trusted_owner_attestation_sha256` to
+`load_trace_fixture`. Missing or mismatched values fail closed.
 
 The loader preserves the chart timezone and session as metadata but normalizes
 every aware row timestamp to UTC.  Rows must already be strictly increasing.
@@ -77,6 +92,9 @@ definitions.
 
 A failure reports the first divergent timestamp and field, expected and actual
 values, both state digests, both active-gate sets, and the numeric tolerance if
-one applied.  A matching internal-spec fixture still returns parity status
-`UNVERIFIED`.  Only a matching fixture loaded with genuine provenance can
-return `VERIFIED`.
+one applied. A matching internal-spec fixture returns `UNVERIFIED`. A trusted
+genuine reference can currently produce a scoped mismatch (`FAILED`), but an
+exact match remains `UNVERIFIED`: v1 has no independently attestable Python
+candidate identity or reviewed normalizer for the missing decision fields. The
+trace schema also contains no fill time, price, quantity, commission, or order
+lifecycle, so execution parity is always reported separately as `UNVERIFIED`.

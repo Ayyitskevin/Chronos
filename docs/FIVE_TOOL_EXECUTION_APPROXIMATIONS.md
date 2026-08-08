@@ -26,8 +26,12 @@ Pine source's asymmetric final entry guard (`long: stop > 0`, `short: distance >
 without changing valid-plan arithmetic.
 
 Positions with at least three minimum lots use Pine's floored thirds and remainder
-rule. Smaller positions use one leg and target 2. Every closure carries a `LegId`
-and `ExitReason`; an absent leg is never treated as evidence that a target filled.
+rule. Chronos fails closed if that geometry would leave target-bearing leg 1 or 2
+below the minimum quantity; only a subminimum runner remainder may be merged into
+leg 2. Smaller positions use one leg and target 2. Every closure carries a `LegId`
+and `ExitReason`, plus the frozen planned-leg count. Validation rejects a position
+until every planned leg has an explicit closure and all legs agree on entry identity;
+an absent leg is never treated as evidence that a target filled.
 In particular, breakeven arms only from an actual `TARGET_1` fill event. A stop,
 manual exit, direct reversal, or a one-leg `TARGET_2` fill cannot arm it.
 
@@ -43,10 +47,12 @@ Every research replay must therefore record one of these policies:
 | `ohlc_target_first` | Fill the target. This is an optimistic sensitivity bound. |
 | `lower_timeframe_magnifier` | Traverse complete, chronological lower-timeframe bars. Within an ambiguous lowest-resolution bar, use stop-first. |
 
-The magnifier policy fails rather than falling back if no sub-bars are supplied, if
-they are out of order, extend beyond the parent close, or do not reproduce the
-parent open, high, low, and close. It is still an approximation unless the supplied
-resolution captures the true event sequence; it is not a claim of TradingView parity.
+The magnifier policy requires explicit parent/sub-bar start and end timestamps, one
+uniform lower resolution, chronological continuous coverage of the complete parent
+interval, and exact reproduction of parent open, high, low, and close. Any gap,
+stale bar, or identity ambiguity fails rather than falling back. It is still an
+approximation unless the supplied resolution captures the true event sequence; it
+is not a claim of TradingView parity.
 
 Stop orders use explicit stop-market gap semantics: an adverse gap through the stop
 fills at the bar open. Target limits use price-improvement semantics: a favorable gap
@@ -73,12 +79,15 @@ deltas without fills still require an explicit side label.
 TradingView's `strategy.closedtrades` ledger counts closed entry legs. The Five-Tool
 strategy can create three legs for one thesis, so those records are not independent
 trades. The validation report always exposes both counts and aggregates all records
-sharing `position_id` before calculating independent-position evidence.
+sharing `position_id` before calculating economic-position evidence. Aggregation does
+not establish statistical independence between positions.
 
-OOS membership is chronological and uses the economic position's final
-`exit_time_utc >= frozen_oos_start`. This supports positions entered before the boundary
-and avoids the Pine dashboard's equal-count fiction. The Pine-compatible equal-count
-closed-leg chunks remain available only under the fixed label
+Strict OOS membership requires
+`economic_position.entry_time_utc >= frozen_oos_start`. Boundary-straddling
+positions and all their legs are purged because no frozen boundary mark exists.
+This avoids leaking pre-boundary economics and the Pine dashboard's equal-count
+fiction. The Pine-compatible equal-count closed-leg chunks remain available only
+under the fixed label
 `heuristic_equal_count_closed_legs_not_walk_forward`.
 
 Profit factor never uses Pine's `999` sentinel:
@@ -89,12 +98,15 @@ Profit factor never uses Pine's `999` sentinel:
 - `undefined_no_gains`: there is no positive payoff (numeric display value `0`, tagged
   so it cannot be confused with a normally estimated ratio).
 
-The deterministic report includes gross P&L, commission, slippage, other costs,
-turnover, economic-position drawdown, loss-tail CVaR, concentration by position,
-instrument and UTC exit month, regime/instrument slices, parameter-variant evidence,
-and best-economic-position/best-month removal. Parameter plateau support remains
-unknown unless the caller supplies a frozen neighbor graph. Empty and small samples
-return tagged unknowns and warnings; they do not manufacture reassuring zeros or a
+Only `report.oos` counts, net P&L, and profit factor use the strict OOS set today.
+Gross P&L/costs, turnover, concentration, risk, regime/instrument slices,
+parameter sensitivity, and removal tests use the full sample and cannot satisfy
+the preregistered OOS gates. Drawdown is cumulative closed-economic-position P&L
+drawdown, not daily mark-to-market equity drawdown; CVaR is the lower tail of
+economic-position dollar P&L. Parameter plateau support checks positive sign among
+the best variant's declared neighbors, not every common statistical gate, and is
+unknown without a frozen valid neighbor graph. Empty and small samples return
+tagged unknowns and warnings; they do not manufacture reassuring zeros or a
 promotion verdict.
 
 ## Known non-parity and deferred evidence
@@ -107,6 +119,8 @@ promotion verdict.
   not a daily return-series CVaR. The basis is embedded in the report.
 - Lower-timeframe OHLC can narrow, but cannot eliminate, event-order ambiguity inside
   its smallest bar.
+- The signal engine, planner/fill model, and validation ledger are separate pure
+  components; no end-to-end engine-to-fill-to-`ClosedLeg` replay is implemented.
 - Daily-loss halt behavior, alert delivery/de-duplication, and TradingView account-equity
   mark timing live outside this pure planning boundary and require separate parity
   traces.

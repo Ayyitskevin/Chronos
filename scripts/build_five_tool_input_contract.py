@@ -206,6 +206,61 @@ SEMANTICS: dict[str, Any] = {
                 "also applies configured age and maturity ceilings; only the dwell gate is toggled."
             ),
         },
+        {
+            "id": "session-open-reconstruction",
+            "classification": "data-model approximation",
+            "status": "UNVERIFIED",
+            "description": (
+                "Chronos bars expose close timestamps, so session/date gates reconstruct open "
+                "time as close minus a fixed interval; daily bars and exchange-calendar "
+                "discontinuities require a certified calendar-aware source."
+            ),
+        },
+        {
+            "id": "input-source-coverage",
+            "classification": "external-series gap",
+            "status": "must-be-explicit",
+            "description": (
+                "External regime/strength sources remain caller-owned, and the AVWAP source "
+                "supports only hlc3 or close unless a separately identified series is added."
+            ),
+        },
+        {
+            "id": "volume-gate-warmup",
+            "classification": "source-code-authoritative",
+            "status": "replicated",
+            "description": (
+                "LONG+/SHORT+ volume-expansion gates pass while their moving average is na; "
+                "Chronos preserves that source behavior and exposes it in tests."
+            ),
+        },
+        {
+            "id": "short-alert-setup-label",
+            "classification": "known Pine alert defect",
+            "status": "must-not-copy",
+            "description": (
+                "Pine labels every short alert with the SHORT+ setup name even for legacy "
+                "shorts; Chronos semantic events retain the selected setup identity."
+            ),
+        },
+        {
+            "id": "disconnected-execution-boundary",
+            "classification": "implementation boundary",
+            "status": "UNVERIFIED",
+            "description": (
+                "The signal engine, pure planner/fill approximations, and closed-leg validation "
+                "are not wired into one end-to-end replay, so execution parity is unverified."
+            ),
+        },
+        {
+            "id": "validation-evidence-subset",
+            "classification": "research-evidence gap",
+            "status": "blocked",
+            "description": (
+                "Implemented validation is descriptive and does not execute every preregistered "
+                "statistical, benchmark-alpha, multiplicity, or OOS-native risk gate."
+            ),
+        },
     ],
 }
 
@@ -449,6 +504,7 @@ def build_contract(source_path: Path) -> dict[str, object]:
         raise ValueError("Pine language or script version marker is missing")
     return {
         "schema_version": SCHEMA_VERSION,
+        "document_kind": "pine_input_contract",
         "strategy_id": "five_tool_confluence_v3_6",
         "capability_scope": "research-only",
         "owner_approved": False,

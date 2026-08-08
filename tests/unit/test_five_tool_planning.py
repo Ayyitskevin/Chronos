@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -13,6 +14,7 @@ from chronos.research.five_tool.planning import (
     OhlcBar,
     PlanningError,
     PositionMilestones,
+    PositionPlan,
     PositionSide,
     SizingRejection,
     SizingRequest,
@@ -56,8 +58,23 @@ def _bar(
     high: float = 112.0,
     low: float = 88.0,
     close: float = 101.0,
+    start: datetime | None = None,
+    symbol: str | None = "AAA",
+    source: str | None = "internal_spec",
+    interval: str | None = "1D",
 ) -> OhlcBar:
-    return OhlcBar(sequence_id, timestamp, open_, high, low, close)
+    return OhlcBar(
+        sequence_id,
+        timestamp,
+        open_,
+        high,
+        low,
+        close,
+        start,
+        symbol,
+        source,
+        interval,
+    )
 
 
 def _order(side: PositionSide = PositionSide.LONG) -> ExitOrder:
@@ -79,13 +96,14 @@ def _fill(
     leg: LegId,
     reason: ExitReason,
     price: float = 100.0,
+    quantity: float = 1.0,
 ) -> FillEvent:
     return FillEvent(
         fill_id=fill_id,
         position_id="p1",
         owner_side=side,
         leg_id=leg,
-        quantity=1.0,
+        quantity=quantity,
         price=price,
         reason=reason,
         timestamp_utc=NOW,
@@ -94,6 +112,15 @@ def _fill(
         gap_through=False,
         oco_cancelled_reason=None,
     )
+
+
+def _position_plan(side: PositionSide, *, one_leg: bool = False) -> PositionPlan:
+    stop = 90.0 if side is PositionSide.LONG else 110.0
+    changes = {
+        "equity": 1_000.0 if one_leg else 3_000.0,
+        "cap_pct": 200.0,
+    }
+    return build_position_plan(pine_quantity_plan(_request(side, stop, **changes)))
 
 
 def test_long_and_short_sizing_use_symmetric_positive_stop_distance() -> None:
@@ -117,6 +144,11 @@ def test_long_and_short_sizing_use_symmetric_positive_stop_distance() -> None:
 def test_both_sides_reject_zero_or_inverted_stop_geometry(side: PositionSide, stop: float) -> None:
     plan = pine_quantity_plan(_request(side, stop))
     assert plan.quantity == 0.0
+    assert plan.rejection is SizingRejection.INVALID_STOP_DISTANCE
+
+
+def test_nonpositive_stop_price_is_rejected_even_with_positive_distance() -> None:
+    plan = pine_quantity_plan(_request(PositionSide.LONG, -1.0))
     assert plan.rejection is SizingRejection.INVALID_STOP_DISTANCE
 
 
@@ -255,6 +287,13 @@ def test_exit_orders_and_fill_events_reject_impossible_attribution() -> None:
             leg=LegId.LEG_2,
             reason=ExitReason.TARGET_1,
         )
+    with pytest.raises(PlanningError, match="TARGET_2"):
+        _fill(
+            fill_id="runner-target",
+            side=PositionSide.LONG,
+            leg=LegId.LEG_3,
+            reason=ExitReason.TARGET_2,
+        )
 
 
 def test_gap_through_stop_and_target_fill_at_better_or_worse_open() -> None:
@@ -285,16 +324,33 @@ def test_magnifier_requires_complete_lower_timeframe_coverage() -> None:
 
 
 def test_magnifier_uses_chronological_subbars_before_parent_ambiguity() -> None:
-    parent = _bar(open_=100.0, high=112.0, low=88.0, close=95.0)
+    parent = _bar(
+        open_=100.0,
+        high=112.0,
+        low=88.0,
+        close=95.0,
+        start=NOW - timedelta(minutes=2),
+        interval="2m",
+    )
     first = _bar(
         sequence_id="m1",
         timestamp=NOW - timedelta(minutes=1),
+        start=NOW - timedelta(minutes=2),
         open_=100.0,
         high=112.0,
         low=99.0,
         close=109.0,
+        interval="1m",
     )
-    second = _bar(sequence_id="m2", open_=109.0, high=110.0, low=88.0, close=95.0)
+    second = _bar(
+        sequence_id="m2",
+        open_=109.0,
+        high=110.0,
+        low=88.0,
+        close=95.0,
+        start=NOW - timedelta(minutes=1),
+        interval="1m",
+    )
     fill = resolve_exit_fill(
         _order(),
         parent,
@@ -307,10 +363,53 @@ def test_magnifier_uses_chronological_subbars_before_parent_ambiguity() -> None:
     assert fill.policy is FillPolicy.LOWER_TIMEFRAME_MAGNIFIER
 
 
+def test_magnifier_rejects_cross_symbol_source_or_interval_bars() -> None:
+    parent = _bar(
+        open_=100.0,
+        high=112.0,
+        low=88.0,
+        close=95.0,
+        start=NOW - timedelta(minutes=2),
+        interval="2m",
+    )
+    first = _bar(
+        sequence_id="m1",
+        timestamp=NOW - timedelta(minutes=1),
+        start=NOW - timedelta(minutes=2),
+        open_=100.0,
+        high=112.0,
+        low=99.0,
+        close=109.0,
+        interval="1m",
+    )
+    second = _bar(
+        sequence_id="m2",
+        start=NOW - timedelta(minutes=1),
+        open_=109.0,
+        high=110.0,
+        low=88.0,
+        close=95.0,
+        interval="1m",
+    )
+
+    for corrupted in (
+        replace(first, symbol="BBB"),
+        replace(first, source="other_feed"),
+        replace(first, interval="30s"),
+    ):
+        with pytest.raises(UnsupportedMagnifierError, match=r"identity|interval"):
+            resolve_exit_fill(
+                _order(),
+                parent,
+                policy=FillPolicy.LOWER_TIMEFRAME_MAGNIFIER,
+                lower_timeframe_bars=(corrupted, second),
+            )
+
+
 def test_only_an_actual_target_1_fill_arms_breakeven() -> None:
-    state = PositionMilestones("p1", PositionSide.LONG)
+    split_state = PositionMilestones("p1", _position_plan(PositionSide.LONG))
     stopped = apply_fill_to_milestones(
-        state,
+        split_state,
         _fill(
             fill_id="stop",
             side=PositionSide.LONG,
@@ -322,8 +421,9 @@ def test_only_an_actual_target_1_fill_arms_breakeven() -> None:
     assert not stopped.target_1_filled
     assert not stopped.break_even_armed
 
+    one_leg_state = PositionMilestones("p1", _position_plan(PositionSide.LONG, one_leg=True))
     target_2 = apply_fill_to_milestones(
-        state,
+        one_leg_state,
         _fill(
             fill_id="single-t2",
             side=PositionSide.LONG,
@@ -335,7 +435,7 @@ def test_only_an_actual_target_1_fill_arms_breakeven() -> None:
     assert not target_2.break_even_armed
 
     target_1 = apply_fill_to_milestones(
-        state,
+        split_state,
         _fill(
             fill_id="t1",
             side=PositionSide.LONG,
@@ -367,9 +467,155 @@ def test_only_an_actual_target_1_fill_arms_breakeven() -> None:
         )
 
 
+def test_milestones_reject_fills_that_contradict_the_accepted_plan() -> None:
+    one_leg_state = PositionMilestones("p1", _position_plan(PositionSide.LONG, one_leg=True))
+    with pytest.raises(PlanningError, match="target fill contradicts"):
+        apply_fill_to_milestones(
+            one_leg_state,
+            _fill(
+                fill_id="impossible-t1",
+                side=PositionSide.LONG,
+                leg=LegId.LEG_1,
+                reason=ExitReason.TARGET_1,
+            ),
+        )
+    with pytest.raises(PlanningError, match="leg absent"):
+        apply_fill_to_milestones(
+            one_leg_state,
+            _fill(
+                fill_id="absent-leg",
+                side=PositionSide.LONG,
+                leg=LegId.LEG_2,
+                reason=ExitReason.INITIAL_STOP,
+            ),
+        )
+    with pytest.raises(PlanningError, match="entire planned leg"):
+        apply_fill_to_milestones(
+            one_leg_state,
+            _fill(
+                fill_id="partial-leg",
+                side=PositionSide.LONG,
+                leg=LegId.LEG_1,
+                reason=ExitReason.TARGET_2,
+                quantity=0.5,
+            ),
+        )
+    with pytest.raises(PlanningError, match="actual TARGET_1"):
+        apply_fill_to_milestones(
+            one_leg_state,
+            _fill(
+                fill_id="unarmed-be",
+                side=PositionSide.LONG,
+                leg=LegId.LEG_1,
+                reason=ExitReason.BREAKEVEN_STOP,
+            ),
+        )
+
+    split_state = PositionMilestones("p1", _position_plan(PositionSide.LONG))
+    with pytest.raises(PlanningError, match="target fill contradicts"):
+        apply_fill_to_milestones(
+            split_state,
+            _fill(
+                fill_id="wrong-split-target",
+                side=PositionSide.LONG,
+                leg=LegId.LEG_1,
+                reason=ExitReason.TARGET_2,
+            ),
+        )
+
+    after_t1 = apply_fill_to_milestones(
+        split_state,
+        _fill(
+            fill_id="split-t1",
+            side=PositionSide.LONG,
+            leg=LegId.LEG_1,
+            reason=ExitReason.TARGET_1,
+        ),
+    )
+    after_t2 = apply_fill_to_milestones(
+        after_t1,
+        _fill(
+            fill_id="split-t2",
+            side=PositionSide.LONG,
+            leg=LegId.LEG_2,
+            reason=ExitReason.TARGET_2,
+        ),
+    )
+    runner_closed = apply_fill_to_milestones(
+        after_t2,
+        _fill(
+            fill_id="runner-trail",
+            side=PositionSide.LONG,
+            leg=LegId.LEG_3,
+            reason=ExitReason.TRAILING_STOP,
+        ),
+    )
+    assert runner_closed.target_1_filled and runner_closed.target_2_filled
+    assert runner_closed.break_even_armed
+    assert runner_closed.closed_legs == frozenset(LegId)
+
+
+def test_milestone_claims_cannot_contradict_their_fill_events() -> None:
+    target_fill = _fill(
+        fill_id="t1-evidence",
+        side=PositionSide.LONG,
+        leg=LegId.LEG_1,
+        reason=ExitReason.TARGET_1,
+        price=110.0,
+    )
+    with pytest.raises(PlanningError, match="target_1_filled"):
+        PositionMilestones(
+            "p1",
+            _position_plan(PositionSide.LONG),
+            closed_legs=frozenset({LegId.LEG_1}),
+            fills=(target_fill,),
+        )
+
+    stop_fill = _fill(
+        fill_id="stop-evidence",
+        side=PositionSide.LONG,
+        leg=LegId.LEG_1,
+        reason=ExitReason.INITIAL_STOP,
+        price=90.0,
+    )
+    with pytest.raises(PlanningError, match="target_1_filled"):
+        PositionMilestones(
+            "p1",
+            _position_plan(PositionSide.LONG),
+            closed_legs=frozenset({LegId.LEG_1}),
+            target_1_filled=True,
+            break_even_armed=True,
+            fills=(stop_fill,),
+        )
+
+
+def test_break_even_policy_is_persisted_and_derived_from_target_fill() -> None:
+    state = apply_fill_to_milestones(
+        PositionMilestones("p1", _position_plan(PositionSide.LONG)),
+        _fill(
+            fill_id="t1-no-be",
+            side=PositionSide.LONG,
+            leg=LegId.LEG_1,
+            reason=ExitReason.TARGET_1,
+            price=110.0,
+        ),
+        break_even_after_target_1=False,
+    )
+    assert state.target_1_filled is True
+    assert state.break_even_armed is False
+    assert state.break_even_after_target_1 is False
+
+
 def test_short_breakeven_tightens_downward_without_loosening() -> None:
-    state = PositionMilestones(
-        "p1", PositionSide.SHORT, target_1_filled=True, break_even_armed=True
+    state = apply_fill_to_milestones(
+        PositionMilestones("p1", _position_plan(PositionSide.SHORT)),
+        _fill(
+            fill_id="short-t1",
+            side=PositionSide.SHORT,
+            leg=LegId.LEG_1,
+            reason=ExitReason.TARGET_1,
+            price=90.0,
+        ),
     )
     assert (
         milestone_stop(

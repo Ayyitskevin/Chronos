@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -32,8 +33,11 @@ def _leg(
     commission: float = 0.0,
     slippage: float = 0.0,
     turnover: float = 1000.0,
+    planned_leg_count: int = 1,
+    entry_day: int | None = None,
 ) -> ClosedLeg:
     exit_time = BASE + timedelta(days=day)
+    entry_time = BASE + timedelta(days=day - 2 if entry_day is None else entry_day)
     return ClosedLeg(
         position_id=position,
         leg_id=leg,
@@ -41,13 +45,22 @@ def _leg(
         instrument=instrument,
         regime=regime,
         parameter_variant=variant,
-        entry_time_utc=exit_time - timedelta(days=2),
+        planned_leg_count=planned_leg_count,
+        entry_time_utc=entry_time,
         exit_time_utc=exit_time,
         gross_pnl=gross,
         commission_cost=commission,
         slippage_cost=slippage,
         turnover=turnover,
-        exit_reason=ExitReason.TARGET_1 if leg is LegId.LEG_1 else ExitReason.TARGET_2,
+        exit_reason=(
+            ExitReason.TARGET_2
+            if planned_leg_count == 1
+            else ExitReason.TARGET_1
+            if leg is LegId.LEG_1
+            else ExitReason.TARGET_2
+            if leg is LegId.LEG_2
+            else ExitReason.TRAILING_STOP
+        ),
     )
 
 
@@ -69,9 +82,9 @@ def test_profit_factor_has_explicit_non_numeric_states() -> None:
 
 def test_three_closed_legs_are_one_economic_position() -> None:
     legs = [
-        _leg("p1", LegId.LEG_3, day=4, gross=5.0),
-        _leg("p1", LegId.LEG_1, day=2, gross=10.0),
-        _leg("p1", LegId.LEG_2, day=3, gross=-2.0),
+        _leg("p1", LegId.LEG_3, day=4, gross=5.0, planned_leg_count=3, entry_day=0),
+        _leg("p1", LegId.LEG_1, day=2, gross=10.0, planned_leg_count=3, entry_day=0),
+        _leg("p1", LegId.LEG_2, day=3, gross=-2.0, planned_leg_count=3, entry_day=0),
     ]
     positions = aggregate_economic_positions(legs)
     assert len(positions) == 1
@@ -91,26 +104,49 @@ def test_position_aggregation_rejects_duplicate_leg_and_side_switch() -> None:
     with pytest.raises(ValidationInputError, match="inconsistent"):
         aggregate_economic_positions(
             [
-                _leg("p1", LegId.LEG_1, day=1, gross=1.0),
+                _leg(
+                    "p1",
+                    LegId.LEG_1,
+                    day=1,
+                    gross=1.0,
+                    planned_leg_count=2,
+                    entry_day=-1,
+                ),
                 _leg(
                     "p1",
                     LegId.LEG_2,
                     day=2,
                     gross=2.0,
                     side=PositionSide.SHORT,
+                    planned_leg_count=2,
+                    entry_day=-1,
                 ),
             ]
         )
 
 
-def test_oos_selection_uses_exit_time_and_is_chronological() -> None:
-    before = _leg("before", LegId.LEG_1, day=2, gross=1.0)
-    at_boundary = _leg("boundary", LegId.LEG_1, day=5, gross=2.0)
-    after = _leg("after", LegId.LEG_1, day=8, gross=3.0)
+def test_oos_selection_purges_pre_boundary_entries_and_is_chronological() -> None:
+    before = _leg("before", LegId.LEG_1, day=6, gross=1.0, entry_day=4)
+    at_boundary = _leg("boundary", LegId.LEG_1, day=7, gross=2.0, entry_day=5)
+    after = _leg("after", LegId.LEG_1, day=8, gross=3.0, entry_day=6)
     selected = chronological_oos_legs(
         [after, before, at_boundary], start_utc=BASE + timedelta(days=5)
     )
     assert [leg.position_id for leg in selected] == ["boundary", "after"]
+
+
+def test_oos_report_purges_boundary_straddling_position_pnl() -> None:
+    before_leg = _leg("cross", LegId.LEG_1, day=2, gross=100.0, planned_leg_count=2, entry_day=0)
+    after_leg = _leg("cross", LegId.LEG_2, day=8, gross=-10.0, planned_leg_count=2, entry_day=0)
+    report = build_validation_report(
+        [before_leg, after_leg],
+        oos_start_utc=BASE + timedelta(days=5),
+        minimum_economic_positions=1,
+    )
+    assert report.oos.economic_positions == 0
+    assert report.oos.closed_legs == 0
+    assert report.oos.net_pnl == 0.0
+    assert any("boundary-straddling" in warning for warning in report.warnings)
 
 
 def test_pine_dashboard_is_explicitly_a_closed_leg_heuristic() -> None:
@@ -134,6 +170,8 @@ def test_full_report_covers_cost_risk_slices_sensitivity_and_removal() -> None:
             commission=2.0,
             slippage=3.0,
             variant="base",
+            planned_leg_count=2,
+            entry_day=0,
         ),
         _leg(
             "p1",
@@ -143,6 +181,8 @@ def test_full_report_covers_cost_risk_slices_sensitivity_and_removal() -> None:
             commission=1.0,
             slippage=1.0,
             variant="base",
+            planned_leg_count=2,
+            entry_day=0,
         ),
         _leg(
             "p2",
@@ -243,8 +283,22 @@ def test_empty_report_fails_soft_without_inventing_zero_quality() -> None:
 def test_removing_best_trade_removes_the_whole_economic_position_not_one_leg() -> None:
     report = build_validation_report(
         [
-            _leg("multi", LegId.LEG_1, day=1, gross=40.0),
-            _leg("multi", LegId.LEG_2, day=2, gross=30.0),
+            _leg(
+                "multi",
+                LegId.LEG_1,
+                day=1,
+                gross=40.0,
+                planned_leg_count=2,
+                entry_day=-1,
+            ),
+            _leg(
+                "multi",
+                LegId.LEG_2,
+                day=2,
+                gross=30.0,
+                planned_leg_count=2,
+                entry_day=-1,
+            ),
             _leg("single", LegId.LEG_1, day=3, gross=-20.0),
         ],
         oos_start_utc=BASE,
@@ -253,6 +307,64 @@ def test_removing_best_trade_removes_the_whole_economic_position_not_one_leg() -
     assert report.best_trade_removal.removed_key == "multi"
     assert report.best_trade_removal.removed_net_pnl == 70.0
     assert report.best_trade_removal.net_pnl_after_removal == -20.0
+
+
+def test_partial_or_entry_inconsistent_positions_are_not_observations() -> None:
+    with pytest.raises(ValidationInputError, match="not fully closed"):
+        aggregate_economic_positions(
+            [
+                _leg(
+                    "partial",
+                    LegId.LEG_1,
+                    day=1,
+                    gross=4.0,
+                    planned_leg_count=3,
+                    entry_day=-1,
+                )
+            ]
+        )
+
+
+def test_target_exit_reason_must_match_the_entry_plan() -> None:
+    with pytest.raises(ValidationInputError, match="TARGET_1"):
+        replace(
+            _leg("single", LegId.LEG_1, day=1, gross=1.0),
+            exit_reason=ExitReason.TARGET_1,
+        )
+    with pytest.raises(ValidationInputError, match="TARGET_2"):
+        replace(
+            _leg(
+                "split",
+                LegId.LEG_1,
+                day=1,
+                gross=1.0,
+                planned_leg_count=2,
+                entry_day=-1,
+            ),
+            exit_reason=ExitReason.TARGET_2,
+        )
+
+    with pytest.raises(ValidationInputError, match="inconsistent entry metadata"):
+        aggregate_economic_positions(
+            [
+                _leg(
+                    "drift",
+                    LegId.LEG_1,
+                    day=2,
+                    gross=2.0,
+                    planned_leg_count=2,
+                    entry_day=0,
+                ),
+                _leg(
+                    "drift",
+                    LegId.LEG_2,
+                    day=3,
+                    gross=3.0,
+                    planned_leg_count=2,
+                    entry_day=1,
+                ),
+            ]
+        )
 
 
 def test_parameter_plateau_can_only_pass_with_declared_positive_neighbors() -> None:
@@ -270,6 +382,14 @@ def test_parameter_plateau_can_only_pass_with_declared_positive_neighbors() -> N
     )
     assert unassessed.parameter_sensitivity.plateau_supported is None
     assert assessed.parameter_sensitivity.plateau_supported is True
+
+    with pytest.raises(ValidationInputError, match="self-neighbors"):
+        build_validation_report(
+            legs,
+            oos_start_utc=BASE,
+            minimum_economic_positions=1,
+            parameter_neighbors={"center": ("center",)},
+        )
 
 
 def test_naive_datetimes_and_nonfinite_pnl_are_rejected() -> None:

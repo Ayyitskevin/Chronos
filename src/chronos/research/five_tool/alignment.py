@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from chronos.marketdata.bars import Bar, BarInterval, BarSeries, BarStatus
@@ -14,6 +14,8 @@ from chronos.research.five_tool.models import (
     CompanionValue,
     FiveToolBarInput,
     FiveToolInputError,
+    FiveToolSettings,
+    pine_timeframe_seconds,
 )
 
 _INTERVAL_SECONDS = {
@@ -29,18 +31,32 @@ def interval_seconds(interval: BarInterval) -> int:
 
 
 def source_bar_id(bar: Bar) -> str:
-    """Timestamp-qualified identity; ``Bar.sequence_id`` is only daily-safe today."""
+    """Full venue/feed identity qualified by the exact source timestamp."""
 
-    return f"{bar.sequence_id}:{bar.timestamp_utc.isoformat()}"
+    identity = (
+        f"{bar.source}:{bar.exchange}:{bar.symbol}:{bar.interval}:{bar.session_date.isoformat()}"
+    )
+    return f"{identity}:{bar.timestamp_utc.isoformat()}"
+
+
+def _series_feed_identity(series: BarSeries, label: str) -> tuple[str, str] | None:
+    """Return one stable ``(source, exchange)`` identity or fail on drift."""
+
+    if not series.bars:
+        return None
+    expected = (series.bars[0].source, series.bars[0].exchange)
+    if any((bar.source, bar.exchange) != expected for bar in series.bars[1:]):
+        raise FiveToolInputError(f"{label} source/exchange identity changed within the series")
+    return expected
 
 
 @dataclass(frozen=True, slots=True)
 class SessionWindow:
-    """A Pine-style local exchange session evaluated at the bar close timestamp.
+    """A Pine-style local exchange session evaluated at a supplied bar-open time.
 
-    Pine's session gate uses the bar opening time.  Chronos bars currently expose
-    only close time, so callers must treat this helper as a documented close-time
-    approximation or supply membership from a richer calendar feed.
+    Chronos bars expose only close time, so the alignment helper derives open time
+    by subtracting the fixed interval.  This is exact for regular intraday bars and
+    a documented approximation for daily bars and exchange-calendar discontinuities.
     """
 
     start: time
@@ -80,12 +96,17 @@ class SessionWindow:
             timezone=timezone,
         )
 
-    def contains_close(self, timestamp_utc: datetime) -> bool:
+    def contains_open(self, timestamp_utc: datetime) -> bool:
         if timestamp_utc.tzinfo is None or timestamp_utc.utcoffset() is None:
             raise FiveToolInputError("session timestamp must be timezone-aware")
         local = timestamp_utc.astimezone(ZoneInfo(self.timezone))
         local_time = local.timetz().replace(tzinfo=None)
-        if self.start <= self.end:
+        if self.start == self.end:
+            session_weekday = (
+                local.weekday() if local_time >= self.start else (local.weekday() - 1) % 7
+            )
+            return session_weekday in self.weekdays
+        if self.start < self.end:
             return local.weekday() in self.weekdays and self.start <= local_time < self.end
         # Overnight session: after start belongs to current day; before end belongs
         # to the day whose session began yesterday.
@@ -94,19 +115,21 @@ class SessionWindow:
         previous_weekday = (local.weekday() - 1) % 7
         return local_time < self.end and previous_weekday in self.weekdays
 
+    def contains_close(self, timestamp_utc: datetime) -> bool:
+        """Backward-compatible alias; the argument is interpreted as an instant."""
+
+        return self.contains_open(timestamp_utc)
+
 
 AccountProvider = Callable[[Bar, int], AccountSnapshot]
 
 
 def align_five_tool_inputs(
+    settings: FiveToolSettings,
     primary: BarSeries,
     benchmark: BarSeries,
     *,
     higher_timeframe: BarSeries | None = None,
-    htf_ema_length: int = 100,
-    exchange_timezone: str = "America/New_York",
-    long_session: str = "0935-1530",
-    short_session: str = "0935-1530",
     account_provider: AccountProvider | None = None,
     external_regime: Mapping[datetime, float | None] | None = None,
     external_strength: Mapping[datetime, float | None] | None = None,
@@ -120,24 +143,82 @@ def align_five_tool_inputs(
 
     if benchmark.interval is not primary.interval:
         raise FiveToolInputError("benchmark must use the primary chart interval")
+    configured_benchmark = settings.text("bench_sym")
+    expected_benchmark_exchange, separator, expected_benchmark_symbol = (
+        configured_benchmark.rpartition(":")
+    )
+    if not separator or not expected_benchmark_exchange or not expected_benchmark_symbol:
+        raise FiveToolInputError("settings bench_sym must be an exchange-qualified ticker ID")
+    if benchmark.symbol.upper() != expected_benchmark_symbol.upper():
+        raise FiveToolInputError(
+            "benchmark series does not match the settings bench_sym contract: "
+            f"expected {expected_benchmark_symbol!r}, got {benchmark.symbol!r}"
+        )
+    primary_identity = _series_feed_identity(primary, "primary")
+    benchmark_identity = _series_feed_identity(benchmark, "benchmark")
+    if benchmark_identity is not None:
+        benchmark_source, benchmark_exchange = benchmark_identity
+        if benchmark_exchange.upper() != expected_benchmark_exchange.upper():
+            raise FiveToolInputError(
+                "benchmark exchange does not match settings bench_sym: "
+                f"expected {expected_benchmark_exchange!r}, got {benchmark_exchange!r}"
+            )
+        if primary_identity is not None and benchmark_source != primary_identity[0]:
+            raise FiveToolInputError(
+                "benchmark feed source does not match the primary series source"
+            )
     if any(bar.status is not BarStatus.CLOSED for bar in (*primary.bars, *benchmark.bars)):
         raise FiveToolInputError("alignment accepts closed bars only")
-    htf_valid = higher_timeframe is not None and interval_seconds(
-        higher_timeframe.interval
-    ) > interval_seconds(primary.interval)
+    requested_seconds = pine_timeframe_seconds(settings.text("htf_tf"))
+    requested_htf_valid = requested_seconds > interval_seconds(primary.interval)
+    if requested_htf_valid and requested_seconds not in set(_INTERVAL_SECONDS.values()):
+        raise FiveToolInputError(
+            "settings htf_tf cannot be represented by the supported BarInterval vocabulary"
+        )
+    if requested_htf_valid and higher_timeframe is None:
+        raise FiveToolInputError(
+            "a valid higher settings htf_tf requires an explicit higher_timeframe series"
+        )
+    if higher_timeframe is not None and higher_timeframe.symbol != primary.symbol:
+        raise FiveToolInputError("HTF series must use the primary chart symbol")
+    htf_identity = (
+        _series_feed_identity(higher_timeframe, "HTF") if higher_timeframe is not None else None
+    )
+    if (
+        primary_identity is not None
+        and htf_identity is not None
+        and htf_identity != primary_identity
+    ):
+        raise FiveToolInputError("HTF source/exchange identity must match the primary series")
+    if (
+        higher_timeframe is not None
+        and requested_htf_valid
+        and interval_seconds(higher_timeframe.interval) != requested_seconds
+    ):
+        raise FiveToolInputError("HTF series interval does not match settings htf_tf")
+    htf_valid = (
+        higher_timeframe is not None
+        and interval_seconds(higher_timeframe.interval) > interval_seconds(primary.interval)
+        and requested_htf_valid
+    )
     if higher_timeframe is not None and any(
         bar.status is not BarStatus.CLOSED for bar in higher_timeframe
     ):
         raise FiveToolInputError("HTF alignment accepts closed bars only")
 
     htf_bars = higher_timeframe.bars if htf_valid and higher_timeframe is not None else ()
-    htf_ema = pine_ema(tuple(bar.close for bar in htf_bars), htf_ema_length)
-    long_window = SessionWindow.parse(long_session, exchange_timezone)
-    short_window = SessionWindow.parse(short_session, exchange_timezone)
+    htf_ema = pine_ema(tuple(bar.close for bar in htf_bars), settings.integer("htf_ema_len"))
+    long_window = SessionWindow.parse(
+        settings.text("long_plus_session"), settings.exchange_timezone
+    )
+    short_window = SessionWindow.parse(
+        settings.text("short_plus_session"), settings.exchange_timezone
+    )
     benchmark_index = -1
     htf_index = -1
     result: list[FiveToolBarInput] = []
     for index, bar in enumerate(primary):
+        approximated_open = bar.timestamp_utc - timedelta(seconds=interval_seconds(bar.interval))
         while (
             benchmark_index + 1 < len(benchmark)
             and benchmark[benchmark_index + 1].timestamp_utc <= bar.timestamp_utc
@@ -180,8 +261,8 @@ def align_five_tool_inputs(
                 htf_ema=htf_ema_value,
                 external_regime=(external_regime or {}).get(bar.timestamp_utc),
                 external_strength=(external_strength or {}).get(bar.timestamp_utc),
-                long_plus_in_session=long_window.contains_close(bar.timestamp_utc),
-                short_plus_in_session=short_window.contains_close(bar.timestamp_utc),
+                long_plus_in_session=long_window.contains_open(approximated_open),
+                short_plus_in_session=short_window.contains_open(approximated_open),
                 account=(account_provider or (lambda _bar, _index: AccountSnapshot()))(bar, index),
             )
         )

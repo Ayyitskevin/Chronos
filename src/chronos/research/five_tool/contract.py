@@ -115,6 +115,7 @@ class FiveToolSemantics:
 @dataclass(frozen=True, slots=True)
 class FiveToolContract:
     schema_version: int
+    document_kind: str
     strategy_id: str
     capability_scope: str
     owner_approved: bool
@@ -378,6 +379,9 @@ def load_contract(
     schema_version = _integer(raw.get("schema_version"), "schema_version")
     if schema_version != 1:
         raise ContractSchemaError(f"unsupported Five-Tool contract schema {schema_version}")
+    document_kind = _string(raw.get("document_kind"), "document_kind")
+    if document_kind != "pine_input_contract":
+        raise ContractSchemaError("Five-Tool artifact document_kind must be 'pine_input_contract'")
     capability_scope = _string(raw.get("capability_scope"), "capability_scope")
     owner_approved = _boolean(raw.get("owner_approved"), "owner_approved")
     if capability_scope != "research-only" or owner_approved:
@@ -399,6 +403,7 @@ def load_contract(
     _verify_source(resolved_source, pine)
     return FiveToolContract(
         schema_version=schema_version,
+        document_kind=document_kind,
         strategy_id=_string(raw.get("strategy_id"), "strategy_id"),
         capability_scope=capability_scope,
         owner_approved=owner_approved,
@@ -433,6 +438,28 @@ def input_contract_digest() -> str:
     payload = {
         "source_sha256": contract.pine.source_sha256,
         "inputs": [asdict(item) for item in contract.inputs],
+    }
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def semantic_contract_digest() -> str:
+    """Return the source-bound identity of the declared execution semantics.
+
+    Input identity and semantic identity are deliberately separate locks.  A
+    campaign cannot use the input digest as evidence that timing, dependency,
+    warm-up, and deviation declarations were also reviewed.
+    """
+
+    contract = load_contract()
+    payload = {
+        "source_sha256": contract.pine.source_sha256,
+        "semantics": asdict(contract.semantics),
     }
     canonical = json.dumps(
         payload,

@@ -1,7 +1,7 @@
 """Deterministic, sample-honest validation evidence for Five-Tool research.
 
-Closed Pine trades are *legs*, not independent economic positions.  This module
-keeps both views explicit, selects OOS observations by chronological exit time,
+Closed Pine trades are *legs*, not independent economic positions. This module
+keeps both views explicit, purges positions opened before the frozen OOS boundary,
 and represents undefined metrics with tagged states instead of magic numbers.
 It is descriptive evidence only: no field is a promotion decision.
 """
@@ -33,7 +33,7 @@ class ProfitFactorState(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class ClosedLeg:
-    """One broker-emulator leg closure, not necessarily an independent trade."""
+    """One planned broker-emulator leg closure, not an independent trade."""
 
     position_id: str
     leg_id: LegId
@@ -41,6 +41,7 @@ class ClosedLeg:
     instrument: str
     regime: str
     parameter_variant: str
+    planned_leg_count: int
     entry_time_utc: datetime
     exit_time_utc: datetime
     gross_pnl: float
@@ -68,6 +69,19 @@ class ClosedLeg:
             object.__setattr__(self, field_name, timestamp.astimezone(UTC))
         if self.exit_time_utc < self.entry_time_utc:
             raise ValidationInputError("leg exit precedes entry")
+        if type(self.planned_leg_count) is not int or self.planned_leg_count not in (
+            1,
+            2,
+            3,
+        ):
+            raise ValidationInputError("planned_leg_count must be 1, 2, or 3")
+        leg_number = {
+            LegId.LEG_1: 1,
+            LegId.LEG_2: 2,
+            LegId.LEG_3: 3,
+        }[self.leg_id]
+        if leg_number > self.planned_leg_count:
+            raise ValidationInputError("closed leg was not present in the entry plan")
         if not math.isfinite(self.gross_pnl):
             raise ValidationInputError("gross_pnl must be finite")
         for cost_name, cost_value in (
@@ -78,6 +92,14 @@ class ClosedLeg:
         ):
             if not math.isfinite(cost_value) or cost_value < 0.0:
                 raise ValidationInputError(f"{cost_name} must be finite and non-negative")
+        if self.exit_reason is ExitReason.TARGET_1 and not (
+            self.planned_leg_count >= 2 and self.leg_id is LegId.LEG_1
+        ):
+            raise ValidationInputError("TARGET_1 requires split-plan leg 1")
+        if self.exit_reason is ExitReason.TARGET_2:
+            expected_target_2_leg = LegId.LEG_1 if self.planned_leg_count == 1 else LegId.LEG_2
+            if self.leg_id is not expected_target_2_leg:
+                raise ValidationInputError("TARGET_2 does not match the planned target-2 leg")
 
     @property
     def total_cost(self) -> float:
@@ -266,12 +288,35 @@ def aggregate_economic_positions(legs: Sequence[ClosedLeg]) -> tuple[EconomicPos
         if len({member.leg_id for member in members}) != len(members):
             raise ValidationInputError(f"position {position_id!r} repeats a leg id")
         for member in members[1:]:
-            metadata = (member.side, member.instrument, member.regime, member.parameter_variant)
-            expected = (first.side, first.instrument, first.regime, first.parameter_variant)
+            metadata = (
+                member.side,
+                member.instrument,
+                member.regime,
+                member.parameter_variant,
+                member.planned_leg_count,
+                member.entry_time_utc,
+            )
+            expected = (
+                first.side,
+                first.instrument,
+                first.regime,
+                first.parameter_variant,
+                first.planned_leg_count,
+                first.entry_time_utc,
+            )
             if metadata != expected:
                 raise ValidationInputError(
-                    f"position {position_id!r} has inconsistent side/slice metadata"
+                    f"position {position_id!r} has inconsistent entry metadata"
                 )
+        ordered_leg_ids = (LegId.LEG_1, LegId.LEG_2, LegId.LEG_3)
+        expected_legs = set(ordered_leg_ids[: first.planned_leg_count])
+        observed_legs = {member.leg_id for member in members}
+        if observed_legs != expected_legs:
+            missing = sorted(leg.value for leg in expected_legs - observed_legs)
+            extra = sorted(leg.value for leg in observed_legs - expected_legs)
+            raise ValidationInputError(
+                f"position {position_id!r} is not fully closed; missing={missing}, extra={extra}"
+            )
         positions.append(
             EconomicPosition(
                 position_id=position_id,
@@ -279,7 +324,7 @@ def aggregate_economic_positions(legs: Sequence[ClosedLeg]) -> tuple[EconomicPos
                 instrument=first.instrument,
                 regime=first.regime,
                 parameter_variant=first.parameter_variant,
-                entry_time_utc=min(member.entry_time_utc for member in members),
+                entry_time_utc=first.entry_time_utc,
                 exit_time_utc=max(member.exit_time_utc for member in members),
                 leg_count=len(members),
                 gross_pnl=math.fsum(member.gross_pnl for member in members),
@@ -335,10 +380,17 @@ def profit_factor(values: Sequence[float]) -> ProfitFactorEvidence:
 def chronological_oos_legs(
     legs: Sequence[ClosedLeg], *, start_utc: datetime
 ) -> tuple[ClosedLeg, ...]:
+    """Return complete positions opened on/after the frozen OOS boundary."""
+
     start = _aware_utc(start_utc, "OOS start")
+    eligible_position_ids = {
+        position.position_id
+        for position in aggregate_economic_positions(legs)
+        if position.entry_time_utc >= start
+    }
     return tuple(
         sorted(
-            (leg for leg in legs if leg.exit_time_utc >= start),
+            (leg for leg in legs if leg.position_id in eligible_position_ids),
             key=lambda item: (item.exit_time_utc, item.position_id, item.leg_id),
         )
     )
@@ -399,10 +451,16 @@ def build_validation_report(
         sorted(legs, key=lambda item: (item.exit_time_utc, item.position_id, item.leg_id))
     )
     positions = aggregate_economic_positions(ordered_legs)
-    oos_legs = chronological_oos_legs(ordered_legs, start_utc=start)
-    # A position enters OOS only once its final leg exits, matching Pine's exit_time test
-    # while preserving independence at the economic-position level.
-    oos_positions = tuple(position for position in positions if position.exit_time_utc >= start)
+    # Purge boundary-straddling positions.  Without a frozen mark-to-market at the
+    # boundary, including their complete P&L would leak pre-OOS economics into OOS.
+    oos_positions = tuple(position for position in positions if position.entry_time_utc >= start)
+    oos_position_ids = {position.position_id for position in oos_positions}
+    oos_legs = tuple(leg for leg in ordered_legs if leg.position_id in oos_position_ids)
+    straddling = tuple(
+        position
+        for position in positions
+        if position.entry_time_utc < start <= position.exit_time_utc
+    )
 
     position_values = [position.net_pnl for position in positions]
     oos_values = [position.net_pnl for position in oos_positions]
@@ -414,7 +472,11 @@ def build_validation_report(
             "economic-position sample is below the configured minimum; no promotion inference"
         )
     if not oos_positions:
-        warnings.append("no economic positions exit in the OOS interval")
+        warnings.append("no economic positions were opened in the OOS interval")
+    if straddling:
+        warnings.append(
+            f"purged {len(straddling)} boundary-straddling economic position(s) from OOS"
+        )
     if len(ordered_legs) != len(positions):
         warnings.append("closed legs are not independent; use economic_position_count for N")
 
@@ -424,13 +486,18 @@ def build_validation_report(
 
     return FiveToolValidationReport(
         schema_version=1,
-        accounting_basis="economic positions aggregate all leg closures sharing position_id",
+        accounting_basis=(
+            "complete economic positions aggregate every planned leg closure sharing position_id"
+        ),
         closed_leg_count=len(ordered_legs),
         economic_position_count=len(positions),
         all_closed_legs_profit_factor=profit_factor([leg.net_pnl for leg in ordered_legs]),
         all_economic_positions_profit_factor=profit_factor(position_values),
         oos=OosEvidence(
-            selection_basis="economic position final exit_time_utc >= frozen OOS start",
+            selection_basis=(
+                "economic position entry_time_utc >= frozen OOS start; "
+                "boundary-straddling positions purged"
+            ),
             start_utc=start,
             closed_legs=len(oos_legs),
             economic_positions=len(oos_positions),
@@ -520,9 +587,12 @@ def _risk_evidence(
     peak = 0.0
     max_drawdown = 0.0
     values: list[float] = []
+    by_exit: dict[datetime, list[float]] = defaultdict(list)
     for position in positions:
         values.append(position.net_pnl)
-        cumulative += position.net_pnl
+        by_exit[position.exit_time_utc].append(position.net_pnl)
+    for exit_time in sorted(by_exit):
+        cumulative += math.fsum(by_exit[exit_time])
         peak = max(peak, cumulative)
         max_drawdown = max(max_drawdown, peak - cumulative)
     tail_count = max(1, math.ceil(len(values) * alpha))
@@ -595,13 +665,18 @@ def _parameter_sensitivity(
             raise ValidationInputError(f"parameter neighbor graph has unknown variants: {invalid}")
         best_key = max(known, key=lambda key: (known[key], key))
         adjacent = tuple(neighbors.get(best_key, ()))
+        if len(adjacent) != len(set(adjacent)):
+            raise ValidationInputError("parameter neighbor graph contains duplicate neighbors")
+        if best_key in adjacent:
+            raise ValidationInputError("parameter neighbor graph cannot contain self-neighbors")
         if any(key not in known for key in adjacent):
             raise ValidationInputError("parameter neighbor graph references an unknown neighbor")
-        plateau = bool(adjacent) and all(known[key] > 0.0 for key in adjacent)
+        positive_neighbors = sum(known[key] > 0.0 for key in adjacent)
+        plateau = bool(adjacent) and positive_neighbors / len(adjacent) >= 0.67
         note = (
-            "best variant has declared neighbors and all are positive"
+            "at least 67% of the best variant's declared neighbors are positive"
             if plateau
-            else ("best variant lacks a fully positive declared neighborhood")
+            else ("best variant lacks a 67% positive declared neighborhood")
         )
     return ParameterSensitivityEvidence(
         variants=variants,

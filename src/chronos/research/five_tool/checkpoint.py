@@ -19,7 +19,7 @@ from chronos.research.five_tool.models import (
     Side,
 )
 
-CHECKPOINT_SCHEMA = "five-tool-state-v1"
+CHECKPOINT_SCHEMA = "five-tool-state-v2"
 
 
 def _json_default(value: object) -> str:
@@ -110,6 +110,8 @@ def _observation(value: object) -> FiveToolBarInput:
             position=Side(str(account_raw["position"])),
             average_entry_price=_optional_float(account_raw.get("average_entry_price")),
             entry_bar_index=_optional_int(account_raw.get("entry_bar_index")),
+            entry_setup=SetupFamily(str(account_raw["entry_setup"])),
+            base_pivot_at_entry=_optional_float(account_raw.get("base_pivot_at_entry")),
             long_virtual_equity=_optional_float(account_raw.get("long_virtual_equity")),
             short_virtual_equity=_optional_float(account_raw.get("short_virtual_equity")),
         ),
@@ -173,6 +175,7 @@ def state_from_json(payload: str) -> FiveToolState:
         last_regime=int(cast(int, state_raw["last_regime"])),
         have_regime=bool_field("have_regime"),
         previous_selected_regime=_optional_int(state_raw.get("previous_selected_regime")),
+        internal_bars_in_regime=int(cast(int, state_raw["internal_bars_in_regime"])),
         active_bars_in_regime=int(cast(int, state_raw["active_bars_in_regime"])),
         dwell_bull=_tuple_int(state_raw["dwell_bull"]),
         dwell_neutral=_tuple_int(state_raw["dwell_neutral"]),
@@ -189,6 +192,7 @@ def state_from_json(payload: str) -> FiveToolState:
         avwap_weight=_optional_float(state_raw.get("avwap_weight")),
         avwap_p2v=_optional_float(state_raw.get("avwap_p2v")),
         avwap_on=bool_field("avwap_on"),
+        avwap_valid_observations=int(cast(int, state_raw["avwap_valid_observations"])),
         avwap_age=int(cast(int, state_raw["avwap_age"])),
         previous_pivot_low=_pivot(state_raw.get("previous_pivot_low")),
         previous_pivot_high=_pivot(state_raw.get("previous_pivot_high")),
@@ -198,6 +202,11 @@ def state_from_json(payload: str) -> FiveToolState:
         long_retest_taken=bool_field("long_retest_taken"),
         pending_entry_side=Side(str(state_raw["pending_entry_side"])),
         pending_entry_setup=SetupFamily(str(state_raw["pending_entry_setup"])),
+        pending_base_pivot_at_entry=_optional_float(state_raw.get("pending_base_pivot_at_entry")),
+        active_entry_side=Side(str(state_raw["active_entry_side"])),
+        active_entry_bar_index=_optional_int(state_raw.get("active_entry_bar_index")),
+        active_entry_setup=SetupFamily(str(state_raw["active_entry_setup"])),
+        active_base_pivot_at_entry=_optional_float(state_raw.get("active_base_pivot_at_entry")),
         equity_peak=_optional_float(state_raw.get("equity_peak")),
         equity_history=tuple(
             float(cast(float | int, item))
@@ -222,6 +231,14 @@ def state_from_json(payload: str) -> FiveToolState:
         short_daily_halt_latched=bool_field("short_daily_halt_latched"),
         previous_position=Side(str(state_raw["previous_position"])),
         last_exit_bar_index=_optional_int(state_raw.get("last_exit_bar_index")),
+        long_last_exit_bar_index=_optional_int(state_raw.get("long_last_exit_bar_index")),
+        short_last_exit_bar_index=_optional_int(state_raw.get("short_last_exit_bar_index")),
+        short_blocked_no_chase=int(cast(int, state_raw["short_blocked_no_chase"])),
+        short_blocked_support=int(cast(int, state_raw["short_blocked_support"])),
+        short_blocked_squeeze=int(cast(int, state_raw["short_blocked_squeeze"])),
+        long_blocked_no_chase=int(cast(int, state_raw["long_blocked_no_chase"])),
+        long_blocked_resistance=int(cast(int, state_raw["long_blocked_resistance"])),
+        long_blocked_exhaustion=int(cast(int, state_raw["long_blocked_exhaustion"])),
         emitted_event_ids=tuple(
             str(item) for item in cast(list[object], state_raw["emitted_event_ids"])
         ),

@@ -26,6 +26,16 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from chronos.research.five_tool.contract import load_contract
+from chronos.research.five_tool.models import (
+    FiveToolBarInput,
+    FiveToolTrace,
+    SignalIntent,
+)
+from chronos.research.five_tool.models import (
+    Side as EngineSide,
+)
+
 SCHEMA_VERSION = "chronos.five_tool_tradingview_trace.v1"
 PINNED_CATALOG_NUMBER = "00"
 PINNED_PINE_SHA256 = "e51d5a40d2e933bf86847c7432364ba8934fd2de653d6aec3d7205639248e45f"
@@ -100,6 +110,7 @@ _METADATA_KEYS = frozenset(
         "input_config_sha256",
         "trace_sha256",
         "row_count",
+        "owner_attestation_sha256",
     }
 )
 
@@ -189,9 +200,16 @@ class FixtureMetadata:
     input_config_sha256: str
     trace_sha256: str
     row_count: int
+    owner_attestation_sha256: str | None
+    trusted_owner_export: bool
 
     @classmethod
-    def from_mapping(cls, document: Mapping[str, object]) -> FixtureMetadata:
+    def from_mapping(
+        cls,
+        document: Mapping[str, object],
+        *,
+        trusted_owner_attestation_sha256: str | None = None,
+    ) -> FixtureMetadata:
         present = frozenset(document)
         if present != _METADATA_KEYS:
             missing = sorted(_METADATA_KEYS - present)
@@ -252,6 +270,8 @@ class FixtureMetadata:
                 f"genuine catalog 00 exports require all {PINNED_PINE_INPUT_COUNT} inputs; "
                 f"got {input_count}"
             )
+        if provenance is FixtureProvenance.GENUINE:
+            _validate_genuine_input_config(validated)
 
         input_config_sha256 = _require_string(document, "input_config_sha256").lower()
         if not _SHA256_RE.fullmatch(input_config_sha256):
@@ -269,6 +289,33 @@ class FixtureMetadata:
         row_count = _require_nonnegative_int(document, "row_count")
         if row_count == 0:
             raise FixtureSchemaError("metadata.row_count must be positive")
+
+        raw_attestation = document["owner_attestation_sha256"]
+        owner_attestation_sha256: str | None
+        trusted_owner_export = False
+        if provenance is FixtureProvenance.INTERNAL_SPEC:
+            if raw_attestation is not None:
+                raise FixtureSchemaError("internal_spec fixtures cannot carry an owner attestation")
+            owner_attestation_sha256 = None
+        else:
+            if not isinstance(raw_attestation, str):
+                raise FixtureSchemaError(
+                    "genuine fixtures require a detached owner attestation SHA-256"
+                )
+            owner_attestation_sha256 = raw_attestation.lower()
+            if not _SHA256_RE.fullmatch(owner_attestation_sha256):
+                raise FixtureSchemaError(
+                    "metadata.owner_attestation_sha256 must be lowercase SHA-256"
+                )
+            if trusted_owner_attestation_sha256 is None:
+                raise FixtureSchemaError(
+                    "genuine fixture is untrusted without an out-of-band owner attestation"
+                )
+            if owner_attestation_sha256 != trusted_owner_attestation_sha256:
+                raise FixtureSchemaError(
+                    "owner attestation does not match the trusted out-of-band digest"
+                )
+            trusted_owner_export = True
 
         return cls(
             schema_version=schema_version,
@@ -289,7 +336,44 @@ class FixtureMetadata:
             input_config_sha256=input_config_sha256,
             trace_sha256=trace_sha256,
             row_count=row_count,
+            owner_attestation_sha256=owner_attestation_sha256,
+            trusted_owner_export=trusted_owner_export,
         )
+
+
+def _validate_genuine_input_config(config: Mapping[str, JsonValue]) -> None:
+    contract = load_contract()
+    expected_names = tuple(item.name for item in contract.inputs)
+    if tuple(config) != expected_names:
+        missing = sorted(set(expected_names) - set(config))
+        unknown = sorted(set(config) - set(expected_names))
+        raise FixtureSchemaError(
+            "genuine input_config must contain the exact source-ordered Pine inputs; "
+            f"missing={missing}, unknown={unknown}"
+        )
+    for item in contract.inputs:
+        value = config[item.name]
+        if item.pine_type == "bool":
+            valid_type = isinstance(value, bool)
+        elif item.pine_type in {"int", "time"}:
+            valid_type = isinstance(value, int) and not isinstance(value, bool)
+        elif item.pine_type == "float":
+            valid_type = isinstance(value, int | float) and not isinstance(value, bool)
+        else:
+            valid_type = isinstance(value, str)
+        if not valid_type:
+            raise FixtureSchemaError(f"genuine input_config.{item.name} has an incompatible type")
+        if item.options is not None and value not in item.options:
+            raise FixtureSchemaError(
+                f"genuine input_config.{item.name} is outside declared options"
+            )
+        if isinstance(value, int | float) and not isinstance(value, bool):
+            minimum = item.minval.value if item.minval is not None else None
+            maximum = item.maxval.value if item.maxval is not None else None
+            if isinstance(minimum, int | float) and value < minimum:
+                raise FixtureSchemaError(f"genuine input_config.{item.name} is below minval")
+            if isinstance(maximum, int | float) and value > maximum:
+                raise FixtureSchemaError(f"genuine input_config.{item.name} is above maxval")
 
 
 @dataclass(frozen=True, slots=True)
@@ -503,7 +587,13 @@ class FloatTolerance:
     rel_tol: float
 
     def __post_init__(self) -> None:
-        if not self.name or self.abs_tol < 0 or self.rel_tol < 0:
+        if (
+            not self.name
+            or not math.isfinite(self.abs_tol)
+            or not math.isfinite(self.rel_tol)
+            or self.abs_tol < 0
+            or self.rel_tol < 0
+        ):
             raise ValueError("float tolerances require a name and non-negative limits")
 
 
@@ -656,7 +746,147 @@ class TraceFixture:
     rows: tuple[TraceRow, ...]
 
 
-def load_trace_fixture(csv_path: Path, metadata_path: Path | None = None) -> TraceFixture:
+def trace_row_from_engine(trace: FiveToolTrace, item: FiveToolBarInput) -> TraceRow:
+    """Strictly project one engine decision trace into the TV comparison schema.
+
+    This adapter is not evidence that TradingView agrees.  It only makes the
+    engine side of a future owner-export comparison executable and inspectable.
+    """
+
+    if trace.timestamp_utc != item.primary.timestamp_utc:
+        raise FixtureSchemaError("engine trace and bar input timestamps disagree")
+
+    def feature(name: str) -> JsonScalar:
+        value = trace.feature(name)
+        if value is not None and not isinstance(value, str | bool | int | float):
+            raise FixtureSchemaError(f"engine feature {name!r} is not scalar")
+        return value
+
+    def boolean(name: str) -> bool:
+        value = feature(name)
+        if not isinstance(value, bool):
+            raise FixtureSchemaError(f"engine feature {name!r} must be boolean")
+        return value
+
+    def integer(name: str) -> int:
+        value = feature(name)
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise FixtureSchemaError(f"engine feature {name!r} must be integer")
+        return value
+
+    def number(name: str) -> float | None:
+        value = feature(name)
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            raise FixtureSchemaError(f"engine feature {name!r} must be numeric")
+        result = float(value)
+        if not math.isfinite(result):
+            raise FixtureSchemaError(f"engine feature {name!r} must be finite")
+        return result
+
+    raw_regime = feature("regime")
+    regime = (
+        Regime.BULL
+        if raw_regime == 1
+        else Regime.BEAR
+        if raw_regime == -1
+        else Regime.NEUTRAL
+        if raw_regime == 0
+        else None
+    )
+    entry = (
+        EntryDecision.LONG
+        if trace.intent is SignalIntent.ENTER_LONG
+        else EntryDecision.SHORT
+        if trace.intent is SignalIntent.ENTER_SHORT
+        else EntryDecision.NONE
+    )
+    exit_ = (
+        ExitDecision.LONG
+        if trace.intent is SignalIntent.EXIT_LONG
+        else ExitDecision.SHORT
+        if trace.intent is SignalIntent.EXIT_SHORT
+        else ExitDecision.NONE
+    )
+    position = {
+        EngineSide.FLAT: PositionSide.FLAT,
+        EngineSide.LONG: PositionSide.LONG,
+        EngineSide.SHORT: PositionSide.SHORT,
+    }[item.account.position]
+    p_stay = number("markov_p_stay")
+    return TraceRow(
+        timestamp_utc=trace.timestamp_utc,
+        source_timestamp=trace.timestamp_utc.isoformat(),
+        regime=regime,
+        regime_flip=boolean("regime_flip"),
+        entry_decision=entry,
+        exit_decision=exit_,
+        position_side=position,
+        regime_z=number("regime_z"),
+        strength=number("strength"),
+        chop_risk=integer("chop_risk"),
+        extension=boolean("extension"),
+        mansfield=number("mansfield"),
+        avwap=number("avwap"),
+        long_score=number("long_score"),
+        short_score=number("short_score"),
+        equity_dd_pct=number("equity_drawdown_percent"),
+        daily_dd_pct=number("daily_drawdown_percent"),
+        atr_pct=number("atr_percent"),
+        markov_transitions=integer("markov_total_transitions"),
+        regime_pstay_pct=None if p_stay is None else p_stay * 100.0,
+        short_review_ok=trace.gate("short_review_v2"),
+        short_failed_reclaim=boolean("short_failed_reclaim"),
+        short_bear_flag_break=boolean("short_bear_flag_breakdown"),
+        short_bear_flip_retest=boolean("short_bear_retest"),
+        short_sector_laggard=boolean("short_sector_laggard"),
+        short_plus_score=number("short_continuation_score"),
+        short_plus_gate=boolean("short_plus_gate_core"),
+        short_plus_agrade=boolean("short_plus_a_grade"),
+        short_plus_risk_mult=number("short_plus_risk_multiplier"),
+        short_plus_score_boost=number("short_plus_score_boost"),
+        short_no_chase_block=boolean("short_no_chase_block"),
+        short_support_block=boolean("short_support_block"),
+        short_squeeze_block=boolean("short_squeeze_block"),
+        short_struct_stop=number("short_structural_stop"),
+        short_stop_pct=number("short_stop_percent"),
+        short_blocked_no_chase=integer("short_blocked_no_chase"),
+        short_blocked_support=integer("short_blocked_support"),
+        short_blocked_squeeze=integer("short_blocked_squeeze"),
+        long_review_ok=trace.gate("long_review_v2"),
+        long_blocked_no_chase=integer("long_blocked_no_chase"),
+        long_blocked_resistance=integer("long_blocked_resistance"),
+        long_blocked_exhaustion=integer("long_blocked_exhaustion"),
+        long_struct_stop=number("long_structural_stop"),
+        long_stop_pct=number("long_stop_percent"),
+        long_virtual_equity=number("long_virtual_equity"),
+        short_virtual_equity=number("short_virtual_equity"),
+        avwap_force_reset=boolean("avwap_stale_reset"),
+        avwap_age_bars=integer("avwap_age"),
+        avwap_display_hidden=boolean("avwap_display_hidden"),
+    )
+
+
+def trace_rows_from_engine(
+    traces: Sequence[FiveToolTrace], inputs: Sequence[FiveToolBarInput]
+) -> tuple[TraceRow, ...]:
+    """Convert a complete engine run without sorting, shifting, or filling bars."""
+
+    if len(traces) != len(inputs):
+        raise FixtureSchemaError("engine trace and input counts disagree")
+    return tuple(
+        trace_row_from_engine(trace, item) for trace, item in zip(traces, inputs, strict=True)
+    )
+
+
+def load_trace_fixture(
+    csv_path: Path,
+    metadata_path: Path | None = None,
+    *,
+    owner_attestation_path: Path | None = None,
+    trusted_owner_attestation_sha256: str | None = None,
+) -> TraceFixture:
     """Load and validate a normalized fixture without sorting or filling rows."""
 
     meta_path = metadata_path or csv_path.with_suffix(".meta.json")
@@ -671,7 +901,26 @@ def load_trace_fixture(csv_path: Path, metadata_path: Path | None = None) -> Tra
         raise FixtureSchemaError(f"unable to read fixture metadata {meta_path}: {error}") from error
     if not isinstance(raw_document, dict):
         raise FixtureSchemaError("fixture metadata root must be an object")
-    metadata = FixtureMetadata.from_mapping(raw_document)
+    if (owner_attestation_path is None) != (trusted_owner_attestation_sha256 is None):
+        raise FixtureSchemaError(
+            "owner attestation path and trusted digest must be supplied together"
+        )
+    attestation_digest: str | None = None
+    if owner_attestation_path is not None and trusted_owner_attestation_sha256 is not None:
+        if not _SHA256_RE.fullmatch(trusted_owner_attestation_sha256):
+            raise FixtureSchemaError("trusted owner attestation must be lowercase SHA-256")
+        try:
+            attestation_digest = _file_sha256(owner_attestation_path)
+        except OSError as error:
+            raise FixtureSchemaError(
+                f"unable to read detached owner attestation: {error}"
+            ) from error
+        if attestation_digest != trusted_owner_attestation_sha256:
+            raise FixtureSchemaError("detached owner attestation bytes do not match trusted digest")
+    metadata = FixtureMetadata.from_mapping(
+        raw_document,
+        trusted_owner_attestation_sha256=attestation_digest,
+    )
 
     try:
         actual_trace_sha256 = _file_sha256(csv_path)
@@ -733,6 +982,9 @@ class ComparisonReport:
     compared_rows: int
     parity_status: ParityStatus
     first_divergence: Divergence | None
+    verification_scope: str
+    execution_parity_status: ParityStatus
+    verification_blockers: tuple[str, ...]
 
 
 def _metadata_mismatch(reference: FixtureMetadata, candidate: FixtureMetadata) -> str | None:
@@ -745,6 +997,7 @@ def _metadata_mismatch(reference: FixtureMetadata, candidate: FixtureMetadata) -
         "chart_timezone",
         "session",
         "timestamp_semantics",
+        "data_source",
         "input_count",
         "input_config_sha256",
     ):
@@ -809,6 +1062,10 @@ def compare_trace_fixtures(
         raise FixtureSchemaError(
             f"float tolerances must cover the exact schema; missing={missing}, unknown={unknown}"
         )
+    if reference.metadata.trusted_owner_export and reference is candidate:
+        raise FixtureSchemaError(
+            "a genuine reference must be compared with an independently built candidate"
+        )
 
     compared_rows = 0
     first: Divergence | None = None
@@ -863,19 +1120,33 @@ def compare_trace_fixtures(
         )
 
     matched = first is None
-    if reference.metadata.provenance is FixtureProvenance.GENUINE:
-        parity_status = ParityStatus.VERIFIED if matched else ParityStatus.FAILED
-    else:
-        parity_status = ParityStatus.UNVERIFIED
+    blockers: list[str] = []
+    if not reference.metadata.trusted_owner_export:
+        blockers.append("reference_is_not_a_trusted_owner_export")
+    if tolerances != FLOAT_TOLERANCES:
+        blockers.append("comparison_uses_a_nonofficial_tolerance_profile")
+    # The v1 fixture contract has no independently attestable Python-candidate
+    # identity and no reviewed normalizer for decision/event fields absent from the
+    # Pine *_EXPORT plots.  Matching values are useful diagnostic evidence, but an
+    # automated VERIFIED upgrade would let a copied reference certify itself.
+    blockers.append("independent_candidate_and_normalizer_attestation_not_implemented")
+    parity_status = (
+        ParityStatus.FAILED
+        if reference.metadata.trusted_owner_export and not matched
+        else ParityStatus.UNVERIFIED
+    )
     return ComparisonReport(
         matched=matched,
         compared_rows=compared_rows,
         parity_status=parity_status,
         first_divergence=first,
+        verification_scope="closed_bar_signal_trace_only",
+        execution_parity_status=ParityStatus.UNVERIFIED,
+        verification_blockers=tuple(blockers),
     )
 
 
 def genuine_reference_present(fixtures: Sequence[TraceFixture]) -> bool:
     """Return true only for an actually loaded owner-exported reference."""
 
-    return any(item.metadata.provenance is FixtureProvenance.GENUINE for item in fixtures)
+    return any(item.metadata.trusted_owner_export for item in fixtures)

@@ -7,12 +7,16 @@ import hashlib
 import io
 import json
 from dataclasses import replace
-from datetime import UTC, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from chronos.marketdata.bars import Bar, BarInterval, BarSeries
+from chronos.research.five_tool.alignment import align_five_tool_inputs
+from chronos.research.five_tool.engine import evaluate_batch
+from chronos.research.five_tool.models import FiveToolBarInput, FiveToolSettings
 from chronos.research.tradingview import (
     PINNED_PINE_INPUT_COUNT,
     EntryDecision,
@@ -22,11 +26,19 @@ from chronos.research.tradingview import (
     compare_trace_fixtures,
     genuine_reference_present,
     load_trace_fixture,
+    trace_row_from_engine,
+    trace_rows_from_engine,
 )
 
 FIXTURE_DIR = Path(__file__).parents[1] / "fixtures" / "tradingview_synthetic"
 FIXTURE_CSV = FIXTURE_DIR / "five_tool_trace.csv"
 FIXTURE_META = FIXTURE_DIR / "five_tool_trace.meta.json"
+
+
+def _genuine_input_config() -> dict[str, bool | int | float | str]:
+    return dict(
+        FiveToolSettings.defaults(history_start_utc=datetime(2024, 1, 1, tzinfo=UTC)).inputs
+    )
 
 
 def _load_synthetic() -> Any:
@@ -89,7 +101,34 @@ def test_synthetic_exact_match_never_claims_tradingview_parity() -> None:
     assert report.compared_rows == 3
     assert report.first_divergence is None
     assert report.parity_status is ParityStatus.UNVERIFIED
+    assert report.verification_scope == "closed_bar_signal_trace_only"
+    assert report.execution_parity_status is ParityStatus.UNVERIFIED
+    assert "reference_is_not_a_trusted_owner_export" in report.verification_blockers
+    assert (
+        "independent_candidate_and_normalizer_attestation_not_implemented"
+        in report.verification_blockers
+    )
     assert genuine_reference_present([fixture]) is False
+
+
+def test_copied_trusted_reference_cannot_self_certify() -> None:
+    fixture = _load_synthetic()
+    forged_metadata = replace(
+        fixture.metadata,
+        provenance=FixtureProvenance.GENUINE,
+        owner_attestation_sha256="a" * 64,
+        trusted_owner_export=True,
+    )
+    reference = replace(fixture, metadata=forged_metadata)
+    candidate = replace(fixture, metadata=forged_metadata)
+
+    report = compare_trace_fixtures(reference, candidate)
+
+    assert report.matched is True
+    assert report.parity_status is ParityStatus.UNVERIFIED
+    assert report.verification_blockers == (
+        "independent_candidate_and_normalizer_attestation_not_implemented",
+    )
 
 
 def test_rejects_wrong_pinned_source_hash(tmp_path: Path) -> None:
@@ -125,12 +164,110 @@ def test_genuine_fixture_requires_complete_219_input_config(tmp_path: Path) -> N
         load_trace_fixture(csv_path, meta_path)
 
 
+def test_arbitrary_219_keys_cannot_forge_genuine_provenance(tmp_path: Path) -> None:
+    csv_path, meta_path = _copy_fixture(tmp_path)
+    metadata = _read_metadata(meta_path)
+    config = {f"not_a_pine_input_{index}": index for index in range(219)}
+    metadata["provenance"] = "genuine"
+    metadata["input_count"] = len(config)
+    metadata["input_config"] = config
+    metadata["input_config_sha256"] = hashlib.sha256(
+        json.dumps(config, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    metadata["owner_attestation_sha256"] = "a" * 64
+    _write_metadata(meta_path, metadata)
+    with pytest.raises(FixtureSchemaError, match="exact source-ordered Pine inputs"):
+        load_trace_fixture(csv_path, meta_path)
+
+
+def test_genuine_metadata_requires_detached_out_of_band_attestation(tmp_path: Path) -> None:
+    csv_path, meta_path = _copy_fixture(tmp_path)
+    metadata = _read_metadata(meta_path)
+    config = _genuine_input_config()
+    metadata["provenance"] = "genuine"
+    metadata["input_count"] = len(config)
+    metadata["input_config"] = config
+    metadata["input_config_sha256"] = hashlib.sha256(
+        json.dumps(config, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    metadata["owner_attestation_sha256"] = "a" * 64
+    _write_metadata(meta_path, metadata)
+    with pytest.raises(FixtureSchemaError, match="out-of-band owner attestation"):
+        load_trace_fixture(csv_path, meta_path)
+
+
+def test_trusted_genuine_reference_loads_but_match_remains_unverified(
+    tmp_path: Path,
+) -> None:
+    csv_path, meta_path = _copy_fixture(tmp_path)
+    attestation_path = tmp_path / "owner-attestation.json"
+    attestation_path.write_bytes(b'{"reviewed_export":"fixture-only-test"}\n')
+    attestation_digest = hashlib.sha256(attestation_path.read_bytes()).hexdigest()
+    metadata = _read_metadata(meta_path)
+    config = _genuine_input_config()
+    metadata.update(
+        {
+            "provenance": "genuine",
+            "input_count": len(config),
+            "input_config": config,
+            "input_config_sha256": hashlib.sha256(
+                json.dumps(config, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest(),
+            "owner_attestation_sha256": attestation_digest,
+        }
+    )
+    _write_metadata(meta_path, metadata)
+
+    reference = load_trace_fixture(
+        csv_path,
+        meta_path,
+        owner_attestation_path=attestation_path,
+        trusted_owner_attestation_sha256=attestation_digest,
+    )
+    candidate = replace(
+        reference,
+        metadata=replace(
+            reference.metadata,
+            provenance=FixtureProvenance.INTERNAL_SPEC,
+            owner_attestation_sha256=None,
+            trusted_owner_export=False,
+        ),
+    )
+    report = compare_trace_fixtures(reference, candidate)
+
+    assert reference.metadata.trusted_owner_export is True
+    assert genuine_reference_present([reference]) is True
+    assert report.matched is True
+    assert report.parity_status is ParityStatus.UNVERIFIED
+    assert report.verification_blockers == (
+        "independent_candidate_and_normalizer_attestation_not_implemented",
+    )
+
+
+def test_nonfinite_tolerance_is_rejected() -> None:
+    from chronos.research.tradingview import FloatTolerance
+
+    with pytest.raises(ValueError, match="non-negative"):
+        FloatTolerance("forged", float("inf"), 0.0)
+
+
 def test_compare_rejects_config_identity_mismatch_before_rows() -> None:
     fixture = _load_synthetic()
     other_metadata = replace(fixture.metadata, input_config_sha256="f" * 64)
     candidate = replace(fixture, metadata=other_metadata)
 
     with pytest.raises(FixtureSchemaError, match="metadata mismatch for input_config_sha256"):
+        compare_trace_fixtures(fixture, candidate)
+
+
+def test_compare_rejects_data_source_identity_mismatch_before_rows() -> None:
+    fixture = _load_synthetic()
+    candidate = replace(
+        fixture,
+        metadata=replace(fixture.metadata, data_source="different-feed-and-adjustment"),
+    )
+
+    with pytest.raises(FixtureSchemaError, match="metadata mismatch for data_source"):
         compare_trace_fixtures(fixture, candidate)
 
 
@@ -249,3 +386,80 @@ def test_rejects_unknown_metadata_key(tmp_path: Path) -> None:
 
     with pytest.raises(FixtureSchemaError, match=r"unknown=\['parity_verified'\]"):
         load_trace_fixture(csv_path, meta_path)
+
+
+def test_real_engine_trace_projects_into_comparison_rows_deterministically() -> None:
+    start = datetime(2024, 1, 2, 21, tzinfo=UTC)
+
+    def series(symbol: str, scale: float) -> BarSeries:
+        bars = tuple(
+            Bar(
+                symbol=symbol,
+                source="internal_spec",
+                exchange="AMEX" if symbol == "SPY" else "NYSE",
+                interval=BarInterval.DAY_1,
+                session_date=(start + timedelta(days=index)).date(),
+                timestamp_utc=start + timedelta(days=index),
+                open=(100.0 + index * 0.3) * scale,
+                high=(101.0 + index * 0.3) * scale,
+                low=(99.0 + index * 0.3) * scale,
+                close=(100.5 + index * 0.3 + (0.1 if index % 2 else -0.1)) * scale,
+                volume=1_000_000.0,
+            )
+            for index in range(35)
+        )
+        return BarSeries(symbol=symbol, interval=BarInterval.DAY_1, bars=bars)
+
+    settings = FiveToolSettings.defaults(history_start_utc=start)
+    inputs = align_five_tool_inputs(settings, series("AAA", 1.0), series("SPY", 4.0))
+    rows = trace_rows_from_engine(evaluate_batch(settings, inputs), inputs)
+    combined = hashlib.sha256("".join(row.state_digest for row in rows).encode()).hexdigest()
+    assert len(rows) == 35
+    assert rows[0].timestamp_utc == start
+    assert combined == "136097ff46f57dee883a4bd39c81a66d398a0aa7f676ee712c755848261630ab"
+
+
+def test_engine_adapter_projects_raw_v2_gates_and_stale_only_avwap_reset() -> None:
+    start = datetime(2024, 1, 2, 21, tzinfo=UTC)
+    primary = Bar(
+        symbol="AAA",
+        source="internal_spec",
+        exchange="NYSE",
+        interval=BarInterval.DAY_1,
+        session_date=start.date(),
+        timestamp_utc=start,
+        open=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.5,
+        volume=1_000_000.0,
+    )
+    item = FiveToolBarInput(primary=primary, benchmark=None)
+    trace = evaluate_batch(FiveToolSettings.defaults(history_start_utc=start), (item,))[0]
+    features = dict(trace.features)
+    features.update(
+        {
+            "extension": True,
+            "extension_active": False,
+            "avwap_reset": True,
+            "avwap_stale_reset": False,
+        }
+    )
+    gates = dict(trace.gates)
+    gates.update(
+        {
+            "short_review": False,
+            "short_review_v2": True,
+            "long_review": False,
+            "long_review_v2": True,
+        }
+    )
+    projected = trace_row_from_engine(
+        replace(trace, features=tuple(features.items()), gates=tuple(gates.items())),
+        item,
+    )
+
+    assert projected.extension is True
+    assert projected.short_review_ok is True
+    assert projected.long_review_ok is True
+    assert projected.avwap_force_reset is False

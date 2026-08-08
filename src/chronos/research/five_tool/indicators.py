@@ -105,22 +105,26 @@ def pine_stdev(source: Sequence[float | None], length: int) -> NullableSeries:
 
 
 def pine_percentrank(source: Sequence[float | None], length: int) -> NullableSeries:
-    """Percentage of the preceding ``length`` valid values no greater than current."""
+    """Percentage of the preceding ``length`` values no greater than current.
+
+    Unlike Pine moving averages, ``ta.percentrank`` includes missing source slots
+    in its window and returns ``na`` while any such slot remains in that window.
+    """
 
     if length <= 0:
         raise ValueError("length must be positive")
-    valid_history: list[float] = []
+    history: list[float | None] = []
     output: list[float | None] = []
     for value in source:
-        if not _finite(value):
+        prior = history[-length:]
+        if not _finite(value) or len(prior) < length or any(not _finite(item) for item in prior):
             output.append(None)
-            continue
-        assert value is not None
-        prior = valid_history[-length:]
-        output.append(
-            None if len(prior) < length else 100.0 * sum(item <= value for item in prior) / length
-        )
-        valid_history.append(value)
+        else:
+            assert value is not None
+            output.append(
+                100.0 * sum(item is not None and item <= value for item in prior) / length
+            )
+        history.append(value if _finite(value) else None)
     return tuple(output)
 
 
@@ -181,8 +185,13 @@ def pine_mfi(
     typical = tuple(
         (high + low + close) / 3.0 for high, low, close in zip(highs, lows, closes, strict=True)
     )
-    positive: list[float | None] = [None]
-    negative: list[float | None] = [None]
+    if not typical:
+        return ()
+    # Pine v6 comparisons with the first bar's missing change are false, so both
+    # ternaries in the documented ta.mfi equivalent select the first raw flow.
+    initial_flow = typical[0] * volumes[0]
+    positive: list[float | None] = [initial_flow]
+    negative: list[float | None] = [initial_flow]
     for index in range(1, len(typical)):
         flow = typical[index] * volumes[index]
         positive.append(flow if typical[index] > typical[index - 1] else 0.0)
@@ -222,7 +231,9 @@ def pine_dmi(
         down = lows[index - 1] - lows[index]
         plus_dm.append(up if up > down and up > 0.0 else 0.0)
         minus_dm.append(down if down > up and down > 0.0 else 0.0)
-    atr_values = pine_rma((None, *true_range(highs, lows, closes)[1:]), di_length)
+    # Pine's true-range seed includes the first bar's high-low range.  Directional
+    # movement itself still begins on the second bar because it needs a predecessor.
+    atr_values = pine_rma(true_range(highs, lows, closes), di_length)
     plus_smoothed = pine_rma(plus_dm, di_length)
     minus_smoothed = pine_rma(minus_dm, di_length)
     plus_di: list[float | None] = []

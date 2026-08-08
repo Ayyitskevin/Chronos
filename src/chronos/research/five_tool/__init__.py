@@ -1,5 +1,7 @@
-"""Research-only Five-Tool Confluence parity capability."""
+"""Research-only Five-Tool Confluence signal and evidence capability."""
 
+from chronos.research.five_tool.alignment import align_five_tool_inputs
+from chronos.research.five_tool.checkpoint import state_from_json, state_to_json
 from chronos.research.five_tool.contract import (
     ContractDriftError,
     ContractSchemaError,
@@ -18,24 +20,51 @@ from chronos.research.five_tool.contract import (
     default_source_path,
     input_contract_digest,
     load_contract,
+    semantic_contract_digest,
+)
+from chronos.research.five_tool.engine import FiveToolEngine, evaluate_batch, resume_batch
+from chronos.research.five_tool.models import (
+    AccountSnapshot,
+    FiveToolBarInput,
+    FiveToolInputError,
+    FiveToolSettings,
+    FiveToolState,
+    FiveToolTrace,
+    SetupFamily,
+    Side,
 )
 
 __all__ = [
+    "AccountSnapshot",
     "ContractDriftError",
     "ContractSchemaError",
     "DependencyStage",
     "Deviation",
+    "FiveToolBarInput",
     "FiveToolContract",
     "FiveToolContractError",
+    "FiveToolEngine",
+    "FiveToolInputError",
     "FiveToolSemantics",
+    "FiveToolSettings",
+    "FiveToolState",
+    "FiveToolTrace",
     "PineInput",
     "PineSource",
     "PineValue",
+    "SetupFamily",
+    "Side",
     "TimingRule",
     "WarmupRule",
+    "align_five_tool_inputs",
     "default_contract_path",
     "default_input_values",
     "default_source_path",
+    "evaluate_batch",
     "input_contract_digest",
     "load_contract",
+    "resume_batch",
+    "semantic_contract_digest",
+    "state_from_json",
+    "state_to_json",
 ]

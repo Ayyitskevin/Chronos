@@ -9,15 +9,22 @@ import subprocess
 import sys
 from collections import Counter
 from dataclasses import FrozenInstanceError
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
+import chronos.research.five_tool as five_tool
 from chronos.research.five_tool import (
     ContractDriftError,
+    FiveToolEngine,
+    FiveToolSettings,
     default_input_values,
     input_contract_digest,
     load_contract,
+    semantic_contract_digest,
+    state_from_json,
+    state_to_json,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -45,6 +52,7 @@ def test_loader_exposes_all_inputs_in_source_order_and_immutable_records() -> No
     contract = load_contract()
 
     assert contract.pine.source_sha256 == PINNED_SHA256
+    assert contract.document_kind == "pine_input_contract"
     assert contract.pine.input_count == 219
     assert len(contract.inputs) == 219
     assert contract.inputs[0].name == "enable_orders"
@@ -112,6 +120,30 @@ def test_engine_helpers_return_complete_ordered_defaults_and_stable_digest() -> 
     assert defaults["htf_tf"] == "D"
     assert re.fullmatch(r"[0-9a-f]{64}", input_contract_digest())
     assert input_contract_digest() == PINNED_INPUT_DIGEST
+    assert re.fullmatch(r"[0-9a-f]{64}", semantic_contract_digest())
+
+
+def test_public_signal_workflow_surface_round_trips_initial_state() -> None:
+    expected = {
+        "AccountSnapshot",
+        "FiveToolBarInput",
+        "FiveToolEngine",
+        "FiveToolInputError",
+        "FiveToolSettings",
+        "FiveToolState",
+        "FiveToolTrace",
+        "SetupFamily",
+        "Side",
+        "align_five_tool_inputs",
+        "evaluate_batch",
+        "resume_batch",
+        "state_from_json",
+        "state_to_json",
+    }
+    assert expected <= set(five_tool.__all__)
+    settings = FiveToolSettings.defaults(history_start_utc=datetime(2026, 1, 2, tzinfo=UTC))
+    engine = FiveToolEngine(settings)
+    assert state_from_json(state_to_json(engine.checkpoint())) == engine.checkpoint()
 
 
 def test_multiline_calls_options_and_resolved_groups_are_preserved() -> None:
@@ -161,6 +193,7 @@ def test_artifact_schema_is_complete_for_every_input() -> None:
     document = json.loads(SPEC.read_text(encoding="utf-8"))
     assert set(document) == {
         "schema_version",
+        "document_kind",
         "strategy_id",
         "capability_scope",
         "owner_approved",

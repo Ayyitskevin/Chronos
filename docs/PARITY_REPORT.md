@@ -1,40 +1,48 @@
 # Parity Report — Pine to Python (Phase 4)
 
-## Verification level: TRANSLATION VERIFIED AGAINST SPECIFICATION
+## Verification level: INTERNAL DETERMINISM VERIFIED; EXTERNAL PARITY UNVERIFIED
 
 ### Catalog 00 Five-Tool status: TRADINGVIEW PARITY `UNVERIFIED`
 
-No owner-exported TradingView strategy-tester trades or indicator series were
-provided for this build (ASSUMPTIONS A-03), and TradingView is not reachable
-from this environment. Therefore **nothing in this repository claims
-"verified against TradingView."** In particular, the catalog `00` Five-Tool
-fixture under `tests/fixtures/tradingview_synthetic/` is explicitly marked
-`internal_spec`. It proves the strict import/comparison machinery, not Pine
-agreement. The verification chain actually established is:
+No owner-exported TradingView strategy-tester trades or Data Window series were
+provided for this build (ASSUMPTIONS A-03), and TradingView was not used from
+this environment. Therefore **nothing in this repository claims that catalog
+`00` is verified against TradingView.** The fixture under
+`tests/fixtures/tradingview_synthetic/` is marked `internal_spec`; it proves
+strict parsing, engine-to-schema projection, comparison diagnostics, and a
+pinned internal regression only. Its expected values are not an independent
+Pine or TradingView oracle.
+
+The evidence chain established here is:
 
 ```
 Pine source (SHA-256-pinned)
-   → canonical specification (specs/*.yaml, schema-validated,
-     every deviation enumerated)
-   → deterministic Python implementation
-   → parity tests: implementation == specification == batch indicator library
+   → frozen 219-input contract and declared semantic dependencies
+   → deterministic Python signal engine and checkpoint/replay state
+   → strict engine-trace adapter and internal-spec fixture comparison
 ```
 
-Upgrading to true TradingView parity requires the owner to export, from the
-exact pinned script versions: bar-by-bar Data Window series for the
-`*_EXPORT` plots and the strategy tester trade list (symbol, timeframe,
-timestamps, side, prices, quantities). The owner-export directory and strict
-normalization procedure are prepared in `fixtures/tradingview/README.md`; no
-genuine export is present.
+The semantic declarations and repeated-step batch façade are not independent
+implementations of the formulas. They cannot, by themselves, establish Pine
+agreement. Upgrading the closed-bar signal-trace status requires an owner export
+from the exact pinned script, exact typed values for all 219 inputs, and a
+detached owner attestation whose digest is supplied out of band. A reviewed
+normalizer and independently attestable Python-candidate identity are also
+required before v1 can upgrade a match. Strategy Tester fills require a separate
+trade-list reconciliation; execution parity
+remains `UNVERIFIED` even if every signal-trace row matches. The normalization
+procedure is in `fixtures/tradingview/README.md`; no genuine export or owner
+attestation is present.
 
 ## Catalog 00 strict parity infrastructure
 
-`chronos.research.tradingview` defines a closed schema for Five-Tool trace rows
-and metadata. The metadata pins catalog `00`, Pine SHA-256
+`chronos.research.tradingview` defines a closed schema for Five-Tool closed-bar
+signal-trace rows and metadata. The metadata pins catalog `00`, Pine SHA-256
 `e51d5a40d2e933bf86847c7432364ba8934fd2de653d6aec3d7205639248e45f`,
-all 219 Pine inputs for a genuine export, a canonical full-config digest, the
-exact CSV digest, symbol/timeframe, data source, chart timezone, and session.
-Unknown or missing metadata and CSV columns fail closed.
+the exact source-ordered names and typed values of all 219 Pine inputs for a
+genuine export, a canonical input-config digest, the exact CSV digest,
+symbol/timeframe, data source, chart timezone, and session. Unknown or missing
+metadata and CSV columns fail closed.
 
 Timestamp handling is causal: aware source timestamps are retained verbatim
 for diagnostics, normalized to UTC for identity, and required to be strictly
@@ -47,10 +55,23 @@ tolerances (`indicator`, `price`, and `account_value`).
 The first mismatch report includes the UTC timestamp, field, expected/actual
 values, expected/actual state digests, active gates on both sides, and the
 applicable tolerance. A synthetic exact match is deliberately reported as
-`UNVERIFIED`; only an exact/tolerance-compliant match whose reference metadata
-has genuine owner-export provenance can become `VERIFIED`.
+`UNVERIFIED`. A trusted genuine reference may produce a scoped `FAILED`
+mismatch, but a match remains `UNVERIFIED` in v1 because the comparator cannot
+attest independent candidate construction and the current Pine export lacks
+several decision fields. The report always keeps execution parity separately
+`UNVERIFIED`.
 
-## What was verified
+## Catalog 00 evidence
+
+The Catalog 00 tests pin the Pine bytes and 219-input inventory, validate
+selected formula and causal invariants, assert exact batch/stream/checkpoint
+agreement across arbitrary chunk boundaries, and project a real engine run
+through the strict trace adapter into a pinned internal regression. Because the
+batch façade calls the same streaming kernel and the expected trace is generated
+inside Chronos, these tests establish determinism and regression protection—not
+an independent Pine oracle.
+
+## Legacy supporting tests, not Catalog 00 parity
 
 ### Indicator layer (tests/parity/test_indicator_reference.py)
 
@@ -62,13 +83,13 @@ flat window → 50 by implementation definition) and warm-up/NA semantics
 
 ### Incremental-vs-batch equivalence (tests/parity/test_incremental_vs_batch.py)
 
-The strategies run incrementally (O(1)/bar recursions). Tests assert the
+The older derived strategies run incrementally (O(1)/bar recursions). Tests assert the
 recursions equal the batch library on deterministic pseudorandom walks at
 multiple probe points (relative tolerance 1e-9), and that the
 continuity-reset path (non-contiguous history) rebuilds to identical
 proposals as a fresh instance.
 
-### Behavioral invariants
+### Legacy behavioral invariants
 
 - Closed bars only; decisions at bar t can fill no earlier than bar t+1;
   same-bar entry+exit cannot occur (engine construction).
@@ -86,22 +107,25 @@ proposals as a fresh instance.
 | 5 | `mean_reversion_v1` omits the session-VWAP sigma-stretch flag component | Impossible on daily bars; recorded in `specs/mean_reversion_v1.yaml`. The derived strategy is simpler than the study's intraday flags. |
 | 6 | Pine float NaN (`na`) propagation vs Python `None` | The indicator library returns `None` during warm-up and strategies refuse to act on `None`; Pine would likewise gate on `na` checks in the audited sources. |
 
-No tolerance is used anywhere except the 1e-9 relative tolerance for
-float-recursion equivalence, which covers ordering-of-operations differences
-between incremental and batch summation — not behavioral differences.
+Legacy float-recursion tests use relative tolerance `1e-9`. The Catalog 00 trace
+comparator uses relative tolerance `1e-9`, absolute tolerance `1e-8` for named
+indicator/price fields, and absolute tolerance `1e-6` for account values; exact
+fields remain exact. A custom tolerance profile always adds a verification
+blocker, and matching rows remain `UNVERIFIED` in v1 regardless.
 
 ## Mismatch process
 
 Any future TradingView-fixture mismatch must be recorded here with: first
-divergent timestamp, Pine value, Python value, input bars, state, root
-cause, and resolution. As of this build there are **zero unexplained
-mismatches at the level verified** and **no TradingView-level verification
-performed**.
+divergent timestamp, Pine value, Python value, input bars, state, root cause,
+and resolution. As of this build the pinned internal-spec regression is green,
+but **no TradingView-level verification has been performed**.
 
 ## Consequence for eligibility
 
-Because parity is specification-level only, both derived strategies carry
-status `research_prototype` in their specs, and the promotion gates in
-docs/GO_LIVE_CHECKLIST.md list "TradingView reference exports provided and
-parity fixtures green, or limitation explicitly accepted by the owner" as an
-open item for paper-mode entry.
+Because external parity is unverified, catalog `00` remains a research-only
+signal capability and cannot support paper/live eligibility. The other derived
+strategies retain status `research_prototype` in their specs, and the promotion
+gates in docs/GO_LIVE_CHECKLIST.md keep TradingView reference evidence (or an
+explicit owner acceptance of that limitation) open. Catalog `00` has the
+stricter boundary documented in `docs/FIVE_TOOL_SEMANTICS.md`: no promotion,
+broker, mandate, or runtime-strategy integration exists.

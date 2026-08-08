@@ -150,7 +150,7 @@ def pine_quantity_plan(request: SizingRequest) -> QuantityPlan:
         return _rejected(request, SizingRejection.INVALID_RISK_INPUT)
     if not math.isfinite(request.cap_pct) or request.cap_pct < 0.0:
         return _rejected(request, SizingRejection.INVALID_CAP_INPUT)
-    if not math.isfinite(request.stop_price):
+    if not _positive_finite(request.stop_price):
         return _rejected(request, SizingRejection.INVALID_STOP_DISTANCE)
 
     distance = (
@@ -216,6 +216,10 @@ def build_position_plan(
     can_split = quantity >= minimum * 3.0
     if can_split:
         first = _floor_to_step(quantity / 3.0, step)
+        if first < minimum:
+            raise PlanningError(
+                "Pine split geometry would orphan target legs below minimum quantity"
+            )
         second = first
         third = _floor_to_step(quantity - first - second, step)
         if third < minimum:
@@ -274,13 +278,34 @@ class OhlcBar:
     high: float
     low: float
     close: float
+    start_timestamp_utc: datetime | None = None
+    symbol: str | None = None
+    source: str | None = None
+    interval: str | None = None
 
     def __post_init__(self) -> None:
         if not self.sequence_id:
             raise PlanningError("bar sequence_id is required")
+        for name, value in (
+            ("symbol", self.symbol),
+            ("source", self.source),
+            ("interval", self.interval),
+        ):
+            if value is not None and not value.strip():
+                raise PlanningError(f"bar {name} identity cannot be blank")
         if self.timestamp_utc.tzinfo is None or self.timestamp_utc.utcoffset() is None:
             raise PlanningError("bar timestamp must be timezone-aware")
         object.__setattr__(self, "timestamp_utc", self.timestamp_utc.astimezone(UTC))
+        if self.start_timestamp_utc is not None:
+            if (
+                self.start_timestamp_utc.tzinfo is None
+                or self.start_timestamp_utc.utcoffset() is None
+            ):
+                raise PlanningError("bar start timestamp must be timezone-aware")
+            start = self.start_timestamp_utc.astimezone(UTC)
+            if start >= self.timestamp_utc:
+                raise PlanningError("bar start must precede bar close")
+            object.__setattr__(self, "start_timestamp_utc", start)
         if not all(
             _positive_finite(value) for value in (self.open, self.high, self.low, self.close)
         ):
@@ -447,39 +472,139 @@ def _resolve_ohlc(order: ExitOrder, bar: OhlcBar, policy: FillPolicy) -> FillEve
 @dataclass(frozen=True, slots=True)
 class PositionMilestones:
     position_id: str
-    side: PositionSide
+    plan: PositionPlan
     closed_legs: frozenset[LegId] = frozenset()
     target_1_filled: bool = False
     target_2_filled: bool = False
     break_even_armed: bool = False
+    fills: tuple[FillEvent, ...] = ()
+    break_even_after_target_1: bool = True
+
+    @property
+    def side(self) -> PositionSide:
+        return self.plan.side
+
+    def __post_init__(self) -> None:
+        if not self.position_id:
+            raise PlanningError("milestone position_id is required")
+        if not isinstance(self.break_even_after_target_1, bool):
+            raise PlanningError("break_even_after_target_1 must be boolean")
+        _validate_milestone_plan(self.plan)
+        break_even_available = False
+        for fill in self.fills:
+            _validate_fill_against_plan(self.position_id, self.plan, fill)
+            if fill.reason is ExitReason.BREAKEVEN_STOP and not break_even_available:
+                raise PlanningError("breakeven fill requires the plan's actual TARGET_1 fill first")
+            if fill.reason is ExitReason.TARGET_1 and self.break_even_after_target_1:
+                break_even_available = True
+        fill_ids = tuple(fill.fill_id for fill in self.fills)
+        if len(fill_ids) != len(set(fill_ids)):
+            raise PlanningError("milestone fills contain a duplicate fill id")
+        filled_legs = tuple(fill.leg_id for fill in self.fills)
+        if len(filled_legs) != len(set(filled_legs)):
+            raise PlanningError("milestone fills contain a duplicate closing leg")
+
+        derived_closed_legs = frozenset(filled_legs)
+        derived_target_1 = any(fill.reason is ExitReason.TARGET_1 for fill in self.fills)
+        derived_target_2 = any(fill.reason is ExitReason.TARGET_2 for fill in self.fills)
+        derived_break_even = self.break_even_after_target_1 and derived_target_1
+        if self.closed_legs != derived_closed_legs:
+            raise PlanningError("closed_legs must be derived from explicit fill events")
+        if self.target_1_filled is not derived_target_1:
+            raise PlanningError("target_1_filled must be derived from a TARGET_1 fill event")
+        if self.target_2_filled is not derived_target_2:
+            raise PlanningError("target_2_filled must be derived from a TARGET_2 fill event")
+        if self.break_even_armed is not derived_break_even:
+            raise PlanningError("break_even_armed must be derived from target fills and policy")
+
+
+def _validate_milestone_plan(plan: PositionPlan) -> None:
+    legs = {leg.leg_id: leg for leg in plan.legs}
+    if not legs or len(legs) != len(plan.legs):
+        raise PlanningError("milestone plan requires unique planned legs")
+    for leg in plan.legs:
+        if (leg.target_price is None) != (leg.target_reason is None):
+            raise PlanningError("planned target price and reason must be supplied together")
+
+    leg_ids = frozenset(legs)
+    expected_targets: dict[LegId, ExitReason | None]
+    if leg_ids == {LegId.LEG_1}:
+        expected_targets = {LegId.LEG_1: ExitReason.TARGET_2}
+    elif leg_ids in (
+        {LegId.LEG_1, LegId.LEG_2},
+        {LegId.LEG_1, LegId.LEG_2, LegId.LEG_3},
+    ):
+        expected_targets = {
+            LegId.LEG_1: ExitReason.TARGET_1,
+            LegId.LEG_2: ExitReason.TARGET_2,
+            LegId.LEG_3: None,
+        }
+    else:
+        raise PlanningError("milestone plan has unsupported leg geometry")
+    if any(leg.target_reason is not expected_targets[leg.leg_id] for leg in plan.legs):
+        raise PlanningError("milestone plan target attribution is inconsistent")
+
+
+def _validate_fill_against_plan(
+    position_id: str,
+    plan: PositionPlan,
+    fill: FillEvent,
+) -> None:
+    if fill.position_id != position_id or fill.owner_side is not plan.side:
+        raise PlanningError("milestone fill does not belong to the position plan")
+    planned_leg = next((leg for leg in plan.legs if leg.leg_id is fill.leg_id), None)
+    if planned_leg is None:
+        raise PlanningError("milestone fill references a leg absent from the position plan")
+    if not math.isclose(
+        fill.quantity,
+        planned_leg.quantity,
+        rel_tol=1e-12,
+        abs_tol=1e-12,
+    ):
+        raise PlanningError("milestone fill quantity does not close its entire planned leg")
+    target_reasons = (ExitReason.TARGET_1, ExitReason.TARGET_2)
+    if fill.reason in target_reasons and fill.reason is not planned_leg.target_reason:
+        raise PlanningError("milestone target fill contradicts the position plan")
+    if (
+        fill.oco_cancelled_reason in target_reasons
+        and fill.oco_cancelled_reason is not planned_leg.target_reason
+    ):
+        raise PlanningError("milestone OCO target attribution contradicts the position plan")
 
 
 def apply_fill_to_milestones(
     state: PositionMilestones,
     fill: FillEvent,
     *,
-    break_even_after_target_1: bool = True,
+    break_even_after_target_1: bool | None = None,
 ) -> PositionMilestones:
     """Advance milestones from explicit fills, never from open-leg absence."""
 
-    if fill.position_id != state.position_id or fill.owner_side is not state.side:
-        raise PlanningError("fill does not belong to the milestone position")
+    _validate_fill_against_plan(state.position_id, state.plan, fill)
     if fill.leg_id in state.closed_legs:
         raise PlanningError(f"duplicate closing fill for {fill.leg_id}")
-    if fill.reason is ExitReason.TARGET_1 and fill.leg_id is not LegId.LEG_1:
-        raise PlanningError("TARGET_1 can only close leg 1")
-    if fill.reason is ExitReason.TARGET_2 and fill.leg_id not in (LegId.LEG_1, LegId.LEG_2):
-        raise PlanningError("TARGET_2 can only close the single leg or leg 2")
+    if fill.reason is ExitReason.BREAKEVEN_STOP and not state.break_even_armed:
+        raise PlanningError("breakeven fill requires the plan's actual TARGET_1 fill first")
 
+    break_even_policy = (
+        state.break_even_after_target_1
+        if break_even_after_target_1 is None
+        else break_even_after_target_1
+    )
+    if state.fills and break_even_policy is not state.break_even_after_target_1:
+        raise PlanningError("break-even policy cannot change after the first closing fill")
+    fills = (*state.fills, fill)
     target_1 = state.target_1_filled or fill.reason is ExitReason.TARGET_1
     return PositionMilestones(
         position_id=state.position_id,
-        side=state.side,
+        plan=state.plan,
         closed_legs=state.closed_legs | {fill.leg_id},
         target_1_filled=target_1,
         target_2_filled=state.target_2_filled or fill.reason is ExitReason.TARGET_2,
         break_even_armed=state.break_even_armed
-        or (break_even_after_target_1 and fill.reason is ExitReason.TARGET_1),
+        or (break_even_policy and fill.reason is ExitReason.TARGET_1),
+        fills=fills,
+        break_even_after_target_1=break_even_policy,
     )
 
 
@@ -557,6 +682,20 @@ def reconcile_sleeves(
     if len(fill_by_id) != len(fills):
         raise SleeveReconciliationError("fill ids must be unique")
 
+    if fills and any(attribution.source_fill_id is None for attribution in attributions):
+        raise SleeveReconciliationError(
+            "fill reconciliation cannot mix unlinked mark-to-market attributions"
+        )
+    referenced_fill_ids = [
+        attribution.source_fill_id
+        for attribution in attributions
+        if attribution.source_fill_id is not None
+    ]
+    if len(referenced_fill_ids) != len(set(referenced_fill_ids)):
+        raise SleeveReconciliationError("each fill may be attributed only once")
+    if fills and set(referenced_fill_ids) != set(fill_by_id):
+        raise SleeveReconciliationError("every supplied fill must be attributed exactly once")
+
     long_delta = 0.0
     short_delta = 0.0
     for attribution in attributions:
@@ -621,12 +760,55 @@ def _required_target_reason(order: ExitOrder) -> ExitReason:
 def _validate_magnifier_coverage(parent: OhlcBar, subbars: tuple[OhlcBar, ...]) -> None:
     if not subbars:
         raise UnsupportedMagnifierError("magnifier policy requires lower-timeframe bars")
+    if parent.symbol is None or parent.source is None or parent.interval is None:
+        raise UnsupportedMagnifierError(
+            "magnifier coverage requires explicit parent symbol/source/interval identity"
+        )
+    if any(bar.symbol is None or bar.source is None or bar.interval is None for bar in subbars):
+        raise UnsupportedMagnifierError(
+            "magnifier coverage requires explicit sub-bar symbol/source/interval identity"
+        )
+    if any((bar.symbol, bar.source) != (parent.symbol, parent.source) for bar in subbars):
+        raise UnsupportedMagnifierError(
+            "lower-timeframe symbol/source identity does not match the parent"
+        )
+    subbar_intervals = {bar.interval for bar in subbars}
+    if len(subbar_intervals) != 1 or parent.interval in subbar_intervals:
+        raise UnsupportedMagnifierError(
+            "magnifier bars must share one lower interval identity distinct from the parent"
+        )
+    if parent.start_timestamp_utc is None or any(
+        bar.start_timestamp_utc is None for bar in subbars
+    ):
+        raise UnsupportedMagnifierError(
+            "magnifier coverage requires explicit parent and sub-bar intervals"
+        )
     if any(
         current.timestamp_utc <= previous.timestamp_utc for previous, current in pairwise(subbars)
     ):
         raise UnsupportedMagnifierError("lower-timeframe bars are not chronological")
-    if subbars[-1].timestamp_utc > parent.timestamp_utc:
-        raise UnsupportedMagnifierError("lower-timeframe bars extend beyond the parent close")
+    if (
+        subbars[0].start_timestamp_utc != parent.start_timestamp_utc
+        or subbars[-1].timestamp_utc != parent.timestamp_utc
+        or any(
+            current.start_timestamp_utc != previous.timestamp_utc
+            for previous, current in pairwise(subbars)
+        )
+    ):
+        raise UnsupportedMagnifierError(
+            "lower-timeframe bars do not continuously cover the parent interval"
+        )
+    durations = {
+        bar.timestamp_utc - bar.start_timestamp_utc  # type: ignore[operator]
+        for bar in subbars
+    }
+    if (
+        len(durations) != 1
+        or next(iter(durations)) >= parent.timestamp_utc - parent.start_timestamp_utc
+    ):
+        raise UnsupportedMagnifierError(
+            "magnifier bars must have one consistent resolution below the parent"
+        )
     # Complete coverage is evidenced by reproducing all four parent OHLC extrema.
     if not all(
         math.isclose(left, right, rel_tol=1e-12, abs_tol=1e-12)

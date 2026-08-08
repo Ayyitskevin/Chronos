@@ -19,5 +19,6 @@
   },
   "input_config_sha256": "96de830ef4e45e9b27ad86fa46cd1c9a034ff9220ea299d5287fb9877120b5b6",
   "trace_sha256": "4ceb10de4673474a0d2923da857b1c961e293032578234309a069e67a8f3a762",
-  "row_count": 3
+  "row_count": 3,
+  "owner_attestation_sha256": null
 }

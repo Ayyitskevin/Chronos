@@ -12,10 +12,11 @@ import hashlib
 import json
 import math
 from dataclasses import asdict, replace
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from itertools import pairwise
 
 from chronos.marketdata.bars import BarInterval
+from chronos.research.five_tool.alignment import source_bar_id
 from chronos.research.five_tool.indicators import (
     confirmed_pivot,
     pine_atr,
@@ -40,6 +41,7 @@ from chronos.research.five_tool.models import (
     SignalEvent,
     SignalIntent,
     TraceValue,
+    pine_timeframe_seconds,
 )
 
 
@@ -109,11 +111,10 @@ def _current_extreme(values: tuple[float, ...], length: int, kind: str) -> float
     return max(window) if kind == "high" else min(window)
 
 
-def _parse_pine_timestamp(value: str) -> datetime:
-    try:
-        return datetime.strptime(value, "%d %b %Y %H:%M %z")
-    except ValueError as exc:
-        raise FiveToolInputError(f"unsupported Pine timestamp literal: {value!r}") from exc
+def _unix_milliseconds(value: datetime) -> int:
+    epoch = datetime(1970, 1, 1, tzinfo=UTC)
+    delta = value.astimezone(UTC) - epoch
+    return (delta.days * 86_400 + delta.seconds) * 1_000 + delta.microseconds // 1_000
 
 
 def _stable_digest(value: object) -> str:
@@ -141,6 +142,211 @@ def _profile(settings: FiveToolSettings, interval: BarInterval) -> tuple[int, fl
     if requested == "Weekly":
         return 20, 0.70, 0.45, 2
     return 20, 0.85, 0.55, 2
+
+
+def _interval_seconds(interval: BarInterval) -> int:
+    return {
+        BarInterval.MIN_1: 60,
+        BarInterval.MIN_5: 5 * 60,
+        BarInterval.HOUR_1: 60 * 60,
+        BarInterval.DAY_1: 24 * 60 * 60,
+    }[interval]
+
+
+def _avwap_display_hidden(
+    *,
+    show_avwap_plot: bool,
+    avwap_on: bool,
+    close: float,
+    atr: float | None,
+    avwap: float | None,
+    avwap_sd: float | None,
+    maximum_atr_distance: float,
+) -> bool:
+    """Project Pine's exact mid/lower/upper AVWAP display suppression flag."""
+
+    if not show_avwap_plot or not avwap_on or atr is None or atr <= 0.0:
+        return False
+    plotted_values: tuple[float | None, ...] = (
+        avwap,
+        avwap - avwap_sd if avwap is not None and avwap_sd is not None else None,
+        avwap + avwap_sd if avwap is not None and avwap_sd is not None else None,
+    )
+    return any(
+        value is not None and abs(close - value) / atr > maximum_atr_distance
+        for value in plotted_values
+    )
+
+
+def _validate_active_entry_state(
+    state: FiveToolState,
+    settings: FiveToolSettings,
+) -> None:
+    if state.pending_entry_side is Side.FLAT:
+        if (
+            state.pending_entry_setup is not SetupFamily.NONE
+            or state.pending_base_pivot_at_entry is not None
+        ):
+            raise FiveToolInputError("flat checkpoint retains pending entry metadata")
+    else:
+        if state.pending_entry_setup is SetupFamily.NONE:
+            raise FiveToolInputError("pending entry is missing its frozen setup")
+        if state.pending_entry_setup is SetupFamily.BASE_BREAKOUT:
+            if state.pending_entry_side is not Side.LONG:
+                raise FiveToolInputError("base-breakout pending entry must be long")
+            if state.pending_base_pivot_at_entry is None:
+                raise FiveToolInputError("base-breakout pending entry is missing its base pivot")
+        if (
+            state.pending_base_pivot_at_entry is not None
+            and state.pending_entry_side is not Side.LONG
+        ):
+            raise FiveToolInputError("pending base pivot requires a long entry")
+        if state.pending_base_pivot_at_entry is not None and (
+            not math.isfinite(state.pending_base_pivot_at_entry)
+            or state.pending_base_pivot_at_entry <= 0.0
+        ):
+            raise FiveToolInputError("checkpoint pending base pivot must be finite and positive")
+
+    if state.active_entry_side is Side.FLAT:
+        if (
+            state.active_entry_bar_index is not None
+            or state.active_entry_setup is not SetupFamily.NONE
+            or state.active_base_pivot_at_entry is not None
+        ):
+            raise FiveToolInputError("flat checkpoint retains active entry metadata")
+        if state.previous_position is not Side.FLAT:
+            raise FiveToolInputError("non-flat checkpoint is missing frozen entry metadata")
+        return
+    if state.previous_position is not state.active_entry_side:
+        raise FiveToolInputError("checkpoint position disagrees with frozen entry side")
+    if state.pending_entry_side is not Side.FLAT:
+        raise FiveToolInputError("non-flat checkpoint retains a pending entry")
+    if state.active_entry_bar_index is not None and not 0 <= state.active_entry_bar_index < len(
+        state.observations
+    ):
+        raise FiveToolInputError("checkpoint active entry bar is outside observed history")
+    if settings.boolean("use_time_stop") and state.active_entry_bar_index is None:
+        raise FiveToolInputError("non-flat checkpoint is missing its frozen entry bar")
+    base_failure_relevant = (
+        state.active_entry_side is Side.LONG
+        and settings.boolean("use_long_side_v2")
+        and settings.boolean("use_long_base_failure_exit")
+    )
+    if base_failure_relevant and state.active_entry_setup is SetupFamily.NONE:
+        raise FiveToolInputError(
+            "non-flat checkpoint is missing its frozen entry_setup for the base-failure exit"
+        )
+    if state.active_entry_setup is SetupFamily.BASE_BREAKOUT:
+        if state.active_entry_side is not Side.LONG:
+            raise FiveToolInputError("base-breakout active entry must be long")
+        if base_failure_relevant and state.active_base_pivot_at_entry is None:
+            raise FiveToolInputError(
+                "base-breakout checkpoint is missing signal-bar base_pivot_at_entry evidence"
+            )
+    if state.active_base_pivot_at_entry is not None:
+        if state.active_entry_side is not Side.LONG:
+            raise FiveToolInputError("checkpoint active base pivot requires a long position")
+        if (
+            not math.isfinite(state.active_base_pivot_at_entry)
+            or state.active_base_pivot_at_entry <= 0.0
+        ):
+            raise FiveToolInputError("checkpoint active base pivot must be finite and positive")
+
+
+def _freeze_active_entry_metadata(
+    state: FiveToolState,
+    item: FiveToolBarInput,
+    *,
+    index: int,
+    settings: FiveToolSettings,
+) -> tuple[Side, int | None, SetupFamily, float | None]:
+    """Own immutable entry facts once a position is first observed.
+
+    Pine records the base pivot on the signal/order bar and the active entry bar
+    on the next bar where the position becomes visible.  Account metadata is
+    therefore corroboration, not mutable position state or a replacement for
+    signal-bar pivot evidence.
+    """
+
+    account = item.account
+    position = account.position
+    if position is Side.FLAT:
+        return Side.FLAT, None, SetupFamily.NONE, None
+
+    if account.entry_bar_index is not None and account.entry_bar_index > index:
+        raise FiveToolInputError("non-flat account entry_bar_index is in the future")
+
+    if state.active_entry_side is not Side.FLAT:
+        if position is not state.active_entry_side:
+            raise FiveToolInputError("non-flat position side changed without an observed flat bar")
+        if (
+            account.entry_bar_index is not None
+            and account.entry_bar_index != state.active_entry_bar_index
+        ):
+            raise FiveToolInputError("account entry_bar_index contradicts frozen engine state")
+        if (
+            account.entry_setup is not SetupFamily.NONE
+            and account.entry_setup is not state.active_entry_setup
+        ):
+            raise FiveToolInputError("account entry_setup contradicts frozen engine state")
+        if (
+            account.base_pivot_at_entry is not None
+            and account.base_pivot_at_entry != state.active_base_pivot_at_entry
+        ):
+            raise FiveToolInputError("account base_pivot_at_entry contradicts frozen engine state")
+        active_side = state.active_entry_side
+        active_bar = state.active_entry_bar_index
+        active_setup = state.active_entry_setup
+        active_pivot = state.active_base_pivot_at_entry
+    else:
+        if state.previous_position is not Side.FLAT:
+            raise FiveToolInputError("non-flat checkpoint is missing frozen entry metadata")
+        if state.pending_entry_side is not Side.FLAT and position is not state.pending_entry_side:
+            raise FiveToolInputError("observed position side contradicts the pending entry")
+
+        active_side = position
+        active_bar = index
+        if account.entry_bar_index is not None and account.entry_bar_index != active_bar:
+            raise FiveToolInputError(
+                "account entry_bar_index contradicts the engine-observed entry bar"
+            )
+
+        pending_matches = state.pending_entry_side is position
+        active_setup = state.pending_entry_setup if pending_matches else account.entry_setup
+        if (
+            pending_matches
+            and account.entry_setup is not SetupFamily.NONE
+            and account.entry_setup is not active_setup
+        ):
+            raise FiveToolInputError("account entry_setup contradicts the pending entry setup")
+
+        active_pivot = state.pending_base_pivot_at_entry if pending_matches else None
+
+        if account.base_pivot_at_entry is not None and account.base_pivot_at_entry != active_pivot:
+            if active_setup is SetupFamily.BASE_BREAKOUT:
+                raise FiveToolInputError(
+                    "account base_pivot_at_entry cannot replace missing signal-bar evidence"
+                )
+            raise FiveToolInputError("account base_pivot_at_entry contradicts frozen engine state")
+
+    if settings.boolean("use_time_stop") and active_bar is None:
+        raise FiveToolInputError("non-flat position is missing its frozen entry bar")
+    base_failure_relevant = (
+        position is Side.LONG
+        and settings.boolean("use_long_side_v2")
+        and settings.boolean("use_long_base_failure_exit")
+    )
+    if base_failure_relevant and active_setup is SetupFamily.NONE:
+        raise FiveToolInputError(
+            "non-flat long position is missing its frozen entry_setup for the base-failure exit"
+        )
+    if base_failure_relevant and active_setup is SetupFamily.BASE_BREAKOUT and active_pivot is None:
+        raise FiveToolInputError(
+            "base-breakout position is missing signal-bar base_pivot_at_entry evidence"
+        )
+    if active_pivot is not None and (not math.isfinite(active_pivot) or active_pivot <= 0.0):
+        raise FiveToolInputError("frozen base pivot must be finite and positive")
+    return active_side, active_bar, active_setup, active_pivot
 
 
 def _select_setup(
@@ -193,6 +399,7 @@ class FiveToolEngine:
             raise FiveToolInputError("checkpoint settings digest does not match")
         if self.state.history_start_utc != settings.history_start_utc:
             raise FiveToolInputError("checkpoint history start does not match")
+        _validate_active_entry_state(self.state, settings)
 
     def checkpoint(self) -> FiveToolState:
         return self.state
@@ -209,9 +416,32 @@ class FiveToolEngine:
             )
         if state.observations and timestamp <= state.observations[-1].primary.timestamp_utc:
             raise FiveToolInputError("primary bars must be strictly increasing without rewind")
+        if state.observations:
+            first = state.observations[0].primary
+            current_bar = item.primary
+            if (
+                current_bar.symbol,
+                current_bar.source,
+                current_bar.exchange,
+                current_bar.interval,
+            ) != (
+                first.symbol,
+                first.source,
+                first.exchange,
+                first.interval,
+            ):
+                raise FiveToolInputError(
+                    "primary symbol/source/exchange/interval identity changed mid-stream"
+                )
         observations = (*state.observations, item)
         index = len(observations) - 1
         settings = self.settings
+        (
+            active_entry_side,
+            active_entry_bar_index,
+            active_entry_setup,
+            active_base_pivot_at_entry,
+        ) = _freeze_active_entry_metadata(state, item, index=index, settings=settings)
 
         opens = tuple(observation.primary.open for observation in observations)
         highs = tuple(observation.primary.high for observation in observations)
@@ -227,9 +457,11 @@ class FiveToolEngine:
         )
 
         one_bar_returns: list[float | None] = [None]
-        for previous, current in pairwise(closes):
+        for previous_close, current_close in pairwise(closes):
             one_bar_returns.append(
-                math.log(current / previous) if current > 0.0 and previous > 0.0 else None
+                math.log(current_close / previous_close)
+                if current_close > 0.0 and previous_close > 0.0
+                else None
             )
         window_return = (
             math.log(closes[-1] / closes[-1 - lookback])
@@ -342,6 +574,13 @@ class FiveToolEngine:
             and all(value == candidate for value in candidates[-confirmation_bars:])
         )
         confirmed_core = candidate if candidate_held else state.confirmed_core
+        internal_age = (
+            0
+            if confirmed_core is None
+            else 1
+            if state.confirmed_core is None or confirmed_core != state.confirmed_core
+            else state.internal_bars_in_regime + 1
+        )
         internal_regime = (
             None
             if confirmed_core is None
@@ -498,7 +737,7 @@ class FiveToolEngine:
             confirmed_core not in {None, 0}
             and internal_strength is not None
             and internal_strength >= settings.number("extension_strength_threshold")
-            and active_age > lookback
+            and internal_age > lookback
         )
         extension_active = extension_risk and (
             not use_external or (internal_regime is not None and internal_regime == regime)
@@ -569,15 +808,25 @@ class FiveToolEngine:
             and benchmark_ema is not None
             and benchmark_close < benchmark_ema
         )
-        htf_long_ok = not settings.boolean("use_htf_filter") or (
-            item.htf_close is not None
-            and item.htf_ema is not None
-            and item.htf_close.value > item.htf_ema.value
+        requested_htf_seconds = pine_timeframe_seconds(settings.text("htf_tf"))
+        htf_valid = requested_htf_seconds > _interval_seconds(item.primary.interval)
+        htf_long_ok = (
+            not settings.boolean("use_htf_filter")
+            or not htf_valid
+            or (
+                item.htf_close is not None
+                and item.htf_ema is not None
+                and item.htf_close.value > item.htf_ema.value
+            )
         )
-        htf_short_ok = not settings.boolean("use_htf_filter") or (
-            item.htf_close is not None
-            and item.htf_ema is not None
-            and item.htf_close.value < item.htf_ema.value
+        htf_short_ok = (
+            not settings.boolean("use_htf_filter")
+            or not htf_valid
+            or (
+                item.htf_close is not None
+                and item.htf_ema is not None
+                and item.htf_close.value < item.htf_ema.value
+            )
         )
 
         oscillator_series = (
@@ -655,7 +904,7 @@ class FiveToolEngine:
         stale_reset = (
             settings.boolean("use_avwap_stale_guard")
             and state.avwap_on
-            and state.avwap_age >= settings.integer("avwap_stale_min_bars")
+            and state.avwap_valid_observations >= settings.integer("avwap_stale_min_bars")
             and previous_vwap is not None
             and atr_value is not None
             and atr_value > 0.0
@@ -667,6 +916,7 @@ class FiveToolEngine:
         avwap_weight = 0.0 if avwap_reset else state.avwap_weight
         avwap_p2v = 0.0 if avwap_reset else state.avwap_p2v
         avwap_on = state.avwap_on or avwap_reset
+        avwap_valid_observations = 0 if avwap_reset else state.avwap_valid_observations
         if avwap_on:
             weight = (
                 volumes[-1]
@@ -679,6 +929,7 @@ class FiveToolEngine:
                 avwap_pv = (avwap_pv or 0.0) + vwap_source * weight
                 avwap_weight = (avwap_weight or 0.0) + weight
                 avwap_p2v = (avwap_p2v or 0.0) + vwap_source**2 * weight
+                avwap_valid_observations += 1
         flip_vwap = (
             avwap_pv / avwap_weight
             if avwap_on and avwap_pv is not None and avwap_weight is not None and avwap_weight > 0.0
@@ -807,7 +1058,11 @@ class FiveToolEngine:
             and settings.number("min_atr_pct") <= atr_percent <= settings.number("max_atr_pct")
         )
         dollar_volume_series: tuple[float | None, ...] = tuple(
-            volume * close * settings.point_value if close > 0.0 else None
+            volume
+            * close
+            * (settings.point_value if settings.boolean("use_pointvalue_sizing") else 1.0)
+            if close > 0.0
+            else None
             for volume, close in zip(volumes, closes, strict=True)
         )
         dollar_volume_average = _last(pine_sma(dollar_volume_series, settings.integer("liq_len")))
@@ -845,10 +1100,26 @@ class FiveToolEngine:
             state.previous_position is not Side.FLAT and item.account.position is Side.FLAT
         )
         last_exit_index = index if transitioned_to_flat else state.last_exit_bar_index
+        long_last_exit_index = state.long_last_exit_bar_index
+        short_last_exit_index = state.short_last_exit_bar_index
+        if transitioned_to_flat and state.previous_position is Side.LONG:
+            long_last_exit_index = index
+        elif transitioned_to_flat and state.previous_position is Side.SHORT:
+            short_last_exit_index = index
         cooldown_ok = (
             settings.integer("cooldown_bars_after_trade") <= 0
             or last_exit_index is None
             or index - last_exit_index >= settings.integer("cooldown_bars_after_trade")
+        )
+        long_cooldown_ok = (
+            settings.integer("cooldown_bars_after_trade") <= 0
+            or long_last_exit_index is None
+            or index - long_last_exit_index >= settings.integer("cooldown_bars_after_trade")
+        )
+        short_cooldown_ok = (
+            settings.integer("cooldown_bars_after_trade") <= 0
+            or short_last_exit_index is None
+            or index - short_last_exit_index >= settings.integer("cooldown_bars_after_trade")
         )
         risk_halt = equity_halt or daily_halt_latched
 
@@ -928,17 +1199,24 @@ class FiveToolEngine:
                 and short_drawdown >= settings.number("max_equity_dd_for_entries")
             ) or short_daily_latched
 
+        long_cooldown_effective = (
+            long_cooldown_ok if settings.boolean("use_blended_capital_split") else cooldown_ok
+        )
+        short_cooldown_effective = (
+            short_cooldown_ok if settings.boolean("use_blended_capital_split") else cooldown_ok
+        )
+
         common_pretrade = atr_percent_ok and liquidity_ok and avwap_entries_ok
         long_environment_ok = (
             not long_risk_halt
-            and cooldown_ok
+            and long_cooldown_effective
             and common_pretrade
             and benchmark_long_ok
             and htf_long_ok
         )
         short_environment_ok = (
             not short_risk_halt
-            and cooldown_ok
+            and short_cooldown_effective
             and common_pretrade
             and benchmark_short_ok
             and htf_short_ok
@@ -953,19 +1231,23 @@ class FiveToolEngine:
         short_retest_taken = state.short_retest_taken
         pending_side = state.pending_entry_side
         pending_setup = state.pending_entry_setup
+        pending_base_pivot = state.pending_base_pivot_at_entry
         if state.previous_position is Side.FLAT and item.account.position is Side.LONG:
             if pending_side is Side.LONG and pending_setup is SetupFamily.BULL_RETEST:
                 long_retest_taken = True
             pending_side = Side.FLAT
             pending_setup = SetupFamily.NONE
+            pending_base_pivot = None
         elif state.previous_position is Side.FLAT and item.account.position is Side.SHORT:
             if pending_side is Side.SHORT and pending_setup is SetupFamily.BEAR_RETEST:
                 short_retest_taken = True
             pending_side = Side.FLAT
             pending_setup = SetupFamily.NONE
+            pending_base_pivot = None
         elif transitioned_to_flat:
             pending_side = Side.FLAT
             pending_setup = SetupFamily.NONE
+            pending_base_pivot = None
 
         rw_below_zero = mansfield is not None and mansfield < 0.0
         rw_deteriorating = mansfield is not None and not mans_rising
@@ -1195,6 +1477,25 @@ class FiveToolEngine:
             not settings.boolean("short_plus_enabled")
             or not settings.boolean("use_short_side_v2")
             or short_plus_core
+        )
+        short_plus_a_grade = (
+            settings.boolean("short_plus_enabled")
+            and settings.boolean("use_short_side_v2")
+            and short_plus_core
+            and short_primary_setup
+            and short_markov_core
+            and short_continuation_score >= 85.0
+        )
+        short_plus_risk_multiplier = (
+            1.0
+            if not settings.boolean("short_plus_enabled")
+            or not settings.boolean("short_plus_risk_mult_on")
+            or not settings.boolean("use_short_side_v2")
+            else settings.number("short_plus_a_grade_risk_mult")
+            if short_plus_a_grade
+            else settings.number("short_plus_std_risk_mult")
+            if short_plus_core
+            else settings.number("short_plus_block_risk_mult")
         )
         short_permission_v2 = regime == -1 and entry_gates_ok and short_environment_ok
         short_block_v2 = chop_risk == 2 or short_no_chase or short_support_block or short_squeeze
@@ -1507,10 +1808,14 @@ class FiveToolEngine:
 
         in_test_window = True
         if settings.boolean("use_date_filter"):
+            approximated_bar_open = timestamp - timedelta(
+                seconds=_interval_seconds(item.primary.interval)
+            )
+            approximated_bar_open_ms = _unix_milliseconds(approximated_bar_open)
             in_test_window = (
-                _parse_pine_timestamp(settings.text("test_start"))
-                <= timestamp
-                <= _parse_pine_timestamp(settings.text("test_end"))
+                settings.integer("test_start")
+                <= approximated_bar_open_ms
+                <= settings.integer("test_end")
             )
         is_flat = item.account.position is Side.FLAT
         can_long = (
@@ -1529,6 +1834,39 @@ class FiveToolEngine:
             and active_short_trigger
             and active_short_score >= settings.integer("min_score")
             and is_flat
+        )
+        short_wouldbe = (
+            in_test_window
+            and settings.boolean("allow_shorts")
+            and regime == -1
+            and short_permission_v2
+            and short_rw_ok_v2
+            and active_short_trigger
+            and active_short_score >= settings.integer("min_score")
+            and is_flat
+        )
+        long_wouldbe = (
+            in_test_window
+            and regime == 1
+            and long_permission_v2
+            and long_rs_ok_v2
+            and long_trigger_v2
+            and long_v2_score >= settings.integer("min_score")
+            and is_flat
+        )
+        short_blocked_no_chase = state.short_blocked_no_chase + int(
+            short_wouldbe and short_no_chase
+        )
+        short_blocked_support = state.short_blocked_support + int(
+            short_wouldbe and short_support_block
+        )
+        short_blocked_squeeze = state.short_blocked_squeeze + int(short_wouldbe and short_squeeze)
+        long_blocked_no_chase = state.long_blocked_no_chase + int(long_wouldbe and long_no_chase)
+        long_blocked_resistance = state.long_blocked_resistance + int(
+            long_wouldbe and resistance_block
+        )
+        long_blocked_exhaustion = state.long_blocked_exhaustion + int(
+            long_wouldbe and exhaustion_block
         )
         long_setup = _select_setup(
             flip=long_flip_trigger,
@@ -1561,14 +1899,20 @@ class FiveToolEngine:
             rs_exit = (
                 settings.boolean("use_long_side_v2")
                 and settings.boolean("use_long_rs_deterioration_exit")
-                and (mansfield is not None and mansfield < 0.0)
+                and (mansfield is not None and mansfield < 0.0 and not mans_rising)
+            )
+            base_failure_exit = (
+                settings.boolean("use_long_side_v2")
+                and settings.boolean("use_long_base_failure_exit")
+                and active_base_pivot_at_entry is not None
+                and closes[-1] < active_base_pivot_at_entry
             )
             time_exit = (
                 settings.boolean("use_time_stop")
-                and item.account.entry_bar_index is not None
-                and index - item.account.entry_bar_index >= settings.integer("max_bars_in_trade")
+                and active_entry_bar_index is not None
+                and index - active_entry_bar_index >= settings.integer("max_bars_in_trade")
             )
-            if adverse or avwap_exit or rs_exit or time_exit:
+            if adverse or avwap_exit or rs_exit or base_failure_exit or time_exit:
                 intent = SignalIntent.EXIT_LONG
                 exit_reason = (
                     "adverse_regime"
@@ -1577,6 +1921,8 @@ class FiveToolEngine:
                     if avwap_exit
                     else "relative_strength_deterioration"
                     if rs_exit
+                    else "base_failure"
+                    if base_failure_exit
                     else "time_stop"
                 )
         elif item.account.position is Side.SHORT:
@@ -1584,8 +1930,8 @@ class FiveToolEngine:
             avwap_exit = settings.boolean("use_short_avwap_exit") and reclaim_up
             time_exit = (
                 settings.boolean("use_time_stop")
-                and item.account.entry_bar_index is not None
-                and index - item.account.entry_bar_index >= settings.integer("max_bars_in_trade")
+                and active_entry_bar_index is not None
+                and index - active_entry_bar_index >= settings.integer("max_bars_in_trade")
             )
             if adverse or avwap_exit or time_exit:
                 intent = SignalIntent.EXIT_SHORT
@@ -1600,9 +1946,11 @@ class FiveToolEngine:
         if intent is SignalIntent.ENTER_LONG:
             pending_side = Side.LONG
             pending_setup = long_setup
+            pending_base_pivot = base_pivot if long_base_breakout else None
         elif intent is SignalIntent.ENTER_SHORT:
             pending_side = Side.SHORT
             pending_setup = short_setup
+            pending_base_pivot = None
 
         event_side = (
             Side.LONG
@@ -1611,9 +1959,37 @@ class FiveToolEngine:
             if intent in {SignalIntent.ENTER_SHORT, SignalIntent.EXIT_SHORT}
             else Side.FLAT
         )
-        event_setup = long_setup if event_side is Side.LONG else short_setup
-        events: tuple[SignalEvent, ...] = ()
+        event_setup = (
+            active_entry_setup
+            if intent in {SignalIntent.EXIT_LONG, SignalIntent.EXIT_SHORT}
+            else long_setup
+            if event_side is Side.LONG
+            else short_setup
+        )
+        event_list: list[SignalEvent] = []
         emitted_ids = state.emitted_event_ids
+        if regime_flip:
+            regime_event_id = _stable_digest(
+                {
+                    "strategy": "five_tool_confluence_v3_6",
+                    "timestamp": timestamp.isoformat(),
+                    "event": "regime_flip",
+                    "regime": regime,
+                }
+            )
+            if regime_event_id not in emitted_ids:
+                event_list.append(
+                    SignalEvent(
+                        event_id=regime_event_id,
+                        kind="regime_flip",
+                        timestamp_utc=timestamp,
+                        side=(
+                            Side.LONG if regime == 1 else Side.SHORT if regime == -1 else Side.FLAT
+                        ),
+                        setup=SetupFamily.NONE,
+                    )
+                )
+                emitted_ids = (*emitted_ids, regime_event_id)
         if intent is not SignalIntent.NONE:
             event_id = _stable_digest(
                 {
@@ -1624,16 +2000,17 @@ class FiveToolEngine:
                 }
             )
             if event_id not in emitted_ids:
-                events = (
+                event_list.append(
                     SignalEvent(
                         event_id=event_id,
                         kind=intent.value,
                         timestamp_utc=timestamp,
                         side=event_side,
                         setup=event_setup,
-                    ),
+                    )
                 )
                 emitted_ids = (*emitted_ids, event_id)
+        events = tuple(event_list)
 
         warmup: list[str] = []
         if regime_z is None:
@@ -1646,7 +2023,11 @@ class FiveToolEngine:
             warmup.append("oscillator")
         if flip_vwap is None:
             warmup.append("avwap_anchor_or_weight")
-        if settings.boolean("use_htf_filter") and (item.htf_close is None or item.htf_ema is None):
+        if (
+            settings.boolean("use_htf_filter")
+            and htf_valid
+            and (item.htf_close is None or item.htf_ema is None)
+        ):
             warmup.append("prior_completed_htf")
         if use_external and not external_live:
             warmup.append("external_regime_latch")
@@ -1659,6 +2040,10 @@ class FiveToolEngine:
             "internal_regime": internal_regime,
             "regime": regime,
             "regime_age": active_age,
+            "internal_regime_age": internal_age,
+            "regime_flip": regime_flip,
+            "extension": extension_risk,
+            "extension_active": extension_active,
             "strength": strength,
             "adx": adx_value,
             "efficiency_ratio": efficiency_ratio,
@@ -1679,6 +2064,17 @@ class FiveToolEngine:
             "avwap_reset": avwap_reset,
             "avwap_stale_reset": stale_reset,
             "avwap_age": avwap_age,
+            "avwap_valid_observations": avwap_valid_observations,
+            "avwap_display_hidden": _avwap_display_hidden(
+                show_avwap_plot=settings.boolean("show_avwap_plot"),
+                avwap_on=avwap_on,
+                close=closes[-1],
+                atr=atr_value,
+                avwap=flip_vwap,
+                avwap_sd=flip_sd,
+                maximum_atr_distance=settings.number("avwap_display_max_atr"),
+            ),
+            "markov_total_transitions": sum(markov_rows),
             "markov_row_n": markov_n,
             "markov_stay_count": stay_count,
             "markov_p_stay": markov_p_stay,
@@ -1687,7 +2083,45 @@ class FiveToolEngine:
             "dwell_percentile": dwell_percentile,
             "long_score": active_long_score,
             "short_score": active_short_score,
-            "short_continuation_score": short_continuation_score,
+            "short_continuation_score": (
+                short_continuation_score if settings.boolean("short_plus_enabled") else None
+            ),
+            "short_continuation_score_raw": short_continuation_score,
+            "short_plus_a_grade": short_plus_a_grade,
+            "short_plus_gate_core": short_plus_core,
+            "short_plus_risk_multiplier": short_plus_risk_multiplier,
+            "short_plus_score_boost": short_boost,
+            "short_failed_reclaim": short_failed_reclaim,
+            "short_bear_flag_breakdown": short_breakdown,
+            "short_bear_retest": short_bear_retest,
+            "short_sector_laggard": short_sector_laggard,
+            "short_no_chase_block": short_no_chase,
+            "short_support_block": short_support_block,
+            "short_squeeze_block": short_squeeze,
+            "short_structural_stop": short_structural_stop,
+            "short_stop_percent": short_stop_percent,
+            "short_blocked_no_chase": short_blocked_no_chase,
+            "short_blocked_support": short_blocked_support,
+            "short_blocked_squeeze": short_blocked_squeeze,
+            "long_no_chase_block": long_no_chase,
+            "long_resistance_block": resistance_block,
+            "long_exhaustion_block": exhaustion_block,
+            "long_structural_stop": long_structural_stop,
+            "long_stop_percent": long_stop_percent,
+            "long_blocked_no_chase": long_blocked_no_chase,
+            "long_blocked_resistance": long_blocked_resistance,
+            "long_blocked_exhaustion": long_blocked_exhaustion,
+            "long_virtual_equity": (
+                item.account.long_virtual_equity
+                if settings.boolean("use_blended_capital_split")
+                else None
+            ),
+            "short_virtual_equity": (
+                item.account.short_virtual_equity
+                if settings.boolean("use_blended_capital_split")
+                else None
+            ),
+            "htf_valid": htf_valid,
             "atr": atr_value,
             "atr_percent": atr_percent,
             "long_stop_distance": long_stop_distance,
@@ -1711,10 +2145,14 @@ class FiveToolEngine:
             "atr_percent": atr_percent_ok,
             "liquidity": liquidity_ok,
             "cooldown": cooldown_ok,
+            "long_cooldown": long_cooldown_effective,
+            "short_cooldown": short_cooldown_effective,
             "long_risk_halt_clear": not long_risk_halt,
             "short_risk_halt_clear": not short_risk_halt,
             "long_review": active_long_review,
             "short_review": active_short_review,
+            "long_review_v2": long_review_v2,
+            "short_review_v2": short_review_v2,
             "long_plus": long_plus_pass,
             "short_plus": short_plus_pass,
             "long_volume": long_volume_ok,
@@ -1731,6 +2169,7 @@ class FiveToolEngine:
             last_regime=last_regime,
             have_regime=have_regime,
             previous_selected_regime=regime,
+            internal_bars_in_regime=internal_age,
             active_bars_in_regime=active_age,
             dwell_bull=dwell_bull,
             dwell_neutral=dwell_neutral,
@@ -1747,6 +2186,7 @@ class FiveToolEngine:
             avwap_weight=avwap_weight,
             avwap_p2v=avwap_p2v,
             avwap_on=avwap_on,
+            avwap_valid_observations=avwap_valid_observations,
             avwap_age=avwap_age,
             previous_pivot_low=previous_pivot_low,
             previous_pivot_high=previous_pivot_high,
@@ -1756,6 +2196,11 @@ class FiveToolEngine:
             long_retest_taken=long_retest_taken,
             pending_entry_side=pending_side,
             pending_entry_setup=pending_setup,
+            pending_base_pivot_at_entry=pending_base_pivot,
+            active_entry_side=active_entry_side,
+            active_entry_bar_index=active_entry_bar_index,
+            active_entry_setup=active_entry_setup,
+            active_base_pivot_at_entry=active_base_pivot_at_entry,
             equity_peak=equity_peak,
             equity_history=equity_history,
             long_equity_peak=long_equity_peak,
@@ -1771,13 +2216,21 @@ class FiveToolEngine:
             short_daily_halt_latched=short_daily_latched,
             previous_position=item.account.position,
             last_exit_bar_index=last_exit_index,
+            long_last_exit_bar_index=long_last_exit_index,
+            short_last_exit_bar_index=short_last_exit_index,
+            short_blocked_no_chase=short_blocked_no_chase,
+            short_blocked_support=short_blocked_support,
+            short_blocked_squeeze=short_blocked_squeeze,
+            long_blocked_no_chase=long_blocked_no_chase,
+            long_blocked_resistance=long_blocked_resistance,
+            long_blocked_exhaustion=long_blocked_exhaustion,
             emitted_event_ids=emitted_ids,
         )
         state_digest = _stable_digest(asdict(new_state))
         trace = FiveToolTrace(
             bar_index=index,
             timestamp_utc=timestamp,
-            primary_sequence_id=f"{item.primary.sequence_id}:{timestamp.isoformat()}",
+            primary_sequence_id=source_bar_id(item.primary),
             benchmark_source_id=(
                 item.benchmark.source_sequence_id if item.benchmark is not None else None
             ),
