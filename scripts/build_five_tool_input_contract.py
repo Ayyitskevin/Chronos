@@ -244,12 +244,13 @@ SEMANTICS: dict[str, Any] = {
             ),
         },
         {
-            "id": "disconnected-execution-boundary",
+            "id": "causal-replay-execution-boundary",
             "classification": "implementation boundary",
             "status": "UNVERIFIED",
             "description": (
-                "The signal engine, pure planner/fill approximations, and closed-leg validation "
-                "are not wired into one end-to-end replay, so execution parity is unverified."
+                "The signal engine now drives a pure next-open planner/fill/closed-leg replay, "
+                "but its frozen Chronos policies are approximations and TradingView execution "
+                "parity remains unverified."
             ),
         },
         {

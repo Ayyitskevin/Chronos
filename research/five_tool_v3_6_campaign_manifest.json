@@ -28,7 +28,7 @@
     },
     "semantic_config": {
       "path": "specs/five_tool_confluence_v3_6.yaml",
-      "sha256": "1c9f5b386d63732e8e9fab3e3e3e7173721590f84884101ef78817b8b3ab1531",
+      "sha256": "c0d85a17b26b9da3c1e68dd16fd341288fd3710021a7dbf9a07c953c3a9fe196",
       "digest_scope": "source-bound timing/dependency/warmup/deviation identity",
       "status": "resolved",
       "required_before_execution": true
@@ -75,8 +75,31 @@
     "market_entry_eligibility": "next primary bar open",
     "higher_timeframe": "prior completed higher-timeframe value only",
     "chart_ohlcv_approximation": "conservative stop-first when stop and target are both reachable within one bar",
-    "bar_magnifier": "not reproducible from chart-timeframe OHLCV; isolated from signal parity",
+    "bar_magnifier": "requires complete identity-bound lower-timeframe coverage for every primary replay bar and fails closed otherwise; isolated from signal parity",
     "tradingview_fill_parity": "UNVERIFIED"
+  },
+  "replay_policy": {
+    "canonical": {
+      "schema_version": "chronos-five-tool-replay-policy-v1",
+      "initial_equity": 100000.0,
+      "parameter_variant": "five_tool_default",
+      "fill_policy": "ohlc_stop_first",
+      "commission_bps_per_fill": 3.0,
+      "slippage_ticks_per_fill": 2,
+      "apply_slippage_to_target_limits": false,
+      "terminal_position_policy": "require_flat",
+      "signal_clock": "confirmed_primary_bar_close",
+      "market_order_eligibility": "next_primary_bar_open",
+      "entry_bar_stop": "signal_time_absolute_stop_active_for_every_leg_with_stop_market_gap_semantics",
+      "entry_bar_targets": "inactive",
+      "post_entry_ladder": "signal_time_quantity_and_risk_distance_frozen_then_stop_and_targets_rebased_to_adverse_actual_next_open_execution_for_later_bars",
+      "discretionary_priority": "queued_close_time_discretionary_exit_executes_at_next_open_before_protective_resolution",
+      "protective_priority": "on_later_bars_protective_resolution_precedes_close_time_signal_evaluation",
+      "replay_scope": "full_from_settings_history_start_only",
+      "checkpoint_resume": "unsupported",
+      "execution_parity": "UNVERIFIED"
+    },
+    "sha256": "f367ab249233adbd11a3a3393c778bd0efe419df6d158089ec05cffc8919b8a5"
   },
   "costs": {
     "commission_bps_per_fill": 3.0,
@@ -177,7 +200,7 @@
     "record_kind_start": "trial_started",
     "start_must_precede_reader": true,
     "reader_and_evaluator_failures_count": true,
-    "multiplicity": "private test harness only: number of unique durable attempt_id values in one caller-selected ledger; not the canonical ADR-0013 global research multiplicity and not sufficient for final scores",
+    "multiplicity": "this blocked manifest still exposes only the private harness count from one caller-selected ledger; canonical start-before-read accounting and a fixed-path snapshot now exist as separate infrastructure but are not wired or sufficient for final scores",
     "candidate_order_or_display_rename_changes_verdict": false
   },
   "criteria_document": "docs/FIVE_TOOL_RESEARCH_HYPOTHESES.md",
@@ -195,6 +218,7 @@
     "history_start_utc",
     "benchmark_identity",
     "fill_policy",
+    "replay_policy_sha256",
     "cost_model",
     "criteria_digest",
     "code_commit"
@@ -202,8 +226,8 @@
   "blocked_before_first_data_read": [
     "Resolve and review the certified dataset-version SHA-256.",
     "Replace the placeholder history start with the certified dataset's exact first bar-close timestamp.",
-    "Integrate every attempt with the canonical ADR-0013 global experiment registry; caller-selected ledger paths cannot supply final multiplicity.",
-    "Replace arbitrary reader/evaluator callbacks with a certified broker-owned reader and content-addressed replay artifacts.",
+    "Wire every campaign attempt through the implemented CanonicalTrialRegistry fixed-path capability; the private caller-selected Five-Tool ledger cannot supply final multiplicity.",
+    "Authorize and wire this campaign through the implemented manifest-bound ordinary reader, BrokeredResearchTrialRunner, replay object store, and reviewed Five-Tool evaluator; infrastructure alone is not dataset or campaign certification.",
     "Freeze owner drawdown, CVaR, turnover, and concentration limits.",
     "Freeze the power calculation, accessible date partitions, code commit, and criteria digest.",
     "Confirm every campaign cell maps to an executable semantic overlay rather than a prose-only label."

@@ -201,10 +201,10 @@
         "description": "Pine labels every short alert with the SHORT+ setup name even for legacy shorts; Chronos semantic events retain the selected setup identity."
       },
       {
-        "id": "disconnected-execution-boundary",
+        "id": "causal-replay-execution-boundary",
         "classification": "implementation boundary",
         "status": "UNVERIFIED",
-        "description": "The signal engine, pure planner/fill approximations, and closed-leg validation are not wired into one end-to-end replay, so execution parity is unverified."
+        "description": "The signal engine now drives a pure next-open planner/fill/closed-leg replay, but its frozen Chronos policies are approximations and TradingView execution parity remains unverified."
       },
       {
         "id": "validation-evidence-subset",

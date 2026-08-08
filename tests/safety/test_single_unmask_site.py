@@ -1,11 +1,9 @@
-"""A holdout is unmasked from exactly one site — the guardian (ADR-0013 §3, review safety-3).
+"""A holdout is unmasked from exactly one site — the guardian (ADR-0013 §3).
 
-`embargoed_view(..., unlocked=True)` returns held-out data with no grant/phrase/burn. The
-guardian is meant to be the *only* caller that passes it. This AST test enforces that
-across `src/chronos`: any `unlocked=True` keyword argument must appear only in
-`holdout_guardian.py`. It is an accidental-wiring guard (a dynamic `unlocked=<var>` or a
-direct `read_bars` bypass is out of scope and disclosed in ADR-0013 / limitations), the
-same shape and limitation as `test_single_transmit_site.py`.
+The private selective helper preserves every mask except the exact durable grant's
+window.  It must have one production caller, in the guardian.  The old public
+``embargoed_view(..., unlocked=True)`` escape hatch must have no production callers.
+This is an accidental-wiring guard; reflective/dynamic bypasses remain out of scope.
 """
 
 from __future__ import annotations
@@ -16,26 +14,40 @@ from pathlib import Path
 _SRC = Path(__file__).resolve().parent.parent.parent / "src" / "chronos"
 
 
-def _unmask_call_sites() -> list[tuple[str, int]]:
+def _call_name(node: ast.Call) -> str | None:
+    return getattr(node.func, "attr", None) or getattr(node.func, "id", None)
+
+
+def _selective_unmask_call_sites() -> list[tuple[str, int]]:
     sites: list[tuple[str, int]] = []
     for path in _SRC.rglob("*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            for keyword in node.keywords:
-                if (
-                    keyword.arg == "unlocked"
-                    and isinstance(keyword.value, ast.Constant)
-                    and keyword.value.value is True
-                ):
-                    sites.append((path.name, node.lineno))
+            if isinstance(node, ast.Call) and _call_name(node) == (
+                "_embargoed_view_with_window_unlocked"
+            ):
+                sites.append((path.relative_to(_SRC).as_posix(), node.lineno))
     return sites
 
 
-def test_unlocked_true_is_passed_only_by_the_guardian() -> None:
-    sites = _unmask_call_sites()
-    offenders = [(name, line) for name, line in sites if name != "holdout_guardian.py"]
-    assert offenders == [], f"holdout unmasked outside the guardian: {offenders}"
-    # And the guardian really is a site (the guard is not vacuous).
-    assert any(name == "holdout_guardian.py" for name, _ in sites)
+def test_selective_unmask_helper_has_one_guardian_call_site() -> None:
+    sites = _selective_unmask_call_sites()
+    assert len(sites) == 1, f"selective holdout unmask must have one caller: {sites}"
+    assert sites[0][0] == "registry/holdout_guardian.py"
+
+
+def test_public_full_unmask_has_no_production_call_site() -> None:
+    sites: list[tuple[str, int]] = []
+    for path in _SRC.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or _call_name(node) != "embargoed_view":
+                continue
+            if any(
+                keyword.arg == "unlocked"
+                and isinstance(keyword.value, ast.Constant)
+                and keyword.value.value is True
+                for keyword in node.keywords
+            ):
+                sites.append((path.relative_to(_SRC).as_posix(), node.lineno))
+    assert sites == [], f"public full holdout unmask used in production: {sites}"

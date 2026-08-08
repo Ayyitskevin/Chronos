@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
+import chronos.registry.ledger as ledger_module
 from chronos.registry import (
+    CANONICAL_REGISTRY_LEDGER_PATH,
     KIND_UNLOCK,
+    RegistryIntegrityError,
     RegistryLedger,
     RunStage,
     accrued_capture_sessions,
@@ -18,6 +23,7 @@ from chronos.registry import (
     register_run,
     trial_count,
 )
+from chronos.registry.ledger import verified_registry_records
 
 _NOW = datetime(2026, 7, 20, 21, 0, tzinfo=UTC)
 
@@ -48,6 +54,242 @@ def test_append_and_verify_chain(tmp_path: Path) -> None:
     assert ok, detail
 
 
+def test_stale_public_append_refreshes_under_verified_lock_without_duplicate_sequence(
+    tmp_path: Path,
+) -> None:
+    first = _ledger(tmp_path)
+    stale = _ledger(tmp_path)
+
+    first_record = first.append("test_record", {"writer": "first"})
+    refreshed_record = stale.append("test_record", {"writer": "formerly-stale"})
+
+    assert (first_record.sequence, refreshed_record.sequence) == (0, 1)
+    ledger = _ledger(tmp_path)
+    assert ledger.verify()[0] is True
+    assert [record.sequence for record in ledger.records()] == [0, 1]
+
+
+def test_verified_records_validate_and_return_one_exact_ledger_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ledger = _ledger(tmp_path)
+    ledger.append("test_record", {"value": "durable"})
+    forged = RegistryLedger(tmp_path / "forged.jsonl")
+    forged.append("test_record", {"value": "forged-middle-read"})
+    forged_bytes = forged.path.read_bytes()
+    ledger_reads = 0
+    real_read_optional = ledger_module._RegistryDirectory.read_optional
+
+    def staged_read(
+        directory: ledger_module._RegistryDirectory,
+        name: str,
+    ) -> bytes | None:
+        nonlocal ledger_reads
+        if directory.capability.path == ledger.path and name == ledger.path.name:
+            ledger_reads += 1
+            if ledger_reads == 2:
+                return forged_bytes
+        return real_read_optional(directory, name)
+
+    monkeypatch.setattr(ledger_module._RegistryDirectory, "read_optional", staged_read)
+
+    records = verified_registry_records(ledger._path_capability)
+
+    assert ledger_reads == 1
+    assert [record.payload for record in records] == [{"value": "durable"}]
+
+
+def test_verified_records_refuse_a_forged_ledger_snapshot_against_real_anchor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ledger = _ledger(tmp_path)
+    ledger.append("test_record", {"value": "durable"})
+    forged = RegistryLedger(tmp_path / "forged.jsonl")
+    forged.append("test_record", {"value": "forged-snapshot"})
+    forged_bytes = forged.path.read_bytes()
+    real_read_optional = ledger_module._RegistryDirectory.read_optional
+
+    def forged_ledger_read(
+        directory: ledger_module._RegistryDirectory,
+        name: str,
+    ) -> bytes | None:
+        if directory.capability.path == ledger.path and name == ledger.path.name:
+            return forged_bytes
+        return real_read_optional(directory, name)
+
+    monkeypatch.setattr(
+        ledger_module._RegistryDirectory,
+        "read_optional",
+        forged_ledger_read,
+    )
+
+    with pytest.raises(RegistryIntegrityError, match="head hash mismatch"):
+        verified_registry_records(ledger._path_capability)
+
+
+@pytest.mark.parametrize(
+    ("kind", "payload", "match"),
+    [
+        ("", {"value": 1}, "non-empty string"),
+        (None, {"value": 1}, "non-empty string"),
+        ("test_record", {"value": float("nan")}, "non-finite"),
+        ("test_record", {"value": float("inf")}, "non-finite"),
+        ("test_record", {"value": float("-inf")}, "non-finite"),
+        ("test_record", {1: "coerced-key"}, "non-string object key"),
+    ],
+)
+def test_append_rejects_noncanonical_input_without_changing_durable_bytes(
+    tmp_path: Path,
+    kind: object,
+    payload: object,
+    match: str,
+) -> None:
+    ledger = _ledger(tmp_path)
+    ledger.append("test_record", {"value": "preserved"})
+    ledger_before = ledger.path.read_bytes()
+    anchor_before = ledger.anchor_path.read_bytes()
+
+    with pytest.raises(ValueError, match=match):
+        ledger.append(kind, payload)  # type: ignore[arg-type]
+
+    assert ledger.path.read_bytes() == ledger_before
+    assert ledger.anchor_path.read_bytes() == anchor_before
+    assert ledger.verify()[0] is True
+
+
+@pytest.mark.parametrize(
+    "entry_name",
+    ("registry.jsonl", "registry.jsonl.lock", "registry.head.json"),
+)
+def test_registry_refuses_ledger_lock_and_anchor_symlinks_without_touching_victim(
+    tmp_path: Path,
+    entry_name: str,
+) -> None:
+    parent = tmp_path / "registry"
+    parent.mkdir()
+    victim = tmp_path / "victim.txt"
+    victim.write_text("do not touch", encoding="utf-8")
+    (parent / entry_name).symlink_to(victim)
+
+    with pytest.raises(RegistryIntegrityError, match="symlink"):
+        RegistryLedger(parent / "registry.jsonl")
+
+    assert victim.read_text(encoding="utf-8") == "do not touch"
+    assert set(path.name for path in parent.iterdir()) == {entry_name}
+
+
+def test_registry_refuses_a_symlink_parent_without_mutating_its_target(tmp_path: Path) -> None:
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    linked_parent = tmp_path / "linked-registry"
+    linked_parent.symlink_to(victim, target_is_directory=True)
+
+    with pytest.raises(RegistryIntegrityError, match="real directory"):
+        RegistryLedger(linked_parent / "registry.jsonl")
+    assert list(victim.iterdir()) == []
+
+
+def test_registry_leaf_fifo_swap_is_opened_nonblocking_and_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ledger = _ledger(tmp_path)
+    ledger.append("test_record", {"value": "preserved"})
+    original = ledger.path.read_bytes()
+    displaced = tmp_path / "registry.original"
+    real_open = os.open
+    attack_armed = True
+
+    def swap_fifo_before_open(
+        path: str | bytes,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal attack_armed
+        if attack_armed and path == ledger.path.name and dir_fd is not None:
+            attack_armed = False
+            assert flags & os.O_NONBLOCK
+            ledger.path.rename(displaced)
+            os.mkfifo(ledger.path, mode=0o600)
+            try:
+                descriptor = real_open(path, flags, mode, dir_fd=dir_fd)
+            finally:
+                ledger.path.unlink()
+                displaced.rename(ledger.path)
+            return descriptor
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "open", swap_fifo_before_open)
+
+    with pytest.raises(RegistryIntegrityError, match="regular file"):
+        ledger.records()
+    assert attack_armed is False
+    assert ledger.path.read_bytes() == original
+
+
+def test_registry_refuses_parent_replacement_after_capability_construction(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "registry"
+    displaced = tmp_path / "displaced"
+    parent.mkdir()
+    ledger = RegistryLedger(parent / "registry.jsonl")
+    parent.rename(displaced)
+    parent.mkdir()
+
+    with pytest.raises(RegistryIntegrityError, match="replaced"):
+        _run(ledger, "must-not-write")
+    assert list(parent.iterdir()) == []
+    assert list(displaced.iterdir()) == []
+
+
+def test_anchor_publish_is_atomic_and_fsyncs_file_and_parent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    replacements: list[tuple[str, str, int | None, int | None]] = []
+    fsynced_modes: list[int] = []
+    real_replace = os.replace
+    real_fsync = os.fsync
+
+    def tracked_replace(
+        source: str,
+        destination: str,
+        *,
+        src_dir_fd: int | None = None,
+        dst_dir_fd: int | None = None,
+    ) -> None:
+        replacements.append((source, destination, src_dir_fd, dst_dir_fd))
+        real_replace(
+            source,
+            destination,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+        )
+
+    def tracked_fsync(descriptor: int) -> None:
+        fsynced_modes.append(os.fstat(descriptor).st_mode)
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(os, "replace", tracked_replace)
+    monkeypatch.setattr(os, "fsync", tracked_fsync)
+    ledger = _ledger(tmp_path)
+    _run(ledger, "atomic-anchor")
+
+    assert len(replacements) == 1
+    source, destination, source_dir, destination_dir = replacements[0]
+    assert source.startswith(".registry.head.json.") and source.endswith(".tmp")
+    assert destination == "registry.head.json"
+    assert source_dir is not None and source_dir == destination_dir
+    assert any(stat.S_ISREG(mode) for mode in fsynced_modes)
+    assert any(stat.S_ISDIR(mode) for mode in fsynced_modes)
+    assert not list(tmp_path.glob(".*.tmp"))
+
+
 def test_verify_detects_tampering(tmp_path: Path) -> None:
     ledger = _ledger(tmp_path)
     _run(ledger, "regime_trend_v1")
@@ -60,6 +302,89 @@ def test_verify_detects_tampering(tmp_path: Path) -> None:
     ledger.path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     ok, _ = ledger.verify()
     assert ok is False
+
+
+def test_verify_rejects_unhashed_top_level_record_extensions(tmp_path: Path) -> None:
+    ledger = _ledger(tmp_path)
+    _run(ledger, "regime_trend_v1")
+    row = json.loads(ledger.path.read_text(encoding="utf-8"))
+    row["unhashed_extension"] = "must-not-be-ignored"
+    ledger.path.write_text(
+        json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+
+    ok, detail = ledger.verify()
+    assert ok is False
+    assert "keys do not match schema" in detail
+
+
+def test_verify_rejects_duplicate_json_keys_even_when_the_effective_value_matches(
+    tmp_path: Path,
+) -> None:
+    ledger = _ledger(tmp_path)
+    _run(ledger, "regime_trend_v1")
+    line = ledger.path.read_text(encoding="utf-8").strip()
+    ledger.path.write_text(line[:-1] + ',"kind":"experiment_run"}\n', encoding="utf-8")
+
+    ok, detail = ledger.verify()
+    assert ok is False
+    assert "duplicate JSON key" in detail
+
+
+@pytest.mark.parametrize("aliased_sequence", [False, 0.0])
+def test_verify_rejects_bool_and_float_sequence_aliases(
+    tmp_path: Path,
+    aliased_sequence: object,
+) -> None:
+    ledger = _ledger(tmp_path)
+    _run(ledger, "regime_trend_v1")
+    row = json.loads(ledger.path.read_text(encoding="utf-8"))
+    row["sequence"] = aliased_sequence
+    ledger.path.write_text(
+        json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+
+    ok, detail = ledger.verify()
+    assert ok is False
+    assert "true integer" in detail
+
+
+def test_verify_rejects_unhashed_anchor_extensions_and_duplicate_keys(tmp_path: Path) -> None:
+    ledger = _ledger(tmp_path)
+    _run(ledger, "regime_trend_v1")
+    anchor = json.loads(ledger.anchor_path.read_text(encoding="utf-8"))
+    anchor["unhashed_extension"] = True
+    ledger.anchor_path.write_text(json.dumps(anchor) + "\n", encoding="utf-8")
+    ok, detail = ledger.verify()
+    assert ok is False
+    assert "keys do not match schema" in detail
+
+    ledger.anchor_path.write_text(
+        '{"count":1,"last_hash":"' + str(anchor["last_hash"]) + '","count":1}\n',
+        encoding="utf-8",
+    )
+    ok, detail = ledger.verify()
+    assert ok is False
+    assert "duplicate JSON key" in detail
+
+
+def test_legacy_run_mutation_and_count_refuse_a_tampered_shared_ledger(tmp_path: Path) -> None:
+    ledger = _ledger(tmp_path)
+    _run(ledger, "regime_trend_v1")
+    lines = ledger.path.read_text(encoding="utf-8").splitlines()
+    row = json.loads(lines[0])
+    row["payload"]["strategy_id"] = "tampered"
+    ledger.path.write_text(
+        json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RegistryIntegrityError, match="verification"):
+        _run(ledger, "another-strategy")
+    with pytest.raises(RegistryIntegrityError, match="verification"):
+        trial_count(ledger)
 
 
 def test_trial_count_is_derived_and_scoped(tmp_path: Path) -> None:
@@ -161,16 +486,93 @@ def test_accrued_capture_sessions_counts_option_snapshots(tmp_path: Path) -> Non
 # --- CLI wiring -------------------------------------------------------------
 
 
-def test_cli_registry_stats_and_verify(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_cli_registry_stats_and_verify_are_fixed_to_the_canonical_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from chronos.cli.main import main
+
+    monkeypatch.chdir(tmp_path)
+    ledger = RegistryLedger(CANONICAL_REGISTRY_LEDGER_PATH)
+    _run(ledger, "regime_trend_v1")
+    assert main(["registry", "stats"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["scope"] == "canonical"
+    assert payload["ledger"] == str(tmp_path / CANONICAL_REGISTRY_LEDGER_PATH)
+    assert payload["trials"] == 1
+    assert payload["chain_ok"] is True
+    assert main(["registry", "verify"]) == 0
+
+    with pytest.raises(SystemExit):
+        main(["registry", "stats", "--ledger", str(tmp_path / "elsewhere.jsonl")])
+
+
+def test_cli_caller_selected_registry_reporting_is_explicitly_legacy(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     from chronos.cli.main import main
 
     ledger = _ledger(tmp_path)
     _run(ledger, "regime_trend_v1")
     path = str(ledger.path)
-    assert main(["registry", "stats", "--ledger", path]) == 0
+    assert main(["registry", "legacy-stats", "--ledger", path]) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["trials"] == 1 and payload["chain_ok"] is True
-    assert main(["registry", "verify", "--ledger", path]) == 0
+    assert payload["scope"] == "legacy_noncanonical"
+    assert payload["legacy_trials"] == 1
+    assert "trials" not in payload
+    assert main(["registry", "legacy-verify", "--ledger", path]) == 0
+
+
+def test_cli_canonical_stats_refuses_tamper_before_derived_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from chronos.cli.main import main
+
+    monkeypatch.chdir(tmp_path)
+    ledger = RegistryLedger(CANONICAL_REGISTRY_LEDGER_PATH)
+    _run(ledger, "first")
+    _run(ledger, "second")
+    lines = ledger.path.read_text(encoding="utf-8").splitlines()
+    ledger.path.write_text("\n".join(lines[:-1]) + "\n", encoding="utf-8")
+
+    assert main(["registry", "stats"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    error = json.loads(captured.err)
+    assert error["scope"] == "canonical"
+    assert "verification" in error["error"]
+
+
+def test_cli_holdout_status_refuses_a_malformed_last_line_without_traceback(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from chronos.cli.main import main
+
+    ledger = _ledger(tmp_path)
+    _run(ledger, "first")
+    ledger.path.write_text("{malformed-json\n", encoding="utf-8")
+
+    assert (
+        main(
+            [
+                "holdout",
+                "status",
+                "--ledger",
+                str(ledger.path),
+                "--history-root",
+                str(tmp_path),
+            ]
+        )
+        == 1
+    )
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "unreadable" in json.loads(captured.err)["error"]
 
 
 def test_cli_holdout_status(tmp_path: Path) -> None:
