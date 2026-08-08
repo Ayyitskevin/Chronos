@@ -1,0 +1,197 @@
+{
+  "schema_version": "chronos-five-tool-campaign-v1",
+  "campaign_id": "five-tool-v3.6-preregistered-001",
+  "created_at_utc": "2026-08-08T00:00:00Z",
+  "purpose": "Preregistered, research-only component and ablation tests for Five-Tool Confluence AIO v3.6. This manifest freezes identities and rejection tests; it contains no observed result.",
+  "execution_state": "blocked_until_identity_locks_resolve",
+  "performance_claims": [],
+  "promotion_authority": "none",
+  "strategy": {
+    "strategy_id": "five_tool_confluence_v3_6",
+    "version": "3.6",
+    "scope": "research-only",
+    "pine_source": {
+      "path": "research/pine/00_five_tool_confluence_aio.pine",
+      "sha256": "e51d5a40d2e933bf86847c7432364ba8934fd2de653d6aec3d7205639248e45f"
+    },
+    "input_contract": {
+      "path": "specs/five_tool_confluence_v3_6.yaml",
+      "sha256": "93273762b1d01dade4133628a9a2cebf0a1364774fde654a9efc07c4ccf6d049",
+      "digest_scope": "runtime executable-contract identity",
+      "status": "resolved",
+      "required_before_execution": true
+    },
+    "semantic_config": {
+      "path": "specs/five_tool_confluence_v3_6.yaml",
+      "sha256": "93273762b1d01dade4133628a9a2cebf0a1364774fde654a9efc07c4ccf6d049",
+      "digest_scope": "runtime executable-contract identity",
+      "status": "resolved",
+      "required_before_execution": true
+    }
+  },
+  "data": {
+    "primary_instruments": [
+      "SPY",
+      "QQQ",
+      "IWM",
+      "GLD",
+      "TLT",
+      "EFA"
+    ],
+    "benchmark": "SPY",
+    "timeframe": "1D",
+    "history_start_utc": "2010-01-04T00:00:00Z",
+    "accessible_partitions": [
+      "development",
+      "validation"
+    ],
+    "dataset_version_lock": {
+      "dataset_id": "five-tool-certified-daily-v1",
+      "sha256": null,
+      "status": "pending_certified_dataset",
+      "required_before_execution": true
+    },
+    "declared_holdouts": [
+      {
+        "dataset_id": "five-tool-certified-holdout-2026q4",
+        "partition": "holdout",
+        "start_utc": "2026-09-01T00:00:00Z",
+        "status": "future_uncollected_and_unopened",
+        "ordinary_research_access": "forbidden"
+      }
+    ],
+    "known_contamination": [
+      "QQQ 2022-01-01 through 2024-01 was previously consumed and is never represented as clean.",
+      "The existing heterogeneous research/data/raw corpus is not the certified campaign dataset and cannot satisfy this manifest's dataset lock."
+    ]
+  },
+  "fill_policy": {
+    "signal_clock": "confirmed primary bar close",
+    "market_entry_eligibility": "next primary bar open",
+    "higher_timeframe": "prior completed higher-timeframe value only",
+    "chart_ohlcv_approximation": "conservative stop-first when stop and target are both reachable within one bar",
+    "bar_magnifier": "not reproducible from chart-timeframe OHLCV; isolated from signal parity",
+    "tradingview_fill_parity": "UNVERIFIED"
+  },
+  "costs": {
+    "commission_bps_per_fill": 3.0,
+    "slippage_ticks_per_fill": 2,
+    "spread_policy": "Pine-equivalent parity cells add no second spread charge beyond the pinned two-tick slippage; economic-validation cells require a separately content-addressed spread schedule.",
+    "funding_borrow_model_data_costs": "required and content-addressed before any economic-validation verdict; zero is allowed only with a documented not-applicable reason",
+    "stress": {
+      "commission_bps_per_fill": 6.0,
+      "slippage_ticks_per_fill": 4,
+      "require_positive_after_stress": true
+    }
+  },
+  "hypothesis_ids": [
+    "H-5T-001-TREND",
+    "H-5T-002-MOMENTUM",
+    "H-5T-003-VOL-SCALING",
+    "H-5T-004-DIVERGENCE",
+    "H-5T-005-RELATIVE-STRENGTH",
+    "H-5T-006-REGIME-FILTER"
+  ],
+  "campaign_cells": [
+    {
+      "cell_id": "5t-full-default-reference",
+      "hypothesis_id": "H-5T-001-TREND",
+      "role": "full-stack reference, not a component attribution claim",
+      "config_overlay": {}
+    },
+    {
+      "cell_id": "5t-trend-only",
+      "hypothesis_id": "H-5T-001-TREND",
+      "role": "component isolation",
+      "config_overlay": {
+        "tested_component": "trend",
+        "all_other_alpha_components": "disabled"
+      }
+    },
+    {
+      "cell_id": "5t-momentum-only",
+      "hypothesis_id": "H-5T-002-MOMENTUM",
+      "role": "component isolation",
+      "config_overlay": {
+        "tested_component": "momentum",
+        "all_other_alpha_components": "disabled"
+      }
+    },
+    {
+      "cell_id": "5t-vol-scaling-on-vs-off",
+      "hypothesis_id": "H-5T-003-VOL-SCALING",
+      "role": "paired risk-overlay ablation",
+      "config_overlay": {
+        "tested_component": "volatility_scaling",
+        "signal_timestamps_and_directions": "held_fixed"
+      }
+    },
+    {
+      "cell_id": "5t-divergence-only",
+      "hypothesis_id": "H-5T-004-DIVERGENCE",
+      "role": "component isolation",
+      "config_overlay": {
+        "tested_component": "confirmed_pivot_divergence",
+        "all_other_alpha_components": "disabled"
+      }
+    },
+    {
+      "cell_id": "5t-relative-strength-only",
+      "hypothesis_id": "H-5T-005-RELATIVE-STRENGTH",
+      "role": "component isolation",
+      "config_overlay": {
+        "tested_component": "mansfield_relative_strength",
+        "all_other_alpha_components": "disabled"
+      }
+    },
+    {
+      "cell_id": "5t-regime-filter-paired",
+      "hypothesis_id": "H-5T-006-REGIME-FILTER",
+      "role": "paired gate ablation",
+      "config_overlay": {
+        "tested_component": "regime_filter",
+        "underlying_entry_stream": "held_fixed"
+      }
+    }
+  ],
+  "statistics": {
+    "sample_floor": "max(preregistered power-required N, 100 out-of-sample closed trades)",
+    "instruments_required": 3,
+    "materially_different_regimes_required": 2,
+    "expectancy_and_benchmark_alpha_95pct_lower_bound": "> 0 after all applicable costs",
+    "deflated_sharpe_probability_min": 0.95,
+    "fwer_or_fdr_q_max": 0.05,
+    "probability_backtest_overfit_max": 0.1,
+    "parameter_neighbor_pass_fraction_min": 0.67,
+    "best_trade_removal": "net result must remain positive",
+    "best_month_removal": "net result must remain positive",
+    "drawdown_cvar_concentration_limits": "owner-frozen limits required before data access",
+    "two_phase_scoring": "collect raw evidence for every cell first; then bind every score to one ledger-derived global N and one reviewed cross-trial variance"
+  },
+  "trial_accounting": {
+    "record_kind_start": "trial_started",
+    "start_must_precede_reader": true,
+    "reader_and_evaluator_failures_count": true,
+    "multiplicity": "number of unique durable attempt_id values in trial_started records",
+    "candidate_order_or_display_rename_changes_verdict": false
+  },
+  "criteria_document": "docs/FIVE_TOOL_RESEARCH_HYPOTHESES.md",
+  "identity_changes_that_invalidate_campaign": [
+    "pine_source_sha256",
+    "input_contract_sha256",
+    "semantic_config_sha256",
+    "dataset_version_sha256",
+    "history_start_utc",
+    "benchmark_identity",
+    "fill_policy",
+    "cost_model",
+    "criteria_digest",
+    "code_commit"
+  ],
+  "blocked_before_first_data_read": [
+    "Resolve and review the certified dataset-version SHA-256.",
+    "Freeze owner drawdown, CVaR, turnover, and concentration limits.",
+    "Freeze the power calculation, accessible date partitions, code commit, and criteria digest.",
+    "Confirm every campaign cell maps to an executable semantic overlay rather than a prose-only label."
+  ]
+}
