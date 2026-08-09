@@ -61,13 +61,24 @@ Vocabulary that encodes the ladder — use it, never blur it:
 
 ## 2. Test-suite map
 
-Verified 2026-08-02: `pytest -q` → **2489 passed, 1 skipped, ~2 minutes** (2490
+~~Verified 2026-08-02: `pytest -q` → **2489 passed, 1 skipped, ~2 minutes** (2490
 collected). Companion gate baselines, same date: `mypy src/chronos` → "Success: no
 issues found in **218** source files"; `ruff format --check .` → "**379** files already
-formatted" (the count includes the five `.claude/skills` scripts, which sit inside
-`ruff`'s repo-wide scope). This section is the authoritative numeric baseline — other
-skills state the loose shape and cross-reference here. Layout under
-`/home/user/Chronos/tests/`:
+formatted"~~
+
+> **Corrected 2026-08-09.** `pytest -q` → **2745 passed, 1 skipped, ~2 minutes** (2746
+> collected). Companion gate baselines, same date: `mypy --strict src/chronos` →
+> "Success: no issues found in **232** source files"; `ruff format --check .` → "**409**
+> files already formatted". The jump has two causes: M12 carried the suite to **2543
+> passed / 1 skipped** at `721d7f1` (CHANGELOG M12) without this row being updated, and
+> the Five-Tool research slice plus its merge-review tests added the rest. The two new
+> safety files from that review are `test_five_tool_holdout_refusal_exercised.py` and
+> `test_five_tool_inert_fields_disclosed.py`. The 2026-08-02 numbers are struck rather
+> than deleted: they are what a session running against `47a8d72` would still observe.
+
+The format count includes the five `.claude/skills` scripts, which sit inside `ruff`'s
+repo-wide scope. This section is the authoritative numeric baseline — other skills state
+the loose shape and cross-reference here. Layout under `/home/user/Chronos/tests/`:
 
 | Directory | Collected | What lives there |
 |---|---|---|
@@ -370,8 +381,8 @@ facts and how to re-verify each (all read-only):
 
 | Volatile fact | Re-verify with |
 |---|---|
-| 2489 passed / 1 skipped, ~2 min | `.venv/bin/python -m pytest -q` (per README Setup) |
-| mypy 218 source files; format 379 files (incl. the 5 `.claude/skills` scripts) | `.venv/bin/mypy src/chronos` ; `.venv/bin/ruff format --check .` |
+| ~~2489 passed / 1 skipped, ~2 min~~ **corrected 2026-08-09: 2745 passed / 1 skipped** (see the §2 correction note) | `.venv/bin/python -m pytest -q` (per README Setup) |
+| ~~mypy 218 source files; format 379 files~~ **corrected 2026-08-09: mypy 232; format 409** (incl. the 5 `.claude/skills` scripts) | `.venv/bin/mypy src/chronos` ; `.venv/bin/ruff format --check .` |
 | Per-directory counts (1461/202/561/226/27/13) | `.venv/bin/python -m pytest tests/<dir> --collect-only -q \| tail -1` |
 | The single skip is the IBKR smoke test | `.venv/bin/python -m pytest -q -ra \| grep -A1 SKIPPED` |
 | Four CI gates and CI env | `sed -n '1,50p' .github/workflows/ci.yml` |

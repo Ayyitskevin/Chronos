@@ -103,7 +103,7 @@ def analyze(path: Path) -> dict[str, object]:
         "filename": path.name,
         "sha256": hashlib.sha256(raw).hexdigest(),
         "bytes": len(raw),
-        "lines": source.count("\n") + 1,
+        "lines": len(source.splitlines()),
         "pine_version": version_match.group(1) if version_match else "unknown",
         "declaration": decl_match.group(1) if decl_match else "unknown",
         "declared_title": title_match.group(1) if title_match else "",
@@ -154,7 +154,11 @@ def main() -> int:
         json.dumps(registry, indent=2, ensure_ascii=False), encoding="utf-8"
     )
     with (research / "strategy_catalog.csv").open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(entries[0].keys()))
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=list(entries[0].keys()),
+            lineterminator="\n",
+        )
         writer.writeheader()
         writer.writerows(entries)
     print(f"registry written: {len(entries)} scripts, missing from disk: {missing}")

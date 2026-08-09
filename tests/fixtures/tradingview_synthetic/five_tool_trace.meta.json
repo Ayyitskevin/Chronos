@@ -1,0 +1,24 @@
+{
+  "schema_version": "chronos.five_tool_tradingview_trace.v1",
+  "provenance": "internal_spec",
+  "catalog_number": "00",
+  "pine_sha256": "e51d5a40d2e933bf86847c7432364ba8934fd2de653d6aec3d7205639248e45f",
+  "symbol": "SYNTH-5T",
+  "timeframe": "1D",
+  "chart_timezone": "America/New_York",
+  "session": "0930-1600:23456",
+  "timestamp_semantics": "bar_close",
+  "data_source": "deterministic_internal_spec_fixture",
+  "exported_at_utc": "2026-08-08T00:00:00Z",
+  "input_count": 4,
+  "input_config": {
+    "fixture_profile": "deterministic_synthetic_v1",
+    "history_start_utc": "2024-01-01T00:00:00Z",
+    "markov_estimator": "raw",
+    "strict_markov": true
+  },
+  "input_config_sha256": "96de830ef4e45e9b27ad86fa46cd1c9a034ff9220ea299d5287fb9877120b5b6",
+  "trace_sha256": "4ceb10de4673474a0d2923da857b1c961e293032578234309a069e67a8f3a762",
+  "row_count": 3,
+  "owner_attestation_sha256": null
+}
