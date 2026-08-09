@@ -390,7 +390,7 @@ on that commit. Line numbers drift; re-verify before quoting onward:
 | Volatile fact | Re-verify with (read-only) |
 |---|---|
 | AGENTS.md rules and precedence ladder line numbers | `grep -n "Never weaken\|Freeze statistical\|owner review\|Reverify point\|At task start\|never average" AGENTS.md` |
-| §11 owner gates / §13 YAML contract wording | `sed -n '306,362p' docs/VISION_COMPLETION_PLAN.md` |
+| §11 owner gates / §13 YAML contract wording | `sed -n "/^## 11/,/^## 12/p" docs/VISION_COMPLETION_PLAN.md; sed -n "/^## 13/,/^## 14/p" docs/VISION_COMPLETION_PLAN.md` |
 | D-11 strike-through; D-16/D-17 rows (note: D-17/D-18 rows sit AFTER D-19 in the table) | `grep -n "D-11\|D-16\|D-17" DECISIONS.md` |
 | ADR-0016 status + in-place supersession brackets | `grep -n "Superseded by ADR-0017" docs/adr/ADR-0016-controlled-autonomous-model-authority.md` |
 | ADR-0017 scoping quotes | `grep -n "owner-optional ceilings\|None of these is touched" docs/adr/ADR-0017-owner-directed-maximal-autonomy.md` |

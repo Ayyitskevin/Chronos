@@ -410,7 +410,7 @@ facts and how to re-verify each (all read-only):
 | Conftest tripwires | `sed -n '17,52p' tests/conftest.py` |
 | Kernel-defect statuses + revert-the-fix notes | `sed -n '31,35p' RISK_REGISTER.md` |
 | README [enforced]/[contract] labels | `sed -n '119,125p' README.md` |
-| Phase-1 EXIT (property/fuzz/mutation/chaos) still unmet | `sed -n '170,180p' docs/VISION_COMPLETION_PLAN.md`; `ls tests/chaos`; `grep -rln hypothesis tests --include='*.py'` |
+| Phase-1 EXIT (property/fuzz/mutation/chaos) still unmet | `grep -n -B2 -A2 "property, fuzz, mutation" docs/VISION_COMPLETION_PLAN.md`; `ls tests/chaos`; `grep -rln hypothesis tests --include='*.py'` |
 | Remediation-commit count (22) | `git log --no-merges --oneline -i --grep="remediat" \| wc -l` |
 | Exercised-test collected counts (14/9/30/29) | `.venv/bin/python -m pytest tests/safety/test_opening_cap_exercised.py tests/safety/test_session_gate_exercised.py tests/safety/test_option_deliverable.py tests/safety/test_liquid_hours.py --collect-only -q` |
 

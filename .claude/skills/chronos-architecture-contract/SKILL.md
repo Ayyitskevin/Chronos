@@ -280,7 +280,7 @@ with this skill, the repo wins — update this file. Run everything from the rep
 | Quarantine + dormant site lines | `grep -n "quarantine_ack\|order.transmit = True" src/chronos/execution/brokers/ibkr_paper.py` |
 | Stop-mechanism defaults (halt vs kill switch) | `grep -n -A3 "except FileNotFoundError" src/chronos/control/halt.py src/chronos/orders/kill_switch.py` |
 | Mode lock still hard-denies live | `grep -n -A6 "_LIVE_MODES:" src/chronos/control/modes.py` |
-| Phase-1 findings still open / unchanged | `sed -n '138,166p' docs/VISION_COMPLETION_PLAN.md` (then reverify each against code, as the doc itself orders) |
+| Phase-1 findings still open / unchanged | `sed -n "/^## 6/,/^## 7/p" docs/VISION_COMPLETION_PLAN.md` (then reverify each against code, as the doc itself orders) |
 | Risk-register rows cited (R-18/24/28/32/33/42) | `grep -n "R-18\|R-24\|R-28\|R-32\|R-33\|R-42" RISK_REGISTER.md` |
 | assignment_pressure still orphaned | `grep -rln "assignment_pressure" src/chronos tests` (only the module + its unit test ⇒ still orphaned) |
 | Mandate-replaces-arming contradiction unresolved | `grep -n "is_armed" src/chronos/orders/submission.py` (still gate-fed ⇒ unresolved) |

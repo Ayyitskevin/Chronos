@@ -508,7 +508,7 @@ Written 2026-08-02 against commit `47a8d72` on branch
 | Zero declared holdout windows | `cat research/data/history/HOLDOUTS.json` |
 | No campaign output committed yet | `ls research/results/` |
 | C4 floor 20 + freeze timestamps | `sed -n '2,5p;19p' research/selection_manifest.json` |
-| Phase-3 gates (100-trade floor, FWER/FDR, PBO) | `sed -n '240,254p' docs/VISION_COMPLETION_PLAN.md` |
+| Phase-3 gates (100-trade floor, FWER/FDR, PBO) | `grep -n -A8 "declared holdouts that are inaccessible" docs/VISION_COMPLETION_PLAN.md` |
 | QQQ burn disclosure unchanged | `sed -n '184,214p' docs/RESEARCH_REPORT.md` |
 | `--stage all` still excludes final | `sed -n '19,23p;259,260p' scripts/run_research.py` |
 | Unlock phrase mechanics | `grep -n "REQUIRED_HOLDOUT_UNLOCK_PHRASE\|compare_digest" src/chronos/registry/holdout_guardian.py` |
