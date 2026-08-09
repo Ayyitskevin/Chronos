@@ -8,6 +8,20 @@
 
 **Owner:** Kevin; owner approval remains mandatory wherever this plan says `OWNER GATE`
 
+> **Amendment, 2026-08-09 (ADR-0025 / D-21, owner directive):** the §9 promotion
+> ladder and the §12 calendar remain the frozen bar for **claims** — "validated,"
+> "proven," "trades better than the owner" — and are unchanged as such. They no
+> longer sequence the owner's right to run **live experimentation at
+> owner-capped size**, which is instead gated by ADR-0025's mechanical-readiness
+> checklist (funded capital + typed loss limits, the §7 read-only gateway
+> campaign, a frozen paper-lifecycle floor, TradingView parity, market-data
+> subscription, an owner-authored mandate and kill drill). Live records feed the
+> same registry/replay evidence machinery, so the ladder runs concurrently with
+> the experiment rather than in front of it. Finding 4 (§6) resolves toward
+> standing mandate authority; implementation is owner-reviewed follow-up work.
+> Nothing in this amendment weakens a gate, edits a threshold, or lets live P&L
+> at small N count as evidence.
+
 This document turns “10/10” into build order and measurable release gates. It is not an
 ADR and does not silently change accepted architecture. `DECISIONS.md` and accepted ADRs
 govern implemented authority; this plan governs what gets built next and what evidence is

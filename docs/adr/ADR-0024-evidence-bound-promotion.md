@@ -4,6 +4,13 @@ Status: **proposed — owner decision required.** No `DECISIONS.md` row until ac
 
 Date: 2026-08-02
 
+> **Note, 2026-08-09:** the interim rule this ADR recommends ("no rung above
+> `shadow` without an owner decision recorded in `DECISIONS.md`") is now the
+> operative mechanism of ADR-0025/D-21: the owner declares rungs personally,
+> gated by ADR-0025's go-gate checklist. The build options here (A/B/C) remain
+> proposed and undecided — and Option B gets *more* urgent under standing live
+> authority, since a self-declared live rung is exactly the field it hardens.
+
 Closes, if accepted: `docs/VISION_COMPLETION_PLAN.md` §6 finding 8.
 
 ## Context
