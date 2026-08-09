@@ -1,6 +1,14 @@
 """Research-only Five-Tool Confluence signal and evidence capability."""
 
 from chronos.research.five_tool.alignment import align_five_tool_inputs
+from chronos.research.five_tool.campaign import (
+    CampaignBlocker,
+    CampaignBlockerCode,
+    CampaignReadinessReport,
+    CompiledCampaignPlan,
+    CompiledTrialBlueprint,
+    compile_campaign_manifest,
+)
 from chronos.research.five_tool.checkpoint import state_from_json, state_to_json
 from chronos.research.five_tool.contract import (
     ContractDriftError,
@@ -45,6 +53,11 @@ from chronos.research.five_tool.replay import (
 
 __all__ = [
     "AccountSnapshot",
+    "CampaignBlocker",
+    "CampaignBlockerCode",
+    "CampaignReadinessReport",
+    "CompiledCampaignPlan",
+    "CompiledTrialBlueprint",
     "ContractDriftError",
     "ContractSchemaError",
     "DependencyStage",
@@ -72,6 +85,7 @@ __all__ = [
     "TimingRule",
     "WarmupRule",
     "align_five_tool_inputs",
+    "compile_campaign_manifest",
     "default_contract_path",
     "default_input_values",
     "default_source_path",

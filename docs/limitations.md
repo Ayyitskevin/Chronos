@@ -172,6 +172,18 @@ runbooks.
   completed terminal alone is not replay proof. This does not supply certified market data,
   final-N scoring, a cross-trial variance estimate, an untouched holdout result, external
   TradingView execution parity, or a promotion artifact.
+- **The checked Five-Tool campaign authorizes zero trials.** Campaign v2
+  (`five-tool-v3.6-preregistered-002`) superseded v1 before either campaign read data or
+  produced a result. All seven comparison policies and the catalog/partition/evaluator
+  bindings remain `pending_resolution` with closed-code blocker objects, so the compiler
+  emits no partial plan. Public v2 categorically rejects resolved replacements: a generic
+  Pine risk-input pair cannot represent H3/H4/H6's missing typed stream semantics. The
+  callback-driven ready manifest uses an unexported synthetic-only compile seam that keeps
+  identity/request/holdout checks but bypasses that one semantic refusal; it cannot clear
+  public readiness, access certified data, or support a performance claim. Its global
+  dataset lock denotes a release/bundle manifest, while each request separately binds the
+  selected partition's bytes; distinct partitions may not reuse one normalized
+  `(dataset_id, data_version)` content identity.
 - **The budget policy is a first cut** (linear credits per accrued capture session);
   burns and *active* grants spend credits, expired-unused grants are refunded; it
   *rations* unlocks, it does not model statistical power (C3/C4). Empty store ⇒ zero
