@@ -1,6 +1,14 @@
 """Research-only Five-Tool Confluence signal and evidence capability."""
 
 from chronos.research.five_tool.alignment import align_five_tool_inputs
+from chronos.research.five_tool.campaign import (
+    CampaignBlocker,
+    CampaignBlockerCode,
+    CampaignReadinessReport,
+    CompiledCampaignPlan,
+    CompiledTrialBlueprint,
+    compile_campaign_manifest,
+)
 from chronos.research.five_tool.certified_reader import (
     CertificationManifest,
     CertificationManifestInvalid,
@@ -86,6 +94,9 @@ from chronos.research.five_tool.replay import (
 
 __all__ = [
     "AccountSnapshot",
+    "CampaignBlocker",
+    "CampaignBlockerCode",
+    "CampaignReadinessReport",
     "CertificationManifest",
     "CertificationManifestInvalid",
     "CertificationManifestMissing",
@@ -94,6 +105,8 @@ __all__ = [
     "CertifiedFileMissing",
     "CertifiedReadReceipt",
     "CertifiedReaderError",
+    "CompiledCampaignPlan",
+    "CompiledTrialBlueprint",
     "ContractDriftError",
     "ContractSchemaError",
     "DatasetDigestMismatch",
@@ -146,6 +159,7 @@ __all__ = [
     "audit_trace_provenance",
     "build_certification_manifest",
     "certified_payload",
+    "compile_campaign_manifest",
     "default_contract_path",
     "default_input_values",
     "default_source_path",
