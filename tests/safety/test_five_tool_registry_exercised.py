@@ -27,6 +27,7 @@ still ships empty — every ledger below lives in a pytest temporary directory.
 
 from __future__ import annotations
 
+import base64
 import copy
 import hashlib
 import importlib.util
@@ -483,21 +484,19 @@ def test_a_campaign_whose_attempts_were_not_registered_cannot_seal(tmp_path: Pat
 
 
 # --------------------------------------------------------------------------------------
-# The manifest stays blocked, now naming exactly the two capabilities that are missing.
+# The manifest stays blocked, now naming exactly the one capability that is missing.
 # --------------------------------------------------------------------------------------
 
 
 def test_the_canonical_registry_capability_is_no_longer_named_as_missing() -> None:
-    """Updated 2026-08-09 (Track B.2): the certified reader left this list too."""
+    """Updated 2026-08-09 (Tracks B.2, B.3): the reader and the replay store left too."""
 
     named = " | ".join(MISSING_CERTIFIED_RESEARCH_CAPABILITIES).casefold()
     assert "registry" not in named
     assert "adr-0013" not in named
     assert "certified" not in named
-    assert MISSING_CERTIFIED_RESEARCH_CAPABILITIES == (
-        "replay artifacts",
-        "owner evidence",
-    )
+    assert "replay" not in named
+    assert MISSING_CERTIFIED_RESEARCH_CAPABILITIES == ("owner evidence",)
 
 
 @pytest.mark.parametrize("capability", list(MISSING_CERTIFIED_RESEARCH_CAPABILITIES))
@@ -575,11 +574,16 @@ def test_the_certified_reader_capability_now_exists() -> None:
     assert "from chronos.research.five_tool.certified_reader import" in trials_source
 
 
-def test_no_replay_artifact_capability_exists(tmp_path: Path) -> None:
-    """Independent proof of conjunct one: the evidence bytes are digested, never kept.
+def test_the_replay_artifact_capability_now_exists(tmp_path: Path) -> None:
+    """Replaces the former absence proof (Track B.3, 2026-08-09).
 
-    The ledger records ``evidence_artifact_sha256``; the artifact itself is not persisted
-    anywhere, so a completed trial cannot be replayed from what the ledger holds.
+    This file's original ``test_no_replay_artifact_capability_exists`` asserted that the
+    evaluator's evidence bytes were "digested but never persisted anywhere on disk", which
+    is why "replay artifacts" was named as missing above.  That capability landed, so the
+    absence proof is replaced by the capability check rather than deleted: the bytes are
+    now persisted, content-addressed, and named by the terminal ledger record.  Every
+    refusal conjunct and the replay comparison itself are exercised in
+    ``tests/safety/test_five_tool_replay_exercised.py``.
     """
 
     manifest = _synthetic_ready_manifest()
@@ -593,14 +597,17 @@ def test_no_replay_artifact_capability_exists(tmp_path: Path) -> None:
 
     written = b"".join(path.read_bytes() for path in sorted(tmp_path.rglob("*")) if path.is_file())
     assert hashlib.sha256(_ARTIFACT).hexdigest().encode() in written
-    assert _ARTIFACT not in written, (
-        "an artifact store appeared; update the missing-capability list"
-    )
+    assert base64.b64encode(_ARTIFACT) in written, "the evidence bytes are not recoverable"
+    # The dataset itself is still not copied: input identity stays content-addressed.
     assert _DATA not in written
+    terminal = RegistryLedger(broker.ledger_path).records_of("trial_terminal")[-1]
+    digest = terminal.payload["replay_artifact_sha256"]
+    assert isinstance(digest, str) and len(digest) == 64
+    assert importlib.util.find_spec("chronos.research.five_tool.replay") is not None
 
 
 def test_the_owner_evidence_the_campaign_needs_is_still_unfrozen() -> None:
-    """Independent proof of conjunct two: only the owner can supply these."""
+    """Independent proof of the one remaining conjunct: only the owner can supply these."""
 
     manifest = _committed_manifest()
     assert manifest["statistics"]["drawdown_cvar_concentration_limits"] == (

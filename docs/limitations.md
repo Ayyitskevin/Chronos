@@ -171,6 +171,31 @@ runbooks.
   authorizes a partition *label* and does not carve holdout bars out of a dataset that
   contains them; and **no dataset has been certified** — no `CERTIFICATION.json` exists
   under `research/`, so this is a capability, not evidence.
+- **A Five-Tool trial is now re-executable byte-for-byte, and that is all replay proves**
+  (added 2026-08-09). Any Five-Tool attempt that opened data persists a content-addressed
+  replay artifact (`chronos.research.five_tool.replay`) carrying the campaign identity,
+  the engine identity including the semantic configuration itself, the input locks and
+  the digest of the bytes read, the certified attestation and receipt digests, the durable
+  start, and — for a completed attempt — the evidence bytes the ledger previously only
+  digested. The artifact is written before the terminal record and named by it, sealing
+  re-verifies every scored row against the store in both directions, and `replay_trial`
+  refuses on any byte divergence naming which axis moved
+  (`tests/safety/test_five_tool_replay_exercised.py`). **Out of scope:** reproducing a
+  number says it is deterministic, never that it is correct, profitable, or inside limits
+  nobody has frozen; the artifact does not copy the dataset, so a replay depends on the
+  reader it is given still being able to produce those bytes; replay registers **no**
+  trial, the same stance `research/repro.py` takes for its produce/replay probe; and the
+  store ships **empty** — no artifact exists anywhere under `research/`.
+- **The Five-Tool lookahead-provenance audit exists and has never been run on a campaign**
+  (added 2026-08-09). `chronos.research.five_tool.provenance.audit_trace_provenance` reads
+  `FiveToolTrace.primary_sequence_id`, `.benchmark_source_id`, and `.htf_source_id` — which
+  until now nothing read — and refuses an unattributed identifier, a role whose series
+  changes mid-run, an identifier whose timestamp disagrees with the bar it sits on, and a
+  companion bar that had not closed when its primary bar did. That is the preregistration's
+  common test 10 (timestamp audit, no-lookahead), derived from the trace alone
+  (`tests/safety/test_five_tool_provenance_audit_exercised.py`). **Out of scope:** it audits
+  the identifiers a run *recorded* — it cannot see bytes the engine never attributed — and
+  no campaign has run it, so its existence is capability, not a passed test.
 - **The budget policy is a first cut** (linear credits per accrued capture session);
   burns and *active* grants spend credits, expired-unused grants are refunded; it
   *rations* unlocks, it does not model statistical power (C3/C4). Empty store ⇒ zero

@@ -213,6 +213,155 @@ certifying one.
 Suite after this capability: **2805 passed, 1 skipped** (was 2767/1); ruff check, ruff
 format (412 files), and `mypy --strict src/chronos` clean over 233 source files.
 
+### Replay artifacts — a Five-Tool trial is re-executable, or it is not sealed (2026-08-09)
+
+The third and last of the non-owner capabilities the manifest names, and the closure of the
+gap the registry suite observed about itself in its own words: the evidence bytes were
+"digested but never persisted anywhere on disk". The ledger recorded
+`evidence_artifact_sha256` and threw the artifact away, so a completed trial could be
+counted, sealed, and cited while being impossible to re-derive by anyone who did not
+already hold it. A digest of something nobody kept is a receipt for a parcel that was never
+mailed.
+
+`chronos.research.five_tool.replay` is the store. Any attempt that gets as far as opening
+data now persists a **content-addressed** artifact carrying everything needed to re-execute
+it: campaign and attempt identity, the engine identity **including the semantic
+configuration itself and not only its fingerprint**, the input locks and the digest of the
+bytes actually read, the certified attestation and receipt digests from the B.2 reader, the
+durable start the attempt was bound to, and the outcome — for a completed attempt the
+evidence bytes themselves, base64-framed, with every statistic derived from them; for an
+attempt that died after opening data, the bounded error classification it died with, so
+"aborted after read" is replayable too. It does **not** copy the dataset: input identity
+stays content-addressed exactly as `research/repro.py` records dataset SHA-256s rather than
+CSVs, and a replay re-reads through the reader it is given.
+
+**Written before the terminal record, and named by it.** The artifact lands first, so if
+the store refuses, no terminal record exists and no completed trial can — no artifact, no
+sealed trial. The attempt is still counted, because under-counting N is the failure B.1
+exists to prevent and an unwritable store does not license it. An unwired store, or one
+whose parent directory was never provisioned, refuses the attempt **before** registration
+and before the reader is called: a research run may not conjure the place its own
+reproducibility is kept, the same rule the registry already follows.
+
+**Every digest is recomputed, never trusted.** The file name is the SHA-256 of the canonical
+body bytes, so editing the file breaks that equality and re-serializing it with different
+whitespace or key order breaks it too. Inside, `semantic_config_fingerprint` is recomputed
+from the config it fingerprints, `artifact_sha256` from the embedded output bytes, and
+`evidence_digest` from the artifact digest plus the four statistics — an artifact whose own
+claims disagree with its own payload is refused, so a digest can never be decoration. A
+content address is never overwritten with different bytes. Sealing re-verifies every scored
+row against the store in both directions: present, hashing to its own content address, and
+describing the attempt the ledger says it describes; and each `LedgerLocalScoreInput` now
+names the artifact that reproduces it.
+
+**`replay_trial` refuses on any byte divergence and says which axis moved** — inputs,
+configuration, certification, outcome, or outputs — in vocabulary deliberately shaped like
+`research/repro.py`'s `CompareReason` so one repository speaks one language about
+byte-identity, without coupling the planes (the walk-forward module replays a named-backtest
+slice through the strategy platform; importing it here would drag the backtest engine into
+an import-isolated research package for the sake of an enum). Identical bytes with a weaker
+provenance story still diverge: replaying a certified read through an arbitrary callback is
+`certified_read_drift`, not a pass. A digest backstop runs after the field-level pass, so a
+field added to the schema and forgotten in the comparison surfaces as
+`uncompared_field_drift` rather than silently passing. **A replay registers no trial and
+writes no ledger record** — it re-reads bytes whose digest is already recorded and produces
+no new hypothesis evidence, the same stance `repro produce/replay` takes, and it is asserted
+rather than assumed.
+
+`tests/safety/test_five_tool_replay_exercised.py` (43 tests) drives all of it. Every
+conjunct was verified by reverting it alone and confirming a distinct named failure:
+persistence removed entirely (45 failures, including
+`test_a_completed_trial_persists_the_bytes_the_ledger_only_digested`); the store requirement
+removed (`test_an_unwired_artifact_store_refuses_the_trial_before_it_is_counted` alone); the
+artifact written after the terminal instead of before
+(`test_the_artifact_is_written_before_the_terminal_record`); the content-address check
+removed (`test_tampered_artifact_bytes_no_longer_hash_to_their_content_address` alone); each
+self-consistency clause removed
+(`test_an_artifact_whose_own_digests_disagree_with_its_own_payload_is_refused` alone); the
+ledger binding check removed
+(`test_an_artifact_for_another_attempt_cannot_be_bound_to_this_trial` alone); the completed
+terminal allowed to name no artifact
+(`test_a_completed_trial_record_that_names_no_artifact_cannot_seal` alone); the comparison
+neutered (9 failures across every divergence axis); and the digest backstop removed
+(`test_the_digest_backstop_catches_a_field_the_comparison_forgot` alone). Track A's holdout
+file is unmodified and passing under each revert.
+
+### The lookahead-provenance identifiers are read, and they refuse future bytes (2026-08-09)
+
+The Track A merge review classified three `FiveToolTrace` fields as disclosed inert with an
+honest reason: `primary_sequence_id`, `benchmark_source_id`, and `htf_source_id` were "an
+audit trail nothing audits", and whole-trace equality in the parity and determinism tests
+catches nondeterminism only — "two runs of the same code agree on a wrong identifier exactly
+as readily as on a right one". The preregistration's common campaign test 10 requires them:
+"Deterministic repeat, batch-versus-stream replay, **timestamp audit, and no-lookahead
+tests** pass before economic statistics are considered."
+
+`chronos.research.five_tool.provenance.audit_trace_provenance` is the reader that ends that.
+It resolves every identifier to a full venue-qualified series (source, exchange, symbol,
+interval, session date, source instant), requires each role — primary, benchmark, higher
+timeframe — to name one stable series for the whole run, requires each primary identifier's
+own timestamp to be the bar's and primary bars to advance strictly, refuses a companion
+source that moves backwards, and refuses a benchmark bar stamped after its primary bar or a
+higher-timeframe bar that had not closed strictly before it. It derives all of that **from
+the trace alone**, which is the point: a trace is what a campaign keeps, so the audit must
+hold without re-running the aligner that produced it. It is deliberately stricter than
+`align_five_tool_inputs` in one place — the higher-timeframe series must be the same
+instrument at a strictly longer interval, because Pine's higher-timeframe request is the
+same symbol by construction — and that strictness is disclosed in the module rather than
+inherited silently.
+
+**The inert-field guard fired, in its designed second direction, and that failure is the
+evidence.** `tests/safety/test_five_tool_inert_fields_disclosed.py` is written to fail both
+when a new unread field appears *and* when a disclosed field becomes read. Landing the audit
+produced exactly the latter: "FiveToolTrace field(s) ['benchmark_source_id',
+'htf_source_id', 'primary_sequence_id'] are now read; remove them from the disclosure so it
+keeps describing the real state." The disclosure was then corrected in place — struck, dated,
+and explained — in the test and in `models.py`'s module docstring. The five remaining
+`FiveToolTrace` entries are untouched and still unread.
+`tests/safety/test_five_tool_provenance_audit_exercised.py` (42 tests) audits **real engine
+output** over aligned bar series rather than hand-assembled traces, and doctors exactly one
+identifier at a time — which is simultaneously the refusal proof and the proof that each of
+the three fields is genuinely read. Reverting each check alone fails its own named test:
+the attribution parse, the primary/benchmark/HTF series-drift checks, the timestamp-
+consistency check, and each of the two lookahead checks.
+
+**What this is not.** Reproducing a number proves it is deterministic — never that it is
+correct, profitable, or inside limits nobody has frozen. Auditing provenance proves the
+identifiers a run recorded are attributed and causal — it cannot see bytes the engine never
+attributed, and **no campaign has run it**. The registry still ships empty, no dataset is
+certified, **no replay artifact exists anywhere under `research/`**, `research/` is
+byte-identical, and `docs/FIVE_TOOL_RESEARCH_HYPOTHESES.md` and the campaign manifest are
+untouched frozen preregistration surfaces.
+
+**With this, the manifest's only remaining named blocker is owner evidence.**
+`MISSING_CERTIFIED_RESEARCH_CAPABILITIES` is now the one-tuple `("owner evidence",)`, and the
+`EXECUTION_READY` refusal reads "a manifest cannot replace the missing owner evidence
+capability" — built from that list, with the grammar agreeing with it, so neither the list
+nor the sentence can go stale. The three names that left it each left because a capability
+landed, and each absence proof was **replaced by a capability check rather than deleted**:
+`test_no_replay_artifact_capability_exists` became
+`test_the_replay_artifact_capability_now_exists`. The one name that remains is the one no
+engineering session can remove — the Phase-0 freezes are the owner's: drawdown, CVaR,
+turnover and concentration limits, the power calculation, and benchmark/minimum-edge
+economics, and `test_the_owner_evidence_the_campaign_needs_is_still_unfrozen` is untouched
+and still observes their absence independently. **Nothing has run.** No hypothesis was
+tested, no data was acquired, no dataset was certified, no campaign was unblocked, and the
+trial ledger and registry both still ship empty.
+
+Forced edits to prior guard files, each recorded rather than quietly made: B.1's
+`test_five_tool_registry_exercised.py` (the capability tuple assertion, and the absence proof
+replaced by a capability check); B.2's `test_five_tool_certified_reader_exercised.py` (the
+same tuple, in a test renamed from `..._now_names_exactly_two_capabilities` to
+`test_the_public_refusal_still_refuses_after_the_reader_landed` because the list shrank, not
+the property); Track A's `test_five_tool_inert_fields_disclosed.py` (the three identifiers
+leaving the disclosure); and `tests/unit/test_five_tool_trials.py` (one hand-built terminal
+payload gaining the new `replay_artifact_sha256: None` key). Track A's
+`test_five_tool_holdout_refusal_exercised.py` and `test_five_tool_isolation.py` are
+unmodified.
+
+Suite after this capability: **2889 passed, 1 skipped** (was 2805/1); ruff check, ruff
+format (416 files), and `mypy --strict src/chronos` clean over 235 source files.
+
 ## [Unreleased] — M12: the handoff library, document truth, and finding 1 (2026-08-02)
 
 Nine merged PRs across one day. The theme is not new capability — it is making the

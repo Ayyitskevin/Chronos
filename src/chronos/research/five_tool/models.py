@@ -1,15 +1,25 @@
 """Typed, immutable vocabulary for the Five-Tool research-only vertical slice.
 
 Disclosed inert trace fields (AGENTS.md:29-30).  The engine populates
-``FiveToolTrace.primary_sequence_id``, ``.benchmark_source_id``, ``.htf_source_id``,
-``.bar_index``, ``.warmup_blockers``, ``.long_setup``, ``.short_setup``, and ``.events``,
-but nothing in ``src/chronos`` reads them back.  The three source identifiers are the
-lookahead-provenance trail the preregistration's common test 10 (timestamp audit,
-no-lookahead) will need, so their being unread is a gap to close before any campaign
-runs, not a decoration to delete.  Whole-trace equality in the parity and determinism
-tests catches nondeterminism only: two runs of the same code agree on a wrong identifier
-exactly as readily as on a right one.  The set is pinned by
+~~``FiveToolTrace.primary_sequence_id``, ``.benchmark_source_id``, ``.htf_source_id``,~~
+``FiveToolTrace.bar_index``, ``.warmup_blockers``, ``.long_setup``, ``.short_setup``, and
+``.events``, but nothing in ``src/chronos`` reads them back.  ~~The three source
+identifiers are the lookahead-provenance trail the preregistration's common test 10
+(timestamp audit, no-lookahead) will need, so their being unread is a gap to close before
+any campaign runs, not a decoration to delete.~~  Whole-trace equality in the parity and
+determinism tests catches nondeterminism only: two runs of the same code agree on a wrong
+identifier exactly as readily as on a right one.  The set is pinned by
 ``tests/safety/test_five_tool_inert_fields_disclosed.py``.
+
+**Corrected 2026-08-09.**  That gap is closed.  The three source identifiers are now read
+by :func:`chronos.research.five_tool.provenance.audit_trace_provenance`, which resolves
+each to a full venue-qualified series, refuses a role whose series changes mid-run, refuses
+an identifier whose timestamp disagrees with the bar it sits on, and refuses a companion
+bar that had not closed when its primary bar did — common test 10's timestamp audit and
+no-lookahead test, derived from the trace alone.  They left the disclosure because the
+guard fired on them becoming read, not because this sentence was edited.  The five fields
+named above are unchanged and still unread.  No campaign has run the audit; it is the
+capability the preregistration requires, not evidence that anything passed it.
 """
 
 from __future__ import annotations

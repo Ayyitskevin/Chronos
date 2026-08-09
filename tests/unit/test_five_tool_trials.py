@@ -695,6 +695,10 @@ def _failed_terminal_payload(receipt: TrialReceipt) -> dict[str, object]:
         "skew": None,
         "kurtosis": None,
         "error_type": INTERRUPTED_ATTEMPT_ERROR,
+        # Added 2026-08-09 (Track B.3, replay artifacts): the terminal schema now names
+        # the artifact that re-executes the attempt. An orphan start opened no data, so it
+        # has nothing to replay and honestly names none.
+        "replay_artifact_sha256": None,
     }
 
 
