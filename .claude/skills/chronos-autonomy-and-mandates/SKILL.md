@@ -485,7 +485,7 @@ root with the project venv per README Setup, `.venv/bin/python`):
 | Promotion still self-declared (item 8) | `grep -rn "FamilyPromotion" src/chronos --include="*.py"` — only the definition + mandate field = still no grant/demote code |
 | Provenance still static (item 6) | `sed -n '84,94p' src/chronos/api/autonomy_wiring.py` |
 | No LLM SDK in-repo | `grep -n "anthropic\|openai\|litellm\|langchain" pyproject.toml requirements.txt` — no hits |
-| Phase-1 findings list unchanged | `sed -n '140,164p' docs/VISION_COMPLETION_PLAN.md` |
+| Phase-1 findings list unchanged | `sed -n "/^## 6/,/^## 7/p" docs/VISION_COMPLETION_PLAN.md` |
 
 If any re-verification diverges, the CODE is the truth (AGENTS.md precedence:
 current executable facts outrank every document, this skill included) — update

@@ -6,9 +6,10 @@ blockers."  The four kernel defects (R-24..R-27) were all fields and controls th
 enforced and were not.
 
 Merge-time review of ``codex/five-tool-confluence-v36`` found Five-Tool contract fields
-that the research plane writes but never reads back: the trace's lookahead-provenance
-identifiers, and most of ``PositionPlan``/``QuantityPlan`` — including the exit field
-``initial_stop_price``.  None of them can reach an order: the whole package is
+that the research plane writes but never reads back: ~~the trace's lookahead-provenance
+identifiers, and~~ (**corrected 2026-08-09:** those three identifiers are now read — see
+the ``FiveToolTrace`` note below) most of ``PositionPlan``/``QuantityPlan`` — including the
+exit field ``initial_stop_price``.  None of them can reach an order: the whole package is
 import-isolated from the order plane (``test_five_tool_isolation.py``) and its campaign
 refuses all data access (``test_five_tool_holdout_refusal_exercised.py``,
 ``tests/unit/test_five_tool_trials.py``).  So this is a disclosure obligation, not a live
@@ -48,19 +49,29 @@ _RESEARCH_PLANE = Path(__file__).resolve().parents[2] / "src" / "chronos" / "res
 # Fields the research plane writes and never reads back, as of the five-tool integration.
 # Each entry is a disclosure, not an endorsement.
 _DISCLOSED_UNREAD: dict[type, frozenset[str]] = {
-    # Lookahead-provenance identity carried on every bar's trace.  The preregistration
+    # ~~Lookahead-provenance identity carried on every bar's trace.  The preregistration
     # (docs/FIVE_TOOL_RESEARCH_HYPOTHESES.md, "Common campaign tests" item 10) requires a
     # timestamp audit and no-lookahead tests before economic statistics are considered.
     # The engine populates these ids (engine.py, the FiveToolTrace construction) but no
     # code or test reads them, so today they are an audit trail nothing audits.  Whole-
     # trace equality in the parity/determinism tests detects nondeterminism only; two runs
-    # of the same code agree on a wrong id just as readily as on a right one.
+    # of the same code agree on a wrong id just as readily as on a right one.~~
+    #
+    # **Corrected 2026-08-09 (Track B.3).**  ``primary_sequence_id``,
+    # ``benchmark_source_id``, and ``htf_source_id`` LEFT this disclosure because they
+    # became read, not because the sentence was edited.  This test fired in its designed
+    # second direction when `chronos.research.five_tool.provenance` landed — "FiveToolTrace
+    # field(s) ['benchmark_source_id', 'htf_source_id', 'primary_sequence_id'] are now
+    # read; remove them from the disclosure so it keeps describing the real state" — and
+    # that failure is the evidence the wiring is real rather than announced.
+    # ``audit_trace_provenance`` reads all three: it resolves each to a full venue-qualified
+    # series, refuses a role whose series changes mid-run, and refuses a companion bar that
+    # had not closed when its primary bar did.  Exercised end to end over real engine output
+    # in tests/safety/test_five_tool_provenance_audit_exercised.py.  The remaining entries
+    # below are unchanged and still unread.
     FiveToolTrace: frozenset(
         {
             "bar_index",
-            "primary_sequence_id",
-            "benchmark_source_id",
-            "htf_source_id",
             "warmup_blockers",
             "long_setup",
             "short_setup",

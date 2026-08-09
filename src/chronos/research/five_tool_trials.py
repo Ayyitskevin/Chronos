@@ -42,6 +42,20 @@ read happens under this module's control, so it can — and a trial that opened 
 then died is exactly the trial an honest N must keep.  Neither ordering is edited by
 this module; the divergence is recorded rather than averaged away.
 
+**Replay artifacts (the reproducibility residual).**  The ledger has always recorded
+``evidence_artifact_sha256`` and thrown the bytes away, so a completed trial could be
+counted, sealed, and cited while being impossible to re-execute.  Every attempt that gets
+as far as opening data now persists a content-addressed replay artifact
+(:mod:`chronos.research.five_tool.replay`) holding the campaign identity, the engine
+identity *including the semantic configuration itself*, the input locks and the digest of
+the bytes read, the certified attestation and receipt digests, the durable start, and the
+outcome — for a completed attempt the evidence bytes themselves.  The terminal record names
+that artifact's digest, and the artifact is written **before** the terminal, so a completed
+trial that cannot be replayed cannot exist.  Sealing re-verifies every scored row against
+the store in both directions: the named artifact must be present, hash to its own content
+address, and describe the attempt the ledger says it describes.  :func:`replay_trial`
+re-executes from an artifact and refuses on any byte divergence, naming which axis moved.
+
 Inside the synthetic seam, ``FiveToolTrialBroker.run`` durably appends ``trial_started``
 before invoking the supplied reader and appends one terminal outcome before a result is
 returned (or the original exception is re-raised).
@@ -56,15 +70,16 @@ trial-ledger lock is held while the registry is counted; the nesting order is on
 trial-ledger → registry, so the two locks cannot deadlock.
 
 Research only: this module imports no broker, order, mandate, or live persistence code.
-It imports the registry ledger, the run recorder, and the certified reader, and **not**
-the holdout guardian, so it carries no unlock capability.  Request metadata bearing a
-declared holdout identity is refused before any attestation, and the certified reader
-independently refuses holdout vocabulary — neither is a structural holdout guardian, and
-neither can unmask anything.
+It imports the registry ledger, the run recorder, the certified reader, and the replay
+store, and **not** the holdout guardian, so it carries no unlock capability.  Request
+metadata bearing a declared holdout identity is refused before any attestation, and the
+certified reader independently refuses holdout vocabulary — neither is a structural
+holdout guardian, and neither can unmask anything.
 """
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import math
@@ -89,6 +104,18 @@ from chronos.research.five_tool.contract import (
     input_contract_digest,
     semantic_contract_digest,
 )
+from chronos.research.five_tool.replay import (
+    OUTCOME_COMPLETED,
+    OUTCOME_FAILED,
+    REPLAY_ARTIFACT_SCHEMA_VERSION,
+    ReplayArtifact,
+    ReplayDivergence,
+    compare_replay_bodies,
+    load_replay_artifact,
+    require_artifact_root,
+    validate_artifact_body,
+    write_replay_artifact,
+)
 
 KIND_TRIAL_STARTED = "trial_started"
 KIND_TRIAL_TERMINAL = "trial_terminal"
@@ -99,17 +126,17 @@ EXECUTION_BLOCKED = "blocked_until_identity_locks_resolve"
 EXECUTION_READY = "ready_for_certified_research"
 INTERRUPTED_ATTEMPT_ERROR = "InterruptedAttemptRecovery"
 
-# The capabilities a manifest still cannot substitute for.  Two names have already left
+# The capabilities a manifest still cannot substitute for.  Three names have already left
 # this tuple, each because a capability landed rather than because the sentence was
 # edited: the canonical ADR-0013 registry (every attempt registers before it reads —
-# tests/safety/test_five_tool_registry_exercised.py) and the certified reader (a read is
-# proven rather than promised — tests/safety/test_five_tool_certified_reader_exercised.py).
-# Each remaining name is an absence a named test independently observes, so this list
-# cannot quietly go stale as the last capabilities land.
-MISSING_CERTIFIED_RESEARCH_CAPABILITIES: tuple[str, ...] = (
-    "replay artifacts",
-    "owner evidence",
-)
+# tests/safety/test_five_tool_registry_exercised.py), the certified reader (a read is
+# proven rather than promised — tests/safety/test_five_tool_certified_reader_exercised.py),
+# and replay artifacts (a completed attempt persists everything needed to re-execute it
+# byte-identically — tests/safety/test_five_tool_replay_exercised.py).  The one remaining
+# name is an absence a named test independently observes, so this list cannot quietly go
+# stale — and the last name is the one no engineering session can remove, because only the
+# owner can freeze risk limits, a power calculation, and benchmark economics.
+MISSING_CERTIFIED_RESEARCH_CAPABILITIES: tuple[str, ...] = ("owner evidence",)
 
 _DEFAULT_HOLDOUT_PARTITIONS = frozenset(
     {"holdout", "final", "reserved", "reserved_final", "final_holdout"}
@@ -125,6 +152,8 @@ _CANONICAL_STAGE_BY_PARTITION: dict[str, RunStage] = {
 }
 # The harness-local canonical registry filename; production wiring passes a real path.
 _DEFAULT_REGISTRY_LEDGER_NAME = "registry.jsonl"
+# The harness-local replay-artifact store; production wiring passes a real path.
+_DEFAULT_ARTIFACT_DIR_NAME = "replay_artifacts"
 _SHA256_HEX_LENGTH = 64
 _UNCLASSIFIED_CALLBACK_ERROR = "UnclassifiedCallbackError"
 _THREAD_LOCKS: dict[str, threading.Lock] = {}
@@ -173,6 +202,7 @@ _TERMINAL_PAYLOAD_KEYS = frozenset(
         "skew",
         "kurtosis",
         "error_type",
+        "replay_artifact_sha256",
     }
 )
 _SEAL_PAYLOAD_KEYS = frozenset(
@@ -221,6 +251,10 @@ class DataVersionMismatch(FiveToolTrialError):
     """Reader bytes do not match the exact dataset digest authorized by the campaign."""
 
 
+class ReplayArtifactBindingBroken(FiveToolTrialError):
+    """A sealed-in trial record and the artifact it names do not describe one attempt."""
+
+
 class CertifiedProvenanceUnproven(FiveToolTrialError):
     """A run registered as certified could not prove the bytes came through that path."""
 
@@ -261,6 +295,17 @@ class TrialDefinition:
     @property
     def semantic_config_fingerprint(self) -> str:
         return _sha256_text(self._semantic_config_json)
+
+    @property
+    def semantic_config_json(self) -> str:
+        """The frozen canonical config bytes the fingerprint is taken over.
+
+        A replay artifact carries the configuration itself, not only its digest: a
+        fingerprint identifies a config to somebody who already has it, which is exactly
+        the person who does not need a replay artifact.
+        """
+
+        return self._semantic_config_json
 
 
 @dataclass(frozen=True, slots=True)
@@ -365,8 +410,10 @@ class LedgerLocalScoreInput:
     This is not a final multiple-testing input.  ``ledger_trial_count`` remains this
     campaign ledger's own attempt count; the canonical cross-campaign N lives in the
     ADR-0013 registry (:func:`registered_trial_count`), and sealing refuses when the
-    registry has counted fewer attempts than this ledger recorded.  Phase 3 still
-    requires replay artifacts and owner evidence.
+    registry has counted fewer attempts than this ledger recorded.  ``replay_artifact_sha256``
+    names the content-addressed artifact that re-executes the row, verified against the
+    store at seal time.  Phase 3 still requires owner evidence: frozen risk limits, a power
+    calculation, and benchmark economics that no engineering session may choose.
     """
 
     campaign_id: str
@@ -377,6 +424,7 @@ class LedgerLocalScoreInput:
     semantic_config_fingerprint: str
     attempt_id: str
     evidence_digest: str
+    replay_artifact_sha256: str
     observed_sharpe: float
     observations: int
     skew: float
@@ -471,11 +519,15 @@ class FiveToolTrialBroker:
         ledger_path: Path,
         *,
         registry_ledger_path: Path | None = None,
+        artifact_root: Path | None = None,
     ) -> None:
         self._ledger_path = ledger_path
         # ``None`` means no canonical ADR-0013 registry is wired, which is itself a
         # refusal reason: an attempt that cannot be counted may not start.
         self._registry_ledger_path = registry_ledger_path
+        # ``None`` means no replay-artifact store is wired, which is the same kind of
+        # refusal reason: an attempt whose evidence could not be replayed may not start.
+        self._artifact_root = artifact_root
         self._holdout_datasets: frozenset[str] = frozenset()
         self._holdout_partitions = _DEFAULT_HOLDOUT_PARTITIONS
         self._binding: _CampaignBinding | None = None
@@ -494,6 +546,12 @@ class FiveToolTrialBroker:
 
         return self._registry_ledger_path
 
+    @property
+    def artifact_root(self) -> Path | None:
+        """The content-addressed replay-artifact store this broker writes into, if wired."""
+
+        return self._artifact_root
+
     @classmethod
     def from_campaign_manifest(
         cls,
@@ -501,23 +559,30 @@ class FiveToolTrialBroker:
         manifest: Mapping[str, object],
         *,
         registry_ledger_path: Path | None = None,
+        artifact_root: Path | None = None,
     ) -> FiveToolTrialBroker:
         """Validate a blocked manifest without granting reader authority.
 
         ``ready_for_certified_research`` is intentionally rejected in public v1.  A
-        manifest is a claim, not the missing replay-artifact or owner-evidence
-        capability — and a certified reader, which now exists, is a way to read a
-        certified dataset, not a certified dataset.
+        manifest is a claim, not the missing owner evidence — and the three capabilities
+        that now exist are not substitutes for it either: a certified reader is a way to
+        read a certified dataset, not a certified dataset; a registry counts trials, it
+        does not authorize them; and a replay artifact proves a result is reproducible,
+        never that it is economically meaningful or within limits nobody has frozen.
         """
 
         binding = _validate_campaign_manifest(manifest)
         if binding is not None:  # pragma: no cover - public ready validation always raises
             raise CampaignExecutionBlocked("public v1 cannot authorize an execution-ready campaign")
-        broker = cls(ledger_path, registry_ledger_path=registry_ledger_path)
+        broker = cls(
+            ledger_path,
+            registry_ledger_path=registry_ledger_path,
+            artifact_root=artifact_root,
+        )
         broker._bind_declared_holdouts(manifest)
         broker._execution_block_reason = (
             "campaign manifest is blocked_until_identity_locks_resolve; "
-            f"no {_missing_capability_phrase()} capability exists"
+            f"no {_missing_capability_phrase()} {_missing_capability_noun()} exists"
         )
         return broker
 
@@ -528,13 +593,15 @@ class FiveToolTrialBroker:
         manifest: Mapping[str, object],
         *,
         registry_ledger_path: Path | None = None,
+        artifact_root: Path | None = None,
     ) -> FiveToolTrialBroker:
         """Create the private callback-driven harness used only by lifecycle tests.
 
         This seam deliberately bypasses the unavailable certified-readiness authority.
         It must never be used to make a research or performance claim.  When no
-        canonical registry is named, the harness counts into one beside its trial
-        ledger; production wiring passes the real ADR-0013 registry path explicitly.
+        canonical registry or artifact store is named, the harness uses one beside its
+        trial ledger; production wiring passes the real ADR-0013 registry path and
+        artifact store explicitly.
         """
 
         binding = _validate_campaign_manifest(
@@ -551,6 +618,11 @@ class FiveToolTrialBroker:
                 registry_ledger_path
                 if registry_ledger_path is not None
                 else ledger_path.parent / _DEFAULT_REGISTRY_LEDGER_NAME
+            ),
+            artifact_root=(
+                artifact_root
+                if artifact_root is not None
+                else ledger_path.parent / _DEFAULT_ARTIFACT_DIR_NAME
             ),
         )
         broker._bind_declared_holdouts(manifest)
@@ -593,6 +665,13 @@ class FiveToolTrialBroker:
         Provenance is settled before the attempt is registered and proven after the read:
         a certified reader attests its locks up front and its receipt is checked against
         the bytes afterwards, while anything else is registered as uncertified.
+
+        Reproducibility is settled last and before the terminal record.  Any attempt that
+        got as far as opening data persists a content-addressed replay artifact holding
+        everything needed to re-execute it byte-identically, and the terminal record names
+        that artifact's digest.  The ordering is deliberate: if the artifact cannot be
+        written, no terminal lands, so a completed trial that cannot be replayed cannot
+        exist — no artifact, no sealed trial.
         """
 
         if self._execution_block_reason is not None:
@@ -609,6 +688,7 @@ class FiveToolTrialBroker:
         reads_before = len(certified.receipts) if certified is not None else 0
         receipt = self._start(binding, definition, request, data_evidence)
         data: bytes | None = None
+        proven_payload_sha256: str | None = None
         try:
             data = reader(request)
             if not isinstance(data, bytes):
@@ -626,6 +706,7 @@ class FiveToolTrialBroker:
                     data_evidence,
                     reads_before=reads_before,
                 )
+                proven_payload_sha256 = certified.receipts[-1].payload_sha256
             evaluation = evaluator(data, receipt)
             if not isinstance(evaluation, TrialEvaluation):
                 raise TypeError("evaluator must return TrialEvaluation")
@@ -634,28 +715,80 @@ class FiveToolTrialBroker:
             evaluation.evidence._require_valid()
         except BaseException as error:
             try:
+                data_sha256 = hashlib.sha256(data).hexdigest() if isinstance(data, bytes) else None
+                artifact_sha256 = (
+                    self._persist_replay_artifact(
+                        definition,
+                        receipt,
+                        TrialOutcome.FAILED,
+                        data_sha256=data_sha256,
+                        evidence=None,
+                        error_type=_bounded_error_type(error),
+                        attested=data_evidence,
+                        proven_payload_sha256=proven_payload_sha256,
+                    )
+                    if data_sha256 is not None
+                    else None
+                )
                 self._terminal(
                     receipt,
                     TrialOutcome.FAILED,
-                    data_sha256=(
-                        hashlib.sha256(data).hexdigest() if isinstance(data, bytes) else None
-                    ),
+                    data_sha256=data_sha256,
                     evidence=None,
                     error_type=_bounded_error_type(error),
+                    replay_artifact_sha256=artifact_sha256,
                 )
             except Exception as ledger_error:
                 raise FiveToolTrialError(
                     "trial failed and its terminal failure could not be recorded"
                 ) from ledger_error
             raise
+        completed_data_sha256 = hashlib.sha256(data).hexdigest()
+        artifact_sha256 = self._persist_replay_artifact(
+            definition,
+            receipt,
+            TrialOutcome.COMPLETED,
+            data_sha256=completed_data_sha256,
+            evidence=evaluation.evidence,
+            error_type=None,
+            attested=data_evidence,
+            proven_payload_sha256=proven_payload_sha256,
+        )
         self._terminal(
             receipt,
             TrialOutcome.COMPLETED,
-            data_sha256=hashlib.sha256(data).hexdigest(),
+            data_sha256=completed_data_sha256,
             evidence=evaluation.evidence,
             error_type=None,
+            replay_artifact_sha256=artifact_sha256,
         )
         return evaluation.value
+
+    def _persist_replay_artifact(
+        self,
+        definition: TrialDefinition,
+        receipt: TrialReceipt,
+        outcome: TrialOutcome,
+        *,
+        data_sha256: str | None,
+        evidence: EvaluationEvidence | None,
+        error_type: str | None,
+        attested: Mapping[str, object],
+        proven_payload_sha256: str | None,
+    ) -> str:
+        """Write this attempt's replay artifact and return the digest that binds it."""
+
+        body = _replay_artifact_body(
+            definition,
+            receipt,
+            outcome,
+            data_sha256=data_sha256,
+            evidence=evidence,
+            error_type=error_type,
+            attested=attested,
+            proven_payload_sha256=proven_payload_sha256,
+        )
+        return write_replay_artifact(self._artifact_root, body).artifact_sha256
 
     def seal_ledger_local_score_inputs(
         self, reviewed_variance: ReviewedVarianceEvidence
@@ -669,6 +802,7 @@ class FiveToolTrialBroker:
             self._require_binding(),
             reviewed_variance,
             registry_ledger_path=self._registry_ledger_path,
+            artifact_root=self._artifact_root,
         )
 
     def _require_binding(self) -> _CampaignBinding:
@@ -730,6 +864,10 @@ class FiveToolTrialBroker:
     ) -> TrialReceipt:
         trial_id = deterministic_trial_id(definition, request)
         attempt_id = uuid.uuid4().hex
+        # An attempt whose evidence could never be persisted may not begin: the artifact
+        # store is checked before the registry, so an unreplayable attempt does not even
+        # inflate N. Like the registry, the store is provisioned, never conjured.
+        require_artifact_root(self._artifact_root)
         # ADR-0013 §5: the canonical registry is written first, so an attempt that dies
         # anywhere later is still a counted trial. No registry, no trial.
         self._register_canonical_run(
@@ -861,6 +999,7 @@ class FiveToolTrialBroker:
         data_sha256: str | None,
         evidence: EvaluationEvidence | None,
         error_type: str | None,
+        replay_artifact_sha256: str | None,
     ) -> AuditRecord:
         if outcome is TrialOutcome.COMPLETED and not isinstance(evidence, EvaluationEvidence):
             raise FiveToolTrialError("completed terminal requires typed evaluation evidence")
@@ -875,6 +1014,7 @@ class FiveToolTrialBroker:
             data_sha256=data_sha256,
             evidence=evidence,
             error_type=error_type,
+            replay_artifact_sha256=replay_artifact_sha256,
         )
         binding = self._require_binding()
 
@@ -969,6 +1109,86 @@ def _require_proven_certified_read(
         )
 
 
+def _replay_artifact_body(
+    definition: TrialDefinition,
+    receipt: TrialReceipt,
+    outcome: TrialOutcome,
+    *,
+    data_sha256: str | None,
+    evidence: EvaluationEvidence | None,
+    error_type: str | None,
+    attested: Mapping[str, object],
+    proven_payload_sha256: str | None,
+) -> dict[str, object]:
+    """Assemble everything needed to re-execute one attempt byte-identically.
+
+    The semantic config is carried in full, not only as a fingerprint: a fingerprint
+    identifies a configuration to somebody who already has it, and a replay artifact
+    exists for the case where nobody does.  The certified block records only what the
+    reader actually proved — an uncertified read carries nulls rather than a claim.
+    """
+
+    # Attesting is a commitment; the receipt is the proof.  An attempt whose certified
+    # proof never completed records an uncertified block, so an artifact never carries a
+    # provenance claim the trial itself refused to accept.
+    certified = bool(attested.get("certified_reader")) and proven_payload_sha256 is not None
+    files = attested.get("files") if certified else None
+    return {
+        "schema_version": REPLAY_ARTIFACT_SCHEMA_VERSION,
+        "campaign": {
+            "campaign_id": receipt.campaign_id,
+            "campaign_manifest_sha256": receipt.campaign_manifest_sha256,
+            "cell_id": receipt.cell_id,
+            "hypothesis_id": receipt.hypothesis_id,
+            "strategy_id": definition.strategy_id,
+            "trial_id": receipt.trial_id,
+            "attempt_id": receipt.attempt_id,
+        },
+        "engine": {
+            "code_commit": definition.code_commit,
+            "criteria_digest": definition.criteria_digest,
+            "input_contract_digest": definition.input_contract_digest,
+            "semantic_config_fingerprint": definition.semantic_config_fingerprint,
+            "semantic_config": json.loads(definition.semantic_config_json),
+        },
+        "inputs": {
+            "dataset_id": receipt.dataset_id,
+            "partition": receipt.partition,
+            "data_version": receipt.data_version,
+            "data_sha256": data_sha256,
+            "certified_read": {
+                "certified_reader": certified,
+                "dataset_sha256": attested.get("dataset_sha256"),
+                "partition": attested.get("partition"),
+                "certification_manifest_sha256": (
+                    attested.get("certification_manifest_sha256") if certified else None
+                ),
+                "files": dict(files) if isinstance(files, Mapping) else None,
+                "receipt_payload_sha256": proven_payload_sha256 if certified else None,
+            },
+        },
+        "start": {
+            "sequence": receipt.start_sequence,
+            "record_hash": receipt.start_record_hash,
+        },
+        "outputs": {
+            "outcome": OUTCOME_COMPLETED if outcome is TrialOutcome.COMPLETED else OUTCOME_FAILED,
+            "error_type": error_type,
+            "artifact_base64": (
+                base64.b64encode(evidence.artifact_bytes).decode("ascii")
+                if evidence is not None
+                else None
+            ),
+            "artifact_sha256": evidence.artifact_sha256 if evidence is not None else None,
+            "evidence_digest": evidence.evidence_digest if evidence is not None else None,
+            "observed_sharpe": evidence.observed_sharpe if evidence is not None else None,
+            "observations": evidence.observations if evidence is not None else None,
+            "skew": evidence.skew if evidence is not None else None,
+            "kurtosis": evidence.kurtosis if evidence is not None else None,
+        },
+    }
+
+
 def _terminal_payload(
     receipt: TrialReceipt,
     outcome: TrialOutcome,
@@ -976,6 +1196,7 @@ def _terminal_payload(
     data_sha256: str | None,
     evidence: EvaluationEvidence | None,
     error_type: str | None,
+    replay_artifact_sha256: str | None,
 ) -> dict[str, object]:
     """Build the one exact terminal schema used by normal and recovery paths."""
 
@@ -1003,6 +1224,9 @@ def _terminal_payload(
         "kurtosis": evidence.kurtosis if evidence is not None else None,
         # Error messages can contain paths/data. Record a bounded class identifier only.
         "error_type": error_type,
+        # The content address of the replay artifact this attempt persisted. ``None`` only
+        # for an attempt that never opened data, which has nothing to reproduce.
+        "replay_artifact_sha256": replay_artifact_sha256,
     }
 
 
@@ -1070,6 +1294,9 @@ def _recover_interrupted_starts(
                 data_sha256=None,
                 evidence=None,
                 error_type=INTERRUPTED_ATTEMPT_ERROR,
+                # An orphan start never opened data, so there is nothing to replay and
+                # nothing to persist; the artifact binding is honestly absent.
+                replay_artifact_sha256=None,
             )
             _validate_terminal_payload_against_start(payload, start)
             ledger.append(KIND_TRIAL_TERMINAL, payload)
@@ -1108,6 +1335,147 @@ def registered_trial_count(registry_ledger_path: Path, *, strategy_id: str | Non
     thread_lock = _thread_lock_for(path)
     with thread_lock, registry_lock(path):
         return trial_count(_verified_canonical_registry(path), strategy_id=strategy_id)
+
+
+@dataclass(frozen=True, slots=True)
+class ReplayReport:
+    """Proof that one recorded attempt re-executed to exactly the bytes it recorded."""
+
+    artifact_sha256: str
+    campaign_id: str
+    trial_id: str
+    attempt_id: str
+    outcome: str
+    data_sha256: str | None
+    certified_reader: bool
+
+
+def replay_trial[T](
+    artifact_root: Path,
+    artifact_sha256: str,
+    definition: TrialDefinition,
+    request: DataAccessRequest,
+    *,
+    reader: Callable[[DataAccessRequest], bytes],
+    evaluator: Callable[[bytes, TrialReceipt], TrialEvaluation[T]],
+) -> ReplayReport:
+    """Re-execute one attempt from its replay artifact and refuse on any byte divergence.
+
+    The artifact supplies the reconstruction inputs a caller cannot re-derive — the
+    campaign manifest digest and the durable start the attempt was bound to — while the
+    definition, request, reader, and evaluator are the *live* world being tested.  That is
+    the whole question a replay answers: does re-executing today reproduce what was
+    recorded?  Every disagreement is collected and named
+    (:class:`chronos.research.five_tool.replay.ReplayDivergence`), so a caller learns which
+    axis moved — inputs, configuration, certification, outcome, or outputs — rather than
+    only that something did.
+
+    **A replay registers no trial and writes no ledger record.**  It re-reads bytes whose
+    digest is already recorded and produces no new hypothesis evidence, so counting it
+    would inflate the ADR-0013 multiple-testing N with a reproducibility probe.  That is
+    the same stance ``chronos.research.repro``'s produce/replay takes and it is asserted,
+    not assumed, in ``tests/safety/test_five_tool_replay_exercised.py``.
+
+    Two deliberate scope limits.  A certified reader that cannot even attest this request
+    raises its own refusal rather than being folded into a divergence — the reader's
+    message is the more useful one.  And only ``Exception`` is classified into an observed
+    failed outcome; ``KeyboardInterrupt`` and ``SystemExit`` propagate, because a replay
+    that was cancelled is not a replay that diverged.
+    """
+
+    artifact = load_replay_artifact(artifact_root, artifact_sha256)
+    recorded = artifact.document
+    recorded_campaign = _artifact_block(recorded, "campaign")
+    recorded_start = _artifact_block(recorded, "start")
+    receipt = TrialReceipt(
+        trial_id=deterministic_trial_id(definition, request),
+        campaign_id=definition.campaign_id,
+        campaign_manifest_sha256=str(recorded_campaign["campaign_manifest_sha256"]),
+        cell_id=definition.cell_id,
+        hypothesis_id=definition.hypothesis_id,
+        semantic_config_fingerprint=definition.semantic_config_fingerprint,
+        attempt_id=str(recorded_campaign["attempt_id"]),
+        start_sequence=cast(int, recorded_start["sequence"]),
+        start_record_hash=str(recorded_start["record_hash"]),
+        dataset_id=request.dataset_id,
+        partition=request.partition,
+        data_version=request.data_version,
+    )
+
+    certified = _certified_reader_or_none(reader)
+    attested = (
+        certified.attest(request) if certified is not None else _uncertified_evidence(request)
+    )
+    reads_before = len(certified.receipts) if certified is not None else 0
+    data: bytes | None = None
+    proven_payload_sha256: str | None = None
+    evidence: EvaluationEvidence | None = None
+    error_type: str | None = None
+    outcome = TrialOutcome.COMPLETED
+    try:
+        data = reader(request)
+        if not isinstance(data, bytes):
+            raise TypeError(f"reader must return bytes, got {type(data).__name__}")
+        if hashlib.sha256(data).hexdigest() != request.data_version:
+            raise DataVersionMismatch(
+                "replayed bytes do not match the campaign-authorized data_version"
+            )
+        if certified is not None:
+            _require_proven_certified_read(
+                certified,
+                request,
+                data,
+                attested,
+                reads_before=reads_before,
+            )
+            proven_payload_sha256 = certified.receipts[-1].payload_sha256
+        evaluation = evaluator(data, receipt)
+        if not isinstance(evaluation, TrialEvaluation):
+            raise TypeError("evaluator must return TrialEvaluation")
+        if not isinstance(evaluation.evidence, EvaluationEvidence):
+            raise TypeError("TrialEvaluation.evidence must be EvaluationEvidence")
+        evaluation.evidence._require_valid()
+        evidence = evaluation.evidence
+    except Exception as error:
+        outcome = TrialOutcome.FAILED
+        evidence = None
+        error_type = _bounded_error_type(error)
+
+    data_sha256 = hashlib.sha256(data).hexdigest() if isinstance(data, bytes) else None
+    observed = validate_artifact_body(
+        _replay_artifact_body(
+            definition,
+            receipt,
+            outcome,
+            data_sha256=data_sha256,
+            evidence=evidence,
+            error_type=error_type,
+            attested=attested,
+            proven_payload_sha256=proven_payload_sha256,
+        )
+    )
+    findings = compare_replay_bodies(recorded, observed)
+    if findings:
+        raise ReplayDivergence(findings)
+    certified_read = _artifact_block(recorded, "inputs")["certified_read"]
+    return ReplayReport(
+        artifact_sha256=artifact.artifact_sha256,
+        campaign_id=str(recorded_campaign["campaign_id"]),
+        trial_id=str(recorded_campaign["trial_id"]),
+        attempt_id=str(recorded_campaign["attempt_id"]),
+        outcome=artifact.outcome,
+        data_sha256=data_sha256,
+        certified_reader=bool(
+            certified_read.get("certified_reader") if isinstance(certified_read, dict) else False
+        ),
+    )
+
+
+def _artifact_block(body: Mapping[str, object], name: str) -> Mapping[str, object]:
+    value = body.get(name)
+    if not isinstance(value, dict):  # pragma: no cover - bodies are validated on load
+        raise ReplayArtifactBindingBroken(f"replay artifact {name} block is unusable")
+    return value
 
 
 def _require_canonical_registry_path(registry_ledger_path: Path | None) -> Path:
@@ -1150,11 +1518,17 @@ def _missing_capability_phrase() -> str:
     names = MISSING_CERTIFIED_RESEARCH_CAPABILITIES
     if not names:  # pragma: no cover - the campaign is blocked on at least one capability
         raise FiveToolTrialError("the missing-capability list may not be empty while blocked")
-    if len(names) == 1:  # pragma: no cover - two capabilities remain
+    if len(names) == 1:
         return names[0]
-    if len(names) == 2:
+    if len(names) == 2:  # pragma: no cover - one capability remains
         return f"{names[0]} and {names[1]}"
-    return f"{', '.join(names[:-1])}, and {names[-1]}"
+    return f"{', '.join(names[:-1])}, and {names[-1]}"  # pragma: no cover - one remains
+
+
+def _missing_capability_noun() -> str:
+    """Agree the refusal's grammar with the list, so the sentence cannot go stale either."""
+
+    return "capability" if len(MISSING_CERTIFIED_RESEARCH_CAPABILITIES) == 1 else "capabilities"
 
 
 def _ledger_trial_multiplicity_from_records(records: Sequence[AuditRecord]) -> int:
@@ -1189,6 +1563,7 @@ def _seal_and_build_ledger_local_inputs(
     reviewed_variance: ReviewedVarianceEvidence,
     *,
     registry_ledger_path: Path | None,
+    artifact_root: Path | None,
 ) -> tuple[LedgerLocalScoreInput, ...]:
     if not isinstance(reviewed_variance, ReviewedVarianceEvidence):
         raise TypeError("reviewed_variance must be ReviewedVarianceEvidence")
@@ -1210,9 +1585,13 @@ def _seal_and_build_ledger_local_inputs(
                 reviewed_variance,
                 seal_record=seal,
                 ledger_record_count=len(records),
+                artifact_root=artifact_root,
             )
 
         score_rows = _validated_completed_rows(records, binding)
+        # No artifact, no sealed trial: every scored row must still be re-executable from
+        # the store, and the artifact must describe the attempt the ledger says it does.
+        _require_bound_replay_artifacts(score_rows, artifact_root)
         ledger_trial_count = _ledger_trial_multiplicity_from_records(records)
         if ledger_trial_count < 1:
             raise FiveToolTrialError("cannot seal a campaign without durable attempts")
@@ -1506,11 +1885,21 @@ def _validate_terminal_payload_against_start(
         if not isinstance(data_sha256, str):
             raise FiveToolTrialError("trial terminal data_sha256 is invalid")
         _require_lifecycle_sha256("data_sha256", data_sha256)
+    replay_artifact_sha256 = payload.get("replay_artifact_sha256")
+    if replay_artifact_sha256 is not None:
+        if not isinstance(replay_artifact_sha256, str):
+            raise FiveToolTrialError("trial terminal replay_artifact_sha256 is invalid")
+        _require_lifecycle_sha256("replay_artifact_sha256", replay_artifact_sha256)
     if outcome is TrialOutcome.COMPLETED:
         if data_sha256 != start.payload.get("data_version"):
             raise FiveToolTrialError("terminal bytes do not match the authorized data version")
         if payload.get("error_type") is not None:
             raise FiveToolTrialError("completed terminal cannot carry an error type")
+        if replay_artifact_sha256 is None:
+            raise FiveToolTrialError(
+                "completed terminal has no replay artifact; a result that cannot be "
+                "re-executed is not a sealed trial"
+            )
         _validate_terminal_evidence(payload)
         return
 
@@ -1524,6 +1913,14 @@ def _validate_terminal_payload_against_start(
     ):
         if payload.get(key) is not None:
             raise FiveToolTrialError(f"failed terminal cannot carry {key}")
+    # An attempt that never opened data has nothing to reproduce; one that died after
+    # opening data must still name the artifact that reproduces that failure. This is the
+    # ledger half of "no artifact, no trial" on the aborted-after-read path.
+    if (data_sha256 is None) != (replay_artifact_sha256 is None):
+        raise FiveToolTrialError(
+            "a failed terminal that opened data must name its replay artifact, and one "
+            "that did not must name none"
+        )
     error_type = payload.get("error_type")
     if (
         not isinstance(error_type, str)
@@ -1564,6 +1961,61 @@ def _validate_terminal_evidence(payload: Mapping[str, object]) -> None:
         raise FiveToolTrialError("completed terminal evidence digest is inconsistent")
 
 
+def _require_bound_replay_artifacts(
+    rows: Sequence[tuple[AuditRecord, AuditRecord]],
+    artifact_root: Path | None,
+) -> tuple[ReplayArtifact, ...]:
+    """Refuse a seal whose scored rows are not backed by the artifacts they name.
+
+    The ledger names a content address; the store either holds those exact bytes or it
+    does not.  A missing, tampered, or self-inconsistent artifact refuses in the store's
+    own vocabulary, and an artifact that describes a *different* attempt refuses here —
+    the binding is checked in both directions so an artifact cannot be swapped after the
+    fact for another valid one.
+    """
+
+    artifacts: list[ReplayArtifact] = []
+    for start, terminal in rows:
+        digest = terminal.payload.get("replay_artifact_sha256")
+        if not isinstance(digest, str):
+            raise ReplayArtifactBindingBroken(
+                "a completed trial record names no replay artifact; a result that cannot "
+                "be re-executed is not a sealed trial"
+            )
+        artifact = load_replay_artifact(artifact_root, digest)
+        campaign = artifact.document["campaign"]
+        outputs = artifact.document["outputs"]
+        if not isinstance(campaign, dict) or not isinstance(outputs, dict):
+            raise ReplayArtifactBindingBroken(  # pragma: no cover - validated on load
+                "replay artifact structure is not usable"
+            )
+        expected: tuple[tuple[str, object, object], ...] = (
+            ("campaign_id", campaign.get("campaign_id"), start.payload.get("campaign_id")),
+            ("cell_id", campaign.get("cell_id"), start.payload.get("cell_id")),
+            ("trial_id", campaign.get("trial_id"), start.payload.get("trial_id")),
+            ("attempt_id", campaign.get("attempt_id"), start.payload.get("attempt_id")),
+            (
+                "evidence_digest",
+                outputs.get("evidence_digest"),
+                terminal.payload.get("evidence_digest"),
+            ),
+            (
+                "artifact_sha256",
+                outputs.get("artifact_sha256"),
+                terminal.payload.get("evidence_artifact_sha256"),
+            ),
+            ("outcome", outputs.get("outcome"), OUTCOME_COMPLETED),
+        )
+        for field_name, recorded, ledgered in expected:
+            if recorded != ledgered:
+                raise ReplayArtifactBindingBroken(
+                    f"replay artifact {digest} disagrees with its trial record on "
+                    f"{field_name}: artifact={recorded!r}, ledger={ledgered!r}"
+                )
+        artifacts.append(artifact)
+    return tuple(artifacts)
+
+
 def _completed_evidence_identity(terminal: AuditRecord) -> tuple[object, ...]:
     payload = terminal.payload
     return (
@@ -1599,8 +2051,10 @@ def _score_inputs_from_records(
     *,
     seal_record: AuditRecord,
     ledger_record_count: int,
+    artifact_root: Path | None,
 ) -> tuple[LedgerLocalScoreInput, ...]:
     rows = _validated_completed_rows(records, binding)
+    _require_bound_replay_artifacts(rows, artifact_root)
     if seal_record.payload.get("score_inputs_digest") != _score_rows_digest(rows):
         raise FiveToolTrialError("campaign seal score-input digest is inconsistent")
     ledger_trial_count = _ledger_trial_multiplicity_from_records(records)
@@ -1640,6 +2094,7 @@ def _score_inputs_from_rows(
             semantic_config_fingerprint=str(start.payload["semantic_config_fingerprint"]),
             attempt_id=str(start.payload["attempt_id"]),
             evidence_digest=str(terminal.payload["evidence_digest"]),
+            replay_artifact_sha256=str(terminal.payload["replay_artifact_sha256"]),
             observed_sharpe=float(cast(int | float, terminal.payload["observed_sharpe"])),
             observations=cast(int, terminal.payload["observations"]),
             skew=float(cast(int | float, terminal.payload["skew"])),
@@ -1717,7 +2172,7 @@ def _validate_campaign_manifest(
     if ready and not _allow_synthetic_ready_for_tests:
         raise CampaignExecutionBlocked(
             "EXECUTION_READY is not implemented in public v1: a manifest cannot replace "
-            f"the missing {_missing_capability_phrase()} capabilities"
+            f"the missing {_missing_capability_phrase()} {_missing_capability_noun()}"
         )
 
     strategy = _required_mapping(manifest, "strategy")

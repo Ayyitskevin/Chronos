@@ -364,7 +364,7 @@ Re-verify volatile facts before relying on them — read-only commands only:
 | Option capture store still empty | `ls research/data/history/` |
 | SCHEMA_VERSION | `grep -n "SCHEMA_VERSION = " src/chronos/persistence/database.py` |
 | R-25/26/27 status rows | `sed -n '33,35p' RISK_REGISTER.md` |
-| Account snapshot ≈ USD 110 still current | `sed -n '68,70p' docs/VISION_COMPLETION_PLAN.md` (and ask the owner — this is a live decision) |
+| Account snapshot ≈ USD 110 still current | `grep -n "USD 110" docs/VISION_COMPLETION_PLAN.md` (and ask the owner — this is a live decision) |
 
 If any command's output no longer matches this skill, the skill is stale: update it via
 the task contract in **chronos-change-control**, and never let a stale claim stand.

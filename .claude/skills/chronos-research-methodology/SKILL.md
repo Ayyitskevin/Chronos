@@ -249,21 +249,28 @@ research_val.json only).
     (today's per-cell N is running-cumulative and order-fixed instead).
 
     > **Correction (2026-08-09).** The struck sentence was already false when the
-    > Five-Tool slice merged and is now doubly so. `trial_started` exists
+    > Five-Tool slice merged and is now triply so. `trial_started` exists
     > (`src/chronos/research/five_tool_trials.py`, `KIND_TRIAL_STARTED`), the Five-Tool
     > path **registers in the canonical ADR-0013 registry before it reads** and counts
-    > completed *and* failed attempts, and its reader can be a **certified** one —
+    > completed *and* failed attempts, its reader can be a **certified** one —
     > `chronos.research.five_tool.certified_reader.CertifiedDatasetReader`, digest-locked
     > to a certification manifest, whose read is re-checked against its pre-read
-    > attestation so `data_hashes.certified_reader` is a proven claim. Exercised:
-    > `tests/safety/test_five_tool_registry_exercised.py`,
-    > `tests/safety/test_five_tool_certified_reader_exercised.py`. **Still true and still
+    > attestation so `data_hashes.certified_reader` is a proven claim — and every attempt
+    > that opens data now persists a **content-addressed replay artifact**
+    > (`chronos.research.five_tool.replay`) written before its terminal record and named
+    > by it, so a completed trial that cannot be re-executed byte-for-byte cannot exist;
+    > `replay_trial` refuses on any byte divergence and names which axis moved, and
+    > registers no trial while doing so (same stance as `repro produce/replay`, §9).
+    > Exercised: `tests/safety/test_five_tool_registry_exercised.py`,
+    > `tests/safety/test_five_tool_certified_reader_exercised.py`,
+    > `tests/safety/test_five_tool_replay_exercised.py`. **Still true and still
     > load-bearing:** this is the Five-Tool path only — `walkforward.py`/`campaign.py`
     > keep register-last semantics and running-cumulative, order-fixed N; the registry
     > ships **empty**; **no dataset has been certified** (no `CERTIFICATION.json` under
-    > `research/`); and the campaign manifest stays blocked on replay artifacts and
-    > owner evidence. So Phase-3 multiplicity and order-invariant scoring are still not
-    > available — the plumbing arrived, the evidence did not.
+    > `research/`); **no replay artifact exists** under `research/`; and the campaign
+    > manifest stays blocked on ~~replay artifacts and~~ **owner evidence alone** — the
+    > Phase-0 freezes only the owner can make. So Phase-3 multiplicity and order-invariant
+    > scoring are still not available — the plumbing arrived, the evidence did not.
 - **Holdout guardian** (src/chronos/registry/holdout_guardian.py): unlock requires the
   owner-typed module-constant phrase `REQUIRED_HOLDOUT_UNLOCK_PHRASE = "I ACCEPT
   BURNING THIS HOLDOUT"` (:40), compared with `hmac.compare_digest` (:54-57), never
@@ -373,6 +380,16 @@ manifest_fingerprint AND output_fingerprint**, and compare returned
   context, not current evidence.
 - repro produce/replay registers NO trial (it is a reproducibility probe, not a
   selection run) — do not use it to sneak selection-relevant sweeps past the ledger.
+- **A second, separate replay path exists as of 2026-08-09**, and it is per-*trial* rather
+  than per-run: `chronos.research.five_tool_trials.replay_trial` re-executes one recorded
+  Five-Tool attempt from the content-addressed artifact that attempt persisted
+  (`chronos.research.five_tool.replay`), refusing on any byte divergence and naming which
+  axis moved — inputs, configuration, certification, outcome, or outputs. Its reason codes
+  are deliberately shaped like `CompareReason` above; the two are **separate code** and must
+  stay so (this one is import-isolated from the strategy platform). It also registers no
+  trial. It does **not** replace the scope limit in this section: full-campaign
+  byte-identical replay from one manifest is still a Phase-3 deliverable, and no Five-Tool
+  campaign has run, so no artifact exists under `research/`.
 
 ## 10. Running research end-to-end TODAY
 
@@ -388,6 +405,7 @@ tests/safety/test_research_isolation.py).
 | Registered walk-forward | §5 command | report to stdout; `data/walkforward_halt_*.json` | YES (one per run) |
 | Registered campaign | §6 command | `research/results/campaign_<stage-end>.json` | YES (one per cell) |
 | Repro produce/replay/compare | §9 commands | run bundle in `--run-dir` | no |
+| Five-Tool `replay_trial` (§9, added 2026-08-09) | Python API only — no CLI, because public Five-Tool execution is still blocked | reads an existing replay artifact; writes nothing | no |
 | Inspect registry/holdout | `... -m chronos.cli registry stats` / `registry verify` / `holdout status` | JSON to stdout | no (read-only) |
 | Corpus integrity | `... -m chronos.cli verify-corpus` (→ "verified 42 scripts, 0 failures") | stdout | no |
 | Holdout unlock (owner-only) | `CHRONOS_HOLDOUT_UNLOCK_PHRASE='…' ... -m chronos.cli holdout unlock --window W --reason R` | ledger records | burn event |
@@ -490,7 +508,7 @@ Written 2026-08-02 against commit `47a8d72` on branch
 | Zero declared holdout windows | `cat research/data/history/HOLDOUTS.json` |
 | No campaign output committed yet | `ls research/results/` |
 | C4 floor 20 + freeze timestamps | `sed -n '2,5p;19p' research/selection_manifest.json` |
-| Phase-3 gates (100-trade floor, FWER/FDR, PBO) | `sed -n '240,254p' docs/VISION_COMPLETION_PLAN.md` |
+| Phase-3 gates (100-trade floor, FWER/FDR, PBO) | `grep -n -A8 "declared holdouts that are inaccessible" docs/VISION_COMPLETION_PLAN.md` |
 | QQQ burn disclosure unchanged | `sed -n '184,214p' docs/RESEARCH_REPORT.md` |
 | `--stage all` still excludes final | `sed -n '19,23p;259,260p' scripts/run_research.py` |
 | Unlock phrase mechanics | `grep -n "REQUIRED_HOLDOUT_UNLOCK_PHRASE\|compare_digest" src/chronos/registry/holdout_guardian.py` |

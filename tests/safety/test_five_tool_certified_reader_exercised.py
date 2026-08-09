@@ -917,14 +917,23 @@ def test_the_reader_holdout_vocabulary_matches_the_broker_definition() -> None:
 
 
 # --------------------------------------------------------------------------------------
-# Conjunct 4 — recognized, not unblocking. Two capabilities remain, and they still refuse.
+# Conjunct 4 — recognized, not unblocking. The owner's evidence remains, and still refuses.
 # --------------------------------------------------------------------------------------
 
 
-def test_the_public_refusal_now_names_exactly_two_capabilities(tmp_path: Path) -> None:
-    """A reader that can prove a read is not a dataset, an artifact store, or a limit."""
+def test_the_public_refusal_still_refuses_after_the_reader_landed(tmp_path: Path) -> None:
+    """A reader that can prove a read is not a dataset, an artifact store, or a limit.
 
-    assert MISSING_CERTIFIED_RESEARCH_CAPABILITIES == ("replay artifacts", "owner evidence")
+    Renamed and re-pinned 2026-08-09 (Track B.3): this test was
+    ``test_the_public_refusal_now_names_exactly_two_capabilities`` and asserted the exact
+    pair ``("replay artifacts", "owner evidence")``.  The replay-artifact capability then
+    landed and left the list — the forced edit is the list shrinking by one name, not the
+    property changing.  What this file is actually here to prove is unchanged and asserted
+    below: possessing a certified reader does not unblock anything, and the refusal never
+    names the certified reader.
+    """
+
+    assert MISSING_CERTIFIED_RESEARCH_CAPABILITIES == ("owner evidence",)
     root, certification = _certified_dataset(tmp_path)
     manifest = _synthetic_ready_manifest(dataset_sha256=certification["dataset_sha256"])
 
@@ -932,7 +941,7 @@ def test_the_public_refusal_now_names_exactly_two_capabilities(tmp_path: Path) -
         validate_campaign_manifest(manifest)
     message = str(blocked.value)
     assert "EXECUTION_READY is not implemented" in message
-    assert "replay artifacts and owner evidence" in message
+    assert "the missing owner evidence capability" in message
     assert "certified" not in message.casefold()
 
     # Possessing a certified reader does not move the checked-in manifest either.
@@ -942,7 +951,7 @@ def test_the_public_refusal_now_names_exactly_two_capabilities(tmp_path: Path) -
     blocked_broker = FiveToolTrialBroker.from_campaign_manifest(
         tmp_path / "blocked.jsonl", committed
     )
-    with pytest.raises(CampaignExecutionBlocked, match="replay artifacts and owner evidence"):
+    with pytest.raises(CampaignExecutionBlocked, match="no owner evidence capability exists"):
         blocked_broker.run(
             _definition(manifest),
             _request(manifest),
