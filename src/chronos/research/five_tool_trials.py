@@ -2,11 +2,24 @@
 
 This module is intentionally additive.  It does not change walk-forward or campaign
 semantics.  Public v1 construction validates the checked blocked manifest but cannot
-authorize data access: certified-reader readiness, replayable evidence artifacts, and
-the owner-frozen risk/power/benchmark evidence do not exist in this slice.  A
-deliberately private synthetic-test seam exercises lifecycle logic with arbitrary
-reader/evaluator callbacks.  Those callbacks are not a certified reader or an execution
-authority.
+authorize data access: replayable evidence artifacts and the owner-frozen
+risk/power/benchmark evidence do not exist in this slice.  A deliberately private
+synthetic-test seam exercises lifecycle logic with arbitrary reader/evaluator callbacks.
+Those callbacks are not an execution authority, and — unless the reader is the certified
+one below — they cannot prove which bytes they touched either.
+
+**Certified provenance (the reader-honesty residual).** ``certified_reader`` in a
+registered run's ``data_hashes`` used to be ``False`` by construction.  It is now a real
+discriminator: only :class:`chronos.research.five_tool.certified_reader.CertifiedDatasetReader`
+— the exact type, never a subclass — earns ``True``, and only after a two-phase proof.
+Before registration the reader attests, from its certification manifest alone, the
+dataset digest, the manifest digest, and every file digest it is locked to; the campaign
+dataset lock and the certified partition list are checked there, so a mismatched reader
+refuses before the attempt becomes a trial.  After the read, the receipt of what was
+actually opened is compared against that attestation and against the bytes handed over,
+and any disagreement fails the trial closed.  An arbitrary callback, a subclass, a
+wrapper, or any mixed certified/uncertified access records ``False`` — the claim is never
+inferred from good behaviour.
 
 **Canonical ADR-0013 registration (the trial-count-completeness residual).** ADR-0013
 §5 derives the multiple-testing N from *registered* runs, and its §11 discloses that the
@@ -43,10 +56,11 @@ trial-ledger lock is held while the registry is counted; the nesting order is on
 trial-ledger → registry, so the two locks cannot deadlock.
 
 Research only: this module imports no broker, order, mandate, or live persistence code.
-It imports the registry ledger and run recorder and **not** the holdout guardian, so it
-carries no unlock capability.  Request metadata bearing a declared holdout identity is
-refused, but an arbitrary callback is not a structural holdout guardian and cannot prove
-what data it touched.
+It imports the registry ledger, the run recorder, and the certified reader, and **not**
+the holdout guardian, so it carries no unlock capability.  Request metadata bearing a
+declared holdout identity is refused before any attestation, and the certified reader
+independently refuses holdout vocabulary — neither is a structural holdout guardian, and
+neither can unmask anything.
 """
 
 from __future__ import annotations
@@ -68,6 +82,7 @@ from typing import TypeVar, cast
 from chronos.auditlog.log import AuditLogCorruptionError, AuditRecord
 from chronos.registry.ledger import RegistryLedger, registry_lock
 from chronos.registry.runs import RunStage, register_run, trial_count
+from chronos.research.five_tool.certified_reader import CertifiedDatasetReader
 from chronos.research.five_tool.contract import (
     default_contract_path,
     default_source_path,
@@ -84,13 +99,14 @@ EXECUTION_BLOCKED = "blocked_until_identity_locks_resolve"
 EXECUTION_READY = "ready_for_certified_research"
 INTERRUPTED_ATTEMPT_ERROR = "InterruptedAttemptRecovery"
 
-# The capabilities a manifest still cannot substitute for.  The canonical ADR-0013
-# registry is deliberately absent from this tuple: this module now registers every
-# attempt before it reads, proven by tests/safety/test_five_tool_registry_exercised.py.
+# The capabilities a manifest still cannot substitute for.  Two names have already left
+# this tuple, each because a capability landed rather than because the sentence was
+# edited: the canonical ADR-0013 registry (every attempt registers before it reads —
+# tests/safety/test_five_tool_registry_exercised.py) and the certified reader (a read is
+# proven rather than promised — tests/safety/test_five_tool_certified_reader_exercised.py).
 # Each remaining name is an absence a named test independently observes, so this list
-# cannot quietly go stale as the other capabilities land.
+# cannot quietly go stale as the last capabilities land.
 MISSING_CERTIFIED_RESEARCH_CAPABILITIES: tuple[str, ...] = (
-    "certified reader",
     "replay artifacts",
     "owner evidence",
 )
@@ -203,6 +219,10 @@ class CanonicalRegistryUnavailable(FiveToolTrialError):
 
 class DataVersionMismatch(FiveToolTrialError):
     """Reader bytes do not match the exact dataset digest authorized by the campaign."""
+
+
+class CertifiedProvenanceUnproven(FiveToolTrialError):
+    """A run registered as certified could not prove the bytes came through that path."""
 
 
 class TrialOutcome(StrEnum):
@@ -346,7 +366,7 @@ class LedgerLocalScoreInput:
     campaign ledger's own attempt count; the canonical cross-campaign N lives in the
     ADR-0013 registry (:func:`registered_trial_count`), and sealing refuses when the
     registry has counted fewer attempts than this ledger recorded.  Phase 3 still
-    requires the certified reader, replay artifacts, and owner evidence.
+    requires replay artifacts and owner evidence.
     """
 
     campaign_id: str
@@ -485,8 +505,9 @@ class FiveToolTrialBroker:
         """Validate a blocked manifest without granting reader authority.
 
         ``ready_for_certified_research`` is intentionally rejected in public v1.  A
-        manifest is a claim, not the missing certified-reader, replay-artifact, or
-        owner-evidence capability.
+        manifest is a claim, not the missing replay-artifact or owner-evidence
+        capability — and a certified reader, which now exists, is a way to read a
+        certified dataset, not a certified dataset.
         """
 
         binding = _validate_campaign_manifest(manifest)
@@ -568,6 +589,10 @@ class FiveToolTrialBroker:
         A reader failure and an evaluator failure both append ``failed`` and both count
         because multiplicity is derived from unique starts.  A terminal-ledger failure
         is fail-closed: no result or bytes are returned as a successful trial.
+
+        Provenance is settled before the attempt is registered and proven after the read:
+        a certified reader attests its locks up front and its receipt is checked against
+        the bytes afterwards, while anything else is registered as uncertified.
         """
 
         if self._execution_block_reason is not None:
@@ -575,7 +600,14 @@ class FiveToolTrialBroker:
         binding = self._require_binding()
         self._validate_identity(binding, definition, request)
         self._refuse_holdout(request)
-        receipt = self._start(binding, definition, request)
+        certified = _certified_reader_or_none(reader)
+        # A certified reader locked to a different dataset, digest, or partition refuses
+        # here — before registration, because nothing has been read and no trial exists.
+        data_evidence = (
+            certified.attest(request) if certified is not None else _uncertified_evidence(request)
+        )
+        reads_before = len(certified.receipts) if certified is not None else 0
+        receipt = self._start(binding, definition, request, data_evidence)
         data: bytes | None = None
         try:
             data = reader(request)
@@ -585,6 +617,14 @@ class FiveToolTrialBroker:
             if actual_data_sha256 != request.data_version:
                 raise DataVersionMismatch(
                     "reader bytes do not match the campaign-authorized data_version"
+                )
+            if certified is not None:
+                _require_proven_certified_read(
+                    certified,
+                    request,
+                    data,
+                    data_evidence,
+                    reads_before=reads_before,
                 )
             evaluation = evaluator(data, receipt)
             if not isinstance(evaluation, TrialEvaluation):
@@ -686,6 +726,7 @@ class FiveToolTrialBroker:
         binding: _CampaignBinding,
         definition: TrialDefinition,
         request: DataAccessRequest,
+        data_evidence: Mapping[str, object],
     ) -> TrialReceipt:
         trial_id = deterministic_trial_id(definition, request)
         attempt_id = uuid.uuid4().hex
@@ -696,6 +737,7 @@ class FiveToolTrialBroker:
             request,
             trial_id=trial_id,
             attempt_id=attempt_id,
+            data_evidence=data_evidence,
         )
 
         def validate(ledger: RegistryLedger) -> None:
@@ -752,12 +794,16 @@ class FiveToolTrialBroker:
         *,
         trial_id: str,
         attempt_id: str,
+        data_evidence: Mapping[str, object],
     ) -> AuditRecord:
         """Record this attempt in the canonical ADR-0013 registry before it reads.
 
         ``experiment_id`` joins the two ledgers: it is the deterministic trial identity
         and the unique attempt identity, so a canonical record can always be matched to
-        the Five-Tool lifecycle records it authorized.
+        the Five-Tool lifecycle records it authorized.  ``data_evidence`` is the
+        provenance the reader could attest *before* reading; a certified attestation is
+        re-proven against the receipt afterwards, so a completed certified trial cannot
+        exist without the proof.
         """
 
         registry_path = _require_canonical_registry_path(self._registry_ledger_path)
@@ -776,16 +822,7 @@ class FiveToolTrialBroker:
                 strategy_id=definition.strategy_id,
                 config_hash=definition.semantic_config_fingerprint,
                 code_commit=definition.code_commit,
-                data_hashes={
-                    request.dataset_id: {
-                        "dataset_sha256": request.data_version,
-                        "partition": request.partition,
-                        # Constant today by construction: no certified reader exists, so
-                        # no Five-Tool run may claim certified provenance. It becomes a
-                        # real discriminator when that capability lands.
-                        "certified_reader": False,
-                    }
-                },
+                data_hashes={request.dataset_id: dict(data_evidence)},
                 criteria_ref=definition.criteria_digest,
                 touched_data=True,
                 experiment_id=f"{trial_id}:{attempt_id}",
@@ -807,7 +844,7 @@ class FiveToolTrialBroker:
         binding = self._require_binding()
         self._validate_identity(binding, definition, request)
         self._refuse_holdout(request)
-        return self._start(binding, definition, request)
+        return self._start(binding, definition, request, _uncertified_evidence(request))
 
     def _recover_interrupted_starts_for_tests(self) -> tuple[str, ...]:
         """Terminalize orphan starts as bounded failures in the private test harness."""
@@ -862,6 +899,73 @@ class FiveToolTrialBroker:
             KIND_TRIAL_TERMINAL,
             payload,
             validate=validate,
+        )
+
+
+def _certified_reader_or_none(reader: object) -> CertifiedDatasetReader | None:
+    """Return the reader only if it is exactly the certified type, never a subclass.
+
+    A subclass may override ``__call__``, ``attest``, or ``receipts``, so it can produce
+    the same bytes while proving nothing.  Concrete-type identity is the fail-closed
+    reading of "every byte came through the certified path": a reader that *might* be
+    something else is recorded as uncertified, which is the honest answer.
+    """
+
+    if isinstance(reader, CertifiedDatasetReader) and type(reader) is CertifiedDatasetReader:
+        return reader
+    return None
+
+
+def _uncertified_evidence(request: DataAccessRequest) -> dict[str, object]:
+    """Provenance for a reader that cannot prove what it read: the caller's claim only."""
+
+    return {
+        "dataset_sha256": request.data_version,
+        "partition": request.partition,
+        "certified_reader": False,
+    }
+
+
+def _require_proven_certified_read(
+    reader: CertifiedDatasetReader,
+    request: DataAccessRequest,
+    data: bytes,
+    attested: Mapping[str, object],
+    *,
+    reads_before: int,
+) -> None:
+    """Prove the registered certified attestation describes the read that just happened.
+
+    The registered record was written before the read, so on its own it is a commitment.
+    This turns it into evidence: exactly one new receipt, for this request, over the
+    attested certification manifest and the attested file set, whose payload digest is
+    the digest of the bytes the evaluator is about to see.  Any disagreement raises, the
+    attempt takes a ``failed`` terminal, and no completed trial carries the claim.
+    """
+
+    receipts = reader.receipts
+    if len(receipts) != reads_before + 1:
+        raise CertifiedProvenanceUnproven(
+            "the certified reader did not record exactly one read for this attempt"
+        )
+    receipt = receipts[-1]
+    if receipt.payload_sha256 != hashlib.sha256(data).hexdigest():
+        raise CertifiedProvenanceUnproven(
+            "returned bytes are not the certified payload the reader recorded"
+        )
+    if receipt.dataset_id != request.dataset_id or receipt.partition != request.partition:
+        raise CertifiedProvenanceUnproven("certified read receipt is bound to a different request")
+    if receipt.dataset_sha256 != request.data_version:
+        raise CertifiedProvenanceUnproven(
+            "certified read receipt disagrees with the campaign dataset lock"
+        )
+    if receipt.certification_manifest_sha256 != attested.get("certification_manifest_sha256"):
+        raise CertifiedProvenanceUnproven(
+            "certified read used a different certification manifest than it attested"
+        )
+    if receipt.file_digests != attested.get("files"):
+        raise CertifiedProvenanceUnproven(
+            "certified read touched a different file set than it attested"
         )
 
 
@@ -1046,8 +1150,10 @@ def _missing_capability_phrase() -> str:
     names = MISSING_CERTIFIED_RESEARCH_CAPABILITIES
     if not names:  # pragma: no cover - the campaign is blocked on at least one capability
         raise FiveToolTrialError("the missing-capability list may not be empty while blocked")
-    if len(names) == 1:  # pragma: no cover - three capabilities remain
+    if len(names) == 1:  # pragma: no cover - two capabilities remain
         return names[0]
+    if len(names) == 2:
+        return f"{names[0]} and {names[1]}"
     return f"{', '.join(names[:-1])}, and {names[-1]}"
 
 

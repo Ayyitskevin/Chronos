@@ -147,10 +147,29 @@ count/net/PF currently use the strict OOS set; the other metrics are full-sample
 Benchmark-alpha intervals, DSR, FWER/FDR, PBO, power, and fully OOS-native risk/cost
 gates are not implemented verdicts.
 
-The checked campaign manifest remains blocked before any reader, and there is no
-certified dataset capability or holdout guardian/unlock path. Public v1 validation
+The checked campaign manifest remains blocked before any reader, and there is ~~no
+certified dataset capability or~~ no holdout guardian/unlock path. Public v1 validation
 refuses `ready_for_certified_research` even if a caller clears blocker strings and fills
 syntactically valid digests: readiness requires capabilities a manifest cannot grant.
+
+> **Correction (2026-08-09).** Two of the capabilities this section describes as absent
+> have since landed, and the paragraphs are struck rather than rewritten so the earlier
+> state stays legible. (1) Every Five-Tool attempt now registers in the canonical ADR-0013
+> registry **before** the reader is called, and refuses to run when that registry is
+> unwired, unprovisioned, unreadable, or fails chain/anchor verification
+> (`tests/safety/test_five_tool_registry_exercised.py`). (2) A **certified reader**
+> exists: `chronos.research.five_tool.certified_reader.CertifiedDatasetReader` is
+> digest-locked to a certification manifest binding every file to a SHA-256 and the
+> dataset to a bytes-derived overall digest, attests those digests before registration,
+> and has its receipt of what it actually opened re-checked against that attestation and
+> against the returned bytes, so `data_hashes.certified_reader` is `True` only for a
+> proven read (`tests/safety/test_five_tool_certified_reader_exercised.py`). **What is
+> still true:** no dataset has been certified — no `CERTIFICATION.json` exists under
+> `research/`, and the existing heterogeneous corpus cannot satisfy this manifest's
+> dataset lock — the registry ships empty, there is still no holdout guardian or unlock
+> path here, and the campaign stays blocked on **replay artifacts and owner evidence**.
+> An arbitrary reader/evaluator callback is still accepted by the private harness and is
+> still recorded as uncertified, which is what the next paragraph describes.
 
 The private synthetic lifecycle harness exists only to verify start-before-callback,
 data-return hashing, terminal accounting, interruption recovery, local sealing, and
@@ -158,9 +177,11 @@ concurrency. Its reader and evaluator are arbitrary callbacks; data may have bee
 preloaded or additional sources may be touched outside its observation. Its
 `ledger_trial_count` is path-local, evaluation artifact bytes are not retained in a
 replay store, and supplied variance evidence has no reviewer attestation here.
-Consequently it is neither a brokered data reader nor full-campaign replay evidence.
-Integration with the canonical ADR-0013 registry and a certified reader is required
-before Phase-3 multiplicity or final scores exist.
+Consequently it is neither ~~a brokered data reader nor~~ full-campaign replay evidence.
+~~Integration with the canonical ADR-0013 registry and a certified reader is required
+before Phase-3 multiplicity or final scores exist.~~ Content-addressed replay artifacts
+and the owner-frozen risk/power/benchmark evidence are still required before Phase-3
+multiplicity or final scores exist.
 
 The engine currently retains complete observations/equity histories and recomputes
 history-dependent indicators. Its time cost is approximately quadratic and checkpoint

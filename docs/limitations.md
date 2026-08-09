@@ -158,6 +158,19 @@ runbooks.
   cell that raises mid-statistics registers nothing — so its count remains a count of
   *completed* cells. Runs outside both paths count only if their caller registers them,
   and the registry still ships empty.
+- **A registered run's `data_hashes.certified_reader` is now a proven claim, for one
+  reader only** (added 2026-08-09). `chronos.research.five_tool.certified_reader.CertifiedDatasetReader`
+  is digest-locked to a certification manifest binding every file to a SHA-256 and the
+  dataset to a bytes-derived overall digest; it attests those digests before registration
+  and its receipt of what it actually opened is re-checked against that attestation and
+  against the returned bytes, so a completed trial cannot claim certified provenance it
+  did not have (`tests/safety/test_five_tool_certified_reader_exercised.py`). **Out of
+  scope:** only the exact reader type earns the claim, so an arbitrary callback, a
+  subclass, a wrapper, or mixed access records `certified_reader: False` — the field says
+  what is proven, it does not stop an unproven run from being registered; the manifest
+  authorizes a partition *label* and does not carve holdout bars out of a dataset that
+  contains them; and **no dataset has been certified** — no `CERTIFICATION.json` exists
+  under `research/`, so this is a capability, not evidence.
 - **The budget policy is a first cut** (linear credits per accrued capture session);
   burns and *active* grants spend credits, expired-unused grants are refunded; it
   *rations* unlocks, it does not model statistical power (C3/C4). Empty store ⇒ zero
