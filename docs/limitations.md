@@ -150,6 +150,14 @@ runbooks.
   is not auto-wired to the registry in this milestone (a follow-on; also pointing it at
   the C1 bars+actions dual hash instead of the legacy single-CSV sha). `register_run`
   fails closed on null provenance.
+  **Narrowed 2026-08-09 for one path only.** Five-Tool trials now register *before* the
+  reader is called and refuse to run at all when the registry is unwired, unprovisioned,
+  unreadable, or fails chain/anchor verification, so an attempt that opens data and then
+  dies is still counted (`tests/safety/test_five_tool_registry_exercised.py`).
+  `walkforward.py` still registers **last** — it is handed an already-read series, and a
+  cell that raises mid-statistics registers nothing — so its count remains a count of
+  *completed* cells. Runs outside both paths count only if their caller registers them,
+  and the registry still ships empty.
 - **The budget policy is a first cut** (linear credits per accrued capture session);
   burns and *active* grants spend credits, expired-unused grants are refunded; it
   *rations* unlocks, it does not model statistical power (C3/C4). Empty store ⇒ zero

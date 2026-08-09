@@ -39,6 +39,7 @@ from chronos.research.five_tool_trials import (
     campaign_manifest_digest,
     deterministic_trial_id,
     ledger_trial_multiplicity,
+    registered_trial_count,
     seal_ledger_local_score_inputs,
     validate_campaign_manifest,
 )
@@ -611,8 +612,14 @@ def test_ledger_trial_count_is_explicitly_path_local(tmp_path: Path) -> None:
 
     assert ledger_trial_multiplicity(first_path) == 1
     assert ledger_trial_multiplicity(second_path) == 1
-    # There is deliberately no public Five-Tool cross-path aggregator. Canonical
-    # ADR-0013 registry integration remains a Phase-3 blocker rather than being simulated.
+    # Each trial ledger still counts only its own attempts — that is what "path-local"
+    # means. Cross-campaign multiplicity is not simulated here either: it is derived from
+    # the canonical ADR-0013 registry both campaigns registered into before reading
+    # (tests/safety/test_five_tool_registry_exercised.py owns that proof).
+    assert (
+        registered_trial_count(tmp_path / "registry.jsonl", strategy_id="five_tool_confluence_v3_6")
+        == 2
+    )
 
 
 def _complete_campaign(

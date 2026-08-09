@@ -83,6 +83,60 @@ generated boundary set is still checked.
 Suite after integration: **2745 passed, 1 skipped** (was 2543/1 at `721d7f1`); ruff check,
 ruff format, and `mypy --strict src/chronos` clean over 232 source files.
 
+### Canonical ADR-0013 registry integration — trials are counted, or they do not run (2026-08-09)
+
+The first of the three non-owner capabilities the manifest names. ADR-0013 §5 derives the
+multiple-testing N from *registered* runs and its §11 discloses the hole underneath that:
+"completeness of the **trial count** ... auto-registration of the runner is a follow-on".
+A registry that counts only the runs someone remembered to register reports N=3 while the
+world did 40 — and the deflated Sharpe is computed against that number.
+
+`FiveToolTrialBroker` now writes an `experiment_run` record into the canonical
+hash-chained registry **before** the durable local start, and therefore before the reader
+is ever called. It verifies the chain **and** the head anchor before it trusts either, the
+way the holdout guardian does, and fails closed on every way a registry can be missing:
+unwired, an absent registry root (a research run may not conjure the ledger that judges
+it), an unreadable head record, an in-place edit, or a truncated tail. Each refuses with a
+distinct reason, the reader never runs, and no durable trial is created. Sealing a campaign
+additionally refuses when the registry counted fewer attempts than the campaign ledger
+recorded, so a campaign run around the registry cannot produce score inputs.
+
+Ordering is deliberately conservative. If the local start fails *after* the canonical
+record lands, the registry keeps a record for an attempt that never read data: that
+over-counts N, which raises the bar. Under-counting is the failure being prevented. This is
+the opposite choice from `walkforward.py`, which registers *last* — it is handed an
+already-read series and declines to count a cell that raised mid-statistics. The two
+orderings disagree on purpose; the disagreement is recorded in ADR-0013 §11 and
+`docs/limitations.md` rather than resolved by an agent, because changing which runs count
+changes a frozen multiple-testing input.
+
+`tests/safety/test_five_tool_registry_exercised.py` (22 tests) drives the whole path and
+asserts the outcomes that had never been observed: the canonical record read from *inside*
+the reader callback, so register-then-read is proven rather than asserted; an attempt that
+dies mid-read, mid-evaluation, or on unauthorized bytes still counted; the derived count
+aggregating two campaigns that keep separate trial ledgers. Every refusal conjunct was
+verified by reverting it alone and confirming a distinct named failure — including the
+ordering itself: moving registration after the reader fails
+`test_the_canonical_record_exists_before_the_reader_sees_a_byte` specifically.
+
+**What this is not.** The registry still ships **empty** — `research/registry/` does not
+exist, no trial has been run, and every ledger in the tests lives in a temporary
+directory. This is a capability, not evidence. The campaign manifest remains
+`blocked_until_identity_locks_resolve`, and its `EXECUTION_READY` refusal now names the
+three capabilities that are still missing — certified reader, replay artifacts, owner
+evidence — and no longer the registry. That message is built from
+`MISSING_CERTIFIED_RESEARCH_CAPABILITIES`, each entry backed by a test that independently
+observes the absence (no certified-reader module; evidence artifacts digested but never
+persisted, so no replay; the manifest's owner-frozen limits and power calculation still
+unfrozen), so the list cannot go stale as those capabilities land. The reader is still an
+arbitrary callback that cannot prove what data it touched, and the manifest's own blocker
+list is left untouched: editing it is manifest surgery on a frozen preregistration, not an
+agent's call. Nothing here imports, calls, or re-exports the holdout unlock — a subprocess
+probe proves that counting trials never loads the guardian module at all.
+
+Suite after this capability: **2767 passed, 1 skipped** (was 2745/1); ruff check, ruff
+format (410 files), and `mypy --strict src/chronos` clean over 232 source files.
+
 ## [Unreleased] — M12: the handoff library, document truth, and finding 1 (2026-08-02)
 
 Nine merged PRs across one day. The theme is not new capability — it is making the

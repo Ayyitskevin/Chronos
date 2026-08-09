@@ -66,15 +66,19 @@ collected). Companion gate baselines, same date: `mypy src/chronos` → "Success
 issues found in **218** source files"; `ruff format --check .` → "**379** files already
 formatted"~~
 
-> **Corrected 2026-08-09.** `pytest -q` → **2745 passed, 1 skipped, ~2 minutes** (2746
-> collected). Companion gate baselines, same date: `mypy --strict src/chronos` →
-> "Success: no issues found in **232** source files"; `ruff format --check .` → "**409**
-> files already formatted". The jump has two causes: M12 carried the suite to **2543
-> passed / 1 skipped** at `721d7f1` (CHANGELOG M12) without this row being updated, and
-> the Five-Tool research slice plus its merge-review tests added the rest. The two new
-> safety files from that review are `test_five_tool_holdout_refusal_exercised.py` and
-> `test_five_tool_inert_fields_disclosed.py`. The 2026-08-02 numbers are struck rather
-> than deleted: they are what a session running against `47a8d72` would still observe.
+> **Corrected 2026-08-09.** `pytest -q` → ~~**2745 passed, 1 skipped**~~ **2767 passed,
+> 1 skipped, ~2 minutes** (2768 collected). Companion gate baselines, same date:
+> `mypy --strict src/chronos` → "Success: no issues found in **232** source files";
+> `ruff format --check .` → ~~"**409** files already formatted"~~ "**410** files already
+> formatted". The jump has three causes, two of them landing on this date: M12 carried
+> the suite to **2543 passed / 1 skipped** at `721d7f1` (CHANGELOG M12) without this row
+> being updated; the Five-Tool research slice plus its merge-review tests took it to
+> **2745**; and the canonical ADR-0013 registry integration added the last **22**. The
+> three new safety files across those two landings are
+> `test_five_tool_holdout_refusal_exercised.py`, `test_five_tool_inert_fields_disclosed.py`,
+> and `test_five_tool_registry_exercised.py`. Intermediate numbers are struck rather than
+> deleted: 2489 is what a session running against `47a8d72` would still observe, and 2745
+> is what one running against `5871338` would.
 
 The format count includes the five `.claude/skills` scripts, which sit inside `ruff`'s
 repo-wide scope. This section is the authoritative numeric baseline — other skills state
@@ -381,8 +385,8 @@ facts and how to re-verify each (all read-only):
 
 | Volatile fact | Re-verify with |
 |---|---|
-| ~~2489 passed / 1 skipped, ~2 min~~ **corrected 2026-08-09: 2745 passed / 1 skipped** (see the §2 correction note) | `.venv/bin/python -m pytest -q` (per README Setup) |
-| ~~mypy 218 source files; format 379 files~~ **corrected 2026-08-09: mypy 232; format 409** (incl. the 5 `.claude/skills` scripts) | `.venv/bin/mypy src/chronos` ; `.venv/bin/ruff format --check .` |
+| ~~2489 passed / 1 skipped, ~2 min~~ ~~2745 passed~~ **corrected 2026-08-09: 2767 passed / 1 skipped** (see the §2 correction note) | `.venv/bin/python -m pytest -q` (per README Setup) |
+| ~~mypy 218 source files; format 379 files~~ **corrected 2026-08-09: mypy 232; format 410** (incl. the 5 `.claude/skills` scripts) | `.venv/bin/mypy src/chronos` ; `.venv/bin/ruff format --check .` |
 | Per-directory counts (1461/202/561/226/27/13) | `.venv/bin/python -m pytest tests/<dir> --collect-only -q \| tail -1` |
 | The single skip is the IBKR smoke test | `.venv/bin/python -m pytest -q -ra \| grep -A1 SKIPPED` |
 | Four CI gates and CI env | `sed -n '1,50p' .github/workflows/ci.yml` |

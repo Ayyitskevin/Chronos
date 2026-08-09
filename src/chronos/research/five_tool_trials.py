@@ -1,27 +1,52 @@
-"""Fail-closed, ledger-local trial accounting for Five-Tool research tests.
+"""Fail-closed trial accounting for Five-Tool research tests, bound to the ADR-0013 registry.
 
-This module is intentionally additive.  It does not change the canonical ADR-0013
-registry, walk-forward, or campaign semantics.  Public v1 construction validates the
-checked blocked manifest but cannot authorize data access: certified-reader readiness,
-canonical global-registry integration, and replayable evidence artifacts do not exist
-in this slice.  A deliberately private synthetic-test seam exercises lifecycle logic
-with arbitrary reader/evaluator callbacks.  Those callbacks are not a certified reader
-or an execution authority.
+This module is intentionally additive.  It does not change walk-forward or campaign
+semantics.  Public v1 construction validates the checked blocked manifest but cannot
+authorize data access: certified-reader readiness, replayable evidence artifacts, and
+the owner-frozen risk/power/benchmark evidence do not exist in this slice.  A
+deliberately private synthetic-test seam exercises lifecycle logic with arbitrary
+reader/evaluator callbacks.  Those callbacks are not a certified reader or an execution
+authority.
 
-Inside that synthetic seam, ``FiveToolTrialBroker.run`` durably appends
-``trial_started`` before invoking the supplied reader and appends one terminal outcome
-before a result is returned (or the original exception is re-raised).
+**Canonical ADR-0013 registration (the trial-count-completeness residual).** ADR-0013
+§5 derives the multiple-testing N from *registered* runs, and its §11 discloses that the
+derivation is only as complete as the set of paths that actually register.  Every
+Five-Tool attempt therefore writes an ``experiment_run`` record into the canonical
+hash-chained registry (``chronos.registry.runs.register_run``) **before** the durable
+local start, which is itself before any read.  No registry — absent, unwired,
+unreadable, or chain/anchor-broken — means no trial: ``CanonicalRegistryUnavailable`` is
+raised and the reader is never called.  The registry is verified before it is trusted,
+the way the holdout guardian verifies before appending.
 
-The ledger reuses the existing anchor-verified :class:`RegistryLedger`, but creates a
-fresh instance inside every locked critical section.  ``AuditLog`` caches its head at
+Ordering is deliberately conservative.  If the local durable start fails *after* the
+canonical record lands (a sealed campaign, an attempt-id collision, an I/O fault), the
+registry keeps a record for an attempt that never read data.  That over-counts N, which
+raises the multiple-testing bar; under-counting is the failure this integration exists
+to prevent.  This is the opposite choice from ``research/walkforward.py``, which
+registers *last* so a cell that raises mid-statistics registers nothing.  That path is
+handed an already-read series, so it cannot register before the read at all; here the
+read happens under this module's control, so it can — and a trial that opened data and
+then died is exactly the trial an honest N must keep.  Neither ordering is edited by
+this module; the divergence is recorded rather than averaged away.
+
+Inside the synthetic seam, ``FiveToolTrialBroker.run`` durably appends ``trial_started``
+before invoking the supplied reader and appends one terminal outcome before a result is
+returned (or the original exception is re-raised).
+
+Both ledgers reuse the anchor-verified :class:`RegistryLedger`, but a fresh instance is
+created inside every locked critical section.  ``AuditLog`` caches its head at
 construction, so sharing a long-lived instance between concurrent writers would be
-unsafe.  A process-wide thread lock plus the registry's OS ``flock`` protect the full
-verify/append/fsync/verify transaction.
+unsafe.  A process-wide thread lock plus the registry's OS ``flock`` protect each full
+verify/append/fsync/verify transaction.  The canonical-registry transaction completes
+and releases before the trial-ledger transaction begins, except at seal time where the
+trial-ledger lock is held while the registry is counted; the nesting order is only ever
+trial-ledger → registry, so the two locks cannot deadlock.
 
 Research only: this module imports no broker, order, mandate, or live persistence code.
-It offers no holdout-unlock path.  Request metadata bearing a declared holdout identity
-is refused, but an arbitrary callback is not a structural holdout guardian and cannot
-prove what data it touched.
+It imports the registry ledger and run recorder and **not** the holdout guardian, so it
+carries no unlock capability.  Request metadata bearing a declared holdout identity is
+refused, but an arbitrary callback is not a structural holdout guardian and cannot prove
+what data it touched.
 """
 
 from __future__ import annotations
@@ -40,8 +65,9 @@ from enum import StrEnum
 from pathlib import Path
 from typing import TypeVar, cast
 
-from chronos.auditlog.log import AuditRecord
+from chronos.auditlog.log import AuditLogCorruptionError, AuditRecord
 from chronos.registry.ledger import RegistryLedger, registry_lock
+from chronos.registry.runs import RunStage, register_run, trial_count
 from chronos.research.five_tool.contract import (
     default_contract_path,
     default_source_path,
@@ -58,9 +84,31 @@ EXECUTION_BLOCKED = "blocked_until_identity_locks_resolve"
 EXECUTION_READY = "ready_for_certified_research"
 INTERRUPTED_ATTEMPT_ERROR = "InterruptedAttemptRecovery"
 
+# The capabilities a manifest still cannot substitute for.  The canonical ADR-0013
+# registry is deliberately absent from this tuple: this module now registers every
+# attempt before it reads, proven by tests/safety/test_five_tool_registry_exercised.py.
+# Each remaining name is an absence a named test independently observes, so this list
+# cannot quietly go stale as the other capabilities land.
+MISSING_CERTIFIED_RESEARCH_CAPABILITIES: tuple[str, ...] = (
+    "certified reader",
+    "replay artifacts",
+    "owner evidence",
+)
+
 _DEFAULT_HOLDOUT_PARTITIONS = frozenset(
     {"holdout", "final", "reserved", "reserved_final", "final_holdout"}
 )
+# Campaign partitions mapped onto ADR-0013's research stages.  ``RunStage.HOLDOUT`` is
+# deliberately unreachable from here: a holdout partition is refused before any
+# registration happens, and unmasking one is the holdout guardian's job, not this
+# module's.  An unmapped partition fails closed rather than being registered as a guess.
+_CANONICAL_STAGE_BY_PARTITION: dict[str, RunStage] = {
+    "development": RunStage.DEV,
+    "dev": RunStage.DEV,
+    "validation": RunStage.VALIDATION,
+}
+# The harness-local canonical registry filename; production wiring passes a real path.
+_DEFAULT_REGISTRY_LEDGER_NAME = "registry.jsonl"
 _SHA256_HEX_LENGTH = 64
 _UNCLASSIFIED_CALLBACK_ERROR = "UnclassifiedCallbackError"
 _THREAD_LOCKS: dict[str, threading.Lock] = {}
@@ -147,6 +195,10 @@ class CampaignIdentityMismatch(FiveToolTrialError):
 
 class CampaignSealed(FiveToolTrialError):
     """The immutable ledger-local snapshot exists, so no later attempt may start."""
+
+
+class CanonicalRegistryUnavailable(FiveToolTrialError):
+    """The canonical ADR-0013 registry cannot be trusted, so no trial may be counted."""
 
 
 class DataVersionMismatch(FiveToolTrialError):
@@ -290,8 +342,11 @@ class TrialEvaluation[T]:
 class LedgerLocalScoreInput:
     """Order-invariant evidence input bound to one ledger-local attempt count.
 
-    This is not a final multiple-testing input.  Phase 3 additionally requires the
-    canonical ADR-0013 global registry, which is absent from this module.
+    This is not a final multiple-testing input.  ``ledger_trial_count`` remains this
+    campaign ledger's own attempt count; the canonical cross-campaign N lives in the
+    ADR-0013 registry (:func:`registered_trial_count`), and sealing refuses when the
+    registry has counted fewer attempts than this ledger recorded.  Phase 3 still
+    requires the certified reader, replay artifacts, and owner evidence.
     """
 
     campaign_id: str
@@ -394,8 +449,13 @@ class FiveToolTrialBroker:
     def __init__(
         self,
         ledger_path: Path,
+        *,
+        registry_ledger_path: Path | None = None,
     ) -> None:
         self._ledger_path = ledger_path
+        # ``None`` means no canonical ADR-0013 registry is wired, which is itself a
+        # refusal reason: an attempt that cannot be counted may not start.
+        self._registry_ledger_path = registry_ledger_path
         self._holdout_datasets: frozenset[str] = frozenset()
         self._holdout_partitions = _DEFAULT_HOLDOUT_PARTITIONS
         self._binding: _CampaignBinding | None = None
@@ -408,27 +468,35 @@ class FiveToolTrialBroker:
     def ledger_path(self) -> Path:
         return self._ledger_path
 
+    @property
+    def registry_ledger_path(self) -> Path | None:
+        """The canonical ADR-0013 registry this broker counts into, if one is wired."""
+
+        return self._registry_ledger_path
+
     @classmethod
     def from_campaign_manifest(
         cls,
         ledger_path: Path,
         manifest: Mapping[str, object],
+        *,
+        registry_ledger_path: Path | None = None,
     ) -> FiveToolTrialBroker:
         """Validate a blocked manifest without granting reader authority.
 
         ``ready_for_certified_research`` is intentionally rejected in public v1.  A
-        manifest is a claim, not the missing certified-reader/global-registry
-        capability.
+        manifest is a claim, not the missing certified-reader, replay-artifact, or
+        owner-evidence capability.
         """
 
         binding = _validate_campaign_manifest(manifest)
         if binding is not None:  # pragma: no cover - public ready validation always raises
             raise CampaignExecutionBlocked("public v1 cannot authorize an execution-ready campaign")
-        broker = cls(ledger_path)
+        broker = cls(ledger_path, registry_ledger_path=registry_ledger_path)
         broker._bind_declared_holdouts(manifest)
         broker._execution_block_reason = (
             "campaign manifest is blocked_until_identity_locks_resolve; "
-            "no certified reader or ADR-0013 global-registry capability exists"
+            f"no {_missing_capability_phrase()} capability exists"
         )
         return broker
 
@@ -437,11 +505,15 @@ class FiveToolTrialBroker:
         cls,
         ledger_path: Path,
         manifest: Mapping[str, object],
+        *,
+        registry_ledger_path: Path | None = None,
     ) -> FiveToolTrialBroker:
         """Create the private callback-driven harness used only by lifecycle tests.
 
         This seam deliberately bypasses the unavailable certified-readiness authority.
-        It must never be used to make a research or performance claim.
+        It must never be used to make a research or performance claim.  When no
+        canonical registry is named, the harness counts into one beside its trial
+        ledger; production wiring passes the real ADR-0013 registry path explicitly.
         """
 
         binding = _validate_campaign_manifest(
@@ -452,7 +524,14 @@ class FiveToolTrialBroker:
             raise CampaignExecutionBlocked(
                 "synthetic lifecycle harness requires a structurally ready test manifest"
             )
-        broker = cls(ledger_path)
+        broker = cls(
+            ledger_path,
+            registry_ledger_path=(
+                registry_ledger_path
+                if registry_ledger_path is not None
+                else ledger_path.parent / _DEFAULT_REGISTRY_LEDGER_NAME
+            ),
+        )
         broker._bind_declared_holdouts(manifest)
         broker._binding = binding
         broker._synthetic_test_harness = True
@@ -549,6 +628,7 @@ class FiveToolTrialBroker:
             self._ledger_path,
             self._require_binding(),
             reviewed_variance,
+            registry_ledger_path=self._registry_ledger_path,
         )
 
     def _require_binding(self) -> _CampaignBinding:
@@ -609,6 +689,14 @@ class FiveToolTrialBroker:
     ) -> TrialReceipt:
         trial_id = deterministic_trial_id(definition, request)
         attempt_id = uuid.uuid4().hex
+        # ADR-0013 §5: the canonical registry is written first, so an attempt that dies
+        # anywhere later is still a counted trial. No registry, no trial.
+        self._register_canonical_run(
+            definition,
+            request,
+            trial_id=trial_id,
+            attempt_id=attempt_id,
+        )
 
         def validate(ledger: RegistryLedger) -> None:
             if ledger.records_of(KIND_CAMPAIGN_SEALED):
@@ -656,6 +744,56 @@ class FiveToolTrialBroker:
             partition=request.partition,
             data_version=request.data_version,
         )
+
+    def _register_canonical_run(
+        self,
+        definition: TrialDefinition,
+        request: DataAccessRequest,
+        *,
+        trial_id: str,
+        attempt_id: str,
+    ) -> AuditRecord:
+        """Record this attempt in the canonical ADR-0013 registry before it reads.
+
+        ``experiment_id`` joins the two ledgers: it is the deterministic trial identity
+        and the unique attempt identity, so a canonical record can always be matched to
+        the Five-Tool lifecycle records it authorized.
+        """
+
+        registry_path = _require_canonical_registry_path(self._registry_ledger_path)
+        stage = _CANONICAL_STAGE_BY_PARTITION.get(_normalized_identity(request.partition))
+        if stage is None:
+            raise CampaignIdentityMismatch(
+                f"partition {request.partition!r} has no canonical ADR-0013 research stage; "
+                "an unclassifiable partition cannot be registered"
+            )
+        thread_lock = _thread_lock_for(registry_path)
+        with thread_lock, registry_lock(registry_path):
+            ledger = _verified_canonical_registry(registry_path)
+            record = register_run(
+                ledger,
+                stage=stage,
+                strategy_id=definition.strategy_id,
+                config_hash=definition.semantic_config_fingerprint,
+                code_commit=definition.code_commit,
+                data_hashes={
+                    request.dataset_id: {
+                        "dataset_sha256": request.data_version,
+                        "partition": request.partition,
+                        # Constant today by construction: no certified reader exists, so
+                        # no Five-Tool run may claim certified provenance. It becomes a
+                        # real discriminator when that capability lands.
+                        "certified_reader": False,
+                    }
+                },
+                criteria_ref=definition.criteria_digest,
+                touched_data=True,
+                experiment_id=f"{trial_id}:{attempt_id}",
+            )
+            _fsync_path(ledger.anchor_path)
+            _fsync_directory(registry_path.parent)
+            _verified_canonical_registry(registry_path)
+            return record
 
     def _start_for_interruption_test(
         self,
@@ -847,10 +985,70 @@ def _recover_interrupted_starts(
 def ledger_trial_multiplicity(ledger_path: Path) -> int:
     """Return the local ledger's count of unique durable start attempts.
 
-    This is not the ADR-0013 global research multiplicity.
+    This is one campaign ledger's own count, not the ADR-0013 global research
+    multiplicity; :func:`registered_trial_count` derives that one from the registry.
     """
 
     return _ledger_trial_multiplicity_from_records(_verified_records(ledger_path))
+
+
+def registered_trial_count(registry_ledger_path: Path, *, strategy_id: str | None = None) -> int:
+    """The canonical ADR-0013 multiple-testing N, derived from registered runs.
+
+    Nothing here is self-reported: the count is every ``experiment_run`` record with
+    ``touched_data`` in the verified hash-chained registry, optionally scoped to one
+    strategy. An unverifiable registry refuses rather than returning a number.
+    """
+
+    path = _require_canonical_registry_path(registry_ledger_path)
+    thread_lock = _thread_lock_for(path)
+    with thread_lock, registry_lock(path):
+        return trial_count(_verified_canonical_registry(path), strategy_id=strategy_id)
+
+
+def _require_canonical_registry_path(registry_ledger_path: Path | None) -> Path:
+    """Refuse an unwired or unprovisioned canonical registry: no registry, no trial."""
+
+    if registry_ledger_path is None:
+        raise CanonicalRegistryUnavailable(
+            "no canonical ADR-0013 registry is wired; a Five-Tool attempt that cannot be "
+            "counted may not start"
+        )
+    if not registry_ledger_path.parent.is_dir():
+        raise CanonicalRegistryUnavailable(
+            f"canonical ADR-0013 registry root {registry_ledger_path.parent} is absent; "
+            "the registry is provisioned deliberately, never conjured by a research run"
+        )
+    return registry_ledger_path
+
+
+def _verified_canonical_registry(registry_ledger_path: Path) -> RegistryLedger:
+    """Open the canonical registry only if its chain and head anchor still verify."""
+
+    try:
+        ledger = RegistryLedger(registry_ledger_path)
+        ok, detail = ledger.verify()
+    except (AuditLogCorruptionError, OSError, ValueError) as error:
+        raise CanonicalRegistryUnavailable(
+            f"canonical ADR-0013 registry {registry_ledger_path} is unreadable: "
+            f"{type(error).__name__}"
+        ) from error
+    if not ok:
+        raise CanonicalRegistryUnavailable(
+            f"canonical ADR-0013 registry {registry_ledger_path} failed verification: {detail}"
+        )
+    return ledger
+
+
+def _missing_capability_phrase() -> str:
+    """Name every capability a ready manifest still cannot substitute for."""
+
+    names = MISSING_CERTIFIED_RESEARCH_CAPABILITIES
+    if not names:  # pragma: no cover - the campaign is blocked on at least one capability
+        raise FiveToolTrialError("the missing-capability list may not be empty while blocked")
+    if len(names) == 1:  # pragma: no cover - three capabilities remain
+        return names[0]
+    return f"{', '.join(names[:-1])}, and {names[-1]}"
 
 
 def _ledger_trial_multiplicity_from_records(records: Sequence[AuditRecord]) -> int:
@@ -883,6 +1081,8 @@ def _seal_and_build_ledger_local_inputs(
     ledger_path: Path,
     binding: _CampaignBinding,
     reviewed_variance: ReviewedVarianceEvidence,
+    *,
+    registry_ledger_path: Path | None,
 ) -> tuple[LedgerLocalScoreInput, ...]:
     if not isinstance(reviewed_variance, ReviewedVarianceEvidence):
         raise TypeError("reviewed_variance must be ReviewedVarianceEvidence")
@@ -910,6 +1110,18 @@ def _seal_and_build_ledger_local_inputs(
         ledger_trial_count = _ledger_trial_multiplicity_from_records(records)
         if ledger_trial_count < 1:
             raise FiveToolTrialError("cannot seal a campaign without durable attempts")
+        # Cross-ledger completeness: the canonical registry must have counted at least
+        # every durable attempt this campaign made. A campaign whose attempts were not
+        # registered cannot be sealed, so the derived N can never be quietly short.
+        registered = registered_trial_count(
+            _require_canonical_registry_path(registry_ledger_path),
+            strategy_id=binding.strategy_id,
+        )
+        if registered < ledger_trial_count:
+            raise FiveToolTrialError(
+                "canonical ADR-0013 registry under-counts this campaign: registered="
+                f"{registered} < durable attempts={ledger_trial_count}"
+            )
         score_inputs_digest = _score_rows_digest(score_rows)
         prior_head = records[-1].record_hash if records else "0" * _SHA256_HEX_LENGTH
         seal = ledger.append(
@@ -1399,8 +1611,7 @@ def _validate_campaign_manifest(
     if ready and not _allow_synthetic_ready_for_tests:
         raise CampaignExecutionBlocked(
             "EXECUTION_READY is not implemented in public v1: a manifest cannot replace "
-            "the missing certified reader, replay artifacts, owner evidence, and ADR-0013 "
-            "global-registry capability"
+            f"the missing {_missing_capability_phrase()} capabilities"
         )
 
     strategy = _required_mapping(manifest, "strategy")
