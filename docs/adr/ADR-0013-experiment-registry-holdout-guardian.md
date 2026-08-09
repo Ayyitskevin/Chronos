@@ -242,6 +242,23 @@ registration of the runner is a follow-on). Single-writer concurrency is enforce
 file lock. §3's `mediated_holdout_read(ledger, history_root, symbol, ...)` argument order
 is authoritative.
 
+> **Update (2026-08-09) — the trial-count residual is narrowed for one path, not closed.**
+> The Five-Tool trial broker (`src/chronos/research/five_tool_trials.py`) now writes an
+> `experiment_run` record into this registry **before** it starts an attempt and before
+> its reader is called, verifying chain **and** anchor first and refusing the trial when
+> the registry is unwired, unprovisioned, unreadable, or unverifiable — "no registry, no
+> trial". An attempt that dies after opening data is therefore still counted, and a
+> campaign whose attempts were not registered cannot be sealed. Evidence:
+> `tests/safety/test_five_tool_registry_exercised.py`.
+>
+> What is **not** closed: `research/walkforward.py` still calls `register_run` *last*, on
+> purpose — it is handed an already-read series, so it cannot register before the read,
+> and it declines to count a cell that raised mid-statistics. Any run outside both paths
+> still counts only if its caller registers it. The two orderings disagree, deliberately;
+> that disagreement is recorded here and in `docs/limitations.md` rather than resolved by
+> an agent, because changing which runs count changes a frozen multiple-testing input.
+> The registry itself still ships **empty** — this is a capability, not evidence.
+
 ## Consequences
 
 The research plane gains a tamper-evident, anchor-verified registry whose ledger is the
