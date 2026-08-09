@@ -137,6 +137,82 @@ probe proves that counting trials never loads the guardian module at all.
 Suite after this capability: **2767 passed, 1 skipped** (was 2745/1); ruff check, ruff
 format (410 files), and `mypy --strict src/chronos` clean over 232 source files.
 
+### Certified reader — a Five-Tool read proves what it touched, or it is not certified (2026-08-09)
+
+The second of the three non-owner capabilities the manifest names, and the direct closure
+of the residual the previous section disclosed about itself: "the reader is still an
+arbitrary callback that cannot prove what data it touched." Because it could not, every
+registered run recorded `certified_reader: False` **by construction** — a constant field
+shaped like provenance, which is the R-24..R-27 defect class wearing a new costume.
+
+`chronos.research.five_tool.certified_reader` is that field's first real discriminator. A
+`CertifiedDatasetReader` opens a dataset root only under a `CERTIFICATION.json` that binds
+every file to a SHA-256 and a byte length, and binds the dataset to one overall digest that
+is **derived from the bytes** — the SHA-256 of a name- and length-framed canonical payload,
+so renaming, reordering, adding, dropping, or truncating a file all change it. Because that
+overall digest *is* the payload digest, the trial broker's existing "reader bytes must hash
+to the campaign-authorized `data_version`" check now binds the whole certified file set
+without a new code path. Each way the lock can fail refuses with its own message and
+repairs nothing: an absent root or manifest, unreadable JSON, a schema violation, a path
+that escapes the root, a file on disk the manifest never digested, a symbolic link anywhere
+under the root, a digested file missing from disk, bytes that disagree with their declared
+digest or length, a declared dataset digest that disagrees with the bytes, a certified
+dataset that is not the campaign's dataset, and a digest that is not the campaign's
+`dataset_version_lock`.
+
+**Proof, not promise, on both sides of the registration.** Registration still precedes the
+read, so the record written up front is by itself only a commitment: before reading, the
+reader attests from its certification manifest alone (dataset digest, manifest digest,
+every file digest) and the campaign locks are checked there, so a mismatched reader refuses
+*before* the attempt becomes a trial. After the read, the receipt of what was actually
+opened is compared clause by clause against that attestation and against the bytes the
+evaluator is about to see; any disagreement fails the trial closed. `certified_reader: True`
+therefore never accompanies a completed trial that could not be proven. A dataset tampered
+with between construction and read still costs a counted trial — register-then-read working
+as designed, not a leak.
+
+**The two-directional property is the point.** Only the exact `CertifiedDatasetReader` type
+earns the claim — a subclass may override `__call__`, `attest`, or `receipts`, so a subclass
+returning byte-identical certified data still registers `certified_reader: False`. An
+arbitrary callback, a wrapper that appends one uncertified byte, and a reader monkeypatched
+to stop issuing receipts all stay `False` or fail closed. Identical bytes with a weaker
+provenance story get the weaker record.
+
+Composition was asserted rather than assumed. `tests/safety/test_five_tool_holdout_refusal_exercised.py`
+(Track A) and the register-then-read test in `tests/safety/test_five_tool_registry_exercised.py`
+(B.1) are unchanged and passing; a declared holdout is still refused before the reader is
+consulted at all, and the reader independently refuses holdout vocabulary — both as a
+partition request and as a certification-manifest entry, since a certified dataset may
+never declare a holdout partition accessible. A partition the campaign allows but the
+certification manifest does not is refused by the reader with a distinct message: defense in
+depth where the reader is the sole remaining guard.
+`tests/safety/test_five_tool_certified_reader_exercised.py` (39 tests) drives all of it, and
+every conjunct above was verified by reverting it alone and confirming a distinct named
+failure — with the companion Track A and B.1 files still green under each revert, so no
+refusal can pass as another one firing.
+
+**What this is not: nothing was certified.** No `CERTIFICATION.json` exists anywhere under
+`research/` — `research/` is byte-identical — and none was produced for
+`research/data/raw`, whose heterogeneous corpus the manifest already names as unable to
+satisfy its dataset lock. Certifying a dataset means deciding its provenance is acceptable
+and freezing its digest, which is the owner's sourcing decision; `build_certification_manifest`
+attests identity only and can no more vouch for provenance than `sha256sum` can. Every
+dataset in the tests lives in a pytest temporary directory. The campaign manifest stays
+`blocked_until_identity_locks_resolve` and its blocker list is untouched. The
+`EXECUTION_READY` refusal now names exactly **two** remaining capabilities — replay
+artifacts and owner evidence — built from `MISSING_CERTIFIED_RESEARCH_CAPABILITIES`, each
+still backed by a test that independently observes its absence; the former
+"no certified-reader module" absence proof is replaced by a capability check rather than
+deleted. A subprocess probe proves a certified read never loads the holdout guardian.
+
+**Disclosed residual.** The certification manifest authorizes a partition *label*; it does
+not carve holdout bars out of a dataset that contains them. A certified dataset must
+therefore not contain holdout bytes, which is part of what the owner decides when
+certifying one.
+
+Suite after this capability: **2805 passed, 1 skipped** (was 2767/1); ruff check, ruff
+format (412 files), and `mypy --strict src/chronos` clean over 233 source files.
+
 ## [Unreleased] — M12: the handoff library, document truth, and finding 1 (2026-08-02)
 
 Nine merged PRs across one day. The theme is not new capability — it is making the

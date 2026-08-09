@@ -66,31 +66,39 @@ collected). Companion gate baselines, same date: `mypy src/chronos` → "Success
 issues found in **218** source files"; `ruff format --check .` → "**379** files already
 formatted"~~
 
-> **Corrected 2026-08-09.** `pytest -q` → ~~**2745 passed, 1 skipped**~~ **2767 passed,
-> 1 skipped, ~2 minutes** (2768 collected). Companion gate baselines, same date:
-> `mypy --strict src/chronos` → "Success: no issues found in **232** source files";
-> `ruff format --check .` → ~~"**409** files already formatted"~~ "**410** files already
-> formatted". The jump has three causes, two of them landing on this date: M12 carried
-> the suite to **2543 passed / 1 skipped** at `721d7f1` (CHANGELOG M12) without this row
-> being updated; the Five-Tool research slice plus its merge-review tests took it to
-> **2745**; and the canonical ADR-0013 registry integration added the last **22**. The
-> three new safety files across those two landings are
+> **Corrected 2026-08-09.** `pytest -q` → ~~**2745 passed, 1 skipped**~~ ~~**2767
+> passed, 1 skipped**~~ **2805 passed, 1 skipped, ~2 minutes** (2806 collected).
+> Companion gate baselines, same date: `mypy --strict src/chronos` → "Success: no issues
+> found in ~~**232**~~ **233** source files"; `ruff format --check .` →
+> ~~"**409** files already formatted"~~ ~~"**410**"~~ "**412** files already formatted".
+> The jump has four causes, three of them landing on this date: M12 carried the suite to
+> **2543 passed / 1 skipped** at `721d7f1` (CHANGELOG M12) without this row being
+> updated; the Five-Tool research slice plus its merge-review tests took it to **2745**;
+> the canonical ADR-0013 registry integration added **22**; and the certified-reader
+> capability added the last **38** (39 new tests, minus one parametrized case that
+> disappeared when the missing-capability list went from three names to two). The four
+> new safety files across those three landings are
 > `test_five_tool_holdout_refusal_exercised.py`, `test_five_tool_inert_fields_disclosed.py`,
-> and `test_five_tool_registry_exercised.py`. Intermediate numbers are struck rather than
-> deleted: 2489 is what a session running against `47a8d72` would still observe, and 2745
-> is what one running against `5871338` would.
+> `test_five_tool_registry_exercised.py`, and
+> `test_five_tool_certified_reader_exercised.py`. Intermediate numbers are struck rather
+> than deleted: 2489 is what a session running against `47a8d72` would still observe,
+> 2745 is what one running against `5871338` would, and 2767 is what one running against
+> `5b0bce7` would.
 
 The format count includes the five `.claude/skills` scripts, which sit inside `ruff`'s
 repo-wide scope. This section is the authoritative numeric baseline — other skills state
-the loose shape and cross-reference here. Layout under `/home/user/Chronos/tests/`:
+the loose shape and cross-reference here. Layout under `/home/user/Chronos/tests/`
+(**collected counts corrected 2026-08-09**: the previous column was last true at
+`47a8d72` and had drifted through M12 and the Five-Tool landings; re-derive with
+`.venv/bin/pytest -q --collect-only tests/<dir>`):
 
 | Directory | Collected | What lives there |
 |---|---|---|
-| `tests/unit/` | 1461 | Wheel-dashboard subsystem units: brokers, reconciliation, risk, orders, settings, UI models, histdata, SKB, research stats. No `__init__.py`. |
-| `tests/integration/` | 202 | FastAPI API tests (demo/live/orders/strategy), order pipeline, crypto pipeline, Streamlit smoke, terminal API, `test_migrations.py`, `test_live_submission.py` (ten-gate walk), opt-in `test_ibkr_smoke.py`. |
-| `tests/safety/` | 561 | The safety acceptance/structural suite — the crown jewels, itemized below. |
+| `tests/unit/` | ~~1461~~ **1631** | Wheel-dashboard subsystem units: brokers, reconciliation, risk, orders, settings, UI models, histdata, SKB, research stats. No `__init__.py`. |
+| `tests/integration/` | ~~202~~ **208** | FastAPI API tests (demo/live/orders/strategy), order pipeline, crypto pipeline, Streamlit smoke, terminal API, `test_migrations.py`, `test_live_submission.py` (ten-gate walk), opt-in `test_ibkr_smoke.py`. |
+| `tests/safety/` | ~~561~~ **675** | The safety acceptance/structural suite — the crown jewels, itemized below. |
 | `tests/platform_unit/` | 226 | Deterministic strategy-platform units: engine guards, ledgers, promotion, sim broker, state machine, `test_property_invariants.py` (hypothesis). |
-| `tests/parity/` | 27 | Incremental-vs-batch and indicator reference parity. |
+| `tests/parity/` | ~~27~~ **53** | Incremental-vs-batch and indicator reference parity. |
 | `tests/chaos/` | 13 | Fault injection through the deterministic platform's backtest/execution/service pipelines. |
 | `tests/support/` | — | Shared fakes: `order_fakes.py` (`FakeBroker`, `paper_settings`, `option_contract`, `stock_contract`), `histdata_fakes.py`, `options_fakes.py`, `terminal_harness.js` (node:vm harness). |
 
@@ -385,9 +393,9 @@ facts and how to re-verify each (all read-only):
 
 | Volatile fact | Re-verify with |
 |---|---|
-| ~~2489 passed / 1 skipped, ~2 min~~ ~~2745 passed~~ **corrected 2026-08-09: 2767 passed / 1 skipped** (see the §2 correction note) | `.venv/bin/python -m pytest -q` (per README Setup) |
-| ~~mypy 218 source files; format 379 files~~ **corrected 2026-08-09: mypy 232; format 410** (incl. the 5 `.claude/skills` scripts) | `.venv/bin/mypy src/chronos` ; `.venv/bin/ruff format --check .` |
-| Per-directory counts (1461/202/561/226/27/13) | `.venv/bin/python -m pytest tests/<dir> --collect-only -q \| tail -1` |
+| ~~2489 passed / 1 skipped, ~2 min~~ ~~2745 passed~~ ~~2767 passed~~ **corrected 2026-08-09: 2805 passed / 1 skipped** (see the §2 correction note) | `.venv/bin/python -m pytest -q` (per README Setup) |
+| ~~mypy 218 source files; format 379 files~~ ~~mypy 232; format 410~~ **corrected 2026-08-09: mypy 233; format 412** (incl. the 5 `.claude/skills` scripts) | `.venv/bin/mypy src/chronos` ; `.venv/bin/ruff format --check .` |
+| Per-directory counts ~~(1461/202/561/226/27/13)~~ **corrected 2026-08-09: (1631/208/675/226/53/13)** | `.venv/bin/python -m pytest tests/<dir> --collect-only -q \| tail -1` |
 | The single skip is the IBKR smoke test | `.venv/bin/python -m pytest -q -ra \| grep -A1 SKIPPED` |
 | Four CI gates and CI env | `sed -n '1,50p' .github/workflows/ci.yml` |
 | Only marker is `ibkr`; strict flags | `sed -n '61,68p' pyproject.toml` |

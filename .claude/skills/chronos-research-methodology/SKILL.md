@@ -242,11 +242,28 @@ research_val.json only).
   - **FUTURE (Phase 3, NOT yet implemented)**: one brokered research reader where
     "every data touch writes `trial_started` before bytes are returned; completed and
     failed trials both count", plus **order-invariant campaign scoring** using one
-    final global trial count (docs/VISION_COMPLETION_PLAN.md:222-226). No
-    `trial_started` token exists in src/ today. When that lands, both completed AND
+    final global trial count (docs/VISION_COMPLETION_PLAN.md:222-226). ~~No
+    `trial_started` token exists in src/ today.~~ When that lands, both completed AND
     failed trials must count — do NOT port the current register-on-success semantics
     into the brokered reader, and do not claim order-invariance for today's campaign
     (today's per-cell N is running-cumulative and order-fixed instead).
+
+    > **Correction (2026-08-09).** The struck sentence was already false when the
+    > Five-Tool slice merged and is now doubly so. `trial_started` exists
+    > (`src/chronos/research/five_tool_trials.py`, `KIND_TRIAL_STARTED`), the Five-Tool
+    > path **registers in the canonical ADR-0013 registry before it reads** and counts
+    > completed *and* failed attempts, and its reader can be a **certified** one —
+    > `chronos.research.five_tool.certified_reader.CertifiedDatasetReader`, digest-locked
+    > to a certification manifest, whose read is re-checked against its pre-read
+    > attestation so `data_hashes.certified_reader` is a proven claim. Exercised:
+    > `tests/safety/test_five_tool_registry_exercised.py`,
+    > `tests/safety/test_five_tool_certified_reader_exercised.py`. **Still true and still
+    > load-bearing:** this is the Five-Tool path only — `walkforward.py`/`campaign.py`
+    > keep register-last semantics and running-cumulative, order-fixed N; the registry
+    > ships **empty**; **no dataset has been certified** (no `CERTIFICATION.json` under
+    > `research/`); and the campaign manifest stays blocked on replay artifacts and
+    > owner evidence. So Phase-3 multiplicity and order-invariant scoring are still not
+    > available — the plumbing arrived, the evidence did not.
 - **Holdout guardian** (src/chronos/registry/holdout_guardian.py): unlock requires the
   owner-typed module-constant phrase `REQUIRED_HOLDOUT_UNLOCK_PHRASE = "I ACCEPT
   BURNING THIS HOLDOUT"` (:40), compared with `hmac.compare_digest` (:54-57), never
@@ -477,7 +494,8 @@ Written 2026-08-02 against commit `47a8d72` on branch
 | QQQ burn disclosure unchanged | `sed -n '184,214p' docs/RESEARCH_REPORT.md` |
 | `--stage all` still excludes final | `sed -n '19,23p;259,260p' scripts/run_research.py` |
 | Unlock phrase mechanics | `grep -n "REQUIRED_HOLDOUT_UNLOCK_PHRASE\|compare_digest" src/chronos/registry/holdout_guardian.py` |
-| trial_started still unimplemented (Phase 3) | `grep -rn "trial_started" src/ docs/VISION_COMPLETION_PLAN.md` |
+| ~~trial_started still unimplemented (Phase 3)~~ **corrected 2026-08-09: it exists on the Five-Tool path only** (§7 correction note) | `grep -rn "trial_started" src/ docs/VISION_COMPLETION_PLAN.md` |
+| No dataset is certified; the certified reader exists but certifies nothing | `ls src/chronos/research/five_tool/certified_reader.py`; `find research -name CERTIFICATION.json` (→ empty) |
 | Repro round-trip still byte-identical | §9 produce/replay/compare against a /tmp run-dir; expect `"reasons": ["match"]` |
 | Data corpus unchanged | `python3 -c "import json;m=json.load(open('research/data/raw/MANIFEST.json'));print({k:v['row_count'] for k,v in m['files'].items()})"` |
 
