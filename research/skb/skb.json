@@ -1521,7 +1521,7 @@
       "confidence": "high",
       "cycle": "flagship",
       "declaration": "strategy",
-      "deterministic_translation_feasibility": "High for the core decision path. Faithfully translatable with daily/intraday OHLCV plus an aligned benchmark series: regime z-score engine with vol models, hysteresis and confirmation (521-621); Mansfield RS and new-high/low logic (743-758); HTF completed-bar filter (reproduce close[1] of resampled bars); divergence pivot logic (781-823); anchored VWAP with variance bands and stale guard (426-451, 826-851); all entry gates, both side systems, SHORT+/LONG+ Markov gates (fix data start to pin the transition counts); scoring; risk sizing; and a next-bar-open fill model for entries and confirmed-bar discretionary exits. Requires an explicit approximation policy: intra-bar stop/limit fills at chart TF need a tie-break rule (e.g., stop-first conservative) to replace bar magnifier; equity feedback (sizing/halts) is translatable but makes results path-dependent on the fill model; tick slippage becomes a per-fill cost assumption. Not translatable: external input.source override (must be dropped or fed a real series), all display layers. Expect small fill-level divergence from TradingView on bars where a target and stop are both touched; signal-level (entry/exit trigger) parity should be exact.",
+      "deterministic_translation_feasibility": "High for the core decision path. Faithfully translatable with daily/intraday OHLCV plus an aligned benchmark series: regime z-score engine with vol models, hysteresis and confirmation (521-621); Mansfield RS and new-high/low logic (743-758); HTF completed-bar filter (reproduce close[1] of resampled bars); divergence pivot logic (781-823); anchored VWAP with variance bands and stale guard (426-451, 826-851); all entry gates, both side systems, SHORT+/LONG+ Markov gates (fix data start to pin the transition counts); scoring; risk sizing; and a next-bar-open fill model for entries and confirmed-bar discretionary exits. Requires an explicit approximation policy: intra-bar stop/limit fills at chart TF need a tie-break rule (e.g., stop-first conservative) to replace bar magnifier; equity feedback (sizing/halts) is translatable but makes results path-dependent on the fill model; tick slippage becomes a per-fill cost assumption. Not translatable without an explicit supplied series: external input.source overrides; display layers are out of scope. The decision layer is designed for strict closed-bar comparison, but Pine/TradingView agreement remains UNVERIFIED until a genuine owner trace is compared; fill-level divergence is additionally expected where target and stop order cannot be recovered from exported bars.",
       "direction": "bidirectional",
       "disposition": "deferred",
       "disposition_detail": "an executable standalone strategy with a trade direction; portable, not yet ported",
@@ -1545,9 +1545,9 @@
         "Line 607: int_strength is named as int but is a float expression (na branch is float(na)) \u2014 cosmetic/misleading naming only.",
         "Lines 2395-2397 vs 2398-2420: parallel alertcondition and alert() paths let a user double-subscribe the same signal (duplicate notification risk, documented as such, not a compile bug).",
         "Line 404: profit-factor sentinel 999.0 for zero-gross-loss (rendered as infinity at line 406) leaks the literal 999 into any comparison against min_oos_pf_warn \u2014 benign in current use (only >= comparisons) but a magic-number hazard for translation.",
-        "Lines 900-912: daily-loss halt arms on any chart <= 1D including daily charts, where 'daily loss' degenerates to a per-bar loss check; semantics are questionable at exactly 1D (default OFF)."
+        "Lines 900-912: daily-loss halt arms on any chart <= 1D. On a 1D chart, every bar is a new day, so day_start_equity resets to current equity before daily_dd_pct is evaluated; the check is therefore effectively inert at exactly 1D (default OFF), rather than a per-bar loss check."
       ],
-      "lines": 2444,
+      "lines": 2443,
       "pine_version": "6",
       "regime_tags": [],
       "related_scripts": [],
@@ -1591,7 +1591,7 @@
         "Lines 962: long_too_many_up_bars compares long_up_count >= long_up_bars_len where the loop (956-958) counts up-closes over exactly long_up_bars_len comparisons \u2014 condition requires ALL bars up; consistent, but the input name 'Consecutive up-bar window' implies a threshold separate from the window; parameter semantics are conflated (window == threshold).",
         "No compile-blocking defects found: no use-before-declare (atr_val declared line 766 before first use line 889; active_bars_in_regime line 609 before line 617), dwell-array selection deliberately uses if/else instead of the v3.6 ternary (lines 620-624 per header lines 28-29), and division guards are present (lines 674, 1014-1016, 344, 409)."
       ],
-      "lines": 1517,
+      "lines": 1516,
       "pine_version": "6",
       "regime_tags": [],
       "related_scripts": [
@@ -1639,7 +1639,7 @@
         "Lines 1079-1086: blocker telemetry counters increment only under 'wouldbe' (permission_ok and rs_ok) and ignore micro-gate/score blocks, so BLK_*_EXPORT undercounts total blocks \u2014 telemetry-only.",
         "Line 649-652 with markov_sampling = \"Non-overlap lookback\": mk_last_sample_bar gap test uses bar_index distance, so an na-regime spell that resets sampling state (654-656) restarts the stride phase; sample points are not a fixed grid \u2014 statistical nuance, not a bug per se."
       ],
-      "lines": 1507,
+      "lines": 1506,
       "pine_version": "6",
       "regime_tags": [],
       "related_scripts": [
@@ -1686,7 +1686,7 @@
         "Line 43 (fmt): dp > 4 silently falls through to 4 decimals (format string '#.####'); doc promises 0-4 but does not state the >4 clamp \u2014 cosmetic.",
         "No compile-blocking defects found: no use-before-declare, ternary type mismatches, or unguarded divisions (all divisions guarded: lines 47, 51, 76, 83, 92, 175, 190, 206, 246, 262-264)."
       ],
-      "lines": 289,
+      "lines": 288,
       "pine_version": "6",
       "regime_tags": [],
       "related_scripts": [
@@ -1740,7 +1740,7 @@
         "Line 320: nz(basket_inplay_count[1]) means the first confirmed bar with any in-play symbol always fires the count-up alert on script load/chart open \u2014 a spurious first-fire.",
         "No compile-level defects found: security barmerge args are keyword-form (lines 140, 145, 214 \u2014 the v1.0 positional bug the header describes is fixed), merge_cells is one-shot guarded (lines 276-279), all divisions guarded."
       ],
-      "lines": 338,
+      "lines": 337,
       "pine_version": "6",
       "regime_tags": [],
       "related_scripts": [
@@ -1787,7 +1787,7 @@
         "Lines 307-320: overlapping alertcondition and alert() paths for the same break events \u2014 duplicate notification risk if both are armed.",
         "Line 121: \"Chart ATR (v1.0)\" gap option divides the overnight gap by a chart-TF ATR that itself contains the gap bar \u2014 acknowledged in header (lines 7-9) as the reason for the v1.1 default, but still selectable."
       ],
-      "lines": 325,
+      "lines": 324,
       "pine_version": "6",
       "regime_tags": [],
       "related_scripts": [
@@ -1834,7 +1834,7 @@
         "Line 93/95: on bar 0 ta.change(time(\"D\")) is na so new_day is na (treated as false) and day_open stays na for the entire first partial day \u2014 benign due to na guards, but shifts warm-up by up to one day.",
         "Line 126: days_seen counts the first (possibly partial) day-change, so 'warmed' can flip after N+1 day boundaries even if the first stored day is a fragment, mildly biasing early sigma."
       ],
-      "lines": 241,
+      "lines": 240,
       "pine_version": "6",
       "regime_tags": [],
       "related_scripts": [
@@ -1879,7 +1879,7 @@
         "Lines 104-105: up_run/dn_run update only on confirmed bars (97-99) while range_spike/rsi_v evaluate intrabar, so exh_* can be true intrabar with stale run counts; harmless because all decision surfaces are confirm-gated, but the raw exh_* series is mixed-state.",
         "No compile-blocking issues found; v1.1 changelog fix (keyword barmerge args, lines 88/90) is correctly applied."
       ],
-      "lines": 155,
+      "lines": 154,
       "pine_version": "6",
       "regime_tags": [],
       "related_scripts": [],
@@ -1919,7 +1919,7 @@
         "Edge case: on the very first chart day, y_abs_ga finalization (lines 130-132) correctly skips na, and gap_dir==0 with gap_class>0 is impossible (class>0 requires |gap_atr|>=0.25), so the dir!=0 guard at line 97 is dead-but-harmless.",
         "Division guards present (pd_close>0 line 75, d_atr>0 line 76, n>0 throughout) \u2014 no div-by-zero found."
       ],
-      "lines": 223,
+      "lines": 222,
       "pine_version": "6",
       "regime_tags": [],
       "related_scripts": [],
@@ -1960,7 +1960,7 @@
         "Line 118: vold_side uses only the current bar's VOLD sign rather than any session-persistent measure, so one bar's VOLD flip can move dir and up to 20 score points intraday \u2014 by design but a fragility worth noting for translation parity tests.",
         "No compile-blocking defects found: no use-before-declare, division guards present (lines 113, 115, 121, 122), ternaries are well-formed."
       ],
-      "lines": 188,
+      "lines": 187,
       "pine_version": "6",
       "regime_tags": [],
       "related_scripts": [],
@@ -2002,7 +2002,7 @@
         "Lines 515-525: alertcondition and alert() duplicate the same signals; enabling both alert types double-fires.",
         "Line 228: na volume coerced to 0 makes AVWAP permanently inactive (vol never > 0 at line 235) on volume-less symbols with no HUD warning for AVWAP specifically (only OSC n/a is mentioned, line 127), silently disabling 2 of 4 triggers plus the value zone."
       ],
-      "lines": 530,
+      "lines": 529,
       "pine_version": "6",
       "regime_tags": [],
       "related_scripts": [
@@ -2048,7 +2048,7 @@
         "Line 74: if a symbol's first chart day has na daily ATR, bin_sz falls back to mintick*10, giving an arbitrarily granular or coarse first-day profile until warm-up completes \u2014 cosmetic, but affects first-day exports.",
         "No timeframe guard: running on D or higher silently produces a one-bar-per-day 'profile' (line 70 boundary) with degenerate POC/VA."
       ],
-      "lines": 233,
+      "lines": 232,
       "pine_version": "6",
       "regime_tags": [],
       "related_scripts": [],
@@ -2089,7 +2089,7 @@
         "Line 205: syminfo.ticker interpolated into the JSON payload without escaping; malformed JSON possible only for tickers containing double quotes (rare).",
         "Daily-chart degeneracy: on TF >= D every bar sets new_day (line 80), so every episode expires unscored on its first evaluation bar \u2014 the scorer silently never accumulates n; no guard or runtime.error warns the user."
       ],
-      "lines": 210,
+      "lines": 209,
       "pine_version": "6",
       "regime_tags": [],
       "related_scripts": [
@@ -2134,7 +2134,7 @@
         "Line 115: scan window is the LAST j_max_trades closed trades; per-setup n/net therefore reflect a truncated recent window on very long histories \u2014 intended cap but worth noting for translation parity.",
         "Line 164: BestDep is na when net <= 0, so a losing family with one huge winner shows n/a rather than a dependency figure \u2014 minor analytic blind spot, guarded correctly against divide-by-zero."
       ],
-      "lines": 186,
+      "lines": 185,
       "pine_version": "6",
       "regime_tags": [],
       "related_scripts": [
@@ -2178,7 +2178,7 @@
         "Lines 227-228: single-slot sweep memory (last_sweep_dir/bar) means an opposite-side sweep inside the confluence window erases the prior sweep \u2014 sweep\u2192structure confluence can silently miss valid pairings. Design limitation, undocumented.",
         "Line 341: alert fires with the non-JSON text even when sweep_lvl_hit is na would print 'n/a' \u2014 handled via f_fmt, no crash; noted only for payload consumers."
       ],
-      "lines": 344,
+      "lines": 343,
       "pine_version": "6",
       "regime_tags": [],
       "related_scripts": [],
@@ -2218,7 +2218,7 @@
         "Line 172: unwired-detection heuristic (|avwap_src - close| > 0.5 tick) will falsely treat a genuinely wired AVWAP as unwired on any bar where it happens to equal close within half a tick \u2014 momentary score dropout, not a crash.",
         "Line 335: JSON strings not escaped; safe with current internally-generated content but fragile if tags ever contain quotes."
       ],
-      "lines": 344,
+      "lines": 343,
       "pine_version": "6",
       "regime_tags": [],
       "related_scripts": [
@@ -2261,7 +2261,7 @@
         "Line 156: human-readable alert text can embed 'n/a' via f_fmt for us10y/earnings_yield/pb \u2014 cosmetic only; the JSON branch correctly emits null (line 153).",
         "No compile errors found: no use-before-declare, division guards present at lines 81 (close > 0), 82 (bvps > 0), 101 (hi_52w > 0)."
       ],
-      "lines": 162,
+      "lines": 161,
       "pine_version": "6",
       "regime_tags": [],
       "related_scripts": [],
@@ -2303,7 +2303,7 @@
         "Lines 192-193 + 194: gaps_off benchmark fill means on chart symbols with different trading calendars than SPY the Mansfield RS is computed against stale benchmark closes with no staleness guard.",
         "Line 306: cooldown uses bar_index distance, so on charts with session gaps 'cooldown_bars' means bars, not time \u2014 intended but worth flagging for intraday translation."
       ],
-      "lines": 578,
+      "lines": 577,
       "pine_version": "6",
       "regime_tags": [],
       "related_scripts": [
@@ -2348,7 +2348,7 @@
         "Line 205: commit_pct minval 34.0 is safe (3-state max prob >= 33.4%) but exactly 34.0 with near-uniform probabilities makes 'committed' nearly always true at threshold floor \u2014 input-range nit, not a bug.",
         "Line 291: math.min(z_seen, warm_bars) is cosmetic clamping only; z_seen keeps growing unbounded (harmless int)."
       ],
-      "lines": 334,
+      "lines": 333,
       "pine_version": "6",
       "regime_tags": [],
       "related_scripts": [
@@ -2395,7 +2395,7 @@
         "Line 239: rv_ann*100 formatted even when ann_display shows raw path \u2014 no bug, but f_fmt handles na so WARMING rows print 'n/a' rather than erroring.",
         "No compile-blocking defects, no use-before-declare, division guards present (lines 119, 195, 197-201)."
       ],
-      "lines": 266,
+      "lines": 265,
       "pine_version": "6",
       "regime_tags": [],
       "related_scripts": [],
@@ -2435,7 +2435,7 @@
         "Line 165: geometric reference hazard uses 1/mean of the capped 200-spell window; with the shift-based ring the reference drifts as old spells age out \u2014 acknowledged as heuristic in header, not a bug per se.",
         "No compile-blocking defects found; no use-before-declare, division guards present (lines 165, 193, 204)."
       ],
-      "lines": 391,
+      "lines": 390,
       "pine_version": "6",
       "regime_tags": [],
       "related_scripts": [
@@ -2477,7 +2477,7 @@
         "Line 129 maps na obs_z to neutral (0) only when link invalid; however live_ready (line 130) is false when both link invalid and obs_z na, so no counting occurs then \u2014 consistent, no defect; noted to preempt confusion.",
         "No decay/windowing on counts: matrix is all-history cumulative, so 'Adaptive' in the title overstates responsiveness to regime-generating-process drift the header itself warns about (lines 14-15) \u2014 semantic mismatch, not a bug."
       ],
-      "lines": 276,
+      "lines": 275,
       "pine_version": "6",
       "regime_tags": [],
       "related_scripts": [
@@ -2519,7 +2519,7 @@
         "Line 327: hand-concatenated JSON \u2014 a variant_tag or ticker containing a double quote produces invalid JSON payloads (edge case).",
         "Band vs trigger mismatch, disclosed (lines 271-273): plotted band uses post-update sqrt(P+R) while the flag standardizes by predictive sqrt(P_pred+R); the band is an approximation of the trigger distance, not the exact line \u2014 visual only, but a consumer eyeballing band touches will not exactly reproduce flags."
       ],
-      "lines": 333,
+      "lines": 332,
       "pine_version": "6",
       "regime_tags": [],
       "related_scripts": [
@@ -2559,7 +2559,7 @@
       "known_defects": [
         "No functional defects found. Minor notes: line 151 declares _thin_sfx at global scope with a leading underscore (style oddity only, compiles fine); JSON payload (213) uses f_fmt which returns 'n/a' only for na (guarded by explicit na checks, so JSON stays valid); alert usefulness limited by settings-snapshot semantics, explicitly documented at lines 199-203."
       ],
-      "lines": 219,
+      "lines": 218,
       "pine_version": "6",
       "regime_tags": [],
       "related_scripts": [
@@ -2602,7 +2602,7 @@
         "Lines 189-191: O(n) linear scan per confirmed bar, bounded by ring_cap 250 \u2014 performance fine, no defect.",
         "No use-before-declare, division-by-zero (guarded lines 161, 192), or ternary type issues found."
       ],
-      "lines": 258,
+      "lines": 257,
       "pine_version": "6",
       "regime_tags": [],
       "related_scripts": [
@@ -2644,7 +2644,7 @@
         "Line 221: bars_since_rel starts at sentinel 1,000,000 so the 'RELEASED n bars ago' HUD row is correct only after the first release \u2014 no functional harm.",
         "No compile-blocking defects found; no use-before-declare; division guards present (lines 127, 143, 229-232)."
       ],
-      "lines": 297,
+      "lines": 296,
       "pine_version": "6",
       "regime_tags": [],
       "related_scripts": [
@@ -2686,7 +2686,7 @@
         "Line 214: cur_fr for the current chunk early in a chunk is computed on very small n (only guarded against 0), so the gold plot at line 221 is noisy at chunk boundaries \u2014 cosmetic.",
         "Line 137: strict equality of a float source against -1.0/0.0/+1.0 can fail if the linked export plots values with floating-point drift; exports emitting exact int-valued floats are fine, but any transformed export silently drops to the fallback with only a HUD flag."
       ],
-      "lines": 284,
+      "lines": 283,
       "pine_version": "6",
       "regime_tags": [],
       "related_scripts": [
@@ -2728,7 +2728,7 @@
         "Silent zero-volume symbols: nz(volume) (line 163) turns na volume into 0, making tod_sum 0 and rvol_tod na (guarded at line 181) \u2014 safe, but no HUD message distinguishes 'no volume feed' from 'warming'.",
         "Wilson comparison asymmetry (lines 228-231): tilt compares the elevated side's Wilson LOWER bound against the baseline's RAW rate \u2014 the baseline gets no uncertainty treatment, so a noisy small-n baseline can suppress or grant tilt. The header does label the verdict a heuristic (line 47-48), so this is disclosed, not hidden."
       ],
-      "lines": 293,
+      "lines": 292,
       "pine_version": "6",
       "regime_tags": [],
       "related_scripts": [
@@ -2773,7 +2773,7 @@
         "Line 154: trades older than rt_max_report_trades are silently excluded from all statistics including 'net (sample)'; the table does not indicate truncation occurred.",
         "Demo strategy (lines 52-57) has no stop-loss, so the 'avg loss \u2248 1R' framing claimed for suite grafts (lines 27-28) does not hold for the shipped demo \u2014 acknowledged by the REPLACE ME banner."
       ],
-      "lines": 280,
+      "lines": 279,
       "pine_version": "6",
       "regime_tags": [],
       "related_scripts": [
@@ -2815,7 +2815,7 @@
         "Lines 160-174: trades with exactly zero profit are counted in n but in neither wins nor gross loss \u2014 win rate and PF silently treat scratch trades as losses-for-winrate purposes (not a win); minor definitional ambiguity, not a bug.",
         "Line 130: histories longer than cs_max_report_trades are silently truncated to the most recent N trades; the header shows n but does not say 'truncated'."
       ],
-      "lines": 249,
+      "lines": 248,
       "pine_version": "6",
       "regime_tags": [],
       "related_scripts": [
@@ -2857,7 +2857,7 @@
         "Naive inverse-vol ignores correlations \u2014 documented on lines 14-24 and on the HUD (line 215), so a disclosed model limitation rather than a bug.",
         "No compile-risk, use-before-declare, or division-by-zero issues found; divisions guarded at lines 141-149."
       ],
-      "lines": 245,
+      "lines": 244,
       "pine_version": "6",
       "regime_tags": [],
       "related_scripts": [
@@ -2899,7 +2899,7 @@
         "Line 161/165/167: reusing exit id 'DDX' across states correctly modifies the resting order in place \u2014 no defect, noted to preempt a false positive.",
         "No compile errors found: no use-before-declare, switch has a default (line 105), ternaries are parenthesized where needed, division guarded (line 118)."
       ],
-      "lines": 216,
+      "lines": 215,
       "pine_version": "6",
       "regime_tags": [],
       "related_scripts": [
@@ -2941,7 +2941,7 @@
         "Line 150: watch_days (int) pushed into array<float> \u2014 legal implicit widening in v6, not a bug, noted for translators.",
         "Line 125: division guarded (vix3m_c > 0) and line 106 f_fmt guards na \u2014 no division-by-zero or na-format defects found. No use-before-declare or compile risks identified."
       ],
-      "lines": 230,
+      "lines": 229,
       "pine_version": "6",
       "regime_tags": [],
       "related_scripts": [
@@ -2982,7 +2982,7 @@
         "Line 159: worst-bar loss uses raw price change divided by current ATR; on long windows with strong trends/splits-unadjusted data the price-unit change is not comparable to event-time volatility (disclosed in comments, but a real measurement caveat).",
         "Line 225: JSON built by string concatenation \u2014 syminfo.ticker containing a quote character (rare, but some tickers have unusual chars) would break the JSON payload."
       ],
-      "lines": 234,
+      "lines": 233,
       "pine_version": "6",
       "regime_tags": [],
       "related_scripts": [
@@ -3024,7 +3024,7 @@
         "Line 261: JSON gap_atr uses f_fmt which returns the string \"n/a\" (unquoted) if gap_atr were na \u2014 guarded by the ternary emitting null, so no actual malformation; noted as fragile if the guard is ever removed.",
         "No division-by-zero issues found: d_atr>0 (122), win_vol>0 (134), n>0 guards (110, 195, 198) all present."
       ],
-      "lines": 271,
+      "lines": 270,
       "pine_version": "6",
       "regime_tags": [],
       "related_scripts": [
@@ -3066,7 +3066,7 @@
         "Lines 202-203: label text freezes at OR-completion; if the HUD stats later change (they cannot intraday, since counting happens at day start before OR completes \u2014 benign, but the ordering dependence is implicit, lines 126 vs 192).",
         "Line 142: gap-sensitive wall-clock OR window (time - t0) \u2014 a halt inside the opening window yields fewer OR bars than intended with no flag."
       ],
-      "lines": 277,
+      "lines": 276,
       "pine_version": "6",
       "regime_tags": [],
       "related_scripts": [
@@ -3108,7 +3108,7 @@
         "Line 173 (design note, not bug): gate 4 compares gross-profit-ex-best-3 against FULL gross loss, i.e. the stress test removes wins but keeps all losses \u2014 intentional per header (line 19) but asymmetric; documenting so a translator does not \"fix\" it.",
         "Line 34-35: no default_qty declared \u2014 relies on TradingView's 1-contract default, so demo $ statistics are qty-arbitrary; harmless for the placeholder but worth noting for grafts."
       ],
-      "lines": 246,
+      "lines": 245,
       "pine_version": "6",
       "regime_tags": [],
       "related_scripts": [
@@ -3151,7 +3151,7 @@
         "Lines 259/266: the win touch is tested against kf_level already updated with the touch bar's own close (script-order effect), so the 'level touch' target moves within the scoring bar; conservative fail-first ordering limits but does not eliminate the ambiguity when high>=level and low<=fail on the same bar (fail wins by construction, as documented at line 92).",
         "Line 204: last_flag_regime is a single shared var for both sides; if a long flag and a short flag occurred on adjacent bars the alert/HUD regime tag is correct per flag, but pl_idx/ps_idx read it at flag time (lines 273, 279) which is safe only because each side reads it on its own flag bar \u2014 fragile coupling, not an active bug."
       ],
-      "lines": 363,
+      "lines": 362,
       "pine_version": "6",
       "regime_tags": [],
       "related_scripts": [
@@ -3194,7 +3194,7 @@
         "Line 191: link_distinct only rejects all-three-identical series; wiring two identical + one different series that happen to sum to ~100 passes validation.",
         "Line 321: f_bk_wlo returns na*100 for empty buckets \u2014 na-safe but plots na in data-window exports (341-342) until first outcome; harmless, worth knowing downstream."
       ],
-      "lines": 388,
+      "lines": 387,
       "pine_version": "6",
       "regime_tags": [],
       "related_scripts": [
@@ -3237,7 +3237,7 @@
         "Lines 145-146: wired-latch never un-latches; if the user later detaches the source (reverts to close), reference (a) keeps tracking close with an ATR band around it \u2014 a degenerate always-near-price zone that suppresses flags.",
         "Lines 200-201: day_hi/day_lo update even on zero-volume bars while binning skips them, so bin edges can span price the profile has no volume for \u2014 minor, empty bins handled correctly."
       ],
-      "lines": 421,
+      "lines": 420,
       "pine_version": "6",
       "regime_tags": [],
       "related_scripts": [],
@@ -3273,7 +3273,7 @@
       "known_defects": [
         "No functional defects found. Minor observations: (1) line 240 evaluates sigma-derived and coverage strings with f_fmt na-guards \u2014 safe; (2) doubled-notification possibility if a user arms both alertcondition (247-248) and the runtime alert() (249-254) for the same breach event; (3) line 174: with use_drift ON, median uses raw mean log return without a -sigma^2/2 adjustment \u2014 internally consistent as a log-space quantile model, but the two drift modes are not on the same convention (disclosed as estimation noise in tooltip, line 74); (4) mu_hat (line 140) is computed on every bar including unconfirmed realtime ticks but is only consumed inside the isconfirmed block, so no repaint leak."
       ],
-      "lines": 259,
+      "lines": 258,
       "pine_version": "6",
       "regime_tags": [],
       "related_scripts": [
@@ -3316,7 +3316,7 @@
         "Lines 120-122 (f_fmt): round-then-divide float formatting can emit artifacts like 1.2000000000000002 in JSON alert payloads; cosmetic, still parseable.",
         "No division-by-zero defects found: line 170 guards rv_ann_pct > 0 before dividing; line 153 requires sig_iv > 0 and T_yrs > 0 via bs_ok (line 152) before dividing by sig_iv*sqT. No use-before-declare; no ternary compile risks observed in v6 syntax."
       ],
-      "lines": 247,
+      "lines": 246,
       "pine_version": "6",
       "regime_tags": [],
       "related_scripts": [],
@@ -3351,7 +3351,7 @@
     "re_frozen_at_utc": "2026-07-17T18:30:00Z"
   },
   "source_hashes": {
-    "pine_findings_json": "01556cca3d53eb84245a71594866751646891e4ff0b7525541380e59bd267562",
+    "pine_findings_json": "72f7788ae7c275ca68862d76185e47bd889b0d30dd70e3fe02de88a90df426f4",
     "results_json": {
       "research_all.json": "2ff002c60d8aebf5c97c117563a3d846e9a3aa23496e1a4f73ed60319827186e"
     },
@@ -3360,6 +3360,6 @@
       "mean_reversion_v1.yaml": "3eef2fa7d87f1c366e6b69dc7e22623a5ae878bd7b1c550dfa1842d2e8183e6a",
       "regime_trend_v1.yaml": "2a708f1fcf4673a4935b86a9ce62743de6c3561ef6424a55b4587ecf1137deea"
     },
-    "strategy_registry_yaml": "bc712e76e89a5bbe0471b729e01e7581fa490ef99e211b5116166060c9a7187e"
+    "strategy_registry_yaml": "2219d0f696bb65a08f50ce5cef46cd8b4a36a491f5dc5bd37c0841f5510bd838"
   }
 }
