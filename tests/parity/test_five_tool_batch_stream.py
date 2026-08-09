@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from functools import cache
 
 import pytest
-from hypothesis import given
+from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from chronos.marketdata.bars import Bar, BarInterval
@@ -20,6 +21,7 @@ from chronos.research.five_tool.models import (
 _START = datetime(2021, 1, 4, 21, tzinfo=UTC)
 
 
+@cache
 def _case(count: int = 36) -> tuple[FiveToolSettings, tuple[FiveToolBarInput, ...]]:
     settings = FiveToolSettings.defaults(
         history_start_utc=_START,
@@ -66,11 +68,29 @@ def _case(count: int = 36) -> tuple[FiveToolSettings, tuple[FiveToolBarInput, ..
     return settings, tuple(inputs)
 
 
+@cache
+def _batch_reference() -> tuple[FiveToolTrace, ...]:
+    """The batch result is invariant across hypothesis examples, so compute it once.
+
+    Every model this touches is a frozen slotted dataclass, so the cached value cannot be
+    mutated by a caller.
+    """
+    batch_settings, inputs = _case()
+    return evaluate_batch(batch_settings, inputs)
+
+
+# `deadline=None` waives hypothesis' per-example wall-clock timer only. Replaying 36 bars
+# through the engine and round-tripping the checkpoint at each boundary lands near the
+# 200 ms default, so the timer measures machine speed rather than the parity property this
+# test asserts. The assertion itself is untouched, and every generated boundary set is
+# still checked. Same rationale and precedent as
+# tests/platform_unit/test_property_invariants.py:319.
+@settings(deadline=None)
 @given(st.lists(st.integers(min_value=1, max_value=35), unique=True, max_size=8))
 def test_arbitrary_serialized_chunk_boundaries_match_batch(boundaries: list[int]) -> None:
-    settings, inputs = _case()
-    expected = evaluate_batch(settings, inputs)
-    engine = FiveToolEngine(settings)
+    case_settings, inputs = _case()
+    expected = _batch_reference()
+    engine = FiveToolEngine(case_settings)
     observed: list[FiveToolTrace] = []
     start = 0
     for stop in sorted({*boundaries, len(inputs)}):
@@ -78,7 +98,7 @@ def test_arbitrary_serialized_chunk_boundaries_match_batch(boundaries: list[int]
             continue
         observed.extend(engine.step(item) for item in inputs[start:stop])
         engine = FiveToolEngine(
-            settings,
+            case_settings,
             state=state_from_json(state_to_json(engine.checkpoint())),
         )
         start = stop
@@ -86,9 +106,9 @@ def test_arbitrary_serialized_chunk_boundaries_match_batch(boundaries: list[int]
 
 
 def test_repeated_runs_are_byte_deterministic() -> None:
-    settings, inputs = _case()
-    first = evaluate_batch(settings, inputs)
-    second = evaluate_batch(settings, inputs)
+    case_settings, inputs = _case()
+    first = evaluate_batch(case_settings, inputs)
+    second = evaluate_batch(case_settings, inputs)
     assert first == second
     assert [trace.state_digest for trace in first] == [trace.state_digest for trace in second]
 

@@ -1,5 +1,88 @@
 # CHANGELOG
 
+## [Unreleased] — the Five-Tool research slice: fidelity and preregistration, no evidence of edge (2026-08-09)
+
+Integration of `codex/five-tool-confluence-v36` — a deterministic research-plane
+translation of the owner's `research/pine/00_five_tool_confluence_aio.pine` (SHA-256
+pinned) — plus the adversarial review that conditioned the merge.
+
+**What this is.** Implementation fidelity and experiment design. A frozen executable
+input contract (`specs/five_tool_confluence_v3_6.yaml`), one causal transition kernel
+shared by batch evaluation, streaming, and checkpoint replay, a strict TradingView
+trace-comparison harness, and a preregistered six-hypothesis falsification contract
+(`docs/FIVE_TOOL_RESEARCH_HYPOTHESES.md`) that registers its rejection tests before any
+data is read.
+
+**What this is not.** It is not evidence that Five-Tool, or any component of it, has
+edge. No hypothesis was tested, no campaign was run, no data was acquired, and the trial
+ledger still ships empty. The campaign manifest
+(`research/five_tool_v3_6_campaign_manifest.json`) stays
+`blocked_until_identity_locks_resolve` with `performance_claims: []` and
+`promotion_authority: none`, and this integration does not unblock it. Its own document
+says the quiet part: "Agreement with the Pine calculation would establish implementation
+fidelity, not alpha." The parity harness runs against a synthetic trace only — no real
+TradingView export exists yet (A-03). QQQ 2022-01 through 2024-01 remains burned and is
+named as contaminated in the manifest; the declared 2026-Q4 holdout is future,
+uncollected, unopened, and forbidden to ordinary research access.
+
+The manifest names the four capabilities that must exist before it can run: a certified
+broker-owned reader, content-addressed replay artifacts, owner-frozen risk/power/benchmark
+evidence, and integration with the canonical ADR-0013 registry so multiplicity is derived
+rather than self-reported. Three are engineering; the owner evidence is not.
+
+### What the adversarial review changed
+
+The burden was on the branch, and two findings survived first contact.
+
+- **The holdout refusal had never fired.** Deleting the entire body of
+  `FiveToolTrialBroker._refuse_holdout` left the full suite green — the R-25/R-26/R-27
+  defect class exactly: a protection control that is implemented, documented, and
+  structurally unobserved. It was invisible because `_validate_identity` runs first and
+  rejects every request the existing tests could build. The refusal is load-bearing only
+  for manifests that are structurally valid yet declare a holdout the identity check
+  cannot distinguish — one carved from the campaign's own `dataset_id`, or one on a custom
+  partition name that manifest validation does not recognise as holdout vocabulary.
+  `tests/safety/test_five_tool_holdout_refusal_exercised.py` now drives both shapes and
+  asserts the outcome that had never been observed: refusal *before* the reader is called
+  and *before* any ledger record exists. Each conjunct was verified by reverting it alone
+  and confirming a distinct failure.
+- **Unread risk, exit, and provenance fields.** `PositionPlan.initial_stop_price`,
+  `.risk_distance`, `.planned_quantity`, `.unallocated_quantity`, the `QuantityPlan`
+  intermediates, and the trace's lookahead-provenance identifiers
+  (`primary_sequence_id`, `benchmark_source_id`, `htf_source_id`) are written and never
+  read back. None can reach an order — the package is import-isolated and the campaign
+  refuses all data — so these are disclosure obligations rather than live defects, and
+  they are now disclosed in the module docstrings and pinned by
+  `tests/safety/test_five_tool_inert_fields_disclosed.py`. A new unread field fails that
+  test until it is classified or removed; a disclosed field that becomes read fails it
+  too, so the disclosure cannot go stale. The provenance identifiers are the audit trail
+  the preregistration's own no-lookahead test will need, so their being unread is a gap to
+  close before a campaign runs, not a decoration to delete.
+
+Verified to fire, not merely to exist: `tests/safety/test_five_tool_isolation.py` was
+exercised by planting a forbidden `chronos.orders` import and, separately, a computed
+`importlib.import_module` evasion — the AST walk, the dynamic-import branch, and the
+subprocess `sys.modules` probe each failed with a distinct message. The blocked-manifest
+refusals in `tests/unit/test_five_tool_trials.py` were exercised the same way: reverting
+the public `EXECUTION_READY` rejection fails
+`test_public_ready_manifest_cannot_authorize_reader_or_ledger` alone, and reverting the
+reader block fails `test_direct_construction_has_no_read_authority` and
+`test_checked_manifest_is_valid_but_blocks_before_reader_and_ledger` on the refusal
+*reason*, not merely on the exception type.
+
+### Drift fixed forward
+
+The branch predated the default tip by ~37 commits. One real failure:
+`test_arbitrary_serialized_chunk_boundaries_match_batch` exceeded hypothesis' 200 ms
+per-example deadline. The batch reference and fixture case are now computed once instead
+of per example, and the deadline — a wall-clock timer measuring machine speed, not the
+parity property — is waived, following the existing precedent at
+`tests/platform_unit/test_property_invariants.py:319`. No assertion was weakened and every
+generated boundary set is still checked.
+
+Suite after integration: **2745 passed, 1 skipped** (was 2543/1 at `721d7f1`); ruff check,
+ruff format, and `mypy --strict src/chronos` clean over 232 source files.
+
 ## [Unreleased] — M12: the handoff library, document truth, and finding 1 (2026-08-02)
 
 Nine merged PRs across one day. The theme is not new capability — it is making the

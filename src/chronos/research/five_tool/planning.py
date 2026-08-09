@@ -4,6 +4,18 @@ This module is deliberately research-only.  It does not import a broker, an orde
 gateway, or any production execution type.  Pine's risk-sizing arithmetic is kept
 separate from the explicitly approximate OHLC fill model so a caller cannot mistake
 chart-bar simulation for executable order logic.
+
+Disclosed inert outputs (AGENTS.md:29-30).  Nothing in ``src/chronos`` reads
+``PositionPlan.initial_stop_price``, ``.risk_distance``, ``.requested_quantity``,
+``.planned_quantity``, ``.unallocated_quantity``, or ``QuantityPlan.risk_quantity``,
+``.cap_quantity``, ``.raw_quantity``.  This module is not exported from the package
+``__init__``, and its only in-package importer (``validation``) takes the ExitReason /
+LegId / PositionSide enums alone, so those values are consumed exclusively by
+``tests/unit/test_five_tool_planning.py``.  ``initial_stop_price`` is an exit field: it
+is translated Pine geometry awaiting the certified campaign that will consume it, and it
+protects nothing today.  The set is pinned by
+``tests/safety/test_five_tool_inert_fields_disclosed.py``; a new unread field fails that
+test until it is disclosed or removed.
 """
 
 from __future__ import annotations

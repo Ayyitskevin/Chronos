@@ -1,4 +1,16 @@
-"""Typed, immutable vocabulary for the Five-Tool research-only vertical slice."""
+"""Typed, immutable vocabulary for the Five-Tool research-only vertical slice.
+
+Disclosed inert trace fields (AGENTS.md:29-30).  The engine populates
+``FiveToolTrace.primary_sequence_id``, ``.benchmark_source_id``, ``.htf_source_id``,
+``.bar_index``, ``.warmup_blockers``, ``.long_setup``, ``.short_setup``, and ``.events``,
+but nothing in ``src/chronos`` reads them back.  The three source identifiers are the
+lookahead-provenance trail the preregistration's common test 10 (timestamp audit,
+no-lookahead) will need, so their being unread is a gap to close before any campaign
+runs, not a decoration to delete.  Whole-trace equality in the parity and determinism
+tests catches nondeterminism only: two runs of the same code agree on a wrong identifier
+exactly as readily as on a right one.  The set is pinned by
+``tests/safety/test_five_tool_inert_fields_disclosed.py``.
+"""
 
 from __future__ import annotations
 
