@@ -589,7 +589,7 @@ def _check_evidence_bundle(
 ) -> AdmissionOutcome | None:
     expected_id = state.expected_evidence_bundle_id
     expected_digest = state.expected_evidence_bundle_digest
-    if expected_id is None or expected_digest is None:
+    if expected_id is None:
         # Deny-by-default: an unknown bundle is refused, and recorded as
         # unevaluated so it can never read as a satisfied check.
         return _fail(
@@ -608,6 +608,12 @@ def _check_evidence_bundle(
             AdmissionRefusal.EVIDENCE_BUNDLE_MISMATCH,
             "the decision cites an evidence bundle the supervisor did not issue for this run",
         )
+    # Exact match, ``None`` included (ADR-0023). ``None`` on both sides is the
+    # supervisor attesting that no bundle digest exists in the placeholder era
+    # and the decision claiming exactly that — a claim of a digest when none
+    # was issued, or of none when one was, is a mismatch like any other. This
+    # is deliberately NOT a pass-when-absent: absence must be attested by the
+    # supervisor's own expectation, never inferred from the decision.
     if provenance.evidence_bundle_digest != expected_digest:
         return _fail(
             checks,

@@ -33,6 +33,7 @@ CONFIG = WorkerConfig(
     anthropic_api_key="sk-test-key-never-logged",
     model="claude-opus-5",
     api_token="token",
+    proposer_token="",
     backend_url="http://127.0.0.1:8000",
     symbols=("SPY", "IWM"),
     kinds=frozenset({"OPEN", "CLOSE", "REDUCE", "HOLD", "CANCEL"}),

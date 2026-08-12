@@ -24,9 +24,10 @@ Four defaults carry their reasoning here rather than in prose elsewhere:
   default is the house rule, and "no symbols configured" must mean "nothing is
   translatable", never "everything is".
 
-The secret and the API token are read here and never logged, never returned in a
-response body, and never included in the digest the bridge writes into the
-proposal's evidence citation.
+The secret, the API token, and the optional proposer credential
+(``CHRONOS_TV_BRIDGE_PROPOSER_TOKEN``, ADR-0023) are read here and never logged,
+never returned in a response body, and never included in the digest the bridge
+writes into the proposal's evidence citation.
 """
 
 from __future__ import annotations
@@ -79,6 +80,10 @@ class BridgeConfig:
     secret: str
     #: The backend's local API token, presented on the outbound proposal POST.
     api_token: str
+    #: The bridge's registered proposer credential (ADR-0023), presented
+    #: alongside the token when set. Empty is the pre-registry posture; a
+    #: registry-on backend refuses proposals that do not carry one.
+    proposer_token: str
     #: Where proposals are POSTed. Loopback-only, enforced.
     ingress_url: str
     #: Where the webhook listener binds.
@@ -149,6 +154,7 @@ def load_config(environ: dict[str, str]) -> BridgeConfig:
     return BridgeConfig(
         secret=secret,
         api_token=api_token,
+        proposer_token=environ.get("CHRONOS_TV_BRIDGE_PROPOSER_TOKEN", "").strip(),
         ingress_url=ingress_url,
         host=environ.get("CHRONOS_TV_BRIDGE_HOST", "").strip() or _DEFAULT_HOST,
         port=_positive_int(environ, "CHRONOS_TV_BRIDGE_PORT", _DEFAULT_PORT),

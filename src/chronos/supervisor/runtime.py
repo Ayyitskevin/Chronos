@@ -95,6 +95,13 @@ class FactGatherer(Protocol):
 #: "no mandate" when the broker was merely unreachable.
 MandateSource = Callable[[], AutonomyMandate | None]
 
+#: Resolves the identity a queued proposal is stamped with (ADR-0023): the
+#: verified proposer_id recorded at enqueue (or ``None`` for pre-registry
+#: rows) and the tick's clock, to the registration's HarnessIdentity — or
+#: ``None``, which the cycle records as a STAMP-stage PROPOSER_UNRESOLVED
+#: refusal rather than guessing an author.
+IdentityResolver = Callable[[str | None, datetime], "queue.HarnessIdentity | None"]
+
 
 @dataclass(frozen=True, slots=True)
 class RuntimeConfig:
@@ -165,10 +172,16 @@ class AutonomyRuntime:
         sinks: tuple[delivery.AlertSink, ...] = (),
         submit: Handoff | None = None,
         gather_instrument: InstrumentGatherer | None = None,
+        resolve_identity: IdentityResolver | None = None,
     ) -> None:
         self._sessions = sessions
         self._config = config
         self._identity = identity
+        # ADR-0023: when a proposer registry is configured, identity is
+        # per-proposal, resolved from the credential the route verified. When
+        # no resolver is wired, every proposal is stamped with the static
+        # `identity` above — the pre-registry posture, unchanged.
+        self._resolve_identity = resolve_identity
         self._mandate_source = mandate_source
         self._gather_facts = gather_facts
         self._gather_instrument = gather_instrument
@@ -310,11 +323,18 @@ class AutonomyRuntime:
             limit=self._config.proposals_per_tick,
         )
         for item in batch:
+            if self._resolve_identity is None:
+                identity: queue.HarnessIdentity | None = self._identity
+            else:
+                # Resolved per proposal AND per tick: a registration revoked or
+                # expired between enqueue and drain must refuse at the moment
+                # authority is exercised, not the moment bytes were received.
+                identity = self._resolve_identity(item.proposer_id, facts.now)
             outcome = run_cycle(
                 item.payload,
                 session=session,
                 mandate=mandate,
-                identity=self._identity,
+                identity=identity,
                 facts=facts,
                 submit=self._submit,
                 gather_instrument=self._gather_instrument,

@@ -47,8 +47,12 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from chronos.api.auth import load_or_create_token
-from chronos.api.autonomy_wiring import autonomy_tick_task, build_autonomy_runtime
+from chronos.api.auth import load_or_create_token, load_proposer_auth
+from chronos.api.autonomy_wiring import (
+    alert_invalid_proposer_registry,
+    autonomy_tick_task,
+    build_autonomy_runtime,
+)
 from chronos.api.dependencies import BackendState
 from chronos.api.reconciliation_loop import reconciliation_task
 from chronos.api.routes.account import router as account_router
@@ -180,6 +184,22 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             read_only=read_only,
         )
         app.state.api_token = load_or_create_token(runtime.settings.backend_token_file)
+        # ADR-0023: the proposal route's authentication posture is resolved
+        # once, at startup, from the owner's registry file — for every
+        # backend, read-only included, because refusing correctly is not a
+        # writer privilege. A configured-but-broken registry refuses all
+        # proposals rather than falling back to the token posture, and the
+        # owner hears about it the way they hear about a broken mandate.
+        proposer_auth = load_proposer_auth(runtime.settings.autonomy_proposers_file)
+        app.state.proposer_auth = proposer_auth
+        if proposer_auth.configured and proposer_auth.registry is None:
+            _logger.error(
+                "Proposer registry is configured but unreadable or invalid; every "
+                "proposal will refuse until the file is fixed",
+                extra={"event": "proposer_registry_invalid", "passed": False},
+            )
+            if not read_only:
+                alert_invalid_proposer_registry(runtime)
         if not read_only:
             # R-24: the boundary re-checks lease ownership in the database
             # immediately before transmitting, instead of trusting the

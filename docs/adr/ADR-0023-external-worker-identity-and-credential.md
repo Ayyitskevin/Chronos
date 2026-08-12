@@ -1,6 +1,14 @@
 # ADR-0023 — External-worker identity and the ingress credential
 
-Status: **proposed — owner decision required.** No `DECISIONS.md` row until accepted.
+Status: ~~**proposed — owner decision required.** No `DECISIONS.md` row until accepted.~~
+**Accepted 2026-08-12 — Option A, owner-directed** ("lets build the worker identity
+protocol next", Kevin, 2026-08-12, skipping the B-then-A sequencing the recommendation
+proposed; building A directly delivers B's credential split as a subset). Recorded as
+D-24. Implemented the same day: the proposer registry
+(`chronos.supervisor.proposers`, `AUTONOMY_PROPOSERS_FILE`), the proposal-only
+`X-Chronos-Proposer-Token` credential, registration-derived provenance stamped at
+drain time, and the digest honesty change (`"0" * 64` → `None`). Every "Requires"
+proof below is exercised in `tests/safety/test_proposer_credentials_exercised.py`.
 
 Date: 2026-08-02
 
@@ -98,6 +106,23 @@ built.
   can currently misuse.
 
 ## Recommendation
+
+> **Superseded by the owner's decision, 2026-08-12.** The owner directed Option A
+> directly; the sequencing argument below is preserved as written because its gating
+> rule still binds (and is now satisfiable: `HarnessIdentity` is no longer a constant
+> once a registry is configured). Two honest bounds of the implementation, disclosed
+> where the acceptance is recorded rather than discovered later:
+>
+> - **Authorship pins by version tuple, not by name.** A mandate's `VersionPins` has
+>   no `proposer_id` field; "a mandate pinned to worker A refuses bridge B" holds
+>   because their seven version fields differ, and two registrations that share an
+>   identical version tuple are indistinguishable to admission check 8. The registry
+>   permits that (only ids and credential hashes must be unique), and
+>   `mandate check` lists every matching registration so the ambiguity is visible.
+> - **Evidence binding is still uniform.** `ProposerRegistration` carries no
+>   evidence-bundle fields; every registered identity stamps the placeholder bundle
+>   id and an honestly-absent digest. The job/evidence protocol remains future work
+>   (see "What this ADR does not decide").
 
 **Option B now, Option A before any autonomous rung above shadow.**
 

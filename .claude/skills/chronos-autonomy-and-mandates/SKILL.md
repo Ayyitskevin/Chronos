@@ -311,14 +311,28 @@ worker calls the Messages API over raw httpx), the worker imports nothing from
 "Chronos ships no model, no provider SDK, and no API key in the broker-holding
 process" (docs/safety.md) stands verbatim, and docs/limitations.md's "there
 never will be a harness inside Chronos" carries a dated in-place correction to
-the same effect. The worker calls IN over `POST /autonomy/proposals`. Every arriving proposal is stamped with the static
+the same effect. The worker calls IN over `POST /autonomy/proposals`. ~~Every arriving proposal is stamped with the static
 `INGRESS_IDENTITY` constant (provider="external-worker", model_id="ingress",
 autonomy_wiring.py:84-94) — so the version-pin check currently authenticates
 "came through the ingress", NOT "produced by the pinned model". The credential
 is the same local API token every mutating route accepts, not a proposal-only
-one (routes/autonomy.py:52-59; limitations.md:340-341). The narrow
-job/evidence/worker-identity protocol is specified at
-VISION_COMPLETION_PLAN.md:157-159 and does not exist yet.
+one~~ **Corrected 2026-08-12 (ADR-0023 Option A accepted, owner-directed;
+D-24/R-48): a proposer registry now exists (`chronos.supervisor.proposers`,
+configured by `AUTONOMY_PROPOSERS_FILE`). Registry unset = the old posture
+verbatim (local token + static `INGRESS_IDENTITY`, whose evidence digest is now
+honestly `None`, not sixty-four zeros). Registry set = the proposal route
+requires a registered, proposal-only `X-Chronos-Proposer-Token` (general token
+refused there; the proposer credential refused on every other mutating route —
+enumerated, not sampled), the verified proposer_id is recorded on the queue row,
+and the drain re-resolves it into the registration's identity at STAMP time —
+so the version-pin check authenticates a registered author, and revocation
+between enqueue and drain refuses (`PROPOSER_UNRESOLVED`). Authorship pins by
+version *tuple*, not by proposer name; evidence binding stays uniform. Proofs:
+`tests/safety/test_proposer_credentials_exercised.py` (15). The same work fixed
+a live inert-ingress defect: `_fingerprint_of` read an attribute `AppRuntime`
+never had, so every real proposal POST had refused 503 `BACKEND_UNSCOPED` since
+M7.** The narrow job/evidence protocol (per-job evidence digest, expiry) is
+specified at VISION_COMPLETION_PLAN.md:157-159 and remains future ADR work.
 
 ## 7. Promotion: the reality vs the ladder
 

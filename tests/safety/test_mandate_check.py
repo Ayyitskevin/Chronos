@@ -42,6 +42,8 @@ from chronos.autonomy import (
 )
 from chronos.cli.main import main
 from chronos.cli.mandate_check import (
+    RegisteredPins,
+    RegistryPosture,
     Severity,
     load_mandate_text,
     review_mandate,
@@ -128,6 +130,7 @@ def _codes(mandate: AutonomyMandate, **kwargs: object) -> dict[str, Severity]:
         expected_fingerprint=kwargs.pop("expected_fingerprint", _FINGERPRINT),  # type: ignore[arg-type]
         fingerprint_source="test",
         ingress_pins=kwargs.pop("ingress_pins", dict(_INGRESS_PINS)),  # type: ignore[arg-type]
+        registry=kwargs.pop("registry", None),  # type: ignore[arg-type]
     )
     assert not kwargs, f"unexpected kwargs {sorted(kwargs)}"
     return {finding.code: finding.severity for finding in findings}
@@ -249,6 +252,60 @@ def test_unavailable_pins_are_reported_as_skipped_not_as_agreeing() -> None:
     codes = _codes(_shadow(), ingress_pins=None)
     assert "pins-check-skipped" in codes
     assert "version-pins-agree" not in codes
+
+
+def _registered(proposer_id: str, *, current: bool = True, **overrides: str) -> RegisteredPins:
+    return RegisteredPins(
+        proposer_id=proposer_id,
+        pins={**_INGRESS_PINS, "provider": "anthropic", "model_id": "claude-worker", **overrides},
+        current=current,
+    )
+
+
+def test_with_a_registry_the_pins_are_compared_against_registrations_not_the_ingress() -> None:
+    """ADR-0023: registry-on flips what the pins must agree with.
+
+    A mandate pinned to a registered author is correct even though it disagrees
+    with the static ingress stamp — and the old comparison would have called it
+    BLOCKING, which is exactly the wrong-reference defect the seam carries.
+    """
+
+    mandate = _shadow(versions=_pins(provider="anthropic", model_id="claude-worker"))
+    registry = RegistryPosture(path="proposers.json", proposers=(_registered("claude-worker"),))
+    codes = _codes(mandate, registry=registry)
+    assert codes["version-pins-authorize"] is Severity.NOTE
+    assert "version-pin-mismatch" not in codes
+    assert "version-pins-agree" not in codes
+
+
+def test_pins_matching_no_registration_are_blocking_under_a_registry() -> None:
+    # The template's static pins, met by a registry that registers real authors:
+    # nothing can propose under this grant.
+    registry = RegistryPosture(path="proposers.json", proposers=(_registered("claude-worker"),))
+    codes = _codes(_shadow(), registry=registry)
+    assert codes["version-pins-authorize-nobody"] is Severity.BLOCKING
+
+
+def test_pins_matching_only_a_stale_registration_are_reported() -> None:
+    mandate = _shadow(versions=_pins(provider="anthropic", model_id="claude-worker"))
+    registry = RegistryPosture(
+        path="proposers.json", proposers=(_registered("claude-worker", current=False),)
+    )
+    codes = _codes(mandate, registry=registry)
+    assert codes["authorized-proposer-stale"] is Severity.IMPORTANT
+    assert "version-pins-authorize" not in codes
+
+
+def test_a_configured_but_invalid_registry_is_reported_not_fallen_back_from() -> None:
+    codes = _codes(_shadow(), registry=RegistryPosture(path="proposers.json", proposers=None))
+    assert codes["proposer-registry-invalid"] is Severity.IMPORTANT
+    assert "version-pins-agree" not in codes
+    assert "version-pin-mismatch" not in codes
+
+
+def test_an_empty_registry_is_reported_as_the_lockdown_it_is() -> None:
+    codes = _codes(_shadow(), registry=RegistryPosture(path="proposers.json", proposers=()))
+    assert codes["proposer-registry-empty"] is Severity.IMPORTANT
 
 
 def test_a_limit_written_into_an_inert_field_is_reported() -> None:

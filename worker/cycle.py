@@ -33,6 +33,10 @@ _logger = logging.getLogger("chronos.worker.cycle")
 #: The backend enqueues and returns; a slow answer means something is wrong.
 FORWARD_TIMEOUT_SECONDS = 15.0
 
+#: The proposer-credential header (ADR-0023), sent on the proposal POST when
+#: the worker is registered. Must match the backend's ``chronos.api.auth``.
+PROPOSER_HEADER = "X-Chronos-Proposer-Token"
+
 
 class CycleOutcome(enum.Enum):
     """What one cycle did. Every member but FORWARDED is a kind of refusal."""
@@ -86,11 +90,18 @@ def run_cycle(
 def _forward(
     config: WorkerConfig, backend: httpx.Client, payload: str, *, kind: str
 ) -> CycleOutcome:
+    # Both credentials ride along when both exist: the local token satisfies a
+    # pre-registry backend, and a registry-on backend judges the proposer
+    # credential alone (ADR-0023) — so the worker works under either posture
+    # without knowing which one the backend is in.
+    headers = {TOKEN_HEADER: config.api_token, "Content-Type": "application/json"}
+    if config.proposer_token:
+        headers[PROPOSER_HEADER] = config.proposer_token
     try:
         response = backend.post(
             f"{config.backend_url}/autonomy/proposals",
             content=payload.encode("utf-8"),
-            headers={TOKEN_HEADER: config.api_token, "Content-Type": "application/json"},
+            headers=headers,
             timeout=FORWARD_TIMEOUT_SECONDS,
         )
     except httpx.HTTPError as error:

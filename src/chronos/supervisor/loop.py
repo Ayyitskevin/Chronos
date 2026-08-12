@@ -97,9 +97,11 @@ class CycleFacts:
     account_id: str
     now: datetime
     process_generation: int
-    #: The bundle issued to the worker for this run, and its digest.
+    #: The bundle issued to the worker for this run, and its digest. The
+    #: digest is ``None`` in the placeholder era (ADR-0023): absence is
+    #: attested as absence, never as sixty-four zeros.
     evidence_bundle_id: str
-    evidence_bundle_digest: str
+    evidence_bundle_digest: str | None
     market_data: MarketDataEvidence
     account: AccountEvidence
     quote: QuoteEvidence
@@ -180,7 +182,7 @@ def run_cycle(
     *,
     session: Session,
     mandate: AutonomyMandate | None,
-    identity: queue.HarnessIdentity,
+    identity: queue.HarnessIdentity | None,
     facts: CycleFacts,
     submit: Handoff | None = None,
     gather_instrument: InstrumentGatherer | None = None,
@@ -211,6 +213,27 @@ def run_cycle(
         proposal = parsed.proposal
 
     # --- stamp -------------------------------------------------------------
+    # An unresolved identity is a STAMP-stage refusal, not an exception: the
+    # caller could not say who proposed (ADR-0023 — the credential no longer
+    # resolves to a current registration, or a pre-registry row met a
+    # registry-on runtime), and a decision that cannot be attributed is never
+    # judged. Refusing here rather than stamping a guessed identity is the
+    # fail-closed direction: misattribution in a hash-chained journal would be
+    # worse than a recorded refusal.
+    if identity is None:
+        return _record(
+            session,
+            facts,
+            CycleOutcome(
+                stage=CycleStage.STAMP,
+                refusal="PROPOSER_UNRESOLVED",
+                detail=(
+                    "the proposal's credential does not resolve to a current registered "
+                    "proposer, so identity cannot be stamped; re-registering or renewing "
+                    "the proposer is an owner act"
+                ),
+            ),
+        )
     try:
         decision = queue.accept(
             proposal,

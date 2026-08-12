@@ -108,11 +108,41 @@ forwarded proposal somewhere to be judged; and any mode beyond SHADOW, which
 stays behind the ADR-0025 mechanical-readiness checklist (funding, typed loss
 limits, the read-only gateway campaign, paper floor, kill drill).
 
-Two honest limits worth knowing (full list in ADR-0027 §5): provenance cannot
+Two honest limits worth knowing (full list in ADR-0027 §5): ~~provenance cannot
 yet tell the worker from the TradingView bridge from any other local
 token-holder — the evidence-citation kind is the distinguishing mark until the
-ADR-0023 worker-identity protocol lands; and nothing pins the policy file yet,
-so record policy edits in git if you want your experiments attributable.
+ADR-0023 worker-identity protocol lands~~ *(corrected 2026-08-12: ADR-0023
+landed — register the worker and its proposals are stamped with its own
+identity; see the section below)*; and nothing pins the policy file's *content*
+yet — the registration's `prompt_version` is an owner-typed label you should
+bump on each policy edit, and recording edits in git is still what makes
+experiments attributable.
+
+## Registering the worker (ADR-0023)
+
+With the backend's `AUTONOMY_PROPOSERS_FILE` unset, the worker authenticates
+with the local API token and nothing here applies. Once the owner configures a
+proposer registry, the proposal route refuses the general token and the worker
+must present its own registered credential:
+
+1. Mint one: `python -m chronos.cli proposer mint --proposer-id claude-worker
+   --provider anthropic --model-id claude-opus-5 --expires-days 90`. The
+   credential prints exactly once; the registration entry holds only its
+   SHA-256.
+2. Paste the printed registration into the registry file the backend's
+   `AUTONOMY_PROPOSERS_FILE` names, and restart the backend.
+3. Put the credential in the worker's environment as
+   `CHRONOS_WORKER_PROPOSER_TOKEN`. It rides only the proposal POST (evidence
+   reads stay token-only), alongside the API token, so the worker works under
+   either backend posture.
+
+The mandate's version pins then bind to this registration's values — author a
+mandate whose `versions` block matches what you minted, and check it with
+`python -m chronos.cli mandate check`, which is registry-aware. Renewal after
+expiry is a fresh `mint` plus a registry edit: an expired registration refuses,
+including for proposals already queued (`CHRONOS_WORKER_PROPOSER_TOKEN` is an
+environment variable of this separate process, so it deliberately does not
+appear in the backend's `.env.example`).
 
 ## Stopping it
 

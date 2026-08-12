@@ -188,6 +188,17 @@ def test_the_restated_token_header_matches_the_backend() -> None:
     assert TOKEN_HEADER == auth._TOKEN_HEADER
 
 
+def test_the_restated_proposer_header_matches_the_backend() -> None:
+    """Same hazard, one credential over (ADR-0023): a silent rename on either
+    side would make every registry-on forward 401 forever, with the bridge
+    still green because its tests inject the forwarder."""
+
+    from chronos.api import auth
+    from chronos.bridge.app import PROPOSER_HEADER
+
+    assert PROPOSER_HEADER == auth._PROPOSER_HEADER
+
+
 def test_the_bridge_never_emits_a_naked_short_option_strategy() -> None:
     """ADR-0016 §6, restated where an alert author could otherwise reach it."""
 

@@ -66,7 +66,7 @@ from chronos.autonomy import AITradeDecision, AutonomyMandate, TradableAssetClas
 from chronos.domain.models import Instrument, MarketQuote
 from chronos.orders.intent import WheelOrderIntent
 from chronos.runtime import AppRuntime
-from chronos.supervisor import alerts, delivery, durable, queue
+from chronos.supervisor import alerts, delivery, durable, proposers, queue
 from chronos.supervisor.admission import MarketDataEvidence
 from chronos.supervisor.compiler import QuoteEvidence
 from chronos.supervisor.loop import CycleFacts, Handoff, InstrumentFacts
@@ -91,7 +91,9 @@ INGRESS_IDENTITY = queue.HarnessIdentity(
     decision_schema_version="1",
     policy_version="1",
     evidence_bundle_id="owner-workspace",
-    evidence_bundle_digest="0" * 64,
+    # No bundle machinery exists yet; absence is attested as absence rather
+    # than as sixty-four zeros that read like a computed digest (ADR-0023).
+    evidence_bundle_digest=None,
 )
 
 
@@ -181,6 +183,73 @@ class RiskRefusedByOrderPlane(RuntimeError):
 
 class ConfirmationRefusedByOrderPlane(RuntimeError):
     """The order plane refused to confirm the intent."""
+
+
+def build_identity_resolver(
+    settings_path: Path | None,
+) -> Callable[[str | None, datetime], queue.HarnessIdentity | None] | None:
+    """The per-proposal identity resolver, or None for the pre-registry posture.
+
+    ADR-0023: identity comes from which credential authenticated. The route
+    records the verified proposer_id on the queue row; this resolver turns it
+    back into the registration's identity at drain time — re-checking currency,
+    because a registration revoked or expired between enqueue and drain must
+    refuse at the moment authority is exercised.
+
+    Fail-closed by shape: with a registry configured, EVERY path that cannot
+    positively resolve — a pre-registry row, an unknown id, a disabled or
+    expired registration, an unreadable file — returns None, which the cycle
+    records as a STAMP-stage refusal. A configured-but-broken registry never
+    falls back to the static identity, because that would let a file error
+    silently reopen anonymous proposing.
+    """
+
+    if settings_path is None:
+        return None
+    loaded = proposers.load_proposer_registry(settings_path)
+    if loaded is None:
+        _logger.error(
+            "Proposer registry %s is unreadable or invalid; every queued proposal "
+            "will refuse at STAMP until it is fixed",
+            settings_path,
+        )
+
+        def _refuse_all(proposer_id: str | None, now: datetime) -> queue.HarnessIdentity | None:
+            return None
+
+        return _refuse_all
+
+    registry = loaded.registry
+    _logger.info(
+        "Proposer registry loaded (digest %s, %d registration(s))",
+        loaded.digest[:16],
+        len(registry.proposers),
+        extra={"event": "autonomy_proposers_loaded"},
+    )
+
+    def _resolve(proposer_id: str | None, now: datetime) -> queue.HarnessIdentity | None:
+        if proposer_id is None:
+            # A row enqueued under the pre-registry posture, met by a
+            # registry-on runtime: refusing beats stamping the static identity
+            # onto a proposal whose author the owner has since required.
+            return None
+        registration = registry.find(proposer_id)
+        if registration is None or not registration.is_current(now):
+            return None
+        return queue.HarnessIdentity(
+            provider=registration.provider,
+            model_id=registration.model_id,
+            model_version=registration.model_version,
+            prompt_version=registration.prompt_version,
+            tool_schema_version=registration.tool_schema_version,
+            decision_schema_version=registration.decision_schema_version,
+            policy_version=registration.policy_version,
+            proposer_id=registration.proposer_id,
+            evidence_bundle_id=INGRESS_IDENTITY.evidence_bundle_id,
+            evidence_bundle_digest=INGRESS_IDENTITY.evidence_bundle_digest,
+        )
+
+    return _resolve
 
 
 def order_plane_handoff(runtime: AppRuntime, *, is_writer: Callable[[], bool]) -> Handoff:
@@ -386,7 +455,35 @@ def build_autonomy_runtime(
         gather_instrument=gatherers.instrument_facts,
         sinks=delivery.default_sinks(settings.autonomy_alert_file),
         submit=order_plane_handoff(runtime, is_writer=is_writer),
+        resolve_identity=build_identity_resolver(settings.autonomy_proposers_file),
     )
+
+
+def alert_invalid_proposer_registry(runtime: AppRuntime) -> None:
+    """CRITICAL owner alert: the proposer registry exists and does not load.
+
+    Raised from startup (the mandate-file precedent): the backend boots and
+    stays able to close positions, the proposal route refuses with 503, the
+    drain refuses at STAMP — and the owner is told without having to look at
+    a log file (R-32).
+    """
+
+    fingerprint = account_fingerprint(runtime.order_management.account_id)
+    try:
+        with runtime.database.sessions.begin() as session:
+            alerts.raise_alert(
+                session,
+                account_fingerprint=fingerprint,
+                severity=alerts.AlertSeverity.CRITICAL,
+                kind="autonomy.proposers_invalid",
+                summary=(
+                    "the proposer registry file is unreadable or invalid; every proposal "
+                    "refuses until it is fixed"
+                ),
+                now=utc_now(),
+            )
+    except Exception:
+        _logger.exception("Could not record the invalid-proposer-registry alert")
 
 
 def _alert_bad_mandate(runtime: AppRuntime, fingerprint: str, now: datetime) -> None:

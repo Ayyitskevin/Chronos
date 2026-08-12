@@ -6,13 +6,19 @@ is no partial start, because a decision worker that boots with an empty
 allowlist "until it is configured" is the inert-control shape this repository
 was burned by four times (R-24..R-27).
 
-The two credentials this process holds are the most dangerous things in it:
+The credentials this process holds are the most dangerous things in it:
 
 - ``ANTHROPIC_API_KEY`` — never logged, never sent anywhere but
   ``api.anthropic.com``, never included in a proposal or an evidence digest.
 - ``CHRONOS_WORKER_API_TOKEN`` — the backend's local API token. The backend URL
   is checked to be loopback so a misconfigured worker cannot hand it to a
   remote host.
+- ``CHRONOS_WORKER_PROPOSER_TOKEN`` — optional: this worker's registered
+  proposer credential (ADR-0023), minted by ``python -m chronos.cli proposer
+  mint`` and required once the backend configures ``AUTONOMY_PROPOSERS_FILE``.
+  Sent only on the proposal POST, only to the same loopback backend. Unset
+  means the pre-registry posture; a registry-on backend will then refuse the
+  proposal with a message naming this variable's header.
 
 ``CHRONOS_WORKER_FORWARD`` defaults to false: out of the box the worker
 gathers, thinks, and logs — and proposes nothing. Turning forwarding on is a
@@ -65,6 +71,9 @@ class WorkerConfig:
     model: str
     #: The backend's local API token, presented on every read and every POST.
     api_token: str
+    #: This worker's registered proposer credential (ADR-0023), presented on
+    #: the proposal POST only. Empty is the pre-registry posture.
+    proposer_token: str
     #: Loopback-only backend base URL, no trailing slash.
     backend_url: str
     #: Symbols the worker may reason about and propose on. Never empty.
@@ -148,6 +157,7 @@ def load_config(environ: dict[str, str]) -> WorkerConfig:
         anthropic_api_key=api_key,
         model=environ.get("CHRONOS_WORKER_MODEL", "").strip() or _DEFAULT_MODEL,
         api_token=token,
+        proposer_token=environ.get("CHRONOS_WORKER_PROPOSER_TOKEN", "").strip(),
         backend_url=backend_url,
         symbols=symbols,
         kinds=kinds,
