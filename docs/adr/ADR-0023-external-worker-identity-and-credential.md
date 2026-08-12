@@ -123,6 +123,13 @@ built.
 >   evidence-bundle fields; every registered identity stamps the placeholder bundle
 >   id and an honestly-absent digest. The job/evidence protocol remains future work
 >   (see "What this ADR does not decide").
+> - **The registry is a boot-time snapshot.** Both planes read the file once at
+>   startup, the mandate-file precedent. Expiry travels in the snapshot and is
+>   enforced live at verification and at drain; disabling or deleting a
+>   registration lands at the next restart. Live mid-session revocation of a
+>   single proposer would need a DB-backed revocation act (the shape mandate
+>   revocation already has) and is deliberately left to future work; the live
+>   stand-downs today are the kill switch, mandate revocation, and a restart.
 
 **Option B now, Option A before any autonomous rung above shadow.**
 

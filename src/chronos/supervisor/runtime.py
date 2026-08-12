@@ -326,9 +326,12 @@ class AutonomyRuntime:
             if self._resolve_identity is None:
                 identity: queue.HarnessIdentity | None = self._identity
             else:
-                # Resolved per proposal AND per tick: a registration revoked or
-                # expired between enqueue and drain must refuse at the moment
-                # authority is exercised, not the moment bytes were received.
+                # Resolved per proposal AND per tick against the drain's own
+                # clock: a registration that expired between enqueue and drain
+                # refuses at the moment authority is exercised, not the moment
+                # bytes were received. (The resolver's registry is a boot-time
+                # snapshot — file edits such as disabling an entry are honored
+                # at the next restart; see build_identity_resolver.)
                 identity = self._resolve_identity(item.proposer_id, facts.now)
             outcome = run_cycle(
                 item.payload,

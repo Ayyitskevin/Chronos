@@ -15,8 +15,11 @@ was stamped with one hardcoded identity. ADR-0023 (Option A, owner-directed
 - with no registry configured, nothing changes;
 - a configured-but-broken registry refuses everything and alerts, and never
   falls back to the anonymous posture;
-- a registration revoked between enqueue and drain refuses at STAMP, because
-  identity is resolved when authority is exercised, not when it was requested.
+- a registration whose expiry passes between enqueue and drain refuses at
+  STAMP, because identity is resolved when authority is exercised, not when it
+  was requested (the registry itself is a boot-time snapshot: disabling or
+  deleting an entry in the file is honored at the next restart, like the
+  mandate file — expiry is the transition the snapshot carries live).
 
 Also pinned here, because these tests are what exposed it: the route's account
 scoping. Until 2026-08-12, ``_fingerprint_of`` in ``routes/autonomy.py`` read
@@ -100,16 +103,20 @@ def _registration(
     enabled: bool = True,
     **overrides: str,
 ) -> dict[str, Any]:
+    # Five DISTINCT version values on purpose: a resolver that cross-wires two
+    # fields (stamps prompt_version from policy_version, say) is invisible when
+    # every field is "1" — with distinct values, any mis-stamped field breaks
+    # the version-pin agreement the journal test asserts positively.
     entry: dict[str, Any] = {
         "proposer_id": proposer_id,
         "secret_sha256": credential_hash(credential),
         "provider": "anthropic",
         "model_id": "model-x",
-        "model_version": "1",
-        "prompt_version": "1",
-        "tool_schema_version": "1",
-        "decision_schema_version": "1",
-        "policy_version": "1",
+        "model_version": "mv-7",
+        "prompt_version": "pv-3",
+        "tool_schema_version": "ts-2",
+        "decision_schema_version": "ds-4",
+        "policy_version": "pol-5",
         "expires_at": expires_at,
         "enabled": enabled,
     }
@@ -440,11 +447,11 @@ def _mandate(**overrides: Any) -> AutonomyMandate:
         "versions": VersionPins(
             provider="anthropic",
             model_id="model-x",
-            model_version="1",
-            prompt_version="1",
-            tool_schema_version="1",
-            decision_schema_version="1",
-            policy_version="1",
+            model_version="mv-7",
+            prompt_version="pv-3",
+            tool_schema_version="ts-2",
+            decision_schema_version="ds-4",
+            policy_version="pol-5",
         ),
         "scope": InstrumentScope(
             asset_classes=(TradableAssetClass.EQUITY,),
@@ -614,12 +621,19 @@ def test_the_journaled_identity_matches_the_credential_used(
     assert accepted[0]["proposer_id"] == "claude-worker"
     assert accepted[0]["model_id"] == "model-x"  # the registration's, not "static-ingress"
 
-    # And the decision was admitted, which means the version-pin check agreed
-    # with the stamped provenance — the pins bound to an author, exercised.
+    # And the decision was ADMITTED — asserted positively, not by exclusion.
+    # An admitted SHADOW walk (no submit callable) terminates at HANDOFF with
+    # NO_SUBMISSION_CONFIGURED, so this pair fires on ANY admission refusal —
+    # a version-pin disagreement included. That is the "pins bound to an
+    # author" proof: all seven stamped fields (five of them distinct values)
+    # agreed with the mandate's pins. The first version of this assertion
+    # compared against a misspelled refusal code and could never fail; the
+    # adversarial review caught it, and the mutation that exposed it (a
+    # resolver stamping one version field wrong) now fails here.
     cycles = _stream_payloads(sessions, f"autonomy.cycles:{_FINGERPRINT}")
     assert cycles, "the cycle journal must record the walk"
-    assert cycles[-1]["stage"] not in (CycleStage.STAMP.value, CycleStage.INGRESS.value)
-    assert cycles[-1]["refusal"] != "VERSION_PINS_MISMATCH"
+    assert cycles[-1]["stage"] == CycleStage.HANDOFF.value
+    assert cycles[-1]["refusal"] == "NO_SUBMISSION_CONFIGURED"
 
 
 @pytest.mark.parametrize(
@@ -635,10 +649,12 @@ def test_an_unresolvable_proposer_refuses_at_stamp(
 ) -> None:
     """Identity is re-resolved when authority is exercised, not when requested.
 
-    The registration is CURRENT at enqueue time and expired by drain time — and
+    The registration is CURRENT at enqueue time and EXPIRED by drain time — and
     the drain is the moment that counts, so the cycle refuses at STAMP with
     PROPOSER_UNRESOLVED rather than stamping a dead registration's identity (or
-    falling back to the static one).
+    falling back to the static one). Expiry is the one transition the boot-time
+    registry snapshot carries with it; a disable/delete edit to the file lands
+    at the next restart.
     """
 
     registry_path = tmp_path / "proposers.json"
@@ -695,7 +711,16 @@ def test_the_resolver_postures_are_fail_closed(tmp_path: Path) -> None:
     identity = resolve("claude-worker", _NOW)
     assert identity is not None
     assert identity.proposer_id == "claude-worker"
+    # All seven stampable fields, each against its own distinct registration
+    # value, so a resolver that cross-wires or hardcodes any one of them fails
+    # here by name rather than only downstream at the version-pin check.
+    assert identity.provider == "anthropic"
     assert identity.model_id == "model-x"
+    assert identity.model_version == "mv-7"
+    assert identity.prompt_version == "pv-3"
+    assert identity.tool_schema_version == "ts-2"
+    assert identity.decision_schema_version == "ds-4"
+    assert identity.policy_version == "pol-5"
     assert identity.evidence_bundle_id == INGRESS_IDENTITY.evidence_bundle_id
     assert identity.evidence_bundle_digest is None  # honestly absent, never zeros
     assert resolve("disabled-worker", _NOW) is None

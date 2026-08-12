@@ -144,6 +144,14 @@ including for proposals already queued (`CHRONOS_WORKER_PROPOSER_TOKEN` is an
 environment variable of this separate process, so it deliberately does not
 appear in the backend's `.env.example`).
 
+One timing fact worth knowing: the backend reads the registry file **once, at
+boot**, exactly like the mandate file. Expiry is carried in that snapshot and
+enforced live, but setting `"enabled": false` or deleting an entry takes
+effect at the next backend restart. If a credential leaks mid-session, the
+live stand-downs are the kill switch, mandate revocation, or a restart — and
+until then the leaked credential can do exactly one thing: submit proposals
+that still face every gate under the identity it leaked from.
+
 ## Stopping it
 
 Stop the worker and new AI proposals stop; **Chronos does not**. The worker is

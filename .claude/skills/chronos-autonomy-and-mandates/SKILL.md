@@ -325,8 +325,10 @@ requires a registered, proposal-only `X-Chronos-Proposer-Token` (general token
 refused there; the proposer credential refused on every other mutating route —
 enumerated, not sampled), the verified proposer_id is recorded on the queue row,
 and the drain re-resolves it into the registration's identity at STAMP time —
-so the version-pin check authenticates a registered author, and revocation
-between enqueue and drain refuses (`PROPOSER_UNRESOLVED`). Authorship pins by
+so the version-pin check authenticates a registered author, and an expiry
+crossed between enqueue and drain refuses (`PROPOSER_UNRESOLVED`). The registry
+is a boot-time snapshot on both planes, like the mandate file: disable/delete
+edits land at the next restart; expiry transitions live. Authorship pins by
 version *tuple*, not by proposer name; evidence binding stays uniform. Proofs:
 `tests/safety/test_proposer_credentials_exercised.py` (15). The same work fixed
 a live inert-ingress defect: `_fingerprint_of` read an attribute `AppRuntime`

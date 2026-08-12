@@ -192,9 +192,15 @@ def build_identity_resolver(
 
     ADR-0023: identity comes from which credential authenticated. The route
     records the verified proposer_id on the queue row; this resolver turns it
-    back into the registration's identity at drain time — re-checking currency,
-    because a registration revoked or expired between enqueue and drain must
-    refuse at the moment authority is exercised.
+    back into the registration's identity at drain time — re-checking currency
+    against the drain's clock, so a registration that EXPIRED between enqueue
+    and drain refuses at the moment authority is exercised. Be precise about
+    what "currency" means here: the registry itself is read once, at wiring
+    time, exactly like the mandate file — so disabling or deleting a
+    registration in the file takes effect at the next backend restart, not
+    mid-session. Expiry is the transition the snapshot carries with it; the
+    live mid-session stand-downs remain the kill switch, mandate revocation,
+    and a restart.
 
     Fail-closed by shape: with a registry configured, EVERY path that cannot
     positively resolve — a pre-registry row, an unknown id, a disabled or
