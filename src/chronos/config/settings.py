@@ -136,6 +136,13 @@ class Settings(BaseSettings):
     # runtime starts — absence of the grant is absence of the authority, so a
     # fresh checkout still boots with the model plane inert.
     autonomy_mandate_file: Path | None = None
+    # The proposer registry (ADR-0023): the owner's record of who may propose
+    # and as whom. Unset (the default) preserves the pre-ADR-0023 behavior —
+    # the local API token authenticates proposals and the static ingress
+    # identity is stamped. Set, it flips the proposal route to proposer-only
+    # credentials and provenance to credential-derived identity; an invalid or
+    # unreadable file means proposals refuse, never that identity is guessed.
+    autonomy_proposers_file: Path | None = None
     autonomy_alert_file: Path = Path("data/owner_alerts.jsonl")
     autonomy_idle_interval_seconds: Annotated[float, Field(gt=0)] = 60.0
     autonomy_min_interval_seconds: Annotated[float, Field(gt=0)] = 5.0

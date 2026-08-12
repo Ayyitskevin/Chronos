@@ -26,6 +26,7 @@ from pathlib import Path
 
 from chronos.auditlog.log import verify_chain
 from chronos.cli.mandate_check import add_mandate_commands
+from chronos.cli.proposer_commands import add_proposer_commands
 from chronos.control.halt import HaltReason, HaltStore
 from chronos.control.modes import TradingMode, resolve_mode_lock
 from chronos.risk.policy import load_risk_policy
@@ -465,6 +466,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_registry_commands(sub)
     _add_research_commands(sub)
     add_mandate_commands(sub)
+    add_proposer_commands(sub)
 
     return parser
 

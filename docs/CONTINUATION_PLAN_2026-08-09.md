@@ -37,7 +37,7 @@ ruff + `mypy --strict` clean.
 | 3 | Restore overstates safety | Doc half CLOSED; **code half OPEN** (`kill_switch.py:83-85` still boots DISENGAGED on missing file) — owner-gated safety-mechanism change |
 | 4 | Mandate-vs-arming | **OPEN** — owner decision on which authority model wins (`orders/` has zero mandate awareness; `submission.py` requires the arm) |
 | 5 | Supervisor COMPLETE on refusal | **OPEN** — typed outcomes designed in ADR memos; code half owner-gated |
-| 6 | Static ingress provenance / non-scoped credential | **OPEN** — ADR-0023 proposed, undecided |
+| 6 | Static ingress provenance / non-scoped credential | ~~**OPEN** — ADR-0023 proposed, undecided~~ **CLOSED 2026-08-12** (owner directed Option A; D-24/R-48 — proposer registry, proposal-only credential, drain-time identity; evidence-protocol half remains future ADR work) |
 | 7 | Dead economic fields on the decision | **OPEN** — ADR-0021 proposed, undecided |
 | 8 | Promotion not evidence-bound | **OPEN** — ADR-0024 proposed, undecided |
 

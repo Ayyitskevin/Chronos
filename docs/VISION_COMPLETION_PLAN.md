@@ -177,9 +177,15 @@ the live commit and coordinate with any branch already addressing it before edit
 5. The supervisor treats any non-exception handoff return as `COMPLETE`, although
    `SubmissionOutcome(submitted=False)` represents refusal, ambiguity, or rejection
    (`src/chronos/supervisor/loop.py`, `src/chronos/orders/submission.py`).
-6. External-worker provenance is static and its credential is not proposal-only. The
-   worker needs a narrow job/evidence/response protocol bound to job ID, evidence digest,
-   worker identity, model/prompt/tool versions, and expiry.
+6. ~~External-worker provenance is static and its credential is not proposal-only.~~
+   **Addressed 2026-08-12 (ADR-0023 Option A, owner-directed; D-24/R-48):** with
+   `AUTONOMY_PROPOSERS_FILE` configured, proposals require a per-proposer,
+   proposal-only credential and provenance is stamped from the credential's
+   registration at drain time; the same work fixed the route's dead account scoping
+   (every real proposal POST had refused `BACKEND_UNSCOPED` since M7). Still open
+   from this finding: the job/evidence/response protocol — registrations carry no
+   evidence-bundle binding, so the evidence half (job ID, evidence digest, expiry
+   per job) remains future ADR work.
 7. Several economic-looking fields do not mechanically affect execution. Every field must
    be enforced, explicitly advisory, or forbidden; deterministic exits/protection require
    a durable position-management lifecycle.

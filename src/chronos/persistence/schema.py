@@ -687,3 +687,9 @@ class AutonomyProposalQueueRow(Base):
     #: the outcome of a specific submission without correlating streams.
     cycle_stage: Mapped[str] = mapped_column(String(32), default="", nullable=False)
     refusal: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    #: Which registered proposer's credential authenticated this submission
+    #: (ADR-0023). NULL for rows accepted under the pre-registry posture, where
+    #: the local API token authenticated and the static identity was stamped.
+    #: The value is written by the route from the *verified* registration —
+    #: never from the payload — and read at drain time to stamp provenance.
+    proposer_id: Mapped[str | None] = mapped_column(String(64))

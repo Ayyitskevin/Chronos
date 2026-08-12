@@ -88,6 +88,28 @@ def _finding(severity: Severity, code: str, message: str) -> Finding:
     return Finding(severity=severity, code=code, message=message)
 
 
+@dataclass(frozen=True, slots=True)
+class RegisteredPins:
+    """One registered proposer's stampable identity, for the pins comparison."""
+
+    proposer_id: str
+    pins: dict[str, str]
+    current: bool
+
+
+@dataclass(frozen=True, slots=True)
+class RegistryPosture:
+    """What AUTONOMY_PROPOSERS_FILE resolves to at review time (ADR-0023).
+
+    ``proposers=None`` means the file is configured and does not load — a
+    posture with consequences of its own, distinct from "not configured",
+    which is represented by not constructing this object at all.
+    """
+
+    path: str
+    proposers: tuple[RegisteredPins, ...] | None
+
+
 # --------------------------------------------------------------------- loading
 
 
@@ -139,6 +161,7 @@ def review_mandate(
     expected_fingerprint: str | None = None,
     fingerprint_source: str = "",
     ingress_pins: dict[str, str] | None = None,
+    registry: RegistryPosture | None = None,
 ) -> list[Finding]:
     """Every finding this tool can make about a *valid* mandate.
 
@@ -155,7 +178,7 @@ def review_mandate(
             mandate, expected=expected_fingerprint, fingerprint_source=fingerprint_source
         )
     )
-    findings.extend(_review_pins(mandate, ingress_pins=ingress_pins))
+    findings.extend(_review_pins(mandate, ingress_pins=ingress_pins, registry=registry))
     findings.extend(_review_inert_fields(mandate))
     findings.extend(_review_permissive_zeros(mandate))
     findings.extend(_review_discretion(mandate))
@@ -241,15 +264,28 @@ def _review_account(
     ]
 
 
-def _review_pins(mandate: AutonomyMandate, *, ingress_pins: dict[str, str] | None) -> list[Finding]:
+def _review_pins(
+    mandate: AutonomyMandate,
+    *,
+    ingress_pins: dict[str, str] | None,
+    registry: RegistryPosture | None = None,
+) -> list[Finding]:
     """Compare the mandate's version pins against the stamp proposals carry.
 
     Admission refuses on any mismatch (``VERSION_PIN_MISMATCH``), and it does so
     per decision — the mandate itself still loads and activates, so the failure
     looks like a model that proposes nothing rather than a document that is
     wrong. That is why this is worth catching at authoring time.
+
+    Which stamp the pins must agree with depends on the posture (ADR-0023).
+    With a proposer registry configured, provenance is stamped from whichever
+    registration's credential authenticated — so the pins bind the grant to an
+    **author**, and this compares them against every registration. Without a
+    registry, the pins must agree with the static ingress identity, as before.
     """
 
+    if registry is not None:
+        return _review_pins_against_registry(mandate, registry)
     if ingress_pins is None:
         return [
             _finding(
@@ -279,11 +315,88 @@ def _review_pins(mandate: AutonomyMandate, *, ingress_pins: dict[str, str] | Non
         _finding(
             Severity.NOTE,
             "version-pins-agree",
-            "version pins agree with the ingress stamp (agreement, not authorship: the stamp "
-            "names the boundary that accepted the proposal, not the model that made it — "
-            "ADR-0023, proposed)",
+            "version pins agree with the ingress stamp (agreement, not authorship: with no "
+            "proposer registry configured the stamp names the boundary that accepted the "
+            "proposal, not the model that made it — configure AUTONOMY_PROPOSERS_FILE to "
+            "bind these pins to a registered author, ADR-0023)",
         )
     ]
+
+
+def _review_pins_against_registry(
+    mandate: AutonomyMandate, registry: RegistryPosture
+) -> list[Finding]:
+    """Which registered author, if any, this mandate's pins authorize."""
+
+    if registry.proposers is None:
+        return [
+            _finding(
+                Severity.IMPORTANT,
+                "proposer-registry-invalid",
+                f"AUTONOMY_PROPOSERS_FILE ({registry.path}) is configured but unreadable or "
+                "invalid; the pins comparison is moot because EVERY proposal refuses at the "
+                "route (503) and at STAMP until the file is repaired — this does not fall "
+                "back to the tokened posture",
+            )
+        ]
+    if not registry.proposers:
+        return [
+            _finding(
+                Severity.IMPORTANT,
+                "proposer-registry-empty",
+                f"AUTONOMY_PROPOSERS_FILE ({registry.path}) is configured and registers "
+                "nobody: a valid lockdown — every proposal refuses until someone is "
+                "registered (`python -m chronos.cli proposer mint`)",
+            )
+        ]
+    pins = mandate.versions
+    matching = [
+        entry
+        for entry in registry.proposers
+        if all(getattr(pins, label, None) == value for label, value in entry.pins.items())
+    ]
+    others = sorted(entry.proposer_id for entry in registry.proposers if entry not in matching)
+    if not matching:
+        return [
+            _finding(
+                Severity.BLOCKING,
+                "version-pins-authorize-nobody",
+                "the version pins match NO registered proposer "
+                f"(registered: {', '.join(others)}); with a registry configured, provenance "
+                "is stamped from the registration that authenticated (ADR-0023), so every "
+                "attributed proposal will refuse VERSION_PIN_MISMATCH",
+            )
+        ]
+    findings: list[Finding] = []
+    stale = [entry.proposer_id for entry in matching if not entry.current]
+    live = [entry.proposer_id for entry in matching if entry.current]
+    if live:
+        suffix = (
+            f"; proposals from the other registrations ({', '.join(others)}) refuse "
+            "VERSION_PIN_MISMATCH at admission, which is this grant choosing its author"
+            if others
+            else ""
+        )
+        findings.append(
+            _finding(
+                Severity.NOTE,
+                "version-pins-authorize",
+                f"the version pins authorize registered proposer(s): {', '.join(sorted(live))}"
+                + suffix,
+            )
+        )
+    if stale:
+        findings.append(
+            _finding(
+                Severity.IMPORTANT,
+                "authorized-proposer-stale",
+                f"the pins match registration(s) {', '.join(sorted(stale))}, which are "
+                "expired or disabled — their credentials no longer verify, so nothing can "
+                "currently propose under this grant's pins from those registrations; "
+                "renewal is an owner edit of the registry file",
+            )
+        )
+    return findings
 
 
 def _model_defaults(model: BaseModel) -> dict[str, Any]:
@@ -618,6 +731,51 @@ def _resolve_ingress_pins() -> dict[str, str] | None:
     }
 
 
+def _resolve_registry_posture(now: datetime) -> RegistryPosture | None:
+    """What AUTONOMY_PROPOSERS_FILE resolves to, or None when not configured.
+
+    Imported lazily for the same reason as :func:`_resolve_ingress_pins`: the
+    supervisor package pulls planes this CLI is pinned not to load at import
+    time. Any resolution failure short of "configured but invalid" reports as
+    not-configured, which downgrades the check rather than inventing a result.
+    """
+
+    try:
+        from chronos.config.settings import get_settings
+
+        path = get_settings().autonomy_proposers_file
+    except Exception:  # settings failure means "unavailable", not "unconfigured file"
+        return None
+    if path is None:
+        return None
+    try:
+        from chronos.supervisor.proposers import load_proposer_registry
+    except Exception:  # pragma: no cover - the module ships with this CLI
+        return None
+    loaded = load_proposer_registry(path)
+    if loaded is None:
+        return RegistryPosture(path=str(path), proposers=None)
+    return RegistryPosture(
+        path=str(path),
+        proposers=tuple(
+            RegisteredPins(
+                proposer_id=entry.proposer_id,
+                pins={
+                    "provider": entry.provider,
+                    "model_id": entry.model_id,
+                    "model_version": entry.model_version,
+                    "prompt_version": entry.prompt_version,
+                    "tool_schema_version": entry.tool_schema_version,
+                    "decision_schema_version": entry.decision_schema_version,
+                    "policy_version": entry.policy_version,
+                },
+                current=entry.is_current(now),
+            )
+            for entry in loaded.registry.proposers
+        ),
+    )
+
+
 def _default_mandate_path() -> Path | None:
     try:
         from chronos.config.settings import get_settings
@@ -658,12 +816,14 @@ def cmd_mandate_check(args: argparse.Namespace) -> int:
 
     mandate = result.mandate
     expected, source = _resolve_expected_fingerprint(args.account_id)
+    review_now = args.now or utc_now()
     findings = review_mandate(
         mandate,
-        now=args.now or utc_now(),
+        now=review_now,
         expected_fingerprint=expected,
         fingerprint_source=source,
         ingress_pins=None if args.no_pin_check else _resolve_ingress_pins(),
+        registry=None if args.no_pin_check else _resolve_registry_posture(review_now),
     )
     print("STATUS             VALID — the document parses and its invariants hold")
     print()
@@ -742,6 +902,11 @@ def cmd_mandate_template(args: argparse.Namespace) -> int:
     print()
     print("# SHADOW on purpose. A submitting mode additionally requires positive floors and")
     print("# ceilings, and a promotion rung per asset class that no code can grant you.")
+    print('# The "versions" block above matches the STATIC ingress stamp — correct only')
+    print("# while AUTONOMY_PROPOSERS_FILE is unset. With a proposer registry configured,")
+    print("# provenance is stamped from the registration that authenticated (ADR-0023), so")
+    print("# these pins must equal a registered proposer's values or every proposal refuses")
+    print("# VERSION_PIN_MISMATCH. `mandate check` compares against whichever applies.")
     print("# Check it before use:  python -m chronos.cli mandate check --file <path>")
     return 0
 

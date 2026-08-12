@@ -13,8 +13,10 @@ forwarding path be asserted at all.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -40,6 +42,7 @@ def _config(**overrides: object) -> BridgeConfig:
     base: dict[str, object] = {
         "secret": SECRET,
         "api_token": "abc123",
+        "proposer_token": "",
         "ingress_url": "http://127.0.0.1:8000/autonomy/proposals",
         "host": "127.0.0.1",
         "port": 8109,
@@ -339,3 +342,58 @@ def test_the_bridge_exposes_no_route_beyond_the_webhook_and_health() -> None:
     assert client.post("/tradingview/webhook", json=_alert()).status_code == 202
     for path in ("/docs", "/redoc", "/openapi.json", "/autonomy/proposals", "/"):
         assert client.get(path).status_code == 404, f"{path} must not exist on the bridge"
+
+
+def _forward_once(
+    monkeypatch: pytest.MonkeyPatch, config: BridgeConfig
+) -> tuple[ForwardResult, httpx.Request]:
+    """Run the REAL ``_http_forwarder`` against a mock transport, once.
+
+    Every other test injects a recorder in place of the forwarder, which is
+    what keeps this suite socketless — and also what left the real forwarder's
+    header assembly with zero coverage. This drives the genuine code path;
+    only the network is replaced.
+    """
+
+    from chronos.bridge import app as app_module
+
+    captured: list[httpx.Request] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(202, json={"accepted": True, "refusal": "", "detail": ""})
+
+    real_client = httpx.AsyncClient
+
+    def _mocked_client(**kwargs: object) -> httpx.AsyncClient:
+        kwargs["transport"] = httpx.MockTransport(_handler)
+        return real_client(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(app_module.httpx, "AsyncClient", _mocked_client)
+    result = asyncio.run(app_module._http_forwarder(config)(b"{}"))
+    assert len(captured) == 1
+    return result, captured[0]
+
+
+def test_the_real_forwarder_sends_the_token_and_no_proposer_header_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result, request = _forward_once(monkeypatch, _config())
+
+    assert result.forwarded
+    assert request.headers["X-Chronos-Token"] == "abc123"
+    # Pre-registry posture: no credential configured, none invented.
+    assert "X-Chronos-Proposer-Token" not in request.headers
+
+
+def test_the_real_forwarder_carries_a_configured_proposer_credential(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0023: both credentials ride along, so the bridge works under either
+    backend posture without knowing which one the backend is in."""
+
+    result, request = _forward_once(monkeypatch, _config(proposer_token="proposer-secret"))
+
+    assert result.forwarded
+    assert request.headers["X-Chronos-Proposer-Token"] == "proposer-secret"
+    assert request.headers["X-Chronos-Token"] == "abc123"

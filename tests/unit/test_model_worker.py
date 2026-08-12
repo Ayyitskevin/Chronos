@@ -39,6 +39,7 @@ def _config(**overrides: object) -> WorkerConfig:
         "anthropic_api_key": API_KEY,
         "model": "claude-opus-5",
         "api_token": TOKEN,
+        "proposer_token": "",
         "backend_url": "http://127.0.0.1:8000",
         "symbols": ("SPY",),
         "kinds": frozenset({"OPEN", "HOLD"}),
@@ -294,9 +295,37 @@ def test_forwarding_posts_the_proposal_with_the_token() -> None:
     assert len(posts) == 1
     assert posts[0].url.path == "/autonomy/proposals"
     assert posts[0].headers["X-Chronos-Token"] == TOKEN
+    # Pre-registry posture: no proposer credential configured, none sent.
+    assert "X-Chronos-Proposer-Token" not in posts[0].headers
     proposal = json.loads(posts[0].content)
     assert proposal["kind"] == "HOLD"
     assert proposal["evidence"][0]["kind"] == "worker_evidence_snapshot"
+
+
+def test_a_configured_proposer_credential_rides_the_forward() -> None:
+    """ADR-0023: when the worker is registered, the proposal POST carries its
+    credential alongside the token — so it works under either backend posture —
+    and the credential goes nowhere else (evidence reads stay token-only)."""
+
+    seen: list[httpx.Request] = []
+    with (
+        _backend_client(seen) as backend,
+        _anthropic_client(_tool_response(_hold_decision())) as anthropic,
+    ):
+        outcome = run_cycle(
+            _config(forward=True, proposer_token="proposer-secret"),
+            backend=backend,
+            anthropic=anthropic,
+        )
+
+    assert outcome is CycleOutcome.FORWARDED
+    posts = [request for request in seen if request.method == "POST"]
+    assert len(posts) == 1
+    assert posts[0].headers["X-Chronos-Proposer-Token"] == "proposer-secret"
+    assert posts[0].headers["X-Chronos-Token"] == TOKEN
+    reads = [request for request in seen if request.method == "GET"]
+    assert reads, "the cycle must have gathered evidence"
+    assert all("X-Chronos-Proposer-Token" not in request.headers for request in reads)
 
 
 def test_an_incoherent_decision_is_refused_locally_and_never_sent() -> None:

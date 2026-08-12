@@ -169,14 +169,25 @@ class DecisionProvenance(AutonomyModel):
     #: no decision could ever violate. A decision produced under a policy the
     #: mandate does not pin is now refused like any other version mismatch.
     policy_version: str = Field(min_length=1, max_length=64)
+    #: Which registered proposer's credential authenticated the submission
+    #: (ADR-0023). Stamped by the writer from the route's *verified* match —
+    #: never from the payload. Empty means the pre-registry static identity,
+    #: kept as a distinguishable value rather than a plausible name.
+    proposer_id: str = Field(default="", max_length=64)
     #: The immutable, versioned, redacted bundle the model was given.
     evidence_bundle_id: str = Field(min_length=1, max_length=128)
-    evidence_bundle_digest: str
+    #: ``None`` is the honest placeholder-era value (ADR-0023): no bundle
+    #: machinery exists yet, and sixty-four zeros read as a computed digest
+    #: that was never computed. Admission requires the claim to match the
+    #: supervisor's attestation exactly, ``None`` included.
+    evidence_bundle_digest: str | None = None
     produced_at: AwareDatetime
 
     @field_validator("evidence_bundle_digest")
     @classmethod
-    def _validate_digest(cls, value: str) -> str:
+    def _validate_digest(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         return _validate_hex_digest(value, "evidence_bundle_digest")
 
 

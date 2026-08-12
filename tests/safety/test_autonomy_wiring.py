@@ -145,9 +145,12 @@ def _write_mandate(tmp_path: Path, mandate: AutonomyMandate, *, name: str = "man
     return path
 
 
-def _settings(tmp_path: Path, *, mandate_file: Path | None) -> SimpleNamespace:
+def _settings(
+    tmp_path: Path, *, mandate_file: Path | None, proposers_file: Path | None = None
+) -> SimpleNamespace:
     return SimpleNamespace(
         autonomy_mandate_file=mandate_file,
+        autonomy_proposers_file=proposers_file,
         autonomy_min_interval_seconds=5.0,
         autonomy_idle_interval_seconds=60.0,
         autonomy_alert_file=tmp_path / "alerts.jsonl",

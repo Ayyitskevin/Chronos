@@ -98,9 +98,14 @@ class HarnessIdentity:
     policy_version: str
     #: The bundle the harness issued for this run, and its digest. Both are
     #: harness facts: a model cannot cite evidence it was not given, because it
-    #: does not get to say which bundle it read.
+    #: does not get to say which bundle it read. The digest is ``None`` in the
+    #: placeholder era — no bundle machinery exists yet, and absence is
+    #: represented as absence rather than as sixty-four zeros (ADR-0023).
     evidence_bundle_id: str
-    evidence_bundle_digest: str
+    evidence_bundle_digest: str | None
+    #: Which registered proposer's credential authenticated the submission
+    #: (ADR-0023). Empty under the pre-registry static identity.
+    proposer_id: str = ""
 
     def stamp(self, *, produced_at: datetime) -> DecisionProvenance:
         return DecisionProvenance(
@@ -111,6 +116,7 @@ class HarnessIdentity:
             tool_schema_version=self.tool_schema_version,
             decision_schema_version=self.decision_schema_version,
             policy_version=self.policy_version,
+            proposer_id=self.proposer_id,
             evidence_bundle_id=self.evidence_bundle_id,
             evidence_bundle_digest=self.evidence_bundle_digest,
             produced_at=produced_at,
@@ -236,6 +242,10 @@ def accept(
                 "symbol": decision.symbol or decision.futures_root,
                 "model_id": identity.model_id,
                 "model_version": identity.model_version,
+                # Which registered credential authenticated the submission
+                # (ADR-0023). Empty under the pre-registry static identity, so
+                # the journal distinguishes attributed from anonymous eras.
+                "proposer_id": identity.proposer_id,
             },
             recorded_at=produced_at,
         )

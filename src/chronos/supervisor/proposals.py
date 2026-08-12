@@ -52,6 +52,10 @@ class QueuedProposal:
     id: int
     payload: str
     received_at: datetime
+    #: The registration the route's credential check matched (ADR-0023), or
+    #: ``None`` for a row accepted under the pre-registry posture. Written from
+    #: the verified match, never from the payload.
+    proposer_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,7 +83,12 @@ def pending_depth(session: Session, *, account_fingerprint: str) -> int:
 
 
 def enqueue(
-    session: Session, *, account_fingerprint: str, payload: str, now: datetime
+    session: Session,
+    *,
+    account_fingerprint: str,
+    payload: str,
+    now: datetime,
+    proposer_id: str | None = None,
 ) -> EnqueueOutcome:
     """Accept a proposal for later judging, or refuse because the queue is full.
 
@@ -107,6 +116,7 @@ def enqueue(
         status=STATUS_PENDING,
         cycle_stage="",
         refusal="",
+        proposer_id=proposer_id,
     )
     session.add(row)
     session.flush()
@@ -134,7 +144,13 @@ def claim_batch(
         .limit(limit)
     ).all()
     return tuple(
-        QueuedProposal(id=row.id, payload=row.payload, received_at=row.received_at) for row in rows
+        QueuedProposal(
+            id=row.id,
+            payload=row.payload,
+            received_at=row.received_at,
+            proposer_id=row.proposer_id,
+        )
+        for row in rows
     )
 
 

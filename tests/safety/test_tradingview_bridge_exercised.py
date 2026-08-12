@@ -37,6 +37,7 @@ REFERENCE = "CHR-TEST-0123456789ABCDEF0123456789ABCDEF"
 CONFIG = BridgeConfig(
     secret=SECRET,
     api_token="token",
+    proposer_token="",
     ingress_url="http://127.0.0.1:8000/autonomy/proposals",
     host="127.0.0.1",
     port=8109,

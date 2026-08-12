@@ -212,6 +212,17 @@ def test_the_restated_token_header_matches_the_backend() -> None:
     assert TOKEN_HEADER == auth._TOKEN_HEADER
 
 
+def test_the_restated_proposer_header_matches_the_backend() -> None:
+    """Same hazard, one credential over (ADR-0023): a registered worker whose
+    header constant drifted would be refused on every forward, forever."""
+
+    from worker.cycle import PROPOSER_HEADER
+
+    from chronos.api import auth
+
+    assert PROPOSER_HEADER == auth._PROPOSER_HEADER
+
+
 def test_the_tool_schema_cannot_express_a_naked_short_option() -> None:
     """ADR-0016 §6, enforced at the schema the model is handed."""
 

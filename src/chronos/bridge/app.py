@@ -68,6 +68,11 @@ _logger = logging.getLogger("chronos.bridge.tradingview")
 #: ``tests/safety/test_tradingview_bridge_isolation.py`` pins the two equal.
 TOKEN_HEADER: Final[str] = "X-Chronos-Token"
 
+#: The proposer-credential header (ADR-0023), sent when the bridge is
+#: registered. Restated for the same reason as ``TOKEN_HEADER``, and pinned
+#: equal by the same isolation suite.
+PROPOSER_HEADER: Final[str] = "X-Chronos-Proposer-Token"
+
 #: How long the outbound proposal POST may take. Short: the backend is on
 #: loopback and only enqueues, so a slow answer means something is wrong rather
 #: than something is busy.
@@ -359,15 +364,19 @@ def _http_forwarder(config: BridgeConfig) -> Forwarder:
     """
 
     async def _forward(payload: bytes) -> ForwardResult:
+        # Both credentials ride along when both exist: the local token
+        # satisfies a pre-registry backend, and a registry-on backend judges
+        # the proposer credential alone (ADR-0023) — the bridge works under
+        # either posture without knowing which one the backend is in.
+        headers = {TOKEN_HEADER: config.api_token, "Content-Type": "application/json"}
+        if config.proposer_token:
+            headers[PROPOSER_HEADER] = config.proposer_token
         try:
             async with httpx.AsyncClient(timeout=FORWARD_TIMEOUT_SECONDS) as client:
                 response = await client.post(
                     config.ingress_url,
                     content=payload,
-                    headers={
-                        TOKEN_HEADER: config.api_token,
-                        "Content-Type": "application/json",
-                    },
+                    headers=headers,
                 )
         except httpx.HTTPError:
             _logger.exception("Could not reach the Chronos proposal ingress")

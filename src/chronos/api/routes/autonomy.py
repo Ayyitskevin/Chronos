@@ -8,15 +8,21 @@ second, weaker scheme:
 
 - the backend binds **loopback only**, so a worker must already be on this
   machine;
-- every route here requires the **local API token**, the same one every other
-  mutating endpoint requires;
-- and submitting a proposal requires the **single-writer lease**, because a
-  read-only backend accepting proposals would be building state the writer will
-  never see.
+- every route here requires a credential, and submitting a proposal requires
+  the **single-writer lease**, because a read-only backend accepting proposals
+  would be building state the writer will never see.
 
-A worker therefore needs local access plus the token — which is exactly the bar
-for reaching any other part of this backend. Nothing here is weaker than the
-surface it sits beside, and that was the design constraint.
+Which credential depends on the owner's posture (ADR-0023). With no proposer
+registry configured, proposals require the **local API token**, the same one
+every other mutating endpoint requires — nothing here is weaker than the
+surface it sits beside, and that was M6's design constraint. Once the owner
+configures ``AUTONOMY_PROPOSERS_FILE``, the proposal route flips to requiring a
+**registered proposer credential** and refuses the local token with a message
+that says why. The proposer credential is proposal-only in both directions:
+this route is the only one that accepts it, and the route records *which*
+registration verified so the queue writer stamps that author's identity — not
+a constant — into provenance at drain time. The alert read endpoint stays on
+the local token; it is operator surface, not proposer surface.
 
 ## What a proposal endpoint may and may not be
 
@@ -49,14 +55,24 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Request, Response, status
 
-from chronos.api.auth import require_token
+from chronos.api.auth import require_proposer, require_token
 from chronos.api.dependencies import BackendState, require_writer
 from chronos.domain.models import ChronosModel
 from chronos.supervisor import ingress
+from chronos.utils.identifiers import account_fingerprint
 
-router = APIRouter(dependencies=[Depends(require_token)])
+# No router-level credential (ADR-0023): the proposal route and the alert route
+# authenticate differently on purpose, so each route names its own dependency
+# where a reader can see it.
+router = APIRouter()
 
 WriterDep = Annotated[BackendState, Depends(require_writer)]
+
+#: The verified proposer_id, or None under the pre-registry posture. Declared
+#: before ``WriterDep`` in the endpoint signature so authentication is judged
+#: before the writer lease — an unauthenticated caller learns nothing about
+#: this backend's read-only state.
+ProposerDep = Annotated[str | None, Depends(require_proposer)]
 
 #: A conservative cap on one request body, applied before the ingress sees it.
 #: The ingress has its own bound; this one stops a large body being read into
@@ -85,6 +101,7 @@ class ProposalAccepted(ChronosModel):
 async def submit_proposal(
     request: Request,
     response: Response,
+    proposer_id: ProposerDep,
     state: WriterDep,
 ) -> ProposalAccepted:
     """Accept one proposal from an external model worker.
@@ -140,11 +157,16 @@ async def submit_proposal(
     from chronos.utils.time import utc_now
 
     with runtime.database.sessions.begin() as db_session:
+        # `proposer_id` is what the credential check verified, never anything
+        # the payload said (ADR-0023). Recording it on the queue row is what
+        # lets the drain stamp the right author after the credential itself is
+        # long gone from memory.
         queued = proposal_queue.enqueue(
             db_session,
             account_fingerprint=fingerprint,
             payload=body.decode("utf-8"),
             now=utc_now(),
+            proposer_id=proposer_id,
         )
     if not queued.queued:
         # 429: the queue is a load condition the worker should back off from,
@@ -179,13 +201,20 @@ class AlertView(ChronosModel):
     delivered: bool
 
 
-@router.get("/autonomy/alerts", response_model=list[AlertView])
+@router.get(
+    "/autonomy/alerts",
+    response_model=list[AlertView],
+    dependencies=[Depends(require_token)],
+)
 def list_alerts(state: WriterDep) -> list[AlertView]:
     """Everything the owner has not acknowledged, most severe first.
 
     A read endpoint on the *pull* side of alerting. It complements the delivery
     sinks rather than replacing them: R-32 is about the owner being told without
     having to look, and an endpoint is something you have to look at.
+
+    Stays on the local API token under every posture: this is operator surface,
+    and a proposer credential deliberately opens nothing but the proposal route.
     """
 
     from chronos.supervisor import alerts as alert_module
@@ -215,7 +244,19 @@ def _fingerprint_of(runtime: Any) -> str:
 
     Empty rather than raising: an unscoped database has no alerts to show, and a
     500 on a read endpoint would be a worse answer than an empty list.
+
+    Derived from ``order_management.account_id`` exactly as the terminal's
+    read-models and ``build_autonomy_runtime`` derive it. Until 2026-08-12 this
+    read ``runtime.account_fingerprint`` — an attribute :class:`AppRuntime`
+    never had — so every proposal POST answered 503 BACKEND_UNSCOPED and the
+    alert endpoint always answered ``[]``, on every backend, since the route
+    existed. Fail-closed in direction (a refusal, never a wrong account) and
+    still a live defect of the inert-control shape (R-24..R-27):
+    ``tests/safety/test_proposer_credentials_exercised.py`` now proves a
+    proposal actually reaches the queue.
     """
 
-    scope = getattr(runtime, "account_fingerprint", "")
-    return str(scope) if scope else ""
+    account_id = str(getattr(runtime.order_management, "account_id", "") or "").strip()
+    if not account_id:
+        return ""
+    return account_fingerprint(account_id)

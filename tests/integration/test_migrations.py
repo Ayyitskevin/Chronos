@@ -224,6 +224,72 @@ def test_v4_database_upgrades_to_current_schema(tmp_path: Path) -> None:
         database.dispose()
 
 
+def test_v7_database_gains_the_proposer_column_and_keeps_its_rows(tmp_path: Path) -> None:
+    """Migration 0007's DDL, exercised against the TRUE pre-0007 table shape.
+
+    Every other fixture in this file builds tables from the *current* metadata,
+    so once the model carries ``proposer_id`` the earlier upgrade paths never
+    reach 0007's ``add_column`` — its column-existence guard skips it. A real
+    production v7 database is the one shape those tests cannot represent, so
+    this builds it explicitly: current schema, then the column dropped, then
+    the upgrade — proving the column is added, a queued row survives with the
+    honest NULL (pre-registry, ADR-0023), and the fail-closed initializer
+    accepts the result byte-for-byte.
+    """
+
+    db_path = tmp_path / "chronos.db"
+    engine = sa.create_engine(f"sqlite:///{db_path}")
+    Base.metadata.create_all(engine)
+    with engine.begin() as connection:
+        connection.execute(sa.text("ALTER TABLE autonomy_proposal_queue DROP COLUMN proposer_id"))
+        connection.execute(
+            sa.text(
+                "INSERT INTO autonomy_proposal_queue "
+                "(account_fingerprint, payload, received_at, status, cycle_stage, refusal) "
+                "VALUES ('f' , '{}', '2026-01-01 00:00:00.000000', 'PENDING', '', '')"
+            )
+        )
+        for version in range(2, 8):
+            connection.execute(
+                sa.text(
+                    "INSERT INTO schema_version (version, applied_at) "
+                    f"VALUES ({version}, '2026-01-01 00:00:00.000000')"
+                )
+            )
+    engine.dispose()
+
+    config = _alembic_config(db_path)
+    command.stamp(config, "0006")  # v7 == revision 0006
+    command.upgrade(config, "head")
+
+    engine = sa.create_engine(f"sqlite:///{db_path}")
+    columns = {
+        column["name"]: column
+        for column in sa.inspect(engine).get_columns("autonomy_proposal_queue")
+    }
+    assert "proposer_id" in columns, "0007 must add the column to a genuine v7 table"
+    assert columns["proposer_id"]["nullable"] is True
+    with engine.connect() as connection:
+        surviving = connection.execute(
+            sa.text("SELECT proposer_id, status FROM autonomy_proposal_queue")
+        ).all()
+        version = connection.execute(
+            sa.text("SELECT version FROM schema_version ORDER BY id DESC LIMIT 1")
+        ).scalar()
+    engine.dispose()
+    assert surviving == [(None, "PENDING")], (
+        "the pre-upgrade row must survive with proposer_id NULL — the pre-registry "
+        "posture, never a guessed identity"
+    )
+    assert version == SCHEMA_VERSION
+
+    database = Database(f"sqlite:///{db_path}")
+    try:
+        database.initialize()
+    finally:
+        database.dispose()
+
+
 def test_fresh_database_needs_no_alembic(tmp_path: Path) -> None:
     database = Database(f"sqlite:///{tmp_path / 'fresh.db'}")
     try:

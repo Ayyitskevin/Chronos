@@ -130,13 +130,21 @@ in its inert posture only — not the trading:
 
 Two honest limits worth knowing before you decide:
 
-- **Provenance cannot tell the sources apart.** Every proposal is stamped with
-  the same static ingress identity, so a TradingView-sourced decision's
-  provenance is byte-identical to a model worker's. The bridge compensates as far
-  as it can — each proposal carries an evidence citation of kind
-  `tradingview_alert` whose digest is over the exact alert text, so the audit
-  chain records which alert produced which decision and you can recompute it —
-  but the worker-identity work (plan §6 finding 6, ADR-0023) is still open.
+- ~~**Provenance cannot tell the sources apart.**~~ *(corrected 2026-08-12:
+  ADR-0023 landed — plan §6 finding 6 is addressed.)* Under the default,
+  registry-unset posture this limit still reads true: every proposal carries
+  the static ingress identity and the `tradingview_alert` evidence citation is
+  the distinguishing mark. Once the owner configures `AUTONOMY_PROPOSERS_FILE`,
+  the bridge must present its own registered credential — mint one
+  (`python -m chronos.cli proposer mint --proposer-id tradingview-bridge
+  --provider tradingview --model-id signal-bridge ...`), paste the registration
+  into the registry, set `CHRONOS_TV_BRIDGE_PROPOSER_TOKEN` — and every
+  bridge-sourced decision is stamped with the bridge's own identity, journaled
+  with its proposer_id, distinguishable from the worker's. Note the pins
+  consequence: a mandate whose `versions` block names the *worker's*
+  registration refuses bridge proposals at admission — that is the owner
+  choosing which author a grant trusts, and `mandate check` reports which
+  registration a mandate authorizes.
 - **Anyone with the URL and the secret can propose.** That is what a webhook is.
   Your mandate's scope remains the real bound on what a successful forgery could
   achieve, which is another reason to keep both allowlists tight.
