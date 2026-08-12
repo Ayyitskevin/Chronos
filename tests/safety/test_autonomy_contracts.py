@@ -906,7 +906,21 @@ def test_no_deterministic_module_reads_a_narrative_attribute() -> None:
 #: but the exemption is deliberately per-function rather than per-module, because
 #: "this file may touch narrative" is a much larger grant than "this eight-line
 #: copier may". The condition below is what makes it small.
-_NARRATIVE_RECORDERS = {"supervisor/loop.py": "_narrative_of"}
+#:
+#: ``bridge/translate.py`` joined on 2026-08-12 (ADR-0026). It is not a recorder
+#: in the journal sense — it builds the narrative fields of a candidate proposal
+#: from a TradingView alert's own text — but it is subject to the identical
+#: hazard and therefore to the identical rule. Note which direction this entry
+#: moves: the module-level scan would have flagged it either way, and the
+#: alternative (naming the bridge's dataclass fields something other than
+#: ``thesis``/``rationale``) would have *evaded* the guard by spelling. Listing
+#: it here instead subjects the bridge to the stricter per-function condition
+#: below, which is the constraint worth having on a translator standing between
+#: an alert author and a trading decision.
+_NARRATIVE_RECORDERS = {
+    "supervisor/loop.py": "_narrative_of",
+    "bridge/translate.py": "_narrative_of",
+}
 
 #: Node types a recorder may contain. Anything else — a comparison, arithmetic, a
 #: subscript, a conditional on the text — is the beginning of narrative
