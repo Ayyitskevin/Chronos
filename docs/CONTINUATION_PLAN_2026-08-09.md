@@ -1,5 +1,11 @@
 # Continuation plan — 2026-08-09
 
+> **Superseded as the working sequence on 2026-08-12** by
+> `docs/CONTINUATION_PLAN_2026-08-12.md`, after PRs #65 (bridge + model
+> worker) and #66 (proposer registry, ADR-0023) merged. The examination below
+> remains a valid record of its date; the scoreboard's finding-6 row carries
+> its own dated correction.
+
 Status: **working plan, precedence tier 6.** `docs/VISION_COMPLETION_PLAN.md`
 (canonical, 2026-08-01) remains the roadmap authority under the `AGENTS.md`
 precedence ladder; this document sequences the next work *inside* that plan and
