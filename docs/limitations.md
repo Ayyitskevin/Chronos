@@ -324,9 +324,26 @@ provenance claim from *agreement* to *authorship*.
 - ~~**Nothing yet calls the compiler**~~ — **`supervisor.loop.run_cycle` does since M5.**
 - **Prompt injection is bounded, not solved (R-30).** The claim is only that an injection
   cannot exceed the mandate — not that it cannot influence a proposal.
-- **There is still no live provider harness inside Chronos, and by design there never will
-  be.** M5 inverted the relationship: Chronos does not call a model, a model worker calls in.
-  Running that worker is an operational act outside this repository.
+- ~~**There is still no live provider harness inside Chronos, and by design there never will
+  be.**~~ **Corrected 2026-08-12 (ADR-0027/D-23): the letter of this sentence is no longer
+  true; its substance is unchanged.** A model worker now exists *in this repository* — the
+  top-level `worker/` package — but it is not inside Chronos in any sense that matters: it is
+  not part of the `chronos` package or its wheel, it runs as its own process, it imports
+  nothing from `chronos` (pinned by `tests/safety/test_model_worker_isolation.py`), and the
+  broker-holding process still contains no model, no provider SDK (the worker calls the
+  Messages API over raw httpx; the no-SDK grep is now a structural test), and no API key.
+  M5's inversion stands verbatim: Chronos does not call a model, the worker calls in.
+  Running the worker remains a separate operational act — see `docs/model_worker.md`.
+- **Since 2026-08-12 the caller need not be a model at all (ADR-0026 / D-22, R-45).**
+  `chronos.bridge` translates a TradingView alert into a candidate proposal and posts it to
+  the same loopback ingress. It is a *client* of that endpoint, not a second door into it,
+  and it holds no Chronos capability — it imports no order, broker, supervisor, or
+  persistence module, and not `chronos.autonomy` either. The honest consequence is that
+  **the static ingress provenance now covers two genuinely different kinds of author and
+  cannot distinguish them**: a TradingView-sourced decision's `provenance` is byte-identical
+  to a model worker's. The bridge compensates only as far as an evidence citation can — kind
+  `tradingview_alert`, digested over the exact alert text — so the audit chain records which
+  alert produced which decision. The gap below is therefore wider than it was, not narrower.
 
 ### What M5 added, and what it deliberately did not
 

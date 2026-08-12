@@ -29,7 +29,9 @@ Use this skill to understand and extend the autonomy stack. Do NOT use it for
 order-pipeline mechanics, wheel strategy logic, or research evidence gates — see
 "When NOT to use this skill" at the end.
 
-Two facts frame everything: **no model runs inside this repository** (§6), and
+Two facts frame everything: **no model runs inside the `chronos` package or the
+broker-holding process** (§6 — since 2026-08-12 an isolated `worker/` process
+exists in-repo, ADR-0027), and
 **no real IBKR gateway has ever been connected in this project's history** —
 every autonomy control on the adapter path is fixture-verified only
 (see `chronos-real-gateway-campaign`). MITIGATED ≠ CLOSED.
@@ -297,13 +299,19 @@ effectively no lease gate.
 Details of the transmit site, writer lease, and kill switch live in
 `chronos-architecture-contract` — do not restate them here beyond the table.
 
-**Provenance reality (Phase-1 item 6, OPEN).** No model runs in-repo: no LLM SDK
+**Provenance reality (Phase-1 item 6, OPEN).** ~~No model runs in-repo: no LLM SDK
 in `pyproject.toml`/`requirements.txt` (grep-verified), no prompt files, no
-worker implementation; "Chronos ships no model, no provider SDK, and no API key
-in the broker-holding process" (docs/safety.md) and "there is still no live
-provider harness inside Chronos, and by design there never will be"
-(docs/limitations.md:281-283). The worker calls IN over
-`POST /autonomy/proposals`. Every arriving proposal is stamped with the static
+worker implementation~~ **Corrected 2026-08-12 (ADR-0027/D-23): a worker
+implementation now exists — the top-level `worker/` package, OUTSIDE the
+`chronos` package — with its policy prompt at `worker/policy.md`. Still true,
+and now pinned structurally by `tests/safety/test_model_worker_isolation.py`
+rather than by manual grep: no LLM SDK anywhere in the dependency tree (the
+worker calls the Messages API over raw httpx), the worker imports nothing from
+`chronos`, and no model, SDK, or API key is in the broker-holding process**;
+"Chronos ships no model, no provider SDK, and no API key in the broker-holding
+process" (docs/safety.md) stands verbatim, and docs/limitations.md's "there
+never will be a harness inside Chronos" carries a dated in-place correction to
+the same effect. The worker calls IN over `POST /autonomy/proposals`. Every arriving proposal is stamped with the static
 `INGRESS_IDENTITY` constant (provider="external-worker", model_id="ingress",
 autonomy_wiring.py:84-94) — so the version-pin check currently authenticates
 "came through the ingress", NOT "produced by the pinned model". The credential
