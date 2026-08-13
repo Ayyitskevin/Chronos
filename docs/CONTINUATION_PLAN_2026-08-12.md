@@ -72,6 +72,25 @@ tests, revert-the-fix proofs, measured counts, honest residuals).
 
 **[owner-review gate]** (safety-mechanism modification; plan §6 finding 5).
 
+> **BUILT 2026-08-13, awaiting the owner's merge** (the merge IS the review act
+> for an owner-review-gated item). Branch `claude/chronos-typed-handoff-a1`,
+> based on `f4ac14a`. Delivered as specified: four supervisor-owned dispositions
+> in the new `chronos.supervisor.handoff`, translated at the
+> `autonomy_wiring` seam (`classify_submission_outcome`) so no order-plane type
+> reaches the supervisor; two additive `CycleStage` members and new refusal codes
+> with nothing existing weakened; the counting rule stated once and documented in
+> the open — an attempt is consumed exactly when the supervisor cannot prove
+> nothing reached the wire, so REFUSED_NOT_SENT counts nothing while
+> SENT_AMBIGUOUS counts and alerts CRITICAL. Evidence:
+> `tests/safety/test_typed_handoff_outcomes_exercised.py` (42 tests), six
+> conjuncts each reverted alone and watched fail, isolation suite green, gates
+> green at 3082 passed / 1 skipped (baseline 3040 / 1). Governance: R-49,
+> plan §6 finding-5 annotation. Residuals are disclosed in R-49 — most
+> importantly that an exception out of a *non-wiring* handoff callable is still
+> journaled as not-sent, and that the post-submission typed outcomes (partial
+> fill, full fill, cancellation, late commission) are out of scope here because
+> they belong to the order plane's lifecycle tracker.
+
 *Why first:* the journal is the only thing that can answer "why did it not
 trade," and today it answers falsely for every non-exception refusal: a
 `SubmissionOutcome(submitted=False)` (venue rejection, read-only lease,

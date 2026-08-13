@@ -174,9 +174,27 @@ the live commit and coordinate with any branch already addressing it before edit
 4. Standing-authority prose says the mandate replaces arming, while submission still
    requires a current arm (`src/chronos/api/autonomy_wiring.py`,
    `src/chronos/orders/submission.py`). Choose and implement one reviewed authority model.
-5. The supervisor treats any non-exception handoff return as `COMPLETE`, although
+5. ~~The supervisor treats any non-exception handoff return as `COMPLETE`, although
    `SubmissionOutcome(submitted=False)` represents refusal, ambiguity, or rejection
-   (`src/chronos/supervisor/loop.py`, `src/chronos/orders/submission.py`).
+   (`src/chronos/supervisor/loop.py`, `src/chronos/orders/submission.py`).~~
+   **Addressed 2026-08-13 (A1; R-49):** the handoff result is classified into four
+   supervisor-owned dispositions — SUBMITTED, REFUSED_NOT_SENT, SENT_AMBIGUOUS,
+   REJECTED_AFTER_SEND (`chronos.supervisor.handoff`) — each journaling its own
+   `CycleStage` and refusal code, translated at the app-plane seam
+   (`classify_submission_outcome` in `api/autonomy_wiring.py`) so the supervisor
+   still imports no order-plane type. The activity rule is stated once and
+   enforced: an attempt is consumed exactly when the supervisor cannot prove
+   nothing reached the wire — so a refusal before the wire no longer spends an
+   `orders_submitted` attempt, and an ambiguous send both counts and raises a
+   CRITICAL owner alert. Additive: no existing refusal weakens, and
+   `ORDER_PLANE_REFUSED` still names an exception out of the callable. Proof:
+   `tests/safety/test_typed_handoff_outcomes_exercised.py` (42), with six
+   independent conjuncts each verified by reverting it alone. Still open from this
+   finding: the post-submission half of the typed-outcome list below — partial
+   fill, full fill, cancellation, late commission — which belong to the order
+   plane's lifecycle tracker rather than the cycle's handoff; and R-49's
+   residual (a), that an exception out of a non-wiring handoff callable is still
+   recorded as not-sent.
 6. ~~External-worker provenance is static and its credential is not proposal-only.~~
    **Addressed 2026-08-12 (ADR-0023 Option A, owner-directed; D-24/R-48):** with
    `AUTONOMY_PROPOSERS_FILE` configured, proposals require a per-proposer,
