@@ -45,6 +45,7 @@ from chronos.persistence.database import Database
 from chronos.supervisor import alerts, durable, proposals, queue
 from chronos.supervisor.admission import MarketDataEvidence
 from chronos.supervisor.compiler import QuoteEvidence
+from chronos.supervisor.handoff import HandoffResult
 from chronos.supervisor.loop import CycleFacts
 from chronos.supervisor.runtime import AutonomyRuntime, RuntimeConfig
 from chronos.supervisor.sizing import AccountEvidence
@@ -511,10 +512,18 @@ def test_two_deliberate_acts_are_needed_for_an_order(
     different["requested_quantity"] = "7"
     _enqueue(sessions, payload=json.dumps(different))
     live = _runtime(
-        sessions, mandate=mandate, submit=lambda intent: received.append(intent) or "ok"
+        sessions,
+        mandate=mandate,
+        submit=lambda intent: received.append(intent) or HandoffResult.submitted(),
     )
     report = live.run_tick(_NOW + timedelta(seconds=60))
     assert report.orders_handed_off == 1
+    # A1: the breakdown must agree with the total, and "confirmed" is the only
+    # counter a plain success may touch.
+    assert report.orders_confirmed == 1
+    assert report.orders_unconfirmed == 0
+    assert report.orders_rejected_after_send == 0
+    assert report.handoff_refusals == 0
     assert len(received) == 1
 
 

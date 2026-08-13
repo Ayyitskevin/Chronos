@@ -53,6 +53,7 @@ from chronos.persistence.database import Database
 from chronos.supervisor import durable, ingress, queue
 from chronos.supervisor.admission import MarketDataEvidence
 from chronos.supervisor.compiler import QuoteEvidence
+from chronos.supervisor.handoff import HandoffResult
 from chronos.supervisor.loop import CycleFacts, CycleStage, run_cycle
 from chronos.supervisor.sizing import AccountEvidence
 
@@ -235,13 +236,15 @@ def test_a_supplied_handoff_receives_the_compiled_intent(session: Session) -> No
     _activate(session, mandate)
     received: list[WheelOrderIntent] = []
 
-    def _submit(intent: WheelOrderIntent) -> str:
+    def _submit(intent: WheelOrderIntent) -> HandoffResult:
         received.append(intent)
-        return "accepted-by-order-plane"
+        return HandoffResult.submitted(detail="accepted-by-order-plane")
 
     outcome = _run(session, mandate=mandate, submit=_submit)
+    # COMPLETE means a CONFIRMED send and nothing weaker (A1): the handoff has to
+    # say so in the supervisor's own vocabulary, not merely fail to raise.
     assert outcome.stage is CycleStage.COMPLETE
-    assert outcome.handoff == "accepted-by-order-plane"
+    assert outcome.handoff == HandoffResult.submitted(detail="accepted-by-order-plane")
     assert len(received) == 1
     # What the order plane received is a plain intent, not a live order.
     assert received[0].to_order_request().transmit is False
@@ -361,7 +364,7 @@ def test_a_completed_cycle_advances_the_session_counters(session: Session) -> No
 
     mandate = _mandate()
     _activate(session, mandate)
-    _run(session, mandate=mandate, submit=lambda intent: "ok")
+    _run(session, mandate=mandate, submit=lambda intent: HandoffResult.submitted())
     counters = durable.load_counters(session, account_fingerprint=_FINGERPRINT, now=_NOW)
     assert counters.orders_submitted == 1
     assert counters.turnover_usd == Decimal(4_000)  # 10 shares x 400
@@ -380,11 +383,28 @@ def test_counting_happens_at_handoff_because_limits_bound_attempts(
 
     Counting at fill instead would let a system that is being rejected by the
     venue retry without limit, which is exactly when a rate limit matters.
+
+    **Rewritten 2026-08-12 (A1).** This test used to pass
+    ``{"submitted": False}`` — a dict whose only readable content said the order
+    was NOT submitted — and assert that the counter advanced anyway. It read as
+    proof of the "attempts, not fills" rule while actually pinning the defect
+    beneath it: the cycle could not tell a venue rejection from a refusal before
+    the wire, so it counted both. The rule survives; what proves it is now a
+    typed rejection *after* the send. The refusal-before-the-wire case, which
+    must NOT count, is proven in
+    ``tests/safety/test_typed_handoff_outcomes_exercised.py``.
     """
 
     mandate = _mandate()
     _activate(session, mandate)
-    _run(session, mandate=mandate, submit=lambda intent: {"submitted": False})
+    _run(
+        session,
+        mandate=mandate,
+        submit=lambda intent: HandoffResult.rejected_after_send(
+            order_plane_code="BROKER_SUBMIT_FAILED",
+            detail="the venue answered REJECTED",
+        ),
+    )
     assert (
         durable.load_counters(session, account_fingerprint=_FINGERPRINT, now=_NOW).orders_submitted
         == 1
@@ -398,13 +418,13 @@ def test_the_activity_limit_stops_the_next_cycle(session: Session) -> None:
 
     mandate = _mandate(activity=ActivityLimits(max_orders_per_session=1))
     _activate(session, mandate)
-    first = _run(session, mandate=mandate, submit=lambda intent: "ok")
+    first = _run(session, mandate=mandate, submit=lambda intent: HandoffResult.submitted())
     assert first.stage is CycleStage.COMPLETE
 
     second = _run(
         session,
         mandate=mandate,
-        submit=lambda intent: "ok",
+        submit=lambda intent: HandoffResult.submitted(),
         payload=_proposal(requested_quantity=Decimal(5)),
     )
     assert second.stage is CycleStage.ADMISSION
@@ -624,7 +644,7 @@ def test_the_cycle_honours_the_configured_market_timezone(session: Session) -> N
     mandate = _mandate()
     _activate(session, mandate)
     facts = _facts(now=datetime(2026, 7, 25, 20, 0, tzinfo=UTC), market_timezone="America/New_York")
-    _run(session, mandate=mandate, facts=facts, submit=lambda intent: "ok")
+    _run(session, mandate=mandate, facts=facts, submit=lambda intent: HandoffResult.submitted())
     counters = durable.load_counters(
         session,
         account_fingerprint=_FINGERPRINT,

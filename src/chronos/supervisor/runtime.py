@@ -136,11 +136,33 @@ class RuntimeConfig:
 
 @dataclass
 class TickReport:
-    """What one tick did. Mutable so the tick can fill it in as it goes."""
+    """What one tick did. Mutable so the tick can fill it in as it goes.
+
+    The handoff breakdown is four separate counters (A1) because
+    ``orders_handed_off`` used to be incremented for every cycle whose handoff
+    did not raise — a read-only refusal counted as an order handed off, and an
+    operator reading the number was being told the system had done something it
+    had not. Each counter now names exactly one wire truth, and the total that
+    matters to an activity ceiling is the one the counting rule defines.
+    """
 
     at: datetime
     proposals_judged: int = 0
+    #: Attempts that consumed activity budget: confirmed, unconfirmed, and
+    #: rejected-after-send. Equivalently: every cycle that could not prove
+    #: nothing reached the wire. Refusals before the wire are NOT here.
     orders_handed_off: int = 0
+    #: Confirmed working, partially filled, or filled orders. Nothing weaker.
+    orders_confirmed: int = 0
+    #: Sends whose outcome is unknown. Each raised a CRITICAL owner alert.
+    orders_unconfirmed: int = 0
+    #: Sends the venue answered with a non-active lifecycle.
+    orders_rejected_after_send: int = 0
+    #: Order-plane refusals that provably sent nothing, and spend no budget.
+    #: Counts only *classified* refusals: shadow mode (no handoff configured) and
+    #: an exception out of the callable stop at ``HANDOFF`` with no disposition,
+    #: and are not folded in here as if the order plane had answered.
+    handoff_refusals: int = 0
     alerts_delivered: int = 0
     queue_depth: int = 0
     failure: str = ""
@@ -351,8 +373,28 @@ class AutonomyRuntime:
             )
             report.outcomes.append(outcome)
             report.proposals_judged += 1
-            if outcome.stage is CycleStage.COMPLETE:
-                report.orders_handed_off += 1
+            self._count_handoff(outcome, report)
+
+    @staticmethod
+    def _count_handoff(outcome: CycleOutcome, report: TickReport) -> None:
+        """Tally one cycle's handoff by what the order plane actually did (A1).
+
+        Reads ``counted_activity_attempt`` rather than re-deriving the rule from
+        the stage: the rule has exactly one home (``supervisor.handoff``), and a
+        second copy here would be free to drift from the counter the activity
+        ceiling actually reads.
+        """
+
+        if outcome.counted_activity_attempt:
+            report.orders_handed_off += 1
+        if outcome.stage is CycleStage.COMPLETE:
+            report.orders_confirmed += 1
+        elif outcome.stage is CycleStage.SENT_UNCONFIRMED:
+            report.orders_unconfirmed += 1
+        elif outcome.stage is CycleStage.REJECTED_AFTER_SEND:
+            report.orders_rejected_after_send += 1
+        elif outcome.handoff_result is not None:
+            report.handoff_refusals += 1
 
     def _record_failure(self, report: TickReport, now: datetime) -> None:
         """Alert on a failed tick, and stop if failures are consecutive.

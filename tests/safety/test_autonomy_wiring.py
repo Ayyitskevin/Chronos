@@ -62,10 +62,12 @@ from chronos.autonomy import (
 )
 from chronos.domain.enums import DataQuality
 from chronos.domain.models import MarketQuote, UnderlyingContract
+from chronos.orders.submission import SubmissionOutcome, SubmissionRefusalCode
 from chronos.persistence.database import Database
 from chronos.persistence.schema import AutonomyMandateActivationRow
 from chronos.supervisor import alerts, durable
 from chronos.supervisor.compiler import QuoteEvidence
+from chronos.supervisor.handoff import HandoffDisposition
 from chronos.supervisor.runtime import AutonomyRuntime
 from chronos.utils.identifiers import account_fingerprint
 
@@ -380,7 +382,12 @@ def test_a_revoked_persistent_mandate_stays_inert_after_restart(
 
 
 class _RecordingService:
-    """Records the pipeline call order the handoff drives it through."""
+    """Records the pipeline call order the handoff drives it through.
+
+    ``submit`` answers with a real :class:`SubmissionOutcome` (A1). A fake that
+    returned some other shape would exercise the classifier's fail-closed
+    fallback instead of its translation, and the two must stay distinguishable.
+    """
 
     def __init__(self, *, approved: bool = True) -> None:
         self.calls: list[str] = []
@@ -402,7 +409,11 @@ class _RecordingService:
     def submit(self, intent: object, *, writer_lease_held: bool, now: datetime) -> object:
         self.calls.append("submit")
         self.submit_lease = writer_lease_held
-        return SimpleNamespace(receipt="ok")
+        return SubmissionOutcome(
+            submitted=True,
+            refusal=SubmissionRefusalCode.NOT_REFUSED,
+            detail="ok",
+        )
 
 
 def test_the_handoff_walks_the_full_pipeline_in_order() -> None:
@@ -415,7 +426,10 @@ def test_the_handoff_walks_the_full_pipeline_in_order() -> None:
     receipt = handoff(object())
     assert service.calls == ["propose", "preview", "confirm", "submit"]
     assert service.submit_lease is True
-    assert receipt == SimpleNamespace(receipt="ok")
+    # A1: what comes back is the supervisor's own vocabulary, carrying the order
+    # plane's outcome unread rather than leaking its type into the cycle.
+    assert receipt.disposition is HandoffDisposition.SUBMITTED
+    assert receipt.raw.submitted is True
 
 
 def test_a_risk_refusal_raises_and_never_submits() -> None:

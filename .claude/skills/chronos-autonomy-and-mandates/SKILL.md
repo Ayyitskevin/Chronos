@@ -245,8 +245,23 @@ and keeps cadence; `max_consecutive_failures` (default 5) stops the runtime with
 a CRITICAL alert (runtime.py:114-115, 334-377); restart is an operator act
 (:379-391).
 
-**VERIFIED OPEN DEFECT — COMPLETE-on-refusal (Phase-1 item 5).** The handoff
-result is inspected for exceptions only (loop.py:405-425):
+**~~VERIFIED OPEN DEFECT~~ CLOSED 2026-08-13 (A1; R-49) — COMPLETE-on-refusal
+(Phase-1 item 5).** The paragraph below describes the code through 2026-08-12 and
+is kept because the defect class matters more than the fix. **What is true now:**
+`run_cycle` classifies the handoff answer into four dispositions owned by
+`chronos.supervisor.handoff` — SUBMITTED (journals COMPLETE), REFUSED_NOT_SENT
+(journals HANDOFF, `ORDER_PLANE_REFUSED_NOT_SENT`, **counts no activity
+attempt**), SENT_AMBIGUOUS (new stage `SENT_UNCONFIRMED`, counts, CRITICAL owner
+alert `autonomy.send_unconfirmed`), REJECTED_AFTER_SEND (new stage of the same
+name, counts, WARNING). The counting rule has one home: an attempt is consumed
+exactly when the supervisor cannot prove nothing reached the wire. The isolation
+this section warns about is intact — the supervisor still imports no order-plane
+type; `classify_submission_outcome` in `api/autonomy_wiring.py` does the
+translation, and `CycleOutcome.handoff` still carries the raw object untyped.
+An exception out of the callable is unchanged (`ORDER_PLANE_REFUSED`, no count).
+Read R-49's residuals before building on this. The original text follows.
+
+The handoff result is inspected for exceptions only (loop.py:405-425):
 
 ```python
     try:
@@ -502,7 +517,7 @@ root with the project venv per README Setup, `.venv/bin/python`):
 | Live mandate ceiling still 365d | `grep -n "MAX_LIVE_MANDATE_DURATION" src/chronos/autonomy/mandate.py` |
 | MAX_RESUBMISSIONS still 3 | `grep -n "MAX_RESUBMISSIONS" src/chronos/supervisor/admission.py` |
 | Collar still 1% | `grep -n "MARKET_PROTECTION_COLLAR" src/chronos/supervisor/compiler.py` |
-| COMPLETE-on-refusal defect still open (item 5) | `sed -n '405,453p' src/chronos/supervisor/loop.py` — fixed only if a non-exception refused outcome no longer records COMPLETE |
+| ~~COMPLETE-on-refusal defect still open (item 5)~~ **fixed 2026-08-13 (A1/R-49)**; verify the fix is still in force | `grep -n "counts_activity_attempt\|_HANDOFF_STAGE" src/chronos/supervisor/loop.py` and `grep -n "_PROVABLY_NOT_SENT" src/chronos/api/autonomy_wiring.py` — the defect is back if a non-exception refused outcome records COMPLETE again (`.venv/bin/pytest tests/safety/test_typed_handoff_outcomes_exercised.py -q`) |
 | Arming still required on LIVE (item 4) | `grep -n "is_armed" src/chronos/orders/submission.py` and `grep -n "session_arming" src/chronos/orders/live_gate.py` |
 | writer_lease_held literal + auto-confirm still present | `sed -n '195,205p' src/chronos/api/autonomy_wiring.py` |
 | Four decision fields still dead (item 7) | `grep -rn "exit_plan\|protective_order_required\|max_acceptable_loss_usd\|requested_risk_budget_usd" src/chronos --include="*.py" \| grep -v "autonomy/decision.py" \| grep -v "supervisor/queue.py"` — empty output = still dead |

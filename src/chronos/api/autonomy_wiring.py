@@ -63,12 +63,15 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from chronos.autonomy import AITradeDecision, AutonomyMandate, TradableAssetClass
+from chronos.domain.enums import OrderLifecycle
 from chronos.domain.models import Instrument, MarketQuote
 from chronos.orders.intent import WheelOrderIntent
+from chronos.orders.submission import SubmissionOutcome, SubmissionRefusalCode
 from chronos.runtime import AppRuntime
 from chronos.supervisor import alerts, delivery, durable, proposers, queue
 from chronos.supervisor.admission import MarketDataEvidence
 from chronos.supervisor.compiler import QuoteEvidence
+from chronos.supervisor.handoff import SUBMIT_RAISED_CODE, HandoffResult
 from chronos.supervisor.loop import CycleFacts, Handoff, InstrumentFacts
 from chronos.supervisor.runtime import AutonomyRuntime, FactGatherer, RuntimeConfig
 from chronos.supervisor.sizing import AccountEvidence
@@ -185,6 +188,118 @@ class ConfirmationRefusedByOrderPlane(RuntimeError):
     """The order plane refused to confirm the intent."""
 
 
+#: Which submission refusals prove nothing left the process, and which cannot
+#: (A1). This table is the whole translation: every code the order plane can
+#: answer with is classified as *provably not sent* or *possibly sent*, and the
+#: supervisor never sees the code's type — only the disposition it implies.
+#:
+#: ``True`` means **provably not sent**: the refusal is returned from a gate that
+#: runs before the single ``transmit=True`` site, including the two re-checks
+#: inside the CAS-to-transmit window (kill switch, writer lease) whose own
+#: details say "nothing was sent", and ``BROKER_REFUSED_BEFORE_SEND``, which
+#: ADR-0009 §6 defines as the adapter refusing locally before any network send.
+#:
+#: ``False`` means the wire state is not established from the code alone.
+#: ``BROKER_SUBMIT_FAILED`` is the only such code, and it covers three real
+#: shapes that :func:`classify_submission_outcome` separates.
+#:
+#: Adding a member to ``SubmissionRefusalCode`` without adding it here fails
+#: ``test_typed_handoff_outcomes_exercised.py`` — a new refusal must be
+#: classified deliberately, not defaulted into silence.
+_PROVABLY_NOT_SENT: dict[SubmissionRefusalCode, bool] = {
+    SubmissionRefusalCode.NOT_REFUSED: True,
+    SubmissionRefusalCode.READ_ONLY_LEASE: True,
+    SubmissionRefusalCode.TRANSMISSION_NOT_POSSIBLE: True,
+    SubmissionRefusalCode.MODE_FORBIDS: True,
+    SubmissionRefusalCode.ACCOUNT_MISMATCH: True,
+    SubmissionRefusalCode.RISK_NOT_APPROVED: True,
+    SubmissionRefusalCode.RISK_EXPIRED: True,
+    SubmissionRefusalCode.CONFIRMATION_MISSING: True,
+    SubmissionRefusalCode.RISK_EVIDENCE_STALE: True,
+    SubmissionRefusalCode.CONFIRMATION_EXPIRED: True,
+    SubmissionRefusalCode.CONFIRMATION_MISMATCH: True,
+    SubmissionRefusalCode.INTENT_NOT_CONFIRMED: True,
+    SubmissionRefusalCode.RECONCILIATION_NOT_READY: True,
+    SubmissionRefusalCode.LIVE_DEPENDENCIES_MISSING: True,
+    SubmissionRefusalCode.LIVE_GRANT_DENIED: True,
+    SubmissionRefusalCode.LIVE_GATE_BLOCKED: True,
+    SubmissionRefusalCode.BROKER_REFUSED_BEFORE_SEND: True,
+    SubmissionRefusalCode.BROKER_SUBMIT_FAILED: False,
+}
+
+#: Lifecycles that mean the venue holds something that can still act. Anything
+#: else in an acknowledged send is the venue answering "not working".
+_ACTIVE_LIFECYCLES: frozenset[OrderLifecycle] = frozenset(
+    {
+        OrderLifecycle.SUBMITTED,
+        OrderLifecycle.PARTIALLY_FILLED,
+        OrderLifecycle.FILLED,
+        OrderLifecycle.CANCEL_PENDING,
+    }
+)
+
+
+def classify_submission_outcome(outcome: SubmissionOutcome) -> HandoffResult:
+    """Translate the order plane's answer into the supervisor's vocabulary (A1).
+
+    This function is the seam plan §6 finding 5 asked for. It lives in the app
+    plane because it must read a ``SubmissionOutcome``, and the supervisor is
+    structurally forbidden from importing one; what crosses back is a
+    supervisor-owned :class:`~chronos.supervisor.handoff.HandoffResult`.
+
+    The hard case is ``BROKER_SUBMIT_FAILED``, which the boundary returns for
+    three materially different events. They are separated by the evidence the
+    outcome carries, not by parsing its prose:
+
+    1. **No submission object.** ``BrokerError`` came out of the transmit call
+       itself, so bytes may have left and the intent stays
+       ``SUBMISSION_UNKNOWN`` for reconciliation → ``SENT_AMBIGUOUS``.
+    2. **A submission with an active lifecycle.** The send completed and the
+       broker acknowledged it, but Chronos could not persist the acknowledgement
+       (the intent row disappeared, or a newer lifecycle won the CAS). An order
+       may be working at the venue that this process cannot track →
+       ``SENT_AMBIGUOUS``. Treating "we lost the record of a live order" as a
+       clean rejection is the single most dangerous reading available here.
+    3. **A submission with a non-active lifecycle.** The venue saw the order and
+       answered ``REJECTED``/``CANCELLED``/unknown-and-inactive →
+       ``REJECTED_AFTER_SEND``, which counts as an attempt and needs no manual
+       reconciliation.
+
+    A ``submitted=True`` outcome is ``SUBMITTED``. Everything whose code is
+    classified provably-not-sent is ``REFUSED_NOT_SENT`` and consumes no activity
+    attempt — the half of the old behavior that was wrong in the *permissive*
+    direction, spending an opening-order budget on orders that never existed.
+    """
+
+    if outcome.submitted:
+        return HandoffResult.submitted(
+            order_plane_code=outcome.refusal.value,
+            detail=outcome.detail,
+            raw=outcome,
+        )
+    # An unclassified code fails closed as possibly-sent rather than defaulting
+    # to "nothing happened"; the pinning test makes the omission loud, and until
+    # someone fixes it the journal over-reports risk instead of under-reporting.
+    if _PROVABLY_NOT_SENT.get(outcome.refusal, False):
+        return HandoffResult.refused_not_sent(
+            order_plane_code=outcome.refusal.value,
+            detail=outcome.detail,
+            raw=outcome,
+        )
+    submission = outcome.submission
+    if submission is not None and submission.lifecycle not in _ACTIVE_LIFECYCLES:
+        return HandoffResult.rejected_after_send(
+            order_plane_code=outcome.refusal.value,
+            detail=f"{outcome.detail} (broker lifecycle {submission.lifecycle.value})",
+            raw=outcome,
+        )
+    return HandoffResult.sent_ambiguous(
+        order_plane_code=outcome.refusal.value,
+        detail=outcome.detail,
+        raw=outcome,
+    )
+
+
 def build_identity_resolver(
     settings_path: Path | None,
 ) -> Callable[[str | None, datetime], queue.HarnessIdentity | None] | None:
@@ -263,9 +378,10 @@ def order_plane_handoff(runtime: AppRuntime, *, is_writer: Callable[[], bool]) -
 
     Nothing is skipped. An AI-compiled intent walks the same risk engine,
     preview, confirmation and ten-gate live stack a human proposal walks, and a
-    refusal at any of those surfaces back to the cycle as ORDER_PLANE_REFUSED —
-    autonomy added a gate stack and removed none, which is the sentence that has
-    governed every milestone since M2.
+    refusal at any of those surfaces back to the cycle — classified, since A1, by
+    whether it can prove nothing reached the wire. Autonomy added a gate stack and
+    removed none, which is the sentence that has governed every milestone since
+    M2.
 
     ``is_writer`` is read **per submission**, never captured as a value. Until
     2026-08-05 this passed the literal ``True``, which was not a bypass — the
@@ -287,9 +403,28 @@ def order_plane_handoff(runtime: AppRuntime, *, is_writer: Callable[[], bool]) -
     ``chronos.api.routes.orders``). This makes the autonomous path identical,
     which is the property ADR-0018 §4 and every milestone since M2 assert: the
     autonomous path IS the human path.
+
+    ## What it returns, since A1
+
+    A :class:`~chronos.supervisor.handoff.HandoffResult`, not the order plane's
+    own object. ``service.submit`` **returns** its refusals, and the cycle used
+    to read only exceptions — so a read-only lease or a kill switch tripped
+    inside the CAS window journaled as ``COMPLETE`` and spent an activity
+    attempt. Translating here keeps the supervisor free of order-plane types
+    while giving it something it can actually record. The raw
+    ``SubmissionOutcome`` is still carried on the result, unread by the
+    supervisor.
+
+    Exceptions keep their old shape with one deliberate split. A risk veto and a
+    refused confirmation still *raise* — both happen strictly before the wire, so
+    "nothing was sent" is provable and the cycle's exception branch records it
+    correctly. Anything the **submit call itself** raises is caught and returned
+    as ``SENT_AMBIGUOUS``: from outside the boundary a raise mid-submit does not
+    prove the wire stayed quiet, and the fail-closed reading of an unknown wire
+    is "an order may exist".
     """
 
-    def _submit(intent: WheelOrderIntent) -> object:
+    def _submit(intent: WheelOrderIntent) -> HandoffResult:
         service = runtime.order_management
         now = utc_now()
         proposal = service.propose(intent, now=now)
@@ -297,7 +432,23 @@ def order_plane_handoff(runtime: AppRuntime, *, is_writer: Callable[[], bool]) -
             raise RiskRefusedByOrderPlane(proposal.risk.decision_id)
         service.preview(intent, now=utc_now())
         service.confirm(intent, risk_decision_id=proposal.risk.decision_id, now=utc_now())
-        return service.submit(intent, writer_lease_held=is_writer(), now=utc_now())
+        try:
+            outcome = service.submit(intent, writer_lease_held=is_writer(), now=utc_now())
+        except Exception as error:
+            # Only the exception's TYPE is recorded. Its message may quote text
+            # that arrived with a hostile proposal (R-30), and the journal is
+            # append-only: what goes in cannot be taken back out.
+            _logger.exception("The autonomous submission call raised")
+            return HandoffResult.sent_ambiguous(
+                detail=(
+                    f"the submission call raised {type(error).__name__}; whether the "
+                    "intent reached the venue cannot be established from outside the "
+                    "boundary, so it is treated as possibly sent and reconciliation "
+                    "owns the truth"
+                ),
+                refusal_code=SUBMIT_RAISED_CODE,
+            )
+        return classify_submission_outcome(outcome)
 
     return _submit
 
