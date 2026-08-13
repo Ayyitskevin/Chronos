@@ -73,6 +73,11 @@ from chronos.supervisor.durable import (
     SessionCounters,
     build_state,
 )
+from chronos.supervisor.handoff import (
+    COUNTS_ACTIVITY_ATTEMPT,
+    HandoffDisposition,
+    HandoffResult,
+)
 from chronos.supervisor.ingress import (
     MAX_PAYLOAD_BYTES,
     IngressOutcome,
@@ -99,6 +104,7 @@ from chronos.supervisor.sizing import AccountEvidence, SizingOutcome, size_order
 __all__ = [
     "ALERT_STREAM",
     "AUTHORITY_STREAM",
+    "COUNTS_ACTIVITY_ATTEMPT",
     "DECISION_STREAM",
     "MAX_PAYLOAD_BYTES",
     "MAX_PENDING",
@@ -119,6 +125,8 @@ __all__ = [
     "DegradedReason",
     "EnqueueOutcome",
     "FactGatherer",
+    "HandoffDisposition",
+    "HandoffResult",
     "HarnessIdentity",
     "IngressOutcome",
     "IngressRejected",

@@ -37,6 +37,16 @@ question that will be asked far more often than its opposite, and one a system
 that only logged its actions could never answer. Each cycle appends one
 hash-chained record naming the stage that stopped it.
 
+## What the handoff said, not merely whether it raised (A1)
+
+The submission boundary **returns** its refusals. Reading only exceptions meant a
+read-only lease, a kill switch engaged inside the CAS window, an ambiguous send
+and a venue rejection all recorded ``COMPLETE`` and all spent an activity
+attempt. The result is now classified into ``supervisor.handoff``'s four
+dispositions, each journaling its own stage and refusal code, and the counting
+rule is stated once, there. The supervisor still never learns what a
+``SubmissionOutcome`` is: the translation happens at the app-plane seam.
+
 ## Failure is a refusal, never an exception
 
 A stage that raises would leave the cycle half-recorded: counters incremented
@@ -68,18 +78,34 @@ from chronos.supervisor.admission import (
     admit,
 )
 from chronos.supervisor.compiler import CompilationOutcome, QuoteEvidence, compile_order
+from chronos.supervisor.handoff import HandoffDisposition, HandoffResult, classify
 from chronos.supervisor.sizing import AccountEvidence, SizingOutcome, size_order
 
 
 class CycleStage(StrEnum):
-    """Where a cycle stopped. Ordered as the pipeline runs."""
+    """Where a cycle stopped, or how it ended. Ordered as the pipeline runs.
+
+    The last three are all *after* the handoff and are deliberately separate
+    names (A1). ``COMPLETE`` used to mean "the handoff did not raise", which
+    covered a read-only refusal, an ambiguous send and a venue rejection alike;
+    it now means only what it says. The two additions are additive — no existing
+    stage changed meaning, and nothing that used to refuse stops refusing.
+    """
 
     INGRESS = "INGRESS"
     STAMP = "STAMP"
     ADMISSION = "ADMISSION"
     SIZING = "SIZING"
     COMPILATION = "COMPILATION"
+    #: Stopped at the handoff with nothing sent — shadow mode, an order-plane
+    #: gate refusing before the wire, or an exception out of the callable.
     HANDOFF = "HANDOFF"
+    #: Bytes may have reached the venue and the outcome is unconfirmed. An owner
+    #: alert accompanies every one of these.
+    SENT_UNCONFIRMED = "SENT_UNCONFIRMED"
+    #: The venue acknowledged the send and answered with a non-active order.
+    REJECTED_AFTER_SEND = "REJECTED_AFTER_SEND"
+    #: A confirmed working, partially filled, or filled order. Nothing weaker.
     COMPLETE = "COMPLETE"
 
 
@@ -163,17 +189,43 @@ class CycleOutcome:
     #: import the order plane's result types, or it would start to look like it
     #: owns submission.
     handoff: Any = None
+    #: The same answer, classified into the supervisor's own vocabulary (A1).
+    #: ``None`` when the cycle never reached the handoff, or when it raised.
+    handoff_result: HandoffResult | None = None
     alerts_raised: tuple[str, ...] = field(default_factory=tuple)
 
     @property
     def reached_order_plane(self) -> bool:
-        return self.stage in {CycleStage.HANDOFF, CycleStage.COMPLETE}
+        return self.stage in {
+            CycleStage.HANDOFF,
+            CycleStage.SENT_UNCONFIRMED,
+            CycleStage.REJECTED_AFTER_SEND,
+            CycleStage.COMPLETE,
+        }
+
+    @property
+    def counted_activity_attempt(self) -> bool:
+        """Whether this cycle spent an attempt under the activity ceiling.
+
+        Reads the classified result rather than the stage so there is exactly one
+        statement of the counting rule (``supervisor.handoff``) and no second
+        copy here to drift from it.
+        """
+
+        return self.handoff_result is not None and self.handoff_result.counts_activity_attempt
 
 
 #: The handoff. Takes a compiled intent and does whatever the order plane does
 #: with it. Typed as a callable so this module cannot accidentally acquire the
 #: service's full surface — it can hand over an intent and learn the result, and
 #: that is all.
+#:
+#: The return stays ``Any`` rather than ``HandoffResult`` on purpose: a type
+#: annotation cannot stop a caller from handing back something else, and
+#: pretending otherwise would put the fail-closed decision in the type checker
+#: instead of in the code. :func:`chronos.supervisor.handoff.classify` makes the
+#: unclassifiable case ambiguous-and-alerted at runtime, which is where a hostile
+#: or careless caller actually arrives.
 Handoff = Callable[[WheelOrderIntent], Any]
 
 
@@ -429,7 +481,13 @@ def run_cycle(
         result = submit(compilation.intent)
     except Exception as error:
         # The order plane refused or failed. Its own gates are the authority on
-        # why; the cycle records that it got that far and stopped.
+        # why; the cycle records that it got that far and stopped. Unchanged by
+        # A1, deliberately: the production wiring raises only from *before* the
+        # wire (a risk veto, a refused confirmation) and translates anything the
+        # submission call itself raises into SENT_AMBIGUOUS, because from outside
+        # the boundary a raise mid-submit does not prove the wire stayed quiet.
+        # A caller who supplies a handoff that raises after transmitting would be
+        # recorded here as not-sent — disclosed in the risk register, not hidden.
         return _record(
             session,
             facts,
@@ -447,23 +505,49 @@ def run_cycle(
             ),
         )
 
-    # An order reached the order plane, so this session's activity counter
-    # advances. Counting at handoff rather than at fill is deliberate: an
-    # activity limit bounds how much the system *attempts*, and an order that
-    # was sent and then rejected still consumed an attempt.
-    durable.record_activity(
-        session,
-        account_fingerprint=facts.account_fingerprint,
-        now=facts.now,
-        orders_submitted=1,
-        turnover_usd=_notional(sizing.quantity, reference_price, multiplier),
-        market_timezone=facts.market_timezone,
-    )
+    # The handoff answered. What it *said* now decides the journal, the counter
+    # and the alert — before A1 only a raise was read, so a returned refusal
+    # ("read-only lease", "kill switch engaged between pre-submit and transmit")
+    # recorded COMPLETE and spent an attempt on an order that never existed.
+    handoff_result = classify(result)
+
+    # An attempt is consumed exactly when nothing proves the wire stayed quiet
+    # (the rule, and the argument for it, live in `supervisor.handoff`). A
+    # refusal before the wire attempted nothing, so it must not spend budget an
+    # activity ceiling exists to ration.
+    if handoff_result.counts_activity_attempt:
+        durable.record_activity(
+            session,
+            account_fingerprint=facts.account_fingerprint,
+            now=facts.now,
+            orders_submitted=1,
+            turnover_usd=_notional(sizing.quantity, reference_price, multiplier),
+            market_timezone=facts.market_timezone,
+        )
+    if handoff_result.requires_owner_alert:
+        raised_handoff = alerts.raise_alert(
+            session,
+            account_fingerprint=facts.account_fingerprint,
+            severity=_HANDOFF_ALERT_SEVERITY[handoff_result.disposition],
+            kind=_HANDOFF_ALERT_KIND[handoff_result.disposition],
+            summary=_handoff_alert_summary(handoff_result),
+            detail={
+                "decision_id": decision.decision_id,
+                "disposition": handoff_result.disposition.value,
+                "refusal": handoff_result.refusal_code,
+                "order_plane_code": handoff_result.order_plane_code,
+            },
+            now=facts.now,
+        )
+        alert_kinds = (*alert_kinds, raised_handoff.kind)
+
     return _record(
         session,
         facts,
         CycleOutcome(
-            stage=CycleStage.COMPLETE,
+            stage=_HANDOFF_STAGE[handoff_result.disposition],
+            refusal=handoff_result.refusal_code,
+            detail=handoff_result.journal_detail,
             decision_id=decision.decision_id,
             decision=decision,
             admission=admission,
@@ -471,8 +555,49 @@ def run_cycle(
             compilation=compilation,
             intent=compilation.intent,
             handoff=result,
+            handoff_result=handoff_result,
             alerts_raised=alert_kinds,
         ),
+    )
+
+
+#: Which stage each classified outcome journals. The mapping lives here because
+#: the stage vocabulary is the journal's, and the disposition vocabulary is the
+#: handoff's; keeping them in separate modules is what lets the supervisor own a
+#: result type without owning the order plane's.
+_HANDOFF_STAGE: dict[HandoffDisposition, CycleStage] = {
+    HandoffDisposition.SUBMITTED: CycleStage.COMPLETE,
+    HandoffDisposition.REFUSED_NOT_SENT: CycleStage.HANDOFF,
+    HandoffDisposition.SENT_AMBIGUOUS: CycleStage.SENT_UNCONFIRMED,
+    HandoffDisposition.REJECTED_AFTER_SEND: CycleStage.REJECTED_AFTER_SEND,
+}
+
+_HANDOFF_ALERT_KIND: dict[HandoffDisposition, str] = {
+    HandoffDisposition.SENT_AMBIGUOUS: "autonomy.send_unconfirmed",
+    HandoffDisposition.REJECTED_AFTER_SEND: "autonomy.rejected_after_send",
+}
+
+#: An unconfirmed send is CRITICAL because resolving it is an owner act the
+#: system is forbidden to perform for itself (plan §11: "manual broker
+#: resolution of unknown orders, positions, assignments, ambiguous sends"). A
+#: venue rejection is WARNING: the order plane already resolved it, and the
+#: owner needs to know the model is proposing orders the venue will not take.
+_HANDOFF_ALERT_SEVERITY: dict[HandoffDisposition, alerts.AlertSeverity] = {
+    HandoffDisposition.SENT_AMBIGUOUS: alerts.AlertSeverity.CRITICAL,
+    HandoffDisposition.REJECTED_AFTER_SEND: alerts.AlertSeverity.WARNING,
+}
+
+
+def _handoff_alert_summary(result: HandoffResult) -> str:
+    if result.disposition is HandoffDisposition.SENT_AMBIGUOUS:
+        return (
+            "an autonomous order may have reached the venue and its state is "
+            f"unconfirmed ({result.refusal_code}); reconcile with the broker before "
+            "trusting any position or counter"
+        )
+    return (
+        "the venue answered an autonomous order with a non-active lifecycle "
+        f"({result.refusal_code}); the attempt was counted and nothing is working"
     )
 
 
@@ -535,11 +660,29 @@ def _record(session: Session, facts: CycleFacts, outcome: CycleOutcome) -> Cycle
                 "decision_id": outcome.decision_id,
                 "quantity": str(outcome.sizing.quantity) if outcome.sizing else None,
                 "limit_price": str(outcome.intent.limit_price) if outcome.intent else None,
+                **_handoff_of(outcome.handoff_result),
                 **_narrative_of(outcome.decision),
             },
             recorded_at=facts.now,
         )
     return outcome
+
+
+def _handoff_of(result: HandoffResult | None) -> dict[str, Any]:
+    """What the order plane did, for the journal (A1).
+
+    Absent when the cycle never reached the handoff — an admission refusal has no
+    disposition, and writing one would make "nothing was handed off" look like a
+    classification someone made.
+    """
+
+    if result is None:
+        return {}
+    return {
+        "handoff_disposition": result.disposition.value,
+        "handoff_counted_attempt": result.counts_activity_attempt,
+        "order_plane_code": result.order_plane_code,
+    }
 
 
 def _narrative_of(decision: AITradeDecision | None) -> dict[str, Any]:
