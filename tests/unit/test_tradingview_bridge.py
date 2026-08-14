@@ -20,7 +20,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from chronos.bridge.app import ForwardResult, create_app
+from chronos.bridge.app import AttestResult, ForwardResult, create_app
 from chronos.bridge.config import BridgeConfig, BridgeConfigError, load_config
 
 SECRET = "s" * 40
@@ -44,6 +44,7 @@ def _config(**overrides: object) -> BridgeConfig:
         "api_token": "abc123",
         "proposer_token": "",
         "ingress_url": "http://127.0.0.1:8000/autonomy/proposals",
+        "evidence_url": "http://127.0.0.1:8000/autonomy/evidence",
         "host": "127.0.0.1",
         "port": 8109,
         "symbols": frozenset({"SPY"}),
@@ -85,14 +86,40 @@ class _Recorder:
         return self._result
 
 
+class _Attester:
+    """A backend whose evidence binding is off (ADR-0028's unset posture).
+
+    Injected by default so every test in this file keeps its original subject:
+    with binding disabled the bridge cites exactly what it cited before ADR-0028,
+    and the attestation path changes nothing else. A test that is *about*
+    attestation passes its own. Without an injected attester the real HTTP one
+    would run and try to open a socket, which is precisely what these tests exist
+    not to do.
+    """
+
+    def __init__(self, result: AttestResult | None = None) -> None:
+        self.digests: list[str] = []
+        self._result = result or AttestResult(binding_disabled=True)
+
+    async def __call__(self, digest: str) -> AttestResult:
+        self.digests.append(digest)
+        return self._result
+
+
 def _client(
     config: BridgeConfig | None = None,
     *,
     forwarder: _Recorder | None = None,
+    attester: _Attester | None = None,
     now: datetime = NOW,
 ) -> tuple[TestClient, _Recorder]:
     recorder = forwarder or _Recorder()
-    app = create_app(config or _config(), forwarder=recorder, clock=lambda: now)
+    app = create_app(
+        config or _config(),
+        forwarder=recorder,
+        attester=attester or _Attester(),
+        clock=lambda: now,
+    )
     return TestClient(app), recorder
 
 

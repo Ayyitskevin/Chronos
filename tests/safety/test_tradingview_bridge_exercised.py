@@ -39,6 +39,7 @@ CONFIG = BridgeConfig(
     api_token="token",
     proposer_token="",
     ingress_url="http://127.0.0.1:8000/autonomy/proposals",
+    evidence_url="http://127.0.0.1:8000/autonomy/evidence",
     host="127.0.0.1",
     port=8109,
     symbols=frozenset({"SPY", "IWM"}),

@@ -49,6 +49,7 @@ MIN_SECRET_LENGTH: Final[int] = 32
 _LOOPBACK_HOSTS: Final[frozenset[str]] = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
 
 _DEFAULT_INGRESS_URL: Final[str] = "http://127.0.0.1:8000/autonomy/proposals"
+_DEFAULT_EVIDENCE_URL: Final[str] = "http://127.0.0.1:8000/autonomy/evidence"
 _DEFAULT_HOST: Final[str] = "127.0.0.1"
 _DEFAULT_PORT: Final[int] = 8109
 _DEFAULT_MAX_ALERTS_PER_MINUTE: Final[int] = 10
@@ -86,6 +87,10 @@ class BridgeConfig:
     proposer_token: str
     #: Where proposals are POSTed. Loopback-only, enforced.
     ingress_url: str
+    #: Where alert attestations are recorded (ADR-0028). Loopback-bound like
+    #: the ingress: an attestation that left this machine would be a
+    #: configuration error, not a deployment option.
+    evidence_url: str
     #: Where the webhook listener binds.
     host: str
     port: int
@@ -126,6 +131,10 @@ def load_config(environ: dict[str, str]) -> BridgeConfig:
 
     ingress_url = environ.get("CHRONOS_TV_BRIDGE_INGRESS_URL", "").strip() or _DEFAULT_INGRESS_URL
     _require_loopback_url(ingress_url)
+    evidence_url = (
+        environ.get("CHRONOS_TV_BRIDGE_EVIDENCE_URL", "").strip() or _DEFAULT_EVIDENCE_URL
+    )
+    _require_loopback_url(evidence_url)
 
     symbols = _parse_allowlist(
         environ.get("CHRONOS_TV_BRIDGE_SYMBOLS", ""),
@@ -156,6 +165,7 @@ def load_config(environ: dict[str, str]) -> BridgeConfig:
         api_token=api_token,
         proposer_token=environ.get("CHRONOS_TV_BRIDGE_PROPOSER_TOKEN", "").strip(),
         ingress_url=ingress_url,
+        evidence_url=evidence_url,
         host=environ.get("CHRONOS_TV_BRIDGE_HOST", "").strip() or _DEFAULT_HOST,
         port=_positive_int(environ, "CHRONOS_TV_BRIDGE_PORT", _DEFAULT_PORT),
         symbols=symbols,

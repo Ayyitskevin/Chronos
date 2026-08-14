@@ -63,7 +63,7 @@ from typing import Protocol
 from sqlalchemy.orm import Session, sessionmaker
 
 from chronos.autonomy import AutonomyMandate
-from chronos.supervisor import alerts, delivery, proposals, queue
+from chronos.supervisor import alerts, delivery, evidence_bundles, proposals, queue
 from chronos.supervisor.loop import (
     CycleFacts,
     CycleOutcome,
@@ -164,6 +164,9 @@ class TickReport:
     #: and are not folded in here as if the order plane had answered.
     handoff_refusals: int = 0
     alerts_delivered: int = 0
+    #: Expired evidence-bundle rows reclaimed this tick (ADR-0028's retention
+    #: rule). Always zero under the unset posture, which writes no bundles.
+    evidence_bundles_pruned: int = 0
     queue_depth: int = 0
     failure: str = ""
     outcomes: list[CycleOutcome] = field(default_factory=list)
@@ -195,6 +198,7 @@ class AutonomyRuntime:
         submit: Handoff | None = None,
         gather_instrument: InstrumentGatherer | None = None,
         resolve_identity: IdentityResolver | None = None,
+        bind_evidence: bool = False,
     ) -> None:
         self._sessions = sessions
         self._config = config
@@ -204,6 +208,10 @@ class AutonomyRuntime:
         # no resolver is wired, every proposal is stamped with the static
         # `identity` above — the pre-registry posture, unchanged.
         self._resolve_identity = resolve_identity
+        # ADR-0028: with evidence binding in force, every proposal must cite a
+        # bundle this backend issued to that proposer and that has not expired
+        # against the drain's clock. False is the pre-ADR-0028 posture verbatim.
+        self._bind_evidence = bind_evidence
         self._mandate_source = mandate_source
         self._gather_facts = gather_facts
         self._gather_instrument = gather_instrument
@@ -331,6 +339,18 @@ class AutonomyRuntime:
             )
             report.alerts_delivered = delivered.delivered
 
+            if self._bind_evidence:
+                # ADR-0028's retention rule, run as tick housekeeping rather than
+                # at issuance: a proposer that stops asking for bundles must not
+                # be what stops the table being reclaimed. Only the lookup rows
+                # go, and only long after their authority lapsed — the
+                # hash-chained record of what was issued is never pruned.
+                report.evidence_bundles_pruned = evidence_bundles.prune_expired(
+                    session,
+                    account_fingerprint=self._config.account_fingerprint,
+                    now=now,
+                )
+
     def _drain(
         self,
         session: Session,
@@ -363,6 +383,7 @@ class AutonomyRuntime:
                 facts=facts,
                 submit=self._submit,
                 gather_instrument=self._gather_instrument,
+                bind_evidence=self._bind_evidence,
             )
             proposals.mark_processed(
                 session,

@@ -24,7 +24,12 @@ from typing import Any
 import httpx
 
 from worker.config import WorkerConfig
-from worker.evidence import TOKEN_HEADER, gather
+from worker.evidence import (
+    TOKEN_HEADER,
+    EvidenceSnapshot,
+    gather,
+    request_issued_bundle,
+)
 from worker.model import think
 from worker.propose import ProposalRefused, build_proposal
 
@@ -57,9 +62,22 @@ def run_cycle(
 ) -> CycleOutcome:
     """One full cycle. Clients are caller-supplied so tests inject transports."""
 
-    snapshot = gather(config, backend)
-    if snapshot is None:
+    # ADR-0028: ask the backend to issue and digest the evidence, then render
+    # exactly what it serves. A 404 is the backend stating that evidence binding
+    # is off, and only then does the worker compose the view itself — the
+    # pre-ADR-0028 path, unchanged. Any *other* issuance failure means no
+    # thinking: falling back after a failure would propose under a posture the
+    # owner turned on and the backend could not honor.
+    issued = request_issued_bundle(config, backend)
+    if issued is None:
         return CycleOutcome.NO_EVIDENCE
+    if isinstance(issued, EvidenceSnapshot):
+        snapshot = issued
+    else:
+        local = gather(config, backend)
+        if local is None:
+            return CycleOutcome.NO_EVIDENCE
+        snapshot = local
 
     decision = think(config, snapshot, anthropic)
     if decision is None:

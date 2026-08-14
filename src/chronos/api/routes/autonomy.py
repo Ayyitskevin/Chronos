@@ -51,15 +51,30 @@ no broker detail, and no evidence content.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import logging
+from datetime import datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Request, Response, status
 
+from chronos.api import bars as bar_plane
 from chronos.api.auth import require_proposer, require_token
 from chronos.api.dependencies import BackendState, require_writer
 from chronos.domain.models import ChronosModel
-from chronos.supervisor import ingress
+from chronos.marketdata.bars import BarInterval
+from chronos.supervisor import evidence_bundles, evidence_kinds, ingress
+from chronos.terminal import views
 from chronos.utils.identifiers import account_fingerprint
+from chronos.utils.time import utc_now
+
+_logger = logging.getLogger("chronos.api.autonomy")
+
+#: How many symbols one evidence bundle may carry bars for. A bound on the work
+#: a proposal-only credential can ask the broker-holding process to do, in the
+#: same spirit as the queue's depth cap.
+MAX_EVIDENCE_SYMBOLS = 32
 
 # No router-level credential (ADR-0023): the proposal route and the alert route
 # authenticate differently on purpose, so each route names its own dependency
@@ -187,6 +202,311 @@ async def submit_proposal(
             "nothing has been judged or sent"
         ),
     )
+
+
+class EvidenceRequest(ChronosModel):
+    """What a proposer asks for when it wants a bundle (ADR-0028).
+
+    Two shapes, and the ``kind`` decides which fields matter:
+
+    - ``backend_served`` — the backend composes and digests the document. The
+      caller names the symbols it wants bars for and nothing else; it cannot
+      supply a digest, because the whole point is that the backend computes one
+      over bytes it holds.
+    - ``alert_attested`` — the caller supplies the digest it computed over
+      evidence Chronos never saw. The backend records the claim against the
+      credential and the time, and says so in the record's kind.
+    """
+
+    kind: str = evidence_kinds.BundleKind.BACKEND_SERVED.value
+    symbols: tuple[str, ...] = ()
+    lookback_days: int = 180
+    #: Required for ``alert_attested``; refused for ``backend_served``, where
+    #: accepting a caller-supplied digest would quietly turn a witnessed record
+    #: into an attested one under a label claiming otherwise.
+    digest: str = ""
+
+
+class EvidenceIssued(ChronosModel):
+    """One issued bundle, and — for the served kind — the exact bytes digested.
+
+    ``document`` is the canonical JSON string the digest was taken over. A
+    proposer that renders it **verbatim** into its prompt gets ADR-0028's
+    agreement rule for free; one that reformats, truncates, or re-serializes it
+    will produce a different digest and be refused at admission, which is the
+    accident this protocol is built to catch.
+    """
+
+    bundle_id: str
+    kind: str
+    digest: str
+    bundle_version: str
+    issued_at: str
+    expires_at: str
+    document: str = ""
+
+
+@router.post(
+    "/autonomy/evidence",
+    # No `response_model`: this route answers with an `EvidenceIssued` on
+    # success and a `ProposalAccepted`-shaped refusal otherwise, and pinning one
+    # of them would make FastAPI validate the other into a 500 — turning an
+    # honest refusal into a server error, which is the opposite of what a
+    # fail-closed surface should do.
+    status_code=status.HTTP_201_CREATED,
+)
+async def issue_evidence(
+    request: EvidenceRequest,
+    response: Response,
+    http_request: Request,
+    proposer_id: ProposerDep,
+    state: WriterDep,
+) -> EvidenceIssued | Any:
+    """Issue one evidence bundle to the credential that asked for it (ADR-0028).
+
+    **This is the one authorization-surface change ADR-0028 makes, and it is
+    stated loudly rather than absorbed.** Issuance is a *write* reachable by a
+    proposal-only credential, so this route makes that credential open a second
+    route for the first time since ADR-0023 made it proposal-only. R-48's
+    enumeration test — every mutating route, every way a confused process could
+    present the credential, all 401 — grows this route as a deliberate, **named,
+    tested exception** rather than absorbing it into the general rule. ADR-0028's
+    own recommendation stands: this should be the last route that credential
+    opens without a further ADR.
+
+    Three bounds come with the surface, and none of them is optional:
+
+    - **Only a registered proposer may ask.** A bundle is issued *to* a
+      credential. With no registry configured there is no author to issue to, so
+      the route refuses rather than issuing an unattributable record — the same
+      combination startup already alerts on.
+    - **Per-proposer issuance cap.** A proposer that could mint unbounded rows is
+      a disk-filling denial of service against the process holding the broker
+      connection, so the cap refuses rather than evicting an in-flight bundle
+      (``evidence_bundles.MAX_LIVE_BUNDLES_PER_PROPOSER``, the shape
+      ``proposals.MAX_PENDING`` already uses).
+    - **The writer lease.** A read-only backend issuing bundles would be building
+      state the writer will never judge against.
+
+    201 rather than 202: unlike a proposal, something *was* created that the
+    caller now holds — a record with an id it will cite. It authorizes nothing on
+    its own; every gate downstream is unchanged.
+    """
+
+    runtime = state.runtime
+    if not getattr(http_request.app.state, "evidence_binding", False):
+        # Not an error the caller can fix, and deliberately not a silent success:
+        # issuing bundles nothing will ever check would manufacture records that
+        # look like evidence binding is in force when it is not.
+        response.status_code = status.HTTP_404_NOT_FOUND
+        return ProposalAccepted(
+            accepted=False,
+            stage="EVIDENCE",
+            refusal="EVIDENCE_BINDING_DISABLED",
+            detail=(
+                "evidence binding is not configured on this backend; set "
+                "AUTONOMY_EVIDENCE_BUNDLES to issue bundles"
+            ),
+        )
+    if getattr(http_request.app.state, "evidence_posture_broken", False) or proposer_id is None:
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+        return ProposalAccepted(
+            accepted=False,
+            stage="EVIDENCE",
+            refusal="EVIDENCE_POSTURE_INVALID",
+            detail=(
+                "evidence binding is configured without a proposer registry; a bundle is "
+                "issued to a credential, so issuance refuses until the owner configures "
+                "AUTONOMY_PROPOSERS_FILE"
+            ),
+        )
+    fingerprint = _fingerprint_of(runtime)
+    if not fingerprint:
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+        return ProposalAccepted(
+            accepted=False,
+            stage="EVIDENCE",
+            refusal="BACKEND_UNSCOPED",
+            detail="this backend is not bound to an account; evidence cannot be issued",
+        )
+
+    try:
+        kind = evidence_kinds.BundleKind(request.kind)
+    except ValueError:
+        response.status_code = status.HTTP_422_UNPROCESSABLE_ENTITY
+        return ProposalAccepted(
+            accepted=False,
+            stage="EVIDENCE",
+            refusal="EVIDENCE_KIND_UNKNOWN",
+            detail=f"{request.kind!r} is not an evidence bundle kind",
+        )
+
+    document = ""
+    if kind is evidence_kinds.BundleKind.BACKEND_SERVED:
+        if request.digest:
+            # Accepting a caller's digest here would relabel an attestation as a
+            # witnessing — the exact substitution ADR-0028 forbids between kinds.
+            response.status_code = status.HTTP_422_UNPROCESSABLE_ENTITY
+            return ProposalAccepted(
+                accepted=False,
+                stage="EVIDENCE",
+                refusal="EVIDENCE_DIGEST_NOT_ACCEPTED",
+                detail=(
+                    "a backend_served bundle digests the bytes the backend serves; a "
+                    "caller-supplied digest would make it attested while labelled served"
+                ),
+            )
+        composed = compose_served_document(
+            runtime,
+            state,
+            symbols=request.symbols,
+            lookback_days=request.lookback_days,
+            now=utc_now(),
+        )
+        if composed is None:
+            # The fact-gathering doctrine, applied to issuance: evidence is
+            # never invented to keep a caller moving.
+            response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+            return ProposalAccepted(
+                accepted=False,
+                stage="EVIDENCE",
+                refusal="EVIDENCE_UNAVAILABLE",
+                detail=(
+                    "the backend could not gather the facts a bundle is composed from; no "
+                    "bundle is issued rather than one describing facts it does not have"
+                ),
+            )
+        document, digest = composed
+    else:
+        digest = request.digest.strip().lower()
+
+    now = utc_now()
+    try:
+        with runtime.database.sessions.begin() as db_session:
+            issued = evidence_bundles.issue(
+                db_session,
+                account_fingerprint=fingerprint,
+                proposer_id=proposer_id,
+                kind=kind,
+                digest=digest,
+                now=now,
+                ttl_seconds=runtime.settings.autonomy_evidence_ttl_seconds,
+            )
+    except evidence_bundles.IssuanceRefused as error:
+        # 429 for the cap (a load condition to back off from), 422 for a
+        # malformed digest (a request the caller can fix).
+        response.status_code = (
+            status.HTTP_429_TOO_MANY_REQUESTS
+            if "cap" in str(error)
+            else status.HTTP_422_UNPROCESSABLE_ENTITY
+        )
+        return ProposalAccepted(
+            accepted=False,
+            stage="EVIDENCE",
+            refusal="EVIDENCE_ISSUANCE_REFUSED",
+            detail=str(error),
+        )
+
+    return EvidenceIssued(
+        bundle_id=issued.bundle_id,
+        kind=issued.kind.value,
+        digest=issued.digest,
+        bundle_version=issued.bundle_version,
+        issued_at=issued.issued_at.isoformat(),
+        expires_at=issued.expires_at.isoformat(),
+        document=document,
+    )
+
+
+def compose_served_document(
+    runtime: Any,
+    state: Any,
+    *,
+    symbols: tuple[str, ...],
+    lookback_days: int,
+    now: datetime,
+) -> tuple[str, str] | None:
+    """The canonical evidence document and its digest, or ``None`` if ungatherable.
+
+    Composes the same facts a worker used to fetch for itself — account summary,
+    positions, Chronos-owned orders, daily bars per symbol — into one canonical
+    JSON string, and takes SHA-256 over its exact UTF-8 bytes. Canonicalized the
+    same way the hash chain canonicalizes payloads (sorted keys, no insignificant
+    whitespace), so a key-order difference cannot produce a different digest for
+    identical facts and break the comparison for no reason.
+
+    Returns the string, not a structure, because **the string is the artifact**:
+    the digest is over these bytes, and a proposer that re-serializes an
+    equivalent structure has not rendered what was digested.
+
+    ``None`` on any failed read. Issuing a bundle over partial facts would
+    produce a record whose digest binds a document that silently omits what could
+    not be fetched — a worse outcome than refusing, and the same doctrine the
+    supervisor's fact gatherers already follow.
+    """
+
+    bounded = tuple(dict.fromkeys(symbol.strip().upper() for symbol in symbols if symbol.strip()))
+    if len(bounded) > MAX_EVIDENCE_SYMBOLS:
+        bounded = bounded[:MAX_EVIDENCE_SYMBOLS]
+    lookback = max(1, min(lookback_days, bar_plane.MAX_LOOKBACK_DAYS))
+
+    try:
+        summary = runtime.connection.run(runtime.broker.account_summary())
+        positions = runtime.connection.run(runtime.broker.positions())
+        orders = runtime.order_management.list_orders()
+    except Exception:
+        _logger.exception("Evidence composition failed gathering account facts")
+        return None
+
+    payload: dict[str, Any] = {
+        "account": summary.model_dump(mode="json"),
+        "positions": [position.model_dump(mode="json") for position in positions],
+        "open_orders": [_order_fact(record) for record in orders],
+    }
+    bars: dict[str, Any] = {}
+    for symbol in bounded:
+        try:
+            answer = bar_plane.provider_for(runtime, state).bars(
+                symbol, interval=BarInterval.DAY_1, lookback_days=lookback
+            )
+        except Exception:
+            _logger.exception("Evidence composition failed gathering bars for %s", symbol)
+            return None
+        # Rendered through the terminal's own view builder, so the bars a bundle
+        # carries are the same payload the worker used to fetch for itself — the
+        # facts moved behind one credential, they did not change shape. A paced
+        # refusal travels as data exactly as that route renders it: the model is
+        # told the chart is unavailable rather than shown a fabricated one, and
+        # the digest covers that honest statement.
+        bars[symbol] = views.bars_view(
+            answer.series,
+            lookback_days=lookback,
+            source=answer.source,
+            fetched_at=answer.fetched_at,
+            stale=answer.stale,
+            refusal=answer.refusal,
+            now=now,
+        ).model_dump(mode="json")
+    payload["daily_bars"] = bars
+    payload["watchlist"] = list(bounded)
+    payload["as_of"] = now.isoformat()
+    payload["bundle_version"] = evidence_bundles.BUNDLE_VERSION
+
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return canonical, hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _order_fact(record: Any) -> dict[str, Any]:
+    """One Chronos-owned order, as evidence. No broker handles, no raw ids."""
+
+    intent = getattr(record, "intent", None)
+    return {
+        "intent_id": str(getattr(intent, "intent_id", "") or ""),
+        "chronos_reference": str(getattr(intent, "chronos_reference", "") or ""),
+        "symbol": str(getattr(intent, "symbol", "") or ""),
+        "lifecycle": str(getattr(getattr(record, "lifecycle", None), "value", "") or ""),
+        "quantity": str(getattr(intent, "quantity", "") or ""),
+    }
 
 
 class AlertView(ChronosModel):

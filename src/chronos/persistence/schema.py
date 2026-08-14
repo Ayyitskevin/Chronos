@@ -693,3 +693,61 @@ class AutonomyProposalQueueRow(Base):
     #: The value is written by the route from the *verified* registration —
     #: never from the payload — and read at drain time to stamp provenance.
     proposer_id: Mapped[str | None] = mapped_column(String(64))
+
+
+class AutonomyEvidenceBundleRow(Base):
+    """One evidence bundle the backend issued or attested (v9, ADR-0028 Option C).
+
+    This row is the record admission check 9 never had. Through 2026-08-13 that
+    check compared ``provenance.evidence_bundle_id``/``_digest`` against
+    ``SupervisorState.expected_*`` — and both sides were two reads of the single
+    ``INGRESS_IDENTITY`` constant, so the check was a tautology that could not
+    refuse in any posture, for any proposer. A durable per-job record is what
+    finally gives the comparison a side the payload did not author.
+
+    ``kind`` is the honest label, and the two values never substitute for one
+    another:
+
+    - ``backend_served`` — the backend composed a canonical document, digested
+      the exact bytes it served, and returned them. It is a **witness**: it can
+      recompute what it sent.
+    - ``alert_attested`` — a proposer asserted, under its own credential and at
+      a recorded time, that it saw bytes with this digest. The backend cannot
+      recompute it and does not claim to. This is the only shape available to
+      the TradingView bridge, whose evidence is authored outside Chronos and is
+      never seen by the backend at all.
+
+    ADR-0028's rule for the ladder is blunt and belongs beside the label: an
+    attested bundle may back a proposal; it may **not** back a promotion rung.
+    Rendering or reading an ``alert_attested`` row as "evidence the backend
+    issued" would be exactly the false-evidence class the ladder exists to
+    prevent.
+
+    ``expires_at`` is judged against the **drain's** clock, never the proposer's
+    own ``as_of``, so a bundle that expires between enqueue and drain refuses at
+    the moment authority is exercised rather than the moment bytes arrived.
+    """
+
+    __tablename__ = "autonomy_evidence_bundles"
+    __table_args__ = (
+        UniqueConstraint("account_fingerprint", "bundle_id", name="uq_autonomy_evidence_bundle"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account_fingerprint: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    #: Backend-generated. A proposer never chooses its own bundle id, for the
+    #: same reason it never authors its own provenance.
+    bundle_id: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
+    #: The registration this bundle was issued *to*. A bundle cited by a
+    #: different proposer refuses at STAMP: issuance is per-credential, and a
+    #: shared bundle would make attribution ambiguous again.
+    proposer_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    #: ``backend_served`` or ``alert_attested`` — see the class docstring.
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    #: SHA-256, lowercase hex, over the exact bytes served (or attested).
+    digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    #: The bundle schema version, so a change to either side's serialization is
+    #: a visible, version-pinned break rather than a silent digest disagreement.
+    bundle_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    issued_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime(), index=True, nullable=False)

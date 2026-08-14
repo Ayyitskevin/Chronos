@@ -270,11 +270,35 @@ def provider_for(runtime: AppRuntime, state: object) -> BarProvider:
     rebuilt per request would have an empty cache every time, which would turn
     every panel refresh into a broker request — the exact thing this module
     exists to prevent.
+
+    **Fixed 2026-08-14 (found while building ADR-0028's issuance handler, which
+    composes the same bars).** The caching write below used to create a *new*
+    attribute on the state object. ``BackendState`` is a ``slots=True``
+    dataclass, so that raised ``AttributeError`` every time and
+    ``GET /terminal/bars`` answered 500 for every symbol, on every backend, since
+    the route existed — a dead route of exactly the ``_fingerprint_of`` shape
+    ADR-0023's work uncovered, surviving because no test ever called it. The slot
+    is now a declared field on ``BackendState`` and
+    ``tests/safety/test_evidence_bundles_exercised.py`` drives the route to a
+    200. The caching intent above is unchanged; it simply works now.
+
+    A caller whose state object has no such slot still gets a working provider —
+    uncached, which is slow rather than broken, and never an exception.
     """
 
     existing = getattr(state, "bar_provider", None)
     if isinstance(existing, BarProvider):
         return existing
     provider = BarProvider(runtime)
-    state.bar_provider = provider  # type: ignore[attr-defined]
+    try:
+        state.bar_provider = provider  # type: ignore[attr-defined]
+    except AttributeError:
+        # Degrade to uncached rather than failing the request. Losing the cache
+        # costs a broker read; raising costs the panel, and a chart that cannot
+        # render is how this defect hid for so long.
+        _logger.warning(
+            "Bar provider could not be cached on %s; serving uncached",
+            type(state).__name__,
+            extra={"event": "bar_provider_uncached"},
+        )
     return provider

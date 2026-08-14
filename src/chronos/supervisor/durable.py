@@ -635,6 +635,8 @@ def build_state(
     process_generation: int,
     expected_evidence_bundle_id: str | None = None,
     expected_evidence_bundle_digest: str | None = None,
+    expected_evidence_bundle_kind: str | None = None,
+    expected_evidence_expires_at: datetime | None = None,
     market_data: MarketDataEvidence | None = None,
     extra_degraded_reasons: tuple[DegradedReason, ...] = (),
     market_timezone: str | None = None,
@@ -676,5 +678,7 @@ def build_state(
         refused_decision_attempts=dict(refusals),
         expected_evidence_bundle_id=expected_evidence_bundle_id,
         expected_evidence_bundle_digest=expected_evidence_bundle_digest,
+        expected_evidence_bundle_kind=expected_evidence_bundle_kind,
+        expected_evidence_expires_at=expected_evidence_expires_at,
         market_data=market_data,
     )

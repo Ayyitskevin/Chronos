@@ -49,9 +49,12 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from chronos.api.auth import load_or_create_token, load_proposer_auth
 from chronos.api.autonomy_wiring import (
+    alert_broken_evidence_posture,
     alert_invalid_proposer_registry,
     autonomy_tick_task,
     build_autonomy_runtime,
+    evidence_binding_in_force,
+    evidence_posture_is_broken,
 )
 from chronos.api.dependencies import BackendState
 from chronos.api.reconciliation_loop import reconciliation_task
@@ -200,6 +203,20 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             )
             if not read_only:
                 alert_invalid_proposer_registry(runtime)
+        # ADR-0028: a bundle is issued *to* a credential, so turning evidence
+        # binding on without a proposer registry names no author to issue to.
+        # It refuses loudly rather than falling back — ADR-0023's posture rule,
+        # applied to the setting that arrived after it.
+        app.state.evidence_binding = evidence_binding_in_force(runtime.settings)
+        app.state.evidence_posture_broken = evidence_posture_is_broken(runtime.settings)
+        if app.state.evidence_posture_broken:
+            _logger.error(
+                "AUTONOMY_EVIDENCE_BUNDLES is set with no AUTONOMY_PROPOSERS_FILE; every "
+                "proposal will refuse until one is configured or the other unset",
+                extra={"event": "evidence_posture_invalid", "passed": False},
+            )
+            if not read_only:
+                alert_broken_evidence_posture(runtime)
         if not read_only:
             # R-24: the boundary re-checks lease ownership in the database
             # immediately before transmitting, instead of trusting the

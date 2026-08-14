@@ -129,6 +129,38 @@ plan §6 finding-5 annotation.
 **[owner-review gate]** (admission-semantics change; the ADR is the review
 vehicle — draft it first, get the owner's acceptance, then build).
 
+> **BUILT 2026-08-14, awaiting the owner's merge** (the merge IS the review act
+> for an owner-review-gated item). Branch
+> `claude/chronos-evidence-protocol-a2`, based on `b5d61dd` (the merge of PR #69,
+> which landed the ADR draft; A1 landed earlier as PR #68). The ADR was accepted
+> in the owner's own words — "merged 69, go with option C, have opus build it"
+> (Kevin, 2026-08-14) — so this PR carries the acceptance flip as well as the
+> build, following the ADR-0023 precedent. Delivered as specified, Option C
+> whole: the durable hash-chained `autonomy_evidence_bundles` record (migration
+> 0008, SCHEMA_VERSION 8 → 9), `POST /autonomy/evidence` composing and digesting
+> the exact bytes it serves, resolution at STAMP against the drain's clock with
+> provenance stamped from the record, and admission check 9's missing
+> payload-side half. Every recommended parameter honored: 300 s TTL judged at the
+> drain (ceiling 3600 s, out-of-range refuses to start), the bridge on its own
+> `alert_attested` kind that may back a proposal and never a promotion rung, the
+> unset posture byte-identical to `b5d61dd` proven against a recorded journal row,
+> and issuance bounded by a per-proposer cap plus a retention rule that never
+> prunes the hash-chained issuance record. Evidence:
+> `tests/safety/test_evidence_bundles_exercised.py` (25 tests), 18/18 conjuncts
+> each reverted alone and watched fail, gates green at 3108 passed / 1 skipped
+> (baseline 3082 / 1). Governance: ADR-0028 status flipped in place, D-25, R-50,
+> R-48 amended with the issuance route as its one named, tested exception, plan
+> §6 finding-6 annotation. Two additions beyond the ADR's text, both disclosed
+> rather than absorbed: a third additive refusal code
+> (`EVIDENCE_BUNDLE_KIND_MISMATCH`, so a relabelled attestation stays
+> distinguishable from a forged digest), and the fix for a **second live
+> dead-route defect** the build surfaced — `chronos.api.bars.provider_for` cached
+> by assigning a new attribute to the `slots=True` `BackendState`, so
+> `GET /terminal/bars` had answered 500 for every symbol, on every backend, since
+> the route existed, with no test ever calling it. Residuals are in R-50 — most
+> importantly that **equality catches accident, not malice**, and that **attested
+> is not witnessed**.
+
 *Why:* ADR-0023 closed identity and deliberately left evidence uniform: every
 proposal cites the placeholder bundle (`owner-workspace`, digest `None`).
 ADR-0016's promotion bindings and the "no promotion artifact while identity or

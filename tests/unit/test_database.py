@@ -179,9 +179,12 @@ def test_schema_initialization_creates_required_evidence_tables() -> None:
         "autonomy_session_counters",
         "autonomy_decision_attempts",
         "autonomy_proposal_queue",
+        # The per-job evidence-bundle record (v9, ADR-0028, migration 0008).
+        "autonomy_evidence_bundles",
     } <= names
     # v8: autonomy_proposal_queue gains proposer_id (ADR-0023, migration 0007).
-    assert SCHEMA_VERSION == 8
+    # v9: autonomy_evidence_bundles arrives (ADR-0028, migration 0008).
+    assert SCHEMA_VERSION == 9
 
 
 def test_application_events_are_append_only_and_queryable() -> None:
