@@ -59,7 +59,7 @@ proposal chose.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
@@ -70,7 +70,7 @@ from sqlalchemy.orm import Session
 from chronos.autonomy import AITradeDecision, AutonomyMandate, ProposedDecision
 from chronos.domain.models import Instrument
 from chronos.orders.intent import WheelOrderIntent
-from chronos.supervisor import alerts, durable, ingress, queue
+from chronos.supervisor import alerts, durable, evidence_bundles, ingress, queue
 from chronos.supervisor.admission import (
     AdmissionOutcome,
     DegradedReason,
@@ -238,6 +238,7 @@ def run_cycle(
     facts: CycleFacts,
     submit: Handoff | None = None,
     gather_instrument: InstrumentGatherer | None = None,
+    bind_evidence: bool = False,
 ) -> CycleOutcome:
     """Walk one proposal through every gate. Stops at the first refusal.
 
@@ -249,6 +250,13 @@ def run_cycle(
     ``submit`` is optional **on purpose**. Omitting it is SHADOW: the full walk
     runs and no order is placed. A caller that has not thought about the last
     step gets the safe behavior rather than a surprise.
+
+    ``bind_evidence`` is ADR-0028's posture switch, and ``False`` is today's
+    behavior verbatim: the expectation comes from ``CycleFacts`` and check 9
+    compares the constant against itself, as it has since M2. ``True`` requires
+    every proposal to cite an evidence bundle this backend issued to *this*
+    proposer and has not expired — resolved here, at the drain, against the
+    drain's own clock.
     """
 
     # --- ingress -----------------------------------------------------------
@@ -286,6 +294,40 @@ def run_cycle(
                 ),
             ),
         )
+    # The authority half of ADR-0028's evidence binding, in the same stage and
+    # for the same reason as the identity resolution above: the drain re-resolves
+    # what the proposal *cites* against a durable record, using the drain's own
+    # clock, so a bundle that expired between enqueue and drain refuses at the
+    # moment authority is exercised rather than the moment bytes arrived. No
+    # record, a record belonging to another proposer, or an expired one means the
+    # proposal is never judged — and provenance is then stamped from the RECORD,
+    # never from what the payload said about itself.
+    expected_evidence: evidence_bundles.IssuedBundle | None = None
+    if bind_evidence:
+        resolution = evidence_bundles.resolve(
+            session,
+            account_fingerprint=facts.account_fingerprint,
+            cited_ids=tuple(citation.evidence_id for citation in proposal.evidence),
+            proposer_id=identity.proposer_id,
+            now=facts.now,
+        )
+        if resolution.bundle is None:
+            refusal = resolution.refusal
+            return _record(
+                session,
+                facts,
+                CycleOutcome(
+                    stage=CycleStage.STAMP,
+                    refusal=refusal.value if refusal else "EVIDENCE_BUNDLE_UNRESOLVED",
+                    detail=resolution.detail,
+                ),
+            )
+        expected_evidence = resolution.bundle
+        identity = replace(
+            identity,
+            evidence_bundle_id=expected_evidence.bundle_id,
+            evidence_bundle_digest=expected_evidence.digest,
+        )
     try:
         decision = queue.accept(
             proposal,
@@ -320,8 +362,22 @@ def run_cycle(
             mandate=mandate,
             now=facts.now,
             process_generation=facts.process_generation,
-            expected_evidence_bundle_id=facts.evidence_bundle_id,
-            expected_evidence_bundle_digest=facts.evidence_bundle_digest,
+            # Under the configured posture the expectation comes from the record
+            # the drain resolved, not from CycleFacts — which carries the
+            # placeholder constant and would put the tautology straight back.
+            # CycleFacts keeps both fields for the unset posture, unchanged.
+            expected_evidence_bundle_id=(
+                expected_evidence.bundle_id if expected_evidence else facts.evidence_bundle_id
+            ),
+            expected_evidence_bundle_digest=(
+                expected_evidence.digest if expected_evidence else facts.evidence_bundle_digest
+            ),
+            expected_evidence_bundle_kind=(
+                expected_evidence.kind.value if expected_evidence else None
+            ),
+            expected_evidence_expires_at=(
+                expected_evidence.expires_at if expected_evidence else None
+            ),
             market_data=facts.market_data,
             extra_degraded_reasons=facts.degraded_reasons,
             market_timezone=facts.market_timezone,

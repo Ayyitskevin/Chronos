@@ -20,6 +20,26 @@ Three properties are deliberate:
   ``DecisionProvenance`` against the mandate's ``VersionPins``. See the honest
   bound below: today that proves *agreement*, not *authorship*.
 
+## Check 9 had one side until ADR-0028
+
+Worth stating where the check lives, because it is this repository's fifth
+instance of the R-24..R-27 shape and the one it caught before it cost anything.
+Through 2026-08-13 ``_check_evidence_bundle`` compared
+``provenance.evidence_bundle_id``/``_digest`` against
+``SupervisorState.expected_*`` — and both sides originated in the same place, the
+static ``INGRESS_IDENTITY`` constant, one copied into the stamp and one into
+``CycleFacts``. The check was written correctly and wired to a comparison that
+had never had two independent origins, so it could not refuse in any posture,
+for any proposer. Not a control that failed: a control whose evidence was never
+gathered.
+
+ADR-0028 Option C supplies the missing origin. Under the configured posture the
+drain resolves the bundle the proposal **cites** against a durable issued record
+and stamps provenance from that record, and this module additionally compares the
+payload's own ``EvidenceCitation`` — authored by the proposer, never written by
+the backend — against it. ``expected_evidence_bundle_kind`` is the switch: unset
+is the pre-ADR-0028 behavior verbatim.
+
 ## What admission does NOT enforce (read this before relying on it)
 
 The M2 adversarial review found that several mandate limit groups are read by no
@@ -91,6 +111,7 @@ from chronos.autonomy import (
     promotion_rank,
 )
 from chronos.domain.enums import DataQuality
+from chronos.supervisor.evidence_kinds import kind_permits_citation
 
 #: Strategies that can express short exposure in the underlying. Used to refuse a
 #: SHORT-direction decision whose named strategy cannot be short — the hole the
@@ -130,6 +151,15 @@ class AdmissionRefusal(StrEnum):
     VERSION_PIN_MISMATCH = "VERSION_PIN_MISMATCH"
     EVIDENCE_BUNDLE_MISMATCH = "EVIDENCE_BUNDLE_MISMATCH"
     EVIDENCE_BUNDLE_UNKNOWN = "EVIDENCE_BUNDLE_UNKNOWN"
+    #: Additive under ADR-0028's configured posture. Stale, absent and
+    #: wrong-kind evidence stay distinguishable in the journal from a forged
+    #: digest (``EVIDENCE_BUNDLE_MISMATCH``, whose meaning is unchanged) and from
+    #: an expectation the supervisor could not state at all
+    #: (``EVIDENCE_BUNDLE_UNKNOWN``, likewise unchanged). Nothing weakens: every
+    #: input that refused before this ADR refuses after it, with the same code.
+    EVIDENCE_BUNDLE_EXPIRED = "EVIDENCE_BUNDLE_EXPIRED"
+    EVIDENCE_BUNDLE_UNCITED = "EVIDENCE_BUNDLE_UNCITED"
+    EVIDENCE_BUNDLE_KIND_MISMATCH = "EVIDENCE_BUNDLE_KIND_MISMATCH"
     DECISION_REPLAY = "DECISION_REPLAY"
     RESUBMISSION_EXHAUSTED = "RESUBMISSION_EXHAUSTED"
     NOT_EXECUTABLE = "NOT_EXECUTABLE"
@@ -269,6 +299,17 @@ class SupervisorState:
     #: Evidence bundle the supervisor issued for this run, and its digest.
     expected_evidence_bundle_id: str | None = None
     expected_evidence_bundle_digest: str | None = None
+    #: The issued record's kind and expiry (ADR-0028). ``None`` is the **unset
+    #: posture** and means precisely today's behavior: check 9 compares
+    #: provenance against the expectation and stops, exactly as it did before
+    #: this ADR. A value puts evidence binding in force, and the check gains its
+    #: payload-side half — the one independent side it has never had.
+    #:
+    #: Kept as two plain fields rather than a nested record so ``admit`` stays a
+    #: pure function over values the caller assembled, with no supervisor durable
+    #: type reaching the kernel.
+    expected_evidence_bundle_kind: str | None = None
+    expected_evidence_expires_at: datetime | None = None
     #: Fresh quote evidence for the decision's instrument.
     market_data: MarketDataEvidence | None = None
 
@@ -622,7 +663,108 @@ def _check_evidence_bundle(
             "the decision's evidence-bundle digest does not match the bundle the "
             "supervisor issued; the evidence it reasoned from is not the evidence on record",
         )
-    _ok(checks, "evidence_bundle", expected_id)
+    if state.expected_evidence_bundle_kind is None:
+        # The UNSET posture (ADR-0028). Everything above is the check exactly as
+        # it stood at `a74cd09`, and this returns on the same line it always
+        # did, with the same check name and detail. A posture switch that
+        # quietly changed the default posture is the failure this repository
+        # fixes rather than ships, so the unset path is byte-identical and
+        # `test_evidence_bundles_exercised.py` proves it against a recorded
+        # journal row rather than by inspection.
+        _ok(checks, "evidence_bundle", expected_id)
+        return None
+    return _check_cited_evidence(checks, decision, state, expected_id, expected_digest)
+
+
+def _check_cited_evidence(
+    checks: list[AdmissionCheck],
+    decision: AITradeDecision,
+    state: SupervisorState,
+    expected_id: str,
+    expected_digest: str | None,
+) -> AdmissionOutcome | None:
+    """Check 9's payload-side half, in force only under ADR-0028's set posture.
+
+    Everything above this point compares provenance — which the deterministic
+    queue writer stamped — against the supervisor's expectation. Under ADR-0028
+    both of those now come from the *same durable record the drain resolved*, so
+    on their own they would still agree tautologically, just per job instead of
+    globally. This is the second, independent origin: the ``EvidenceCitation``
+    the **proposer itself authored and put in the payload**, which the backend
+    never wrote and cannot influence.
+
+    The comparison it performs is the one the whole check exists for — "the
+    evidence it reasoned from is the evidence on record" — and the honest bound
+    stays what ADR-0028 states plainly: **equality catches accident, not
+    malice.** A proposer that fetches a bundle, reasons on other text and cites
+    the issued digest is indistinguishable from an honest one, because the
+    backend cannot observe a prompt in another process. What it does catch is a
+    rendering that drifted from what was fetched — truncation, reordering, a
+    key-order change, a partial fetch — which is precisely the class that
+    produced R-24..R-27.
+    """
+
+    if expected_digest is None:
+        # Under this posture the stamper had a record or the drain refused
+        # before admission ran. A `None` digest here therefore means the stamper
+        # produced provenance without one, which is a defect rather than an
+        # attested absence — and ADR-0028 is explicit that it must refuse rather
+        # than read as "no digest was issued".
+        return _fail(
+            checks,
+            "evidence_bundle",
+            AdmissionRefusal.EVIDENCE_BUNDLE_MISMATCH,
+            "evidence binding is configured but the stamped provenance carries no digest; "
+            "absence is not attested absence under this posture, it is a missing record",
+        )
+    expires_at = state.expected_evidence_expires_at
+    if expires_at is None or state.now >= expires_at:
+        # Belt and braces: the drain already refuses an expired bundle against
+        # its own clock. Re-judging it here puts the refusal in the pure kernel
+        # too, where it is reproducible from its inputs alone — and a missing
+        # expiry is deny-by-default, never an unbounded bundle.
+        return _fail(
+            checks,
+            "evidence_bundle",
+            AdmissionRefusal.EVIDENCE_BUNDLE_EXPIRED,
+            "the cited evidence bundle has expired; evidence is bound for a bounded window "
+            "and a stale bundle refuses rather than backing a decision made after it lapsed",
+        )
+    cited = next(
+        (citation for citation in decision.evidence if citation.evidence_id == expected_id),
+        None,
+    )
+    if cited is None:
+        return _fail(
+            checks,
+            "evidence_bundle",
+            AdmissionRefusal.EVIDENCE_BUNDLE_UNCITED,
+            "the decision carries no citation for the evidence bundle its provenance names; "
+            "the payload must state which evidence it read, not merely inherit the stamp",
+        )
+    if not kind_permits_citation(state.expected_evidence_bundle_kind or "", cited.kind):
+        # Kinds do not substitute for one another. A backend-served bundle
+        # claims Chronos witnessed the bytes; an attested one claims only that a
+        # credential said so at a time. Letting a citation of one kind satisfy a
+        # record of the other would relabel an attestation as a witnessing,
+        # which is the false-evidence class the ladder exists to prevent.
+        return _fail(
+            checks,
+            "evidence_bundle",
+            AdmissionRefusal.EVIDENCE_BUNDLE_KIND_MISMATCH,
+            f"the decision cites the bundle as {cited.kind!r}, which is not a citation kind "
+            f"the issued record's kind admits; attested evidence and served evidence make "
+            "different claims and are not interchangeable",
+        )
+    if cited.digest != expected_digest:
+        return _fail(
+            checks,
+            "evidence_bundle",
+            AdmissionRefusal.EVIDENCE_BUNDLE_MISMATCH,
+            "the decision's own citation digest disagrees with the issued record; the bytes "
+            "it says it read are not the bytes the backend has on record for this bundle",
+        )
+    _ok(checks, "evidence_bundle", f"{expected_id} ({state.expected_evidence_bundle_kind})")
     return None
 
 

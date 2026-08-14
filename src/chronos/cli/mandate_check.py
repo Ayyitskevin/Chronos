@@ -110,6 +110,25 @@ class RegistryPosture:
     proposers: tuple[RegisteredPins, ...] | None
 
 
+@dataclass(frozen=True, slots=True)
+class EvidencePosture:
+    """What AUTONOMY_EVIDENCE_BUNDLES resolves to at review time (ADR-0028).
+
+    Reported for the same reason the registry posture is: a mandate authored
+    against the wrong posture should be BLOCKING at *authoring* time rather than
+    become a run of silent refusals at trade time. Not constructing this object
+    means "not configured" — the pre-ADR-0028 posture, which needs no finding
+    because it is what every existing mandate was written against.
+    """
+
+    enabled: bool
+    #: Whether a proposer registry is configured alongside it. Evidence binding
+    #: issues bundles *to* a credential, so without a registry it refuses every
+    #: proposal — a configuration error the owner should learn about here.
+    registry_configured: bool
+    ttl_seconds: float
+
+
 # --------------------------------------------------------------------- loading
 
 
@@ -162,6 +181,7 @@ def review_mandate(
     fingerprint_source: str = "",
     ingress_pins: dict[str, str] | None = None,
     registry: RegistryPosture | None = None,
+    evidence: EvidencePosture | None = None,
 ) -> list[Finding]:
     """Every finding this tool can make about a *valid* mandate.
 
@@ -184,7 +204,53 @@ def review_mandate(
     findings.extend(_review_discretion(mandate))
     findings.extend(_review_promotions(mandate))
     findings.extend(_review_posture(mandate))
+    findings.extend(_review_evidence_posture(evidence))
     return findings
+
+
+def _review_evidence_posture(evidence: EvidencePosture | None) -> list[Finding]:
+    """Say what evidence binding will do to this mandate's proposals (ADR-0028).
+
+    Three postures, three different things an owner needs to know before trade
+    time rather than after a run of refusals:
+
+    - not configured — nothing to say; that is what every mandate to date was
+      authored against;
+    - configured **without** a registry — BLOCKING. A bundle is issued to a
+      credential, so this combination refuses every proposal. It is a
+      configuration error with a visible cause, and finding it here is cheaper
+      than finding it in the journal;
+    - configured **with** a registry — a NOTE, plus the bound. Every
+      proposer must now cite a bundle this backend issued, so a proposer that
+      has not been updated to ask for one will refuse at STAMP even though its
+      credential is perfectly valid.
+    """
+
+    if evidence is None or not evidence.enabled:
+        return []
+    if not evidence.registry_configured:
+        return [
+            _finding(
+                Severity.BLOCKING,
+                "EVIDENCE_WITHOUT_REGISTRY",
+                "AUTONOMY_EVIDENCE_BUNDLES is set with no AUTONOMY_PROPOSERS_FILE. An "
+                "evidence bundle is issued TO a credential, so with no registry there is "
+                "no author to issue to and every proposal refuses. Configure a proposer "
+                "registry or unset evidence binding.",
+            )
+        ]
+    return [
+        _finding(
+            Severity.NOTE,
+            "EVIDENCE_BINDING_IN_FORCE",
+            "Evidence binding is in force: every proposal must cite an evidence bundle "
+            f"this backend issued to that proposer within the last {evidence.ttl_seconds:g}s, "
+            "judged at the drain's clock. A proposer that does not request one will refuse "
+            "at STAMP even with a valid credential. Note the honest bound: equality between "
+            "the cited digest and the issued record catches accidental rendering drift, not "
+            "a proposer that reasons on other text and cites the issued digest.",
+        )
+    ]
 
 
 def _review_window(mandate: AutonomyMandate, *, now: datetime) -> list[Finding]:
@@ -776,6 +842,28 @@ def _resolve_registry_posture(now: datetime) -> RegistryPosture | None:
     )
 
 
+def _resolve_evidence_posture() -> EvidencePosture | None:
+    """What AUTONOMY_EVIDENCE_BUNDLES resolves to, or None when unavailable.
+
+    Lazily imported for the same reason as the registry posture. A settings
+    failure reports as not-configured, which downgrades this check rather than
+    inventing a posture — and the downgrade is safe here because the
+    pre-ADR-0028 posture is what an unannotated mandate already assumes.
+    """
+
+    try:
+        from chronos.config.settings import get_settings
+
+        settings = get_settings()
+    except Exception:
+        return None
+    return EvidencePosture(
+        enabled=settings.autonomy_evidence_bundles,
+        registry_configured=settings.autonomy_proposers_file is not None,
+        ttl_seconds=settings.autonomy_evidence_ttl_seconds,
+    )
+
+
 def _default_mandate_path() -> Path | None:
     try:
         from chronos.config.settings import get_settings
@@ -824,6 +912,10 @@ def cmd_mandate_check(args: argparse.Namespace) -> int:
         fingerprint_source=source,
         ingress_pins=None if args.no_pin_check else _resolve_ingress_pins(),
         registry=None if args.no_pin_check else _resolve_registry_posture(review_now),
+        # Not gated on --no-pin-check: the evidence posture is not a pin
+        # comparison, it is whether this backend will demand a cited bundle at
+        # all — which an owner reviewing a mandate needs to know regardless.
+        evidence=_resolve_evidence_posture(),
     )
     print("STATUS             VALID — the document parses and its invariants hold")
     print()

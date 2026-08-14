@@ -260,6 +260,19 @@ def test_registry_on_credential_decides_and_the_row_records_who(
         assert client.get("/autonomy/alerts", headers={TOKEN_HEADER: token}).status_code == 200
 
 
+#: Every route a registered proposer's credential may open, named one by one.
+#: R-48's rule is that this credential is proposal-only; ADR-0028 widened it by
+#: exactly one route and required the widening to be *named and tested* rather
+#: than absorbed. Adding an entry here is a reviewable act that should carry an
+#: ADR with it — the list is the record of how far that credential reaches.
+_PROPOSER_CREDENTIAL_ROUTES = frozenset(
+    {
+        "/autonomy/proposals",  # ADR-0023: the reason the credential exists.
+        "/autonomy/evidence",  # ADR-0028: issuance, the one deliberate addition.
+    }
+)
+
+
 def _api_routes(routes: Any) -> Iterator[APIRoute]:
     """Every APIRoute in the table, across FastAPI's router-nesting shapes.
 
@@ -288,19 +301,41 @@ def test_the_proposer_credential_is_refused_on_every_other_mutating_route(
     session's body token — and every one must answer 401. The enumeration is
     over the app's own route table, so a route added later is included by
     existing rather than by being remembered.
+
+    ## The exceptions are NAMED, and there are exactly two
+
+    ADR-0028 makes issuance a *write* reachable by a proposal-only credential —
+    the first widening of that credential since ADR-0023 made it proposal-only —
+    and requires this enumeration to **grow the route as a deliberate, named
+    exception rather than absorb it**. So the exception list below is explicit
+    and asserted non-empty per entry: a route silently failing to appear is
+    itself a failure, because an enumeration that quietly stops covering
+    something is the R-24..R-27 shape applied to a test.
+
+    Each exception carries its own positive control elsewhere in this file
+    (proposals: ``test_registry_on_credential_decides_and_the_row_records_who``;
+    issuance: ``test_the_issuance_route_is_the_credentials_one_named_exception``
+    in ``test_evidence_bundles_exercised.py``). ADR-0028's own recommendation
+    stands recorded here: this should be the last route that credential opens
+    without a further ADR.
     """
 
     registry = _registry_text(_registration("claude-worker", WORKER_CREDENTIAL))
     with _boot(monkeypatch, registry, demo_env) as client:
         mutating: list[tuple[str, str]] = []
-        skipped_proposals = False
+        seen_exceptions: set[str] = set()
         for route in _api_routes(client.app.routes):  # type: ignore[attr-defined]
             for method in sorted(route.methods - {"GET", "HEAD", "OPTIONS"}):
-                if route.path == "/autonomy/proposals":
-                    skipped_proposals = True  # its positive control is the test above
+                if route.path in _PROPOSER_CREDENTIAL_ROUTES:
+                    seen_exceptions.add(route.path)
                     continue
                 mutating.append((method, route.path.replace("{", "x").replace("}", "x")))
-        assert skipped_proposals, "the proposal route moved; re-point this enumeration"
+        assert seen_exceptions == _PROPOSER_CREDENTIAL_ROUTES, (
+            "a route the proposer credential is allowed to open is missing from the "
+            "application, or moved: the named-exception list and the route table must "
+            f"agree exactly. Expected {sorted(_PROPOSER_CREDENTIAL_ROUTES)}, "
+            f"found {sorted(seen_exceptions)}"
+        )
         # If this shrinks, the enumeration broke — it must never quietly pass
         # by exercising nothing.
         assert len(mutating) >= 10, mutating

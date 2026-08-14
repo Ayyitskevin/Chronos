@@ -143,6 +143,28 @@ class Settings(BaseSettings):
     # credentials and provenance to credential-derived identity; an invalid or
     # unreadable file means proposals refuse, never that identity is guessed.
     autonomy_proposers_file: Path | None = None
+    # The per-job evidence protocol (ADR-0028 Option C). Unset (the default) is
+    # the pre-ADR-0028 posture byte-for-byte: every proposal cites the
+    # placeholder bundle, and admission check 9 compares that constant against
+    # itself. Set, every proposal must cite an evidence bundle this backend
+    # issued to that proposer and that has not expired against the drain's
+    # clock — and check 9 gains the payload-side half it has never had.
+    #
+    # Set WITHOUT a proposer registry refuses every proposal rather than falling
+    # back: a bundle is issued *to* a credential, and with no registry there is
+    # no author to issue to. That combination is a configuration error the owner
+    # must see, never a quiet return to anonymous proposing.
+    autonomy_evidence_bundles: bool = False
+    # How long an issued bundle stays citable, judged at the drain. 300 s is a
+    # disclosed judgment, not a derived number (the MARKET_PROTECTION_COLLAR
+    # precedent): it must exceed worst-case gather -> model call -> POST -> queue
+    # wait -> drain latency, and a TTL below a worker's think time refuses
+    # everything — which is the safe direction and a visible failure rather than
+    # a silent one. The ceiling is likewise a judgment: evidence an hour old is
+    # stale by any reading of an intraday equity decision, so the type refuses to
+    # express a longer window. An unparsable or out-of-range value fails
+    # validation and the process refuses to start.
+    autonomy_evidence_ttl_seconds: Annotated[float, Field(gt=0, le=3600)] = 300.0
     autonomy_alert_file: Path = Path("data/owner_alerts.jsonl")
     autonomy_idle_interval_seconds: Annotated[float, Field(gt=0)] = 60.0
     autonomy_min_interval_seconds: Annotated[float, Field(gt=0)] = 5.0

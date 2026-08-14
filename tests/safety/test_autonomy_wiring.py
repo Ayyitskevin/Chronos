@@ -148,11 +148,22 @@ def _write_mandate(tmp_path: Path, mandate: AutonomyMandate, *, name: str = "man
 
 
 def _settings(
-    tmp_path: Path, *, mandate_file: Path | None, proposers_file: Path | None = None
+    tmp_path: Path,
+    *,
+    mandate_file: Path | None,
+    proposers_file: Path | None = None,
+    evidence_bundles: bool = False,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         autonomy_mandate_file=mandate_file,
         autonomy_proposers_file=proposers_file,
+        # ADR-0028's posture, defaulted off here exactly as the real Settings
+        # defaults it. The double carries the field rather than relying on a
+        # getattr fallback in the wiring: a posture switch that reads as "off"
+        # because the attribute is missing is how a switch quietly stops being
+        # tested.
+        autonomy_evidence_bundles=evidence_bundles,
+        autonomy_evidence_ttl_seconds=300.0,
         autonomy_min_interval_seconds=5.0,
         autonomy_idle_interval_seconds=60.0,
         autonomy_alert_file=tmp_path / "alerts.jsonl",

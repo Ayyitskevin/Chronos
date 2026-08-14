@@ -63,6 +63,7 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from chronos.autonomy import AITradeDecision, AutonomyMandate, TradableAssetClass
+from chronos.config.settings import Settings
 from chronos.domain.enums import OrderLifecycle
 from chronos.domain.models import Instrument, MarketQuote
 from chronos.orders.intent import WheelOrderIntent
@@ -613,7 +614,59 @@ def build_autonomy_runtime(
         sinks=delivery.default_sinks(settings.autonomy_alert_file),
         submit=order_plane_handoff(runtime, is_writer=is_writer),
         resolve_identity=build_identity_resolver(settings.autonomy_proposers_file),
+        bind_evidence=evidence_binding_in_force(settings),
     )
+
+
+def evidence_binding_in_force(settings: Settings) -> bool:
+    """Whether ADR-0028's evidence binding applies to this backend's drain.
+
+    Two settings decide it, and the pairing is deliberate. A bundle is issued
+    **to** a credential, so evidence binding without a proposer registry names
+    no author to issue to. That combination does not silently degrade to the
+    placeholder posture — :func:`evidence_posture_is_broken` reports it, startup
+    raises a CRITICAL owner alert, and the proposal route refuses. Returning
+    ``True`` here in that case is intentional: the drain must refuse those
+    proposals too, so a queue row that predates the misconfiguration cannot be
+    judged under a posture the owner did not get.
+    """
+
+    return settings.autonomy_evidence_bundles
+
+
+def evidence_posture_is_broken(settings: Settings) -> bool:
+    """Evidence binding configured with no proposer registry to issue against."""
+
+    return settings.autonomy_evidence_bundles and settings.autonomy_proposers_file is None
+
+
+def alert_broken_evidence_posture(runtime: AppRuntime) -> None:
+    """CRITICAL owner alert: evidence binding is on with no proposer registry.
+
+    Same shape as the invalid-registry alert, and for the same reason (ADR-0028
+    follows ADR-0023's posture rules verbatim): the backend boots and stays able
+    to close positions, every proposal refuses at the route and at the drain, and
+    the owner is told without having to read a log file (R-32). A process that
+    can still flatten a position never dies because a grant was malformed.
+    """
+
+    fingerprint = account_fingerprint(runtime.order_management.account_id)
+    try:
+        with runtime.database.sessions.begin() as session:
+            alerts.raise_alert(
+                session,
+                account_fingerprint=fingerprint,
+                severity=alerts.AlertSeverity.CRITICAL,
+                kind="autonomy.evidence_posture_invalid",
+                summary=(
+                    "AUTONOMY_EVIDENCE_BUNDLES is set with no proposer registry; a bundle "
+                    "is issued to a credential, so every proposal refuses until the owner "
+                    "configures AUTONOMY_PROPOSERS_FILE or unsets evidence binding"
+                ),
+                now=utc_now(),
+            )
+    except Exception:
+        _logger.exception("Could not record the broken-evidence-posture alert")
 
 
 def alert_invalid_proposer_registry(runtime: AppRuntime) -> None:

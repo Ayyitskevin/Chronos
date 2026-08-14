@@ -23,6 +23,20 @@ class BackendState:
     runtime: AppRuntime
     lease: WriterLease | None
     read_only: bool
+    #: The process's single bar provider, created on first use by
+    #: ``chronos.api.bars.provider_for`` and cached here so a panel refresh does
+    #: not become a broker request.
+    #:
+    #: **It is a declared field because this class is ``slots=True``.** Until
+    #: 2026-08-14 ``provider_for`` cached by *assigning a new attribute* to this
+    #: object, which a slotted dataclass refuses — so every call raised
+    #: ``AttributeError`` and ``GET /terminal/bars`` answered 500 for every
+    #: symbol, on every backend, since the route existed. No test covered that
+    #: route, which is why it survived; ADR-0028's issuance handler composes the
+    #: same bars and is what surfaced it. Typed ``object | None`` rather than
+    #: ``BarProvider | None`` only to keep this module free of the bars import —
+    #: ``provider_for`` re-checks the concrete type before returning it.
+    bar_provider: object | None = None
 
     @property
     def writer(self) -> bool:

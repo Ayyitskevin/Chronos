@@ -267,6 +267,23 @@ def test_the_token_travels_in_the_header_never_the_snapshot() -> None:
     assert TOKEN not in snapshot.canonical
 
 
+def _proposal_posts(seen: list[httpx.Request]) -> list[httpx.Request]:
+    """Only the proposal forwards.
+
+    Since ADR-0028 every cycle also POSTs ``/autonomy/evidence`` to ask for an
+    issued bundle, and this file's fake backend answers 404 — the backend
+    stating that evidence binding is off, which sends the worker down the
+    pre-ADR-0028 local-composition path. That probe is not a proposal, and a
+    test that counted it as one would be asserting the wrong claim.
+    """
+
+    return [
+        request
+        for request in seen
+        if request.method == "POST" and request.url.path == "/autonomy/proposals"
+    ]
+
+
 # ------------------------------------------------------------------------- the cycle
 
 
@@ -279,7 +296,10 @@ def test_dry_run_thinks_and_sends_nothing() -> None:
         outcome = run_cycle(_config(), backend=backend, anthropic=anthropic)
 
     assert outcome is CycleOutcome.DRY_RUN
-    assert not [request for request in seen if request.method == "POST"]
+    assert not _proposal_posts(seen), (
+        "nothing may be proposed here; the /autonomy/evidence POST is ADR-0028's "
+        "issuance probe, which this fake backend answers 404 (binding off)"
+    )
 
 
 def test_forwarding_posts_the_proposal_with_the_token() -> None:
@@ -291,7 +311,7 @@ def test_forwarding_posts_the_proposal_with_the_token() -> None:
         outcome = run_cycle(_config(forward=True), backend=backend, anthropic=anthropic)
 
     assert outcome is CycleOutcome.FORWARDED
-    posts = [request for request in seen if request.method == "POST"]
+    posts = _proposal_posts(seen)
     assert len(posts) == 1
     assert posts[0].url.path == "/autonomy/proposals"
     assert posts[0].headers["X-Chronos-Token"] == TOKEN
@@ -319,7 +339,7 @@ def test_a_configured_proposer_credential_rides_the_forward() -> None:
         )
 
     assert outcome is CycleOutcome.FORWARDED
-    posts = [request for request in seen if request.method == "POST"]
+    posts = _proposal_posts(seen)
     assert len(posts) == 1
     assert posts[0].headers["X-Chronos-Proposer-Token"] == "proposer-secret"
     assert posts[0].headers["X-Chronos-Token"] == TOKEN
@@ -339,7 +359,10 @@ def test_an_incoherent_decision_is_refused_locally_and_never_sent() -> None:
         outcome = run_cycle(_config(forward=True), backend=backend, anthropic=anthropic)
 
     assert outcome is CycleOutcome.REFUSED_LOCALLY
-    assert not [request for request in seen if request.method == "POST"]
+    assert not _proposal_posts(seen), (
+        "nothing may be proposed here; the /autonomy/evidence POST is ADR-0028's "
+        "issuance probe, which this fake backend answers 404 (binding off)"
+    )
 
 
 def test_no_evidence_means_the_model_is_never_called() -> None:
@@ -376,6 +399,13 @@ def test_an_ingress_refusal_is_reported_not_swallowed() -> None:
                     "detail": "rejected field(s): symbol",
                 },
             )
+        if request.url.path == "/autonomy/evidence":
+            # This backend has no evidence binding configured, and says so the
+            # way the real route does. The subject here is the *ingress* refusal,
+            # so the cycle must reach the proposal POST — a 200 with an
+            # unexpected body would (correctly) stop it at NO_EVIDENCE instead,
+            # and the test would then pass for the wrong reason.
+            return httpx.Response(404, json={"refusal": "EVIDENCE_BINDING_DISABLED"})
         return httpx.Response(200, json=bodies.get(request.url.path, {}))
 
     with (

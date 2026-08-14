@@ -66,8 +66,14 @@ _V2_BASELINE_TABLES = {
     "wheel_cycles",
 }
 
+_V9_TABLES = {
+    "autonomy_evidence_bundles",
+}
+
 # The complete table universe the migration chain accounts for through head.
-_ALL_MIGRATED_TABLES = _V2_BASELINE_TABLES | _V3_TABLES | _V4_TABLES | _V5_TABLES | _V7_TABLES
+_ALL_MIGRATED_TABLES = (
+    _V2_BASELINE_TABLES | _V3_TABLES | _V4_TABLES | _V5_TABLES | _V7_TABLES | _V9_TABLES
+)
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -77,7 +83,7 @@ def _make_v2_database(path: Path) -> None:
 
     url = f"sqlite:///{path}"
     engine = sa.create_engine(url)
-    post_v2 = _V3_TABLES | _V4_TABLES | _V5_TABLES | _V7_TABLES
+    post_v2 = _V3_TABLES | _V4_TABLES | _V5_TABLES | _V7_TABLES | _V9_TABLES
     v2_tables = [table for name, table in Base.metadata.tables.items() if name not in post_v2]
     Base.metadata.create_all(engine, tables=v2_tables)
     with engine.begin() as connection:
@@ -95,7 +101,7 @@ def _make_v3_database(path: Path) -> None:
 
     url = f"sqlite:///{path}"
     engine = sa.create_engine(url)
-    post_v3 = _V4_TABLES | _V5_TABLES | _V7_TABLES
+    post_v3 = _V4_TABLES | _V5_TABLES | _V7_TABLES | _V9_TABLES
     v3_tables = [table for name, table in Base.metadata.tables.items() if name not in post_v3]
     Base.metadata.create_all(engine, tables=v3_tables)
     with engine.begin() as connection:
@@ -113,7 +119,7 @@ def _make_v4_database(path: Path) -> None:
 
     url = f"sqlite:///{path}"
     engine = sa.create_engine(url)
-    post_v4 = _V5_TABLES | _V7_TABLES
+    post_v4 = _V5_TABLES | _V7_TABLES | _V9_TABLES
     v4_tables = [table for name, table in Base.metadata.tables.items() if name not in post_v4]
     Base.metadata.create_all(engine, tables=v4_tables)
     with engine.begin() as connection:
@@ -206,7 +212,7 @@ def test_v4_database_upgrades_to_current_schema(tmp_path: Path) -> None:
 
     engine = sa.create_engine(f"sqlite:///{db_path}")
     tables = set(sa.inspect(engine).get_table_names())
-    assert tables >= _V5_TABLES | _V7_TABLES
+    assert tables >= _V5_TABLES | _V7_TABLES | _V9_TABLES
     with engine.connect() as connection:
         version = connection.execute(
             sa.text("SELECT version FROM schema_version ORDER BY id DESC LIMIT 1")
@@ -290,12 +296,105 @@ def test_v7_database_gains_the_proposer_column_and_keeps_its_rows(tmp_path: Path
         database.dispose()
 
 
+def test_v8_database_gains_the_evidence_bundle_table_and_keeps_its_rows(tmp_path: Path) -> None:
+    """Migration 0008's DDL, exercised against the TRUE pre-0008 database shape.
+
+    The same reasoning as the v7 test above, one version on. Every other fixture
+    in this file derives its tables from the *current* metadata minus a
+    hardcoded later-set, so those paths reach 0008 with a database that never
+    looked like a real production v8 — in particular they carry no v8 row
+    history to lose. A real v8 database is the shape that matters: every earlier
+    table present and populated, ``proposer_id`` already on the queue, schema
+    versions 2..8 recorded, and only ``autonomy_evidence_bundles`` missing.
+
+    So this builds exactly that, then upgrades — proving the table is created,
+    that it arrives **empty** (deny-by-default: an absent bundle record must read
+    as "nothing was issued", never as a bundle that happens to have no rows
+    against it), that the pre-existing queue row survives untouched, and that the
+    fail-closed initializer accepts the result byte-for-byte against the live
+    metadata.
+    """
+
+    db_path = tmp_path / "chronos.db"
+    engine = sa.create_engine(f"sqlite:///{db_path}")
+    Base.metadata.create_all(engine)
+    with engine.begin() as connection:
+        connection.execute(sa.text("DROP TABLE autonomy_evidence_bundles"))
+        connection.execute(
+            sa.text(
+                "INSERT INTO autonomy_proposal_queue "
+                "(account_fingerprint, payload, received_at, status, cycle_stage, refusal, "
+                "proposer_id) "
+                "VALUES ('f', '{}', '2026-01-01 00:00:00.000000', 'PENDING', '', '', "
+                "'claude-worker')"
+            )
+        )
+        for version in range(2, 9):
+            connection.execute(
+                sa.text(
+                    "INSERT INTO schema_version (version, applied_at) "
+                    f"VALUES ({version}, '2026-01-01 00:00:00.000000')"
+                )
+            )
+    engine.dispose()
+
+    config = _alembic_config(db_path)
+    command.stamp(config, "0007")  # v8 == revision 0007
+    command.upgrade(config, "head")
+
+    engine = sa.create_engine(f"sqlite:///{db_path}")
+    inspector = sa.inspect(engine)
+    assert "autonomy_evidence_bundles" in set(inspector.get_table_names()), (
+        "0008 must create the table on a genuine v8 database"
+    )
+    columns = {column["name"] for column in inspector.get_columns("autonomy_evidence_bundles")}
+    assert columns == {
+        "id",
+        "account_fingerprint",
+        "bundle_id",
+        "proposer_id",
+        "kind",
+        "digest",
+        "bundle_version",
+        "issued_at",
+        "expires_at",
+    }
+    with engine.connect() as connection:
+        issued = connection.execute(
+            sa.text("SELECT 1 FROM autonomy_evidence_bundles LIMIT 1")
+        ).first()
+        surviving = connection.execute(
+            sa.text("SELECT proposer_id, status FROM autonomy_proposal_queue")
+        ).all()
+        version = connection.execute(
+            sa.text("SELECT version FROM schema_version ORDER BY id DESC LIMIT 1")
+        ).scalar()
+    engine.dispose()
+    assert issued is None, (
+        "the evidence-bundle table must upgrade empty; a backfilled row would be a "
+        "bundle nobody issued, which is the exact claim this protocol exists to refuse"
+    )
+    assert surviving == [("claude-worker", "PENDING")], (
+        "the pre-upgrade queue row and its ADR-0023 authorship must survive 0008 intact"
+    )
+    assert version == SCHEMA_VERSION
+
+    database = Database(f"sqlite:///{db_path}")
+    try:
+        database.initialize()
+    finally:
+        database.dispose()
+
+
 def test_fresh_database_needs_no_alembic(tmp_path: Path) -> None:
     database = Database(f"sqlite:///{tmp_path / 'fresh.db'}")
     try:
         database.initialize()
         inspector = sa.inspect(database.engine)
-        assert set(inspector.get_table_names()) >= _V3_TABLES | _V4_TABLES | _V5_TABLES | _V7_TABLES
+        assert (
+            set(inspector.get_table_names())
+            >= _V3_TABLES | _V4_TABLES | _V5_TABLES | _V7_TABLES | _V9_TABLES
+        )
     finally:
         database.dispose()
 

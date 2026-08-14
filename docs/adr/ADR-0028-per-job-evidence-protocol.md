@@ -1,8 +1,39 @@
 # ADR-0028 — The per-job evidence protocol
 
-Status: **proposed — owner decision required.** No `DECISIONS.md` row until accepted.
+Status: ~~**proposed — owner decision required.** No `DECISIONS.md` row until accepted.~~
+**Accepted 2026-08-14 — Option C, owner-directed** ("merged 69, go with option C, have
+opus build it", Kevin, 2026-08-14). Recorded as D-25. Implemented the same day: the
+durable `autonomy_evidence_bundles` record (migration 0008, schema v9), the
+`POST /autonomy/evidence` issuance route, resolution at STAMP against the drain's clock,
+and admission check 9's payload-side half. Every "Requires" proof in the Option C list
+below is exercised in `tests/safety/test_evidence_bundles_exercised.py` (25 tests), with
+each conjunct verified by reverting it alone and watching a named test fail (18/18).
 
-Date: 2026-08-13
+**Recommended parameters, as built.** All honored: expiry judged by the drain's clock
+with a disclosed 300 s default (`AUTONOMY_EVIDENCE_TTL_SECONDS`, hard ceiling 3600 s, an
+out-of-range value refuses to start); the TradingView bridge on its own `alert_attested`
+kind, which may back a proposal and never a promotion rung; the unset posture
+byte-identical to `b5d61dd`, proven against a recorded journal row rather than by
+inspection; issuance as the one new write reachable by a proposal-only credential, with a
+per-proposer cap (`MAX_LIVE_BUNDLES_PER_PROPOSER = 64`) and a retention rule that reclaims
+the lookup row while never pruning the hash-chained issuance record.
+
+**One addition beyond the ADR's text, disclosed rather than absorbed.** The ADR names two
+additive refusal codes (`EVIDENCE_BUNDLE_EXPIRED`, `EVIDENCE_BUNDLE_UNCITED`); the build
+adds a third, `EVIDENCE_BUNDLE_KIND_MISMATCH`, because the Option C "Requires" list demands
+that served and attested kinds never substitute for one another and folding that into
+`EVIDENCE_BUNDLE_MISMATCH` would have made a relabelled attestation indistinguishable from
+a forged digest in the journal. Additive in the same sense as the other two: nothing that
+refused before this ADR stops refusing, and no existing code changes meaning.
+
+**Bounds that survive the build**, restated here because they are the reason to read the
+"Bounds" section below rather than the feature name: equality catches accident, not malice;
+attested is not witnessed; a bundle binds which facts were served, never that they were
+true (no real IBKR gateway has ever been connected — nothing here leaves MITIGATED); the
+chain is tamper-evident, not tamper-proof; and none of this makes a worker's decision
+evidence. Residuals are carried in RISK_REGISTER **R-50**.
+
+Date: 2026-08-13 (accepted 2026-08-14)
 
 Closes, if accepted: the evidence half of `docs/VISION_COMPLETION_PLAN.md` §6 finding 6
 (the identity half closed 2026-08-12 as D-24/ADR-0023). Named in

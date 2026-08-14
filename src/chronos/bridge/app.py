@@ -44,7 +44,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Final
+from typing import Any, Final
 
 import httpx
 from fastapi import APIRouter, FastAPI, Request, Response, status
@@ -96,6 +96,40 @@ class ForwardResult:
 
 
 Forwarder = Callable[[bytes], Awaitable[ForwardResult]]
+
+
+@dataclass(frozen=True, slots=True)
+class AttestResult:
+    """What the backend said when asked to record an alert attestation (ADR-0028).
+
+    Three outcomes, kept distinct because each leads to a different action:
+
+    - ``bundle_id`` set — the attestation is on record; cite it.
+    - ``binding_disabled`` — the backend answered that evidence binding is off.
+      That is the backend stating its posture, not a failure, and the alert
+      proceeds with the pre-ADR-0028 citation unchanged.
+    - ``refusal`` set — anything else. The alert is **not** forwarded. Proposing
+      without the attestation the owner turned on would mean proposing under a
+      posture the backend could not honor, and the drain would refuse it at STAMP
+      regardless — refusing here says so where an operator can read it.
+
+    **Attested is not witnessed.** All this record can say is that this
+    credential asserted, at this time, that it received an alert with this
+    digest. Chronos never saw the alert: it is authored in TradingView and
+    arrives at a process the backend does not observe. ADR-0028's rule follows
+    from that and travels with the record — an attested bundle may back a
+    proposal; it may **not** back a promotion rung.
+    """
+
+    bundle_id: str = ""
+    binding_disabled: bool = False
+    refusal: str = ""
+
+
+#: Records the alert's digest against the bridge's credential and returns the
+#: bundle id to cite. Injected like :data:`Forwarder` so tests drive it without
+#: a socket.
+Attester = Callable[[str], Awaitable[AttestResult]]
 
 
 class WebhookResult(BaseModel):
@@ -159,13 +193,14 @@ def create_app(
     config: BridgeConfig,
     *,
     forwarder: Forwarder | None = None,
+    attester: Attester | None = None,
     clock: Clock = utc_now,
 ) -> FastAPI:
     """Build the bridge's ASGI app.
 
-    ``forwarder`` is injectable so tests exercise the whole path — including the
-    refusals — without a network or a running backend. The default forwarder is
-    the only code in this package that opens a socket.
+    ``forwarder`` and ``attester`` are injectable so tests exercise the whole
+    path — including the refusals — without a network or a running backend. The
+    defaults are the only code in this package that opens a socket.
     """
 
     app = FastAPI(
@@ -179,6 +214,7 @@ def create_app(
         openapi_url=None,
     )
     send = forwarder if forwarder is not None else _http_forwarder(config)
+    attest = attester if attester is not None else _http_attester(config)
     limiter = _RateLimiter(per_minute=config.max_alerts_per_minute)
     replays = _ReplayCache(window_seconds=config.replay_window_seconds)
     router = APIRouter()
@@ -290,9 +326,12 @@ def create_app(
                 accepted=False, stage="TRANSLATE", refusal="NOT_TRANSLATABLE", detail=str(error)
             )
 
-        payload = json.dumps(proposal, separators=(",", ":")).encode("utf-8")
-
         if not config.forward:
+            # Checked BEFORE attestation, not after: attestation is itself a
+            # POST to the backend, and "the bridge does everything except the
+            # POST" has to stay literally true in the default posture. A dry run
+            # that quietly wrote an attestation row would be a dry run that left
+            # state behind.
             _logger.info(
                 "TradingView alert %s translated; forwarding is off so nothing was sent",
                 alert.alert_id,
@@ -308,6 +347,34 @@ def create_app(
                 ),
             )
 
+        # ADR-0028: record the alert's digest against this bridge's credential
+        # and cite the resulting bundle. The digest is the one already computed
+        # over the exact alert text minus the secret — unchanged, and now with
+        # something downstream that actually reads it. The record's kind is
+        # `alert_attested`, never `backend_served`: Chronos did not see this
+        # alert and the record must never read as though it had.
+        attestation = await attest(alert.digest)
+        if attestation.refusal:
+            _logger.error(
+                "TradingView alert %s could not be attested: %s",
+                alert.alert_id,
+                attestation.refusal,
+                extra={"event": "bridge_attest_failed", "alert_id": alert.alert_id},
+            )
+            response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+            return WebhookResult(
+                accepted=False,
+                stage="ATTEST",
+                refusal="EVIDENCE_NOT_ATTESTED",
+                detail=(
+                    "evidence binding is in force and this alert's attestation could not "
+                    "be recorded; nothing was proposed"
+                ),
+            )
+        if attestation.bundle_id:
+            proposal = _cite_bundle(proposal, attestation.bundle_id)
+
+        payload = json.dumps(proposal, separators=(",", ":")).encode("utf-8")
         result = await send(payload)
         if not result.forwarded:
             _logger.error(
@@ -353,6 +420,68 @@ def _refused(alert_id: str, refusal: str) -> None:
         refusal,
         extra={"event": "bridge_refused", "alert_id": alert_id},
     )
+
+
+def _cite_bundle(proposal: dict[str, Any], bundle_id: str) -> dict[str, Any]:
+    """Point the proposal's citation at the attested bundle, changing nothing else.
+
+    Only ``evidence_id`` moves: the digest stays the one the translator computed
+    over the alert text, and ``kind`` stays ``tradingview_alert`` — which is what
+    binds this citation to the attested record and makes it unable to satisfy a
+    ``backend_served`` one. Rewriting either would be the substitution ADR-0028
+    forbids between kinds.
+    """
+
+    citations = proposal.get("evidence")
+    if not isinstance(citations, list) or not citations:
+        return proposal
+    updated = [dict(citation) for citation in citations if isinstance(citation, dict)]
+    if not updated:
+        return proposal
+    updated[0]["evidence_id"] = bundle_id
+    return {**proposal, "evidence": updated}
+
+
+def _http_attester(config: BridgeConfig) -> Attester:
+    """Record an alert attestation with the backend, or say why not.
+
+    Posts the digest — never the alert text. The backend is not a witness here
+    and this call does not pretend otherwise: what is recorded is that this
+    credential asserted, at this time, that it saw bytes with this digest.
+    """
+
+    async def _attest(digest: str) -> AttestResult:
+        headers = {TOKEN_HEADER: config.api_token, "Content-Type": "application/json"}
+        if config.proposer_token:
+            headers[PROPOSER_HEADER] = config.proposer_token
+        try:
+            async with httpx.AsyncClient(timeout=FORWARD_TIMEOUT_SECONDS) as client:
+                response = await client.post(
+                    config.evidence_url,
+                    json={"kind": "alert_attested", "digest": digest},
+                    headers=headers,
+                )
+        except httpx.HTTPError:
+            _logger.exception("Could not reach the Chronos evidence issuance route")
+            return AttestResult(refusal="ISSUANCE_UNREACHABLE")
+        if response.status_code == 404:
+            # The backend says evidence binding is off. Not a failure: the
+            # pre-ADR-0028 path is exactly today's behavior.
+            return AttestResult(binding_disabled=True)
+        if response.status_code != 201:
+            return AttestResult(refusal=f"ISSUANCE_HTTP_{response.status_code}")
+        try:
+            document = response.json()
+        except ValueError:
+            return AttestResult(refusal="ISSUANCE_MALFORMED")
+        if not isinstance(document, dict):
+            return AttestResult(refusal="ISSUANCE_MALFORMED")
+        bundle_id = str(document.get("bundle_id", ""))
+        if not bundle_id:
+            return AttestResult(refusal="ISSUANCE_MALFORMED")
+        return AttestResult(bundle_id=bundle_id)
+
+    return _attest
 
 
 def _http_forwarder(config: BridgeConfig) -> Forwarder:

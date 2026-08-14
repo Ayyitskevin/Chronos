@@ -200,10 +200,34 @@ the live commit and coordinate with any branch already addressing it before edit
    `AUTONOMY_PROPOSERS_FILE` configured, proposals require a per-proposer,
    proposal-only credential and provenance is stamped from the credential's
    registration at drain time; the same work fixed the route's dead account scoping
-   (every real proposal POST had refused `BACKEND_UNSCOPED` since M7). Still open
+   (every real proposal POST had refused `BACKEND_UNSCOPED` since M7). ~~Still open
    from this finding: the job/evidence/response protocol — registrations carry no
    evidence-bundle binding, so the evidence half (job ID, evidence digest, expiry
-   per job) remains future ADR work.
+   per job) remains future ADR work.~~
+   **Evidence half addressed 2026-08-14 (A2; ADR-0028 Option C, owner-directed;
+   D-25/R-50) — finding 6 is now closed on both halves.** The finding that made it
+   worth building: admission check 9 compared `provenance.evidence_bundle_id`/
+   `_digest` against `SupervisorState.expected_*`, and **both sides were two reads
+   of the single `INGRESS_IDENTITY` constant** — written correctly, wired to a
+   comparison that had never had two independent origins, so it could not refuse
+   in any posture for any proposer. `AUTONOMY_EVIDENCE_BUNDLES` unset is today's
+   behavior byte-for-byte (proven against a recorded journal row, not by
+   inspection). Set, `POST /autonomy/evidence` issues a durable, hash-chained
+   bundle to the presenting credential — `backend_served` (the backend digests the
+   exact bytes it serves) or `alert_attested` (a proposer's claim about bytes
+   Chronos never saw); the drain resolves the cited bundle against that record at
+   its own clock, so unissued, foreign-proposer, and expired-between-enqueue-and-
+   drain refuse at STAMP with provenance stamped from the record; and check 9
+   gains the independent side it never had — the payload's own `EvidenceCitation`,
+   authored by the proposer and never written by the backend. Proof:
+   `tests/safety/test_evidence_bundles_exercised.py` (25), with 18/18 conjuncts
+   verified by reverting each alone. Bounds that survive, disclosed in R-50:
+   **equality catches accident, not malice**; **attested is not witnessed** — an
+   attested bundle may back a proposal, never a promotion rung (ADR-0024's call);
+   and a bundle binds which facts were *served*, never that they were true,
+   because no real gateway has ever been connected. Nothing remains open from this
+   finding itself — but the promotion artifact it makes *resolvable* is item 8
+   below, still open.
 7. Several economic-looking fields do not mechanically affect execution. Every field must
    be enforced, explicitly advisory, or forbidden; deterministic exits/protection require
    a durable position-management lifecycle.
