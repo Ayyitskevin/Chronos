@@ -1,4 +1,5 @@
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -276,3 +277,136 @@ class TestLiveWheelMilestone1Settings:
             Settings(_env_file=None, live_arm_ttl_minutes=0)
         with pytest.raises(ValidationError):
             Settings(_env_file=None, order_confirmation_ttl_seconds=0)
+
+
+class TestAllowlistsParseFromTheEnvironment:
+    """The settings SOURCES, not the constructor — where the real defect lived.
+
+    Every other allowlist test in this file builds ``Settings(...)`` directly,
+    which bypasses ``pydantic-settings``' sources entirely and hands the raw
+    string straight to the validator. That is why they all passed while
+    **no documented allowlist value could actually be configured**:
+    pydantic-settings JSON-decodes a complex field before validators run, so
+    ``IB_ACCOUNT_ALLOWLIST=DU123``, the comma form, and the bare
+    ``IB_ACCOUNT_ALLOWLIST=`` that ``.env.example`` shipped all raised
+    ``SettingsError`` at import. Only a JSON array ever worked, and nothing said
+    so — ``cp .env.example .env``, the README's own setup step, could not boot.
+
+    A control exercised only on a path production never takes is the R-24..R-27
+    shape applied to configuration. These tests go through the environment and
+    through a real ``.env`` file, because those are the paths an owner uses.
+    """
+
+    def test_every_documented_allowlist_form_parses_from_the_environment(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cases = {
+            "": (),
+            "   ": (),
+            "DU123": ("DU123",),
+            "DU123,DU456": ("DU123", "DU456"),
+            "du123, du456": ("DU123", "DU456"),
+            # The JSON spelling kept working: anyone who diagnosed the failure
+            # will have switched to it, and silently reinterpreting a working
+            # ["DU123"] as one garbage symbol would be worse than the bug.
+            '["DU123"]': ("DU123",),
+            '["DU123", "DU456"]': ("DU123", "DU456"),
+            "[]": (),
+        }
+        for raw, expected in cases.items():
+            monkeypatch.setenv("IB_ACCOUNT_ALLOWLIST", raw)
+            assert Settings(_env_file=None).ib_account_allowlist == expected, raw
+
+    def test_an_empty_allowlist_from_the_environment_denies(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Empty is DENY, and the whole point of it being expressible at all.
+
+        Before the fix an owner who blanked the allowlist to lock the system
+        down got a hard crash instead of the deny posture. The crash was
+        fail-closed, but it made the safe value unrepresentable — so this pins
+        both halves: it parses, and what it parses to refuses.
+        """
+
+        monkeypatch.setenv("IB_ACCOUNT_ALLOWLIST", "")
+        settings = Settings(_env_file=None)
+
+        assert settings.ib_account_allowlist == ()
+        assert settings.live_transmission_possible is False
+
+        # And under the live conjunction it is not merely falsy — it is named as
+        # the unmet conjunct, so an owner who blanked the allowlist to stand the
+        # system down is told exactly that rather than left guessing.
+        monkeypatch.setenv("ALLOW_LIVE_TRADING", "true")
+        with pytest.raises(ValidationError, match="IB_ACCOUNT_ALLOWLIST must not be empty"):
+            Settings(_env_file=None)
+
+    def test_a_malformed_json_allowlist_refuses_rather_than_parsing_to_garbage(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A value that opens with '[' is a JSON claim, and is held to it.
+
+        Falling back to the comma split would turn ``["DU123"`` into the single
+        symbol ``["DU123"``, which the alphanumeric validator would then reject
+        anyway — but with a message about the wrong problem. Refusing here names
+        the real one.
+        """
+
+        for raw in ('["DU123"', "[not json]", '{"account": "DU123"}'):
+            monkeypatch.setenv("IB_ACCOUNT_ALLOWLIST", raw)
+            with pytest.raises(ValidationError):
+                Settings(_env_file=None)
+
+    def test_the_existing_validators_still_fire_on_environment_values(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Nothing weakened: the source changed, the rules did not."""
+
+        monkeypatch.setenv("IB_ACCOUNT_ALLOWLIST", "DU123,DU123")
+        with pytest.raises(ValidationError, match="must not contain duplicates"):
+            Settings(_env_file=None)
+
+        monkeypatch.setenv("IB_ACCOUNT_ALLOWLIST", "DU-123")
+        with pytest.raises(ValidationError, match="must be alphanumeric"):
+            Settings(_env_file=None)
+
+    def test_all_three_allowlist_fields_parse_from_the_environment(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The defect was in the shared annotation, so all three shared it."""
+
+        monkeypatch.setenv("IB_ACCOUNT_ALLOWLIST", "DU123")
+        monkeypatch.setenv("CRYPTO_ALLOWLIST", "btc,eth")
+        monkeypatch.setenv("SYMBOL_ALLOWLIST", "spy, qqq")
+        settings = Settings(_env_file=None)
+
+        assert settings.ib_account_allowlist == ("DU123",)
+        assert settings.crypto_allowlist == ("BTC", "ETH")
+        assert settings.symbol_allowlist == ("SPY", "QQQ")
+
+    def test_the_shipped_env_example_loads_and_is_demo_safe(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """`cp .env.example .env` must work, and must boot inert.
+
+        The end-to-end proof of the reported defect: this is the README's
+        documented setup step, it raised ``SettingsError`` on the bare
+        ``IB_ACCOUNT_ALLOWLIST=`` line, and no test had ever loaded the shipped
+        example. Asserting the resulting posture as well, because a setup file
+        that loads but is live-capable would be a worse defect than one that
+        crashes.
+        """
+
+        example = Path(__file__).resolve().parents[2] / ".env.example"
+        target = tmp_path / ".env"
+        target.write_text(example.read_text(encoding="utf-8"), encoding="utf-8")
+        for name in ("IB_ACCOUNT_ALLOWLIST", "CRYPTO_ALLOWLIST", "SYMBOL_ALLOWLIST"):
+            monkeypatch.delenv(name, raising=False)
+
+        settings = Settings(_env_file=target)
+
+        assert settings.ib_account_allowlist == ()
+        assert settings.crypto_allowlist == ()
+        assert settings.allow_order_transmit is False
+        assert settings.allow_live_trading is False
+        assert settings.live_transmission_possible is False
