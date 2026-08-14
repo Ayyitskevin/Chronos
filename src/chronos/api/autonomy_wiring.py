@@ -61,6 +61,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from pydantic import ValidationError
+from sqlalchemy.orm import Session
 
 from chronos.autonomy import AITradeDecision, AutonomyMandate, TradableAssetClass
 from chronos.config.settings import Settings
@@ -69,12 +70,17 @@ from chronos.domain.models import Instrument, MarketQuote
 from chronos.orders.intent import WheelOrderIntent
 from chronos.orders.submission import SubmissionOutcome, SubmissionRefusalCode
 from chronos.runtime import AppRuntime
-from chronos.supervisor import alerts, delivery, durable, proposers, queue
+from chronos.supervisor import alerts, delivery, durable, proposers, queue, revocation
 from chronos.supervisor.admission import MarketDataEvidence
 from chronos.supervisor.compiler import QuoteEvidence
 from chronos.supervisor.handoff import SUBMIT_RAISED_CODE, HandoffResult
 from chronos.supervisor.loop import CycleFacts, Handoff, InstrumentFacts
-from chronos.supervisor.runtime import AutonomyRuntime, FactGatherer, RuntimeConfig
+from chronos.supervisor.runtime import (
+    AutonomyRuntime,
+    FactGatherer,
+    ResolvedIdentity,
+    RuntimeConfig,
+)
 from chronos.supervisor.sizing import AccountEvidence
 from chronos.utils.identifiers import account_fingerprint
 from chronos.utils.time import utc_now
@@ -303,7 +309,7 @@ def classify_submission_outcome(outcome: SubmissionOutcome) -> HandoffResult:
 
 def build_identity_resolver(
     settings_path: Path | None,
-) -> Callable[[str | None, datetime], queue.HarnessIdentity | None] | None:
+) -> Callable[[Session, str | None, datetime], ResolvedIdentity] | None:
     """The per-proposal identity resolver, or None for the pre-registry posture.
 
     ADR-0023: identity comes from which credential authenticated. The route
@@ -336,8 +342,16 @@ def build_identity_resolver(
             settings_path,
         )
 
-        def _refuse_all(proposer_id: str | None, now: datetime) -> queue.HarnessIdentity | None:
-            return None
+        def _refuse_all(
+            session: Session, proposer_id: str | None, now: datetime
+        ) -> ResolvedIdentity:
+            return ResolvedIdentity(
+                refusal="PROPOSER_REGISTRY_INVALID",
+                detail=(
+                    "the proposer registry is configured and does not load, so no "
+                    "proposal can be attributed; repairing the file is an owner act"
+                ),
+            )
 
         return _refuse_all
 
@@ -349,26 +363,57 @@ def build_identity_resolver(
         extra={"event": "autonomy_proposers_loaded"},
     )
 
-    def _resolve(proposer_id: str | None, now: datetime) -> queue.HarnessIdentity | None:
+    def _resolve(session: Session, proposer_id: str | None, now: datetime) -> ResolvedIdentity:
         if proposer_id is None:
             # A row enqueued under the pre-registry posture, met by a
             # registry-on runtime: refusing beats stamping the static identity
             # onto a proposal whose author the owner has since required.
-            return None
+            return ResolvedIdentity(
+                detail=(
+                    "the proposal was enqueued before a proposer registry was configured, "
+                    "so it has no author to resolve; it is refused rather than stamped "
+                    "with the static identity the owner has since replaced"
+                )
+            )
         registration = registry.find(proposer_id)
         if registration is None or not registration.is_current(now):
-            return None
-        return queue.HarnessIdentity(
-            provider=registration.provider,
-            model_id=registration.model_id,
-            model_version=registration.model_version,
-            prompt_version=registration.prompt_version,
-            tool_schema_version=registration.tool_schema_version,
-            decision_schema_version=registration.decision_schema_version,
-            policy_version=registration.policy_version,
-            proposer_id=registration.proposer_id,
-            evidence_bundle_id=INGRESS_IDENTITY.evidence_bundle_id,
-            evidence_bundle_digest=INGRESS_IDENTITY.evidence_bundle_digest,
+            return ResolvedIdentity(
+                detail=(
+                    "the proposal's credential does not resolve to a current registered "
+                    "proposer, so identity cannot be stamped; re-registering or renewing "
+                    "the proposer is an owner act"
+                )
+            )
+        # A3: the durable ledger, read inside the tick's own transaction. The
+        # registry snapshot cannot know about a credential the owner killed
+        # after boot, and "after boot" is when leaks are discovered.
+        if revocation.is_revoked(session, secret_sha256=registration.secret_sha256):
+            _logger.warning(
+                "Refused a revoked proposer at STAMP: %s",
+                registration.proposer_id,
+                extra={"event": "proposer_revoked_refused"},
+            )
+            return ResolvedIdentity(
+                refusal="PROPOSER_REVOKED",
+                detail=(
+                    f"the credential registered to {registration.proposer_id} was revoked by "
+                    "the owner; revocation is permanent for that credential, and re-granting "
+                    "means minting a new one and restarting"
+                ),
+            )
+        return ResolvedIdentity(
+            identity=queue.HarnessIdentity(
+                provider=registration.provider,
+                model_id=registration.model_id,
+                model_version=registration.model_version,
+                prompt_version=registration.prompt_version,
+                tool_schema_version=registration.tool_schema_version,
+                decision_schema_version=registration.decision_schema_version,
+                policy_version=registration.policy_version,
+                proposer_id=registration.proposer_id,
+                evidence_bundle_id=INGRESS_IDENTITY.evidence_bundle_id,
+                evidence_bundle_digest=INGRESS_IDENTITY.evidence_bundle_digest,
+            )
         )
 
     return _resolve

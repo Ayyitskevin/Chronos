@@ -95,12 +95,39 @@ class FactGatherer(Protocol):
 #: "no mandate" when the broker was merely unreachable.
 MandateSource = Callable[[], AutonomyMandate | None]
 
+
+@dataclass(frozen=True, slots=True)
+class ResolvedIdentity:
+    """Who a queued proposal is stamped as, or why it cannot be (ADR-0023, A3).
+
+    A bare ``HarnessIdentity | None`` was enough while there was one way to fail
+    — the registration was not current. A revoked credential is a different
+    event with a different response (the owner killed this proposer mid-session,
+    on purpose), and a journal that cannot tell the two apart cannot answer the
+    first question of an incident review: was this a credential we killed, or
+    one that simply aged out?
+
+    So the resolver returns its refusal alongside. ``refusal`` and ``detail``
+    are ignored when ``identity`` is present, and default to today's values, so
+    every existing caller keeps its exact behavior.
+    """
+
+    identity: queue.HarnessIdentity | None = None
+    refusal: str = "PROPOSER_UNRESOLVED"
+    detail: str = ""
+
+
 #: Resolves the identity a queued proposal is stamped with (ADR-0023): the
 #: verified proposer_id recorded at enqueue (or ``None`` for pre-registry
-#: rows) and the tick's clock, to the registration's HarnessIdentity — or
-#: ``None``, which the cycle records as a STAMP-stage PROPOSER_UNRESOLVED
-#: refusal rather than guessing an author.
-IdentityResolver = Callable[[str | None, datetime], "queue.HarnessIdentity | None"]
+#: rows), judged against the tick's clock and the durable revocation ledger
+#: (A3), to the registration's HarnessIdentity — or to a refusal the cycle
+#: records at the STAMP stage rather than guessing an author.
+#:
+#: The session is passed in because revocation is durable state read at the
+#: moment authority is exercised, and the tick already holds the transaction it
+#: must be read in: a resolver that opened its own would be reading a different
+#: instant than the one it is judging.
+IdentityResolver = Callable[[Session, str | None, datetime], ResolvedIdentity]
 
 
 @dataclass(frozen=True, slots=True)
@@ -365,21 +392,26 @@ class AutonomyRuntime:
             limit=self._config.proposals_per_tick,
         )
         for item in batch:
-            if self._resolve_identity is None:
-                identity: queue.HarnessIdentity | None = self._identity
-            else:
+            resolved = ResolvedIdentity(identity=self._identity)
+            if self._resolve_identity is not None:
                 # Resolved per proposal AND per tick against the drain's own
                 # clock: a registration that expired between enqueue and drain
                 # refuses at the moment authority is exercised, not the moment
-                # bytes were received. (The resolver's registry is a boot-time
-                # snapshot — file edits such as disabling an entry are honored
-                # at the next restart; see build_identity_resolver.)
-                identity = self._resolve_identity(item.proposer_id, facts.now)
+                # bytes were received. Since A3 the same call consults the
+                # durable revocation ledger, so a credential the owner killed
+                # mid-session refuses here too — without a restart, which is
+                # the whole point of that act. (The resolver's registry is
+                # still a boot-time snapshot for everything else: file edits
+                # such as disabling an entry are honored at the next restart;
+                # see build_identity_resolver.)
+                resolved = self._resolve_identity(session, item.proposer_id, facts.now)
             outcome = run_cycle(
                 item.payload,
                 session=session,
                 mandate=mandate,
-                identity=identity,
+                identity=resolved.identity,
+                identity_refusal=resolved.refusal,
+                identity_detail=resolved.detail,
                 facts=facts,
                 submit=self._submit,
                 gather_instrument=self._gather_instrument,

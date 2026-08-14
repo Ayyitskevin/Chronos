@@ -1,0 +1,629 @@
+"""A3, exercised: a leaked proposer credential dies without a restart.
+
+ADR-0023 shipped the proposer registry as a **boot-time snapshot** on both
+planes and disclosed the consequence as R-48 residual (c): disabling a
+registration means editing the owner's file and restarting the backend. The
+mid-session stand-downs were the kill switch, mandate revocation, and bouncing
+the process that holds the broker connection — none of which is "stop this one
+proposer", and the last of which is the worst thing to do during an incident.
+
+This suite proves the durable revocation act closes that, at both enforcement
+points and in the same process:
+
+1. a credential accepted moments ago is refused **401 at the route** after
+   revocation, with no restart and no registry reload;
+2. a proposal already **queued** under that credential refuses at **STAMP**,
+   journaling ``PROPOSER_REVOKED`` rather than sharing a code with expiry;
+3. revocation **survives a restart** — a fresh boot, a fresh registry load, and
+   a fresh ``ProposerAuth`` still refuse;
+4. revocation is **credential-scoped, not name-scoped**: re-minting a new
+   credential for the same ``proposer_id`` verifies again while the leaked hash
+   stays dead, which is exactly the recovery an operator needs;
+5. the act **writes no file** — the owner's grant document is byte-identical
+   afterwards, because revocation lives in the database;
+6. the ledger is **read fail-closed**: an unreadable one refuses rather than
+   assuming nothing was revoked.
+
+Weighted the fail-closed way (§4d): every case above except (4) asserts a
+refusal, and (4) exists precisely to prove the refusal is not broader than the
+act intended.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sqlite3
+from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from pathlib import Path
+from typing import Any
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import select
+from sqlalchemy.orm import Session, sessionmaker
+
+from chronos.api.autonomy_wiring import build_identity_resolver
+from chronos.persistence.database import Database
+from chronos.persistence.schema import AutonomyProposerRevocationRow, HashChainRow
+from chronos.supervisor import revocation
+from chronos.supervisor.proposers import credential_hash
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+_NOW = datetime(2026, 8, 13, 14, 0, tzinfo=UTC)
+_FAR_EXPIRY = "2030-01-01T00:00:00+00:00"
+
+TOKEN_HEADER = "X-Chronos-Token"
+PROPOSER_HEADER = "X-Chronos-Proposer-Token"
+
+WORKER_CREDENTIAL = "w" * 64
+REMINTED_CREDENTIAL = "r" * 64
+
+PROPOSAL_BODY = {
+    "kind": "HOLD",
+    "asset_class": "EQUITY",
+    "symbol": "SPY",
+    "direction": "NEUTRAL",
+    "thesis": "exercised-test proposal",
+}
+
+
+def _registration(
+    proposer_id: str,
+    credential: str,
+    *,
+    expires_at: str = _FAR_EXPIRY,
+    enabled: bool = True,
+) -> dict[str, Any]:
+    return {
+        "proposer_id": proposer_id,
+        "secret_sha256": credential_hash(credential),
+        "provider": "anthropic",
+        "model_id": "model-x",
+        "model_version": "mv-7",
+        "prompt_version": "pv-3",
+        "tool_schema_version": "ts-2",
+        "decision_schema_version": "ds-4",
+        "policy_version": "pol-5",
+        "expires_at": expires_at,
+        "enabled": enabled,
+    }
+
+
+def _registry_text(*entries: dict[str, Any]) -> str:
+    return json.dumps({"schema_version": 1, "proposers": list(entries)})
+
+
+@pytest.fixture
+def database() -> Iterator[Database]:
+    instance = Database("sqlite+pysqlite:///:memory:")
+    instance.initialize()
+    try:
+        yield instance
+    finally:
+        instance.dispose()
+
+
+@pytest.fixture
+def sessions(database: Database) -> sessionmaker[Session]:
+    return database.sessions
+
+
+@pytest.fixture()
+def demo_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[Path]:
+    from chronos.config.settings import get_settings
+
+    monkeypatch.chdir(REPO_ROOT)
+    monkeypatch.setenv("BROKER_MODE", "demo")
+    monkeypatch.setenv("DEMO_PROFILE", "empty_account")
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'chronos.db'}")
+    monkeypatch.setenv("LOG_FILE", str(tmp_path / "chronos.log"))
+    monkeypatch.setenv("BACKEND_TOKEN_FILE", str(tmp_path / "backend_api_token"))
+    get_settings.cache_clear()
+    yield tmp_path
+    get_settings.cache_clear()
+
+
+def _boot(monkeypatch: pytest.MonkeyPatch, registry_text: str, tmp_path: Path) -> TestClient:
+    from chronos.api.main import create_app
+    from chronos.config.settings import get_settings
+
+    registry_path = tmp_path / "autonomy_proposers.json"
+    registry_path.write_text(registry_text, encoding="utf-8")
+    monkeypatch.setenv("AUTONOMY_PROPOSERS_FILE", str(registry_path))
+    get_settings.cache_clear()
+    return TestClient(create_app())
+
+
+def _revoke_in(tmp_path: Path, proposer_id: str, credential: str, reason: str) -> bool:
+    """Revoke against the backend's own database, the way the CLI does."""
+
+    database = Database(f"sqlite:///{tmp_path / 'chronos.db'}")
+    try:
+        with database.sessions.begin() as session:
+            return revocation.revoke(
+                session,
+                proposer_id=proposer_id,
+                secret_sha256=credential_hash(credential),
+                reason=reason,
+                now=datetime.now(tz=UTC),
+            )
+    finally:
+        database.dispose()
+
+
+# ------------------------------------------------- the route, in one process
+
+
+def test_a_revoked_credential_is_refused_without_a_restart(
+    demo_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The defect R-48(c) disclosed: this used to require bouncing the backend.
+
+    One boot. The credential works, is revoked mid-session, and stops working —
+    while the same process keeps running with the same registry snapshot in
+    memory. That "same process" is the whole claim.
+    """
+
+    registry = _registry_text(_registration("claude-worker", WORKER_CREDENTIAL))
+    with _boot(monkeypatch, registry, demo_env) as client:
+        accepted = client.post(
+            "/autonomy/proposals",
+            json=PROPOSAL_BODY,
+            headers={PROPOSER_HEADER: WORKER_CREDENTIAL},
+        )
+        assert accepted.status_code == 202, accepted.text
+
+        assert _revoke_in(demo_env, "claude-worker", WORKER_CREDENTIAL, "credential leaked")
+
+        refused = client.post(
+            "/autonomy/proposals",
+            json=PROPOSAL_BODY,
+            headers={PROPOSER_HEADER: WORKER_CREDENTIAL},
+        )
+        assert refused.status_code == 401
+        # The 401 body says no more than it did for unknown/expired/disabled:
+        # which of the four states this is remains the owner's business.
+        assert refused.json()["detail"] == (
+            f"the {PROPOSER_HEADER} credential is not a current registered proposer"
+        )
+
+    with sqlite3.connect(demo_env / "chronos.db") as connection:
+        queued = list(connection.execute("SELECT COUNT(*) FROM autonomy_proposal_queue"))
+    assert queued == [(1,)], "the post-revocation proposal must not have been queued"
+
+
+def test_revocation_survives_a_restart(demo_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A restart is not permission to undo it — ADR-0017's rule, applied here.
+
+    The registry file still contains the registration, unedited. A fresh boot
+    re-reads that file, builds a fresh ``ProposerAuth``, and still refuses,
+    because the ledger is what says so and the ledger is durable.
+    """
+
+    registry = _registry_text(_registration("claude-worker", WORKER_CREDENTIAL))
+    with _boot(monkeypatch, registry, demo_env) as client:
+        assert (
+            client.post(
+                "/autonomy/proposals",
+                json=PROPOSAL_BODY,
+                headers={PROPOSER_HEADER: WORKER_CREDENTIAL},
+            ).status_code
+            == 202
+        )
+        _revoke_in(demo_env, "claude-worker", WORKER_CREDENTIAL, "credential leaked")
+
+    with _boot(monkeypatch, registry, demo_env) as restarted:
+        after = restarted.post(
+            "/autonomy/proposals",
+            json=PROPOSAL_BODY,
+            headers={PROPOSER_HEADER: WORKER_CREDENTIAL},
+        )
+        assert after.status_code == 401
+
+
+def test_revocation_kills_the_credential_not_the_name(
+    demo_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Re-minting is the recovery path, and it works.
+
+    Keying revocation by ``proposer_id`` would burn the name forever and force
+    the owner to invent ``claude-worker-2`` mid-incident. Keying by credential
+    hash revokes precisely the secret that escaped: a NEW credential for the
+    SAME proposer verifies after the restart the registry snapshot needs, while
+    the leaked one stays dead permanently.
+    """
+
+    leaked = _registry_text(_registration("claude-worker", WORKER_CREDENTIAL))
+    with _boot(monkeypatch, leaked, demo_env):
+        _revoke_in(demo_env, "claude-worker", WORKER_CREDENTIAL, "credential leaked")
+
+    reminted = _registry_text(_registration("claude-worker", REMINTED_CREDENTIAL))
+    with _boot(monkeypatch, reminted, demo_env) as client:
+        assert (
+            client.post(
+                "/autonomy/proposals",
+                json=PROPOSAL_BODY,
+                headers={PROPOSER_HEADER: REMINTED_CREDENTIAL},
+            ).status_code
+            == 202
+        ), "a fresh credential for the same proposer must work"
+        assert (
+            client.post(
+                "/autonomy/proposals",
+                json=PROPOSAL_BODY,
+                headers={PROPOSER_HEADER: WORKER_CREDENTIAL},
+            ).status_code
+            == 401
+        ), "the leaked credential stays dead forever"
+
+
+# ------------------------------------------------- a minimal cycle harness
+#
+# Self-contained, like every other exercised suite here: the cycle refuses at
+# STAMP before any of these facts are consulted, so they only have to be valid.
+
+
+def _proposal() -> Any:
+    from chronos.autonomy import (
+        DecisionKind,
+        EvidenceCitation,
+        ProposedDecision,
+        StrategyForm,
+        TradableAssetClass,
+    )
+
+    return ProposedDecision(
+        kind=DecisionKind.OPEN,
+        asset_class=TradableAssetClass.EQUITY,
+        symbol="SPY",
+        requested_strategy=StrategyForm.LONG_EQUITY,
+        requested_quantity=Decimal(10),
+        evidence=(EvidenceCitation(evidence_id="ev-1", kind="quote", as_of=_NOW, digest="c" * 64),),
+        invalidation_conditions=("closes below 400",),
+    )
+
+
+def _facts() -> Any:
+    from chronos.domain.enums import DataQuality
+    from chronos.domain.models import UnderlyingContract
+    from chronos.supervisor.admission import MarketDataEvidence
+    from chronos.supervisor.compiler import QuoteEvidence
+    from chronos.supervisor.loop import CycleFacts
+    from chronos.supervisor.sizing import AccountEvidence
+
+    return CycleFacts(
+        account_fingerprint="a" * 64,
+        account_id="DU1234567",
+        now=_NOW,
+        process_generation=7,
+        evidence_bundle_id="eb-1",
+        evidence_bundle_digest="b" * 64,
+        market_data=MarketDataEvidence(quote_age_seconds=Decimal(1), quality=DataQuality.LIVE),
+        account=AccountEvidence(
+            net_liquidation_usd=Decimal(100_000),
+            total_cash_usd=Decimal(60_000),
+            buying_power_usd=Decimal(60_000),
+        ),
+        quote=QuoteEvidence(bid=Decimal("399.98"), ask=Decimal("400.02")),
+        contract=UnderlyingContract(con_id=111, symbol="SPY"),
+        reference_price=Decimal(400),
+    )
+
+
+# ------------------------------------------------------------ the drain plane
+
+
+def test_a_queued_proposal_refuses_at_stamp_with_its_own_code(
+    tmp_path: Path, sessions: sessionmaker[Session]
+) -> None:
+    """The race the route alone cannot cover: enqueued before, drained after.
+
+    A proposal accepted seconds before the owner revoked is already in the
+    queue. Identity is resolved at drain time — the moment authority is actually
+    exercised — so this is where that proposal dies, and it says why in its own
+    refusal code rather than sharing ``PROPOSER_UNRESOLVED`` with a registration
+    that merely aged out.
+    """
+
+    registry_path = tmp_path / "proposers.json"
+    registry_path.write_text(
+        _registry_text(_registration("claude-worker", WORKER_CREDENTIAL)), encoding="utf-8"
+    )
+    resolve = build_identity_resolver(registry_path)
+    assert resolve is not None
+
+    with sessions.begin() as session:
+        before = resolve(session, "claude-worker", _NOW)
+    assert before.identity is not None, "the registration must resolve before revocation"
+
+    with sessions.begin() as session:
+        assert revocation.revoke(
+            session,
+            proposer_id="claude-worker",
+            secret_sha256=credential_hash(WORKER_CREDENTIAL),
+            reason="credential leaked",
+            now=_NOW,
+        )
+
+    with sessions.begin() as session:
+        after = resolve(session, "claude-worker", _NOW)
+    assert after.identity is None, "a revoked credential must not resolve to an author"
+
+
+def test_the_revoked_stamp_refusal_names_itself(
+    tmp_path: Path, sessions: sessionmaker[Session]
+) -> None:
+    """PROPOSER_REVOKED, not PROPOSER_UNRESOLVED — a separate conjunct.
+
+    Refusing and *saying why* are two different pieces of this fix, and they can
+    regress independently: the ledger check could stay while the code collapsed
+    back into the generic one, leaving a journal that cannot distinguish a
+    credential the owner killed from a registration that aged out.
+    """
+
+    registry_path = tmp_path / "proposers.json"
+    registry_path.write_text(
+        _registry_text(_registration("claude-worker", WORKER_CREDENTIAL)), encoding="utf-8"
+    )
+    resolve = build_identity_resolver(registry_path)
+    assert resolve is not None
+    with sessions.begin() as session:
+        revocation.revoke(
+            session,
+            proposer_id="claude-worker",
+            secret_sha256=credential_hash(WORKER_CREDENTIAL),
+            reason="credential leaked",
+            now=_NOW,
+        )
+    with sessions.begin() as session:
+        refused = resolve(session, "claude-worker", _NOW)
+
+    assert refused.refusal == "PROPOSER_REVOKED"
+    assert refused.refusal != "PROPOSER_UNRESOLVED"
+    assert "revoked by the owner" in refused.detail
+    assert "permanent" in refused.detail
+
+
+def test_the_stamp_refusal_reaches_the_journal(
+    tmp_path: Path, sessions: sessionmaker[Session]
+) -> None:
+    """End to end through ``run_cycle``: the journal records PROPOSER_REVOKED.
+
+    A refusal nobody can read afterwards is the defect A1 removed elsewhere in
+    this pipeline; a distinct code that never reaches the journal would be the
+    same failure in a new place.
+    """
+
+    from chronos.supervisor.loop import CycleStage, run_cycle
+
+    with sessions.begin() as session:
+        outcome = run_cycle(
+            _proposal(),
+            session=session,
+            mandate=None,
+            identity=None,
+            identity_refusal="PROPOSER_REVOKED",
+            identity_detail="the credential registered to claude-worker was revoked",
+            facts=_facts(),
+        )
+        assert outcome.stage is CycleStage.STAMP
+        assert outcome.refusal == "PROPOSER_REVOKED"
+        journaled = list(
+            session.scalars(select(HashChainRow).order_by(HashChainRow.sequence)).all()
+        )
+    assert journaled, "the refusal must be journaled, not merely returned"
+
+
+# --------------------------------------------------------------- the act itself
+
+
+def test_revocation_is_idempotent_and_hash_chained(sessions: sessionmaker[Session]) -> None:
+    """One act, one row, one chain record — and a second call says so.
+
+    An operator who cannot remember whether the first invocation landed must be
+    able to run it again during an incident without being told something went
+    wrong, and without producing a second record of one act.
+    """
+
+    digest = credential_hash(WORKER_CREDENTIAL)
+    with sessions.begin() as session:
+        assert revocation.revoke(
+            session,
+            proposer_id="claude-worker",
+            secret_sha256=digest,
+            reason="credential leaked",
+            now=_NOW,
+        )
+    with sessions.begin() as session:
+        assert not revocation.revoke(
+            session,
+            proposer_id="claude-worker",
+            secret_sha256=digest,
+            reason="credential leaked again",
+            now=_NOW + timedelta(minutes=1),
+        )
+    with sessions.begin() as session:
+        rows = list(session.scalars(select(AutonomyProposerRevocationRow)).all())
+        chain = [
+            row
+            for row in session.scalars(select(HashChainRow)).all()
+            if row.stream == revocation.PROPOSER_STREAM
+        ]
+        assert len(rows) == 1
+        assert len(chain) == 1
+        assert rows[0].reason == "credential leaked"  # the first reason is the act's
+        payload = json.loads(chain[0].payload_json)
+    assert payload["proposer_id"] == "claude-worker"
+    assert payload["secret_sha256"] == digest
+    assert WORKER_CREDENTIAL not in chain[0].payload_json, "hashes in, hashes out"
+
+
+def test_revoking_without_a_reason_is_refused(sessions: sessionmaker[Session]) -> None:
+    """An act with no stated cause cannot be reviewed — the mandate's rule."""
+
+    with sessions.begin() as session, pytest.raises(ValueError, match="requires a reason"):
+        revocation.revoke(
+            session,
+            proposer_id="claude-worker",
+            secret_sha256=credential_hash(WORKER_CREDENTIAL),
+            reason="   ",
+            now=_NOW,
+        )
+    with sessions.begin() as session:
+        assert not revocation.is_revoked(session, secret_sha256=credential_hash(WORKER_CREDENTIAL))
+
+
+# ------------------------------------------------------------------- the CLI
+
+
+def test_revoke_writes_the_ledger_and_never_the_registry_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The grant document stays owner-authored; the act lives in the database."""
+
+    from chronos.cli.proposer_commands import cmd_proposer_revoke
+
+    registry_path = tmp_path / "proposers.json"
+    registry_path.write_text(
+        _registry_text(_registration("claude-worker", WORKER_CREDENTIAL)), encoding="utf-8"
+    )
+    before = registry_path.read_bytes()
+    url = f"sqlite:///{tmp_path / 'ledger.db'}"
+    database = Database(url)
+    try:
+        database.initialize()
+    finally:
+        database.dispose()
+
+    code = cmd_proposer_revoke(
+        argparse.Namespace(
+            file=str(registry_path),
+            proposer_id="claude-worker",
+            reason="credential pasted into a public issue",
+            database_url=url,
+        )
+    )
+    assert code == 0
+    assert registry_path.read_bytes() == before, "revocation must not edit the owner's grant"
+
+    out = capsys.readouterr().out
+    assert "REVOKED" in out
+    assert "No restart is needed" in out
+    assert WORKER_CREDENTIAL not in out, "the credential is never echoed"
+
+    database = Database(url)
+    try:
+        with database.sessions.begin() as session:
+            assert revocation.is_revoked(session, secret_sha256=credential_hash(WORKER_CREDENTIAL))
+    finally:
+        database.dispose()
+
+
+def test_revoke_refuses_an_unregistered_proposer_and_an_empty_reason(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Both refusals explain themselves rather than failing silently."""
+
+    from chronos.cli.proposer_commands import cmd_proposer_revoke
+
+    registry_path = tmp_path / "proposers.json"
+    registry_path.write_text(
+        _registry_text(_registration("claude-worker", WORKER_CREDENTIAL)), encoding="utf-8"
+    )
+    url = f"sqlite:///{tmp_path / 'ledger.db'}"
+
+    assert (
+        cmd_proposer_revoke(
+            argparse.Namespace(
+                file=str(registry_path),
+                proposer_id="ghost",
+                reason="tidying up",
+                database_url=url,
+            )
+        )
+        == 2
+    )
+    assert "already fails verification" in capsys.readouterr().err
+
+    assert (
+        cmd_proposer_revoke(
+            argparse.Namespace(
+                file=str(registry_path),
+                proposer_id="claude-worker",
+                reason="  ",
+                database_url=url,
+            )
+        )
+        == 2
+    )
+    assert "stated cause" in capsys.readouterr().err
+
+
+def test_check_reports_revoked_and_says_when_it_cannot_tell(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """REVOKED outranks every other state, and an unreadable ledger says so.
+
+    The second half is the one that matters: an entry rendered CURRENT because
+    the ledger could not be read would be fabricated calm, which the terminal
+    tests forbid elsewhere for exactly this reason.
+    """
+
+    from chronos.cli.proposer_commands import cmd_proposer_check, cmd_proposer_revoke
+
+    registry_path = tmp_path / "proposers.json"
+    registry_path.write_text(
+        _registry_text(
+            _registration("claude-worker", WORKER_CREDENTIAL),
+            _registration("other-worker", REMINTED_CREDENTIAL),
+        ),
+        encoding="utf-8",
+    )
+    url = f"sqlite:///{tmp_path / 'ledger.db'}"
+    database = Database(url)
+    try:
+        database.initialize()
+    finally:
+        database.dispose()
+
+    cmd_proposer_revoke(
+        argparse.Namespace(
+            file=str(registry_path),
+            proposer_id="claude-worker",
+            reason="credential leaked",
+            database_url=url,
+        )
+    )
+    capsys.readouterr()
+
+    assert cmd_proposer_check(argparse.Namespace(file=str(registry_path), database_url=url)) == 0
+    out = capsys.readouterr().out
+    assert "claude-worker" in out and "REVOKED" in out
+    assert "credential leaked" in out
+    assert "other-worker" in out and "CURRENT" in out
+
+    # No ledger to read: the state is UNVERIFIED, and the reason is printed.
+    assert (
+        cmd_proposer_check(
+            argparse.Namespace(
+                file=str(registry_path), database_url="sqlite:///" + str(tmp_path / "absent.db")
+            )
+        )
+        == 0
+    )
+    unverified = capsys.readouterr().out
+    assert "could not be read" in unverified
+    # Assert on the registration's OWN line, not on the whole output: the NOTE
+    # above it contains the word UNVERIFIED too, so a whole-output check passes
+    # even when the state column still reads CURRENT — which is how the first
+    # draft of this assertion was vacuous, caught by reverting the fix.
+    entry_line = next(
+        line for line in unverified.splitlines() if line.startswith("  claude-worker")
+    )
+    assert "UNVERIFIED" in entry_line
+    assert "CURRENT" not in entry_line
+    assert "REVOKED" not in entry_line, "an unreadable ledger must not claim knowledge"

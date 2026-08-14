@@ -1,9 +1,9 @@
-"""``chronos proposer mint|check`` — credentials and registry, read-only (ADR-0023).
+"""``chronos proposer mint|check|revoke`` — credentials and registry (ADR-0023, A3).
 
-Two commands, both stdout-only, following ``mandate template``/``check``'s
-doctrine exactly: **a tool that mints text is not a tool that grants**. The
-owner pastes the printed registration into the registry file themselves;
-nothing here writes a file, and nothing here can enable, extend, or revoke a
+``mint`` and ``check`` remain stdout-only, following ``mandate
+template``/``check``'s doctrine exactly: **a tool that mints text is not a tool
+that grants**. The owner pastes the printed registration into the registry file
+themselves; neither command writes a file, and neither can enable or extend a
 proposer. ``tests/safety/test_proposer_credentials_exercised.py`` pins the
 no-write property the same way ``test_mandate_check`` pins the mandate
 commands'.
@@ -12,6 +12,26 @@ commands'.
 exactly once, beside the registration entry that carries only its SHA-256. The
 registry file never holds a credential, so reading it yields nothing
 presentable — the same reasoning as the terminal's hashed session ids (R-41).
+
+## ``revoke`` is the first mutating command on this CLI, and it is narrow (A3)
+
+It writes **one row in the database and nothing else**. It does not touch the
+registry file: the grant document stays owner-authored, and revocation is
+durable state the running backend consults — which is exactly why it takes
+effect without a restart, unlike editing ``enabled: false`` into the file.
+
+Two properties keep it from being an authority surface:
+
+- **It only ever removes.** There is no un-revoke and no flag that grants. The
+  strongest thing this command can do is stop a proposer, which is the direction
+  a mutating operator tool is allowed to move in.
+- **It revokes a credential, not a name.** The row is keyed by the
+  registration's ``secret_sha256``, so re-minting a fresh credential for the
+  same ``proposer_id`` works at the next restart while the leaked one stays dead
+  forever.
+
+An unregistered credential cannot be revoked, and that is not a gap: a
+credential the registry does not contain already fails ``verify()``.
 """
 
 from __future__ import annotations
@@ -90,6 +110,29 @@ def cmd_proposer_mint(args: argparse.Namespace) -> int:
     return 0
 
 
+def _read_revocations(database_url: str) -> tuple[dict[str, Any] | None, str]:
+    """Every revocation keyed by credential hash, or ``None`` and why not (A3).
+
+    Failure is reported rather than swallowed: a registration that looks CURRENT
+    because the ledger could not be read is the exact shape of fabricated calm
+    this repository's terminal tests exist to prevent.
+    """
+
+    try:
+        from chronos.persistence.database import Database
+        from chronos.supervisor.revocation import revoked_credentials
+    except Exception as error:  # pragma: no cover - import failure is environmental
+        return None, f"{type(error).__name__}"
+    database = Database(database_url)
+    try:
+        with database.sessions.begin() as session:
+            return dict(revoked_credentials(session)), ""
+    except Exception as error:
+        return None, f"{type(error).__name__}"
+    finally:
+        database.dispose()
+
+
 def cmd_proposer_check(args: argparse.Namespace) -> int:
     """Validate a registry file and describe what it registers. Writes nothing."""
 
@@ -113,16 +156,115 @@ def cmd_proposer_check(args: argparse.Namespace) -> int:
             "NOTE     the registry is empty: proposals refuse until someone is registered "
             "(a valid lockdown state)"
         )
-    for entry in loaded.registry.proposers:
-        state = (
-            "CURRENT" if entry.is_current(now) else ("DISABLED" if not entry.enabled else "EXPIRED")
-        )
+    revocations, failure = _read_revocations(_database_url(args))
+    if revocations is None:
         print(
-            f"  {entry.proposer_id:<24} {state:<9} provider={entry.provider} "
+            f"NOTE     the revocation ledger could not be read ({failure}); an entry shown "
+            "UNVERIFIED may have been revoked and this command cannot tell"
+        )
+    for entry in loaded.registry.proposers:
+        state = _entry_state(entry, now=now, revocations=revocations)
+        print(
+            f"  {entry.proposer_id:<24} {state:<10} provider={entry.provider} "
             f"model={entry.model_id}@{entry.model_version} "
             f"prompt={entry.prompt_version} policy={entry.policy_version} "
             f"expires={entry.expires_at.isoformat()}"
         )
+        if revocations is not None and entry.secret_sha256 in revocations:
+            record = revocations[entry.secret_sha256]
+            print(
+                f"  {'':<24} revoked {record.revoked_at.isoformat()} — {record.reason}; "
+                "mint a new credential for this proposer and restart to re-grant"
+            )
+    return 0
+
+
+def _entry_state(entry: Any, *, now: datetime, revocations: dict[str, Any] | None) -> str:
+    """The one word an operator reads. REVOKED outranks everything (A3).
+
+    A revoked credential that has also expired is still, first and foremost,
+    revoked: expiry would have let a re-mint of the same secret work, and
+    revocation is what says it never will.
+    """
+
+    if revocations is not None and entry.secret_sha256 in revocations:
+        return "REVOKED"
+    if not entry.enabled:
+        return "DISABLED"
+    if not entry.is_current(now):
+        return "EXPIRED"
+    # Would read CURRENT — but only the ledger can rule out a revocation, so
+    # without it the honest answer is that this was not verified.
+    return "CURRENT" if revocations is not None else "UNVERIFIED"
+
+
+def _database_url(args: argparse.Namespace) -> str:
+    override = getattr(args, "database_url", "") or ""
+    if override:
+        return override
+    from chronos.config.settings import get_settings
+
+    return get_settings().database_url
+
+
+def cmd_proposer_revoke(args: argparse.Namespace) -> int:
+    """Kill one registered credential, now. Writes one database row, no files."""
+
+    from chronos.persistence.database import Database
+    from chronos.supervisor.proposers import load_proposer_registry
+    from chronos.supervisor.revocation import revoke
+
+    reason = args.reason.strip()
+    if not reason:
+        print(
+            "proposer revoke: --reason must not be empty; a credential killed for no "
+            "stated cause cannot be reviewed afterwards",
+            file=sys.stderr,
+        )
+        return 2
+
+    path = Path(args.file)
+    loaded = load_proposer_registry(path)
+    if loaded is None:
+        print(
+            f"proposer revoke: {path} is unreadable or does not validate, so the "
+            "credential to revoke cannot be identified",
+            file=sys.stderr,
+        )
+        return 2
+    registration = loaded.registry.find(args.proposer_id)
+    if registration is None:
+        print(
+            f"proposer revoke: {args.proposer_id!r} is not in {path}. A credential this "
+            "registry does not contain already fails verification, so there is nothing "
+            "to revoke",
+            file=sys.stderr,
+        )
+        return 2
+
+    database = Database(_database_url(args))
+    try:
+        with database.sessions.begin() as session:
+            written = revoke(
+                session,
+                proposer_id=registration.proposer_id,
+                secret_sha256=registration.secret_sha256,
+                reason=reason,
+                now=datetime.now(tz=UTC),
+            )
+    finally:
+        database.dispose()
+
+    if not written:
+        print(f"ALREADY REVOKED  {registration.proposer_id} — no second record written")
+        return 0
+    print(f"REVOKED  {registration.proposer_id}")
+    print(f"  credential {registration.secret_sha256[:16]}… is refused from now on:")
+    print("  at the proposal route (401) and at drain time (STAMP: PROPOSER_REVOKED).")
+    print("  No restart is needed, and none undoes this.")
+    print(f"  The registry file {path} was NOT modified; revocation lives in the database.")
+    print("  To re-grant: mint a NEW credential for this proposer, put it in the registry,")
+    print("  and restart the backend — the revoked credential stays dead permanently.")
     return 0
 
 
@@ -173,4 +315,34 @@ def add_proposer_commands(sub: Any) -> None:
         help="validate a registry file and list what it registers (writes nothing)",
     )
     check.add_argument("--file", required=True, help="path to the registry JSON")
+    check.add_argument(
+        "--database-url",
+        default="",
+        help="where the revocation ledger lives (default: the configured database)",
+    )
     check.set_defaults(func=cmd_proposer_check)
+
+    revoke = proposer_sub.add_parser(
+        "revoke",
+        help=(
+            "kill a registered credential immediately (A3; WRITES one database row — "
+            "the only mutating proposer command, and it only ever removes authority)"
+        ),
+    )
+    revoke.add_argument("--file", required=True, help="path to the registry JSON")
+    revoke.add_argument(
+        "--proposer-id",
+        required=True,
+        help="the registration whose credential is being killed",
+    )
+    revoke.add_argument(
+        "--reason",
+        required=True,
+        help="why, for the audit trail — an act with no stated cause cannot be reviewed",
+    )
+    revoke.add_argument(
+        "--database-url",
+        default="",
+        help="where the revocation ledger lives (default: the configured database)",
+    )
+    revoke.set_defaults(func=cmd_proposer_revoke)

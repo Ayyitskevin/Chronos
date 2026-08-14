@@ -8,6 +8,7 @@ accepts it (version current, zero drift).
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 import sqlalchemy as sa
@@ -71,8 +72,19 @@ _V9_TABLES = {
 }
 
 # The complete table universe the migration chain accounts for through head.
+# Added by revision 0009 (schema v10): durable proposer revocation (A3).
+_V10_TABLES = {
+    "autonomy_proposer_revocations",
+}
+
 _ALL_MIGRATED_TABLES = (
-    _V2_BASELINE_TABLES | _V3_TABLES | _V4_TABLES | _V5_TABLES | _V7_TABLES | _V9_TABLES
+    _V2_BASELINE_TABLES
+    | _V3_TABLES
+    | _V4_TABLES
+    | _V5_TABLES
+    | _V7_TABLES
+    | _V9_TABLES
+    | _V10_TABLES
 )
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -83,7 +95,7 @@ def _make_v2_database(path: Path) -> None:
 
     url = f"sqlite:///{path}"
     engine = sa.create_engine(url)
-    post_v2 = _V3_TABLES | _V4_TABLES | _V5_TABLES | _V7_TABLES | _V9_TABLES
+    post_v2 = _V3_TABLES | _V4_TABLES | _V5_TABLES | _V7_TABLES | _V9_TABLES | _V10_TABLES
     v2_tables = [table for name, table in Base.metadata.tables.items() if name not in post_v2]
     Base.metadata.create_all(engine, tables=v2_tables)
     with engine.begin() as connection:
@@ -101,7 +113,7 @@ def _make_v3_database(path: Path) -> None:
 
     url = f"sqlite:///{path}"
     engine = sa.create_engine(url)
-    post_v3 = _V4_TABLES | _V5_TABLES | _V7_TABLES | _V9_TABLES
+    post_v3 = _V4_TABLES | _V5_TABLES | _V7_TABLES | _V9_TABLES | _V10_TABLES
     v3_tables = [table for name, table in Base.metadata.tables.items() if name not in post_v3]
     Base.metadata.create_all(engine, tables=v3_tables)
     with engine.begin() as connection:
@@ -119,7 +131,7 @@ def _make_v4_database(path: Path) -> None:
 
     url = f"sqlite:///{path}"
     engine = sa.create_engine(url)
-    post_v4 = _V5_TABLES | _V7_TABLES | _V9_TABLES
+    post_v4 = _V5_TABLES | _V7_TABLES | _V9_TABLES | _V10_TABLES
     v4_tables = [table for name, table in Base.metadata.tables.items() if name not in post_v4]
     Base.metadata.create_all(engine, tables=v4_tables)
     with engine.begin() as connection:
@@ -212,7 +224,7 @@ def test_v4_database_upgrades_to_current_schema(tmp_path: Path) -> None:
 
     engine = sa.create_engine(f"sqlite:///{db_path}")
     tables = set(sa.inspect(engine).get_table_names())
-    assert tables >= _V5_TABLES | _V7_TABLES | _V9_TABLES
+    assert tables >= _V5_TABLES | _V7_TABLES | _V9_TABLES | _V10_TABLES
     with engine.connect() as connection:
         version = connection.execute(
             sa.text("SELECT version FROM schema_version ORDER BY id DESC LIMIT 1")
@@ -382,6 +394,82 @@ def test_v8_database_gains_the_evidence_bundle_table_and_keeps_its_rows(tmp_path
     database = Database(f"sqlite:///{db_path}")
     try:
         database.initialize()
+    finally:
+        database.dispose()
+
+
+def test_v9_database_gains_the_revocation_table_and_keeps_its_rows(tmp_path: Path) -> None:
+    """A genuine pre-A3 database reaches head and can be revoked against (A3).
+
+    Same reasoning as the v7 and v8 tests above, one version on: every other
+    fixture derives its tables from the *current* metadata, so once the model
+    carries ``autonomy_proposer_revocations`` those paths reach 0009 with the
+    table already present and its existence guard skips the DDL. A real v9
+    database is the shape they cannot represent — every earlier table present,
+    versions 2..9 recorded, and only the revocation ledger missing.
+
+    The surviving queue row matters as much as the new table. An operator
+    upgrading mid-incident has proposals in flight, and a migration that
+    silently discarded them would lose exactly the evidence of what the leaked
+    credential had been doing.
+    """
+
+    db_path = tmp_path / "chronos.db"
+    engine = sa.create_engine(f"sqlite:///{db_path}")
+    Base.metadata.create_all(engine)
+    with engine.begin() as connection:
+        connection.execute(sa.text("DROP TABLE autonomy_proposer_revocations"))
+        connection.execute(
+            sa.text(
+                "INSERT INTO autonomy_proposal_queue "
+                "(account_fingerprint, payload, received_at, status, cycle_stage, refusal, "
+                "proposer_id) "
+                "VALUES ('f', '{}', '2026-01-01 00:00:00.000000', 'PENDING', '', '', "
+                "'claude-worker')"
+            )
+        )
+        for version in range(2, 10):
+            connection.execute(
+                sa.text(
+                    "INSERT INTO schema_version (version, applied_at) "
+                    f"VALUES ({version}, '2026-01-01 00:00:00.000000')"
+                )
+            )
+    engine.dispose()
+
+    config = _alembic_config(db_path)
+    command.stamp(config, "0008")  # v9 == revision 0008
+    command.upgrade(config, "head")
+
+    engine = sa.create_engine(f"sqlite:///{db_path}")
+    assert "autonomy_proposer_revocations" in set(sa.inspect(engine).get_table_names())
+    with engine.connect() as connection:
+        surviving = connection.execute(
+            sa.text("SELECT proposer_id, status FROM autonomy_proposal_queue")
+        ).all()
+        version = connection.execute(
+            sa.text("SELECT version FROM schema_version ORDER BY id DESC LIMIT 1")
+        ).scalar()
+    engine.dispose()
+    assert surviving == [("claude-worker", "PENDING")]
+    assert version == SCHEMA_VERSION
+
+    database = Database(f"sqlite:///{db_path}")
+    try:
+        database.initialize()
+        # The upgraded database is immediately usable for the act it exists for.
+        from chronos.supervisor.revocation import is_revoked, revoke
+
+        with database.sessions.begin() as session:
+            assert revoke(
+                session,
+                proposer_id="claude-worker",
+                secret_sha256="a" * 64,
+                reason="credential pasted into a public issue",
+                now=datetime(2026, 8, 13, tzinfo=UTC),
+            )
+        with database.sessions.begin() as session:
+            assert is_revoked(session, secret_sha256="a" * 64)
     finally:
         database.dispose()
 

@@ -181,10 +181,13 @@ def test_schema_initialization_creates_required_evidence_tables() -> None:
         "autonomy_proposal_queue",
         # The per-job evidence-bundle record (v9, ADR-0028, migration 0008).
         "autonomy_evidence_bundles",
+        # A3: durable proposer revocation, the ledger both planes consult (v10).
+        "autonomy_proposer_revocations",
     } <= names
     # v8: autonomy_proposal_queue gains proposer_id (ADR-0023, migration 0007).
     # v9: autonomy_evidence_bundles arrives (ADR-0028, migration 0008).
-    assert SCHEMA_VERSION == 9
+    # v10: autonomy_proposer_revocations (A3, migration 0009).
+    assert SCHEMA_VERSION == 10
 
 
 def test_application_events_are_append_only_and_queryable() -> None:
