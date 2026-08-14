@@ -1,10 +1,12 @@
-"""``chronos proposer mint|check|revoke`` — credentials and registry (ADR-0023, A3).
+"""``chronos proposer mint|check|fingerprint|revoke`` — credentials and registry.
 
-``mint`` and ``check`` remain stdout-only, following ``mandate
+ADR-0023, then A3 (revocation) and A4 (policy pinning).
+
+``mint``, ``check`` and ``fingerprint`` are stdout-only, following ``mandate
 template``/``check``'s doctrine exactly: **a tool that mints text is not a tool
 that grants**. The owner pastes the printed registration into the registry file
-themselves; neither command writes a file, and neither can enable or extend a
-proposer. ``tests/safety/test_proposer_credentials_exercised.py`` pins the
+themselves; none of the three writes a file, and none of them can enable or
+extend a proposer. ``tests/safety/test_proposer_credentials_exercised.py`` pins the
 no-write property the same way ``test_mandate_check`` pins the mandate
 commands'.
 
@@ -13,7 +15,7 @@ exactly once, beside the registration entry that carries only its SHA-256. The
 registry file never holds a credential, so reading it yields nothing
 presentable — the same reasoning as the terminal's hashed session ids (R-41).
 
-## ``revoke`` is the first mutating command on this CLI, and it is narrow (A3)
+## ``revoke`` is the only mutating command on this CLI, and it is narrow (A3)
 
 It writes **one row in the database and nothing else**. It does not touch the
 registry file: the grant document stays owner-authored, and revocation is
@@ -32,11 +34,31 @@ Two properties keep it from being an authority surface:
 
 An unregistered credential cannot be revoked, and that is not a gap: a
 credential the registry does not contain already fails ``verify()``.
+
+## Policy-content pinning, and exactly what it proves (A4)
+
+R-47 residual (b): ``prompt_version`` is an owner-typed label, so nothing binds
+it to the policy the worker actually runs, and a policy edit is unattributable
+unless the owner remembers to bump the label. ``--policy-file`` derives it
+instead — ``sha256(policy bytes)[:16]`` — so an edited policy produces a
+different registration, the mandate's version pin stops agreeing, and admission
+refuses on ``VERSION_PIN_MISMATCH`` until the owner re-pins deliberately.
+
+**What that does NOT prove, stated here because this is the file someone reads
+before believing otherwise:** it does not prove which policy the worker *ran*.
+The worker loads its policy at startup from ``CHRONOS_WORKER_POLICY_FILE``
+(default ``worker/policy.md``) and nothing in Chronos observes that read. The
+digest binds the file **as it was at mint time** to the label the registration
+carries. ``check --policy-file`` narrows the gap by comparing the file on this
+machine *now* against what was registered — drift detection, not attestation.
+Closing the rest needs the worker to attest its own policy digest, which is a
+worker change and is not this item.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import secrets
 import sys
@@ -47,6 +69,46 @@ from typing import Any
 #: Minted credentials are 32 random bytes, hex-encoded — the same strength as
 #: the backend's own API token.
 _CREDENTIAL_BYTES = 32
+
+#: How much of the policy digest becomes ``prompt_version``. 16 hex characters
+#: is 64 bits — far past accidental collision for a handful of hand-authored
+#: policy revisions, and short enough to read in a registry file, a mandate pin,
+#: and a log line without wrapping. The field is a label, not a security
+#: boundary: nothing authenticates on it, so truncation costs nothing here.
+POLICY_DIGEST_CHARS = 16
+
+#: ``--prompt-version``'s default. Named so ``mint`` can tell "the owner typed a
+#: label" from "the owner left it alone", which is what makes refusing both
+#: flags possible without argparse's help.
+_PROMPT_VERSION_DEFAULT = "1"
+
+
+def policy_fingerprint(path: Path) -> str:
+    """``sha256`` of the policy file's exact bytes, truncated to a label.
+
+    Over the raw bytes, not the decoded-and-stripped text the worker uses: a
+    trailing-whitespace edit is still an edit, and a fingerprint that forgave
+    some byte changes but not others would be a rule nobody could apply from
+    memory.
+
+    Raises ``ValueError`` when the file cannot be read or is empty. Empty is
+    refused rather than digested because the worker itself refuses to start on
+    an empty policy ("an empty policy is not a strategy", ``worker/config.py``),
+    and minting a credential that claims a policy the worker would reject would
+    put a fiction in the registry.
+    """
+
+    try:
+        raw = path.read_bytes()
+    except OSError as error:
+        raise ValueError(f"the policy file {path} is unreadable: {error}") from error
+    if not raw.strip():
+        raise ValueError(
+            f"the policy file {path} is empty; an empty policy is not a strategy, and the "
+            "worker refuses to start on one"
+        )
+    return hashlib.sha256(raw).hexdigest()[:POLICY_DIGEST_CHARS]
+
 
 # `chronos.supervisor.proposers` is imported INSIDE the commands, not here:
 # importing the supervisor package pulls the broker plane transitively, and
@@ -78,6 +140,26 @@ def cmd_proposer_mint(args: argparse.Namespace) -> int:
     else:
         expires = datetime.now(tz=UTC) + timedelta(days=args.expires_days)
 
+    prompt_version = args.prompt_version
+    policy_file = getattr(args, "policy_file", "") or ""
+    if policy_file:
+        # argparse's mutually-exclusive group already refuses both flags, but
+        # this path is also called directly (tests, scripts), so the ambiguity
+        # is refused here too rather than resolved by precedence. A label whose
+        # provenance depends on which flag won is worse than no label.
+        if prompt_version != _PROMPT_VERSION_DEFAULT:
+            print(
+                "proposer mint: pass --policy-file or --prompt-version, not both; the "
+                "digest and a typed label cannot both be the authority for one field",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            prompt_version = policy_fingerprint(Path(policy_file))
+        except ValueError as error:
+            print(f"proposer mint: {error}", file=sys.stderr)
+            return 2
+
     credential = secrets.token_hex(_CREDENTIAL_BYTES)
     try:
         registration = ProposerRegistration(
@@ -86,7 +168,7 @@ def cmd_proposer_mint(args: argparse.Namespace) -> int:
             provider=args.provider,
             model_id=args.model_id,
             model_version=args.model_version,
-            prompt_version=args.prompt_version,
+            prompt_version=prompt_version,
             tool_schema_version=args.tool_schema_version,
             decision_schema_version=args.decision_schema_version,
             policy_version=args.policy_version,
@@ -107,6 +189,14 @@ def cmd_proposer_mint(args: argparse.Namespace) -> int:
     print()
     print("# A complete registry document, if you are starting one:")
     print(json.dumps({"schema_version": SCHEMA_VERSION, "proposers": [entry]}, indent=2))
+    if policy_file:
+        print()
+        print(f"# prompt_version was derived from {policy_file} (A4):")
+        print(f"#   sha256(bytes)[:{POLICY_DIGEST_CHARS}] = {prompt_version}")
+        print("# Editing that policy changes this value, so the mandate's version pin stops")
+        print("# agreeing and admission refuses VERSION_PIN_MISMATCH until you re-pin. What")
+        print("# this does NOT prove: which policy the worker actually ran — nothing in")
+        print("# Chronos observes the worker's own read of its policy file.")
     return 0
 
 
@@ -173,6 +263,15 @@ def cmd_proposer_check(args: argparse.Namespace) -> int:
             f"NOTE     the revocation ledger could not be read ({failure}); an entry shown "
             "UNVERIFIED may have been revoked and this command cannot tell"
         )
+    policy_file = getattr(args, "policy_file", "") or ""
+    expected_prompt = ""
+    if policy_file:
+        try:
+            expected_prompt = policy_fingerprint(Path(policy_file))
+        except ValueError as error:
+            print(f"POLICY   UNREADABLE — {error}")
+        else:
+            print(f"POLICY   {policy_file} fingerprints to {expected_prompt} (A4)")
     for entry in loaded.registry.proposers:
         state = _entry_state(entry, now=now, revocations=revocations)
         print(
@@ -186,6 +285,23 @@ def cmd_proposer_check(args: argparse.Namespace) -> int:
             print(
                 f"  {'':<24} revoked {record.revoked_at.isoformat()} — {record.reason}; "
                 "mint a new credential for this proposer and restart to re-grant"
+            )
+        if expected_prompt:
+            # Drift detection, and the only part of A4 that keeps working after
+            # mint time: does the policy on THIS machine still match what this
+            # registration was minted against? A DIFFERS is not necessarily
+            # wrong — the owner may have edited deliberately — it means the
+            # label no longer describes the file, and the mandate pin that
+            # trusts the label is now describing something that changed.
+            verdict = "MATCHES" if entry.prompt_version == expected_prompt else "DIFFERS"
+            print(
+                f"  {'':<24} policy {verdict}: registered prompt_version="
+                f"{entry.prompt_version}, file now {expected_prompt}"
+                + (
+                    ""
+                    if verdict == "MATCHES"
+                    else " — re-mint (or re-pin) if this edit was intended"
+                )
             )
     return 0
 
@@ -279,8 +395,31 @@ def cmd_proposer_revoke(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_proposer_fingerprint(args: argparse.Namespace) -> int:
+    """Print a policy file's derived ``prompt_version``. Writes nothing.
+
+    Exists so re-pinning a mandate does not require re-minting a credential:
+    after an intended policy edit the owner needs the new label, and minting a
+    fresh secret to learn it would rotate a credential for no security reason.
+    """
+
+    try:
+        derived = policy_fingerprint(Path(args.policy_file))
+    except ValueError as error:
+        print(f"proposer fingerprint: {error}", file=sys.stderr)
+        return 2
+    print(f"prompt_version: {derived}")
+    print(f"# sha256({args.policy_file})[:{POLICY_DIGEST_CHARS}]")
+    print("# Put this in the registration's prompt_version and in the mandate's")
+    print("# versions.prompt_version. They must agree or admission refuses the")
+    print("# proposal with VERSION_PIN_MISMATCH — which is the point.")
+    print("# It does NOT prove which policy the worker ran: nothing in Chronos")
+    print("# observes the worker's own read of its policy file.")
+    return 0
+
+
 def add_proposer_commands(sub: Any) -> None:
-    """Register ``proposer mint|check`` on the operator CLI."""
+    """Register ``proposer mint|check|fingerprint|revoke`` on the operator CLI."""
 
     proposer = sub.add_parser(
         "proposer",
@@ -304,10 +443,20 @@ def add_proposer_commands(sub: Any) -> None:
         "--model-id", required=True, help='e.g. "claude-opus-5", or the bridge\'s translator name'
     )
     mint.add_argument("--model-version", default="1")
-    mint.add_argument(
+    prompt = mint.add_mutually_exclusive_group()
+    prompt.add_argument(
         "--prompt-version",
-        default="1",
+        default=_PROMPT_VERSION_DEFAULT,
         help="label the policy/prompt revision, e.g. a git short hash",
+    )
+    prompt.add_argument(
+        "--policy-file",
+        default="",
+        help=(
+            "derive prompt_version from this policy file's bytes instead of typing a "
+            "label (A4). Binds the label to the file AS MINTED; it does not prove which "
+            "policy the worker ran"
+        ),
     )
     mint.add_argument("--tool-schema-version", default="1")
     mint.add_argument("--decision-schema-version", default="1")
@@ -331,7 +480,25 @@ def add_proposer_commands(sub: Any) -> None:
         default="",
         help="where the revocation ledger lives (default: the configured database)",
     )
+    check.add_argument(
+        "--policy-file",
+        default="",
+        help=(
+            "also report, per registration, whether its prompt_version still matches "
+            "this policy file's current bytes (A4 drift check)"
+        ),
+    )
     check.set_defaults(func=cmd_proposer_check)
+
+    fingerprint = proposer_sub.add_parser(
+        "fingerprint",
+        help=(
+            "print the prompt_version a policy file derives to, so a mandate can be "
+            "re-pinned without re-minting a credential (writes nothing)"
+        ),
+    )
+    fingerprint.add_argument("--policy-file", required=True, help="path to the policy file")
+    fingerprint.set_defaults(func=cmd_proposer_fingerprint)
 
     revoke = proposer_sub.add_parser(
         "revoke",

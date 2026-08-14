@@ -113,10 +113,19 @@ yet tell the worker from the TradingView bridge from any other local
 token-holder — the evidence-citation kind is the distinguishing mark until the
 ADR-0023 worker-identity protocol lands~~ *(corrected 2026-08-12: ADR-0023
 landed — register the worker and its proposals are stamped with its own
-identity; see the section below)*; and nothing pins the policy file's *content*
+identity; see the section below)*; and ~~nothing pins the policy file's *content*
 yet — the registration's `prompt_version` is an owner-typed label you should
 bump on each policy edit, and recording edits in git is still what makes
-experiments attributable.
+experiments attributable~~ *(narrowed 2026-08-14, A4: mint with
+`--policy-file worker/policy.md` and `prompt_version` becomes
+`sha256(bytes)[:16]`, so an edited policy stops matching the mandate's pin and
+admission refuses `VERSION_PIN_MISMATCH` until you re-pin — `proposer
+fingerprint --policy-file` prints the new value without re-minting a credential,
+and `proposer check --policy-file` tells you whether the file on this machine
+still matches what was registered. **What it still does not do:** prove which
+policy the worker ran. Nothing in Chronos observes the worker's own read of its
+policy file, so the digest binds the file as it was at mint time, and git
+history remains what makes an edit's intent legible.)*
 
 ## Registering the worker (ADR-0023)
 
@@ -126,8 +135,12 @@ proposer registry, the proposal route refuses the general token and the worker
 must present its own registered credential:
 
 1. Mint one: `python -m chronos.cli proposer mint --proposer-id claude-worker
-   --provider anthropic --model-id claude-opus-5 --expires-days 90`. The
-   credential prints exactly once; the registration entry holds only its
+   --provider anthropic --model-id claude-opus-5 --expires-days 90
+   --policy-file worker/policy.md`. The `--policy-file` flag is A4's
+   content pinning — it derives `prompt_version` from the policy's bytes
+   instead of a typed label; omit it and you get the old typed-label
+   behavior. The credential prints exactly once; the registration entry holds
+   only its
    SHA-256.
 2. Paste the printed registration into the registry file the backend's
    `AUTONOMY_PROPOSERS_FILE` names, and restart the backend.
