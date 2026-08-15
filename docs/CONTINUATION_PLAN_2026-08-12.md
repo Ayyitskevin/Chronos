@@ -235,6 +235,32 @@ migration, tests.
 
 ### A4. Policy content pinning — `mint --policy-file` digests the prompt
 
+> **BUILT 2026-08-14, awaiting the owner's merge.** Branch
+> `claude/chronos-policy-pinning-a4`. **Stacked on
+> `claude/chronos-proposer-revocation-a3`, not on the default branch** — a
+> deliberate deviation from §7.3, disclosed rather than silent: A3 and A4 were
+> built as siblings from `b993789` and both rewrite
+> `src/chronos/cli/proposer_commands.py`, `docs/model_worker.md` and
+> `RISK_REGISTER.md`, so they conflict textually and semantically (both extend
+> the same writes-nothing pin). A4 therefore merges *after* A3. Delivered as
+> specified: `mint --policy-file` derives `prompt_version` as
+> `sha256(bytes)[:16]`, plus two companions the plan did not require but a
+> mint-time-only guarantee needs — `proposer fingerprint --policy-file` (re-pin
+> without rotating a credential) and `proposer check --policy-file` (drift
+> detection on this machine, the only part that keeps working after mint time).
+> No backend change; no new refusal — admission check 8's existing
+> `VERSION_PIN_MISMATCH` simply stopped being fooled. Evidence:
+> `tests/safety/test_policy_pinning_exercised.py` (13), including the
+> A3×A4 interaction test that neither branch could have written alone. Gates
+> green at 3137 passed / 1 skipped (baseline 3108 / 1 at `b993789`, measured).
+> Governance: D-27, R-52, R-47 residual (b) narrowed in place. Residuals are in
+> R-52 — above all that **the digest binds the FILE, not the RUN**: nothing in
+> Chronos observes the worker's read of its own policy, so this is attribution
+> at mint time plus drift detection, never attestation. That sentence is
+> repeated in five places on purpose, because it is the claim most likely to be
+> over-read.
+
+
 *Why:* R-47 residual (b): `prompt_version` is an owner-typed label; nothing
 binds it to the policy file's content, so policy edits are unattributable
 unless the owner remembers to bump it.
