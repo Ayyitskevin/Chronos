@@ -321,3 +321,68 @@ def test_no_policy_command_writes_anything(
     assert set(tmp_path.iterdir()) == before_tree
     assert registry.read_bytes() == before_registry
     assert policy.read_bytes() == before_policy, "reading a policy must never rewrite it"
+
+
+def test_check_reports_revocation_and_policy_drift_together(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The interaction A3 and A4 create jointly, which neither built alone.
+
+    A3 taught `check` to report REVOKED per registration; A4 taught it to report
+    whether the policy on this machine still matches what was registered. They
+    were developed on sibling branches and merged here, so this is the first
+    test that runs both reporting paths over the same entry — the shape where a
+    merge quietly drops one feature's output, or lets one's failure suppress the
+    other's.
+
+    Both must appear, and they must stay independent: a revoked credential whose
+    policy has ALSO drifted is two separate facts an incident review needs, and
+    the state column must still read REVOKED rather than being overwritten by
+    the policy verdict.
+    """
+
+    from chronos.cli.proposer_commands import cmd_proposer_revoke
+    from chronos.persistence.database import Database
+
+    policy = _policy_file(tmp_path)
+    registry = tmp_path / "proposers.json"
+    registry.write_text(_registry_text(prompt_version=policy_fingerprint(policy)), encoding="utf-8")
+
+    url = f"sqlite:///{tmp_path / 'ledger.db'}"
+    database = Database(url)
+    try:
+        database.initialize()
+    finally:
+        database.dispose()
+
+    entry = json.loads(registry.read_text(encoding="utf-8"))["proposers"][0]
+    assert (
+        cmd_proposer_revoke(
+            argparse.Namespace(
+                file=str(registry),
+                proposer_id=entry["proposer_id"],
+                reason="credential leaked and the policy moved on",
+                database_url=url,
+            )
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    # The policy drifts after the revocation, so both facts are true at once.
+    policy.write_text(_POLICY.replace("HOLD", "OPEN"), encoding="utf-8")
+    assert (
+        cmd_proposer_check(
+            argparse.Namespace(file=str(registry), policy_file=str(policy), database_url=url)
+        )
+        == 0
+    )
+    out = capsys.readouterr().out
+
+    entry_line = next(
+        line for line in out.splitlines() if line.startswith(f"  {entry['proposer_id']}")
+    )
+    assert "REVOKED" in entry_line, "A3's state must survive A4's reporting"
+    assert "CURRENT" not in entry_line
+    assert "credential leaked and the policy moved on" in out, "A3's reason line must survive"
+    assert "policy DIFFERS" in out, "A4's drift verdict must survive"
