@@ -119,10 +119,21 @@ def _read_revocations(database_url: str) -> tuple[dict[str, Any] | None, str]:
     """
 
     try:
-        from chronos.persistence.database import Database
+        from chronos.persistence.database import Database, _sqlite_database_path
         from chronos.supervisor.revocation import revoked_credentials
     except Exception as error:  # pragma: no cover - import failure is environmental
         return None, f"{type(error).__name__}"
+    # `Database(...)` PREPARES its target: it mkdirs the parent and O_CREATs the
+    # SQLite file. That is right for the backend and wrong here — `check` is a
+    # reporting command that must leave the filesystem exactly as it found it, so
+    # a ledger that does not exist yet has to be reported as unreadable rather
+    # than brought into existence by the act of asking about it.
+    try:
+        sqlite_path = _sqlite_database_path(database_url)
+    except ValueError as error:
+        return None, f"{type(error).__name__}"
+    if sqlite_path is not None and not sqlite_path.exists():
+        return None, "NoLedgerFile"
     database = Database(database_url)
     try:
         with database.sessions.begin() as session:

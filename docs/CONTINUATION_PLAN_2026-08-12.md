@@ -200,8 +200,8 @@ in the same PR as anything else.
 > re-minting for the same proposer is a working recovery path instead of a
 > permanently poisoned id. `mint` and `check` stay stdout-only and the
 > writes-nothing pin was narrowed to them rather than deleted. Evidence:
-> `tests/safety/test_proposer_revocation_exercised.py` (14), nine conjuncts each
-> reverted alone and watched fail, gates green at 3123 passed / 1 skipped
+> `tests/safety/test_proposer_revocation_exercised.py` (15), ten conjuncts each
+> reverted alone and watched fail, gates green at 3124 passed / 1 skipped
 > (baseline 3108 / 1 at `b993789`, measured). Governance: D-26, R-51, R-48
 > residual (c) narrowed in place, and the now-false restart claims corrected in
 > `docs/model_worker.md`, ADR-0023's acceptance note, and D-24. Residuals are in

@@ -773,3 +773,53 @@ def test_check_reports_revoked_and_says_when_it_cannot_tell(
     assert "UNVERIFIED" in entry_line
     assert "CURRENT" not in entry_line
     assert "REVOKED" not in entry_line, "an unreadable ledger must not claim knowledge"
+
+
+def test_check_creates_nothing_when_it_falls_back_to_the_configured_database(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`check` reads the ledger; it must not CREATE one by asking about it.
+
+    The A3 gap this closes, found by rebasing A4 on top of this branch. Every
+    other test here hands `check` an explicit `--database-url` pointing at a
+    ledger that already exists, so none of them exercised the path an operator
+    actually takes: no flag, falling back to the configured database. On that
+    path `check` builds a `Database`, and `Database` PREPARES its target — it
+    mkdirs the parent directory and `O_CREAT`s the SQLite file. A reporting
+    command documented as writes-nothing was therefore creating `data/` (and an
+    empty database inside it) in whatever directory the operator ran it from.
+
+    The doctrine this file inherits is "a tool that mints text is not a tool
+    that grants", pinned by a writes-nothing test — and the pin missed this
+    because it never ran the default path. Asserting on the whole directory
+    tree, rather than on named files, is what makes it hard to miss again.
+    """
+
+    from chronos.cli.proposer_commands import cmd_proposer_check
+    from chronos.config.settings import get_settings
+
+    registry_path = tmp_path / "proposers.json"
+    registry_path.write_text(
+        _registry_text(_registration("claude-worker", WORKER_CREDENTIAL)), encoding="utf-8"
+    )
+
+    workdir = tmp_path / "operator-cwd"
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)
+    # A configured-but-absent ledger: the honest answer is "I cannot tell",
+    # never "I made one so I could tell you nothing was in it".
+    monkeypatch.setenv("DATABASE_URL", "sqlite:///data/chronos.db")
+    get_settings.cache_clear()
+    try:
+        before = set(workdir.iterdir())
+        assert cmd_proposer_check(argparse.Namespace(file=str(registry_path))) == 0
+        assert set(workdir.iterdir()) == before, (
+            "proposer check must leave the filesystem exactly as it found it"
+        )
+    finally:
+        get_settings.cache_clear()
+
+    out = capsys.readouterr().out
+    entry_line = next(line for line in out.splitlines() if line.startswith("  claude-worker"))
+    assert "UNVERIFIED" in entry_line, "an unreadable ledger is reported, not invented"
+    assert "CURRENT" not in entry_line
