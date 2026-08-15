@@ -126,10 +126,20 @@ built.
 > - **The registry is a boot-time snapshot.** Both planes read the file once at
 >   startup, the mandate-file precedent. Expiry travels in the snapshot and is
 >   enforced live at verification and at drain; disabling or deleting a
->   registration lands at the next restart. Live mid-session revocation of a
+>   registration lands at the next restart. ~~Live mid-session revocation of a
 >   single proposer would need a DB-backed revocation act (the shape mandate
 >   revocation already has) and is deliberately left to future work; the live
->   stand-downs today are the kill switch, mandate revocation, and a restart.
+>   stand-downs today are the kill switch, mandate revocation, and a restart.~~
+>   *[Corrected 2026-08-14 (A3; D-26, R-51). The future work named in the struck
+>   sentence was built, in exactly the shape this bullet predicted:
+>   `chronos.cli proposer revoke` writes a DB-backed, hash-chained revocation act
+>   that both planes consult per use — 401 at the route, `PROPOSER_REVOKED` at
+>   STAMP — so a single proposer can be stood down mid-session with no restart.
+>   It is keyed on the credential hash rather than the proposer id, so re-minting
+>   for the same id stays a working recovery path. The rest of this bullet stands
+>   unchanged and deliberately: enabling, re-registering, and identity-field
+>   edits are still honored at the next restart, because a grant should not
+>   change under a running process. Only revocation moved.]*
 
 **Option B now, Option A before any autonomous rung above shadow.**
 

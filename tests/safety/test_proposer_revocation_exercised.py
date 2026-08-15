@@ -22,11 +22,20 @@ points and in the same process:
 5. the act **writes no file** — the owner's grant document is byte-identical
    afterwards, because revocation lives in the database;
 6. the ledger is **read fail-closed**: an unreadable one refuses rather than
-   assuming nothing was revoked.
+   assuming nothing was revoked — proven at the route by dropping the table
+   under a running backend, not merely asserted in a comment;
+7. one revocation stands down **one credential**, not the registry: a second,
+   unrevoked proposer keeps working in the same process, between the same two
+   calls;
+8. the **registry-off posture is untouched** — with no registry configured
+   there is no credential to key a revocation on, and the route does not
+   consult the ledger at all.
 
-Weighted the fail-closed way (§4d): every case above except (4) asserts a
-refusal, and (4) exists precisely to prove the refusal is not broader than the
-act intended.
+Weighted the fail-closed way (§4d): every case asserts a refusal except (4),
+(7), and (8), which exist precisely to prove the refusal is not broader than
+the act intended. (7) and (8) are the positive controls — without them a
+"refuse everything once any revocation exists" bug would leave this whole file
+green while the registry was silently dead.
 """
 
 from __future__ import annotations
@@ -61,6 +70,9 @@ PROPOSER_HEADER = "X-Chronos-Proposer-Token"
 
 WORKER_CREDENTIAL = "w" * 64
 REMINTED_CREDENTIAL = "r" * 64
+#: A second, unrelated proposer — the positive control's whole point is that it
+#: is untouched while another credential is being killed.
+SECOND_CREDENTIAL = "s" * 64
 
 PROPOSAL_BODY = {
     "kind": "HOLD",
@@ -259,6 +271,140 @@ def test_revocation_kills_the_credential_not_the_name(
             ).status_code
             == 401
         ), "the leaked credential stays dead forever"
+
+
+def test_one_revocation_does_not_stand_down_every_other_proposer(
+    demo_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The positive control, in the same process and with no restart.
+
+    Every other test here asserts a refusal, which is exactly the shape a
+    "refuse everything once any revocation exists" bug would satisfy: kill one
+    credential and the suite still goes green while the whole registry is
+    silently dead. So this one registers two proposers, revokes one, and
+    asserts the OTHER keeps working — same boot, same in-memory snapshot, one
+    revocation row in the ledger between the two calls.
+    """
+
+    registry = _registry_text(
+        _registration("claude-worker", WORKER_CREDENTIAL),
+        _registration("tradingview-bridge", SECOND_CREDENTIAL),
+    )
+    with _boot(monkeypatch, registry, demo_env) as client:
+        assert _revoke_in(demo_env, "claude-worker", WORKER_CREDENTIAL, "credential leaked")
+
+        refused = client.post(
+            "/autonomy/proposals",
+            json=PROPOSAL_BODY,
+            headers={PROPOSER_HEADER: WORKER_CREDENTIAL},
+        )
+        assert refused.status_code == 401
+
+        survivor = client.post(
+            "/autonomy/proposals",
+            json=PROPOSAL_BODY,
+            headers={PROPOSER_HEADER: SECOND_CREDENTIAL},
+        )
+        assert survivor.status_code == 202, (
+            "revoking one credential must not stand down the registry; "
+            f"the unrevoked proposer answered {survivor.status_code}: {survivor.text}"
+        )
+
+    with sqlite3.connect(demo_env / "chronos.db") as connection:
+        queued = list(connection.execute("SELECT proposer_id FROM autonomy_proposal_queue"))
+    assert queued == [("tradingview-bridge",)], (
+        "exactly the unrevoked proposer's proposal may be queued"
+    )
+
+
+def test_an_unreadable_ledger_refuses_rather_than_admitting(
+    demo_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fail-closed direction of the per-request read, actually exercised.
+
+    ``auth._is_revoked`` claims in a comment that an authorization check which
+    cannot see its own ledger "has not passed, it has failed to run". That is
+    the kind of claim this repository has been burned by believing (R-24..R-27
+    were all documented controls that could never fire), so it is proven here
+    rather than asserted: the revocation table is dropped out from under a
+    RUNNING backend — the "table missing" case, the cheapest realistic form of
+    a database that has gone bad — and the credential that worked a moment ago
+    now refuses.
+
+    The refusal is 503, not 401, and the distinction is deliberate: the caller
+    is not being told its credential is bad, it is being told the server cannot
+    currently judge. What must never happen is a 202.
+    """
+
+    registry = _registry_text(_registration("claude-worker", WORKER_CREDENTIAL))
+    with _boot(monkeypatch, registry, demo_env) as client:
+        assert (
+            client.post(
+                "/autonomy/proposals",
+                json=PROPOSAL_BODY,
+                headers={PROPOSER_HEADER: WORKER_CREDENTIAL},
+            ).status_code
+            == 202
+        ), "the credential must work before the ledger is broken"
+
+        with sqlite3.connect(demo_env / "chronos.db") as connection:
+            connection.execute("DROP TABLE autonomy_proposer_revocations")
+            connection.commit()
+
+        blinded = client.post(
+            "/autonomy/proposals",
+            json=PROPOSAL_BODY,
+            headers={PROPOSER_HEADER: WORKER_CREDENTIAL},
+        )
+        assert blinded.status_code == 503, (
+            "an unreadable revocation ledger must refuse, never admit; "
+            f"got {blinded.status_code}: {blinded.text}"
+        )
+        assert "revocation ledger could not be read" in blinded.json()["detail"]
+
+    with sqlite3.connect(demo_env / "chronos.db") as connection:
+        queued = list(connection.execute("SELECT COUNT(*) FROM autonomy_proposal_queue"))
+    assert queued == [(1,)], "the proposal sent while the ledger was blind must not be queued"
+
+
+def test_the_registry_off_posture_is_untouched_by_this_feature(
+    demo_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no registry configured, nothing A3 added can refuse anything.
+
+    The pre-registry posture is the one every existing deployment is in today,
+    including the owner's: ``AUTONOMY_PROPOSERS_FILE`` unset, the proposal route
+    gated by the local API token, no proposer identities at all. A revocation
+    ledger is meaningless there — there is no credential to key one on — and
+    the route must not consult it, because a feature that can refuse in a
+    posture it does not apply to is a new failure mode, not a new control.
+
+    Proven with a revocation row deliberately present in the database: even
+    then, the token-authenticated proposal is accepted exactly as before.
+    """
+
+    monkeypatch.delenv("AUTONOMY_PROPOSERS_FILE", raising=False)
+    from chronos.api.main import create_app
+    from chronos.config.settings import get_settings
+
+    get_settings.cache_clear()
+    with TestClient(create_app()) as client:
+        token = (demo_env / "backend_api_token").read_text(encoding="utf-8").strip()
+
+        # A revocation exists, keyed on a credential this posture never sees.
+        assert _revoke_in(demo_env, "claude-worker", WORKER_CREDENTIAL, "credential leaked")
+
+        accepted = client.post(
+            "/autonomy/proposals", json=PROPOSAL_BODY, headers={TOKEN_HEADER: token}
+        )
+        assert accepted.status_code == 202, (
+            "the registry-off posture must be byte-for-byte what it was before A3; "
+            f"got {accepted.status_code}: {accepted.text}"
+        )
+
+    with sqlite3.connect(demo_env / "chronos.db") as connection:
+        queued = list(connection.execute("SELECT proposer_id FROM autonomy_proposal_queue"))
+    assert queued == [(None,)], "the pre-registry row still records no proposer, as before"
 
 
 # ------------------------------------------------- a minimal cycle harness
