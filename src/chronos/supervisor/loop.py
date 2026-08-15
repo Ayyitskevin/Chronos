@@ -239,6 +239,8 @@ def run_cycle(
     submit: Handoff | None = None,
     gather_instrument: InstrumentGatherer | None = None,
     bind_evidence: bool = False,
+    identity_refusal: str = "PROPOSER_UNRESOLVED",
+    identity_detail: str = "",
 ) -> CycleOutcome:
     """Walk one proposal through every gate. Stops at the first refusal.
 
@@ -286,8 +288,14 @@ def run_cycle(
             facts,
             CycleOutcome(
                 stage=CycleStage.STAMP,
-                refusal="PROPOSER_UNRESOLVED",
-                detail=(
+                # The resolver names its own refusal (A3): "the owner killed
+                # this credential" and "this registration aged out" are the
+                # same non-event to the pipeline and completely different
+                # events to whoever reads the journal afterwards. Defaults
+                # preserve the pre-A3 wording exactly.
+                refusal=identity_refusal,
+                detail=identity_detail
+                or (
                     "the proposal's credential does not resolve to a current registered "
                     "proposer, so identity cannot be stamped; re-registering or renewing "
                     "the proposer is an owner act"

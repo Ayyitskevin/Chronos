@@ -186,6 +186,33 @@ in the same PR as anything else.
 
 ### A3. Live proposer revocation — `proposer revoke`, DB-backed
 
+> **BUILT 2026-08-14, awaiting the owner's merge.** Branch
+> `claude/chronos-proposer-revocation-a3`, based on `b993789` (the merge of
+> PR #70). Not owner-review-gated — the change only removes authority — but the
+> CLI grew its first mutating command, which is disclosed loudly rather than
+> absorbed. Delivered as specified: `chronos.cli proposer revoke` writes one row
+> in `autonomy_proposer_revocations` (migration 0009, SCHEMA_VERSION 9 → 10) and
+> one hash-chained record; `require_proposer` refuses at the route (401) and the
+> drain-time resolver at STAMP (`PROPOSER_REVOKED`, additive), both reading the
+> ledger **per check rather than per boot** — which is the whole point — and both
+> fail-closed when it cannot be read. **Keyed on the credential hash, not the
+> proposer id** (D-26): revoking burns the secret that leaked, not the name, so
+> re-minting for the same proposer is a working recovery path instead of a
+> permanently poisoned id. `mint` and `check` stay stdout-only and the
+> writes-nothing pin was narrowed to them rather than deleted. Evidence:
+> `tests/safety/test_proposer_revocation_exercised.py` (15), ten conjuncts each
+> reverted alone and watched fail, gates green at 3124 passed / 1 skipped
+> (baseline 3108 / 1 at `b993789`, measured). Governance: D-26, R-51, R-48
+> residual (c) narrowed in place, and the now-false restart claims corrected in
+> `docs/model_worker.md`, ADR-0023's acceptance note, and D-24. Residuals are in
+> R-51 — most importantly that **the rest of the registry is still a boot-time
+> snapshot** (enabling or re-registering still needs a restart, deliberately),
+> that revocation is **permanent with no un-revoke**, and that the ledger read
+> puts **database health on the proposal path**. One disclosed asymmetry, not
+> resolved here: mandate revocation is a terminal route, proposer revocation is
+> a CLI command; whether the terminal should also surface it is a later
+> question.
+
 *Why:* R-48 residual (c): the registry is a boot-time snapshot, so disabling a
 leaked credential mid-session requires a restart today. Mandate revocation
 already has the right shape — a durable act the running process honors.

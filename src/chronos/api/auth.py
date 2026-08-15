@@ -25,6 +25,7 @@ arm live trading, or acknowledge alerts.
 from __future__ import annotations
 
 import hmac
+import logging
 import secrets
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,6 +35,8 @@ from fastapi import Depends, HTTPException, Request, status
 from chronos.supervisor.proposers import ProposerRegistry, load_proposer_registry
 from chronos.utils.secure_files import secure_owner_only
 from chronos.utils.time import utc_now
+
+_logger = logging.getLogger("chronos.api.auth")
 
 _TOKEN_HEADER = "X-Chronos-Token"
 _TOKEN_BYTES = 32
@@ -164,4 +167,50 @@ def require_proposer(request: Request) -> str | None:
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=f"the {_PROPOSER_HEADER} credential is not a current registered proposer",
         )
+    if _is_revoked(request, registration.secret_sha256):
+        # A revoked credential joins the same message (A3), for the same
+        # reason: a 401 body is the last place to tell an unauthenticated
+        # caller which of four states it is in. The distinction the owner needs
+        # is in the revocation ledger, in the server log below, and — for a
+        # proposal already queued — in the journal's own PROPOSER_REVOKED
+        # refusal at STAMP.
+        _logger.warning(
+            "Refused a revoked proposer credential at the ingress: %s",
+            registration.proposer_id,
+            extra={"event": "proposer_revoked_refused"},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"the {_PROPOSER_HEADER} credential is not a current registered proposer",
+        )
     return registration.proposer_id
+
+
+def _is_revoked(request: Request, secret_sha256: str) -> bool:
+    """Consult the durable revocation ledger, fail-closed (A3).
+
+    Read per request rather than cached: a cached answer would make revocation
+    as slow as the boot-time snapshot it exists to fix. An unreadable ledger
+    refuses — an authorization check that cannot see its own ledger has not
+    passed, it has failed to run.
+    """
+
+    state = getattr(request.app.state, "backend", None)
+    if state is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Backend runtime is not initialized",
+        )
+    from chronos.supervisor import revocation
+
+    try:
+        with state.runtime.database.sessions.begin() as session:
+            return revocation.is_revoked(session, secret_sha256=secret_sha256)
+    except Exception as error:  # the ledger is unreadable: refuse, never assume
+        _logger.exception("The proposer revocation ledger could not be read")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "the proposer revocation ledger could not be read; proposals refuse until it can be"
+            ),
+        ) from error

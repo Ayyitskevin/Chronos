@@ -147,10 +147,45 @@ appear in the backend's `.env.example`).
 One timing fact worth knowing: the backend reads the registry file **once, at
 boot**, exactly like the mandate file. Expiry is carried in that snapshot and
 enforced live, but setting `"enabled": false` or deleting an entry takes
-effect at the next backend restart. If a credential leaks mid-session, the
+effect at the next backend restart. ~~If a credential leaks mid-session, the
 live stand-downs are the kill switch, mandate revocation, or a restart — and
 until then the leaked credential can do exactly one thing: submit proposals
-that still face every gate under the identity it leaked from.
+that still face every gate under the identity it leaked from.~~
+
+> **Corrected 2026-08-14 (A3; D-26, R-51).** That last sentence is no longer
+> true, and the paragraph above it still is — which is the whole shape of the
+> change. A leaked credential is now stood down directly and **without a
+> restart**:
+>
+> ```
+> python -m chronos.cli proposer revoke \
+>     --file "$AUTONOMY_PROPOSERS_FILE" \
+>     --proposer-id claude-worker \
+>     --reason "credential pasted into a public issue"
+> ```
+>
+> `--file` is required and is **read, never written**: it is how the command
+> turns a proposer id into the credential hash it revokes, so a registry that is
+> missing or invalid refuses the act rather than guessing, and an id that is not
+> in it refuses too. The row lands in the configured database unless
+> `--database-url` names another. The registry file itself is byte-identical
+> afterwards — the grant document stays owner-authored, which is precisely why
+> the act can take effect live. The running backend honors it on the next
+> request: refused at the route, and refused at STAMP with `PROPOSER_REVOKED`
+> for any proposal already sitting in the queue. `proposer check` reports
+> `REVOKED` afterwards.
+>
+> Two things to know before you run it. It is keyed on the **credential**, not
+> the proposer id: the leaked secret dies permanently, and minting a fresh
+> credential for the same `proposer_id` works after the usual registry edit and
+> restart, because that genuinely is a different credential. And there is **no
+> un-revoke** — re-granting is a new credential plus a restart, the same rule
+> that applies to a revoked mandate.
+>
+> Everything else in the paragraph above stands: enabling, re-registering, or
+> editing a registration's identity fields is still a boot-time grant honored at
+> the next restart. Only revocation moved, because only revocation has an
+> incident's latency requirement.
 
 ## Stopping it
 

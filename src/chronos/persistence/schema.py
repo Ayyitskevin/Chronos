@@ -751,3 +751,42 @@ class AutonomyEvidenceBundleRow(Base):
     bundle_version: Mapped[str] = mapped_column(String(32), nullable=False)
     issued_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(UTCDateTime(), index=True, nullable=False)
+
+
+class AutonomyProposerRevocationRow(Base):
+    """One proposer credential the owner has killed mid-session (v10, A3).
+
+    The registry file is a **boot-time snapshot** on both planes: editing it to
+    disable a registration is honored at the next restart, which is the wrong
+    latency for the event this table exists for — a leaked credential. So
+    revocation is durable state the running process consults, exactly as mandate
+    revocation is, and the file stays what it has always been: an owner-authored
+    grant nothing else writes.
+
+    **Keyed by credential hash, not by proposer id.** The id is recorded for
+    legibility, but the check is on ``secret_sha256``, because that is what a
+    caller presents and what actually leaked. Keying on the id would burn the
+    name forever; keying on the hash means the owner mints a *new* credential
+    for the same proposer and it works at the next restart, while the leaked one
+    is dead permanently. That is the shape of the real incident.
+
+    **Not account-scoped, deliberately.** A credential is global to the registry
+    document, so a revocation that applied to one account would leave a state in
+    which a revoked credential still proposes somewhere. There is no account
+    column, by construction rather than by omission.
+    """
+
+    __tablename__ = "autonomy_proposer_revocations"
+    __table_args__ = (UniqueConstraint("secret_sha256", name="uq_proposer_revocation_secret"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    #: The registration's id at the moment of revocation, for the audit trail.
+    #: Never the thing compared: ids are reusable, credentials are not.
+    proposer_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    #: SHA-256 of the revoked credential. The registry stores the same hash, so
+    #: revoking still never requires anyone to hold the credential itself.
+    secret_sha256: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    #: Why. Required, like a mandate revocation's reason and an alert's
+    #: acknowledgement note: an act with no stated cause cannot be reviewed.
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    revoked_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)

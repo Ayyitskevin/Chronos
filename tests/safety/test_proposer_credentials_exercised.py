@@ -722,13 +722,19 @@ def test_an_unresolvable_proposer_refuses_at_stamp(
     assert accepted == []
 
 
-def test_the_resolver_postures_are_fail_closed(tmp_path: Path) -> None:
+def test_the_resolver_postures_are_fail_closed(
+    tmp_path: Path, sessions: sessionmaker[Session]
+) -> None:
     """`build_identity_resolver`'s three shapes, exercised directly.
 
     No path is None (the pre-registry posture, preserved exactly); a valid
     registry resolves current registrations and nothing else; an unreadable
     file resolves NOTHING — never the static identity, because a file error
     must not silently reopen anonymous proposing.
+
+    Since A3 the resolver is handed the tick's session, because it also
+    consults the durable revocation ledger; it returns a ``ResolvedIdentity``
+    carrying the refusal the cycle should journal rather than a bare ``None``.
     """
 
     assert build_identity_resolver(None) is None
@@ -743,7 +749,9 @@ def test_the_resolver_postures_are_fail_closed(tmp_path: Path) -> None:
     )
     resolve = build_identity_resolver(registry_path)
     assert resolve is not None
-    identity = resolve("claude-worker", _NOW)
+    with sessions.begin() as session:
+        resolution = resolve(session, "claude-worker", _NOW)
+    identity = resolution.identity
     assert identity is not None
     assert identity.proposer_id == "claude-worker"
     # All seven stampable fields, each against its own distinct registration
@@ -758,13 +766,24 @@ def test_the_resolver_postures_are_fail_closed(tmp_path: Path) -> None:
     assert identity.policy_version == "pol-5"
     assert identity.evidence_bundle_id == INGRESS_IDENTITY.evidence_bundle_id
     assert identity.evidence_bundle_digest is None  # honestly absent, never zeros
-    assert resolve("disabled-worker", _NOW) is None
-    assert resolve("ghost", _NOW) is None
-    assert resolve(None, _NOW) is None
+    with sessions.begin() as session:
+        # Each refusing posture names itself (A3), so the journal can tell an
+        # aged-out registration from a pre-registry row from a broken file.
+        for proposer_id in ("disabled-worker", "ghost"):
+            refused = resolve(session, proposer_id, _NOW)
+            assert refused.identity is None, proposer_id
+            assert refused.refusal == "PROPOSER_UNRESOLVED", proposer_id
+        pre_registry = resolve(session, None, _NOW)
+        assert pre_registry.identity is None
+        assert pre_registry.refusal == "PROPOSER_UNRESOLVED"
+        assert "before a proposer registry was configured" in pre_registry.detail
 
     broken = build_identity_resolver(tmp_path / "does-not-exist.json")
     assert broken is not None  # configured-but-broken is NOT the None posture
-    assert broken("claude-worker", _NOW) is None
+    with sessions.begin() as session:
+        unreadable = broken(session, "claude-worker", _NOW)
+    assert unreadable.identity is None
+    assert unreadable.refusal == "PROPOSER_REGISTRY_INVALID"
 
 
 # ------------------------------------------------- evidence-digest honesty
@@ -868,6 +887,23 @@ def test_a_digest_disagreement_refuses_in_every_direction(
 # ------------------------------------------------------------- the CLI seam
 
 
+def _ledger_database_url(tmp_path: Path) -> str:
+    """A real, initialized database for the CLI to read revocations from (A3).
+
+    `proposer check` consults the ledger, and an entry it could not verify is
+    reported UNVERIFIED rather than CURRENT — so a test that wants to assert
+    CURRENT has to give it a ledger to read.
+    """
+
+    url = f"sqlite:///{tmp_path / 'ledger.db'}"
+    database = Database(url)
+    try:
+        database.initialize()
+    finally:
+        database.dispose()
+    return url
+
+
 def test_mint_prints_a_credential_whose_hash_is_the_registration_and_writes_nothing(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -922,7 +958,12 @@ def test_check_reports_current_disabled_and_expired_and_writes_nothing(
         encoding="utf-8",
     )
     before = registry_path.read_bytes()
-    assert cmd_proposer_check(argparse.Namespace(file=str(registry_path))) == 0
+    assert (
+        cmd_proposer_check(
+            argparse.Namespace(file=str(registry_path), database_url=_ledger_database_url(tmp_path))
+        )
+        == 0
+    )
     out = capsys.readouterr().out
     assert "claude-worker" in out and "CURRENT" in out
     assert "expired-worker" in out and "EXPIRED" in out
@@ -932,5 +973,10 @@ def test_check_reports_current_disabled_and_expired_and_writes_nothing(
 
     broken = tmp_path / "broken.json"
     broken.write_text("{ nope", encoding="utf-8")
-    assert cmd_proposer_check(argparse.Namespace(file=str(broken))) == 1
+    assert (
+        cmd_proposer_check(
+            argparse.Namespace(file=str(broken), database_url=_ledger_database_url(tmp_path))
+        )
+        == 1
+    )
     assert "INVALID" in capsys.readouterr().out
