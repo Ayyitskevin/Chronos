@@ -1,0 +1,95 @@
+{
+  "schema_version": "chronos-five-tool-gold-pairing-campaign-v1",
+  "campaign_id": "five-tool-pairing-gld-v1-preregistered-001",
+  "created_at_utc": "2026-08-15T00:00:00Z",
+  "purpose": "Preregistered, research-only gold pairing identity on an immutable Five-Tool v3.6 GLD stream. Equity VIX and breadth are inert on GLD. Sidecar only; does not mutate campaign five-tool-v3.6-preregistered-002, pairing campaign 001, or the frozen Pine identity. This manifest freezes identities and rejection tests; it contains no observed result.",
+  "execution_state": "blocked_until_identity_locks_resolve",
+  "blocked_before_first_data_read": true,
+  "performance_claims": [],
+  "promotion_authority": "none",
+  "feature_policy_schema": "chronos-five-tool-feature-policy-v1",
+  "primary_symbol": "GLD",
+  "host_strategy": {
+    "strategy_id": "five_tool_confluence_v3_6",
+    "version": "3.6",
+    "scope": "research-only",
+    "pine_source": {
+      "path": "research/pine/00_five_tool_confluence_aio.pine",
+      "sha256": "e51d5a40d2e933bf86847c7432364ba8934fd2de653d6aec3d7205639248e45f"
+    },
+    "mutates_campaign_002": false
+  },
+  "hypothesis_ids": [
+    "H-PAIR-GLD-TAIL",
+    "H-PAIR-GLD-RVOL",
+    "H-PAIR-GLD-USD"
+  ],
+  "campaign_cells": [
+    {
+      "hypothesis_id": "H-PAIR-GLD-TAIL",
+      "role": "FAT_TAILED veto on versus off, same Five-Tool GLD opportunity stream",
+      "status": "pending_resolution",
+      "executable": false,
+      "neighbor_axis": "tail_kurtosis_fat"
+    },
+    {
+      "hypothesis_id": "H-PAIR-GLD-RVOL",
+      "role": "daily In-Play as GLD universe and entry veto",
+      "status": "pending_resolution",
+      "executable": false,
+      "neighbor_axis": "rvol_min_ratio"
+    },
+    {
+      "hypothesis_id": "H-PAIR-GLD-USD",
+      "role": "rising-USD headwind veto from owner-certified UUP; not equity VIX",
+      "status": "pending_resolution",
+      "executable": false,
+      "neighbor_axis": "usd_slope_lookback"
+    }
+  ],
+  "companion_catalog": {
+    "schema_version": "chronos-five-tool-pairing-companion-catalog-v1",
+    "status": "pending_certified_dataset",
+    "required_symbols": ["VIX", "VIX3M", "RSP", "SPY", "QQQ"],
+    "optional_symbols": ["TICK", "ADD", "VOLD"],
+    "dataset_id": null,
+    "sha256": null
+  },
+  "future_gold_companions": {
+    "symbols": ["UUP"],
+    "status": "pending_certified_dataset",
+    "downloads": false,
+    "dataset_id": null,
+    "sha256": null,
+    "reason": "USD headwind overlay named before bytes exist; not in the locked equity companion set"
+  },
+  "tradable_universe": {
+    "schema_version": "chronos-five-tool-tradable-book-v1",
+    "symbols": ["GLD", "IWM", "QQQ"],
+    "companion_only": ["RSP", "SPY", "VIX", "VIX3M"],
+    "research_proxy": {},
+    "book_digest": "9f6f87ea001a0870fe66b94b9438f7ddea3e7999f54fce722d659810d631e26b"
+  },
+  "certified_intake": {
+    "schema_version": "chronos-five-tool-certified-intake-v1",
+    "status": "pending_certified_dataset",
+    "downloads": false,
+    "book_digest": "9f6f87ea001a0870fe66b94b9438f7ddea3e7999f54fce722d659810d631e26b",
+    "required_symbols": ["GLD", "IWM", "QQQ", "RSP", "SPY", "VIX", "VIX3M"],
+    "optional_symbols": ["ADD", "TICK", "VOLD"],
+    "burned_holdouts": [
+      {
+        "name": "qqq-2022-01-2024-01-consumed",
+        "start": "2022-01-01",
+        "end": "2024-01-10",
+        "symbols": ["QQQ"],
+        "status": "consumed",
+        "reason": "declared consumed in FIVE_TOOL_RESEARCH_HYPOTHESES; not a clean holdout"
+      }
+    ],
+    "owner_holdout": null,
+    "dataset_id": null,
+    "sha256": null,
+    "catalog_id": null
+  }
+}

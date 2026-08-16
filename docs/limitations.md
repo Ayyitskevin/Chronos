@@ -196,6 +196,25 @@ runbooks.
   (`tests/safety/test_five_tool_provenance_audit_exercised.py`). **Out of scope:** it audits
   the identifiers a run *recorded* — it cannot see bytes the engine never attributed — and
   no campaign has run it, so its existence is capability, not a passed test.
+- **The pairing veto plane is research infrastructure, not a selected strategy.**
+  `chronos.research.features` can emit closed-bar tail, daily RVOL, index-vol, and
+  breadth snapshots and mask Five-Tool `ENTER_*` intents. It does not certify
+  companions, does not mutate campaign `five-tool-v3.6-preregistered-002`, and
+  does not attach fields to `AITradeDecision`. Pine parity is `UNVERIFIED`.
+  Campaign `five-tool-pairing-v1-preregistered-001` authorizes zero trials.
+- **GLD does not inherit equity VIX or breadth vetoes.** Pairing on gold is
+  same-symbol tail and daily RVOL only. That identity was frozen before
+  certified GLD bars exist. Campaign `five-tool-pairing-gld-v1-preregistered-001`
+  authorizes zero trials. UUP is named as a future USD companion and is not
+  downloaded. See [FIVE_TOOL_GOLD_STRATEGY.md](FIVE_TOOL_GOLD_STRATEGY.md).
+- **The certified-intake contract is a refuse-closed schema, not a dataset.**
+  `chronos-five-tool-certified-intake-v1` names the overlapping series the owner
+  must certify (GLD, IWM, QQQ, RSP, SPY, VIX, VIX3M) and locks the consumed QQQ
+  2022-01 through 2024-01-10 window. `open_certified_intake` always raises.
+  Identities stay unset. This slice does not download bytes, open
+  `CertifiedDatasetCatalog`, or write `HOLDOUTS.json`. An owner holdout may be
+  declared later only if it covers every required symbol and does not overlap
+  that burned range. No owner holdout dates are chosen here.
 - **The checked Five-Tool campaign authorizes zero trials.** Campaign v2
   (`five-tool-v3.6-preregistered-002`) superseded v1 before either campaign read data or
   produced a result. All seven comparison policies and the catalog/partition/evaluator
