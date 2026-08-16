@@ -721,7 +721,7 @@ def cmd_mandate_template(args: argparse.Namespace) -> int:
         },
         "scope": {
             "asset_classes": ["EQUITY"],
-            "symbols": ["SPY"],
+            "symbols": ["GLD", "IWM", "QQQ"],
             "strategies": ["LONG_EQUITY"],
             "order_forms": ["LIMIT"],
         },

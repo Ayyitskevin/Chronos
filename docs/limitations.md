@@ -182,7 +182,8 @@ runbooks.
   same-symbol tail and daily RVOL only. That identity was frozen before
   certified GLD bars exist. Campaign `five-tool-pairing-gld-v1-preregistered-001`
   authorizes zero trials. UUP is named as a future USD companion and is not
-  downloaded. See [FIVE_TOOL_GOLD_STRATEGY.md](FIVE_TOOL_GOLD_STRATEGY.md).
+  downloaded. A shadow OPEN on GLD is not paper. External workers, paper, and
+  live stay refused. See [FIVE_TOOL_GOLD_STRATEGY.md](FIVE_TOOL_GOLD_STRATEGY.md).
 - **The certified-intake contract is a refuse-closed schema, not a dataset.**
   `chronos-five-tool-certified-intake-v1` names the overlapping series the owner
   must certify (GLD, IWM, QQQ, RSP, SPY, VIX, VIX3M) and locks the consumed QQQ
@@ -191,6 +192,17 @@ runbooks.
   `CertifiedDatasetCatalog`, or write `HOLDOUTS.json`. An owner holdout may be
   declared later only if it covers every required symbol and does not overlap
   that burned range. No owner holdout dates are chosen here.
+- **The shadow learning loop is a journal, not autonomy.** Advisory Five-Tool /
+  pairing facts can be digest-pinned on an `EvidenceBundle` (`1.1`). A
+  deterministic reference worker may emit HOLD or OPEN through ingress. The
+  shadow journal records those proposals as `admission=not_attempted` and
+  `transmit=false`. It does not loosen gates, certify companions, stamp
+  provenance, or create a promotion artifact. See
+  [FIVE_TOOL_SHADOW_LEARNING.md](FIVE_TOOL_SHADOW_LEARNING.md).
+  The SHADOW template and reference worker are locked to **GLD**, **IWM**, and
+  **QQQ**. SPY is companion-only. QQQM is not in the book. In-repo IWM is
+  2019–2021 and adjusted, not certified. Three names are not three-instrument
+  promotion evidence until certified overlapping history exists.
 - **The checked Five-Tool campaign authorizes zero trials.** Campaign v2
   (`five-tool-v3.6-preregistered-002`) superseded v1 before either campaign read data or
   produced a result. All seven comparison policies and the catalog/partition/evaluator

@@ -56,7 +56,12 @@ from chronos.autonomy.enums import (
     promotion_rank,
 )
 from chronos.autonomy.evidence import (
+    ADVISORY_BUNDLE_VERSION,
     AccountFact,
+    AdvisoryDatum,
+    AdvisoryFeatureSnapshotFact,
+    AdvisoryFiveToolFact,
+    AdvisoryVetoFact,
     EvidenceBundle,
     PositionFact,
     QuoteFact,
@@ -80,6 +85,7 @@ from chronos.autonomy.mandate import (
 from chronos.autonomy.tools import ToolKind, ToolRegistry, ToolSpec, default_registry
 
 __all__ = [
+    "ADVISORY_BUNDLE_VERSION",
     "CONTEXT_DEPENDENT_DECISION_KINDS",
     "DEFAULT_AUTONOMY_MODE",
     "EXPOSURE_CREATING_DECISION_KINDS",
@@ -96,6 +102,10 @@ __all__ = [
     "AITradeDecision",
     "AccountFact",
     "ActivityLimits",
+    "AdvisoryDatum",
+    "AdvisoryFeatureSnapshotFact",
+    "AdvisoryFiveToolFact",
+    "AdvisoryVetoFact",
     "AutonomyMandate",
     "AutonomyMode",
     "AutonomyModel",

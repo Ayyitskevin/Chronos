@@ -177,6 +177,9 @@ def test_the_printed_template_is_shadow_and_not_submitting(
     }
     for promotion in skeleton["promotions"]:
         assert promotion["level"] == PromotionLevel.SHADOW.value
+    assert skeleton["scope"]["symbols"] == ["GLD", "IWM", "QQQ"]
+    assert "QQQM" not in skeleton["scope"]["symbols"]
+    assert "SPY" not in skeleton["scope"]["symbols"]
 
 
 def test_the_report_never_claims_to_authorize(
