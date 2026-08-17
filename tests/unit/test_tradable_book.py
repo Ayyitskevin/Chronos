@@ -8,10 +8,14 @@ from chronos.research.features.models import FeatureInputError, FeaturePolicy
 
 
 def test_autonomy_and_research_agree_on_the_locked_book() -> None:
-    assert autonomy_book.TRADABLE_SYMBOLS == research_universe.TRADABLE_SYMBOLS == (
-        "GLD",
-        "IWM",
-        "QQQ",
+    assert (
+        autonomy_book.TRADABLE_SYMBOLS
+        == research_universe.TRADABLE_SYMBOLS
+        == (
+            "GLD",
+            "IWM",
+            "QQQ",
+        )
     )
     assert autonomy_book.COMPANION_ONLY_SYMBOLS == research_universe.COMPANION_ONLY_SYMBOLS
     assert autonomy_book.RESEARCH_PROXY == research_universe.RESEARCH_PROXY == {}
