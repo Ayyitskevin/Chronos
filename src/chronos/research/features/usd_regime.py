@@ -33,8 +33,7 @@ def require_certified_uup() -> None:
     """Refuse every attempt to treat UUP as a certified companion."""
 
     raise FeatureInputError(
-        "UUP stays pending_certified_dataset; this slice does not download "
-        "or open a USD series"
+        "UUP stays pending_certified_dataset; this slice does not download or open a USD series"
     )
 
 
