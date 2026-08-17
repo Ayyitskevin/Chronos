@@ -99,6 +99,170 @@ class AccountFact(AutonomyModel):
     total_cash_usd: Decimal | None = None
 
 
+#: Schema identity for bundles that carry Five-Tool / pairing advisory facts.
+#: Empty advisory collections may still use ``"1"``; a non-empty advisory pack
+#: must use this version so the digest is honest about what the model was shown.
+ADVISORY_BUNDLE_VERSION = "1.1"
+
+#: Names that would make an advisory fact look like a size, stop, or credential.
+#: Advisory facts are closed-bar research evidence. They may not smuggle an
+#: economic instruction the kernel would have to ignore (ADR-0021).
+_FORBIDDEN_ADVISORY_NAME_MARKERS = (
+    "account",
+    "api_key",
+    "credential",
+    "equity",
+    "notional",
+    "password",
+    "quantity",
+    "risk_budget",
+    "risk_multiplier",
+    "risk_scale",
+    "secret",
+    "shares",
+    "size",
+    "stop",
+    "token",
+    "transmit",
+)
+
+
+def _reject_advisory_name(name: str) -> str:
+    normalized = name.strip()
+    if not normalized or not normalized.replace("_", "").isalnum():
+        raise ValueError("advisory value names must be simple identifiers")
+    lowered = normalized.lower()
+    for marker in _FORBIDDEN_ADVISORY_NAME_MARKERS:
+        if marker in lowered:
+            raise ValueError(
+                f"advisory fact {normalized!r} looks economic or secret-bearing; "
+                "advisory packs may carry closed-bar signal facts only"
+            )
+    return normalized
+
+
+def _reject_advisory_number(
+    value: bool | int | float | str | None,
+) -> bool | int | float | str | None:
+    if isinstance(value, float) and (value != value or value in (float("inf"), float("-inf"))):
+        raise ValueError("advisory numeric values must be finite")
+    if isinstance(value, str) and len(value) > 128:
+        raise ValueError("advisory string values are limited to 128 characters")
+    return value
+
+
+class AdvisoryDatum(AutonomyModel):
+    """One named closed-bar fact. Never a size, stop, or credential."""
+
+    name: str = Field(min_length=1, max_length=64)
+    value: bool | int | float | str | None = None
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, value: str) -> str:
+        return _reject_advisory_name(value)
+
+    @field_validator("value")
+    @classmethod
+    def _validate_value(
+        cls, value: bool | int | float | str | None
+    ) -> bool | int | float | str | None:
+        return _reject_advisory_number(value)
+
+
+class AdvisoryFiveToolFact(AutonomyModel):
+    """Closed-bar Five-Tool signal facts shown to a model. Explicitly advisory.
+
+    This is not an order, a size, or a stop. The kernel never reads these
+    fields to compute quantity or protection. Changing them changes the
+    bundle digest, which is the point: the model and the audit trail must
+    have seen the same closed-bar evidence.
+    """
+
+    advisory: bool = True
+    symbol: str = Field(min_length=1, max_length=32)
+    timestamp_utc: AwareDatetime
+    primary_sequence_id: str = Field(min_length=1, max_length=256)
+    bar_index: int = Field(ge=0)
+    intent: str = Field(min_length=1, max_length=32)
+    long_setup: str = Field(min_length=1, max_length=64)
+    short_setup: str = Field(min_length=1, max_length=64)
+    warmup_blockers: tuple[str, ...] = ()
+    state_digest: str = Field(min_length=64, max_length=64)
+    values: tuple[AdvisoryDatum, ...] = Field(default=(), max_length=64)
+
+    @field_validator("advisory")
+    @classmethod
+    def _always_advisory(cls, value: bool) -> bool:
+        if not value:
+            raise ValueError("Five-Tool bundle facts are advisory; they cannot be marked binding")
+        return value
+
+    @field_validator("symbol")
+    @classmethod
+    def _normalize_symbol(cls, value: str) -> str:
+        return value.strip().upper()
+
+    @field_validator("intent", "long_setup", "short_setup")
+    @classmethod
+    def _normalize_label(cls, value: str) -> str:
+        return value.strip().lower()
+
+    @field_validator("state_digest")
+    @classmethod
+    def _hex_digest(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if len(normalized) != 64 or any(char not in "0123456789abcdef" for char in normalized):
+            raise ValueError("state_digest must be a 64-character lowercase hex digest")
+        return normalized
+
+
+class AdvisoryFeatureSnapshotFact(AutonomyModel):
+    """One pairing-family snapshot. Explicitly advisory; never a size."""
+
+    advisory: bool = True
+    family: str = Field(min_length=1, max_length=32)
+    timestamp_utc: AwareDatetime
+    primary_sequence_id: str = Field(min_length=1, max_length=256)
+    warmup: bool
+    missing_required: tuple[str, ...] = ()
+    values: tuple[AdvisoryDatum, ...] = Field(default=(), max_length=64)
+
+    @field_validator("advisory")
+    @classmethod
+    def _always_advisory(cls, value: bool) -> bool:
+        if not value:
+            raise ValueError("pairing snapshots are advisory; they cannot be marked binding")
+        return value
+
+    @field_validator("family")
+    @classmethod
+    def _normalize_family(cls, value: str) -> str:
+        return value.strip().lower()
+
+
+class AdvisoryVetoFact(AutonomyModel):
+    """Pairing veto shown to a model. Explicitly advisory; not an order."""
+
+    advisory: bool = True
+    status: str = Field(min_length=1, max_length=32)
+    original_intent: str = Field(min_length=1, max_length=32)
+    filtered_intent: str = Field(min_length=1, max_length=32)
+    reasons: tuple[str, ...] = ()
+
+    @field_validator("advisory")
+    @classmethod
+    def _always_advisory(cls, value: bool) -> bool:
+        if not value:
+            raise ValueError("pairing vetoes are advisory; they cannot be marked binding")
+        return value
+
+    @field_validator("status", "original_intent", "filtered_intent")
+    @classmethod
+    def _normalize_label(cls, value: str) -> str:
+        return value.strip().lower()
+
+
 class TextualEvidence(AutonomyModel):
     """Attacker-controlled text, carried honestly as attacker-controlled.
 
@@ -142,6 +306,11 @@ class EvidenceBundle(AutonomyModel):
     quotes: tuple[QuoteFact, ...] = Field(default=(), max_length=256)
     positions: tuple[PositionFact, ...] = Field(default=(), max_length=256)
     texts: tuple[TextualEvidence, ...] = Field(default=(), max_length=64)
+    #: Closed-bar Five-Tool / pairing facts. Advisory only: the kernel does not
+    #: size, stop, or transmit from these fields.
+    five_tool_signals: tuple[AdvisoryFiveToolFact, ...] = Field(default=(), max_length=64)
+    feature_snapshots: tuple[AdvisoryFeatureSnapshotFact, ...] = Field(default=(), max_length=64)
+    pairing_vetoes: tuple[AdvisoryVetoFact, ...] = Field(default=(), max_length=64)
 
     def digest(self) -> str:
         """SHA-256 over the canonical content. Excludes nothing that was shown.
@@ -176,6 +345,9 @@ def issue(
     quotes: tuple[QuoteFact, ...] = (),
     positions: tuple[PositionFact, ...] = (),
     texts: tuple[TextualEvidence, ...] = (),
+    five_tool_signals: tuple[AdvisoryFiveToolFact, ...] = (),
+    feature_snapshots: tuple[AdvisoryFeatureSnapshotFact, ...] = (),
+    pairing_vetoes: tuple[AdvisoryVetoFact, ...] = (),
 ) -> tuple[EvidenceBundle, str]:
     """Build a bundle and return it with its digest, refusing on a redaction hit.
 
@@ -183,7 +355,19 @@ def issue(
     the *expected* digest for this run, and having to receive it makes that hard
     to forget. A bundle whose digest nobody kept cannot be checked against
     anything, which would quietly restore the gap the check exists to close.
+
+    A non-empty advisory pack requires :data:`ADVISORY_BUNDLE_VERSION` so the
+    schema identity matches what the model was shown.
     """
+
+    if (
+        five_tool_signals or feature_snapshots or pairing_vetoes
+    ) and bundle_version != ADVISORY_BUNDLE_VERSION:
+        raise ValueError(
+            "advisory Five-Tool / pairing facts require bundle_version "
+            f"{ADVISORY_BUNDLE_VERSION}; an older version would hide a schema change "
+            "inside an unchanged pin"
+        )
 
     bundle = EvidenceBundle(
         bundle_id=bundle_id,
@@ -193,6 +377,9 @@ def issue(
         quotes=quotes,
         positions=positions,
         texts=texts,
+        five_tool_signals=five_tool_signals,
+        feature_snapshots=feature_snapshots,
+        pairing_vetoes=pairing_vetoes,
     )
     violations = bundle.redaction_violations()
     if violations:
