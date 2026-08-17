@@ -1,6 +1,7 @@
 {
-  "schema_version": "chronos-five-tool-campaign-v1",
-  "campaign_id": "five-tool-v3.6-preregistered-001",
+  "schema_version": "chronos-five-tool-campaign-v2",
+  "campaign_id": "five-tool-v3.6-preregistered-002",
+  "supersedes_campaign_id": "five-tool-v3.6-preregistered-001",
   "created_at_utc": "2026-08-08T00:00:00Z",
   "purpose": "Preregistered, research-only component and ablation tests for Five-Tool Confluence AIO v3.6. This manifest freezes identities and rejection tests; it contains no observed result.",
   "execution_state": "blocked_until_identity_locks_resolve",
@@ -28,7 +29,7 @@
     },
     "semantic_config": {
       "path": "specs/five_tool_confluence_v3_6.yaml",
-      "sha256": "1c9f5b386d63732e8e9fab3e3e3e7173721590f84884101ef78817b8b3ab1531",
+      "sha256": "c0d85a17b26b9da3c1e68dd16fd341288fd3710021a7dbf9a07c953c3a9fe196",
       "digest_scope": "source-bound timing/dependency/warmup/deviation identity",
       "status": "resolved",
       "required_before_execution": true
@@ -75,8 +76,31 @@
     "market_entry_eligibility": "next primary bar open",
     "higher_timeframe": "prior completed higher-timeframe value only",
     "chart_ohlcv_approximation": "conservative stop-first when stop and target are both reachable within one bar",
-    "bar_magnifier": "not reproducible from chart-timeframe OHLCV; isolated from signal parity",
+    "bar_magnifier": "requires complete identity-bound lower-timeframe coverage for every primary replay bar and fails closed otherwise; isolated from signal parity",
     "tradingview_fill_parity": "UNVERIFIED"
+  },
+  "replay_policy": {
+    "canonical": {
+      "schema_version": "chronos-five-tool-replay-policy-v1",
+      "initial_equity": 100000.0,
+      "parameter_variant": "five_tool_default",
+      "fill_policy": "ohlc_stop_first",
+      "commission_bps_per_fill": 3.0,
+      "slippage_ticks_per_fill": 2,
+      "apply_slippage_to_target_limits": false,
+      "terminal_position_policy": "require_flat",
+      "signal_clock": "confirmed_primary_bar_close",
+      "market_order_eligibility": "next_primary_bar_open",
+      "entry_bar_stop": "signal_time_absolute_stop_active_for_every_leg_with_stop_market_gap_semantics",
+      "entry_bar_targets": "inactive",
+      "post_entry_ladder": "signal_time_quantity_and_risk_distance_frozen_then_stop_and_targets_rebased_to_adverse_actual_next_open_execution_for_later_bars",
+      "discretionary_priority": "queued_close_time_discretionary_exit_executes_at_next_open_before_protective_resolution",
+      "protective_priority": "on_later_bars_protective_resolution_precedes_close_time_signal_evaluation",
+      "replay_scope": "full_from_settings_history_start_only",
+      "checkpoint_resume": "unsupported",
+      "execution_parity": "UNVERIFIED"
+    },
+    "sha256": "f367ab249233adbd11a3a3393c778bd0efe419df6d158089ec05cffc8919b8a5"
   },
   "costs": {
     "commission_bps_per_fill": 3.0,
@@ -89,6 +113,11 @@
       "require_positive_after_stress": true
     }
   },
+  "reference_arm": {
+    "arm_id": "5t-full-default-reference",
+    "pine_overrides": {},
+    "research_ablation": null
+  },
   "hypothesis_ids": [
     "H-5T-001-TREND",
     "H-5T-002-MOMENTUM",
@@ -99,66 +128,219 @@
   ],
   "campaign_cells": [
     {
-      "cell_id": "5t-full-default-reference",
+      "cell_id": "5t-trend-directional-paired",
       "hypothesis_id": "H-5T-001-TREND",
-      "role": "full-stack reference, not a component attribution claim",
-      "config_overlay": {}
-    },
-    {
-      "cell_id": "5t-trend-only",
-      "hypothesis_id": "H-5T-001-TREND",
-      "role": "component isolation",
-      "config_overlay": {
-        "tested_component": "trend",
-        "all_other_alpha_components": "disabled"
+      "role": "paired trend attribution against a duration/exposure-matched direction-neutral baseline",
+      "ablation_policy": {
+        "schema_version": "chronos-five-tool-ablation-policy-v1",
+        "status": "pending_resolution",
+        "treatment": null,
+        "control": null,
+        "comparison": null,
+        "allowed_differences": [],
+        "held_fixed": null,
+        "neighbor_axes": [],
+        "resolution_blockers": [
+          {
+            "code": "unrepresentable_ablation",
+            "message": "Typed trend-only and duration/exposure-matched direction-neutral evaluator variants do not exist."
+          },
+          {
+            "code": "missing_neighbor_axis",
+            "message": "Trend lookback and EMA neighbor axes are not frozen."
+          }
+        ]
       }
     },
     {
-      "cell_id": "5t-momentum-only",
+      "cell_id": "5t-momentum-score-paired",
       "hypothesis_id": "H-5T-002-MOMENTUM",
-      "role": "component isolation",
-      "config_overlay": {
-        "tested_component": "momentum",
-        "all_other_alpha_components": "disabled"
+      "role": "paired momentum/strength contribution with eligibility and exposure held fixed",
+      "ablation_policy": {
+        "schema_version": "chronos-five-tool-ablation-policy-v1",
+        "status": "pending_resolution",
+        "treatment": null,
+        "control": null,
+        "comparison": null,
+        "allowed_differences": [],
+        "held_fixed": null,
+        "neighbor_axes": [],
+        "resolution_blockers": [
+          {
+            "code": "unrepresentable_ablation",
+            "message": "A typed momentum-on/off evaluator variant with fixed eligible bars and exposure does not exist."
+          },
+          {
+            "code": "missing_neighbor_axis",
+            "message": "Momentum score-threshold neighbor axes are not frozen."
+          }
+        ]
       }
     },
     {
-      "cell_id": "5t-vol-scaling-on-vs-off",
+      "cell_id": "5t-vol-scaling-paired",
       "hypothesis_id": "H-5T-003-VOL-SCALING",
-      "role": "paired risk-overlay ablation",
-      "config_overlay": {
-        "tested_component": "volatility_scaling",
-        "signal_timestamps_and_directions": "held_fixed"
+      "role": "paired risk-sizing overlay with exact timestamp/direction stream binding",
+      "ablation_policy": {
+        "schema_version": "chronos-five-tool-ablation-policy-v1",
+        "status": "pending_resolution",
+        "treatment": null,
+        "control": null,
+        "comparison": null,
+        "allowed_differences": [],
+        "held_fixed": null,
+        "neighbor_axes": [],
+        "resolution_blockers": [
+          {
+            "code": "unbound_shared_signal_stream",
+            "message": "No typed evaluator variant can replay scaling on/off over one identical timestamp/direction signal stream."
+          },
+          {
+            "code": "unrepresentable_ablation",
+            "message": "The source-bound Pine inputs do not expose the claimed risk-sizing overlay as an independently executable switch."
+          },
+          {
+            "code": "missing_neighbor_axis",
+            "message": "Volatility lookback and target neighbor axes are not frozen."
+          }
+        ]
       }
     },
     {
-      "cell_id": "5t-divergence-only",
+      "cell_id": "5t-rsi-divergence-paired",
       "hypothesis_id": "H-5T-004-DIVERGENCE",
-      "role": "component isolation",
-      "config_overlay": {
-        "tested_component": "confirmed_pivot_divergence",
-        "all_other_alpha_components": "disabled"
+      "role": "RSI confirmation-time divergence versus disabled and timestamp-matched controls",
+      "ablation_policy": {
+        "schema_version": "chronos-five-tool-ablation-policy-v1",
+        "status": "pending_resolution",
+        "treatment": null,
+        "control": null,
+        "comparison": null,
+        "allowed_differences": [],
+        "held_fixed": null,
+        "neighbor_axes": [],
+        "resolution_blockers": [
+          {
+            "code": "unrepresentable_ablation",
+            "message": "Typed RSI confirmation-time divergence-off semantics do not exist."
+          },
+          {
+            "code": "unbound_pseudo_event_stream",
+            "message": "The timestamp-matched RSI pseudo-event control stream is not bound."
+          },
+          {
+            "code": "missing_neighbor_axis",
+            "message": "RSI pivot-left, pivot-right, minimum-gap, and maximum-gap neighbor axes are not frozen."
+          }
+        ]
       }
     },
     {
-      "cell_id": "5t-relative-strength-only",
+      "cell_id": "5t-mfi-divergence-paired",
+      "hypothesis_id": "H-5T-004-DIVERGENCE",
+      "role": "MFI confirmation-time divergence versus disabled and timestamp-matched controls",
+      "ablation_policy": {
+        "schema_version": "chronos-five-tool-ablation-policy-v1",
+        "status": "pending_resolution",
+        "treatment": null,
+        "control": null,
+        "comparison": null,
+        "allowed_differences": [],
+        "held_fixed": null,
+        "neighbor_axes": [],
+        "resolution_blockers": [
+          {
+            "code": "unrepresentable_ablation",
+            "message": "Typed MFI confirmation-time divergence-off semantics do not exist."
+          },
+          {
+            "code": "unbound_pseudo_event_stream",
+            "message": "The timestamp-matched MFI pseudo-event control stream is not bound."
+          },
+          {
+            "code": "missing_neighbor_axis",
+            "message": "MFI pivot-left, pivot-right, minimum-gap, and maximum-gap neighbor axes are not frozen."
+          }
+        ]
+      }
+    },
+    {
+      "cell_id": "5t-relative-strength-paired",
       "hypothesis_id": "H-5T-005-RELATIVE-STRENGTH",
-      "role": "component isolation",
-      "config_overlay": {
-        "tested_component": "mansfield_relative_strength",
-        "all_other_alpha_components": "disabled"
+      "role": "paired Mansfield relative-strength contribution with all non-RS coordinates held fixed",
+      "ablation_policy": {
+        "schema_version": "chronos-five-tool-ablation-policy-v1",
+        "status": "pending_resolution",
+        "treatment": null,
+        "control": null,
+        "comparison": null,
+        "allowed_differences": [],
+        "held_fixed": null,
+        "neighbor_axes": [],
+        "resolution_blockers": [
+          {
+            "code": "unrepresentable_ablation",
+            "message": "No typed evaluator variant removes Mansfield effects from gates, triggers, and scores together."
+          },
+          {
+            "code": "missing_neighbor_axis",
+            "message": "Mansfield lookback and threshold neighbor axes are not frozen."
+          }
+        ]
       }
     },
     {
       "cell_id": "5t-regime-filter-paired",
       "hypothesis_id": "H-5T-006-REGIME-FILTER",
-      "role": "paired gate ablation",
-      "config_overlay": {
-        "tested_component": "regime_filter",
-        "underlying_entry_stream": "held_fixed"
+      "role": "paired regime gate with exact underlying-opportunity and equalized-exposure binding",
+      "ablation_policy": {
+        "schema_version": "chronos-five-tool-ablation-policy-v1",
+        "status": "pending_resolution",
+        "treatment": null,
+        "control": null,
+        "comparison": null,
+        "allowed_differences": [],
+        "held_fixed": null,
+        "neighbor_axes": [],
+        "resolution_blockers": [
+          {
+            "code": "unbound_shared_signal_stream",
+            "message": "No typed evaluator variant binds gate-on/off to one opportunity stream with equalized exposure."
+          },
+          {
+            "code": "unrepresentable_ablation",
+            "message": "Separate z-score/hysteresis and Markov/dwell contribution variants do not exist."
+          },
+          {
+            "code": "missing_neighbor_axis",
+            "message": "Regime lookback and entry/exit-threshold neighbor axes are not frozen."
+          }
+        ]
       }
     }
   ],
+  "execution_bindings": {
+    "schema_version": "chronos-five-tool-execution-bindings-v1",
+    "status": "pending_resolution",
+    "catalog_manifest_sha256": null,
+    "partition_stage_map": null,
+    "requests": null,
+    "evaluator": null,
+    "resolution_blockers": [
+      {
+        "code": "certified_catalog_pending",
+        "message": "The catalog digest and exact partition source/request identities are not frozen."
+      },
+      {
+        "code": "partition_stage_bindings_pending",
+        "message": "Development and validation requests are not mapped to canonical trial stages."
+      },
+      {
+        "code": "evaluator_pending",
+        "message": "No reviewed Five-Tool evaluator identity and digest is authorized."
+      }
+    ]
+  },
   "statistics": {
     "sample_floor": "max(preregistered power-required N, 100 out-of-sample economic positions); closed legs reported separately",
     "instruments_required": 3,
@@ -177,7 +359,7 @@
     "record_kind_start": "trial_started",
     "start_must_precede_reader": true,
     "reader_and_evaluator_failures_count": true,
-    "multiplicity": "private test harness only: number of unique durable attempt_id values in one caller-selected ledger; not the canonical ADR-0013 global research multiplicity and not sufficient for final scores",
+    "multiplicity": "this blocked v2 manifest exposes zero executable campaign trials; the private synthetic harness count remains lifecycle-test-only, while canonical start-before-read accounting and a fixed-path snapshot exist as separate infrastructure but are not wired or sufficient for final scores",
     "candidate_order_or_display_rename_changes_verdict": false
   },
   "criteria_document": "docs/FIVE_TOOL_RESEARCH_HYPOTHESES.md",
@@ -195,17 +377,25 @@
     "history_start_utc",
     "benchmark_identity",
     "fill_policy",
+    "replay_policy_sha256",
     "cost_model",
+    "campaign_plan_sha256",
+    "ablation_policy_sha256",
+    "execution_bindings_sha256",
+    "certified_catalog_sha256",
+    "source_receipt_sha256",
+    "evaluator_sha256",
     "criteria_digest",
     "code_commit"
   ],
   "blocked_before_first_data_read": [
-    "Resolve and review the certified dataset-version SHA-256.",
+    "Resolve and review the certified dataset release/bundle-manifest SHA-256.",
     "Replace the placeholder history start with the certified dataset's exact first bar-close timestamp.",
-    "Integrate every attempt with the canonical ADR-0013 global experiment registry; caller-selected ledger paths cannot supply final multiplicity.",
-    "Replace arbitrary reader/evaluator callbacks with a certified broker-owned reader and content-addressed replay artifacts.",
+    "Wire every campaign attempt through the implemented CanonicalTrialRegistry fixed-path capability; the private caller-selected Five-Tool ledger cannot supply final multiplicity.",
+    "Authorize and wire this campaign through the implemented manifest-bound ordinary reader, BrokeredResearchTrialRunner, replay object store, and reviewed Five-Tool evaluator; infrastructure alone is not dataset or campaign certification.",
     "Freeze owner drawdown, CVaR, turnover, and concentration limits.",
     "Freeze the power calculation, accessible date partitions, code commit, and criteria digest.",
-    "Confirm every campaign cell maps to an executable semantic overlay rather than a prose-only label."
+    "Replace v2 with a reviewed successor schema and campaign identity that can type every required evaluator variant; an opaque research-policy digest cannot clear an unrepresentable-ablation or stream-binding blocker.",
+    "In that successor, freeze exact treatment/control Pine differences, complete held-fixed coordinates, and monotone single-dimension neighbor axes wherever the source-bound inputs can represent the comparison."
   ]
 }

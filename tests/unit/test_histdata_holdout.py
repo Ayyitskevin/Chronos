@@ -7,6 +7,7 @@ no-op, the model's validation + round-trip, and the store-composed reader.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -98,6 +99,33 @@ def test_holdouts_round_trip(tmp_path: Path) -> None:
     loaded = load_holdouts(tmp_path)
     assert [w.name for w in loaded] == ["w1", "w2"]  # sorted by start
     assert loaded[0].symbols == ("SPY", "QQQ")
+
+
+def test_write_holdouts_refuses_duplicate_names_before_creating_a_file(tmp_path: Path) -> None:
+    windows = (
+        HoldoutWindow("duplicate", date(2024, 1, 1), date(2024, 1, 2)),
+        HoldoutWindow("duplicate", date(2024, 2, 1), date(2024, 2, 2)),
+    )
+    with pytest.raises(ValueError, match="duplicate holdout"):
+        write_holdouts(tmp_path, windows)
+    assert not (tmp_path / "HOLDOUTS.json").exists()
+
+
+def test_load_holdouts_refuses_duplicate_names(tmp_path: Path) -> None:
+    (tmp_path / "HOLDOUTS.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "windows": [
+                    {"name": "duplicate", "start": "2024-01-01", "end": "2024-01-02"},
+                    {"name": "duplicate", "start": "2024-02-01", "end": "2024-02-02"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="duplicate holdout"):
+        load_holdouts(tmp_path)
 
 
 def test_load_holdouts_absent_is_empty(tmp_path: Path) -> None:

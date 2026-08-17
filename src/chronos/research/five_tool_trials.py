@@ -1,12 +1,12 @@
 """Fail-closed trial accounting for Five-Tool research tests, bound to the ADR-0013 registry.
 
-This module is intentionally additive.  It does not change walk-forward or campaign
-semantics.  Public v1 construction validates the checked blocked manifest but cannot
-authorize data access: replayable evidence artifacts and the owner-frozen
-risk/power/benchmark evidence do not exist in this slice.  A deliberately private
-synthetic-test seam exercises lifecycle logic with arbitrary reader/evaluator callbacks.
-Those callbacks are not an execution authority, and — unless the reader is the certified
-one below — they cannot prove which bytes they touched either.
+This module is intentionally additive.  It does not change the canonical ADR-0013
+registry, walk-forward, or campaign semantics.  Public v2 construction validates the
+checked blocked manifest but cannot authorize data access: certified-reader readiness,
+canonical global-registry integration, and replayable evidence artifacts exist as
+separate infrastructure but are not authorized or wired to this campaign. A deliberately
+private synthetic-test seam exercises lifecycle logic with arbitrary reader/evaluator
+callbacks. Those callbacks are not a certified reader or an execution authority.
 
 **Certified provenance (the reader-honesty residual).** ``certified_reader`` in a
 registered run's ``data_hashes`` used to be ``False`` by construction.  It is now a real
@@ -97,6 +97,17 @@ from typing import TypeVar, cast
 from chronos.auditlog.log import AuditLogCorruptionError, AuditRecord
 from chronos.registry.ledger import RegistryLedger, registry_lock
 from chronos.registry.runs import RunStage, register_run, trial_count
+from chronos.research.five_tool.campaign import (
+    ABLATION_POLICY_SCHEMA_VERSION,
+    CAMPAIGN_ID,
+    CAMPAIGN_SCHEMA_VERSION,
+    EVALUATOR_BINDING_SCHEMA_VERSION,
+    EXECUTION_BINDINGS_SCHEMA_VERSION,
+    SUPERSEDES_CAMPAIGN_ID,
+    CampaignBlockerCode,
+    _compile_campaign_manifest_for_tests,
+    compile_campaign_manifest,
+)
 from chronos.research.five_tool.certified_reader import CertifiedDatasetReader
 from chronos.research.five_tool.contract import (
     default_contract_path,
@@ -104,12 +115,15 @@ from chronos.research.five_tool.contract import (
     input_contract_digest,
     semantic_contract_digest,
 )
+from chronos.research.five_tool.planning import FillPolicy
 from chronos.research.five_tool.replay import (
     OUTCOME_COMPLETED,
     OUTCOME_FAILED,
     REPLAY_ARTIFACT_SCHEMA_VERSION,
+    FiveToolReplayPolicy,
     ReplayArtifact,
     ReplayDivergence,
+    TerminalPositionPolicy,
     compare_replay_bodies,
     load_replay_artifact,
     require_artifact_root,
@@ -121,7 +135,7 @@ KIND_TRIAL_STARTED = "trial_started"
 KIND_TRIAL_TERMINAL = "trial_terminal"
 KIND_CAMPAIGN_SEALED = "campaign_sealed"
 TRIAL_SCHEMA_VERSION = "chronos-five-tool-trial-v2"
-CAMPAIGN_MANIFEST_SCHEMA = "chronos-five-tool-campaign-v1"
+CAMPAIGN_MANIFEST_SCHEMA = CAMPAIGN_SCHEMA_VERSION
 EXECUTION_BLOCKED = "blocked_until_identity_locks_resolve"
 EXECUTION_READY = "ready_for_certified_research"
 INTERRUPTED_ATTEMPT_ERROR = "InterruptedAttemptRecovery"
@@ -158,6 +172,68 @@ _SHA256_HEX_LENGTH = 64
 _UNCLASSIFIED_CALLBACK_ERROR = "UnclassifiedCallbackError"
 _THREAD_LOCKS: dict[str, threading.Lock] = {}
 _THREAD_LOCKS_GUARD = threading.Lock()
+_CERTIFIED_IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/+@-]{0,255}")
+_REFERENCE_ARM_ID = "5t-full-default-reference"
+_EXPECTED_CELL_HYPOTHESES = {
+    "5t-trend-directional-paired": "H-5T-001-TREND",
+    "5t-momentum-score-paired": "H-5T-002-MOMENTUM",
+    "5t-vol-scaling-paired": "H-5T-003-VOL-SCALING",
+    "5t-rsi-divergence-paired": "H-5T-004-DIVERGENCE",
+    "5t-mfi-divergence-paired": "H-5T-004-DIVERGENCE",
+    "5t-relative-strength-paired": "H-5T-005-RELATIVE-STRENGTH",
+    "5t-regime-filter-paired": "H-5T-006-REGIME-FILTER",
+}
+_CELL_RESOLUTION_BLOCKER_CODES = frozenset(
+    {
+        "unresolved_cell_config",
+        "missing_comparison_arm",
+        "missing_neighbor_axis",
+        "unrepresentable_ablation",
+        "unbound_shared_signal_stream",
+        "unbound_pseudo_event_stream",
+    }
+)
+_EXECUTION_RESOLUTION_BLOCKER_CODES = frozenset(
+    {
+        "certified_catalog_pending",
+        "partition_stage_bindings_pending",
+        "evaluator_pending",
+        "identity_unresolved",
+    }
+)
+_EXPECTED_CELL_BLOCKER_CODES = {
+    "5t-trend-directional-paired": frozenset({"unrepresentable_ablation", "missing_neighbor_axis"}),
+    "5t-momentum-score-paired": frozenset({"unrepresentable_ablation", "missing_neighbor_axis"}),
+    "5t-vol-scaling-paired": frozenset(
+        {
+            "unrepresentable_ablation",
+            "missing_neighbor_axis",
+            "unbound_shared_signal_stream",
+        }
+    ),
+    "5t-rsi-divergence-paired": frozenset(
+        {
+            "unrepresentable_ablation",
+            "missing_neighbor_axis",
+            "unbound_pseudo_event_stream",
+        }
+    ),
+    "5t-mfi-divergence-paired": frozenset(
+        {
+            "unrepresentable_ablation",
+            "missing_neighbor_axis",
+            "unbound_pseudo_event_stream",
+        }
+    ),
+    "5t-relative-strength-paired": frozenset({"unrepresentable_ablation", "missing_neighbor_axis"}),
+    "5t-regime-filter-paired": frozenset(
+        {
+            "unrepresentable_ablation",
+            "missing_neighbor_axis",
+            "unbound_shared_signal_stream",
+        }
+    ),
+}
 _START_PAYLOAD_KEYS = frozenset(
     {
         "schema_version",
@@ -248,7 +324,7 @@ class CanonicalRegistryUnavailable(FiveToolTrialError):
 
 
 class DataVersionMismatch(FiveToolTrialError):
-    """Reader bytes do not match the exact dataset digest authorized by the campaign."""
+    """Reader bytes do not match the exact partition digest authorized by the campaign."""
 
 
 class ReplayArtifactBindingBroken(FiveToolTrialError):
@@ -484,8 +560,8 @@ class _CampaignBinding:
     criteria_digest: str
     input_contract_digest: str
     dataset_id: str
-    data_version: str
     accessible_partitions: frozenset[str]
+    request_identities: frozenset[tuple[str, str, str]]
     cells: tuple[_CampaignCell, ...]
 
 
@@ -563,7 +639,7 @@ class FiveToolTrialBroker:
     ) -> FiveToolTrialBroker:
         """Validate a blocked manifest without granting reader authority.
 
-        ``ready_for_certified_research`` is intentionally rejected in public v1.  A
+        ``ready_for_certified_research`` is intentionally rejected in public v2.  A
         manifest is a claim, not the missing owner evidence — and the three capabilities
         that now exist are not substitutes for it either: a certified reader is a way to
         read a certified dataset, not a certified dataset; a registry counts trials, it
@@ -573,7 +649,7 @@ class FiveToolTrialBroker:
 
         binding = _validate_campaign_manifest(manifest)
         if binding is not None:  # pragma: no cover - public ready validation always raises
-            raise CampaignExecutionBlocked("public v1 cannot authorize an execution-ready campaign")
+            raise CampaignExecutionBlocked("public v2 cannot authorize an execution-ready campaign")
         broker = cls(
             ledger_path,
             registry_ledger_path=registry_ledger_path,
@@ -836,10 +912,15 @@ class FiveToolTrialBroker:
             raise CampaignIdentityMismatch("trial semantic config disagrees with its campaign cell")
         if request.dataset_id != binding.dataset_id:
             raise CampaignIdentityMismatch("data request dataset_id disagrees with manifest")
-        if request.data_version != binding.data_version:
-            raise CampaignIdentityMismatch("data request data_version disagrees with manifest")
         if _normalized_identity(request.partition) not in binding.accessible_partitions:
             raise CampaignIdentityMismatch("data request partition is not campaign-accessible")
+        request_identity = (
+            _normalized_identity(request.dataset_id),
+            _normalized_identity(request.partition),
+            request.data_version,
+        )
+        if request_identity not in binding.request_identities:
+            raise CampaignIdentityMismatch("data request identity disagrees with manifest bindings")
 
     def _refuse_holdout(self, request: DataAccessRequest) -> None:
         dataset = _normalized_identity(request.dataset_id)
@@ -1773,7 +1854,6 @@ def _validate_start_identity(start: AuditRecord, binding: _CampaignBinding) -> N
         "criteria_digest": binding.criteria_digest,
         "input_contract_digest": binding.input_contract_digest,
         "dataset_id": binding.dataset_id,
-        "data_version": binding.data_version,
     }
     for key, value in expected.items():
         if payload.get(key) != value:
@@ -1811,6 +1891,16 @@ def _validate_start_identity(start: AuditRecord, binding: _CampaignBinding) -> N
         binding.accessible_partitions
     ):
         raise FiveToolTrialError("trial start partition is outside campaign access")
+    data_version = payload.get("data_version")
+    if not isinstance(data_version, str):
+        raise FiveToolTrialError("trial start data_version is invalid")
+    request_identity = (
+        _normalized_identity(binding.dataset_id),
+        _normalized_identity(partition),
+        data_version,
+    )
+    if request_identity not in binding.request_identities:
+        raise FiveToolTrialError("trial start request identity disagrees with campaign bindings")
     cell_id = payload.get("cell_id")
     cells = [cell for cell in binding.cells if cell.cell_id == cell_id]
     if len(cells) != 1:
@@ -2111,7 +2201,7 @@ def _score_inputs_from_rows(
 
 
 def validate_campaign_manifest(manifest: Mapping[str, object]) -> None:
-    """Validate the blocked v1 manifest; public ready authority is not implemented."""
+    """Validate the blocked v2 manifest; public ready authority is not implemented."""
 
     _validate_campaign_manifest(manifest)
 
@@ -2134,6 +2224,7 @@ def _validate_campaign_manifest(
         {
             "schema_version",
             "campaign_id",
+            "supersedes_campaign_id",
             "created_at_utc",
             "purpose",
             "execution_state",
@@ -2144,8 +2235,10 @@ def _validate_campaign_manifest(
             "data",
             "fill_policy",
             "costs",
+            "reference_arm",
             "hypothesis_ids",
             "campaign_cells",
+            "execution_bindings",
             "statistics",
             "trial_accounting",
             "criteria_document",
@@ -2158,7 +2251,10 @@ def _validate_campaign_manifest(
     if manifest.get("schema_version") != CAMPAIGN_MANIFEST_SCHEMA:
         raise ValueError(f"schema_version must be {CAMPAIGN_MANIFEST_SCHEMA!r}")
     campaign_id = _required_string(manifest, "campaign_id")
-    _require_nonempty("campaign_id", campaign_id)
+    if campaign_id != CAMPAIGN_ID:
+        raise ValueError(f"campaign_id must exactly identify {CAMPAIGN_ID!r}")
+    if manifest.get("supersedes_campaign_id") != SUPERSEDES_CAMPAIGN_ID:
+        raise ValueError(f"supersedes_campaign_id must exactly identify {SUPERSEDES_CAMPAIGN_ID!r}")
     _require_utc_timestamp("created_at_utc", _required_string(manifest, "created_at_utc"))
     _require_nonempty("purpose", _required_string(manifest, "purpose"))
     if manifest.get("performance_claims") != []:
@@ -2171,7 +2267,7 @@ def _validate_campaign_manifest(
     ready = execution_state == EXECUTION_READY
     if ready and not _allow_synthetic_ready_for_tests:
         raise CampaignExecutionBlocked(
-            "EXECUTION_READY is not implemented in public v1: a manifest cannot replace "
+            "EXECUTION_READY is not implemented in public v2: a manifest cannot replace "
             f"the missing {_missing_capability_phrase()} {_missing_capability_noun()}"
         )
 
@@ -2263,21 +2359,21 @@ def _validate_campaign_manifest(
         "data.dataset_version_lock",
     )
     dataset_id = _required_string(dataset_lock, "dataset_id")
-    _require_nonempty("data.dataset_version_lock.dataset_id", dataset_id)
+    _require_certified_identity("data.dataset_version_lock.dataset_id", dataset_id)
     if dataset_lock.get("required_before_execution") is not True:
         raise ValueError("data.dataset_version_lock must be required before execution")
-    dataset_digest: str | None = None
-    raw_dataset_digest = dataset_lock.get("sha256")
-    if raw_dataset_digest is None:
+    dataset_release_digest: str | None = None
+    raw_dataset_release_digest = dataset_lock.get("sha256")
+    if raw_dataset_release_digest is None:
         if dataset_lock.get("status") != "pending_certified_dataset":
             raise ValueError(
-                "null dataset version digest requires pending_certified_dataset status"
+                "null dataset release digest requires pending_certified_dataset status"
             )
-    elif isinstance(raw_dataset_digest, str):
-        _require_sha256("data.dataset_version_lock.sha256", raw_dataset_digest)
+    elif isinstance(raw_dataset_release_digest, str):
+        _require_sha256("data.dataset_version_lock.sha256", raw_dataset_release_digest)
         if dataset_lock.get("status") != "resolved":
-            raise ValueError("resolved dataset version digest requires resolved status")
-        dataset_digest = raw_dataset_digest
+            raise ValueError("resolved dataset release digest requires resolved status")
+        dataset_release_digest = raw_dataset_release_digest
     else:
         raise ValueError("data.dataset_version_lock.sha256 must be SHA-256 or null")
     primary = data.get("primary_instruments")
@@ -2305,6 +2401,8 @@ def _validate_campaign_manifest(
     ):
         raise ValueError("data.accessible_partitions must be a non-empty string list")
     normalized_accessible = [_normalized_identity(str(item)) for item in accessible]
+    for index, partition in enumerate(accessible):
+        _require_certified_identity(f"data.accessible_partitions[{index}]", str(partition))
     if len(set(normalized_accessible)) != len(normalized_accessible):
         raise ValueError("data.accessible_partitions must be unique")
     if set(normalized_accessible) & _DEFAULT_HOLDOUT_PARTITIONS:
@@ -2320,11 +2418,11 @@ def _validate_campaign_manifest(
             {"dataset_id", "partition", "start_utc", "status", "ordinary_research_access"},
             f"data.declared_holdouts[{index}]",
         )
-        _require_nonempty(
+        _require_certified_identity(
             f"data.declared_holdouts[{index}].dataset_id",
             _required_string(holdout, "dataset_id"),
         )
-        _require_nonempty(
+        _require_certified_identity(
             f"data.declared_holdouts[{index}].partition",
             _required_string(holdout, "partition"),
         )
@@ -2347,13 +2445,22 @@ def _validate_campaign_manifest(
     ]
     if len(set(holdout_keys)) != len(holdout_keys):
         raise ValueError("data.declared_holdouts must be unique")
+    holdout_partitions = {partition for _dataset, partition in holdout_keys}
+    if set(normalized_accessible) & holdout_partitions:
+        raise ValueError("declared holdout partition aliases cannot be ordinarily accessible")
+    ordinary_keys = {
+        (_normalized_identity(dataset_id), partition) for partition in normalized_accessible
+    }
+    if ordinary_keys & set(holdout_keys):
+        raise ValueError("declared holdout dataset/partition aliases cannot be accessible")
     contamination = data.get("known_contamination")
     if (
         not isinstance(contamination, list)
         or not contamination
         or not all(isinstance(item, str) and item.strip() for item in contamination)
+        or len(set(contamination)) != len(contamination)
     ):
-        raise ValueError("data.known_contamination must be a non-empty string list")
+        raise ValueError("data.known_contamination must be a unique non-empty string list")
 
     blockers = manifest.get("blocked_before_first_data_read")
     if not isinstance(blockers, list) or not all(
@@ -2366,10 +2473,20 @@ def _validate_campaign_manifest(
         raise ValueError("blocked manifest must enumerate blockers before first data read")
 
     fill_policy = _required_mapping(manifest, "fill_policy")
-    if not fill_policy or not all(
-        isinstance(value, str) and value.strip() for value in fill_policy.values()
-    ):
-        raise ValueError("fill_policy must be non-empty and fully specified")
+    _require_exact_keys(
+        fill_policy,
+        {
+            "signal_clock",
+            "market_entry_eligibility",
+            "higher_timeframe",
+            "chart_ohlcv_approximation",
+            "bar_magnifier",
+            "tradingview_fill_parity",
+        },
+        "fill_policy",
+    )
+    for name in fill_policy:
+        _require_nonempty(f"fill_policy.{name}", _required_string(fill_policy, name))
     costs = _required_mapping(manifest, "costs")
     _require_exact_keys(
         costs,
@@ -2401,18 +2518,31 @@ def _validate_campaign_manifest(
     if stress.get("require_positive_after_stress") is not True:
         raise ValueError("costs.stress.require_positive_after_stress must be true")
 
+    reference_arm = _required_mapping(manifest, "reference_arm")
+    _require_exact_keys(
+        reference_arm,
+        {"arm_id", "pine_overrides", "research_ablation"},
+        "reference_arm",
+    )
+    if reference_arm.get("arm_id") != _REFERENCE_ARM_ID:
+        raise ValueError(f"reference_arm.arm_id must be {_REFERENCE_ARM_ID!r}")
+    if reference_arm.get("pine_overrides") != {}:
+        raise ValueError("reference_arm.pine_overrides must remain the empty Pine default")
+    if reference_arm.get("research_ablation") is not None:
+        raise ValueError("reference_arm.research_ablation must remain null")
+
     hypotheses = manifest.get("hypothesis_ids")
+    expected_hypotheses = set(_EXPECTED_CELL_HYPOTHESES.values())
     if (
         not isinstance(hypotheses, list)
         or not all(isinstance(value, str) and value.strip() for value in hypotheses)
-        or len(hypotheses) != 6
-        or len(set(hypotheses)) != 6
+        or len(hypotheses) != len(expected_hypotheses)
+        or set(hypotheses) != expected_hypotheses
     ):
-        raise ValueError("hypothesis_ids must contain six unique component hypotheses")
+        raise ValueError("hypothesis_ids must contain the exact six component hypotheses")
     cells = manifest.get("campaign_cells")
     if not isinstance(cells, list) or not cells:
         raise ValueError("campaign_cells must be a non-empty list")
-    cell_hypotheses: set[str] = set()
     cell_ids: set[str] = set()
     parsed_cells: list[_CampaignCell] = []
     for index, cell in enumerate(cells):
@@ -2420,7 +2550,7 @@ def _validate_campaign_manifest(
             raise ValueError(f"campaign_cells[{index}] must be an object")
         _require_exact_keys(
             cell,
-            {"cell_id", "hypothesis_id", "role", "config_overlay"},
+            {"cell_id", "hypothesis_id", "role", "ablation_policy"},
             f"campaign_cells[{index}]",
         )
         cell_id = _required_string(cell, "cell_id")
@@ -2429,35 +2559,106 @@ def _validate_campaign_manifest(
             raise ValueError("campaign cell IDs must be unique")
         cell_ids.add(cell_id)
         hypothesis_id = _required_string(cell, "hypothesis_id")
-        if hypothesis_id not in hypotheses:
-            raise ValueError("campaign cell references an undeclared hypothesis")
-        cell_hypotheses.add(hypothesis_id)
+        expected_hypothesis = _EXPECTED_CELL_HYPOTHESES.get(cell_id)
+        if expected_hypothesis is None or hypothesis_id != expected_hypothesis:
+            raise ValueError("campaign cell ID/hypothesis topology is not the frozen v2 plan")
         _require_nonempty(f"campaign_cells[{index}].role", _required_string(cell, "role"))
-        overlay = _required_mapping(cell, "config_overlay")
+        policy = _required_mapping(cell, "ablation_policy")
+        _validate_ablation_policy_shape(
+            policy,
+            context=f"campaign_cells[{index}].ablation_policy",
+            expected_pending_codes=_EXPECTED_CELL_BLOCKER_CODES[cell_id],
+            allow_resolved_for_synthetic_tests=_allow_synthetic_ready_for_tests,
+        )
         parsed_cells.append(
             _CampaignCell(
                 cell_id=cell_id,
                 hypothesis_id=hypothesis_id,
-                semantic_config_json=_canonical_json(overlay),
+                semantic_config_json=_canonical_json(policy),
             )
         )
-    if not set(hypotheses).issubset(cell_hypotheses):
-        raise ValueError("each hypothesis_id must have at least one campaign cell")
+    if cell_ids != set(_EXPECTED_CELL_HYPOTHESES):
+        raise ValueError("campaign_cells must contain the exact seven v2 comparisons")
+
+    request_identities = _validate_execution_bindings_shape(
+        _required_mapping(manifest, "execution_bindings"),
+        dataset_id=dataset_id,
+        dataset_release_digest=dataset_release_digest,
+        accessible_partitions=frozenset(str(item) for item in accessible),
+        declared_holdout_keys=frozenset(holdout_keys),
+        declared_holdout_partitions=frozenset(holdout_partitions),
+    )
 
     statistics = _required_mapping(manifest, "statistics")
-    if not statistics:
-        raise ValueError("statistics policy must be non-empty")
+    _require_exact_keys(
+        statistics,
+        {
+            "sample_floor",
+            "instruments_required",
+            "materially_different_regimes_required",
+            "expectancy_and_benchmark_alpha_95pct_lower_bound",
+            "deflated_sharpe_probability_min",
+            "fwer_or_fdr_q_max",
+            "probability_backtest_overfit_max",
+            "parameter_neighbor_pass_fraction_min",
+            "best_trade_removal",
+            "best_month_removal",
+            "drawdown_cvar_concentration_limits",
+            "two_phase_scoring",
+        },
+        "statistics",
+    )
+    for name, expected_count in {
+        "instruments_required": 3,
+        "materially_different_regimes_required": 2,
+    }.items():
+        value = statistics.get(name)
+        if isinstance(value, bool) or not isinstance(value, int) or value != expected_count:
+            raise ValueError(f"statistics.{name} must be exactly {expected_count}")
+    for name, expected_threshold in {
+        "deflated_sharpe_probability_min": 0.95,
+        "fwer_or_fdr_q_max": 0.05,
+        "probability_backtest_overfit_max": 0.1,
+        "parameter_neighbor_pass_fraction_min": 0.67,
+    }.items():
+        value = statistics.get(name)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int | float)
+            or not math.isfinite(value)
+            or not 0.0 <= value <= 1.0
+            or value != expected_threshold
+        ):
+            raise ValueError(f"statistics.{name} must be exactly {expected_threshold}")
+    for name in (
+        "sample_floor",
+        "expectancy_and_benchmark_alpha_95pct_lower_bound",
+        "best_trade_removal",
+        "best_month_removal",
+        "drawdown_cvar_concentration_limits",
+        "two_phase_scoring",
+    ):
+        _require_nonempty(f"statistics.{name}", _required_string(statistics, name))
     trial_accounting = _required_mapping(manifest, "trial_accounting")
-    if not trial_accounting:
-        raise ValueError("trial_accounting policy must be non-empty")
+    _require_exact_keys(
+        trial_accounting,
+        {
+            "record_kind_start",
+            "start_must_precede_reader",
+            "reader_and_evaluator_failures_count",
+            "multiplicity",
+            "candidate_order_or_display_rename_changes_verdict",
+        },
+        "trial_accounting",
+    )
     required_accounting = {
         "record_kind_start": KIND_TRIAL_STARTED,
         "start_must_precede_reader": True,
         "reader_and_evaluator_failures_count": True,
         "candidate_order_or_display_rename_changes_verdict": False,
     }
-    for key, expected in required_accounting.items():
-        if trial_accounting.get(key) != expected:
+    for key, expected_value in required_accounting.items():
+        if trial_accounting.get(key) != expected_value:
             raise ValueError(f"trial_accounting.{key} does not preserve the control")
     multiplicity_policy = trial_accounting.get("multiplicity")
     if not isinstance(multiplicity_policy, str) or not multiplicity_policy.strip():
@@ -2501,21 +2702,73 @@ def _validate_campaign_manifest(
         "benchmark_identity",
         "fill_policy",
         "cost_model",
+        "campaign_plan_sha256",
+        "ablation_policy_sha256",
+        "execution_bindings_sha256",
+        "certified_catalog_sha256",
+        "source_receipt_sha256",
+        "evaluator_sha256",
         "criteria_digest",
         "code_commit",
     }
     if (
         not isinstance(invalidates, list)
+        or not all(isinstance(item, str) for item in invalidates)
         or len(invalidates) != len(set(invalidates))
         or set(invalidates) != required_invalidations
     ):
         raise ValueError("identity_changes_that_invalidate_campaign must be exact and complete")
 
-    if ready and (code_commit is None or criteria_digest is None or dataset_digest is None):
+    compiler_report = (
+        _compile_campaign_manifest_for_tests(manifest)
+        if _allow_synthetic_ready_for_tests
+        else compile_campaign_manifest(manifest)
+    )
+    if ready:
+        if not compiler_report.ready or compiler_report.plan is None:
+            details = "; ".join(
+                f"{item.code.value}@{item.location}: {item.message}"
+                for item in compiler_report.blockers
+            )
+            raise ValueError(f"execution-ready campaign does not compile: {details}")
+    else:
+        expected_pending_codes = {
+            CampaignBlockerCode.EXECUTION_STATE,
+            CampaignBlockerCode.IDENTITY_UNRESOLVED,
+            CampaignBlockerCode.DECLARED_BLOCKER,
+            CampaignBlockerCode.ABLATION_POLICY_PENDING,
+            CampaignBlockerCode.RESEARCH_ABLATION_PENDING,
+            CampaignBlockerCode.UNRESOLVED_CELL_CONFIG,
+            CampaignBlockerCode.MISSING_COMPARISON_ARM,
+            CampaignBlockerCode.MISSING_NEIGHBOR_AXIS,
+            CampaignBlockerCode.UNBOUND_SHARED_SIGNAL_STREAM,
+            CampaignBlockerCode.UNBOUND_PSEUDO_EVENT_STREAM,
+            CampaignBlockerCode.UNREPRESENTABLE_ABLATION,
+            CampaignBlockerCode.EXECUTION_BINDING_PENDING,
+            CampaignBlockerCode.CERTIFIED_CATALOG_PENDING,
+            CampaignBlockerCode.PARTITION_STAGE_BINDINGS_PENDING,
+            CampaignBlockerCode.EVALUATOR_PENDING,
+        }
+        invalid = tuple(
+            blocker
+            for blocker in compiler_report.blockers
+            if blocker.code not in expected_pending_codes
+        )
+        if invalid:
+            details = "; ".join(
+                f"{item.code.value}@{item.location}: {item.message}" for item in invalid
+            )
+            raise ValueError(f"blocked campaign contains invalid compiler structure: {details}")
+
+    if ready and (code_commit is None or criteria_digest is None or dataset_release_digest is None):
         raise ValueError("execution-ready manifest requires every identity lock to be resolved")
     if not ready:
         return None
-    assert code_commit is not None and criteria_digest is not None and dataset_digest is not None
+    assert (
+        code_commit is not None
+        and criteria_digest is not None
+        and dataset_release_digest is not None
+    )
     return _CampaignBinding(
         campaign_id=campaign_id,
         manifest_sha256=_sha256_text(canonical_manifest),
@@ -2524,8 +2777,8 @@ def _validate_campaign_manifest(
         criteria_digest=criteria_digest,
         input_contract_digest=input_contract_digest(),
         dataset_id=dataset_id,
-        data_version=dataset_digest,
         accessible_partitions=frozenset(normalized_accessible),
+        request_identities=request_identities,
         cells=tuple(parsed_cells),
     )
 
@@ -2546,6 +2799,309 @@ def _validate_resolved_artifact_lock(lock: Mapping[str, object], name: str) -> N
     _require_sha256(f"{name}.sha256", digest)
     if lock.get("status") != "resolved":
         raise ValueError(f"{name}.status must be 'resolved'")
+
+
+def _validate_ablation_policy_shape(
+    policy: Mapping[str, object],
+    *,
+    context: str,
+    expected_pending_codes: frozenset[str],
+    allow_resolved_for_synthetic_tests: bool,
+) -> None:
+    """Require canonical v2 blockers, except inside the private synthetic test seam."""
+
+    _require_exact_keys(
+        policy,
+        {
+            "schema_version",
+            "status",
+            "treatment",
+            "control",
+            "comparison",
+            "allowed_differences",
+            "held_fixed",
+            "neighbor_axes",
+            "resolution_blockers",
+        },
+        context,
+    )
+    if policy.get("schema_version") != ABLATION_POLICY_SCHEMA_VERSION:
+        raise ValueError(f"{context}.schema_version must be {ABLATION_POLICY_SCHEMA_VERSION!r}")
+    status = policy.get("status")
+    blockers = _validate_resolution_blocker_objects(
+        policy.get("resolution_blockers"),
+        context=f"{context}.resolution_blockers",
+        allowed_codes=_CELL_RESOLUTION_BLOCKER_CODES,
+    )
+    blocker_codes = tuple(code for code, _message in blockers)
+    if len(blocker_codes) != len(set(blocker_codes)):
+        raise ValueError(f"{context}.resolution_blockers must use unique codes")
+    if status == "pending_resolution":
+        if (
+            policy.get("treatment") is not None
+            or policy.get("control") is not None
+            or policy.get("comparison") is not None
+            or policy.get("allowed_differences") != []
+            or policy.get("held_fixed") is not None
+            or policy.get("neighbor_axes") != []
+            or not blockers
+        ):
+            raise ValueError(
+                f"{context} pending policy must keep semantic fields null/empty and "
+                "enumerate resolution blockers"
+            )
+        if set(blocker_codes) != expected_pending_codes:
+            raise ValueError(f"{context} must retain the exact canonical pending blocker-code set")
+        return
+    if status != "resolved":
+        raise ValueError(f"{context}.status must be pending_resolution or resolved")
+    if not allow_resolved_for_synthetic_tests:
+        raise ValueError(
+            f"{context} cannot resolve under public campaign v2; a new typed campaign "
+            "schema is required"
+        )
+    if blockers:
+        raise ValueError(f"{context} resolved policy cannot retain resolution blockers")
+    for name in ("treatment", "control", "comparison", "held_fixed"):
+        if not isinstance(policy.get(name), dict):
+            raise ValueError(f"{context}.{name} must be an object when resolved")
+    for name in ("allowed_differences", "neighbor_axes"):
+        if not isinstance(policy.get(name), list):
+            raise ValueError(f"{context}.{name} must be a list when resolved")
+
+
+def _validate_execution_bindings_shape(
+    bindings: Mapping[str, object],
+    *,
+    dataset_id: str,
+    dataset_release_digest: str | None,
+    accessible_partitions: frozenset[str],
+    declared_holdout_keys: frozenset[tuple[str, str]],
+    declared_holdout_partitions: frozenset[str],
+) -> frozenset[tuple[str, str, str]]:
+    """Validate pending or test-only resolved broker/data/evaluator bindings."""
+
+    context = "execution_bindings"
+    _require_exact_keys(
+        bindings,
+        {
+            "schema_version",
+            "status",
+            "catalog_manifest_sha256",
+            "partition_stage_map",
+            "requests",
+            "evaluator",
+            "resolution_blockers",
+        },
+        context,
+    )
+    if bindings.get("schema_version") != EXECUTION_BINDINGS_SCHEMA_VERSION:
+        raise ValueError(f"{context}.schema_version must be {EXECUTION_BINDINGS_SCHEMA_VERSION!r}")
+    status = bindings.get("status")
+    blockers = _validate_resolution_blocker_objects(
+        bindings.get("resolution_blockers"),
+        context=f"{context}.resolution_blockers",
+        allowed_codes=_EXECUTION_RESOLUTION_BLOCKER_CODES,
+    )
+    if status == "pending_resolution":
+        if (
+            bindings.get("catalog_manifest_sha256") is not None
+            or bindings.get("partition_stage_map") is not None
+            or bindings.get("requests") is not None
+            or bindings.get("evaluator") is not None
+            or not blockers
+        ):
+            raise ValueError(
+                "pending execution_bindings must keep identities null and enumerate blockers"
+            )
+        return frozenset()
+    if status != "resolved":
+        raise ValueError("execution_bindings.status must be pending_resolution or resolved")
+    if blockers:
+        raise ValueError("resolved execution_bindings cannot retain resolution blockers")
+    _require_sha256(
+        "execution_bindings.catalog_manifest_sha256",
+        _required_string(bindings, "catalog_manifest_sha256"),
+    )
+    raw_stage_map = bindings.get("partition_stage_map")
+    if not isinstance(raw_stage_map, dict):
+        raise ValueError("resolved execution_bindings.partition_stage_map must be an object")
+    stage_map: dict[str, str] = {}
+    normalized_stage_partitions: set[str] = set()
+    for partition, stage in raw_stage_map.items():
+        if not isinstance(partition, str):
+            raise ValueError("execution_bindings.partition_stage_map keys must be strings")
+        _require_certified_identity(
+            f"execution_bindings.partition_stage_map.{partition}", partition
+        )
+        if not isinstance(stage, str) or stage not in {"dev", "validation"}:
+            raise ValueError(
+                f"execution_bindings.partition_stage_map.{partition} has unsupported stage"
+            )
+        normalized = _normalized_identity(partition)
+        if normalized in normalized_stage_partitions:
+            raise ValueError("execution binding stage-map partitions must be canonically unique")
+        normalized_stage_partitions.add(normalized)
+        stage_map[partition] = stage
+
+    raw_requests = bindings.get("requests")
+    if not isinstance(raw_requests, list) or not raw_requests:
+        raise ValueError("resolved execution_bindings.requests must be a list")
+    request_ids: set[str] = set()
+    semantic_requests: set[tuple[str, str, str]] = set()
+    content_identities: set[tuple[str, str]] = set()
+    request_partitions: set[str] = set()
+    for index, raw_request in enumerate(raw_requests):
+        context = f"execution_bindings.requests[{index}]"
+        if not isinstance(raw_request, dict):
+            raise ValueError(f"{context} must be an object")
+        _require_exact_keys(
+            raw_request,
+            {
+                "request_id",
+                "dataset_id",
+                "partition",
+                "data_version",
+                "source_id",
+                "source_receipt_sha256",
+            },
+            context,
+        )
+        request_id = _required_string(raw_request, "request_id")
+        _require_nonempty(f"{context}.request_id", request_id)
+        if request_id in request_ids:
+            raise ValueError("execution binding request IDs must be unique")
+        request_ids.add(request_id)
+
+        request_dataset = _required_string(raw_request, "dataset_id")
+        request_partition = _required_string(raw_request, "partition")
+        source_id = _required_string(raw_request, "source_id")
+        _require_certified_identity(f"{context}.dataset_id", request_dataset)
+        _require_certified_identity(f"{context}.partition", request_partition)
+        _require_certified_identity(f"{context}.source_id", source_id)
+        data_version = _required_string(raw_request, "data_version")
+        source_receipt = _required_string(raw_request, "source_receipt_sha256")
+        _require_sha256(f"{context}.data_version", data_version)
+        _require_sha256(f"{context}.source_receipt_sha256", source_receipt)
+
+        normalized_dataset = _normalized_identity(request_dataset)
+        normalized_partition = _normalized_identity(request_partition)
+        if normalized_partition in declared_holdout_partitions:
+            raise ValueError("execution request partition aliases a declared holdout")
+        if (normalized_dataset, normalized_partition) in declared_holdout_keys:
+            raise ValueError("execution request aliases a declared holdout identity")
+        if request_partition not in accessible_partitions:
+            raise ValueError("execution request partition is not declared accessible")
+        if request_partition not in stage_map:
+            raise ValueError("execution request partition has no stage mapping")
+        if dataset_release_digest is None:
+            raise ValueError("resolved execution bindings require a resolved dataset release")
+        if request_dataset != dataset_id:
+            raise ValueError("execution request disagrees with the campaign dataset ID")
+
+        semantic_key = (normalized_dataset, normalized_partition, data_version)
+        if semantic_key in semantic_requests:
+            raise ValueError("execution requests must have unique semantic data identities")
+        semantic_requests.add(semantic_key)
+        content_identity = (normalized_dataset, data_version)
+        if content_identity in content_identities:
+            raise ValueError(
+                "distinct execution partitions must have distinct dataset/content identities"
+            )
+        content_identities.add(content_identity)
+        request_partitions.add(request_partition)
+
+    if set(stage_map) != request_partitions:
+        raise ValueError("partition stage map must exactly cover the certified requests")
+
+    evaluator = bindings.get("evaluator")
+    if not isinstance(evaluator, dict):
+        raise ValueError("resolved execution_bindings.evaluator must be an object")
+    _require_exact_keys(
+        evaluator,
+        {"schema_version", "evaluator_id", "sha256"},
+        "execution_bindings.evaluator",
+    )
+    if evaluator.get("schema_version") != EVALUATOR_BINDING_SCHEMA_VERSION:
+        raise ValueError(
+            "execution_bindings.evaluator.schema_version must identify the v1 evaluator"
+        )
+    _require_nonempty(
+        "execution_bindings.evaluator.evaluator_id",
+        _required_string(evaluator, "evaluator_id"),
+    )
+    _require_sha256(
+        "execution_bindings.evaluator.sha256",
+        _required_string(evaluator, "sha256"),
+    )
+    return frozenset(semantic_requests)
+
+
+def _validate_resolution_blocker_objects(
+    value: object,
+    *,
+    context: str,
+    allowed_codes: frozenset[str],
+) -> tuple[tuple[str, str], ...]:
+    """Require closed-code blocker objects; free-text readiness cannot grant authority."""
+
+    if not isinstance(value, list):
+        raise ValueError(f"{context} must be a list")
+    parsed: list[tuple[str, str]] = []
+    for index, item in enumerate(value):
+        item_context = f"{context}[{index}]"
+        if not isinstance(item, dict):
+            raise ValueError(f"{item_context} must be an object")
+        _require_exact_keys(item, {"code", "message"}, item_context)
+        code = item.get("code")
+        message = item.get("message")
+        if not isinstance(code, str) or code not in allowed_codes:
+            raise ValueError(f"{item_context}.code is unknown or disallowed")
+        if not isinstance(message, str) or not message.strip():
+            raise ValueError(f"{item_context}.message must be a non-empty string")
+        parsed.append((code, message))
+    return tuple(parsed)
+
+
+def _validate_replay_policy_lock(lock: Mapping[str, object]) -> FiveToolReplayPolicy:
+    _require_exact_keys(lock, {"canonical", "sha256"}, "replay_policy")
+    canonical = _required_mapping(lock, "canonical")
+    expected_keys = set(FiveToolReplayPolicy().canonical_payload)
+    _require_exact_keys(canonical, expected_keys, "replay_policy.canonical")
+
+    initial_equity = canonical.get("initial_equity")
+    commission = canonical.get("commission_bps_per_fill")
+    slippage = canonical.get("slippage_ticks_per_fill")
+    target_slippage = canonical.get("apply_slippage_to_target_limits")
+    if isinstance(initial_equity, bool) or not isinstance(initial_equity, int | float):
+        raise ValueError("replay_policy initial_equity must be numeric")
+    if isinstance(commission, bool) or not isinstance(commission, int | float):
+        raise ValueError("replay_policy commission must be numeric")
+    if isinstance(slippage, bool) or not isinstance(slippage, int):
+        raise ValueError("replay_policy slippage ticks must be an integer")
+    if not isinstance(target_slippage, bool):
+        raise ValueError("replay_policy target-limit slippage must be boolean")
+    try:
+        policy = FiveToolReplayPolicy(
+            initial_equity=float(initial_equity),
+            parameter_variant=_required_string(canonical, "parameter_variant"),
+            fill_policy=FillPolicy(_required_string(canonical, "fill_policy")),
+            commission_bps_per_fill=float(commission),
+            slippage_ticks_per_fill=slippage,
+            apply_slippage_to_target_limits=target_slippage,
+            terminal_position_policy=TerminalPositionPolicy(
+                _required_string(canonical, "terminal_position_policy")
+            ),
+        )
+    except ValueError as error:
+        raise ValueError(f"replay_policy is invalid: {error}") from error
+    if _canonical_json(canonical) != _canonical_json(policy.canonical_payload):
+        raise ValueError("replay_policy canonical execution semantics do not match the adapter")
+    digest = _required_string(lock, "sha256")
+    _require_sha256("replay_policy.sha256", digest)
+    if digest != policy.digest:
+        raise ValueError("replay_policy.sha256 does not match its canonical policy")
+    return policy
 
 
 def _locked_append(
@@ -2623,6 +3179,11 @@ def _require_sha256(name: str, value: str) -> None:
 def _require_nonempty(name: str, value: str) -> None:
     if not value.strip():
         raise ValueError(f"{name} must be non-empty")
+
+
+def _require_certified_identity(name: str, value: str) -> None:
+    if _CERTIFIED_IDENTITY.fullmatch(value) is None:
+        raise ValueError(f"{name} is not a valid certified-data identity")
 
 
 def _require_exact_lifecycle_keys(

@@ -17,11 +17,13 @@ as if fresh — must become **structurally impossible**.
 
 This builds on two existing pieces (discovery-confirmed):
 
-- **`chronos.auditlog.AuditLog`** — a file-based, `fsync`'d, hash-chained JSONL log
+- **`chronos.auditlog.AuditLog`** — the existing file-based, `fsync`'d, hash-chained
+  JSONL record format
   (`AuditRecord{sequence, at_utc, kind, payload, previous_hash, record_hash}`;
   `_hash_record = sha256("{seq}|{at}|{kind}|{payload_json}|{prev}")`; `verify_chain`
-  detects sequence-gap / chain-break / hash-mismatch). The registry **reuses it** as
-  its ledger — tamper-evidence for free.
+  detects sequence-gap / chain-break / hash-mismatch). The registry keeps this
+  record/hash format but implements hardened descriptor-bound I/O and exact-schema
+  verification in `RegistryLedger`; it does not inherit `AuditLog`'s path semantics.
 - **`chronos.histdata.holdout`** (C1) — `HoldoutWindow` + `embargoed_view(...,
   unlocked=False)` default-masks declared windows; today `unlocked=True` is a plain
   boolean with **no token, no logging, no once-only enforcement** (its docstring names
@@ -46,17 +48,23 @@ A new **research-plane** package `chronos.registry`. It records runs and guards
 holdouts; it opens no trading database, places no order, and imports no
 order/broker/execution module.
 
-### 1. The registry ledger — hash-chained, append-only, reused from auditlog
+### 1. The registry ledger — hash-chained, append-only, AuditLog-compatible records
 
-`registry/ledger.py` wraps `AuditLog` over `research/registry/registry.jsonl`
-(separate from the trading `data/platform_audit.jsonl`). Typed record kinds:
+`registry/ledger.py` preserves the `AuditLog` record/hash format over
+`research/registry/registry.jsonl` (separate from the trading
+`data/platform_audit.jsonl`) while performing registry I/O through a hardened,
+descriptor-bound `RegistryLedger`. Typed record kinds:
 
 - `experiment_run` — one research run (§2).
+- `trial_started` — one canonical Phase-3 data-touching attempt, durably written before
+  the brokered reader may return bytes (§9).
+- `trial_terminal` — the completed/failed outcome bound to exactly one canonical start;
+  terminal records describe outcomes but do not reduce multiplicity (§9).
 - `holdout_unlock` — an owner-typed unlock was granted for a window (§3).
 - `holdout_consume` — a holdout window was read under a granted unlock; the window is
   now **burned** (§4).
 
-Every record inherits the chain's tamper-evidence; `verify_chain` (and a new CLI
+Every record retains the chain's tamper-evidence; `RegistryLedger.verify()` (and CLI
 `registry verify`) proves the ledger was not edited, reordered, or truncated. The
 ledger is the **single source of truth** for trial counts and burned-holdout status —
 not any in-memory or self-reported value.
@@ -88,41 +96,48 @@ criteria_ref, touched_data)` appends an `experiment_run`. Fields:
   (so it can never land in a serialized/logged config), validated with
   `hmac.compare_digest`; the raw phrase is never stored, logged, or echoed. Mirrors
   `orders.arming`.
-- `request_unlock(ledger, window_name, *, typed_phrase, reason, now, accrued_sessions)`
-  → validates the phrase; checks the window is **declared** and **not already burned**
-  (§4); checks the **budget** (§6); appends a `holdout_unlock` record carrying a fresh
-  random `unlock_id` (`secrets.token_hex`), the window, the reason (masked — no raw
-  phrase), and an `expires_at` (TTL setting); returns an `UnlockGrant{unlock_id,
-  window, expires_at}`. A grant is **single-use**: it authorizes exactly one consume.
-- `mediated_holdout_read(root, ledger, symbol, *, grant, now)` → verifies the grant is
-  present in the ledger, unexpired, **not yet consumed** (no prior `holdout_consume`
-  for that `unlock_id`), and covers the symbol's window; appends a `holdout_consume`
-  record (burning the window); **only then** calls the C1
-  `embargoed_view(..., unlocked=True)` and returns the unmasked series. This is the
-  **only** sanctioned path that passes `unlocked=True`.
+- `request_unlock(ledger, history_root, window_name, *, typed_phrase, reason, now,
+  accrued_sessions, ...)` → validates the phrase; checks the window is **declared**,
+  does not overlap already-burned scope, and has no overlapping active grant (§4);
+  checks the **budget** (§6); then appends a `holdout_unlock` carrying a fresh random
+  `unlock_id` (`secrets.token_hex`), the reason (never the phrase), expiry, canonical
+  window definition, name-independent scope digest, relevant stored-bar digest, and
+  full canonical HOLDOUT set digest. A grant is **single-use** and bound to those exact
+  definitions and bytes.
+- `mediated_holdout_read(ledger, history_root, symbol, *, grant, now)` → verifies the
+  exact durable grant, expiry, immutable bindings, canonical symbol path, and absence
+  of a prior consume; appends `holdout_consume` (burning the scope) **before** reading;
+  then calls the private C1 selective-unmask helper for only the authorized window.
+  Every other applicable holdout remains masked. Shipped source contains no call to
+  the broad `embargoed_view(..., unlocked=True)` bypass.
 
 ### 4. "Burned" is structural — the ledger is the authority
 
 A window with a `holdout_consume` record is **burned**. `is_burned(ledger, window)` and
 `burned_windows(ledger)` derive from the ledger. Consequences enforced in code:
 
-- `request_unlock` **refuses** a burned window (fail-closed) — a burned holdout cannot be
-  re-unlocked; re-using it as "fresh" is impossible without a new, explicitly
-  re-declared window (a deliberate, logged human act, itself recorded).
+- `request_unlock` **refuses** a burned or overlapping scope (fail-closed), including a
+  renamed declaration. A legacy burn without sufficient scope evidence blocks all new
+  unlocks until a future explicit contamination/reset protocol exists.
 - A consumed grant cannot be replayed (`mediated_holdout_read` refuses a second consume
   of the same `unlock_id`).
+- Changing the target definition, another declared holdout, or the relevant stored bytes
+  between grant and consume invalidates the grant before unmasking.
 - The M5 failure ("holdout read once, then silently treated as fresh in a later run")
   cannot occur: the ledger records the burn, and any run over a burned window is
   self-evidently over seen data.
 
 ### 5. Trial counting — derived, not declared
 
-`trial_count(ledger, *, strategy_id=None, since_criteria=None)` counts every
-`experiment_run` with `touched_data=True` (optionally scoped). Because C3's
-walk-forward inner-loop configurations and D4's AI-drafted proposals will each
-`register_run` before touching data, they are **auto-counted** — the multiple-testing N
-is a property of the ledger, never a human claim. C2 delivers the recording API +
-derivation; the deflated-Sharpe / trial-adjusted statistics that *consume* N are C3.
+`trial_count(ledger, *, strategy_id=None, since_criteria=None)` remains the compatibility
+view over legacy `experiment_run` records. The Phase-3
+`CanonicalTrialRegistry.multiplicity_snapshot()` derives one head-bound count from unique
+canonical `trial_started` attempts plus legacy data-touching `experiment_run` identities,
+deduplicated across record kinds (§9). A start counts whether it later completes, fails, or
+is interrupted; retries use distinct attempt IDs and each count. Final campaign scoring
+must consume one snapshot only after every candidate has run. The registry supplies that
+global-N fact, but order-invariant scoring and the reviewed cross-trial variance estimator
+remain separate Phase-3 work.
 
 ### 6. Budget — unlocks rationed against newly accrued data
 
@@ -160,7 +175,9 @@ Two test layers (mirroring `test_histdata_isolation` + `test_single_transmit_sit
 
 ### 8. CLI (owner-run) + settings
 
-- `chronos registry stats|trials|verify` (read-only reporting + chain verification).
+- `chronos registry stats|verify` reports/verifies the canonical lifecycle and global-N
+  snapshot. Compatibility-only `legacy-stats|legacy-verify` commands are explicitly
+  named and never presented as the canonical count.
 - `chronos holdout status` (declared/burned windows, budget) and `chronos holdout
   unlock --window W --reason R` — the **owner-run** unlock, which reads the phrase and
   calls `request_unlock`. Following the arming precedent, the phrase is not a CLI flag
@@ -169,32 +186,71 @@ Two test layers (mirroring `test_histdata_isolation` + `test_single_transmit_sit
   (`Field(ge=1)`), `max_outstanding_unlocks` (`Field(ge=0)`). The phrase stays a module
   constant, never a setting.
 
+### 9. Phase-3 canonical trial and replay-evidence extension (2026-08-08)
+
+Phase 3 adds a narrower production research path without widening the guardian:
+
+- `CanonicalTrialRegistry()` owns the fixed `research/registry/registry.jsonl` path. Its
+  private temporary-path constructor exists only for tests. A canonical start binds the
+  campaign, manifest, stage, strategy, config, code, criteria, and data identities and is
+  durable before the brokered reader may open the partition.
+- `CertifiedDatasetCatalog` is constructed from an out-of-band trusted manifest digest and
+  a fixed dataset root. Ordinary callers receive sanitized metadata only. The path-bearing
+  entry and byte-opening operation stay private to the broker; declared holdouts are
+  categorically refused, and the catalog rejects any path or content digest classified on
+  both the ordinary and holdout sides.
+- `BrokeredResearchTrialRunner` sequences start -> read -> evaluate -> retain -> terminal.
+  The evaluator receives bytes, not a path or reader capability. Reader and evaluator
+  failures receive a failed terminal when the registry remains writable, while their start
+  still counts. Completion is recorded only after all evidence is retained.
+- `ReplayObjectStore` retains immutable SHA-256-addressed input/output objects and a
+  canonical envelope binding the trial receipt, data catalog, dataset version, evaluator,
+  code, config, and criteria. The completed terminal stores the envelope digest.
+  `load_completed_evidence` verifies the terminal-bound registry identity, envelope, and
+  every referenced object after restart; a completed terminal by itself is not sufficient
+  replay evidence.
+- Every registry mutation uses a fresh descriptor-bound `RegistryLedger` inside one
+  thread- and OS-file-locked, verify-before/after transaction. This avoids stale cached
+  head/sequence state and path-replacement races across concurrent writers; the existing
+  anchor still supplies rollback/truncation detection.
+
+This is infrastructure, not a certified campaign verdict. Registry and replay-store paths
+are frozen from each capability's construction-time working directory, and the runner
+refuses capabilities from different workspaces before recording a start. Constructing both
+from the trusted Chronos workspace remains an operational boundary. Path traversal is
+descriptor-relative and rejects symlinked/replaced components. The local anchor is unsigned.
+A Python evaluator is not a sandbox and must be reviewed. Legacy `research.campaign` and
+`research.walkforward` paths still touch data before their legacy registration; they are not
+brokered or certified. The Five-Tool manifest remains blocked pending real data/code/criteria
+locks and evaluator authorization. No final-N seal, reviewed variance estimator, untouched
+holdout result, or promotion artifact is created by this extension.
+
 ## Honesty bounds
 
 - **"Typed by the owner" is enforced structurally + by phrase**, not by a runtime
   interactivity check (the codebase has none). An owner who scripts the phrase into an
   automated caller defeats it — but the structural test guarantees no *shipped*
   scheduled/proposal/copilot path can, which is the DoD's actual requirement.
-- **The research runner is not rewired** to consume the histdata store or to call
-  `register_run` automatically in this milestone; C2 delivers the registry + guardian
-  and the `data_fingerprint`, and records runs through the new API. Wiring the existing
-  runner/shadow paths to auto-register is a follow-on (kept out to avoid changing
-  established research provenance mid-milestone).
+- **Legacy research paths are not brokered.** The Phase-3 runner in §9 enforces canonical
+  start-before-read and evidence retention for callers that use it; existing campaign,
+  walk-forward, generic runner, and shadow paths are unchanged and cannot claim that
+  guarantee.
 - **The budget policy is a first cut** (linear accrual credits); it rations, it does not
   model statistical power — that lands with C3/C4.
 - **No copilot module exists**; its bar is prospective (§7).
 
 ## What proves it
 
-- Ledger: append + `verify_chain` passes; a tampered line fails with the right class;
+- Ledger: append + `RegistryLedger.verify()` passes; a tampered line fails with the right class;
   records round-trip.
-- Guardian: a correct phrase grants an unlock (logged, no raw phrase in the record); a
-  wrong phrase fails; a grant authorizes exactly **one** consume (second consume
-  refused); an expired grant is refused; a burned window cannot be re-unlocked;
-  `mediated_holdout_read` is the only path that unmasks, and it records the burn first.
+- Guardian: a correct phrase grants an immutable scope/data/set-bound unlock (logged, no
+  raw phrase in the record); a wrong phrase fails; a grant authorizes exactly **one**
+  consume; expiry, definition drift, data drift, renaming, overlap, and replay are refused;
+  the private selective helper unmasks only that scope after the burn is recorded.
 - Budget: zero budget fails closed; accrual grants exactly the rationed number.
-- Trial count: N equals the number of data-touching runs in the ledger, not a
-  self-reported field.
+- Trial count: the canonical snapshot equals unique starts plus legacy data-touching runs,
+  is bound to one verified ledger head, and counts completed, failed, retried, and orphaned
+  starts rather than a self-reported field.
 - Structural: `chronos.registry` imports nothing forbidden; the scheduler / service /
   proposal / promotion / submission modules import neither the guardian module nor call
   its unlock functions; subprocess probe leaks nothing.
@@ -221,8 +277,9 @@ claims below are the corrected, honest ones.
   arming service it mirrors uses a lock; the guardian had dropped it. **Fix:** the
   read-verify-append critical section holds an exclusive **OS file lock** (`fcntl.flock`).
 - **safety-3 (HIGH) — the guardian was bypassable.** `embargoed_view(unlocked=True)` had
-  no single-site guard. **Fix:** `test_single_unmask_site.py` asserts `unlocked=True` is
-  passed from exactly one site (the guardian).
+  no single-site guard. **Fix:** shipped source is forbidden from passing that broad flag;
+  `test_single_unmask_site.py` permits the private selective-unmask helper at exactly one
+  call site in the guardian.
 - **safety-4 (HIGH) — the no-automated-unlock test had coverage holes.** **Fix:** it now
   scans the whole automated tree (`service`/`services`/`control`/`execution`/`orders` +
   `runtime.py`), not a hand-picked list.
@@ -237,10 +294,11 @@ catch accidental/incidental truncation, deletion, in-place edits, and rollback, 
 *shipped* automated path can invoke the unlock. Out of scope (disclosed): an actor who
 rewrites **both** the ledger and its anchor consistently (the anchor is not a signed,
 off-host root of trust), a determined **runtime-reflection** evasion of the unlock guard,
-and completeness of the **trial count** (it is derived from *registered* runs; auto-
-registration of the runner is a follow-on). Single-writer concurrency is enforced by the
-file lock. §3's `mediated_holdout_read(ledger, history_root, symbol, ...)` argument order
-is authoritative.
+and completeness of the **trial count** outside the §9 brokered path (it is derived from
+registered records; legacy research paths remain a follow-on). Registry writers use fresh
+state inside the shared file lock; single-writer concurrency is enforced by that lock.
+§3's `mediated_holdout_read(ledger, history_root, symbol, ...)` argument order is
+authoritative.
 
 > **Update (2026-08-09) — the trial-count residual is narrowed for one path, not closed.**
 > The Five-Tool trial broker (`src/chronos/research/five_tool_trials.py`) now writes an

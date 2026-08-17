@@ -716,3 +716,45 @@ def _require_exact_keys(
             f"{context} keys do not match schema; "
             f"missing={sorted(expected - present)}, unknown={sorted(present - expected)}"
         )
+
+
+# Signal-to-ledger adapter lives in signal_replay.py. Re-export so both the
+# default-branch artifact store and PR-73 replay_five_tool tests share this module.
+from chronos.research.five_tool.signal_replay import (  # noqa: E402
+    FiveToolReplayPolicy,
+    FiveToolReplayResult,
+    IncompleteReplayError,
+    ReplayBar,
+    ReplayInputError,
+    TerminalPositionPolicy,
+    replay_five_tool,
+)
+
+__all__ = (
+    "ARTIFACT_FILENAME_PREFIX",
+    "OUTCOME_COMPLETED",
+    "OUTCOME_FAILED",
+    "REPLAY_ARTIFACT_SCHEMA_VERSION",
+    "FiveToolReplayPolicy",
+    "FiveToolReplayResult",
+    "IncompleteReplayError",
+    "ReplayArtifact",
+    "ReplayArtifactDigestMismatch",
+    "ReplayArtifactError",
+    "ReplayArtifactInvalid",
+    "ReplayArtifactMissing",
+    "ReplayArtifactUnavailable",
+    "ReplayBar",
+    "ReplayDivergence",
+    "ReplayDivergenceReason",
+    "ReplayFinding",
+    "ReplayInputError",
+    "TerminalPositionPolicy",
+    "artifact_digest",
+    "compare_replay_bodies",
+    "load_replay_artifact",
+    "replay_five_tool",
+    "require_artifact_root",
+    "validate_artifact_body",
+    "write_replay_artifact",
+)

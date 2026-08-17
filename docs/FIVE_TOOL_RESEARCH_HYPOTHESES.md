@@ -11,17 +11,47 @@ The Five-Tool Pine program combines several economically different ideas. Agreem
 the Pine calculation would establish implementation fidelity, not alpha. A profitable
 full-stack backtest would not identify which idea helped, and an attractive cell selected
 after looking at all cells would be a multiple-testing artifact unless every attempt were
-counted. This document therefore registers six separate hypotheses, a full-stack reference
-cell, common rejection tests, and the identities whose change starts a new campaign.
+counted. This document therefore registers six separate hypotheses, one top-level
+full-stack reference arm, seven paired-comparison cells (RSI and MFI divergence remain
+separate), common rejection tests, and the identities whose change starts a new campaign.
 
-No campaign result exists in this document. The checked-in manifest is blocked until the
-certified dataset digest, power calculation, accessible partitions, code/criteria digests,
-and owner risk limits are frozen. QQQ 2022-01 through 2024-01 is already consumed and is
-not a clean holdout. The checked manifest broker refuses all data while blocked, and
-this slice contains no holdout guardian or unlock capability. Public v1 validation also
-refuses any manifest changed to `ready_for_certified_research`: prose and digests cannot
-stand in for the missing certified-reader, replay-artifact, owner-evidence, and canonical
-ADR-0013 registry capabilities.
+No campaign result exists in this document. Campaign v2
+`five-tool-v3.6-preregistered-002` supersedes v1
+`five-tool-v3.6-preregistered-001`; v1 was superseded before any campaign data read,
+or result. The checked-in v2 manifest is structurally
+non-executable; a reviewed successor would additionally remain blocked until the certified
+dataset-release digest, power calculation, accessible partitions, code/criteria digests, and owner
+risk limits are frozen. QQQ 2022-01 through 2024-01 is already consumed and is not a clean
+holdout. The checked manifest broker refuses all data while blocked, and no Five-Tool
+campaign path can invoke the repository's separately owner-gated holdout guardian. Public
+v2 validation also refuses any manifest changed to
+`ready_for_certified_research`: the new canonical trial registry, manifest-bound ordinary
+reader, replay object store, and causal fill adapter are infrastructure, not proof that
+this campaign's dataset, evaluator, owner limits, or readiness locks have been certified.
+
+The v2 manifest replaces prose `config_overlay` labels with exact typed campaign
+structures. Every comparison currently has `status: pending_resolution`, null
+treatment/control/comparison fields, and closed-code `{code, message}` blockers. The
+catalog, partition-to-stage requests, source receipts, and evaluator identity are likewise
+an exact pending execution-binding object. Unknown blocker codes, free-text blocker
+strings, and extra waiver fields are invalid. Any one blocker suppresses the entire
+compiled plan, so this checked artifact authorizes **zero executable campaign trials**.
+Public campaign v2 requires each canonical cell's exact pending blocker-code set and
+categorically refuses a resolved substitute. In particular, generic Pine `risk_pct` pairs
+cannot stand in for H3's shared signal stream, H4's timestamp-matched pseudo-events, or
+H6's shared opportunity stream. The current schema has no typed evaluator variant capable
+of representing those semantics, so an executable campaign requires a reviewed schema and
+campaign-identity revision.
+
+An opaque research-policy digest cannot clear an `unrepresentable_ablation`,
+`unbound_shared_signal_stream`, or `unbound_pseudo_event_stream` blocker; a reviewed typed
+evaluator variant must exist. When a future campaign revision makes a Pine-only pair
+representable, its complete effective-config difference must exactly equal its declared
+Pine selectors, all other settings and replay policy must use the fixed-coordinate
+literal, and every neighbor axis must be a preregistered monotone single-input axis. Cell
+`role` prose is display-only and is excluded from compiled semantic campaign/cell hashes.
+It still changes the exact whole-manifest audit SHA carried by the current trial
+blueprint; no scoring consumer or verdict exists yet.
 
 ## Evidence the cited sources do and do not provide
 
@@ -160,6 +190,16 @@ assumption. They are strategy-specific mechanisms that must earn evidence from z
 
 ## Common campaign tests (all cells)
 
+The checked v2 manifest does not compile an executable plan. Its seven comparison
+policies and its catalog/partition/evaluator bindings are all pending, and compilation is
+campaign-atomic: one blocker means zero executable trials. The private test fixture can
+replace those pending objects with resolved Pine-only pairs and synthetic execution
+bindings through an unexported test-only compiler seam to exercise ledger lifecycle
+behavior. It binds each trial's semantic config to the canonical ablation-policy JSON,
+but the public compiler refuses the same generic substitution and it grants no public
+data or execution authority. Even the private seam retains all identity, neighbor,
+request, source, and holdout-alias checks.
+
 The private synthetic lifecycle harness gives every attempted parameterization, ablation,
 retry, reader failure, and evaluator failure a unique durable `trial_started` record
 before its callback reader is invoked. Its multiplicity is only the count of unique start
@@ -172,6 +212,25 @@ cross-trial Sharpe variance. The current private harness can seal ledger-local e
 and a supplied variance identity for lifecycle tests only. It cannot produce a Phase-3
 score or final verdict. Candidate display names and evaluation order remain excluded from
 the intended scoring identity.
+
+Chronos now also provides a separate brokered evidence path:
+`CanonicalTrialRegistry` writes a unique start to the fixed canonical registry,
+`CertifiedDatasetCatalog` opens only the exact authenticated ordinary partition after that
+start, `ReplayObjectStore` retains exact input/output bytes, and
+`BrokeredResearchTrialRunner` writes the terminal outcome only after a replay envelope is
+durable. Starts—not terminals—define the canonical multiplicity snapshot, so failed,
+interrupted, and repeated attempts remain counted. The Five-Tool manifest is not yet wired
+to this path, and the snapshot is not a final score seal or reviewed variance estimate.
+Any future resolved execution binding must use identities accepted by
+`CertifiedDataRequest`, provide one exact source receipt per request, and keep normalized
+`(dataset_id, partition, data_version)` request keys unique; changing source labels cannot
+multiply one data request. An accessible or requested partition that aliases any declared
+holdout partition is refused regardless of stage. The global
+`data.dataset_version_lock.sha256` identifies the certified release/bundle manifest; it is
+not a partition-content digest. Each request's `data_version` instead identifies that
+partition's exact bytes. Distinct partitions must have distinct normalized
+`(dataset_id, data_version)` content identities, and the callback harness independently
+checks returned bytes against the selected request's digest.
 
 A cell cannot pass unless all applicable checks below pass unchanged:
 
@@ -210,8 +269,19 @@ after observing a result.
 - TradingView bar magnifier can choose a different within-bar target/stop ordering than
   chart-timeframe OHLCV. Signal parity is reported separately; the Chronos approximation
   is conservative stop-first and labeled as such.
+- The entry bar resolves only the absolute signal-time stop pre-submitted for every leg;
+  targets remain inactive until later bars, when the ladder is rebased to actual adverse
+  next-open execution without resizing signal-time quantity or risk. This is frozen replay
+  policy, not a fill-parity claim.
+- Lower-timeframe magnifier mode requires complete, identity-matched sub-bar coverage that
+  reproduces parent OHLC for every replay bar, even while flat. Missing or incomplete
+  coverage fails closed; it never silently falls back to chart OHLC.
 - Expanding Markov/dwell state changes with loaded history. `history_start_utc` is identity,
-  and alternate starts are sensitivity trials, never a silent data-loader choice.
+  and alternate starts are sensitivity trials, never a silent data-loader choice. The
+  signal-to-ledger adapter is full-from-origin only and has no checkpoint/resume contract.
+- Result identity binds all effective primary/companion identities and values, explicit
+  primary open timestamps, and lower-timeframe identity/OHLC evidence. Caller account
+  snapshots are excluded only because replay overwrites them with result-bound owned state.
 - A three-leg position is not three independent hypotheses or necessarily three
   independent trades. Statistics disclose leg-level versus position-level accounting.
 - Exit reasons must be explicit events. A missing leg identifier is not by itself proof
@@ -230,19 +300,32 @@ after observing a result.
 ## Campaign invalidation and honest restart
 
 Any change to one of the following ends this campaign identity: Pine SHA, executable
-input-contract/config digest, certified dataset digest, history start, benchmark, fill
-policy, cost model, criteria digest, or code commit. A changed identity receives a new
-campaign id. Before Phase 3 can run, both old and new attempts must be recorded in the
-canonical ADR-0013 registry so a new path or restart cannot erase prior multiplicity. The
-current Five-Tool ledger is path-local and does not provide that integration.
+input-contract/config digest, certified dataset-release digest, history start, benchmark, fill
+policy, canonical replay-policy SHA-256 (including terminal policy, entry-stop/later-ladder
+timing, target-limit slippage, and discretionary/protective priority), cost model,
+compiled campaign-plan/topology SHA, ablation-policy SHA, execution-bindings SHA,
+certified-catalog SHA, any source-receipt SHA, evaluator SHA, criteria digest, or code
+commit. A changed identity receives a new campaign id. Campaign-cell ordering, request
+ordering, and `role` display prose do not enter the compiler's semantic campaign/cell
+hashes; stable IDs are sorted before those hashes are derived. They do change the exact
+whole-manifest audit SHA, and each current trial blueprint carries that SHA. No scoring
+consumer or verdict exists. Future wiring must bind and use both the exact reviewed
+artifact SHA and the semantic plan/cell hashes correctly before it can claim
+order-invariant scoring. Before Phase 3 can run, both old and new attempts must be recorded
+through the fixed canonical ADR-0013 capability so a new evidence path or restart cannot
+erase prior multiplicity. The private Five-Tool lifecycle harness remains path-local; the
+new canonical runner exists, but this blocked campaign has not been authorized or wired to
+it.
 
-No holdout guardian or unlock capability exists in this slice. Any future
-owner-authorized guardian may open the untouched holdout only after all
+No Five-Tool evaluator imports or exposes a holdout unlock capability. The repository's
+separate owner-authorized guardian may open an untouched holdout only after all
 development/validation choices are frozen. Failure on that one unchanged holdout means
 rejection, not a threshold edit, new ablation, or second “final” window under the old id.
 
 The private lifecycle harness accepts arbitrary reader and evaluator callbacks. A callback
 can preload data or touch undeclared sources, so its start-before-callback ordering is not
-proof that every underlying data touch was brokered. Evaluation artifacts are hashed but
-not retained in a content-addressed replay store, and a variance digest carries no reviewer
-attestation here. These are explicit test-harness boundaries, not certified evidence.
+proof that every underlying data touch was brokered. Its evaluation artifacts are hashed
+but not retained. The separate brokered runner removes the reader callback, retains its
+declared input/output objects, and binds them to canonical start/terminal hashes; it is not
+a Python sandbox, so only reviewed evaluators may be used. No campaign-ready Five-Tool
+evaluator, owner attestation, final-N seal, or reviewed variance evidence exists yet.

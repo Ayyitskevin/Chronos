@@ -1,4 +1,4 @@
-"""The walk-forward research code must never reach the real order/broker path (ADR-0014).
+"""The research evidence plane must never reach the real order/broker path.
 
 The research plane deliberately drives the deterministic backtest engine, which uses the
 *simulated* execution broker — so unlike ``registry``/``histdata`` it legitimately reaches
@@ -23,7 +23,37 @@ import chronos.research as research_pkg
 # The real trading edge C3 must not touch. NOT chronos.execution/control/risk: those are
 # reached through the *simulated* backtest engine by design (see module docstring).
 _FORBIDDEN = ("chronos.orders", "chronos.broker")
-_C3_MODULES = ("stats", "walkforward", "purged_cv", "campaign", "repro")
+_BROKERED_RUNNER_FORBIDDEN = (
+    "chronos.api",
+    "chronos.autonomy",
+    "chronos.broker",
+    "chronos.control",
+    "chronos.execution",
+    "chronos.orders",
+    "chronos.persistence",
+    "chronos.risk",
+    "chronos.service",
+    "chronos.services",
+    "chronos.strategy",
+    "chronos.strategies",
+    "chronos.supervisor",
+    "fastapi",
+    "httpx",
+    "ib_async",
+    "ibapi",
+    "sqlalchemy",
+    "sqlite3",
+)
+_C3_MODULES = (
+    "stats",
+    "walkforward",
+    "purged_cv",
+    "campaign",
+    "repro",
+    "certified_data",
+    "replay_store",
+    "trial_runner",
+)
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
@@ -40,7 +70,12 @@ def _imported_names(source: str) -> list[str]:
             names.extend(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module:
             names.append(node.module)
+            names.extend(f"{node.module}.{alias.name}" for alias in node.names)
     return names
+
+
+def test_import_matcher_sees_subpackage_aliases() -> None:
+    assert "chronos.broker" in _imported_names("from chronos import broker\n")
 
 
 def test_c3_modules_exist() -> None:
@@ -57,12 +92,22 @@ def test_c3_modules_have_no_forbidden_ast_imports() -> None:
                 )
 
 
+def test_brokered_trial_runner_has_no_trading_database_network_or_promotion_imports() -> None:
+    path = Path(research_pkg.__file__).parent / "trial_runner.py"
+    for name in _imported_names(path.read_text(encoding="utf-8")):
+        for forbidden in _BROKERED_RUNNER_FORBIDDEN:
+            assert not (name == forbidden or name.startswith(forbidden + ".")), (
+                f"trial_runner.py imports forbidden authority {name!r}"
+            )
+
+
 def test_importing_walkforward_leaks_no_order_or_broker_module() -> None:
     prefixes = repr(_FORBIDDEN)
     probe = (
         "import chronos.research.stats, chronos.research.walkforward, "
         "chronos.research.purged_cv, chronos.research.campaign, "
-        "chronos.research.repro, sys; "
+        "chronos.research.repro, chronos.research.certified_data, "
+        "chronos.research.replay_store, chronos.research.trial_runner, sys; "
         f"bad=[m for m in sys.modules if m.startswith({prefixes})]; "
         "print(';'.join(sorted(bad)))"
     )

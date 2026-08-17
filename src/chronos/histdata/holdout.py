@@ -82,15 +82,30 @@ def load_holdouts(root: Path) -> tuple[HoldoutWindow, ...]:
     if not path.exists():
         return ()
     doc = json.loads(path.read_text(encoding="utf-8"))
-    return tuple(HoldoutWindow.from_mapping(item) for item in doc.get("windows", []))
+    windows = tuple(HoldoutWindow.from_mapping(item) for item in doc.get("windows", []))
+    _require_unique_names(windows)
+    return windows
 
 
 def write_holdouts(root: Path, windows: Iterable[HoldoutWindow]) -> None:
-    ordered = sorted(windows, key=lambda w: (w.start, w.end, w.name))
+    materialized = tuple(windows)
+    _require_unique_names(materialized)
+    ordered = sorted(materialized, key=lambda w: (w.start, w.end, w.name))
     payload = {"schema_version": 1, "windows": [w.to_mapping() for w in ordered]}
     path = holdouts_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _require_unique_names(windows: Iterable[HoldoutWindow]) -> None:
+    seen: set[str] = set()
+    duplicates: set[str] = set()
+    for window in windows:
+        if window.name in seen:
+            duplicates.add(window.name)
+        seen.add(window.name)
+    if duplicates:
+        raise ValueError(f"duplicate holdout window names are forbidden: {sorted(duplicates)}")
 
 
 def embargoed_view(
@@ -105,10 +120,32 @@ def embargoed_view(
     if unlocked:
         return series
     applicable = [w for w in holdouts if w.applies_to(symbol)]
-    if not applicable:
+    return _mask_windows(series, applicable)
+
+
+def _embargoed_view_with_window_unlocked(
+    series: BarSeries,
+    holdouts: Iterable[HoldoutWindow],
+    symbol: str,
+    *,
+    window_name: str,
+) -> BarSeries:
+    """Unmask exactly one guardian-authorized window; keep every other mask."""
+
+    applicable = [
+        window for window in holdouts if window.applies_to(symbol) and window.name != window_name
+    ]
+    return _mask_windows(series, applicable)
+
+
+def _mask_windows(series: BarSeries, applicable: Iterable[HoldoutWindow]) -> BarSeries:
+    applicable_windows = tuple(applicable)
+    if not applicable_windows:
         return series
     kept = tuple(
-        bar for bar in series.bars if not any(w.contains(bar.session_date) for w in applicable)
+        bar
+        for bar in series.bars
+        if not any(window.contains(bar.session_date) for window in applicable_windows)
     )
     return BarSeries(symbol=series.symbol, interval=series.interval, bars=kept)
 

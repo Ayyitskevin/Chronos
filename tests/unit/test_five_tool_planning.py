@@ -23,6 +23,7 @@ from chronos.research.five_tool.planning import (
     SleeveState,
     UnsupportedMagnifierError,
     apply_fill_to_milestones,
+    build_filled_position_plan,
     build_position_plan,
     milestone_stop,
     pine_quantity_plan,
@@ -233,6 +234,34 @@ def test_one_leg_plan_targets_t2_and_three_leg_plan_has_explicit_milestones() ->
     assert [leg.target_price for leg in three.legs] == [90.0, 80.0, None]
 
 
+@pytest.mark.parametrize(
+    ("side", "signal_stop", "fill", "expected_stop", "expected_targets"),
+    [
+        (PositionSide.LONG, 90.0, 107.0, 97.0, (117.0, 127.0, None)),
+        (PositionSide.SHORT, 110.0, 93.0, 103.0, (83.0, 73.0, None)),
+    ],
+)
+def test_filled_plan_rebases_ladder_without_resizing_signal_quantity(
+    side: PositionSide,
+    signal_stop: float,
+    fill: float,
+    expected_stop: float,
+    expected_targets: tuple[float | None, ...],
+) -> None:
+    quantity_plan = pine_quantity_plan(
+        _request(side, signal_stop, equity=90_000.0, risk_pct=0.1, cap_pct=200.0)
+    )
+    signal_plan = build_position_plan(quantity_plan)
+    filled_plan = build_filled_position_plan(quantity_plan, entry_fill_price=fill)
+
+    assert filled_plan.requested_quantity == signal_plan.requested_quantity
+    assert filled_plan.risk_distance == signal_plan.risk_distance == 10.0
+    assert [leg.quantity for leg in filled_plan.legs] == [3.0, 3.0, 3.0]
+    assert filled_plan.entry_reference_price == fill
+    assert filled_plan.initial_stop_price == expected_stop
+    assert tuple(leg.target_price for leg in filled_plan.legs) == expected_targets
+
+
 def test_same_bar_priority_is_policy_driven_and_oco_returns_one_fill() -> None:
     stop_first = resolve_exit_fill(_order(), _bar(), policy=FillPolicy.OHLC_STOP_FIRST)
     target_first = resolve_exit_fill(_order(), _bar(), policy=FillPolicy.OHLC_TARGET_FIRST)
@@ -403,6 +432,49 @@ def test_magnifier_rejects_cross_symbol_source_or_interval_bars() -> None:
                 parent,
                 policy=FillPolicy.LOWER_TIMEFRAME_MAGNIFIER,
                 lower_timeframe_bars=(corrupted, second),
+            )
+
+
+def test_magnifier_rejects_duplicate_parent_or_subbar_sequence_identity() -> None:
+    parent = _bar(
+        sequence_id="parent",
+        open_=100.0,
+        high=112.0,
+        low=88.0,
+        close=95.0,
+        start=NOW - timedelta(minutes=2),
+        interval="2m",
+    )
+    first = _bar(
+        sequence_id="m1",
+        timestamp=NOW - timedelta(minutes=1),
+        start=NOW - timedelta(minutes=2),
+        open_=100.0,
+        high=112.0,
+        low=99.0,
+        close=109.0,
+        interval="1m",
+    )
+    second = _bar(
+        sequence_id="m2",
+        start=NOW - timedelta(minutes=1),
+        open_=109.0,
+        high=110.0,
+        low=88.0,
+        close=95.0,
+        interval="1m",
+    )
+
+    for duplicate in (
+        replace(second, sequence_id=first.sequence_id),
+        replace(second, sequence_id=parent.sequence_id),
+    ):
+        with pytest.raises(UnsupportedMagnifierError, match="sequence identities"):
+            resolve_exit_fill(
+                _order(),
+                parent,
+                policy=FillPolicy.LOWER_TIMEFRAME_MAGNIFIER,
+                lower_timeframe_bars=(first, duplicate),
             )
 
 

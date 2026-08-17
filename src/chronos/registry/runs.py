@@ -23,7 +23,12 @@ from pathlib import Path
 
 from chronos.auditlog.log import AuditRecord
 from chronos.histdata.store import manifest_path
-from chronos.registry.ledger import KIND_RUN, RegistryLedger
+from chronos.registry.ledger import (
+    KIND_RUN,
+    RegistryLedger,
+    verified_registry_records,
+    verified_registry_transaction,
+)
 
 _NULL_COMMITS = frozenset({"", "unknown"})
 
@@ -114,7 +119,19 @@ def register_run(
         "criteria_ref": criteria_ref,
         "touched_data": touched_data,
     }
-    return ledger.append(KIND_RUN, payload)
+    # The supplied object may have cached a head before another writer appended.
+    # Recover a fresh writer under the shared lock and verify before/after mutation.
+    with verified_registry_transaction(ledger._path_capability) as fresh:
+        if any(
+            record.kind == KIND_RUN
+            and record.payload.get("experiment_id") == payload["experiment_id"]
+            for record in fresh.records()
+        ):
+            raise ValueError(
+                f"experiment_id {payload['experiment_id']!r} is already registered; "
+                "every data-touching run requires a unique identity"
+            )
+        return fresh.append(KIND_RUN, payload)
 
 
 def trial_count(ledger: RegistryLedger, *, strategy_id: str | None = None) -> int:
@@ -125,7 +142,9 @@ def trial_count(ledger: RegistryLedger, *, strategy_id: str | None = None) -> in
     """
 
     count = 0
-    for record in ledger.records_of(KIND_RUN):
+    for record in verified_registry_records(ledger._path_capability):
+        if record.kind != KIND_RUN:
+            continue
         if not record.payload.get("touched_data", False):
             continue
         if strategy_id is not None and record.payload.get("strategy_id") != strategy_id:
