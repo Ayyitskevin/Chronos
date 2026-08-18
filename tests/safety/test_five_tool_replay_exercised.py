@@ -98,7 +98,7 @@ _CRITERIA_PATH = _ROOT / "docs/FIVE_TOOL_RESEARCH_HYPOTHESES.md"
 _DATA = b"content-addressed-certified-five-tool-dataset-v1\n"
 _DATA_SHA256 = hashlib.sha256(_DATA).hexdigest()
 _CODE_COMMIT = "1" * 40
-_REFERENCE_CELL = "5t-full-default-reference"
+_REFERENCE_CELL = "5t-trend-directional-paired"
 _ARTIFACT = b'{"metric":"raw-score-evidence-that-is-now-persisted"}'
 _VARIANCE = ReviewedVarianceEvidence(0.04, "reviewed-sample-variance-v1", "f" * 64)
 _DATASET_FILES: dict[str, bytes] = {
@@ -146,6 +146,28 @@ def _synthetic_ready_manifest(*, dataset_sha256: str = _DATA_SHA256) -> dict[str
         "status": "resolved",
         "required_before_execution": True,
     }
+    manifest["execution_bindings"] = {
+        "schema_version": "chronos-five-tool-execution-bindings-v1",
+        "status": "resolved",
+        "catalog_manifest_sha256": "a" * 64,
+        "partition_stage_map": {"validation": "validation"},
+        "requests": [
+            {
+                "request_id": "synthetic-validation",
+                "dataset_id": "five-tool-certified-daily-v1",
+                "partition": "validation",
+                "data_version": dataset_sha256,
+                "source_id": "synthetic-lifecycle-source",
+                "source_receipt_sha256": "b" * 64,
+            }
+        ],
+        "evaluator": {
+            "schema_version": "chronos-five-tool-evaluator-v1",
+            "evaluator_id": "synthetic-lifecycle-evaluator",
+            "sha256": "c" * 64,
+        },
+        "resolution_blockers": [],
+    }
     return manifest
 
 
@@ -166,7 +188,7 @@ def _definition(
         hypothesis_id=cells[0]["hypothesis_id"],
         strategy_id=manifest["strategy"]["strategy_id"],
         semantic_config=(
-            copy.deepcopy(cells[0]["config_overlay"]) if config is None else copy.deepcopy(config)
+            copy.deepcopy(cells[0]["ablation_policy"]) if config is None else copy.deepcopy(config)
         ),
         code_commit=code_commit or manifest["code_commit_lock"]["git_commit"],
         criteria_digest=criteria_digest or manifest["criteria_lock"]["sha256"],
@@ -720,8 +742,8 @@ def _seal_reference_cell(
             criteria_digest=binding.criteria_digest,
             input_contract_digest=binding.input_contract_digest,
             dataset_id=binding.dataset_id,
-            data_version=binding.data_version,
             accessible_partitions=binding.accessible_partitions,
+            request_identities=binding.request_identities,
             cells=tuple(cell for cell in binding.cells if cell.cell_id == _REFERENCE_CELL),
         ),
     )
@@ -774,9 +796,12 @@ def _rewrite_last_record(ledger_path: Path, payload: dict[str, Any]) -> None:
         for record in records
     ]
     ledger_path.unlink()
-    anchor = ledger_path.parent / f"{ledger_path.name}.anchor"
-    if anchor.exists():
-        anchor.unlink()
+    for extra in (
+        ledger_path.parent / f"{ledger_path.name}.anchor",
+        ledger_path.parent / f"{ledger_path.name}.lock",
+        ledger_path.parent / f"{ledger_path.stem}.head.json",
+    ):
+        extra.unlink(missing_ok=True)
     fresh = RegistryLedger(ledger_path)
     starts: dict[str, Any] = {}
     for kind, item in rebuilt:

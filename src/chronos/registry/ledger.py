@@ -538,9 +538,22 @@ def _coerce_capability(
 def registry_lock(
     ledger_path: Path | _RegistryPathCapability,
 ) -> Iterator[_RegistryDirectory]:
-    """Thread + OS lock guarding one descriptor-relative registry transaction."""
+    """Thread + OS lock guarding one descriptor-relative registry transaction.
+
+    Nested calls on the same thread reuse the already-published directory.
+    ``threading.Lock`` and a second ``flock`` on a new fd are both
+    non-reentrant; without this reuse, ``registered_trial_count`` (outer lock)
+    calling ``trial_count`` → ``verified_registry_records`` (inner lock)
+    deadlocks the worker thread. That hang cancelled CI at the 10-minute cap.
+    """
 
     capability = _coerce_capability(ledger_path)
+    active = _active_directory_for(capability.path)
+    if active is not None:
+        active.assert_still_bound()
+        yield active
+        return
+
     with _thread_lock_for(capability):
         directory = capability.open_parent(create=True)
         assert directory is not None
