@@ -37,8 +37,9 @@ three times over:
 1. **Gather** — read the backend's own token-protected read endpoints (account
    summary, positions, open orders, recent daily bars for the watchlist) and
    freeze them into one canonical-JSON snapshot with a SHA-256 digest.
-2. **Think** — send the snapshot to Claude with the owner's editable trading
-   policy (``worker/policy.md``) as the system prompt, forcing a single
+2. **Think** — send the snapshot to the configured provider (Claude by default,
+   or Grok via ``CHRONOS_WORKER_PROVIDER=xai``) with the owner's editable
+   trading policy (``worker/policy.md``) as the system prompt, forcing a single
    ``propose_decision`` tool call so the answer arrives as structure, never
    prose to parse.
 3. **Propose** — treat the model's output as hostile: validate it against the

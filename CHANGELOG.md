@@ -1,5 +1,13 @@
 # CHANGELOG
 
+## [Unreleased] — Grok/xAI worker provider, SHADOW only (2026-08-18)
+
+`CHRONOS_WORKER_PROVIDER=xai` plus a console `XAI_API_KEY` selects a raw-httpx
+Chat Completions transport (`worker/model_xai.py`) that forces `propose_decision`.
+Anthropic remains the default. `CHRONOS_WORKER_FORWARD` still defaults false.
+No new authority, no broker-process network channel, no live path. Register Grok
+as its own proposer — do not reuse the Claude credential. See D-28.
+
 ## [Unreleased] — the Five-Tool research slice: fidelity and preregistration, no evidence of edge (2026-08-09)
 
 Integration of `codex/five-tool-confluence-v36` — a deterministic research-plane

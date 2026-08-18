@@ -17,6 +17,9 @@ from worker.config import WorkerConfig, WorkerConfigError, load_config
 from worker.cycle import CycleOutcome, run_cycle
 from worker.evidence import EvidenceSnapshot, gather
 from worker.model import ANTHROPIC_URL, build_request, think
+from worker.model_xai import XAI_URL
+from worker.model_xai import build_request as build_xai_request
+from worker.model_xai import think as think_xai
 
 API_KEY = "sk-test-key-never-logged"
 TOKEN = "backend-token"
@@ -36,7 +39,9 @@ def _env(**overrides: str) -> dict[str, str]:
 
 def _config(**overrides: object) -> WorkerConfig:
     base: dict[str, object] = {
+        "provider": "anthropic",
         "anthropic_api_key": API_KEY,
+        "xai_api_key": "",
         "model": "claude-opus-5",
         "api_token": TOKEN,
         "proposer_token": "",
@@ -164,6 +169,28 @@ def test_forwarding_is_off_unless_the_owner_turns_it_on() -> None:
 
 def test_the_default_model_is_the_current_opus() -> None:
     assert load_config(_env()).model == "claude-opus-5"
+    assert load_config(_env()).provider == "anthropic"
+
+
+def test_an_unknown_provider_refuses_to_start() -> None:
+    with pytest.raises(WorkerConfigError, match="CHRONOS_WORKER_PROVIDER"):
+        load_config(_env(CHRONOS_WORKER_PROVIDER="openai"))
+
+
+def test_xai_without_a_console_key_refuses_to_start() -> None:
+    with pytest.raises(WorkerConfigError, match="XAI_API_KEY"):
+        load_config(_env(CHRONOS_WORKER_PROVIDER="xai", ANTHROPIC_API_KEY=""))
+
+
+def test_xai_does_not_require_the_anthropic_key() -> None:
+    config = load_config(
+        _env(CHRONOS_WORKER_PROVIDER="xai", ANTHROPIC_API_KEY="", XAI_API_KEY="xai-test")
+    )
+    assert config.provider == "xai"
+    assert config.model == "grok-4.6"
+    assert config.xai_api_key == "xai-test"
+    assert config.anthropic_api_key == ""
+    assert config.forward is False
 
 
 # ------------------------------------------------------------------ the Claude call
@@ -235,6 +262,96 @@ def test_an_api_error_yields_no_decision() -> None:
     error = {"type": "error", "error": {"type": "rate_limit_error", "message": "slow down"}}
     with _anthropic_client(error, status=429) as client:
         assert think(_config(), SNAPSHOT, client) is None
+
+
+def _xai_config() -> WorkerConfig:
+    return _config(
+        provider="xai",
+        anthropic_api_key="",
+        xai_api_key="xai-test-key-never-logged",
+        model="grok-4.6",
+    )
+
+
+def _xai_tool_response(decision: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "choices": [
+            {
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "propose_decision",
+                                "arguments": json.dumps(decision),
+                            },
+                        }
+                    ],
+                },
+            }
+        ],
+        "usage": {"prompt_tokens": 800, "completion_tokens": 200},
+    }
+
+
+def test_the_xai_request_is_forced_tool_and_carries_no_sampling() -> None:
+    seen: list[httpx.Request] = []
+    with _anthropic_client(_xai_tool_response(_hold_decision()), record=seen) as client:
+        think_xai(_xai_config(), SNAPSHOT, client)
+
+    request = seen[0]
+    assert str(request.url) == XAI_URL
+    assert request.headers["authorization"] == "Bearer xai-test-key-never-logged"
+    body = json.loads(request.content)
+    assert body["model"] == "grok-4.6"
+    assert body["tool_choice"] == {
+        "type": "function",
+        "function": {"name": "propose_decision"},
+    }
+    assert body["tools"][0]["function"]["name"] == "propose_decision"
+    for forbidden in ("temperature", "top_p", "top_k"):
+        assert forbidden not in body
+    assert "xai-test-key-never-logged" not in json.dumps(body)
+
+
+def test_think_dispatches_to_xai_when_the_provider_is_xai() -> None:
+    with _anthropic_client(_xai_tool_response(_hold_decision())) as client:
+        decision = think(_xai_config(), SNAPSHOT, client)
+    assert decision is not None
+    assert decision["kind"] == "HOLD"
+
+
+def test_xai_prose_only_yields_no_decision() -> None:
+    body = {
+        "choices": [
+            {
+                "finish_reason": "stop",
+                "message": {"role": "assistant", "content": "BUY SPY NOW!!!"},
+            }
+        ],
+        "usage": {},
+    }
+    with _anthropic_client(body) as client:
+        assert think_xai(_xai_config(), SNAPSHOT, client) is None
+
+
+def test_xai_truncation_yields_no_decision() -> None:
+    body = {
+        "choices": [{"finish_reason": "length", "message": {"role": "assistant", "content": ""}}],
+        "usage": {},
+    }
+    with _anthropic_client(body) as client:
+        assert think_xai(_xai_config(), SNAPSHOT, client) is None
+
+
+def test_the_xai_prompt_contains_the_exact_digested_evidence() -> None:
+    body = build_xai_request(_xai_config(), SNAPSHOT)
+    user_text = body["messages"][1]["content"]
+    assert SNAPSHOT.canonical in user_text
+    assert SNAPSHOT.digest in user_text
 
 
 # ---------------------------------------------------------------------- the evidence
