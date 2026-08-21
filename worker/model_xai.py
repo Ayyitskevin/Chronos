@@ -26,9 +26,16 @@ from typing import Any, Final
 
 import httpx
 
+from worker.budget import DailyTokenBudget
 from worker.config import WorkerConfig
 from worker.evidence import EvidenceSnapshot
-from worker.model import FRAMING, MAX_TOKENS, PROPOSE_DECISION_TOOL, REQUEST_TIMEOUT
+from worker.model import (
+    FRAMING,
+    MAX_TOKENS,
+    PROPOSE_DECISION_TOOL,
+    REQUEST_TIMEOUT,
+    charged_tokens,
+)
 
 _logger = logging.getLogger("chronos.worker.model_xai")
 
@@ -36,7 +43,10 @@ XAI_URL: Final[str] = "https://api.x.ai/v1/chat/completions"
 
 
 def think(
-    config: WorkerConfig, snapshot: EvidenceSnapshot, client: httpx.Client
+    config: WorkerConfig,
+    snapshot: EvidenceSnapshot,
+    client: httpx.Client,
+    budget: DailyTokenBudget | None = None,
 ) -> dict[str, Any] | None:
     """One decision from Grok, as validated tool input — or None."""
 
@@ -68,6 +78,9 @@ def think(
     except ValueError:
         _logger.error("xAI API returned a non-JSON body")
         return None
+    if budget is not None:
+        usage = body.get("usage") or {}
+        budget.spend(charged_tokens(usage.get("prompt_tokens"), usage.get("completion_tokens")))
     return _extract_decision(body)
 
 

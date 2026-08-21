@@ -43,6 +43,7 @@ CONFIG = WorkerConfig(
     interval_seconds=300,
     lookback_days=30,
     forward=False,
+    max_daily_tokens=None,
 )
 
 _CANONICAL = json.dumps({"account": {"cash": "100"}}, sort_keys=True, separators=(",", ":"))

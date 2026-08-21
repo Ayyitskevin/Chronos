@@ -23,6 +23,7 @@ from typing import Any
 
 import httpx
 
+from worker.budget import DailyTokenBudget
 from worker.config import WorkerConfig
 from worker.evidence import (
     TOKEN_HEADER,
@@ -46,6 +47,7 @@ PROPOSER_HEADER = "X-Chronos-Proposer-Token"
 class CycleOutcome(enum.Enum):
     """What one cycle did. Every member but FORWARDED is a kind of refusal."""
 
+    COST_CEILING = "COST_CEILING"
     NO_EVIDENCE = "NO_EVIDENCE"
     NO_DECISION = "NO_DECISION"
     REFUSED_LOCALLY = "REFUSED_LOCALLY"
@@ -59,8 +61,22 @@ def run_cycle(
     *,
     backend: httpx.Client,
     anthropic: httpx.Client,
+    budget: DailyTokenBudget | None = None,
 ) -> CycleOutcome:
     """One full cycle. Clients are caller-supplied so tests inject transports."""
+
+    # The daily token ceiling is judged before anything else: an exhausted
+    # budget means no evidence read and no model call — the cycle costs
+    # nothing until the UTC day rolls. ``None`` is the uncapped posture.
+    if budget is not None and budget.exhausted():
+        _logger.warning(
+            "COST_CEILING — %d tokens spent today (UTC) meets the "
+            "CHRONOS_WORKER_MAX_DAILY_TOKENS ceiling of %d; skipping thinking "
+            "until the day rolls",
+            budget.spent_today,
+            budget.ceiling,
+        )
+        return CycleOutcome.COST_CEILING
 
     # ADR-0028: ask the backend to issue and digest the evidence, then render
     # exactly what it serves. A 404 is the backend stating that evidence binding
@@ -79,7 +95,7 @@ def run_cycle(
             return CycleOutcome.NO_EVIDENCE
         snapshot = local
 
-    decision = think(config, snapshot, anthropic)
+    decision = think(config, snapshot, anthropic, budget=budget)
     if decision is None:
         return CycleOutcome.NO_DECISION
 
@@ -158,11 +174,12 @@ def run_loop(config: WorkerConfig, *, once: bool = False) -> None:
     read or one model call failed, and it never speeds up to compensate.
     """
 
+    budget = DailyTokenBudget(config.max_daily_tokens)
     with httpx.Client() as backend, httpx.Client() as anthropic:
         while True:
             started = time.monotonic()
             try:
-                outcome = run_cycle(config, backend=backend, anthropic=anthropic)
+                outcome = run_cycle(config, backend=backend, anthropic=anthropic, budget=budget)
                 _logger.info("Cycle outcome: %s", outcome.value)
             except Exception:
                 _logger.exception("Cycle failed unexpectedly; keeping cadence")
