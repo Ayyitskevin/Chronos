@@ -419,12 +419,17 @@ def test_the_three_identifiers_are_no_longer_disclosed_as_unread() -> None:
 
     **Corrected 2026-08-18.** ``events`` left the disclosure in the same landing that
     made ``signal_replay`` iterate ``trace.events``; this assertion still required it to
-    be present, so it pinned a state the disclosure no longer describes. The remaining
-    ``FiveToolTrace`` entries are untouched and still unread.
+    be present, so it pinned a state the disclosure no longer describes.
+
+    **Corrected 2026-08-21.** The un-strand of PRs #74/#75 brought
+    ``research/features/advisory_export.py``, which reads the last four entries, so the
+    ``FiveToolTrace`` disclosure is now empty. The pin becomes that emptiness: every
+    field on the contract is read, and anything re-added to the disclosure has to
+    justify itself here.
     """
 
     from tests.safety.test_five_tool_inert_fields_disclosed import _DISCLOSED_UNREAD
 
     disclosed = _DISCLOSED_UNREAD[FiveToolTrace]
     assert not (set(_PROVENANCE_FIELDS) & disclosed)
-    assert {"bar_index", "warmup_blockers", "long_setup", "short_setup"} <= disclosed
+    assert disclosed == frozenset()

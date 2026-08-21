@@ -71,14 +71,22 @@ _DISCLOSED_UNREAD: dict[type, frozenset[str]] = {
     # below are unchanged and still unread.
     # **Corrected 2026-08-18.** ``events`` left this disclosure because
     # ``signal_replay`` iterates ``trace.events``.
-    FiveToolTrace: frozenset(
-        {
-            "bar_index",
-            "warmup_blockers",
-            "long_setup",
-            "short_setup",
-        }
-    ),
+    #
+    # **Corrected 2026-08-21 (un-strand of PRs #74/#75).**  The last four entries —
+    # ``bar_index``, ``warmup_blockers``, ``long_setup``, ``short_setup`` — LEFT this
+    # disclosure because they became read, not because the sentence was edited.
+    # ``research/features/advisory_export.py`` (:87-91), which arrives with the
+    # refuse-closed pairing sidecar in ``59e3bd0``, projects all four into the advisory
+    # pack.  The guard fired in its designed second direction on that merge —
+    # "FiveToolTrace field(s) ['bar_index', 'long_setup', 'short_setup',
+    # 'warmup_blockers'] are now read" — and that failure is the evidence the sidecar
+    # consumes the trace rather than announcing that it does.
+    #
+    # ``FiveToolTrace`` now discloses nothing: every field on the contract is read
+    # somewhere in the research plane.  The key stays so the guard keeps running in its
+    # FIRST direction — a field added later that nothing reads must still be classified
+    # and disclosed here rather than passing unnoticed.
+    FiveToolTrace: frozenset(),
     # The translated Pine sizing/stop geometry.  ``planning`` is not exported from
     # ``chronos.research.five_tool.__init__``; the only in-package importer,
     # ``validation.py``, imports the ExitReason/LegId/PositionSide enums and nothing else,
