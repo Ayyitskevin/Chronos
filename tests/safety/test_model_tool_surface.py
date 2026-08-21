@@ -260,7 +260,16 @@ def test_a_bundle_has_no_field_for_a_credential_or_an_account_number() -> None:
     """Redaction by shape, not by a filtering step that could be skipped."""
 
     fields: set[str] = set()
-    for model in (ev.EvidenceBundle, ev.AccountFact, ev.QuoteFact, ev.PositionFact):
+    for model in (
+        ev.EvidenceBundle,
+        ev.AccountFact,
+        ev.QuoteFact,
+        ev.PositionFact,
+        ev.AdvisoryFiveToolFact,
+        ev.AdvisoryFeatureSnapshotFact,
+        ev.AdvisoryVetoFact,
+        ev.AdvisoryDatum,
+    ):
         fields |= set(model.model_fields)
     for forbidden in ("account_id", "password", "api_key", "token", "credential", "path"):
         assert forbidden not in fields
