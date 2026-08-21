@@ -67,7 +67,18 @@ loopback enforced), `CHRONOS_WORKER_PROVIDER` (`anthropic`),
 `CHRONOS_WORKER_MODEL` (`claude-opus-5` for anthropic, `grok-4.6` for xai),
 `CHRONOS_WORKER_POLICY_FILE` (`worker/policy.md`),
 `CHRONOS_WORKER_INTERVAL_SECONDS` (`300`), `CHRONOS_WORKER_LOOKBACK_DAYS`
-(`30`), `CHRONOS_WORKER_FORWARD` (`false`).
+(`30`), `CHRONOS_WORKER_FORWARD` (`false`), `CHRONOS_WORKER_MAX_DAILY_TOKENS`
+(unset — no ceiling).
+
+`CHRONOS_WORKER_MAX_DAILY_TOKENS` is the daily cost ceiling: the worker
+accumulates each response's reported token usage (input + output) per UTC day
+in memory, and at the ceiling cycles log `COST_CEILING` and skip thinking —
+no evidence read, no model call — until the day rolls. A response that
+reports no usable usage is charged the full `max_tokens` rather than nothing.
+An unparsable or non-positive value refuses to start; unset means uncapped,
+and the startup banner says so. The counter is per process: a restart forgets
+the day's spend, so the ceiling bounds a running worker, not a supervisor
+that restarts it.
 
 ### Grok (xAI) instead of Claude
 
@@ -119,6 +130,8 @@ full stack.
 
 ## What a cycle can end as
 
+`COST_CEILING` (the daily token ceiling is met — nothing is read and
+nothing is spent until the UTC day rolls) ·
 `NO_EVIDENCE` (a backend read failed — the worker never thinks on partial
 facts) · `NO_DECISION` (the model refused, truncated, or answered in prose) ·
 `REFUSED_LOCALLY` (the decision was incoherent — the log names the rule) ·
@@ -127,7 +140,8 @@ facts) · `NO_DECISION` (the model refused, truncated, or answered in prose) ·
 
 ## Before you enable it
 
-Three things are yours (ADR-0027 §8): the API key and its metered cost;
+Three things are yours (ADR-0027 §8): the API key and its metered cost
+(`CHRONOS_WORKER_MAX_DAILY_TOKENS` caps a runaway day; the bill is still yours);
 `CHRONOS_WORKER_FORWARD=true` plus the allowlists and mandate that give a
 forwarded proposal somewhere to be judged; and any mode beyond SHADOW, which
 stays behind the ADR-0025 mechanical-readiness checklist (funding, typed loss

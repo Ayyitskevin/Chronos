@@ -37,6 +37,11 @@ def main(argv: list[str]) -> int:
         if config.forward
         else ("DRY RUN (decisions are logged, nothing is sent)")
     )
+    ceiling = (
+        f"{config.max_daily_tokens} tokens per UTC day"
+        if config.max_daily_tokens is not None
+        else "none (CHRONOS_WORKER_MAX_DAILY_TOKENS unset — cost is logged, not capped)"
+    )
     print(
         f"chronos-worker: {'one cycle' if once else f'looping every {config.interval_seconds}s'}"
         f" — {posture}\n"
@@ -44,7 +49,8 @@ def main(argv: list[str]) -> int:
         f"  model     : {config.model}\n"
         f"  backend   : {config.backend_url}\n"
         f"  watchlist : {', '.join(config.symbols)}\n"
-        f"  kinds     : {', '.join(sorted(config.kinds))}",
+        f"  kinds     : {', '.join(sorted(config.kinds))}\n"
+        f"  ceiling   : {ceiling}",
         file=sys.stderr,
     )
     try:

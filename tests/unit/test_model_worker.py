@@ -9,14 +9,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import date
 from typing import Any
 
 import httpx
 import pytest
+from worker.budget import DailyTokenBudget
 from worker.config import WorkerConfig, WorkerConfigError, load_config
 from worker.cycle import CycleOutcome, run_cycle
 from worker.evidence import EvidenceSnapshot, gather
-from worker.model import ANTHROPIC_URL, build_request, think
+from worker.model import ANTHROPIC_URL, MAX_TOKENS, build_request, think
 from worker.model_xai import XAI_URL
 from worker.model_xai import build_request as build_xai_request
 from worker.model_xai import think as think_xai
@@ -52,6 +54,7 @@ def _config(**overrides: object) -> WorkerConfig:
         "interval_seconds": 300,
         "lookback_days": 5,
         "forward": False,
+        "max_daily_tokens": None,
     }
     base.update(overrides)
     return WorkerConfig(**base)  # type: ignore[arg-type]
@@ -532,3 +535,89 @@ def test_an_ingress_refusal_is_reported_not_swallowed() -> None:
         outcome = run_cycle(_config(forward=True), backend=backend, anthropic=anthropic)
 
     assert outcome is CycleOutcome.INGRESS_REFUSED
+
+
+# ------------------------------------------------------- the daily token ceiling (A5)
+
+
+def test_an_unparsable_daily_ceiling_refuses_to_start() -> None:
+    with pytest.raises(WorkerConfigError, match="CHRONOS_WORKER_MAX_DAILY_TOKENS"):
+        load_config(_env(CHRONOS_WORKER_MAX_DAILY_TOKENS="a lot"))
+
+
+def test_a_non_positive_daily_ceiling_refuses_to_start() -> None:
+    for bad in ("0", "-5"):
+        with pytest.raises(WorkerConfigError, match="CHRONOS_WORKER_MAX_DAILY_TOKENS"):
+            load_config(_env(CHRONOS_WORKER_MAX_DAILY_TOKENS=bad))
+
+
+def test_an_unset_ceiling_means_uncapped() -> None:
+    assert load_config(_env()).max_daily_tokens is None
+
+
+def test_a_set_ceiling_parses() -> None:
+    config = load_config(_env(CHRONOS_WORKER_MAX_DAILY_TOKENS="250000"))
+    assert config.max_daily_tokens == 250000
+
+
+def test_at_the_ceiling_the_cycle_reads_no_evidence_and_never_calls_the_model() -> None:
+    budget = DailyTokenBudget(10)
+    budget.spend(10)
+    backend_calls: list[httpx.Request] = []
+    anthropic_calls: list[httpx.Request] = []
+    with (
+        _backend_client(backend_calls) as backend,
+        _anthropic_client(_tool_response(_hold_decision()), record=anthropic_calls) as anthropic,
+    ):
+        outcome = run_cycle(_config(), backend=backend, anthropic=anthropic, budget=budget)
+
+    assert outcome is CycleOutcome.COST_CEILING
+    assert backend_calls == [], "an exhausted budget must cost no backend reads"
+    assert anthropic_calls == [], "an exhausted budget must never reach the model"
+
+
+def test_a_cycle_under_the_ceiling_proceeds_and_charges_the_budget() -> None:
+    budget = DailyTokenBudget(1_000_000)
+    with (
+        _backend_client() as backend,
+        _anthropic_client(_tool_response(_hold_decision())) as anthropic,
+    ):
+        outcome = run_cycle(_config(), backend=backend, anthropic=anthropic, budget=budget)
+
+    assert outcome is CycleOutcome.DRY_RUN
+    assert budget.spent_today == 1500, "the canned response reports 1200 + 300 tokens"
+
+
+def test_a_priced_response_without_usage_charges_the_full_max_tokens() -> None:
+    budget = DailyTokenBudget(1_000_000)
+    body = _tool_response(_hold_decision())
+    del body["usage"]
+    with _anthropic_client(body) as client:
+        think(_config(), SNAPSHOT, client, budget=budget)
+
+    assert budget.spent_today == MAX_TOKENS, (
+        "a priced response reporting no usage must overcharge, never undercharge"
+    )
+
+
+def test_the_xai_response_charges_the_budget_too() -> None:
+    budget = DailyTokenBudget(1_000_000)
+    with _anthropic_client(_xai_tool_response(_hold_decision())) as client:
+        think_xai(_xai_config(), SNAPSHOT, client, budget=budget)
+
+    assert budget.spent_today == 1000, "the canned xAI response reports 800 + 200 tokens"
+
+
+def test_the_utc_day_roll_resets_the_spend() -> None:
+    budget = DailyTokenBudget(100)
+    budget.spend(100, today=date(2026, 8, 20))
+    assert budget.exhausted(today=date(2026, 8, 20))
+    assert not budget.exhausted(today=date(2026, 8, 21)), "a new UTC day starts at zero"
+    assert budget.spent_today == 0
+
+
+def test_an_uncapped_budget_tracks_but_never_exhausts() -> None:
+    budget = DailyTokenBudget(None)
+    budget.spend(10**9)
+    assert budget.spent_today == 10**9
+    assert not budget.exhausted()

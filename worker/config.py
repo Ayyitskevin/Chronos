@@ -102,6 +102,10 @@ class WorkerConfig:
     lookback_days: int
     #: False (the default) means think and log but never POST a proposal.
     forward: bool
+    #: Max model tokens (input + output) per UTC day. ``None`` means uncapped —
+    #: today's behavior, disclosed at startup. At the ceiling cycles log
+    #: ``COST_CEILING`` and skip thinking until the day rolls.
+    max_daily_tokens: int | None
 
     @property
     def api_key(self) -> str:
@@ -199,6 +203,7 @@ def load_config(environ: dict[str, str]) -> WorkerConfig:
             environ, "CHRONOS_WORKER_LOOKBACK_DAYS", _DEFAULT_LOOKBACK_DAYS
         ),
         forward=_parse_bool(environ, "CHRONOS_WORKER_FORWARD", default=False),
+        max_daily_tokens=_optional_positive_int(environ, "CHRONOS_WORKER_MAX_DAILY_TOKENS"),
     )
 
 
@@ -240,6 +245,14 @@ def _positive_int(environ: dict[str, str], name: str, default: int) -> int:
     if value <= 0:
         raise WorkerConfigError(f"{name} must be positive, got {value}")
     return value
+
+
+def _optional_positive_int(environ: dict[str, str], name: str) -> int | None:
+    """``None`` when unset or blank; otherwise a positive int or a refusal."""
+
+    if not environ.get(name, "").strip():
+        return None
+    return _positive_int(environ, name, 0)
 
 
 def _parse_bool(environ: dict[str, str], name: str, *, default: bool) -> bool:

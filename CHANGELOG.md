@@ -1,5 +1,17 @@
 # CHANGELOG
 
+## [Unreleased] — A5: the worker's daily cost ceiling (2026-08-21)
+
+`CHRONOS_WORKER_MAX_DAILY_TOKENS` closes R-47 residual (e): cost was logged,
+never capped. The worker now accumulates each response's token usage per UTC
+day in memory; at the ceiling, cycles log `COST_CEILING` and skip thinking —
+no evidence read, no model call — until the day rolls. Fail-closed: an
+unparsable or non-positive ceiling refuses to start, a response without
+usable usage is charged the full `max_tokens`, and unset means today's
+uncapped behavior, disclosed in the startup banner. Both providers are
+covered. Also removes a byte-identical duplicate of the R-47..R-50 block that
+RISK_REGISTER.md had carried since A4's merge.
+
 ## [Unreleased] — Grok/xAI worker provider, SHADOW only (2026-08-18)
 
 `CHRONOS_WORKER_PROVIDER=xai` plus a console `XAI_API_KEY` selects a raw-httpx

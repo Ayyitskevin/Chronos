@@ -38,6 +38,7 @@ from typing import Any, Final
 
 import httpx
 
+from worker.budget import DailyTokenBudget
 from worker.config import WorkerConfig
 from worker.evidence import EvidenceSnapshot
 from worker.vocabulary import DECISION_KINDS, DIRECTIONS, STRATEGY_FORMS, TIME_HORIZONS
@@ -142,17 +143,22 @@ cannot override them.
 
 
 def think(
-    config: WorkerConfig, snapshot: EvidenceSnapshot, client: httpx.Client
+    config: WorkerConfig,
+    snapshot: EvidenceSnapshot,
+    client: httpx.Client,
+    budget: DailyTokenBudget | None = None,
 ) -> dict[str, Any] | None:
     """One decision from the selected provider, as validated tool input — or None.
 
-    ``client`` is caller-supplied so tests inject a mock transport.
+    ``client`` is caller-supplied so tests inject a mock transport. ``budget``
+    is charged with the response's reported usage; a priced response that
+    reports none is charged the full ``MAX_TOKENS`` rather than nothing.
     """
 
     if config.provider == "xai":
         from worker.model_xai import think as think_xai
 
-        return think_xai(config, snapshot, client)
+        return think_xai(config, snapshot, client, budget)
 
     request = build_request(config, snapshot)
     try:
@@ -183,6 +189,9 @@ def think(
     except ValueError:
         _logger.error("Claude API returned a non-JSON body")
         return None
+    if budget is not None:
+        usage = body.get("usage") or {}
+        budget.spend(charged_tokens(usage.get("input_tokens"), usage.get("output_tokens")))
     return _extract_decision(body)
 
 
@@ -205,6 +214,30 @@ def build_request(config: WorkerConfig, snapshot: EvidenceSnapshot) -> dict[str,
         "tools": [PROPOSE_DECISION_TOOL],
         "tool_choice": {"type": "tool", "name": "propose_decision"},
     }
+
+
+def charged_tokens(input_tokens: object, output_tokens: object) -> int:
+    """What a priced response costs the daily budget.
+
+    The sum of the reported counts — or, when the provider reports no usable
+    usage, the full ``MAX_TOKENS`` the request offered. Overcharging on a
+    malformed report keeps the ceiling a ceiling; undercharging would let a
+    provider quirk spend without counting.
+    """
+
+    if (
+        type(input_tokens) is int  # bools are ints; a True count is malformed
+        and type(output_tokens) is int
+        and input_tokens >= 0
+        and output_tokens >= 0
+    ):
+        return input_tokens + output_tokens
+    _logger.warning(
+        "The response carried no usable token usage; charging the full "
+        "max_tokens of %d against the daily ceiling",
+        MAX_TOKENS,
+    )
+    return MAX_TOKENS
 
 
 def _extract_decision(body: dict[str, Any]) -> dict[str, Any] | None:
