@@ -1,0 +1,1 @@
+"""Synthetic pairing-feature fixtures."""

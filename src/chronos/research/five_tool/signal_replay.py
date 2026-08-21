@@ -17,7 +17,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, date, datetime
 from enum import StrEnum
@@ -322,6 +322,7 @@ def replay_five_tool(
     bars: Sequence[ReplayBar],
     *,
     policy: FiveToolReplayPolicy = _DEFAULT_REPLAY_POLICY,
+    intent_override: Callable[[FiveToolTrace], SignalIntent] | None = None,
 ) -> FiveToolReplayResult:
     """Drive signal traces, next-open fills, account feedback, and validation ledgers.
 
@@ -334,6 +335,8 @@ def replay_five_tool(
     The call must contain the complete prefix beginning exactly at
     ``settings.history_start_utc``. A fresh engine and replay ledger are created
     on every call; replay checkpoint/resume is intentionally unsupported.
+    ``intent_override`` may mask ``ENTER_*`` to ``NONE`` for a research sidecar;
+    stored traces remain the engine's original intents.
     """
 
     if not isinstance(policy, FiveToolReplayPolicy):
@@ -548,8 +551,9 @@ def replay_five_tool(
         if active is not None:
             _update_stops(active, trace, primary_history, settings=settings)
 
+        fill_intent = _effective_fill_intent(trace, intent_override)
         if settings.boolean("enable_orders"):
-            if trace.intent in (SignalIntent.ENTER_LONG, SignalIntent.ENTER_SHORT):
+            if fill_intent in (SignalIntent.ENTER_LONG, SignalIntent.ENTER_SHORT):
                 if pending_entry is not None or active is not None:
                     raise ReplayInputError("entry intent was emitted while replay was not flat")
                 candidate = _plan_entry(
@@ -565,7 +569,7 @@ def replay_five_tool(
                     rejections.append(candidate)
                 else:
                     pending_entry = candidate
-            elif trace.intent in (SignalIntent.EXIT_LONG, SignalIntent.EXIT_SHORT):
+            elif fill_intent in (SignalIntent.EXIT_LONG, SignalIntent.EXIT_SHORT):
                 if active is None:
                     raise ReplayInputError("exit intent was emitted without an active position")
                 if pending_exit is not None:
@@ -623,6 +627,26 @@ def replay_five_tool(
             pending_exit.position_id if pending_exit is not None else None
         ),
     )
+
+
+def _effective_fill_intent(
+    trace: FiveToolTrace,
+    intent_override: Callable[[FiveToolTrace], SignalIntent] | None,
+) -> SignalIntent:
+    """Allow a research sidecar to mask ENTER intents only.  Traces stay original."""
+
+    if intent_override is None:
+        return trace.intent
+    overridden = intent_override(trace)
+    if not isinstance(overridden, SignalIntent):
+        raise ReplayInputError("intent override must return SignalIntent")
+    if overridden is trace.intent:
+        return trace.intent
+    if trace.intent not in (SignalIntent.ENTER_LONG, SignalIntent.ENTER_SHORT):
+        raise ReplayInputError("intent override may only mask ENTER intents")
+    if overridden is not SignalIntent.NONE:
+        raise ReplayInputError("intent override may only replace ENTER with NONE")
+    return SignalIntent.NONE
 
 
 def _validate_replay_bars(bars: tuple[ReplayBar, ...], policy: FiveToolReplayPolicy) -> None:

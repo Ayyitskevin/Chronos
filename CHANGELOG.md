@@ -8,6 +8,62 @@ Anthropic remains the default. `CHRONOS_WORKER_FORWARD` still defaults false.
 No new authority, no broker-process network channel, no live path. Register Grok
 as its own proposer — do not reuse the Claude credential. See D-28.
 
+## [Unreleased] — Five-Tool advisory pack and SHADOW learning journal (2026-08-15)
+
+Research-only loop so a model can train on Chronos's own closed-bar facts
+without loosening a gate or touching the frozen Five-Tool Pine identity.
+
+- `EvidenceBundle` `1.1` can carry advisory Five-Tool signals, pairing
+  snapshots, and vetoes. Size, stop, and equity keys are excluded. Research
+  projects dicts; autonomy validates them. Neither plane imports the other.
+- Worker contract binds job id, bundle digest, expected pins, and expiry. The
+  deterministic reference worker emits HOLD unless ENTER and pairing ALLOW.
+  Ingress still refuses self-attested provenance.
+- `supervisor.shadow_learning` journals ingress outcomes as not-sent. No
+  admit, size, compile, or transmit.
+- `require_external_worker` / paper / live stay refused. Chronos does not
+  call a model. This is not a second promotion path.
+
+## [Unreleased] — Five-Tool pairing veto plane (2026-08-15)
+
+Research-only sidecar on an immutable Five-Tool v3.6 opportunity stream.
+ENTER intents may be masked to NONE. Exits always pass. Pine, the 219-input
+contract, and campaign `five-tool-v3.6-preregistered-002` are untouched.
+Campaign `five-tool-pairing-v1-preregistered-001` authorizes zero trials.
+
+## [Unreleased] — GLD USD-regime treatment engine (2026-08-15)
+
+`H-PAIR-GLD-USD` now has a fixture-only engine: rising UUP slope vetoes GLD
+ENTER. Default `enable_usd_regime` stays false, so the locked gold shadow
+path is unchanged. Missing UUP fails closed. No download, no paper, no
+Vision score claim.
+
+## [Unreleased] — GLD pairing identity and refuse-closed ladder (2026-08-15)
+
+Gold pairing rule frozen before certified bars. No download, no paper, no
+live model, no Vision score claim.
+
+- On primary GLD, `iv_regime` and `breadth` are inert. Same-symbol tail and
+  daily RVOL still veto. QQQ and IWM keep the equity quartet.
+- Blocked campaign `five-tool-pairing-gld-v1-preregistered-001` preregisters
+  `H-PAIR-GLD-TAIL`, `H-PAIR-GLD-RVOL`, and `H-PAIR-GLD-USD` (UUP pending).
+  Zero executable trials.
+
+## [Unreleased] — Certified book-and-companion intake contract (2026-08-15)
+
+Phase 3 pre-catalog schema only. No certified bytes, no download, no
+`HOLDOUTS.json` write, no campaign `five-tool-v3.6-preregistered-002` mutation,
+and no Vision score claim.
+
+- `chronos.research.features.intake` names the overlapping release (GLD, IWM,
+  QQQ, RSP, SPY, VIX, VIX3M), freezes the consumed QQQ 2022-01-01 through
+  2024-01-10 window, and accepts an owner holdout declaration only when it
+  covers every required symbol and does not overlap that burned range.
+- Dataset, SHA-256, and catalog identities stay unset.
+  `open_certified_intake` refuses every call.
+- Pairing campaign `five-tool-pairing-v1-preregistered-001` requires the
+  checked intake object and still authorizes zero executable trials.
+
 ## [Unreleased] — the Five-Tool research slice: fidelity and preregistration, no evidence of edge (2026-08-09)
 
 Integration of `codex/five-tool-confluence-v36` — a deterministic research-plane

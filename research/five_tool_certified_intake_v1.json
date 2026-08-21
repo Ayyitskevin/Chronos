@@ -1,0 +1,28 @@
+{
+  "schema_version": "chronos-five-tool-certified-intake-v1",
+  "status": "pending_certified_dataset",
+  "downloads": false,
+  "bar_status": "closed",
+  "timestamp_timezone": "UTC",
+  "source": "owner_certified_dataset_catalog",
+  "book_digest": "9f6f87ea001a0870fe66b94b9438f7ddea3e7999f54fce722d659810d631e26b",
+  "required_symbols": ["GLD", "IWM", "QQQ", "RSP", "SPY", "VIX", "VIX3M"],
+  "optional_symbols": ["ADD", "TICK", "VOLD"],
+  "tradable_symbols": ["GLD", "IWM", "QQQ"],
+  "companion_only": ["RSP", "SPY", "VIX", "VIX3M"],
+  "research_proxy": {},
+  "burned_holdouts": [
+    {
+      "name": "qqq-2022-01-2024-01-consumed",
+      "start": "2022-01-01",
+      "end": "2024-01-10",
+      "symbols": ["QQQ"],
+      "status": "consumed",
+      "reason": "declared consumed in FIVE_TOOL_RESEARCH_HYPOTHESES; not a clean holdout"
+    }
+  ],
+  "owner_holdout": null,
+  "dataset_id": null,
+  "sha256": null,
+  "catalog_id": null
+}
