@@ -1,6 +1,7 @@
 # Deep-trading candidate feasibility — mapping awesome-deep-trading onto Chronos
 
-Status: **DECISION REQUESTED (owner picks ≤ 2 candidates, or zero)**
+Status: **DECIDED 2026-08-21 — the owner selected C1 + C2** (in-session
+direction to Claude Code; recorded as D-29 in DECISIONS.md and on PR #79)
 Scope: research only. This document authorizes **no code, no data reads, no
 campaign, no dependency change**. Its only output is an owner decision; the
 first artifact after that decision is a preregistered hypotheses revision in
@@ -165,13 +166,14 @@ dependencies, or make any performance claim. "Feasible" here means "can be
 attempted under the rails" — it is not evidence of edge, and the D2 gate
 means nothing is attemptable today.
 
-## 7. Decision requested
+## 7. Decision
 
-Pick any of (or none — "not now" keeps the PR #76 deferral in force):
+Decided 2026-08-21 (owner, in-session direction; D-29):
 
-- [ ] **C1** — deep momentum network + TSMOM twin
-- [ ] **C2** — CNN/LSTM direction classifier + logistic twin
+- [x] **C1** — deep momentum network + TSMOM twin
+- [x] **C2** — CNN/LSTM direction classifier + logistic twin
 - [ ] Neither / not now
 
-Recorded by the owner on the PR or in DECISIONS.md; the pick (if any) makes
-the preregistration revision the next research artifact after D2.
+The pick makes the preregistration revision the next research artifact
+after D2. Nothing else is unlocked: D2 remains the gate, and the §6
+ordering stands.
