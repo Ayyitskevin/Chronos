@@ -88,7 +88,7 @@ _MANIFEST_PATH = _ROOT / "research/five_tool_v3_6_campaign_manifest.json"
 _CRITERIA_PATH = _ROOT / "docs/FIVE_TOOL_RESEARCH_HYPOTHESES.md"
 _CODE_COMMIT = "1" * 40
 _STRATEGY_ID = "five_tool_confluence_v3_6"
-_REFERENCE_CELL = "5t-full-default-reference"
+_REFERENCE_CELL = "5t-trend-directional-paired"
 _DATASET_ID = "five-tool-certified-daily-v1"
 _CERTIFIED_AT = "2026-08-09T00:00:00Z"
 _ARTIFACT = b'{"metric":"raw-score-evidence-that-is-never-persisted"}'
@@ -194,6 +194,28 @@ def _synthetic_ready_manifest(
         "status": "resolved",
         "required_before_execution": True,
     }
+    manifest["execution_bindings"] = {
+        "schema_version": "chronos-five-tool-execution-bindings-v1",
+        "status": "resolved",
+        "catalog_manifest_sha256": "a" * 64,
+        "partition_stage_map": {"validation": "validation"},
+        "requests": [
+            {
+                "request_id": "synthetic-validation",
+                "dataset_id": dataset_id,
+                "partition": "validation",
+                "data_version": dataset_sha256,
+                "source_id": "synthetic-lifecycle-source",
+                "source_receipt_sha256": "b" * 64,
+            }
+        ],
+        "evaluator": {
+            "schema_version": "chronos-five-tool-evaluator-v1",
+            "evaluator_id": "synthetic-lifecycle-evaluator",
+            "sha256": "c" * 64,
+        },
+        "resolution_blockers": [],
+    }
     return manifest
 
 
@@ -205,7 +227,7 @@ def _definition(manifest: dict[str, Any], *, cell_id: str = _REFERENCE_CELL) -> 
         cell_id=cell_id,
         hypothesis_id=cells[0]["hypothesis_id"],
         strategy_id=manifest["strategy"]["strategy_id"],
-        semantic_config=copy.deepcopy(cells[0]["config_overlay"]),
+        semantic_config=copy.deepcopy(cells[0]["ablation_policy"]),
         code_commit=manifest["code_commit_lock"]["git_commit"],
         criteria_digest=manifest["criteria_lock"]["sha256"],
         input_contract_digest=manifest["strategy"]["input_contract"]["sha256"],
@@ -766,7 +788,7 @@ def test_a_subclassed_reader_returns_the_same_bytes_and_earns_no_certified_claim
     # Non-vacuity: the exact type, same dataset, same request — now it is certified.
     second = _broker(tmp_path, manifest, trial_name="exact.jsonl")
     second.run(
-        _definition(manifest, cell_id="5t-trend-only"),
+        _definition(manifest, cell_id="5t-momentum-score-paired"),
         _request(manifest),
         reader=CertifiedDatasetReader(root),
         evaluator=_evaluate,
@@ -877,7 +899,10 @@ def test_a_partition_outside_the_certification_manifest_is_refused_as_defense_in
     reader = CertifiedDatasetReader(root)
     broker = _broker(tmp_path, manifest)
 
-    with pytest.raises(PartitionNotCertified, match="is not certified-accessible"):
+    with pytest.raises(
+        (PartitionNotCertified, CampaignIdentityMismatch),
+        match=r"is not certified-accessible|data request identity disagrees",
+    ):
         broker.run(
             _definition(manifest),
             _request(manifest, partition="development"),

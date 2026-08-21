@@ -40,6 +40,7 @@ def main(argv: list[str]) -> int:
     print(
         f"chronos-worker: {'one cycle' if once else f'looping every {config.interval_seconds}s'}"
         f" — {posture}\n"
+        f"  provider  : {config.provider}\n"
         f"  model     : {config.model}\n"
         f"  backend   : {config.backend_url}\n"
         f"  watchlist : {', '.join(config.symbols)}\n"

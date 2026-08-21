@@ -23,7 +23,8 @@ from chronos.registry import (
     register_run,
     trial_count,
 )
-from chronos.registry.ledger import verified_registry_records
+from chronos.registry.ledger import registry_lock, verified_registry_records
+from chronos.research.five_tool_trials import registered_trial_count
 
 _NOW = datetime(2026, 7, 20, 21, 0, tzinfo=UTC)
 
@@ -127,6 +128,22 @@ def test_verified_records_refuse_a_forged_ledger_snapshot_against_real_anchor(
 
     with pytest.raises(RegistryIntegrityError, match="head hash mismatch"):
         verified_registry_records(ledger._path_capability)
+
+
+def test_nested_registry_lock_on_the_same_path_does_not_deadlock(tmp_path: Path) -> None:
+    """Same-thread re-entry must reuse the published directory.
+
+    ``registered_trial_count`` used to take ``registry_lock`` and then call
+    ``trial_count`` → ``verified_registry_records``, which took it again.
+    ``threading.Lock`` is not reentrant, so the thread parked on a futex
+    until CI's 10-minute job timeout cancelled the run.
+    """
+
+    path = tmp_path / "registry.jsonl"
+    with registry_lock(path) as outer:
+        with registry_lock(path) as inner:
+            assert inner is outer
+        assert registered_trial_count(path) == 0
 
 
 @pytest.mark.parametrize(

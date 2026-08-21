@@ -14,8 +14,9 @@ posture is `RISK_REGISTER.md` **R-47**.
 designed the whole autonomy stack around and nothing had ever implemented. Each
 cycle it reads what an operator can read (account summary, positions, open
 orders, recent daily bars for your watchlist), freezes that into a digested
-evidence snapshot, asks Claude for exactly one decision through a forced,
-strict tool call, validates the result as hostile input, and — only if you
+evidence snapshot, asks the configured provider (Claude by default, or Grok
+via `CHRONOS_WORKER_PROVIDER=xai`) for exactly one decision through a forced
+tool call, validates the result as hostile input, and — only if you
 turned forwarding on — POSTs the candidate to the same loopback proposal
 ingress everything else uses. Every proposal walks the full gate stack:
 ingress, fifteen admission checks, sizing against your mandate, deterministic
@@ -62,10 +63,34 @@ export CHRONOS_WORKER_KINDS="HOLD,OPEN,REDUCE,CLOSE"
 ```
 
 Optional, with defaults: `CHRONOS_WORKER_BACKEND_URL` (`http://127.0.0.1:8000`,
-loopback enforced), `CHRONOS_WORKER_MODEL` (`claude-opus-5`),
+loopback enforced), `CHRONOS_WORKER_PROVIDER` (`anthropic`),
+`CHRONOS_WORKER_MODEL` (`claude-opus-5` for anthropic, `grok-4.6` for xai),
 `CHRONOS_WORKER_POLICY_FILE` (`worker/policy.md`),
 `CHRONOS_WORKER_INTERVAL_SECONDS` (`300`), `CHRONOS_WORKER_LOOKBACK_DAYS`
 (`30`), `CHRONOS_WORKER_FORWARD` (`false`).
+
+### Grok (xAI) instead of Claude
+
+Same process, same policy file, same ingress. Set the provider and a
+**console** API key — never `~/.grok/auth.json` (that is a TUI session and
+expires):
+
+```bash
+export CHRONOS_WORKER_PROVIDER=xai
+export XAI_API_KEY="xai-..."                   # worker process ONLY
+export CHRONOS_WORKER_API_TOKEN="$(cat data/api_token)"
+export CHRONOS_WORKER_SYMBOLS="SPY,IWM"
+export CHRONOS_WORKER_KINDS="HOLD,OPEN,REDUCE,CLOSE"
+```
+
+Mint a **distinct** proposer so Grok is not stamped as Claude
+(`python -m chronos.cli proposer mint --proposer-id grok-worker --provider xai
+--model-id grok-4.6 --policy-file worker/policy.md`). Do not reuse the Claude
+credential.
+
+xAI's Chat Completions tool-calling does not expose Anthropic's `strict: true`.
+Illegal kinds/symbols still die in `worker.propose` and at the gateway; that
+gap is a disclosed residual, not a second schema.
 
 The worker refuses to start on a missing key, missing token, empty watchlist,
 empty kind allowlist, unreadable policy, or non-loopback backend URL — an

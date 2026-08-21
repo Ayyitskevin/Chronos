@@ -8,8 +8,9 @@ was burned by four times (R-24..R-27).
 
 The credentials this process holds are the most dangerous things in it:
 
-- ``ANTHROPIC_API_KEY`` — never logged, never sent anywhere but
-  ``api.anthropic.com``, never included in a proposal or an evidence digest.
+- ``ANTHROPIC_API_KEY`` / ``XAI_API_KEY`` — never logged, never sent anywhere
+  but the selected provider's API, never included in a proposal or an
+  evidence digest. The unused provider's key is not required and is not read.
 - ``CHRONOS_WORKER_API_TOKEN`` — the backend's local API token. The backend URL
   is checked to be loopback so a misconfigured worker cannot hand it to a
   remote host.
@@ -38,9 +39,17 @@ from worker.vocabulary import DECISION_KINDS, SYMBOL_ALPHABET
 
 _LOOPBACK_HOSTS: Final[frozenset[str]] = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
 
-#: The current default per the Claude API reference (2026-08). Overridable via
-#: CHRONOS_WORKER_MODEL; the string is passed through verbatim, never guessed at.
-_DEFAULT_MODEL: Final[str] = "claude-opus-5"
+#: Provider id → default model. The string is passed through verbatim.
+_PROVIDERS: Final[frozenset[str]] = frozenset({"anthropic", "xai"})
+_DEFAULT_PROVIDER: Final[str] = "anthropic"
+_DEFAULT_MODELS: Final[dict[str, str]] = {
+    "anthropic": "claude-opus-5",
+    "xai": "grok-4.6",
+}
+_KEY_VARS: Final[dict[str, str]] = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "xai": "XAI_API_KEY",
+}
 
 _DEFAULT_BACKEND_URL: Final[str] = "http://127.0.0.1:8000"
 _DEFAULT_INTERVAL_SECONDS: Final[int] = 300
@@ -65,9 +74,14 @@ class WorkerConfigError(ValueError):
 class WorkerConfig:
     """Everything the worker needs, all of it validated."""
 
-    #: Anthropic API key. Lives only in this process's environment.
+    #: ``anthropic`` or ``xai``. Selects which key and default model bind.
+    provider: str
+    #: Anthropic API key when ``provider`` is anthropic; empty otherwise.
     anthropic_api_key: str
-    #: The Claude model id used for decisions.
+    #: xAI console API key when ``provider`` is xai; empty otherwise.
+    #: Never loaded from ``~/.grok/auth.json`` — that file is a TUI session.
+    xai_api_key: str
+    #: The model id used for decisions. Provider default if unset.
     model: str
     #: The backend's local API token, presented on every read and every POST.
     api_token: str
@@ -89,16 +103,30 @@ class WorkerConfig:
     #: False (the default) means think and log but never POST a proposal.
     forward: bool
 
+    @property
+    def api_key(self) -> str:
+        """The key for the selected provider. Empty if that provider is not bound."""
+
+        return self.xai_api_key if self.provider == "xai" else self.anthropic_api_key
+
 
 def load_config(environ: dict[str, str]) -> WorkerConfig:
     """Build a :class:`WorkerConfig`, or raise :class:`WorkerConfigError`."""
 
-    api_key = environ.get("ANTHROPIC_API_KEY", "").strip()
+    provider = (environ.get("CHRONOS_WORKER_PROVIDER", "") or _DEFAULT_PROVIDER).strip().lower()
+    if provider not in _PROVIDERS:
+        raise WorkerConfigError(
+            f"CHRONOS_WORKER_PROVIDER must be one of {sorted(_PROVIDERS)}, got {provider!r}"
+        )
+
+    key_var = _KEY_VARS[provider]
+    api_key = environ.get(key_var, "").strip()
     if not api_key:
         raise WorkerConfigError(
-            "ANTHROPIC_API_KEY must be set: the worker is the one process that talks to "
-            "the model, and it cannot think without a key. The key belongs in THIS "
-            "process's environment only — never the backend's"
+            f"{key_var} must be set when CHRONOS_WORKER_PROVIDER={provider}: the worker "
+            "is the one process that talks to the model, and it cannot think without a "
+            "key. The key belongs in THIS process's environment only — never the "
+            "backend's, and never a TUI session file"
         )
 
     token = environ.get("CHRONOS_WORKER_API_TOKEN", "").strip()
@@ -154,8 +182,10 @@ def load_config(environ: dict[str, str]) -> WorkerConfig:
         )
 
     return WorkerConfig(
-        anthropic_api_key=api_key,
-        model=environ.get("CHRONOS_WORKER_MODEL", "").strip() or _DEFAULT_MODEL,
+        provider=provider,
+        anthropic_api_key=api_key if provider == "anthropic" else "",
+        xai_api_key=api_key if provider == "xai" else "",
+        model=environ.get("CHRONOS_WORKER_MODEL", "").strip() or _DEFAULT_MODELS[provider],
         api_token=token,
         proposer_token=environ.get("CHRONOS_WORKER_PROPOSER_TOKEN", "").strip(),
         backend_url=backend_url,

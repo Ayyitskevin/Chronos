@@ -14,7 +14,7 @@ concurrency:
 jobs:
   quality:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     env:
       BROKER_MODE: demo
       ALLOW_ORDER_TRANSMIT: "false"

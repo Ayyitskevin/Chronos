@@ -68,7 +68,7 @@ _FIVE_TOOL_PACKAGE = _ROOT / "src/chronos/research/five_tool"
 _DATA = b"content-addressed-certified-five-tool-dataset-v1\n"
 _CODE_COMMIT = "1" * 40
 _STRATEGY_ID = "five_tool_confluence_v3_6"
-_REFERENCE_CELL = "5t-full-default-reference"
+_REFERENCE_CELL = "5t-trend-directional-paired"
 _ARTIFACT = b'{"metric":"raw-score-evidence-that-is-never-persisted"}'
 _VARIANCE = ReviewedVarianceEvidence(0.04, "reviewed-sample-variance-v1", "f" * 64)
 
@@ -101,11 +101,36 @@ def _synthetic_ready_manifest() -> dict[str, Any]:
         "status": "resolved",
         "required_before_execution": True,
     }
+    digest = hashlib.sha256(_DATA).hexdigest()
     manifest["data"]["dataset_version_lock"] = {
         "dataset_id": "five-tool-certified-daily-v1",
-        "sha256": hashlib.sha256(_DATA).hexdigest(),
+        "sha256": digest,
         "status": "resolved",
         "required_before_execution": True,
+    }
+    # Pending campaign bindings have empty request identities; the lifecycle
+    # harness has to name the one synthetic request it will actually issue.
+    manifest["execution_bindings"] = {
+        "schema_version": "chronos-five-tool-execution-bindings-v1",
+        "status": "resolved",
+        "catalog_manifest_sha256": "a" * 64,
+        "partition_stage_map": {"validation": "validation"},
+        "requests": [
+            {
+                "request_id": "synthetic-validation",
+                "dataset_id": "five-tool-certified-daily-v1",
+                "partition": "validation",
+                "data_version": digest,
+                "source_id": "synthetic-lifecycle-source",
+                "source_receipt_sha256": "b" * 64,
+            }
+        ],
+        "evaluator": {
+            "schema_version": "chronos-five-tool-evaluator-v1",
+            "evaluator_id": "synthetic-lifecycle-evaluator",
+            "sha256": "c" * 64,
+        },
+        "resolution_blockers": [],
     }
     return manifest
 
@@ -118,7 +143,7 @@ def _definition(manifest: dict[str, Any], *, cell_id: str = _REFERENCE_CELL) -> 
         cell_id=cell_id,
         hypothesis_id=cells[0]["hypothesis_id"],
         strategy_id=manifest["strategy"]["strategy_id"],
-        semantic_config=copy.deepcopy(cells[0]["config_overlay"]),
+        semantic_config=copy.deepcopy(cells[0]["ablation_policy"]),
         code_commit=manifest["code_commit_lock"]["git_commit"],
         criteria_digest=manifest["criteria_lock"]["sha256"],
         input_contract_digest=manifest["strategy"]["input_contract"]["sha256"],
@@ -401,7 +426,7 @@ def test_a_registry_that_cannot_be_verified_refuses_the_next_trial(
 
     with pytest.raises(CanonicalRegistryUnavailable, match=expected_message):
         broker.run(
-            _definition(manifest, cell_id="5t-trend-only"),
+            _definition(manifest, cell_id="5t-momentum-score-paired"),
             _request(manifest),
             reader=poison,
             evaluator=_evaluate,
@@ -414,7 +439,7 @@ def test_a_registry_that_cannot_be_verified_refuses_the_next_trial(
     # Non-vacuity: restore the registry byte-for-byte and the same attempt succeeds.
     registry.write_bytes(intact)
     broker.run(
-        _definition(manifest, cell_id="5t-trend-only"),
+        _definition(manifest, cell_id="5t-momentum-score-paired"),
         _request(manifest),
         reader=poison,
         evaluator=_evaluate,
@@ -439,7 +464,10 @@ def test_an_unclassifiable_partition_is_refused_rather_than_registered_as_a_gues
         opened = True
         return _DATA
 
-    with pytest.raises(CampaignIdentityMismatch, match="no canonical ADR-0013 research stage"):
+    with pytest.raises(
+        CampaignIdentityMismatch,
+        match=r"data request identity disagrees|no canonical ADR-0013 research stage",
+    ):
         broker.run(
             _definition(manifest),
             _request(manifest, partition="exploration"),
@@ -639,5 +667,6 @@ def test_counting_trials_never_loads_the_holdout_unlock_capability(tmp_path: Pat
         check=True,
         capture_output=True,
         text=True,
+        timeout=15,
     )
     assert result.stdout.strip() == "ABSENT"

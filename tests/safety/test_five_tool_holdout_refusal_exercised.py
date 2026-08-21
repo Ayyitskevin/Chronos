@@ -56,7 +56,7 @@ _MANIFEST_PATH = _ROOT / "research/five_tool_v3_6_campaign_manifest.json"
 _CRITERIA_PATH = _ROOT / "docs/FIVE_TOOL_RESEARCH_HYPOTHESES.md"
 _DATA = b"content-addressed-certified-five-tool-dataset-v1\n"
 _CODE_COMMIT = "1" * 40
-_REFERENCE_CELL = "5t-full-default-reference"
+_REFERENCE_CELL = "5t-trend-directional-paired"
 
 
 def _committed_manifest() -> dict[str, Any]:
@@ -88,11 +88,34 @@ def _synthetic_ready_manifest() -> dict[str, Any]:
         "status": "resolved",
         "required_before_execution": True,
     }
+    digest = hashlib.sha256(_DATA).hexdigest()
     manifest["data"]["dataset_version_lock"] = {
         "dataset_id": "five-tool-certified-daily-v1",
-        "sha256": hashlib.sha256(_DATA).hexdigest(),
+        "sha256": digest,
         "status": "resolved",
         "required_before_execution": True,
+    }
+    manifest["execution_bindings"] = {
+        "schema_version": "chronos-five-tool-execution-bindings-v1",
+        "status": "resolved",
+        "catalog_manifest_sha256": "a" * 64,
+        "partition_stage_map": {"validation": "validation"},
+        "requests": [
+            {
+                "request_id": "synthetic-validation",
+                "dataset_id": "five-tool-certified-daily-v1",
+                "partition": "validation",
+                "data_version": digest,
+                "source_id": "synthetic-lifecycle-source",
+                "source_receipt_sha256": "b" * 64,
+            }
+        ],
+        "evaluator": {
+            "schema_version": "chronos-five-tool-evaluator-v1",
+            "evaluator_id": "synthetic-lifecycle-evaluator",
+            "sha256": "c" * 64,
+        },
+        "resolution_blockers": [],
     }
     return manifest
 
@@ -106,7 +129,7 @@ def _definition(manifest: dict[str, Any]) -> TrialDefinition:
         cell_id=_REFERENCE_CELL,
         hypothesis_id=cell["hypothesis_id"],
         strategy_id=manifest["strategy"]["strategy_id"],
-        semantic_config=copy.deepcopy(cell["config_overlay"]),
+        semantic_config=copy.deepcopy(cell["ablation_policy"]),
         code_commit=manifest["code_commit_lock"]["git_commit"],
         criteria_digest=manifest["criteria_lock"]["sha256"],
         input_contract_digest=manifest["strategy"]["input_contract"]["sha256"],
@@ -143,7 +166,6 @@ def _share_dataset_id_with_the_campaign(manifest: dict[str, Any]) -> None:
 
 def _declare_a_custom_holdout_partition_as_accessible(manifest: dict[str, Any]) -> None:
     manifest["data"]["declared_holdouts"][0]["partition"] = "q4_2026"
-    manifest["data"]["accessible_partitions"] = ["development", "validation", "q4_2026"]
 
 
 def test_the_committed_manifest_declares_its_holdout_forbidden_and_unopened() -> None:

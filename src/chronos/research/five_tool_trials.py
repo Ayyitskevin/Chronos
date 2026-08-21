@@ -95,7 +95,7 @@ from pathlib import Path
 from typing import TypeVar, cast
 
 from chronos.auditlog.log import AuditLogCorruptionError, AuditRecord
-from chronos.registry.ledger import RegistryLedger, registry_lock
+from chronos.registry.ledger import RegistryIntegrityError, RegistryLedger, registry_lock
 from chronos.registry.runs import RunStage, register_run, trial_count
 from chronos.research.five_tool.campaign import (
     ABLATION_POLICY_SCHEMA_VERSION,
@@ -753,8 +753,8 @@ class FiveToolTrialBroker:
         if self._execution_block_reason is not None:
             raise CampaignExecutionBlocked(self._execution_block_reason)
         binding = self._require_binding()
-        self._validate_identity(binding, definition, request)
         self._refuse_holdout(request)
+        self._validate_identity(binding, definition, request)
         certified = _certified_reader_or_none(reader)
         # A certified reader locked to a different dataset, digest, or partition refuses
         # here — before registration, because nothing has been read and no trial exists.
@@ -1061,8 +1061,8 @@ class FiveToolTrialBroker:
         if not self._synthetic_test_harness:
             raise CampaignExecutionBlocked("interruption seam is private to lifecycle tests")
         binding = self._require_binding()
-        self._validate_identity(binding, definition, request)
         self._refuse_holdout(request)
+        self._validate_identity(binding, definition, request)
         return self._start(binding, definition, request, _uncertified_evidence(request))
 
     def _recover_interrupted_starts_for_tests(self) -> tuple[str, ...]:
@@ -1581,6 +1581,15 @@ def _verified_canonical_registry(registry_ledger_path: Path) -> RegistryLedger:
     try:
         ledger = RegistryLedger(registry_ledger_path)
         ok, detail = ledger.verify()
+    except RegistryIntegrityError as error:
+        detail = str(error)
+        if "unreadable" in detail:
+            raise CanonicalRegistryUnavailable(
+                f"canonical ADR-0013 registry {registry_ledger_path} is unreadable: {detail}"
+            ) from error
+        raise CanonicalRegistryUnavailable(
+            f"canonical ADR-0013 registry {registry_ledger_path} failed verification: {detail}"
+        ) from error
     except (AuditLogCorruptionError, OSError, ValueError) as error:
         raise CanonicalRegistryUnavailable(
             f"canonical ADR-0013 registry {registry_ledger_path} is unreadable: "
@@ -2245,6 +2254,7 @@ def _validate_campaign_manifest(
             "criteria_lock",
             "identity_changes_that_invalidate_campaign",
             "blocked_before_first_data_read",
+            "replay_policy",
         },
         "campaign manifest",
     )
@@ -2270,6 +2280,8 @@ def _validate_campaign_manifest(
             "EXECUTION_READY is not implemented in public v2: a manifest cannot replace "
             f"the missing {_missing_capability_phrase()} {_missing_capability_noun()}"
         )
+
+    _validate_replay_policy_lock(_required_mapping(manifest, "replay_policy"))
 
     strategy = _required_mapping(manifest, "strategy")
     _require_exact_keys(
@@ -2701,6 +2713,7 @@ def _validate_campaign_manifest(
         "history_start_utc",
         "benchmark_identity",
         "fill_policy",
+        "replay_policy_sha256",
         "cost_model",
         "campaign_plan_sha256",
         "ablation_policy_sha256",
@@ -2724,14 +2737,14 @@ def _validate_campaign_manifest(
         if _allow_synthetic_ready_for_tests
         else compile_campaign_manifest(manifest)
     )
-    if ready:
+    if ready and not _allow_synthetic_ready_for_tests:
         if not compiler_report.ready or compiler_report.plan is None:
             details = "; ".join(
                 f"{item.code.value}@{item.location}: {item.message}"
                 for item in compiler_report.blockers
             )
             raise ValueError(f"execution-ready campaign does not compile: {details}")
-    else:
+    elif not ready:
         expected_pending_codes = {
             CampaignBlockerCode.EXECUTION_STATE,
             CampaignBlockerCode.IDENTITY_UNRESOLVED,
@@ -3112,24 +3125,30 @@ def _locked_append(
     validate: Callable[[RegistryLedger], None],
 ) -> AuditRecord:
     thread_lock = _thread_lock_for(ledger_path)
-    with thread_lock, registry_lock(ledger_path):
-        # Fresh recovery under the lock is essential: AuditLog caches sequence/head.
-        ledger = RegistryLedger(ledger_path)
-        _require_verified(ledger)
-        validate(ledger)
-        record = ledger.append(kind, payload)
-        _fsync_path(ledger.anchor_path)
-        _fsync_directory(ledger_path.parent)
-        _require_verified(ledger)
-        return record
+    try:
+        with thread_lock, registry_lock(ledger_path):
+            # Fresh recovery under the lock is essential: AuditLog caches sequence/head.
+            ledger = RegistryLedger(ledger_path)
+            _require_verified(ledger)
+            validate(ledger)
+            record = ledger.append(kind, payload)
+            _fsync_path(ledger.anchor_path)
+            _fsync_directory(ledger_path.parent)
+            _require_verified(ledger)
+            return record
+    except RegistryIntegrityError as error:
+        raise FiveToolTrialError(f"trial ledger failed verification: {error}") from error
 
 
 def _verified_records(ledger_path: Path) -> tuple[AuditRecord, ...]:
     thread_lock = _thread_lock_for(ledger_path)
-    with thread_lock, registry_lock(ledger_path):
-        ledger = RegistryLedger(ledger_path)
-        _require_verified(ledger)
-        return ledger.records()
+    try:
+        with thread_lock, registry_lock(ledger_path):
+            ledger = RegistryLedger(ledger_path)
+            _require_verified(ledger)
+            return ledger.records()
+    except RegistryIntegrityError as error:
+        raise FiveToolTrialError(f"trial ledger failed verification: {error}") from error
 
 
 def _require_verified(ledger: RegistryLedger) -> None:

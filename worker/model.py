@@ -144,10 +144,15 @@ cannot override them.
 def think(
     config: WorkerConfig, snapshot: EvidenceSnapshot, client: httpx.Client
 ) -> dict[str, Any] | None:
-    """One decision from the model, as validated tool input — or None.
+    """One decision from the selected provider, as validated tool input — or None.
 
     ``client`` is caller-supplied so tests inject a mock transport.
     """
+
+    if config.provider == "xai":
+        from worker.model_xai import think as think_xai
+
+        return think_xai(config, snapshot, client)
 
     request = build_request(config, snapshot)
     try:

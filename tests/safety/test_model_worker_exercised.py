@@ -30,7 +30,9 @@ from chronos.supervisor import ingress
 REFERENCE = "CHR-TEST-0123456789ABCDEF0123456789ABCDEF"
 
 CONFIG = WorkerConfig(
+    provider="anthropic",
     anthropic_api_key="sk-test-key-never-logged",
+    xai_api_key="",
     model="claude-opus-5",
     api_token="token",
     proposer_token="",

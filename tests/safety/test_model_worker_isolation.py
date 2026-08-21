@@ -42,6 +42,7 @@ _FORBIDDEN = (
     "chronos",
     "anthropic",
     "openai",
+    "xai",
     "litellm",
     "langchain",
     "sqlalchemy",
@@ -51,7 +52,7 @@ _FORBIDDEN = (
 )
 
 #: Provider SDKs that must never enter the repo's declared dependencies.
-_FORBIDDEN_DEPENDENCIES = ("anthropic", "openai", "litellm", "langchain")
+_FORBIDDEN_DEPENDENCIES = ("anthropic", "openai", "litellm", "langchain", "xai")
 
 
 def _module_files() -> list[Path]:
@@ -81,6 +82,7 @@ def test_the_package_contains_the_modules_this_file_guards() -> None:
         "cycle",
         "evidence",
         "model",
+        "model_xai",
         "propose",
         "vocabulary",
         "__main__",
@@ -100,7 +102,7 @@ def test_worker_modules_import_nothing_forbidden() -> None:
 
 def test_importing_the_worker_leaks_no_forbidden_module() -> None:
     probe = (
-        "import worker, worker.cycle, worker.model, worker.__main__, sys; "
+        "import worker, worker.cycle, worker.model, worker.model_xai, worker.__main__, sys; "
         f"bad=[m for m in sys.modules if m.startswith({_FORBIDDEN!r})]; "
         "print(';'.join(sorted(bad)))"
     )

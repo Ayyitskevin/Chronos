@@ -415,11 +415,16 @@ def test_the_three_identifiers_are_no_longer_disclosed_as_unread() -> None:
     ``test_five_tool_inert_fields_disclosed.py`` failed on this landing with "FiveToolTrace
     field(s) ['benchmark_source_id', 'htf_source_id', 'primary_sequence_id'] are now read",
     which is the guard working: a disclosed field that becomes read must leave the
-    disclosure. The remaining ``FiveToolTrace`` entries are untouched and still unread.
+    disclosure.
+
+    **Corrected 2026-08-18.** ``events`` left the disclosure in the same landing that
+    made ``signal_replay`` iterate ``trace.events``; this assertion still required it to
+    be present, so it pinned a state the disclosure no longer describes. The remaining
+    ``FiveToolTrace`` entries are untouched and still unread.
     """
 
     from tests.safety.test_five_tool_inert_fields_disclosed import _DISCLOSED_UNREAD
 
     disclosed = _DISCLOSED_UNREAD[FiveToolTrace]
     assert not (set(_PROVENANCE_FIELDS) & disclosed)
-    assert {"bar_index", "warmup_blockers", "long_setup", "short_setup", "events"} <= disclosed
+    assert {"bar_index", "warmup_blockers", "long_setup", "short_setup"} <= disclosed

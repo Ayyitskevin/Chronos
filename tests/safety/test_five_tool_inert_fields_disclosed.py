@@ -69,26 +69,25 @@ _DISCLOSED_UNREAD: dict[type, frozenset[str]] = {
     # had not closed when its primary bar did.  Exercised end to end over real engine output
     # in tests/safety/test_five_tool_provenance_audit_exercised.py.  The remaining entries
     # below are unchanged and still unread.
+    # **Corrected 2026-08-18.** ``events`` left this disclosure because
+    # ``signal_replay`` iterates ``trace.events``.
     FiveToolTrace: frozenset(
         {
             "bar_index",
             "warmup_blockers",
             "long_setup",
             "short_setup",
-            "events",
         }
     ),
     # The translated Pine sizing/stop geometry.  ``planning`` is not exported from
     # ``chronos.research.five_tool.__init__``; the only in-package importer,
     # ``validation.py``, imports the ExitReason/LegId/PositionSide enums and nothing else,
     # so these outputs are consumed exclusively by tests/unit/test_five_tool_planning.py.
-    # ``initial_stop_price`` is an exit field in the AGENTS.md sense and is listed here
-    # deliberately: it is fidelity translation awaiting the certified campaign that will
-    # consume it, NOT a protection anything currently applies.
+    # ``initial_stop_price`` / ``risk_distance`` LEFT this disclosure 2026-08-18:
+    # ``signal_replay`` now reads both (leg/runner stop and R-multiple). Remaining
+    # quantity fields are still unread on this contract by name-scan.
     PositionPlan: frozenset(
         {
-            "initial_stop_price",
-            "risk_distance",
             "requested_quantity",
             "planned_quantity",
             "unallocated_quantity",
