@@ -1,5 +1,18 @@
 # CHANGELOG
 
+## [Unreleased] — D2: an expected-session calendar for research coverage (2026-08-21)
+
+`chronos.research.session_calendar` supplies the independent expectation Phase 3's
+"at least 99.5% expected-session coverage" gate needs and never had — recurring NYSE
+holidays by rule (Rule 7.2 observance, including the Saturday-New-Year exception that
+keeps December 31 a trading day), Good Friday by computus, Juneteenth from 2022, plus a
+pinned table of ad-hoc closures no rule derives. Fail-closed outside its pinned range;
+half-days pinned more narrowly still, so `expected_bar_count` refuses rather than
+counting a 13:00 close as 16:00. Research-only and structurally fenced from every
+authority package — R-26's "the venue's own CLOSED is the load-bearing token" is
+unchanged. Verified against published NYSE schedules, not against a second copy of the
+same rules: 2001 resolves to 248 sessions, 2024 to 252. See D-30.
+
 ## [Unreleased] — A5: the worker's daily cost ceiling (2026-08-21)
 
 `CHRONOS_WORKER_MAX_DAILY_TOKENS` closes R-47 residual (e): cost was logged,
