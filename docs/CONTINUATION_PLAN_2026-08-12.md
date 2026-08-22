@@ -349,9 +349,12 @@ dependency chain before inventing one.
    B3: `chronos-change-control` first).
 2. Re-verify this plan's §2 snapshot; the repo wins over this document.
 3. Branch discipline: restart the working branch from the live default branch
-   (`git fetch origin feat/wheel-dashboard-mvp && git checkout -B <branch>
-   origin/feat/wheel-dashboard-mvp`); one item per PR; a merged PR is never
-   reused.
+   ~~(`git fetch origin feat/wheel-dashboard-mvp && git checkout -B <branch>
+   origin/feat/wheel-dashboard-mvp`)~~ **[updated 2026-08-22: the default flipped
+   to `main` and `feat/wheel-dashboard-mvp` is deleted (D-33). Derive the default
+   by command — `git ls-remote --symref origin HEAD` — and branch from its live
+   tip; full protocol in `docs/AGENT_PROTOCOL.md`]**; one item per PR; a merged
+   PR is never reused.
 4. Gates per PR: `ruff check .`, `ruff format --check .`, `mypy src/chronos`,
    `mypy --strict worker`, full `pytest -q` against the §2 baseline; measured
    test counts (`pytest --collect-only -q | grep -c '::'`), never estimates.

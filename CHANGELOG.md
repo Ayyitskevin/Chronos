@@ -1,5 +1,42 @@
 # CHANGELOG
 
+## [Unreleased] — the agent protocol, and the day the ship got steered (2026-08-22)
+
+The morning's red PRs were not work — they were symptoms. A mickey-wide sync
+re-pushed two SUPERSEDED branch tips as `-mickey-20260822` archive branches and
+opened PR #82 against a `main` sitting 98 commits behind the true default, claiming
+"48 patch-unique commits"; computed against the real default branch, the number was
+zero. The divergence had been measured against the wrong base — the same failure
+class as the phantom merge and the stranded allowlist fix, wearing a new costume.
+
+The steering, in order. The owner flipped the GitHub default branch to `main` and
+deleted `feat/wheel-dashboard-mvp`; the `main-integrity` ruleset now makes `main`
+PR-only — required green `quality` check, no force-push, no deletion, no bypass
+actors (every seat pushes as one account, so no seat is special) — and
+`delete_branch_on_merge` is on. The branch list was cleaned against measured
+divergence, never memory: 31 refs became 8 branches, 19 remote + 3 archive deletions
+each verified `ahead_by=0` against the real default before deletion, and the 2 tips
+genuinely worth keeping went to `refs/preserve/*` — no CI, no clutter, never a PR.
+
+And the rules moved into the repo, where seats can actually read them:
+`docs/AGENT_PROTOCOL.md` is now the canonical operating protocol for every AI seat —
+mandatory mechanical preflight (derive the default by command, branch from its live
+tip, measure your own baseline), branch and PR rules (base = the default, always; no
+stacked PRs without owner ack, and any stack carries the un-strand duty;
+`ahead_by=0` means nothing to preserve), the gate as `.github/workflows/ci.yml`
+defines it, review semantics (an empty review result is not a pass; a HOLD is closed
+only by the holder re-verifying in writing), post-merge ancestry verification,
+scan-before-claim ID allocation, and four case files so each rule reads as scar
+tissue rather than ceremony. `AGENTS.md`'s read-before-acting list points at it; a
+new PR template carries the base-branch check, the §13 contract skeleton, and the
+measured-counts gates footer. The duplicate D-21/D-22 rows in `DECISIONS.md` are
+annotated in place as (a)/(b) — never renumbered, since ADR-0025 and others cite the
+numbers. Recorded as D-33; the failure class registered as R-54, MITIGATED and
+deliberately not CLOSED — the protocol's adoption by the non-claude seats is
+unproven until their next PRs arrive preflighted and correctly based. Also folds in
+the continuation-plan correction that had been stranded on
+`claude/chronos-a1-plan-annotation` with no path to the default branch.
+
 ## [Unreleased] — hourly lane: adversarial-review fixes (2026-08-22)
 
 A four-lens review of the hourly lane against its own commit claims found 17
