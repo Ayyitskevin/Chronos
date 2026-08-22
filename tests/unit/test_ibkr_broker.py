@@ -334,6 +334,12 @@ def make_broker(
     *,
     account_id: str = ACCOUNT_ID,
     max_quote_age_seconds: int = 5,
+    # FakeIB delivers updates on the next event-loop pass, so ordering is
+    # deterministic — but asyncio.wait_for measures real wall clock, and a tight
+    # bound races runner load (0.2s lost once on CI, 2026-08-21). Keep the
+    # default generous; only the timeout-path test, where no update is ever
+    # published and the timeout is the sole possible outcome, passes a small one.
+    quote_timeout_seconds: float = 30.0,
     on_connection_uncertain: Callable[[str], object] | None = None,
 ) -> IBKRBroker:
     settings = Settings(
@@ -345,7 +351,7 @@ def make_broker(
         settings,
         client=client,
         clock=lambda: FIXED_NOW,
-        quote_timeout_seconds=0.2,
+        quote_timeout_seconds=quote_timeout_seconds,
         quote_settle_seconds=0,
         on_connection_uncertain=on_connection_uncertain,
     )
@@ -790,7 +796,9 @@ async def test_quote_waits_for_a_current_update_and_does_not_reuse_cached_values
 async def test_quote_without_a_current_price_update_times_out_and_cleans_up() -> None:
     client = FakeIB()
     client.publish_market_data_updates = False
-    broker = make_broker(client)
+    # No update is ever published, so the timeout is the only possible outcome
+    # at any duration; a small bound just keeps the test fast.
+    broker = make_broker(client, quote_timeout_seconds=0.05)
     await broker.connect()
 
     with pytest.raises(MarketDataUnavailableError, match="current price update"):
