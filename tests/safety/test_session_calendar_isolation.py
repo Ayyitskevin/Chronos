@@ -180,28 +180,80 @@ def test_every_import_spelling_is_recognised() -> None:
         assert _mentions(names, _CALENDAR_MODULE), names
 
 
-def test_no_authority_module_imports_histdata() -> None:
-    """The transitive route, opened when the hourly parser needed the session close.
+def _chronos_modules() -> dict[str, Path]:
+    return {_module_name_for(path): path for path in sorted(_PACKAGE_ROOT.rglob("*.py"))}
 
-    ``chronos.histdata.official_client`` holds a module-level ``SessionCalendar``. An
-    authority module importing ``chronos.histdata`` would load the calendar into the
-    authority plane while the direct guard stayed green.
+
+def _import_graph() -> dict[str, set[str]]:
+    """Every chronos module mapped to the chronos modules it imports.
+
+    Names that resolve to a symbol rather than a module (``from x.y import z``
+    where ``z`` is a function) are dropped by intersecting with the real module
+    set, so the graph carries only edges that actually load code.
     """
 
-    offenders = [
-        str(path.relative_to(_PACKAGE_ROOT))
-        for path in _modules_outside(_ALLOWED_PACKAGES)
-        if any(
-            _module_name_for(path).startswith(f"chronos.{package}")
-            for package in _AUTHORITY_PACKAGES
-        )
-        and _mentions(_names_in(path), "chronos.histdata")
-    ]
+    modules = _chronos_modules()
+    graph: dict[str, set[str]] = {}
+    for name, path in modules.items():
+        imported = set(_imported_names(path.read_text(), module_name=name))
+        graph[name] = {other for other in imported if other in modules}
+    return graph
+
+
+def _reaches(graph: dict[str, set[str]], start: str, target: str) -> list[str] | None:
+    """Shortest import path from ``start`` to ``target``, or None."""
+
+    queue: list[tuple[str, list[str]]] = [(start, [start])]
+    seen = {start}
+    while queue:
+        current, trail = queue.pop(0)
+        for nxt in sorted(graph.get(current, ())):
+            if nxt == target:
+                return [*trail, nxt]
+            if nxt not in seen:
+                seen.add(nxt)
+                queue.append((nxt, [*trail, nxt]))
+    return None
+
+
+def test_no_module_outside_research_can_reach_the_calendar_transitively() -> None:
+    """The escape codex's second HOLD named, closed at the level it actually lives.
+
+    Denying every importer of ``chronos.histdata`` outright would be wrong and would
+    fail today: ``chronos.cli`` and ``chronos.registry`` legitimately import
+    ``histdata.store``/``holdout``, neither of which loads the calendar. Only
+    ``histdata.official_client`` holds a module-level ``SessionCalendar`` (its hourly
+    parser needs the session close). The honest invariant is therefore reachability,
+    not a package list and not a single hop — and unlike a list, a transitive closure
+    cannot be defeated by adding a module nobody remembered to enumerate.
+    """
+
+    graph = _import_graph()
+    offenders: list[str] = []
+    for name in sorted(graph):
+        if name.startswith(("chronos.research", "chronos.histdata")):
+            continue
+        trail = _reaches(graph, name, _CALENDAR_MODULE)
+        if trail is not None:
+            offenders.append(" -> ".join(trail))
     assert offenders == [], (
-        "the authority plane imported chronos.histdata, which transitively carries the "
-        f"research session calendar: {offenders}. R-26 keeps market-open evidence on "
-        "the venue's own CLOSED token."
+        "these modules can load the research session calendar by following imports:\n"
+        + "\n".join(offenders)
+        + "\nR-26 keeps market-open evidence on the venue's own CLOSED token."
     )
+
+
+def test_the_reachability_graph_is_real() -> None:
+    """Guard the guard: an all-empty graph would make the check above vacuous."""
+
+    graph = _import_graph()
+    assert len(graph) > 200, "the module scan collapsed"
+    assert graph["chronos.histdata.official_client"] >= {_CALENDAR_MODULE}
+    # A known-good multi-hop path exists, so BFS is genuinely traversing edges.
+    assert _reaches(graph, "chronos.histdata.holdout", "chronos.marketdata.quality")
+    # And the legitimate cli/registry -> histdata edges must NOT reach the calendar.
+    for benign in ("chronos.cli.main", "chronos.registry.holdout_guardian"):
+        assert _reaches(graph, benign, _CALENDAR_MODULE) is None
 
 
 def test_importing_the_calendar_pulls_in_no_trading_module() -> None:
