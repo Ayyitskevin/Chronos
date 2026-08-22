@@ -285,9 +285,14 @@ def test_an_attestation_must_carry_a_source_and_a_sample() -> None:
 # ------------------------------------------------------------- refusals and boundaries
 
 
-def test_hourly_certification_is_refused_because_nothing_ingests_hourly() -> None:
-    with pytest.raises(CertificationError, match="ingests daily bars"):
-        _certify(interval=BarInterval.HOUR_1)
+def test_minute_certification_is_refused_because_nothing_ingests_minutes() -> None:
+    """HOUR_1 gained its path (see test_hourly_certification.py); the refusal now
+    guards exactly the intervals that remain vocabulary without ingestion."""
+
+    with pytest.raises(CertificationError, match="vocabulary"):
+        _certify(interval=BarInterval.MIN_5)
+    with pytest.raises(CertificationError, match="vocabulary"):
+        _certify(interval=BarInterval.MIN_1)
 
 
 def test_certification_needs_a_dataset_id_and_a_window() -> None:

@@ -76,7 +76,16 @@ def load_daily_csv_bytes(
     bars: list[Bar] = []
     for line_number, row in enumerate(reader, start=2):
         try:
-            session = date.fromisoformat(row[fields["date"]].strip()[:10])
+            date_cell = row[fields["date"]].strip()
+            if len(date_cell) > 10:
+                # A timestamped cell means this is not a daily file. Truncating it
+                # would silently collapse every bar of a session onto one date —
+                # refuse instead and name the loader that can read it.
+                raise ValueError(
+                    f"date cell {date_cell!r} carries a time component; "
+                    "use load_hourly_csv for intraday files"
+                )
+            session = date.fromisoformat(date_cell)
             open_ = float(row[fields["open"]])
             high = float(row[fields["high"]])
             low = float(row[fields["low"]])
@@ -107,3 +116,88 @@ def load_daily_csv_bytes(
     return LoadedSeries(
         series=series, path=path, sha256=digest, has_adjusted_close=adj_key is not None
     )
+
+
+_HOURLY_REQUIRED = ("timestamp_utc", "session_date", "open", "high", "low", "close", "volume")
+
+
+def load_hourly_csv(path: Path, symbol: str, source: str, exchange: str = "ARCA") -> LoadedSeries:
+    """Load one symbol's hourly bars from a CSV file, fail-closed."""
+
+    raw = path.read_bytes()
+    return load_hourly_csv_bytes(
+        raw,
+        path=path,
+        symbol=symbol,
+        source=source,
+        exchange=exchange,
+    )
+
+
+def load_hourly_csv_bytes(
+    raw: bytes,
+    *,
+    path: Path,
+    symbol: str,
+    source: str,
+    exchange: str = "ARCA",
+) -> LoadedSeries:
+    """Parse an hourly CSV snapshot: real close timestamps, no synthesis.
+
+    The hourly schema carries both ``timestamp_utc`` (the bar's true close, ISO
+    8601, UTC required) and ``session_date`` (the exchange trading date, written
+    at ingestion from the exchange calendar). ``session_date`` is deliberately a
+    stored column rather than re-derived here: deriving it from the UTC timestamp
+    would misdate any bar whose UTC close crosses midnight, and the writer knew
+    the exchange date at ingestion time. This loader synthesizes nothing — a
+    daily-shaped file (no timestamp column) is refused, not reinterpreted.
+    """
+
+    if not isinstance(raw, bytes):
+        raise TypeError("raw CSV content must be bytes")
+    digest = hashlib.sha256(raw).hexdigest()
+    text = raw.decode("utf-8-sig")
+    reader = csv.DictReader(text.splitlines())
+    if reader.fieldnames is None:
+        raise ValueError(f"{path}: CSV has no header row")
+    fields = {_norm_header(name): name for name in reader.fieldnames}
+    missing = [column for column in _HOURLY_REQUIRED if column not in fields]
+    if missing:
+        raise ValueError(f"{path}: missing required hourly columns {missing}")
+
+    bars: list[Bar] = []
+    for line_number, row in enumerate(reader, start=2):
+        try:
+            timestamp = datetime.fromisoformat(row[fields["timestamp_utc"]].strip())
+            session = date.fromisoformat(row[fields["session_date"]].strip())
+            open_ = float(row[fields["open"]])
+            high = float(row[fields["high"]])
+            low = float(row[fields["low"]])
+            close = float(row[fields["close"]])
+            volume = float(row[fields["volume"]])
+        except (KeyError, ValueError) as error:
+            raise ValueError(f"{path}:{line_number}: unparseable row: {error}") from error
+        if timestamp.tzinfo is None or timestamp.utcoffset() != UTC.utcoffset(None):
+            raise ValueError(
+                f"{path}:{line_number}: timestamp_utc must be timezone-aware UTC, "
+                f"got {row[fields['timestamp_utc']]!r}"
+            )
+        bars.append(
+            Bar(
+                symbol=symbol,
+                source=source,
+                exchange=exchange,
+                interval=BarInterval.HOUR_1,
+                session_date=session,
+                timestamp_utc=timestamp,
+                open=open_,
+                high=high,
+                low=low,
+                close=close,
+                volume=volume,
+            )
+        )
+
+    bars.sort(key=lambda bar: bar.timestamp_utc)
+    series = BarSeries(symbol=symbol, interval=BarInterval.HOUR_1, bars=tuple(bars))
+    return LoadedSeries(series=series, path=path, sha256=digest, has_adjusted_close=False)

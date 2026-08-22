@@ -4,7 +4,10 @@ Lays out ``research/data/history/`` as flat files — **no trading database is e
 opened**, so the data process structurally cannot hold the writer lease::
 
     research/data/history/
-      bars/<SYMBOL>.csv                 # UNADJUSTED as-traded OHLCV (never re-adjusted)
+      bars/<SYMBOL>.csv                 # UNADJUSTED daily OHLCV (never re-adjusted)
+      bars_1h/<SYMBOL>.csv              # UNADJUSTED hourly OHLCV with real close
+                                        # timestamps (ADR-0029; separate lane so the
+                                        # date-keyed daily schema is never overloaded)
       corporate_actions/<SYMBOL>.json   # the split + cash-dividend event stream
       MANIFEST.json                     # per-symbol provenance (sha256, range, capture)
 
@@ -26,16 +29,18 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import date
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from chronos.histdata.corporate_actions import CorporateAction
 from chronos.marketdata.bars import Bar, BarInterval, BarSeries
-from chronos.marketdata.csv_provider import load_daily_csv
+from chronos.marketdata.csv_provider import load_daily_csv, load_hourly_csv
 from chronos.marketdata.quality import validate_series
 
 _CANON_DECIMALS = 6
 _BARS_HEADER = "date,open,high,low,close,volume"
+_HOURLY_BARS_HEADER = "timestamp_utc,session_date,open,high,low,close,volume"
+_EASTERN = ZoneInfo("America/New_York")
 
 
 class StoreError(RuntimeError):
@@ -52,10 +57,19 @@ class WriteResult:
     rows_written: int
     rows_added: int
     corrections: tuple[str, ...]
+    #: Chunk end-dates the gateway answered with zero rows. Empty for a single-request
+    #: daily write; the hourly coordinator fills it so an operator can tell "the
+    #: gateway had nothing before 2015" from silent vendor loss, and knows exactly
+    #: which spans to re-request.
+    empty_chunks: tuple[str, ...] = ()
 
 
 def bars_path(root: Path, symbol: str) -> Path:
     return root / "bars" / f"{symbol}.csv"
+
+
+def hourly_bars_path(root: Path, symbol: str) -> Path:
+    return root / "bars_1h" / f"{symbol}.csv"
 
 
 def actions_path(root: Path, symbol: str) -> Path:
@@ -92,8 +106,22 @@ def write_bars(
     captured_at: str,
     allow_correction: bool = False,
 ) -> WriteResult:
-    """Idempotently merge ``series`` into the store; fail closed on conflict."""
+    """Idempotently merge a DAILY ``series`` into the store; fail closed on conflict.
 
+    The interval guard is explicit because it used to be accidental: before the
+    intraday-aware ``Bar.sequence_id``, an HOUR_1 series was refused here only
+    because every bar of a session collided into one identifier and tripped
+    ``DUPLICATE_BAR``. Giving intraday bars distinct identities removed that side
+    effect, so the refusal is now stated — otherwise an hourly series renders
+    through the daily schema as duplicate-date rows and bricks the symbol's daily
+    lane on the next read.
+    """
+
+    if series.interval is not BarInterval.DAY_1:
+        raise StoreError(
+            f"{series.symbol}: write_bars accepts DAY_1 series only, got {series.interval} "
+            "— use write_hourly_bars for the intraday lane"
+        )
     _require_clean(series)
     path = bars_path(root, series.symbol)
     if path.exists():
@@ -121,6 +149,82 @@ def write_bars(
     return WriteResult(series.symbol, len(merged), added, corrections)
 
 
+def read_hourly_bars(
+    root: Path, symbol: str, *, source: str = "ibkr", exchange: str = "SMART"
+) -> BarSeries:
+    path = hourly_bars_path(root, symbol)
+    if not path.exists():
+        return BarSeries(symbol=symbol, interval=BarInterval.HOUR_1, bars=())
+    return load_hourly_csv(path, symbol, source, exchange).series
+
+
+def write_hourly_bars(
+    root: Path,
+    series: BarSeries,
+    *,
+    source: str = "ibkr",
+    exchange: str = "SMART",
+    captured_at: str,
+    allow_correction: bool = False,
+) -> WriteResult:
+    """Idempotently merge an hourly ``series`` into its own lane; fail closed on conflict.
+
+    Same contract as ``write_bars`` — quality-gated, idempotent no-op on a clean
+    re-fetch, conflict on a changed row unless the supersede is deliberate — with
+    row identity keyed on the close timestamp instead of the session date.
+    """
+
+    if series.interval is not BarInterval.HOUR_1:
+        raise StoreError(
+            f"{series.symbol}: write_hourly_bars accepts HOUR_1 series only, got {series.interval}"
+        )
+    _require_clean(series)
+    _require_session_dates_agree(series)
+    path = hourly_bars_path(root, series.symbol)
+    if path.exists():
+        existing = load_hourly_csv(path, series.symbol, source, exchange).series
+        merged, added, corrections = _merge(existing, series, allow_correction=allow_correction)
+        if added == 0 and not corrections:
+            return WriteResult(series.symbol, len(merged), 0, ())
+    else:
+        merged, added, corrections = series, len(series), ()
+
+    _require_clean(merged)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_render_hourly_csv(merged), encoding="utf-8")
+    _update_hourly_manifest(
+        root,
+        series.symbol,
+        source=source,
+        exchange=exchange,
+        series=merged,
+        captured_at=captured_at,
+        corrections=corrections,
+    )
+    return WriteResult(series.symbol, len(merged), added, corrections)
+
+
+def _require_session_dates_agree(series: BarSeries) -> None:
+    """Every intraday bar's ``session_date`` must be its own exchange-local date.
+
+    The two columns are stored independently and the embargo masks by
+    ``session_date`` — so a row whose date cell disagrees with its timestamp is
+    exactly how a bar inside an embargoed session reaches a default-masked read.
+    RTH bars never cross midnight Eastern, so agreement is the invariant rather
+    than an approximation of one.
+    """
+
+    for bar in series.bars:
+        eastern_date = bar.timestamp_utc.astimezone(_EASTERN).date()
+        if bar.session_date != eastern_date:
+            raise StoreError(
+                f"{series.symbol}: bar at {bar.timestamp_utc.isoformat()} declares "
+                f"session_date {bar.session_date.isoformat()} but falls in the "
+                f"{eastern_date.isoformat()} exchange session — a disagreeing date "
+                "cell is how an embargoed bar reaches a masked read"
+            )
+
+
 def _require_clean(series: BarSeries) -> None:
     report = validate_series(series)
     if report.blocking:
@@ -129,26 +233,42 @@ def _require_clean(series: BarSeries) -> None:
         raise StoreError(f"{series.symbol}: blocking data-quality issue(s) — {detail}")
 
 
+def _bar_key(bar: Bar) -> str:
+    """The row identity the idempotent merge and the correction audit key on.
+
+    Daily rows are identified by their session date exactly as before. Intraday
+    rows must key on the close timestamp: a date key would make the bars of one
+    session collide with each other — fail-closed as a spurious conflict without
+    ``allow_correction``, and worse, a silent last-bar-wins collapse recorded as
+    legitimate "corrections" with it.
+    """
+
+    if bar.interval is BarInterval.DAY_1:
+        return bar.session_date.isoformat()
+    return bar.timestamp_utc.isoformat()
+
+
 def _merge(
     existing: BarSeries, incoming: BarSeries, *, allow_correction: bool
 ) -> tuple[BarSeries, int, tuple[str, ...]]:
-    by_date: dict[date, Bar] = {bar.session_date: bar for bar in existing.bars}
+    by_key: dict[str, Bar] = {_bar_key(bar): bar for bar in existing.bars}
     added = 0
     corrections: list[str] = []
     for bar in incoming.bars:
-        prior = by_date.get(bar.session_date)
+        key = _bar_key(bar)
+        prior = by_key.get(key)
         if prior is None:
-            by_date[bar.session_date] = bar
+            by_key[key] = bar
             added += 1
         elif _row_changed(prior, bar):
             if not allow_correction:
                 raise StoreConflictError(
-                    f"{incoming.symbol} {bar.session_date.isoformat()}: re-fetch differs from "
+                    f"{incoming.symbol} {key}: re-fetch differs from "
                     "the stored row; pass allow_correction to supersede it deliberately"
                 )
-            by_date[bar.session_date] = bar
-            corrections.append(bar.session_date.isoformat())
-    ordered = tuple(by_date[key] for key in sorted(by_date))
+            by_key[key] = bar
+            corrections.append(key)
+    ordered = tuple(sorted(by_key.values(), key=lambda bar: bar.timestamp_utc))
     merged = BarSeries(symbol=incoming.symbol, interval=incoming.interval, bars=ordered)
     return merged, added, tuple(corrections)
 
@@ -169,6 +289,16 @@ def _render_csv(series: BarSeries) -> str:
         lines.append(
             f"{bar.session_date.isoformat()},{bar.open},{bar.high},"
             f"{bar.low},{bar.close},{bar.volume}"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _render_hourly_csv(series: BarSeries) -> str:
+    lines = [_HOURLY_BARS_HEADER]
+    for bar in series.bars:
+        lines.append(
+            f"{bar.timestamp_utc.isoformat()},{bar.session_date.isoformat()},"
+            f"{bar.open},{bar.high},{bar.low},{bar.close},{bar.volume}"
         )
     return "\n".join(lines) + "\n"
 
@@ -240,6 +370,37 @@ def _update_manifest(
         "rows": len(series),
         "start": series.bars[0].session_date.isoformat() if series.bars else None,
         "end": series.bars[-1].session_date.isoformat() if series.bars else None,
+        "adjusted": False,
+        "captured_at": captured_at,
+        "corrections": all_corrections,
+    }
+    _store_manifest(root, manifest)
+
+
+def _update_hourly_manifest(
+    root: Path,
+    symbol: str,
+    *,
+    source: str,
+    exchange: str,
+    series: BarSeries,
+    captured_at: str,
+    corrections: tuple[str, ...],
+) -> None:
+    manifest = _load_manifest(root)
+    entry = _symbol_entry(manifest, symbol)
+    # Same append-only union as the daily lane; keys are timestamps here.
+    prior = entry.get("bars_1h")
+    prior_corrections = prior.get("corrections", []) if isinstance(prior, dict) else []
+    all_corrections = sorted({*prior_corrections, *corrections})
+    entry["bars_1h"] = {
+        "source": source,
+        "exchange": exchange,
+        "interval": "1h",
+        "sha256": _sha256_file(hourly_bars_path(root, symbol)),
+        "rows": len(series),
+        "start": series.bars[0].timestamp_utc.isoformat() if series.bars else None,
+        "end": series.bars[-1].timestamp_utc.isoformat() if series.bars else None,
         "adjusted": False,
         "captured_at": captured_at,
         "corrections": all_corrections,

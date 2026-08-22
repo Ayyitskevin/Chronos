@@ -36,7 +36,7 @@ import hashlib
 import json
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from enum import StrEnum
 from typing import Any
 
@@ -58,7 +58,13 @@ MATERIAL_RETURN_THRESHOLD = 0.20
 #: declares. A 4-for-1 split implies -75%; anything inside this band reconciles.
 SPLIT_RECONCILIATION_TOLERANCE = 0.02
 
-CERTIFICATION_SCHEMA_VERSION = "chronos-dataset-certification-v1"
+# The evidence mapping shape is pinned by a golden-digest test: renaming or adding a
+# field must bump this constant, or every recorded digest silently re-identifies.
+# v2 added the bar-granular evidence fields for HOUR_1 certification. Bumped while
+# zero production digests existed (no real release had ever been minted), so no
+# recorded evidence changed identity — after the first real release this constant
+# moves only with a migration story.
+CERTIFICATION_SCHEMA_VERSION = "chronos-dataset-certification-v2"
 
 
 class CertificationError(RuntimeError):
@@ -72,6 +78,7 @@ class Verdict(StrEnum):
 
 class FindingKind(StrEnum):
     MISSING_SESSION = "MISSING_SESSION"
+    MISSING_BAR = "MISSING_BAR"
     UNEXPECTED_BAR = "UNEXPECTED_BAR"
     COVERAGE_BELOW_FLOOR = "COVERAGE_BELOW_FLOOR"
     UNCLASSIFIED_MATERIAL_MOVE = "UNCLASSIFIED_MATERIAL_MOVE"
@@ -84,12 +91,18 @@ class FindingKind(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class Finding:
-    """One reason an export is not certified. Every finding blocks; there are no warnings."""
+    """One reason an export is not certified. Every finding blocks; there are no warnings.
+
+    ``timestamp_utc`` locates bar-granular findings: for an hourly export, "SPY
+    2024-05-06" cannot say WHICH of seven bars is missing, and evidence that
+    cannot name the defect is not evidence.
+    """
 
     kind: FindingKind
     symbol: str
     detail: str
     session_date: date | None = None
+    timestamp_utc: datetime | None = None
 
     def to_mapping(self) -> dict[str, Any]:
         return {
@@ -97,6 +110,7 @@ class Finding:
             "symbol": self.symbol,
             "detail": self.detail,
             "session_date": self.session_date.isoformat() if self.session_date else None,
+            "timestamp_utc": self.timestamp_utc.isoformat() if self.timestamp_utc else None,
         }
 
 
@@ -169,16 +183,30 @@ class CorporateActionAttestation:
 
 @dataclass(frozen=True, slots=True)
 class SymbolCoverage:
-    """Measured coverage for one symbol against its expected sessions."""
+    """Measured coverage for one symbol against its expected sessions.
+
+    The session dimension is always present. For an hourly export the bar
+    dimension is filled too, and it is the one the floor binds: a session with
+    one of its seven bars would count as "present" at session granularity, which
+    is exactly the hole bar-level certification exists to see.
+    """
 
     symbol: str
     expected_sessions: int
     observed_bars: int
     missing_sessions: tuple[date, ...]
     unexpected_bars: tuple[date, ...]
+    expected_bar_total: int | None = None
+    observed_slot_bars: int | None = None
+    missing_bar_timestamps: tuple[datetime, ...] = ()
+    unexpected_bar_timestamps: tuple[datetime, ...] = ()
 
     @property
     def coverage(self) -> float:
+        if self.expected_bar_total is not None:
+            if self.expected_bar_total == 0:
+                return 0.0
+            return (self.observed_slot_bars or 0) / self.expected_bar_total
         if self.expected_sessions == 0:
             return 0.0
         present = self.expected_sessions - len(self.missing_sessions)
@@ -197,6 +225,10 @@ class SymbolCoverage:
             "meets_floor": self.meets_floor,
             "missing_sessions": [day.isoformat() for day in self.missing_sessions],
             "unexpected_bars": [day.isoformat() for day in self.unexpected_bars],
+            "expected_bar_total": self.expected_bar_total,
+            "observed_slot_bars": self.observed_slot_bars,
+            "missing_bar_timestamps": [ts.isoformat() for ts in self.missing_bar_timestamps],
+            "unexpected_bar_timestamps": [ts.isoformat() for ts in self.unexpected_bar_timestamps],
         }
 
 
@@ -263,17 +295,37 @@ def _split_implied_return(ratio: float) -> float:
     return (1.0 / ratio) - 1.0
 
 
-def _material_moves(series: BarSeries) -> tuple[tuple[date, float], ...]:
+def _session_closes(series: BarSeries) -> tuple[tuple[date, float], ...]:
+    """One (session_date, close) pair per session — the last bar's close.
+
+    For a daily series this is the identity mapping. For an hourly series it
+    recovers the session close, which is the only frame in which a split ratio
+    means anything: split-implied returns are daily close-to-close facts, and
+    running them over adjacent hourly closes would dilute the discontinuity
+    across the ex-date's first hour and key multiple intraday moves onto one
+    date, silently masking each other.
+    """
+
+    closes: list[tuple[date, float]] = []
+    for bar in series.bars:
+        if closes and closes[-1][0] == bar.session_date:
+            closes[-1] = (bar.session_date, bar.close)
+        else:
+            closes.append((bar.session_date, bar.close))
+    return tuple(closes)
+
+
+def _material_moves(closes: tuple[tuple[date, float], ...]) -> tuple[tuple[date, float], ...]:
     """Close-to-close returns at or beyond the material threshold, in order."""
 
     moves: list[tuple[date, float]] = []
     previous_close: float | None = None
-    for bar in series.bars:
+    for day, close in closes:
         if previous_close is not None and previous_close > 0:
-            change = (bar.close / previous_close) - 1.0
+            change = (close / previous_close) - 1.0
             if abs(change) >= MATERIAL_RETURN_THRESHOLD:
-                moves.append((bar.session_date, change))
-        previous_close = bar.close
+                moves.append((day, change))
+        previous_close = close
     return tuple(moves)
 
 
@@ -301,20 +353,36 @@ def certify_export(
 ) -> CertificationReport:
     """Judge one export against the frozen gates and return the verdict with evidence.
 
-    Refuses a non-daily interval outright: the historical-data plane requests ``"1 day"``
-    bars only (``histdata/official_client.py``), so an hourly certification would be
-    judging an export that no ingestion path can currently produce.
+    DAY_1 coverage is judged at session granularity against the calendar's expected
+    sessions. HOUR_1 coverage is judged at BAR granularity against
+    ``expected_close_timestamps_utc`` — a session holding one of its seven bars is
+    six missing bars, not a covered session — and the 99.5% floor binds the bar
+    ratio (D-32 records that reading of the frozen gate). Corporate-action
+    reconciliation always runs in the daily close frame: for an hourly export the
+    per-session closing series is derived first, because a split ratio implies a
+    daily close-to-close return and nothing else. Minute intervals refuse — they
+    are vocabulary with no ingestion or certification path.
     """
 
     if not dataset_id.strip():
         raise CertificationError("dataset_id must be non-empty")
-    if interval is not BarInterval.DAY_1:
+    if interval not in (BarInterval.DAY_1, BarInterval.HOUR_1):
         raise CertificationError(
-            f"certification supports {BarInterval.DAY_1} only; the historical-data plane "
-            f"ingests daily bars and has no {interval} path to certify"
+            f"certification supports {BarInterval.DAY_1} and {BarInterval.HOUR_1}; "
+            f"{interval} is interval vocabulary with no ingestion path to certify"
         )
     if not windows:
         raise CertificationError("certification requires at least one symbol window")
+    for supplied_symbol, supplied in sorted(series_by_symbol.items()):
+        if len(supplied) and supplied.interval is not interval:
+            # Judging an hourly export at session granularity marks a session holding
+            # one of its seven bars "covered" — the exact blind spot the bar-level
+            # path exists to close, minted as a CERTIFIED digest.
+            raise CertificationError(
+                f"{supplied_symbol}: series interval {supplied.interval} does not match "
+                f"the {interval} certification requested — a verdict must judge the bars "
+                "it was handed, not a lookalike"
+            )
 
     calendar = calendar or SessionCalendar()
     findings: list[Finding] = []
@@ -371,7 +439,13 @@ def certify_export(
             )
 
         try:
-            expected = set(calendar.sessions(window.start, window.end))
+            session_days = calendar.sessions(window.start, window.end)
+            expected = set(session_days)
+            expected_slots: dict[date, tuple[datetime, ...]] = {}
+            if interval is BarInterval.HOUR_1:
+                expected_slots = {
+                    day: calendar.expected_close_timestamps_utc(day) for day in session_days
+                }
         except CalendarCoverageError as error:
             findings.append(
                 Finding(
@@ -396,13 +470,47 @@ def certify_export(
         missing = tuple(sorted(expected - observed))
         unexpected = tuple(sorted(observed - expected))
 
-        entry = SymbolCoverage(
-            symbol=symbol,
-            expected_sessions=len(expected),
-            observed_bars=len(in_window),
-            missing_sessions=missing,
-            unexpected_bars=unexpected,
-        )
+        if interval is BarInterval.HOUR_1:
+            observed_by_session: dict[date, set[datetime]] = {}
+            for bar in in_window:
+                observed_by_session.setdefault(bar.session_date, set()).add(bar.timestamp_utc)
+            expected_bar_total = sum(len(slots) for slots in expected_slots.values())
+            observed_slot_bars = 0
+            missing_bar_ts: list[datetime] = []
+            partial_missing: list[tuple[date, datetime]] = []
+            for day, slots in expected_slots.items():
+                got = observed_by_session.get(day, set())
+                for slot in slots:
+                    if slot in got:
+                        observed_slot_bars += 1
+                    else:
+                        missing_bar_ts.append(slot)
+                        if got:
+                            partial_missing.append((day, slot))
+            off_slot: list[tuple[date, datetime]] = []
+            for day, got in sorted(observed_by_session.items()):
+                for ts in sorted(got - set(expected_slots.get(day, ()))):
+                    if day in expected:
+                        off_slot.append((day, ts))
+            entry = SymbolCoverage(
+                symbol=symbol,
+                expected_sessions=len(expected),
+                observed_bars=len(in_window),
+                missing_sessions=missing,
+                unexpected_bars=unexpected,
+                expected_bar_total=expected_bar_total,
+                observed_slot_bars=observed_slot_bars,
+                missing_bar_timestamps=tuple(sorted(missing_bar_ts)),
+                unexpected_bar_timestamps=tuple(ts for _, ts in off_slot),
+            )
+        else:
+            entry = SymbolCoverage(
+                symbol=symbol,
+                expected_sessions=len(expected),
+                observed_bars=len(in_window),
+                missing_sessions=missing,
+                unexpected_bars=unexpected,
+            )
         coverage.append(entry)
 
         for day in missing:
@@ -410,7 +518,11 @@ def certify_export(
                 Finding(
                     kind=FindingKind.MISSING_SESSION,
                     symbol=symbol,
-                    detail="the exchange held a session and the export has no bar for it",
+                    detail=(
+                        "the exchange held a session and the export has no bar for it"
+                        if interval is BarInterval.DAY_1
+                        else "the exchange held a session and the export has no bars for it"
+                    ),
                     session_date=day,
                 )
             )
@@ -424,6 +536,33 @@ def certify_export(
                     session_date=day,
                 )
             )
+        if interval is BarInterval.HOUR_1:
+            # A fully-empty session is already one MISSING_SESSION finding; per-slot
+            # findings are for sessions the export partially covered, so the evidence
+            # names the exact bar without seven-fold noise on a wholly missing day.
+            for day, slot in partial_missing:
+                findings.append(
+                    Finding(
+                        kind=FindingKind.MISSING_BAR,
+                        symbol=symbol,
+                        detail="the session ran and the export is missing this bar",
+                        session_date=day,
+                        timestamp_utc=slot,
+                    )
+                )
+            for day, ts in off_slot:
+                findings.append(
+                    Finding(
+                        kind=FindingKind.UNEXPECTED_BAR,
+                        symbol=symbol,
+                        detail=(
+                            "bar timestamp is not an expected session slot "
+                            "(pre/post-market, misaligned, or a phantom extra bar)"
+                        ),
+                        session_date=day,
+                        timestamp_utc=ts,
+                    )
+                )
         if not entry.meets_floor:
             findings.append(
                 Finding(
@@ -448,7 +587,7 @@ def certify_export(
                 )
 
         splits = _splits_by_date(actions_by_symbol.get(symbol, ()))
-        moves = {day: change for day, change in _material_moves(series)}
+        moves = {day: change for day, change in _material_moves(_session_closes(series))}
 
         for day, change in sorted(moves.items()):
             if not (window.start <= day <= window.end):

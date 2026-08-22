@@ -1,5 +1,40 @@
 # CHANGELOG
 
+## [Unreleased] — hourly lane: adversarial-review fixes (2026-08-22)
+
+A four-lens review of the hourly lane against its own commit claims found 17
+verified findings, two of them regressions introduced by the lane itself:
+making `Bar.sequence_id` interval-aware silently disarmed the accidental
+`DUPLICATE_BAR` guard that had kept hourly series out of the daily store, and
+`certify_export` never checked that the series it was handed were the interval
+it was told to judge (an hourly export under the default DAY_1 certified at
+100% while missing ~86% of its bars). Both now refuse explicitly. Also: bars
+that have not closed are dropped before the store (the close cap was mapping a
+forming bar onto exactly the expected closing slot); empty chunks are actually
+recorded and surfaced, as three documents already claimed; `bars_per_hour`
+values that do not divide 60 refuse instead of hanging; the hourly store
+refuses a `session_date` that disagrees with its timestamp's Eastern date (the
+embargo-leak shape); `_render_partition` refuses intervals it has no faithful
+schema for; and the R-26 isolation guard now covers the transitive route the
+lane opened (authority → `chronos.histdata` → session calendar). 24 regression
+tests, one per finding.
+
+## [Unreleased] — ADR-0029: the hourly bars lane (2026-08-21)
+
+Hourly ingestion + bar-granular certification, end to end: `bars_1h/<SYMBOL>.csv`
+with real close timestamps and stored session dates; interval-conditional
+`Bar.sequence_id` (DAY_1 byte-identical — it feeds execution intent identity);
+IBKR "1 hour" requests pinned to `formatDate=2` + RTH with closes capped at the
+session's official close; chunked oldest-first backfill where every chunk is paced
+and empty pre-horizon chunks are recorded skips; `certify_export(interval=HOUR_1)`
+judging bars against `expected_close_timestamps_utc` with the 99.5% floor on the
+bar ratio and corporate actions reconciled in the derived daily-close frame;
+hourly releases as their own v2 dataset. Hourly adjusted views refuse (no official
+close to anchor C_ref). Two silent-wrong paths found by the pre-build sweep are
+fixed and pinned by tests: the `allow_correction` last-bar-wins collapse and the
+date-keyed dedup identity. A-31 narrowed, R-11 restated, D-12's executable scope
+deliberately unmoved. See D-32 / ADR-0029.
+
 ## [Unreleased] — D2: certification, and the first producer of a certified catalog (2026-08-21)
 
 `research.certification` turns Phase 3's four frozen data-quality gates into a verdict:

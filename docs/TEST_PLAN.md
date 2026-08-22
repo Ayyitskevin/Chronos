@@ -124,7 +124,7 @@ CHRONOS_RUN_IBKR_SMOKE=1 BROKER_MODE=ibkr ALLOW_ORDER_TRANSMIT=false ALLOW_LIVE_
 - **Real-gateway reconciliation evidence gathering** (RISK_REGISTER.md R-04 residual).
 - **Read-only smoke test** (above) — runnable only by the owner.
 - **TradingView parity** — no reference exports exist (A-03).
-- **Intraday strategies** — no trustworthy intraday data in this environment (A-31).
+- **Intraday strategies** — excluded until a certified hourly release exists AND an intraday validation plan (labels, session calendars, half-days) is written. The original premise — no trustworthy intraday data in this environment (A-31) — narrowed 2026-08-21: ADR-0029 built the data path, but a path is not a release and a release is not a plan.
 
 ## CI gates
 

@@ -29,6 +29,17 @@ holds no writer lease, and imports no order/broker module.
 python -m chronos.histdata bars --symbols SPY,QQQ --end-date 2024-12-31 --duration-days 365
 ```
 
+Hourly bars are their own lane (ADR-0029): add `--bar-size 1h` (and optionally
+`--chunk-days`, default 30 — conservative under IBKR's per-bar-size duration caps,
+which are unverified in this repo; raise it only after the first real run confirms
+the actual cap). The hourly path requests `formatDate=2` (epoch) and RTH only, paces
+at a stricter 4/min, runs oldest-first, records empty pre-horizon chunks by end-date
+in the per-symbol JSON line (`empty_chunks`), and never ingests a bar that has not
+closed yet — so a backfill run during market hours cannot store the forming bar as
+the session's closing print. First-run verification items for hourly: actual depth horizon per symbol,
+bars arriving start-stamped 09:30…15:30 with the final bar spanning to the close,
+half-days ending at 13:00, and volume units at intraday resolution.
+
 Each symbol is paced (a conservative rolling budget + per-key cooldown), fetched,
 quality-gated, and written idempotently. Output is one JSON line per symbol
 (`{symbol, rows, added, error}`); a non-zero exit means at least one symbol failed.

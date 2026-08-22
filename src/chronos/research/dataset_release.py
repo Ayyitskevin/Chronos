@@ -42,13 +42,16 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-from chronos.marketdata.bars import BarSeries
+from chronos.marketdata.bars import BarInterval, BarSeries
 from chronos.research.certification import CertificationReport
 from chronos.research.certified_data import CATALOG_SCHEMA_VERSION, DataClassification
 
-RELEASE_SCHEMA_VERSION = "chronos-dataset-release-v1"
+# v2 added the per-release interval and the hourly partition schema. Bumped while
+# zero production release digests existed; see certification.py's matching note.
+RELEASE_SCHEMA_VERSION = "chronos-dataset-release-v2"
 
 _BARS_HEADER = "date,open,high,low,close,volume"
+_HOURLY_BARS_HEADER = "timestamp_utc,session_date,open,high,low,close,volume"
 
 
 class DatasetReleaseError(RuntimeError):
@@ -137,6 +140,7 @@ class PartitionRelease:
 class DatasetRelease:
     """The frozen release: its partitions, its map, and the digest that names it."""
 
+    interval: str
     dataset_id: str
     catalog_id: str
     source_id: str
@@ -174,6 +178,7 @@ class DatasetRelease:
     def release_document(self) -> dict[str, Any]:
         return {
             "schema_version": RELEASE_SCHEMA_VERSION,
+            "interval": self.interval,
             "dataset_id": self.dataset_id,
             "catalog_id": self.catalog_id,
             "source_id": self.source_id,
@@ -212,17 +217,42 @@ class DatasetRelease:
 
 
 def _render_partition(series: BarSeries, span: HoldoutSpan) -> tuple[str, int]:
-    """Render the bars inside ``span`` in the store's own CSV shape."""
+    """Render the bars inside ``span`` in the store's own CSV shape for the interval.
 
-    lines = [_BARS_HEADER]
+    Span membership keys on ``session_date`` for BOTH intervals, deliberately: a
+    holdout boundary can therefore never split a trading session mid-day, and
+    every bar of one session always lands in one classification — including a
+    bar whose UTC close crossed midnight, which is why the timestamp is never
+    the membership key. The hourly shape carries the real close timestamps; the
+    daily renderer through the hourly schema (or vice versa) is unrepresentable
+    by construction.
+    """
+
+    if series.interval not in (BarInterval.DAY_1, BarInterval.HOUR_1):
+        # The daily branch below would render any other interval through the
+        # date-keyed schema, discarding timestamps into duplicate date rows.
+        # Certification refuses minutes today; refusing here too means a later
+        # vocabulary widening cannot silently mint an unfaithful release.
+        raise DatasetReleaseError(
+            f"{series.symbol}: no partition schema for {series.interval} — a release "
+            "may only freeze intervals whose bytes can faithfully round-trip"
+        )
+    hourly = series.interval is BarInterval.HOUR_1
+    lines = [_HOURLY_BARS_HEADER if hourly else _BARS_HEADER]
     rows = 0
     for bar in series.bars:
         if not span.contains(bar.session_date):
             continue
-        lines.append(
-            f"{bar.session_date.isoformat()},{bar.open},{bar.high},"
-            f"{bar.low},{bar.close},{bar.volume}"
-        )
+        if hourly:
+            lines.append(
+                f"{bar.timestamp_utc.isoformat()},{bar.session_date.isoformat()},"
+                f"{bar.open},{bar.high},{bar.low},{bar.close},{bar.volume}"
+            )
+        else:
+            lines.append(
+                f"{bar.session_date.isoformat()},{bar.open},{bar.high},"
+                f"{bar.low},{bar.close},{bar.volume}"
+            )
         rows += 1
     return "\n".join(lines) + "\n", rows
 
@@ -303,6 +333,12 @@ def freeze_release(
         series = series_by_symbol.get(symbol)
         if series is None or len(series) == 0:
             raise DatasetReleaseError(f"{symbol}: certified export supplied no bars to freeze")
+        if series.interval is not certification.interval:
+            raise DatasetReleaseError(
+                f"{symbol}: series interval {series.interval} does not match the "
+                f"certification's {certification.interval} — a release freezes exactly "
+                "what was judged, never a lookalike"
+            )
         symbol_spans = by_symbol[symbol]
         _require_tiling(
             symbol_spans,
@@ -342,6 +378,7 @@ def freeze_release(
         )
 
     return DatasetRelease(
+        interval=str(certification.interval),
         dataset_id=dataset_id,
         catalog_id=catalog_id,
         source_id=source_id,

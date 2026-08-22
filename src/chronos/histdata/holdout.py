@@ -21,7 +21,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from chronos.histdata.store import read_bars
+from chronos.histdata.store import read_bars, read_hourly_bars
 from chronos.marketdata.bars import BarSeries
 
 
@@ -148,6 +148,20 @@ def _mask_windows(series: BarSeries, applicable: Iterable[HoldoutWindow]) -> Bar
         if not any(window.contains(bar.session_date) for window in applicable_windows)
     )
     return BarSeries(symbol=series.symbol, interval=series.interval, bars=kept)
+
+
+def read_embargoed_hourly_bars(root: Path, symbol: str, *, unlocked: bool = False) -> BarSeries:
+    """The hourly lane's default-masked read; same embargo semantics as daily.
+
+    Windows are date ranges and bars carry ``session_date``, so masking a session
+    drops every intraday bar of that session — including one whose UTC close
+    rolled past midnight, which is exactly why ``session_date`` is stored rather
+    than derived from the timestamp.
+    """
+
+    series = read_hourly_bars(root, symbol)
+    windows = load_holdouts(root)
+    return embargoed_view(series, windows, symbol, unlocked=unlocked)
 
 
 def read_embargoed_bars(root: Path, symbol: str, *, unlocked: bool = False) -> BarSeries:
