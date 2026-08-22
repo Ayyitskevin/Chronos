@@ -1,7 +1,7 @@
 # Chronos developer targets. All commands assume the project venv at .venv.
 PY := .venv/bin/python
 
-.PHONY: test lint format-check type gates backend ui demo migrate
+.PHONY: test lint format-check type type-worker gates backend ui demo migrate
 
 test:
 	$(PY) -m pytest -q
@@ -15,7 +15,10 @@ format-check:
 type:
 	.venv/bin/mypy src/chronos
 
-gates: lint format-check type test
+type-worker:
+	.venv/bin/mypy --strict worker
+
+gates: lint format-check type type-worker test
 
 backend:
 	$(PY) scripts/run_backend.py
