@@ -1,5 +1,33 @@
 # CHANGELOG
 
+## [Unreleased] — D2: certification, and the first producer of a certified catalog (2026-08-21)
+
+`research.certification` turns Phase 3's four frozen data-quality gates into a verdict:
+coverage against an independent expected-session count, both gap directions, split/price
+reconciliation, and a required owner attestation for the independent-sample half that
+code cannot perform. `research.dataset_release` freezes a passing export into
+content-addressed partitions (`data_version == sha256`) and emits the exact
+`chronos-certified-data-catalog-v1` manifest that `research.certified_data` has
+authenticated since C3 and that nothing in the repository had ever produced. The holdout
+map must tile each symbol's range exactly once; clean spans become catalog `holdout`,
+seen and burned become `ordinary`, and burned records why. Owner command:
+`scripts/certify_dataset.py certify|freeze`, with `docs/certified_data_runbook.md`.
+Refuses a non-daily interval — the histdata plane requests `"1 day"` bars only, so
+there is no hourly export to certify yet. See D-31.
+
+## [Unreleased] — D2: an expected-session calendar for research coverage (2026-08-21)
+
+`chronos.research.session_calendar` supplies the independent expectation Phase 3's
+"at least 99.5% expected-session coverage" gate needs and never had — recurring NYSE
+holidays by rule (Rule 7.2 observance, including the Saturday-New-Year exception that
+keeps December 31 a trading day), Good Friday by computus, Juneteenth from 2022, plus a
+pinned table of ad-hoc closures no rule derives. Fail-closed outside its pinned range;
+half-days pinned more narrowly still, so `expected_bar_count` refuses rather than
+counting a 13:00 close as 16:00. Research-only and structurally fenced from every
+authority package — R-26's "the venue's own CLOSED is the load-bearing token" is
+unchanged. Verified against published NYSE schedules, not against a second copy of the
+same rules: 2001 resolves to 248 sessions, 2024 to 252. See D-30.
+
 ## [Unreleased] — A5: the worker's daily cost ceiling (2026-08-21)
 
 `CHRONOS_WORKER_MAX_DAILY_TOKENS` closes R-47 residual (e): cost was logged,
