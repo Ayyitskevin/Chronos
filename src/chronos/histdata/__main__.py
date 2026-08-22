@@ -26,7 +26,11 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 
 from chronos.config.settings import get_settings
-from chronos.histdata.backfill import backfill_symbols
+from chronos.histdata.backfill import (
+    DEFAULT_HOURLY_CHUNK_DAYS,
+    backfill_hourly_symbols,
+    backfill_symbols,
+)
 from chronos.histdata.client import HistoricalDataError
 from chronos.histdata.official_client import OfficialIBKRHistoricalClient
 from chronos.histdata.official_options_client import OfficialIBKROptionClient
@@ -48,10 +52,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    bars = sub.add_parser("bars", help="backfill unadjusted historical daily bars")
+    bars = sub.add_parser("bars", help="backfill unadjusted historical bars (daily or hourly)")
     bars.add_argument("--symbols", required=True, help="comma-separated, e.g. SPY,QQQ")
     bars.add_argument("--end-date", default=datetime.now(UTC).date().isoformat(), help="YYYY-MM-DD")
     bars.add_argument("--duration-days", type=int, default=365)
+    bars.add_argument(
+        "--bar-size",
+        choices=("1d", "1h"),
+        default="1d",
+        help="1d writes bars/<SYMBOL>.csv; 1h writes the bars_1h/ lane in paced chunks",
+    )
+    bars.add_argument(
+        "--chunk-days",
+        type=int,
+        default=DEFAULT_HOURLY_CHUNK_DAYS,
+        help="hourly only: days per gateway request, conservative under IBKR's caps",
+    )
     bars.add_argument("--history-root", type=Path, default=HISTORY_ROOT)
     bars.add_argument("--exchange", default="SMART")
     bars.set_defaults(func=_run_bars)
@@ -85,17 +101,34 @@ def _run_bars(args: argparse.Namespace) -> int:
         print(json.dumps({"error": f"connect failed: {error}"}))
         return 1
     try:
-        outcomes = backfill_symbols(
-            client,
-            args.history_root,
-            symbols,
-            end_date=date.fromisoformat(args.end_date),
-            duration_days=args.duration_days,
-            pacing=PacingController(),
-            now_fn=lambda: datetime.now(UTC),
-            captured_at=now.isoformat(),
-            exchange=args.exchange,
-        )
+        if args.bar_size == "1h":
+            # A stricter window than the daily default: chunked hourly backfill
+            # would otherwise sustain the pace AT IBKR's ~60/10-minute ceiling
+            # for its whole run; four per minute leaves deliberate margin.
+            outcomes = backfill_hourly_symbols(
+                client,
+                args.history_root,
+                symbols,
+                end_date=date.fromisoformat(args.end_date),
+                duration_days=args.duration_days,
+                pacing=PacingController(max_per_window=4),
+                now_fn=lambda: datetime.now(UTC),
+                captured_at=now.isoformat(),
+                exchange=args.exchange,
+                chunk_days=args.chunk_days,
+            )
+        else:
+            outcomes = backfill_symbols(
+                client,
+                args.history_root,
+                symbols,
+                end_date=date.fromisoformat(args.end_date),
+                duration_days=args.duration_days,
+                pacing=PacingController(),
+                now_fn=lambda: datetime.now(UTC),
+                captured_at=now.isoformat(),
+                exchange=args.exchange,
+            )
     finally:
         client.disconnect()
 

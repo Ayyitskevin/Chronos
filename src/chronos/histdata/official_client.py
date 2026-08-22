@@ -16,12 +16,14 @@ confirms on first real backfill.
 from __future__ import annotations
 
 import threading
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from chronos.config.settings import Settings, get_settings
 from chronos.histdata.client import HistoricalDataError
 from chronos.marketdata.bars import Bar, BarInterval, BarSeries
+from chronos.research.session_calendar import CalendarCoverageError, SessionCalendar
 
 _INSTALL_GUIDANCE = (
     "The official IBKR TWS API package (ibapi) is not installed. It is not on PyPI: "
@@ -30,6 +32,18 @@ _INSTALL_GUIDANCE = (
 )
 _DAILY_CLOSE_UTC = (21, 0)  # matches marketdata.csv_provider's synthetic daily close
 _REQUEST_TIMEOUT_SECONDS = 60.0
+_EASTERN = ZoneInfo("America/New_York")
+_HOURLY_SPAN = timedelta(hours=1)
+
+# The hourly parser needs one fact ingestion cannot derive from the response: the
+# session's official close, which caps the final partial bar (a 15:30 start closes
+# at 16:00, and at 13:00 on a half-day — adjacency in the response cannot tell you
+# that). That fact lives in exactly one place, chronos.research.session_calendar.
+# Layering note: research already imports histdata (corporate_actions), so this is
+# a package-level cycle but not a module-level one — session_calendar imports
+# nothing from chronos, and the R-26 guard is untouched: histdata is the read-only
+# data plane, not an authority package, and may never become one.
+_calendar = SessionCalendar()
 
 
 def _load_ibapi() -> tuple[Any, Any, Any]:
@@ -97,6 +111,43 @@ class OfficialIBKRHistoricalClient:
         rows = self._app.await_request(req_id, _REQUEST_TIMEOUT_SECONDS)
         bars = tuple(_bar_from_row(symbol, self._exchange, row) for row in rows)
         return BarSeries(symbol=symbol, interval=BarInterval.DAY_1, bars=bars)
+
+    def fetch_hourly_bars(
+        self, symbol: str, *, end_date: date, duration_days: int
+    ) -> BarSeries:  # pragma: no cover - owner-run only
+        """One chunk of unadjusted HOUR_1 bars. formatDate=2 and RTH-only, on purpose.
+
+        ``formatDate=2`` returns epoch seconds — unambiguous UTC. The in-repo claim
+        that intraday rows under ``formatDate=1`` arrive as epoch seconds
+        (``broker/official_ibkr.py``) has never run against a gateway and is
+        probably wrong (formatDate=1 intraday is a zone-ambiguous datetime string);
+        requesting epoch sidesteps the ambiguity instead of resolving it.
+        ``useRTH=1`` matches the certification expectation exactly: the session
+        calendar counts 09:30-16:00 bars (ADR-0029 records both decisions).
+        """
+
+        if self._app is None:
+            raise HistoricalDataError("not connected; call connect() first")
+        _, _, contract_cls = _load_ibapi()
+        contract = _stock_contract(contract_cls, symbol, self._exchange)
+        req_id = self._app.next_req_id()
+        end = end_date.strftime("%Y%m%d 23:59:59 UTC")
+        self._app.begin_request(req_id)
+        self._app.reqHistoricalData(
+            req_id,
+            contract,
+            end,
+            f"{max(1, duration_days)} D",
+            "1 hour",
+            "TRADES",
+            1,  # useRTH — regular session only; the certification expectation
+            2,  # formatDate — epoch seconds, unambiguous UTC
+            False,  # keepUpToDate
+            [],
+        )
+        rows = self._app.await_request(req_id, _REQUEST_TIMEOUT_SECONDS)
+        bars = tuple(_hourly_bar_from_row(symbol, self._exchange, row) for row in rows)
+        return BarSeries(symbol=symbol, interval=BarInterval.HOUR_1, bars=bars)
 
 
 def _make_app(e_client: Any, e_wrapper: Any) -> Any:  # pragma: no cover - owner-run only
@@ -166,6 +217,60 @@ def _bar_from_row(symbol: str, exchange: str, row: Any) -> Bar:  # pragma: no co
         timestamp_utc=datetime(
             session_date.year, session_date.month, session_date.day, hour, minute, tzinfo=UTC
         ),
+        open=float(row.open),
+        high=float(row.high),
+        low=float(row.low),
+        close=float(row.close),
+        volume=float(row.volume),
+    )
+
+
+def _hourly_bar_from_row(symbol: str, exchange: str, row: Any) -> Bar:
+    """Build one HOUR_1 bar from a formatDate=2 row. Pure logic, unit-tested.
+
+    IBKR bar timestamps are bar START times; Chronos ``timestamp_utc`` is the bar
+    CLOSE. The close is ``start + 1h`` capped at the session's official close, so
+    the final partial bar (15:30 start on a regular day, 12:30 on a half-day) is
+    stamped 16:00/13:00 rather than a fabricated 16:30/13:30. ``session_date`` is
+    the exchange-local (US/Eastern) date of the bar start — RTH bars never cross
+    midnight Eastern, and deriving it from UTC would misdate every bar after
+    20:00 New York standard time.
+    """
+
+    text = str(row.date).strip()
+    if not text.isdigit():
+        raise HistoricalDataError(
+            f"{symbol}: expected epoch-seconds bar date under formatDate=2, got {text!r} — "
+            "the gateway answered in a format this parser refuses to guess about"
+        )
+    start_utc = datetime.fromtimestamp(int(text), tz=UTC)
+    start_eastern = start_utc.astimezone(_EASTERN)
+    session_date = start_eastern.date()
+    try:
+        closure = _calendar.closure_reason(session_date)
+    except CalendarCoverageError as error:
+        raise HistoricalDataError(
+            f"{symbol}: bar dated {session_date.isoformat()} is outside the pinned "
+            f"session-calendar range — extend the calendar before ingesting ({error})"
+        ) from error
+    if closure is None:
+        session = _calendar.session(session_date)
+        session_close_utc = datetime.combine(
+            session_date, session.close_time, tzinfo=_EASTERN
+        ).astimezone(UTC)
+        timestamp_utc = min(start_utc + _HOURLY_SPAN, session_close_utc)
+    else:
+        # A bar on a non-session day is the venue disagreeing with the calendar.
+        # Ingestion stores it honestly (nominal one-hour span) and certification
+        # classifies it as UNEXPECTED_BAR — refusing here would hide the evidence.
+        timestamp_utc = start_utc + _HOURLY_SPAN
+    return Bar(
+        symbol=symbol,
+        source="ibkr",
+        exchange=exchange,
+        interval=BarInterval.HOUR_1,
+        session_date=session_date,
+        timestamp_utc=timestamp_utc,
         open=float(row.open),
         high=float(row.high),
         low=float(row.low),

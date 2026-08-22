@@ -1,8 +1,11 @@
 """Historical-data client port (ADR-0011 §2).
 
 The one boundary the data process fetches through. Implementations return
-**unadjusted** as-traded daily bars (``marketdata.BarSeries``); adjustment is a
+**unadjusted** as-traded bars (``marketdata.BarSeries``); adjustment is a
 read-time concern handled elsewhere (``adjust.py``) and never crosses this port.
+Daily and hourly are separate methods rather than an interval parameter, because
+their request semantics differ at the gateway (IBKR caps request duration per
+bar size — ADR-0029), and a caller must confront that instead of passing a flag.
 
 Two implementations exist: ``FakeHistoricalDataClient`` (tests, deterministic,
 contacts nothing) drives every CI/dev path, and ``OfficialIBKRHistoricalClient``
@@ -24,7 +27,7 @@ class HistoricalDataError(RuntimeError):
 
 @runtime_checkable
 class HistoricalDataClient(Protocol):
-    """A source of unadjusted historical daily bars for one symbol at a time."""
+    """A source of unadjusted historical bars for one symbol at a time."""
 
     def connect(self) -> None:
         """Open the underlying connection (idempotent)."""
@@ -38,4 +41,15 @@ class HistoricalDataClient(Protocol):
         ``duration_days`` bounds how far back to request. The returned series is
         as-traded (never adjusted); ordering/uniqueness are guaranteed by
         ``BarSeries``. Raises :class:`HistoricalDataError` on failure.
+        """
+
+    def fetch_hourly_bars(self, symbol: str, *, end_date: date, duration_days: int) -> BarSeries:
+        """Return unadjusted HOUR_1 bars for one bounded chunk ending on ``end_date``.
+
+        One call is ONE gateway request: chunking a long backfill into cap-sized
+        requests belongs to the coordinator (``backfill.py``), never in here —
+        chunks issued inside a client would bypass the pacing controller entirely.
+        ``duration_days`` must respect IBKR's per-bar-size duration cap; the
+        conservative chunk default lives with the coordinator. Raises
+        :class:`HistoricalDataError` on failure.
         """

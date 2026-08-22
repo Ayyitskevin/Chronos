@@ -23,7 +23,13 @@ from enum import StrEnum
 
 
 class BarInterval(StrEnum):
-    """Supported bar intervals. Only DAY_1 is validated for research today."""
+    """Supported bar intervals.
+
+    DAY_1 and HOUR_1 have validated ingestion and certification paths (ADR-0011,
+    ADR-0029); MIN_5 and MIN_1 are vocabulary only — nothing ingests or validates
+    them. ADR-0005's engine-scope statement is unchanged: only DAY_1 bars drive
+    the deterministic strategy engine.
+    """
 
     DAY_1 = "1d"
     HOUR_1 = "1h"
@@ -64,17 +70,33 @@ class Bar:
 
     @property
     def sequence_id(self) -> str:
-        """Stable deduplication identifier."""
+        """Stable deduplication identifier.
 
-        return f"{self.source}:{self.symbol}:{self.interval}:{self.session_date.isoformat()}"
+        DAY_1 keeps the historical ``source:symbol:interval:session_date`` form
+        byte-for-byte: this string participates in execution intent identity
+        (``chronos.execution.intents.source_bar_sequence_id``), so changing it for
+        daily bars would silently re-key the order plane's duplicate suppression.
+        Intraday intervals append the bar-close time — without it, every bar of a
+        session would share one identifier and ``DUPLICATE_BAR`` would brand all
+        valid intraday data as duplicated.
+        """
+
+        base = f"{self.source}:{self.symbol}:{self.interval}:{self.session_date.isoformat()}"
+        if self.interval is BarInterval.DAY_1:
+            return base
+        return f"{base}T{self.timestamp_utc.strftime('%H%M%S')}Z"
 
 
 @dataclass(frozen=True, slots=True)
 class BarSeries:
     """A chronologically ordered, single-symbol, single-interval bar container.
 
-    The constructor enforces ordering and uniqueness; consumers can therefore
-    rely on ``bars[i].session_date < bars[i + 1].session_date``.
+    The constructor enforces strictly increasing ``timestamp_utc``; consumers can
+    rely on that and on ``bars[i].session_date <= bars[i + 1].session_date``. The
+    strict per-date form holds for DAY_1 only — an intraday series has many bars
+    per session, so nothing may key a mapping by ``session_date`` and assume one
+    entry per bar. (An earlier revision of this docstring promised the strict
+    date inequality unconditionally; the constructor never enforced it.)
     """
 
     symbol: str
@@ -91,7 +113,8 @@ class BarSeries:
             if previous is not None and bar.timestamp_utc <= previous.timestamp_utc:
                 raise ValueError(
                     "Bars must be strictly increasing in time; "
-                    f"{bar.session_date} follows {previous.session_date}"
+                    f"{bar.timestamp_utc.isoformat()} follows "
+                    f"{previous.timestamp_utc.isoformat()}"
                 )
             previous = bar
 

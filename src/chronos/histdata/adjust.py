@@ -34,7 +34,7 @@ from datetime import date
 from enum import StrEnum
 
 from chronos.histdata.corporate_actions import ActionKind, CorporateAction
-from chronos.marketdata.bars import Bar, BarSeries
+from chronos.marketdata.bars import Bar, BarInterval, BarSeries
 
 _PRICE_DECIMALS = 6
 _SUSPICIOUS_DIVIDEND_YIELD = 0.5
@@ -70,9 +70,25 @@ def adjust_series(
     actions: Iterable[CorporateAction],
     view: AdjustmentView,
 ) -> AdjustmentResult:
-    """Derive ``view`` from an unadjusted ``series`` and its corporate actions."""
+    """Derive ``view`` from an unadjusted ``series`` and its corporate actions.
+
+    Daily series only, for a reason worth keeping in view: the dividend factor's
+    reference price is "the unadjusted close on the last trading day strictly
+    before the ex-date" — an official daily closing print. Over an hourly series
+    ``_close_before`` would silently substitute the last HOURLY close (a
+    last-hour trade, not the auction close), and every dividend factor would
+    drift from the daily-derived truth. Hourly adjusted views therefore refuse
+    until they can reference the daily series for C_ref (ADR-0029 defers this
+    deliberately; the hourly research lane consumes unadjusted bars).
+    """
 
     bars = series.bars
+    if series.interval is not BarInterval.DAY_1 and view is not AdjustmentView.RAW:
+        raise AdjustmentError(
+            f"{series.symbol}: adjusted views are defined over daily series only — "
+            f"a {series.interval} series has no official closing print to anchor "
+            "dividend factors (ADR-0029)"
+        )
     if not bars or view is AdjustmentView.RAW:
         return AdjustmentResult(series)
 
