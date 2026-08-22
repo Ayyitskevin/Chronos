@@ -1,5 +1,20 @@
 # CHANGELOG
 
+## [Unreleased] — D2: certification, and the first producer of a certified catalog (2026-08-21)
+
+`research.certification` turns Phase 3's four frozen data-quality gates into a verdict:
+coverage against an independent expected-session count, both gap directions, split/price
+reconciliation, and a required owner attestation for the independent-sample half that
+code cannot perform. `research.dataset_release` freezes a passing export into
+content-addressed partitions (`data_version == sha256`) and emits the exact
+`chronos-certified-data-catalog-v1` manifest that `research.certified_data` has
+authenticated since C3 and that nothing in the repository had ever produced. The holdout
+map must tile each symbol's range exactly once; clean spans become catalog `holdout`,
+seen and burned become `ordinary`, and burned records why. Owner command:
+`scripts/certify_dataset.py certify|freeze`, with `docs/certified_data_runbook.md`.
+Refuses a non-daily interval — the histdata plane requests `"1 day"` bars only, so
+there is no hourly export to certify yet. See D-31.
+
 ## [Unreleased] — D2: an expected-session calendar for research coverage (2026-08-21)
 
 `chronos.research.session_calendar` supplies the independent expectation Phase 3's

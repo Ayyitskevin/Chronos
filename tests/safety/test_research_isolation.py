@@ -53,6 +53,10 @@ _C3_MODULES = (
     "certified_data",
     "replay_store",
     "trial_runner",
+    # D2 certification: judges an export and freezes it; owns no order path either.
+    "certification",
+    "dataset_release",
+    "session_calendar",
 )
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 

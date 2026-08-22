@@ -15,7 +15,7 @@ from pathlib import Path
 
 import chronos.research as research_pkg
 
-_MODULES = ("certified_data", "replay_store")
+_MODULES = ("certified_data", "replay_store", "certification", "dataset_release")
 _FORBIDDEN_PREFIXES = (
     "chronos.api",
     "chronos.autonomy",
