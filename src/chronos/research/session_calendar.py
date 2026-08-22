@@ -48,8 +48,9 @@ same rules, which would only prove the rules agree with themselves.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from enum import StrEnum
+from zoneinfo import ZoneInfo
 
 # ---------------------------------------------------------------- coverage bounds
 
@@ -69,6 +70,7 @@ FIRST_EARLY_CLOSE_COVERED_DATE = date(2000, 1, 1)
 LAST_EARLY_CLOSE_COVERED_DATE = LAST_COVERED_DATE
 
 #: Regular session hours, US/Eastern wall clock.
+_EASTERN = ZoneInfo("America/New_York")
 REGULAR_OPEN = time(9, 30)
 REGULAR_CLOSE = time(16, 0)
 #: Every NYSE half-day in the covered range closes at 13:00 ET.
@@ -376,6 +378,38 @@ class SessionCalendar:
         # Partial trailing bars count: 09:30-16:00 is 6.5 hours, which is seven
         # hourly bars with a half-length final bar, and IBKR delivers exactly that.
         return -(-span_minutes // minutes_per_bar)
+
+    def expected_close_timestamps_utc(
+        self, day: date, *, bars_per_hour: int = 1
+    ) -> tuple[datetime, ...]:
+        """The exact UTC close timestamp of every expected intraday bar of ``day``.
+
+        This is ``expected_bar_count`` sharpened from *how many* to *which*: bar-level
+        certification needs to name the missing bar, not merely count a shortfall.
+        Closes fall on whole bar boundaries after the open, and the final partial
+        bar closes at the session close itself — 16:00, or 13:00 on a half-day —
+        matching how the ingestion parser stamps IBKR's RTH bars. Same coverage
+        refusals as ``expected_bar_count``; conversion runs through US/Eastern so
+        both DST regimes produce the timestamps the data actually carries.
+        """
+
+        if bars_per_hour < 1:
+            raise ValueError("bars_per_hour must be at least 1")
+        self._require_covered(day)
+        if not self.is_session(day):
+            return ()
+        early = self.is_early_close(day)  # carries the narrower coverage refusal
+        close = EARLY_CLOSE if early else REGULAR_CLOSE
+        open_dt = datetime.combine(day, REGULAR_OPEN, tzinfo=_EASTERN)
+        close_dt = datetime.combine(day, close, tzinfo=_EASTERN)
+        step = timedelta(minutes=60 // bars_per_hour)
+        closes: list[datetime] = []
+        cursor = open_dt + step
+        while cursor < close_dt:
+            closes.append(cursor.astimezone(UTC))
+            cursor += step
+        closes.append(close_dt.astimezone(UTC))
+        return tuple(closes)
 
 
 __all__ = [

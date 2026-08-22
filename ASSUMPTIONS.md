@@ -81,6 +81,11 @@ zero / empty / disabled / deny.
 - **A-31 — Intraday data.** Not reliably obtainable in this environment. Intraday strategies
   (ORB, session VWAP, RVOL screeners) therefore cannot be quantitatively validated here and are
   marked `INSUFFICIENT_INFORMATION` / research-only regardless of their code quality.
+  *(Narrowed 2026-08-21, ADR-0029/D-32: the data-plane half of this assumption is retired — an
+  hourly ingestion + bar-granular certification path now exists, owner-run against a gateway.
+  The strategy-validation half STANDS until a certified hourly release exists and an intraday
+  validation plan is written; and D-12's daily-bar executable scope is account economics, not
+  data availability, so it does not move with this.)*
 - **A-32 — Corporate actions.** Research uses split/dividend-adjusted close series where the
   source provides them, with raw OHLC retained. Signals computed on adjusted series, cost/PnL on
   the same series; this is an approximation documented in the research report.

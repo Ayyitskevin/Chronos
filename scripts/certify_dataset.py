@@ -19,6 +19,7 @@ be inferred:
 
     {
       "dataset_id": "chronos-etf-daily-v1",
+      "interval": "1d",
       "catalog_id": "chronos-etf-daily-v1-release-001",
       "source_id": "ibkr-tws-historical",
       "source_receipt_sha256": "<64 hex>",
@@ -37,6 +38,9 @@ be inferred:
       ],
       "classified_moves": []
     }
+
+``interval`` is ``"1d"`` (default) or ``"1h"``; hourly reads the ``bars_1h/``
+store lane and certifies at bar granularity.
 """
 
 from __future__ import annotations
@@ -48,7 +52,8 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from chronos.histdata.store import read_actions, read_bars
+from chronos.histdata.store import read_actions, read_bars, read_hourly_bars
+from chronos.marketdata.bars import BarInterval
 from chronos.research.certification import (
     CertificationReport,
     ClassifiedMove,
@@ -116,14 +121,26 @@ def _spans(document: dict[str, Any]) -> list[HoldoutSpan]:
     ]
 
 
+def _interval(document: dict[str, Any]) -> BarInterval:
+    raw = str(document.get("interval", "1d"))
+    try:
+        return BarInterval(raw)
+    except ValueError as error:
+        raise SystemExit(f"declaration interval {raw!r} is not a bar interval") from error
+
+
 def _run_certification(
     document: dict[str, Any], history_root: Path
 ) -> tuple[CertificationReport, dict[str, Any]]:
     windows = _windows(document)
     if not windows:
         raise SystemExit("declaration has no windows; nothing to certify")
+    interval = _interval(document)
     symbols = [window.symbol for window in windows]
-    series_by_symbol = {symbol: read_bars(history_root, symbol) for symbol in symbols}
+    if interval is BarInterval.HOUR_1:
+        series_by_symbol = {symbol: read_hourly_bars(history_root, symbol) for symbol in symbols}
+    else:
+        series_by_symbol = {symbol: read_bars(history_root, symbol) for symbol in symbols}
     actions_by_symbol = {symbol: read_actions(history_root, symbol) for symbol in symbols}
     report = certify_export(
         dataset_id=str(document["dataset_id"]),
@@ -132,21 +149,32 @@ def _run_certification(
         actions_by_symbol=actions_by_symbol,
         attestation=_attestation(document),
         classified_moves=_classified_moves(document),
+        interval=interval,
     )
     return report, series_by_symbol
 
 
 def _print_report(report: CertificationReport) -> None:
     print(f"dataset        {report.dataset_id}")
+    print(f"interval       {report.interval}")
     print(f"verdict        {report.verdict}")
     print(f"digest         {report.certification_digest}")
     for entry in report.coverage:
         flag = "ok " if entry.meets_floor else "LOW"
-        print(
-            f"  {flag} {entry.symbol:<8} coverage {entry.coverage:.4%} "
-            f"({entry.observed_bars}/{entry.expected_sessions} sessions, "
-            f"{len(entry.missing_sessions)} missing, {len(entry.unexpected_bars)} unexpected)"
-        )
+        if entry.expected_bar_total is not None:
+            print(
+                f"  {flag} {entry.symbol:<8} coverage {entry.coverage:.4%} "
+                f"({entry.observed_slot_bars}/{entry.expected_bar_total} bars over "
+                f"{entry.expected_sessions} sessions, "
+                f"{len(entry.missing_bar_timestamps)} bars missing, "
+                f"{len(entry.unexpected_bar_timestamps)} off-slot)"
+            )
+        else:
+            print(
+                f"  {flag} {entry.symbol:<8} coverage {entry.coverage:.4%} "
+                f"({entry.observed_bars}/{entry.expected_sessions} sessions, "
+                f"{len(entry.missing_sessions)} missing, {len(entry.unexpected_bars)} unexpected)"
+            )
     if report.findings:
         print(f"findings       {len(report.findings)}")
         for finding in report.findings:

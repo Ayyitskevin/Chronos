@@ -90,6 +90,13 @@ runbooks.
   and process isolation against a fake client only; the official client's behavior
   (volume units, exact bar-date formatting, accepted pacing) is confirmed by the
   owner on first real backfill.
+- **The hourly lane inherits every one of these bounds, enlarged (ADR-0029).** More
+  requests per backfill (chunked), a second store lane, and gateway truths this repo
+  has never observed: per-bar-size duration caps, the intraday depth horizon,
+  delayed-tier eligibility for hourly historical requests, and intraday volume units
+  are all owner-confirmed on the first real hourly run. Hourly **adjusted views
+  refuse** — the dividend factor's reference is the official daily closing print,
+  which an hourly series does not contain.
 - **No corporate-action data is fabricated.** The store ships with empty bars and
   empty action files; adjustment correctness is proven with synthetic split/dividend
   fixtures. Real splits/dividends are captured or entered by the owner, in **native

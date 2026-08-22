@@ -29,11 +29,20 @@ installed, a running gateway, and `IB_DATA_CLIENT_ID` distinct from `IB_CLIENT_I
 Bars land unadjusted in `research/data/history/bars/<SYMBOL>.csv` with per-symbol
 provenance in `MANIFEST.json`.
 
-**Known limitation, stated before you plan around it:** the historical-data plane
-requests `"1 day"` bars only (`chronos/histdata/official_client.py`). There is no
-hourly ingestion path, and `certify_export` refuses a non-daily interval rather than
-pretending otherwise. An hourly leg needs an ingestion change first; D-29's C1/C2 can
-begin on daily bars.
+**The hourly leg (ADR-0029):** hourly ingestion exists and runs chunked and paced:
+
+```bash
+python -m chronos.histdata bars --symbols SPY,QQQ,IWM,DIA,GLD,TLT \
+    --bar-size 1h --end-date 2026-08-21 --duration-days 5000 --chunk-days 30
+```
+
+Bars land in `bars_1h/<SYMBOL>.csv` with real close timestamps. Two truths to hold
+while planning: IBKR's intraday depth horizon is far shorter than its daily depth and
+is not recorded anywhere in this repo — chunks before the horizon come back empty and
+are skipped, and the certifier judges whatever window results, so **declare hourly
+windows over what actually landed**, not over the daily range. And minute intervals
+still refuse everywhere: vocabulary, no path. D-29's C1/C2 can begin on daily bars;
+the hourly release is additive.
 
 ## Step 2 — sample the corporate actions independently (owner)
 
@@ -86,6 +95,13 @@ Rules the freeze enforces rather than trusting:
 ```bash
 python scripts/certify_dataset.py certify --declaration research/data/certify.json
 ```
+
+The declaration's `"interval"` field (`"1d"` default, `"1h"` for the hourly lane)
+selects the store lane and the gate's granularity. Hourly certification counts BARS
+against the calendar's expected close slots — a session holding one of its seven bars
+is six named `MISSING_BAR` findings, and the 99.5% floor binds the bar ratio (D-32).
+An hourly release is a separate dataset (`chronos-etf-hourly-v1`, its own catalog and
+digest), never rows appended into a daily one.
 
 Exits non-zero when the export does not certify, so it is usable as a gate. Read the
 findings; do not tune around them. A genuine market event that no corporate action

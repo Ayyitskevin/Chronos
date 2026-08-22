@@ -1,5 +1,21 @@
 # CHANGELOG
 
+## [Unreleased] — ADR-0029: the hourly bars lane (2026-08-21)
+
+Hourly ingestion + bar-granular certification, end to end: `bars_1h/<SYMBOL>.csv`
+with real close timestamps and stored session dates; interval-conditional
+`Bar.sequence_id` (DAY_1 byte-identical — it feeds execution intent identity);
+IBKR "1 hour" requests pinned to `formatDate=2` + RTH with closes capped at the
+session's official close; chunked oldest-first backfill where every chunk is paced
+and empty pre-horizon chunks are recorded skips; `certify_export(interval=HOUR_1)`
+judging bars against `expected_close_timestamps_utc` with the 99.5% floor on the
+bar ratio and corporate actions reconciled in the derived daily-close frame;
+hourly releases as their own v2 dataset. Hourly adjusted views refuse (no official
+close to anchor C_ref). Two silent-wrong paths found by the pre-build sweep are
+fixed and pinned by tests: the `allow_correction` last-bar-wins collapse and the
+date-keyed dedup identity. A-31 narrowed, R-11 restated, D-12's executable scope
+deliberately unmoved. See D-32 / ADR-0029.
+
 ## [Unreleased] — D2: certification, and the first producer of a certified catalog (2026-08-21)
 
 `research.certification` turns Phase 3's four frozen data-quality gates into a verdict:
