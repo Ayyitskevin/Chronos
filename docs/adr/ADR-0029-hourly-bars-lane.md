@@ -41,10 +41,15 @@ never a design decision — this ADR is the plan for retiring it honestly.
 4. **Chunking is the coordinator's job.** One client call is one gateway request; the
    backfill coordinator chunks (default 30 days per request — conservative under every
    published reading of IBKR's per-bar-size duration caps, which this repo has never
-   gateway-verified), paces every chunk with distinct keys, runs oldest-first, treats an
-   empty chunk as a recorded skip (IBKR's intraday depth horizon is undocumented here),
-   and the CLI's hourly path takes a stricter 4/min pacing window so a long backfill
-   does not sustain IBKR's ~60/10-minute ceiling.
+   gateway-verified), paces every chunk with distinct keys, runs oldest-first, records
+   each empty chunk's end-date in `WriteResult.empty_chunks` and surfaces it in the CLI
+   JSON (IBKR's intraday depth horizon is undocumented here, and without the record an
+   operator cannot tell a gateway horizon from silent vendor loss), and the CLI's hourly
+   path takes a stricter 4/min pacing window so a long backfill does not sustain IBKR's
+   ~60/10-minute ceiling. **Bars that have not closed are dropped before the store**:
+   a historical request reaching today returns the forming bar, and the close cap would
+   stamp it with the session's official close — landing a partial print on exactly the
+   timestamp certification expects for the delivered closing bar.
 5. **Certification judges bars, not sessions.** `certify_export(interval=HOUR_1)` compares
    delivered close timestamps against `expected_close_timestamps_utc` per session; a
    missing bar and an off-slot bar are named findings with timestamps, and the frozen
@@ -54,7 +59,17 @@ never a design decision — this ADR is the plan for retiring it honestly.
 6. **Hourly adjusted views refuse.** The dividend factor's reference price is the official
    daily closing print; the last hourly trade is not it. Adjusted hourly is deferred until
    it can anchor C_ref to the daily series — a later, explicit change.
-7. **Evidence schemas bumped to v2** (`chronos-dataset-certification-v2`,
+7. **Interval guards are explicit at every write and judgement seam.** `write_bars`
+   refuses non-DAY_1 and `write_hourly_bars` non-HOUR_1; `certify_export` refuses a
+   series whose interval is not the one it was told to judge; `_render_partition`
+   refuses an interval it has no faithful schema for; and the hourly store refuses a
+   bar whose `session_date` disagrees with its timestamp's Eastern date. These are
+   stated rather than emergent — the pre-existing refusal of hourly series by the daily
+   store was an *accident* of the date-keyed `sequence_id`, and making that identifier
+   interval-aware silently removed it. An adversarial review of this ADR's own
+   implementation caught that regression; the guards and their regression tests
+   (`tests/unit/test_hourly_review_fixes.py`) are its result.
+8. **Evidence schemas bumped to v2** (`chronos-dataset-certification-v2`,
    `chronos-dataset-release-v2`) while zero production digests existed, so no recorded
    evidence changed identity. Interval is part of the release document and of dataset
    identity by naming convention (`chronos-etf-hourly-v1`); the certified-data catalog

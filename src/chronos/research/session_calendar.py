@@ -365,6 +365,13 @@ class SessionCalendar:
 
         if bars_per_hour < 1:
             raise ValueError("bars_per_hour must be at least 1")
+        if 60 % bars_per_hour:
+            # A non-divisor makes the minute step zero: expected_bar_count would
+            # raise ZeroDivisionError, and the slot loop would never terminate.
+            # Refuse the boundary — a method that hangs cannot fail closed.
+            raise ValueError(
+                f"bars_per_hour must divide 60 evenly; {bars_per_hour} yields no whole-minute bar"
+            )
         self._require_covered(day)
         if not self.is_session(day):
             return 0
@@ -395,6 +402,13 @@ class SessionCalendar:
 
         if bars_per_hour < 1:
             raise ValueError("bars_per_hour must be at least 1")
+        if 60 % bars_per_hour:
+            # A non-divisor makes the minute step zero: expected_bar_count would
+            # raise ZeroDivisionError, and the slot loop would never terminate.
+            # Refuse the boundary — a method that hangs cannot fail closed.
+            raise ValueError(
+                f"bars_per_hour must divide 60 evenly; {bars_per_hour} yields no whole-minute bar"
+            )
         self._require_covered(day)
         if not self.is_session(day):
             return ()

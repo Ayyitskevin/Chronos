@@ -30,6 +30,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from chronos.histdata.corporate_actions import CorporateAction
 from chronos.marketdata.bars import Bar, BarInterval, BarSeries
@@ -39,6 +40,7 @@ from chronos.marketdata.quality import validate_series
 _CANON_DECIMALS = 6
 _BARS_HEADER = "date,open,high,low,close,volume"
 _HOURLY_BARS_HEADER = "timestamp_utc,session_date,open,high,low,close,volume"
+_EASTERN = ZoneInfo("America/New_York")
 
 
 class StoreError(RuntimeError):
@@ -55,6 +57,11 @@ class WriteResult:
     rows_written: int
     rows_added: int
     corrections: tuple[str, ...]
+    #: Chunk end-dates the gateway answered with zero rows. Empty for a single-request
+    #: daily write; the hourly coordinator fills it so an operator can tell "the
+    #: gateway had nothing before 2015" from silent vendor loss, and knows exactly
+    #: which spans to re-request.
+    empty_chunks: tuple[str, ...] = ()
 
 
 def bars_path(root: Path, symbol: str) -> Path:
@@ -99,8 +106,22 @@ def write_bars(
     captured_at: str,
     allow_correction: bool = False,
 ) -> WriteResult:
-    """Idempotently merge ``series`` into the store; fail closed on conflict."""
+    """Idempotently merge a DAILY ``series`` into the store; fail closed on conflict.
 
+    The interval guard is explicit because it used to be accidental: before the
+    intraday-aware ``Bar.sequence_id``, an HOUR_1 series was refused here only
+    because every bar of a session collided into one identifier and tripped
+    ``DUPLICATE_BAR``. Giving intraday bars distinct identities removed that side
+    effect, so the refusal is now stated — otherwise an hourly series renders
+    through the daily schema as duplicate-date rows and bricks the symbol's daily
+    lane on the next read.
+    """
+
+    if series.interval is not BarInterval.DAY_1:
+        raise StoreError(
+            f"{series.symbol}: write_bars accepts DAY_1 series only, got {series.interval} "
+            "— use write_hourly_bars for the intraday lane"
+        )
     _require_clean(series)
     path = bars_path(root, series.symbol)
     if path.exists():
@@ -158,6 +179,7 @@ def write_hourly_bars(
             f"{series.symbol}: write_hourly_bars accepts HOUR_1 series only, got {series.interval}"
         )
     _require_clean(series)
+    _require_session_dates_agree(series)
     path = hourly_bars_path(root, series.symbol)
     if path.exists():
         existing = load_hourly_csv(path, series.symbol, source, exchange).series
@@ -180,6 +202,27 @@ def write_hourly_bars(
         corrections=corrections,
     )
     return WriteResult(series.symbol, len(merged), added, corrections)
+
+
+def _require_session_dates_agree(series: BarSeries) -> None:
+    """Every intraday bar's ``session_date`` must be its own exchange-local date.
+
+    The two columns are stored independently and the embargo masks by
+    ``session_date`` — so a row whose date cell disagrees with its timestamp is
+    exactly how a bar inside an embargoed session reaches a default-masked read.
+    RTH bars never cross midnight Eastern, so agreement is the invariant rather
+    than an approximation of one.
+    """
+
+    for bar in series.bars:
+        eastern_date = bar.timestamp_utc.astimezone(_EASTERN).date()
+        if bar.session_date != eastern_date:
+            raise StoreError(
+                f"{series.symbol}: bar at {bar.timestamp_utc.isoformat()} declares "
+                f"session_date {bar.session_date.isoformat()} but falls in the "
+                f"{eastern_date.isoformat()} exchange session — a disagreeing date "
+                "cell is how an embargoed bar reaches a masked read"
+            )
 
 
 def _require_clean(series: BarSeries) -> None:

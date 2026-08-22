@@ -228,6 +228,15 @@ def _render_partition(series: BarSeries, span: HoldoutSpan) -> tuple[str, int]:
     by construction.
     """
 
+    if series.interval not in (BarInterval.DAY_1, BarInterval.HOUR_1):
+        # The daily branch below would render any other interval through the
+        # date-keyed schema, discarding timestamps into duplicate date rows.
+        # Certification refuses minutes today; refusing here too means a later
+        # vocabulary widening cannot silently mint an unfaithful release.
+        raise DatasetReleaseError(
+            f"{series.symbol}: no partition schema for {series.interval} — a release "
+            "may only freeze intervals whose bytes can faithfully round-trip"
+        )
     hourly = series.interval is BarInterval.HOUR_1
     lines = [_HOURLY_BARS_HEADER if hourly else _BARS_HEADER]
     rows = 0

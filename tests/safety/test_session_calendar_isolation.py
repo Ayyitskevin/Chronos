@@ -87,6 +87,35 @@ def test_no_authority_module_imports_the_calendar() -> None:
     )
 
 
+def test_no_authority_module_reaches_the_calendar_through_histdata() -> None:
+    """The transitive route, opened when the hourly parser needed the session close.
+
+    ``chronos.histdata.official_client`` holds a module-level ``SessionCalendar``
+    (it needs the official close to cap the final intraday bar). The direct-import
+    guard above cannot see an authority module that imports ``chronos.histdata``
+    instead — it would load the calendar into the authority plane with every test
+    still green, quietly reversing R-26. histdata is the read-only data plane and
+    the authority plane has no business importing it either way.
+    """
+
+    offenders: list[str] = []
+    for package in _AUTHORITY_PACKAGES:
+        package_dir = _PACKAGE_ROOT / package
+        if not package_dir.is_dir():
+            continue
+        for path in package_dir.rglob("*.py"):
+            names = _imported_names(path.read_text())
+            if any(
+                name == "chronos.histdata" or name.startswith("chronos.histdata.") for name in names
+            ):
+                offenders.append(str(path.relative_to(_PACKAGE_ROOT)))
+    assert offenders == [], (
+        "the authority plane imported chronos.histdata, which now transitively "
+        f"carries the research session calendar: {offenders}. R-26 keeps market-open "
+        "evidence on the venue's own CLOSED token."
+    )
+
+
 def test_importing_the_calendar_pulls_in_no_trading_module() -> None:
     """AST covers the source; this covers whatever the import machinery actually does."""
 

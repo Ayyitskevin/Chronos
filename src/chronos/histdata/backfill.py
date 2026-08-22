@@ -20,6 +20,7 @@ from pathlib import Path
 
 from chronos.histdata.client import HistoricalDataClient
 from chronos.histdata.store import WriteResult, write_bars, write_hourly_bars
+from chronos.marketdata.bars import BarSeries
 from chronos.marketdata.pacing import PacingController
 
 
@@ -100,6 +101,23 @@ def backfill_symbols(
     return tuple(outcomes)
 
 
+def _drop_unclosed(series: BarSeries, now: datetime) -> BarSeries:
+    """Drop bars whose close has not happened yet — the session still forming.
+
+    Historical requests that reach today return the in-progress bar, and the
+    parser's close cap stamps it with the session's official close, landing it on
+    exactly the timestamp certification expects for the delivered closing bar. So
+    a partial print would certify as complete. A bar whose close is in the future
+    is not a bar yet; the fix belongs here because this is the layer holding a
+    clock. A close exactly at ``now`` is kept — that bar has closed.
+    """
+
+    closed = tuple(bar for bar in series.bars if bar.timestamp_utc <= now)
+    if len(closed) == len(series.bars):
+        return series
+    return BarSeries(symbol=series.symbol, interval=series.interval, bars=closed)
+
+
 #: One hourly request's span, chosen under every published reading of IBKR's
 #: per-bar-size duration caps (the strictest is one month for 1-hour bars; the
 #: repo records no verified table — ADR-0029 makes pinning it a first-run item).
@@ -133,9 +151,12 @@ def backfill_hourly_symbol(
     shared window budget is what bounds the true request rate. Chunks run oldest
     to newest so an interrupted backfill leaves a clean, resumable prefix.
 
-    A chunk that returns zero rows is recorded and skipped, not an error: IBKR's
-    intraday history horizon is undocumented in this repo, and chunks before a
-    symbol's available depth (or its listing) legitimately come back empty. The
+    A chunk that returns zero rows is skipped and its end-date recorded in
+    ``WriteResult.empty_chunks``, not treated as an error: IBKR's intraday history
+    horizon is undocumented in this repo, and chunks before a symbol's available
+    depth (or its listing) legitimately come back empty. The record is the point —
+    without it, an operator reading a short export cannot tell a gateway horizon
+    from silent vendor loss, and has nothing naming which spans to re-request. The
     certifier judges the resulting window; the backfill does not guess at it.
     """
 
@@ -158,6 +179,7 @@ def backfill_hourly_symbol(
     total_rows = 0
     total_added = 0
     corrections: list[str] = []
+    empty_chunks: list[str] = []
     for chunk_end, span in ends:
         key = f"{symbol}:1h:{chunk_end.isoformat()}"
         delay = pacing.delay_before(key, now_fn())
@@ -165,7 +187,12 @@ def backfill_hourly_symbol(
             sleep(delay)
         pacing.record(key, now_fn())
         series = client.fetch_hourly_bars(symbol, end_date=chunk_end, duration_days=span)
+        series = _drop_unclosed(series, now_fn())
         if len(series) == 0:
+            # Recorded, not merely skipped: a bare `continue` leaves an operator
+            # unable to distinguish "before the gateway's intraday horizon" from
+            # silent data loss when certification later reports the hole.
+            empty_chunks.append(chunk_end.isoformat())
             continue
         result = write_hourly_bars(
             root,
@@ -178,7 +205,7 @@ def backfill_hourly_symbol(
         total_rows = result.rows_written
         total_added += result.rows_added
         corrections.extend(result.corrections)
-    return WriteResult(symbol, total_rows, total_added, tuple(corrections))
+    return WriteResult(symbol, total_rows, total_added, tuple(corrections), tuple(empty_chunks))
 
 
 def backfill_hourly_symbols(

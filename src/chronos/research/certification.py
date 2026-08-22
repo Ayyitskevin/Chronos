@@ -58,6 +58,8 @@ MATERIAL_RETURN_THRESHOLD = 0.20
 #: declares. A 4-for-1 split implies -75%; anything inside this band reconciles.
 SPLIT_RECONCILIATION_TOLERANCE = 0.02
 
+# The evidence mapping shape is pinned by a golden-digest test: renaming or adding a
+# field must bump this constant, or every recorded digest silently re-identifies.
 # v2 added the bar-granular evidence fields for HOUR_1 certification. Bumped while
 # zero production digests existed (no real release had ever been minted), so no
 # recorded evidence changed identity — after the first real release this constant
@@ -371,6 +373,16 @@ def certify_export(
         )
     if not windows:
         raise CertificationError("certification requires at least one symbol window")
+    for supplied_symbol, supplied in sorted(series_by_symbol.items()):
+        if len(supplied) and supplied.interval is not interval:
+            # Judging an hourly export at session granularity marks a session holding
+            # one of its seven bars "covered" — the exact blind spot the bar-level
+            # path exists to close, minted as a CERTIFIED digest.
+            raise CertificationError(
+                f"{supplied_symbol}: series interval {supplied.interval} does not match "
+                f"the {interval} certification requested — a verdict must judge the bars "
+                "it was handed, not a lookalike"
+            )
 
     calendar = calendar or SessionCalendar()
     findings: list[Finding] = []

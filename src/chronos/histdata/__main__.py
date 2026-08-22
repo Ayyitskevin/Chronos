@@ -142,6 +142,7 @@ def _run_bars(args: argparse.Namespace) -> int:
                     "symbol": outcome.symbol,
                     "rows": outcome.result.rows_written if outcome.result else None,
                     "added": outcome.result.rows_added if outcome.result else None,
+                    "empty_chunks": (list(outcome.result.empty_chunks) if outcome.result else None),
                     "error": outcome.error,
                 }
             )
