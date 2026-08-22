@@ -181,7 +181,9 @@ worth having; it deserved — and got — a written close.
   3. After merging anything that appends to a table document (`DECISIONS.md`,
      `RISK_REGISTER.md`), grep for duplicated row IDs — merges can duplicate doc
      blocks byte-identically, and this file's own D-21/D-22 collision is the standing
-     exhibit: `grep -oE '^\| (D|R)-[0-9]+[a-z()]*' DECISIONS.md RISK_REGISTER.md | sort | uniq -d`
+     exhibit: `grep -oE '^\| [DR]-[0-9]+[^ |]*' DECISIONS.md RISK_REGISTER.md | sort | uniq -d`
+     (match the full ID cell — a looser pattern false-positives on the `R-nn-orig`
+     historical rows, which this command's first rehearsal proved)
 - The branch auto-deletes on merge. Expected. Anything you still need from it should
   already be in the merge or in `refs/preserve/*`.
 
