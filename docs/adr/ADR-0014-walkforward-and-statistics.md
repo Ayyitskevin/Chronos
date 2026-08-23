@@ -7,7 +7,12 @@ Date: 2026-07-19
 > implemented and running: `src/chronos/research/walkforward.py` and
 > `src/chronos/research/stats.py` ship the walk-forward harness, the deflated Sharpe ratio
 > (threshold 0.95, trial count taken from the registry ledger), and the stationary
-> block bootstrap. Unlike ADR-0012 (accepted via `DECISIONS.md` D-14), **this ADR has no
+> block bootstrap, and since 2026-08-23 the CSCV estimator of the Probability of
+> Backtest Overfitting (`probability_of_backtest_overfitting`) — an addition inside this
+> ADR's stated scope, not a new decision; it is a primitive, and no campaign verdict
+> consumes it yet.
+>
+> Unlike ADR-0012 (accepted via `DECISIONS.md` D-14), **this ADR has no
 > row in `DECISIONS.md`** — `grep -c "ADR-0014" DECISIONS.md` returns 0 — so its formal
 > acceptance is recorded nowhere, and the "design-review pending" clause may be accurate
 > rather than stale. An agent cannot resolve this: marking an ADR accepted is an owner act
