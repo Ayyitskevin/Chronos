@@ -238,6 +238,14 @@ These are preregistered requirements, not an implemented campaign verdict. Bench
 confidence intervals, DSR scoring, FWER/FDR, PBO, power, and fully OOS-native cost/risk
 evidence remain unimplemented and therefore blocking.
 
+**Updated 2026-08-23 — the PBO *estimator* now ships, the PBO *gate* does not.**
+`chronos.research.stats.probability_of_backtest_overfitting` implements CSCV (Bailey,
+Borwein, López de Prado & Zhu 2015), which removes the missing-primitive half of gate 3.
+The campaign half is untouched and the gate stays blocking: scoring PBO needs an aligned
+per-trial return matrix over a common time axis, and `CampaignReport` retains only a
+per-window `oos_return` per cell — far too few observations to partition. Nothing in the
+campaign calls the estimator yet, and no verdict may cite a PBO until it does.
+
 1. `max(preregistered power-required N, 100 OOS economic positions)`; closed legs are
    reported separately, with sufficient bars for the declared warm-up/history start.
 2. Post-cost expectancy and benchmark-alpha 95% lower bounds above zero.

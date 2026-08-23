@@ -6,9 +6,16 @@ numpy/scipy, matching ``backtest.metrics``. Every function fails soft (returns `
 below the sample size it can support rather than emitting a falsely precise number.
 
 Provides the Probabilistic Sharpe Ratio (PSR), the Deflated Sharpe Ratio (DSR) — PSR
-against the expected maximum Sharpe of ``N`` trials (Bailey & López de Prado) — and a
+against the expected maximum Sharpe of ``N`` trials (Bailey & López de Prado) — a
 **stationary block bootstrap** over a return series (geometric block lengths, circular
-wrap) that preserves autocorrelation, deliberately *not* IID trade-level resampling.
+wrap) that preserves autocorrelation, deliberately *not* IID trade-level resampling, and
+the **Probability of Backtest Overfitting** (PBO) by Combinatorially Symmetric
+Cross-Validation (CSCV; Bailey, Borwein, López de Prado & Zhu 2015).
+
+PSR/DSR and PBO answer different questions and neither substitutes for the other: DSR asks
+whether *one* selected configuration's Sharpe survives the multiplicity it was chosen from,
+while PBO asks whether the *selection procedure itself* generalizes — how often the
+in-sample winner lands below the out-of-sample median of its own peers.
 """
 
 from __future__ import annotations
@@ -17,6 +24,7 @@ import math
 import random
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from itertools import combinations
 
 _EULER_MASCHERONI = 0.5772156649015329
 
@@ -214,3 +222,116 @@ def block_bootstrap_ci(
     lo = estimates[int((alpha / 2.0) * (len(estimates) - 1))]
     hi = estimates[int((1.0 - alpha / 2.0) * (len(estimates) - 1))]
     return lo, hi
+
+
+@dataclass(frozen=True, slots=True)
+class OverfittingReport:
+    """One CSCV run, with every quantity a reviewer needs to judge it.
+
+    ``pbo`` alone is not evidence: a PBO computed over three surviving combinations, or
+    over a trial set of two, is arithmetically valid and epistemically worthless. The
+    counts are carried so a reader can see what the number was computed *from*.
+    """
+
+    #: P(logit(relative OOS rank of the IS winner) <= 0) — i.e. how often the in-sample
+    #: best lands at or below the out-of-sample median of its peers. 0.5 is the pure-noise
+    #: expectation, not a passing score.
+    pbo: float
+    trials: int
+    #: Combinations that produced a defined statistic for every trial, and were scored.
+    combinations: int
+    #: Combinations dropped because the statistic was undefined for some trial (e.g. a
+    #: zero-variance slice). Non-zero means ``pbo`` describes a subset — say so.
+    skipped: int
+    splits: int
+    observations_used: int
+    #: Trailing observations dropped so the splits divide evenly. Never silent.
+    observations_dropped: int
+    median_logit: float
+
+
+def probability_of_backtest_overfitting(
+    trial_returns: Sequence[Sequence[float]],
+    *,
+    splits: int = 16,
+    statistic: Callable[[Sequence[float]], float | None] = sharpe,
+) -> OverfittingReport | None:
+    """PBO by CSCV (Bailey, Borwein, López de Prado & Zhu 2015).
+
+    ``trial_returns`` is ``N`` equal-length return series — one per configuration tried,
+    all on the same time axis. The series are the *whole* record of the search: leaving
+    out the configurations that were discarded is exactly the bias this estimator exists
+    to measure, so a caller that passes only its finalists will get a reassuring number
+    that means nothing.
+
+    The observation axis is cut into ``splits`` contiguous blocks (contiguous, not
+    interleaved, so serial correlation stays inside a block rather than leaking across
+    the in/out boundary). For each of the ``C(splits, splits/2)`` ways to choose half the
+    blocks as in-sample, the best configuration in-sample is found, and its rank among
+    all configurations *out*-of-sample is recorded. PBO is the fraction of those splits
+    where the in-sample winner came in at or below the out-of-sample median.
+
+    Reading it: ~0.5 is what pure noise produces — the winner is a coin flip out of
+    sample. Near 0 means the selection generalized. Above 0.5 means the procedure is
+    actively anti-predictive, which is worse than choosing at random.
+
+    Returns ``None`` — never a falsely precise number — when the input cannot support
+    the estimate: fewer than 2 configurations, an odd or smaller-than-2 ``splits``,
+    ragged series, fewer observations than splits, or no combination scorable at all.
+    Ties are resolved toward *more* apparent overfitting (lowest index wins in-sample,
+    lowest rank among equals out-of-sample), so the number never flatters the search.
+    """
+
+    trials = len(trial_returns)
+    if trials < 2 or splits < 2 or splits % 2 != 0:
+        return None
+    lengths = {len(r) for r in trial_returns}
+    if len(lengths) != 1:
+        return None
+    total = lengths.pop()
+    if total < splits:
+        return None
+
+    block = total // splits
+    used = block * splits
+    dropped = total - used
+    blocks = tuple(tuple(range(index * block, (index + 1) * block)) for index in range(splits))
+
+    half = splits // 2
+    logits: list[float] = []
+    skipped = 0
+    for chosen in combinations(range(splits), half):
+        in_rows = [row for index in chosen for row in blocks[index]]
+        out_rows = [row for index in range(splits) if index not in chosen for row in blocks[index]]
+
+        in_scores = [statistic([series[i] for i in in_rows]) for series in trial_returns]
+        out_scores = [statistic([series[i] for i in out_rows]) for series in trial_returns]
+        if any(v is None for v in in_scores) or any(v is None for v in out_scores):
+            skipped += 1
+            continue
+        # mypy: the None case is filtered above.
+        in_values = [float(v) for v in in_scores if v is not None]
+        out_values = [float(v) for v in out_scores if v is not None]
+
+        best = max(range(trials), key=lambda n: (in_values[n], -n))
+        selected = out_values[best]
+        # Lowest rank among equals: ties count against the candidate.
+        rank = sum(1 for v in out_values if v < selected) + 1
+        omega = rank / (trials + 1)
+        logits.append(math.log(omega / (1.0 - omega)))
+
+    if not logits:
+        return None
+    logits.sort()
+    mid = len(logits) // 2
+    median = logits[mid] if len(logits) % 2 else (logits[mid - 1] + logits[mid]) / 2.0
+    return OverfittingReport(
+        pbo=sum(1 for value in logits if value <= 0.0) / len(logits),
+        trials=trials,
+        combinations=len(logits),
+        skipped=skipped,
+        splits=splits,
+        observations_used=used,
+        observations_dropped=dropped,
+        median_logit=median,
+    )
