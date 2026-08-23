@@ -1,5 +1,55 @@
 # CHANGELOG
 
+## [Unreleased] — the overfitting gate gets its missing instrument (2026-08-23)
+
+`docs/VISION_COMPLETION_PLAN.md` §8 and `docs/FIVE_TOOL_RESEARCH_HYPOTHESES.md` have both
+required "probability of backtest overfitting at most 10%" as a Phase 3 strategy gate.
+Nothing implemented it. `grep -rniE 'cscv|backtest overfit'` over the tree returned two
+hits, both of them the requirement itself — a gate specified in two places and computable
+in none, which meant no strategy could ever be honestly evaluated against the bar the plan
+sets.
+
+`chronos.research.stats.probability_of_backtest_overfitting` implements Combinatorially
+Symmetric Cross-Validation (Bailey, Borwein, López de Prado & Zhu 2015). It takes the `N`
+equal-length return series of *every* configuration tried, cuts the observation axis into
+`S` contiguous blocks, and for each of the `C(S, S/2)` ways to choose half the blocks as
+in-sample records where the in-sample winner ranks out-of-sample. PBO is the share of
+those splits where the winner landed at or below the out-of-sample median. Blocks are
+contiguous rather than interleaved so serial correlation stays inside a block instead of
+leaking across the in/out boundary, and rows keep their original order within each half
+because the paper notes ordering matters for path-dependent statistics such as
+return-over-max-drawdown, even though it does not for Sharpe.
+
+Same house style as its neighbours: pure, deterministic, stdlib-only, and fail-soft — it
+returns `None` rather than a falsely precise number when the input cannot support the
+estimate (fewer than two configurations, odd `splits`, ragged series, fewer observations
+than splits, or nothing scorable). `OverfittingReport` carries the counts a reviewer needs
+to judge the number rather than just read it: how many combinations were actually scored,
+how many were skipped because a statistic was undefined, and how many trailing
+observations were truncated to make the blocks divide evenly. Ties resolve toward *more*
+apparent overfitting, so the estimate never flatters the search.
+
+**Calibration checked against the paper, not against expectation.** Bailey et al. state
+that an informationless backtest gives near-uniform relative ranks and therefore
+standard-normal logits — so PBO ≈ 0.5 is the no-skill baseline, not a passing score.
+Measured over 20 seeded informationless searches the mean is 0.55; a mild upward bias is
+expected at small `N`/`T` and shrinks as both grow, because in-sample and out-of-sample
+partition one fixed realization. Note this makes any *single* informationless run range
+roughly 0.15–0.95, which is why the test averages over seeds instead of asserting once.
+
+The tests pin direction, not output, and were verified by violation: inverting the
+out-of-sample rank comparison, selecting the in-sample worst instead of the best, and
+flipping the PBO threshold each fail two tests, and the restored implementation passes all
+fourteen.
+
+**This ships a primitive, not a closed gate.** Nothing in the campaign calls it yet, and no
+verdict may cite a PBO until something does. Scoring it at campaign level needs an aligned
+per-trial return matrix over a common time axis; `CampaignReport` retains only a per-window
+`oos_return` per cell, which is far too few observations to partition. That wiring — and
+the data-retention change it implies — is deliberately not in this change. Both documents
+that carry the gate now say exactly this, so the record does not claim a gate it cannot
+evaluate.
+
 ## [Unreleased] — the /oc workflow stops trusting strangers (2026-08-22)
 
 The `/oc` comment workflow ran on a public repository with no author gate:
