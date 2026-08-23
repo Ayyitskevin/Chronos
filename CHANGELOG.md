@@ -25,6 +25,24 @@ the 4-DELAYED case still demands an explicit `DataQuality.DELAYED` with every
 price field `None`, verified by a 100× loop and by breaking the production
 path to confirm the assertion still bites.
 
+## [Unreleased] — the allowlist fix comes off the dead branch (2026-08-22)
+
+Commit `9dcbcc55e` (2026-08-14) fixed the account allowlist — every documented
+syntax for `IB_ACCOUNT_ALLOWLIST` / `CRYPTO_ALLOWLIST` / `SYMBOL_ALLOWLIST`
+crashed at import because pydantic-settings JSON-decoded the value before the
+validator ran; `NoDecode` makes the documented comma form and the
+previously-working JSON form both parse, with empty still meaning deny. But it
+was pushed to `claude/chronos-evidence-protocol-a2` *after* PR #70 had already
+merged, so it never landed: HEAD still crashed on `cp .env.example .env` while
+the branch that fixed it sat dead. Salvaged today by cherry-pick onto `main`.
+One bookkeeping change beyond the pick itself: the commit's register row
+claimed R-51, but main assigned R-51 (live proposer revocation) and R-52
+(policy-content pinning) in the intervening week, so the salvaged row is
+renumbered — its wording, including the owner-approves-by-merging sentence,
+otherwise verbatim. The allowlist defect is now R-53.
+
+## [Unreleased] — hourly lane: adversarial-review fixes (2026-08-22)
+
 A four-lens review of the hourly lane against its own commit claims found 17
 verified findings, two of them regressions introduced by the lane itself:
 making `Bar.sequence_id` interval-aware silently disarmed the accidental

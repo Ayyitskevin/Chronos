@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
@@ -9,7 +10,7 @@ from typing import Annotated, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BeforeValidator, Field, PositiveInt, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from chronos.config.limits import (
     MAX_CANDIDATE_EXPIRATIONS,
@@ -21,12 +22,63 @@ from chronos.domain.enums import BrokerAdapter, BrokerMode, DemoProfile, IBEnvir
 
 
 def _parse_symbol_allowlist(value: object) -> object:
+    """Accept a comma-separated list, a JSON array, or an already-parsed sequence.
+
+    **This validator's string branch was unreachable from the environment until
+    2026-08-14.** ``pydantic-settings`` JSON-decodes any field whose type is
+    "complex" (a tuple here) *before* validators run, so every documented value
+    of ``IB_ACCOUNT_ALLOWLIST`` / ``CRYPTO_ALLOWLIST`` / ``SYMBOL_ALLOWLIST``
+    raised ``SettingsError`` at import: the bare ``IB_ACCOUNT_ALLOWLIST=`` that
+    ``.env.example`` shipped, the comma form this function exists to parse, and
+    anything else that was not already JSON. Only a JSON array ever worked, and
+    nothing said so. ``cp .env.example .env`` — the README's own setup step —
+    therefore could not boot.
+
+    The tests did not catch it because they construct ``Settings(...)`` directly,
+    which bypasses the settings sources entirely and runs this validator on a
+    real string. A control exercised only on a path production never takes is
+    the R-24..R-27 shape, here applied to configuration parsing rather than to a
+    gate.
+
+    ``NoDecode`` on the annotation below now hands us the raw string, so this
+    function is the single parser for every source. It accepts both spellings on
+    purpose: the comma form is what the docs promise, and the JSON form is what
+    anyone who diagnosed the failure will have switched to — silently
+    reinterpreting their working ``["DU123"]`` as one garbage symbol would be a
+    worse outcome than the bug being fixed.
+
+    Empty stays empty, which is **deny**: an empty account allowlist makes
+    ``live_transmission_possible`` false and is reported as a problem by
+    ``live_configuration_problems``. Nothing here can widen a scope — the parse
+    result still faces the duplicate and alphanumeric validators, the
+    account-match check, and the whole ADR-0009 conjunction.
+    """
+
     if isinstance(value, str):
-        return tuple(part.strip().upper() for part in value.split(",") if part.strip())
+        text = value.strip()
+        if text.startswith("["):
+            # A JSON array: what pydantic-settings used to decode for us, and so
+            # the only spelling that worked before this fix. Parsed here to keep
+            # every previously-working configuration working unchanged.
+            try:
+                decoded = json.loads(text)
+            except ValueError as error:
+                raise ValueError(
+                    "an allowlist that opens with '[' must be a valid JSON array of "
+                    "strings; use the comma-separated form (A,B,C) if that was not "
+                    "the intent"
+                ) from error
+            if not isinstance(decoded, list):
+                raise ValueError("a JSON allowlist must be an array of strings")
+            return tuple(str(entry).strip().upper() for entry in decoded if str(entry).strip())
+        return tuple(part.strip().upper() for part in text.split(",") if part.strip())
     return value
 
 
-SymbolAllowlist = Annotated[tuple[str, ...], BeforeValidator(_parse_symbol_allowlist)]
+#: ``NoDecode`` is load-bearing, not decoration: without it pydantic-settings
+#: JSON-decodes the raw value before :func:`_parse_symbol_allowlist` ever sees
+#: it, which is what made every documented allowlist value fail to parse.
+SymbolAllowlist = Annotated[tuple[str, ...], NoDecode, BeforeValidator(_parse_symbol_allowlist)]
 
 
 class Settings(BaseSettings):
