@@ -41,6 +41,7 @@ production module passes.
 from __future__ import annotations
 
 import ast
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -116,6 +117,18 @@ _EXPECTED_MUTATION_SITES: set[tuple[str, str]] = {
     # QUARANTINED deterministic-plane adapter (R-28), constructed nowhere.
     ("execution/brokers/ibkr_paper.py", "placeOrder"),
     ("execution/brokers/ibkr_paper.py", "cancelOrder"),
+}
+
+#: Exact call counts for the semantic sites above. A set of ``(path, method)``
+#: pairs cannot distinguish one call from two calls in the same file, so without
+#: this second inventory another ``placeOrder`` beside the guarded one would be
+#: invisible. The official adapter deliberately has two: what-if preview and the
+#: single guarded submit. Every other mutation method appears once.
+_EXPECTED_MUTATION_SITE_COUNTS: dict[tuple[str, str], int] = {
+    ("broker/official_ibkr.py", "placeOrder"): 2,
+    ("broker/official_ibkr.py", "cancelOrder"): 1,
+    ("execution/brokers/ibkr_paper.py", "placeOrder"): 1,
+    ("execution/brokers/ibkr_paper.py", "cancelOrder"): 1,
 }
 
 #: Names that mutate broker state. `exerciseOptions` and `reqGlobalCancel` are
@@ -210,30 +223,32 @@ def test_only_the_orders_boundary_transmits_via_keyword() -> None:
     assert keyword_sites == {"orders/submission.py"}
 
 
-def _mutation_sites() -> set[tuple[str, str]]:
-    """Every call to a broker-mutating method, anywhere in the package."""
+def _mutation_calls_in_tree(tree: ast.AST, *, relative: str) -> list[tuple[str, str]]:
+    """Every broker-mutating call in one tree, retaining duplicate callsites."""
 
-    found: set[tuple[str, str]] = set()
-    for path in _source_files():
-        relative = _relative(path)
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            name = getattr(node.func, "attr", None) or getattr(node.func, "id", None)
-            if name in _MUTATING_METHODS:
-                found.add((relative, name))
+    found: list[tuple[str, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        name = getattr(node.func, "attr", None) or getattr(node.func, "id", None)
+        if name in _MUTATING_METHODS:
+            found.append((relative, name))
     return found
 
 
-def test_the_complete_broker_mutation_inventory_is_exactly_as_expected() -> None:
-    """The directive's 'complete broker-mutation inventory', enforced.
+def _mutation_site_counts() -> Counter[tuple[str, str]]:
+    """Every mutating callsite, counted by file and broker method."""
 
-    A transmit flag marks an order live; the *call* is what reaches the venue.
-    Pinning only the flag would let a new placeOrder site appear silently.
-    """
+    found: Counter[tuple[str, str]] = Counter()
+    for path in _source_files():
+        relative = _relative(path)
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        found.update(_mutation_calls_in_tree(tree, relative=relative))
+    return found
 
-    actual = _mutation_sites()
+
+def _assert_mutation_inventory(actual_counts: Counter[tuple[str, str]]) -> None:
+    actual = set(actual_counts)
     unexpected = actual - _EXPECTED_MUTATION_SITES
     missing = _EXPECTED_MUTATION_SITES - actual
     assert not unexpected, (
@@ -245,6 +260,40 @@ def test_the_complete_broker_mutation_inventory_is_exactly_as_expected() -> None
         f"expected broker-mutating call site(s) disappeared: {sorted(missing)} — update "
         "this inventory deliberately if an adapter genuinely moved."
     )
+    assert dict(actual_counts) == _EXPECTED_MUTATION_SITE_COUNTS, (
+        "broker-mutating call count changed within an inventoried file; expected "
+        f"{_EXPECTED_MUTATION_SITE_COUNTS}, found {dict(actual_counts)}. A second call in "
+        "an already-listed file is still a new mutation path and requires deliberate review."
+    )
+
+
+def _mutation_sites() -> set[tuple[str, str]]:
+    """Every semantic broker-mutation site, preserving the original set view."""
+
+    return set(_mutation_site_counts())
+
+
+def test_the_complete_broker_mutation_inventory_is_exactly_as_expected() -> None:
+    """The directive's complete broker-mutation inventory, including call counts.
+
+    A transmit flag marks an order live; the *call* is what reaches the venue.
+    Pinning only the flag or a set of method names would let another placeOrder
+    call in an already-listed adapter appear silently.
+    """
+
+    _assert_mutation_inventory(_mutation_site_counts())
+
+
+def test_an_extra_same_file_mutation_call_cannot_hide_in_set_deduplication() -> None:
+    """Guard the guard: a duplicate path/method pair must still change inventory."""
+
+    extra = ast.parse("app.placeOrder(order_id, contract, order)")
+    actual = Counter(_EXPECTED_MUTATION_SITE_COUNTS)
+    actual.update(_mutation_calls_in_tree(extra, relative="broker/official_ibkr.py"))
+
+    assert set(actual) == _EXPECTED_MUTATION_SITES  # the old set-only check would pass
+    with pytest.raises(AssertionError, match="call count changed"):
+        _assert_mutation_inventory(actual)
 
 
 def test_no_exercise_or_global_cancel_capability_exists() -> None:

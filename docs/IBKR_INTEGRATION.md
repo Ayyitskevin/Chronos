@@ -4,6 +4,13 @@ This document describes how the deterministic platform talks to Interactive Brok
 paper execution adapter (`src/chronos/execution/brokers/ibkr_paper.py`), the gates around it, and
 how it differs from the wheel dashboard's separate read-only adapter.
 
+> **Scope correction (2026-08-01).** The "no options" statement below is about
+> this quarantined deterministic-platform paper adapter, not the repository-wide
+> autonomy capability. ADR-0030 uses the wheel/backend broker read plane for
+> default-off deterministic cash-secured-put and covered-call selection. Real
+> IBKR still returns `NO_TRADE` there because TWS supplies no authoritative
+> deliverable schedule; no live resolver promotion was created.
+
 **Status: implemented and unit-tested against a fake IB object; NOT yet exercised against a real
 TWS/IB Gateway.** No credentials exist in this build environment. The first real-gateway contact is
 an owner action: run the read-only smoke path (docs/ibkr_setup.md) with owner credentials and a

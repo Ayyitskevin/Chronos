@@ -80,6 +80,7 @@ from chronos.autonomy.enums import (
     TradingSession,
     promotion_rank,
 )
+from chronos.config.limits import validate_option_selection_decimal
 from chronos.domain.enums import DataQuality
 from chronos.utils.identifiers import normalize_account_fingerprint
 
@@ -356,6 +357,11 @@ class MarketDataRequirements(AutonomyModel):
     min_option_volume: int = Field(default=0, ge=0)
     min_open_interest: int = Field(default=0, ge=0)
     max_relative_spread: Decimal = Field(default=Decimal(0), ge=0, le=1)
+
+    @field_validator("max_quote_age_seconds", "max_relative_spread")
+    @classmethod
+    def _validate_receipt_decimal_width(cls, value: Decimal) -> Decimal:
+        return validate_option_selection_decimal(value, "market-data requirement")
 
     @model_validator(mode="after")
     def _validate_qualities(self) -> MarketDataRequirements:

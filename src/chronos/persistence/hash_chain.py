@@ -50,12 +50,16 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import Text, case, cast, func, literal, select
 from sqlalchemy.orm import Session
 
+from chronos.config.limits import (
+    MAX_DURABLE_HASH_TEXT_CHARS,
+    MAX_DURABLE_SEQUENCE_TEXT_CHARS,
+)
 from chronos.persistence.schema import HashChainRow
 
 #: The ``previous_hash`` of the first record in any stream. A literal zero
@@ -105,7 +109,8 @@ def compute_hash(
 ) -> str:
     """Digest one record. Identity fields are covered, not only the payload."""
 
-    material = f"{stream}|{sequence}|{recorded_at.isoformat()}|{payload_json}|{previous_hash}"
+    normalized_at = recorded_at.astimezone(UTC) if recorded_at.tzinfo is not None else recorded_at
+    material = f"{stream}|{sequence}|{normalized_at.isoformat()}|{payload_json}|{previous_hash}"
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
@@ -118,6 +123,107 @@ def head(session: Session, stream: str) -> HashChainRow | None:
         .order_by(HashChainRow.sequence.desc())
         .limit(1)
     )
+
+
+def _bounded_head_link(session: Session, stream: str) -> tuple[int, str] | None:
+    """Read only a bounded sequence/hash link for an append.
+
+    SQLite does not enforce declared ``Integer``/``String`` widths.  Selecting
+    the full ORM head would also materialize its unrelated payload, allowing a
+    corrupt durable row to allocate arbitrary text after a caller's integrity
+    check.  The database projects bounded scalar text instead, and SQLite's
+    storage class is checked explicitly before the values can extend a chain.
+    """
+
+    sequence_text = cast(HashChainRow.sequence, Text)
+    record_hash_text = cast(HashChainRow.record_hash, Text)
+    sequence_storage_type: Any
+    sequence_length: Any
+    sequence_value: Any
+    record_hash_storage_type: Any
+    record_hash_length: Any
+    record_hash_value: Any
+    if session.get_bind().dialect.name == "sqlite":
+        sequence_storage_type = func.typeof(HashChainRow.sequence)
+        sequence_is_integer = sequence_storage_type == "integer"
+        sequence_length = case(
+            (sequence_is_integer, func.length(sequence_text)),
+            else_=literal(None),
+        )
+        sequence_value = case(
+            (
+                sequence_is_integer,
+                func.substr(sequence_text, 1, MAX_DURABLE_SEQUENCE_TEXT_CHARS + 1),
+            ),
+            else_=literal(None),
+        )
+        record_hash_storage_type = func.typeof(HashChainRow.record_hash)
+        record_hash_is_text = record_hash_storage_type == "text"
+        record_hash_length = case(
+            (record_hash_is_text, func.length(record_hash_text)),
+            else_=literal(None),
+        )
+        record_hash_value = case(
+            (
+                record_hash_is_text,
+                func.substr(record_hash_text, 1, MAX_DURABLE_HASH_TEXT_CHARS + 1),
+            ),
+            else_=literal(None),
+        )
+    else:
+        sequence_storage_type = literal("integer")
+        sequence_length = func.length(sequence_text)
+        sequence_value = func.substr(
+            sequence_text,
+            1,
+            MAX_DURABLE_SEQUENCE_TEXT_CHARS + 1,
+        )
+        record_hash_storage_type = literal("text")
+        record_hash_length = func.length(record_hash_text)
+        record_hash_value = func.substr(
+            record_hash_text,
+            1,
+            MAX_DURABLE_HASH_TEXT_CHARS + 1,
+        )
+    row = session.execute(
+        select(
+            sequence_storage_type.label("sequence_storage_type"),
+            sequence_length.label("sequence_length"),
+            sequence_value.label("sequence_text"),
+            record_hash_storage_type.label("record_hash_storage_type"),
+            record_hash_length.label("record_hash_length"),
+            record_hash_value.label("record_hash"),
+        )
+        .where(HashChainRow.stream == stream)
+        .order_by(HashChainRow.sequence.desc())
+        .limit(1)
+    ).one_or_none()
+    if row is None:
+        return None
+    if row.sequence_storage_type != "integer":
+        raise HashChainError("hash-chain head sequence has an invalid storage type")
+    if row.record_hash_storage_type != "text":
+        raise HashChainError("hash-chain head digest has an invalid storage type")
+    if row.sequence_length > MAX_DURABLE_SEQUENCE_TEXT_CHARS:
+        raise HashChainError("hash-chain head sequence exceeds its durable bound")
+    sequence_text_value = row.sequence_text
+    if (
+        not sequence_text_value.isascii()
+        or not sequence_text_value.isdecimal()
+        or str(int(sequence_text_value)) != sequence_text_value
+    ):
+        raise HashChainError("hash-chain head sequence is not a canonical integer")
+    sequence = int(sequence_text_value)
+    if sequence <= 0:
+        raise HashChainError("hash-chain head sequence must be positive")
+    record_hash = row.record_hash
+    if (
+        not isinstance(record_hash, str)
+        or row.record_hash_length != MAX_DURABLE_HASH_TEXT_CHARS
+        or any(character not in "0123456789abcdef" for character in record_hash)
+    ):
+        raise HashChainError("hash-chain head digest is invalid")
+    return sequence, record_hash
 
 
 def append(
@@ -144,15 +250,16 @@ def append(
         # assumptions about its zone, which would break verification later.
         raise HashChainError(f"recorded_at must be timezone-aware, got {recorded_at!r}")
 
-    previous = head(session, stream)
-    sequence = 1 if previous is None else previous.sequence + 1
-    previous_hash = GENESIS_HASH if previous is None else previous.record_hash
+    previous = _bounded_head_link(session, stream)
+    sequence = 1 if previous is None else previous[0] + 1
+    previous_hash = GENESIS_HASH if previous is None else previous[1]
 
+    normalized_recorded_at = recorded_at.astimezone(UTC)
     payload_json = canonical_payload(payload)
     record_hash = compute_hash(
         stream=stream,
         sequence=sequence,
-        recorded_at=recorded_at,
+        recorded_at=normalized_recorded_at,
         payload_json=payload_json,
         previous_hash=previous_hash,
     )
@@ -161,7 +268,7 @@ def append(
         sequence=sequence,
         kind=kind,
         payload_json=payload_json,
-        recorded_at=recorded_at,
+        recorded_at=normalized_recorded_at,
         previous_hash=previous_hash,
         record_hash=record_hash,
     )
@@ -180,40 +287,43 @@ def verify(session: Session, stream: str) -> ChainVerification:
     exception. Callers that must halt on failure check ``ok``.
     """
 
-    rows = list(
-        session.scalars(
-            select(HashChainRow)
-            .where(HashChainRow.stream == stream)
-            .order_by(HashChainRow.sequence.asc())
-        )
-    )
-    if not rows:
-        return ChainVerification(ok=True, stream=stream, records=0, detail="chain is empty")
-
     expected_previous = GENESIS_HASH
+    record_count = 0
+    broken_at: int | None = None
+    broken_detail = ""
+    rows = session.execute(
+        select(
+            HashChainRow.stream,
+            HashChainRow.sequence,
+            HashChainRow.recorded_at,
+            HashChainRow.payload_json,
+            HashChainRow.previous_hash,
+            HashChainRow.record_hash,
+        )
+        .where(HashChainRow.stream == stream)
+        .order_by(HashChainRow.sequence.asc())
+        .execution_options(yield_per=100)
+    )
     for index, row in enumerate(rows, start=1):
+        record_count = index
+        # Preserve the first failure but drain the streamed cursor so ``records``
+        # keeps its documented whole-stream meaning without retaining every row.
+        if broken_at is not None:
+            continue
         if row.sequence != index:
-            return ChainVerification(
-                ok=False,
-                stream=stream,
-                records=len(rows),
-                broken_at=index,
-                detail=(
-                    f"sequence gap: expected {index}, found {row.sequence}. A record was "
-                    "deleted or renumbered."
-                ),
+            broken_at = index
+            broken_detail = (
+                f"sequence gap: expected {index}, found {row.sequence}. A record was "
+                "deleted or renumbered."
             )
+            continue
         if row.previous_hash != expected_previous:
-            return ChainVerification(
-                ok=False,
-                stream=stream,
-                records=len(rows),
-                broken_at=row.sequence,
-                detail=(
-                    f"record {row.sequence} does not link to its predecessor; the chain was "
-                    "reordered or a record was replaced."
-                ),
+            broken_at = row.sequence
+            broken_detail = (
+                f"record {row.sequence} does not link to its predecessor; the chain was "
+                "reordered or a record was replaced."
             )
+            continue
         recomputed = compute_hash(
             stream=row.stream,
             sequence=row.sequence,
@@ -222,23 +332,29 @@ def verify(session: Session, stream: str) -> ChainVerification:
             previous_hash=row.previous_hash,
         )
         if recomputed != row.record_hash:
-            return ChainVerification(
-                ok=False,
-                stream=stream,
-                records=len(rows),
-                broken_at=row.sequence,
-                detail=(
-                    f"record {row.sequence} was modified after it was written; its contents no "
-                    "longer match its digest."
-                ),
+            broken_at = row.sequence
+            broken_detail = (
+                f"record {row.sequence} was modified after it was written; its contents no "
+                "longer match its digest."
             )
+            continue
         expected_previous = row.record_hash
 
+    if record_count == 0:
+        return ChainVerification(ok=True, stream=stream, records=0, detail="chain is empty")
+    if broken_at is not None:
+        return ChainVerification(
+            ok=False,
+            stream=stream,
+            records=record_count,
+            broken_at=broken_at,
+            detail=broken_detail,
+        )
     return ChainVerification(
         ok=True,
         stream=stream,
-        records=len(rows),
-        detail=f"{len(rows)} record(s) verified to head {expected_previous[:12]}…",
+        records=record_count,
+        detail=f"{record_count} record(s) verified to head {expected_previous[:12]}…",
     )
 
 

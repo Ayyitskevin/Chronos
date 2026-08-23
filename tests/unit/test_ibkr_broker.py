@@ -19,6 +19,7 @@ from ib_async import (
     Order,
     OrderStatus,
     Position,
+    PriceIncrement,
     Stock,
     TickData,
     Ticker,
@@ -37,9 +38,16 @@ from chronos.broker.base import (
 )
 from chronos.broker.ibkr import IBKRBroker
 from chronos.broker.market_data import (
+    MarketDataCancellationError,
     MarketDataManager,
+    MarketDataPacingError,
     MarketDataPermissionError,
     MarketDataUnavailableError,
+)
+from chronos.config.limits import (
+    MAX_OPTION_CHAIN_EXPIRATIONS_PER_ROW,
+    MAX_OPTION_CHAIN_ROWS,
+    MAX_OPTION_MARKET_RULE_INCREMENTS,
 )
 from chronos.config.settings import Settings
 from chronos.domain.enums import (
@@ -51,7 +59,15 @@ from chronos.domain.enums import (
     OrderLifecycle,
     OrderSide,
 )
-from chronos.domain.models import OptionContract, OptionContractSpec, OrderRequest
+from chronos.domain.models import (
+    MarketQuote,
+    OptionContract,
+    OptionContractSpec,
+    OptionMarketRule,
+    OptionPriceIncrement,
+    OrderRequest,
+    UnderlyingContract,
+)
 
 ACCOUNT_ID = "DU1234567"
 IBErrorHandler = Callable[[int, int, str, Contract | None], None]
@@ -131,6 +147,22 @@ def domain_option() -> OptionContract:
     )
 
 
+def option_ticker_template(contract: Contract) -> Ticker:
+    ticker = Ticker(contract=contract, time=FIXED_NOW, marketDataType=1)
+    ticker.bid = 3.10
+    ticker.ask = 3.25
+    ticker.putVolume = 44
+    ticker.putOpenInterest = 555
+    ticker.modelGreeks = OptionComputation(
+        tickAttrib=0,
+        impliedVol=0.25,
+        delta=-0.30,
+        gamma=0.02,
+        theta=-0.10,
+    )
+    return ticker
+
+
 class FakeIB:
     def __init__(self) -> None:
         self.errorEvent = FakeErrorEvent()
@@ -153,6 +185,32 @@ class FakeIB:
         # deliverable screen reads them (M11, R-27).
         self.option_underlying_symbol = "AAPL"
         self.option_underlying_sec_type = "STK"
+        self.option_liquid_hours = "20260821:0930-1600"
+        self.option_time_zone_id = "US/Eastern"
+        self.market_rule_response: list[PriceIncrement] | None = [
+            PriceIncrement(0.0, 0.01),
+            PriceIncrement(3.0, 0.05),
+        ]
+        self.market_rule_responses: dict[int, list[PriceIncrement] | None] = {}
+        self.market_rule_wait_ids: set[int] = set()
+        self.market_rule_requested_ids: list[int] = []
+        self.market_rule_completed_ids: list[int] = []
+        self.market_rule_ids_by_contract: dict[int, int] = {202: 26}
+        self.contract_detail_fail_ids: set[int] = set()
+        self.contract_detail_wait_ids: set[int] = set()
+        self.contract_detail_requested_ids: list[int] = []
+        self.qualification_global_error_code: int | None = None
+        self.option_chain_global_error_code: int | None = None
+        self.option_chain_response = [
+            OptionChain(
+                exchange="SMART",
+                underlyingConId=101,
+                tradingClass="AAPL",
+                multiplier="100",
+                expirations=["20260821", "20260814"],
+                strikes=[190.0, 185.0],
+            )
+        ]
         self.account_values = [
             AccountValue(ACCOUNT_ID, "NetLiquidation", "250000.25", "USD", ""),
             AccountValue(ACCOUNT_ID, "TotalCashValue", "125000.50", "USD", ""),
@@ -237,23 +295,53 @@ class FakeIB:
                 qualified.append(stock)
             elif contract.secType == "OPT":
                 option = ib_option()
+                if Decimal(str(contract.strike)) == Decimal("180"):
+                    option.conId = 203
+                    option.strike = 180.0
+                    option.localSymbol = "AAPL  260821P00180000"
                 option.currency = self.option_currency
                 option.exchange = self.option_exchange
                 qualified.append(option)
             else:
                 qualified.append(None)
+        if self.qualification_global_error_code is not None:
+            self.errorEvent.emit(
+                -1,
+                self.qualification_global_error_code,
+                "simulated simultaneous global qualification error",
+                None,
+            )
         return qualified
 
     async def reqContractDetailsAsync(self, contract: Contract) -> list[ContractDetails]:
-        return [
-            ContractDetails(
-                contract=contract,
-                minTick=self.min_tick,
-                underConId=self.option_underlying_con_id,
-                underSymbol=self.option_underlying_symbol,
-                underSecType=self.option_underlying_sec_type,
-            )
-        ]
+        self.contract_detail_requested_ids.append(contract.conId)
+        if contract.conId in self.contract_detail_fail_ids:
+            raise RuntimeError("simulated contract-detail failure")
+        if contract.conId in self.contract_detail_wait_ids:
+            await asyncio.Future()
+        detail = ContractDetails(
+            contract=contract,
+            minTick=self.min_tick,
+            underConId=self.option_underlying_con_id,
+            underSymbol=self.option_underlying_symbol,
+            underSecType=self.option_underlying_sec_type,
+        )
+        detail.validExchanges = "SMART,CBOE"
+        detail.marketRuleIds = f"{self.market_rule_ids_by_contract.get(contract.conId, 26)},27"
+        detail.liquidHours = self.option_liquid_hours
+        detail.timeZoneId = self.option_time_zone_id
+        return [detail]
+
+    async def reqMarketRuleAsync(self, marketRuleId: int) -> list[PriceIncrement] | None:
+        self.market_rule_requested_ids.append(marketRuleId)
+        if marketRuleId in self.market_rule_wait_ids:
+            await asyncio.Future()
+        if marketRuleId in self.market_rule_responses:
+            self.market_rule_completed_ids.append(marketRuleId)
+            return self.market_rule_responses[marketRuleId]
+        assert marketRuleId == 26
+        self.market_rule_completed_ids.append(marketRuleId)
+        return self.market_rule_response
 
     async def reqSecDefOptParamsAsync(
         self,
@@ -265,16 +353,14 @@ class FakeIB:
         assert underlyingSymbol == "AAPL"
         assert futFopExchange == ""
         assert underlyingSecType == "STK"
-        return [
-            OptionChain(
-                exchange="SMART",
-                underlyingConId=underlyingConId,
-                tradingClass="AAPL",
-                multiplier="100",
-                expirations=["20260821", "20260814"],
-                strikes=[190.0, 185.0],
+        if self.option_chain_global_error_code is not None:
+            self.errorEvent.emit(
+                -1,
+                self.option_chain_global_error_code,
+                "simulated simultaneous global market-data error",
+                None,
             )
-        ]
+        return self.option_chain_response
 
     def reqMktData(
         self,
@@ -321,7 +407,41 @@ class FakeIB:
             setattr(ticker, field_name, getattr(template, field_name))
         ticker.time = template.time or FIXED_NOW
         ticker.marketDataType = template.marketDataType
-        ticker.ticks.append(TickData(FIXED_NOW, 2, ticker.ask, 1))
+        ticker.ticks.extend(
+            (
+                TickData(FIXED_NOW, 1, ticker.bid, float("nan")),
+                TickData(FIXED_NOW, 2, ticker.ask, float("nan")),
+            )
+        )
+        ticker_contract = ticker.contract
+        if ticker_contract is not None and ticker_contract.secType == "OPT":
+            is_call = ticker_contract.right.upper().startswith("C")
+            volume = ticker.callVolume if is_call else ticker.putVolume
+            open_interest = ticker.callOpenInterest if is_call else ticker.putOpenInterest
+            ticker.ticks.extend(
+                (
+                    TickData(
+                        FIXED_NOW,
+                        29 if is_call else 30,
+                        float("nan"),
+                        volume,
+                    ),
+                    TickData(
+                        FIXED_NOW,
+                        27 if is_call else 28,
+                        float("nan"),
+                        open_interest,
+                    ),
+                )
+            )
+            if ticker.modelGreeks is None:
+                ticker.modelGreeks = OptionComputation(
+                    tickAttrib=0,
+                    impliedVol=-2,
+                    delta=-2,
+                    gamma=-2,
+                    theta=-2,
+                )
         ticker.updateEvent.emit(ticker)
 
     def cancelMktData(self, contract: Contract) -> bool:
@@ -352,7 +472,6 @@ def make_broker(
         client=client,
         clock=lambda: FIXED_NOW,
         quote_timeout_seconds=quote_timeout_seconds,
-        quote_settle_seconds=0,
         on_connection_uncertain=on_connection_uncertain,
     )
 
@@ -594,13 +713,21 @@ async def test_qualification_chain_and_contract_details_are_authoritative() -> N
             ),
         )
     )
+    rules = await broker.option_market_rules(options)
+    deliverables = await broker.option_deliverable_facts(options)
 
     assert underlying.con_id == 101
+    assert chains.complete is True
+    assert chains.truncated is False
+    assert chains.completion_marker == "securityDefinitionOptionParameterEnd"
+    assert chains.source == "ib_async-v1"
     assert chains[0].expirations == (date(2026, 8, 14), date(2026, 8, 21))
     assert chains[0].strikes == (Decimal("185.0"), Decimal("190.0"))
     assert options[0].con_id == 202
     assert options[0].underlying_con_id == underlying.con_id
     assert options[0].min_tick == Decimal("0.05")
+    assert options[0].liquid_hours == "20260821:0930-1600"
+    assert options[0].time_zone_id == "US/Eastern"
     # The assertion that could not have been written before M11. This line read
     # `is False` for six milestones, and it was pinning R-27: neither IBKR
     # adapter set the flag, so `standard_deliverable_verified` FAILed every
@@ -608,6 +735,10 @@ async def test_qualification_chain_and_contract_details_are_authoritative() -> N
     assert options[0].deliverable_verified is True
     assert options[0].deliverable_shares == Decimal("100")
     assert options[0].has_verified_standard_deliverable is True
+    assert rules[0].market_rule_id == 26
+    assert rules[0].price_increments[-1].increment == Decimal("0.05")
+    assert deliverables[0].authoritative is False
+    assert not deliverables[0].is_standard_for(options[0])
 
     client.min_tick = 0
     with pytest.raises(BrokerDataError, match="minimum tick"):
@@ -659,6 +790,342 @@ async def test_option_qualification_rejects_identity_mismatch(
                 ),
             )
         )
+
+
+@pytest.mark.asyncio
+async def test_ib_async_chain_overflow_retains_bounded_response() -> None:
+    client = FakeIB()
+    start = date(2026, 1, 1)
+    client.option_chain_response = [
+        OptionChain(
+            exchange="SMART",
+            underlyingConId=101,
+            tradingClass="AAPL",
+            multiplier="100",
+            expirations=[
+                (start + timedelta(days=index)).strftime("%Y%m%d")
+                for index in range(MAX_OPTION_CHAIN_EXPIRATIONS_PER_ROW + 1)
+            ],
+            strikes=[185.0],
+        )
+    ]
+    broker = make_broker(client)
+    await broker.connect()
+    underlying = await broker.qualify_underlying("AAPL")
+
+    with pytest.raises(MarketDataUnavailableError, match="hard evidence bound") as raised:
+        await broker.option_chain_parameters(underlying)
+
+    response = raised.value.chain_response
+    assert response is not None
+    assert response.complete is True
+    assert response.truncated is True
+    assert len(response.parameters[0].expirations) == MAX_OPTION_CHAIN_EXPIRATIONS_PER_ROW
+
+
+@pytest.mark.asyncio
+async def test_ib_async_chain_row_overflow_is_arrival_order_independent() -> None:
+    start = date(2026, 1, 1)
+    rows = [
+        OptionChain(
+            exchange="SMART",
+            underlyingConId=101,
+            tradingClass="AAPL",
+            multiplier="100",
+            expirations=[(start + timedelta(days=index)).strftime("%Y%m%d")],
+            strikes=[185.0],
+        )
+        for index in range(MAX_OPTION_CHAIN_ROWS + 1)
+    ]
+
+    async def overflow_error(
+        response_rows: list[OptionChain],
+    ) -> MarketDataUnavailableError:
+        client = FakeIB()
+        client.option_chain_response = response_rows
+        broker = make_broker(client)
+        await broker.connect()
+        underlying = await broker.qualify_underlying("AAPL")
+        with pytest.raises(
+            MarketDataUnavailableError,
+            match="hard evidence bound",
+        ) as raised:
+            await broker.option_chain_parameters(underlying)
+        return raised.value
+
+    forward = await overflow_error(rows)
+    reversed_order = await overflow_error(list(reversed(rows)))
+
+    assert forward.chain_response == reversed_order.chain_response
+    assert forward.contract_ids == reversed_order.contract_ids == (101,)
+    assert forward.observed_values == reversed_order.observed_values == ()
+    assert forward.observed_at == reversed_order.observed_at == FIXED_NOW
+    assert forward.truncated is reversed_order.truncated is True
+    response = forward.chain_response
+    assert response is not None
+    assert len(response.parameters) == MAX_OPTION_CHAIN_ROWS
+    assert tuple(parameter.expirations[0] for parameter in response.parameters) == tuple(
+        start + timedelta(days=index) for index in range(MAX_OPTION_CHAIN_ROWS)
+    )
+
+
+@pytest.mark.asyncio
+async def test_ib_async_option_qualification_retains_prior_valid_contract() -> None:
+    client = FakeIB()
+    client.contract_detail_fail_ids.add(203)
+    broker = make_broker(client)
+    await broker.connect()
+    first = OptionContractSpec(
+        symbol="AAPL",
+        underlying_con_id=101,
+        expiration=date(2026, 8, 21),
+        strike=Decimal("185"),
+        right=OptionRight.PUT,
+        exchange="SMART",
+        currency="USD",
+        multiplier=Decimal("100"),
+        trading_class="AAPL",
+    )
+    second = first.model_copy(update={"strike": Decimal("180")})
+
+    with pytest.raises(BrokerDataError, match="details are unavailable") as raised:
+        await broker.qualify_option_contracts((first, second))
+
+    observed = tuple(
+        value for value in raised.value.observed_values if isinstance(value, OptionContract)
+    )
+    assert tuple(option.con_id for option in observed) == (202,)
+    assert raised.value.contract_ids == (203,)
+
+
+@pytest.mark.asyncio
+async def test_ib_async_chain_malformed_later_row_retains_valid_prefix() -> None:
+    client = FakeIB()
+    client.option_chain_response.append(
+        OptionChain(
+            exchange="SMART",
+            underlyingConId=999,
+            tradingClass="AAPL",
+            multiplier="100",
+            expirations=["20260821"],
+            strikes=[185.0],
+        )
+    )
+    broker = make_broker(client)
+    await broker.connect()
+    underlying = await broker.qualify_underlying("AAPL")
+
+    with pytest.raises(MarketDataUnavailableError, match="malformed") as raised:
+        await broker.option_chain_parameters(underlying)
+
+    response = raised.value.chain_response
+    assert response is not None
+    assert tuple(parameter.underlying_con_id for parameter in response.parameters) == (101,)
+    assert response.complete is True
+    assert response.truncated is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("response_kind", ["timeout", "malformed"])
+async def test_market_rule_timeout_or_malformed_schedule_fails_closed(
+    response_kind: str,
+) -> None:
+    client = FakeIB()
+    if response_kind == "timeout":
+        client.market_rule_response = None
+        expected = "did not complete"
+    else:
+        client.market_rule_response = [PriceIncrement(1.0, 0.01)]
+        expected = "malformed"
+    broker = make_broker(client)
+    await broker.connect()
+    broker._ib_contracts[202] = ib_option()
+
+    with pytest.raises(BrokerDataError, match=expected):
+        await broker.option_market_rules((domain_option(),))
+
+
+@pytest.mark.asyncio
+async def test_market_rule_overflow_retains_bounded_increment_prefix() -> None:
+    client = FakeIB()
+    client.market_rule_response = [
+        PriceIncrement(float(index), 0.01) for index in range(MAX_OPTION_MARKET_RULE_INCREMENTS + 1)
+    ]
+    broker = make_broker(client)
+    await broker.connect()
+    broker._ib_contracts[202] = ib_option()
+
+    with pytest.raises(BrokerDataError, match="malformed") as raised:
+        await broker.option_market_rules((domain_option(),))
+
+    increments = tuple(
+        value for value in raised.value.observed_values if isinstance(value, OptionPriceIncrement)
+    )
+    assert len(increments) == MAX_OPTION_MARKET_RULE_INCREMENTS
+    assert increments[0].low_edge == Decimal("0.0")
+    assert raised.value.truncated is True
+    assert raised.value.contract_ids == (202,)
+
+
+@pytest.mark.asyncio
+async def test_manager_deadline_retains_completed_ib_async_market_rule() -> None:
+    client = FakeIB()
+    client.market_rule_ids_by_contract = {202: 26, 203: 27}
+    client.market_rule_responses[26] = [
+        PriceIncrement(0.0, 0.01),
+        PriceIncrement(3.0, 0.05),
+    ]
+    client.market_rule_wait_ids.add(27)
+    broker = make_broker(client)
+    await broker.connect()
+    first_ib = ib_option()
+    second_ib = ib_option()
+    second_ib.conId = 203
+    second_ib.strike = 180.0
+    second_ib.localSymbol = "AAPL  260821P00180000"
+    broker._ib_contracts.update({202: first_ib, 203: second_ib})
+    second = domain_option().model_copy(
+        update={
+            "con_id": 203,
+            "strike": Decimal("180"),
+            "local_symbol": "AAPL  260821P00180000",
+        }
+    )
+    manager = MarketDataManager(
+        broker,
+        request_timeout_seconds=0.01,
+        max_attempts=1,
+    )
+
+    with pytest.raises(MarketDataUnavailableError, match="interrupted") as raised:
+        await manager.option_market_rules((domain_option(), second))
+
+    observed_rules = tuple(
+        value for value in raised.value.observed_values if isinstance(value, OptionMarketRule)
+    )
+    assert tuple(rule.con_id for rule in observed_rules) == (202,)
+    assert raised.value.contract_ids == (203,)
+    assert raised.value.request_completed is False
+
+
+@pytest.mark.asyncio
+async def test_global_pacing_interrupt_retains_completed_ib_async_market_rule() -> None:
+    client = FakeIB()
+    client.market_rule_ids_by_contract = {202: 26, 203: 27}
+    client.market_rule_responses[26] = [
+        PriceIncrement(0.0, 0.01),
+        PriceIncrement(3.0, 0.05),
+    ]
+    client.market_rule_wait_ids.add(27)
+    broker = make_broker(client)
+    await broker.connect()
+    first_ib = ib_option()
+    second_ib = ib_option()
+    second_ib.conId = 203
+    second_ib.strike = 180.0
+    second_ib.localSymbol = "AAPL  260821P00180000"
+    broker._ib_contracts.update({202: first_ib, 203: second_ib})
+    second = domain_option().model_copy(
+        update={
+            "con_id": 203,
+            "strike": Decimal("180"),
+            "local_symbol": "AAPL  260821P00180000",
+        }
+    )
+
+    request = asyncio.create_task(broker.option_market_rules((domain_option(), second)))
+    for _ in range(20):
+        if 26 in client.market_rule_completed_ids and 27 in client.market_rule_requested_ids:
+            break
+        await asyncio.sleep(0)
+    assert 26 in client.market_rule_completed_ids
+    assert 27 in client.market_rule_requested_ids
+    await asyncio.sleep(0)
+    client.errorEvent.emit(-1, 100, "simulated global pacing error", None)
+
+    with pytest.raises(MarketDataPacingError) as raised:
+        await request
+
+    observed_rules = tuple(
+        value for value in raised.value.observed_values if isinstance(value, OptionMarketRule)
+    )
+    assert tuple(rule.con_id for rule in observed_rules) == (202,)
+    assert raised.value.contract_ids == (203,)
+    assert raised.value.broker_error_code == 100
+
+
+@pytest.mark.asyncio
+async def test_global_pacing_interrupt_retains_prior_ib_async_qualification() -> None:
+    client = FakeIB()
+    client.contract_detail_wait_ids.add(203)
+    broker = make_broker(client)
+    await broker.connect()
+    first = OptionContractSpec(
+        symbol="AAPL",
+        underlying_con_id=101,
+        expiration=date(2026, 8, 21),
+        strike=Decimal("185"),
+        right=OptionRight.PUT,
+        exchange="SMART",
+        currency="USD",
+        multiplier=Decimal("100"),
+        trading_class="AAPL",
+    )
+    second = first.model_copy(update={"strike": Decimal("180")})
+
+    request = asyncio.create_task(broker.qualify_option_contracts((first, second)))
+    for _ in range(20):
+        if 203 in client.contract_detail_requested_ids:
+            break
+        await asyncio.sleep(0)
+    assert 203 in client.contract_detail_requested_ids
+    client.errorEvent.emit(-1, 100, "simulated global pacing error", None)
+
+    with pytest.raises(MarketDataPacingError) as raised:
+        await request
+
+    observed = tuple(
+        value for value in raised.value.observed_values if isinstance(value, OptionContract)
+    )
+    assert tuple(option.con_id for option in observed) == (202,)
+    assert raised.value.contract_ids == (203,)
+    assert raised.value.broker_error_code == 100
+
+
+@pytest.mark.asyncio
+async def test_simultaneous_global_pacing_precedes_completed_chain_response() -> None:
+    client = FakeIB()
+    broker = make_broker(client)
+    await broker.connect()
+    underlying = await broker.qualify_underlying("AAPL")
+    client.option_chain_global_error_code = 100
+
+    with pytest.raises(MarketDataPacingError) as raised:
+        await broker.option_chain_parameters(underlying)
+
+    assert raised.value.broker_error_code == 100
+    assert raised.value.chain_response.complete is True
+    assert tuple(
+        parameter.underlying_con_id for parameter in raised.value.chain_response.parameters
+    ) == (101,)
+
+
+@pytest.mark.asyncio
+async def test_simultaneous_global_pacing_retains_qualified_underlying() -> None:
+    client = FakeIB()
+    broker = make_broker(client)
+    await broker.connect()
+    client.qualification_global_error_code = 100
+
+    with pytest.raises(MarketDataPacingError) as raised:
+        await broker.qualify_underlying("AAPL")
+
+    assert raised.value.broker_error_code == 100
+    observed = tuple(
+        value for value in raised.value.observed_values if isinstance(value, UnderlyingContract)
+    )
+    assert tuple(contract.con_id for contract in observed) == (101,)
+    assert raised.value.contract_ids == ()
 
 
 @pytest.mark.asyncio
@@ -714,7 +1181,7 @@ async def test_option_quotes_stream_generic_ticks_preserve_missing_and_cancel() 
 
     quotes = await broker.request_option_quotes((domain_option(),))
 
-    assert client.market_data_requests == [(202, "100,101,106", False, False)]
+    assert client.market_data_requests == [(202, "100,101", False, False)]
     assert quotes[0].data_quality is DataQuality.LIVE
     assert quotes[0].bid == Decimal("3.1")
     assert quotes[0].last is None
@@ -726,6 +1193,49 @@ async def test_option_quotes_stream_generic_ticks_preserve_missing_and_cancel() 
 
     await broker.cancel_market_data((202,))
     assert client.cancelled_contracts == [202]
+
+
+@pytest.mark.asyncio
+async def test_option_quote_waits_for_exact_right_open_interest_callback() -> None:
+    client = FakeIB()
+    client.publish_market_data_updates = False
+    broker = make_broker(client)
+    await broker.connect()
+
+    request = asyncio.create_task(broker.request_option_quotes((domain_option(),)))
+    await asyncio.sleep(0)
+    ticker = client.live_tickers[202]
+    ticker.marketDataType = 1
+    ticker.bid = 3.10
+    ticker.ask = 3.25
+    ticker.putVolume = 44
+    ticker.putOpenInterest = 555
+    ticker.modelGreeks = OptionComputation(
+        tickAttrib=0,
+        impliedVol=0.25,
+        delta=-0.30,
+        gamma=0.02,
+        theta=-0.10,
+    )
+    ticker.ticks.extend(
+        (
+            TickData(FIXED_NOW, 1, ticker.bid, float("nan")),
+            TickData(FIXED_NOW, 2, ticker.ask, float("nan")),
+            TickData(FIXED_NOW, 30, float("nan"), ticker.putVolume),
+            TickData(FIXED_NOW, 27, float("nan"), 999),  # wrong-side call OI
+        )
+    )
+    ticker.updateEvent.emit(ticker)
+    await asyncio.sleep(0)
+    assert request.done() is False
+
+    ticker.ticks.append(TickData(FIXED_NOW, 28, float("nan"), ticker.putOpenInterest))
+    ticker.updateEvent.emit(ticker)
+    quotes = await request
+
+    assert quotes[0].open_interest == 555
+    assert quotes[0].volume == 44
+    await broker.cancel_market_data((202,))
 
 
 @pytest.mark.asyncio
@@ -801,7 +1311,7 @@ async def test_quote_without_a_current_price_update_times_out_and_cleans_up() ->
     broker = make_broker(client, quote_timeout_seconds=0.05)
     await broker.connect()
 
-    with pytest.raises(MarketDataUnavailableError, match="current price update"):
+    with pytest.raises(MarketDataUnavailableError, match="required quote callback"):
         await broker.request_option_quotes((domain_option(),))
 
     assert client.cancelled_contracts == [202]
@@ -875,6 +1385,150 @@ async def test_ibkr_permission_event_is_classified_and_subscription_is_cleaned()
         await broker.request_option_quotes((domain_option(),))
 
     assert client.cancelled_contracts == [202]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("evidence_path", ["chain", "qualification", "rules", "deliverables"])
+async def test_stored_global_pacing_precedes_every_option_evidence_path(
+    evidence_path: str,
+) -> None:
+    client = FakeIB()
+    broker = make_broker(client)
+    await broker.connect()
+    underlying = await broker.qualify_underlying("AAPL")
+    broker._ib_contracts[202] = ib_option()
+    specification = OptionContractSpec(
+        symbol="AAPL",
+        underlying_con_id=101,
+        expiration=date(2026, 8, 21),
+        strike=Decimal("185"),
+        right=OptionRight.PUT,
+        exchange="SMART",
+        currency="USD",
+        multiplier=Decimal("100"),
+        trading_class="AAPL",
+    )
+    client.errorEvent.emit(-1, 100, "simulated global pacing error", None)
+
+    with pytest.raises(MarketDataPacingError) as raised:
+        if evidence_path == "chain":
+            await broker.option_chain_parameters(underlying)
+        elif evidence_path == "qualification":
+            await broker.qualify_option_contracts((specification,))
+        elif evidence_path == "rules":
+            await broker.option_market_rules((domain_option(),))
+        else:
+            await broker.option_deliverable_facts((domain_option(),))
+
+    assert raised.value.broker_error_code == 100
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("code", "error_type"),
+    [
+        (100, MarketDataPacingError),
+        (101, MarketDataUnavailableError),
+        (10089, MarketDataPermissionError),
+    ],
+)
+async def test_stored_global_error_keeps_exact_classification(
+    code: int,
+    error_type: type[BrokerDataError],
+) -> None:
+    client = FakeIB()
+    broker = make_broker(client)
+    await broker.connect()
+    client.errorEvent.emit(-1, code, "simulated global market-data error", None)
+
+    with pytest.raises(error_type) as raised:
+        await broker.option_deliverable_facts((domain_option(),))
+
+    assert raised.value.broker_error_code == code
+
+
+@pytest.mark.asyncio
+async def test_ibkr_batch_retains_completed_quote_when_peer_is_denied() -> None:
+    client = FakeIB()
+    client.publish_market_data_updates = False
+    broker = make_broker(client)
+    await broker.connect()
+    second = domain_option().model_copy(
+        update={
+            "con_id": 203,
+            "strike": Decimal("180"),
+            "local_symbol": "AAPL  260821P00180000",
+        }
+    )
+
+    request = asyncio.create_task(broker.request_option_quotes((domain_option(), second)))
+    await asyncio.sleep(0)
+    FakeIB._publish_ticker(
+        client.live_tickers[202],
+        option_ticker_template(client.live_tickers[202].contract),
+    )
+    client.errorEvent.emit(
+        1,
+        10089,
+        "simulated permission failure",
+        client.live_tickers[203].contract,
+    )
+
+    with pytest.raises(MarketDataPermissionError) as raised:
+        await request
+
+    observed = tuple(
+        value for value in raised.value.observed_values if isinstance(value, MarketQuote)
+    )
+    assert tuple(quote.contract.con_id for quote in observed) == (202,)
+    assert raised.value.contract_ids == (203,)
+    assert client.cancelled_contracts == [202, 203]
+    assert broker._active_market_data == {}
+
+
+@pytest.mark.asyncio
+async def test_ibkr_cleanup_failure_wins_without_discarding_completed_quote() -> None:
+    client = FakeIB()
+    client.publish_market_data_updates = False
+    client.cancel_succeeds = False
+    broker = make_broker(client)
+    await broker.connect()
+    second = domain_option().model_copy(
+        update={
+            "con_id": 203,
+            "strike": Decimal("180"),
+            "local_symbol": "AAPL  260821P00180000",
+        }
+    )
+
+    request = asyncio.create_task(broker.request_option_quotes((domain_option(), second)))
+    await asyncio.sleep(0)
+    FakeIB._publish_ticker(
+        client.live_tickers[202],
+        option_ticker_template(client.live_tickers[202].contract),
+    )
+    client.errorEvent.emit(
+        1,
+        10089,
+        "simulated permission failure",
+        client.live_tickers[203].contract,
+    )
+
+    with pytest.raises(MarketDataCancellationError) as raised:
+        await request
+
+    cause = raised.value.__cause__
+    assert isinstance(cause, MarketDataPermissionError)
+    assert tuple(
+        quote.contract.con_id for quote in cause.observed_values if isinstance(quote, MarketQuote)
+    ) == (202,)
+    assert tuple(
+        quote.contract.con_id
+        for quote in raised.value.observed_values
+        if isinstance(quote, MarketQuote)
+    ) == (202,)
+    assert client.cancelled_contracts == [202, 203]
+    assert set(broker._active_market_data) == {202, 203}
 
 
 @pytest.mark.asyncio

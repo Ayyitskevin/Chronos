@@ -1,11 +1,31 @@
 # Test Results
 
 Companion to [TEST_PLAN.md](TEST_PLAN.md). All commands run from the repo
-root on Python 3.12 (`.venv`). Statuses use the plan's vocabulary:
+root on Python 3.12 using the existing `.venv` directly. Statuses use the plan's vocabulary:
 PASSED / FAILED / SKIPPED / NOT RUNNABLE WITHOUT CREDENTIALS /
 NOT IMPLEMENTED / REQUIRES OWNER ACTION.
 
-## Summary (current — re-measured 2026-08-02)
+## Summary (current — re-measured 2026-08-23)
+
+Measured on the option-chain salvage merge result (`main` `93a26f6` + codex's
+`ae9d256`), Python 3.12, all five gates run in CI order and in CI's own default
+test order. **These numbers drift with every merged test** — re-run before
+citing them.
+
+| Command | Result |
+|---|---|
+| `pytest -q` | **3976 passed, 1 skipped** (~153 s; 3977 collected) |
+| `ruff check .` | clean |
+| `ruff format --check .` | clean (525 files) |
+| `mypy src/chronos` | clean (286 source files) |
+| `mypy --strict worker` | clean (10 source files) |
+| GitHub Actions `quality` job | verify on the current PR |
+
+The single skip is the opt-in, credential-gated, read-only IBKR smoke test — it
+has never been run against a real gateway, which is why it skips; it does not
+fail. For comparison, `main` alone collects 3630 tests at `93a26f6`.
+
+## Summary (historical — re-measured 2026-08-02, superseded)
 
 Measured on this date against the merge commit `7f2d208`, Python 3.12, all four gates run
 in CI order. **These numbers drift with every merged test** — re-run before citing them;
@@ -23,6 +43,35 @@ The single skip is the opt-in, read-only IBKR smoke test
 (`tests/integration/test_ibkr_smoke.py`, marker `ibkr`, enabled with
 `CHRONOS_RUN_IBKR_SMOKE=1`). It is skipped because **no real gateway has ever been
 connected** — not because it fails.
+
+## ADR-0030 focused verification (2026-08-01)
+
+| Command | Result |
+|---|---|
+| `PATH="$PWD/.venv/bin:$PATH" BROKER_MODE=demo ALLOW_ORDER_TRANSMIT=false ALLOW_LIVE_TRADING=false pytest -q tests/unit/test_request_registry.py tests/unit/test_callback_bridge.py tests/unit/test_ibkr_broker.py tests/unit/test_official_ibkr.py tests/unit/test_market_data.py tests/unit/test_option_selection.py tests/unit/test_option_selection_service.py tests/safety/test_supervisor_durable_state.py tests/safety/test_option_selection_cycle.py tests/integration/test_option_selection_terminal.py` | **512 passed**, 1 Starlette deprecation warning (12.05 s) |
+
+This focused run covers the bounded market-data seam, pure resolver and golden
+replay, promotion/partial-evidence service, durable cycle integration, and
+authenticated GET-only receipt inspection. It used only offline fakes. The
+credential-gated real-IBKR smoke was not run, no live resolver-promotion artifact
+was created, and no order was placed.
+
+## Final repository gate (2026-08-01)
+
+All commands used `BROKER_MODE=demo ALLOW_ORDER_TRANSMIT=false
+ALLOW_LIVE_TRADING=false` and `PATH="$PWD/.venv/bin:$PATH"`.
+
+| Command | Result |
+|---|---|
+| `ruff check .` | **PASSED** — all checks passed |
+| `ruff format --check .` | **PASSED** — 380 files already formatted |
+| `mypy src/chronos` | **PASSED** — no issues in 220 source files |
+| `pytest -q` | **2,836 passed, 1 skipped, 5 warnings** (64.21 s) |
+
+The single skip is the explicitly opt-in, credential-gated, read-only IBKR
+smoke test. The five warnings are existing Starlette/FastAPI HTTP-status
+deprecations. The older snapshots below remain historical evidence, not a claim
+about the present working tree.
 
 A green suite proves the code behaves as its tests specify. It does **not** prove
 gateway conformance, live-execution quality, or strategy edge: every adapter path is
@@ -95,12 +144,18 @@ milestones.
 | Storage failure prevents new orders | ledger-failure halt tests (safety + chaos) |
 | Invalid configuration prevents startup | risk-policy `extra=forbid` tests; settings validators (wheel suite) |
 | Tests cannot reach live brokerage endpoints | no test constructs a live-capable lock (impossible via `resolve_mode_lock`); the only network-capable test is the skipped read-only smoke |
+| Model cannot choose an option contract | request-schema structural test plus strategy-derived-right service test; no `conId`, strike, expiry, route, or trading-class request field |
+| Missing or partial option evidence cannot rank | resolver mutation matrix, exact-set market-data/service tests, completion-provenance tests, and unknown-liquidity-with-zero-floors test |
+| Option receipt is durable before handoff | independent-session visibility, crash-after-commit, full-chain semantic tamper, conflicting reuse, and pre-handoff recheck tests |
+| Live option resolver authority cannot drift | exact-one-mode artifact validation, canonical mandate/policy/source bindings, post-acquisition expiry/replacement, and immediate pre-handoff validation tests |
 
 ## Not implemented / requires owner action
 
 | Item | Status |
 |---|---|
 | Paper-account submission integration test against real IB Gateway | REQUIRES OWNER ACTION (credentials + TWS; the adapter is unit-tested against a fake IB object in `tests/platform_unit/test_ibkr_paper_adapter.py`, never against a real gateway) |
+| Positive real-IBKR autonomous option selection | NOT IMPLEMENTED: TWS exposes no authoritative deliverable schedule, both adapters return `authoritative=False`, and the expected current result is `NO_TRADE` |
+| Live option-resolver promotion | REQUIRES OWNER ACTION + HUMAN SIGN-OFF after an authoritative source and gateway verification; runtime has no writer and this change created no artifact |
 | TradingView parity fixtures | REQUIRES OWNER ACTION (exports; see fixtures/tradingview/README.md) |
 | Property-based (hypothesis) tests | IMPLEMENTED (M4): `tests/platform_unit/test_property_invariants.py` — intent identity, state-machine legality, sizer bounds, deny-monotonicity; complemented by the concrete breach⇒deny matrix (`test_risk_engine_limits.py`, M5) |
 | Long-running shadow service tests | IMPLEMENTED (M2): `tests/platform_unit/test_service.py`, `tests/chaos/test_service_faults.py` |

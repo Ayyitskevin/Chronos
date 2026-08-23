@@ -355,8 +355,16 @@ class AutonomyRuntime:
                     now=now,
                 )
             else:
-                self._drain(session, mandate, facts, now, report)
+                batch = proposals.claim_batch(
+                    session,
+                    account_fingerprint=self._config.account_fingerprint,
+                    limit=self._config.proposals_per_tick,
+                )
 
+        if facts is not None:
+            self._drain(batch, mandate, facts, now, report)
+
+        with self._sessions.begin() as session:
             delivered = delivery.deliver_pending(
                 session,
                 account_fingerprint=self._config.account_fingerprint,
@@ -380,50 +388,51 @@ class AutonomyRuntime:
 
     def _drain(
         self,
-        session: Session,
+        batch: tuple[proposals.QueuedProposal, ...],
         mandate: AutonomyMandate | None,
         facts: CycleFacts,
         now: datetime,
         report: TickReport,
     ) -> None:
-        batch = proposals.claim_batch(
-            session,
-            account_fingerprint=self._config.account_fingerprint,
-            limit=self._config.proposals_per_tick,
-        )
         for item in batch:
-            resolved = ResolvedIdentity(identity=self._identity)
-            if self._resolve_identity is not None:
-                # Resolved per proposal AND per tick against the drain's own
-                # clock: a registration that expired between enqueue and drain
-                # refuses at the moment authority is exercised, not the moment
-                # bytes were received. Since A3 the same call consults the
-                # durable revocation ledger, so a credential the owner killed
-                # mid-session refuses here too — without a restart, which is
-                # the whole point of that act. (The resolver's registry is
-                # still a boot-time snapshot for everything else: file edits
-                # such as disabling an entry are honored at the next restart;
-                # see build_identity_resolver.)
-                resolved = self._resolve_identity(session, item.proposer_id, facts.now)
-            outcome = run_cycle(
-                item.payload,
-                session=session,
-                mandate=mandate,
-                identity=resolved.identity,
-                identity_refusal=resolved.refusal,
-                identity_detail=resolved.detail,
-                facts=facts,
-                submit=self._submit,
-                gather_instrument=self._gather_instrument,
-                bind_evidence=self._bind_evidence,
-            )
-            proposals.mark_processed(
-                session,
-                queue_id=item.id,
-                stage=outcome.stage.value,
-                refusal=outcome.refusal,
-                now=now,
-            )
+            with self._sessions() as session:
+                try:
+                    resolved = ResolvedIdentity(identity=self._identity)
+                    if self._resolve_identity is not None:
+                        # Resolved per proposal AND per tick against the drain's own
+                        # clock: a registration that expired between enqueue and drain
+                        # refuses at the moment authority is exercised, not the moment
+                        # bytes were received. Since A3 the same call consults the
+                        # durable revocation ledger, so a credential the owner killed
+                        # mid-session refuses here too — without a restart, which is
+                        # the whole point of that act. (The resolver's registry is
+                        # still a boot-time snapshot for everything else: file edits
+                        # such as disabling an entry are honored at the next restart;
+                        # see build_identity_resolver.)
+                        resolved = self._resolve_identity(session, item.proposer_id, facts.now)
+                    outcome = run_cycle(
+                        item.payload,
+                        session=session,
+                        mandate=mandate,
+                        identity=resolved.identity,
+                        identity_refusal=resolved.refusal,
+                        identity_detail=resolved.detail,
+                        facts=facts,
+                        submit=self._submit,
+                        gather_instrument=self._gather_instrument,
+                        bind_evidence=self._bind_evidence,
+                    )
+                    proposals.mark_processed(
+                        session,
+                        queue_id=item.id,
+                        stage=outcome.stage.value,
+                        refusal=outcome.refusal,
+                        now=now,
+                    )
+                    session.commit()
+                except BaseException:
+                    session.rollback()
+                    raise
             report.outcomes.append(outcome)
             report.proposals_judged += 1
             self._count_handoff(outcome, report)

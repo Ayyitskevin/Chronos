@@ -25,6 +25,26 @@ def test_safe_demo_defaults() -> None:
     assert settings.max_strikes_per_expiration == 12
     assert settings.assignment_near_zero_extrinsic == Decimal("0.05")
     assert settings.market_timezone == "America/New_York"
+    assert settings.enable_autonomy_option_selection is False
+    assert settings.autonomy_option_resolver_promotion_file is None
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        "target_abs_delta",
+        "min_abs_delta",
+        "max_abs_delta",
+        "max_relative_spread",
+        "delta_weight",
+        "spread_weight",
+        "dte_weight",
+        "liquidity_weight",
+    ),
+)
+def test_option_selection_settings_reject_unbounded_decimal_rendering(field: str) -> None:
+    with pytest.raises(ValidationError, match="option-selection setting"):
+        Settings(_env_file=None, **{field: Decimal("1E-1000000")})
 
 
 def test_empty_account_demo_profile_parses_from_environment(
@@ -224,6 +244,16 @@ def test_inconsistent_resolver_settings_are_rejected(
 ) -> None:
     with pytest.raises(ValidationError, match=message):
         Settings(_env_file=None, **values)
+
+
+@pytest.mark.parametrize("weight", ("100.0001", "1e60"))
+def test_resolver_weights_have_a_hard_numeric_ceiling(weight: str) -> None:
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, spread_weight=weight)
+
+
+def test_resolver_weight_ceiling_is_accepted_exactly() -> None:
+    assert Settings(_env_file=None, spread_weight="100").spread_weight == Decimal("100")
 
 
 class TestLiveWheelMilestone1Settings:

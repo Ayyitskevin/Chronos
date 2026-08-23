@@ -9,13 +9,15 @@ from pathlib import Path
 from typing import Annotated, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import BeforeValidator, Field, PositiveInt, model_validator
+from pydantic import BeforeValidator, Field, PositiveInt, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from chronos.config.limits import (
     MAX_CANDIDATE_EXPIRATIONS,
     MAX_CANDIDATE_REQUEST_CONTRACTS,
     MAX_CANDIDATE_STRIKES_PER_EXPIRATION,
+    MAX_OPTION_SELECTION_WEIGHT,
+    validate_option_selection_decimal,
 )
 from chronos.domain.accounts import is_live_account_id
 from chronos.domain.enums import BrokerAdapter, BrokerMode, DemoProfile, IBEnvironment
@@ -221,6 +223,14 @@ class Settings(BaseSettings):
     autonomy_idle_interval_seconds: Annotated[float, Field(gt=0)] = 60.0
     autonomy_min_interval_seconds: Annotated[float, Field(gt=0)] = 5.0
     autonomy_market_timezone: str = "America/New_York"
+    # Autonomous options are a separately activated capability.  A mandate
+    # that already names EQUITY_OPTION must not silently gain contract
+    # selection merely because new resolver code was deployed.
+    enable_autonomy_option_selection: bool = False
+    # LIVE/CANARY additionally require an owner-created artifact bound to the
+    # exact resolver/policy/schema digests.  Runtime code only reads it; no
+    # creation or promotion command exists in Chronos.
+    autonomy_option_resolver_promotion_file: Path | None = None
 
     symbol_allowlist: SymbolAllowlist = ("AAPL", "MSFT", "SPY")
     target_abs_delta: Annotated[Decimal, Field(gt=0, lt=1)] = Decimal("0.30")
@@ -242,10 +252,12 @@ class Settings(BaseSettings):
     max_symbol_allocation_pct: Annotated[Decimal, Field(gt=0, le=1)] = Decimal("0.25")
     max_total_wheel_allocation_pct: Annotated[Decimal, Field(gt=0, le=1)] = Decimal("0.60")
 
-    delta_weight: Annotated[Decimal, Field(ge=0)] = Decimal("0.45")
-    spread_weight: Annotated[Decimal, Field(ge=0)] = Decimal("0.30")
-    dte_weight: Annotated[Decimal, Field(ge=0)] = Decimal("0.15")
-    liquidity_weight: Annotated[Decimal, Field(ge=0)] = Decimal("0.10")
+    delta_weight: Annotated[Decimal, Field(ge=0, le=MAX_OPTION_SELECTION_WEIGHT)] = Decimal("0.45")
+    spread_weight: Annotated[Decimal, Field(ge=0, le=MAX_OPTION_SELECTION_WEIGHT)] = Decimal("0.30")
+    dte_weight: Annotated[Decimal, Field(ge=0, le=MAX_OPTION_SELECTION_WEIGHT)] = Decimal("0.15")
+    liquidity_weight: Annotated[Decimal, Field(ge=0, le=MAX_OPTION_SELECTION_WEIGHT)] = Decimal(
+        "0.10"
+    )
 
     assignment_near_zero_extrinsic: Annotated[Decimal, Field(ge=0)] = Decimal("0.05")
     assignment_meaningful_extrinsic: Annotated[Decimal, Field(ge=0)] = Decimal("0.10")
@@ -257,6 +269,20 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///data/chronos.db"
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     log_file: Path = Path("logs/chronos.log")
+
+    @field_validator(
+        "target_abs_delta",
+        "min_abs_delta",
+        "max_abs_delta",
+        "max_relative_spread",
+        "delta_weight",
+        "spread_weight",
+        "dte_weight",
+        "liquidity_weight",
+    )
+    @classmethod
+    def validate_option_selection_decimal_width(cls, value: Decimal) -> Decimal:
+        return validate_option_selection_decimal(value, "option-selection setting")
 
     @model_validator(mode="after")
     def validate_reconciliation_cadence(self) -> Settings:

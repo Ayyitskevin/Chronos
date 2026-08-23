@@ -1,5 +1,78 @@
 # CHANGELOG
 
+## [Unreleased] — the option-chain lane comes off its stranded branch (2026-08-23)
+
+`codex/chronos-option-chain-selection-v1` had carried deterministic option
+selection and evidence receipts since 2026-08-01 — 54 files, ~16.6k lines — and
+`docs/VISION_COMPLETION_PLAN.md` §2 had been warning ever since that it was
+"observed separately" and must not be assumed present on the default branch. It
+was 139 commits behind by the time it landed. This is the third stranded-lane
+salvage after R-53 (the allowlist fix) and the `/oc` hardening, and it is the
+largest.
+
+The lane is preserved by merge rather than replayed by cherry-pick: `6e7429e`
+and `ae9d256` remain reachable as themselves, with their original messages and
+dates. (Every seat pushes as the same GitHub account per D-33, so the git author
+field is the shared one on all of them — what a merge preserves here is the
+commit objects and the lane's history, not an attribution the field never
+carried.)
+
+**Two identifier collisions had to be resolved before it could land.** The branch
+claimed `ADR-0020` and `D-20`, both of which `main` allocated on 2026-08-02 to
+bounded periodic reconciliation. Neither could be left ambiguous — a repo where
+`ADR-0020` names two different decisions is a repo whose own record lies. The
+option-selection pair is renumbered to **ADR-0030 / D-34** (scan-max+1, claimed
+in this PR per `docs/AGENT_PROTOCOL.md`), across 30 references. The
+reconciliation pair is untouched, verified reference-count-for-reference-count
+against `origin/main`.
+
+**Three drift resolutions worth naming, because a naive merge gets each wrong.**
+
+1. *The supervisor's transaction shape.* `main` refactored `_drain` to take a
+   caller-owned session; the branch refactored it to claim a batch and then open
+   one transaction per item. The branch's shape is load-bearing, not stylistic:
+   a bounded option acquisition may run up to
+   `MAX_OPTION_SELECTION_ACQUISITION_SECONDS` (600s), and holding a tick-long
+   database transaction open across that much broker I/O is not something to
+   ship. The branch's per-item transaction is kept, and `main`'s A3 work —
+   per-proposal identity resolution against the durable revocation ledger,
+   `identity_refusal`/`identity_detail`, and ADR-0028 evidence binding — is
+   re-applied *inside* it. Neither side survives intact alone.
+
+2. *The handoff contract.* The branch's `submit` callables returned a bare
+   order-id string, which was the contract when it forked. `main` since requires
+   a typed `HandoffResult` and classifies an untyped return as
+   `HANDOFF_RESULT_UNTYPED` → `SENT_UNCONFIRMED` with a CRITICAL owner alert.
+   Two safety tests in `tests/safety/test_option_selection_cycle.py` were
+   asserting `COMPLETE` against the old contract. They now return
+   `HandoffResult.submitted(...)`. `main`'s stricter reading is correct and was
+   not weakened to accommodate the older tests — COMPLETE still means a
+   confirmed send and nothing weaker.
+
+3. *`quote_settle_seconds`.* The branch deletes it from `IBKRBroker`, replacing
+   a settle-sleep heuristic with deterministic per-contract quote waiters. Git
+   merged that deletion silently, since `main` never touched those lines — but
+   `main`'s test helper still passed the argument. The deletion is kept (the
+   waiters are the better mechanism); the caller is updated. `main`'s separate
+   2026-08-21 fix for the same test — a generous `quote_timeout_seconds` default
+   so `asyncio.wait_for`'s real-wall-clock bound cannot race CI load — is
+   preserved, because that flake is orthogonal to how quotes are awaited.
+
+**Nothing here turns anything on.** `ENABLE_AUTONOMY_OPTION_SELECTION` still
+defaults false; CANARY and LIVE still additionally require an owner-authored
+resolver promotion artifact that this repository has no command to create and
+does not ship; and both real IBKR adapters still report non-authoritative
+deliverable evidence, so real-gateway option selection remains `NO_TRADE` even
+when evaluation is enabled.
+
+**Verified on the merge result, not on either branch:** `ruff check` clean ·
+`ruff format --check` clean (525 files) · `mypy src/chronos` clean (286 files) ·
+`mypy --strict worker` clean (10 files) · `pytest -q` **3976 passed, 1 skipped**
+(3977 collected, ~153 s), run in CI's own default order. `main` at `93a26f6`
+collects 3630, so the lane adds 347 tests. The single skip is the credential-
+gated read-only IBKR smoke. A merge-direction audit confirms no `main`-side
+addition was lost and no public symbol on `main` was dropped.
+
 ## [Unreleased] — the /oc workflow stops trusting strangers (2026-08-22)
 
 The `/oc` comment workflow ran on a public repository with no author gate:
@@ -764,6 +837,45 @@ No real IBKR gateway was connected — none ever has been, and every adapter pat
 fixture-verified only. No strategy was selected; the best candidate still sits at 18 closed
 trades against a frozen floor of 20. The wheel still has zero backtested evidence. Findings 3
 and 5 keep their code halves open, and 4, 6, 7 and 8 await owner decisions.
+## [Unreleased] — Deterministic Option-Chain Selection + Evidence Receipts v1 (2026-08-01)
+
+ADR-0030 closes the categorical option-selection seam for one exact autonomous
+scope: `OPEN` equity-option cash-secured puts and covered calls. The model still
+cannot name an option right or any broker contract identity. Strategy derives
+`PUT`/`CALL`; owner policy supplies DTE, delta, liquidity, routing, session,
+multiplier, order-form, and scoring constraints.
+
+The app plane now acquires a bounded exact set of underlying, explicit
+chain-completion, qualification, quote/Greeks/liquidity, market-rule, session, and
+authoritative-deliverable facts. The pure resolver records every considered
+candidate and typed refusal, uses a pinned Decimal context and documented total
+order, and derives the receipt-bound tick-conforming limit. The existing
+compiler independently reproduces the contract and price; a mismatch stops
+before the order plane. Missing volume/open interest, incomplete or truncated
+completion, partial exact-set responses, stale/conflicting identity or time,
+and non-authoritative deliverables all fail closed.
+
+Each `SELECTED` or `NO_TRADE` result is canonical and replayable. Before any
+downstream use, the receipt is bounded, appended to the account-scoped
+`autonomy.option-selections` hash chain, committed, and read back through a
+full cryptographic plus semantic-envelope verification. The same receipt/stream
+check runs again immediately before handoff. The authenticated bounded
+`GET /terminal/option-selections` view exposes chain and semantic status without
+an action surface; local replay is the receipt model's `verifies()` method, not
+a new CLI. System/evidence refusals raise a deduplicated owner alert.
+
+Activation remains default-off. Every live autonomy mode requires a separate
+owner-authored resolver artifact for exactly that mode, bound to the canonical
+mandate, policy, account, versions, effective window, and material-source digest
+at initial, post-acquisition, and pre-handoff checks. Runtime code has no
+artifact writer, and this release creates none.
+
+**Residual:** both real IBKR adapters return explicit non-authoritative
+deliverable evidence because TWS exposes no OCC deliverable schedule. Real IBKR
+therefore remains `NO_TRADE` until an authoritative source is integrated and
+owner gateway verification plus human sign-off are complete. Tests and CI use
+only offline fakes; no credential, broker connection, order, promotion, push, or
+deployment is part of this change.
 
 ## [Unreleased] — M11: the option deliverable, and the last kernel defect (2026-07-27)
 

@@ -13,6 +13,7 @@ from chronos.broker.base import (
     BrokerDataError,
     BrokerSafetyError,
     BrokerSendGuard,
+    OptionChainResponse,
 )
 from chronos.domain.enums import (
     ConnectionState,
@@ -39,6 +40,9 @@ from chronos.domain.models import (
     OptionChainParameters,
     OptionContract,
     OptionContractSpec,
+    OptionDeliverableFacts,
+    OptionMarketRule,
+    OptionPriceIncrement,
     OrderModification,
     OrderPreview,
     OrderRequest,
@@ -210,7 +214,7 @@ class DemoBroker:
     async def option_chain_parameters(
         self,
         underlying: UnderlyingContract,
-    ) -> tuple[OptionChainParameters, ...]:
+    ) -> OptionChainResponse:
         self._require_connection()
         contracts = [
             contract
@@ -223,15 +227,22 @@ class DemoBroker:
             ]
         if not contracts:
             raise BrokerDataError(f"No deterministic option chain for {underlying.symbol}")
-        return (
-            OptionChainParameters(
-                exchange="SMART",
-                underlying_con_id=underlying.con_id,
-                trading_class=underlying.symbol,
-                multiplier=Decimal("100"),
-                expirations=tuple(sorted({contract.expiration for contract in contracts})),
-                strikes=tuple(sorted({contract.strike for contract in contracts})),
+        return OptionChainResponse(
+            parameters=(
+                OptionChainParameters(
+                    exchange="SMART",
+                    underlying_con_id=underlying.con_id,
+                    trading_class=underlying.symbol,
+                    multiplier=Decimal("100"),
+                    expirations=tuple(sorted({contract.expiration for contract in contracts})),
+                    strikes=tuple(sorted({contract.strike for contract in contracts})),
+                ),
             ),
+            complete=True,
+            truncated=False,
+            completion_marker="demo-option-chain-fixture-complete",
+            observed_at=self._clock().astimezone(UTC),
+            source="demo-fixture-v1",
         )
 
     async def qualify_option_contracts(
@@ -267,6 +278,47 @@ class DemoBroker:
                 )
             qualified.append(match)
         return tuple(qualified)
+
+    async def option_market_rules(
+        self,
+        contracts: Sequence[OptionContract],
+    ) -> tuple[OptionMarketRule, ...]:
+        """Return deterministic synthetic rule schedules, never guessed ticks."""
+
+        self._require_connection()
+        return tuple(
+            OptionMarketRule(
+                con_id=contract.con_id,
+                exchange=contract.exchange,
+                market_rule_id=26,
+                price_increments=(
+                    OptionPriceIncrement(low_edge=Decimal("0"), increment=Decimal("0.01")),
+                    OptionPriceIncrement(low_edge=Decimal("3"), increment=Decimal("0.05")),
+                ),
+                source="demo-fixture-v1",
+            )
+            for contract in contracts
+        )
+
+    async def option_deliverable_facts(
+        self,
+        contracts: Sequence[OptionContract],
+    ) -> tuple[OptionDeliverableFacts, ...]:
+        """Return explicit synthetic share-only deliverables for demo/replay."""
+
+        self._require_connection()
+        return tuple(
+            OptionDeliverableFacts(
+                con_id=contract.con_id,
+                authoritative=True,
+                source="demo-fixture-v1",
+                underlying_con_id=contract.underlying_con_id,
+                share_quantity=contract.multiplier,
+                cash_amount=Decimal("0"),
+                other_assets=(),
+            )
+            for contract in contracts
+        )
 
     async def request_underlying_quote(self, contract: UnderlyingContract) -> MarketQuote:
         self._require_connection()
@@ -512,7 +564,19 @@ class DemoBroker:
             self._option(2501, "IWM", expiry_21, "215", OptionRight.PUT),
             self._option(2601, "TSLA", expiry_21, "230", OptionRight.PUT),
         )
-        self._option_contracts = {contract.con_id: contract for contract in options}
+        # Synthetic session evidence is explicit and complete for the fixed
+        # demo instant.  It is not a claim about any real exchange calendar.
+        session_day = as_of.astimezone(UTC).strftime("%Y%m%d")
+        session_options = tuple(
+            contract.model_copy(
+                update={
+                    "liquid_hours": f"{session_day}:0000-2359",
+                    "time_zone_id": "UTC",
+                }
+            )
+            for contract in options
+        )
+        self._option_contracts = {contract.con_id: contract for contract in session_options}
 
         stock_values = {
             "AAPL": ("190.20", "190.30", "190.25", DataQuality.DEMO, as_of),

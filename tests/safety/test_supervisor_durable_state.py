@@ -27,6 +27,7 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
+from sqlalchemy import event
 from sqlalchemy.orm import Session
 
 from chronos.autonomy import (
@@ -625,6 +626,80 @@ def test_a_naive_timestamp_is_refused(session: Session) -> None:
             payload={},
             recorded_at=datetime(2026, 7, 25, 14, 0),  # noqa: DTZ001 - the point of the test
         )
+
+
+def test_append_projects_only_a_bounded_head_link(session: Session) -> None:
+    stream = "test.bounded-head"
+    oversized_prior_payload = "x" * 100_000
+    hash_chain.append(
+        session,
+        stream=stream,
+        kind="k",
+        payload={"padding": oversized_prior_payload},
+        recorded_at=_NOW,
+    )
+    session.flush()
+    executed_selects: list[str] = []
+    assert session.bind is not None
+
+    def _capture_statement(
+        _connection: Any,
+        _cursor: Any,
+        statement: str,
+        _parameters: Any,
+        _context: Any,
+        _executemany: bool,
+    ) -> None:
+        if statement.lstrip().upper().startswith("SELECT"):
+            executed_selects.append(statement.lower())
+
+    event.listen(session.bind, "before_cursor_execute", _capture_statement)
+    try:
+        appended = hash_chain.append(
+            session,
+            stream=stream,
+            kind="k",
+            payload={"n": 2},
+            recorded_at=_NOW,
+        )
+    finally:
+        event.remove(session.bind, "before_cursor_execute", _capture_statement)
+
+    assert appended.sequence == 2
+    head_select = next(statement for statement in executed_selects if "order by" in statement)
+    projection = head_select.partition("from hash_chain_records")[0]
+    assert "payload_json" not in projection
+    assert "length(cast(hash_chain_records.record_hash as text))" in projection
+    assert "substr(cast(hash_chain_records.record_hash as text)" in projection
+
+
+@pytest.mark.parametrize(
+    ("column", "corrupt_value"),
+    [
+        ("sequence", "9" * 100_000),
+        ("record_hash", "x" * 100_000),
+        ("sequence", b"\x80" * 100_000),
+        ("record_hash", b"\x80" * 100_000),
+    ],
+)
+def test_append_refuses_a_corrupt_dynamic_sqlite_head_field(
+    session: Session,
+    column: str,
+    corrupt_value: object,
+) -> None:
+    stream = "test.corrupt-head"
+    hash_chain.append(session, stream=stream, kind="k", payload={}, recorded_at=_NOW)
+    session.flush()
+    assert column in {"sequence", "record_hash"}
+    session.connection().exec_driver_sql(
+        f"UPDATE hash_chain_records SET {column} = ? WHERE stream = ?",
+        (corrupt_value, stream),
+    )
+
+    with pytest.raises(hash_chain.HashChainError) as raised:
+        hash_chain.append(session, stream=stream, kind="k", payload={}, recorded_at=_NOW)
+
+    assert len(str(raised.value)) < 100
 
 
 def test_payload_hashing_is_key_order_independent() -> None:

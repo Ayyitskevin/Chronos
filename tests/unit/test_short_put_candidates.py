@@ -8,7 +8,7 @@ from typing import Any, TypeVar, cast
 
 import pytest
 
-from chronos.broker.base import Broker, BrokerDataError
+from chronos.broker.base import Broker, BrokerDataError, OptionChainResponse
 from chronos.broker.market_data import MarketDataManager
 from chronos.config.limits import MAX_CANDIDATE_EXPIRATIONS
 from chronos.config.settings import Settings
@@ -207,7 +207,7 @@ class _CandidateBroker:
     async def option_chain_parameters(
         self,
         underlying: UnderlyingContract,
-    ) -> tuple[OptionChainParameters, ...]:
+    ) -> OptionChainResponse:
         self._record("option_chain")
         chain = OptionChainParameters(
             exchange="SMART",
@@ -220,7 +220,14 @@ class _CandidateBroker:
             ),
             strikes=(Decimal("175"), Decimal("180"), Decimal("185")),
         )
-        return (chain, chain) if self.ambiguous_chain else (chain,)
+        return OptionChainResponse(
+            parameters=(chain, chain) if self.ambiguous_chain else (chain,),
+            complete=True,
+            truncated=False,
+            completion_marker="synthetic-security-definition-option-parameter-end",
+            observed_at=NOW,
+            source="synthetic-short-put-candidate-broker",
+        )
 
     async def qualify_option_contracts(
         self,
