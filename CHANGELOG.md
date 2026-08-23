@@ -1,5 +1,30 @@
 # CHANGELOG
 
+## [Unreleased] — CI stops lying: the worker gate lands and the flake dies (2026-08-22)
+
+Two defects let a green check mean less than it claimed. First, the documented
+per-PR gate list has included `mypy --strict worker` since 2026-08-12, but CI
+never ran it — and it was red at HEAD: three `union-attr` errors in
+`worker/model_xai.py`'s deny-by-default extract, invisible to every merge and
+inherited unexplained by any agent that ran the documented list. The chains now
+narrow through explicit `isinstance` checks — same extraction for valid
+payloads, same refusals for malformed ones (only a completed `propose_decision`
+call counts; prose is never parsed) — and the gate runs everywhere the other
+four do: CI, README, `make gates`. Second, the only time the default branch has
+ever gone red (2026-08-21, run 32492350131) it was
+`test_quote_data_quality_is_explicit_and_fail_closed[4-DELAYED]`, and nobody
+fixed it — it just went green on the next merge. The fake broker delivers its
+quote update on the next event-loop pass, deterministically ordered, but the
+test brokers bounded that wait with 0.2 s of real wall clock, so a loaded
+runner could fire `MarketDataUnavailableError` before the DELAYED-quality
+handling the test exists to prove. The shared test bound is now generous enough
+that only a dead event loop could lose the race; the one test whose expected
+outcome IS the timeout — where no update is ever published and no race exists
+in either direction — pins its own small bound. Nothing asserted got weaker:
+the 4-DELAYED case still demands an explicit `DataQuality.DELAYED` with every
+price field `None`, verified by a 100× loop and by breaking the production
+path to confirm the assertion still bites.
+
 ## [Unreleased] — the agent protocol, and the day the ship got steered (2026-08-22)
 
 The morning's red PRs were not work — they were symptoms. A mickey-wide sync

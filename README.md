@@ -246,13 +246,14 @@ trade, or an unexplained mismatch makes the state ambiguous.
 ## Development gates
 
 ```bash
-.venv/bin/pytest
 .venv/bin/ruff check .
 .venv/bin/ruff format --check .
 .venv/bin/mypy src/chronos
+.venv/bin/mypy --strict worker
+.venv/bin/pytest
 ```
 
-CI runs these four in order. Migration verification (fresh-DB init, v2/v3 → head upgrades,
+CI runs these five in order. Migration verification (fresh-DB init, v2/v3 → head upgrades,
 and a no-un-migrated-drift completeness check) runs inside the pytest step. The separately
 marked IBKR smoke test is skipped by default and remains strictly read-only.
 
