@@ -1,5 +1,24 @@
 # CHANGELOG
 
+## [Unreleased] — the /oc workflow stops trusting strangers (2026-08-22)
+
+The `/oc` comment workflow ran on a public repository with no author gate:
+anyone who could leave an issue or review comment containing `/oc` or
+`/opencode` could fire a job that ran `anomalyco/opencode/github@latest` — a
+mutable tag, so whatever that ref pointed at on any given day — with
+`id-token: write`, read access to PRs and issues, and `OPENCODE_API_KEY` in
+its environment. The codex lane built the fix on 2026-07-21 and it sat green
+and unmerged on `codex/chronos-opencode-hardened` for a month. Landed today
+by cherry-pick with codex's authorship preserved: the job now refuses any
+comment whose `author_association` is not OWNER, MEMBER, or COLLABORATOR;
+`actions/checkout` is pinned to a verified SHA; the mutable action is replaced
+by the v1.18.4 CLI tarball checked against a pinned sha256 before it executes;
+`USE_GITHUB_TOKEN=false` and `SHARE=false`; the `pull-requests: read` /
+`issues: read` permissions are dropped; and a concurrency group plus
+`timeout-minutes: 30` bound what a run can occupy. The policy is pinned by
+`tests/test_opencode_workflow_policy.py` and documented in
+`docs/OPENCODE_WORKFLOW.md`.
+
 ## [Unreleased] — CI stops lying: the worker gate lands and the flake dies (2026-08-22)
 
 Two defects let a green check mean less than it claimed. First, the documented
