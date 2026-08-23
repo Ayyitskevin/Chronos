@@ -1,54 +1,55 @@
 # CHANGELOG
 
-## [Unreleased] — the overfitting gate gets its missing instrument (2026-08-23)
+## [Unreleased] — the capture that never started gets a preflight, and a schedule that labels the right day (2026-08-23)
 
-`docs/VISION_COMPLETION_PLAN.md` §8 and `docs/FIVE_TOOL_RESEARCH_HYPOTHESES.md` have both
-required "probability of backtest overfitting at most 10%" as a Phase 3 strategy gate.
-Nothing implemented it. `grep -rniE 'cscv|backtest overfit'` over the tree returned two
-hits, both of them the requirement itself — a gate specified in two places and computable
-in none, which meant no strategy could ever be honestly evaluated against the bar the plan
-sets.
+Forward option capture has never run. Not once. The harness landed 2026-07-19 (`ab16162`)
+and `docs/histdata_runbook.md` has said "deploy ASAP … IBKR keeps *no* history for expired
+options, so every un-captured session is unrecoverable" ever since. `research/data/history/`
+contains `HOLDOUTS.json` and a README. There is no cron entry, no systemd timer, no `ibapi`
+in the venv, and nothing listening on 7497/7496/4001/4002. That is roughly twenty-five
+trading days of SPY/QQQ/IWM chains that cannot be bought, refetched, or reconstructed, and
+the number grows by one every close.
 
-`chronos.research.stats.probability_of_backtest_overfitting` implements Combinatorially
-Symmetric Cross-Validation (Bailey, Borwein, López de Prado & Zhu 2015). It takes the `N`
-equal-length return series of *every* configuration tried, cuts the observation axis into
-`S` contiguous blocks, and for each of the `C(S, S/2)` ways to choose half the blocks as
-in-sample records where the in-sample winner ranks out-of-sample. PBO is the share of
-those splits where the winner landed at or below the out-of-sample median. Blocks are
-contiguous rather than interleaved so serial correlation stays inside a block instead of
-leaking across the in/out boundary, and rows keep their original order within each half
-because the paper notes ordering matters for path-dependent statistics such as
-return-over-max-drawdown, even though it does not for Sharpe.
+Nothing here captures anything — that still needs a gateway, which is an owner action. What
+it removes is every avoidable reason for the first scheduled run to fail or, worse, to
+succeed wrongly.
 
-Same house style as its neighbours: pure, deterministic, stdlib-only, and fail-soft — it
-returns `None` rather than a falsely precise number when the input cannot support the
-estimate (fewer than two configurations, odd `splits`, ragged series, fewer observations
-than splits, or nothing scorable). `OverfittingReport` carries the counts a reviewer needs
-to judge the number rather than just read it: how many combinations were actually scored,
-how many were skipped because a statistic was undefined, and how many trailing
-observations were truncated to make the blocks divide evenly. Ties resolve toward *more*
-apparent overfitting, so the estimate never flatters the search.
+**`scripts/preflight_options_capture.py`** checks each prerequisite the runbook names —
+`ibapi` importable, settings loadable, `IB_DATA_CLIENT_ID` distinct from `IB_CLIENT_ID`, the
+gateway accepting connections, the history root writable, and the session-label hazard below
+— and reports *all* of them rather than stopping at the first, so one run tells you
+everything to fix. Each failure names its remedy; a non-zero exit means "do not schedule
+yet". It is offline and read-only by default, opening no socket; `--connect` adds one
+bounded read-only chain fetch to prove the gateway answers for this account's data
+permissions. `--print-units` emits ready-to-install systemd user units.
 
-**Calibration checked against the paper, not against expectation.** Bailey et al. state
-that an informationless backtest gives near-uniform relative ranks and therefore
-standard-normal logits — so PBO ≈ 0.5 is the no-skill baseline, not a passing score.
-Measured over 20 seeded informationless searches the mean is 0.55; a mild upward bias is
-expected at small `N`/`T` and shrinks as both grow, because in-sample and out-of-sample
-partition one fixed realization. Note this makes any *single* informationless run range
-roughly 0.15–0.95, which is why the test averages over seeds instead of asserting once.
+**The schedule now labels the right day, which the runbook's own example did not.**
+`--session` defaults to the *UTC* date, and the documented cron line was `15 21 * * 1-5` —
+unpinned, therefore local. On an `America/New_York` host that fires at 01:15 UTC the
+following day, filing Thursday's chain as Friday and **Friday's as Saturday, a date on which
+no session exists**. Verified with the tool rather than argued:
 
-The tests pin direction, not output, and were verified by violation: inverting the
-out-of-sample rank comparison, selecting the in-sample worst instead of the best, and
-flipping the PBO threshold each fail two tests, and the restored implementation passes all
-fourteen.
+```
+$ systemd-analyze calendar "Mon..Fri 21:15"        # local
+       (in UTC): Tue 2026-08-25 01:15:00 UTC       <-- next UTC day
+$ systemd-analyze calendar "Mon..Fri 21:15 UTC"    # pinned
+       (in UTC): Mon 2026-08-24 21:15:00 UTC       <-- same UTC day, 17:15 EDT
+```
 
-**This ships a primitive, not a closed gate.** Nothing in the campaign calls it yet, and no
-verdict may cite a PBO until something does. Scoring it at campaign level needs an aligned
-per-trial return matrix over a common time axis; `CampaignReport` retains only a per-window
-`oos_return` per cell, which is far too few observations to partition. That wiring — and
-the data-retention change it implies — is deliberately not in this change. Both documents
-that carry the gate now say exactly this, so the record does not claim a gate it cannot
-evaluate.
+The shipped timer pins `OnCalendar=Mon..Fri 21:15 UTC`, the runbook explains why the pin is
+load-bearing rather than stylistic, and the cron alternative now carries `CRON_TZ=UTC`. A
+mislabeled snapshot is indistinguishable from a real one after the fact and cannot be
+corrected by refetching, which is what makes this worth a section rather than a footnote.
+
+The timer is deliberately **not** `Persistent=true`: a missed session is unrecoverable, so a
+catch-up run would fetch *today's* chain and file it under the missed date. A visible gap
+beats a plausible wrong row. systemd user units were chosen over cron so each run's JSON
+output lands in the journal, where a failure is visible afterwards instead of mailed into
+the void.
+
+Five tests pin the session-date reasoning across the DST boundary and both sides of UTC
+midnight, and were verified by violation: collapsing `eastern_session_date` to the bare UTC
+date fails three of them.
 
 ## [Unreleased] — the /oc workflow stops trusting strangers (2026-08-22)
 
