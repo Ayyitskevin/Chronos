@@ -4,9 +4,10 @@ from decimal import Decimal
 from typing import Any, cast
 
 import pytest
+from pydantic import ValidationError
 from tests.conftest import FIXED_NOW
 
-from chronos.broker.base import Broker, BrokerDataError
+from chronos.broker.base import Broker, BrokerDataError, OptionChainResponse
 from chronos.broker.market_data import (
     MarketDataCancellationError,
     MarketDataManager,
@@ -15,7 +16,13 @@ from chronos.broker.market_data import (
     MarketDataPermissionError,
     MarketDataUnavailableError,
 )
-from chronos.config.limits import MAX_CANDIDATE_REQUEST_CONTRACTS
+from chronos.config.limits import (
+    MAX_CANDIDATE_REQUEST_CONTRACTS,
+    MAX_OPTION_CHAIN_EXPIRATIONS_PER_ROW,
+    MAX_OPTION_CHAIN_ROWS,
+    MAX_OPTION_CHAIN_STRIKES_PER_ROW,
+    MAX_OPTION_MARKET_RULE_INCREMENTS,
+)
 from chronos.domain.enums import DataQuality, OptionRight
 from chronos.domain.models import (
     CryptoContract,
@@ -23,6 +30,9 @@ from chronos.domain.models import (
     OptionChainParameters,
     OptionContract,
     OptionContractSpec,
+    OptionDeliverableFacts,
+    OptionMarketRule,
+    OptionPriceIncrement,
     UnderlyingContract,
 )
 
@@ -43,12 +53,21 @@ class FakeMarketDataBroker:
         self.clock = clock
         self.option_quote_calls: list[tuple[int, ...]] = []
         self.option_qualification_calls = 0
+        self.qualification_failure_calls: dict[int, Exception] = {}
+        self.qualification_local_symbol_by_call: dict[int, str] = {}
+        self.underlying_qualification_calls = 0
         self.cancellation_calls: list[tuple[int, ...]] = []
         self.chain_calls = 0
+        self.chain_failures: list[Exception] = []
         self.failures: list[Exception] = []
+        self.underlying_failures: list[Exception] = []
         self.cancellation_failures: list[Exception] = []
         self.cancellation_delay_seconds = 0.0
         self.omitted_contract_ids: set[int] = set()
+        self.omitted_qualification_indexes: set[int] = set()
+        self.omitted_market_rule_ids: set[int] = set()
+        self.market_rule_increment_count = 1
+        self.omitted_deliverable_ids: set[int] = set()
         self.missing_values = False
         self.data_quality = DataQuality.LIVE
         self.crossed_market = False
@@ -57,24 +76,56 @@ class FakeMarketDataBroker:
         self.active_subscriptions = 0
         self.max_active_requests = 0
         self.max_active_subscriptions = 0
+        self.chain_complete = True
+        self.chain_truncated = False
+        self.chain_without_envelope = False
+        self.chain_parameters_override: tuple[OptionChainParameters, ...] | None = None
+        self.underlying_symbol_override: str | None = None
+        self.underlying_quote_con_id_override: int | None = None
+        self.underlying_delay_seconds = 0.0
+
+    async def qualify_underlying(self, symbol: str) -> UnderlyingContract:
+        self.underlying_qualification_calls += 1
+        if self.underlying_delay_seconds:
+            await asyncio.sleep(self.underlying_delay_seconds)
+        if self.underlying_failures:
+            raise self.underlying_failures.pop(0)
+        return UnderlyingContract(
+            con_id=1_001,
+            symbol=self.underlying_symbol_override or symbol,
+        )
 
     async def option_chain_parameters(
         self,
         underlying: UnderlyingContract,
-    ) -> tuple[OptionChainParameters, ...]:
+    ) -> OptionChainResponse | tuple[OptionChainParameters, ...]:
         self.chain_calls += 1
-        return (
-            OptionChainParameters(
-                exchange="SMART",
-                underlying_con_id=underlying.con_id,
-                trading_class=underlying.symbol,
-                multiplier=Decimal("100"),
-                expirations=(
-                    self.clock.value.date() + timedelta(days=14),
-                    self.clock.value.date() + timedelta(days=21),
+        if self.chain_failures:
+            raise self.chain_failures.pop(0)
+        parameters = self.chain_parameters_override
+        if parameters is None:
+            parameters = (
+                OptionChainParameters(
+                    exchange="SMART",
+                    underlying_con_id=underlying.con_id,
+                    trading_class=underlying.symbol,
+                    multiplier=Decimal("100"),
+                    expirations=(
+                        self.clock.value.date() + timedelta(days=14),
+                        self.clock.value.date() + timedelta(days=21),
+                    ),
+                    strikes=(Decimal("95"), Decimal("100"), Decimal("105")),
                 ),
-                strikes=(Decimal("95"), Decimal("100"), Decimal("105")),
-            ),
+            )
+        if self.chain_without_envelope:
+            return parameters
+        return OptionChainResponse(
+            parameters=parameters,
+            complete=self.chain_complete,
+            truncated=self.chain_truncated,
+            completion_marker="fake-option-chain-end",
+            observed_at=self.clock(),
+            source="fake-v1",
         )
 
     async def qualify_option_contracts(
@@ -82,20 +133,75 @@ class FakeMarketDataBroker:
         specs: tuple[OptionContractSpec, ...],
     ) -> tuple[OptionContract, ...]:
         self.option_qualification_calls += 1
+        failure = self.qualification_failure_calls.pop(
+            self.option_qualification_calls,
+            None,
+        )
+        if failure is not None:
+            raise failure
         return tuple(
             OptionContract(
                 **spec.model_dump(),
                 con_id=9_000 + index,
-                local_symbol=f"{spec.symbol}-{index}",
+                local_symbol=self.qualification_local_symbol_by_call.get(
+                    self.option_qualification_calls,
+                    f"{spec.symbol}-{index}",
+                ),
             )
             for index, spec in enumerate(specs)
+            if index not in self.omitted_qualification_indexes
         )
 
     async def request_underlying_quote(
         self,
         contract: UnderlyingContract,
     ) -> MarketQuote:
-        return self._quote(contract)
+        quoted_contract = (
+            contract.model_copy(update={"con_id": self.underlying_quote_con_id_override})
+            if self.underlying_quote_con_id_override is not None
+            else contract
+        )
+        return self._quote(quoted_contract)
+
+    async def option_market_rules(
+        self,
+        contracts: tuple[OptionContract, ...],
+    ) -> tuple[OptionMarketRule, ...]:
+        return tuple(
+            OptionMarketRule(
+                con_id=contract.con_id,
+                exchange=contract.exchange,
+                market_rule_id=26,
+                price_increments=tuple(
+                    OptionPriceIncrement(
+                        low_edge=Decimal(index),
+                        increment=Decimal("0.01"),
+                    )
+                    for index in range(self.market_rule_increment_count)
+                ),
+                source="fake-v1",
+            )
+            for contract in contracts
+            if contract.con_id not in self.omitted_market_rule_ids
+        )
+
+    async def option_deliverable_facts(
+        self,
+        contracts: tuple[OptionContract, ...],
+    ) -> tuple[OptionDeliverableFacts, ...]:
+        return tuple(
+            OptionDeliverableFacts(
+                con_id=contract.con_id,
+                authoritative=True,
+                source="fake-v1",
+                underlying_con_id=contract.underlying_con_id or 1,
+                share_quantity=contract.multiplier,
+                cash_amount=Decimal("0"),
+                other_assets=(),
+            )
+            for contract in contracts
+            if contract.con_id not in self.omitted_deliverable_ids
+        )
 
     async def request_crypto_quote(
         self,
@@ -239,6 +345,70 @@ def test_narrowing_rejects_over_cap_product_before_cartesian_allocation() -> Non
 
 
 @pytest.mark.asyncio
+async def test_underlying_qualification_uses_bounded_pacing_retry() -> None:
+    clock = MutableClock()
+    broker = FakeMarketDataBroker(clock)
+    broker.underlying_failures.extend(
+        [MarketDataPacingError("paced"), MarketDataPacingError("paced")]
+    )
+    delays: list[float] = []
+
+    async def record_delay(delay: float) -> None:
+        delays.append(delay)
+
+    manager = make_manager(
+        broker,
+        max_attempts=3,
+        initial_backoff_seconds=0.1,
+        sleep=record_delay,
+    )
+
+    qualified = await manager.qualify_underlying(" test ")
+
+    assert qualified.symbol == "TEST"
+    assert broker.underlying_qualification_calls == 3
+    assert delays == [0.1, 0.2]
+
+
+@pytest.mark.asyncio
+async def test_underlying_qualification_timeout_and_identity_mismatch_are_typed() -> None:
+    clock = MutableClock()
+    broker = FakeMarketDataBroker(clock)
+    broker.underlying_delay_seconds = 0.02
+    manager = make_manager(broker, request_timeout_seconds=0.001)
+
+    with pytest.raises(MarketDataUnavailableError, match="qualification timed out"):
+        await manager.qualify_underlying("TEST")
+
+    broker.underlying_delay_seconds = 0
+    broker.underlying_symbol_override = "WRONG"
+    with pytest.raises(MarketDataUnavailableError, match="mismatched underlying") as error:
+        await manager.qualify_underlying("TEST")
+    assert len(error.value.observed_values) == 1
+    assert isinstance(error.value.observed_values[0], UnderlyingContract)
+    assert error.value.observed_at == clock()
+
+
+@pytest.mark.asyncio
+async def test_underlying_quote_identity_mismatch_retains_the_observed_quote() -> None:
+    clock = MutableClock()
+    broker = FakeMarketDataBroker(clock)
+    broker.underlying_quote_con_id_override = 9_999
+    manager = make_manager(broker)
+    underlying = UnderlyingContract(con_id=1_001, symbol="TEST")
+
+    with pytest.raises(MarketDataUnavailableError, match="mismatched quote") as error:
+        await manager.underlying_quote(underlying, force_refresh=True)
+
+    assert len(error.value.observed_values) == 1
+    observed = error.value.observed_values[0]
+    assert isinstance(observed, MarketQuote)
+    assert observed.contract.con_id == 9_999
+    assert error.value.observed_at == clock()
+    assert broker.cancellation_calls == [(1_001,)]
+
+
+@pytest.mark.asyncio
 async def test_oversized_option_requests_fail_before_broker_or_subscription_work() -> None:
     clock = MutableClock()
     broker = FakeMarketDataBroker(clock)
@@ -270,6 +440,105 @@ async def test_oversized_option_requests_fail_before_broker_or_subscription_work
     assert broker.option_quote_calls == []
     assert broker.cancellation_calls == []
     assert manager.active_subscription_count == 0
+
+
+@pytest.mark.asyncio
+async def test_partial_option_qualification_retains_the_returned_contract() -> None:
+    clock = MutableClock()
+    broker = FakeMarketDataBroker(clock)
+    broker.omitted_qualification_indexes.add(1)
+    manager = make_manager(broker)
+    first = OptionContractSpec(
+        symbol="TEST",
+        underlying_con_id=100,
+        expiration=date(2026, 2, 20),
+        strike=Decimal("95"),
+        right=OptionRight.PUT,
+        multiplier=Decimal("100"),
+        trading_class="TEST",
+    )
+    second = first.model_copy(update={"strike": Decimal("100")})
+
+    with pytest.raises(MarketDataUnavailableError, match="incomplete or mismatched") as error:
+        await manager.qualify_option_contracts((first, second))
+
+    assert tuple(
+        contract.con_id
+        for contract in error.value.observed_values
+        if isinstance(contract, OptionContract)
+    ) == (9_000,)
+    assert error.value.observed_at == clock()
+
+
+@pytest.mark.asyncio
+async def test_later_qualification_batch_retains_only_fresh_prefix_and_partial_batch() -> None:
+    clock = MutableClock()
+    broker = FakeMarketDataBroker(clock)
+    manager = make_manager(broker, batch_size=1)
+    first = OptionContractSpec(
+        symbol="TEST",
+        underlying_con_id=100,
+        expiration=date(2026, 2, 20),
+        strike=Decimal("95"),
+        right=OptionRight.PUT,
+        multiplier=Decimal("100"),
+        trading_class="TEST",
+    )
+    second = first.model_copy(update={"strike": Decimal("100")})
+    third = first.model_copy(update={"strike": Decimal("105")})
+    await manager.qualify_option_contracts((first,))
+    partial_third = OptionContract(
+        **third.model_dump(),
+        con_id=9_999,
+        local_symbol="TEST-PARTIAL-THIRD",
+    )
+    broker.qualification_failure_calls[3] = MarketDataUnavailableError(
+        "later qualification batch failed",
+        observed_values=(partial_third,),
+        observed_at=clock(),
+    )
+
+    with pytest.raises(MarketDataUnavailableError, match="later qualification") as error:
+        await manager.qualify_option_contracts((first, second, third))
+
+    observed_contracts = tuple(
+        contract for contract in error.value.observed_values if isinstance(contract, OptionContract)
+    )
+    assert tuple(contract.strike for contract in observed_contracts) == (
+        Decimal("100"),
+        Decimal("105"),
+    )
+    assert all(contract.strike != first.strike for contract in observed_contracts)
+    assert error.value.observed_at == clock()
+    assert broker.option_qualification_calls == 3
+
+
+@pytest.mark.asyncio
+async def test_later_qualification_batch_rejects_oversized_broker_text_before_error_sort() -> None:
+    clock = MutableClock()
+    broker = FakeMarketDataBroker(clock)
+    manager = make_manager(broker, batch_size=1)
+    first = OptionContractSpec(
+        symbol="TEST",
+        underlying_con_id=100,
+        expiration=date(2026, 2, 20),
+        strike=Decimal("95"),
+        right=OptionRight.PUT,
+        multiplier=Decimal("100"),
+        trading_class="TEST",
+    )
+    second = first.model_copy(update={"strike": Decimal("100")})
+    broker.qualification_local_symbol_by_call[2] = "x" * 10_000
+
+    with pytest.raises(ValidationError, match="local_symbol") as error:
+        await manager.qualify_option_contracts((first, second))
+
+    assert tuple(
+        contract.strike
+        for contract in getattr(error.value, "observed_values", ())
+        if isinstance(contract, OptionContract)
+    ) == (Decimal("95"),)
+    assert broker.option_qualification_calls == 2
 
 
 @pytest.mark.asyncio
@@ -352,14 +621,48 @@ async def test_cancellation_failure_quarantines_manager_and_retains_capacity() -
     broker.cancellation_failures.append(BrokerDataError("simulated cancellation failure"))
     manager = make_manager(broker, batch_size=2, max_active_subscriptions=2)
 
-    with pytest.raises(MarketDataCancellationError, match="locked until"):
+    with pytest.raises(MarketDataCancellationError, match="locked until") as error:
         await manager.option_quotes((make_contract(350),))
 
+    assert tuple(
+        quote.contract.con_id
+        for quote in error.value.observed_values
+        if isinstance(quote, MarketQuote)
+    ) == (350,)
+    assert error.value.observed_at == clock()
     assert manager.active_subscription_count == 1
     with pytest.raises(MarketDataCancellationError, match="locked until"):
         await manager.option_quotes((make_contract(351),))
     assert broker.option_quote_calls == [(350,)]
     assert broker.cancellation_calls == [(350,)]
+
+
+@pytest.mark.asyncio
+async def test_cleanup_failure_preserves_primary_partial_observations() -> None:
+    clock = MutableClock()
+    broker = FakeMarketDataBroker(clock)
+    contract = make_contract(360)
+    observed = broker._quote(contract)
+    broker.failures.append(
+        MarketDataUnavailableError(
+            "partial quote set",
+            contract_ids=(360,),
+            observed_values=(observed,),
+            observed_at=clock(),
+            truncated=True,
+        )
+    )
+    broker.cancellation_failures.append(BrokerDataError("simulated cancellation failure"))
+    manager = make_manager(broker, batch_size=2, max_active_subscriptions=2)
+
+    with pytest.raises(MarketDataCancellationError, match="locked until") as error:
+        await manager.option_quotes((contract,))
+
+    assert error.value.observed_values == (observed,)
+    assert error.value.observed_at == clock()
+    assert error.value.contract_ids == (360,)
+    assert error.value.truncated is True
+    assert manager.active_subscription_count == 1
 
 
 @pytest.mark.asyncio
@@ -436,6 +739,94 @@ async def test_pacing_retry_exhaustion_is_finite_and_cancels() -> None:
 
 
 @pytest.mark.asyncio
+async def test_pacing_exhaustion_retains_only_final_attempt_quote_evidence() -> None:
+    clock = MutableClock()
+    broker = FakeMarketDataBroker(clock)
+    contract = make_contract(502)
+    first = MarketDataPacingError("paced first")
+    vars(first).update(
+        observed_values=(broker._quote(contract).model_copy(update={"bid": Decimal("0.90")}),),
+        observed_at=clock(),
+        contract_ids=(502,),
+        truncated=False,
+    )
+    clock.advance(1)
+    final_observed_at = clock()
+    final_quote = broker._quote(contract).model_copy(update={"bid": Decimal("1.00")})
+    final = MarketDataPacingError("paced final")
+    vars(final).update(
+        observed_values=(final_quote,),
+        observed_at=final_observed_at,
+        contract_ids=(502,),
+        truncated=True,
+    )
+    broker.failures.extend((first, final))
+    manager = make_manager(broker, max_attempts=2, sleep=lambda _delay: asyncio.sleep(0))
+
+    with pytest.raises(MarketDataPacingExhaustedError) as error:
+        await manager.option_quotes((contract,))
+
+    assert error.value.observed_values == (final_quote,)
+    assert error.value.observed_at == final_observed_at
+    assert error.value.contract_ids == (502,)
+    assert error.value.truncated is True
+    assert broker.cancellation_calls == [(502,)]
+
+
+@pytest.mark.asyncio
+async def test_pacing_exhaustion_retains_only_final_attempt_partial_chain() -> None:
+    clock = MutableClock()
+    broker = FakeMarketDataBroker(clock)
+    underlying = UnderlyingContract(con_id=1_001, symbol="TEST")
+    first_response = OptionChainResponse(
+        parameters=(),
+        complete=False,
+        truncated=False,
+        completion_marker="request-registry-pacing",
+        observed_at=clock(),
+        source="fake-v1",
+    )
+    first = MarketDataPacingError("paced first")
+    vars(first).update(chain_response=first_response, observed_at=clock())
+    clock.advance(1)
+    row = OptionChainParameters(
+        exchange="SMART",
+        underlying_con_id=underlying.con_id,
+        trading_class=underlying.symbol,
+        multiplier=Decimal("100"),
+        expirations=(clock().date() + timedelta(days=21),),
+        strikes=(Decimal("95"),),
+    )
+    final_response = OptionChainResponse(
+        parameters=(row,),
+        complete=False,
+        truncated=True,
+        completion_marker="request-registry-pacing",
+        observed_at=clock(),
+        source="fake-v1",
+    )
+    final = MarketDataPacingError("paced final")
+    vars(final).update(
+        chain_response=final_response,
+        observed_values=(row,),
+        observed_at=clock(),
+        contract_ids=(underlying.con_id,),
+        truncated=True,
+    )
+    broker.chain_failures.extend((first, final))
+    manager = make_manager(broker, max_attempts=2, sleep=lambda _delay: asyncio.sleep(0))
+
+    with pytest.raises(MarketDataPacingExhaustedError) as error:
+        await manager.option_chain_parameters(underlying, force_refresh=True)
+
+    assert error.value.chain_response == final_response
+    assert error.value.observed_values == (row,)
+    assert error.value.observed_at == clock()
+    assert error.value.contract_ids == (underlying.con_id,)
+    assert error.value.truncated is True
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "failure",
     [MarketDataPermissionError("no entitlement"), BrokerDataError("ordinary data error")],
@@ -472,6 +863,12 @@ async def test_incomplete_response_surfaces_missing_contract_and_cancels() -> No
         await manager.option_quotes((make_contract(701), make_contract(702)))
 
     assert error.value.contract_ids == (702,)
+    assert tuple(
+        quote.contract.con_id
+        for quote in error.value.observed_values
+        if isinstance(quote, MarketQuote)
+    ) == (701,)
+    assert error.value.observed_at == clock()
     assert broker.cancellation_calls == [(701, 702)]
     assert manager.active_subscription_count == 0
 
@@ -600,8 +997,111 @@ async def test_option_chain_metadata_cache_has_explicit_age_and_ttl() -> None:
     assert cached.from_cache is True
     assert cached.fresh is True
     assert cached.cache_age_seconds == 4
+    assert cached.complete is True
+    assert cached.truncated is False
+    assert cached.completion_marker == "fake-option-chain-end"
+    assert cached.completion_source == "fake-v1"
+    assert cached.completion_observed_at == first.completion_observed_at
     assert refreshed.from_cache is False
     assert broker.chain_calls == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("complete", "truncated"),
+    [(False, False), (True, True)],
+)
+async def test_nonempty_partial_or_truncated_chain_is_rejected_and_not_cached(
+    complete: bool,
+    truncated: bool,
+) -> None:
+    clock = MutableClock()
+    broker = FakeMarketDataBroker(clock)
+    broker.chain_complete = complete
+    broker.chain_truncated = truncated
+    manager = make_manager(broker)
+    underlying = UnderlyingContract(con_id=1_010, symbol="TEST")
+
+    with pytest.raises(MarketDataUnavailableError, match="partial or truncated") as error:
+        await manager.option_chain_parameters(underlying)
+
+    assert manager.cache_entry_count == 0
+    assert error.value.chain_response is not None
+    assert error.value.chain_response.parameters
+    assert error.value.chain_response.complete is complete
+    assert error.value.chain_response.truncated is truncated
+    assert error.value.observed_at == clock()
+    broker.chain_complete = True
+    broker.chain_truncated = False
+    snapshot = await manager.option_chain_parameters(underlying)
+    assert snapshot.complete is True
+    assert broker.chain_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_chain_without_completion_envelope_is_rejected() -> None:
+    clock = MutableClock()
+    broker = FakeMarketDataBroker(clock)
+    broker.chain_without_envelope = True
+    manager = make_manager(broker)
+
+    with pytest.raises(MarketDataUnavailableError, match="without completion evidence"):
+        await manager.option_chain_parameters(UnderlyingContract(con_id=1_011, symbol="TEST"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("oversized_dimension", ["rows", "expirations", "strikes"])
+async def test_oversized_chain_envelope_is_rejected_before_caching(
+    oversized_dimension: str,
+) -> None:
+    clock = MutableClock()
+    broker = FakeMarketDataBroker(clock)
+    underlying = UnderlyingContract(con_id=1_012, symbol="TEST")
+    base = OptionChainParameters(
+        exchange="SMART",
+        underlying_con_id=underlying.con_id,
+        trading_class="TEST",
+        multiplier=Decimal("100"),
+        expirations=(clock().date() + timedelta(days=1),),
+        strikes=(Decimal("1"),),
+    )
+    if oversized_dimension == "rows":
+        broker.chain_parameters_override = (base,) * (MAX_OPTION_CHAIN_ROWS + 1)
+    elif oversized_dimension == "expirations":
+        broker.chain_parameters_override = (
+            base.model_copy(
+                update={
+                    "expirations": tuple(
+                        clock().date() + timedelta(days=index + 1)
+                        for index in range(MAX_OPTION_CHAIN_EXPIRATIONS_PER_ROW + 1)
+                    )
+                }
+            ),
+        )
+    else:
+        broker.chain_parameters_override = (
+            base.model_copy(
+                update={
+                    "strikes": tuple(
+                        Decimal(index + 1) for index in range(MAX_OPTION_CHAIN_STRIKES_PER_ROW + 1)
+                    )
+                }
+            ),
+        )
+    manager = make_manager(broker)
+
+    with pytest.raises(MarketDataUnavailableError, match="hard evidence bound") as error:
+        await manager.option_chain_parameters(underlying)
+
+    assert manager.cache_entry_count == 0
+    assert error.value.truncated is True
+    assert error.value.chain_response is not None
+    assert len(error.value.chain_response.parameters) <= MAX_OPTION_CHAIN_ROWS
+    assert all(
+        len(row.expirations) <= MAX_OPTION_CHAIN_EXPIRATIONS_PER_ROW
+        and len(row.strikes) <= MAX_OPTION_CHAIN_STRIKES_PER_ROW
+        for row in error.value.chain_response.parameters
+    )
 
 
 @pytest.mark.asyncio
@@ -620,3 +1120,70 @@ async def test_expired_entries_are_evicted_when_the_manager_is_observed_again() 
     await manager.option_chain_parameters(UnderlyingContract(con_id=1_101, symbol="TEST"))
 
     assert manager.cache_entry_count == 1
+
+
+@pytest.mark.asyncio
+async def test_market_rule_and_deliverable_reads_are_exactly_aligned() -> None:
+    clock = MutableClock()
+    broker = FakeMarketDataBroker(clock)
+    manager = make_manager(broker)
+    contracts = (make_contract(1_201), make_contract(1_202))
+
+    rules = await manager.option_market_rules(contracts)
+    deliverables = await manager.option_deliverable_facts(contracts)
+
+    assert tuple(rule.con_id for rule in rules) == (1_201, 1_202)
+    assert tuple(item.con_id for item in deliverables) == (1_201, 1_202)
+
+
+@pytest.mark.asyncio
+async def test_market_rule_schedule_beyond_evidence_bound_is_retained_as_bounded_failure() -> None:
+    clock = MutableClock()
+    broker = FakeMarketDataBroker(clock)
+    broker.market_rule_increment_count = MAX_OPTION_MARKET_RULE_INCREMENTS + 1
+    manager = make_manager(broker)
+
+    with pytest.raises(MarketDataUnavailableError, match="hard evidence bound") as error:
+        await manager.option_market_rules((make_contract(1_203),))
+
+    assert error.value.truncated is True
+    assert error.value.observed_at == clock()
+    assert len(error.value.observed_values) == 1
+    observed_rule = cast(OptionMarketRule, error.value.observed_values[0])
+    assert len(observed_rule.price_increments) == MAX_OPTION_MARKET_RULE_INCREMENTS
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["market_rule", "deliverable"])
+async def test_missing_candidate_metadata_refuses_the_whole_set(kind: str) -> None:
+    clock = MutableClock()
+    broker = FakeMarketDataBroker(clock)
+    manager = make_manager(broker)
+    contracts = (make_contract(1_301), make_contract(1_302))
+    if kind == "market_rule":
+        broker.omitted_market_rule_ids.add(1_302)
+        with pytest.raises(MarketDataUnavailableError, match="incomplete or mismatched") as error:
+            await manager.option_market_rules(contracts)
+        assert tuple(item.con_id for item in error.value.observed_values) == (1_301,)
+    else:
+        broker.omitted_deliverable_ids.add(1_302)
+        with pytest.raises(MarketDataUnavailableError, match="incomplete or mismatched") as error:
+            await manager.option_deliverable_facts(contracts)
+        assert tuple(item.con_id for item in error.value.observed_values) == (1_301,)
+    assert error.value.contract_ids == (1_302,)
+    assert error.value.observed_at == clock()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["market_rule", "deliverable"])
+async def test_duplicate_candidate_metadata_request_is_rejected(kind: str) -> None:
+    clock = MutableClock()
+    broker = FakeMarketDataBroker(clock)
+    manager = make_manager(broker)
+    contract = make_contract(1_401)
+
+    with pytest.raises(MarketDataUnavailableError, match="duplicate contract"):
+        if kind == "market_rule":
+            await manager.option_market_rules((contract, contract))
+        else:
+            await manager.option_deliverable_facts((contract, contract))

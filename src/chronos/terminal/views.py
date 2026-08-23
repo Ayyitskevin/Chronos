@@ -9,11 +9,13 @@ That makes this module the terminal's **disclosure boundary**, which is why its
 tests live in ``tests/safety/``. Two rules govern every field below, and both
 are structural rather than procedural:
 
-1. **Nothing here may carry a secret or an identifier.** No credential, no 2FA
-   code, no raw arm or confirmation phrase, and no full broker account id. The
-   ``account_fingerprint`` is a 64-character pseudonym (``chronos.utils.
+1. **Nothing here may carry a secret or an account identifier.** No credential,
+   no 2FA code, no raw arm or confirmation phrase, and no full broker account
+   id. The ``account_fingerprint`` is a 64-character pseudonym (``chronos.utils.
    identifiers``) and is safe to return; it is the *only* account-shaped value
-   any of these models carries.
+   any of these models carries. Market instrument identifiers do appear inside
+   the canonical option-selection receipt: they are the exact public-market
+   facts the operator is inspecting, not an account or submission handle.
 2. **Nothing here may be invented.** A value the assembler could not read is
    ``None``, and ``None`` means *unknown*, never *zero*. This is the one rule
    that most changes how the models look, so it is worth stating what it costs:
@@ -87,15 +89,26 @@ question gets answered.
 
 from __future__ import annotations
 
+import json
 import math
-from datetime import datetime
+from collections import deque
+from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
-from sqlalchemy import func, select
+from sqlalchemy import Text, case, cast, func, literal, select
 from sqlalchemy.orm import Session
+from sqlalchemy.sql.elements import ColumnElement
 
 from chronos.autonomy import AutonomyMandate
+from chronos.config.limits import (
+    MAX_DURABLE_HASH_TEXT_CHARS,
+    MAX_DURABLE_KIND_TEXT_CHARS,
+    MAX_DURABLE_SEQUENCE_TEXT_CHARS,
+    MAX_DURABLE_TIMESTAMP_TEXT_CHARS,
+    MAX_OPTION_SELECTION_PAYLOAD_JSON_CHARS,
+    MAX_OPTION_SELECTION_RECEIPT_BYTES,
+)
 from chronos.domain.models import ChronosModel
 from chronos.marketdata.bars import BarSeries
 from chronos.persistence import hash_chain
@@ -107,6 +120,11 @@ from chronos.persistence.schema import (
 )
 from chronos.supervisor import alerts as alert_module
 from chronos.supervisor import durable, proposals
+from chronos.supervisor.option_selection import (
+    OPTION_SELECTION_STREAM,
+    OptionSelectionReceipt,
+    SelectionStatus,
+)
 
 #: The hash-chain stream every cycle appends to, whatever the outcome. Written
 #: inline by ``chronos.supervisor.loop._record``; named here because the journal
@@ -116,6 +134,10 @@ CYCLE_STREAM = "autonomy.cycles"
 
 DEFAULT_JOURNAL_LIMIT = 50
 MAX_JOURNAL_LIMIT = 500
+DEFAULT_OPTION_SELECTION_LIMIT = 25
+MAX_OPTION_SELECTION_LIMIT = 25
+MAX_OPTION_SELECTION_DECISION_ID_CHARS = 128
+MAX_OPTION_SELECTION_DIGEST_CHARS = 64
 DEFAULT_QUEUE_LIMIT = 25
 MAX_QUEUE_LIMIT = 200
 DEFAULT_ALERT_LIMIT = 50
@@ -127,6 +149,10 @@ MAX_ALERT_LIMIT = 200
 #: ``JournalEntryView.detail_truncated`` says so rather than letting the owner
 #: read a sentence that silently ends early.
 MAX_DETAIL_CHARS = 2000
+
+_OPTION_SELECTION_STATUSES = frozenset(status.value for status in SelectionStatus)
+_MAX_OPTION_SELECTION_STATUS_CHARS = max(len(status) for status in _OPTION_SELECTION_STATUSES)
+_OPTION_SELECTION_STREAM_BATCH_SIZE = 1
 
 
 class TickSchedule(Protocol):
@@ -252,8 +278,8 @@ class JournalEntryView(ChronosModel):
     compilation, and stay ``None`` here.
     """
 
-    sequence: int
-    recorded_at: str
+    sequence: int | None = None
+    recorded_at: str | None = None
     stage: str
     refusal: str = ""
     detail: str = ""
@@ -277,6 +303,61 @@ class JournalView(ChronosModel):
 
     entries: tuple[JournalEntryView, ...] = ()
     stream_present: bool
+    limit: int
+    account_fingerprint: str | None = None
+    generated_at: str
+
+
+class OptionSelectionEntryView(ChronosModel):
+    """One stored option-selection receipt and the evidence that it is intact.
+
+    ``canonical_receipt`` is the exact string embedded in the append-only
+    envelope.  ``receipt`` is populated only when that string is canonical,
+    validates as :class:`OptionSelectionReceipt`, deterministically replays,
+    and agrees with every duplicated envelope field.  Keeping both lets an
+    operator inspect the bytes that were actually committed without presenting
+    a convenient parsed value when those bytes cannot be trusted.
+
+    The three validity flags answer different questions. ``receipt_valid``
+    covers the canonical receipt and envelope, ``record_hash_valid`` covers the
+    row's own stored digest, and ``chain_valid`` says the verified prefix reaches
+    this row. ``record_valid`` is the conjunction of the first two; a later row
+    can therefore be internally intact while its lineage is invalid because an
+    earlier record was changed or removed.
+    """
+
+    sequence: int | None = None
+    recorded_at: str | None = None
+    kind: str | None = None
+    decision_id: str | None = None
+    status: str | None = None
+    output_digest: str | None = None
+    canonical_receipt: str | None = None
+    receipt: OptionSelectionReceipt | None = None
+    receipt_valid: bool
+    record_hash_valid: bool
+    record_valid: bool
+    chain_valid: bool
+    invalid_detail: str = ""
+
+
+class OptionSelectionsView(ChronosModel):
+    """Account-scoped option-selection receipts, newest first and bounded.
+
+    Whole-stream verification is deliberately performed on every inspection.
+    This endpoint is an operator audit surface rather than a high-frequency
+    dashboard poll: returning a reassuring page from a broken prefix would be
+    worse than paying the cost of hashing the full append-only stream.
+    """
+
+    entries: tuple[OptionSelectionEntryView, ...] = ()
+    stream_present: bool
+    chain_valid: bool | None = None
+    chain_records: int | None = None
+    chain_broken_at: int | None = None
+    chain_detail: str = ""
+    semantic_valid: bool | None = None
+    semantic_detail: str = ""
     limit: int
     account_fingerprint: str | None = None
     generated_at: str
@@ -527,6 +608,307 @@ def journal_view(
     return JournalView(
         entries=tuple(_journal_entry(row) for row in rows),
         stream_present=bool(rows),
+        limit=bounded,
+        account_fingerprint=scoped,
+        generated_at=_iso(now),
+    )
+
+
+def option_selections_view(
+    session: Session,
+    *,
+    account_fingerprint: str,
+    now: datetime,
+    limit: int = DEFAULT_OPTION_SELECTION_LIMIT,
+) -> OptionSelectionsView:
+    """Inspect canonical option-selection receipts without acquiring or acting.
+
+    The returned page is bounded and newest first, but ``chain_valid`` covers
+    the complete account-scoped stream. A truncated page must not turn an
+    earlier break into an apparently sound tail.
+    """
+
+    bounded = _bounded(limit, maximum=MAX_OPTION_SELECTION_LIMIT)
+    scoped = _scope(account_fingerprint)
+    if scoped is None:
+        return OptionSelectionsView(
+            stream_present=False,
+            chain_detail="account scope is unavailable; no receipt stream can be named",
+            limit=bounded,
+            account_fingerprint=None,
+            generated_at=_iso(now),
+        )
+
+    stream = durable.stream_for(OPTION_SELECTION_STREAM, scoped)
+    # Cast every dynamically typed SQLite value to text *inside SQL*, then
+    # project only its length and a MAX + 1 prefix. No result processor or DB
+    # driver receives an unbounded corrupt value before this disclosure boundary
+    # can reject it. PostgreSQL uses the same portable length/substr projection;
+    # only SQLite needs ``typeof`` to distinguish a true INTEGER sequence from
+    # dynamically stored text.
+    sequence_storage_type: ColumnElement[Any]
+    kind_storage_type: ColumnElement[Any]
+    payload_storage_type: ColumnElement[Any]
+    recorded_at_storage_type: ColumnElement[Any]
+    previous_hash_storage_type: ColumnElement[Any]
+    record_hash_storage_type: ColumnElement[Any]
+    sequence_text: ColumnElement[Any]
+    kind_text: ColumnElement[Any]
+    payload_text: ColumnElement[Any]
+    recorded_at_text: ColumnElement[Any]
+    previous_hash_text: ColumnElement[Any]
+    record_hash_text: ColumnElement[Any]
+    if session.get_bind().dialect.name == "sqlite":
+        sequence_storage_type = func.typeof(HashChainRow.sequence)
+        kind_storage_type = func.typeof(HashChainRow.kind)
+        payload_storage_type = func.typeof(HashChainRow.payload_json)
+        recorded_at_storage_type = func.typeof(HashChainRow.recorded_at)
+        previous_hash_storage_type = func.typeof(HashChainRow.previous_hash)
+        record_hash_storage_type = func.typeof(HashChainRow.record_hash)
+        sequence_text = case(
+            (sequence_storage_type == "integer", cast(HashChainRow.sequence, Text)),
+            else_=None,
+        )
+        kind_text = case(
+            (kind_storage_type == "text", cast(HashChainRow.kind, Text)),
+            else_=None,
+        )
+        payload_text = case(
+            (payload_storage_type == "text", cast(HashChainRow.payload_json, Text)),
+            else_=None,
+        )
+        recorded_at_text = case(
+            (recorded_at_storage_type == "text", cast(HashChainRow.recorded_at, Text)),
+            else_=None,
+        )
+        previous_hash_text = case(
+            (previous_hash_storage_type == "text", cast(HashChainRow.previous_hash, Text)),
+            else_=None,
+        )
+        record_hash_text = case(
+            (record_hash_storage_type == "text", cast(HashChainRow.record_hash, Text)),
+            else_=None,
+        )
+    else:
+        sequence_storage_type = literal("integer")
+        kind_storage_type = literal("text")
+        payload_storage_type = literal("text")
+        recorded_at_storage_type = literal("text")
+        previous_hash_storage_type = literal("text")
+        record_hash_storage_type = literal("text")
+        sequence_text = cast(HashChainRow.sequence, Text)
+        kind_text = cast(HashChainRow.kind, Text)
+        payload_text = cast(HashChainRow.payload_json, Text)
+        recorded_at_text = cast(HashChainRow.recorded_at, Text)
+        previous_hash_text = cast(HashChainRow.previous_hash, Text)
+        record_hash_text = cast(HashChainRow.record_hash, Text)
+    statement = (
+        select(
+            sequence_storage_type.label("sequence_storage_type"),
+            func.length(sequence_text).label("sequence_length"),
+            func.substr(
+                sequence_text,
+                1,
+                MAX_DURABLE_SEQUENCE_TEXT_CHARS + 1,
+            ).label("sequence_text"),
+            kind_storage_type.label("kind_storage_type"),
+            func.length(kind_text).label("kind_length"),
+            func.substr(
+                kind_text,
+                1,
+                MAX_DURABLE_KIND_TEXT_CHARS + 1,
+            ).label("kind"),
+            payload_storage_type.label("payload_storage_type"),
+            func.length(payload_text).label("payload_length"),
+            func.substr(
+                payload_text,
+                1,
+                MAX_OPTION_SELECTION_PAYLOAD_JSON_CHARS + 1,
+            ).label("payload_json"),
+            recorded_at_storage_type.label("recorded_at_storage_type"),
+            func.length(recorded_at_text).label("recorded_at_length"),
+            func.substr(
+                recorded_at_text,
+                1,
+                MAX_DURABLE_TIMESTAMP_TEXT_CHARS + 1,
+            ).label("recorded_at_text"),
+            previous_hash_storage_type.label("previous_hash_storage_type"),
+            func.length(previous_hash_text).label("previous_hash_length"),
+            func.substr(
+                previous_hash_text,
+                1,
+                MAX_DURABLE_HASH_TEXT_CHARS + 1,
+            ).label("previous_hash"),
+            record_hash_storage_type.label("record_hash_storage_type"),
+            func.length(record_hash_text).label("record_hash_length"),
+            func.substr(
+                record_hash_text,
+                1,
+                MAX_DURABLE_HASH_TEXT_CHARS + 1,
+            ).label("record_hash"),
+        )
+        .where(HashChainRow.stream == stream)
+        .order_by(HashChainRow.sequence.asc())
+        .execution_options(yield_per=_OPTION_SELECTION_STREAM_BATCH_SIZE)
+    )
+    page: deque[OptionSelectionEntryView] = deque(maxlen=bounded)
+    semantic_detail = ""
+    seen_decisions: dict[str, int] = {}
+    expected_previous = hash_chain.GENESIS_HASH
+    chain_broken_at: int | None = None
+    chain_detail = ""
+    record_count = 0
+    for row in session.execute(statement):
+        record_count += 1
+        sequence, sequence_invalid = _stored_sequence(
+            storage_type=row.sequence_storage_type,
+            reported_length=row.sequence_length,
+            value=row.sequence_text,
+        )
+        kind, kind_invalid = _bounded_stored_text(
+            storage_type=row.kind_storage_type,
+            value=row.kind,
+            reported_length=row.kind_length,
+            field="record kind",
+            maximum=MAX_DURABLE_KIND_TEXT_CHARS,
+        )
+        payload_json, payload_invalid = _bounded_stored_text(
+            storage_type=row.payload_storage_type,
+            value=row.payload_json,
+            reported_length=row.payload_length,
+            field="record payload",
+            maximum=MAX_OPTION_SELECTION_PAYLOAD_JSON_CHARS,
+        )
+        recorded_at, recorded_at_invalid = _stored_recorded_at(
+            storage_type=row.recorded_at_storage_type,
+            value=row.recorded_at_text,
+            reported_length=row.recorded_at_length,
+        )
+        previous_hash, previous_hash_invalid = _stored_hash_text(
+            storage_type=row.previous_hash_storage_type,
+            value=row.previous_hash,
+            reported_length=row.previous_hash_length,
+            field="previous_hash",
+        )
+        record_hash, record_hash_invalid = _stored_hash_text(
+            storage_type=row.record_hash_storage_type,
+            value=row.record_hash,
+            reported_length=row.record_hash_length,
+            field="record_hash",
+        )
+        record_hash_checked = False
+        record_hash_valid = False
+        if (
+            sequence is not None
+            and payload_json is not None
+            and recorded_at is not None
+            and previous_hash is not None
+            and record_hash is not None
+        ):
+            record_hash_checked = True
+            recomputed_hash = hash_chain.compute_hash(
+                stream=stream,
+                sequence=sequence,
+                recorded_at=recorded_at,
+                payload_json=payload_json,
+                previous_hash=previous_hash,
+            )
+            record_hash_valid = recomputed_hash == record_hash
+        # Match hash_chain.verify's first-failure contract while continuing to
+        # drain the cursor for an honest whole-stream record count and page.
+        if chain_broken_at is None:
+            if sequence_invalid:
+                chain_broken_at = record_count
+                chain_detail = f"{sequence_invalid}; its digest was not verified."
+            elif sequence != record_count:
+                chain_broken_at = record_count
+                chain_detail = (
+                    f"sequence gap: expected {record_count}, found {sequence}. A record was "
+                    "deleted or renumbered."
+                )
+            elif previous_hash_invalid:
+                chain_broken_at = sequence
+                chain_detail = (
+                    f"record {sequence} {previous_hash_invalid}; the link was not verified."
+                )
+            elif previous_hash != expected_previous:
+                chain_broken_at = sequence
+                chain_detail = (
+                    f"record {sequence} does not link to its predecessor; the chain was "
+                    "reordered or a record was replaced."
+                )
+            elif recorded_at_invalid:
+                chain_broken_at = sequence
+                chain_detail = (
+                    f"record {sequence} {recorded_at_invalid}; its digest was not verified."
+                )
+            elif record_hash_invalid:
+                chain_broken_at = sequence
+                chain_detail = f"record {sequence} {record_hash_invalid}; its digest is invalid."
+            elif payload_invalid:
+                chain_broken_at = sequence
+                chain_detail = f"record {sequence} {payload_invalid}; its digest was not verified."
+            elif not record_hash_valid:
+                chain_broken_at = sequence
+                chain_detail = (
+                    f"record {sequence} was modified after it was written; its contents no "
+                    "longer match its digest."
+                )
+            else:
+                assert record_hash is not None
+                expected_previous = record_hash
+        entry = _option_selection_entry(
+            sequence=sequence,
+            kind=kind,
+            kind_invalid=kind_invalid,
+            payload_json=payload_json,
+            recorded_at=recorded_at,
+            record_hash_valid=record_hash_valid,
+            record_hash_checked=record_hash_checked,
+            storage_invalid=tuple(
+                detail
+                for detail in (
+                    sequence_invalid,
+                    recorded_at_invalid,
+                    previous_hash_invalid,
+                    record_hash_invalid,
+                    payload_invalid,
+                )
+                if detail
+            ),
+            chain_valid=chain_broken_at is None,
+            chain_detail=chain_detail,
+        )
+        page.append(entry)
+        sequence_label = record_count if sequence is None else sequence
+        if semantic_detail:
+            continue
+        if not entry.receipt_valid:
+            semantic_detail = (
+                f"receipt envelope at sequence {sequence_label} fails semantic validation"
+            )
+            continue
+        assert entry.decision_id is not None
+        previous = seen_decisions.get(entry.decision_id)
+        if previous is not None:
+            semantic_detail = (
+                f"duplicate option decision receipt at sequences {previous} and {sequence_label}"
+            )
+            continue
+        seen_decisions[entry.decision_id] = sequence_label
+    if record_count == 0:
+        chain_detail = "chain is empty"
+    elif chain_broken_at is None:
+        chain_detail = f"{record_count} record(s) verified to head {expected_previous[:12]}…"
+    return OptionSelectionsView(
+        entries=tuple(reversed(page)),
+        stream_present=record_count > 0,
+        chain_valid=chain_broken_at is None,
+        chain_records=record_count,
+        chain_broken_at=chain_broken_at,
+        chain_detail=chain_detail,
+        semantic_valid=not semantic_detail,
+        semantic_detail=semantic_detail,
         limit=bounded,
         account_fingerprint=scoped,
         generated_at=_iso(now),
@@ -798,6 +1180,316 @@ def _journal_entry(row: HashChainRow) -> JournalEntryView:
         quantity=_optional_text(payload.get("quantity")),
         limit_price=_optional_text(payload.get("limit_price")),
     )
+
+
+def _bounded_stored_text(
+    *,
+    storage_type: object | None = None,
+    value: object,
+    reported_length: object,
+    field: str,
+    maximum: int,
+) -> tuple[str | None, str]:
+    """Validate one SQL-bounded text projection without echoing corrupt data."""
+
+    if storage_type is not None and storage_type != "text":
+        return None, f"{field} has an invalid storage type"
+    if not isinstance(reported_length, int) or reported_length < 0:
+        return None, f"{field} has an invalid stored length"
+    if reported_length > maximum:
+        return None, f"{field} exceeds the {maximum}-character inspection limit"
+    if not isinstance(value, str) or len(value) != reported_length:
+        return None, f"{field} could not be read as bounded text"
+    return value, ""
+
+
+def _stored_sequence(
+    *,
+    storage_type: object,
+    reported_length: object,
+    value: object,
+) -> tuple[int | None, str]:
+    if storage_type != "integer":
+        return None, "record sequence has an invalid storage type"
+    text, invalid = _bounded_stored_text(
+        value=value,
+        reported_length=reported_length,
+        field="record sequence",
+        maximum=MAX_DURABLE_SEQUENCE_TEXT_CHARS,
+    )
+    if text is None:
+        return None, invalid
+    if not text.isascii() or not text.isdecimal():
+        return None, "record sequence is not a canonical positive integer"
+    sequence = int(text)
+    if sequence <= 0 or str(sequence) != text:
+        return None, "record sequence is not a canonical positive integer"
+    return sequence, ""
+
+
+def _stored_recorded_at(
+    *,
+    storage_type: object,
+    value: object,
+    reported_length: object,
+) -> tuple[datetime | None, str]:
+    text, invalid = _bounded_stored_text(
+        storage_type=storage_type,
+        value=value,
+        reported_length=reported_length,
+        field="record timestamp",
+        maximum=MAX_DURABLE_TIMESTAMP_TEXT_CHARS,
+    )
+    if text is None:
+        return None, invalid
+    if not text.isascii() or len(text) < 19 or text[10] not in {" ", "T"}:
+        return None, "record timestamp is not a valid ISO datetime"
+    try:
+        recorded_at = datetime.fromisoformat(text)
+        if recorded_at.tzinfo is None:
+            recorded_at = recorded_at.replace(tzinfo=UTC)
+        else:
+            recorded_at = recorded_at.astimezone(UTC)
+    except (OverflowError, ValueError):
+        return None, "record timestamp is not a valid ISO datetime"
+    return recorded_at, ""
+
+
+def _stored_hash_text(
+    *,
+    storage_type: object,
+    value: object,
+    reported_length: object,
+    field: str,
+) -> tuple[str | None, str]:
+    text, invalid = _bounded_stored_text(
+        storage_type=storage_type,
+        value=value,
+        reported_length=reported_length,
+        field=field,
+        maximum=MAX_DURABLE_HASH_TEXT_CHARS,
+    )
+    if text is None:
+        return None, invalid
+    if len(text) != MAX_DURABLE_HASH_TEXT_CHARS:
+        return None, f"{field} is not exactly {MAX_DURABLE_HASH_TEXT_CHARS} characters"
+    return text, ""
+
+
+def _option_selection_entry(
+    *,
+    sequence: int | None,
+    kind: str | None,
+    kind_invalid: str,
+    payload_json: str | None,
+    recorded_at: datetime | None,
+    record_hash_valid: bool,
+    record_hash_checked: bool,
+    storage_invalid: tuple[str, ...],
+    chain_valid: bool,
+    chain_detail: str,
+) -> OptionSelectionEntryView:
+    """Decode and independently verify one selection receipt envelope."""
+
+    invalid = list(storage_invalid)
+    if record_hash_checked and not record_hash_valid:
+        invalid.append("stored record contents do not match record_hash")
+    if not chain_valid:
+        invalid.append(f"chain lineage is invalid: {chain_detail}")
+    receipt_invalid: list[str] = []
+    if kind_invalid:
+        receipt_invalid.append(kind_invalid)
+        kind_for_view = None
+    else:
+        kind_for_view = _selection_status_text(kind, "record kind", receipt_invalid)
+    recorded_at_for_view = None if recorded_at is None else _iso(recorded_at)
+
+    if payload_json is None:
+        return OptionSelectionEntryView(
+            sequence=sequence,
+            recorded_at=recorded_at_for_view,
+            kind=kind_for_view,
+            receipt_valid=False,
+            record_hash_valid=record_hash_valid,
+            record_valid=False,
+            chain_valid=chain_valid,
+            invalid_detail="; ".join((*invalid, *receipt_invalid)),
+        )
+    try:
+        decoded: object = json.loads(payload_json)
+    except (RecursionError, TypeError, ValueError):
+        receipt_invalid.append("record payload is not valid JSON")
+        return OptionSelectionEntryView(
+            sequence=sequence,
+            recorded_at=recorded_at_for_view,
+            kind=kind_for_view,
+            receipt_valid=False,
+            record_hash_valid=record_hash_valid,
+            record_valid=False,
+            chain_valid=chain_valid,
+            invalid_detail="; ".join((*invalid, *receipt_invalid)),
+        )
+    if not isinstance(decoded, dict):
+        receipt_invalid.append("record payload is not a JSON object")
+        return OptionSelectionEntryView(
+            sequence=sequence,
+            recorded_at=recorded_at_for_view,
+            kind=kind_for_view,
+            receipt_valid=False,
+            record_hash_valid=record_hash_valid,
+            record_valid=False,
+            chain_valid=chain_valid,
+            invalid_detail="; ".join((*invalid, *receipt_invalid)),
+        )
+    payload: dict[str, object] = decoded
+    try:
+        canonical_payload = hash_chain.canonical_payload(payload)
+    except (RecursionError, TypeError, ValueError):
+        receipt_invalid.append("record payload cannot be represented as canonical JSON")
+    else:
+        if payload_json != canonical_payload:
+            receipt_invalid.append("record payload is not its canonical JSON representation")
+    expected_fields = {
+        "decision_id",
+        "status",
+        "output_digest",
+        "canonical_receipt",
+    }
+    if set(payload) != expected_fields:
+        receipt_invalid.append("record payload has unexpected or missing envelope fields")
+
+    decision_id = _required_payload_text(
+        payload,
+        "decision_id",
+        receipt_invalid,
+        maximum=MAX_OPTION_SELECTION_DECISION_ID_CHARS,
+    )
+    status = _selection_status_text(
+        _required_payload_text(payload, "status", receipt_invalid),
+        "payload status",
+        receipt_invalid,
+    )
+    output_digest = _output_digest_text(payload, receipt_invalid)
+    canonical_receipt = _required_payload_text(payload, "canonical_receipt", receipt_invalid)
+
+    candidate: OptionSelectionReceipt | None = None
+    canonical_receipt_for_view = canonical_receipt
+    if canonical_receipt is not None:
+        # UTF-8 is at least one byte per code point, so the character count is
+        # a cheap early refusal that avoids allocating another giant byte
+        # string. Invalid oversized bytes are never echoed under a field whose
+        # name promises the exact canonical receipt.
+        oversized = len(canonical_receipt) > MAX_OPTION_SELECTION_RECEIPT_BYTES
+        if not oversized:
+            oversized = len(canonical_receipt.encode("utf-8")) > MAX_OPTION_SELECTION_RECEIPT_BYTES
+        if oversized:
+            receipt_invalid.append("canonical_receipt exceeds the inspection size limit")
+            canonical_receipt_for_view = None
+        else:
+            try:
+                candidate = OptionSelectionReceipt.model_validate_json(canonical_receipt)
+            except (TypeError, ValueError):
+                receipt_invalid.append(
+                    "canonical_receipt does not validate as OptionSelectionReceipt"
+                )
+
+    if candidate is not None:
+        try:
+            is_exact_canonical = candidate.canonical_bytes().decode("utf-8") == canonical_receipt
+            replay_valid = candidate.verifies()
+        except (ArithmeticError, AssertionError, TypeError, ValueError):
+            is_exact_canonical = False
+            replay_valid = False
+        if not is_exact_canonical:
+            receipt_invalid.append(
+                "canonical_receipt is not the receipt's canonical byte representation"
+            )
+        if not replay_valid:
+            receipt_invalid.append(
+                "receipt output digest or deterministic replay verification failed"
+            )
+        if output_digest != candidate.output_digest:
+            receipt_invalid.append("payload output_digest does not match the canonical receipt")
+        if status != candidate.status.value:
+            receipt_invalid.append("payload status does not match the canonical receipt")
+        if kind_for_view != candidate.status.value:
+            receipt_invalid.append("record kind does not match the canonical receipt status")
+        if decision_id != candidate.request.decision_id:
+            receipt_invalid.append("payload decision_id does not match the canonical receipt")
+        if recorded_at != candidate.evaluated_at:
+            receipt_invalid.append("record timestamp does not match the receipt evaluation time")
+
+    receipt_valid = candidate is not None and not receipt_invalid
+    invalid.extend(receipt_invalid)
+    # Chain lineage is reported separately: a sound receipt after an earlier
+    # break remains inspectable, but it is not represented as part of a sound
+    # append-only history.
+    receipt = candidate if receipt_valid else None
+    return OptionSelectionEntryView(
+        sequence=sequence,
+        recorded_at=recorded_at_for_view,
+        kind=kind_for_view,
+        decision_id=decision_id,
+        status=status,
+        output_digest=output_digest,
+        canonical_receipt=canonical_receipt_for_view,
+        receipt=receipt,
+        receipt_valid=receipt_valid,
+        record_hash_valid=record_hash_valid,
+        record_valid=receipt_valid and record_hash_valid,
+        chain_valid=chain_valid,
+        invalid_detail="; ".join(invalid),
+    )
+
+
+def _required_payload_text(
+    payload: dict[str, object],
+    field: str,
+    invalid: list[str],
+    *,
+    maximum: int | None = None,
+) -> str | None:
+    value = payload.get(field)
+    if not isinstance(value, str) or not value:
+        invalid.append(f"payload {field} is missing or is not non-empty text")
+        return None
+    if maximum is not None and len(value) > maximum:
+        invalid.append(f"payload {field} exceeds the {maximum}-character inspection limit")
+        return None
+    return value
+
+
+def _selection_status_text(value: object, label: str, invalid: list[str]) -> str | None:
+    if not isinstance(value, str) or not value:
+        if label == "record kind":
+            invalid.append("record kind is missing or is not non-empty text")
+        return None
+    if len(value) > _MAX_OPTION_SELECTION_STATUS_CHARS:
+        invalid.append(
+            f"{label} exceeds the {_MAX_OPTION_SELECTION_STATUS_CHARS}-character inspection limit"
+        )
+        return None
+    if value not in _OPTION_SELECTION_STATUSES:
+        invalid.append(f"{label} is not a recognized option-selection status")
+        return None
+    return value
+
+
+def _output_digest_text(payload: dict[str, object], invalid: list[str]) -> str | None:
+    value = _required_payload_text(
+        payload,
+        "output_digest",
+        invalid,
+        maximum=MAX_OPTION_SELECTION_DIGEST_CHARS,
+    )
+    if value is None:
+        return None
+    if len(value) != MAX_OPTION_SELECTION_DIGEST_CHARS or any(
+        character not in "0123456789abcdef" for character in value
+    ):
+        invalid.append("payload output_digest is not exactly 64 lowercase hexadecimal characters")
+        return None
+    return value
 
 
 def _text(value: object) -> str:

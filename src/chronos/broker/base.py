@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from contextlib import AbstractContextManager
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Protocol, runtime_checkable
+from typing import Protocol, overload, runtime_checkable
 
+from chronos.config.limits import MAX_BROKER_EVIDENCE_SOURCE_CHARS
 from chronos.domain.models import (
     AccountSummary,
     BrokerExecution,
@@ -19,6 +21,8 @@ from chronos.domain.models import (
     OptionChainParameters,
     OptionContract,
     OptionContractSpec,
+    OptionDeliverableFacts,
+    OptionMarketRule,
     OrderModification,
     OrderPreview,
     OrderRequest,
@@ -65,6 +69,62 @@ class BrokerSendGuard(Protocol):
     def at_send(self) -> AbstractContextManager[bool]: ...
 
 
+@dataclass(frozen=True, slots=True)
+class OptionChainResponse(Sequence[OptionChainParameters]):
+    """One broker response plus explicit proof that its stream completed.
+
+    A non-empty tuple alone cannot distinguish a complete option-chain response
+    from the prefix accumulated before a timeout.  Adapters therefore publish
+    the vendor completion signal explicitly; the market-data manager validates
+    it before caching or exposing any parameters.
+
+    The sequence methods keep direct, read-only adapter callers ergonomic while
+    making it impossible for the manager to manufacture success metadata.
+    """
+
+    parameters: tuple[OptionChainParameters, ...]
+    complete: bool
+    truncated: bool
+    completion_marker: str
+    observed_at: datetime
+    source: str
+
+    def __post_init__(self) -> None:
+        if self.observed_at.tzinfo is None or self.observed_at.utcoffset() is None:
+            raise ValueError("option-chain response timestamp must be timezone-aware")
+        if (
+            len(self.completion_marker) > MAX_BROKER_EVIDENCE_SOURCE_CHARS
+            or len(self.source) > MAX_BROKER_EVIDENCE_SOURCE_CHARS
+        ):
+            raise ValueError("option-chain completion provenance exceeds the hard evidence bound")
+        marker = self.completion_marker.strip()
+        source = self.source.strip()
+        if not marker:
+            raise ValueError("option-chain completion marker must not be blank")
+        if not source:
+            raise ValueError("option-chain response source must not be blank")
+        object.__setattr__(self, "parameters", tuple(self.parameters))
+        object.__setattr__(self, "completion_marker", marker)
+        object.__setattr__(self, "source", source)
+
+    def __len__(self) -> int:
+        return len(self.parameters)
+
+    def __iter__(self) -> Iterator[OptionChainParameters]:
+        return iter(self.parameters)
+
+    @overload
+    def __getitem__(self, index: int) -> OptionChainParameters: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> tuple[OptionChainParameters, ...]: ...
+
+    def __getitem__(
+        self, index: int | slice
+    ) -> OptionChainParameters | tuple[OptionChainParameters, ...]:
+        return self.parameters[index]
+
+
 @runtime_checkable
 class Broker(Protocol):
     """Async broker boundary; callers serialize it through the connection manager."""
@@ -92,12 +152,22 @@ class Broker(Protocol):
     async def option_chain_parameters(
         self,
         underlying: UnderlyingContract,
-    ) -> tuple[OptionChainParameters, ...]: ...
+    ) -> OptionChainResponse: ...
 
     async def qualify_option_contracts(
         self,
         contracts: Sequence[OptionContractSpec],
     ) -> tuple[OptionContract, ...]: ...
+
+    async def option_market_rules(
+        self,
+        contracts: Sequence[OptionContract],
+    ) -> tuple[OptionMarketRule, ...]: ...
+
+    async def option_deliverable_facts(
+        self,
+        contracts: Sequence[OptionContract],
+    ) -> tuple[OptionDeliverableFacts, ...]: ...
 
     async def request_underlying_quote(
         self,

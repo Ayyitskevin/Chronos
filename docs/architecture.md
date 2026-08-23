@@ -8,7 +8,9 @@
 > it as the historical M1-M10 posture, not current capability. The current authority model
 > is [ADR-0016](adr/ADR-0016-controlled-autonomous-model-authority.md); the current
 > execution posture is [docs/safety.md](safety.md) and
-> [docs/live_trading_runbook.md](live_trading_runbook.md).
+> [docs/live_trading_runbook.md](live_trading_runbook.md). ADR-0030 adds the
+> default-off deterministic option-selection boundary described below; it does
+> not reactivate the historical dashboard's UI-held candidate as authority.
 
 ## Decisions
 
@@ -117,6 +119,45 @@ a standalone scalar receipt envelope. A new ancestor attempt or workspace-symbol
 terminally supersedes its terms before newer work starts. Failed attempts retain only sanitized
 feedback and cannot restore an old receipt. Ordinary reruns perform no approval work and make no
 related broker request.
+
+## Autonomous option-selection receipt boundary (ADR-0030)
+
+Autonomous opening cash-secured puts and covered calls use a separate path from
+the dashboard candidate view. The app plane derives the option right from the
+admitted strategy, acquires a bounded exact set of read-only broker facts, and
+passes one frozen evidence value into `chronos.supervisor.option_selection`.
+That pure selector has no broker or order dependency. It rejects incomplete or
+truncated chain completion, missing or unexpected candidates, stale or
+conflicting timestamps, unknown volume/open interest, non-authoritative
+deliverables, bad session evidence, and missing market-rule bands. It derives
+the receipt-bound tick/limit and returns a canonical `SELECTED` or `NO_TRADE`
+receipt; the compiler independently reproduces the exact contract and price.
+
+State lives in the account-scoped `autonomy.option-selections` hash chain. A
+receipt is committed before downstream use, then the complete cryptographic
+chain and every canonical semantic envelope are read and replayed afresh, with
+decision-ID uniqueness checked across the whole stream; the
+same verification runs immediately before handoff. Feedback lives in typed
+receipt reasons, the authenticated bounded `GET /terminal/option-selections`
+view, and deduplicated `option_selection.system_failure` owner alerts for
+system/evidence failures. Whole-stream semantic inspection retains only the
+bounded newest page plus decision identifiers. It SQL-bounds every durable row
+field before the driver can materialize it and suppresses oversized, malformed,
+deeply nested, invalid-storage, or noncanonical data instead of reflecting it.
+Removing or corrupting any receipt, completion fact,
+policy/mandate binding, or candidate observation breaks replay and blocks the
+decision. Timing is explicit: source, fetch, observation, and chain-completion
+times are bounded; durable timestamps are UTC-normalized before hashing and
+storage. Live promotion is validated initially, after evidence acquisition, and
+immediately before handoff.
+
+`ENABLE_AUTONOMY_OPTION_SELECTION` defaults false. Each live autonomy mode also
+needs its own owner-authored resolver-promotion artifact bound to the canonical
+mandate, policy, mode, implementation digest, and version set. Chronos can load
+and verify that artifact but cannot create it, and this release creates none.
+Both real IBKR adapters intentionally report deliverables as non-authoritative,
+so real IBKR selection remains `NO_TRADE` until an authoritative schedule source
+is integrated.
 
 ## Package boundaries
 

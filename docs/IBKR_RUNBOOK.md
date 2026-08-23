@@ -196,3 +196,10 @@ For the wheel dashboard's read-only IBKR smoke test:
 ```bash
 .venv/bin/python scripts/smoke_test_ibkr.py        # forces all transmission flags off
 ```
+
+For ADR-0030, this smoke additionally exercises the adapter's explicit
+option-chain completion envelope, but it still requests no option quote fanout
+and proves no deliverable authority or promotion. Both real adapters report
+autonomous deliverables as non-authoritative, so real IBKR option selection is
+expected to remain `NO_TRADE`. `ENABLE_AUTONOMY_OPTION_SELECTION` defaults false,
+and this release creates no live resolver-promotion artifact.

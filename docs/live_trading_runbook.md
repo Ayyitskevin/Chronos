@@ -16,7 +16,7 @@ against a running gateway.
 
 This runbook describes the safety controls that gate every live order.
 
-## Autonomous operation (ADR-0016 / D-16, ADR-0017 / D-17)
+## Autonomous operation (ADR-0016 / D-16, ADR-0017 / D-17, ADR-0030 / D-34)
 
 ~~Under ADR-0016 an active owner-authored **AutonomyMandate** replaces gates 7
 (session arming) and 8 (per-order confirmation) — **and only those two** — inside
@@ -51,6 +51,25 @@ no decisions. Autonomous **live** operation additionally remains blocked by the
 arming contradiction above. Revoking a mandate — like engaging the kill switch —
 is an immediate owner action that stops new autonomous exposure; the terminal
 exposes it at `POST /terminal/mandate/revoke`, and revocation survives restart.
+
+Opening equity-option cash-secured puts and covered calls add ADR-0030's
+selection gate before sizing and compilation. `ENABLE_AUTONOMY_OPTION_SELECTION`
+defaults false. A complete, bounded, exact broker evidence snapshot must produce
+a canonical receipt, the receipt must commit to and semantically verify against
+the account-scoped hash chain, and the existing compiler must independently
+reproduce its selected contract and limit price. System/evidence failures are
+typed `NO_TRADE` and alert the owner.
+
+For `CANARY_LIVE_AUTONOMOUS` or `CAPPED_LIVE_AUTONOMOUS`, an option decision also
+requires a separate owner-authored resolver promotion for exactly that one mode.
+The artifact binds the canonical mandate, exact selection policy, account,
+resolver versions, and material-source digest; it is checked initially, after
+acquisition, and immediately before handoff. Chronos has no creator or promotion
+command for it, and this release creates none. Both real IBKR adapters currently
+return non-authoritative deliverable evidence, so real IBKR option selection
+remains `NO_TRADE` even when evaluation is enabled. Do not create a live artifact
+until an authoritative deliverable source, owner gateway verification, full
+evidence review, and human sign-off exist.
 
 ## The ten live gates
 

@@ -614,6 +614,31 @@ def journal(
         )
 
 
+@router.get("/terminal/option-selections", response_model=views.OptionSelectionsView)
+def option_selections(
+    state: StateDep,
+    limit: Annotated[int, Query(description="How many selection receipts to return.")] = (
+        views.DEFAULT_OPTION_SELECTION_LIMIT
+    ),
+) -> views.OptionSelectionsView:
+    """Inspect canonical option-selection receipts and their hash-chain status.
+
+    This is intentionally a terminal-credential read. It neither requires the
+    writer lease nor imports an acquisition, broker, compiler, or order surface,
+    so a demoted backend can still show the operator why selection did or did
+    not produce a contract.
+    """
+
+    runtime = state.runtime
+    with runtime.database.sessions.begin() as session:
+        return views.option_selections_view(
+            session,
+            account_fingerprint=_fingerprint_of(runtime),
+            now=utc_now(),
+            limit=limit,
+        )
+
+
 @router.get("/terminal/counters", response_model=views.CountersView)
 def counters(state: StateDep) -> views.CountersView:
     """This session's observed activity, or an explicit statement that none was.

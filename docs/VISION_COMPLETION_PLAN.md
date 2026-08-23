@@ -91,9 +91,17 @@ This snapshot is context, not remembered state. Reverify it before building on i
   QQQ holdout was consumed and must not be treated as clean.
 - Futures and index-option execution are absent. Options support is narrow and must remain
   family-gated.
-- The option-chain evidence-boundary work was observed separately on
+- ~~The option-chain evidence-boundary work was observed separately on
   `codex/chronos-option-chain-selection-v1` at `ae9d256`; do not assume it is present on the
-  default branch until it is actually integrated.
+  default branch until it is actually integrated.~~ **Updated 2026-08-23: it is integrated.**
+  The lane merged to `main` as codex's own commits (`6e7429e`, `ae9d256`), renumbered to ADR-0030 / D-34
+  (it had claimed ADR-0020 / D-20, which `main` allocated to bounded periodic reconciliation
+  on 2026-08-02). Evaluation is still default-off behind
+  `ENABLE_AUTONOMY_OPTION_SELECTION`, CANARY/LIVE still require an owner-authored resolver
+  promotion artifact this repository cannot create, and both real IBKR adapters still return
+  non-authoritative deliverable evidence — so real-gateway option selection remains
+  `NO_TRADE`. Verify presence by command, not by this line:
+  `git cat-file -e origin/main:src/chronos/supervisor/option_selection.py`.
 - The last documented account snapshot was approximately USD 110. That makes cash-secured
   options and most futures economically unavailable without a separate owner capital
   decision. Engineering must not disguise that constraint.
