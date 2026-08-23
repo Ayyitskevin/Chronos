@@ -44,5 +44,8 @@ jobs:
       - name: Type-check
         run: mypy src/chronos
 
+      - name: Type-check worker
+        run: mypy --strict worker
+
       - name: Test
         run: pytest -q

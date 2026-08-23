@@ -138,11 +138,13 @@ def _extract_decision(body: dict[str, Any]) -> dict[str, Any] | None:
         _logger.warning("xAI hit max_tokens before completing a decision; none proposed")
         return None
 
-    message = first.get("message") if isinstance(first.get("message"), dict) else {}
+    raw_message = first.get("message")
+    message: dict[str, Any] = raw_message if isinstance(raw_message, dict) else {}
     for call in message.get("tool_calls") or []:
         if not isinstance(call, dict):
             continue
-        function = call.get("function") if isinstance(call.get("function"), dict) else {}
+        raw_function = call.get("function")
+        function: dict[str, Any] = raw_function if isinstance(raw_function, dict) else {}
         if function.get("name") != "propose_decision":
             continue
         raw = function.get("arguments")

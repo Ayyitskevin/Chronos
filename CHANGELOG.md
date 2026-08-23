@@ -19,6 +19,68 @@ by the v1.18.4 CLI tarball checked against a pinned sha256 before it executes;
 `tests/test_opencode_workflow_policy.py` and documented in
 `docs/OPENCODE_WORKFLOW.md`.
 
+## [Unreleased] — CI stops lying: the worker gate lands and the flake dies (2026-08-22)
+
+Two defects let a green check mean less than it claimed. First, the documented
+per-PR gate list has included `mypy --strict worker` since 2026-08-12, but CI
+never ran it — and it was red at HEAD: three `union-attr` errors in
+`worker/model_xai.py`'s deny-by-default extract, invisible to every merge and
+inherited unexplained by any agent that ran the documented list. The chains now
+narrow through explicit `isinstance` checks — same extraction for valid
+payloads, same refusals for malformed ones (only a completed `propose_decision`
+call counts; prose is never parsed) — and the gate runs everywhere the other
+four do: CI, README, `make gates`. Second, the only time the default branch has
+ever gone red (2026-08-21, run 32492350131) it was
+`test_quote_data_quality_is_explicit_and_fail_closed[4-DELAYED]`, and nobody
+fixed it — it just went green on the next merge. The fake broker delivers its
+quote update on the next event-loop pass, deterministically ordered, but the
+test brokers bounded that wait with 0.2 s of real wall clock, so a loaded
+runner could fire `MarketDataUnavailableError` before the DELAYED-quality
+handling the test exists to prove. The shared test bound is now generous enough
+that only a dead event loop could lose the race; the one test whose expected
+outcome IS the timeout — where no update is ever published and no race exists
+in either direction — pins its own small bound. Nothing asserted got weaker:
+the 4-DELAYED case still demands an explicit `DataQuality.DELAYED` with every
+price field `None`, verified by a 100× loop and by breaking the production
+path to confirm the assertion still bites.
+
+## [Unreleased] — the agent protocol, and the day the ship got steered (2026-08-22)
+
+The morning's red PRs were not work — they were symptoms. A mickey-wide sync
+re-pushed two SUPERSEDED branch tips as `-mickey-20260822` archive branches and
+opened PR #82 against a `main` sitting 98 commits behind the true default, claiming
+"48 patch-unique commits"; computed against the real default branch, the number was
+zero. The divergence had been measured against the wrong base — the same failure
+class as the phantom merge and the stranded allowlist fix, wearing a new costume.
+
+The steering, in order. The owner flipped the GitHub default branch to `main` and
+deleted `feat/wheel-dashboard-mvp`; the `main-integrity` ruleset now makes `main`
+PR-only — required green `quality` check, no force-push, no deletion, no bypass
+actors (every seat pushes as one account, so no seat is special) — and
+`delete_branch_on_merge` is on. The branch list was cleaned against measured
+divergence, never memory: 31 refs became 8 branches, 19 remote + 3 archive deletions
+each verified `ahead_by=0` against the real default before deletion, and the 2 tips
+genuinely worth keeping went to `refs/preserve/*` — no CI, no clutter, never a PR.
+
+And the rules moved into the repo, where seats can actually read them:
+`docs/AGENT_PROTOCOL.md` is now the canonical operating protocol for every AI seat —
+mandatory mechanical preflight (derive the default by command, branch from its live
+tip, measure your own baseline), branch and PR rules (base = the default, always; no
+stacked PRs without owner ack, and any stack carries the un-strand duty;
+`ahead_by=0` means nothing to preserve), the gate as `.github/workflows/ci.yml`
+defines it, review semantics (an empty review result is not a pass; a HOLD is closed
+only by the holder re-verifying in writing), post-merge ancestry verification,
+scan-before-claim ID allocation, and four case files so each rule reads as scar
+tissue rather than ceremony. `AGENTS.md`'s read-before-acting list points at it; a
+new PR template carries the base-branch check, the §13 contract skeleton, and the
+measured-counts gates footer. The duplicate D-21/D-22 rows in `DECISIONS.md` are
+annotated in place as (a)/(b) — never renumbered, since ADR-0025 and others cite the
+numbers. Recorded as D-33; the failure class registered as R-54, MITIGATED and
+deliberately not CLOSED — the protocol's adoption by the non-claude seats is
+unproven until their next PRs arrive preflighted and correctly based. Also folds in
+the continuation-plan correction that had been stranded on
+`claude/chronos-a1-plan-annotation` with no path to the default branch.
+
 ## [Unreleased] — the allowlist fix comes off the dead branch (2026-08-22)
 
 Commit `9dcbcc55e` (2026-08-14) fixed the account allowlist — every documented
