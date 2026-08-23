@@ -66,12 +66,14 @@ update your understanding, not the gate.
 | 4 | **Account snapshot ≈ USD 110** vs the ~USD 3,000 premise still carried by ~25 doc/config sites. This is a LIVE, UNRESOLVED owner decision — never quietly assume either number. | `grep -n "USD 110" docs/VISION_COMPLETION_PLAN.md` |
 | 5 | Suite green with exactly one skip (the opt-in IBKR smoke test); ruff/format/mypy-strict clean. ~~Expect ~2489 passed as of 2026-08-02~~ ~~expect ~2745 passed~~ ~~expect ~2767 passed~~ ~~expect ~2805 passed~~ **Corrected 2026-08-09: expect ~2889 passed** — 2543 at `721d7f1`, +202 from the Five-Tool slice and its merge-review tests, +22 from the canonical ADR-0013 registry integration, +38 from the certified-reader capability, +84 from the replay-artifact capability and the lookahead-provenance audit. Authoritative baseline and suite map: `chronos-validation-and-qa` §2. | `.venv/bin/pytest -q` (~120 s) |
 | 6 | **Option-chain selection work lives on `codex/chronos-option-chain-selection-v1` @ ae9d256 and is NOT assumed integrated** into the default branch. | `grep -n "option-chain-selection" docs/VISION_COMPLETION_PLAN.md`; `git log --oneline --all \| grep -ci "option-chain"` (→ 0 locally) |
-| 7 | **Default branch is still `feat/wheel-dashboard-mvp` — target your PRs there.** A remote `main` was created 2026-08-02 at `46b2ad0` (owner request; a new ref only, no history rewritten), but flipping the *default* is a repository setting only the owner can change and it has not happened. Open owner items: whether the old branch is retired, and re-adding branch protection, which does not follow the default. CI is unaffected (no branch filter in `ci.yml`). | `git ls-remote --symref origin HEAD` |
+| 7 | ~~**Default branch is still `feat/wheel-dashboard-mvp` — target your PRs there.** A remote `main` was created 2026-08-02 at `46b2ad0` (owner request; a new ref only, no history rewritten), but flipping the *default* is a repository setting only the owner can change and it has not happened. Open owner items: whether the old branch is retired, and re-adding branch protection, which does not follow the default.~~ **[Updated 2026-08-22: the owner flipped the default branch to `main` and deleted `feat/wheel-dashboard-mvp`; the `main-integrity` ruleset makes `main` PR-only with a required green `quality` check. Target the default branch, derived by command — never remembered.]** CI is unaffected (no branch filter in `ci.yml`). | `git ls-remote --symref origin HEAD` |
 | 8 | Experiment-registry ledger **ships empty** (0 records, 0 trials); the burned QQQ 2022-2024 holdout is documented ONLY in docs/results, not the ledger — never infer holdout cleanliness from the empty ledger. | `ls research/registry/` (→ does not exist); `grep -n "must not be treated as clean" docs/VISION_COMPLETION_PLAN.md` |
 
 Deeper detail lives elsewhere: statistical gates → `chronos-research-methodology`;
 suite map → `chronos-validation-and-qa`; doc contradictions → `chronos-docs-map`;
-drift-measurement scripts → `chronos-diagnostics`.
+drift-measurement scripts → `chronos-diagnostics`; the operational protocol every seat
+follows (branches, PRs, gates, review, IDs) → `docs/AGENT_PROTOCOL.md` (in-repo,
+canonical since 2026-08-22).
 
 ---
 

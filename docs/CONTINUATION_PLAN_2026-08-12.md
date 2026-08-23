@@ -53,9 +53,9 @@ binding (item A2), and revocation liveness (item A3).
 
 | # | Fact | Re-verify with |
 |---|---|---|
-| 1 | Default branch `feat/wheel-dashboard-mvp` at `4fda36f`; suite baseline **3040 passed, 1 skipped**; ruff, `mypy src/chronos`, `mypy --strict worker` all clean. | `git log --oneline -1 origin/feat/wheel-dashboard-mvp`; `.venv/bin/pytest -q` |
-| 2 | Plan §6 scoreboard: findings 1, 2, 6 CLOSED (D-20, doc fix, D-24); finding 3 doc-half closed / code-half owner-gated; findings 4, 7, 8 OPEN behind proposed ADRs 0022, 0021, 0024; **finding 5 OPEN and unowned by any ADR** — the only §6 code defect an AI session can take next. | `grep -n "Status" docs/adr/ADR-002{1,2,4}-*.md`; item A1's greps below |
-| 3 | Supervisor still journals COMPLETE on any non-exception handoff return: only `except Exception` maps to ORDER_PLANE_REFUSED (`loop.py:428-448`), then activity is counted and COMPLETE recorded (`:450-476`) even for `SubmissionOutcome(submitted=False)`. | `sed -n '428,476p' src/chronos/supervisor/loop.py` |
+| 1 | ~~Default branch `feat/wheel-dashboard-mvp` at `4fda36f`; suite baseline **3040 passed, 1 skipped**~~ **corrected 2026-08-13:** at `a74cd09` (A1 merged, PR #68); baseline **3082 passed, 1 skipped**; ruff, `mypy src/chronos`, `mypy --strict worker` all clean. | `git log --oneline -1 origin/feat/wheel-dashboard-mvp`; `.venv/bin/pytest -q` |
+| 2 | Plan §6 scoreboard: findings 1, 2, 6 CLOSED (D-20, doc fix, D-24); finding 3 doc-half closed / code-half owner-gated; findings 4, 7, 8 OPEN behind proposed ADRs 0022, 0021, 0024; ~~**finding 5 OPEN and unowned by any ADR** — the only §6 code defect an AI session can take next~~ **finding 5 addressed 2026-08-13 (A1/R-49), leaving its post-submission half (partial fill, full fill, cancellation, late commission) open in the order plane's lifecycle tracker.** | `grep -n "Status" docs/adr/ADR-002{1,2,4}-*.md`; `sed -n "/^## 6/,/^## 7/p" docs/VISION_COMPLETION_PLAN.md` |
+| 3 | ~~Supervisor still journals COMPLETE on any non-exception handoff return: only `except Exception` maps to ORDER_PLANE_REFUSED (`loop.py:428-448`), then activity is counted and COMPLETE recorded (`:450-476`) even for `SubmissionOutcome(submitted=False)`.~~ **Fixed 2026-08-13 (A1/R-49):** the handoff answer is classified into four dispositions (`chronos.supervisor.handoff`), each with its own stage and refusal code; `COMPLETE` now means a confirmed send only, a refusal before the wire counts no activity attempt, and an ambiguous send counts AND alerts CRITICAL. | `grep -n "counts_activity_attempt\|_HANDOFF_STAGE" src/chronos/supervisor/loop.py`; `.venv/bin/pytest tests/safety/test_typed_handoff_outcomes_exercised.py -q` |
 | 4 | Evidence binding is uniform: every identity (static or registered) stamps `evidence_bundle_id="owner-workspace"`, digest `None`; `EvidenceBundle` exists as a type (`chronos.autonomy.evidence:130`) but nothing issues, stores, or expires bundles per job. | `grep -n "owner-workspace" src/chronos/api/autonomy_wiring.py` |
 | 5 | The proposer registry is a boot-time snapshot on both planes: expiry transitions live, disable/delete lands at restart. Disclosed in ADR-0023's acceptance note, D-24, R-48(c). | `grep -n "boot-time snapshot" RISK_REGISTER.md` |
 | 6 | Worker: token usage is logged, never capped (`worker/model.py:212-213`); policy content is unpinned (registration `prompt_version` is an owner-typed label). Terminal polls at 5 s (`POLL_MS = 5000`). | `grep -n "usage.get" worker/model.py`; `grep -n "POLL_MS" src/chronos/terminal/static/*.js` |
@@ -72,9 +72,10 @@ tests, revert-the-fix proofs, measured counts, honest residuals).
 
 **[owner-review gate]** (safety-mechanism modification; plan §6 finding 5).
 
-> **BUILT 2026-08-13, awaiting the owner's merge** (the merge IS the review act
-> for an owner-review-gated item). Branch `claude/chronos-typed-handoff-a1`,
-> based on `f4ac14a`. Delivered as specified: four supervisor-owned dispositions
+> **MERGED 2026-08-13 as PR #68 (`a74cd09`).** The owner-review gate is
+> satisfied: for an owner-review-gated item the merge IS the review act.
+> Branch `claude/chronos-typed-handoff-a1`, based on `f4ac14a`. Delivered as
+> specified: four supervisor-owned dispositions
 > in the new `chronos.supervisor.handoff`, translated at the
 > `autonomy_wiring` seam (`classify_submission_outcome`) so no order-plane type
 > reaches the supervisor; two additive `CycleStage` members and new refusal codes
@@ -90,6 +91,11 @@ tests, revert-the-fix proofs, measured counts, honest residuals).
 > journaled as not-sent, and that the post-submission typed outcomes (partial
 > fill, full fill, cancellation, late commission) are out of scope here because
 > they belong to the order plane's lifecycle tracker.
+>
+> One thing the session could not attest: this environment's GitHub API access
+> was refused throughout (403, the App is not connected for the org), so the PR
+> was opened by the owner by hand and **CI's own verdict on #68 was never read by
+> the session**. The gate results quoted above are local runs at `d744d29`.
 
 *Why first:* the journal is the only thing that can answer "why did it not
 trade," and today it answers falsely for every non-exception refusal: a
@@ -343,9 +349,12 @@ dependency chain before inventing one.
    B3: `chronos-change-control` first).
 2. Re-verify this plan's §2 snapshot; the repo wins over this document.
 3. Branch discipline: restart the working branch from the live default branch
-   (`git fetch origin feat/wheel-dashboard-mvp && git checkout -B <branch>
-   origin/feat/wheel-dashboard-mvp`); one item per PR; a merged PR is never
-   reused.
+   ~~(`git fetch origin feat/wheel-dashboard-mvp && git checkout -B <branch>
+   origin/feat/wheel-dashboard-mvp`)~~ **[updated 2026-08-22: the default flipped
+   to `main` and `feat/wheel-dashboard-mvp` is deleted (D-33). Derive the default
+   by command — `git ls-remote --symref origin HEAD` — and branch from its live
+   tip; full protocol in `docs/AGENT_PROTOCOL.md`]**; one item per PR; a merged
+   PR is never reused.
 4. Gates per PR: `ruff check .`, `ruff format --check .`, `mypy src/chronos`,
    `mypy --strict worker`, full `pytest -q` against the §2 baseline; measured
    test counts (`pytest --collect-only -q | grep -c '::'`), never estimates.

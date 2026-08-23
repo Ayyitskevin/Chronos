@@ -262,8 +262,10 @@ blockquote-annotate, date it, name the superseding authority, leave the original
 
 ### Numbering and status conventions
 
-- Files: `docs/adr/ADR-NNNN-short-slug.md`, four-digit zero-padded. Highest existing:
-  ADR-0019 (2026-08-02); the next ADR is 0020.
+- Files: `docs/adr/ADR-NNNN-short-slug.md`, four-digit zero-padded. The next number is
+  max + 1, where max is scanned — `ls docs/adr/ | grep -oE 'ADR-[0-9]{4}' | sort | tail -1`
+  — never remembered *(replaced a copied value that had gone stale, 2026-08-22; allocation
+  discipline: docs/AGENT_PROTOCOL.md §7)*.
 - Status line is line 3, e.g. "Status: accepted (owner directive, 2026-07-25)" or
   "Status: accepted (design-panel remediated, 2026-07-18)" — the parenthetical names the
   review that earned acceptance. Supersessions are appended to the status line, not
@@ -346,12 +348,15 @@ docs above are rules.
 - Branch naming observed: `claude/<topic>-<suffix>` (e.g.
   `claude/chronos-autonomous-governance-jhgfat`), `agent/<topic>`
   (`agent/reconciliation-readiness`), `feat/<topic>` (`feat/research-run-repro`),
-  `codex/<topic>` (`codex/chronos-option-chain-selection-v1`). Integration branch:
+  `codex/<topic>` (`codex/chronos-option-chain-selection-v1`). ~~Integration branch:
   `feat/wheel-dashboard-mvp` (still the GitHub default — target PRs there). A remote
   `main` was created 2026-08-02 at the same tip on owner request, but the default-branch
   flip is a repository setting the owner has not yet made, so `main` is not yet the
-  integration target. Renaming or rewriting shared history remains out of bounds either
-  way (VISION_COMPLETION_PLAN.md §2).
+  integration target.~~ **[Updated 2026-08-22: the owner flipped the default branch to
+  `main` and deleted `feat/wheel-dashboard-mvp`. PRs target the default branch, derived
+  by command — `git ls-remote --symref origin HEAD` — never remembered. Operational
+  rules: `docs/AGENT_PROTOCOL.md`.]** Renaming or rewriting shared history remains out of
+  bounds either way (VISION_COMPLETION_PLAN.md §2).
 - Commit subjects: predominantly milestone-prefixed narrative ("M11: the option
   deliverable, and the last kernel defect (closes R-27)"); conventional-commit prefixes
   (`docs:`, `fix:`, `feat:`, `chore:`) are the minority (~10 of 150).
