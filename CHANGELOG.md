@@ -1,5 +1,56 @@
 # CHANGELOG
 
+## [Unreleased] — the capture that never started gets a preflight, and a schedule that labels the right day (2026-08-23)
+
+Forward option capture has never run. Not once. The harness landed 2026-07-19 (`ab16162`)
+and `docs/histdata_runbook.md` has said "deploy ASAP … IBKR keeps *no* history for expired
+options, so every un-captured session is unrecoverable" ever since. `research/data/history/`
+contains `HOLDOUTS.json` and a README. There is no cron entry, no systemd timer, no `ibapi`
+in the venv, and nothing listening on 7497/7496/4001/4002. That is roughly twenty-five
+trading days of SPY/QQQ/IWM chains that cannot be bought, refetched, or reconstructed, and
+the number grows by one every close.
+
+Nothing here captures anything — that still needs a gateway, which is an owner action. What
+it removes is every avoidable reason for the first scheduled run to fail or, worse, to
+succeed wrongly.
+
+**`scripts/preflight_options_capture.py`** checks each prerequisite the runbook names —
+`ibapi` importable, settings loadable, `IB_DATA_CLIENT_ID` distinct from `IB_CLIENT_ID`, the
+gateway accepting connections, the history root writable, and the session-label hazard below
+— and reports *all* of them rather than stopping at the first, so one run tells you
+everything to fix. Each failure names its remedy; a non-zero exit means "do not schedule
+yet". It is offline and read-only by default, opening no socket; `--connect` adds one
+bounded read-only chain fetch to prove the gateway answers for this account's data
+permissions. `--print-units` emits ready-to-install systemd user units.
+
+**The schedule now labels the right day, which the runbook's own example did not.**
+`--session` defaults to the *UTC* date, and the documented cron line was `15 21 * * 1-5` —
+unpinned, therefore local. On an `America/New_York` host that fires at 01:15 UTC the
+following day, filing Thursday's chain as Friday and **Friday's as Saturday, a date on which
+no session exists**. Verified with the tool rather than argued:
+
+```
+$ systemd-analyze calendar "Mon..Fri 21:15"        # local
+       (in UTC): Tue 2026-08-25 01:15:00 UTC       <-- next UTC day
+$ systemd-analyze calendar "Mon..Fri 21:15 UTC"    # pinned
+       (in UTC): Mon 2026-08-24 21:15:00 UTC       <-- same UTC day, 17:15 EDT
+```
+
+The shipped timer pins `OnCalendar=Mon..Fri 21:15 UTC`, the runbook explains why the pin is
+load-bearing rather than stylistic, and the cron alternative now carries `CRON_TZ=UTC`. A
+mislabeled snapshot is indistinguishable from a real one after the fact and cannot be
+corrected by refetching, which is what makes this worth a section rather than a footnote.
+
+The timer is deliberately **not** `Persistent=true`: a missed session is unrecoverable, so a
+catch-up run would fetch *today's* chain and file it under the missed date. A visible gap
+beats a plausible wrong row. systemd user units were chosen over cron so each run's JSON
+output lands in the journal, where a failure is visible afterwards instead of mailed into
+the void.
+
+Five tests pin the session-date reasoning across the DST boundary and both sides of UTC
+midnight, and were verified by violation: collapsing `eastern_session_date` to the bare UTC
+date fails three of them.
+
 ## [Unreleased] — the /oc workflow stops trusting strangers (2026-08-22)
 
 The `/oc` comment workflow ran on a public repository with no author gate:

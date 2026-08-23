@@ -60,9 +60,68 @@ unrecoverable. Output is one JSON line per underlying
 (`{underlying, rows, worst_quality, reason, error}`). The $0 tier is delayed/EOD
 quality — captured and labeled `DELAYED`, never presented as live.
 
-Example daily cron (owner machine, after the US close):
+### Before you schedule it: run the preflight
+
+```bash
+python scripts/preflight_options_capture.py               # offline; opens no socket
+python scripts/preflight_options_capture.py --connect     # adds one bounded read-only chain fetch
+```
+
+It checks every prerequisite above — `ibapi` importable, settings loadable,
+`IB_DATA_CLIENT_ID` distinct from `IB_CLIENT_ID`, the gateway accepting connections, the
+history root writable, and the session-label hazard below — reports *all* of them rather
+than stopping at the first, names the fix for each, and exits non-zero while anything is
+unmet. `--print-units` emits ready-to-install systemd user units.
+
+### The session-label hazard — read this before choosing a schedule
+
+`--session` defaults to the **UTC** date. A job scheduled in a local timezone west of UTC
+can therefore cross UTC midnight and file the session under the wrong day. This is not
+hypothetical, and it is invisible after the fact — a mislabeled snapshot looks exactly
+like a real one, and the data cannot be re-fetched to correct it.
+
+```
+$ systemd-analyze calendar "Mon..Fri 21:15"        # unpinned == LOCAL time
+    Next elapse: Mon 2026-08-24 21:15:00 EDT
+       (in UTC): Tue 2026-08-25 01:15:00 UTC       <-- next UTC day: session filed as tomorrow
+
+$ systemd-analyze calendar "Mon..Fri 21:15 UTC"    # pinned
+    Next elapse: Mon 2026-08-24 17:15:00 EDT       <-- 75 min after the close
+       (in UTC): Mon 2026-08-24 21:15:00 UTC       <-- same UTC day: session labeled correctly
+```
+
+On an `America/New_York` host the unpinned form files Thursday's chain as Friday, and
+**Friday's as Saturday — a date on which no session exists**. Either pin the schedule to
+UTC, or pass `--session` explicitly. The old cron example in this runbook was the unpinned
+form and is corrected below.
+
+### Schedule it — systemd user timer (preferred)
+
+Preferred over cron because the run's JSON output lands in the journal, where a failed or
+missed capture is visible after the fact rather than mailed into the void (R12:
+automation must stay observable).
+
+```bash
+python scripts/preflight_options_capture.py --print-units --symbols SPY,QQQ,IWM
+# write the two blocks to ~/.config/systemd/user/, then:
+systemctl --user daemon-reload
+systemctl --user enable --now chronos-options-capture.timer
+systemctl --user list-timers chronos-options-capture.timer   # confirm the next elapse
+sudo loginctl enable-linger $USER                            # unattended hosts only
+journalctl --user -u chronos-options-capture -n 50           # after the first run
+```
+
+The timer is deliberately **not** `Persistent=true`. A missed session cannot be recovered
+— IBKR keeps no history for expired options — so a catch-up run would fetch *today's*
+chain and file it under the missed date. A visible gap beats a plausible wrong row.
+
+Equivalent cron, if you prefer it — note the explicit UTC handling, which the schedule
+cannot express on its own:
 
 ```cron
+# 21:15 UTC Mon-Fri. CRON_TZ is honored by cronie/vixie-cron; without it this line means
+# 21:15 LOCAL and mislabels the session on any host west of UTC.
+CRON_TZ=UTC
 15 21 * * 1-5  cd /path/to/Chronos && .venv/bin/python -m chronos.histdata options --symbols SPY,QQQ,IWM
 ```
 
