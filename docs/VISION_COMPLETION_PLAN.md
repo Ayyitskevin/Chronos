@@ -68,15 +68,21 @@ This snapshot is context, not remembered state. Reverify it before building on i
 - GitHub default branch observed on 2026-08-01: `feat/wheel-dashboard-mvp` at `06fcee6`.
   ~~No remote `main` branch existed.~~ **Updated 2026-08-02 (owner request):** a remote
   `main` now exists, created from the tip of `feat/wheel-dashboard-mvp` at `46b2ad0` — a
-  new ref only; no history was renamed or rewritten. **The GitHub default branch is still
+  new ref only; no history was renamed or rewritten. ~~**The GitHub default branch is still
   `feat/wheel-dashboard-mvp`**: changing it is a repository setting, not a git operation,
   and only the owner can make it. Until that flip happens, PRs continue to target
   `feat/wheel-dashboard-mvp`. Two follow-ups are owner decisions and are deliberately
   unresolved here: whether `feat/wheel-dashboard-mvp` is retired or kept alongside `main`,
-  and re-adding any branch protection, which does **not** follow the default branch. CI is
+  and re-adding any branch protection, which does **not** follow the default branch.~~ CI is
   unaffected either way — `.github/workflows/ci.yml` triggers on bare `push:`/
   `pull_request:` with no branch filter. Re-verify with
-  `git ls-remote --symref origin HEAD`.
+  `git ls-remote --symref origin HEAD`. **Updated 2026-08-22 (owner direction, D-33): the
+  flip happened.** `main` IS the GitHub default branch; `feat/wheel-dashboard-mvp` is
+  deleted. Both 2026-08-02 follow-ups are resolved: the old branch is retired, and
+  protection returned as the `main-integrity` ruleset (PR-only, required green `quality`
+  check, no force-push, no deletion, no bypass actors). PRs target `main`. Derive the
+  default by command — `git ls-remote --symref origin HEAD` — never from a document,
+  including this one; operating rules in `docs/AGENT_PROTOCOL.md`.
 - The fail-closed autonomy and order kernel is substantial, but no real gateway, paper
   order, or live order has supplied operational evidence.
 - Zero strategies are selected for promotion; insufficient evidence remains a correct

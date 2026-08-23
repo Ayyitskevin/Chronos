@@ -12,6 +12,8 @@ Read these files completely before proposing, reviewing, or changing Chronos:
    architecture.
 3. `docs/safety.md`, `docs/limitations.md`, and `RISK_REGISTER.md` — controls, honest
    capability boundaries, and residual risk.
+4. `docs/AGENT_PROTOCOL.md` — the operational protocol every seat follows: branches,
+   PRs, gates, review, and ID allocation.
 
 Historical game plans and handoffs preserve rationale; they are not current roadmap
 authority when they conflict with the vision-completion plan.
