@@ -69,4 +69,6 @@ none is. Voting correlated indicators together was explicitly avoided.
   and rebalance rule remain unresolved. D-40 gives long and short their own loss tails;
   short exposure remains zero until its borrow/cost evidence is certifiable. D-41 uses the
   lower of marked strategy NAV and USD 3,000 as the sizing base, so the dollar risk allowance
-  shrinks after losses and cannot rise above USD 45 after gains.
+  shrinks after losses and cannot rise above USD 45 after gains. D-42 recomputes risk daily,
+  allows next-session reductions, and permits exposure increases only weekly; the weekly
+  anchor and trade-size mechanics remain unresolved.
