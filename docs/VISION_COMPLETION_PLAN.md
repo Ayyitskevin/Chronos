@@ -205,8 +205,14 @@ QQQ-specific causal price-domain overlay: technical geometry
 uses point-in-time total-return OHLC rebased to the current raw close, while broker truth
 remains raw and an intervening corporate action invalidates entry. Its public compiler
 authenticates the pinned source/contract/campaign but remains blocked before data.
-Executable position-management lifecycle, power analysis, certified data/cost/borrow
-identities, a clean holdout, incident availability, and legal/tax review remain open.
+D-49/ADR-0035 adds a default-off, proposal-only PAPER position-management state machine
+for actual QQQ fills: exact candidate/policy pins, durable semantic replay, typed fill
+resolution, stop/target/breakeven/runner logic, and risk-reducing proposals only. It is
+deliberately absent from production imports and creates no authority. Executable activation
+still requires an authenticated management-event identity, unique opening-order binding,
+broker-held protection semantics, runtime scheduling, and real PAPER evidence. Power
+analysis, certified data/cost/borrow identities, a clean holdout, incident availability,
+and legal/tax review remain open.
 
 ## 6. Phase 1 — Authority and lifecycle coherence
 
