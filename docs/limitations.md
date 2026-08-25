@@ -290,11 +290,14 @@ runbooks.
   eligible. D-43 whole-share flooring, D-44 point-in-time
   total-return research/raw execution separation, and D-45 current-confirmed-session windows
   remain shared controls.
-- This is still not a complete preregistration. Exact control equality/initialization,
-  sizing-reference price, entry-gap handling, pre-handoff revalidation, minimum economic
-  trade, the integrated EMA/ATR/AVWAP/support price-domain mapping, executable position
-  management, remaining neighbors, power, and a certified clean partition remain open. The
-  Five-Tool campaign's typed semantic blockers still authorize zero trials.
+- D-47/ADR-0033 freezes the control's initialization/equality, confirmed-raw-close sizing
+  reference, downward-only next-session gap re-sizing, one-shot protected order semantics,
+  pre-handoff checks, economic floor, and five-cell one-axis robustness grid. Its
+  content-addressed compiler can emit only blocked metadata and has no reader, trial,
+  holdout, broker, order, or promotion capability. The integrated
+  EMA/ATR/AVWAP/support price-domain mapping, executable position management, power, and a
+  certified clean partition remain open. The Five-Tool campaign's typed semantic blockers
+  still authorize zero trials.
   The short estimate and exposure remain unavailable while compiler support, account
   eligibility, shortability/borrow evidence, costs, and fresh authority are absent.
 - USD 3,000 is a conditional research reference/future funding target, not current capital.

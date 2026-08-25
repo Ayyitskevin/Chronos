@@ -197,11 +197,12 @@ entries, layered Confluence exit stack, and 1% stop-distance sizing inside the s
 CVaR/gross/owner ceilings. D-42's weekly increase schedule is superseded by new-entry-event
 increases while flat, with no later top-up after the native same-event management legs;
 daily/next-session reductions remain. Phase 0 has
-not exited: exact control equality/initialization, sizing-reference/gap/revalidation/
-economic-trade/order semantics, integrated feature price-domain mapping, executable
-position-management lifecycle, remaining
-parameter neighbors, power analysis, certified data/cost/borrow identities, a clean
-holdout, incident availability, and legal/tax review remain open.
+not exited. D-47/ADR-0033 now freezes the exact control initialization/equality,
+raw-price sizing reference, next-session gap/revalidation/order behavior, economic-trade
+floor, and five-cell one-axis robustness grid in a content-addressed artifact whose public
+compiler remains blocked before data. Integrated feature price-domain mapping, executable
+position-management lifecycle, power analysis, certified data/cost/borrow identities, a
+clean holdout, incident availability, and legal/tax review remain open.
 
 ## 6. Phase 1 — Authority and lifecycle coherence
 
