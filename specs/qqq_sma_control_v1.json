@@ -1,0 +1,219 @@
+{
+  "schema_version": "chronos-qqq-sma-control-v1",
+  "preregistration_id": "qqq-sma-control-v1-owner-review-2026-08-25",
+  "status": "blocked_before_first_data_read",
+  "purpose": "Freeze a low-degree-of-freedom QQQ daily trend control and its one-axis robustness cells before certified data, trial registration, or holdout access.",
+  "constitution": {
+    "constitution_id": "qqq-daily-trend-v1-owner-frozen-2026-08-25",
+    "constitution_path": "research/qqq_v1_constitution.json",
+    "constitution_sha256": "4c99ce9d09f43a418c7342b0e40a0795b253bf3f1cd0e37d29419498b3008d56",
+    "confluence_boundary_adr": "ADR-0032",
+    "material_change_rule": "Any material semantic change creates a new preregistration identity and resets the affected cell to research before more evidence is observed."
+  },
+  "authority": {
+    "order_authority": "none",
+    "promotion_authority": "none",
+    "selected_strategy": null,
+    "registered_trials": 0,
+    "live_risk_authorized_usd": 0,
+    "performance_claims": [],
+    "short_execution": "forbidden_pending_compiler_borrow_cost_account_and_owner_evidence"
+  },
+  "scope": {
+    "execution_target_symbol": "QQQ",
+    "asset_family": "US_LISTED_ETF",
+    "bar_interval": "1D",
+    "signal_clock": "confirmed_daily_close",
+    "earliest_action_clock": "next_session",
+    "same_bar_action": false,
+    "intraday_signal": false,
+    "control_role": "trend_attribution_control_not_five_tool_candidate"
+  },
+  "price_domains": {
+    "signal_and_risk": {
+      "series": "point_in_time_total_return",
+      "construction": "derived_only_from_unadjusted_bars_and_corporate_actions_known_by_the_confirmed_close",
+      "future_restatement": "forbidden",
+      "missing_or_uncertifiable": "no_signal_and_no_new_exposure"
+    },
+    "sizing_and_execution": {
+      "series": "raw_tradable_price",
+      "signal_time_reference": "confirmed_raw_close_t",
+      "handoff_reference": "fresh_protected_limit_derived_from_next_session_quote",
+      "broker_truth": "raw_orders_fills_positions_and_reconciliation"
+    }
+  },
+  "signal": {
+    "indicator": "simple_moving_average",
+    "primary_lookback_completed_sessions": 200,
+    "window_includes_confirmed_session": true,
+    "primary_transition": "immediate_two_state",
+    "initialization": {
+      "before_full_window": "flat",
+      "first_full_window_above": "long",
+      "first_full_window_below": "short",
+      "first_full_window_equal": "remain_flat_until_first_strict_inequality"
+    },
+    "equality_after_initialization": "hold_prior_direction",
+    "primary_long_condition": "total_return_close_t_strictly_greater_than_sma_t",
+    "primary_short_condition": "total_return_close_t_strictly_less_than_sma_t",
+    "exit": "first_confirmed_strict_signal_flip",
+    "buffer": 0.0,
+    "confirmation_closes": 1
+  },
+  "risk_and_sizing": {
+    "applicable_capital_base": "min(marked_strategy_nav_usd,3000)",
+    "missing_nonpositive_stale_or_nonfinite_nav": "no_new_exposure",
+    "daily_cvar": {
+      "confidence": 0.95,
+      "lookback_completed_returns": 252,
+      "tail_observation_count": 13,
+      "estimator": "arithmetic_mean_of_greatest_direction_specific_losses",
+      "window_includes_confirmed_session": true,
+      "long_and_short_tails": "separate",
+      "short_tail_without_certified_borrow_costs": "unavailable_and_zero_exposure",
+      "max_loss_fraction_of_applicable_base": 0.015,
+      "max_loss_usd": 45
+    },
+    "gross_exposure_fraction_max": 1.0,
+    "leverage_max": 1.0,
+    "whole_share_rule": "floor_magnitude_toward_zero",
+    "minimum_quantity_shares": 1,
+    "signal_time_quantity": "floor(permitted_target_notional/confirmed_raw_close_t)",
+    "in_position_upsize": "forbidden",
+    "reduction": "eligible_next_session_after_each_confirmed_close"
+  },
+  "entry_and_order_semantics": {
+    "increase_event": "new_confirmed_direction_transition_while_flat_or_same_event_second_phase_after_authoritative_flatten",
+    "one_attempt_per_event": true,
+    "later_retry_or_chase": false,
+    "order_form": "protected_marketable_limit",
+    "market_protection_collar_fraction": 0.01,
+    "time_in_force": "DAY",
+    "entry_gap_rule": "recompute_against_the_next_session_protected_limit_and_only_reduce_quantity_never_increase",
+    "handoff_quantity": "min(signal_time_quantity,floor(permitted_target_notional/max(confirmed_raw_close_t,next_session_protected_buy_limit)))",
+    "gap_or_cost_rejection": "consume_the_entry_event_and_wait_for_a_new_direction_transition",
+    "partial_fill": "retain_the_filled_quantity_as_the_position_cancel_the_remainder_at_DAY_expiry_and_never_top_up",
+    "direction_flip": "flatten_the_old_direction_first_then_require_authoritative_flat_reconciliation_before_any_same_event_opposite_entry",
+    "short_direction_while_blocked": "flatten_long_if_needed_then_remain_cash",
+    "pre_handoff_revalidation": [
+      "exact_preregistration_and_constitution_identity",
+      "same_unconsumed_signal_event_and_QQQ_contract_identity",
+      "fresh_complete_next_session_quote_and_market_rule",
+      "fresh_account_and_position_reconciliation",
+      "applicable_mode_mandate_promotion_and_strategy_binding",
+      "kill_switch_disengaged_and_no_loss_drawdown_or_policy_halt",
+      "fresh_finite_nav_CVaR_affordability_gross_and_leverage_evidence",
+      "quantity_not_greater_than_signal_time_quantity"
+    ],
+    "failed_revalidation": "no_new_exposure",
+    "risk_reducing_exit": "not_blocked_by_missing_entry_risk_evidence_but_still_requires_identity_reconciliation_and_safe_order_construction"
+  },
+  "minimum_economic_trade": {
+    "projected_cost_components": [
+      "commissions",
+      "spread",
+      "slippage",
+      "funding",
+      "model",
+      "data",
+      "borrow_when_applicable"
+    ],
+    "long_round_trip_commission_floor_usd": 2.1,
+    "long_slippage_bps_per_side": 2,
+    "maximum_projected_round_trip_cost_fraction_of_applicable_cvar_budget": 0.1,
+    "rule": "require_at_least_one_whole_share_and_projected_all_in_round_trip_cost_no_greater_than_10_percent_of_the_applicable_CVaR_dollar_budget",
+    "missing_or_unbounded_cost": "no_new_exposure"
+  },
+  "cells": [
+    {
+      "cell_id": "qqq-sma200-immediate-primary",
+      "role": "primary",
+      "lookback_completed_sessions": 200,
+      "transition": "immediate_two_state",
+      "band_fraction": 0.0,
+      "confirmation_closes": 1
+    },
+    {
+      "cell_id": "qqq-sma150-immediate-neighbor",
+      "role": "one_axis_parameter_neighbor",
+      "lookback_completed_sessions": 150,
+      "transition": "immediate_two_state",
+      "band_fraction": 0.0,
+      "confirmation_closes": 1
+    },
+    {
+      "cell_id": "qqq-sma250-immediate-neighbor",
+      "role": "one_axis_parameter_neighbor",
+      "lookback_completed_sessions": 250,
+      "transition": "immediate_two_state",
+      "band_fraction": 0.0,
+      "confirmation_closes": 1
+    },
+    {
+      "cell_id": "qqq-sma200-neutral-band-1pct",
+      "role": "prospective_robustness_variant",
+      "lookback_completed_sessions": 200,
+      "transition": "three_state_neutral_band",
+      "band_fraction": 0.01,
+      "confirmation_closes": 1,
+      "semantics": "long_strictly_above_1.01_times_SMA_short_strictly_below_0.99_times_SMA_otherwise_flat_boundaries_included_in_flat"
+    },
+    {
+      "cell_id": "qqq-sma200-five-close-confirmation",
+      "role": "prospective_robustness_variant",
+      "lookback_completed_sessions": 200,
+      "transition": "five_consecutive_strict_closes",
+      "band_fraction": 0.0,
+      "confirmation_closes": 5,
+      "semantics": "equality_resets_the_pending_streak_and_holds_the_initialized_state_transition_occurs_only_after_five_consecutive_strict_closes_on_the_new_side"
+    }
+  ],
+  "multiplicity": {
+    "planned_cells": 5,
+    "combinations_of_neighbor_axes": "forbidden",
+    "result_based_cell_addition_or_redefinition": "forbidden",
+    "evidence_transfer_to_five_tool_candidate": "forbidden"
+  },
+  "statistics": {
+    "primary_kpi": "net_edge_confidence",
+    "sample_floor": "max(preregistered_power_required_N,100_out_of_sample_economic_positions)",
+    "power_required_N": null,
+    "deflated_sharpe_probability_min": 0.95,
+    "fwer_or_fdr_q_max": 0.05,
+    "probability_of_backtest_overfitting_max": 0.1,
+    "best_trade_removal_must_remain_positive": true,
+    "best_month_removal_must_remain_positive": true,
+    "parameter_plateau_required": true
+  },
+  "identity_locks": {
+    "certified_catalog_sha256": null,
+    "ordinary_dataset_release_sha256": null,
+    "clean_holdout_map_sha256": null,
+    "cash_leg_source_sha256": null,
+    "long_cost_schedule_sha256": null,
+    "short_borrow_cost_schedule_sha256": null,
+    "power_analysis_sha256": null,
+    "evaluator_sha256": null,
+    "criteria_sha256": null,
+    "code_commit": null
+  },
+  "blocked_before_first_data_read": [
+    "Owner approval is recorded by merge of this exact preregistration identity.",
+    "A certified six-symbol daily release and exact ordinary catalog digest exist.",
+    "A content-addressed clean/seen/burned map is owner-approved without opening the clean partition.",
+    "The volatility-matched QQQ/cash benchmark and cash-leg source are content-addressed.",
+    "Long costs and the separately required short borrow-cost schedule are content-addressed.",
+    "Power analysis freezes required N and earliest possible pass date.",
+    "The evaluator, criteria, code commit, registry, and campaign identities are bound.",
+    "TradingView parity requirements are satisfied or remain an explicit blocker."
+  ],
+  "forbidden_imports_or_capabilities": [
+    "market_data_reader",
+    "holdout_unlock",
+    "trial_registration",
+    "broker",
+    "order_submission",
+    "promotion"
+  ]
+}
