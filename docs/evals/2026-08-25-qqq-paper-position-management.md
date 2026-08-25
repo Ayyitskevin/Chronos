@@ -67,22 +67,22 @@ and a separate non-author review are required; activation is out of scope.
 
 ```text
 PYTHONPATH=src .venv/bin/pytest -q tests/safety/test_paper_position_management.py
-# 37 passed
+# 38 passed
 
 make gates
 # ruff: All checks passed
 # format: 536 files already formatted
 # mypy: 290 source files; worker strict: 10 source files
-# pytest: 4,044 passed / 1 skipped / 13 failed
+# pytest: 4,045 passed / 1 skipped / 13 failed
 
 git diff --check
 # clean
 ```
 
 The isolated merged-main worktree at `103d4e642f47b05e98536e085b4d8c1727137d31`
-collects 4,021 tests; this branch collects 4,058, exactly 37 more. Its static baseline is
+collects 4,021 tests; this branch collects 4,059, exactly 38 more. Its static baseline is
 clean (534 formatted files, 289 source files, 10 worker files). The baseline full invocation
 reported 4,006 passed / 1 skipped / 14 failed: the same 13 Streamlit 1.62 relative-path
 failures plus one concurrent-ledger hard-link transient. That isolated transient passed on
-immediate rerun. The branch full invocation reported 4,044 passed / 1 skipped / the same 13
+immediate rerun. The branch full invocation reported 4,045 passed / 1 skipped / the same 13
 Streamlit failures, with no new failure class.

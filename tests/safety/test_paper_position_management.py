@@ -190,6 +190,14 @@ def test_plan_refuses_invalid_geometry_or_cvar_observations(
         _plan(**overrides)
 
 
+def test_plan_refuses_noncanonical_leg_order() -> None:
+    plan = _plan()
+    payload = plan.model_dump()
+    payload["legs"] = tuple(reversed(plan.legs))
+    with pytest.raises(ValueError, match="canonical T1, T2, RUNNER order"):
+        type(plan).model_validate(payload)
+
+
 def test_trailing_high_must_cover_the_current_price() -> None:
     with pytest.raises(ValueError, match="at least last_price"):
         _observation(
@@ -956,6 +964,30 @@ def test_module_defines_no_parallel_authority_grant() -> None:
         / "position_management.py"
     )
     source = source_path.read_text(encoding="utf-8")
+    tree = ast.parse(source)
     assert "PaperPositionManagementAuthority" not in source
     assert "owner_authorization_ref" not in source
     assert "AutonomyMode" not in source
+
+    authority_words = ("authority", "mandate", "grant", "enable")
+    class_names = {node.name for node in ast.walk(tree) if isinstance(node, ast.ClassDef)}
+    parameter_names: set[str] = set()
+    field_names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            arguments = (
+                *node.args.posonlyargs,
+                *node.args.args,
+                *node.args.kwonlyargs,
+            )
+            parameter_names.update(argument.arg for argument in arguments)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            field_names.add(node.target.id)
+    assert not {
+        name
+        for name in class_names | parameter_names
+        if any(word in name.lower() for word in authority_words)
+    }
+    assert {
+        name for name in field_names if any(word in name.lower() for word in authority_words)
+    } == {"execution_authority"}
