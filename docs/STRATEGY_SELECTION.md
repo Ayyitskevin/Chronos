@@ -61,5 +61,6 @@ none is. Voting correlated indicators together was explicitly avoided.
   only execution target and five ETFs used only for robustness validation. No campaign
   identity, complete rule, trial, data release, holdout result, promotion rung, or
   short-side authority exists yet. D-36 selects confirmed close versus SMA-200 as the
-  direction indicator only; its transitions, exits, sizing, and parameter neighbors are
-  still unresolved.
+  direction indicator. D-37 adds an immediate two-state primary transition and reserves a
+  1% neutral band and five-close confirmation as robustness variants; price/window details,
+  protective exits, sizing, and remaining parameter neighbors are still unresolved.
