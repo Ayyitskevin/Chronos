@@ -1,7 +1,7 @@
 # ADR-0031 — QQQ v1 staged research and risk constitution
 
 Status: **accepted — owner directive, 2026-08-25.** Index entries: DECISIONS.md D-35,
-D-36, D-37, D-38, D-39, D-40, D-41, D-42, and D-43.
+D-36, D-37, D-38, D-39, D-40, D-41, D-42, D-43, and D-44.
 
 ## Context
 
@@ -234,3 +234,19 @@ the CVaR-derived target, but an overnight gap can still change realized notional
 This choice does not authorize an order or guarantee the cap will contain a gap. Constitution
 identity, trial count, selected strategy, current USD 0 live allocation, and authority remain
 unchanged.
+
+## Post-acceptance price-series choice (D-44)
+
+SMA-200 and the CVaR return streams use a point-in-time total-return-adjusted QQQ series
+derived only from unadjusted bars and corporate-action evidence known by the confirmed
+close. Long returns include distributions; short returns include the corresponding
+distribution liability when certified. Future corporate actions may never rewrite an
+earlier decision's information set.
+
+Order quantities, prices, fills, and broker reconciliation remain on raw tradable prices.
+Missing or uncertifiable corporate-action evidence blocks the campaign rather than falling
+back to raw or silently back-adjusted data. Current-session window inclusion remains open.
+
+This separates economic-return evidence from executable price identity. It makes no
+performance claim and grants no fallback, trial, strategy selection, funding, or authority.
+The D-35 constitution remains unchanged.

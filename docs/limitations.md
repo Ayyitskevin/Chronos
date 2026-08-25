@@ -287,6 +287,9 @@ runbooks.
   increases; its weekly anchor remains unresolved. D-43 rounds target magnitude down to
   whole shares and leaves sub-one-share targets in cash, while its sizing-reference price,
   gap handling, pre-handoff revalidation, and minimum economic trade threshold remain open.
+  D-44 requires point-in-time total-return-adjusted signal/risk data and raw execution prices;
+  uncertifiable corporate actions block rather than trigger a fallback, and current-session
+  window inclusion remains open.
   The short estimate and exposure remain unavailable while compiler support, account
   eligibility, shortability/borrow evidence, costs, and fresh authority are absent.
 - USD 3,000 is a conditional research reference/future funding target, not current capital.
