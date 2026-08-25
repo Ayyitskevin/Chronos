@@ -284,10 +284,11 @@ runbooks.
   NAV composition are still unresolved. D-41 caps the applicable sizing
   base at the lower of marked strategy NAV and USD 3,000, so gains do not automatically
   expand the USD 45 ceiling. D-42 permits next-session risk reductions but only weekly
-  increases; its weekly anchor, whole-share rounding, and minimum economic trade threshold
-  remain unresolved. The short estimate and exposure remain unavailable while compiler
-  support, account eligibility, shortability/borrow evidence, costs, and fresh authority
-  are absent.
+  increases; its weekly anchor remains unresolved. D-43 rounds target magnitude down to
+  whole shares and leaves sub-one-share targets in cash, while its sizing-reference price,
+  gap handling, pre-handoff revalidation, and minimum economic trade threshold remain open.
+  The short estimate and exposure remain unavailable while compiler support, account
+  eligibility, shortability/borrow evidence, costs, and fresh authority are absent.
 - USD 3,000 is a conditional research reference/future funding target, not current capital.
   A zero incremental data budget means missing certifiable evidence blocks the campaign.
 

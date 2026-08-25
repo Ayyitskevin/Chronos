@@ -1,7 +1,7 @@
 # ADR-0031 — QQQ v1 staged research and risk constitution
 
 Status: **accepted — owner directive, 2026-08-25.** Index entries: DECISIONS.md D-35,
-D-36, D-37, D-38, D-39, D-40, D-41, and D-42.
+D-36, D-37, D-38, D-39, D-40, D-41, D-42, and D-43.
 
 ## Context
 
@@ -219,3 +219,18 @@ threshold, and order semantics remain open.
 The asymmetry makes safety faster than risk expansion and limits turnover from daily
 estimator noise. It does not guarantee lower costs or losses. Constitution identity, trial
 count, selected strategy, current USD 0 live allocation, and authority remain unchanged.
+
+## Post-acceptance whole-share choice (D-43)
+
+Permitted target exposure is converted to whole shares by rounding magnitude down toward
+zero: `floor(permitted_target_notional / sizing_reference_price)`, with the signal direction
+applied afterward. A target below one share produces zero exposure. Nearest-share, round-up,
+and fractional-share sizing are excluded from the primary cell.
+
+The exact sizing-reference price, next-session gap handling, pre-handoff revalidation, and
+minimum economic rebalance threshold remain open. Rounding down cannot intentionally exceed
+the CVaR-derived target, but an overnight gap can still change realized notional and loss.
+
+This choice does not authorize an order or guarantee the cap will contain a gap. Constitution
+identity, trial count, selected strategy, current USD 0 live allocation, and authority remain
+unchanged.
