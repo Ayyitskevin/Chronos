@@ -1,0 +1,246 @@
+{
+  "schema_version": "chronos-qqq-five-tool-candidate-v1",
+  "candidate_id": "qqq-five-tool-confluence-v3.6-integration-v1",
+  "status": "blocked_before_first_data_read",
+  "purpose": "Bind the pinned Five-Tool v3.6 implementation to QQQ v1 causal price domains, owner risk limits, and Chronos execution semantics without mutating the simple SMA control.",
+  "governance": {
+    "constitution_path": "research/qqq_v1_constitution.json",
+    "constitution_sha256": "4c99ce9d09f43a418c7342b0e40a0795b253bf3f1cd0e37d29419498b3008d56",
+    "integration_boundary": "ADR-0032",
+    "control_evidence_transfer": "forbidden",
+    "material_change_rule": "Any material overlay or pinned-source change creates a new candidate identity and resets the affected evidence before further data access."
+  },
+  "base_five_tool_identity": {
+    "strategy_id": "five_tool_confluence_v3_6",
+    "pine_path": "research/pine/00_five_tool_confluence_aio.pine",
+    "pine_sha256": "e51d5a40d2e933bf86847c7432364ba8934fd2de653d6aec3d7205639248e45f",
+    "input_contract_path": "specs/five_tool_confluence_v3_6.yaml",
+    "input_contract_file_sha256": "a8e69b26c9e23a9c5b0674a8895c28a540665aa116c05781c1a6d2cfeddb769f",
+    "input_contract_digest": "93273762b1d01dade4133628a9a2cebf0a1364774fde654a9efc07c4ccf6d049",
+    "semantic_contract_digest": "c0d85a17b26b9da3c1e68dd16fd341288fd3710021a7dbf9a07c953c3a9fe196",
+    "blocked_campaign_path": "research/five_tool_v3_6_campaign_manifest.json",
+    "blocked_campaign_file_sha256": "995d4b5c12e9ff442651c54a8568d3de8bbcfd591059eea4d4965f4414172170",
+    "source_input_count": 219,
+    "pine_overrides": {}
+  },
+  "authority": {
+    "order_authority": "none",
+    "promotion_authority": "none",
+    "selected_strategy": null,
+    "registered_trials": 0,
+    "live_risk_authorized_usd": 0,
+    "performance_claims": [],
+    "short_execution": "forbidden"
+  },
+  "scope": {
+    "execution_target_symbol": "QQQ",
+    "robustness_panel_symbols": [
+      "QQQ",
+      "SPY",
+      "IWM",
+      "DIA",
+      "GLD",
+      "TLT"
+    ],
+    "robustness_panel_authority": "validation_only_never_execution",
+    "bar_interval": "1D",
+    "signal_clock": "confirmed_daily_close",
+    "earliest_action_clock": "next_session",
+    "same_bar_action": false,
+    "history_start_utc": null
+  },
+  "source_native_effective_defaults": {
+    "preset": "Auto_resolves_to_Daily",
+    "regime_lookback": 20,
+    "regime_enter_z": 0.85,
+    "regime_exit_z": 0.55,
+    "regime_confirmation_closes": 2,
+    "volatility_percentile_adjustment": true,
+    "hysteresis": true,
+    "ema_filter_enabled": true,
+    "ema_length": 100,
+    "entry_triggers": {
+      "regime_flip": true,
+      "hidden_divergence": true,
+      "regular_divergence": true,
+      "avwap_reclaim": true
+    },
+    "minimum_score": 55,
+    "master_allow_shorts": false,
+    "dedicated_short_v2": true,
+    "short_plus": true,
+    "dedicated_long_v2": false,
+    "long_plus": false,
+    "use_time_stop": false,
+    "exit_on_neutral": false
+  },
+  "causal_price_domains": {
+    "decision_ohlc": {
+      "domain": "point_in_time_total_return_OHLC_rebased_to_current_raw_close",
+      "rule": "At each confirmed close t derive one causal adjustment factor per historical bar using only corporate actions known by t, multiply each bar OHLC by that factor, and normalize the series so adjusted_close_t equals raw_close_t.",
+      "future_restatement": "forbidden",
+      "missing_or_uncertifiable_actions": "no_trace_and_no_new_exposure"
+    },
+    "volume": {
+      "domain": "point_in_time_current_share_units",
+      "rule": "Apply only the inverse causal split factor to historical raw share volume; cash distributions do not change share volume.",
+      "missing_or_uncertifiable_splits": "no_trace_and_no_new_exposure"
+    },
+    "regime_returns_and_oscillators": "decision_ohlc",
+    "ema100": "decision_ohlc_close",
+    "atr14_gap_and_volatility": "decision_ohlc_true_range",
+    "pivots_support_resistance_and_structural_stops": "decision_ohlc",
+    "avwap": "decision_ohlc_hlc3_or_close_weighted_by_current_share_unit_volume",
+    "benchmark_and_mansfield_relative_strength": "independently_causal_point_in_time_total_return_indices_with_identity_bound_aligned_closes",
+    "raw_execution": {
+      "domain": "raw_tradable_prices",
+      "uses": [
+        "quotes",
+        "order_limits",
+        "fills",
+        "positions",
+        "cash",
+        "broker_reconciliation"
+      ]
+    },
+    "level_translation_at_signal": "Because decision OHLC is rebased so close_t equals raw_close_t, EMA, ATR, AVWAP, support, resistance, stop, and target levels at t are expressed in current raw-price units without future knowledge.",
+    "corporate_action_between_signal_and_handoff": "invalidate_and_consume_the_entry_event_no_factor_roll_forward_or_fallback",
+    "domain_mixing": "forbidden"
+  },
+  "entry": {
+    "state_requirement": "flat",
+    "event": "pinned_source_confirmed_entry_intent",
+    "one_attempt_per_event": true,
+    "later_retry_chase_or_in_position_add": false,
+    "order_form": "protected_marketable_limit",
+    "market_protection_collar_fraction": 0.01,
+    "time_in_force": "DAY",
+    "gap_rule": "revalidate_the_signal_time_risk_distance_and_all_caps_against_the_next_session_protected_limit_then_only_reduce_quantity",
+    "partial_fill": "retain_filled_quantity_cancel_or_expire_remainder_and_never_top_up"
+  },
+  "position_plan": {
+    "initial_stop": "active_side_structural_stop_when_supplied_otherwise_2.0_times_ATR14",
+    "signal_time_stop": "absolute_stop_active_for_every_leg_on_the_entry_bar_with_stop_market_gap_semantics_in_replay",
+    "post_fill_ladder": "freeze_signal_time_risk_distance_then_rebase_stop_and_targets_to_the_adverse_actual_next_open_fill_for_later_bars",
+    "target_1_r": 1.0,
+    "target_2_r": 2.0,
+    "break_even_after_target_1": true,
+    "runner": {
+      "enabled": true,
+      "activation_r": 1.0,
+      "chandelier_lookback": 22,
+      "chandelier_atr_multiple": 3.0
+    },
+    "quantity_split": "up_to_three_same_entry_event_legs_using_source_floor_third_remainder_geometry",
+    "discretionary_exits": [
+      "opposite_confirmed_regime",
+      "short_AVWAP_reclaim_when_short_side_active",
+      "long_AVWAP_failure_only_when_dedicated_long_v2_active"
+    ],
+    "not_added": [
+      "SMA200_exit",
+      "fixed_time_stop",
+      "neutral_regime_exit"
+    ],
+    "durable_paper_lifecycle": "not_implemented_by_this_candidate_spec"
+  },
+  "risk_and_sizing": {
+    "applicable_capital_base_usd": "min(marked_strategy_nav_usd,3000)",
+    "native_stop_risk_fraction": 0.01,
+    "native_stop_risk_usd_max": 30,
+    "outer_daily_cvar": {
+      "confidence": 0.95,
+      "lookback_completed_returns": 252,
+      "direction_specific_tail_observations": 13,
+      "max_loss_fraction_of_applicable_base": 0.015,
+      "max_loss_usd": 45,
+      "observation": "one_session_direction_specific_loss_fraction_on_one_USD_of_unlevered_QQQ_exposure_from_the_point_in_time_total_return_close_to_close_return",
+      "long_loss_fraction": "max(0,-one_session_total_return)",
+      "short_loss_fraction": "unavailable_until_certified_borrow_and_cost_evidence_exists",
+      "estimator": "arithmetic_mean_of_the_13_greatest_loss_fractions_in_the_252_completed_return_window",
+      "required_value": "finite_and_strictly_positive_otherwise_no_new_exposure"
+    },
+    "quantity_components": {
+      "signal_time_entry_basis_usd": "confirmed_raw_close_t",
+      "handoff_entry_basis_usd": "max(confirmed_raw_close_t,next_session_protected_buy_limit)",
+      "signal_time_active_initial_stop_usd": "active_side_structural_stop_usd_when_supplied_otherwise_confirmed_raw_close_t-2.0*ATR14_usd",
+      "signal_time_native_stop_distance_usd": "confirmed_raw_close_t-signal_time_active_initial_stop_usd",
+      "handoff_native_stop_distance_usd": "max(signal_time_native_stop_distance_usd,next_session_protected_buy_limit-signal_time_active_initial_stop_usd)",
+      "native_stop_loss_budget_usd": "min(0.01*applicable_capital_base_usd,30)",
+      "signal_time_native_stop_quantity": "native_stop_loss_budget_usd/signal_time_native_stop_distance_usd",
+      "handoff_native_stop_quantity": "native_stop_loss_budget_usd/handoff_native_stop_distance_usd",
+      "cvar_loss_budget_usd": "min(0.015*applicable_capital_base_usd,45)",
+      "signal_time_cvar_quantity": "cvar_loss_budget_usd/(signal_time_entry_basis_usd*direction_specific_unit_exposure_cvar_loss_fraction)",
+      "handoff_cvar_quantity": "cvar_loss_budget_usd/(handoff_entry_basis_usd*direction_specific_unit_exposure_cvar_loss_fraction)",
+      "signal_time_gross_quantity": "1.0*applicable_capital_base_usd/signal_time_entry_basis_usd",
+      "handoff_gross_quantity": "1.0*applicable_capital_base_usd/handoff_entry_basis_usd",
+      "signal_time_leverage_quantity": "1.0*applicable_capital_base_usd/signal_time_entry_basis_usd",
+      "handoff_leverage_quantity": "1.0*applicable_capital_base_usd/handoff_entry_basis_usd",
+      "signal_time_affordability_quantity": "greatest_nonnegative_whole_QQQ_quantity_whose_signal_time_entry_notional_plus_projected_all_in_entry_and_exit_costs_does_not_exceed_fresh_settled_cash_after_owner_cash_floor",
+      "handoff_affordability_quantity": "greatest_nonnegative_whole_QQQ_quantity_whose_handoff_entry_notional_plus_projected_all_in_entry_and_exit_costs_does_not_exceed_fresh_settled_cash_after_owner_cash_floor",
+      "owner_policy_quantity": "fresh_owner_mandate_and_account_policy_ceiling_shares_for_QQQ",
+      "missing_stale_nonfinite_nonpositive_or_uncertifiable_input": "no_new_exposure"
+    },
+    "signal_time_permitted_quantity": "floor_toward_zero(max(0,min(signal_time_native_stop_quantity,signal_time_cvar_quantity,signal_time_gross_quantity,signal_time_leverage_quantity,signal_time_affordability_quantity,owner_policy_quantity)))",
+    "handoff_permitted_quantity": "min(signal_time_permitted_quantity,floor_toward_zero(max(0,min(handoff_native_stop_quantity,handoff_cvar_quantity,handoff_gross_quantity,handoff_leverage_quantity,handoff_affordability_quantity,owner_policy_quantity))))",
+    "gross_exposure_fraction_max": 1.0,
+    "leverage_max": 1.0,
+    "whole_share_minimum": 1,
+    "in_position_upsize": "forbidden",
+    "missing_stale_nonfinite_or_uncertifiable_input": "no_new_exposure",
+    "observed_daily_and_session_loss_halt_fraction": 0.02,
+    "observed_daily_and_session_loss_halt_usd_at_reference": 60,
+    "peak_to_trough_drawdown_halt_fraction": 0.1,
+    "short_without_certified_borrow_shortability_account_and_owner_evidence": "zero_exposure"
+  },
+  "costs": {
+    "parity_only_source_replay": "3_bps_commission_per_fill_and_2_slippage_ticks_per_fill_as_pinned_by_the_base_campaign",
+    "economic_validation": "owner_constitution_all_in_content_addressed_cost_schedule",
+    "minimum_economic_trade": "projected_all_in_round_trip_cost_no_greater_than_10_percent_of_min(native_stop_risk_budget,applicable_CVaR_budget)",
+    "missing_or_unbounded_cost": "no_new_exposure"
+  },
+  "pre_handoff_revalidation": [
+    "exact_candidate_constitution_pine_contract_semantic_and_settings_identity",
+    "same_unconsumed_QQQ_entry_event_and_contract_identity",
+    "no_corporate_action_or_adjustment_factor_change_since_signal",
+    "fresh_complete_next_session_quote_market_rule_and_session_evidence",
+    "fresh_account_position_order_execution_cash_and_NAV_reconciliation",
+    "applicable_mode_mandate_strategy_promotion_and_long_only_binding",
+    "kill_switch_disengaged_and_no_daily_session_drawdown_or_policy_halt",
+    "fresh_finite_stop_CVaR_cost_affordability_gross_leverage_and_quantity_evidence",
+    "handoff_quantity_not_greater_than_signal_time_quantity"
+  ],
+  "identity_locks": {
+    "history_start_utc": null,
+    "candidate_settings_sha256": null,
+    "certified_catalog_sha256": null,
+    "ordinary_dataset_release_sha256": null,
+    "clean_holdout_map_sha256": null,
+    "cash_leg_source_sha256": null,
+    "all_in_cost_schedule_sha256": null,
+    "short_borrow_cost_schedule_sha256": null,
+    "power_analysis_sha256": null,
+    "evaluator_sha256": null,
+    "criteria_sha256": null,
+    "code_commit": null,
+    "tradingview_trace_export_sha256": null,
+    "paper_position_lifecycle_sha256": null
+  },
+  "blocked_before_first_data_read": [
+    "Owner approval is recorded by merge of this exact candidate identity.",
+    "The base Five-Tool campaign's typed ablation and execution-binding blockers remain unresolved.",
+    "The certified six-symbol QQQ release, exact ordinary catalog, and owner-approved unopened holdout map do not exist.",
+    "History start, candidate settings, code commit, evaluator, criteria, registry, campaign, benchmark, cost, and power identities are unresolved.",
+    "TradingView trace and execution parity remain unverified.",
+    "The durable paper position-management lifecycle is absent.",
+    "Short compiler, borrow, shortability, account, legal, tax, and owner evidence are absent."
+  ],
+  "forbidden_imports_or_capabilities": [
+    "market_data_reader",
+    "holdout_unlock",
+    "trial_registration",
+    "broker",
+    "order_submission",
+    "promotion"
+  ]
+}
