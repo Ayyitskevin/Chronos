@@ -8,11 +8,13 @@ from pathlib import Path
 import pytest
 
 from chronos.research.qqq_control import (
+    EXPECTED_CONSTITUTION_SHA256,
     EXPECTED_PREREGISTRATION_SHA256,
     ControlBlockerCode,
     ControlCompilationStatus,
     QQQControlSpecError,
     compile_qqq_control,
+    default_constitution_path,
     default_preregistration_path,
     load_qqq_control_preregistration,
 )
@@ -26,6 +28,10 @@ def test_exact_preregistration_compiles_only_to_blocked_metadata() -> None:
     compiled = compile_qqq_control()
 
     assert hashlib.sha256(payload).hexdigest() == EXPECTED_PREREGISTRATION_SHA256
+    assert compiled.constitution_sha256 == EXPECTED_CONSTITUTION_SHA256
+    assert hashlib.sha256(default_constitution_path().read_bytes()).hexdigest() == (
+        EXPECTED_CONSTITUTION_SHA256
+    )
     assert compiled.status is ControlCompilationStatus.BLOCKED_BEFORE_FIRST_DATA_READ
     assert compiled.order_authority == "none"
     assert compiled.promotion_authority == "none"
@@ -61,9 +67,11 @@ def test_chosen_equality_gap_cost_and_order_semantics_are_exact() -> None:
     signal = document["signal"]
     order = document["entry_and_order_semantics"]
     economics = document["minimum_economic_trade"]
+    risk = document["risk_and_sizing"]
     assert isinstance(signal, dict)
     assert isinstance(order, dict)
     assert isinstance(economics, dict)
+    assert isinstance(risk, dict)
 
     assert signal["initialization"] == {
         "before_full_window": "flat",
@@ -77,6 +85,25 @@ def test_chosen_equality_gap_cost_and_order_semantics_are_exact() -> None:
     assert order["later_retry_or_chase"] is False
     assert "only_reduce_quantity_never_increase" in order["entry_gap_rule"]
     assert economics["maximum_projected_round_trip_cost_fraction_of_applicable_cvar_budget"] == 0.1
+    assert risk["unit_exposure_cvar"] == {
+        "observation": (
+            "one_session_direction_specific_loss_fraction_on_one_USD_of_unlevered_QQQ_"
+            "exposure_from_the_point_in_time_total_return_close_to_close_return"
+        ),
+        "long_loss_fraction": "max(0,-one_session_total_return)",
+        "short_loss_fraction": "unavailable_until_certified_borrow_and_cost_evidence_exists",
+        "estimator": (
+            "arithmetic_mean_of_the_13_greatest_loss_fractions_in_the_252_completed_return_window"
+        ),
+        "required_value": "finite_and_strictly_positive_otherwise_no_new_exposure",
+    }
+    assert risk["permitted_target_notional"]["definition"] == (
+        "max(0,min(cvar_notional_usd,gross_notional_usd,leverage_notional_usd,"
+        "affordability_notional_usd,owner_policy_notional_usd))"
+    )
+    assert risk["permitted_target_notional"]["cvar_notional_usd"] == (
+        "cvar_loss_budget_usd/direction_specific_unit_exposure_cvar_loss_fraction"
+    )
 
 
 def test_any_byte_drift_refuses_before_interpretation(tmp_path: Path) -> None:
@@ -89,7 +116,17 @@ def test_any_byte_drift_refuses_before_interpretation(tmp_path: Path) -> None:
         compile_qqq_control(changed)
 
 
-def test_spec_loader_has_no_data_holdout_trial_or_execution_capability_import() -> None:
+def test_constitution_bytes_are_independently_authenticated(tmp_path: Path) -> None:
+    constitution = json.loads(default_constitution_path().read_text())
+    constitution["authority"]["live_risk_authorized_usd"] = 999_999
+    changed = tmp_path / "constitution.json"
+    changed.write_text(json.dumps(constitution, sort_keys=True))
+
+    with pytest.raises(QQQControlSpecError, match="constitution drifted"):
+        compile_qqq_control(constitution_path=changed)
+
+
+def test_spec_loader_has_no_chronos_capability_import_at_all() -> None:
     tree = ast.parse(_MODULE.read_text(), filename=str(_MODULE))
     imports: set[str] = set()
     for node in ast.walk(tree):
@@ -98,16 +135,4 @@ def test_spec_loader_has_no_data_holdout_trial_or_execution_capability_import() 
         elif isinstance(node, ast.ImportFrom) and node.module:
             imports.add(node.module)
 
-    forbidden = (
-        "chronos.marketdata",
-        "chronos.histdata",
-        "chronos.registry",
-        "chronos.broker",
-        "chronos.orders",
-        "chronos.execution",
-        "chronos.control",
-        "chronos.supervisor",
-    )
-    assert not any(
-        name == prefix or name.startswith(f"{prefix}.") for name in imports for prefix in forbidden
-    )
+    assert not any(name == "chronos" or name.startswith("chronos.") for name in imports)

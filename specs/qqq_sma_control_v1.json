@@ -75,11 +75,29 @@
       "max_loss_fraction_of_applicable_base": 0.015,
       "max_loss_usd": 45
     },
+    "unit_exposure_cvar": {
+      "observation": "one_session_direction_specific_loss_fraction_on_one_USD_of_unlevered_QQQ_exposure_from_the_point_in_time_total_return_close_to_close_return",
+      "long_loss_fraction": "max(0,-one_session_total_return)",
+      "short_loss_fraction": "unavailable_until_certified_borrow_and_cost_evidence_exists",
+      "estimator": "arithmetic_mean_of_the_13_greatest_loss_fractions_in_the_252_completed_return_window",
+      "required_value": "finite_and_strictly_positive_otherwise_no_new_exposure"
+    },
+    "permitted_target_notional": {
+      "applicable_capital_base_usd": "min(marked_strategy_nav_usd,3000)",
+      "cvar_loss_budget_usd": "min(0.015*applicable_capital_base_usd,45)",
+      "cvar_notional_usd": "cvar_loss_budget_usd/direction_specific_unit_exposure_cvar_loss_fraction",
+      "gross_notional_usd": "1.0*applicable_capital_base_usd",
+      "leverage_notional_usd": "1.0*applicable_capital_base_usd",
+      "affordability_notional_usd": "fresh_settled_cash_after_owner_cash_floor_and_projected_all_in_entry_and_exit_costs",
+      "owner_policy_notional_usd": "fresh_owner_mandate_and_account_policy_ceiling_for_QQQ",
+      "definition": "max(0,min(cvar_notional_usd,gross_notional_usd,leverage_notional_usd,affordability_notional_usd,owner_policy_notional_usd))",
+      "missing_stale_nonfinite_or_nonpositive_input": "no_new_exposure"
+    },
     "gross_exposure_fraction_max": 1.0,
     "leverage_max": 1.0,
     "whole_share_rule": "floor_magnitude_toward_zero",
     "minimum_quantity_shares": 1,
-    "signal_time_quantity": "floor(permitted_target_notional/confirmed_raw_close_t)",
+    "signal_time_quantity": "floor(signal_time_permitted_target_notional_usd/confirmed_raw_close_t)",
     "in_position_upsize": "forbidden",
     "reduction": "eligible_next_session_after_each_confirmed_close"
   },
@@ -91,7 +109,7 @@
     "market_protection_collar_fraction": 0.01,
     "time_in_force": "DAY",
     "entry_gap_rule": "recompute_against_the_next_session_protected_limit_and_only_reduce_quantity_never_increase",
-    "handoff_quantity": "min(signal_time_quantity,floor(permitted_target_notional/max(confirmed_raw_close_t,next_session_protected_buy_limit)))",
+    "handoff_quantity": "min(signal_time_quantity,floor(handoff_permitted_target_notional_usd/max(confirmed_raw_close_t,next_session_protected_buy_limit)))",
     "gap_or_cost_rejection": "consume_the_entry_event_and_wait_for_a_new_direction_transition",
     "partial_fill": "retain_the_filled_quantity_as_the_position_cancel_the_remainder_at_DAY_expiry_and_never_top_up",
     "direction_flip": "flatten_the_old_direction_first_then_require_authoritative_flat_reconciliation_before_any_same_event_opposite_entry",

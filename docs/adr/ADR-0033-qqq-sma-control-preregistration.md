@@ -14,10 +14,13 @@ the remaining answers from the pinned Confluence and the current Chronos authori
 configuration rather than continuing the question loop.
 
 The controlling machine artifact is `specs/qqq_sma_control_v1.json`, SHA-256
-`06465d4541abd35119092176b3da71f958d3acb6f7dc6d3ccaa97fd5586991da`.
-`chronos.research.qqq_control` pins that byte identity and compiles only typed blocked
-metadata. It possesses no market-data, holdout, trial, broker, order, or promotion
-capability.
+`a0ec83b3431016df0c599895ead65083fc72b5afb87073dfbdf046d68e23bb03`.
+Those bytes define the unit-exposure CVaR observation and the complete composition of
+CVaR, gross, leverage, affordability, and owner-policy caps into permitted target
+notional; no sizing term is inherited only from unpinned prose.
+`chronos.research.qqq_control` independently hashes both that artifact and its referenced
+constitution bytes before compiling typed blocked metadata. It possesses no other Chronos
+capability: no market-data, holdout, trial, broker, order, or promotion import.
 
 ## Decision
 
@@ -58,6 +61,16 @@ The primary economic floor is one whole share **and** projected all-in round-tri
 greater than 10% of the applicable CVaR dollar budget. This relates the cost floor to the
 account's already-frozen tail-risk scale without manufacturing an expected-return estimate.
 Missing or unbounded cost evidence blocks entry.
+
+The CVaR denominator is now part of the pinned artifact: one unit-exposure observation is
+the one-session direction-specific loss fraction on USD 1 of unlevered QQQ exposure from
+the point-in-time total-return close-to-close return. Long loss is `max(0, -return)`; the
+estimator is the mean of the 13 greatest loss fractions in the completed 252-return
+window. It must be finite and strictly positive. The CVaR notional is its USD loss budget
+divided by that unit-exposure loss fraction. Permitted target notional is the non-negative
+minimum of CVaR notional, 100% gross, 1x leverage, fresh post-floor/post-cost
+affordability, and fresh owner-policy notional. Any missing, stale, non-finite, or
+non-positive required input creates no new exposure.
 
 ### 4. Small, prospective robustness grid
 

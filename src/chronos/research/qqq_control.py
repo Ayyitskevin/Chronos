@@ -18,7 +18,7 @@ from typing import cast
 
 SCHEMA_VERSION = "chronos-qqq-sma-control-v1"
 PREREGISTRATION_ID = "qqq-sma-control-v1-owner-review-2026-08-25"
-EXPECTED_PREREGISTRATION_SHA256 = "06465d4541abd35119092176b3da71f958d3acb6f7dc6d3ccaa97fd5586991da"
+EXPECTED_PREREGISTRATION_SHA256 = "a0ec83b3431016df0c599895ead65083fc72b5afb87073dfbdf046d68e23bb03"
 EXPECTED_CONSTITUTION_SHA256 = "4c99ce9d09f43a418c7342b0e40a0795b253bf3f1cd0e37d29419498b3008d56"
 
 _ROOT_KEYS = frozenset(
@@ -86,6 +86,7 @@ class ControlBlocker:
 class CompiledQQQControl:
     preregistration_id: str
     preregistration_sha256: str
+    constitution_sha256: str
     status: ControlCompilationStatus
     cells: tuple[ControlCell, ...]
     blockers: tuple[ControlBlocker, ...]
@@ -104,6 +105,10 @@ class CompiledQQQControl:
 
 def default_preregistration_path() -> Path:
     return Path(__file__).resolve().parents[3] / "specs/qqq_sma_control_v1.json"
+
+
+def default_constitution_path() -> Path:
+    return Path(__file__).resolve().parents[3] / "research/qqq_v1_constitution.json"
 
 
 def _mapping(value: object, context: str) -> dict[str, object]:
@@ -222,6 +227,11 @@ def _validate_document(document: dict[str, object]) -> tuple[ControlCell, ...]:
 
     constitution = _mapping(document.get("constitution"), "constitution")
     _require_exact(
+        constitution.get("constitution_path"),
+        "research/qqq_v1_constitution.json",
+        "constitution.constitution_path",
+    )
+    _require_exact(
         constitution.get("constitution_sha256"),
         EXPECTED_CONSTITUTION_SHA256,
         "constitution.constitution_sha256",
@@ -268,6 +278,83 @@ def _validate_document(document: dict[str, object]) -> tuple[ControlCell, ...]:
     _require_exact(cvar.get("tail_observation_count"), 13, "CVaR tail count")
     _require_exact(cvar.get("max_loss_fraction_of_applicable_base"), 0.015, "CVaR limit")
     _require_exact(cvar.get("max_loss_usd"), 45, "CVaR dollar limit")
+    unit_cvar = _mapping(risk.get("unit_exposure_cvar"), "risk_and_sizing.unit_exposure_cvar")
+    _require_exact(
+        unit_cvar.get("observation"),
+        "one_session_direction_specific_loss_fraction_on_one_USD_of_unlevered_QQQ_"
+        "exposure_from_the_point_in_time_total_return_close_to_close_return",
+        "unit-exposure CVaR observation",
+    )
+    _require_exact(
+        unit_cvar.get("long_loss_fraction"),
+        "max(0,-one_session_total_return)",
+        "long unit-exposure loss",
+    )
+    _require_exact(
+        unit_cvar.get("short_loss_fraction"),
+        "unavailable_until_certified_borrow_and_cost_evidence_exists",
+        "short unit-exposure loss",
+    )
+    _require_exact(
+        unit_cvar.get("estimator"),
+        "arithmetic_mean_of_the_13_greatest_loss_fractions_in_the_252_completed_return_window",
+        "unit-exposure CVaR estimator",
+    )
+    _require_exact(
+        unit_cvar.get("required_value"),
+        "finite_and_strictly_positive_otherwise_no_new_exposure",
+        "unit-exposure CVaR required value",
+    )
+    target_notional = _mapping(
+        risk.get("permitted_target_notional"),
+        "risk_and_sizing.permitted_target_notional",
+    )
+    _require_exact(
+        target_notional.get("applicable_capital_base_usd"),
+        "min(marked_strategy_nav_usd,3000)",
+        "target-notional capital base",
+    )
+    _require_exact(
+        target_notional.get("cvar_loss_budget_usd"),
+        "min(0.015*applicable_capital_base_usd,45)",
+        "target-notional CVaR budget",
+    )
+    _require_exact(
+        target_notional.get("cvar_notional_usd"),
+        "cvar_loss_budget_usd/direction_specific_unit_exposure_cvar_loss_fraction",
+        "target-notional CVaR composition",
+    )
+    _require_exact(
+        target_notional.get("gross_notional_usd"),
+        "1.0*applicable_capital_base_usd",
+        "target-notional gross cap",
+    )
+    _require_exact(
+        target_notional.get("leverage_notional_usd"),
+        "1.0*applicable_capital_base_usd",
+        "target-notional leverage cap",
+    )
+    _require_exact(
+        target_notional.get("affordability_notional_usd"),
+        "fresh_settled_cash_after_owner_cash_floor_and_projected_all_in_entry_and_exit_costs",
+        "target-notional affordability",
+    )
+    _require_exact(
+        target_notional.get("owner_policy_notional_usd"),
+        "fresh_owner_mandate_and_account_policy_ceiling_for_QQQ",
+        "target-notional owner policy",
+    )
+    _require_exact(
+        target_notional.get("definition"),
+        "max(0,min(cvar_notional_usd,gross_notional_usd,leverage_notional_usd,"
+        "affordability_notional_usd,owner_policy_notional_usd))",
+        "permitted target-notional definition",
+    )
+    _require_exact(
+        target_notional.get("missing_stale_nonfinite_or_nonpositive_input"),
+        "no_new_exposure",
+        "target-notional missing-input rule",
+    )
     _require_exact(risk.get("gross_exposure_fraction_max"), 1.0, "gross limit")
     _require_exact(risk.get("leverage_max"), 1.0, "leverage limit")
     _require_exact(risk.get("in_position_upsize"), "forbidden", "in-position upsize")
@@ -331,8 +418,25 @@ def _validate_document(document: dict[str, object]) -> tuple[ControlCell, ...]:
     return _parse_cells(document.get("cells"))
 
 
-def load_qqq_control_preregistration(path: Path | None = None) -> tuple[str, dict[str, object]]:
-    """Load the exact preregistration bytes and return their digest and document."""
+def _verify_constitution(path: Path) -> str:
+    try:
+        payload = path.read_bytes()
+    except OSError as error:
+        raise QQQControlSpecError(f"cannot read QQQ constitution: {error}") from error
+    digest = hashlib.sha256(payload).hexdigest()
+    if digest != EXPECTED_CONSTITUTION_SHA256:
+        raise QQQControlSpecError(
+            f"QQQ constitution drifted: expected {EXPECTED_CONSTITUTION_SHA256}, observed {digest}"
+        )
+    return digest
+
+
+def load_qqq_control_preregistration(
+    path: Path | None = None,
+    *,
+    constitution_path: Path | None = None,
+) -> tuple[str, dict[str, object]]:
+    """Load and authenticate the preregistration and referenced constitution bytes."""
 
     target = path or default_preregistration_path()
     try:
@@ -351,13 +455,21 @@ def load_qqq_control_preregistration(path: Path | None = None) -> tuple[str, dic
         raise QQQControlSpecError("QQQ control preregistration is not valid JSON") from error
     document = _mapping(decoded, "preregistration")
     _validate_document(document)
+    _verify_constitution(constitution_path or default_constitution_path())
     return digest, document
 
 
-def compile_qqq_control(path: Path | None = None) -> CompiledQQQControl:
+def compile_qqq_control(
+    path: Path | None = None,
+    *,
+    constitution_path: Path | None = None,
+) -> CompiledQQQControl:
     """Compile only typed blocked metadata; v1 grants no reader or execution plan."""
 
-    digest, document = load_qqq_control_preregistration(path)
+    digest, document = load_qqq_control_preregistration(
+        path,
+        constitution_path=constitution_path,
+    )
     authority = _mapping(document["authority"], "authority")
     cells = _parse_cells(document["cells"])
     blockers = (
@@ -393,6 +505,7 @@ def compile_qqq_control(path: Path | None = None) -> CompiledQQQControl:
     return CompiledQQQControl(
         preregistration_id=PREREGISTRATION_ID,
         preregistration_sha256=digest,
+        constitution_sha256=EXPECTED_CONSTITUTION_SHA256,
         status=ControlCompilationStatus.BLOCKED_BEFORE_FIRST_DATA_READ,
         cells=cells,
         blockers=blockers,
@@ -403,6 +516,7 @@ def compile_qqq_control(path: Path | None = None) -> CompiledQQQControl:
 
 
 __all__ = [
+    "EXPECTED_CONSTITUTION_SHA256",
     "EXPECTED_PREREGISTRATION_SHA256",
     "PREREGISTRATION_ID",
     "SCHEMA_VERSION",
@@ -413,6 +527,7 @@ __all__ = [
     "ControlCompilationStatus",
     "QQQControlSpecError",
     "compile_qqq_control",
+    "default_constitution_path",
     "default_preregistration_path",
     "load_qqq_control_preregistration",
 ]
