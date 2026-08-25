@@ -280,12 +280,14 @@ runbooks.
   protective exits, remaining parameter neighbors, power analysis, and a certified clean
   dataset partition. D-38 chooses CVaR-capped volatility sizing, and D-39 chooses a
   252-session empirical 95% historical estimator whose tail contains only 13 observations.
-  D-40 constructs long and short tails independently, but its return/window convention,
-  NAV composition, and rebalance rule are still unresolved. D-41 caps the applicable sizing
+  D-40 constructs long and short tails independently, but its return/window convention and
+  NAV composition are still unresolved. D-41 caps the applicable sizing
   base at the lower of marked strategy NAV and USD 3,000, so gains do not automatically
-  expand the USD 45 ceiling. The short estimate and exposure remain unavailable while
-  compiler support, account eligibility, shortability/borrow evidence, costs, and fresh
-  authority are absent.
+  expand the USD 45 ceiling. D-42 permits next-session risk reductions but only weekly
+  increases; its weekly anchor, whole-share rounding, and minimum economic trade threshold
+  remain unresolved. The short estimate and exposure remain unavailable while compiler
+  support, account eligibility, shortability/borrow evidence, costs, and fresh authority
+  are absent.
 - USD 3,000 is a conditional research reference/future funding target, not current capital.
   A zero incremental data budget means missing certifiable evidence blocks the campaign.
 

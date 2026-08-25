@@ -186,10 +186,12 @@ existing 100% gross/1x ceilings, and D-39 selects a 252-session empirical 95% hi
 CVaR estimator. D-40 constructs long and short loss tails separately and keeps short
 exposure at zero while short-cost evidence is uncertifiable. D-41 sets the sizing base to
 the lower of marked strategy NAV and USD 3,000, preventing automatic risk expansion after
-gains. Phase 0 has not exited: the exact signal window/price/equality convention,
-initialization, protective exits, CVaR return/window-inclusion/NAV-composition/rebalance
-semantics, remaining parameter neighbors, power analysis, certified data/cost/borrow
-identities, a clean holdout, incident availability, and legal/tax review remain open.
+gains. D-42 recomputes risk daily, permits next-session reductions, and limits increases to
+a weekly schedule. Phase 0 has not exited: the exact signal window/price/equality
+convention, initialization, protective exits, CVaR return/window-inclusion/NAV composition,
+weekly anchor, whole-share/economic-trade/order semantics, remaining parameter neighbors,
+power analysis, certified data/cost/borrow identities, a clean holdout, incident
+availability, and legal/tax review remain open.
 
 ## 6. Phase 1 — Authority and lifecycle coherence
 

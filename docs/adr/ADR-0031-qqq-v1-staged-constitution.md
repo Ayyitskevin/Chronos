@@ -1,7 +1,7 @@
 # ADR-0031 — QQQ v1 staged research and risk constitution
 
 Status: **accepted — owner directive, 2026-08-25.** Index entries: DECISIONS.md D-35,
-D-36, D-37, D-38, D-39, D-40, and D-41.
+D-36, D-37, D-38, D-39, D-40, D-41, and D-42.
 
 ## Context
 
@@ -204,3 +204,18 @@ composition and rebalance mechanics remain open.
 This choice is a risk-budget ratchet, not evidence of performance and not authorization to
 compound, fund, or trade. Constitution identity, trial count, selected strategy, and
 authority remain unchanged.
+
+## Post-acceptance rebalance-timing choice (D-42)
+
+Risk evidence and target exposure are recomputed at every confirmed daily close. Any
+required gross-exposure reduction—including closing the old direction after a signal
+flip—is eligible at the next session. Exposure increases, including establishing the new
+direction, are eligible only on the frozen weekly increase schedule.
+
+A halt, stale input, or failed gate can reduce or suppress exposure but can never accelerate
+an increase. The exact weekly anchor, whole-share rounding, minimum economic trade
+threshold, and order semantics remain open.
+
+The asymmetry makes safety faster than risk expansion and limits turnover from daily
+estimator noise. It does not guarantee lower costs or losses. Constitution identity, trial
+count, selected strategy, current USD 0 live allocation, and authority remain unchanged.
