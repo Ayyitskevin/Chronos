@@ -1,0 +1,135 @@
+{
+  "schema_version": "chronos-five-tool-arrival-quote-evidence-plan-v1",
+  "plan_id": "five-tool-intraday-arrival-quote-evidence-001",
+  "created_at_utc": "2026-08-24T00:00:00Z",
+  "purpose": "Preregistered technical-blocker slice for causal arrival-quote evidence on the immutable Five-Tool v3.6 opportunity stream. This plan selects no companion, freezes no economic threshold, authorizes no data read, and creates no performance claim.",
+  "execution_state": "blocked_before_certified_quote_data",
+  "blocked_before_first_data_read": true,
+  "selected_companion": null,
+  "candidate": {
+    "candidate_id": "C-1-relative-spread-quote-freshness",
+    "status": "future_priority_not_selected",
+    "role": "possible entry-only veto after a separate reviewed campaign preregistration",
+    "reason": "The candidate is orthogonal and directly cost-relevant, but no certified quote history, exact admission clock, content-addressed cost schedule, or incremental out-of-sample evidence exists."
+  },
+  "performance_claims": [],
+  "promotion_authority": "none",
+  "executable_trial_count": 0,
+  "host_strategy": {
+    "strategy_id": "five_tool_confluence_v3_6",
+    "version": "3.6",
+    "pine_source": {
+      "path": "research/pine/00_five_tool_confluence_aio.pine",
+      "sha256": "e51d5a40d2e933bf86847c7432364ba8934fd2de653d6aec3d7205639248e45f"
+    },
+    "mutates_pine_or_host_identity": false
+  },
+  "research_record": {
+    "evidence_artifact": "docs/FIVE_TOOL_INTRADAY_COMPANION_SOURCES.md",
+    "searxng": {
+      "status": "completed_with_engine_fallback",
+      "detail": "General engines returned no results because Brave was rate-suspended and DuckDuckGo/Startpage required CAPTCHA; local Google Scholar and Semantic Scholar engines returned the primary-source discovery set."
+    },
+    "deepapi": {
+      "status": "unavailable_in_session",
+      "detail": "Account availability and balance were confirmed without exposing credentials. Two paid deep-research POST attempts were interrupted before DeepAPI created a request; the free request ledger confirmed no request id, debit, or output. No DeepAPI result influenced this plan."
+    }
+  },
+  "data_contract": {
+    "status": "pending_owner_certified_dataset",
+    "downloads": false,
+    "tradable_symbols": [
+      "GLD",
+      "IWM",
+      "QQQ"
+    ],
+    "required_fields": [
+      "symbol",
+      "bid",
+      "ask",
+      "source_timestamp_utc",
+      "received_timestamp_utc",
+      "source_sequence_id",
+      "source",
+      "quote_condition"
+    ],
+    "required_metadata": [
+      "NBBO construction and odd-lot policy",
+      "quote-condition normalization",
+      "source clock and sequence semantics",
+      "exchange calendar including early closes and DST",
+      "corporate-action policy",
+      "coverage and gap report",
+      "clean, seen, and burned partition map"
+    ],
+    "dataset_id": null,
+    "catalog_id": null,
+    "sha256": null,
+    "owner_holdout": null,
+    "burned_holdouts": [
+      {
+        "name": "qqq-2022-01-2024-01-consumed",
+        "start": "2022-01-01",
+        "end": "2024-01-10",
+        "symbols": [
+          "QQQ"
+        ],
+        "status": "consumed"
+      }
+    ]
+  },
+  "causal_clock": {
+    "opportunity_clock": "confirmed immutable Five-Tool primary-bar close",
+    "admission_clock": {
+      "status": "pending_resolution",
+      "requirement": "Freeze the last instant at which the entry can still be withheld without changing Five-Tool exits, sizing, or host signal identity."
+    },
+    "join_policy": "Select only a same-symbol quote whose source and receipt timestamps are both at or before the admission timestamp; choose the latest eligible source timestamp without backfill from a later receipt.",
+    "source_timestamp_must_not_follow_receipt": true,
+    "opportunity_must_not_follow_admission": true,
+    "missing_ambiguous_or_invalid_quote": "fail_closed_measurement",
+    "future_quote": "forbidden"
+  },
+  "measurement_contract": {
+    "outputs": [
+      "quote_status",
+      "quote_age_seconds",
+      "relative_quoted_spread_bps",
+      "source_sequence_id",
+      "source_identity"
+    ],
+    "relative_quoted_spread_bps": "10000 * (ask - bid) / ((ask + bid) / 2)",
+    "valid_quote": "positive bid and ask, ask strictly greater than bid, NORMAL normalized condition, causal source and receipt timestamps, stable source identity",
+    "forbidden_decision_inputs": [
+      "fill_price",
+      "effective_spread",
+      "realized_spread",
+      "post-admission midpoint",
+      "mark-out",
+      "final session volume",
+      "validation or holdout fitted threshold"
+    ]
+  },
+  "threshold_policy": {
+    "max_quote_age_seconds": null,
+    "max_relative_quoted_spread_bps": null,
+    "status": "not_selected_or_frozen",
+    "note": "This technical slice measures causal evidence only. Any threshold and monotone neighbors require a successor campaign identity frozen before certified bytes are read."
+  },
+  "implementation_scope": {
+    "module": "src/chronos/research/features/arrival_quotes.py",
+    "tests": "tests/unit/test_feature_arrival_quotes.py",
+    "capability": "validate a blocked plan and align synthetic or future owner-certified arrival quotes to explicit admission points",
+    "may_apply_veto": false,
+    "may_open_dataset": false,
+    "may_register_or_run_trial": false,
+    "may_import_live_authority": false
+  },
+  "blocked_before_campaign": [
+    "Owner supplies and certifies identity-bound intraday NBBO/trades data for GLD, IWM, and QQQ.",
+    "Owner declares a clean holdout that does not reuse the consumed QQQ 2022-01-01 through 2024-01-10 window.",
+    "A reviewed successor preregistration freezes the exact admission clock, quote-age and spread thresholds, monotone neighbors, power, multiplicity, and cost schedule.",
+    "The treatment/control evaluator binds one unchanged Five-Tool opportunity stream and permits the treatment to mask entries only.",
+    "TradingView execution parity, campaign-level aligned return evidence for PBO, and owner risk limits remain separate blockers."
+  ]
+}

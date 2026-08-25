@@ -11,6 +11,21 @@ This campaign is a sidecar. It does not reopen or mutate
 
 No campaign result exists. Public validation authorizes zero executable trials.
 
+## Intraday companion screen (2026-08-24)
+
+The orthogonal market-state/session/liquidity screen selected **no companion**:
+`INSUFFICIENT_EVIDENCE`. Contemporaneous relative quoted spread plus quote
+freshness (`C-1`) is the highest-priority future cell, but it remains contingent
+on certified identity-bound quotes/trades, an exact admission clock, frozen
+costs and thresholds, multiplicity treatment, and an untouched owner holdout.
+
+The bounded arrival-quote slice is measurement infrastructure only: it can
+causally align a quote and fail closed, but it cannot open data, apply a veto,
+register a trial, mutate Five-Tool/Pine identity, or create selection, paper,
+live, risk, or promotion authority. See
+[FIVE_TOOL_INTRADAY_COMPANION_SOURCES.md](FIVE_TOOL_INTRADAY_COMPANION_SOURCES.md)
+and `research/five_tool_intraday_quote_evidence_v1_manifest.json`.
+
 ## Isolation
 
 Each cell holds the Five-Tool signal stream, fill policy, and risk budget fixed.
