@@ -183,11 +183,12 @@ indicator, and D-37 selects an immediate two-state primary transition while rese
 neutral band and five-close confirmation as prospective robustness variants. Neither
 selects a strategy or reads data. D-38 selects CVaR-capped volatility sizing under the
 existing 100% gross/1x ceilings, and D-39 selects a 252-session empirical 95% historical
-CVaR estimator. Phase 0 has not exited: the exact signal window/price/equality convention,
-initialization, protective exits, CVaR return/window-inclusion/capital-base/rebalance
-semantics, long/short tail asymmetry, remaining parameter neighbors, power analysis,
-certified data/cost/borrow identities, a clean holdout, incident availability, and legal/tax
-review remain open.
+CVaR estimator. D-40 constructs long and short loss tails separately and keeps short
+exposure at zero while short-cost evidence is uncertifiable. Phase 0 has not exited: the
+exact signal window/price/equality convention, initialization, protective exits, CVaR
+return/window-inclusion/capital-base/rebalance semantics, remaining parameter neighbors,
+power analysis, certified data/cost/borrow identities, a clean holdout, incident
+availability, and legal/tax review remain open.
 
 ## 6. Phase 1 — Authority and lifecycle coherence
 

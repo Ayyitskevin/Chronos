@@ -66,4 +66,5 @@ none is. Voting correlated indicators together was explicitly avoided.
   protective exits, and remaining parameter neighbors are still unresolved. D-38 selects
   CVaR-capped volatility sizing under the frozen 100% gross/1x ceilings, and D-39 selects a
   252-session empirical historical estimator; its return/window convention, capital base,
-  rebalance rule, and short-side treatment remain unresolved.
+  and rebalance rule remain unresolved. D-40 gives long and short their own loss tails;
+  short exposure remains zero until its borrow/cost evidence is certifiable.
