@@ -1,0 +1,216 @@
+{
+  "schema_version": "chronos-qqq-constitution-v1",
+  "constitution_id": "qqq-daily-trend-v1-owner-frozen-2026-08-25",
+  "adopted_at_utc": "2026-08-25T00:00:00Z",
+  "status": "blocked_before_first_data_read",
+  "purpose": "Freeze the owner-selected QQQ daily long/short research target, economic hurdle, risk envelope, evidence sequence, and strategy roadmap before a new certified campaign observes data.",
+  "identity": {
+    "method": "sha256_exact_file_bytes",
+    "digest_location": "ADR-0031",
+    "material_change_rule": "Any material change creates a new constitution identity and resets the affected strategy to research before further evidence is observed."
+  },
+  "authority": {
+    "live_risk_authorized_usd": 0,
+    "order_authority": "none",
+    "promotion_authority": "none",
+    "submitting_mandate": "forbidden",
+    "performance_claims": [],
+    "selected_strategy": null,
+    "registered_trials": 0
+  },
+  "scope": {
+    "asset_family": "US_LISTED_ETF",
+    "execution_target_symbols": [
+      "QQQ"
+    ],
+    "robustness_panel_symbols": [
+      "QQQ",
+      "SPY",
+      "IWM",
+      "DIA",
+      "GLD",
+      "TLT"
+    ],
+    "robustness_panel_authority": "validation_only_never_execution",
+    "target_directions": [
+      "LONG",
+      "SHORT"
+    ],
+    "bar_interval": "1D",
+    "signal_clock": "confirmed_daily_close",
+    "earliest_execution_clock": "next_session",
+    "same_bar_execution": false,
+    "intraday_execution": false,
+    "options": false,
+    "futures": false,
+    "crypto": false
+  },
+  "capability_matrix": [
+    {
+      "direction": "LONG",
+      "strategy_shape": "SIMPLE_TREND_FOLLOWING",
+      "research": "blocked_pending_preregistration_and_certified_data",
+      "replay": "not_earned",
+      "shadow": "not_earned",
+      "supervised_paper": "not_earned",
+      "autonomous_paper": "not_earned",
+      "live": "not_authorized"
+    },
+    {
+      "direction": "SHORT",
+      "strategy_shape": "SIMPLE_TREND_FOLLOWING",
+      "research": "blocked_pending_preregistration_certified_data_and_borrow_cost_identity",
+      "replay": "not_earned",
+      "shadow": "not_earned",
+      "supervised_paper": "blocked_no_compiler_or_borrow_shortability_evidence",
+      "autonomous_paper": "blocked_no_compiler_or_borrow_shortability_evidence",
+      "live": "not_authorized",
+      "required_before_any_executable_short": [
+        "reviewed SHORT_EQUITY compiler support",
+        "strategy-level short-side promotion binding",
+        "point-in-time shortability and borrow evidence",
+        "content-addressed borrow-cost schedule",
+        "owner-verified margin-account and regulatory eligibility",
+        "independent short-side evidence and owner approval"
+      ]
+    }
+  ],
+  "capital": {
+    "research_reference_capital_usd": 3000,
+    "current_live_allocation_usd": 0,
+    "future_funding_target_usd": 3000,
+    "funding_is_authority": false,
+    "funding_requires_fresh_owner_approval": true,
+    "funding_evidence_gate": {
+      "untouched_holdout": "pass_unchanged",
+      "shadow_calendar_days_min": 90,
+      "supervised_paper": "required",
+      "performance_claim": "none_until_full_vision_ladder_passes"
+    }
+  },
+  "risk": {
+    "max_gross_exposure_fraction": 1.0,
+    "max_leverage": 1.0,
+    "max_qqq_concentration_fraction": 1.0,
+    "max_peak_to_trough_drawdown_fraction": 0.1,
+    "max_daily_loss_fraction": 0.02,
+    "max_daily_loss_usd_at_reference_capital": 60,
+    "max_session_loss_fraction": 0.02,
+    "max_session_loss_usd_at_reference_capital": 60,
+    "daily_cvar_confidence": 0.95,
+    "max_daily_cvar_loss_fraction": 0.015,
+    "max_daily_cvar_loss_usd_at_reference_capital": 45,
+    "loss_limit_semantics": "Observed loss halts new exposure; gaps, short squeezes, and execution slippage can exceed the threshold before it is observed.",
+    "short_loss_asymmetry_acknowledged": true
+  },
+  "economics": {
+    "primary_benchmark": "volatility_matched_QQQ_and_cash_blend",
+    "secondary_benchmark": "raw_QQQ_buy_and_hold_total_return",
+    "cash_leg_source_identity": null,
+    "annualized_post_cost_alpha_point_estimate_min_fraction": 0.04,
+    "benchmark_alpha_95pct_lower_bound_min_exclusive": 0.0,
+    "all_costs_required": [
+      "commissions",
+      "spread",
+      "slippage",
+      "funding",
+      "borrow",
+      "model",
+      "data"
+    ],
+    "recurring_data_and_software_budget_usd_per_month": 0,
+    "base_long_cost_policy": {
+      "round_trip_commission_floor_usd": 2.1,
+      "slippage_bps_per_side": 2,
+      "source": "ASSUMPTIONS A-20 and A-21"
+    },
+    "short_borrow_cost_schedule_sha256": null,
+    "cost_stress": {
+      "commission_multiplier": 2.0,
+      "slippage_bps_per_side": 10,
+      "result_must_remain_positive": true
+    },
+    "budget_failure_rule": "If a trustworthy source cannot be certified at zero incremental recurring cost, the campaign stays blocked."
+  },
+  "research": {
+    "first_strategy_family": "simple_long_short_trend_following",
+    "strategy_sequence": [
+      {
+        "order": 1,
+        "family": "simple_long_short_trend_following",
+        "status": "current_preregistration_target"
+      },
+      {
+        "order": 2,
+        "family": "long_short_mean_reversion",
+        "status": "future_independent_campaign"
+      },
+      {
+        "order": 3,
+        "family": "regime_switching_trend_plus_mean_reversion",
+        "status": "future_independent_campaign"
+      },
+      {
+        "order": 4,
+        "family": "model_selected_signals",
+        "status": "future_independent_campaign"
+      }
+    ],
+    "evidence_never_transfers_between_strategy_families": true,
+    "sample_floor": "max(preregistered_power_required_N, 100_out_of_sample_closed_positions)",
+    "instruments_required_min": 3,
+    "materially_different_regimes_required_min": 2,
+    "deflated_sharpe_probability_min": 0.95,
+    "fwer_or_fdr_q_max": 0.05,
+    "probability_of_backtest_overfitting_max": 0.1,
+    "best_trade_removal_must_remain_positive": true,
+    "best_month_removal_must_remain_positive": true,
+    "parameter_plateau_required": true,
+    "ordinary_dataset_release_sha256": null,
+    "owner_holdout": null,
+    "known_contamination": [
+      {
+        "symbols": [
+          "QQQ"
+        ],
+        "start": "2022-01-01",
+        "end": "2024-01-10",
+        "status": "burned",
+        "reason": "Previously consumed final window; never eligible as a clean holdout again."
+      },
+      {
+        "symbols": [
+          "QQQ",
+          "SPY",
+          "IWM",
+          "DIA",
+          "GLD",
+          "TLT"
+        ],
+        "start": "2022-01-01",
+        "end": "2024-01-10",
+        "status": "correlated_window_seen",
+        "reason": "The QQQ bear episode was observed; the same calendar window is not treated as an independent clean robustness test on correlated instruments."
+      }
+    ]
+  },
+  "blocked_before_first_data_read": [
+    "Exact trend signal and exit rules are preregistered with deterministic parameter neighbors.",
+    "A certified daily dataset release and exact catalog digest cover the six-symbol robustness panel.",
+    "A complete content-addressed clean/seen/burned holdout map is owner-approved.",
+    "The volatility-matched QQQ/cash benchmark and cash-leg source are fully specified and content-addressed.",
+    "The long cost schedule and short borrow-cost schedule are content-addressed.",
+    "Power analysis freezes the required sample size and earliest possible pass date.",
+    "The canonical registry, evaluator, criteria, code commit, and campaign digests are bound.",
+    "TradingView parity requirements are either satisfied or explicitly blocking.",
+    "Incident-response availability and legal/tax/margin review needs are recorded before paper or live authority."
+  ],
+  "owner_gates_still_open": [
+    "Run the read-only IBKR gateway campaign for at least five sessions including a restart.",
+    "Supply the independent corporate-action sample needed for data certification.",
+    "Approve any clean holdout declaration and its one-shot unlock.",
+    "Verify short-selling, margin, borrow, tax, and regulatory eligibility before executable short work.",
+    "Approve funding after the evidence gate; funding alone grants no authority.",
+    "Approve every paper, autonomous-paper, canary, live, and cap-increase promotion."
+  ]
+}

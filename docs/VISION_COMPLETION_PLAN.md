@@ -102,9 +102,12 @@ This snapshot is context, not remembered state. Reverify it before building on i
   non-authoritative deliverable evidence — so real-gateway option selection remains
   `NO_TRADE`. Verify presence by command, not by this line:
   `git cat-file -e origin/main:src/chronos/supervisor/option_selection.py`.
-- The last documented account snapshot was approximately USD 110. That makes cash-secured
-  options and most futures economically unavailable without a separate owner capital
-  decision. Engineering must not disguise that constraint.
+- The last documented account snapshot remains approximately USD 110; it is an observation,
+  not a funded allocation. Owner directive 2026-08-25 freezes the QQQ v1 research reference
+  at USD 3,000 while current live allocation and live risk remain USD 0. Funding may be
+  considered only after an untouched-holdout pass, at least 90 days of shadow evidence, and
+  supervised-paper evidence, followed by fresh owner approval. Funding does not create
+  strategy-selection, promotion, submission, or short-selling authority (ADR-0031).
 
 ## 3. Build strategy: one complete vertical first
 
@@ -171,6 +174,13 @@ Deliver:
 
 **EXIT:** no unresolved scope contradiction; no clean holdout has been opened; owner gates
 and criteria are recorded before observation.
+
+**Progress (2026-08-25):** ADR-0031 and its content-addressed constitution freeze the QQQ
+execution target, validation panel, staged capital, benchmark, minimum useful edge, risk
+limits, cadence, strategy sequence, and zero incremental data budget before any new trial
+or data read. Phase 0 has not exited: exact trend rules, power analysis, certified
+data/cost/borrow identities, a clean holdout, incident availability, and legal/tax review
+remain open.
 
 ## 6. Phase 1 — Authority and lifecycle coherence
 

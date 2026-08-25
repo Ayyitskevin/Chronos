@@ -56,3 +56,8 @@ none is. Voting correlated indicators together was explicitly avoided.
   surfaced two re-test hypotheses (regime_trend on liquid equity indices,
   mean_reversion on small-caps) for a future run against uniformly-adjusted,
   full-history data — not promotions.
+- QQQ v1 (ADR-0031) leaves the selected strategy as **NONE**. Its first intended campaign
+  is a separately preregistered simple daily long/short trend hypothesis, with QQQ as the
+  only execution target and five ETFs used only for robustness validation. No campaign
+  identity, exact rule, trial, data release, holdout result, promotion rung, or short-side
+  authority exists yet.
