@@ -181,10 +181,12 @@ limits, cadence, strategy sequence, and zero incremental data budget before any 
 or data read. D-36 subsequently selects confirmed close versus SMA-200 as the direction
 indicator, and D-37 selects an immediate two-state primary transition while reserving a 1%
 neutral band and five-close confirmation as prospective robustness variants. Neither
-selects a strategy or reads data. Phase 0 has not exited: the exact window/price/equality
-convention, initialization, protective exits, sizing, short asymmetry, remaining parameter
-neighbors, power analysis, certified data/cost/borrow identities, a clean holdout, incident
-availability, and legal/tax review remain open.
+selects a strategy or reads data. D-38 selects CVaR-capped volatility sizing under the
+existing 100% gross/1x ceilings, but leaves its estimator and operating semantics open.
+Phase 0 has not exited: the exact window/price/equality convention, initialization,
+protective exits, CVaR estimator/lookback/capital-base/rebalance semantics, short asymmetry,
+remaining parameter neighbors, power analysis, certified data/cost/borrow identities, a
+clean holdout, incident availability, and legal/tax review remain open.
 
 ## 6. Phase 1 — Authority and lifecycle coherence
 
