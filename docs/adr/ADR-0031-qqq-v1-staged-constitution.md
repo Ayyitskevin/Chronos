@@ -1,7 +1,7 @@
 # ADR-0031 — QQQ v1 staged research and risk constitution
 
 Status: **accepted — owner directive, 2026-08-25.** Index entries: DECISIONS.md D-35,
-D-36, D-37, D-38, and D-39.
+D-36, D-37, D-38, D-39, and D-40.
 
 ## Context
 
@@ -171,3 +171,20 @@ The estimator is backward-looking and its empirical tail contains only 13 observ
 The 100% gross ceiling and other D-35 controls remain independently binding, and no claim is
 made that the estimate predicts or caps the next realized loss. Constitution identity,
 trial count, selected strategy, and authority remain unchanged.
+
+## Post-acceptance direction-specific-tail choice (D-40)
+
+Long and short CVaR tails are constructed independently. Long sizing uses the 13 greatest
+losses from the 252 completed long unit-exposure return observations. Short sizing uses the
+13 greatest losses from the corresponding short unit-exposure observations, so sharp QQQ
+rallies—not QQQ selloffs—populate the short market-loss tail. Applicable certified costs
+belong in the direction's return stream; long CVaR is never mirrored onto shorts.
+
+The content-addressed borrow-cost schedule and other short-side evidence required by D-35
+do not exist. Until they do, short CVaR is uncertifiable and the correct short exposure is
+zero. This preserves the research question without manufacturing a tradable short estimate.
+
+Exact return/price semantics, current-session window inclusion, capital base, and
+rebalancing remain open. Separate tails do not prove profitability or prevent a future loss
+from exceeding the historical estimate. Constitution identity, trial count, selected
+strategy, and authority remain unchanged.
