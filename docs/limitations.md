@@ -209,6 +209,14 @@ runbooks.
   companions, does not mutate campaign `five-tool-v3.6-preregistered-002`, and
   does not attach fields to `AITradeDecision`. Pine parity is `UNVERIFIED`.
   Campaign `five-tool-pairing-v1-preregistered-001` authorizes zero trials.
+- **The intraday companion screen selected no feature.** The 2026-08-24 source
+  review ranks contemporaneous relative spread plus quote freshness first, but
+  records `INSUFFICIENT_EVIDENCE`. Its arrival-quote module is causal
+  measurement infrastructure only: it cannot open data, apply a veto, run a
+  trial, or import runtime authority. Dataset/holdout identities and economic
+  thresholds remain unset pending owner-certified trades-and-quotes data and a
+  separately reviewed campaign preregistration. See
+  [FIVE_TOOL_INTRADAY_COMPANION_SOURCES.md](FIVE_TOOL_INTRADAY_COMPANION_SOURCES.md).
 - **GLD does not inherit equity VIX or breadth vetoes.** Pairing on gold is
   same-symbol tail and daily RVOL only. That identity was frozen before
   certified GLD bars exist. Campaign `five-tool-pairing-gld-v1-preregistered-001`
