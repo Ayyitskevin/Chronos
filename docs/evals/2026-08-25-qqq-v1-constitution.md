@@ -45,8 +45,10 @@ measurement belongs to the future registered campaign after every blocker is res
 The owner explicitly selected QQQ long/short as the target; research/shadow with USD 0
 live risk; conditional USD 3,000 funding after holdout, 90-day shadow, and supervised
 paper; the benchmark and four-point hurdle; 10% drawdown, 100% gross exposure, 2% daily
-loss, 1.5% CVaR; daily cadence; strategy sequence; six-to-ten-instrument robustness;
-and USD 0 recurring data/software budget.
+loss, 1.5% CVaR; daily cadence; strategy sequence; evaluation across the exact six-symbol
+v1 robustness panel with the inherited promotion floor of at least three instruments; and
+USD 0 recurring data/software budget. Expansion toward ten symbols requires a new
+preregistered identity rather than changing this constitution in place.
 
 ## Verification
 
