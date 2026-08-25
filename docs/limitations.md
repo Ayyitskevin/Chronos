@@ -277,9 +277,11 @@ runbooks.
   selects an immediate two-state primary transition while reserving a 1% neutral band and
   five-close confirmation as prospective robustness variants. This is not yet a complete
   strategy: the campaign still needs exact window/price/equality semantics, initialization,
-  protective exits, sizing, remaining parameter neighbors, power analysis, and a certified
-  clean dataset partition. The short side is additionally blocked by compiler refusal,
-  account eligibility, shortability/borrow evidence, costs, and fresh authority.
+  protective exits, remaining parameter neighbors, power analysis, and a certified clean
+  dataset partition. D-38 chooses CVaR-capped volatility sizing, but its estimator, lookback,
+  capital base, rebalance rule, and short-side treatment are still unresolved. The short
+  side is additionally blocked by compiler refusal, account eligibility, shortability/borrow
+  evidence, costs, and fresh authority.
 - USD 3,000 is a conditional research reference/future funding target, not current capital.
   A zero incremental data budget means missing certifiable evidence blocks the campaign.
 

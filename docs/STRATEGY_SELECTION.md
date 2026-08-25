@@ -63,4 +63,6 @@ none is. Voting correlated indicators together was explicitly avoided.
   short-side authority exists yet. D-36 selects confirmed close versus SMA-200 as the
   direction indicator. D-37 adds an immediate two-state primary transition and reserves a
   1% neutral band and five-close confirmation as robustness variants; price/window details,
-  protective exits, sizing, and remaining parameter neighbors are still unresolved.
+  protective exits, and remaining parameter neighbors are still unresolved. D-38 selects
+  CVaR-capped volatility sizing under the frozen 100% gross/1x ceilings, while its estimator,
+  capital base, rebalance rule, and short-side treatment remain unresolved.

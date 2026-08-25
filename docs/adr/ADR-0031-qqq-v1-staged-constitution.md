@@ -1,7 +1,7 @@
 # ADR-0031 — QQQ v1 staged research and risk constitution
 
 Status: **accepted — owner directive, 2026-08-25.** Index entries: DECISIONS.md D-35,
-D-36, and D-37.
+D-36, D-37, and D-38.
 
 ## Context
 
@@ -135,3 +135,21 @@ This decision still leaves the exact adjusted-price/window convention, equality 
 state, sizing, protective exits, short-side asymmetry, and parameter-neighbor grid open. It
 does not amend the D-35 constitution, read data, register a trial, select a strategy, or grant
 authority.
+
+## Post-acceptance sizing-method choice (D-38)
+
+The owner selected deterministic volatility scaling whose binding objective is estimated
+daily 95% loss-CVaR no greater than 1.5% of the applicable capital base: USD 45 at the
+USD 3,000 research reference. Gross exposure remains capped at 100% and leverage at 1x.
+Those values are ceilings, not targets, and do not authorize any position.
+
+The exact CVaR estimator, lookback, capital-base convention, rebalance rule, minimum trade
+threshold, and short-side treatment remain open. Missing, stale, non-finite, or otherwise
+uncertifiable risk evidence cannot produce exposure. Fixed 100%, fixed 50%, and ATR-stop
+sizing are not the primary method unless a future, separately identified preregistration
+names them as comparisons.
+
+This decision operationalizes D-35's tail-risk objective at the design level; it does not
+show that volatility scaling improves performance or prevents gaps from exceeding the cap.
+The immutable constitution, trial count, selected-strategy field, and authority remain
+unchanged.
