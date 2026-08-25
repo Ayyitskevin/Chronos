@@ -300,7 +300,14 @@ runbooks.
   split-adjusted current-share volume, raw broker truth, corporate-action invalidation,
   one-shot protected entries, and the combined native-stop/CVaR/owner envelope. Its
   authenticated compiler remains blocked and has no reader or execution capability.
-  Executable position management, power, and a certified clean partition remain open. The
+  D-49/ADR-0035 adds an inert, proposal-only PAPER management capability for actual QQQ
+  fills. It hash-chains and semantically replays management observations and resolutions,
+  but no production module imports it, it holds no mandate, and it cannot construct, send,
+  cancel, or maintain an order. Its account/reconciliation/evidence fields are caller
+  attestations until a reviewed adapter authenticates them. A dedicated management-event
+  queue identity, unique opening-order binding, persistent broker protection, runtime
+  scheduling, and real PAPER lifecycle evidence remain mandatory before activation. Power
+  and a certified clean partition also remain open. The
   Five-Tool campaign's typed semantic blockers still authorize zero trials.
   The short estimate and exposure remain unavailable while compiler support, account
   eligibility, shortability/borrow evidence, costs, and fresh authority are absent.
