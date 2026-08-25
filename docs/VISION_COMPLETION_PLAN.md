@@ -189,11 +189,11 @@ the lower of marked strategy NAV and USD 3,000, preventing automatic risk expans
 gains. D-42 recomputes risk daily, permits next-session reductions, and limits increases to
 a weekly schedule. D-43 rounds permitted target magnitude down to whole shares and keeps
 sub-one-share targets in cash. D-44 uses a point-in-time total-return series for SMA/CVaR and
-raw prices for execution. Phase 0 has not exited: the exact signal window/equality convention,
-initialization, protective exits, current-session inclusion, NAV composition, weekly anchor,
-sizing-reference/gap/revalidation/economic-trade/order semantics, remaining parameter
-neighbors, power analysis, certified data/cost/borrow identities, a clean holdout, incident
-availability, and legal/tax review remain open.
+raw prices for execution. D-45 includes the newly confirmed session in both the SMA-200 and
+CVaR-252 windows. Phase 0 has not exited: exact signal equality/initialization, protective
+exits, NAV composition, weekly anchor, sizing-reference/gap/revalidation/economic-trade/order
+semantics, remaining parameter neighbors, power analysis, certified data/cost/borrow
+identities, a clean holdout, incident availability, and legal/tax review remain open.
 
 ## 6. Phase 1 — Authority and lifecycle coherence
 
