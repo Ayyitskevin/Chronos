@@ -71,4 +71,6 @@ none is. Voting correlated indicators together was explicitly avoided.
   lower of marked strategy NAV and USD 3,000 as the sizing base, so the dollar risk allowance
   shrinks after losses and cannot rise above USD 45 after gains. D-42 recomputes risk daily,
   allows next-session reductions, and permits exposure increases only weekly; the weekly
-  anchor and trade-size mechanics remain unresolved.
+  anchor remains unresolved. D-43 rounds permitted target magnitude down to whole shares and
+  keeps sub-one-share targets in cash; its reference price, gap handling, and economic-trade
+  threshold remain unresolved.
