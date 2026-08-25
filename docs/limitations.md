@@ -275,22 +275,26 @@ runbooks.
   holdout. Its thresholds are owner-frozen hypotheses to judge later evidence.
 - D-36 selects confirmed close versus SMA-200 as the trend direction indicator, and D-37
   selects an immediate two-state primary transition while reserving a 1% neutral band and
-  five-close confirmation as prospective robustness variants. This is not yet a complete
-  strategy: the campaign still needs exact window/price/equality semantics, initialization,
-  protective exits, remaining parameter neighbors, power analysis, and a certified clean
-  dataset partition. D-38 chooses CVaR-capped volatility sizing, and D-39 chooses a
-  252-session empirical 95% historical estimator whose tail contains only 13 observations.
-  D-40 constructs long and short tails independently, but its return/window convention and
-  NAV composition are still unresolved. D-41 caps the applicable sizing
-  base at the lower of marked strategy NAV and USD 3,000, so gains do not automatically
-  expand the USD 45 ceiling. D-42 permits next-session risk reductions but only weekly
-  increases; its weekly anchor remains unresolved. D-43 rounds target magnitude down to
-  whole shares and leaves sub-one-share targets in cash, while its sizing-reference price,
-  gap handling, pre-handoff revalidation, and minimum economic trade threshold remain open.
-  D-44 requires point-in-time total-return-adjusted signal/risk data and raw execution prices;
-  uncertifiable corporate actions block rather than trigger a fallback. D-45 includes the
-  newly confirmed session in both windows; exact equality and initial-state behavior remain
-  open.
+  five-close confirmation as prospective robustness variants. D-46/ADR-0032 scopes these to
+  the simple attribution control, whose exit is the signal flip and whose primary sizing is
+  D-38 CVaR. The separately identified integrated Five-Tool cell keeps the pinned source's
+  native EMA-100, two-bar hysteresis, entries, 1% stop-distance sizing, and layered
+  stop/target/breakeven/trailing/regime/side-specific-AVWAP exit behavior. Full-stack evidence
+  cannot be attributed to SMA-200, and control evidence cannot promote the full stack.
+- D-39's 252-session empirical 95% estimator has only 13 tail observations. D-40 constructs
+  long and short tails independently; D-41 caps their applicable base at the lower of marked
+  strategy NAV and USD 3,000. In the integrated cell, these are outer vetoes/caps rather than
+  replacements for native stop-risk sizing. D-42's weekly increases are superseded: exposure
+  can increase only on a new confirmed entry while flat, with no later top-up after any
+  source-native same-event management legs, while required reductions remain next-session
+  eligible. D-43 whole-share flooring, D-44 point-in-time
+  total-return research/raw execution separation, and D-45 current-confirmed-session windows
+  remain shared controls.
+- This is still not a complete preregistration. Exact control equality/initialization,
+  sizing-reference price, entry-gap handling, pre-handoff revalidation, minimum economic
+  trade, the integrated EMA/ATR/AVWAP/support price-domain mapping, executable position
+  management, remaining neighbors, power, and a certified clean partition remain open. The
+  Five-Tool campaign's typed semantic blockers still authorize zero trials.
   The short estimate and exposure remain unavailable while compiler support, account
   eligibility, shortability/borrow evidence, costs, and fresh authority are absent.
 - USD 3,000 is a conditional research reference/future funding target, not current capital.

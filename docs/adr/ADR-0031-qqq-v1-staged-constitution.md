@@ -264,3 +264,13 @@ no exposure. Exact equality and initial-state behavior remain open.
 Including completed current information reduces needless lag without changing the
 next-session execution boundary. It makes no performance claim and grants no trial,
 strategy selection, funding, or authority. The D-35 constitution remains unchanged.
+
+## Subsequent Confluence-fit reconciliation (D-46 / ADR-0032)
+
+ADR-0032 audits D-36 through D-45 against the pinned Five-Tool source and preserves two
+separate identities: a simple SMA-200 attribution control and an integrated Five-Tool
+candidate. It selects the source's layered Confluence invalidation/protection stack for
+the integrated cell, narrows CVaR to an outer cap around native stop-distance sizing there,
+and supersedes D-42's calendar increase schedule with new-entry-event-only increases while
+flat. This pointer records the later authority; ADR-0032 contains the exact scope and does
+not mutate the D-35 constitution.

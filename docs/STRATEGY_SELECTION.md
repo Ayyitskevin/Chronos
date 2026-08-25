@@ -60,19 +60,15 @@ none is. Voting correlated indicators together was explicitly avoided.
   is a separately preregistered simple daily long/short trend hypothesis, with QQQ as the
   only execution target and five ETFs used only for robustness validation. No campaign
   identity, complete rule, trial, data release, holdout result, promotion rung, or
-  short-side authority exists yet. D-36 selects confirmed close versus SMA-200 as the
-  direction indicator. D-37 adds an immediate two-state primary transition and reserves a
-  1% neutral band and five-close confirmation as robustness variants; price/window details,
-  protective exits, and remaining parameter neighbors are still unresolved. D-38 selects
-  CVaR-capped volatility sizing under the frozen 100% gross/1x ceilings, and D-39 selects a
-  252-session empirical historical estimator; its return/window convention, capital base,
-  and rebalance rule remain unresolved. D-40 gives long and short their own loss tails;
-  short exposure remains zero until its borrow/cost evidence is certifiable. D-41 uses the
-  lower of marked strategy NAV and USD 3,000 as the sizing base, so the dollar risk allowance
-  shrinks after losses and cannot rise above USD 45 after gains. D-42 recomputes risk daily,
-  allows next-session reductions, and permits exposure increases only weekly; the weekly
-  anchor remains unresolved. D-43 rounds permitted target magnitude down to whole shares and
-  keeps sub-one-share targets in cash; its reference price, gap handling, and economic-trade
-  threshold remain unresolved. D-44 uses point-in-time total-return-adjusted data for the
-  signal and CVaR while preserving raw tradable prices for execution. D-45 includes the
-  newly confirmed session in both windows; equality and initial-state behavior remain open.
+  short-side authority exists yet. D-46/ADR-0032 audits D-36 through D-45 and preserves two
+  identities: the simple control uses immediate SMA-200 direction, a signal-flip exit, and
+  CVaR-primary sizing; the integrated candidate preserves the pinned Five-Tool source's
+  native EMA-100/two-bar hysteretic entries, exact layered Confluence exit stack, and 1%
+  stop-distance sizing inside direction-specific CVaR-252 and the stricter owner caps. The
+  owner-selected 2%/USD 60 limit remains a daily/session circuit breaker, not per-trade risk.
+  Weekly increases are superseded by new-entry-event increases while flat, with no
+  later top-up after any native same-event management legs; required reductions remain
+  next-session eligible. Whole-share flooring, point-in-time total-return research/raw
+  execution prices, and current-confirmed-session windows remain outer controls; the
+  integrated feature price-domain mapping is still unresolved. Both cells remain unselected
+  and blocked before data access.
