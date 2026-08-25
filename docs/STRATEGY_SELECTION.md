@@ -74,5 +74,5 @@ none is. Voting correlated indicators together was explicitly avoided.
   anchor remains unresolved. D-43 rounds permitted target magnitude down to whole shares and
   keeps sub-one-share targets in cash; its reference price, gap handling, and economic-trade
   threshold remain unresolved. D-44 uses point-in-time total-return-adjusted data for the
-  signal and CVaR while preserving raw tradable prices for execution; current-session window
-  inclusion remains unresolved.
+  signal and CVaR while preserving raw tradable prices for execution. D-45 includes the
+  newly confirmed session in both windows; equality and initial-state behavior remain open.

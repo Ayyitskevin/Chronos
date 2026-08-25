@@ -1,7 +1,7 @@
 # ADR-0031 — QQQ v1 staged research and risk constitution
 
 Status: **accepted — owner directive, 2026-08-25.** Index entries: DECISIONS.md D-35,
-D-36, D-37, D-38, D-39, D-40, D-41, D-42, D-43, and D-44.
+D-36, D-37, D-38, D-39, D-40, D-41, D-42, D-43, D-44, and D-45.
 
 ## Context
 
@@ -250,3 +250,17 @@ back to raw or silently back-adjusted data. Current-session window inclusion rem
 This separates economic-return evidence from executable price identity. It makes no
 performance claim and grants no fallback, trial, strategy selection, funding, or authority.
 The D-35 constitution remains unchanged.
+
+## Post-acceptance window-inclusion choice (D-45)
+
+At confirmed close `t`, SMA-200 uses the 200 completed point-in-time total-return closes
+ending at `t`, and CVaR-252 uses the 252 completed direction-specific daily return
+observations ending at `t`. No intrabar or future value enters either window. Any reduction
+or weekly-permitted increase remains first eligible after the decision, never at close `t`.
+
+Fewer than the full required observations produces no signal or risk estimate and therefore
+no exposure. Exact equality and initial-state behavior remain open.
+
+Including completed current information reduces needless lag without changing the
+next-session execution boundary. It makes no performance claim and grants no trial,
+strategy selection, funding, or authority. The D-35 constitution remains unchanged.
