@@ -27,8 +27,11 @@ Scope is intentionally narrow:
   dedicated-long-v2 source switch is off.  No SMA, neutral, or time exit is
   introduced.
 
-The module imports no broker, order service, submission boundary, or execution
-adapter.  It can describe a risk-reducing proposal and cannot send one.
+This source directly imports no broker, order service, submission boundary, or
+execution adapter.  Importing its ``chronos.supervisor`` package still inherits
+that package's process-level dependency graph; this module constructs, calls,
+and holds none of those capabilities.  It can describe a risk-reducing proposal
+and cannot send one.
 
 The management-event reference remains separate from the proposal target.  A
 risk-reducing proposal targets the existing Chronos position, as required by
@@ -381,6 +384,17 @@ class QQQFiveToolPaperPlan(ChronosModel):
         expected_t1 = self.entry_price + risk_distance * self.policy.target_1_r
         expected_t2 = self.entry_price + risk_distance * self.policy.target_2_r
         by_id = {leg.leg_id: leg for leg in self.legs}
+        expected_order = (
+            (ManagedLegId.TARGET_2,)
+            if self.quantity < 3
+            else (
+                ManagedLegId.TARGET_1,
+                ManagedLegId.TARGET_2,
+                ManagedLegId.RUNNER,
+            )
+        )
+        if tuple(leg.leg_id for leg in self.legs) != expected_order:
+            raise ValueError("managed legs must use canonical T1, T2, RUNNER order")
         if self.quantity < 3:
             if set(by_id) != {ManagedLegId.TARGET_2}:
                 raise ValueError("a sub-three-share position uses one TARGET_2 leg")
@@ -509,6 +523,8 @@ class PositionObservation(ChronosModel):
     last_price: Decimal
     marked_strategy_nav_usd: Decimal
     broker_position_quantity: Decimal
+    # Recorded-only provenance until ADR-0035's authenticated PAPER adapter
+    # exists. Presence is not freshness or same-session proof.
     reconciliation_generation: int = Field(ge=0)
     reconciliation_session_id: str = Field(min_length=1, max_length=128)
     highest_high_22: Decimal | None = None

@@ -43,9 +43,11 @@ authoritative entry-fill identities and evidence digests, actual fill price/quan
 signal-time risk distance, marked strategy NAV, and unit-exposure CVaR observation.
 
 Whole shares are divided into T1, T2, and runner legs when at least three shares exist;
-smaller fills use a single 2R closing leg. Native stop loss must equal quantity times the
-preserved stop distance. CVaR loss must equal actual filled notional times the recorded
-unit-exposure loss fraction. An over-limit actual fill is still registered as broker truth,
+smaller fills use a single 2R closing leg. The stored sequence is canonical—T1, T2,
+runner—so a direct model construction cannot silently change target precedence. Native
+stop loss must equal quantity times the preserved stop distance. CVaR loss must equal actual
+filled notional times the recorded unit-exposure loss fraction. An over-limit actual fill
+is still registered as broker truth,
 but immediately latches a flatten proposal; refusing to record it would hide exposure.
 
 ### 3. Management is event-sourced and semantically replayed
