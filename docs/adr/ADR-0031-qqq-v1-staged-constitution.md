@@ -1,6 +1,6 @@
 # ADR-0031 — QQQ v1 staged research and risk constitution
 
-Status: **accepted — owner directive, 2026-08-25.** Index entry: DECISIONS.md D-35.
+Status: **accepted — owner directive, 2026-08-25.** Index entries: DECISIONS.md D-35 and D-36.
 
 ## Context
 
@@ -97,3 +97,23 @@ its correct runtime outcome is refusal.
   advanced by accepting this ADR.
 - A correct next result may be `INSUFFICIENT_EVIDENCE`, including indefinitely if daily
   trade counts cannot clear the frozen sample floor.
+
+## Post-acceptance direction-indicator choice (D-36)
+
+On 2026-08-25 the owner selected price relative to a trailing 200-session simple moving
+average as the direction indicator for the first QQQ trend preregistration. The observable
+will use confirmed daily closes and cannot act before the next session, preserving D-35's
+clock boundary.
+
+This records one design input, not a complete or selected strategy. The preregistration
+must still freeze the exact price series and window convention, equality behavior, state
+transitions, entry and exit rules, persistence or buffer, sizing, short-side asymmetry, and
+deterministic parameter neighbors before data access. No market data was read to make this
+choice, and no claim is made that SMA-200 improves returns. The choice was based on its
+structural compatibility with the Five-Tool Confluence's moving-average direction filters;
+that compatibility is a hypothesis to isolate, not evidence.
+
+The content-addressed D-35 constitution is deliberately unchanged: its selected strategy
+remains `null`, its trial count remains zero, and all authority remains absent. The complete
+preregistration, once owner-approved, will receive its own identity rather than silently
+mutating the constitution.

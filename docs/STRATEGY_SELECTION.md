@@ -59,5 +59,7 @@ none is. Voting correlated indicators together was explicitly avoided.
 - QQQ v1 (ADR-0031) leaves the selected strategy as **NONE**. Its first intended campaign
   is a separately preregistered simple daily long/short trend hypothesis, with QQQ as the
   only execution target and five ETFs used only for robustness validation. No campaign
-  identity, exact rule, trial, data release, holdout result, promotion rung, or short-side
-  authority exists yet.
+  identity, complete rule, trial, data release, holdout result, promotion rung, or
+  short-side authority exists yet. D-36 selects confirmed close versus SMA-200 as the
+  direction indicator only; its transitions, exits, sizing, and parameter neighbors are
+  still unresolved.

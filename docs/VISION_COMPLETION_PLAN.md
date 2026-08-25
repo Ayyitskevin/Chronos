@@ -178,9 +178,11 @@ and criteria are recorded before observation.
 **Progress (2026-08-25):** ADR-0031 and its content-addressed constitution freeze the QQQ
 execution target, validation panel, staged capital, benchmark, minimum useful edge, risk
 limits, cadence, strategy sequence, and zero incremental data budget before any new trial
-or data read. Phase 0 has not exited: exact trend rules, power analysis, certified
-data/cost/borrow identities, a clean holdout, incident availability, and legal/tax review
-remain open.
+or data read. D-36 subsequently selects confirmed close versus SMA-200 as the direction
+indicator, without selecting a strategy or reading data. Phase 0 has not exited: the exact
+window/price convention, signal transitions, entry/exit rules, sizing, short asymmetry,
+parameter neighbors, power analysis, certified data/cost/borrow identities, a clean
+holdout, incident availability, and legal/tax review remain open.
 
 ## 6. Phase 1 — Authority and lifecycle coherence
 
