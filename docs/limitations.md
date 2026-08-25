@@ -273,8 +273,10 @@ runbooks.
 
 - The constitution selects no strategy, runs no trial, reads no new dataset, and opens no
   holdout. Its thresholds are owner-frozen hypotheses to judge later evidence.
-- The long-side trend campaign still needs exact preregistered rules, power analysis, and a
-  certified clean dataset partition. The short side is additionally blocked by compiler
+- D-36 selects confirmed close versus SMA-200 as the trend direction indicator, but does
+  not yet define a complete strategy. The campaign still needs exact window/price
+  semantics, transitions, entries, exits, sizing, parameter neighbors, power analysis, and
+  a certified clean dataset partition. The short side is additionally blocked by compiler
   refusal, account eligibility, shortability/borrow evidence, costs, and fresh authority.
 - USD 3,000 is a conditional research reference/future funding target, not current capital.
   A zero incremental data budget means missing certifiable evidence blocks the campaign.
