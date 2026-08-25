@@ -1,6 +1,7 @@
 # ADR-0031 — QQQ v1 staged research and risk constitution
 
-Status: **accepted — owner directive, 2026-08-25.** Index entries: DECISIONS.md D-35 and D-36.
+Status: **accepted — owner directive, 2026-08-25.** Index entries: DECISIONS.md D-35,
+D-36, and D-37.
 
 ## Context
 
@@ -117,3 +118,20 @@ The content-addressed D-35 constitution is deliberately unchanged: its selected 
 remains `null`, its trial count remains zero, and all authority remains absent. The complete
 preregistration, once owner-approved, will receive its own identity rather than silently
 mutating the constitution.
+
+## Post-acceptance transition choice (D-37)
+
+The owner selected an immediate two-state primary cell with no neutral band or confirmation
+delay. Once the signal is initialized, the first confirmed daily close strictly across the
+SMA-200 changes its direction; any resulting action remains deferred until the next session.
+This is a signal transition, not an instruction to take 100% exposure or bypass a gate.
+
+Two alternatives are retained prospectively as robustness variants rather than rescue
+choices: a 1% neutral band around SMA-200 and a five-consecutive-close confirmation rule.
+Their complete deterministic semantics and identities must be frozen in the same future
+preregistration as the primary cell. No result may be used to choose or redefine them.
+
+This decision still leaves the exact adjusted-price/window convention, equality and initial
+state, sizing, protective exits, short-side asymmetry, and parameter-neighbor grid open. It
+does not amend the D-35 constitution, read data, register a trial, select a strategy, or grant
+authority.
