@@ -1,7 +1,7 @@
 # ADR-0031 — QQQ v1 staged research and risk constitution
 
 Status: **accepted — owner directive, 2026-08-25.** Index entries: DECISIONS.md D-35,
-D-36, D-37, D-38, D-39, and D-40.
+D-36, D-37, D-38, D-39, D-40, and D-41.
 
 ## Context
 
@@ -188,3 +188,19 @@ Exact return/price semantics, current-session window inclusion, capital base, an
 rebalancing remain open. Separate tails do not prove profitability or prevent a future loss
 from exceeding the historical estimate. Constitution identity, trial count, selected
 strategy, and authority remain unchanged.
+
+## Post-acceptance capital-base choice (D-41)
+
+At each confirmed-close decision, the applicable CVaR capital base is the lower of current
+marked strategy NAV and the USD 3,000 research reference. The dollar tail-risk ceiling is
+therefore `min(1.5% * applicable_base, USD 45)`: it shrinks after losses and cannot increase
+above USD 45 after gains. A non-positive, missing, stale, or non-finite NAV produces no
+exposure.
+
+The USD 3,000 ceiling can change only through a fresh owner decision. It is still a research
+reference rather than funded capital, and current live allocation remains USD 0. Exact NAV
+composition and rebalance mechanics remain open.
+
+This choice is a risk-budget ratchet, not evidence of performance and not authorization to
+compound, fund, or trade. Constitution identity, trial count, selected strategy, and
+authority remain unchanged.

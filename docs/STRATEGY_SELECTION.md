@@ -67,4 +67,6 @@ none is. Voting correlated indicators together was explicitly avoided.
   CVaR-capped volatility sizing under the frozen 100% gross/1x ceilings, and D-39 selects a
   252-session empirical historical estimator; its return/window convention, capital base,
   and rebalance rule remain unresolved. D-40 gives long and short their own loss tails;
-  short exposure remains zero until its borrow/cost evidence is certifiable.
+  short exposure remains zero until its borrow/cost evidence is certifiable. D-41 uses the
+  lower of marked strategy NAV and USD 3,000 as the sizing base, so the dollar risk allowance
+  shrinks after losses and cannot rise above USD 45 after gains.
