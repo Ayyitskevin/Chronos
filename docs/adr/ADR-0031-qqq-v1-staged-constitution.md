@@ -1,7 +1,7 @@
 # ADR-0031 — QQQ v1 staged research and risk constitution
 
 Status: **accepted — owner directive, 2026-08-25.** Index entries: DECISIONS.md D-35,
-D-36, D-37, and D-38.
+D-36, D-37, D-38, and D-39.
 
 ## Context
 
@@ -153,3 +153,21 @@ This decision operationalizes D-35's tail-risk objective at the design level; it
 show that volatility scaling improves performance or prevents gaps from exceeding the cap.
 The immutable constitution, trial count, selected-strategy field, and authority remain
 unchanged.
+
+## Post-acceptance CVaR-estimator choice (D-39)
+
+The primary risk estimator is empirical 95% historical loss-CVaR over the latest 252
+completed daily unit-exposure return observations available at the confirmed-close decision
+time. It takes the arithmetic mean of the 13 greatest observed losses
+(`ceil(5% * 252)`), without a parametric distribution or quantile interpolation. Fewer than
+252 finite observations produces no estimate and therefore no exposure.
+
+The exact return and adjusted-price convention, inclusion of the current completed session,
+long-versus-short tail construction, rebalance rule, and capital base remain open. A
+126-session, 504-session, or EWMA estimator is not primary unless a future preregistration
+identifies it separately.
+
+The estimator is backward-looking and its empirical tail contains only 13 observations.
+The 100% gross ceiling and other D-35 controls remain independently binding, and no claim is
+made that the estimate predicts or caps the next realized loss. Constitution identity,
+trial count, selected strategy, and authority remain unchanged.

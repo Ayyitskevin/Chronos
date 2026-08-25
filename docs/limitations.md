@@ -278,10 +278,11 @@ runbooks.
   five-close confirmation as prospective robustness variants. This is not yet a complete
   strategy: the campaign still needs exact window/price/equality semantics, initialization,
   protective exits, remaining parameter neighbors, power analysis, and a certified clean
-  dataset partition. D-38 chooses CVaR-capped volatility sizing, but its estimator, lookback,
-  capital base, rebalance rule, and short-side treatment are still unresolved. The short
-  side is additionally blocked by compiler refusal, account eligibility, shortability/borrow
-  evidence, costs, and fresh authority.
+  dataset partition. D-38 chooses CVaR-capped volatility sizing, and D-39 chooses a
+  252-session empirical 95% historical estimator whose tail contains only 13 observations.
+  Its return/window convention, capital base, rebalance rule, and short-side treatment are
+  still unresolved. The short side is additionally blocked by compiler refusal, account
+  eligibility, shortability/borrow evidence, costs, and fresh authority.
 - USD 3,000 is a conditional research reference/future funding target, not current capital.
   A zero incremental data budget means missing certifiable evidence blocks the campaign.
 
