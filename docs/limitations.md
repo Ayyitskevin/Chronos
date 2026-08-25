@@ -294,10 +294,14 @@ runbooks.
   reference, downward-only next-session gap re-sizing, one-shot protected order semantics,
   pre-handoff checks, economic floor, and five-cell one-axis robustness grid. Its
   content-addressed compiler can emit only blocked metadata and has no reader, trial,
-  holdout, broker, order, or promotion capability. The integrated
-  EMA/ATR/AVWAP/support price-domain mapping, executable position management, power, and a
-  certified clean partition remain open. The Five-Tool campaign's typed semantic blockers
-  still authorize zero trials.
+  holdout, broker, order, or promotion capability.
+- D-48/ADR-0034 freezes the QQQ integrated candidate overlay, including source-default
+  asymmetry, causal point-in-time total-return OHLC rebased to current raw price,
+  split-adjusted current-share volume, raw broker truth, corporate-action invalidation,
+  one-shot protected entries, and the combined native-stop/CVaR/owner envelope. Its
+  authenticated compiler remains blocked and has no reader or execution capability.
+  Executable position management, power, and a certified clean partition remain open. The
+  Five-Tool campaign's typed semantic blockers still authorize zero trials.
   The short estimate and exposure remain unavailable while compiler support, account
   eligibility, shortability/borrow evidence, costs, and fresh authority are absent.
 - USD 3,000 is a conditional research reference/future funding target, not current capital.

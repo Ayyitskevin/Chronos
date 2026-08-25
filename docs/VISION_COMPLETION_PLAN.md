@@ -200,9 +200,13 @@ daily/next-session reductions remain. Phase 0 has
 not exited. D-47/ADR-0033 now freezes the exact control initialization/equality,
 raw-price sizing reference, next-session gap/revalidation/order behavior, economic-trade
 floor, and five-cell one-axis robustness grid in a content-addressed artifact whose public
-compiler remains blocked before data. Integrated feature price-domain mapping, executable
-position-management lifecycle, power analysis, certified data/cost/borrow identities, a
-clean holdout, incident availability, and legal/tax review remain open.
+compiler remains blocked before data. D-48/ADR-0034 freezes the integrated candidate's
+QQQ-specific causal price-domain overlay: technical geometry
+uses point-in-time total-return OHLC rebased to the current raw close, while broker truth
+remains raw and an intervening corporate action invalidates entry. Its public compiler
+authenticates the pinned source/contract/campaign but remains blocked before data.
+Executable position-management lifecycle, power analysis, certified data/cost/borrow
+identities, a clean holdout, incident availability, and legal/tax review remain open.
 
 ## 6. Phase 1 — Authority and lifecycle coherence
 
