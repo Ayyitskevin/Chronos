@@ -64,5 +64,6 @@ none is. Voting correlated indicators together was explicitly avoided.
   direction indicator. D-37 adds an immediate two-state primary transition and reserves a
   1% neutral band and five-close confirmation as robustness variants; price/window details,
   protective exits, and remaining parameter neighbors are still unresolved. D-38 selects
-  CVaR-capped volatility sizing under the frozen 100% gross/1x ceilings, while its estimator,
-  capital base, rebalance rule, and short-side treatment remain unresolved.
+  CVaR-capped volatility sizing under the frozen 100% gross/1x ceilings, and D-39 selects a
+  252-session empirical historical estimator; its return/window convention, capital base,
+  rebalance rule, and short-side treatment remain unresolved.
