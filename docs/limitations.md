@@ -269,6 +269,16 @@ runbooks.
 - Backtests and shadow scans describe would-be intents only; paper fills do not prove live
   execution quality, and past behavior does not predict future results.
 
+### QQQ v1 constitution (ADR-0031)
+
+- The constitution selects no strategy, runs no trial, reads no new dataset, and opens no
+  holdout. Its thresholds are owner-frozen hypotheses to judge later evidence.
+- The long-side trend campaign still needs exact preregistered rules, power analysis, and a
+  certified clean dataset partition. The short side is additionally blocked by compiler
+  refusal, account eligibility, shortability/borrow evidence, costs, and fresh authority.
+- USD 3,000 is a conditional research reference/future funding target, not current capital.
+  A zero incremental data budget means missing certifiable evidence blocks the campaign.
+
 ## Autonomous model authority (ADR-0016 / D-16, ADR-0017 / D-17)
 
 - **The autonomy stack is built and wired (M1–M7.5).** Contracts, gateway, durable state,

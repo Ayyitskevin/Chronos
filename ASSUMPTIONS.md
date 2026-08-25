@@ -25,29 +25,26 @@ zero / empty / disabled / deny.
 
 ## Account and instruments
 
-- **A-10 — Account type.** *(Amended 2026-08-02.)* As originally written: assumed a small
-  IBKR **cash account** (~USD 3,000), no margin, no short selling, long-only equity/ETF
-  positions. **The ~USD 3,000 premise is superseded as a statement of fact:** the last
-  documented account snapshot is approximately **USD 110**
-  (`docs/VISION_COMPLETION_PLAN.md` §2). Whether the account is funded toward the original
-  premise, or the scope is cut to match ~USD 110, is a **live, unresolved owner decision**
-  (plan §11 owner gates). **Owner direction, 2026-08-02: fund toward the original premise
-  rather than descope** — the ≈USD 110 snapshot is a temporary state, not a design
-  constraint, so sizing defaults (`MIN_CASH_BUFFER_USD`, the `--equity`/`--cash` CLI
-  defaults) stay as they are pending the funded balance. **The exact capital envelope is
-  still unfrozen** and remains a Phase 0 deliverable (plan §5: the owner-approved capital
-  envelope, loss/drawdown/CVaR and concentration limits must be frozen *before* the
-  evidence they judge). Until that number exists, no work may quietly assume any
-  particular balance, and any run against the live account must pass its own `--equity`. At ~USD 110, cash-secured options and
-  most futures are economically unavailable, and the default `MIN_CASH_BUFFER_USD` of 5000
-  alone makes every cash-secured put unaffordable. The rest of the assumption is unchanged
-  and still binding: pattern-day-trading rules make intraday strategies impractical below
-  USD 25,000 in a margin account; cash-account settlement further constrains turnover.
-  Consequence: only **daily-bar, long-only, non-leveraged** strategies are candidates for
-  eventual execution; intraday scripts are classified research-only.
+- **A-10 — Account type.** *(Amended 2026-08-25.)* The last documented account snapshot
+  remains approximately **USD 110** (`docs/VISION_COMPLETION_PLAN.md` §2). The owner has
+  frozen a staged QQQ v1 capital constitution: **USD 3,000 is a research reference and
+  future funding target only; current live allocation and live risk are USD 0**. Funding
+  may be considered only after an untouched-holdout pass, at least 90 days of shadow
+  evidence, supervised-paper evidence, and fresh owner approval. Funding does not create
+  strategy-selection, promotion, submission, or short-selling authority. Until those gates
+  pass, no work may present the account as funded or size against an assumed live balance.
+  The current executable boundary remains a cash-account, daily-bar, long-only,
+  non-leveraged equity/ETF path: the compiler refuses `SHORT_EQUITY`, and no deterministic
+  borrow or shortability evidence exists. The owner-directed long/short target therefore
+  keeps its short side blocked pending account eligibility, margin and locate/borrow
+  evidence, explicit cost identity, a separately preregistered campaign, an implementation
+  ADR, and fresh owner authority. Pattern-day-trading and cash-settlement constraints keep
+  intraday scripts research-only.
 - **A-11 — Instruments.** Candidate universe restricted to highly liquid US-listed ETFs
-  (SPY, QQQ, IWM, DIA, GLD, TLT) unless the owner approves otherwise. Single-stock candidates
-  are research-only until approved.
+  (SPY, QQQ, IWM, DIA, GLD, TLT) unless the owner approves otherwise. For QQQ v1, **QQQ is
+  the only execution target**; SPY, IWM, DIA, GLD, and TLT are validation-only instruments
+  and cannot become portfolio legs by implication. Single-stock candidates are
+  research-only until approved.
 - **A-12 — Options.** *(Amended 2026-07-25.)* As originally written: the wheel dashboard
   remains decision-support only and the deterministic platform adds no options execution
   path. The second clause still holds — `chronos.execution`/`chronos.risk` have no options
