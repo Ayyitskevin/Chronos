@@ -37,6 +37,9 @@ opened. Running an economic measurement here would violate the constitution's
 freeze-before-read ordering. The appropriate evaluation is therefore structural:
 
 - exact artifact bytes are SHA-256 pinned;
+- the referenced constitution bytes are independently read and SHA-256 authenticated;
+- the pinned artifact itself defines unit-exposure CVaR and the complete permitted-target-
+  notional composition, so sizing semantics do not depend on unpinned ADR prose;
 - any byte drift refuses before interpretation;
 - all strategy, promotion, order, and live authority remain absent;
 - the compiler reports every pre-data blocker and can never return executable/read-ready;
@@ -46,10 +49,11 @@ freeze-before-read ordering. The appropriate evaluation is therefore structural:
 
 ## Negative cases
 
-The safety tests require that an authority mutation changes the digest and refuses, the
-blocker set is complete, every compiled plan remains non-executable, and the module's import
-graph contains no forbidden capability. These cases guard the characteristic failure mode
-where a correctly worded blocker is structurally unable to block.
+The safety tests require that an authority mutation changes the digest and refuses, a
+constitution mutation refuses even while the preregistration bytes remain exact, the
+blocker set is complete, every compiled plan remains non-executable, and the loader has no
+other `chronos.*` import at all. These cases guard the characteristic failure mode where a
+correctly worded identity or blocker is structurally unable to block.
 
 ## Result
 
@@ -61,14 +65,24 @@ the repository protocol.
 ## Verification result
 
 ```text
-.venv/bin/pytest -q tests/safety/test_qqq_control_preregistration.py tests/safety/test_qqq_v1_constitution.py
-# 9 passed
+PYTHONPATH=src .venv/bin/pytest -q \
+  tests/safety/test_qqq_control_preregistration.py \
+  tests/safety/test_qqq_v1_constitution.py
+# 10 passed
 
-make gates
-# ruff clean; format clean on 532 files; mypy clean on 288 source files;
-# worker mypy clean on 10 files; 4,000 passed / 1 skipped / 13 failed
+.venv/bin/ruff check .
+# All checks passed!
+.venv/bin/ruff format --check .
+# 532 files already formatted
+.venv/bin/mypy src/chronos
+# Success: no issues found in 288 source files
+.venv/bin/mypy --strict worker
+# Success: no issues found in 10 source files
+PYTHONPATH=src .venv/bin/python -m pytest -q
+# 4,001 passed / 1 skipped / 13 failed
 ```
 
 The 13 failures are the same local Streamlit 1.62 relative-path failures measured at the
-untouched base (which had 3,995 passes); this change adds five passing safety tests and no
-new failure class. `git diff --check` is clean.
+untouched base (which had 3,995 passes); this repaired change adds six passing safety tests
+and no new failure class. `git diff --check` is clean. The independent reviewer must still
+re-verify and withdraw the written HOLD before owner merge.
