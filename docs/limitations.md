@@ -320,6 +320,14 @@ runbooks.
   Five-Tool campaign's typed semantic blockers still authorize zero trials.
   The short estimate and exposure remain unavailable while compiler support, account
   eligibility, shortability/borrow evidence, costs, and fresh authority are absent.
+- D-51/ADR-0037 adds a content-addressed readiness report, not readiness itself. It authenticates
+  the constitution, both strategy artifacts, inert PAPER policy/source, and default-off admission
+  source, then classifies the remaining owner/build/short/activation work. It opens no data or
+  holdout, registers no trial, and grants no authority. The six-symbol QQQ robustness release
+  (`QQQ, SPY, IWM, DIA, GLD, TLT`) and the seven-symbol base Five-Tool intake (`GLD, IWM, QQQ,
+  RSP, SPY, VIX, VIX3M`) remain separate identities; overlap does not transfer evidence. The
+  report cannot prove owner merge context, IBKR completeness, corporate actions, power, parity,
+  edge, PAPER behavior, or broker protection.
 - USD 3,000 is a conditional research reference/future funding target, not current capital.
   A zero incremental data budget means missing certifiable evidence blocks the campaign.
 

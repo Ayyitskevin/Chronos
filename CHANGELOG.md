@@ -1,5 +1,18 @@
 # CHANGELOG
 
+## [Unreleased] — QQQ readiness becomes an authenticated checklist (2026-08-25)
+
+ADR-0037 adds one content-addressed `compile_qqq_campaign_readiness()` operation. It authenticates
+the exact QQQ constitution, SMA control, integrated Confluence candidate, inert PAPER policy/source,
+and default-off opening-admission source, then returns a typed ledger of owner inputs, Chronos work,
+unavailable short evidence, and deferred activation work.
+
+The six-symbol QQQ robustness release and seven-symbol base Five-Tool companion intake are pinned
+as separate identities. Every referenced-byte drift, child authority expansion, or dropped blocker
+refuses. The module imports no data, trial, holdout, broker, order, persistence, execution,
+supervisor, service, network, database, or promotion capability. Nothing here opens evidence,
+registers a trial, activates PAPER, or advances a promotion gate.
+
 ## [Unreleased] — filled QQQ openings gain an identity, not an authority (2026-08-25)
 
 ADR-0036 adds one default-off managed-position admission seam. Given only a

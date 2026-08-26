@@ -220,6 +220,12 @@ ongoing management observations and outcomes, a trusted management-event identit
 broker-held protection semantics, runtime scheduling, and real PAPER evidence. Power
 analysis, certified data/cost/borrow identities, a clean holdout, incident availability,
 and legal/tax review remain open.
+D-51/ADR-0037 now composes those exact repository identities into one content-addressed,
+authentication-only readiness report. It separates owner actions from Chronos build work,
+unavailable short evidence, and deferred PAPER activation, and forbids evidence transfer between
+the six-symbol QQQ robustness release and the distinct seven-symbol base Five-Tool intake. This
+is current-state legibility only: Phase 0 still has not exited, no market data or holdout was
+opened, no trial was registered, and no evidence or promotion gate advanced.
 
 ## 6. Phase 1 — Authority and lifecycle coherence
 
