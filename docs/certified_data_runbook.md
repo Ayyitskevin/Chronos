@@ -5,6 +5,62 @@ research campaign, and D-29 stacks the whole deep-trading programme behind it. T
 runbook is the executable half. The other half — running TWS and pulling the history —
 is the owner's and cannot be automated.
 
+## Recommended owner path for the QQQ v1 packet
+
+Run the reviewed interactive wizard from the repository root:
+
+```bash
+./scripts/qqq_certified_data_wizard.sh
+```
+
+The wizard does not receive credentials or account identifiers and does not run from CI.
+It requires the owner to start a PAPER TWS/IB Gateway with **Read-Only API** checked, then
+pins the exact QQQ campaign identity before connecting:
+
+- daily RTH `TRADES` bars for `QQQ,SPY,IWM,DIA,GLD,TLT`;
+- `SMART`, cutoff `2026-08-21`, duration 9,500 calendar days;
+- dataset `chronos-qqq-robustness-daily-v1` and release 001;
+- a campaign-local, git-ignored root at `research/data/campaigns/qqq-v1/`.
+
+The bar exporter does **not** populate corporate actions. The wizard therefore creates one
+owner-input file per symbol under `owner_actions/`; populate each with the complete primary
+split/dividend stream from official fund-sponsor records, in native ex-date basis. Each file
+is a JSON array of:
+
+```json
+{
+  "kind": "cash_dividend",
+  "ex_date": "2024-03-21",
+  "value": 0.522126,
+  "source": "official sponsor distribution history",
+  "note": "native amount as declared for this ex-date"
+}
+```
+
+`kind` is `cash_dividend` or `split`; a 4-for-1 split uses value `4`, and a 1-for-10
+reverse split uses `0.1`. Empty `[]` is valid only when the primary source affirmatively
+shows no actions in the captured window. The helper canonicalizes and hashes all six action
+files through the historical-data store and refuses an unlogged overwrite.
+
+The independent attestation remains an owner act. The wizard requires at least 12 actions
+sampled across the six-symbol panel from a second source unrelated to both IBKR and the
+primary sponsor streams. It records the attestation only after explicit owner confirmation;
+code does not perform or infer the sample.
+
+The recommended holdout map is conservative and fixed before certification:
+
+- all symbols through `2024-01-10` are `seen`;
+- QQQ `2022-01-01` through `2024-01-10` is explicitly `burned`;
+- all symbols from `2024-01-11` through `2026-08-21` are the clean final holdout.
+
+The wizard authenticates the capture log, bar/action hashes, manifest, sanitized source
+receipt, declaration, catalog, and release. A `NOT_CERTIFIED` result stops the run without
+freezing. Correct bad source evidence or add a documented genuine market event to
+`classified_moves`; never lower a threshold or move the holdout boundary after seeing a
+finding. Release construction occurs in a temporary directory and moves into its final path
+only after a successful freeze. Re-runs verify immutable artifacts instead of overwriting
+them.
+
 ## What "certified" means here
 
 Four gates, frozen before collection and not tunable at a call site:
@@ -49,7 +105,9 @@ the hourly release is additive.
 Code cannot do this. Take a sample of splits and dividends from a source unrelated to
 the export, reconcile them by hand, and record what you did in the declaration's
 `attestation` block. An export with no attestation is refused — self-consistency is not
-a second source.
+a second source. For the QQQ wizard, the primary action stream is the official fund-sponsor
+record and the attestation source is separate again; using the sponsor record as both the
+stream and its own check does not satisfy this gate.
 
 ## Step 3 — write the declaration
 

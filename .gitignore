@@ -8,6 +8,9 @@ __pycache__/
 .ruff_cache/
 research/registry/
 research/replay_store/
+# Owner-run market-data packets may carry licensed source bytes. Only reviewed,
+# sanitized evidence identities should ever be committed separately.
+research/data/campaigns/
 .coverage
 htmlcov/
 build/

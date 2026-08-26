@@ -25,6 +25,12 @@ holds no writer lease, and imports no order/broker module.
 
 ## Run — historical bars
 
+For the reviewed six-symbol QQQ campaign packet, use
+[`qqq_certified_data_wizard.sh`](../scripts/qqq_certified_data_wizard.sh) and the complete
+workflow in [certified_data_runbook.md](certified_data_runbook.md). The direct command below
+is the generic exporter; by itself it does not supply corporate actions, an independent
+attestation, a holdout map, certification, or a frozen release.
+
 ```bash
 python -m chronos.histdata bars --symbols SPY,QQQ --end-date 2024-12-31 --duration-days 365
 ```
