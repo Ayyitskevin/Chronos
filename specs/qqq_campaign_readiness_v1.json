@@ -1,0 +1,213 @@
+{
+  "schema_version": "chronos-qqq-campaign-readiness-v1",
+  "readiness_id": "qqq-campaign-readiness-v1-owner-review-2026-08-25",
+  "status": "blocked_before_first_data_read",
+  "purpose": "Authenticate the frozen QQQ research identities and report what remains without reading market data or granting research, order, holdout, or promotion capability.",
+  "authority": {
+    "order_authority": "none",
+    "promotion_authority": "none",
+    "selected_strategy": null,
+    "registered_trials": 0,
+    "live_risk_authorized_usd": 0,
+    "performance_claims": []
+  },
+  "campaign": {
+    "execution_symbol": "QQQ",
+    "robustness_panel_symbols": [
+      "QQQ",
+      "SPY",
+      "IWM",
+      "DIA",
+      "GLD",
+      "TLT"
+    ],
+    "bar_interval": "1D",
+    "primary_kpi": "net_edge_confidence",
+    "strategy_order": [
+      "sma_control",
+      "confluence_candidate_after_control_pass"
+    ],
+    "short_side": "unavailable_without_new_identity_and_evidence"
+  },
+  "data_boundaries": {
+    "qqq_release_symbols": [
+      "QQQ",
+      "SPY",
+      "IWM",
+      "DIA",
+      "GLD",
+      "TLT"
+    ],
+    "base_five_tool_intake_symbols": [
+      "GLD",
+      "IWM",
+      "QQQ",
+      "RSP",
+      "SPY",
+      "VIX",
+      "VIX3M"
+    ],
+    "cross_dataset_identity_transfer": "forbidden",
+    "base_five_tool_intake_status": "separate_pending_certified_dataset_and_campaign_binding"
+  },
+  "artifacts": [
+    {
+      "code": "constitution",
+      "path": "research/qqq_v1_constitution.json",
+      "content_sha256": "4c99ce9d09f43a418c7342b0e40a0795b253bf3f1cd0e37d29419498b3008d56",
+      "semantic_sha256": null,
+      "state": "locked_in_repository"
+    },
+    {
+      "code": "sma_control",
+      "path": "specs/qqq_sma_control_v1.json",
+      "content_sha256": "a0ec83b3431016df0c599895ead65083fc72b5afb87073dfbdf046d68e23bb03",
+      "semantic_sha256": null,
+      "state": "locked_in_repository"
+    },
+    {
+      "code": "confluence_candidate",
+      "path": "specs/qqq_five_tool_candidate_v1.json",
+      "content_sha256": "59348ca3da9e9b68ec4edd1fc54572783e9256ae9c55ac18ffe844c0b4b78054",
+      "semantic_sha256": null,
+      "state": "locked_in_repository"
+    },
+    {
+      "code": "paper_management",
+      "path": "src/chronos/supervisor/position_management.py",
+      "content_sha256": "0f89368049cd0b936fa88847fd0dc5c9d8dddd3a7ed1a69a78eb471d8edf0e2c",
+      "semantic_sha256": "7a5b29eb8055b0b4cf0f80476cca200234cfe96afd5327101da7e76ac09ec188",
+      "state": "locked_in_repository"
+    },
+    {
+      "code": "managed_position_admission",
+      "path": "src/chronos/supervisor/position_admission.py",
+      "content_sha256": "dc7e703fd5e393d3cf3baedf7b470437850fdb4a4dae9a2a61847d7353087846",
+      "semantic_sha256": null,
+      "state": "locked_in_repository"
+    }
+  ],
+  "requirements": [
+    {
+      "code": "readiness_owner_approval",
+      "scope": "shared",
+      "state": "owner_action_required",
+      "blocks_long_campaign": true,
+      "detail": "Owner approval is recorded only by merge of this exact readiness identity."
+    },
+    {
+      "code": "certified_six_symbol_export",
+      "scope": "shared",
+      "state": "owner_action_required",
+      "blocks_long_campaign": true,
+      "detail": "The owner must run the read-only IBKR daily export for QQQ, SPY, IWM, DIA, GLD, and TLT; no credential is supplied to this artifact."
+    },
+    {
+      "code": "independent_corporate_action_attestation",
+      "scope": "shared",
+      "state": "owner_action_required",
+      "blocks_long_campaign": true,
+      "detail": "The owner must independently sample and attest splits and dividends; export self-consistency is not a second source."
+    },
+    {
+      "code": "owner_approved_holdout_map",
+      "scope": "shared",
+      "state": "owner_action_required",
+      "blocks_long_campaign": true,
+      "detail": "The owner must approve a complete content-addressed clean, seen, and burned map without opening the clean partition."
+    },
+    {
+      "code": "certified_release_and_catalog",
+      "scope": "shared",
+      "state": "chronos_build_required",
+      "blocks_long_campaign": true,
+      "detail": "Chronos must certify and freeze the six-symbol export into exact release and ordinary catalog identities after owner inputs exist."
+    },
+    {
+      "code": "benchmark_and_cash_leg_identity",
+      "scope": "shared",
+      "state": "owner_action_required",
+      "blocks_long_campaign": true,
+      "detail": "The owner must approve the volatility-matched QQQ/cash benchmark definition and a content-addressed cash-leg source."
+    },
+    {
+      "code": "long_cost_schedule_identity",
+      "scope": "shared",
+      "state": "owner_action_required",
+      "blocks_long_campaign": true,
+      "detail": "The owner must approve a content-addressed long commission, spread, slippage, funding, model, and data cost schedule."
+    },
+    {
+      "code": "power_analysis_identity",
+      "scope": "shared",
+      "state": "chronos_build_required",
+      "blocks_long_campaign": true,
+      "detail": "Chronos must freeze power-required N and the earliest possible pass date before any market data is opened."
+    },
+    {
+      "code": "evaluator_criteria_code_registry_campaign_identity",
+      "scope": "shared",
+      "state": "chronos_build_required",
+      "blocks_long_campaign": true,
+      "detail": "Chronos must bind evaluator, criteria, code commit, experiment registry, and campaign identities before the first trial."
+    },
+    {
+      "code": "tradingview_trace_export",
+      "scope": "shared",
+      "state": "owner_action_required",
+      "blocks_long_campaign": true,
+      "detail": "The owner must export the pinned TradingView traces needed for causal signal and execution-parity comparison."
+    },
+    {
+      "code": "tradingview_parity_evidence",
+      "scope": "shared",
+      "state": "chronos_build_required",
+      "blocks_long_campaign": true,
+      "detail": "Chronos must produce content-addressed parity evidence or preserve parity as an explicit blocker."
+    },
+    {
+      "code": "base_five_tool_bindings",
+      "scope": "confluence_candidate",
+      "state": "chronos_build_required",
+      "blocks_long_campaign": true,
+      "detail": "The integrated candidate additionally requires the base Five-Tool ablation and execution-binding blockers to be resolved under a new campaign identity."
+    },
+    {
+      "code": "short_side_evidence",
+      "scope": "short_side",
+      "state": "unavailable",
+      "blocks_long_campaign": false,
+      "detail": "Short compiler, borrow cost, shortability, account eligibility, legal, tax, and fresh owner authority are absent; short exposure remains zero."
+    },
+    {
+      "code": "authenticated_management_event_identity",
+      "scope": "paper_activation",
+      "state": "deferred_activation",
+      "blocks_long_campaign": false,
+      "detail": "PAPER activation later requires authenticated ongoing management observations and outcomes plus a trusted management-event identity."
+    },
+    {
+      "code": "broker_held_protection_semantics",
+      "scope": "paper_activation",
+      "state": "deferred_activation",
+      "blocks_long_campaign": false,
+      "detail": "PAPER activation later requires explicit broker-held protection semantics across disconnects, gaps, process death, and queue latency."
+    },
+    {
+      "code": "real_paper_lifecycle_evidence",
+      "scope": "paper_activation",
+      "state": "deferred_activation",
+      "blocks_long_campaign": false,
+      "detail": "PAPER activation later requires bounded scheduling and real restart, partial-fill, late-event, and ambiguous-send lifecycle evidence."
+    }
+  ],
+  "forbidden_capabilities": [
+    "market_data_reader",
+    "holdout_unlock",
+    "trial_registration",
+    "broker",
+    "order_construction",
+    "order_submission",
+    "promotion"
+  ]
+}

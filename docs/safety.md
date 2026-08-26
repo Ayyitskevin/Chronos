@@ -99,6 +99,21 @@ process death; no scheduler exists; no real PAPER lifecycle has run; and PAPER
 simulation would not prove LIVE equivalence. Any activation is a separate
 owner-gated change.
 
+### QQQ campaign readiness (ADR-0037, 2026-08-25)
+
+`chronos.research.qqq_campaign_readiness` is an authentication-only report. It reads the exact
+readiness/specification and referenced source bytes, composes the two existing QQQ research
+compilers, and emits immutable blockers. It imports no data reader, trial registry, holdout
+guardian, broker, order, persistence, execution, supervisor, service, network, or database
+capability. Fresh-process and AST tests enforce that boundary.
+
+The report treats the inert PAPER management and opening-admission modules as locked repository
+identities only. They are not real PAPER evidence, runtime scheduling, authenticated ongoing
+management events, broker-held protection, or authority. It also keeps the six-symbol QQQ release
+separate from the seven-symbol base Five-Tool intake; neither catalog nor result transfers by
+overlap. Compilation cannot read market data, register a trial, unlock a holdout, construct or
+submit an order, or promote a strategy.
+
 ## Hard boundaries
 
 Live transmission is a gated *capability*, not an impossibility (ADR-0009, Milestone 7): it
