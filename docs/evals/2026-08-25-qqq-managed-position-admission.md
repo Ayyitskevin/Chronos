@@ -50,7 +50,10 @@ refusal or authorization behavior:
 - non-positive broker/permanent order identities; and
 - a full-suite structural guard that caught the first implementation importing
   `chronos.broker` from `supervisor`; the final design uses a local read-only
-  evidence protocol and the supervisor-boundary guard passes.
+  evidence protocol and the supervisor-boundary guard passes; and
+- independent-review probes that exposed a repeating multi-fill VWAP, an impossible
+  buy fill above its limit, an untyped registration conflict, and missing durable
+  `permId` uniqueness. Four focused red tests pinned the findings before correction.
 
 Positive controls prove a valid full fill, a terminal cancelled partial fill,
 exact idempotent replay without a second broker observation, and clean retry after
@@ -64,8 +67,13 @@ a refused transaction leaves no partial binding.
 - Two stable broker reads, unchanged reconciliation provenance, positive execution
   identity, local lifecycle agreement, and exact aggregate-position coherence are
   conjunctive.
-- Schema v11 enforces one order and one deterministic position per account scope;
+- Multi-fill VWAP and derived CVaR persistence use conservative directional rounding,
+  and a buy execution above its protected limit refuses.
+- Schema v11 enforces one order, one deterministic position, and one broker permanent
+  identity per account scope;
   registration and hash-chain append are atomic and exact retries are idempotent.
+- A managed-stream registration conflict returns a typed durable-state refusal and
+  rolls the already-flushed binding back.
 - The capability has no runtime consumer or broker mutation path.
 
 ## What it does not prove
@@ -97,13 +105,13 @@ a refused transaction leaves no partial binding.
   tests/safety/test_paper_position_management.py \
   tests/integration/test_order_pipeline.py tests/integration/test_migrations.py \
   tests/unit/test_database.py
-# 142 passed
+# 145 passed
 
 make gates
 # ruff: All checks passed
 # format: 539 files already formatted
 # mypy: 292 Chronos source files; worker strict: 10 source files
-# pytest: 4,063 passed / 1 skipped / 14 failed
+# pytest: 4,066 passed / 1 skipped / 14 failed
 
 .venv/bin/pytest -q \
   tests/unit/test_five_tool_trials.py::test_concurrent_processes_keep_chain_and_anchor_consistent
@@ -113,11 +121,37 @@ make gates
 
 The exact-main baseline at `e1770b76069c04a59f014a5f64faed71ddae4338` was
 static-clean and reported 4,045 passed / 1 skipped / the same 13 Streamlit 1.62
-relative-path failures. This branch adds 19 tests. Its fourteenth full-run failure
+relative-path failures. This branch adds 22 tests. Its fourteenth full-run failure
 was the pre-existing concurrent-ledger hard-link transient already disclosed in
 the ADR-0035 evaluation; it failed once more and then passed on the next isolated
 retry. No changed file reaches that research-ledger subsystem. Independent-review
 results are appended before the PR is declared merge-ready.
+
+## Independent review
+
+Claude reviewed exact commit `4e9c49d` from a separate clean clone and posted an
+evidence-backed PASS on PR 97. Its independent full run measured 4,064 passed /
+1 skipped / the same 13 inherited failures, exactly 19 tests above its separately
+measured main baseline. It also probed socket-inert import, the AST call graph,
+transaction rollback after injected registration failures, a real two-connection
+admission race, both original unique constraints, and the over-envelope flatten
+latch.
+
+The reviewer found four non-blocking weaknesses. The review-delta red/green cycle
+closed all four before owner handoff:
+
+1. repeating multi-execution VWAPs now round upward to 1e-8; derived CVaR loss
+   rounds upward and allowed budget downward;
+2. a QQQ buy execution above the durable protected limit refuses as an identity
+   contradiction;
+3. `PositionManagementError` during registration becomes a typed
+   `DURABLE_STATE_CONFLICT`, with rollback pinned; and
+4. schema v11 now uniquely binds `(account_fingerprint, permanent_id)` and the true
+   v10 migration test inspects the resulting constraint.
+
+Focused verification at the review-delta tree is 145 passed. The original reviewer
+must post a fresh exact-head PASS/HOLD delta verdict before merge; the earlier PASS
+does not silently carry forward.
 
 ## Result
 

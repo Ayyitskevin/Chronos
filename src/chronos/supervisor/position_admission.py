@@ -19,7 +19,7 @@ import re
 from collections.abc import Coroutine
 from dataclasses import dataclass
 from datetime import datetime
-from decimal import Decimal
+from decimal import ROUND_CEILING, Decimal
 from enum import StrEnum
 from typing import Any, Protocol, TypeVar
 
@@ -64,6 +64,7 @@ from chronos.utils.identifiers import account_fingerprint
 _T = TypeVar("_T")
 _ORDER_REF = re.compile(r"^CHR-ORD-[0-9A-F]{32}$")
 _TERMINAL_FILLED_STATUSES = frozenset({OrderLifecycle.FILLED, OrderLifecycle.CANCELLED})
+_ENTRY_PRICE_QUANTUM = Decimal("0.00000001")
 
 
 class ReadOnlyBrokerEvidence(Protocol):
@@ -236,6 +237,11 @@ class ManagedPositionAdmission:
                 OpeningAdmissionRefusalCode.DURABLE_STATE_CONFLICT,
                 "a concurrent admission created conflicting durable state",
             )
+        except PositionManagementError:
+            return _refuse(
+                OpeningAdmissionRefusalCode.DURABLE_STATE_CONFLICT,
+                "managed-position registration conflicts with durable state",
+            )
 
     async def _observe_broker(self, since: datetime) -> _BrokerObservation:
         status_start = await self._broker.connection_status()
@@ -364,7 +370,13 @@ class ManagedPositionAdmission:
             fill_notional = sum(
                 (execution.quantity * execution.price for execution in executions), Decimal(0)
             )
-            entry_price = fill_notional / fill_quantity
+            # ADR-0035 persists decimal geometry at 1e-8.  A multi-fill VWAP can
+            # repeat forever, so round a long entry upward: the bounded delta is
+            # conservative for basis, gross exposure, CVaR, and all targets.
+            entry_price = (fill_notional / fill_quantity).quantize(
+                _ENTRY_PRICE_QUANTUM,
+                rounding=ROUND_CEILING,
+            )
             opened_at = max(execution.timestamp for execution in executions)
             if now < opened_at:
                 return _refuse(
@@ -533,12 +545,13 @@ class ManagedPositionAdmission:
             or execution.side is not OrderSide.BUY
             or execution.contract.symbol != "QQQ"
             or execution.contract.con_id != intent.con_id
+            or execution.price > intent.limit_price
             or execution.timestamp < intent.created_at
             for execution in executions
         ):
             return _refuse(
                 OpeningAdmissionRefusalCode.BROKER_IDENTITY_MISMATCH,
-                "opening executions disagree with account, order, side, contract, or time",
+                "opening executions disagree with account, order, side, contract, limit, or time",
             )
         return None
 

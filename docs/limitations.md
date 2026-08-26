@@ -307,7 +307,10 @@ runbooks.
   Admission now obtains the opening account, reconciliation, execution, order, and aggregate
   position facts through two stable reads of the canonical broker port, requires the named
   persisted D-48 entry-risk check, and atomically enforces one opening-order/managed-stream
-  binding in schema v11. This authenticates opening registration only: ongoing observations
+  binding plus one broker permanent identity per account in schema v11. Repeating multi-fill
+  VWAPs are conservatively rounded upward to the 1e-8 persistence scale, derived CVaR loss
+  rounds upward, and its allowed budget rounds downward; exact executions remain in the fill
+  digest. A buy fill above its protected limit refuses. This authenticates opening registration only: ongoing observations
   and directive outcomes remain caller attestations. A dedicated management-event queue
   identity, persistent broker protection, runtime scheduling, and real PAPER lifecycle
   evidence remain mandatory before activation. IBKR's bounded execution-history window and

@@ -550,6 +550,11 @@ class ManagedPositionBindingRow(Base):
             "position_id",
             name="uq_managed_position_identity",
         ),
+        UniqueConstraint(
+            "account_fingerprint",
+            "permanent_id",
+            name="uq_managed_position_permanent_id",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)

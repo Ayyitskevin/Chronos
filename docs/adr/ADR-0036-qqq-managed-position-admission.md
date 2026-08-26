@@ -47,7 +47,11 @@ decision.
 Admission accepts no replacement risk values. It revalidates the stored decision,
 named check, candidate/source evidence, timing, entry-reconciliation provenance,
 and risk projection. The managed plan is then derived from actual fill quantity
-and VWAP while preserving the frozen signal-time risk distance. If actual broker
+and VWAP while preserving the frozen signal-time risk distance. A repeating
+multi-fill VWAP is rounded upward to the 1e-8 persistence quantum; derived CVaR
+loss is rounded upward and its allowed budget downward. These directions are
+conservative for a long position and the original executions remain exact in the
+fill digest. If actual broker
 truth breaches the envelope, ADR-0035's state records the exposure and latches a
 flatten proposal rather than hiding the position.
 
@@ -63,7 +67,7 @@ executions, and open orders. Admission refuses unless:
   economic state;
 - one or more positive executions identify the exact account, order reference,
   QQQ contract, buy side, positive broker order ID, positive permanent ID, and
-  valid time window;
+  valid time window, and no buy fill exceeds the protected local limit;
 - those identities and cumulative fill quantity agree with Chronos's durable
   order lifecycle;
 - the opening order is no longer active, no other QQQ order can change the same
@@ -77,7 +81,8 @@ state, never fill evidence.
 
 `managed_position_bindings` stores only the account fingerprint and enforces
 unique `(account_fingerprint, opening_order_ref)` and
-`(account_fingerprint, position_id)` identities. It binds the local risk decision,
+`(account_fingerprint, position_id)` identities, plus unique
+`(account_fingerprint, permanent_id)` broker identity. It binds the local risk decision,
 broker/permanent order identities, fill/risk/candidate/policy digests, and
 reconciliation generation/session.
 
@@ -87,6 +92,9 @@ reference. Exact retries rehydrate the same stream without another broker read;
 contradictory or corrupt durable state returns a typed refusal. Migration 0010
 creates an empty table and performs no historical backfill because old rows lack
 the required authenticated evidence.
+
+A managed-stream registration conflict returns a typed durable-state refusal and
+the surrounding transaction rolls the already-flushed binding row back.
 
 ### 5. The capability remains inert
 

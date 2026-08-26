@@ -14,6 +14,9 @@ order risk engine applies native-stop, CVaR, and gross limits and persists a nam
 passing check that admission revalidates. Missing/old/contradictory broker facts,
 fractional or identity-mismatched fills, competing QQQ orders, unexplained
 aggregate exposure, or conflicting durable bindings refuse with typed results.
+Multi-fill VWAPs and derived CVaR amounts use explicit conservative 1e-8 rounding;
+a buy fill above its protected limit refuses; and account-scoped permanent IDs are
+database-unique.
 
 Nothing is activated. No runtime imports admission, no broker mutation capability
 is present, and ongoing management observations, a trusted queue, broker-held
