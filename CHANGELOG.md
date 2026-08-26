@@ -1,5 +1,19 @@
 # CHANGELOG
 
+## [Unreleased] — QQQ source independence names the whole IBKR family (2026-08-26)
+
+The frozen QQQ packet now refuses IBKR-family identities at both evidence seams: the
+primary corporate-action `source` and the independent attestation `source_id`. Unicode,
+case, punctuation, spacing, and joined-word variants of IBKR, Interactive Brokers, TWS,
+Trader Workstation, IB Gateway, and `ib_async` normalize to the same fail-closed family.
+Clear sponsor and second-source identities remain accepted; the ambiguous token `IB` is
+not a blanket deny rule.
+
+This closes a false-independence label bypass only. It does not verify that an accepted
+label is truthful, that either provider is complete, or that a real QQQ dataset is
+certified. No data, gateway, account, holdout, trial, strategy, risk, PAPER/LIVE, funding,
+or promotion state changed.
+
 ## [Unreleased] — certified action claims bind actual events (2026-08-26)
 
 ADR-0039 moves certification evidence to v3: every declared symbol now carries an

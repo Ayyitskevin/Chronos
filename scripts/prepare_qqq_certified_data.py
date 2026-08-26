@@ -21,7 +21,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import sys
+import unicodedata
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
@@ -41,6 +43,19 @@ DATASET_ID = "chronos-qqq-robustness-daily-v1"
 CATALOG_ID = "chronos-qqq-robustness-daily-v1-release-001"
 RECEIPT_SCHEMA = "chronos-qqq-source-receipt-v1"
 MINIMUM_ATTESTED_ACTIONS = 12
+
+_IBKR_SOURCE_MARKERS = frozenset(
+    {
+        "ibkr",
+        "interactivebroker",
+        "interactivebrokers",
+        "tws",
+        "traderworkstation",
+        "ibgateway",
+        "ibasync",
+    }
+)
+_LONGEST_IBKR_SOURCE_MARKER = max(len(marker) for marker in _IBKR_SOURCE_MARKERS)
 
 SEEN_SPLIT = date(2022, 1, 1)
 BURNED_END = date(2024, 1, 10)
@@ -81,6 +96,20 @@ def _canonical_bytes(document: dict[str, Any]) -> bytes:
     return (
         json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n"
     ).encode("utf-8")
+
+
+def _uses_ibkr_source_identity(source: str) -> bool:
+    normalized = unicodedata.normalize("NFKC", source).casefold()
+    tokens = tuple(re.findall(r"[a-z0-9]+", normalized))
+    for start in range(len(tokens)):
+        candidate = ""
+        for token in tokens[start:]:
+            candidate += token
+            if len(candidate) > _LONGEST_IBKR_SOURCE_MARKER:
+                break
+            if candidate in _IBKR_SOURCE_MARKERS:
+                return True
+    return False
 
 
 def _write_immutable(path: Path, payload: bytes) -> None:
@@ -213,10 +242,9 @@ def _parse_action_file(path: Path, *, symbol: str, start: date) -> tuple[Corpora
             action = CorporateAction.from_mapping(item)
         except (TypeError, ValueError) as error:
             raise PacketError(f"{path}: invalid action {index}: {error}") from error
-        source = action.source.casefold()
-        if "ibkr" in source or "interactive brokers" in source:
+        if _uses_ibkr_source_identity(action.source):
             raise PacketError(
-                f"{path}: {action.ex_date} uses IBKR as its action source; "
+                f"{path}: {action.ex_date} uses the IBKR/TWS source family; "
                 "the action stream must be independent of the IBKR bar export"
             )
         if not start <= action.ex_date <= date.fromisoformat(END_DATE):
@@ -425,8 +453,13 @@ def _expected_declaration(
     attestation_source_id: str,
     attestation_count: int,
 ) -> dict[str, Any]:
-    if not attestation_source_id.strip():
+    attestation_source_id = attestation_source_id.strip()
+    if not attestation_source_id:
         raise PacketError("the independent attestation source id must be non-empty")
+    if _uses_ibkr_source_identity(attestation_source_id):
+        raise PacketError(
+            "the attestation source must be independent of the IBKR/TWS source family"
+        )
     if attestation_count < MINIMUM_ATTESTED_ACTIONS:
         raise PacketError(
             f"the reviewed packet requires at least {MINIMUM_ATTESTED_ACTIONS} sampled actions"
@@ -474,7 +507,7 @@ def _expected_declaration(
         "source_receipt_sha256": _sha256(source_receipt),
         "attestation": {
             "kind": "sampled_actions",
-            "source_id": attestation_source_id.strip(),
+            "source_id": attestation_source_id,
             "sampled_action_count": attestation_count,
             "symbols": list(SYMBOLS),
             "note": (

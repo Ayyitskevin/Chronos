@@ -51,6 +51,14 @@ primary sponsor streams. It records the attestation only after explicit owner co
 code does not perform or infer the sample. The claimed count may not exceed the distinct
 events supplied inside the certified windows.
 
+The frozen helper refuses IBKR-family identities in both places where independence is
+claimed: every primary action `source` and the attestation `source_id`. It normalizes Unicode,
+case, punctuation, spacing, and joined words before recognizing IBKR, Interactive Brokers,
+TWS/Trader Workstation, IB Gateway, and `ib_async`; spelling one of those aliases differently
+does not make it a second source. This is a narrow deny-family check, not a source allowlist:
+an unrelated label passing it is not proof that the source exists, is complete, or was
+actually consulted. Keep the owner-verifiable provider identity and reconciliation record.
+
 The recommended holdout map is conservative and fixed before certification:
 
 - all symbols through `2024-01-10` are `seen`;

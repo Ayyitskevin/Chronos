@@ -143,9 +143,15 @@ action-free short window requires a separate independent-source attestation over
 symbol/date windows, and supplied actions contradict it.
 
 The frozen multi-decade QQQ helper is stricter: all six action files cannot be empty, manifest
-counts must equal parsed bytes, and there is no override flag. These checks close an internal
-false-certification path. They do not establish sponsor completeness or independent-source
-truth, certify a real dataset, open a holdout, count a trial, or grant trading authority.
+counts must equal parsed bytes, and there is no override flag. Its primary-action and
+attestation identity fields also normalize and refuse the full IBKR/TWS source family,
+including punctuation/case variants, Trader Workstation, IB Gateway, and `ib_async`. The
+guard is deliberately not a general substring ban: unrelated labels and the token `IB` alone
+are not evidence of an IBKR relationship.
+
+These checks close internal false-certification and false-independence paths. They do not
+establish that an accepted label is truthful, sponsor completeness, or independent-source
+truth; certify a real dataset; open a holdout; count a trial; or grant trading authority.
 
 ## Hard boundaries
 
