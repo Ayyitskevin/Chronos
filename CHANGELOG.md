@@ -1,5 +1,19 @@
 # CHANGELOG
 
+## [Unreleased] — QQQ power becomes arithmetic instead of shorthand (2026-08-26)
+
+ADR-0038 adds a content-addressed, no-data power compiler for the QQQ SMA-200 primary cell.
+With a 4% minimum annual post-cost active return, one-sided 5% type-I error, 80% power, 252
+sessions/year, and an 8% annualized long-run tracking-error ceiling, it requires 6,233
+completed OOS daily returns (24.7302289281 year-equivalents). Twenty pinned sensitivity cases
+and invalid-input refusals make the assumptions and their direction observable.
+
+The 100-closed-position floor remains a separate gate; unlike units are never compared with
+a numeric maximum. The absolute pass date remains `null` until an owner-approved clean start
+and sufficiently covered session calendar exist. The compiler authenticates its exact spec
+and three bound design artifacts, imports no Chronos subsystem, reads no market data, opens no
+holdout, registers no trial, and grants no strategy-selection, order, or promotion authority.
+
 ## [Unreleased] — QQQ readiness becomes an authenticated checklist (2026-08-25)
 
 ADR-0037 adds one content-addressed `compile_qqq_campaign_readiness()` operation. It authenticates

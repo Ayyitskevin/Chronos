@@ -12,6 +12,8 @@ holdout, contact a broker, construct or submit an order, or promote a strategy.
 - Integrated Five-Tool Confluence candidate overlay.
 - Default-off PAPER management policy and state machine.
 - Default-off managed-position opening admission.
+- Relative power arithmetic for the SMA-200 primary cell: 6,233 completed OOS daily active
+  returns (24.7302289281 year-equivalents), plus a separate 100-closed-position floor.
 
 These are implementation identities, not evidence. The PAPER modules remain inert, have no
 runtime consumer, and do not provide broker-held protection.
@@ -21,7 +23,9 @@ runtime consumer, and do not provide broker-held protection.
 Do not send credentials, account identifiers, or market-data files through chat or commit
 them to the repository.
 
-1. Merge approval for the exact readiness identity after independent review.
+1. Merge approval for the exact readiness identity after independent review. Approval of
+   ADR-0038's exact power identity also approves its 8% annualized long-run tracking-error
+   design ceiling; it is an assumption, not an observed QQQ fact.
 2. Run the owner-only read-only six-symbol export in
    [certified_data_runbook.md](certified_data_runbook.md) for QQQ, SPY, IWM, DIA, GLD, and
    TLT.
@@ -37,7 +41,9 @@ must exist before Chronos can freeze a release.
 ## What Chronos builds after those inputs
 
 1. Certify and freeze the six-symbol release and ordinary catalog.
-2. Freeze power-required N and the earliest possible pass date before opening data.
+2. Bind the frozen 6,233-session power requirement and separate 100-position floor into a
+   successor campaign identity, then freeze the absolute earliest pass date from the approved
+   clean start and a session calendar covering the entire horizon.
 3. Bind evaluator, criteria, code commit, registry, and campaign identities.
 4. Produce content-addressed TradingView parity evidence or preserve parity as a blocker.
 5. Run the SMA control first. The Confluence candidate remains a separate campaign and may

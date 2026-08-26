@@ -116,6 +116,24 @@ separate from the seven-symbol base Five-Tool intake; neither catalog nor result
 overlap. Compilation cannot read market data, register a trial, unlock a holdout, construct or
 submit an order, or promote a strategy.
 
+### QQQ power analysis (ADR-0038, 2026-08-26)
+
+`chronos.research.qqq_power_analysis` is a content-addressed, pre-data calculator for the
+SMA-200 primary cell. It authenticates the exact constitution, control, and Confluence
+candidate bytes and recomputes a prospective one-sided mean-test requirement from explicit
+design assumptions: 4% minimum annualized post-cost active return, 5% type-I error, 80%
+power, 252 sessions/year, and an 8% ceiling on annualized long-run tracking error. The result
+is 6,233 completed OOS daily active returns, or 24.7302289281 year-equivalents.
+
+That result is not evidence. Long-run tracking error must include serial dependence; an IID
+standard deviation is not an admissible replacement. Robustness cells cannot substitute for
+the powered primary and instrument returns cannot be pooled. The independent 100-closed-
+position floor must also pass; sessions and positions are never reduced to one numeric
+maximum. The absolute date remains unresolved until an owner-approved clean-window start
+and covered future session calendar exist. The module imports no Chronos subsystem and can
+read no market data, register no trial, unlock no holdout, select no strategy, construct no
+order, and grant no promotion or execution authority.
+
 ## Hard boundaries
 
 Live transmission is a gated *capability*, not an impossibility (ADR-0009, Milestone 7): it

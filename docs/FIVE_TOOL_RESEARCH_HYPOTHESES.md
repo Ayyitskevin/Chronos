@@ -246,8 +246,9 @@ per-trial return matrix over a common time axis, and `CampaignReport` retains on
 per-window `oos_return` per cell — far too few observations to partition. Nothing in the
 campaign calls the estimator yet, and no verdict may cite a PBO until it does.
 
-1. `max(preregistered power-required N, 100 OOS economic positions)`; closed legs are
-   reported separately, with sufficient bars for the declared warm-up/history start.
+1. The preregistered power-required observations **and** 100 OOS economic positions must
+   each pass; unlike units are not compared with a numeric `max`. Closed legs are reported
+   separately, with sufficient bars for the declared warm-up/history start.
 2. Post-cost expectancy and benchmark-alpha 95% lower bounds above zero.
 3. Deflated-Sharpe probability at least 0.95 using the final canonical-registry trial
    multiplicity; FWER or FDR `q <= 0.05`; probability of backtest overfitting at most
