@@ -103,9 +103,11 @@ owner-gated change.
 
 `chronos.research.qqq_campaign_readiness` is an authentication-only report. It reads the exact
 readiness/specification and referenced source bytes, composes the two existing QQQ research
-compilers, and emits immutable blockers. It imports no data reader, trial registry, holdout
-guardian, broker, order, persistence, execution, supervisor, service, network, or database
-capability. Fresh-process and AST tests enforce that boundary.
+compilers, and emits immutable blockers. Those inherited compilers load existing Five-Tool
+market-data types and certified-reader code, but this operation does not invoke or expose a
+market-data read. Direct-import AST tests and a fresh-process probe exclude registry, holdout,
+broker, order, persistence, execution, supervisor, service, network, and database authority
+dependencies; they do not claim that the dependency closure contains no data-related module.
 
 The report treats the inert PAPER management and opening-admission modules as locked repository
 identities only. They are not real PAPER evidence, runtime scheduling, authenticated ongoing

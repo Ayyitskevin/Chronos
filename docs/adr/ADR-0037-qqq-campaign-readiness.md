@@ -19,16 +19,19 @@ input, and preserves all capability boundaries.
 
 ## Decision
 
-### 1. One public operation reports readiness and owns no capability
+### 1. One public operation reports readiness and owns no authority
 
 `compile_qqq_campaign_readiness()` is the sole public operation. It reads only the exact
 readiness/specification and source artifacts. Its result is immutable metadata with literal
 false data-read, trial-registration, holdout-unlock, execution, order, and promotion flags.
 
 The module may directly import only the two existing authentication-only QQQ research
-compilers. A repository AST guard and fresh-process import probe refuse any data, registry,
-holdout, broker, order, persistence, execution, supervisor, service, network, or database
-capability from entering its dependency graph.
+compilers. Their existing dependency closure loads Five-Tool market-data types and certified-
+reader code, but this operation neither invokes nor exposes a market-data read. A repository
+AST guard pins those two direct imports, while a fresh-process probe excludes registry,
+holdout, broker, order, persistence, execution, supervisor, service, network, and database
+authority dependencies. This is an execution-path boundary, not a claim that no data-related
+module is loaded.
 
 ### 2. Current repository identities are authenticated, not inferred
 

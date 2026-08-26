@@ -187,6 +187,23 @@ def test_a_referenced_compiler_cannot_silently_drop_a_blocker(
         compile_qqq_campaign_readiness()
 
 
+@pytest.mark.parametrize(
+    "compiler_name",
+    ["compile_qqq_control", "compile_qqq_confluence_candidate"],
+)
+def test_a_referenced_compiler_cannot_silently_duplicate_a_blocker(
+    compiler_name: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compiler = getattr(qqq_campaign_readiness, compiler_name)
+    compiled = compiler()
+    duplicated = replace(compiled, blockers=(*compiled.blockers, compiled.blockers[-1]))
+    monkeypatch.setattr(qqq_campaign_readiness, compiler_name, lambda *_args, **_kwargs: duplicated)
+
+    with pytest.raises(QQQCampaignReadinessError, match="blocker set"):
+        compile_qqq_campaign_readiness()
+
+
 def test_any_readiness_byte_drift_refuses_before_interpretation(tmp_path: Path) -> None:
     document = json.loads(_SPEC.read_text())
     document["authority"]["order_authority"] = "paper"
@@ -197,7 +214,7 @@ def test_any_readiness_byte_drift_refuses_before_interpretation(tmp_path: Path) 
         compile_qqq_campaign_readiness(changed)
 
 
-def test_readiness_import_has_no_data_trial_holdout_or_execution_capability() -> None:
+def test_readiness_import_has_only_known_direct_imports_and_no_authority_capability() -> None:
     tree = ast.parse(_MODULE.read_text(), filename=str(_MODULE))
     imports: set[str] = set()
     for node in ast.walk(tree):
@@ -211,6 +228,8 @@ def test_readiness_import_has_no_data_trial_holdout_or_execution_capability() ->
         "chronos.research.qqq_control",
     }
 
+    # qqq_confluence transitively loads existing Five-Tool market-data code. This
+    # probe excludes authority dependencies; it is not a no-data-module claim.
     forbidden = (
         "chronos.api",
         "chronos.autonomy",
