@@ -952,7 +952,10 @@ def test_module_is_not_wired_into_the_production_runtime() -> None:
             )
             if imports_module or imports_module_directly:
                 importers.append(str(path.relative_to(source_root)))
-    assert importers == []
+    # The default-off authenticated admission module is now the sole importer:
+    # it can register proven fills but is itself structurally absent from every
+    # runtime path (pinned in test_managed_position_admission.py).
+    assert importers == ["supervisor/position_admission.py"]
 
 
 def test_module_defines_no_parallel_authority_grant() -> None:

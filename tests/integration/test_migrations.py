@@ -77,6 +77,11 @@ _V10_TABLES = {
     "autonomy_proposer_revocations",
 }
 
+# Added by revision 0010 (schema v11): one opening order to one managed position.
+_V11_TABLES = {
+    "managed_position_bindings",
+}
+
 _ALL_MIGRATED_TABLES = (
     _V2_BASELINE_TABLES
     | _V3_TABLES
@@ -85,6 +90,7 @@ _ALL_MIGRATED_TABLES = (
     | _V7_TABLES
     | _V9_TABLES
     | _V10_TABLES
+    | _V11_TABLES
 )
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -95,7 +101,9 @@ def _make_v2_database(path: Path) -> None:
 
     url = f"sqlite:///{path}"
     engine = sa.create_engine(url)
-    post_v2 = _V3_TABLES | _V4_TABLES | _V5_TABLES | _V7_TABLES | _V9_TABLES | _V10_TABLES
+    post_v2 = (
+        _V3_TABLES | _V4_TABLES | _V5_TABLES | _V7_TABLES | _V9_TABLES | _V10_TABLES | _V11_TABLES
+    )
     v2_tables = [table for name, table in Base.metadata.tables.items() if name not in post_v2]
     Base.metadata.create_all(engine, tables=v2_tables)
     with engine.begin() as connection:
@@ -113,7 +121,7 @@ def _make_v3_database(path: Path) -> None:
 
     url = f"sqlite:///{path}"
     engine = sa.create_engine(url)
-    post_v3 = _V4_TABLES | _V5_TABLES | _V7_TABLES | _V9_TABLES | _V10_TABLES
+    post_v3 = _V4_TABLES | _V5_TABLES | _V7_TABLES | _V9_TABLES | _V10_TABLES | _V11_TABLES
     v3_tables = [table for name, table in Base.metadata.tables.items() if name not in post_v3]
     Base.metadata.create_all(engine, tables=v3_tables)
     with engine.begin() as connection:
@@ -131,7 +139,7 @@ def _make_v4_database(path: Path) -> None:
 
     url = f"sqlite:///{path}"
     engine = sa.create_engine(url)
-    post_v4 = _V5_TABLES | _V7_TABLES | _V9_TABLES | _V10_TABLES
+    post_v4 = _V5_TABLES | _V7_TABLES | _V9_TABLES | _V10_TABLES | _V11_TABLES
     v4_tables = [table for name, table in Base.metadata.tables.items() if name not in post_v4]
     Base.metadata.create_all(engine, tables=v4_tables)
     with engine.begin() as connection:
@@ -224,7 +232,7 @@ def test_v4_database_upgrades_to_current_schema(tmp_path: Path) -> None:
 
     engine = sa.create_engine(f"sqlite:///{db_path}")
     tables = set(sa.inspect(engine).get_table_names())
-    assert tables >= _V5_TABLES | _V7_TABLES | _V9_TABLES | _V10_TABLES
+    assert tables >= _V5_TABLES | _V7_TABLES | _V9_TABLES | _V10_TABLES | _V11_TABLES
     with engine.connect() as connection:
         version = connection.execute(
             sa.text("SELECT version FROM schema_version ORDER BY id DESC LIMIT 1")
@@ -474,6 +482,47 @@ def test_v9_database_gains_the_revocation_table_and_keeps_its_rows(tmp_path: Pat
         database.dispose()
 
 
+def test_v10_database_gains_managed_position_bindings_empty(tmp_path: Path) -> None:
+    """A real schema-v10 database gains only the empty admission binding table."""
+
+    db_path = tmp_path / "chronos.db"
+    engine = sa.create_engine(f"sqlite:///{db_path}")
+    Base.metadata.create_all(engine)
+    with engine.begin() as connection:
+        connection.execute(sa.text("DROP TABLE managed_position_bindings"))
+        for version in range(2, 11):
+            connection.execute(
+                sa.text(
+                    "INSERT INTO schema_version (version, applied_at) "
+                    f"VALUES ({version}, '2026-01-01 00:00:00.000000')"
+                )
+            )
+    engine.dispose()
+
+    config = _alembic_config(db_path)
+    command.stamp(config, "0009")
+    command.upgrade(config, "head")
+
+    engine = sa.create_engine(f"sqlite:///{db_path}")
+    assert "managed_position_bindings" in set(sa.inspect(engine).get_table_names())
+    with engine.connect() as connection:
+        assert (
+            connection.execute(sa.text("SELECT 1 FROM managed_position_bindings LIMIT 1")).first()
+            is None
+        )
+        version = connection.execute(
+            sa.text("SELECT version FROM schema_version ORDER BY id DESC LIMIT 1")
+        ).scalar()
+    engine.dispose()
+    assert version == SCHEMA_VERSION
+
+    database = Database(f"sqlite:///{db_path}")
+    try:
+        database.initialize()
+    finally:
+        database.dispose()
+
+
 def test_fresh_database_needs_no_alembic(tmp_path: Path) -> None:
     database = Database(f"sqlite:///{tmp_path / 'fresh.db'}")
     try:
@@ -481,7 +530,13 @@ def test_fresh_database_needs_no_alembic(tmp_path: Path) -> None:
         inspector = sa.inspect(database.engine)
         assert (
             set(inspector.get_table_names())
-            >= _V3_TABLES | _V4_TABLES | _V5_TABLES | _V7_TABLES | _V9_TABLES
+            >= _V3_TABLES
+            | _V4_TABLES
+            | _V5_TABLES
+            | _V7_TABLES
+            | _V9_TABLES
+            | _V10_TABLES
+            | _V11_TABLES
         )
     finally:
         database.dispose()

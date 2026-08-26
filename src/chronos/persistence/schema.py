@@ -535,6 +535,43 @@ class HashChainRow(Base):
     record_hash: Mapped[str] = mapped_column(String(64), nullable=False)
 
 
+class ManagedPositionBindingRow(Base):
+    """One durable opening-order identity for one managed position stream."""
+
+    __tablename__ = "managed_position_bindings"
+    __table_args__ = (
+        UniqueConstraint(
+            "account_fingerprint",
+            "opening_order_ref",
+            name="uq_managed_position_opening_order",
+        ),
+        UniqueConstraint(
+            "account_fingerprint",
+            "position_id",
+            name="uq_managed_position_identity",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account_fingerprint: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    opening_order_ref: Mapped[str] = mapped_column(
+        ForeignKey("order_intents.order_ref"), nullable=False
+    )
+    position_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    risk_decision_id: Mapped[str] = mapped_column(
+        ForeignKey("risk_decisions.decision_id"), nullable=False
+    )
+    broker_order_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    permanent_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    opening_fill_evidence_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    entry_risk_evidence_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    candidate_spec_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    management_policy_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    reconciliation_session_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    reconciliation_generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    admitted_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
 class AutonomyMandateActivationRow(Base):
     """An owner event that put a mandate in force, or revoked it.
 

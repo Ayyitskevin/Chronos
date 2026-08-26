@@ -32,14 +32,24 @@ from chronos.domain.enums import (
     ProductFamily,
     ReconciliationStatus,
 )
-from chronos.domain.models import BrokerExecution, BrokerOrder, OrderRequest, OrderSubmission
-from chronos.orders.intent import build_option_intent
+from chronos.domain.models import (
+    BrokerExecution,
+    BrokerOrder,
+    OrderRequest,
+    OrderSubmission,
+    UnderlyingContract,
+)
+from chronos.orders.intent import build_option_intent, build_stock_intent
 from chronos.orders.mutations import OrderCancellationService, OrderModificationService
 from chronos.orders.preview import OrderPreviewService
 from chronos.orders.reconciliation_readiness import ReconciliationReadiness
 from chronos.orders.reconciliation_recovery import OrderRestartReconciler
-from chronos.orders.risk import OrderRiskEngine, RiskEvidence
-from chronos.orders.service import OrderManagementService
+from chronos.orders.risk import (
+    OrderRiskEngine,
+    QQQPositionManagementRiskEvidence,
+    RiskEvidence,
+)
+from chronos.orders.service import OrderManagementService, RiskEvidenceProvider
 from chronos.orders.submission import OrderSubmissionBoundary, SubmissionRefusalCode
 from chronos.orders.tracker import OrderStatusUpdate, OrderTracker
 from chronos.persistence.database import Database
@@ -81,6 +91,30 @@ class _CannedEvidence:
         )
 
 
+class _QQQEvidence:
+    def gather(self, intent: object, *, now: datetime) -> RiskEvidence:
+        return RiskEvidence(
+            account=_account(),  # type: ignore[arg-type]
+            reconciliation_status=ReconciliationStatus.RECONCILED,
+            reconciliation_generation=0,
+            reconciliation_session_id="qqq-entry-recon",
+            session=session_for(ProductFamily.STOCK, now=now, broker_confirms_open=True),
+            opening_orders_today=0,
+            qqq_position_management=QQQPositionManagementRiskEvidence(
+                candidate_spec_sha256=(
+                    "59348ca3da9e9b68ec4edd1fc54572783e9256ae9c55ac18ffe844c0b4b78054"
+                ),
+                source_evidence_digest="d" * 64,
+                as_of=FIXED_NOW - timedelta(minutes=1),
+                signal_time_entry_basis_usd=Decimal(100),
+                signal_time_initial_stop_price_usd=Decimal(99),
+                signal_time_risk_distance_usd=Decimal(1),
+                marked_strategy_nav_usd=Decimal(3000),
+                unit_exposure_cvar_loss_fraction=Decimal("0.05"),
+            ),
+        )
+
+
 def _account() -> object:
     from chronos.domain.models import AccountSummary
 
@@ -94,7 +128,13 @@ def _account() -> object:
 
 
 class _Harness:
-    def __init__(self, broker: FakeBroker, settings: Settings) -> None:
+    def __init__(
+        self,
+        broker: FakeBroker,
+        settings: Settings,
+        *,
+        evidence_provider: RiskEvidenceProvider | None = None,
+    ) -> None:
         self.broker = broker
         self.settings = settings
         self.db = Database("sqlite:///:memory:")
@@ -114,6 +154,7 @@ class _Harness:
         confirmations = OrderConfirmationRepository(self.db.sessions)
         self.confirmations = confirmations
         risk_decisions = RiskDecisionRepository(self.db.sessions)
+        self.risk_decisions = risk_decisions
         tracker = OrderTracker(intents, tracker_repo)
         self.intents = intents
         self.tracker = tracker
@@ -130,7 +171,9 @@ class _Harness:
             settings=settings,
             environment=IBEnvironment.PAPER,
             account_id=PAPER_ACCOUNT,
-            evidence_provider=_CannedEvidence(broker, settings, self.readiness),
+            evidence_provider=(
+                evidence_provider or _CannedEvidence(broker, settings, self.readiness)
+            ),
             risk_engine=OrderRiskEngine(settings),
             preview_service=OrderPreviewService(self.connection),
             submission_boundary=boundary,
@@ -216,6 +259,83 @@ def test_happy_path_transmits_exactly_once(harness: _Harness) -> None:
     assert harness.broker.submit_calls[0].account_id == PAPER_ACCOUNT
     stored = harness.service.get("intent-1")
     assert stored is not None and stored.status is OrderLifecycle.SUBMITTED
+
+
+def test_propose_persists_typed_qqq_management_risk_for_post_fill_admission() -> None:
+    settings = paper_settings(symbol_allowlist=("QQQ",))
+    readiness = ReconciliationReadiness(session_id="qqq-entry-recon")
+    assert readiness.complete(
+        expected_generation=0,
+        status=ReconciliationStatus.RECONCILED,
+        reason="QQQ entry evidence is current",
+        reconciled_at=FIXED_NOW,
+    )
+
+    broker = FakeBroker()
+    h = _Harness(broker, settings, evidence_provider=_QQQEvidence())
+    try:
+        intent = build_stock_intent(
+            account_id=PAPER_ACCOUNT,
+            intent=OrderIntent.OPEN_LONG_STOCK,
+            contract=UnderlyingContract(con_id=320227571, symbol="QQQ"),
+            quantity=3,
+            limit_price=Decimal(101),
+            correlation_id="CHR-ORD-" + "C" * 32,
+            intent_id="intent-qqq-risk",
+        )
+
+        proposed = h.service.propose(intent, now=FIXED_NOW)
+        stored = h.risk_decisions.get(
+            proposed.risk.decision_id,
+            current_account_id=PAPER_ACCOUNT,
+        )
+
+        assert proposed.risk.approved
+        assert stored is not None
+        assert stored.evidence["qqq_position_management"] == {
+            "schema_version": "chronos-qqq-position-risk-v1",
+            "candidate_spec_sha256": (
+                "59348ca3da9e9b68ec4edd1fc54572783e9256ae9c55ac18ffe844c0b4b78054"
+            ),
+            "source_evidence_digest": "d" * 64,
+            "as_of": "2026-07-17T14:59:00Z",
+            "signal_time_entry_basis_usd": "100",
+            "signal_time_initial_stop_price_usd": "99",
+            "signal_time_risk_distance_usd": "1",
+            "marked_strategy_nav_usd": "3000",
+            "unit_exposure_cvar_loss_fraction": "0.05",
+        }
+    finally:
+        h.close()
+
+
+def test_qqq_management_risk_is_authorizing_not_inert() -> None:
+    settings = paper_settings(symbol_allowlist=("QQQ",))
+    h = _Harness(FakeBroker(), settings, evidence_provider=_QQQEvidence())
+    try:
+        intent = build_stock_intent(
+            account_id=PAPER_ACCOUNT,
+            intent=OrderIntent.OPEN_LONG_STOCK,
+            contract=UnderlyingContract(con_id=320227571, symbol="QQQ"),
+            quantity=31,
+            limit_price=Decimal(101),
+            correlation_id="CHR-ORD-" + "D" * 32,
+            intent_id="intent-qqq-risk-breach",
+        )
+
+        proposed = h.service.propose(intent, now=FIXED_NOW)
+
+        assert not proposed.risk.approved
+        check = next(
+            item for item in proposed.risk.checks if item.name == "qqq_position_management_risk"
+        )
+        assert check.status.value == "FAIL"
+        assert "native stop" in check.detail
+        assert "CVaR" in check.detail
+        assert "gross" in check.detail
+        assert h.service.get("intent-qqq-risk-breach").status is OrderLifecycle.REJECTED  # type: ignore[union-attr]
+    finally:
+        h.close()
 
 
 def test_invalidated_reconciliation_refuses_before_persistence(harness: _Harness) -> None:
