@@ -10,8 +10,10 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, TypeVar
 
+import pytest
 from sqlalchemy import inspect
 
+import chronos.supervisor.position_admission as admission_module
 from chronos.domain.enums import (
     ConnectionState,
     DataQuality,
@@ -39,7 +41,11 @@ from chronos.persistence.order_repositories import (
     RiskDecisionRecord,
     RiskDecisionRepository,
 )
-from chronos.persistence.schema import RiskCheckResultRow, RiskDecisionRow
+from chronos.persistence.schema import (
+    ManagedPositionBindingRow,
+    RiskCheckResultRow,
+    RiskDecisionRow,
+)
 from chronos.supervisor.position_admission import (
     AdmittedManagedPosition,
     ManagedPositionAdmission,
@@ -72,12 +78,16 @@ class _Broker:
         open_orders: tuple[BrokerOrder, ...] = (),
         broker_order_id: int = 9001,
         permanent_id: int = 109001,
+        fills: tuple[tuple[Decimal, Decimal], ...] | None = None,
     ) -> None:
         self.position_reads = 0
         self.execution_reads = 0
         self.execution_timestamp = execution_timestamp or (_NOW - timedelta(minutes=1))
-        self.fill_quantity = fill_quantity
-        self.position_quantity = fill_quantity if position_quantity is None else position_quantity
+        self.fills = fills or ((fill_quantity, Decimal(100)),)
+        self.fill_quantity = sum((quantity for quantity, _price in self.fills), Decimal(0))
+        self.position_quantity = (
+            self.fill_quantity if position_quantity is None else position_quantity
+        )
         self.second_position_quantity = second_position_quantity
         self.include_execution = include_execution
         self.on_second_execution_read = on_second_execution_read
@@ -121,9 +131,9 @@ class _Broker:
             self.on_second_execution_read()
         if not self.include_execution:
             return ()
-        return (
+        return tuple(
             BrokerExecution(
-                execution_id="0001.abcdef.01.01",
+                execution_id=f"0001.abcdef.01.{index:02d}",
                 account_id=_ACCOUNT,
                 broker_order_id=self.broker_order_id,
                 permanent_id=self.permanent_id,
@@ -131,10 +141,11 @@ class _Broker:
                 order_ref=_ORDER_REF,
                 contract=_CONTRACT,
                 side=OrderSide.BUY,
-                quantity=self.fill_quantity,
-                price=Decimal(100),
+                quantity=quantity,
+                price=price,
                 timestamp=self.execution_timestamp,
-            ),
+            )
+            for index, (quantity, price) in enumerate(self.fills, start=1)
         )
 
     async def open_orders(self) -> tuple[BrokerOrder, ...]:
@@ -402,6 +413,84 @@ def test_nonpositive_broker_order_identity_refuses() -> None:
 
         assert isinstance(result, RefusedManagedPositionAdmission)
         assert result.code is OpeningAdmissionRefusalCode.BROKER_IDENTITY_MISMATCH
+    finally:
+        database.dispose()
+
+
+def test_multi_execution_vwap_rounds_up_to_the_persistence_scale() -> None:
+    database = Database("sqlite+pysqlite:///:memory:")
+    database.initialize()
+    try:
+        _seed_filled_opening(database)
+        admission = ManagedPositionAdmission(
+            connection=_Runner(
+                _Broker(
+                    fills=(
+                        (Decimal(2), Decimal("100.00")),
+                        (Decimal(1), Decimal("100.01")),
+                    )
+                )
+            ),
+            sessions=database.sessions,
+            readiness=_readiness(),
+            account_id=_ACCOUNT,
+        )
+
+        result = admission.admit_opening(_ORDER_REF, _NOW)
+
+        assert isinstance(result, AdmittedManagedPosition)
+        assert result.state.plan.entry_price == Decimal("100.00333334")
+        assert result.state.plan.initial_stop_price == Decimal("99.00333334")
+        assert result.state.plan.cvar_projected_loss_usd == Decimal("15.00050001")
+    finally:
+        database.dispose()
+
+
+def test_buy_execution_above_the_protected_limit_refuses() -> None:
+    database = Database("sqlite+pysqlite:///:memory:")
+    database.initialize()
+    try:
+        _seed_filled_opening(database)
+        admission = ManagedPositionAdmission(
+            connection=_Runner(_Broker(fills=((Decimal(3), Decimal(200)),))),
+            sessions=database.sessions,
+            readiness=_readiness(),
+            account_id=_ACCOUNT,
+        )
+
+        result = admission.admit_opening(_ORDER_REF, _NOW)
+
+        assert isinstance(result, RefusedManagedPositionAdmission)
+        assert result.code is OpeningAdmissionRefusalCode.BROKER_IDENTITY_MISMATCH
+    finally:
+        database.dispose()
+
+
+def test_position_registration_conflict_is_typed_and_rolls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = Database("sqlite+pysqlite:///:memory:")
+    database.initialize()
+    try:
+        _seed_filled_opening(database)
+
+        def fail_registration(*_args: object, **_kwargs: object) -> object:
+            raise admission_module.PositionManagementError("conflicting managed stream")
+
+        monkeypatch.setattr(admission_module, "register_position", fail_registration)
+        admission = ManagedPositionAdmission(
+            connection=_Runner(_Broker()),
+            sessions=database.sessions,
+            readiness=_readiness(),
+            account_id=_ACCOUNT,
+        )
+
+        result = admission.admit_opening(_ORDER_REF, _NOW)
+
+        assert isinstance(result, RefusedManagedPositionAdmission)
+        assert result.code is OpeningAdmissionRefusalCode.DURABLE_STATE_CONFLICT
+        with database.sessions() as session:
+            assert session.query(ManagedPositionBindingRow).count() == 0
     finally:
         database.dispose()
 
@@ -692,7 +781,7 @@ def test_admission_has_one_public_operation_and_no_runtime_or_send_capability() 
         ), source_path
 
 
-def test_binding_schema_enforces_one_order_and_one_position_per_account() -> None:
+def test_binding_schema_enforces_account_scoped_order_position_and_perm_id() -> None:
     database = Database("sqlite+pysqlite:///:memory:")
     database.initialize()
     try:
@@ -703,6 +792,7 @@ def test_binding_schema_enforces_one_order_and_one_position_per_account() -> Non
         }
         assert ("account_fingerprint", "opening_order_ref") in unique_columns
         assert ("account_fingerprint", "position_id") in unique_columns
+        assert ("account_fingerprint", "permanent_id") in unique_columns
         columns = {
             str(column["name"]) for column in inspector.get_columns("managed_position_bindings")
         }

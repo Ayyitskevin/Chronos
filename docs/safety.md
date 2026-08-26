@@ -86,9 +86,12 @@ Registration requires a terminal PAPER QQQ `BUY OPEN`, a named passing frozen
 entry-risk check, unchanged reconciliation session/generation, positive execution
 identity agreeing with Chronos's broker/permanent IDs and cumulative fill, no
 competing QQQ order, and exact account-level QQQ position coherence. Missing
-execution evidence refuses; disappearance from open orders never proves a fill.
-Schema v11 atomically binds one opening order to one deterministic managed stream
-per account scope, and exact replay does not re-read the broker.
+execution evidence or a buy fill above the protected limit refuses; disappearance
+from open orders never proves a fill. Repeating multi-fill VWAPs round upward at
+the persistence boundary, as do derived losses, while allowed risk budgets round
+downward. Schema v11 atomically binds one opening order, one deterministic managed
+stream, and one broker permanent ID per account scope, and exact replay does not
+re-read the broker.
 
 This is not protection. Ongoing management observations/outcomes are not yet
 authenticated by this seam; no broker-held stop/target survives disconnect or

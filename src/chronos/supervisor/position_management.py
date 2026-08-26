@@ -46,7 +46,7 @@ import hashlib
 import json
 import re
 from datetime import datetime
-from decimal import Decimal
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from enum import StrEnum
 from typing import Literal
 
@@ -72,6 +72,7 @@ _POSITION_REF = re.compile(r"^CHR-POS-[0-9A-F]{32}$")
 _ORDER_REF = re.compile(r"^CHR-ORD-[0-9A-F]{32}$")
 _DIRECTIVE_REF = re.compile(r"^CHR-PM-[0-9A-F]{32}$")
 _MAX_PRICE_SCALE = -8
+_PERSISTENCE_QUANTUM = Decimal("0.00000001")
 
 
 class PositionManagementError(RuntimeError):
@@ -173,6 +174,14 @@ def _bounded_positive_decimal(value: Decimal, label: str) -> Decimal:
     if isinstance(exponent, int) and exponent < _MAX_PRICE_SCALE:
         raise ValueError(f"{label} is finer than the 1e-8 persistence scale")
     return value
+
+
+def _persistence_ceiling(value: Decimal) -> Decimal:
+    return value.quantize(_PERSISTENCE_QUANTUM, rounding=ROUND_CEILING)
+
+
+def _persistence_floor(value: Decimal) -> Decimal:
+    return value.quantize(_PERSISTENCE_QUANTUM, rounding=ROUND_FLOOR)
 
 
 def _hex_digest(value: str, label: str) -> str:
@@ -363,13 +372,15 @@ class QQQFiveToolPaperPlan(ChronosModel):
         if self.native_stop_risk_usd != expected_risk:
             raise ValueError("native_stop_risk_usd must equal quantity times stop distance")
         base = min(self.strategy_nav_usd, self.policy.capital_base_usd_max)
-        expected_cvar_budget = min(
-            base * self.policy.cvar_risk_fraction,
-            self.policy.cvar_risk_usd_max,
+        expected_cvar_budget = _persistence_floor(
+            min(
+                base * self.policy.cvar_risk_fraction,
+                self.policy.cvar_risk_usd_max,
+            )
         )
         if self.cvar_budget_usd != expected_cvar_budget:
             raise ValueError("CVaR budget must equal the exact selected outer loss budget")
-        expected_cvar_loss = (
+        expected_cvar_loss = _persistence_ceiling(
             self.entry_price * self.quantity * self.unit_exposure_cvar_loss_fraction
         )
         if self.cvar_projected_loss_usd != expected_cvar_loss:
@@ -463,9 +474,11 @@ def build_qqq_five_tool_paper_plan(
         strategy_nav_usd,
         QQQ_FIVE_TOOL_PAPER_POLICY.capital_base_usd_max,
     )
-    cvar_budget_usd = min(
-        applicable_base * QQQ_FIVE_TOOL_PAPER_POLICY.cvar_risk_fraction,
-        QQQ_FIVE_TOOL_PAPER_POLICY.cvar_risk_usd_max,
+    cvar_budget_usd = _persistence_floor(
+        min(
+            applicable_base * QQQ_FIVE_TOOL_PAPER_POLICY.cvar_risk_fraction,
+            QQQ_FIVE_TOOL_PAPER_POLICY.cvar_risk_usd_max,
+        )
     )
     legs: tuple[ManagedLeg, ...]
     if quantity < 3:
@@ -508,7 +521,9 @@ def build_qqq_five_tool_paper_plan(
         strategy_nav_usd=strategy_nav_usd,
         cvar_budget_usd=cvar_budget_usd,
         unit_exposure_cvar_loss_fraction=unit_exposure_cvar_loss_fraction,
-        cvar_projected_loss_usd=(entry_price * quantity * unit_exposure_cvar_loss_fraction),
+        cvar_projected_loss_usd=_persistence_ceiling(
+            entry_price * quantity * unit_exposure_cvar_loss_fraction
+        ),
         native_stop_risk_usd=risk_distance * quantity,
         legs=legs,
     )

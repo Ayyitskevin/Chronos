@@ -504,7 +504,13 @@ def test_v10_database_gains_managed_position_bindings_empty(tmp_path: Path) -> N
     command.upgrade(config, "head")
 
     engine = sa.create_engine(f"sqlite:///{db_path}")
-    assert "managed_position_bindings" in set(sa.inspect(engine).get_table_names())
+    inspector = sa.inspect(engine)
+    assert "managed_position_bindings" in set(inspector.get_table_names())
+    unique_columns = {
+        tuple(constraint["column_names"])
+        for constraint in inspector.get_unique_constraints("managed_position_bindings")
+    }
+    assert ("account_fingerprint", "permanent_id") in unique_columns
     with engine.connect() as connection:
         assert (
             connection.execute(sa.text("SELECT 1 FROM managed_position_bindings LIMIT 1")).first()

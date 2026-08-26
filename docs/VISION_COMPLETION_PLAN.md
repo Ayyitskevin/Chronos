@@ -212,7 +212,9 @@ deliberately absent from runtime imports and creates no authority. D-50/ADR-0036
 still-default-off opening-admission seam: persisted D-48 entry risk is now an authorizing
 order check, two stable canonical-broker reads must positively prove the execution and exact
 account-level QQQ quantity, and schema v11 atomically enforces one opening order per managed
-stream. This code-mitigates ADR-0035 activation blockers 1 and 2 but does not operationally
+stream plus one broker permanent identity per account. Multi-fill VWAP/CVaR persistence uses
+explicit conservative directional rounding, and buy fills above the protected limit refuse.
+This code-mitigates ADR-0035 activation blockers 1 and 2 but does not operationally
 close them without real PAPER evidence. Executable activation still requires authenticated
 ongoing management observations and outcomes, a trusted management-event identity,
 broker-held protection semantics, runtime scheduling, and real PAPER evidence. Power

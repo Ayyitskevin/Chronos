@@ -1,4 +1,4 @@
-"""Schema v11: one opening order binds one managed QQQ position.
+"""Schema v11: one opening and broker identity bind one managed QQQ position.
 
 Revision ID: 0010
 Revises: 0009
