@@ -13,6 +13,38 @@ ROOT = Path(__file__).resolve().parents[2]
 HELPER = ROOT / "scripts" / "prepare_qqq_certified_data.py"
 SYMBOLS = ("QQQ", "SPY", "IWM", "DIA", "GLD", "TLT")
 END_DATE = "2026-08-21"
+IBKR_SOURCE_ALIASES = (
+    "IBKR corporate actions",
+    "I.B.K.R. corporate actions",
+    "IB-KR corporate actions",
+    "interactive-brokers corporate actions",
+    "Inter-active Brokers export",
+    "Interactive_Brokers export",
+    "InteractiveBrokers LLC",
+    "TWS API corporate actions",
+    "T.W.S. export",
+    "T-WS API export",
+    "Trader Workstation data",
+    "TraderWorkstation API",
+    "IB Gateway export",
+    "IBGateway history",
+    "ib_async history",
+    "ibasync export",
+    "\uff29\uff22\uff2b\uff32 full-width export",
+)
+INDEPENDENT_ACTION_SOURCE_IDS = (
+    "Invesco QQQ distribution history",
+    "State Street SPDR distribution schedule",
+    "iShares TLT distribution history",
+    "SPDR Gold Shares sponsor archive",
+    "official sponsor history for IBEX",
+)
+INDEPENDENT_ATTESTATION_SOURCE_IDS = (
+    "Nasdaq dividend history 2026-08-21",
+    "Cboe corporate actions review 2026-08-21",
+    "LSEG distribution history 2026-08-21",
+    "official exchange bulletin review 2026-08-21",
+)
 
 
 def _sha256(path: Path) -> str:
@@ -287,10 +319,13 @@ def test_receipt_refuses_campaign_identity_drift(
     assert expected in result.stderr
 
 
-def test_action_ingest_refuses_ibkr_as_the_independent_action_source(tmp_path: Path) -> None:
+@pytest.mark.parametrize("source", IBKR_SOURCE_ALIASES)
+def test_action_ingest_refuses_ibkr_family_as_the_independent_action_source(
+    tmp_path: Path, source: str
+) -> None:
     history_root, actions_root, _capture_log = _write_capture(tmp_path)
     qqq = json.loads((actions_root / "QQQ.json").read_text(encoding="utf-8"))
-    qqq[0]["source"] = "IBKR corporate actions"
+    qqq[0]["source"] = source
     (actions_root / "QQQ.json").write_text(json.dumps(qqq), encoding="utf-8")
     result = _run(
         "ingest-actions",
@@ -301,6 +336,70 @@ def test_action_ingest_refuses_ibkr_as_the_independent_action_source(tmp_path: P
     )
     assert result.returncode == 1
     assert "action stream must be independent" in result.stderr
+
+
+@pytest.mark.parametrize("source_id", IBKR_SOURCE_ALIASES)
+def test_declaration_refuses_ibkr_family_as_the_attestation_source(
+    tmp_path: Path, source_id: str
+) -> None:
+    history_root, _capture_log, receipt, _declaration = _prepare_packet(tmp_path)
+    result = _run(
+        "build-declaration",
+        "--history-root",
+        str(history_root),
+        "--source-receipt",
+        str(receipt),
+        "--output",
+        str(tmp_path / "blocked-declaration.json"),
+        "--attestation-source-id",
+        source_id,
+        "--attestation-count",
+        "12",
+    )
+    assert result.returncode == 1
+    assert "attestation source must be independent" in result.stderr
+
+
+@pytest.mark.parametrize("source", INDEPENDENT_ACTION_SOURCE_IDS)
+def test_action_ingest_accepts_clear_non_ibkr_source_identities(
+    tmp_path: Path, source: str
+) -> None:
+    history_root, actions_root, _capture_log = _write_capture(tmp_path)
+    qqq = json.loads((actions_root / "QQQ.json").read_text(encoding="utf-8"))
+    qqq[0]["source"] = source
+    (actions_root / "QQQ.json").write_text(json.dumps(qqq), encoding="utf-8")
+    result = _run(
+        "ingest-actions",
+        "--history-root",
+        str(history_root),
+        "--input-root",
+        str(actions_root),
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("source_id", INDEPENDENT_ATTESTATION_SOURCE_IDS)
+def test_declaration_accepts_clear_non_ibkr_source_identities(
+    tmp_path: Path, source_id: str
+) -> None:
+    history_root, _capture_log, receipt, _declaration = _prepare_packet(tmp_path)
+    output = tmp_path / "independent-declaration.json"
+    result = _run(
+        "build-declaration",
+        "--history-root",
+        str(history_root),
+        "--source-receipt",
+        str(receipt),
+        "--output",
+        str(output),
+        "--attestation-source-id",
+        source_id,
+        "--attestation-count",
+        "12",
+    )
+    assert result.returncode == 0, result.stderr
+    declaration = json.loads(output.read_text(encoding="utf-8"))
+    assert declaration["attestation"]["source_id"] == source_id
 
 
 def test_declaration_refuses_an_all_empty_action_panel(tmp_path: Path) -> None:

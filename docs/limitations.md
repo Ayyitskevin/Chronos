@@ -344,9 +344,12 @@ runbooks.
   grants no data, trial, holdout, strategy-selection, order, or promotion authority.
 - D-53/ADR-0039 closes a certified-data false-positive in code. Corporate-action sample
   counts now bind to distinct in-window events and v3 digests commit to per-symbol action
-  semantics. The frozen six-symbol QQQ identity refuses an all-empty action panel. This is
-  structural integrity, not proof that sponsor or independent-source histories are complete;
-  D2 and all research gates remain blocked pending owner-supplied real data and review.
+  semantics. The frozen six-symbol QQQ identity refuses an all-empty action panel and rejects
+  normalized IBKR, Interactive Brokers, TWS/Trader Workstation, IB Gateway, and `ib_async`
+  identities in both primary-action and attestation fields. This is structural integrity and
+  source-family separation, not proof that an accepted label is truthful or that sponsor or
+  independent-source histories are complete; D2 and all research gates remain blocked pending
+  owner-supplied real data and review.
 - USD 3,000 is a conditional research reference/future funding target, not current capital.
   A zero incremental data budget means missing certifiable evidence blocks the campaign.
 
