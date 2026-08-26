@@ -328,6 +328,14 @@ runbooks.
   RSP, SPY, VIX, VIX3M`) remain separate identities; overlap does not transfer evidence. The
   report cannot prove owner merge context, IBKR completeness, corporate actions, power, parity,
   edge, PAPER behavior, or broker protection.
+- D-52/ADR-0038 freezes relative power arithmetic for the SMA-200 primary cell: 6,233 completed
+  OOS daily post-cost active returns (24.7302289281 year-equivalents) under a 4% minimum annual
+  alpha, one-sided 5% type-I error, 80% power, and an 8% annualized long-run tracking-error
+  ceiling. The 8% input is an owner-approved design judgment, not measured QQQ dispersion, and
+  must include serial dependence. The 100-closed-position floor remains a separate conjunct.
+  There is no absolute pass date, clean-window identity, sufficiently covered future session
+  calendar, or successor campaign binding yet; the calculator is not observed evidence and
+  grants no data, trial, holdout, strategy-selection, order, or promotion authority.
 - USD 3,000 is a conditional research reference/future funding target, not current capital.
   A zero incremental data budget means missing certifiable evidence blocks the campaign.
 

@@ -175,7 +175,7 @@ Deliver:
 **EXIT:** no unresolved scope contradiction; no clean holdout has been opened; owner gates
 and criteria are recorded before observation.
 
-**Progress (2026-08-25):** ADR-0031 and its content-addressed constitution freeze the QQQ
+**Progress (2026-08-26):** ADR-0031 and its content-addressed constitution freeze the QQQ
 execution target, validation panel, staged capital, benchmark, minimum useful edge, risk
 limits, cadence, strategy sequence, and zero incremental data budget before any new trial
 or data read. D-36 subsequently selects confirmed close versus SMA-200 as the direction
@@ -217,15 +217,21 @@ explicit conservative directional rounding, and buy fills above the protected li
 This code-mitigates ADR-0035 activation blockers 1 and 2 but does not operationally
 close them without real PAPER evidence. Executable activation still requires authenticated
 ongoing management observations and outcomes, a trusted management-event identity,
-broker-held protection semantics, runtime scheduling, and real PAPER evidence. Power
-analysis, certified data/cost/borrow identities, a clean holdout, incident availability,
-and legal/tax review remain open.
+broker-held protection semantics, runtime scheduling, and real PAPER evidence. Certified
+data/cost/borrow identities, a clean holdout, incident availability, and legal/tax review
+remain open.
 D-51/ADR-0037 now composes those exact repository identities into one content-addressed,
 authentication-only readiness report. It separates owner actions from Chronos build work,
 unavailable short evidence, and deferred PAPER activation, and forbids evidence transfer between
 the six-symbol QQQ robustness release and the distinct seven-symbol base Five-Tool intake. This
 is current-state legibility only: Phase 0 still has not exited, no market data or holdout was
 opened, no trial was registered, and no evidence or promotion gate advanced.
+D-52/ADR-0038 now freezes the QQQ SMA-200 primary cell's relative power arithmetic at 6,233
+completed OOS daily active returns (24.7302289281 year-equivalents), using the owner-gated 4%
+minimum annual alpha and 8% annualized long-run tracking-error ceiling. The independent
+100-closed-position floor remains a separate conjunct. The absolute date and successor
+campaign binding remain blocked until the owner approves the clean start and covered calendar;
+this arithmetic is not observed evidence and advances no gate.
 
 ## 6. Phase 1 — Authority and lifecycle coherence
 
@@ -379,7 +385,8 @@ Starting data-quality gates, frozen before collection:
 
 Starting strategy gates, subject only to stricter preregistered power requirements:
 
-- Sample floor: `max(power-required N, 100 out-of-sample closed trades)`.
+- Sample floor: the typed power-required observation count **and** at least 100 out-of-sample
+  closed trades must each pass; unlike units are not compared with a numeric `max`.
 - Net expectancy and benchmark-alpha 95% lower bounds above zero after commission, spread,
   slippage, funding/borrow, model, and data costs.
 - Deflated Sharpe probability at least 0.95; family-wise error or FDR `q <= 0.05`;
@@ -405,11 +412,11 @@ after results are seen.
 | Rung | Minimum evidence before promotion |
 |---|---|
 | Replay | Byte-identical decisions and state over the complete evaluation/stress corpus; 100% decision/receipt coverage; zero unexplained research/runtime difference |
-| Shadow | `max(90 calendar days, power-required decision opportunities)`; at least 99.5% scheduled-cycle/data availability; zero duplicate/illegal intents, unresolved reconciliation, or Sev-1/Sev-2 incidents; restart, stale-data, disconnect, clock, alert, and restore drills pass |
-| Supervised paper | `max(90 days, 50 completed round trips, power-required N)` and at least 100 controlled order lifecycles across 20 sessions; 100% fill/commission/account reconciliation; implementation shortfall and cost-model error inside frozen bands |
+| Shadow | At least 90 calendar days **and** the power-required decision opportunities; at least 99.5% scheduled-cycle/data availability; zero duplicate/illegal intents, unresolved reconciliation, or Sev-1/Sev-2 incidents; restart, stale-data, disconnect, clock, alert, and restore drills pass |
+| Supervised paper | At least 90 days, 50 completed round trips, the power-required observations, and 100 controlled order lifecycles across 20 sessions; 100% fill/commission/account reconciliation; implementation shortfall and cost-model error inside frozen bands |
 | Autonomous paper | At least 60 trading days and 100 eligible lifecycles with the exact live candidate stack; at least 99.9% scheduler availability; no unplanned rescue, duplicate, unbounded order, unknown exposure, unresolved incident, or severe safety event |
-| Live canary | `max(6 months, 50 round trips)` at minimum economically meaningful size under an absolute owner-approved loss budget; real fill/fee/slippage and tracking error stay inside frozen bands; independent review before each cap increase |
-| Capped live | `max(12 months, 100 independent completed trades, power-required N)` across at least two regimes; post-cost live expectancy and benchmark-alpha lower bounds above zero; 100% broker attribution/reconciliation; zero severe safety incidents or unauthorized exposure |
+| Live canary | At least 6 months **and** 50 round trips at minimum economically meaningful size under an absolute owner-approved loss budget; real fill/fee/slippage and tracking error stay inside frozen bands; independent review before each cap increase |
+| Capped live | At least 12 months, 100 independent completed trades, and the power-required observations across at least two regimes; post-cost live expectancy and benchmark-alpha lower bounds above zero; 100% broker attribution/reconciliation; zero severe safety incidents or unauthorized exposure |
 
 Every promotion artifact binds the exact account, commit, dependencies, configuration,
 mandate, strategy-policy, model/prompt/tools, compiler/resolver, evidence/data versions,

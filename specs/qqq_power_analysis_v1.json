@@ -1,0 +1,82 @@
+{
+  "schema_version": "chronos-qqq-power-analysis-v1",
+  "analysis_id": "qqq-power-analysis-v1-owner-review-2026-08-26",
+  "status": "blocked_pending_clean_window_identity",
+  "purpose": "Freeze prospective sample-size arithmetic for the QQQ SMA-200 confirmatory cell without reading market data or inventing an absolute pass date.",
+  "bound_artifacts": [
+    {
+      "path": "research/qqq_v1_constitution.json",
+      "sha256": "4c99ce9d09f43a418c7342b0e40a0795b253bf3f1cd0e37d29419498b3008d56"
+    },
+    {
+      "path": "specs/qqq_sma_control_v1.json",
+      "sha256": "a0ec83b3431016df0c599895ead65083fc72b5afb87073dfbdf046d68e23bb03"
+    },
+    {
+      "path": "specs/qqq_five_tool_candidate_v1.json",
+      "sha256": "59348ca3da9e9b68ec4edd1fc54572783e9256ae9c55ac18ffe844c0b4b78054"
+    }
+  ],
+  "authority": {
+    "order_authority": "none",
+    "promotion_authority": "none",
+    "selected_strategy": null,
+    "registered_trials": 0,
+    "market_data_reads": 0,
+    "holdout_unlocks": 0,
+    "performance_claims": []
+  },
+  "estimand": {
+    "confirmatory_cell_id": "qqq-sma200-immediate-primary",
+    "observation_unit": "one_completed_OOS_daily_session_net_strategy_return_minus_volatility_matched_QQQ_cash_benchmark_return",
+    "minimum_detectable_annualized_post_cost_alpha_fraction": 0.04,
+    "null_hypothesis": "annualized_mean_benchmark_relative_net_return_lte_0",
+    "alternative_at_power_point": "annualized_mean_benchmark_relative_net_return_eq_0.04",
+    "annualization_sessions": 252,
+    "cross_instrument_pooling": "forbidden",
+    "robustness_cell_treatment": "not_selectable_substitutes_for_the_powered_primary_cell"
+  },
+  "power_design": {
+    "confidence_lower_bound": 0.95,
+    "confidence_tail": "one_sided_lower",
+    "type_i_error_alpha": 0.05,
+    "target_power": 0.8,
+    "type_ii_error_beta": 0.2,
+    "annualized_long_run_tracking_error_ceiling_fraction": 0.08,
+    "minimum_information_ratio_at_power_point": 0.5,
+    "formula": "ceil((z_1_minus_alpha+z_power)^2*(annualized_long_run_tracking_error/minimum_detectable_annualized_alpha)^2*annualization_sessions)",
+    "dependence_treatment": "tracking_error_is_the_annualized_square_root_of_the_long_run_variance_of_daily_benchmark_relative_returns_and_must_include_serial_dependence",
+    "multiplicity_treatment": "only_the_preregistered_primary_cell_is_powered;_all_attempts_still_count_for_DSR_and_the_frozen_FWER_or_FDR_gate"
+  },
+  "result": {
+    "power_required_N": 6233,
+    "power_required_N_unit": "completed_OOS_daily_session_returns",
+    "required_year_equivalents": 24.7302289281,
+    "minimum_OOS_closed_positions": 100,
+    "sample_gate_composition": "both_requirements_must_pass_independently;_a_numeric_max_across_session_returns_and_positions_is_forbidden",
+    "earliest_pass_offset_completed_sessions_from_clean_start_inclusive": 6232,
+    "earliest_possible_pass_date": null
+  },
+  "invalidation_conditions": [
+    "Realized or preregistered annualized long-run tracking error exceeds 0.08.",
+    "The primary effect threshold, confidence level, target power, annualization, benchmark, costs, or observation unit changes.",
+    "Any robustness cell becomes a selectable substitute for the powered primary cell.",
+    "Cross-instrument observations are pooled without a successor power identity that models their dependence.",
+    "The constitution, control, or Confluence candidate bytes change."
+  ],
+  "blockers": [
+    "Owner approval is recorded only by merge of this exact power-analysis identity.",
+    "The owner-approved clean OOS window identity and first completed session do not exist.",
+    "An absolute earliest pass date cannot be frozen until the clean start and a covered future exchange-session calendar exist.",
+    "A successor campaign schema must bind the 6233-session power requirement and the separate 100-position floor without comparing unlike units."
+  ],
+  "forbidden_capabilities": [
+    "market_data_reader",
+    "holdout_unlock",
+    "trial_registration",
+    "broker",
+    "order_construction",
+    "order_submission",
+    "promotion"
+  ]
+}
