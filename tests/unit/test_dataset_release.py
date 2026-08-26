@@ -17,7 +17,7 @@ import pytest
 
 from chronos.marketdata.bars import Bar, BarInterval, BarSeries, BarStatus
 from chronos.research.certification import (
-    CorporateActionAttestation,
+    NoCorporateActionAttestation,
     SymbolWindow,
     certify_export,
 )
@@ -76,10 +76,9 @@ def _certification(symbol: str = "SPY"):
         windows=[SymbolWindow(symbol, _START, _END)],
         series_by_symbol={symbol: _series(symbol)},
         actions_by_symbol={},
-        attestation=CorporateActionAttestation(
-            source_id="nasdaq-dividend-history-2026-08-21",
-            sampled_action_count=12,
-            symbols=(symbol,),
+        attestation=NoCorporateActionAttestation(
+            source_id="official-sponsor-history-2026-08-26",
+            windows=(SymbolWindow(symbol, _START, _END),),
         ),
         calendar=_CALENDAR,
     )

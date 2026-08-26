@@ -1,5 +1,18 @@
 # CHANGELOG
 
+## [Unreleased] — certified action claims bind actual events (2026-08-26)
+
+ADR-0039 moves certification evidence to v3: every declared symbol now carries an
+order-invariant semantic digest and distinct count for its in-window corporate actions.
+Positive sampled-action counts cannot exceed the events supplied, exact duplicates block,
+and an all-empty positive attestation refuses. Legitimately action-free short windows use a
+separate independent-source declaration bound to their exact symbol/date windows.
+
+The frozen QQQ packet additionally reparses action files before receipt construction,
+requires manifest counts to equal the bytes, refuses all six files being empty, and refuses
+sampling more actions than were ingested. This closes a false-certification path; it does not
+certify any dataset or prove provider completeness.
+
 ## [Unreleased] — QQQ power becomes arithmetic instead of shorthand (2026-08-26)
 
 ADR-0038 adds a content-addressed, no-data power compiler for the QQQ SMA-200 primary cell.

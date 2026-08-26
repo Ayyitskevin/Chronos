@@ -134,6 +134,19 @@ and covered future session calendar exist. The module imports no Chronos subsyst
 read no market data, register no trial, unlock no holdout, select no strategy, construct no
 order, and grant no promotion or execution authority.
 
+### Certified corporate-action evidence (ADR-0039, 2026-08-26)
+
+Certification v3 commits to the distinct in-window corporate actions it judged, per symbol,
+with an order-invariant semantic digest. A positive independent-sample count cannot exceed
+the supplied distinct events; duplicates and an all-empty positive panel block. A genuinely
+action-free short window requires a separate independent-source attestation over the exact
+symbol/date windows, and supplied actions contradict it.
+
+The frozen multi-decade QQQ helper is stricter: all six action files cannot be empty, manifest
+counts must equal parsed bytes, and there is no override flag. These checks close an internal
+false-certification path. They do not establish sponsor completeness or independent-source
+truth, certify a real dataset, open a holdout, count a trial, or grant trading authority.
+
 ## Hard boundaries
 
 Live transmission is a gated *capability*, not an impossibility (ADR-0009, Milestone 7): it

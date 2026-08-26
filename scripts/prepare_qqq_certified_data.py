@@ -301,13 +301,18 @@ def _validated_actions(history_root: Path, manifest: dict[str, Any]) -> dict[str
         action_path = history_root / "corporate_actions" / f"{symbol}.json"
         if _sha256(action_path) != actions.get("sha256"):
             raise PacketError(f"{symbol}: action bytes do not match the manifest sha256")
-        _parse_action_file(
+        parsed_actions = _parse_action_file(
             action_path,
             symbol=symbol,
             start=date.fromisoformat(
                 str(_mapping(entry["bars"], context=f"manifest {symbol}.bars")["start"])
             ),
         )
+        if count != len(parsed_actions):
+            raise PacketError(
+                f"{symbol}: manifest count {count} does not match "
+                f"{len(parsed_actions)} parsed corporate actions"
+            )
         validated[symbol] = dict(actions)
     return validated
 
@@ -438,7 +443,19 @@ def _expected_declaration(
             raise PacketError(f"source receipt {key} does not match the reviewed packet")
     manifest = _manifest(history_root)
     _validate_bars(history_root, manifest)
-    _validated_actions(history_root, manifest)
+    actions = _validated_actions(history_root, manifest)
+    ingested_action_count = sum(int(actions[symbol]["count"]) for symbol in SYMBOLS)
+    if ingested_action_count == 0:
+        raise PacketError(
+            "the all-empty six-symbol corporate-action panel cannot use this frozen "
+            "QQQ identity; a legitimately empty panel requires a separately reviewed "
+            "identity with an explicit justification"
+        )
+    if attestation_count > ingested_action_count:
+        raise PacketError(
+            f"cannot attest to {attestation_count} sampled actions when only "
+            f"{ingested_action_count} were ingested"
+        )
     if receipt.get("manifest_sha256") != _sha256(history_root / "MANIFEST.json"):
         raise PacketError("source receipt no longer matches MANIFEST.json")
     windows = []
@@ -456,6 +473,7 @@ def _expected_declaration(
         "source_id": SOURCE_ID,
         "source_receipt_sha256": _sha256(source_receipt),
         "attestation": {
+            "kind": "sampled_actions",
             "source_id": attestation_source_id.strip(),
             "sampled_action_count": attestation_count,
             "symbols": list(SYMBOLS),

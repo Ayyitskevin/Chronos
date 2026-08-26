@@ -28,7 +28,7 @@ from chronos.marketdata.bars import Bar, BarInterval, BarSeries, BarStatus
 from chronos.marketdata.pacing import PacingController
 from chronos.research.certification import (
     CertificationError,
-    CorporateActionAttestation,
+    NoCorporateActionAttestation,
     SymbolWindow,
     certify_export,
 )
@@ -95,8 +95,11 @@ def _daily(day: date, price: float = 100.0) -> Bar:
     )
 
 
-def _attest() -> CorporateActionAttestation:
-    return CorporateActionAttestation(source_id="probe", sampled_action_count=1, symbols=("SPY",))
+def _attest(start: date = _MON, end: date = _FRI) -> NoCorporateActionAttestation:
+    return NoCorporateActionAttestation(
+        source_id="probe",
+        windows=(SymbolWindow("SPY", start, end),),
+    )
 
 
 # ------------------------------------------------- the guard my own change disarmed
@@ -328,7 +331,7 @@ def test_an_est_hourly_week_certifies_end_to_end() -> None:
         windows=[SymbolWindow("SPY", start, end)],
         series_by_symbol={"SPY": _hourly(start, end)},
         actions_by_symbol={},
-        attestation=_attest(),
+        attestation=_attest(start, end),
         calendar=_CAL,
         interval=BarInterval.HOUR_1,
     )
@@ -418,7 +421,7 @@ def test_a_minute_series_has_no_partition_schema(tmp_path: Path) -> None:
 # ------------------------------------------------------------ evidence shape is pinned
 
 
-def test_the_v2_evidence_mapping_shape_is_frozen() -> None:
+def test_the_v3_evidence_mapping_shape_is_frozen() -> None:
     """A renamed or added field silently re-identifies every future digest.
 
     This pins the key set, not the values — values move with the data, identity
@@ -435,7 +438,7 @@ def test_the_v2_evidence_mapping_shape_is_frozen() -> None:
         interval=BarInterval.HOUR_1,
     )
     mapping = json.loads(report.canonical_json())
-    assert mapping["schema_version"] == "chronos-dataset-certification-v2"
+    assert mapping["schema_version"] == "chronos-dataset-certification-v3"
     assert set(mapping) == {
         "schema_version",
         "dataset_id",
@@ -446,6 +449,7 @@ def test_the_v2_evidence_mapping_shape_is_frozen() -> None:
         "coverage",
         "findings",
         "attestation",
+        "corporate_actions",
         "classified_moves",
     }
     assert set(mapping["coverage"][0]) == {
