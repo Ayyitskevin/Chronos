@@ -9,9 +9,12 @@ unavailable short evidence, and deferred activation work.
 
 The six-symbol QQQ robustness release and seven-symbol base Five-Tool companion intake are pinned
 as separate identities. Every referenced-byte drift, child authority expansion, or dropped blocker
-refuses. The module imports no data, trial, holdout, broker, order, persistence, execution,
-supervisor, service, network, database, or promotion capability. Nothing here opens evidence,
-registers a trial, activates PAPER, or advances a promotion gate.
+refuses. Direct imports are limited to the two authentication-only QQQ compilers. Their existing
+dependency closure loads inert Five-Tool market-data types and certified-reader code, but this
+operation neither invokes nor exposes a market-data read; authority-isolation guards exclude
+registry, holdout, broker, order, persistence, execution, supervisor, service, network, database,
+and promotion paths. Nothing here opens evidence, registers a trial, activates PAPER, or advances
+a promotion gate.
 
 ## [Unreleased] — filled QQQ openings gain an identity, not an authority (2026-08-25)
 

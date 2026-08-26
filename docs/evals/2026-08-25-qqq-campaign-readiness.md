@@ -9,7 +9,7 @@ plan_phase: 0; Phase 3 prerequisite
 primary_kpi: net_edge_confidence
 gate_advanced: none
 files: one content-addressed readiness spec, one authentication-only compiler, seam-level safety tests, owner checklist, ADR/index/risk/status docs
-verification: red-green focused tests, realistic artifact mutation matrix, static isolation probes, full repository gates, independent non-author review
+verification: red-green focused tests, realistic artifact mutation matrix, direct-import and authority-isolation probes, full repository gates, independent non-author review
 evidence_artifact: specs/qqq_campaign_readiness_v1.json and this evaluation
 owner_gate: required at merge; financial research identity and owner-input classification
 open: certified data and attestation, holdout map, benchmark/cost/power/evaluator/parity identities, base Five-Tool blockers, short evidence, real PAPER activation evidence
@@ -47,21 +47,26 @@ mutation measurements, not a market-distribution or broker-behavior test.
 ## Red-green and realistic mutation evidence
 
 The first test failed because the public module did not exist. Subsequent red tests exposed
-and then closed three aggregation hazards: referenced artifact overrides initially skipped
-the constitution/control/candidate copies; child authority changes initially passed; and a
-child blocker deletion initially passed.
+and then closed four aggregation hazards: referenced artifact overrides initially skipped
+the constitution/control/candidate copies; child authority changes initially passed; a child
+blocker deletion initially passed; and the review-response test proved duplicate blockers passed.
 
-The final focused file contains 15 exercised cases:
+The final focused file contains 17 exercised cases:
 
 - exact blocked posture, exact five-artifact identity, typed responsibility ledger, and the
   six-symbol/seven-symbol data boundary (4);
 - one-byte drift in each real referenced artifact copy (5);
 - authority escalation in each inherited compiler (2);
-- blocker deletion in each inherited compiler (2);
+- blocker deletion and duplication in each inherited compiler (4);
 - readiness-document authority drift before interpretation (1); and
-- direct AST plus fresh-process transitive import isolation (1).
+- direct-import AST plus fresh-process authority-dependency isolation (1).
 
-The companion QQQ control and candidate tests add 12 existing cases, for 27 focused passes.
+The companion QQQ control and candidate tests add 12 existing cases, for 29 focused passes.
+
+The fresh-process probe deliberately does not claim that the entire dependency closure is free
+of data-related modules. The existing Confluence compiler loads Five-Tool market-data types and
+certified-reader code transitively; this readiness operation never invokes or exposes that reader.
+The probe excludes authority dependencies, and the direct AST guard pins the only two imports.
 
 ## Verification result
 
@@ -92,7 +97,7 @@ Focused implementation evidence:
 PYTHONPATH=src .venv/bin/pytest -q tests/safety/test_qqq_campaign_readiness.py \
   tests/safety/test_qqq_control_preregistration.py \
   tests/safety/test_qqq_confluence_candidate.py
-# 27 passed
+# 29 passed
 ```
 
 Full post-change evidence:
@@ -102,13 +107,24 @@ make gates
 # ruff: All checks passed
 # format: 541 files already formatted
 # mypy: 293 Chronos source files; worker strict: 10 source files
-# pytest: 4,082 passed / 1 skipped / 13 failed
+# pytest: 4,084 passed / 1 skipped / 13 failed
 ```
 
 The 13 failures are exactly the same inherited Streamlit 1.62 relative-path cases measured
-at preflight; this change adds 15 passing cases and no new failure. The exact-head independent
+at preflight; the revised head adds 17 passing cases and no new failure. The exact-head independent
 review verdict is recorded on the pull request and in the fleet handoff so the reviewed commit
 does not move merely to copy its own review result into this file.
+
+## Independent-review response
+
+Claude reviewed initial head `8be926ebbb21f5513aac1ed104d05ac1bdee7c40` from an independent
+clone and returned HOLD because the safety, changelog, risk, and ADR prose claimed the dependency
+graph excluded data readers. A reproduced fresh-process import closure confirmed that the existing
+Confluence compiler transitively loads Five-Tool market-data types and certified-reader code even
+though this operation does not invoke it. The claims and probe name are narrowed to the actual
+direct-import and authority boundary. The review also observed that set comparison admitted a
+duplicate child blocker; a red regression test now requires each exact blocker-code sequence.
+Exact-head delta review remains on the PR rather than being copied into a post-review commit.
 
 ## Result
 

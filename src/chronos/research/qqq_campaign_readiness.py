@@ -1,8 +1,8 @@
 """Authentication-only readiness report for the frozen QQQ research campaign.
 
-This module reports repository identity and blockers.  It deliberately owns no
-market-data reader, trial registry, holdout unlock, broker, order, execution,
-promotion, or runtime capability.
+This module reports repository identity and blockers.  It deliberately exposes
+no market-data read operation, trial registry, holdout unlock, broker, order,
+execution, promotion, or runtime capability.
 """
 
 from __future__ import annotations
@@ -303,7 +303,7 @@ def _parse_campaign(value: object) -> tuple[str, tuple[str, ...], str, str]:
         "unavailable_without_new_identity_and_evidence",
         "campaign.short_side",
     )
-    return "QQQ", ("QQQ", "SPY", "IWM", "DIA", "GLD", "TLT"), "1D", ("net_edge_confidence")
+    return "QQQ", ("QQQ", "SPY", "IWM", "DIA", "GLD", "TLT"), "1D", "net_edge_confidence"
 
 
 def _parse_requirements(value: object) -> tuple[CampaignRequirement, ...]:
@@ -438,9 +438,9 @@ def _authenticate_artifacts(artifacts: tuple[ArtifactIdentity, ...]) -> None:
             or compiled.executable
         ):
             raise QQQCampaignReadinessError(f"{label} authority posture changed")
-    if {blocker.code for blocker in control.blockers} != set(ControlBlockerCode):
+    if tuple(blocker.code for blocker in control.blockers) != tuple(ControlBlockerCode):
         raise QQQCampaignReadinessError("SMA control blocker set changed")
-    if {blocker.code for blocker in candidate.blockers} != set(CandidateBlockerCode):
+    if tuple(blocker.code for blocker in candidate.blockers) != tuple(CandidateBlockerCode):
         raise QQQCampaignReadinessError("Confluence candidate blocker set changed")
     _require_exact(
         control.constitution_sha256,
