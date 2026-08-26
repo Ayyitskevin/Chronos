@@ -1,5 +1,24 @@
 # CHANGELOG
 
+## [Unreleased] — filled QQQ openings gain an identity, not an authority (2026-08-25)
+
+ADR-0036 adds one default-off managed-position admission seam. Given only a
+Chronos opening-order reference and time, it re-derives the terminal PAPER QQQ
+intent, persisted D-48 entry-risk evidence, two stable broker snapshots, positive
+execution identity, and exact account-level position coherence. Schema v11 then
+atomically binds that opening to one deterministic ADR-0035 stream; exact retries
+rehydrate it without a second broker read.
+
+The QQQ risk evidence is now authorizing rather than descriptive: the normal
+order risk engine applies native-stop, CVaR, and gross limits and persists a named
+passing check that admission revalidates. Missing/old/contradictory broker facts,
+fractional or identity-mismatched fills, competing QQQ orders, unexplained
+aggregate exposure, or conflicting durable bindings refuse with typed results.
+
+Nothing is activated. No runtime imports admission, no broker mutation capability
+is present, and ongoing management observations, a trusted queue, broker-held
+protection, scheduling, and real PAPER evidence remain mandatory owner-gated work.
+
 ## [Unreleased] — the option-chain lane comes off its stranded branch (2026-08-23)
 
 `codex/chronos-option-chain-selection-v1` had carried deterministic option

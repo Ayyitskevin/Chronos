@@ -302,11 +302,17 @@ runbooks.
   authenticated compiler remains blocked and has no reader or execution capability.
   D-49/ADR-0035 adds an inert, proposal-only PAPER management capability for actual QQQ
   fills. It hash-chains and semantically replays management observations and resolutions,
-  but no production module imports it, it holds no mandate, and it cannot construct, send,
-  cancel, or maintain an order. Its account/reconciliation/evidence fields are caller
-  attestations until a reviewed adapter authenticates them. A dedicated management-event
-  queue identity, unique opening-order binding, persistent broker protection, runtime
-  scheduling, and real PAPER lifecycle evidence remain mandatory before activation. Power
+  but only the default-off D-50/ADR-0036 admission seam imports it; neither module has a
+  runtime consumer, mandate, or ability to construct, send, cancel, or maintain an order.
+  Admission now obtains the opening account, reconciliation, execution, order, and aggregate
+  position facts through two stable reads of the canonical broker port, requires the named
+  persisted D-48 entry-risk check, and atomically enforces one opening-order/managed-stream
+  binding in schema v11. This authenticates opening registration only: ongoing observations
+  and directive outcomes remain caller attestations. A dedicated management-event queue
+  identity, persistent broker protection, runtime scheduling, and real PAPER lifecycle
+  evidence remain mandatory before activation. IBKR's bounded execution-history window and
+  account-level position aggregation can force refusal; the seam cannot reconstruct missing
+  history or assign unexplained manual exposure. Power
   and a certified clean partition also remain open. The
   Five-Tool campaign's typed semantic blockers still authorize zero trials.
   The short estimate and exposure remain unavailable while compiler support, account

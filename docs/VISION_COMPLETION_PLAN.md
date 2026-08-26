@@ -208,8 +208,13 @@ authenticates the pinned source/contract/campaign but remains blocked before dat
 D-49/ADR-0035 adds a default-off, proposal-only PAPER position-management state machine
 for actual QQQ fills: exact candidate/policy pins, durable semantic replay, typed fill
 resolution, stop/target/breakeven/runner logic, and risk-reducing proposals only. It is
-deliberately absent from production imports and creates no authority. Executable activation
-still requires an authenticated management-event identity, unique opening-order binding,
+deliberately absent from runtime imports and creates no authority. D-50/ADR-0036 adds the
+still-default-off opening-admission seam: persisted D-48 entry risk is now an authorizing
+order check, two stable canonical-broker reads must positively prove the execution and exact
+account-level QQQ quantity, and schema v11 atomically enforces one opening order per managed
+stream. This code-mitigates ADR-0035 activation blockers 1 and 2 but does not operationally
+close them without real PAPER evidence. Executable activation still requires authenticated
+ongoing management observations and outcomes, a trusted management-event identity,
 broker-held protection semantics, runtime scheduling, and real PAPER evidence. Power
 analysis, certified data/cost/borrow identities, a clean holdout, incident availability,
 and legal/tax review remain open.

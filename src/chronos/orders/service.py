@@ -136,7 +136,7 @@ class OrderManagementService:
         evidence = self._evidence.gather(intent, now=moment)
         decision = self._risk_engine.evaluate(intent, evidence, now=moment)
         self._risk_decisions.store(
-            _decision_to_record(decision, intent=intent),
+            _decision_to_record(decision, intent=intent, evidence=evidence),
             current_account_id=self._account_id,
         )
 
@@ -379,10 +379,21 @@ class OrderManagementService:
 
 
 def _decision_to_record(
-    decision: OrderRiskDecision, *, intent: WheelOrderIntent
+    decision: OrderRiskDecision,
+    *,
+    intent: WheelOrderIntent,
+    evidence: RiskEvidence,
 ) -> RiskDecisionRecord:
     from chronos.utils.identifiers import account_fingerprint
 
+    decision_evidence: dict[str, object] = {
+        "reconciliation_generation": decision.reconciliation_generation,
+        "reconciliation_session_id": decision.reconciliation_session_id,
+    }
+    if evidence.qqq_position_management is not None:
+        decision_evidence["qqq_position_management"] = evidence.qqq_position_management.model_dump(
+            mode="json"
+        )
     checks = tuple(
         RiskCheckRecord(
             sequence=index,
@@ -402,9 +413,6 @@ def _decision_to_record(
         overall_result=decision.overall,
         decided_at=decision.decided_at,
         expires_at=decision.expires_at,
-        evidence={
-            "reconciliation_generation": decision.reconciliation_generation,
-            "reconciliation_session_id": decision.reconciliation_session_id,
-        },
+        evidence=decision_evidence,
         checks=checks,
     )

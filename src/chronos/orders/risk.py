@@ -18,7 +18,7 @@ import uuid
 from datetime import datetime, timedelta
 from decimal import Decimal
 
-from pydantic import Field
+from pydantic import AwareDatetime, Field, model_validator
 
 from chronos.config.settings import Settings
 from chronos.domain.enums import (
@@ -33,6 +33,106 @@ from chronos.services.trading_hours import SessionDecision
 from chronos.strategy import capital, reservations
 
 DEFAULT_RISK_DECISION_TTL_SECONDS = 60
+_QQQ_FIVE_TOOL_CANDIDATE_SHA256 = "59348ca3da9e9b68ec4edd1fc54572783e9256ae9c55ac18ffe844c0b4b78054"
+_QQQ_CAPITAL_BASE_USD_MAX = Decimal(3000)
+_QQQ_NATIVE_STOP_RISK_FRACTION = Decimal("0.01")
+_QQQ_NATIVE_STOP_RISK_USD_MAX = Decimal(30)
+_QQQ_CVAR_RISK_FRACTION = Decimal("0.015")
+_QQQ_CVAR_RISK_USD_MAX = Decimal(45)
+
+
+class QQQPositionManagementRiskProjection(ChronosModel):
+    """Deterministic protected-entry projection under the frozen QQQ limits."""
+
+    handoff_entry_usd: Decimal = Field(gt=0)
+    handoff_risk_distance_usd: Decimal = Field(gt=0)
+    applicable_capital_base_usd: Decimal = Field(gt=0)
+    native_stop_risk_usd: Decimal = Field(gt=0)
+    native_stop_budget_usd: Decimal = Field(gt=0)
+    cvar_risk_usd: Decimal = Field(gt=0)
+    cvar_budget_usd: Decimal = Field(gt=0)
+    gross_notional_usd: Decimal = Field(gt=0)
+
+    @property
+    def failures(self) -> tuple[str, ...]:
+        failures: list[str] = []
+        if self.native_stop_risk_usd > self.native_stop_budget_usd:
+            failures.append(
+                f"native stop {self.native_stop_risk_usd} exceeds {self.native_stop_budget_usd}"
+            )
+        if self.cvar_risk_usd > self.cvar_budget_usd:
+            failures.append(f"CVaR {self.cvar_risk_usd} exceeds {self.cvar_budget_usd}")
+        if self.gross_notional_usd > self.applicable_capital_base_usd:
+            failures.append(
+                f"gross {self.gross_notional_usd} exceeds {self.applicable_capital_base_usd}"
+            )
+        return tuple(failures)
+
+    @property
+    def passed(self) -> bool:
+        return not self.failures
+
+
+class QQQPositionManagementRiskEvidence(ChronosModel):
+    """Signal-time facts required to manage an eventual QQQ opening fill.
+
+    The evidence provider, not the order client, supplies this value.  It is
+    persisted with the authorizing risk decision so post-fill admission can
+    reconstruct the exact frozen risk geometry without accepting new economic
+    inputs from its caller.
+    """
+
+    schema_version: str = "chronos-qqq-position-risk-v1"
+    candidate_spec_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    source_evidence_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    as_of: AwareDatetime
+    signal_time_entry_basis_usd: Decimal = Field(gt=0)
+    signal_time_initial_stop_price_usd: Decimal = Field(gt=0)
+    signal_time_risk_distance_usd: Decimal = Field(gt=0)
+    marked_strategy_nav_usd: Decimal = Field(gt=0)
+    unit_exposure_cvar_loss_fraction: Decimal = Field(gt=0, le=1)
+
+    @model_validator(mode="after")
+    def _exact_signal_geometry(self) -> QQQPositionManagementRiskEvidence:
+        if self.schema_version != "chronos-qqq-position-risk-v1":
+            raise ValueError("unsupported QQQ position-risk evidence schema")
+        if (
+            self.signal_time_entry_basis_usd - self.signal_time_initial_stop_price_usd
+            != self.signal_time_risk_distance_usd
+        ):
+            raise ValueError("signal-time entry, stop, and risk distance disagree")
+        return self
+
+    def project(
+        self,
+        *,
+        quantity: Decimal,
+        protected_entry_price: Decimal,
+    ) -> QQQPositionManagementRiskProjection:
+        """Project exact risk at the worst executable protected entry price."""
+
+        handoff_entry = max(self.signal_time_entry_basis_usd, protected_entry_price)
+        handoff_distance = max(
+            self.signal_time_risk_distance_usd,
+            handoff_entry - self.signal_time_initial_stop_price_usd,
+        )
+        applicable_base = min(self.marked_strategy_nav_usd, _QQQ_CAPITAL_BASE_USD_MAX)
+        return QQQPositionManagementRiskProjection(
+            handoff_entry_usd=handoff_entry,
+            handoff_risk_distance_usd=handoff_distance,
+            applicable_capital_base_usd=applicable_base,
+            native_stop_risk_usd=handoff_distance * quantity,
+            native_stop_budget_usd=min(
+                applicable_base * _QQQ_NATIVE_STOP_RISK_FRACTION,
+                _QQQ_NATIVE_STOP_RISK_USD_MAX,
+            ),
+            cvar_risk_usd=(handoff_entry * quantity * self.unit_exposure_cvar_loss_fraction),
+            cvar_budget_usd=min(
+                applicable_base * _QQQ_CVAR_RISK_FRACTION,
+                _QQQ_CVAR_RISK_USD_MAX,
+            ),
+            gross_notional_usd=handoff_entry * quantity,
+        )
 
 
 class OrderRiskCheck(ChronosModel):
@@ -117,6 +217,10 @@ class RiskEvidence(ChronosModel):
     current_crypto_allocation: Decimal = Field(default=Decimal("0"), ge=0)
     crypto_allocation_marked: bool = True
     pending_crypto_buy_notional: Decimal = Field(default=Decimal("0"), ge=0)
+    # Optional because every non-QQQ order and the currently manual Wheel path
+    # has no reason to carry it.  Managed-position admission later requires the
+    # exact typed record and refuses when it is absent.
+    qqq_position_management: QQQPositionManagementRiskEvidence | None = None
 
 
 def _passed(name: str, detail: str) -> OrderRiskCheck:
@@ -161,6 +265,8 @@ class OrderRiskEngine:
             checks.extend(self._crypto_checks(intent, evidence))
         else:
             checks.extend(self._stock_checks(intent, evidence))
+        if evidence.qqq_position_management is not None:
+            checks.append(self._check_qqq_position_management_risk(intent, evidence, now=now))
 
         overall = (
             RiskCheckStatus.PASS
@@ -430,6 +536,51 @@ class OrderRiskEngine:
         from chronos.orders.stocks import validate_stock_order
 
         return validate_stock_order(intent, evidence=evidence, settings=self._settings)
+
+    @staticmethod
+    def _check_qqq_position_management_risk(
+        intent: WheelOrderIntent,
+        evidence: RiskEvidence,
+        *,
+        now: datetime,
+    ) -> OrderRiskCheck:
+        """Apply the frozen Five-Tool budgets to the protected entry terms."""
+
+        managed = evidence.qqq_position_management
+        if managed is None:  # pragma: no cover - caller invokes only when present
+            return _unknown(
+                "qqq_position_management_risk",
+                "QQQ position-management risk evidence is unavailable",
+            )
+        if (
+            intent.product_family is not ProductFamily.STOCK
+            or intent.symbol != "QQQ"
+            or intent.intent is not OrderIntent.OPEN_LONG_STOCK
+            or managed.candidate_spec_sha256 != _QQQ_FIVE_TOOL_CANDIDATE_SHA256
+            or managed.as_of > now
+        ):
+            return _failed(
+                "qqq_position_management_risk",
+                "management evidence does not identify the current long QQQ candidate",
+            )
+
+        # The protected buy limit is the worst executable entry price.  Its
+        # distance from the frozen structural stop can exceed the signal-close
+        # distance after a gap, so entry authorization uses the larger distance
+        # and price exactly as the QQQ preregistration requires.
+        projection = managed.project(
+            quantity=intent.quantity,
+            protected_entry_price=intent.limit_price,
+        )
+        if projection.failures:
+            return _failed("qqq_position_management_risk", "; ".join(projection.failures))
+        return _passed(
+            "qqq_position_management_risk",
+            f"native stop {projection.native_stop_risk_usd} <= "
+            f"{projection.native_stop_budget_usd}; CVaR {projection.cvar_risk_usd} <= "
+            f"{projection.cvar_budget_usd}; gross {projection.gross_notional_usd} <= "
+            f"{projection.applicable_capital_base_usd}",
+        )
 
     def _crypto_checks(
         self, intent: WheelOrderIntent, evidence: RiskEvidence

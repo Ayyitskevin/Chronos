@@ -92,6 +92,11 @@ owner review:
 5. bounded scheduling plus kill, loss, drawdown, and reconciliation integration; and
 6. real PAPER lifecycle evidence, including restart and ambiguous-send drills.
 
+**2026-08-25 follow-up:** ADR-0036 code-mitigates items 1 and 2 for opening
+registration through a canonical read-only broker seam and schema-v11 uniqueness.
+It does not authenticate later management observations/outcomes or provide real
+PAPER evidence, so those items are not operationally closed. Items 3–6 remain.
+
 ## Consequences
 
 Chronos gains an executable specification for post-fill state transitions and can now test

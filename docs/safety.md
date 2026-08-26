@@ -73,6 +73,29 @@ cannot create that artifact, and this release creates none. Both real IBKR
 adapters report deliverable evidence as non-authoritative, so they intentionally
 remain `NO_TRADE` until an authoritative schedule source exists.
 
+### QQQ managed-position admission (ADR-0035/ADR-0036, 2026-08-25)
+
+The QQQ Five-Tool management state machine and its opening-admission seam remain
+off by structure: no runtime module imports admission, and neither module owns a
+submission, modification, cancellation, scheduler, mandate, or activation path.
+Admission accepts only a Chronos opening-order reference and an aware clock value.
+It re-derives economic facts from durable local intent/risk records and two stable
+read-only broker snapshots.
+
+Registration requires a terminal PAPER QQQ `BUY OPEN`, a named passing frozen
+entry-risk check, unchanged reconciliation session/generation, positive execution
+identity agreeing with Chronos's broker/permanent IDs and cumulative fill, no
+competing QQQ order, and exact account-level QQQ position coherence. Missing
+execution evidence refuses; disappearance from open orders never proves a fill.
+Schema v11 atomically binds one opening order to one deterministic managed stream
+per account scope, and exact replay does not re-read the broker.
+
+This is not protection. Ongoing management observations/outcomes are not yet
+authenticated by this seam; no broker-held stop/target survives disconnect or
+process death; no scheduler exists; no real PAPER lifecycle has run; and PAPER
+simulation would not prove LIVE equivalence. Any activation is a separate
+owner-gated change.
+
 ## Hard boundaries
 
 Live transmission is a gated *capability*, not an impossibility (ADR-0009, Milestone 7): it
