@@ -63,11 +63,12 @@ def _write_capture(tmp_path: Path) -> tuple[Path, Path, Path]:
             action = [
                 {
                     "kind": "cash_dividend",
-                    "ex_date": "2024-03-21",
+                    "ex_date": ex_date,
                     "value": 0.5,
                     "source": f"official sponsor history for {symbol}",
                     "note": "native ex-date amount",
                 }
+                for ex_date in ("2024-03-21", "2024-06-21", "2024-09-20")
             ]
         (actions_root / f"{symbol}.json").write_text(json.dumps(action) + "\n", encoding="utf-8")
     (history_root / "MANIFEST.json").write_text(
@@ -139,7 +140,7 @@ def test_packet_binds_bars_actions_receipt_and_conservative_holdout(tmp_path: Pa
     for symbol in SYMBOLS:
         actions = manifest["symbols"][symbol]["corporate_actions"]
         assert len(actions["sha256"]) == 64
-        assert actions["count"] == (0 if symbol == "GLD" else 1)
+        assert actions["count"] == (0 if symbol == "GLD" else 3)
 
     receipt_document = json.loads(receipt.read_text(encoding="utf-8"))
     assert receipt_document["capture"]["symbols"] == list(SYMBOLS)
@@ -155,6 +156,7 @@ def test_packet_binds_bars_actions_receipt_and_conservative_holdout(tmp_path: Pa
     assert document["dataset_id"] == "chronos-qqq-robustness-daily-v1"
     assert document["catalog_id"] == "chronos-qqq-robustness-daily-v1-release-001"
     assert document["source_receipt_sha256"] == _sha256(receipt)
+    assert document["attestation"]["kind"] == "sampled_actions"
     assert document["attestation"]["symbols"] == list(SYMBOLS)
     assert document["attestation"]["sampled_action_count"] == 12
     burned = [span for span in document["holdout_map"] if span["status"] == "burned"]
@@ -299,6 +301,121 @@ def test_action_ingest_refuses_ibkr_as_the_independent_action_source(tmp_path: P
     )
     assert result.returncode == 1
     assert "action stream must be independent" in result.stderr
+
+
+def test_declaration_refuses_an_all_empty_action_panel(tmp_path: Path) -> None:
+    history_root, actions_root, capture_log = _write_capture(tmp_path)
+    for symbol in SYMBOLS:
+        (actions_root / f"{symbol}.json").write_text("[]\n", encoding="utf-8")
+    ingest = _run(
+        "ingest-actions",
+        "--history-root",
+        str(history_root),
+        "--input-root",
+        str(actions_root),
+    )
+    assert ingest.returncode == 0, ingest.stderr
+    receipt = tmp_path / "source_receipt.json"
+    finalized = _run(
+        "finalize-receipt",
+        "--history-root",
+        str(history_root),
+        "--capture-log",
+        str(capture_log),
+        "--output",
+        str(receipt),
+    )
+    assert finalized.returncode == 0, finalized.stderr
+
+    result = _run(
+        "build-declaration",
+        "--history-root",
+        str(history_root),
+        "--source-receipt",
+        str(receipt),
+        "--output",
+        str(tmp_path / "certify.json"),
+        "--attestation-source-id",
+        "nasdaq-independent-sample-2026-08-21",
+        "--attestation-count",
+        "12",
+    )
+
+    assert result.returncode == 1
+    assert "all-empty six-symbol corporate-action panel" in result.stderr
+
+
+def test_declaration_refuses_more_sampled_actions_than_were_ingested(tmp_path: Path) -> None:
+    history_root, actions_root, capture_log = _write_capture(tmp_path)
+    ingest = _run(
+        "ingest-actions",
+        "--history-root",
+        str(history_root),
+        "--input-root",
+        str(actions_root),
+    )
+    assert ingest.returncode == 0, ingest.stderr
+    receipt = tmp_path / "source_receipt.json"
+    finalized = _run(
+        "finalize-receipt",
+        "--history-root",
+        str(history_root),
+        "--capture-log",
+        str(capture_log),
+        "--output",
+        str(receipt),
+    )
+    assert finalized.returncode == 0, finalized.stderr
+
+    result = _run(
+        "build-declaration",
+        "--history-root",
+        str(history_root),
+        "--source-receipt",
+        str(receipt),
+        "--output",
+        str(tmp_path / "certify.json"),
+        "--attestation-source-id",
+        "nasdaq-independent-sample-2026-08-21",
+        "--attestation-count",
+        "16",
+    )
+
+    assert result.returncode == 1
+    assert "cannot attest to 16 sampled actions when only 15 were ingested" in result.stderr
+
+
+def test_receipt_refuses_a_manifest_count_that_disagrees_with_action_bytes(
+    tmp_path: Path,
+) -> None:
+    history_root, actions_root, capture_log = _write_capture(tmp_path)
+    ingest = _run(
+        "ingest-actions",
+        "--history-root",
+        str(history_root),
+        "--input-root",
+        str(actions_root),
+    )
+    assert ingest.returncode == 0, ingest.stderr
+    manifest_path = history_root / "MANIFEST.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["symbols"]["QQQ"]["corporate_actions"]["count"] = 99
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+    result = _run(
+        "finalize-receipt",
+        "--history-root",
+        str(history_root),
+        "--capture-log",
+        str(capture_log),
+        "--output",
+        str(tmp_path / "source_receipt.json"),
+    )
+
+    assert result.returncode == 1
+    assert "manifest count 99 does not match 3 parsed corporate actions" in result.stderr
 
 
 def test_release_verification_requires_every_symbol_holdout_and_matching_bytes(

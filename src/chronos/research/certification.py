@@ -26,8 +26,9 @@ no host detail, so certifying the same bytes twice produces byte-identical evide
 What this module deliberately does **not** claim: it does not make data trustworthy, and
 it cannot perform the "independently sampled" half of the corporate-action gate. Sampling
 a second, unrelated source is an owner act; code can only check that the attestation
-exists and reconcile the stream it was given against the prices. An export with no
-attestation is refused rather than certified on the strength of self-consistency.
+exists, bind its count to distinct supplied events, commit to their semantics, and reconcile
+the stream it was given against the prices. An export with no attestation is refused rather
+than certified on the strength of self-consistency.
 """
 
 from __future__ import annotations
@@ -60,11 +61,12 @@ SPLIT_RECONCILIATION_TOLERANCE = 0.02
 
 # The evidence mapping shape is pinned by a golden-digest test: renaming or adding a
 # field must bump this constant, or every recorded digest silently re-identifies.
-# v2 added the bar-granular evidence fields for HOUR_1 certification. Bumped while
-# zero production digests existed (no real release had ever been minted), so no
-# recorded evidence changed identity — after the first real release this constant
-# moves only with a migration story.
-CERTIFICATION_SCHEMA_VERSION = "chronos-dataset-certification-v2"
+# v2 added the bar-granular evidence fields for HOUR_1 certification. v3 binds the
+# corporate-action semantics the verdict judged and makes typed sample counts
+# mechanically consistent with distinct supplied events. Both bumps occurred while
+# zero production digests existed (no real release had ever been minted); after the
+# first real release this constant moves only with a migration story.
+CERTIFICATION_SCHEMA_VERSION = "chronos-dataset-certification-v3"
 
 
 class CertificationError(RuntimeError):
@@ -86,6 +88,11 @@ class FindingKind(StrEnum):
     BLOCKING_QUALITY_ISSUE = "BLOCKING_QUALITY_ISSUE"
     EMPTY_SERIES = "EMPTY_SERIES"
     MISSING_ATTESTATION = "MISSING_ATTESTATION"
+    EMPTY_ACTION_PANEL = "EMPTY_ACTION_PANEL"
+    ATTESTATION_EXCEEDS_ACTIONS = "ATTESTATION_EXCEEDS_ACTIONS"
+    DUPLICATE_CORPORATE_ACTION = "DUPLICATE_CORPORATE_ACTION"
+    NO_ACTION_ATTESTATION_MISMATCH = "NO_ACTION_ATTESTATION_MISMATCH"
+    NO_ACTION_ATTESTATION_CONTRADICTED = "NO_ACTION_ATTESTATION_CONTRADICTED"
     CALENDAR_NOT_COVERED = "CALENDAR_NOT_COVERED"
 
 
@@ -174,10 +181,71 @@ class CorporateActionAttestation:
 
     def to_mapping(self) -> dict[str, Any]:
         return {
+            "kind": "sampled_actions",
             "source_id": self.source_id,
             "sampled_action_count": self.sampled_action_count,
             "symbols": list(self.symbols),
             "note": self.note,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class NoCorporateActionAttestation:
+    """Independent-source evidence that exact declared windows contain no actions.
+
+    This is deliberately a separate type from a positive sampled-action count. It
+    binds the source review to exact symbol windows, so a free-form note cannot turn
+    an unexpectedly empty multi-decade action capture into affirmative evidence.
+    """
+
+    source_id: str
+    windows: tuple[SymbolWindow, ...]
+    note: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.source_id.strip():
+            raise ValueError("no-action attestation source_id must name the independent source")
+        if not self.windows:
+            raise ValueError("no-action attestation must name the exact windows it covers")
+        identities = {(window.symbol, window.start, window.end) for window in self.windows}
+        if len(identities) != len(self.windows):
+            raise ValueError("no-action attestation windows must not contain duplicates")
+
+    @property
+    def symbols(self) -> tuple[str, ...]:
+        return tuple(sorted({window.symbol for window in self.windows}))
+
+    def to_mapping(self) -> dict[str, Any]:
+        return {
+            "kind": "reviewed_no_actions",
+            "source_id": self.source_id,
+            "windows": [
+                {
+                    "symbol": window.symbol,
+                    "start": window.start.isoformat(),
+                    "end": window.end.isoformat(),
+                }
+                for window in sorted(
+                    self.windows, key=lambda item: (item.symbol, item.start, item.end)
+                )
+            ],
+            "note": self.note,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class CorporateActionEvidence:
+    """Content identity and distinct event count for one judged action stream."""
+
+    symbol: str
+    count: int
+    semantic_sha256: str
+
+    def to_mapping(self) -> dict[str, Any]:
+        return {
+            "symbol": self.symbol,
+            "count": self.count,
+            "semantic_sha256": self.semantic_sha256,
         }
 
 
@@ -240,7 +308,8 @@ class CertificationReport:
     interval: BarInterval
     coverage: tuple[SymbolCoverage, ...]
     findings: tuple[Finding, ...]
-    attestation: CorporateActionAttestation | None
+    attestation: CorporateActionAttestation | NoCorporateActionAttestation | None
+    corporate_actions: tuple[CorporateActionEvidence, ...]
     classified_moves: tuple[ClassifiedMove, ...] = field(default=())
 
     @property
@@ -262,6 +331,7 @@ class CertificationReport:
             "coverage": [entry.to_mapping() for entry in self.coverage],
             "findings": [finding.to_mapping() for finding in self.findings],
             "attestation": self.attestation.to_mapping() if self.attestation else None,
+            "corporate_actions": [entry.to_mapping() for entry in self.corporate_actions],
             "classified_moves": [
                 {
                     "symbol": move.symbol,
@@ -337,6 +407,70 @@ def _reconciles(observed: float, action: CorporateAction) -> bool:
     return abs(observed - _split_implied_return(action.value)) <= SPLIT_RECONCILIATION_TOLERANCE
 
 
+def _action_identity(action: CorporateAction) -> tuple[str, str, float, str, str]:
+    return (
+        action.kind.value,
+        action.ex_date.isoformat(),
+        action.value,
+        action.source,
+        action.note,
+    )
+
+
+def _action_evidence(
+    windows: Sequence[SymbolWindow],
+    actions_by_symbol: Mapping[str, Sequence[CorporateAction]],
+) -> tuple[tuple[CorporateActionEvidence, ...], tuple[Finding, ...], int]:
+    """Bind and count distinct actions inside the exact certification windows."""
+
+    windows_by_symbol: dict[str, list[SymbolWindow]] = {}
+    for window in windows:
+        windows_by_symbol.setdefault(window.symbol, []).append(window)
+
+    evidence: list[CorporateActionEvidence] = []
+    findings: list[Finding] = []
+    distinct_total = 0
+    for symbol, symbol_windows in sorted(windows_by_symbol.items()):
+        actions = tuple(
+            action
+            for action in actions_by_symbol.get(symbol, ())
+            if any(window.start <= action.ex_date <= window.end for window in symbol_windows)
+        )
+        identities = [_action_identity(action) for action in actions]
+        distinct_identities = set(identities)
+        duplicate_count = len(identities) - len(distinct_identities)
+        if duplicate_count:
+            findings.append(
+                Finding(
+                    kind=FindingKind.DUPLICATE_CORPORATE_ACTION,
+                    symbol=symbol,
+                    detail=(
+                        f"the supplied stream repeats {duplicate_count} corporate-action "
+                        "record(s); duplicates cannot increase the attestable sample"
+                    ),
+                )
+            )
+        canonical_actions = sorted(
+            (action.to_mapping() for action in actions),
+            key=lambda item: json.dumps(
+                item, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+            ),
+        )
+        semantic_bytes = json.dumps(
+            canonical_actions, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        ).encode("utf-8")
+        distinct_count = len(distinct_identities)
+        distinct_total += distinct_count
+        evidence.append(
+            CorporateActionEvidence(
+                symbol=symbol,
+                count=distinct_count,
+                semantic_sha256=hashlib.sha256(semantic_bytes).hexdigest(),
+            )
+        )
+    return tuple(evidence), tuple(findings), distinct_total
+
+
 # ------------------------------------------------------------------------------ certify
 
 
@@ -346,7 +480,7 @@ def certify_export(
     windows: Sequence[SymbolWindow],
     series_by_symbol: Mapping[str, BarSeries],
     actions_by_symbol: Mapping[str, Sequence[CorporateAction]],
-    attestation: CorporateActionAttestation | None,
+    attestation: CorporateActionAttestation | NoCorporateActionAttestation | None,
     classified_moves: Sequence[ClassifiedMove] = (),
     calendar: SessionCalendar | None = None,
     interval: BarInterval = BarInterval.DAY_1,
@@ -388,6 +522,11 @@ def certify_export(
     findings: list[Finding] = []
     coverage: list[SymbolCoverage] = []
 
+    action_evidence, action_findings, distinct_action_count = _action_evidence(
+        windows, actions_by_symbol
+    )
+    findings.extend(action_findings)
+
     if attestation is None:
         findings.append(
             Finding(
@@ -400,6 +539,60 @@ def certify_export(
                 ),
             )
         )
+    elif isinstance(attestation, CorporateActionAttestation):
+        if distinct_action_count == 0:
+            findings.append(
+                Finding(
+                    kind=FindingKind.EMPTY_ACTION_PANEL,
+                    symbol="*",
+                    detail=(
+                        "a positive sampled-action attestation cannot certify an all-empty "
+                        "corporate-action panel; a legitimately action-free panel needs a "
+                        "separately reviewed evidence type, not a free-form note"
+                    ),
+                )
+            )
+        elif attestation.sampled_action_count > distinct_action_count:
+            findings.append(
+                Finding(
+                    kind=FindingKind.ATTESTATION_EXCEEDS_ACTIONS,
+                    symbol="*",
+                    detail=(
+                        f"the attestation claims {attestation.sampled_action_count} sampled "
+                        f"actions but only {distinct_action_count} distinct corporate actions "
+                        "were supplied inside the certified windows"
+                    ),
+                )
+            )
+    else:
+        certified_windows = tuple(
+            sorted((window.symbol, window.start, window.end) for window in windows)
+        )
+        attested_windows = tuple(
+            sorted((window.symbol, window.start, window.end) for window in attestation.windows)
+        )
+        if certified_windows != attested_windows:
+            findings.append(
+                Finding(
+                    kind=FindingKind.NO_ACTION_ATTESTATION_MISMATCH,
+                    symbol="*",
+                    detail=(
+                        "the reviewed no-action attestation does not cover the exact "
+                        "symbol windows being certified"
+                    ),
+                )
+            )
+        if distinct_action_count:
+            findings.append(
+                Finding(
+                    kind=FindingKind.NO_ACTION_ATTESTATION_CONTRADICTED,
+                    symbol="*",
+                    detail=(
+                        "the reviewed no-action attestation is contradicted by "
+                        f"{distinct_action_count} distinct supplied corporate action(s)"
+                    ),
+                )
+            )
 
     classified = {(move.symbol, move.session_date): move for move in classified_moves}
     attested_symbols = set(attestation.symbols) if attestation else set()
@@ -639,6 +832,7 @@ def certify_export(
         coverage=tuple(coverage),
         findings=tuple(findings),
         attestation=attestation,
+        corporate_actions=action_evidence,
         classified_moves=tuple(classified_moves),
     )
 
@@ -652,8 +846,10 @@ __all__ = [
     "CertificationReport",
     "ClassifiedMove",
     "CorporateActionAttestation",
+    "CorporateActionEvidence",
     "Finding",
     "FindingKind",
+    "NoCorporateActionAttestation",
     "SymbolCoverage",
     "SymbolWindow",
     "Verdict",

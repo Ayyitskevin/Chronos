@@ -38,14 +38,18 @@ is a JSON array of:
 ```
 
 `kind` is `cash_dividend` or `split`; a 4-for-1 split uses value `4`, and a 1-for-10
-reverse split uses `0.1`. Empty `[]` is valid only when the primary source affirmatively
-shows no actions in the captured window. The helper canonicalizes and hashes all six action
-files through the historical-data store and refuses an unlogged overwrite.
+reverse split uses `0.1`. Empty `[]` is valid for one symbol only when the primary source
+affirmatively shows no actions in that symbol's captured window. The frozen QQQ identity
+refuses if **all six** files are empty; that claim requires a separately reviewed campaign
+identity, not a note or flag. The helper canonicalizes and hashes all six action files,
+refuses duplicates, verifies manifest counts against parsed bytes, and refuses an unlogged
+overwrite.
 
 The independent attestation remains an owner act. The wizard requires at least 12 actions
 sampled across the six-symbol panel from a second source unrelated to both IBKR and the
 primary sponsor streams. It records the attestation only after explicit owner confirmation;
-code does not perform or infer the sample.
+code does not perform or infer the sample. The claimed count may not exceed the distinct
+events supplied inside the certified windows.
 
 The recommended holdout map is conservative and fixed before certification:
 
@@ -69,7 +73,7 @@ Four gates, frozen before collection and not tunable at a call site:
 |---|---|
 | At least 99.5% expected-session coverage | `research.certification` against `research.session_calendar` |
 | Every gap and material move classified; zero unresolved conflicts | `MISSING_SESSION`, `UNEXPECTED_BAR`, `UNCLASSIFIED_MATERIAL_MOVE` findings |
-| Corporate actions independently sampled **and** reconciled | attestation required (owner) + split/price reconciliation (code) |
+| Corporate actions independently sampled **and** reconciled | attestation required (owner) + count/semantic binding, duplicate refusal, and split/price reconciliation (code) |
 | Clean/seen/burned holdout map, complete and content-addressed | `research.dataset_release` tiling + partition digests |
 
 Every finding blocks. There are no warnings, and there is no flag that downgrades one.
@@ -109,6 +113,21 @@ a second source. For the QQQ wizard, the primary action stream is the official f
 record and the attestation source is separate again; using the sponsor record as both the
 stream and its own check does not satisfy this gate.
 
+For a genuinely action-free short export, use the separate typed form and bind it to the
+exact reviewed windows:
+
+```json
+{
+  "kind": "reviewed_no_actions",
+  "source_id": "independent-source-review-2026-08-26",
+  "windows": [{"symbol": "SPY", "start": "2024-01-02", "end": "2024-01-05"}],
+  "note": "independent source showed no split or distribution in this exact window"
+}
+```
+
+Any supplied event contradicts this form, and any window mismatch refuses. It is not an
+escape hatch for the frozen multi-decade QQQ panel, which must contain actions.
+
 ## Step 3 — write the declaration
 
 One JSON file, deliberately explicit; nothing about a holdout map is inferred.
@@ -120,6 +139,7 @@ One JSON file, deliberately explicit; nothing about a holdout map is inferred.
   "source_id": "ibkr-tws-historical",
   "source_receipt_sha256": "<64 hex>",
   "attestation": {
+    "kind": "sampled_actions",
     "source_id": "nasdaq-dividend-history-2026-08-21",
     "sampled_action_count": 12,
     "symbols": ["SPY", "QQQ"],
@@ -170,6 +190,10 @@ evidence:
 {"symbol": "SPY", "session_date": "2020-03-16", "reason": "COVID-19 circuit-breaker session"}
 ```
 
+The canonical v3 report includes each symbol's distinct action count and semantic SHA-256.
+Changing a cash distribution changes the certification digest even when the associated price
+move is below the material-move threshold. Event order does not change the digest.
+
 ## Step 5 — freeze the release
 
 ```bash
@@ -201,6 +225,8 @@ strategy valid — it makes the *data* admissible. That is the only claim it car
 ## What this does not do
 
 - It does not sample a second source for you (step 2 is irreducibly owner work).
+- It does not prove the primary or independent source is complete or true. Counts and hashes
+  prove coherence of the supplied evidence, not external provider truth.
 - It does not make transcribed or rounded data trustworthy. The in-repo GLD/IWM/TLT
   files are markdown-transcribed to 2 decimals and remain unfit regardless of verdict.
 - It does not count a trial or authorize a campaign. The brokered reader and blocked

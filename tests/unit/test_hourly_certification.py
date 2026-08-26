@@ -22,6 +22,7 @@ from chronos.research.certification import (
     CertificationError,
     CorporateActionAttestation,
     FindingKind,
+    NoCorporateActionAttestation,
     SymbolWindow,
     Verdict,
     certify_export,
@@ -80,21 +81,23 @@ def _series(
     return BarSeries(symbol="SPY", interval=BarInterval.HOUR_1, bars=tuple(bars))
 
 
-def _attestation() -> CorporateActionAttestation:
-    return CorporateActionAttestation(
-        source_id="nasdaq-dividend-history-2026-08-21",
-        sampled_action_count=3,
-        symbols=("SPY",),
+def _no_action_attestation(
+    windows: tuple[SymbolWindow, ...],
+) -> NoCorporateActionAttestation:
+    return NoCorporateActionAttestation(
+        source_id="official-sponsor-history-2026-08-26",
+        windows=windows,
     )
 
 
 def _certify(**overrides: object):
+    windows = overrides.get("windows", [SymbolWindow("SPY", _START, _END)])
     kwargs: dict[str, object] = {
         "dataset_id": "chronos-etf-hourly-v1",
-        "windows": [SymbolWindow("SPY", _START, _END)],
+        "windows": windows,
         "series_by_symbol": {"SPY": _series()},
         "actions_by_symbol": {"SPY": ()},
-        "attestation": _attestation(),
+        "attestation": _no_action_attestation(tuple(windows)),
         "calendar": _CALENDAR,
         "interval": BarInterval.HOUR_1,
     }
@@ -241,6 +244,11 @@ def test_a_split_reconciles_against_derived_session_closes() -> None:
                 CorporateAction(kind=ActionKind.SPLIT, ex_date=ex_date, value=4.0, source="ibkr"),
             )
         },
+        attestation=CorporateActionAttestation(
+            source_id="official-sponsor-history-2026-08-26",
+            sampled_action_count=1,
+            symbols=("SPY",),
+        ),
     )
     assert report.verdict is Verdict.CERTIFIED
 

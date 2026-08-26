@@ -152,6 +152,10 @@ CRON_TZ=UTC
   aborts the write.
 - **Corporate actions are native-basis.** Store a dividend as the raw as-declared
   amount at its own ex-date, never restated to a later split's terms.
+- **Certification binds action semantics, not provider completeness.** The v3 report records
+  each declared symbol's distinct in-window action count and order-invariant semantic digest;
+  duplicate events and inflated independent-sample counts refuse. The owner still verifies
+  sponsor completeness and the independent source on the first real capture.
 - **Isolation is enforced by tests** (`tests/safety/test_histdata_isolation.py`): the
   package imports nothing from the order/broker/persistence/lease planes or
   `sqlalchemy`/`sqlite3`, and `ibapi` stays lazy.
@@ -166,6 +170,8 @@ Both official clients are unexercised in CI. On the first real **bars** run conf
 3. Bar dates parse as `YYYYMMDD` (the process assumes `formatDate=1` daily bars).
 4. No pacing violations from the gateway across a multi-symbol run.
 5. `MANIFEST.json` records a sha256 and range for each symbol.
+6. Each corporate-action manifest count equals its parsed file, no exact event repeats, and
+   the independent sampled count does not exceed the supplied distinct events.
 
 On the first real **options** capture confirm:
 

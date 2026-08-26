@@ -383,6 +383,13 @@ Starting data-quality gates, frozen before collection:
 - Corporate actions independently sampled and reconciled.
 - Clean/seen/burned holdout map complete and content-addressed.
 
+**Integrity progress (2026-08-26):** D-53/ADR-0039 makes the corporate-action half
+content-addressed: certification v3 binds per-symbol distinct counts and semantic digests,
+refuses duplicate/inflated claims, and gives legitimate zero-action windows an exact typed
+evidence form. The frozen QQQ helper additionally refuses an all-empty six-symbol panel and
+recomputes manifest counts from bytes. This closes a code false-positive only; no provider
+completeness, owner reconciliation, or D2 certification gate has advanced.
+
 Starting strategy gates, subject only to stricter preregistered power requirements:
 
 - Sample floor: the typed power-required observation count **and** at least 100 out-of-sample

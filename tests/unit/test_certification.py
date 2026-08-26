@@ -20,6 +20,7 @@ from chronos.research.certification import (
     ClassifiedMove,
     CorporateActionAttestation,
     FindingKind,
+    NoCorporateActionAttestation,
     SymbolWindow,
     Verdict,
     certify_export,
@@ -68,12 +69,38 @@ def _series(
     )
 
 
-def _attestation(symbols: tuple[str, ...] = ("SPY",)) -> CorporateActionAttestation:
+def _action(
+    symbol: str = "SPY",
+    *,
+    ex_date: date = date(2024, 2, 1),
+    value: float = 0.5,
+) -> CorporateAction:
+    return CorporateAction(
+        kind=ActionKind.CASH_DIVIDEND,
+        ex_date=ex_date,
+        value=value,
+        source=f"official sponsor history for {symbol}",
+    )
+
+
+def _attestation(
+    symbols: tuple[str, ...] = ("SPY",), *, sampled_action_count: int = 1
+) -> CorporateActionAttestation:
     return CorporateActionAttestation(
         source_id="nasdaq-dividend-history-2026-08-21",
-        sampled_action_count=12,
+        sampled_action_count=sampled_action_count,
         symbols=symbols,
-        note="owner sampled 12 actions against a second source",
+        note="owner sampled the declared actions against a second source",
+    )
+
+
+def _no_action_attestation(
+    windows: tuple[SymbolWindow, ...] = (SymbolWindow("SPY", _START, _END),),
+) -> NoCorporateActionAttestation:
+    return NoCorporateActionAttestation(
+        source_id="official-sponsor-history-2026-08-26",
+        windows=windows,
+        note="owner reviewed the exact windows against an independent source",
     )
 
 
@@ -82,7 +109,7 @@ def _certify(**overrides: object):
         "dataset_id": "chronos-etf-daily-v1",
         "windows": [SymbolWindow("SPY", _START, _END)],
         "series_by_symbol": {"SPY": _series()},
-        "actions_by_symbol": {"SPY": ()},
+        "actions_by_symbol": {"SPY": (_action(),)},
         "attestation": _attestation(),
         "calendar": _CALENDAR,
     }
@@ -115,6 +142,37 @@ def test_a_different_export_gets_a_different_digest() -> None:
     clean = _certify()
     holed = _certify(series_by_symbol={"SPY": _series(skip={date(2024, 2, 20)})})
     assert clean.certification_digest != holed.certification_digest
+
+
+def test_a_cash_distribution_changes_the_certification_digest() -> None:
+    first = _certify()
+    changed = _certify(actions_by_symbol={"SPY": (_action(value=0.6),)})
+
+    assert first.certification_digest != changed.certification_digest
+    assert first.to_mapping()["corporate_actions"] == [
+        {
+            "symbol": "SPY",
+            "count": 1,
+            "semantic_sha256": first.to_mapping()["corporate_actions"][0]["semantic_sha256"],
+        }
+    ]
+
+
+def test_action_order_does_not_change_the_semantic_digest() -> None:
+    first = _action(ex_date=date(2024, 2, 1))
+    second = _action(ex_date=date(2024, 3, 1))
+    attestation = _attestation(sampled_action_count=2)
+
+    forward = _certify(
+        actions_by_symbol={"SPY": (first, second)},
+        attestation=attestation,
+    )
+    reversed_order = _certify(
+        actions_by_symbol={"SPY": (second, first)},
+        attestation=attestation,
+    )
+
+    assert forward.certification_digest == reversed_order.certification_digest
 
 
 # ------------------------------------------------------------------------- coverage
@@ -273,6 +331,105 @@ def test_an_attestation_that_skips_a_symbol_does_not_cover_it() -> None:
     assert missing[0].symbol == "SPY"
 
 
+def test_an_all_empty_action_panel_cannot_certify_from_a_typed_count() -> None:
+    report = _certify(actions_by_symbol={"SPY": ()})
+
+    assert report.verdict is Verdict.NOT_CERTIFIED
+    assert [finding.kind for finding in report.findings] == [FindingKind.EMPTY_ACTION_PANEL]
+    assert "separately reviewed evidence type" in report.findings[0].detail
+
+
+def test_an_exact_reviewed_no_action_panel_can_certify() -> None:
+    report = _certify(
+        actions_by_symbol={"SPY": ()},
+        attestation=_no_action_attestation(),
+    )
+
+    assert report.verdict is Verdict.CERTIFIED
+    assert report.to_mapping()["attestation"]["kind"] == "reviewed_no_actions"
+
+
+def test_a_no_action_attestation_must_bind_the_exact_windows() -> None:
+    report = _certify(
+        actions_by_symbol={"SPY": ()},
+        attestation=_no_action_attestation(
+            (SymbolWindow("SPY", _START, _END - timedelta(days=1)),)
+        ),
+    )
+
+    assert [finding.kind for finding in report.findings] == [
+        FindingKind.NO_ACTION_ATTESTATION_MISMATCH
+    ]
+
+
+def test_supplied_actions_contradict_a_no_action_attestation() -> None:
+    report = _certify(attestation=_no_action_attestation())
+
+    assert [finding.kind for finding in report.findings] == [
+        FindingKind.NO_ACTION_ATTESTATION_CONTRADICTED
+    ]
+
+
+def test_declaration_parser_preserves_the_typed_no_action_windows() -> None:
+    from scripts.certify_dataset import _attestation as parse_attestation
+
+    parsed = parse_attestation(
+        {
+            "attestation": {
+                "kind": "reviewed_no_actions",
+                "source_id": "independent-source",
+                "windows": [
+                    {
+                        "symbol": "spy",
+                        "start": _START.isoformat(),
+                        "end": _END.isoformat(),
+                    }
+                ],
+            }
+        }
+    )
+
+    assert parsed == NoCorporateActionAttestation(
+        source_id="independent-source",
+        windows=(SymbolWindow("SPY", _START, _END),),
+    )
+
+
+def test_declaration_parser_refuses_an_unknown_attestation_kind() -> None:
+    from scripts.certify_dataset import _attestation as parse_attestation
+
+    with pytest.raises(SystemExit, match="unknown corporate-action attestation kind"):
+        parse_attestation(
+            {
+                "attestation": {
+                    "kind": "free_form_override",
+                    "source_id": "independent-source",
+                    "sampled_action_count": 1,
+                    "symbols": ["SPY"],
+                }
+            }
+        )
+
+
+def test_attestation_count_cannot_exceed_distinct_ingested_actions() -> None:
+    report = _certify(attestation=_attestation(sampled_action_count=2))
+
+    assert report.verdict is Verdict.NOT_CERTIFIED
+    assert [finding.kind for finding in report.findings] == [
+        FindingKind.ATTESTATION_EXCEEDS_ACTIONS
+    ]
+    assert "2 sampled actions but only 1 distinct" in report.findings[0].detail
+
+
+def test_duplicate_actions_cannot_inflate_the_available_sample() -> None:
+    action = _action()
+    report = _certify(actions_by_symbol={"SPY": (action, action)})
+
+    assert report.verdict is Verdict.NOT_CERTIFIED
+    assert [finding.kind for finding in report.findings] == [FindingKind.DUPLICATE_CORPORATE_ACTION]
+    assert report.findings[0].symbol == "SPY"
+
+
 def test_an_attestation_must_carry_a_source_and_a_sample() -> None:
     with pytest.raises(ValueError, match="independent source"):
         CorporateActionAttestation(source_id="  ", sampled_action_count=5, symbols=("SPY",))
@@ -303,7 +460,12 @@ def test_certification_needs_a_dataset_id_and_a_window() -> None:
 
 
 def test_a_window_outside_the_pinned_calendar_refuses_rather_than_scoring() -> None:
-    report = _certify(windows=[SymbolWindow("SPY", date(2026, 12, 1), date(2027, 1, 10))])
+    window = SymbolWindow("SPY", date(2026, 12, 1), date(2027, 1, 10))
+    report = _certify(
+        windows=[window],
+        actions_by_symbol={"SPY": ()},
+        attestation=_no_action_attestation((window,)),
+    )
     assert [f.kind for f in report.findings] == [FindingKind.CALENDAR_NOT_COVERED]
     assert report.verdict is Verdict.NOT_CERTIFIED
 
@@ -318,8 +480,8 @@ def test_multiple_symbols_are_reported_in_a_stable_order() -> None:
         dataset_id="chronos-etf-daily-v1",
         windows=[SymbolWindow("QQQ", _START, _END), SymbolWindow("SPY", _START, _END)],
         series_by_symbol={"SPY": _series("SPY"), "QQQ": _series("QQQ")},
-        actions_by_symbol={},
-        attestation=_attestation(symbols=("SPY", "QQQ")),
+        actions_by_symbol={"SPY": (_action("SPY"),), "QQQ": (_action("QQQ"),)},
+        attestation=_attestation(symbols=("SPY", "QQQ"), sampled_action_count=2),
         calendar=_CALENDAR,
     )
     assert [entry.symbol for entry in report.coverage] == ["QQQ", "SPY"]

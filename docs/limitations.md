@@ -102,6 +102,12 @@ runbooks.
   fixtures. Real splits/dividends are captured or entered by the owner, in **native
   as-of-ex-date basis** (never restated to a later split's terms, or the read-time
   factor double-counts).
+- **Certification v3 binds the supplied action stream; it does not prove completeness
+  (ADR-0039).** Per-symbol distinct counts and semantic digests make distributions visible
+  to the certification identity, while duplicate events, inflated sample counts, and
+  unsupported empty panels refuse. A plausible but incomplete sponsor transcription can
+  still be internally coherent. The independent-source review and first real QQQ capture
+  remain owner obligations; no dataset is certified merely because these checks exist.
 - **`TOTAL_RETURN` is the CRSP/vendor adjusted-close approximation**, exact for splits
   and first-order for dividends — not an exact reinvested total-return index.
 - **Pacing is coded to documented limits, not measured.** Cross-process coordination
@@ -336,6 +342,11 @@ runbooks.
   There is no absolute pass date, clean-window identity, sufficiently covered future session
   calendar, or successor campaign binding yet; the calculator is not observed evidence and
   grants no data, trial, holdout, strategy-selection, order, or promotion authority.
+- D-53/ADR-0039 closes a certified-data false-positive in code. Corporate-action sample
+  counts now bind to distinct in-window events and v3 digests commit to per-symbol action
+  semantics. The frozen six-symbol QQQ identity refuses an all-empty action panel. This is
+  structural integrity, not proof that sponsor or independent-source histories are complete;
+  D2 and all research gates remain blocked pending owner-supplied real data and review.
 - USD 3,000 is a conditional research reference/future funding target, not current capital.
   A zero incremental data budget means missing certifiable evidence blocks the campaign.
 

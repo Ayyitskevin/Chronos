@@ -24,6 +24,7 @@ be inferred:
       "source_id": "ibkr-tws-historical",
       "source_receipt_sha256": "<64 hex>",
       "attestation": {
+        "kind": "sampled_actions",
         "source_id": "nasdaq-dividend-history-2026-08-21",
         "sampled_action_count": 12,
         "symbols": ["SPY", "QQQ"],
@@ -58,6 +59,7 @@ from chronos.research.certification import (
     CertificationReport,
     ClassifiedMove,
     CorporateActionAttestation,
+    NoCorporateActionAttestation,
     SymbolWindow,
     certify_export,
 )
@@ -84,10 +86,28 @@ def _windows(document: dict[str, Any]) -> list[SymbolWindow]:
     ]
 
 
-def _attestation(document: dict[str, Any]) -> CorporateActionAttestation | None:
+def _attestation(
+    document: dict[str, Any],
+) -> CorporateActionAttestation | NoCorporateActionAttestation | None:
     raw = document.get("attestation")
     if not raw:
         return None
+    kind = str(raw.get("kind", "sampled_actions"))
+    if kind == "reviewed_no_actions":
+        return NoCorporateActionAttestation(
+            source_id=str(raw["source_id"]),
+            windows=tuple(
+                SymbolWindow(
+                    symbol=str(entry["symbol"]).upper(),
+                    start=date.fromisoformat(entry["start"]),
+                    end=date.fromisoformat(entry["end"]),
+                )
+                for entry in raw["windows"]
+            ),
+            note=str(raw.get("note", "")),
+        )
+    if kind != "sampled_actions":
+        raise SystemExit(f"unknown corporate-action attestation kind {kind!r}")
     return CorporateActionAttestation(
         source_id=str(raw["source_id"]),
         sampled_action_count=int(raw["sampled_action_count"]),
