@@ -44,18 +44,18 @@ CATALOG_ID = "chronos-qqq-robustness-daily-v1-release-001"
 RECEIPT_SCHEMA = "chronos-qqq-source-receipt-v1"
 MINIMUM_ATTESTED_ACTIONS = 12
 
-_IBKR_SOURCE_MARKERS = frozenset(
+_IBKR_SOURCE_SUBSTRINGS = frozenset(
     {
         "ibkr",
         "interactivebroker",
         "interactivebrokers",
-        "tws",
         "traderworkstation",
         "ibgateway",
         "ibasync",
+        "twsapi",
     }
 )
-_LONGEST_IBKR_SOURCE_MARKER = max(len(marker) for marker in _IBKR_SOURCE_MARKERS)
+_TWS_SOURCE_MARKER = "tws"
 
 SEEN_SPLIT = date(2022, 1, 1)
 BURNED_END = date(2024, 1, 10)
@@ -101,13 +101,16 @@ def _canonical_bytes(document: dict[str, Any]) -> bytes:
 def _uses_ibkr_source_identity(source: str) -> bool:
     normalized = unicodedata.normalize("NFKC", source).casefold()
     tokens = tuple(re.findall(r"[a-z0-9]+", normalized))
+    compact = "".join(tokens)
+    if any(marker in compact for marker in _IBKR_SOURCE_SUBSTRINGS):
+        return True
     for start in range(len(tokens)):
         candidate = ""
         for token in tokens[start:]:
             candidate += token
-            if len(candidate) > _LONGEST_IBKR_SOURCE_MARKER:
+            if len(candidate) > len(_TWS_SOURCE_MARKER):
                 break
-            if candidate in _IBKR_SOURCE_MARKERS:
+            if candidate == _TWS_SOURCE_MARKER:
                 return True
     return False
 

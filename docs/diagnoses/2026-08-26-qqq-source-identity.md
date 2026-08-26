@@ -26,11 +26,17 @@ manifest integrity, provider data, or the certification digest.
 
 ## Correction and proof
 
-One deterministic predicate now normalizes Unicode, case, and alphanumeric token boundaries,
-then recognizes complete IBKR-family markers across separators. Both public CLI paths use it.
-Red/green regression runs covered action and attestation identities independently; the final
-production-CLI corpus produced 43/43 expected decisions and the focused suite produced 53
-passes.
+One deterministic predicate now normalizes Unicode, case, and alphanumeric token boundaries.
+It finds unambiguous four-or-more-character family markers across separators and inside
+longer tokens; `TWS` remains token-exact while `TWSAPI` is explicit. Both public CLI paths use
+the predicate.
+
+The first exact-marker implementation passed its 43-case corpus but regressed labels that the
+old substring check blocked. A non-author HOLD demonstrated `ibkrexport`, `ibkrdata`,
+`IBKRHistorical`, and `ibkr2` passing at both seams. The review claim reproduced locally as
+18 failures across 9 glued aliases before the long-marker substring rule. After remediation,
+the expanded production-CLI corpus produced 69/69 expected decisions and the focused packet
+suite produced 79 passes.
 
 The correction authenticates no source. Passing the deny-family check remains weaker than
 proving the claimed provider was real, complete, and independently reconciled.

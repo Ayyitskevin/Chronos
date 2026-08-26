@@ -40,31 +40,42 @@ repository dataset, owner data, credential, gateway, account, holdout, trial, br
 order surface was opened.
 
 The final policy applies Unicode NFKC normalization, case folding, and alphanumeric token
-normalization. Adjacent tokens are joined only until they exactly equal a reviewed complete
-family marker. This catches separators inside a name without banning arbitrary substrings or
-the ambiguous token `IB`.
+normalization. The normalized stream is searched for complete unambiguous markers of four or
+more characters, including when they are separated or glued to another word. The shorter
+`TWS` marker stays token-exact to avoid a general three-character substring rule; the common
+joined `TWSAPI` form is explicit. This keeps unrelated `TWSE` and the ambiguous token `IB`
+outside the deny rule.
+
+The first implementation used only exact normalized marker membership. A non-author review
+showed that it regressed the old behavior for glued labels such as `ibkrexport`, `ibkrdata`,
+`IBKRHistorical`, and `ibkr2`. A second red run reproduced 9 glued aliases at both public CLI
+seams (18 failures) before the substring rule above was applied.
 
 ## Results
 
 | Surface and corpus | Expected | Observed |
 |---|---:|---:|
-| `ingest-actions`: 17 IBKR-family aliases | refuse 17 | refuse 17 |
-| `build-declaration`: same 17 aliases | refuse 17 | refuse 17 |
-| `ingest-actions`: 5 sponsor/unrelated identities | accept 5 | accept 5 |
-| `build-declaration`: 4 independent-source identities | accept 4 | accept 4 |
+| `ingest-actions`: 26 IBKR-family aliases | refuse 26 | refuse 26 |
+| `build-declaration`: same 26 aliases | refuse 26 | refuse 26 |
+| `ingest-actions`: 5 sponsor identities + 4 lexical controls | accept 9 | accept 9 |
+| `build-declaration`: 4 second-source identities + 4 lexical controls | accept 8 | accept 8 |
 
-The forbidden corpus covered plain, dotted, hyphenated, underscored, joined, split-inside-
-word, mixed-case, and full-width forms across all six family markers. The accepted corpus
-covered Invesco, State Street/SPDR, iShares, Nasdaq, Cboe, LSEG, an exchange bulletin, and an
-unrelated `IBEX` token.
+The forbidden corpus covered plain, dotted, hyphenated, underscored, canonical joins,
+split-inside-word, mixed-case, full-width, numeric-suffix, and foreign-word-suffix forms
+across all six family markers. The accepted corpus covered Invesco, State Street/SPDR,
+iShares, Nasdaq, Cboe, LSEG, an exchange bulletin, an unrelated `IBEX` token, and four
+TWS-like controls (`net worth statement`, `outwards settlement`, `shortwave`, and `TWSE`).
 
-**Result: 43/43 expected production-CLI decisions.** The focused regression suite reported
-53 passed after implementation.
+**Result: 69/69 expected production-CLI decisions.** The focused packet regression suite
+reported 79 passed after the HOLD remediation.
 
 ## Residual
 
 This is a conservative source-family separation rule, not identity authentication. A label
 that does not name this family may still be false, incomplete, mistyped, or not actually
 consulted. NFKC is not a general Unicode-confusable detector. The owner must still retain a
-verifiable provider identity and reconciliation record, and the first real capture remains
-owner-gated. No dataset was certified and no Phase-3 evidence gate advanced.
+verifiable provider identity and reconciliation record. The short `TWS` acronym is
+intentionally token-exact except for explicit `TWSAPI`; that tradeoff avoids blocking
+unrelated three-letter substrings and makes owner evidence, not label cleverness, the final
+truth check. The first real capture remains owner-gated. No dataset was certified and no
+Phase-3 evidence gate advanced.
