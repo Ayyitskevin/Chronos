@@ -82,12 +82,12 @@ The box above, line by line — each line is load-bearing:
   `gh pr view <n> --json baseRefName` against the derive command in §2. A PR's MERGED
   badge is a claim about the PR's *base*, not about the default branch — a PR merged
   into anything else is work stranded with a green light on it (§11, case 1).
-- **No stacked PRs without explicit owner acknowledgment.** A stack whose parents merge
-  into each other produces MERGED badges and zero commits on the default branch. If
-  the owner approves a stack anyway, the stack opener carries the **un-strand duty**:
-  after the final merge, prove ancestry — `git merge-base --is-ancestor <tip>
-  origin/<default>` for every PR in the stack — and post the proof in the last PR.
-  The badge is not the proof; the ancestry check is.
+- **No stacked PRs without explicit owner acknowledgment.** Stacked review may be
+  owner-approved; stacked landing is not. Merge base-first. After each parent lands,
+  rebase and retarget every descendant to the live default before merging it, rerun CI
+  and exact-candidate review when the candidate changes, then apply §6 to that PR's
+  result. A PR merged into a stack parent remains stranded regardless of its badge; do
+  not postpone integration proof until the end of the stack.
 - **One item per PR.** One logical change, one reviewable narrative, one revert unit.
 - **A merged PR is never reused.** No new commits to a merged branch, no reopening.
   New work is a new branch from the live default tip.
@@ -172,13 +172,29 @@ worth having; it deserved — and got — a written close.
 - The owner merges owner-gate PRs. "The owner merging the PR is the review act"
   (`docs/CONTINUATION_PLAN_2026-08-12.md`) — do not pre-merge, do not self-merge a PR
   whose contract says `owner_gate: required`.
-- **Post-merge, verify the merge did what the badge says:**
-  1. `git fetch origin && git merge-base --is-ancestor <tip-sha> origin/<default>` —
-     the commits are actually on the default branch (exit 0), not merged into a stack
-     parent (§11, case 1).
-  2. Spot-check file presence: the files the PR claims to add exist at
-     `origin/<default>`. The phantom merge was caught because the docs weren't there.
-  3. After merging anything that appends to a table document (`DECISIONS.md`,
+- **Post-merge, verify the result rather than the badge:**
+  1. Fetch, derive the default branch again (§2), and read the exact PR identities:
+     `gh pr view <n> --json baseRefName,headRefOid,mergeCommit,state`. Require `MERGED`,
+     the derived default as the base, the reviewed SHA as `headRefOid`, and a non-null
+     `mergeCommit.oid`. Call that last value `<merge-result-sha>`.
+  2. Prove the merge result itself is on the default branch:
+     `git merge-base --is-ancestor <merge-result-sha> origin/<default>`. This check
+     applies to every merge strategy and catches a result stranded on a stack parent.
+  3. Determine whether the merge preserved the reviewed candidate's identity:
+     - For a merge or fast-forward that preserves it, run
+       `git merge-base --is-ancestor <candidate-sha> <merge-result-sha>`.
+     - A squash or rebase merge rewrites identity, so candidate ancestry is expected to fail.
+       Derive and inspect the exact PR path set with
+       `gh api repos/Ayyitskevin/Chronos/pulls/<n>/files --paginate --jq '.[] | .filename, (.previous_filename // empty)'`,
+       then require byte-for-byte final-state equality on those paths:
+       `git diff --exit-code <candidate-sha> <merge-result-sha> -- <changed-paths>`.
+       Pass the inspected paths explicitly; do not use unquoted command substitution.
+  4. Require exact default-branch CI at `<merge-result-sha>` and read every required
+     job's result and relevant log evidence. A green candidate run is not proof about
+     the rewritten result.
+  5. Spot-check claimed additions, modifications, and deletions at the merge result.
+     The phantom merge was caught because the claimed documents were absent.
+  6. After merging anything that appends to a table document (`DECISIONS.md`,
      `RISK_REGISTER.md`), grep for duplicated row IDs — merges can duplicate doc
      blocks byte-identically, and this file's own D-21/D-22 collision is the standing
      exhibit: `grep -oE '^\| [DR]-[0-9]+[^ |]*' DECISIONS.md RISK_REGISTER.md | sort | uniq -d`
@@ -291,8 +307,8 @@ green badges. Nobody noticed from the badges; someone noticed because documents 
 PRs claimed to add were not in the tree. The MERGED badge is a statement about the
 PR's base, and the base of a stacked PR is not the default branch. *The rule that
 exists because of this:* no stacked PRs without explicit owner ack, and every merge
-is verified by ancestry (`git merge-base --is-ancestor`) and file presence, never by
-badge (§3, §6).
+is verified from its merge result with strategy-aware ancestry or changed-path
+equality plus file presence, never by badge (§3, §6).
 
 **The empty review and the wrong-tree reviewer (commit `f259189`).** A four-lens
 adversarial review's first run reported zero findings — because all four reviewers
@@ -337,6 +353,9 @@ trusting prose — including this document's own examples.
 | `make gates` still matches CI | `grep -A1 '^gates:' Makefile` vs the workflow steps |
 | Ruleset: PR-only, required `quality`, no bypass | `gh api repos/Ayyitskevin/Chronos/rulesets --jq '.[].name'` and the repo settings |
 | `delete_branch_on_merge` | `gh repo view Ayyitskevin/Chronos --json deleteBranchOnMerge` |
+| PR base, reviewed candidate, and merge result | `gh pr view <n> --json baseRefName,headRefOid,mergeCommit,state` |
+| Exact PR changed-path set | `gh api repos/Ayyitskevin/Chronos/pulls/<n>/files --paginate --jq '.[] | .filename, (.previous_filename // empty)'` |
+| Exact merge-result CI | `gh run list --commit <merge-result-sha>` and inspect the required run's jobs/log |
 | Next D / ADR / R number | the scan commands in §7 — never a remembered value |
 | Task-contract YAML fields | `sed -n '/^## 13/,/^## 14/p' docs/VISION_COMPLETION_PLAN.md` |
 | Owner-gate list | `sed -n '/^## 11/,/^## 12/p' docs/VISION_COMPLETION_PLAN.md` |
