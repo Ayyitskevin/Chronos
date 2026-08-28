@@ -44,6 +44,8 @@ from chronos.ui.rehearsal_state import (
 )
 from chronos.ui.session import get_runtime
 
+_APP = Path(__file__).resolve().parents[2] / "src/chronos/app.py"
+
 # Streamlit ``AppTest`` timeout budget (raised 2026-08-08).
 #
 # The FIRST render in a process that reaches ``st.dataframe`` pays a one-time
@@ -94,7 +96,7 @@ def test_demo_portfolio_and_symbol_pages_render_without_exceptions(
     monkeypatch.setattr(DemoBroker, "connection_status", track_connection_status)
 
     try:
-        app = AppTest.from_file("src/chronos/app.py").run(timeout=_APPTEST_TIMEOUT)
+        app = AppTest.from_file(_APP).run(timeout=_APPTEST_TIMEOUT)
 
         assert not app.exception
         assert [title.value for title in app.title] == ["Chronos"]
@@ -214,7 +216,7 @@ def test_explicit_candidate_evaluation_renders_locked_eligible_and_clears_stale_
     monkeypatch.setattr(ShortPutCandidateService, "evaluate", controlled_evaluation)
 
     try:
-        app = AppTest.from_file("src/chronos/app.py").run(timeout=_APPTEST_TIMEOUT)
+        app = AppTest.from_file(_APP).run(timeout=_APPTEST_TIMEOUT)
         app.radio[0].set_value("Symbol Detail & Order Workspace").run(timeout=_APPTEST_TIMEOUT)
 
         assert not app.exception
@@ -332,7 +334,7 @@ def test_explicit_risk_preview_refreshes_evidence_and_invalidates_stale_output(
     monkeypatch.setattr(DemoBroker, "cancel_order", reject_cancel)
 
     try:
-        app = AppTest.from_file("src/chronos/app.py").run(timeout=_APPTEST_TIMEOUT)
+        app = AppTest.from_file(_APP).run(timeout=_APPTEST_TIMEOUT)
         app.radio[0].set_value("Symbol Detail & Order Workspace").run(timeout=_APPTEST_TIMEOUT)
 
         assert not app.exception
@@ -494,7 +496,7 @@ def test_demo_what_if_rehearsal_refreshes_terms_without_persistence_or_submissio
     monkeypatch.setattr(DemoBroker, "cancel_order", reject_cancel)
 
     try:
-        app = AppTest.from_file("src/chronos/app.py").run(timeout=_APPTEST_TIMEOUT)
+        app = AppTest.from_file(_APP).run(timeout=_APPTEST_TIMEOUT)
         app.radio[0].set_value("Symbol Detail & Order Workspace").run(timeout=_APPTEST_TIMEOUT)
         app.button[0].click().run(timeout=_APPTEST_TIMEOUT)
 
@@ -653,7 +655,7 @@ def test_withheld_demo_what_if_rerun_clears_parent_panels_and_retains_result(
     monkeypatch.setattr(DemoBroker, "cancel_order", reject_cancel)
 
     try:
-        app = AppTest.from_file("src/chronos/app.py").run(timeout=_APPTEST_TIMEOUT)
+        app = AppTest.from_file(_APP).run(timeout=_APPTEST_TIMEOUT)
         app.radio[0].set_value("Symbol Detail & Order Workspace").run(timeout=_APPTEST_TIMEOUT)
         app.button[0].click().run(timeout=_APPTEST_TIMEOUT)
         app.text_input[0].set_value("0.65").run(timeout=_APPTEST_TIMEOUT)
@@ -775,7 +777,7 @@ def test_demo_approval_rehearsal_is_memoryless_lineage_bound_and_nontransmitting
     monkeypatch.setattr(DemoBroker, "cancel_order", reject_cancel)
 
     try:
-        app = AppTest.from_file("src/chronos/app.py").run(timeout=_APPTEST_TIMEOUT)
+        app = AppTest.from_file(_APP).run(timeout=_APPTEST_TIMEOUT)
         app.radio[0].set_value("Symbol Detail & Order Workspace").run(timeout=_APPTEST_TIMEOUT)
         app.button[0].click().run(timeout=_APPTEST_TIMEOUT)
         app.text_input[0].set_value("0.65").run(timeout=_APPTEST_TIMEOUT)
@@ -1109,7 +1111,7 @@ def test_withheld_demo_approval_rerun_clears_parent_panels_and_retains_safe_feed
     monkeypatch.setattr(DemoBroker, "cancel_order", reject_cancel)
 
     try:
-        app = AppTest.from_file("src/chronos/app.py").run(timeout=_APPTEST_TIMEOUT)
+        app = AppTest.from_file(_APP).run(timeout=_APPTEST_TIMEOUT)
         app.radio[0].set_value("Symbol Detail & Order Workspace").run(timeout=_APPTEST_TIMEOUT)
         app.button[0].click().run(timeout=_APPTEST_TIMEOUT)
         app.text_input[0].set_value("0.65").run(timeout=_APPTEST_TIMEOUT)
@@ -1267,7 +1269,7 @@ def test_risk_preview_rejects_unbounded_or_overprecise_commission_without_refres
     monkeypatch.setattr(ShortPutRiskPreviewService, "preview", track_preview)
 
     try:
-        app = AppTest.from_file("src/chronos/app.py").run(timeout=_APPTEST_TIMEOUT)
+        app = AppTest.from_file(_APP).run(timeout=_APPTEST_TIMEOUT)
         app.radio[0].set_value("Symbol Detail & Order Workspace").run(timeout=_APPTEST_TIMEOUT)
         app.button[0].click().run(timeout=_APPTEST_TIMEOUT)
 
@@ -1361,7 +1363,7 @@ def test_disappeared_risk_contract_remains_visible_until_operator_changes_select
     monkeypatch.setattr(ShortPutCandidateService, "evaluate", controlled_evaluation)
 
     try:
-        app = AppTest.from_file("src/chronos/app.py").run(timeout=_APPTEST_TIMEOUT)
+        app = AppTest.from_file(_APP).run(timeout=_APPTEST_TIMEOUT)
         app.radio[0].set_value("Symbol Detail & Order Workspace").run(timeout=_APPTEST_TIMEOUT)
         app.button[0].click().run(timeout=_APPTEST_TIMEOUT)
 

@@ -9,6 +9,7 @@ submit/transmit control.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from pathlib import Path
 
 import httpx
 import pytest
@@ -16,7 +17,7 @@ from streamlit.testing.v1 import AppTest
 
 from chronos.ui.api_client import ApiClient, ApiClientError
 
-_APP = "src/chronos/ui/backend_app.py"
+_APP = Path(__file__).resolve().parents[2] / "src/chronos/ui/backend_app.py"
 
 _REGIME_NOTE = (
     "Pine-derived heuristic context — not a validated signal, not an assignment "
