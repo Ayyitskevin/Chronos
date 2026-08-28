@@ -1,0 +1,2 @@
+# Keep this exact requirement aligned with pyproject.toml [build-system].
+setuptools==84.0.0

@@ -37,9 +37,9 @@ Read these before changing the build or environment:
    verification requirements.
 2. `pyproject.toml` for `requires-python`, build backend, dependencies, entry
    points, package data, and tool configuration.
-3. `requirements-dev.lock` for the exact hash-locked environment and its
-   generator command. If the live workflow or release verifier names a separate
-   build-input lock, inspect that lock and its source input too.
+3. `requirements-build.in`, `requirements-build.lock`, and
+   `requirements-dev.lock` for the exact hash-locked build backend and
+   development environment plus their generator commands.
 4. `Makefile` and `.github/workflows/ci.yml` for the live local and CI gates.
 5. `docs/DEPLOYMENT.md` and `docs/SECURITY.md` for supported deployment and
    dependency-maintenance policy.
@@ -63,7 +63,7 @@ git rev-parse HEAD
 rg -n '^requires-python|^\[build-system\]|^build-backend' pyproject.toml
 sed -n '/^gates:/p' Makefile
 rg -n '^\s*- name:|^\s*run:|python-version:' .github/workflows/ci.yml
-sed -n '1,2p' requirements-dev.lock
+sed -n '1,2p' requirements-build.lock requirements-dev.lock
 ```
 
 Record the commit. Do not compare outcomes from different revisions as though
@@ -95,12 +95,16 @@ project without resolving a second dependency graph:
 
 ```bash
 .venv/bin/python -m pip install --upgrade pip
+.venv/bin/python -m pip install --require-hashes -r requirements-build.lock
 .venv/bin/python -m pip install --require-hashes -r requirements-dev.lock
-.venv/bin/python -m pip install -e . --no-deps
+.venv/bin/python -m pip install -e . --no-deps --no-build-isolation --check-build-dependencies
 ```
 
 The first command updates the installer and is outside the application dependency
-lock. Record the resulting toolchain when provenance matters:
+lock. The build lock must be installed before isolation is disabled: this makes
+the hash-verified backend the build input, while `--check-build-dependencies`
+verifies that it satisfies `pyproject.toml`. Record the resulting toolchain when
+provenance matters:
 
 ```bash
 .venv/bin/python -m pip --version
@@ -206,33 +210,34 @@ because application startup reported drift.
 
 ## 7. Maintain the dependency lock
 
-Dependency changes are owner-reviewed build-input changes. Before regenerating,
-inspect the declaration diff and read the generator command from the lock itself:
+Dependency changes are owner-reviewed build-input changes. Keep the exact
+requirement in `requirements-build.in` aligned with `[build-system].requires` in
+`pyproject.toml`. Before regenerating either lock, inspect the declaration diff
+and read the generator commands from the locks themselves:
 
 ```bash
-git diff -- pyproject.toml requirements-dev.lock
-sed -n '1,2p' requirements-dev.lock
+git diff -- pyproject.toml requirements-build.in requirements-build.lock requirements-dev.lock
+sed -n '1,2p' requirements-build.lock requirements-dev.lock
 ```
 
-Run that checked-in command with its output directed to the existing requirements-dev.lock.
-uv prefers versions already present in an existing output file, which limits
-unrelated churn. Use `--upgrade` or a package-scoped upgrade only when the intended
-owner review explicitly includes that broader change.
+Run the applicable checked-in command with its output directed to the existing
+lock. uv prefers versions already present in an existing output file, which
+limits unrelated churn. Use `--upgrade` or a package-scoped upgrade only when the
+intended owner review explicitly includes that broader change.
 
 After regeneration:
 
 ```bash
-git diff -- pyproject.toml requirements-dev.lock
+git diff -- pyproject.toml requirements-build.in requirements-build.lock requirements-dev.lock
+.venv/bin/python -m pip install --require-hashes -r requirements-build.lock
 .venv/bin/python -m pip install --require-hashes -r requirements-dev.lock
-.venv/bin/python -m pip install -e . --no-deps
+.venv/bin/python -m pip install -e . --no-deps --no-build-isolation --check-build-dependencies
 make gates
 ```
 
 Review the complete lock diff for unexpected transitive changes and preserve its
-hashes. The build backend declared in `pyproject.toml` is a separate build input.
-Derive whether and how the current revision pins it from the workflow,
-`docs/SECURITY.md`, and the release verifier; never infer backend coverage from the
-application lock alone.
+hashes. The application lock and build-backend lock cover distinct inputs; verify
+both from the workflow, `docs/SECURITY.md`, and the release verifier.
 
 ## Failure triage
 
@@ -254,7 +259,8 @@ application lock alone.
   the live gates. Do not conclude it is unverified because the main package type
   check succeeds.
 - `requirements.txt` and `requirements-dev.txt` are convenience inputs, not the
-  hash-locked reproducibility boundary. CI uses `requirements-dev.lock`.
+  hash-locked reproducibility boundary. CI uses both `requirements-build.lock`
+  and `requirements-dev.lock`.
 - Prefer the existing `.venv` executables for evidence commands. Tool convenience
   runners may create unrelated project metadata and dirty the checkout.
 - A clean editable import does not prove package data, migrations, entry points,

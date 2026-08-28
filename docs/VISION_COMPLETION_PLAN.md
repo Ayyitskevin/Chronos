@@ -348,8 +348,8 @@ Deliver:
   namespace match source bytes, executes the installed migration tree from the supported v2
   baseline through its single head and validates the resulting schema, and exercises the console
   plus every packaged `src/chronos/**/__main__.py` command surface. Dependency/secret/static scans,
-  SBOM generation, build-backend pinning, and artifact signing remain open; this does not satisfy
-  the Phase 2 exit.
+  SBOM generation, and artifact signing remain open; the build backend is exact and hash-locked,
+  but the pip frontend remains outside that lock. This does not satisfy the Phase 2 exit.
 
 ### Real-gateway read-only gate
 

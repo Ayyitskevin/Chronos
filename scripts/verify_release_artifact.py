@@ -96,6 +96,47 @@ def _run(command: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _build_wheel(
+    python: Path,
+    source_root: Path,
+    wheel_directory: Path,
+    *,
+    cwd: Path,
+) -> None:
+    """Install the hash-locked backend, then build without isolation."""
+
+    _run(
+        [
+            str(python),
+            "-m",
+            "pip",
+            "install",
+            "--disable-pip-version-check",
+            "--quiet",
+            "--require-hashes",
+            "-r",
+            str(source_root / "requirements-build.lock"),
+        ],
+        cwd=cwd,
+    )
+    _run(
+        [
+            str(python),
+            "-m",
+            "pip",
+            "wheel",
+            "--disable-pip-version-check",
+            "--no-build-isolation",
+            "--check-build-dependencies",
+            "--no-deps",
+            "--wheel-dir",
+            str(wheel_directory),
+            str(source_root),
+        ],
+        cwd=cwd,
+    )
+
+
 def _copy_source(destination: Path) -> None:
     """Copy exactly the current non-ignored source set into an isolated build tree."""
 
@@ -333,20 +374,7 @@ def verify_release_artifact() -> None:
         venv.EnvBuilder(with_pip=True).create(environment_root)
         python = environment_root / "bin/python"
 
-        _run(
-            [
-                str(python),
-                "-m",
-                "pip",
-                "wheel",
-                "--disable-pip-version-check",
-                "--no-deps",
-                "--wheel-dir",
-                str(wheel_directory),
-                str(source_root),
-            ],
-            cwd=work,
-        )
+        _build_wheel(python, source_root, wheel_directory, cwd=work)
         wheels = sorted(wheel_directory.glob("chronos-*.whl"))
         if len(wheels) != 1:
             raise ReleaseArtifactError(f"expected one Chronos wheel, found {wheels}")
