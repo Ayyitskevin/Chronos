@@ -45,6 +45,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from validation_snapshot import read_validation_snapshot
+
 # --------------------------------------------------------------------------
 # Fallback defaults, valid as of 2026-08-02 (src/chronos/config/settings.py).
 # Used only when the textual parse of settings.py fails.
@@ -434,10 +436,18 @@ def report_git(root: Path) -> None:
 
 def report_test_collection(root: Path) -> None:
     print("\n== Test collection (optional; needs a Python 3.12 venv) ==")
+    snapshot = read_validation_snapshot(root / "docs" / "TEST_RESULTS.md")
+    if snapshot is None:
+        emit(
+            "WARN",
+            "docs/TEST_RESULTS.md has no coherent current validation summary; "
+            "comparison unavailable",
+        )
     candidate = os.environ.get("CHRONOS_DIAG_VENV_PYTHON") or str(root / ".venv" / "bin" / "python")
     if not Path(candidate).is_file():
         emit("SKIP", f"no venv python at {candidate} — skipping pytest collection")
-        detail("Baseline 2026-08-02: 2490 collected / 2489 passed, 1 skipped.")
+        if snapshot is not None:
+            detail(f"Latest dated evidence: {snapshot.describe()}.")
         detail("Set CHRONOS_DIAG_VENV_PYTHON to a 3.12 venv python to enable.")
         return
     env = dict(os.environ)
@@ -458,9 +468,13 @@ def report_test_collection(root: Path) -> None:
     match = re.search(r"(\d+)\s+tests?\s+collected", proc.stdout)
     if match:
         count = int(match.group(1))
-        emit("OK", f"pytest collected {count} tests (baseline 2026-08-02: 2490)")
-        if count < 2490:
-            emit("WARN", f"collection count DROPPED below the 2490 baseline ({count})")
+        comparison = f"; documented {snapshot.describe()}" if snapshot is not None else ""
+        emit("OK", f"pytest collected {count} tests{comparison}")
+        if snapshot is not None and count < snapshot.collected:
+            emit(
+                "WARN",
+                f"collection count DROPPED below the documented {snapshot.collected} ({count})",
+            )
             detail("Tests disappeared. Investigate before trusting any green run.")
     else:
         emit("WARN", f"could not parse collection output (rc={proc.returncode})")

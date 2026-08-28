@@ -21,8 +21,7 @@ fixing it, and the rule stays PRESENT until the text itself changes.
 
 Also prints the live pytest --collect-only count when a project venv exists
 (read-only invocation: -p no:cacheprovider + PYTHONDONTWRITEBYTECODE=1),
-else the last-known 2026-08-02 baseline (2490 collected / 2489 passed,
-1 skipped — CHANGELOG.md M11 entry).
+compared with the current dated evidence parsed from docs/TEST_RESULTS.md.
 
 Rules are DATA (the RULES list below): future sessions extend the ledger by
 appending a Rule, not by editing logic. Patterns are matched against the whole
@@ -48,7 +47,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-BASELINE_NOTE = "2490 collected / 2489 passed, 1 skipped (baseline 2026-08-02, CHANGELOG.md M11)"
+from validation_snapshot import read_validation_snapshot
 
 
 @dataclass(frozen=True)
@@ -104,8 +103,8 @@ RULES: tuple[Rule, ...] = (
         "TESTRESULTS-STALE-COUNT",
         "docs/TEST_RESULTS.md",
         r"1901 passed",
-        "The section labeled 'current' reports the M2a count (1901); reality "
-        f"as of 2026-08-02 is {BASELINE_NOTE}.",
+        "The section originally labeled 'current' reports the historical M2a "
+        "count (1901); use the explicitly current dated summary instead.",
         "The 'current' summary re-run and updated, or the section relabeled "
         "'historical — superseded' like its older sibling table.",
     ),
@@ -372,10 +371,14 @@ def check_rule(root: Path, rule: Rule) -> tuple[str, str]:
 
 def live_collection_count(root: Path) -> None:
     print("\n== Live test-collection cross-check ==")
+    snapshot = read_validation_snapshot(root / "docs" / "TEST_RESULTS.md")
+    if snapshot is None:
+        print("[WARN] docs/TEST_RESULTS.md has no coherent current validation summary")
     candidate = os.environ.get("CHRONOS_DIAG_VENV_PYTHON") or str(root / ".venv" / "bin" / "python")
     if not Path(candidate).is_file():
         print(f"[SKIP] no venv python at {candidate}")
-        print(f"       last-known baseline: {BASELINE_NOTE}")
+        if snapshot is not None:
+            print(f"       latest dated evidence: {snapshot.describe()}")
         return
     env = dict(os.environ)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -391,15 +394,13 @@ def live_collection_count(root: Path) -> None:
         )
         match = re.search(r"(\d+)\s+tests?\s+collected", proc.stdout)
         if match:
-            print(
-                f"[INFO] live pytest --collect-only: {match.group(1)} tests "
-                f"(baseline: {BASELINE_NOTE})"
-            )
+            count = int(match.group(1))
+            comparison = f"; documented {snapshot.describe()}" if snapshot is not None else ""
+            print(f"[INFO] live pytest --collect-only: {count} tests{comparison}")
+            if snapshot is not None and count < snapshot.collected:
+                print(f"[WARN] live collection is below the documented {snapshot.collected} tests")
         else:
-            print(
-                f"[WARN] could not parse pytest output (rc={proc.returncode}); "
-                f"baseline: {BASELINE_NOTE}"
-            )
+            print(f"[WARN] could not parse pytest output (rc={proc.returncode})")
     except (OSError, subprocess.SubprocessError) as error:
         print(f"[WARN] pytest collection failed: {error}")
 
