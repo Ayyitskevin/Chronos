@@ -132,11 +132,9 @@ does not.
 
 **Where the evidence comes from.** Both adapters read `underConId` / `underSymbol` /
 `underSecType` off **`ContractDetails`, not the `Contract` nested inside it** — the
-wrong-object read is exactly how R-27 shipped inert for six milestones
-(`src/chronos/broker/official_ibkr.py:231-269`, docstring 234-237;
-`src/chronos/broker/ibkr.py:849, 860-861` feeding the screen at 897-916). For the general
-Contract-vs-ContractDetails pattern and the full touchpoint map, load
-**chronos-ibkr-boundary** — do not add a fourth instance of this bug class.
+wrong-object read is exactly how R-27 shipped inert for six milestones. For the general
+Contract-vs-ContractDetails source-derivation procedure, load
+**chronos-ibkr-boundary** — do not repeat this bug class at the broker boundary.
 
 **Fail-closed on refusal.** A failing contract is returned **unchanged**
 (`deliverable_verified` stays False; official_ibkr.py:255-262, ibkr.py:906-913 — logged
