@@ -33,10 +33,11 @@ make gates
 
 The final gate builds the current non-ignored source set in isolation, checks the wheel's terminal
 assets and complete migration namespace byte-for-byte against that source, installs the wheel with
-the hash-locked dependencies in a fresh venv outside the checkout, and exercises its package,
-console, and every packaged `src/chronos/**/__main__.py` command surface. A local run includes
-untracked, non-ignored files; CI rebuilds the committed clean tree and is authoritative for that
-revision. Run only that check with `make release-gate`.
+the hash-locked dependencies in a fresh venv outside the checkout, upgrades a disposable v2
+database through the installed migration tree and validates the resulting schema, and exercises
+the package, console, and every packaged `src/chronos/**/__main__.py` command surface. A local run
+includes untracked, non-ignored files; CI rebuilds the committed clean tree and is authoritative
+for that revision. Run only that check with `make release-gate`.
 
 Reproducibility record: even with the lock, record the resolved environment at deployment
 time (the build backend and pip itself are outside the hash gate — docs/SECURITY.md):

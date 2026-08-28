@@ -280,10 +280,10 @@ trade, or an unexplained mismatch makes the state ambiguous.
 CI runs these six in order. Migration verification (fresh-DB init, historical-schema → head
 upgrades, and a no-un-migrated-drift completeness check) runs inside the pytest step. The release
 gate builds the current source as a wheel, installs it with hash-locked dependencies in a clean
-venv outside the checkout, and verifies package origin, static assets, the complete importable
-migration namespace at head, the `chronos` console entry point, and every packaged
-`src/chronos/**/__main__.py` command surface. The separately marked IBKR smoke test is skipped by
-default and remains strictly read-only.
+venv outside the checkout, verifies package origin and static assets, upgrades a disposable v2
+database through the installed migration namespace and validates its schema, and exercises the
+`chronos` console entry point plus every packaged `src/chronos/**/__main__.py` command surface. The
+separately marked IBKR smoke test is skipped by default and remains strictly read-only.
 
 ## Documentation
 

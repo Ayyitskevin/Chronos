@@ -26,6 +26,27 @@ _REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[1]
 _ENTRY_POINT: Final[tuple[str, str]] = ("chronos", "chronos.app:main")
 _MIGRATION_SUPPORT: Final[tuple[str, ...]] = ("env.py", "script.py.mako")
 _MIGRATION_HEAD: Final[str] = "0010"
+# Intentionally independent of the pytest manifest: the artifact gate must carry
+# its own frozen legacy contract rather than derive it from another check.
+_V2_BASELINE_TABLES: Final[frozenset[str]] = frozenset(
+    {
+        "application_events",
+        "candidate_evaluations",
+        "commissions",
+        "database_scope",
+        "fills",
+        "guardrail_decisions",
+        "order_drafts",
+        "order_previews",
+        "reconciliation_runs",
+        "rejected_candidate_reasons",
+        "schema_version",
+        "strategy_basis_entries",
+        "strategy_state",
+        "submitted_orders",
+        "wheel_cycles",
+    }
+)
 
 
 class ReleaseArtifactError(RuntimeError):
@@ -142,11 +163,103 @@ def _verify_archive(wheel: Path, source_root: Path) -> None:
             )
 
 
-def _installed_smoke() -> None:
-    """Verify public installed surfaces from the clean artifact environment."""
+def _exercise_migration_tree(migration_root: Path, database_path: Path) -> int:
+    """Upgrade a disposable v2 database with the selected migration tree."""
+
+    from datetime import UTC, datetime
+
+    import sqlalchemy as sa
+    from alembic import command
+    from alembic.config import Config
+
+    from chronos.persistence.database import Database
+    from chronos.persistence.schema import Base
+
+    missing_baseline_tables = _V2_BASELINE_TABLES - set(Base.metadata.tables)
+    if missing_baseline_tables:
+        raise ReleaseArtifactError(
+            f"installed schema is missing v2 baseline tables: {sorted(missing_baseline_tables)}"
+        )
+
+    database_url = f"sqlite:///{database_path.resolve()}"
+    engine = sa.create_engine(database_url)
+    try:
+        Base.metadata.create_all(
+            engine,
+            tables=[Base.metadata.tables[name] for name in sorted(_V2_BASELINE_TABLES)],
+        )
+        with engine.begin() as connection:
+            connection.execute(
+                Base.metadata.tables["schema_version"]
+                .insert()
+                .values(
+                    version=2,
+                    applied_at=datetime.now(tz=UTC),
+                )
+            )
+    finally:
+        engine.dispose()
+
+    config = Config()
+    config.set_main_option("script_location", str(migration_root))
+    config.set_main_option("sqlalchemy.url", database_url)
+    previous_database_url = os.environ.get("DATABASE_URL")
+    os.environ["DATABASE_URL"] = database_url
+    try:
+        command.stamp(config, "0001")
+        command.upgrade(config, "head")
+    finally:
+        if previous_database_url is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = previous_database_url
+
+    database = Database(database_url)
+    try:
+        database.initialize()
+        inspector = sa.inspect(database.engine)
+        model_tables = set(inspector.get_table_names()) - {"alembic_version"}
+        with database.engine.connect() as connection:
+            applied_heads = set(
+                connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalars()
+            )
+    finally:
+        database.dispose()
+
+    if applied_heads != {_MIGRATION_HEAD}:
+        raise ReleaseArtifactError(
+            f"installed migration upgrade ended at {sorted(applied_heads)}, "
+            f"expected {_MIGRATION_HEAD!r}"
+        )
+    return len(model_tables)
+
+
+def _exercise_installed_migrations(database_path: Path) -> int:
+    """Resolve and execute only the installed package's migration resource."""
 
     from alembic.config import Config
     from alembic.script import ScriptDirectory
+
+    migration_root = importlib.resources.files("chronos.persistence.migrations")
+    for name in _MIGRATION_SUPPORT:
+        if not migration_root.joinpath(name).is_file():
+            raise ReleaseArtifactError(f"installed migration support file is absent: {name}")
+    # Alembic requires a filesystem path. Python 3.12's as_file() supports
+    # Traversable directories, including package resources extracted from a zip.
+    # Source: https://docs.python.org/3.12/library/importlib.resources.html#importlib.resources.as_file
+    with importlib.resources.as_file(migration_root) as migration_path:
+        config = Config()
+        config.set_main_option("script_location", str(migration_path))
+        heads = ScriptDirectory.from_config(config).get_heads()
+        if heads != [_MIGRATION_HEAD]:
+            raise ReleaseArtifactError(
+                f"installed migration chain must have head {_MIGRATION_HEAD!r}, got {heads}"
+            )
+        return _exercise_migration_tree(migration_path, database_path)
+
+
+def _installed_smoke() -> None:
+    """Verify public installed surfaces from the clean artifact environment."""
 
     import chronos
 
@@ -179,21 +292,9 @@ def _installed_smoke() -> None:
         if not resource.is_file() or not resource.read_bytes():
             raise ReleaseArtifactError(f"installed terminal asset is absent or empty: {name}")
 
-    migration_root = importlib.resources.files("chronos.persistence.migrations")
-    for name in _MIGRATION_SUPPORT:
-        if not migration_root.joinpath(name).is_file():
-            raise ReleaseArtifactError(f"installed migration support file is absent: {name}")
-    # Alembic requires a filesystem path. Python 3.12's as_file() supports
-    # Traversable directories, including package resources extracted from a zip.
-    # Source: https://docs.python.org/3.12/library/importlib.resources.html#importlib.resources.as_file
-    with importlib.resources.as_file(migration_root) as migration_path:
-        config = Config()
-        config.set_main_option("script_location", str(migration_path))
-        scripts = ScriptDirectory.from_config(config)
-        heads = scripts.get_heads()
-    if heads != [_MIGRATION_HEAD]:
-        raise ReleaseArtifactError(
-            f"installed migration chain must have head {_MIGRATION_HEAD!r}, got {heads}"
+    with tempfile.TemporaryDirectory(prefix="chronos-installed-migration-") as raw_directory:
+        migration_table_count = _exercise_installed_migrations(
+            Path(raw_directory) / "chronos-v2-upgrade.db"
         )
 
     module_entrypoints = _module_entrypoints(_REPO_ROOT)
@@ -213,7 +314,8 @@ def _installed_smoke() -> None:
 
     print(
         "Installed artifact smoke passed: package origin, console entry point, "
-        f"{len(static_assets)} terminal assets, migration head {_MIGRATION_HEAD}, "
+        f"{len(static_assets)} terminal assets, migration head {_MIGRATION_HEAD} "
+        f"after a v2 upgrade across {migration_table_count} model tables, "
         f"and {len(module_entrypoints)} module entry points."
     )
 

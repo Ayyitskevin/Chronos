@@ -76,6 +76,9 @@ runbooks.
   chain exists to upgrade legacy v2/v3 databases, with `0001` a no-op baseline. Migration
   completeness is guarded in CI (via pytest) by a frozen table manifest and a
   from-baseline-upgrade check, so a **table** added to the models without a migration fails CI.
+  The release-artifact gate independently repeats the supported v2-to-head upgrade using only the
+  installed wheel's migration namespace and requires the installed schema-drift checker to accept
+  the result.
   A new **column** on an existing table added without a migration is not automatically caught for
   the legacy-upgrade path (fresh DBs get it via `create_all`); add the migration explicitly.
 - Chronos never upgrades a v1 database in place, adopts account-specific rows from an unscoped
