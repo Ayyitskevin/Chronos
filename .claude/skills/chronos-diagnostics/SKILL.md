@@ -4,221 +4,158 @@ description: >
   Read-only diagnostic scripts for Chronos — measure instead of eyeball. Load
   this skill whenever you need to "check system state", answer "is it safe to
   restart", "what state is the system in", run a "health check", "diagnose"
-  something before touching it, take an "inventory" of safety files, check
-  "doc drift" / stale documentation, do a "session-start check", or verify
-  state "before restore" / after restoring a backup. Also load it at the start
-  of any session that will touch live-adjacent code (orders, kill switch,
-  mandate, .env), and after any documentation edit to confirm which known-stale
-  claims are fixed. NOT for fixing what the scripts find
-  (chronos-run-and-operate, chronos-docs-map, chronos-build-and-env) or deep
-  debugging (chronos-debugging-playbook).
+  something before touching it, inventory safety files, check documentation
+  drift, do a session-start check, or verify state around a backup restore. Also
+  load it before live-adjacent code work and after documentation edits. NOT for
+  fixing findings (chronos-run-and-operate, chronos-docs-map,
+  chronos-build-and-env) or deep debugging (chronos-debugging-playbook).
 ---
 
 # chronos-diagnostics — measure, don't eyeball
 
-Chronos state lives in files with NON-OBVIOUS defaults (a missing kill-switch
-file means the emergency stop is DISARMED; a missing halt file means SAFE), and
-its documentation is known to lag the code. Guessing state from memory or from
-docs has burned this project repeatedly. These three scripts turn "I think it's
-fine" into a labeled, exit-coded report.
+Chronos state has non-obvious defaults: a missing live kill-switch file means
+the emergency stop is disarmed, while a missing platform halt file means halted.
+These scripts produce labeled, exit-coded observations rather than relying on
+memory or a prose snapshot.
 
-All three are STRICTLY read-only observers: they open files read-only, open
-SQLite with `mode=ro` URIs, run git with `--no-optional-locks`, invoke pytest
-(optionally) with `-p no:cacheprovider` + `PYTHONDONTWRITEBYTECODE=1` so no
-cache dirs appear in the repo, and never touch the network or any broker.
+All scripts are read-only. They read files, open SQLite through read-only URIs,
+run git with optional locks disabled, and invoke pytest collection with its cache
+plugin disabled and bytecode writing off. They never contact a broker or network
+service.
 
-## The scripts
+## 1. Scripts and execution
 
-| Script | Question it answers | Typical runtime |
-|---|---|---|
-| `scripts/state_inventory.py` | What is the safety state of this checkout right now? | <1 s (+~15 s with live test collection) |
-| `scripts/doc_drift_check.py` | Which known-stale doc claims (2026-08-02 ledger) are still present? | <1 s |
-| `scripts/env_check.py` | Can this machine actually build/test the project? | ~2 s |
+| Script | Question |
+|---|---|
+| `scripts/state_inventory.py` | What is the durable safety state of this checkout? |
+| `scripts/doc_drift_check.py` | Which claims in the dated contradiction ledger still match? |
+| `scripts/env_check.py` | Can this machine build and test the project? |
 
-## How to run
-
-Repo convention (README Setup uses the project venv):
+Run from the repository root:
 
 ```bash
-cd /home/user/Chronos
 .venv/bin/python .claude/skills/chronos-diagnostics/scripts/state_inventory.py
 .venv/bin/python .claude/skills/chronos-diagnostics/scripts/doc_drift_check.py
 .venv/bin/python .claude/skills/chronos-diagnostics/scripts/env_check.py
 ```
 
-The scripts are stdlib-only and deliberately do NOT import chronos, so they
-also run with any `python3` (3.11+ verified 2026-08-02) even when no venv
-exists yet:
+The implementations use the standard library and do not import `chronos`, so a
+compatible system `python3` can run them before the project environment exists.
+
+For `state_inventory.py` and `env_check.py`, exit codes are `0` for clean, `1`
+for findings, and `2` when the script cannot run. For `doc_drift_check.py`, exit
+`1` specifically means a `PRESENT` or `FILE-MISSING` ledger rule; its collection
+cross-check warnings are visible context and do not change that ledger exit.
+Optional environment variables:
+
+- `CHRONOS_REPO_ROOT` overrides repository-root discovery.
+- `CHRONOS_DIAG_VENV_PYTHON` selects the Python used for the optional
+  `pytest --collect-only` cross-check.
+
+The two collection-reporting scripts parse the first explicitly current summary
+in `docs/TEST_RESULTS.md` through `scripts/validation_snapshot.py`. They never use
+a hard-coded test-count fallback. Missing, malformed, or incoherent evidence is a
+visible warning, not permission to compare against an older count.
+
+## 2. When to run each observer
+
+| Moment | Run | Reason |
+|---|---|---|
+| Session start | all three | Establish checkout and environment truth before trusting a handoff |
+| Before and after restore | `state_inventory.py` | Compare durable safety artifacts; a restore can change missing-file semantics |
+| Before live-adjacent work | `state_inventory.py` | Observe stop, mandate, database, environment, and git state first |
+| Before answering whether restart is safe | `state_inventory.py` | Durable mandates can survive while process-local arming and sessions do not |
+| After documentation edits | `doc_drift_check.py` | See which ledger entries became `CORRECTED` or `ABSENT` |
+| Fresh machine or build trouble | `env_check.py` | Detect interpreter, environment, lockfile, Node, and import problems |
+
+## 3. Interpret `state_inventory.py`
+
+Labels are `[OK]`, `[INFO]`, `[WARN]`, `[CRIT]`, and `[SKIP]`. A warning or
+critical result makes the command non-zero.
+
+| Section | Important interpretation | Route a change to |
+|---|---|---|
+| Live kill switch | Missing means **DISENGAGED**: this stop contributes no protection | `chronos-run-and-operate` |
+| Platform halt | Missing means **HALTED / NEVER_ARMED**, the safe default | `chronos-run-and-operate` |
+| Autonomy mandate | Unset means inert; a valid configured file activates on boot and must be treated like a credential | `chronos-autonomy-and-mandates` |
+| Durable stores | Fresh-checkout absence can be normal; mismatched schema or a registry ledger without its anchor is a finding | `chronos-run-and-operate`, `chronos-research-methodology` |
+| Migrations | The migration-derived schema and code constant must agree; the script derives both live | `chronos-build-and-env` |
+| Environment | Any live-capable value deserves deliberate review; tests reject live-capable settings by design | `chronos-config-and-flags` |
+| Git | Pre-existing changes may belong to another lane | `chronos-change-control` |
+| Test collection | A count below the coherent current `docs/TEST_RESULTS.md` snapshot may mean tests disappeared | `chronos-validation-and-qa` |
+
+The halt mechanisms are deliberately asymmetric. `python -m chronos.cli halt`
+does not stop the live order plane; its live kill switch is separate.
+
+## 4. Interpret `doc_drift_check.py`
+
+Each stable rule ID reports one verdict:
+
+- `PRESENT`: stale text still matches without an accepted correction;
+- `CORRECTED`: every match is beside a dated in-place correction;
+- `ABSENT`: the pattern no longer matches;
+- `FILE-MISSING`: the target disappeared and the rule needs maintenance.
+
+This repository preserves some correction history, so retaining struck-through
+wording can be correct. Rules whose resolution requires an owner decision use
+`annotation_is_not_a_fix=True`; a nearby note cannot convert them to corrected.
+
+The `RULES` tuple is a dated contradiction ledger, not a current-count promise.
+Append a stable rule only after confirming a contradiction against the document
+authority map. Do not delete or rewrite rules merely to improve the summary.
+Route findings through `chronos-docs-map` and `chronos-change-control`; never
+change executable behavior just to make stale prose true.
+
+## 5. Interpret `env_check.py`
+
+It derives environment facts live rather than asking this skill to cache them:
+
+- interpreter and project-venv compatibility;
+- required tool imports and the local `chronos` import origin;
+- lockfile syntax, pins, and hash shape;
+- Node availability for terminal-client safety tests;
+- `PYTHONPATH` shadowing hazards;
+- `.env` presence for cross-reference with the state inventory.
+
+Use `chronos-build-and-env` for repairs. Diagnostics observe; they do not install,
+regenerate, or mutate the environment.
+
+## 6. Limits
+
+1. A clean report describes observable state at one instant. It is not promotion,
+   real-gateway, operating, or economic proof.
+2. The scripts read durable state, not a running process's arming, session, lease,
+   or reconciliation state. Use authenticated health/terminal surfaces for that.
+3. Config resolution is a textual mirror so diagnostics stay import-free. If source
+   syntax drifts, `state_inventory.py` warns before using its path fallbacks.
+4. `references/expected-output-2026-08-02.md` is a historical report-shape fixture.
+   Its values are not current baselines. Compare labels and structure only.
+5. A documented validation snapshot remains a dated claim. Run `make gates` on the
+   actual candidate before declaring it verified.
+
+## 7. Maintenance contract
+
+Do not put volatile counts in this skill or either diagnostic. Test comparison
+comes from `docs/TEST_RESULTS.md`; migration, schema, rule, and lockfile facts are
+derived from live files. If the current validation summary format changes, update
+`validation_snapshot.py` and its unit tests in the same change.
+
+After changing a diagnostic:
 
 ```bash
-python3 .claude/skills/chronos-diagnostics/scripts/state_inventory.py
+.venv/bin/pytest -q tests/unit/test_diagnostics_validation_snapshot.py
+.venv/bin/ruff check .claude/skills/chronos-diagnostics/scripts
+.venv/bin/ruff format --check .claude/skills/chronos-diagnostics/scripts
 ```
 
-Exit codes (all three): `0` = clean, `1` = findings (WARN/CRIT, or PRESENT
-stale claims), `2` = could not run (repo root not found). Optional env vars:
+Then run all three observers and `make gates`. Never add a write path, credential
+load, network call, or broker connection to these scripts.
 
-- `CHRONOS_REPO_ROOT` — override repo-root autodetection (scripts locate the
-  root from their own path and require `AGENTS.md` there).
-- `CHRONOS_DIAG_VENV_PYTHON` — a Python 3.12 venv python to use for the live
-  `pytest --collect-only` cross-check (default: `<repo>/.venv/bin/python`;
-  skipped with a labeled SKIP line when absent).
+## 8. Route elsewhere when needed
 
-## When to run them
-
-| Moment | Run | Why |
-|---|---|---|
-| Session start (any Chronos work) | all three | Know the checkout before believing anything |
-| Before AND after a backup restore | `state_inventory.py` | The restore docs overstate safety: a restore that omits `data/live_kill_switch.json` boots the live plane DISENGAGED. Compare before/after reports |
-| Before any live-adjacent work (orders, kill switch, mandate, `.env`, arming) | `state_inventory.py` | Confirms what is armed/disarmed/present before you change it |
-| Before answering "is it safe to restart?" | `state_inventory.py` | Restart clears arming + terminal sessions (process memory) but a set `AUTONOMY_MANDATE_FILE` auto-activates on boot — the report shows both |
-| After ANY documentation edit | `doc_drift_check.py` | Confirms which ledger entries your edit actually fixed (`CORRECTED`/`ABSENT`) vs left (`PRESENT`) |
-| Fresh machine / build trouble / before running `make` anything | `env_check.py` | Catches the 3.11-default-python trap and the missing `.venv` before they waste an hour |
-
-## Interpretation guide — state_inventory.py
-
-Line labels: `[OK]` expected-safe, `[INFO]` neutral fact, `[NOT-PRESENT]`
-reported inside INFO lines, `[WARN]`/`[CRIT]` findings (non-zero exit),
-`[SKIP]` optional section unavailable.
-
-| Report section | GOOD looks like | Warning means | Fix lives in |
-|---|---|---|---|
-| Live kill switch | File present + `ENGAGED` (deliberate stop), or you consciously accept DISENGAGED | `NOT PRESENT` => **the live-plane emergency stop is DISARMED** (missing file = DISENGAGED, `orders/kill_switch.py:83-85`). Loud by design — this is the single most-misunderstood default in the repo | chronos-run-and-operate (engage via `POST /live/kill`) |
-| Platform halt | `NOT PRESENT => HALTED (NEVER_ARMED)` is the SAFE default | `REARMED (not halted)` = the deterministic platform will generate work when driven | chronos-run-and-operate (`python -m chronos.cli halt`) |
-| Autonomy mandate | `AUTONOMY_MANDATE_FILE unset => INERT` | SET = auto-activates on every backend boot (ADR-0017); file missing/unreadable = boots inert with CRITICAL alert. Treat the file like a credential | chronos-run-and-operate (revoke), chronos-autonomy-and-mandates (semantics) |
-| Durable stores | Fresh checkout: everything `NOT PRESENT` is normal. Populated box: main DB present, `schema_version = 7`, scope bound | `schema_version != 7` = backend refuses the DB at boot (CRIT); registry ledger present WITHOUT its head anchor = possible tail truncation (un-burned holdout) — run `python -m chronos.cli registry verify` | chronos-run-and-operate; chronos-research-methodology (registry/holdout meaning) |
-| Migrations vs SCHEMA_VERSION | `N revisions + baseline => vN+1` consistent (6 => v7 as of 2026-08-02) | MISMATCH = a migration or schema bump landed without its counterpart; do not run `alembic upgrade` until understood | chronos-build-and-env |
-| .env live-capability | `.env NOT PRESENT` or only safe values (`demo`, `paper`, `false`, empty) | Any live-capable var set (BROKER_MODE!=demo, ALLOW_ORDER_TRANSMIT, ALLOW_LIVE_TRADING, IB_ACCOUNT_ID, AUTONOMY_MANDATE_FILE, ...) — also note: a live-capable `.env` makes the whole test suite fail by design (conftest tripwires) | chronos-config-and-flags (meanings), chronos-run-and-operate (procedures) |
-| Git state | Clean tree on a work branch | Dirty tree before you started = someone else's uncommitted state; know whose | chronos-change-control (branch discipline) |
-| Test collection | `2490` collected (2026-08-02 baseline; authoritative baseline home: chronos-validation-and-qa §2) | Count DROPPED below baseline = tests disappeared; a green run proves less than you think | chronos-validation-and-qa |
-
-The kill-switch/halt asymmetry in one line: **two stop mechanisms, opposite
-missing-file defaults** — platform halt missing = HALTED (safe); live
-kill-switch missing = DISENGAGED (disarmed). `python -m chronos.cli halt` does
-NOT stop the live order plane; `POST /live/kill` does.
-
-## Interpretation guide — doc_drift_check.py
-
-Verdicts per rule: `PRESENT` = the stale claim is still there, uncorrected (a
-finding); `CORRECTED` = the original wording is still on the page but every
-occurrence sits beside a dated in-place correction (counted as fixed);
-`ABSENT` = the text is gone entirely; `FILE-MISSING` = the doc is gone (retire
-or repoint the rule).
-
-**Why `CORRECTED` exists** (added 2026-08-02, after the first correction pass):
-this repository corrects documents *in place* — strikethrough plus a dated
-"Corrected"/"Amended" note, so history stays visible (house style, see
-chronos-docs-map). A plain substring check therefore keeps matching the original
-wording forever and reports a correctly-repaired document as still stale. The
-script now looks for a dated correction marker within 25 lines of every match.
-A rule can refuse that verdict with `annotation_is_not_a_fix=True`: where the
-real resolution is an **owner decision** an agent may not take — flipping an ADR
-status line, for instance — writing a note about the problem is not fixing it,
-and the rule stays PRESENT until the text itself changes.
-
-Baselines: on 2026-08-02 all 20 original rules were PRESENT — the honest
-starting state, not an error. After that day's correction pass the ledger holds
-**22 rules** reading **2 PRESENT / 14 CORRECTED / 6 ABSENT**. The two remaining
-PRESENT entries (`ADR0014-PROPOSED`, `ADR0015-PROPOSED`) are deliberate: neither
-ADR has a `DECISIONS.md` row, so their acceptance is recorded nowhere and only
-the owner can resolve it. **A PRESENT count of 2 is currently the correct
-result** — do not "fix" it by flipping those status lines.
-
-The rules ledger (`RULES` tuple at the top of the script) is data: each rule
-carries id, file, regex, why-stale, and fixed-when. Extend it by APPENDING a
-rule when a new contradiction is confirmed (source of truth for contradictions:
-the chronos-docs-map skill). Never delete a rule because it annoys you; delete
-only when the doc is fixed AND chronos-docs-map's ledger is updated to match.
-
-Rule families as of 2026-08-02:
-
-- `*-AUTONOMY-M1` — "wired into nothing" claims frozen at Milestone 1.
-- `TESTRESULTS-STALE-COUNT` — the "current" 1901 count (reality baseline:
-  2490 collected / 2489 passed, 1 skipped; the script prints the LIVE count
-  when a venv is available — always prefer the live number).
-- `*-3K` — the ~USD 3,000 capital premise (verified snapshot ~USD 110; a
-  LIVE, unresolved owner decision — flag, never quietly assume either number).
-- `IBKRINT-ONLY-PATH`, `IBKRRUN-NO-SERVICE`, `SECURITY-*`,
-  `DEPLOY-SERVICE-DENIAL` — capability claims falsified by M2-M7 code.
-- `MANDATE-ARMING-*`, `ADR17-NO-RITUAL` — the mandate-replaces-arming prose
-  vs code that unconditionally requires a current arm (submission.py:441).
-  Fixing THIS one is not a doc edit: it is an open owner-gated Phase-1 defect.
-- `ADR0012/0014/0015-PROPOSED` — ADR status lines never flipped despite
-  shipped implementations.
-
-Route PRESENT findings to chronos-docs-map (which doc to trust, house style
-for corrections) under chronos-change-control rules. Do NOT bulk-edit docs
-straight from this output, and NEVER "fix" a contradiction by changing code to
-match prose — for authority-model rules the code is the fact and the change is
-owner-gated.
-
-## Interpretation guide — env_check.py
-
-| Section | GOOD | Warning means | Fix lives in |
-|---|---|---|---|
-| Interpreters | `python3.12` on PATH | bare `python3` is 3.11 => `python3 -m venv .venv` silently builds an unusable venv | chronos-build-and-env |
-| Project venv | `.venv` present, 3.12, pytest/ruff/mypy/alembic all importable, chronos importable | `.venv NOT PRESENT` => every `make` target fails (all hard-code `.venv/bin/...`); missing tool => reinstall from lock | chronos-build-and-env |
-| Lockfile | present, uv-compile header, 76 pins / 1387 hashes (2026-08-02 shape), well-formed digests | missing/odd shape => no reproducible install; CI installs `--require-hashes` | chronos-build-and-env |
-| Node | present (v22 here) | absent => terminal-client JS safety tests skip locally but HARD-FAIL in CI | chronos-build-and-env |
-| PYTHONPATH | unset, or exactly `<repo>/src` | nonexistent entries, or another `chronos` package shadowing the repo | chronos-build-and-env |
-| .env | reported for cross-reference | details live in state_inventory.py | chronos-config-and-flags |
-
-## Limits — read these before trusting a report
-
-1. **Observers, not gates.** A clean report means the observable file state
-   was clean at that instant. It is NOT evidence for any promotion gate, NOT
-   real-gateway evidence (no real IBKR gateway has ever been connected in this
-   project's history — see chronos-real-gateway-campaign), and NOT proof any
-   control fires. MITIGATED != CLOSED.
-2. **They read files, not processes.** A running backend's in-memory state
-   (arming, terminal sessions, writer lease held, reconciliation latch) is
-   invisible here. For live process state use `GET /health` and the terminal
-   panels (chronos-run-and-operate).
-3. **Path resolution mirrors, not executes, the config machinery.** Defaults
-   are parsed textually from `src/chronos/config/settings.py`, then overridden
-   by process env and a textual `.env` parse (documented choice: no chronos
-   import, no .env loading, so the scripts run anywhere and can never trip the
-   settings validators). If settings.py's field syntax changes, the scripts
-   fall back to hard-coded 2026-08-02 defaults and print a WARN — update them.
-4. **Scripts drift too.** Baselines (2490 tests, 76 pins, 6 revisions, v7,
-   the 20 doc rules) are 2026-08-02 facts. Re-validate after any repo change:
-   run all three and compare the report SHAPE to
-   `references/expected-output-2026-08-02.md` (values may differ; structure,
-   verdict logic, and parse success must not).
-
-## When NOT to use this skill
-
-- Fixing what a script found: kill-switch/halt/mandate/restore procedures →
-  **chronos-run-and-operate**; doc corrections and which-doc-to-trust →
-  **chronos-docs-map**; venv/lockfile/interpreter repair →
-  **chronos-build-and-env**; config meanings and safety classes →
-  **chronos-config-and-flags**.
-- Deep debugging of a failure or refusal (why did a gate block, UNKNOWN vs
-  zero, lease demotion) → **chronos-debugging-playbook**.
-- Judging test evidence or writing tests → **chronos-validation-and-qa**.
-- Anything that would CHANGE state as part of "diagnosis" — not this skill,
-  and for safety mechanisms not any skill without an owner gate
-  (**chronos-change-control**).
-
-## Provenance and maintenance
-
-Compiled 2026-08-02 against branch `claude/chronos-skills-library-bfbj29`.
-Volatile facts and their re-verification commands (all read-only):
-
-| Fact (2026-08-02) | Re-verify with |
-|---|---|
-| Missing kill-switch file reads DISENGAGED | `sed -n '83,92p' src/chronos/orders/kill_switch.py` |
-| Missing halt file reads HALTED | `sed -n '100,112p' src/chronos/control/halt.py` |
-| `SCHEMA_VERSION = 7`; 6 migration revisions | `grep -n "^SCHEMA_VERSION" src/chronos/persistence/database.py; ls src/chronos/persistence/migrations/versions/` |
-| Settings path defaults (kill switch, DB URL, alerts, token) | `grep -n 'Path("data/\|sqlite:///' src/chronos/config/settings.py` |
-| Mandate auto-activation + `persistent-mandate:<digest16>` | `grep -n "persistent-mandate" src/chronos/api/autonomy_wiring.py` |
-| Test baseline 2490 collected / 2489 passed, 1 skipped | `.venv/bin/python -m pytest --collect-only -q -p no:cacheprovider` (and CHANGELOG.md top entry) |
-| Lockfile shape 76 pins / 1387 hashes | `grep -cE '^[A-Za-z0-9_.-]+==' requirements-dev.lock; grep -c -- '--hash=sha256:' requirements-dev.lock` |
-| Each doc-drift rule's target text | run `doc_drift_check.py` — the rules ARE the re-verification; cross-check new/fixed entries against chronos-docs-map |
-| Scripts still behave as captured | run all three; compare shape to `references/expected-output-2026-08-02.md` |
-
-Maintenance duties for future sessions: (a) when a doc in the ledger is fixed,
-confirm the rule flips to ABSENT and update chronos-docs-map; (b) when a new
-contradiction is confirmed, append a dated Rule; (c) when baselines legitimately
-move (new tests, new migration, new lock), update the constants in the scripts
-AND recapture `references/expected-output-<date>.md`; (d) never add a
-write-path or network call to these scripts — read-only is their contract.
+- State mutation or restore: `chronos-run-and-operate`.
+- Documentation authority/corrections: `chronos-docs-map`.
+- Environment repair: `chronos-build-and-env`.
+- Deep refusal/failure triage: `chronos-debugging-playbook`.
+- Test design or evidence judgment: `chronos-validation-and-qa`.
+- Any safety-mechanism or authority change: `chronos-change-control`.

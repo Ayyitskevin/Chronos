@@ -14,10 +14,12 @@ description: >
   what to do after the gate passes (chronos-priorities-and-roadmap).
 ---
 
-# The real-gateway campaign — first-ever read-only IBKR evidence
+# The real-gateway campaign — first read-only IBKR evidence
 
-Facts and commands verified against the repo on 2026-08-02. Run everything from the repo
-root with the project venv (`.venv/bin/python`, per README Setup).
+This procedure was grounded against the repository when authored, but every capability
+and "first-ever" premise is volatile. Re-run the provenance checks before relying on it.
+Run everything from the repository root with the project venv (`.venv/bin/python`, per
+README Setup).
 
 ## 0. Why this campaign exists
 
@@ -142,12 +144,16 @@ not silently edit mid-campaign).
 **1.1 Suite green.**
 
 ```bash
-make gates    # = ruff check, ruff format --check, mypy src/chronos, pytest -q
+make gates
 ```
 
-- EXPECTED: all four pass; pytest green with exactly one skip — the one skip IS the
-  gateway smoke test (expect ~2489 passed as of 2026-08-02; authoritative baseline:
-  chronos-validation-and-qa §2). Counts drift; re-measure, don't quote.
+- EXPECTED: the complete repository gate passes. Read `Makefile` and the hosted workflow
+  for its current shape; do not substitute the older command list from memory. Use the
+  first explicitly current summary in `docs/TEST_RESULTS.md` only as dated comparison
+  evidence, then record the actual candidate result. Test and skip counts drift.
+- Confirm separately that the credential-gated gateway smoke remains opt-in and skips
+  when its explicit enablement is absent. Do not infer that every suite skip has that
+  cause.
 - If the whole suite fails with "SAFETY TRIPWIRE: ambient settings are live-capable" →
   your repo-root `.env` sets a live-capable combination; the suite refuses by design
   (tests/conftest.py:17-52). Fix `.env` (see 1.2). Other failures → stop the campaign;
@@ -212,7 +218,7 @@ belongs in every session evidence doc.
 .venv/bin/pytest tests/integration/test_ibkr_smoke.py -ra
 ```
 
-- EXPECTED: `1 skipped` with reason "set CHRONOS_RUN_IBKR_SMOKE=1 …". If it runs or
+- EXPECTED: the single test is skipped with reason "set CHRONOS_RUN_IBKR_SMOKE=1 …". If it runs or
   errors instead, stop: your environment already sets the flag or collection is broken.
 
 **1.5 Rehearse the capture harness offline (demo).** Proves the harness end to end
@@ -250,8 +256,8 @@ quote with real price data (quality LIVE/FROZEN/DELAYED) → disconnect, always,
 
 | Observation | Meaning → branch |
 |---|---|
-| `1 passed` | **First gateway contact in project history.** Record timestamp + gateway version in the evidence doc; proceed to 2.2 |
-| `1 skipped` | Flag not set — you ran pytest directly; use the launcher |
+| `passed` | **First gateway contact in project history.** Record timestamp + gateway version in the evidence doc; proceed to 2.2 |
+| `skipped` | Flag not set — you ran pytest directly; use the launcher |
 | `BrokerError` with ibapi install guidance | Phase 0.1 not done → back to 0.1 |
 | `BrokerSafetyError: IB_ACCOUNT_ID is required` | Set the paper id (1.2) |
 | `BrokerSafetyError: IB_ENVIRONMENT=paper requires a paper port` | Port/environment mismatch → 0.3 table; check what the gateway shows |
@@ -495,13 +501,10 @@ claim-evidence ladder).
 
 ## Provenance and maintenance
 
-Compiled 2026-08-02 from the live repo (branch `claude/chronos-skills-library-bfbj29`).
-The demo rehearsal, refusal guards, sanitization, tamper detection, and replay checks of
-the shipped scripts were executed and verified in this environment on 2026-08-02
-(re-verified the same day after the fixer pass added argparse `--help` handling to
-`replay_check.py` and the labeled no-ibapi refusal to `capture_readonly.py` — exit
-contract 0/1/2 unchanged). No gateway was contacted (none exists here — that is the
-campaign's job).
+Originally compiled from the live repository in 2026-08. The demo rehearsal, refusal
+guards, sanitization, tamper detection, and replay checks were exercised then; that is
+historical evidence, not a claim about the current tree. No gateway was contacted while
+authoring this skill.
 
 Volatile facts → re-verify before trusting (all read-only):
 
@@ -510,7 +513,7 @@ Volatile facts → re-verify before trusting (all read-only):
 | No gateway evidence exists yet / fixtures absent | `ls fixtures/` (only `tradingview/` ⇒ campaign not run) and `ls docs/evidence/ 2>/dev/null` |
 | Smoke test still opt-in, read-only, 8 steps | `sed -n 1,45p tests/integration/test_ibkr_smoke.py`; `sed -n 14,42p scripts/smoke_test_ibkr.py` |
 | §7 gate text unchanged | `grep -n "Real-gateway read-only gate" -A 12 docs/VISION_COMPLETION_PLAN.md` |
-| Suite green + only skip is the smoke test | `make gates` (re-measure counts) |
+| Current validation state | read the current summary in `docs/TEST_RESULTS.md`, then run `make gates` on the candidate; never cite a count from this skill |
 | Paper ports {7497,4002}; account-id required | `grep -n "_PAPER_PORTS\|IB_ACCOUNT_ID is required" src/chronos/broker/official_ibkr.py` |
 | Missing kill-switch file ⇒ DISENGAGED | `sed -n 80,95p src/chronos/orders/kill_switch.py` |
 | Mandate auto-activation on boot | `grep -n "AUTONOMY_MANDATE_FILE" .env.example src/chronos/config/settings.py` |
