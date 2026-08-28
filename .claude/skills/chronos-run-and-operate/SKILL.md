@@ -1,413 +1,317 @@
 ---
 name: chronos-run-and-operate
 description: >
-  Load this skill whenever you need to RUN or OPERATE Chronos: "start the backend",
-  "run the app", "run the UI", "demo mode", "paper trading", "how do I stop it",
-  "emergency", "kill switch", "halt", "rearm", "arm live", "disarm", "revoke the
-  mandate", "acknowledge an alert", "restart the backend", "restore a backup",
-  "reconcile orders", "run the terminal", "histdata backfill", "run migrations",
-  or any question about which process does what and how to stop it safely. It is
-  the single home for the two stop mechanisms (live kill switch vs platform halt)
-  and the backup/restore reality. NOT for env setup (chronos-build-and-env),
-  variable meanings (chronos-config-and-flags), diagnosing WHY something refused
-  (chronos-debugging-playbook), or the real-gateway campaign
-  (chronos-real-gateway-campaign).
+  Use this skill to start, stop, inspect, migrate, back up, restore, or operate
+  Chronos; run the backend, UI, terminal, platform service, monitor, or histdata;
+  handle an incident; use the live kill switch or platform halt; disarm or rearm;
+  revoke a mandate; acknowledge an alert; or reconcile order state. Do not use it
+  for environment setup, configuration design, refusal diagnosis, or first-gateway
+  qualification; route those to the dedicated Chronos skills named below.
 ---
 
 # Chronos: run and operate
 
-Repo root: `/home/user/Chronos`. All commands assume the repo root as CWD (CLI default
-paths like `data/platform_halt.json` are CWD-relative) and the project venv at `.venv/`
-(README Setup). Facts dated 2026-08-02; re-verify volatile ones per the last section.
+Use this as a decision procedure, not as a snapshot of one revision. Run every
+command from the repository root with the project virtual environment at `.venv/`.
+Many state paths are relative to the current working directory.
 
-Deployment reality (verified `docs/DEPLOYMENT.md:118-158`): one Linux machine, one
-operator, bare **foreground processes**. No systemd units, no containers for the trading
-path — the systemd unit in DEPLOYMENT.md is explicitly labeled "FUTURE WORK — no such
-entry point exists". "Stop the process" means Ctrl-C / kill the foreground process.
+## Authority and source order
 
-There are TWO subsystems with SEPARATE stop mechanisms. Confusing them is the #1
-operator hazard — see "The two stop mechanisms" below before touching anything.
+Resolve operational facts in this order:
 
-## When NOT to use this skill
+1. Executable code, command `--help`, and tests.
+2. `Makefile` targets and startup scripts.
+3. The focused runbooks:
+   - deployment: `docs/DEPLOYMENT.md`
+   - incidents: `docs/INCIDENT_RESPONSE.md`
+   - backup and restore: `docs/BACKUP_AND_RECOVERY.md`
+   - live controls: `docs/live_trading_runbook.md`
+   - broker operations: `docs/IBKR_RUNBOOK.md`
 
-| You actually need | Go to |
+If prose and code disagree, the executable source wins. Report the contradiction
+and repair the stale guidance in its own change; do not blend two behaviors.
+
+This skill does not grant permission to connect a broker, transmit an order, run a
+migration against shared or live state, restore an autonomy mandate, rearm the
+platform, disengage the kill switch, or arm a live session. Those actions can add
+authority or change durable state and require deliberate owner direction. During
+an incident, authority-reducing actions are the priority: engage the live kill
+switch, disarm the live session, halt the deterministic platform, and revoke an
+autonomy mandate.
+
+## Route elsewhere when appropriate
+
+| Need | Skill |
 |---|---|
-| Create venv, install deps, container traps | chronos-build-and-env |
-| What an env var means, defaults, safety class | chronos-config-and-flags |
-| WHY a submission/boot was refused | chronos-debugging-playbook |
-| First-ever real-gateway session | chronos-real-gateway-campaign |
-| Mandate/autonomy semantics and authority rules | chronos-autonomy-and-mandates |
-| Which doc is stale/contradicts code | chronos-docs-map |
-| Read-only state-inventory scripts | chronos-diagnostics |
+| Create or repair the venv and dependencies | `chronos-build-and-env` |
+| Interpret or change environment variables | `chronos-config-and-flags` |
+| Diagnose why startup or an operation refused | `chronos-debugging-playbook` |
+| Inspect current local state without mutating it | `chronos-diagnostics` |
+| Qualify the first real IBKR connection | `chronos-real-gateway-campaign` |
+| Author or interpret autonomy authority | `chronos-autonomy-and-mandates` |
 
-## Process inventory
+## Preflight before starting anything
 
-| Process | Start command | Needs | Can / cannot |
-|---|---|---|---|
-| Backend API (the ONLY broker-owning, order-writing process; also serves the terminal) | `make backend` → `.venv/bin/python scripts/run_backend.py` (uvicorn `chronos.api.main:create_app`) | `.env`, `data/` DB; binds loopback `127.0.0.1:8765` only (non-loopback `BACKEND_HOST` refuses at load, `settings.py:255-259`) | Owns the single writer lease (the single-writer DB lock — one process may write; invariant: chronos-architecture-contract inv. 3; demotion triage: chronos-debugging-playbook §5); runs reconciliation at startup; auto-activates a valid `AUTONOMY_MANDATE_FILE` (`api/main.py:250-276`) |
-| Backend-driven Streamlit UI | `make ui` → `scripts/run_ui.py` → `streamlit run src/chronos/ui/backend_app.py` | Backend must be up first (talks loopback HTTP) | Thin client; no broker handle |
-| Legacy in-process Streamlit app | `.venv/bin/streamlit run src/chronos/app.py`; forced-safe: `.venv/bin/python scripts/run_demo.py` | run_demo.py forces `BROKER_MODE=demo`, `ALLOW_ORDER_TRANSMIT=false`, `ALLOW_LIVE_TRADING=false` in the child env (`scripts/run_demo.py:12-19`) | In-process runtime; the pre-backend surface |
-| Operator terminal | NOT a separate process — served BY the backend at `http://127.0.0.1:8765/terminal/app` | A running backend + the API token | Read panels + acknowledge/revoke only (see Terminal section) |
-| Platform CLI | `.venv/bin/python -m chronos.cli <cmd>` (prog `chronos-platform`) | Run from repo root (CWD-relative `--halt-file`/`--audit-file`) | status/halt/rearm/verify/monitor/backtest/research; NO command arms, transmits, enables live, or touches kill switch/mandate (`cli/main.py:1-10`) |
-| Shadow/paper platform service | `.venv/bin/python -m chronos.service [--mode shadow\|paper] [--watch] [--interval N]` | halt/audit files; data under `research/data/raw` | Default SHADOW = capability NO_ORDERS; no flag enables live (`service/__main__.py:1-11`); halts itself on exceptions |
-| Histdata capture (read-only data plane) | `.venv/bin/python -m chronos.histdata bars --symbols SPY,QQQ --end-date YYYY-MM-DD --duration-days 365` / `... options --symbols SPY,QQQ` | Gateway + official `ibapi`; its OWN client id `IB_DATA_CLIENT_ID` (must differ from `IB_CLIENT_ID`, validated at load) | Read-only: opens no trading DB, holds no lease, imports no order module (structural test `tests/safety/test_histdata_isolation.py`) |
-| Migrations | `make migrate` → `.venv/bin/alembic upgrade head` | `alembic.ini`; `DATABASE_URL` overrides the URL | Only the v2→head upgrade path; fresh DBs never run alembic (`Database.initialize()` creates schema v7 directly) |
-| Platform monitor | `.venv/bin/python -m chronos.cli monitor [--ledger data/platform_ledger.db]` or `CHRONOS_MONITOR_MODE=shadow streamlit run src/chronos/monitoring/streamlit_app.py` | Files on disk only | Read-only; imports no broker adapter (test-enforced) |
+1. Confirm the revision and worktree you are operating:
 
-Traps:
+   ```bash
+   git status --short --branch
+   git rev-parse HEAD
+   ```
 
-- **`make demo` runs `make ui` (the backend-driven UI), NOT the forced-safe demo
-  launcher** (`Makefile:26` is `demo: ui`). The only thing that forces demo-safe env
-  vars is `scripts/run_demo.py`. `make ui` against a `.env` configured for ibkr/paper
-  is a paper-capable session, not a demo.
-- The console script `chronos` is the legacy Streamlit app (`pyproject.toml:47`), not
-  the CLI. The CLI is `python -m chronos.cli`.
-- Restarting the backend clears live arming and signs every terminal session out
-  (both are process memory). That is a feature: restart = known state. It does NOT
-  clear the kill-switch file, the halt file, or a mandate file — see below.
+2. Inventory state read-only. Do not treat an absent file as proof of a safe
+   default:
 
-## Modes
+   ```bash
+   .venv/bin/python .claude/skills/chronos-diagnostics/scripts/state_inventory.py
+   .venv/bin/python -m chronos.cli status
+   ```
 
-**Demo (default).** `BROKER_MODE=demo` builds a deterministic in-process `DemoBroker`
-— no network, no account, structurally cannot submit (`broker/demo.py:408-413`).
-`DEMO_PROFILE` selects the dataset: `safety_cases` (default) or `empty_account`
-(`domain/enums.py:11-13`). Demo bars are synthetic, seeded by symbol, bannered
-`source="demo"` in the chart.
+3. Derive the commands and accepted flags from the current checkout:
 
-**Paper.** `BROKER_MODE=ibkr`, `IB_ENVIRONMENT=paper`, `ALLOW_ORDER_TRANSMIT=true`,
-`IB_ACCOUNT_ID` set (required for paper transmit, `settings.py:225-231`), and
-`IB_ACCOUNT_ALLOWLIST` containing the broker-reported paper account — the paper mode
-lock denies on an empty allowlist, an off-list account, or an account not matching
-IBKR's paper pattern `D[UF]\d{4,}` (`control/modes.py:126-144`, fed from
-`settings.ib_account_allowlist` at `orders/submission.py:262`). VERIFIED: the
-paper-vs-live branch is selected purely by the frozen `ib_environment`
-(`submission.py:227`). The paper branch does NOT consult arming or the kill switch at
-the boundary (`submission.py:241-330`) — but the official adapter's last-line check
-still refuses any mutating call while the kill switch is engaged
-(`official_ibkr.py:1248-1253`), so engaging the kill switch stops paper submissions
-too, one layer down. Enabling `ALLOW_ORDER_TRANSMIT` for the first time is an owner
-decision (chronos-config-and-flags §2); the read-only real-gateway campaign precedes
-any paper order. NOTE: no real gateway (paper or live) has EVER been connected in
-this project's history — see chronos-real-gateway-campaign before any gateway session.
+   ```bash
+   make -n backend ui demo migrate
+   .venv/bin/python -m chronos.cli --help
+   .venv/bin/python -m chronos.service --help
+   .venv/bin/python -m chronos.histdata --help
+   ```
 
-**Live.** NEVER walk a reader toward live casually — live acceptance is an owner
-action. Live requires ALL of: the full ADR-0009 config conjunction (startup refuses
-otherwise, naming every unmet conjunct — `settings.py:165-199`; variable list in
-chronos-config-and-flags), PLUS at runtime the ten-gate walk including a current
-per-session arm (typed phrase, TTL, process memory), a per-order typed confirmation,
-and the kill switch disengaged. `docs/live_trading_runbook.md` is the operator
-reference. The mandate does NOT remove any of this — see the contradiction note below.
+4. Inspect the intended broker mode, environment, account scope, database URL,
+   transmission flags, and authority files without printing tokens or credentials.
+   A backend start can open the configured broker adapter and can auto-activate a
+   valid, unrevoked `AUTONOMY_MANDATE_FILE`.
+5. Keep IBKR/TWS/Gateway disconnected unless the requested operation explicitly
+   needs it and the owner has approved that boundary. Before any first gateway
+   session, follow `chronos-real-gateway-campaign` and `docs/IBKR_RUNBOOK.md`.
+6. Before a migration, restore, or overwrite, take the backup required by
+   `docs/BACKUP_AND_RECOVERY.md` and verify the exact target path.
 
-## THE TWO STOP MECHANISMS — read before any emergency
+## Process map
 
-Two independent stop mechanisms exist. They stop DIFFERENT subsystems and have
-OPPOSITE missing-file defaults. `python -m chronos.cli halt` does NOT stop the live
-order plane; `POST /live/kill` does not stop the deterministic platform.
-
-| | (a) Live order-plane kill switch | (b) Deterministic-platform halt |
+| Surface | Current command source | Operational boundary |
 |---|---|---|
-| Stops | `chronos.orders` live-Wheel pipeline via the backend (the only path that can reach a real broker) | `chronos.execution`/`chronos.service` platform loop (shadow/paper research plane; live hard-refused in code anyway) |
-| Engage | `POST /live/kill` (token only — deliberately NOT writer-gated, always reachable) | `.venv/bin/python -m chronos.cli halt --reason "..."` |
-| Release | `POST /live/kill/disengage` (token + writer lease, non-empty note) | `.venv/bin/python -m chronos.cli rearm --note "..."` (non-empty note required) |
-| Persistence file | `data/live_kill_switch.json` (`LIVE_KILL_SWITCH_FILE`) | `data/platform_halt.json` (CLI `--halt-file`) |
-| File MISSING | **DISENGAGED — trading-capable** (`orders/kill_switch.py:83-85`) | **HALTED** (`NEVER_ARMED`, `control/halt.py:102-109`) |
-| File corrupt/unreadable | ENGAGED (fail closed, `kill_switch.py:86-92`) | HALTED (`STATE_CORRUPTION`, `halt.py:110-117`) |
-| Restart behavior | Engaged switch survives restart (file re-read at every check; no boot reset path exists) | Halt survives restart ("re-load, never reset", `halt.py:7`) |
-| Who else engages it | Session-drawdown breaker on breach (`session_drawdown.py:119-121`); any component may | Any platform component (audit corruption, strategy exception, reconciliation mismatch, ...) |
-| Status | `GET /live/status` (arm + kill state) | `python -m chronos.cli status` (banner + audit chain) |
-| HTTP or CLI? | HTTP-only. No CLI command exists for it (`cli/main.py:1-10`; verified: no such subcommand) | CLI-only. No HTTP route exists for it |
+| Backend API | `make backend`, implemented by `scripts/run_backend.py` | Sole broker owner and order writer; serves the terminal; may demote to read-only if it cannot hold the writer lease. |
+| Backend-driven UI | `make ui`, implemented by `scripts/run_ui.py` | Thin Streamlit client; start the backend first. |
+| Operator terminal | `/terminal/app` on the backend address | Browser client, not a separate process. Its cookie is scoped to `/terminal`. |
+| Forced-safe legacy demo | `.venv/bin/python scripts/run_demo.py` | Forces demo broker and disables transmission in the child environment. |
+| Legacy in-process UI | `.venv/bin/streamlit run src/chronos/app.py` | Older in-process surface; the `chronos` console script points here, not to the platform CLI. |
+| Platform CLI | `.venv/bin/python -m chronos.cli <command>` | Deterministic platform status, halt/rearm, monitor, audit, corpus, and research commands. |
+| Shadow/paper service | `.venv/bin/python -m chronos.service` | Derive flags with `--help`; the command surface has no live mode. Keep it foreground unless daemonization is reviewed. |
+| Platform monitor | `.venv/bin/python -m chronos.cli monitor` | File-backed and read-only; it does not own a broker. |
+| Historical-data capture | `.venv/bin/python -m chronos.histdata ...` | Read-only data plane, but it does connect to a configured gateway and needs its own client id. |
+| Wheel database migration | `make migrate` | Runs Alembic against the configured `DATABASE_URL`; it is a durable-state mutation. |
 
-**WARNING — the asymmetry that bites:** deleting or losing
-`data/live_kill_switch.json` silently DISARMS the live emergency stop (missing =
-DISENGAGED). Never "clean up" that file, never repoint `LIVE_KILL_SWITCH_FILE`
-casually (a path change orphans an engaged switch), and never assume a
-restored/fresh deploy is stopped. `docs/BACKUP_AND_RECOVERY.md`'s file table does
-not even list this file (see Backup/restore below).
+`docs/DEPLOYMENT.md` contains a reviewed shape for a possible systemd user unit,
+but the repository does not install or enable one. Do not daemonize a process as a
+side effect of an ordinary run request.
 
-### Procedures (exact commands)
+### Choosing a start path
 
-Token setup for all curl commands (token file created by the backend on first boot,
-0600):
+- For an offline demonstration, use `scripts/run_demo.py`; do not infer safety
+  from the target name `make demo`, because that target aliases the backend-driven
+  UI and does not rewrite the environment.
+- For the current backend/UI path, run `make backend` in one foreground terminal,
+  wait for a healthy loopback startup, then run `make ui` or open `/terminal/app`.
+- For the deterministic platform loop, inspect `python -m chronos.service --help`,
+  pass the intended mode and capital inputs explicitly, and keep the process in the
+  foreground. Its service loop is separate from the backend live order plane.
+- For research or monitoring, prefer `chronos.cli` commands that state their
+  read-only boundary. The console command named `chronos` is not that CLI.
 
-```bash
-TOKEN=$(cat data/backend_api_token)
-```
+## The two independent stop mechanisms
 
-Engage the live kill switch (the live-plane emergency stop; works even when the
-backend has demoted itself to read-only — that is deliberate, `routes/live.py:105-121`):
+Chronos has two stop states. Engage both during an incident because neither is a
+repository-wide substitute for the other.
 
-```bash
-curl -sS -X POST http://127.0.0.1:8765/live/kill \
-  -H "X-Chronos-Token: $TOKEN" -H "Content-Type: application/json" \
-  -d '{"reason": "operator emergency stop: <one line why>"}'
-```
+| Control | Stops | Engage | Release | Missing file |
+|---|---|---|---|---|
+| Live order-plane kill switch | `chronos.orders` submissions through the backend | Terminal **ENGAGE KILL SWITCH** or `POST /live/kill` | `POST /live/kill/disengage` with a note and writer lease | **DISENGAGED**; other gates still apply, but this stop contributes nothing |
+| Deterministic-platform halt | `chronos.execution` and `chronos.service` order generation | `.venv/bin/python -m chronos.cli halt --reason "..."` | `.venv/bin/python -m chronos.cli rearm --note "..."` | **HALTED** as never armed |
 
-Verify it took (never trust the POST alone):
+The opposite missing-file defaults are load-bearing. Derive them from
+`src/chronos/orders/kill_switch.py` and `src/chronos/control/halt.py`; never delete,
+rename, or repoint either state file as cleanup.
 
-```bash
-curl -sS http://127.0.0.1:8765/live/status -H "X-Chronos-Token: $TOKEN"
-# expect: "kill_switch": {"engaged": true, ...}
-```
+### Incident order
 
-Disengage (explicit operator act; token + writer lease; non-empty note required —
-422 otherwise, `routes/live.py:124-133`):
+Follow `docs/INCIDENT_RESPONSE.md`. Its evidence-capture and broker playbooks are
+the canonical detailed procedure. The minimum safe ordering is:
 
-```bash
-curl -sS -X POST http://127.0.0.1:8765/live/kill/disengage \
-  -H "X-Chronos-Token: $TOKEN" -H "Content-Type: application/json" \
-  -d '{"note": "verified <what you checked>; safe to resume because <why>"}'
-```
+1. Engage the live kill switch from `/terminal/app` or `POST /live/kill` with a
+   reason. The stop remains available after writer-lease demotion.
+2. Verify `GET /live/status` reports the switch engaged and confirm the configured
+   kill-switch file exists. Do not trust a successful-looking click alone.
+3. Halt the deterministic platform with `chronos.cli halt` and verify with
+   `chronos.cli status`.
+4. Disarm the live session. If autonomy is configured, revoke the mandate and
+   follow the incident runbook's file-handling instruction so a later boot cannot
+   restore authority unexpectedly.
+5. Stop making changes, capture evidence, inspect the broker directly, and cancel
+   working orders manually when the owner decides that is required. Chronos never
+   auto-flattens an unexplained position.
+6. Do not rearm, disengage the switch, or restore a mandate until the incident is
+   explained, reconciliation is clean, and the owner deliberately accepts the
+   authority increase.
 
-Platform halt / rearm:
+Restarting is not an emergency stop. It clears process-memory live arming and
+terminal sessions, but durable kill, halt, mandate, revocation, ledger, and audit
+state have their own persistence rules. Re-inventory after every restart.
 
-```bash
-.venv/bin/python -m chronos.cli halt --reason "SEV-n: <one line>"
-.venv/bin/python -m chronos.cli status          # confirm TRADING HALTED banner
-.venv/bin/python -m chronos.cli rearm --note "resolved <what>; verified <evidence>"
-```
+## Terminal operations
 
-**Restore/incident rule — VERIFY-AND-ENGAGE, never assume.** After any restore,
-file operation under `data/`, or doubt about kill-switch state: engage it explicitly
-(`POST /live/kill` with a reason like "post-restore default-safe"), then verify via
-`GET /live/status`. Engaging is idempotent-safe and monotonically restricting; a
-missing file that you assumed was "still engaged" is the failure mode this rule
-exists to prevent. If the backend is not running, inspect the file
-(`cat data/live_kill_switch.json` — `"engaged": true` present and parseable), and
-still re-verify via `/live/status` after boot.
+Open `/terminal/app` on the backend's configured loopback address and authenticate
+with the local API token. Never print or commit the token. Scripts may use the
+`X-Chronos-Token` header directly; the browser exchanges it for an httpOnly,
+`/terminal`-scoped session cookie.
 
-### Emergency stop EVERYTHING (corrected sequence)
+The current terminal mutation surface is derived from
+`src/chronos/api/routes/terminal.py`:
 
-`docs/INCIDENT_RESPONSE.md`'s universal first action is `python -m chronos.cli halt`
-— that engages ONLY the platform halt and does nothing to the live order plane. This
-is a known doc defect (self-disclosed at `docs/VISION_COMPLETION_PLAN.md:146-148`;
-ledger home: chronos-docs-map). The complete sequence:
+- `POST /terminal/alerts/{alert_id}/acknowledge` records that an alert was seen;
+  it does not resolve the underlying condition.
+- `POST /terminal/live/kill` engages the live kill switch.
+- `POST /terminal/live/disarm` removes the in-memory live arm.
+- `POST /terminal/mandate/revoke` durably withdraws an active mandate.
 
-1. **Live plane:** `POST /live/kill` (curl above). Verify via `GET /live/status`.
-2. **Platform:** `.venv/bin/python -m chronos.cli halt --reason "..."`.
-3. **If a mandate is active:** revoke it durably (curl in the next section) — a
-   revocation survives restarts and the revoked mandate version will not
-   re-activate (`api/autonomy_wiring.py:145-157`). Additionally move the mandate
-   file aside (`mv <mandate-file> <mandate-file>.standdown`) so no future boot
-   under any DB/scope can auto-activate it.
-4. **Cancel working orders** if needed: `POST /orders/{intent_id}/cancel` —
-   cancellation deliberately still works while the kill switch is engaged
-   (risk-reducing; `official_ibkr.py:1475-1477`). Or cancel manually in TWS.
-5. **Do NOT restart expecting quiet.** A valid, unrevoked `AUTONOMY_MANDATE_FILE`
-   auto-activates on every boot (`api/main.py:250-276`, ADR-0017). Restart clears
-   arming and terminal sessions but resets NOTHING else. The vision plan's
-   "recovery must always boot kill-engaged, read-only, unreconciled" is the
-   REQUIRED end-state, still OPEN — today's code boots a missing kill-switch file
-   DISENGAGED, so steps 1-3 are the manual bridge.
+Kill and disarm only remove authority and remain reachable on a read-only backend.
+Acknowledge and mandate revocation require the writer boundary. The terminal does
+not expose `POST /live/arm` or `POST /live/kill/disengage`; those grant authority
+and remain explicit token-and-writer operations.
 
-## Arming, disarming, and mandate operations
+After a backend restart, log in again and re-read the system, mandate, queue,
+alerts, and reconciliation state before acting.
 
-**Arm a live session** (writer-gated; grants nothing by itself — it is one of ten
-gates; TTL `LIVE_ARM_TTL_MINUTES`, default 15 min, max 120; process memory, restart
-clears it):
+## Reconciliation operations
 
-```bash
-curl -sS -X POST http://127.0.0.1:8765/live/arm \
-  -H "X-Chronos-Token: $TOKEN" -H "Content-Type: application/json" \
-  -d '{"phrase": "I ACCEPT LIVE TRADING RISK", "reason": "operator arm: <why>"}'
-```
+The backend runs reconciliation at startup. A writer also starts the bounded
+periodic refresher in `src/chronos/api/reconciliation_loop.py`; it renews expired
+submission readiness on configured cadences and leaves readiness to expire when
+broker calls fail. A read-only backend does not run that refresher and cannot
+publish recovery.
 
-The phrase is exact (`orders/arming.py:26`), compared constant-time, never logged or
-echoed. Wrong phrase → generic 400.
+- Read `GET /health` for reconciliation status and generation.
+- Use `POST /orders/reconcile` only for a deliberate fresh pass or recovery
+  workflow; do not weaken or bypass the readiness latch.
+- Treat `SUBMISSION_UNKNOWN`, unexplained positions, and unknown broker orders as
+  broker-truth problems. Follow `docs/IBKR_RUNBOOK.md` and
+  `docs/INCIDENT_RESPONSE.md`; never repair them by editing SQLite rows.
+- Resolve an ambiguous intent only through the audited route documented in the
+  runbooks and only from positive broker evidence. Snapshot absence is not proof
+  that an order was rejected.
 
-**Disarm** (token only, no body, no writer lease — removing authority is always
-reachable, `routes/live.py:98-102`):
+Re-verify wiring in `src/chronos/api/main.py`,
+`src/chronos/api/reconciliation_loop.py`, and
+`src/chronos/orders/reconciliation_readiness.py` before changing this procedure.
 
-```bash
-curl -sS -X POST http://127.0.0.1:8765/live/disarm -H "X-Chronos-Token: $TOKEN"
-```
+## Database initialization and migrations
 
-**Mandate activate:** there is no activation endpoint. Activation = a valid mandate
-JSON at `AUTONOMY_MANDATE_FILE` + a backend boot (auto-activation, digest-stamped
-`persistent-mandate:<digest16>`). Broken/mismatched file → CRITICAL alert, backend
-continues WITHOUT autonomy. Authoring a mandate is owner-gated — see
-chronos-autonomy-and-mandates.
-
-**Mandate revoke** (writer-gated; `reason` required — 422 if blank; optional
-`mandate_id` must match the grant in force or 409; durable, audited into the
-authority chain, survives restarts; `routes/terminal.py:702-819`):
+Do not cache a schema number or migration head in this skill. Derive both from the
+checkout:
 
 ```bash
-curl -sS -X POST http://127.0.0.1:8765/terminal/mandate/revoke \
-  -H "X-Chronos-Token: $TOKEN" -H "Content-Type: application/json" \
-  -d '{"reason": "<why you are standing the supervisor down>"}'
+rg -n '^SCHEMA_VERSION' src/chronos/persistence/database.py
+.venv/bin/alembic heads
 ```
 
-`revoked: false` with 200 means nothing was in force — that is an answer, not a
-failure. A cycle already in flight finishes; the next one refuses at admission.
-The "typed confirmation" for revoke (typing `REVOKE MANDATE`) is a terminal-client
-UI gate (`terminal.js:1201-1216`), not a server field — curl needs only the reason.
+`Database.initialize()` creates a fresh wheel database at the current
+`SCHEMA_VERSION`. Alembic upgrades supported existing databases to the current
+head. These are different paths by design.
 
-**The arming-vs-mandate contradiction (one line):** prose in
-`docs/live_trading_runbook.md:21-24` says a mandate replaces gates 7+8, but the CODE
-requires a current, unexpired arm for every LIVE submit regardless of mandate
-(`submission.py:441`; `live_gate.py` has no mandate input) — trust the code; details
-in chronos-autonomy-and-mandates.
+Before `make migrate`:
 
-**Terminal client buttons (updated 2026-08-02):** acknowledge alert, revoke mandate,
-**ENGAGE KILL SWITCH**, and **DISARM LIVE SESSION** — the last two added via
-`POST /terminal/live/kill` and `POST /terminal/live/disarm` (R-43). Both require a typed
-confirmation, the kill switch also requires a reason, and both stay enabled on a
-read-only backend because the routes behind them are not writer-gated — a demoted
-backend is the one whose operator most needs the stop.
+1. Resolve the configured `DATABASE_URL` to one explicit file without exposing
+   credentials.
+2. Stop every process that can use that database unless the runbook explicitly
+   permits the operation online.
+3. Make a SQLite-consistent backup and preserve any WAL/SHM sidecars as prescribed
+   by `docs/BACKUP_AND_RECOVERY.md`.
+4. Confirm the revision set with `.venv/bin/alembic history` and
+   `.venv/bin/alembic heads`.
+5. Obtain owner approval before touching shared or live state.
 
-**Arming and kill-disengage still have no buttons and remain curl-only** with
-`X-Chronos-Token`. That is deliberate, not an oversight: they *grant* authority, and
-`test_the_terminal_offers_no_route_that_grants_live_authority` pins their absence.
-ADR-0018 §4 permits them, so exposing them is an owner posture decision, not a bug.
+Afterward, run initialization/validation against the upgraded database and run
+`make gates`. Never edit `schema_version`, scope rows, ledgers, or migrations in
+place to force acceptance.
 
-The terminal cookie is still path-scoped to `/terminal` and structurally cannot reach
-`/live/*` or `/orders/*` — the new routes live under `/terminal`, which is why the
-browser can call them at all.
+## Backup and restore
 
-## Terminal usage
+Use `docs/BACKUP_AND_RECOVERY.md` as the canonical file inventory and exact SQLite
+procedure. Pay particular attention to the live kill-switch file and any
+`AUTONOMY_MANDATE_FILE`: the first has a permissive missing-file default, while a
+valid unrevoked mandate can activate at backend boot.
 
-- Browse `http://127.0.0.1:8765/terminal/app` (shell is unauthenticated by design; every
-  data route is credentialed).
-- Login: the page posts your token to `POST /terminal/session`, which exchanges it for
-  an httpOnly cookie scoped to `path=/terminal`, TTL 12h, max 32 live sessions, stored
-  in process memory as SHA-256 digests (`api/terminal_session.py:71-101`). Script
-  equivalent:
+Restore procedure:
 
-```bash
-curl -sS -c /tmp/chronos-cookies.txt -X POST http://127.0.0.1:8765/terminal/session \
-  -H "Content-Type: application/json" -d "{\"token\": \"$TOKEN\"}"
-```
+1. Stop every Chronos process and verify the exact restore target.
+2. Buy reversibility by backing up the current target before overwriting it.
+3. Restore SQLite and sidecars exactly as the runbook specifies. Never remove WAL
+   or SHM files from a running database.
+4. Keep the mandate out of the startup path unless the owner explicitly intends to
+   restore that authority. Verify the live kill switch rather than inferring its
+   state from file absence.
+5. Start only the minimum process needed, engage and verify the live kill switch,
+   confirm the platform halt, and run the read-only state inventory.
+6. Verify the audit chain, corpus when applicable, database integrity, and broker
+   reconciliation. Record discrepancies; do not repair broker truth locally.
+7. Treat every rearm, kill disengagement, session arm, and mandate restoration as
+   a separate owner decision.
 
-- Scripts can skip the cookie entirely: every `/terminal/*` data route also accepts the
-  `X-Chronos-Token` header directly.
-- Panels (commands typed into the terminal): SYS/system, MAND/mandate, JRNL/journal,
-  CNTR/counters, QUE/queue, ALRT/alerts, THESIS/theses, GP `<SYMBOL>`/chart, HELP.
-  Panels poll every 5s; the chart every 120s (pacing). `GET /terminal/system` shows
-  concrete `kill_switch_engaged` and `live_armed` booleans — the fastest glanceable
-  stop-state readout.
-- Reads work even on a read-only (lease-lost) backend; the two writes (acknowledge,
-  revoke) are writer-gated.
-- **A backend restart signs every terminal session out** (sessions are process
-  memory) and clears arming. Log in again; re-verify state before trusting panels.
+## Routine checks
 
-## Reconciliation ops
-
-- Backend startup runs one reconciliation pass; failure leaves submission LOCKED while
-  inspection/cancel/recovery still work (`api/main.py:201-236`).
-- Readiness starts PENDING and is **consumed by exactly ONE opening submission** —
-  after each opening order the latch is PENDING again, and there is NO periodic loop
-  to re-arm it (OPEN gap, `docs/VISION_COMPLETION_PLAN.md:143-145`). Before each
-  opening order, run a fresh pass:
-
-```bash
-curl -sS -X POST http://127.0.0.1:8765/orders/reconcile -H "X-Chronos-Token: $TOKEN"
-```
-
-  Do not "fix" a blocked second order by weakening the latch — the missing piece is
-  the bounded periodic reconciliation of Phase 2.
-- `GET /health` (the only unauthenticated route) reports `reconciliation_status` /
-  `reconciliation_generation` for quick checks.
-- **MANUAL_REVIEW** (wheel stage): the derivation found conflicting or un-attributable
-  evidence — partial assignment, corporate-action warning, account mismatch,
-  reconciliation not OK, broker-vs-local disagreement (`strategy/wheel_state.py:107-152`).
-  Operationally: no automated action is eligible for that symbol; the owner inspects
-  and resolves at the broker; the state clears only when the evidence does.
-- **Unknown broker order/position** ⇒ platform halts (`HaltReason.UNKNOWN_ORDER` /
-  `UNKNOWN_POSITION`); there is NO auto-flatten anywhere. Resolution is manual at the
-  broker (owner gate), then document, then `rearm --note`.
-- **SUBMISSION_UNKNOWN stuck intents** block live submits. Resolve via a fresh
-  reconciliation pass, or `POST /orders/{intent_id}/resolve` (audited evidence
-  refresh; snapshot absence returns 409 and stays locked — that is correct). Never
-  edit the database.
-
-## Backup / restore REALITY
-
-What `docs/BACKUP_AND_RECOVERY.md` prescribes (platform ledger + halt file + audit
-JSONL + config/specs/research + `data/chronos.db` + `.env`; `sqlite3 .backup` online
-or plain copy only while stopped; restore → starts HALTED → verify-audit-log →
-verify-corpus → broker reconciliation → explicit `rearm --note`) is correct FOR THE
-PLATFORM PLANE ONLY. Two verified defects:
-
-1. **Its file table OMITS `data/live_kill_switch.json`** (also
-   `session_baseline.json`, `owner_alerts.jsonl`, `backend_api_token`). A by-the-book
-   restore drops the kill-switch file, and missing = DISENGAGED.
-2. Its "restore never auto-resumes trading" claims name only platform-halt gates.
-   True for the platform; for the live plane, arming (empty after restart) and
-   reconciliation (PENDING) block trading, but the kill switch itself contributes
-   nothing after such a restore.
-
-The line "recovery must always boot kill-engaged, read-only, and unreconciled"
-(`VISION_COMPLETION_PLAN.md:149-150`) is the vision plan's REQUIRED end-state — it is
-OPEN, not current code behavior. The manual procedure below is the bridge.
-
-**Safe restore procedure (compensates for the code+doc gaps):**
-
-1. Stop every Chronos process. Verify nothing is running.
-2. Back up the current state before overwriting anything
-   (`tar czf backup-pre-restore-$(date +%F).tar.gz data/ config/ 2>/dev/null`).
-3. Restore files per BACKUP_AND_RECOVERY.md (delete stale `-wal`/`-shm` sidecars for
-   `.backup`-produced SQLite files).
-4. **BEFORE restarting anything:**
-   - Write/verify an ENGAGED kill-switch state: if a known-good
-     `data/live_kill_switch.json` with `"engaged": true` was backed up, restore it;
-     otherwise plan to engage via `POST /live/kill` immediately after boot and treat
-     the system as trading-capable until you have.
-   - Verify `data/platform_halt.json` reads HALTED (missing is fine — missing =
-     HALTED for this one).
-   - Move any mandate file aside (`mv <AUTONOMY_MANDATE_FILE> <file>.restore-hold`)
-     so boot cannot auto-activate autonomy.
-5. Restart the backend. Immediately: `POST /live/kill` (verify-and-engage), then
-   `GET /live/status` and `GET /health`.
-6. Verify state: `python -m chronos.cli status` (halt + audit chain),
-   `python -m chronos.cli verify-audit-log`, `verify-corpus` if research state was
-   restored, and the read-only inventory scripts in chronos-diagnostics.
-7. Reconcile against the broker (`POST /orders/reconcile`; resolve
-   UNEXPLAINED/UNKNOWN discrepancies at the broker, documented).
-8. Only then consider re-enabling anything: `rearm --note` for the platform,
-   `POST /live/kill/disengage` with a note for the live plane, mandate file back
-   only by explicit owner decision.
-
-## Routine duties
-
-| Duty | Command / action |
+| Duty | Read-only command or source |
 |---|---|
-| Morning status | `.venv/bin/python -m chronos.cli status` (mode banner, halt state, audit chain) — read it deliberately; do not rearm reflexively |
-| Audit-chain verify | `.venv/bin/python -m chronos.cli verify-audit-log` (exit 1 on failure = incident) |
-| Registry ledger verify | `.venv/bin/python -m chronos.cli registry verify` (chain + anchor; exit 1 on tamper) |
-| Pine corpus verify | `.venv/bin/python -m chronos.cli verify-corpus` |
-| Acknowledge an alert | Terminal ALRT panel button, or `curl -sS -X POST http://127.0.0.1:8765/terminal/alerts/<id>/acknowledge -H "X-Chronos-Token: $TOKEN" -H "Content-Type: application/json" -d '{"note": "<what you saw/did>"}'` — note required (422 if inadequate); ack never resolves the condition |
-| Watch the alert sink | `tail -f data/owner_alerts.jsonl` (JSONL, local-only by structural test; no email/SMS/webhook exists) |
-| Clock-sync check (R-18, manual) | `timedatectl status` — confirm "System clock synchronized: yes". R-18 (OPEN) makes this an operator duty; automated NTP verification is not implemented. NOTE: R-18 points at docs/OPERATIONS.md for this duty, but that doc does not actually spell out the check — this row is the compensating procedure |
-| DB integrity spot-check | `sqlite3 -readonly data/chronos.db "PRAGMA integrity_check;"` and same for `data/platform_ledger.db` (read-only flag always; never UPDATE/DELETE ledger rows) |
-| Backups | Manual, per Backup/restore section — no backup script exists in scripts/ |
+| Platform status and halt state | `.venv/bin/python -m chronos.cli status` |
+| Audit-chain integrity | `.venv/bin/python -m chronos.cli verify-audit-log` |
+| Strategy registry integrity | `.venv/bin/python -m chronos.cli registry verify` |
+| Pine corpus integrity | `.venv/bin/python -m chronos.cli verify-corpus` |
+| Backend health | `GET /health` |
+| Live arm and kill state | authenticated `GET /live/status` or the terminal system panel |
+| Local state inventory | `.venv/bin/python .claude/skills/chronos-diagnostics/scripts/state_inventory.py` |
+| SQLite integrity | `sqlite3 -readonly <db> 'PRAGMA integrity_check;'` |
+| Host clock synchronization | `timedatectl status` |
 
-Log locations: `logs/chronos.log` (+.1..5 rotation, wheel/backend structured JSON,
-account-masked) · `data/platform_audit.jsonl` (hash-chained platform audit) ·
-`data/owner_alerts.jsonl` (alert sink) · `data/platform_ledger.db` (platform order
-ledger; read with `sqlite3 -readonly`, queries in docs/OPERATIONS.md) · TWS/Gateway
-logs are broker-side (export before the gateway's daily restart rotates them).
+Logs and durable evidence live in the paths configured by current settings. Common
+surfaces include the rotating application log, platform audit JSONL, owner-alert
+JSONL, the wheel database, the platform ledger, and TWS/Gateway logs. Derive their
+configured paths before collecting them, and never paste secrets or raw account
+identifiers into a handoff.
 
-## Provenance and maintenance
+## Known pitfalls
 
-Compiled 2026-08-02 from code-first verification (evidence priority: executable code >
-ops docs). Volatile facts and their one-line re-verification commands:
+- CWD changes state identity because many defaults are relative paths.
+- `make demo` starts the UI target; only `scripts/run_demo.py` forces demo-safe
+  environment values.
+- The `chronos` console script is the legacy app, not `chronos.cli`.
+- A UI or terminal start does not prove the backend is healthy or authoritative.
+- A backend can demote itself read-only after losing the writer lease. Restart only
+  after identifying the competing writer or lease failure.
+- Restart clears some process memory but can re-read durable authority. Never use
+  restart as shorthand for halt, kill, revoke, reconcile, or recover.
+- One wheel database is bound to one broker/account scope. Repoint the database;
+  do not edit the scope row.
+- The platform service and backend order plane are separate runtimes with separate
+  safety state. A stop in one does not imply a stop in the other.
+- A real gateway connection remains an owner-controlled campaign even for a
+  read-only command. Do not silently substitute it for demo or recorded evidence.
+- Corrected historical passages in runbooks explain old defects; verify the active
+  procedure and current code rather than copying the struck-through claim.
 
-| Volatile fact | Re-verify with (read-only) |
-|---|---|
-| Kill-switch missing=DISENGAGED / corrupt=ENGAGED | `sed -n '83,92p' src/chronos/orders/kill_switch.py` |
-| Halt missing/corrupt=HALTED | `sed -n '102,117p' src/chronos/control/halt.py` |
-| `/live/*` routes, payloads, lease asymmetry | `sed -n '1,135p' src/chronos/api/routes/live.py` |
-| No CLI kill/arm/live command; halt/rearm flags | `.venv/bin/python -m chronos.cli --help` |
-| Arm phrase constant | `grep -n REQUIRED_ARM_PHRASE src/chronos/orders/arming.py` |
-| Revoke route contract (reason 422, mandate_id 409) | `sed -n '702,760p' src/chronos/api/routes/terminal.py` |
-| Terminal client mutates only ack+revoke | `sed -n '1,10p;78,80p' src/chronos/terminal/static/terminal.js` |
-| Paper branch skips arming/kill; branch by ib_environment | `sed -n '211,330p' src/chronos/orders/submission.py` |
-| Readiness consumed by one opening submission | `grep -n "consumed by an opening" src/chronos/orders/reconciliation_readiness.py` |
-| Backup doc still omits live_kill_switch.json | `grep -c live_kill_switch docs/BACKUP_AND_RECOVERY.md` (0 = still omitted) |
-| Incident runbook still platform-halt-only | `grep -c "live/kill" docs/INCIDENT_RESPONSE.md` (0 = defect stands) |
-| Mandate auto-activation on boot | `sed -n '250,276p' src/chronos/api/main.py` |
-| `make demo` still aliases `ui` | `grep -n -A1 "^demo:" Makefile` |
-| Entry-point flags (service/histdata) | `.venv/bin/python -m chronos.service --help` / `... -m chronos.histdata --help` |
+## Maintenance contract
 
-If any re-verification disagrees with this skill, the code wins (AGENTS.md precedence);
-update this skill and log the drift in chronos-docs-map's ledger.
+Before relying on or updating this skill, re-derive the volatile surfaces:
+
+```bash
+make -n backend ui demo migrate
+.venv/bin/python -m chronos.cli --help
+.venv/bin/python -m chronos.service --help
+.venv/bin/python -m chronos.histdata --help
+rg -n '^@router\.(get|post)' src/chronos/api/routes/terminal.py src/chronos/api/routes/live.py
+rg -n '^SCHEMA_VERSION' src/chronos/persistence/database.py
+.venv/bin/alembic heads
+make gates
+```
+
+Do not add schema versions, migration heads, test counts, branch names, dated
+status snapshots, or copied open-finding claims. Point to the authoritative source
+and state the decision rule instead. `tests/unit/test_operator_skill_contract.py`
+keeps the terminal mutation surface and these anti-staleness rules executable.
