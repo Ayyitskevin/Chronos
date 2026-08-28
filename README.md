@@ -281,8 +281,9 @@ CI runs these six in order. Migration verification (fresh-DB init, historical-sc
 upgrades, and a no-un-migrated-drift completeness check) runs inside the pytest step. The release
 gate builds the current source as a wheel, installs it with hash-locked dependencies in a clean
 venv outside the checkout, and verifies package origin, static assets, the complete importable
-migration namespace at head, and all shipped entry points. The separately marked IBKR smoke test
-is skipped by default and remains strictly read-only.
+migration namespace at head, the `chronos` console entry point, and every source-declared
+`python -m` entry point. The separately marked IBKR smoke test is skipped by default and remains
+strictly read-only.
 
 ## Documentation
 
