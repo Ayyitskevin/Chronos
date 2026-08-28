@@ -173,6 +173,12 @@ worth having; it deserved — and got — a written close.
   (`docs/CONTINUATION_PLAN_2026-08-12.md`) — do not pre-merge, do not self-merge a PR
   whose contract says `owner_gate: required`.
 - **Post-merge, verify the result rather than the badge:**
+  GitHub's [GraphQL PullRequest reference](https://docs.github.com/en/graphql/reference/pulls#pullrequest)
+  defines `mergeCommit` as the commit created by the merge and keeps `headRefOid`
+  available after head-ref deletion. Its [merge-method reference](https://docs.github.com/en/pull-requests/reference/pull-request-merges)
+  distinguishes preserved merge-commit history from squash consolidation and rebase
+  SHA rewriting. The proof branches below follow those documented identities.
+
   1. Fetch, derive the default branch again (§2), and read the exact PR identities:
      `gh pr view <n> --json baseRefName,headRefOid,mergeCommit,state`. Require `MERGED`,
      the derived default as the base, the reviewed SHA as `headRefOid`, and a non-null

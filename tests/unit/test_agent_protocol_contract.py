@@ -23,6 +23,17 @@ def test_post_merge_proof_starts_from_the_merge_result() -> None:
         assert fragment in text, f"agent protocol omits merge-result proof: {fragment}"
 
 
+def test_merge_strategy_api_claims_cite_official_github_sources() -> None:
+    text = _protocol_text()
+    required_sources = (
+        "https://docs.github.com/en/graphql/reference/pulls#pullrequest",
+        "https://docs.github.com/en/pull-requests/reference/pull-request-merges",
+    )
+
+    for source in required_sources:
+        assert source in text, f"agent protocol omits official GitHub source: {source}"
+
+
 def test_rewritten_candidates_use_changed_path_equality() -> None:
     text = _protocol_text()
     required_fragments = (
