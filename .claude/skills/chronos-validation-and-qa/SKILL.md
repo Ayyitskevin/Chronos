@@ -24,7 +24,8 @@ fifth instance. The rule that governs everything below:
 > the exact evidence artifact — a specific test file and what it asserts, a real-gateway
 > capture, or a promotion artifact. If you cannot name it, do not claim it.**
 
-All volatile numbers below verified on 2026-08-02 at HEAD `47a8d72`.
+Base examples were written against 2026-08-02 HEAD `47a8d72`; the suite inventory and CI
+contract were re-verified on 2026-08-28 at `d44fc4ac7d2f37475e81ebdc15ccd9ba301247a2`.
 
 ## 1. The claim-evidence ladder (the centerpiece)
 
@@ -37,7 +38,7 @@ docs, and in your own head.
 | Rung (weakest → strongest) | What it means | Minimum evidence you must name | Chronos examples today (2026-08-02) |
 |---|---|---|---|
 | 1. Code exists | The lines are present | `file:line` | Almost everything |
-| 2. Tested | A test calls it and asserts something | Named test file + what it actually asserts (not just that it exists) | Most of `src/chronos` (2489 passing tests) |
+| 2. Tested | A test calls it and asserts something | Named test file + what it actually asserts (not just that it exists) | Most of `src/chronos`; the current dated suite count is below |
 | 3. Structurally enforced | A test fails on ANY regression, not just the cases someone thought of — typically an AST/source scan or pinned inventory | The structural test + the property it pins | Single transmit site, transmit/mutation inventory, import bans, no-HTML-sinks, ENFORCED/INERT mandate pin (§4a) |
 | 4. Exercised | The control has been driven end-to-end on its real blocking path and observed producing its intended outcome (a refusal, an OPEN, a PASS) with realistic payloads | A `test_*_exercised.py`-style test asserting the outcome fires | Opening cap (14 tests), session gate (9), option deliverable (30) — each asserts "the outcome that had never happened" |
 | 5. Gateway-verified | Behavior confirmed against a real IBKR TWS/Gateway session | A captured, sanitized real-gateway run | **NOTHING has this. No real IBKR gateway (paper or live) has ever been connected in this project's history** (docs/limitations.md:22-23) |
@@ -61,12 +62,18 @@ Vocabulary that encodes the ladder — use it, never blur it:
 
 ## 2. Test-suite map
 
+> **Current snapshot (2026-08-28, exact main `d44fc4ac7d2f`):** `pytest -q` → **4239
+> passed, 1 skipped** (4240 collected); `mypy src/chronos` → 294 source files;
+> `mypy --strict worker` → 10 source files; `ruff format --check .` → 548 files; the
+> installed-wheel release gate passed. Counts are evidence snapshots, not contracts: rerun
+> `make gates` before citing another tree.
+
 ~~Verified 2026-08-02: `pytest -q` → **2489 passed, 1 skipped, ~2 minutes** (2490
 collected). Companion gate baselines, same date: `mypy src/chronos` → "Success: no
 issues found in **218** source files"; `ruff format --check .` → "**379** files already
 formatted"~~
 
-> **Corrected 2026-08-09.** `pytest -q` → ~~**2745 passed, 1 skipped**~~ ~~**2767
+> **Historical snapshot (2026-08-09, superseded).** `pytest -q` → ~~**2745 passed, 1 skipped**~~ ~~**2767
 > passed, 1 skipped**~~ ~~**2805 passed, 1 skipped**~~ **2889 passed, 1 skipped, ~2
 > minutes** (2890 collected).
 > Companion gate baselines, same date: `mypy --strict src/chronos` → "Success: no issues
@@ -91,21 +98,21 @@ formatted"~~
 > 2745 is what one running against `5871338` would, 2767 is what one running against
 > `5b0bce7` would, and 2805 is what one running against `8721ea0` would.
 
-The format count includes the five `.claude/skills` scripts, which sit inside `ruff`'s
-repo-wide scope. This section is the authoritative numeric baseline — other skills state
-the loose shape and cross-reference here. Layout under `/home/user/Chronos/tests/`
-(**collected counts corrected 2026-08-09**: the previous column was last true at
-`47a8d72` and had drifted through M12 and the Five-Tool landings; re-derive with
+The format count includes Python scripts under `.claude/skills`, which sit inside `ruff`'s
+repo-wide scope. `docs/TEST_RESULTS.md` preserves the dated run artifact; this skill keeps the
+execution shape and re-verification commands. Layout under `tests/`
+(**collected counts corrected 2026-08-28**; re-derive with
 `.venv/bin/pytest -q --collect-only tests/<dir>`):
 
 | Directory | Collected | What lives there |
 |---|---|---|
-| `tests/unit/` | ~~1461~~ **1631** | Wheel-dashboard subsystem units: brokers, reconciliation, risk, orders, settings, UI models, histdata, SKB, research stats. No `__init__.py`. |
-| `tests/integration/` | ~~202~~ **208** | FastAPI API tests (demo/live/orders/strategy), order pipeline, crypto pipeline, Streamlit smoke, terminal API, `test_migrations.py`, `test_live_submission.py` (ten-gate walk), opt-in `test_ibkr_smoke.py`. |
-| `tests/safety/` | ~~561~~ ~~675~~ **759** | The safety acceptance/structural suite — the crown jewels, itemized below. |
+| `tests/unit/` | ~~1461~~ ~~1631~~ **2544** | Application units: brokers, reconciliation, risk, orders, settings, UI models, histdata, research, and release tooling. No `__init__.py`. |
+| `tests/integration/` | ~~202~~ ~~208~~ **240** | API/order/crypto flows, Streamlit smoke, terminal API, installed migrations, live-gate walk, and opt-in IBKR smoke. |
+| `tests/safety/` | ~~561~~ ~~675~~ ~~759~~ **1159** | The safety acceptance/structural suite — the crown jewels, itemized below. |
 | `tests/platform_unit/` | 226 | Deterministic strategy-platform units: engine guards, ledgers, promotion, sim broker, state machine, `test_property_invariants.py` (hypothesis). |
 | `tests/parity/` | ~~27~~ **53** | Incremental-vs-batch and indicator reference parity. |
 | `tests/chaos/` | 13 | Fault injection through the deterministic platform's backtest/execution/service pipelines. |
+| `tests/` root | **5** | OpenCode workflow-policy tests. |
 | `tests/support/` | — | Shared fakes: `order_fakes.py` (`FakeBroker`, `paper_settings`, `option_contract`, `stock_contract`), `histdata_fakes.py`, `options_fakes.py`, `terminal_harness.js` (node:vm harness). |
 
 **The single skip** is `tests/integration/test_ibkr_smoke.py` — the opt-in, strictly
@@ -142,7 +149,7 @@ ambient settings are live-capable` means your repo-root `.env`, not the code.
 | `tests/safety/test_single_unmask_site.py` | `unlocked=True` (holdout unmask) is passed only by `holdout_guardian.py`, and the guard is non-vacuous (the guardian really is a site). |
 | `tests/safety/test_registry_no_automated_unlock.py` | No automated plane (autonomy, supervisor, scheduled paths — derived from the package tree, not a hand list) imports the registry or calls the holdout unlock. |
 | `tests/safety/test_alert_delivery.py` | R-32: owner alerting works AND the module structurally cannot acquire a networked sender — alerts are local sinks only. |
-| `tests/integration/test_migrations.py` | Builds a v2-shaped DB, runs `alembic upgrade head`, asserts `Database.initialize()` accepts it with zero drift. Migration verification lives INSIDE pytest, not as a separate CI step. |
+| `tests/integration/test_migrations.py` | Builds a v2-shaped DB, runs `alembic upgrade head`, and asserts `Database.initialize()` accepts it with zero drift. The separate release gate repeats v2-to-head verification through the installed wheel. |
 | `tests/integration/test_live_submission.py` | The LIVE branch's ten-gate walk against `FakeBroker`: stale data, reconciliation latch, account match, confirmation hash, and the kill-switch-adjacent-to-transmit wiring (:910). |
 
 Also structural, same family: `test_histdata_isolation.py`, `test_research_isolation.py`,
@@ -151,34 +158,38 @@ Also structural, same family: `test_histdata_isolation.py`, `test_research_isola
 
 ## 3. How tests actually run
 
-**CI** (`.github/workflows/ci.yml`, one job `quality`, ubuntu-latest, 10-minute timeout,
+**CI** (`.github/workflows/ci.yml`, one job `quality`, ubuntu-latest, 20-minute timeout,
 every push and PR) runs on Python 3.12 with a hash-locked install
 (`pip install --require-hashes -r requirements-dev.lock` then `pip install -e . --no-deps`)
 under env `BROKER_MODE=demo`, `ALLOW_ORDER_TRANSMIT=false`, `ALLOW_LIVE_TRADING=false`,
-then the **four gates in order**:
+then the **six gates in order**:
 
 ```bash
 ruff check .
 ruff format --check .
 mypy src/chronos        # strict = true
+mypy --strict worker
 pytest -q
+python scripts/verify_release_artifact.py
 ```
 
-Locally: `make gates` runs the same four (Makefile targets `lint`, `format-check`,
-`type`, `test`; every target hard-codes `.venv/bin/...` — environment setup, the 3.11
-default-python trap, and the lockfile discipline are `chronos-build-and-env`'s domain).
+Locally: `make gates` runs the same six (Makefile targets `lint`, `format-check`, `type`,
+`type-worker`, `test`, `release-gate`; every target hard-codes `.venv/bin/...` — environment
+setup, the 3.11 default-python trap, and lockfile discipline are
+`chronos-build-and-env`'s domain).
 
-Facts, not endorsements (verified 2026-08-02):
+Facts, not endorsements (CI shape re-verified 2026-08-28):
 
 - **No coverage tooling exists** — no pytest-cov, no coverage config, no CI coverage
   step. Any coverage number you see quoted was not produced by this repo.
-- **No pytest-timeout.** The suite is fast (~2 min for 2490 tests); CI's 10-minute job
-  timeout means a *hang*, not slowness, is what kills CI.
+- **No pytest-timeout.** The 2026-08-28 suite takes roughly three minutes locally; CI's
+  20-minute job timeout remains the outer bound.
 - pytest config (pyproject.toml:61-67): `--strict-config --strict-markers -ra`,
   `asyncio_mode = "auto"`, `testpaths = ["tests"]`, exactly ONE registered marker: `ibkr`.
-- **mypy strict covers `src/chronos` only** — tests and `scripts/` are not type-checked.
-  Ruff checks everything (line-length 100, rules `E,F,I,B,UP,SIM,DTZ,RUF` — `DTZ` means
-  naive datetimes fail lint; use timezone-aware datetimes in tests).
+- **mypy strict covers `src/chronos` and, in a separate command, `worker`** — tests and
+  `scripts/` are not type-checked. Ruff checks everything (line-length 100, rules
+  `E,F,I,B,UP,SIM,DTZ,RUF` — `DTZ` means naive datetimes fail lint; use timezone-aware
+  datetimes in tests).
 
 ## 4. The house proof patterns
 
@@ -223,8 +234,9 @@ passing tests; none had ever produced its intended outcome end-to-end. An exerci
    invisibly); fail-open hid R-25 (passed everything, invisibly). Neither direction
    produced a test failure until the exercised tests existed.
 
-Naming convention: `tests/safety/test_<control>_exercised.py` (two exist today:
-opening cap, session gate). Follow it when you make an inert-capable control fire.
+Naming convention: `tests/safety/test_<control>_exercised.py`. Multiple controls now follow it;
+derive the current inventory with `rg --files tests/safety | rg 'exercised.*\.py$'`. Follow the
+convention when you make an inert-capable control fire.
 
 ### 4c. Revert-the-fix verification — manual mutation testing
 
@@ -393,17 +405,17 @@ Restate these verbatim when anyone (including you) is tempted to over-claim:
 
 ## Provenance and maintenance
 
-Verified 2026-08-02 against HEAD `47a8d72` on branch `claude/chronos-skills-library-bfbj29`,
-full suite executed in a Python 3.12 venv built from `requirements-dev.lock`. Volatile
-facts and how to re-verify each (all read-only):
+Base content verified 2026-08-02 against HEAD `47a8d72`; the suite/CI facts were
+re-verified 2026-08-28 against exact main `d44fc4ac7d2f`. Volatile facts and how to
+re-verify each (all read-only):
 
 | Volatile fact | Re-verify with |
 |---|---|
-| ~~2489 passed / 1 skipped, ~2 min~~ ~~2745 passed~~ ~~2767 passed~~ ~~2805 passed~~ **corrected 2026-08-09: 2889 passed / 1 skipped** (see the §2 correction note) | `.venv/bin/python -m pytest -q` (per README Setup) |
-| ~~mypy 218 source files; format 379 files~~ ~~mypy 232; format 410~~ ~~mypy 233; format 412~~ **corrected 2026-08-09: mypy 235; format 416** (incl. the 5 `.claude/skills` scripts) | `.venv/bin/mypy src/chronos` ; `.venv/bin/ruff format --check .` |
-| Per-directory counts ~~(1461/202/561/226/27/13)~~ ~~(1631/208/675/226/53/13)~~ **corrected 2026-08-09: (1631/208/759/226/53/13)** | `.venv/bin/python -m pytest tests/<dir> --collect-only -q \| tail -1` |
+| **4239 passed / 1 skipped (2026-08-28)**; older lineage remains in §2 | `.venv/bin/python -m pytest -q` (per README Setup) |
+| **mypy 294+10 source files; format 548 files (2026-08-28)** | `.venv/bin/mypy src/chronos`; `.venv/bin/mypy --strict worker`; `.venv/bin/ruff format --check .` |
+| Per-directory counts **2544/240/1159/226/53/13**, plus 5 root tests | `.venv/bin/python -m pytest tests/<dir> --collect-only -q \| tail -1` |
 | The single skip is the IBKR smoke test | `.venv/bin/python -m pytest -q -ra \| grep -A1 SKIPPED` |
-| Four CI gates and CI env | `sed -n '1,50p' .github/workflows/ci.yml` |
+| Six CI gates, installed-wheel gate, and CI env | `sed -n '1,70p' .github/workflows/ci.yml` |
 | Only marker is `ibkr`; strict flags | `sed -n '61,68p' pyproject.toml` |
 | No coverage / pytest-timeout tooling | `grep -in "coverage\|timeout" pyproject.toml Makefile` (only CI job timeout exists) |
 | Transmit site at submission.py:745 | `grep -n "transmit=True" src/chronos/orders/submission.py` |

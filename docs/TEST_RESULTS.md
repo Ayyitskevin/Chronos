@@ -5,31 +5,31 @@ root on Python 3.12 using the existing `.venv` directly. Statuses use the plan's
 PASSED / FAILED / SKIPPED / NOT RUNNABLE WITHOUT CREDENTIALS /
 NOT IMPLEMENTED / REQUIRES OWNER ACTION.
 
-## Summary (current — re-measured 2026-08-23)
+## Summary (current — re-measured 2026-08-28)
 
-Measured on the option-chain salvage merge result (`main` `93a26f6` + codex's
-`ae9d256`), Python 3.12, all five gates run in CI order and in CI's own default
-test order. **These numbers drift with every merged test** — re-run before
-citing them.
+Measured on exact `main` `d44fc4ac7d2f37475e81ebdc15ccd9ba301247a2`, Python 3.12,
+with all six `make gates` targets in CI order. **These numbers drift with every merged test** —
+rerun before citing them.
 
 | Command | Result |
 |---|---|
-| `pytest -q` | **3976 passed, 1 skipped** (~153 s; 3977 collected) |
+| `pytest -q` | **4239 passed, 1 skipped, 24 warnings** (4240 collected) |
 | `ruff check .` | clean |
-| `ruff format --check .` | clean (525 files) |
-| `mypy src/chronos` | clean (286 source files) |
+| `ruff format --check .` | clean (548 files) |
+| `mypy src/chronos` | clean (294 source files) |
 | `mypy --strict worker` | clean (10 source files) |
-| GitHub Actions `quality` job | verify on the current PR |
+| `python scripts/verify_release_artifact.py` | installed package/assets/entry points and v2-to-head migration smoke passed |
+| GitHub Actions `quality` job | [run 33139504555](https://github.com/Ayyitskevin/Chronos/actions/runs/33139504555) succeeded at exact `d44fc4ac7d2f` |
 
-The single skip is the opt-in, credential-gated, read-only IBKR smoke test — it
-has never been run against a real gateway, which is why it skips; it does not
-fail. For comparison, `main` alone collects 3630 tests at `93a26f6`.
+The single skip is the opt-in, credential-gated, read-only IBKR smoke test — it has never been run
+against a real gateway, which is why it skips; it does not fail. The installed-wheel smoke uses
+only disposable local state and no broker connection.
 
 ## Summary (historical — re-measured 2026-08-02, superseded)
 
 Measured on this date against the merge commit `7f2d208`, Python 3.12, all four gates run
-in CI order. **These numbers drift with every merged test** — re-run before citing them;
-the authoritative live command is the first row.
+in CI order. This table is a historical artifact; use the current summary above and rerun its
+commands before citing another tree.
 
 | Command | Result |
 |---|---|
@@ -56,7 +56,7 @@ authenticated GET-only receipt inspection. It used only offline fakes. The
 credential-gated real-IBKR smoke was not run, no live resolver-promotion artifact
 was created, and no order was placed.
 
-## Final repository gate (2026-08-01)
+## Final repository gate (historical — 2026-08-01, superseded)
 
 All commands used `BROKER_MODE=demo ALLOW_ORDER_TRANSMIT=false
 ALLOW_LIVE_TRADING=false` and `PATH="$PWD/.venv/bin:$PATH"`.
@@ -113,7 +113,7 @@ grew across two independent-review remediations
 (docs/REMEDIATION_REPORT.md, docs/INDEPENDENT_REVIEW_M5.md) and the M2–M4
 milestones.
 
-## Breakdown
+## Breakdown (historical — post-M5 snapshot, superseded)
 
 | Suite | Count | Status | Notes |
 |---|---|---|---|

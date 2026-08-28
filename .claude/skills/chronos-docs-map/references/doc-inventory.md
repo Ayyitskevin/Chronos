@@ -1,8 +1,9 @@
 # Chronos document inventory — complete, per file
 
-Verified against the repo at HEAD `47a8d72` on 2026-08-02. Status vocabulary
-(defined in ../SKILL.md): CURRENT / HISTORICAL-HONEST / STALE-UNBANNERED / MIXED.
-Tier numbers are the AGENTS.md:41-54 precedence tiers (1 owner direction … 6 historical).
+Base inventory verified at HEAD `47a8d72` on 2026-08-02; validation-document rows and
+count lineage re-verified at exact main `d44fc4ac7d2f` on 2026-08-28. Status vocabulary
+(defined in ../SKILL.md): CURRENT / HISTORICAL-HONEST / STALE-UNBANNERED / MIXED. Tier numbers
+are the AGENTS.md precedence tiers (1 owner direction … 6 historical).
 
 Re-generate the raw file list any time:
 
@@ -18,7 +19,7 @@ ls *.md docs/*.md docs/adr/*.md
 | CLAUDE.md | 6-line entry pointer: read AGENTS.md + vision plan before any work | Meta | CURRENT |
 | KIMI.md | Byte-parallel entry pointer for the Kimi agent | Meta | CURRENT |
 | README.md | Front page: mission (owner directive 2026-07-25), autonomy milestone log M0-M11, safety posture with [enforced]/[contract] labels, setup | 1 (mission) / 2 (status) | CURRENT — the freshest status narrative in the repo |
-| CHANGELOG.md | Reverse-chron build log with per-milestone gate counts; head entry = M11, 2026-07-27 | 2 | CURRENT — the ONLY doc with the current test count (2489 passed, 1 skipped, CHANGELOG.md:69) |
+| CHANGELOG.md | Reverse-chron build history with snapshot gate counts | 2 | CURRENT as history; use docs/TEST_RESULTS.md plus a fresh run for current gate evidence |
 | DECISIONS.md | Decision index D-01..D-19; D-11 struck through, superseded by D-16 | 3 | CURRENT — exemplary supersession hygiene (note: rows D-17/D-18 appear after D-19 in the file) |
 | RISK_REGISTER.md | Living risk register R-01..R-42 with dated statuses and disclosed residuals | 4 | MIXED — R-01's note is frozen at M1-era and contradicts R-38 (Ledger #12); trust R-24..R-42 after spot-checking code |
 | ASSUMPTIONS.md | Conservative build assumptions A-01..A-42, some amended in place | 4-ish | MIXED — A-12 amended 2026-07-25; A-10/A-21/A-22 still assume ~USD 3,000 (Ledger #8) |
@@ -60,8 +61,8 @@ ls *.md docs/*.md docs/adr/*.md
 | docs/PINE_AUDIT.md | Forensic audit of all 42 Pine scripts | reference | CURRENT (static artifact) |
 | docs/PARITY_REPORT.md | Pine→Python parity — "TRANSLATION VERIFIED AGAINST SPECIFICATION" (spec-level only, no TradingView exports) | 2 | CURRENT |
 | docs/RESEARCH_REPRODUCIBILITY.md | produce/replay/compare manifest tooling | reference | CURRENT — dead link at :8 to RESEARCH_READINESS.md, which does not exist |
-| docs/TEST_PLAN.md | Test taxonomy per layer | 6 | MIXED — taxonomy useful; ":4-5 being produced separately" is stale (results exist) and layer counts are frozen (":22 29 tests" for tests/safety/ vs "~90" per TEST_RESULTS.md:18) |
-| docs/TEST_RESULTS.md | Test run evidence | 2 | STALE-UNBANNERED (danger) — the section headed "Summary (current — M2a, 2026-07-25)" reports 1901 passed; the real count is 2489 (CHANGELOG.md:69). The historical section IS labeled superseded; the "current" header simply stopped being maintained (Ledger #7) |
+| docs/TEST_PLAN.md | Current test taxonomy, executable CI/local gate contract, and environment limits | 6 | CURRENT — volatile whole-suite counts defer to TEST_RESULTS and `make gates` (Ledger #7 resolved 2026-08-28) |
+| docs/TEST_RESULTS.md | Dated test-run evidence plus explicitly historical snapshots | 2 | CURRENT — exact-main 2026-08-28 summary is first; older measurements are labeled historical (Ledger #7 resolved) |
 | docs/INDEPENDENT_REVIEW.md | Adversarial review round 1 (7 dimensions, 1 CRITICAL, 7 HIGH) | 2 | CURRENT as a record |
 | docs/INDEPENDENT_REVIEW_M5.md | Adversarial review round 2 (post-M1..M4; no criticals, 2 HIGH) | 2 | CURRENT as a record |
 | docs/REMEDIATION_REPORT.md | Disposition of every round-1 finding; "1158 passed" is a snapshot count, not current | 2 | CURRENT as a record |
@@ -102,16 +103,15 @@ Status lines verified verbatim from each file's `Status:` line, 2026-08-02.
 | 0018 | Operator terminal: fresh, Python-served (D-18) | accepted (2026-07-26) | tyche/midas rejected on evidence |
 | 0019 | Historical bars + chart panel (D-19) | accepted (2026-07-26) | |
 
-## The test-count lineage (why any count outside CHANGELOG head misleads)
+## The test-count lineage (dated snapshots; current evidence lives in TEST_RESULTS)
 
-951 (TASKS.md:13, baseline) → 1115 (GO_LIVE_CHECKLIST.md:60) → 1158
-(REMEDIATION_REPORT.md, TASKS.md:40, OPUS_BUILD_BRIEF.md) → 1255 (TEST_RESULTS.md:27,
-labeled historical) → 1885 (HANDOFF.md:24) → 1901 (TEST_RESULTS.md:12, labeled "current",
-is not) → **2489 passed, 1 skipped** (CHANGELOG.md:69, M11 2026-07-27; re-verified green
-2026-08-02).
+951 (TASKS baseline) → 1115 (GO_LIVE_CHECKLIST) → 1158 (REMEDIATION_REPORT, TASKS,
+OPUS_BUILD_BRIEF) → 1255 (TEST_RESULTS historical) → 1885 (HANDOFF) → 1901
+(TEST_RESULTS, formerly mislabeled current) → 2489 (2026-08-02) → 3976 (2026-08-23) →
+**4239 passed, 1 skipped** (TEST_RESULTS, exact main `d44fc4ac7d2f`, 2026-08-28).
 
 Every count is a snapshot. Re-verify before citing:
 
 ```bash
-.venv/bin/pytest -q   # count drifts with every milestone; CHANGELOG head records the last gate
+.venv/bin/pytest -q   # count drifts with every milestone; TEST_RESULTS stores dated evidence
 ```

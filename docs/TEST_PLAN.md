@@ -1,17 +1,17 @@
 # Test Plan
 
 The test taxonomy as it exists in this repository, what each layer proves, exact commands, and —
-just as important — what cannot be tested from this environment. Final counts and run evidence
-land in docs/TEST_RESULTS.md (being produced separately; see TASKS.md).
+just as important — what cannot be tested from this environment. Dated run evidence lives in
+docs/TEST_RESULTS.md; counts are snapshots, so rerun `make gates` before citing the current tree.
 
 ## Layers
 
-### 1. Existing wheel-dashboard suite — `tests/unit/`, `tests/integration/`
+### 1. Application unit and integration suites — `tests/unit/`, `tests/integration/`
 
-The pre-platform baseline: 951 passed, 1 skipped (the credential-gated IBKR smoke test) on Python
-3.12 (TASKS.md). Covers the wheel dashboard's broker adapters, reconciliation, candidate/risk/
-what-if/approval boundaries, persistence, and UI models. This suite must stay green; the platform
-was added without modifying it (ADR-0001).
+The original pre-platform snapshot was 951 passed and one skipped. The directories have since
+grown beyond the wheel dashboard: they cover broker adapters, reconciliation, order/API flows,
+research, persistence, UI models, installed migrations, and Streamlit rendering. The current
+collected counts belong in docs/TEST_RESULTS.md, not in this plan.
 
 ```bash
 .venv/bin/pytest tests/unit tests/integration -q
@@ -19,7 +19,7 @@ was added without modifying it (ADR-0001).
 
 ### 2. Platform safety acceptance suite — `tests/safety/`
 
-`tests/safety/test_safety_invariants.py` — 29 tests exercising the real components (no mocks of
+`tests/safety/test_safety_invariants.py` — 36 collected cases exercising the real components (no mocks of
 the objects under test), mapping to invariants in docs/RISK_POLICY.md. Classes and what they
 prove:
 
@@ -56,11 +56,12 @@ probe); `AITradeDecision` carries no account/broker/routing/transmit field anywh
 nested model tree and refuses smuggled fields; a decision may not name a broker order id;
 exposure-creating decisions must cite evidence and state invalidation conditions;
 `AutonomyMandate` is frozen, must expire after it starts, authorizes nothing by default,
-cannot exceed its promotion rung, cannot outlive the 30-day live ceiling, must state its
-scope explicitly in submitting modes, refuses futures options and known-bad data qualities,
+cannot exceed its promotion rung, cannot outlive the code-defined live-duration ceiling, must
+state its scope explicitly in submitting modes, refuses futures options and known-bad data qualities,
 and requires a pseudonymous account scope; no uncovered short option and no `MARKET` order
-form are expressible; the startup autonomy mode is not live. It also asserts that **M1 wired
-the contracts into no runtime path** — a milestone guard that M2's gateway tests replace.
+form are expressible; the startup autonomy mode is not live. Its current structural guard asserts
+that only the supervisor and named wiring modules consume the contracts; this replaced the M1
+milestone's wired-into-nothing assertion.
 
 `tests/unit/test_option_selection.py`, `tests/unit/test_option_selection_service.py`,
 `tests/safety/test_option_selection_cycle.py`, and
@@ -119,26 +120,21 @@ list, because M2's deterministic supervisor must import the decision contract to
 
 ### 3. Platform unit / parity / chaos suites — `tests/platform_unit/`, `tests/parity/`, `tests/chaos/`
 
-Being authored in parallel by another workstream; files are landing while this plan is written.
-Coverage:
+These are established suites. Their current file inventory is executable state (`rg --files
+tests/platform_unit tests/parity tests/chaos`); the durable division of responsibility is:
 
-- `tests/platform_unit/` — per-module platform tests. Current files: `test_auditlog.py`,
-  `test_ledgers.py`, `test_metrics.py`, `test_notifier.py`, `test_portfolio_sizer.py`,
-  `test_promotion.py`, `test_quality_and_csv.py`, `test_sim_broker.py`, `test_specs.py`,
-  `test_state_machine.py`. Intended scope also includes IBKR paper adapter behavior against a
-  fake `IBLike` object (construction gates, account verification, order shape, event
-  translation).
-- `tests/parity/` — indicator/strategy parity: `test_indicator_reference.py` (Pine-semantics
-  indicator values against references), `test_incremental_vs_batch.py` (incremental computation
-  equals batch recomputation). Honest limit: no TradingView exports exist (ASSUMPTIONS.md A-03),
-  so parity is verified against specifications and references, never against TradingView output.
-- `tests/chaos/` — fault injection through the simulated broker's `FaultPlan`
-  (`src/chronos/execution/brokers/simulated.py`): `test_execution_faults.py`,
-  `test_backtest_faults.py` — rejections, partial fills, duplicated events, dropped acks —
-  asserting the engine halts/reconciles rather than trading through ambiguity, and that
-  backtests remain deterministic under identical fault plans.
+- `tests/platform_unit/` — per-module deterministic-platform tests, including the state machine,
+  ledgers, promotion, simulated and paper-broker behavior, service loop, metrics, and property
+  invariants.
+- `tests/parity/` — indicator/strategy reference parity and batch-versus-stream equivalence,
+  including the Five-Tool path. Honest limit: the base strategy set has no TradingView exports
+  (ASSUMPTIONS.md A-03), so those cases verify specifications and references rather than
+  TradingView output.
+- `tests/chaos/` — deterministic fault injection through backtest, execution, and service-loop
+  paths: rejections, partial fills, duplicated events, dropped acknowledgements, and recovery
+  behavior. These assert halt/reconciliation behavior rather than trading through ambiguity.
 
-Final shape and counts: docs/TEST_RESULTS.md once that work lands.
+Current shape and dated counts: docs/TEST_RESULTS.md.
 
 ```bash
 .venv/bin/pytest tests/platform_unit tests/parity tests/chaos -q
@@ -183,21 +179,24 @@ CHRONOS_RUN_IBKR_SMOKE=1 BROKER_MODE=ibkr ALLOW_ORDER_TRANSMIT=false ALLOW_LIVE_
 
 ## CI gates
 
-`.github/workflows/ci.yml`, on every push and pull request (Python 3.12, 10-minute timeout, env
+`.github/workflows/ci.yml`, on every push and pull request (Python 3.12, 20-minute timeout, env
 pins `BROKER_MODE=demo`, `ALLOW_ORDER_TRANSMIT=false`, `ALLOW_LIVE_TRADING=false`):
 
 ```bash
 ruff check .
 ruff format --check .
 mypy src/chronos          # strict mode (pyproject.toml)
+mypy --strict worker      # separate worker process/package
 pytest -q                 # entire tests/ tree; the IBKR smoke test self-skips
+python scripts/verify_release_artifact.py
 ```
 
-All four must pass. Run the same four locally before pushing.
+All six must pass. The final command builds and installs the wheel outside the checkout, compares
+shipped assets and migrations with source, upgrades a disposable v2 database through head, and
+exercises installed entry points. Run the same sequence locally before pushing.
 
 ## Full local run
 
 ```bash
-.venv/bin/ruff check . && .venv/bin/ruff format --check . \
-  && .venv/bin/mypy src/chronos && .venv/bin/pytest -q
+make gates
 ```
