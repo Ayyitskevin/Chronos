@@ -14,8 +14,8 @@ This is an owner-independent slice of the Phase 2 package/release work. The publ
 3. import Chronos only from that environment and load its `chronos` console entry point;
 4. verify terminal assets and the complete migration namespace equal their source bytes;
 5. load the installed Alembic graph at its single expected head; and
-6. discover every source-declared `python -m` entry point and run its `--help` surface from the
-   installed wheel.
+6. discover every packaged `src/chronos/**/__main__.py` command surface and run its `--help` from
+   the installed wheel.
 
 The gate uses setuptools package-data declarations for non-Python files, following the
 [setuptools package-data contract](https://setuptools.pypa.io/en/stable/userguide/datafiles.html#package-data).
@@ -54,12 +54,12 @@ GitHub Actions `Validate release artifact` step call it directly.
 ## Review follow-up — 2026-08-28
 
 Independent review found that the first gate hard-coded both its three terminal filenames and two
-of the four source-declared module entry points. A new static-file extension could therefore be
-omitted from the wheel while the gate stayed green, and the bridge and historical-data entry points
-were not exercised. The follow-up makes the source tree the inventory for both surfaces, broadens
-the setuptools declaration to terminal files of any non-hidden type at any depth, and makes
-`python -m chronos.bridge --help` exit before credentials are read. Ordinary bridge startup still
-refuses a missing secret.
+of the four packaged `src/chronos/**/__main__.py` command surfaces. A new static-file extension
+could therefore be omitted from the wheel while the gate stayed green, and the bridge and
+historical-data commands were not exercised. The follow-up makes the source tree the inventory for
+both surfaces, broadens the setuptools declaration to terminal files of any non-hidden type at any
+depth, and makes `python -m chronos.bridge --help` exit before credentials are read. Ordinary bridge
+startup still refuses a missing secret.
 
 The adversarial static probe first reproduced the blind spot against the old declaration, then
 made the source-driven verifier refuse the wheel:

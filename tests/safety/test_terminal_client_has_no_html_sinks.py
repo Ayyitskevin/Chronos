@@ -53,11 +53,11 @@ refreshing.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from pathlib import Path
 
 _CLIENT_DIR = Path(__file__).resolve().parents[2] / "src" / "chronos" / "terminal" / "static"
 _JS = _CLIENT_DIR / "terminal.js"
-_CSS = _CLIENT_DIR / "terminal.css"
 _HTML = _CLIENT_DIR / "index.html"
 
 #: Every way a string can stop being text and start being code or markup. Named
@@ -263,6 +263,20 @@ def _sinks_in(label: str, text: str) -> list[str]:
     return found
 
 
+def _sources(
+    suffix: str,
+    strip_comments: Callable[[str], str],
+    *,
+    root: Path = _CLIENT_DIR,
+) -> dict[str, str]:
+    """Every matching client source, including files in future subdirectories."""
+
+    return {
+        path.relative_to(root).as_posix(): strip_comments(path.read_text(encoding="utf-8"))
+        for path in sorted(root.rglob(f"*{suffix}"))
+    }
+
+
 def _tags(html: str) -> list[str]:
     return re.findall(r"<[a-zA-Z][^>]*>", html)
 
@@ -279,9 +293,13 @@ def test_the_shipped_client_assigns_no_markup_and_evaluates_no_string() -> None:
     same-origin with the order routes.
     """
 
-    offenders = _sinks_in("terminal.js", _strip_js_comments(_JS.read_text(encoding="utf-8")))
-    offenders += _sinks_in("index.html", _strip_html_comments(_HTML.read_text(encoding="utf-8")))
-    offenders += _sinks_in("terminal.css", _strip_css_comments(_CSS.read_text(encoding="utf-8")))
+    sources = {
+        **_sources(".js", _strip_js_comments),
+        **_sources(".html", _strip_html_comments),
+        **_sources(".css", _strip_css_comments),
+    }
+    assert sources, "the terminal client has no scannable source files"
+    offenders = [finding for label, text in sources.items() for finding in _sinks_in(label, text)]
     assert offenders == [], "the terminal client grew an HTML or eval sink:\n" + "\n".join(
         offenders
     )
@@ -297,8 +315,14 @@ def test_the_shell_declares_no_inline_event_handler() -> None:
     the browser is still a handler nobody meant to ship.
     """
 
-    html = _strip_html_comments(_HTML.read_text(encoding="utf-8"))
-    offenders = [tag for tag in _tags(html) if re.search(r"(?i)\son[a-z]+\s*=", tag)]
+    sources = _sources(".html", _strip_html_comments)
+    assert sources, "the terminal client has no HTML to scan"
+    offenders = [
+        f"{label}: {tag}"
+        for label, html in sources.items()
+        for tag in _tags(html)
+        if re.search(r"(?i)\son[a-z]+\s*=", tag)
+    ]
     assert offenders == [], f"the shell declares an inline event handler: {offenders}"
 
 
@@ -311,11 +335,10 @@ def test_the_client_loads_nothing_from_another_origin() -> None:
     already says so in prose; this is the same claim in a form that fails.
     """
 
-    sources = {
-        "terminal.js": _strip_js_comments(_JS.read_text(encoding="utf-8")),
-        "terminal.css": _strip_css_comments(_CSS.read_text(encoding="utf-8")),
-        "index.html": _strip_html_comments(_HTML.read_text(encoding="utf-8")),
-    }
+    html_sources = _sources(".html", _strip_html_comments)
+    css_sources = _sources(".css", _strip_css_comments)
+    sources = {**_sources(".js", _strip_js_comments), **css_sources, **html_sources}
+    assert sources, "the terminal client has no source files to scan"
     offenders = [
         f"{label}:{text.count(chr(10), 0, match.start()) + 1} — {match.group(0)!r}"
         for label, text in sources.items()
@@ -327,11 +350,14 @@ def test_the_client_loads_nothing_from_another_origin() -> None:
 
     # And every reference it *does* make stays under the one prefix index.html
     # documents, so "same-origin" is a path and not just an absent hostname.
-    references = _SHELL_REFERENCE.findall(sources["index.html"])
+    references = _SHELL_REFERENCE.findall(html_sources["index.html"])
     assert references, "the shell references nothing at all, so this test proved nothing"
     assert [ref for ref in references if not ref.startswith("/terminal/static/")] == []
 
-    assert _CSS_URL.findall(sources["terminal.css"]) == []
+    css_urls = [
+        f"{label}: {url}" for label, text in css_sources.items() for url in _CSS_URL.findall(text)
+    ]
+    assert css_urls == []
 
     # The same pattern, shown finding what it is for. An origin check that
     # matched nothing would pass on a page full of CDN tags.
@@ -359,6 +385,16 @@ def test_the_scan_reads_a_file_that_still_contains_its_own_description() -> None
     stripped = _strip_js_comments(raw)
     assert "textContent" in stripped, "the stripper removed the client along with its comments"
     assert stripped.count("\n") == raw.count("\n"), "line numbers no longer line up"
+
+
+def test_the_source_scan_discovers_nested_client_files(tmp_path: Path) -> None:
+    nested = tmp_path / "widgets"
+    nested.mkdir()
+    (nested / "panel.js").write_text("const panel = 1;", encoding="utf-8")
+
+    assert _sources(".js", _strip_js_comments, root=tmp_path) == {
+        "widgets/panel.js": "const panel = 1;"
+    }
 
 
 # ------------------------------------------------- the stripper, pinned in turn
