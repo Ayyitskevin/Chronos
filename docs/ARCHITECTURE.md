@@ -18,6 +18,10 @@ Chronos now contains two cooperating systems in one repository:
 Both share the safety doctrine: deny-by-default, fail closed, broker evidence
 over local belief, and an unconditional deterministic veto over every order.
 
+The repository-scoped capability matrix and default posture are generated from
+executable sources in [generated/CURRENT_STATE.md](generated/CURRENT_STATE.md).
+That page reports code paths, not deployment authority or operational evidence.
+
 **Authority model (ADR-0016 / D-16, 2026-07-25).** The former "no generative AI in
 any runtime decision path" clause (ADR-0004 §5 / D-11) is superseded. An approved
 model may originate runtime trading decisions, but only as a typed
