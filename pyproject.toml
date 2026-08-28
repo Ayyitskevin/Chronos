@@ -57,6 +57,10 @@ where = ["src"]
 # a defect to first appear.
 [tool.setuptools.package-data]
 "chronos.terminal" = ["static/*.html", "static/*.css", "static/*.js"]
+# Alembic's revision template is non-Python package data. Keep it with the
+# installed migration namespace so the wheel carries the complete script tree.
+# Source: https://setuptools.pypa.io/en/stable/userguide/datafiles.html#package-data
+"chronos.persistence.migrations" = ["script.py.mako"]
 
 [tool.pytest.ini_options]
 addopts = "--strict-config --strict-markers -ra"

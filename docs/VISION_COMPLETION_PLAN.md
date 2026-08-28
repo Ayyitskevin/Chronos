@@ -343,6 +343,13 @@ Deliver:
 - Reproducible package/release validation: clean venv install, all migrations, static
   assets, entry points, dependency/secret/static scans, SBOM, and signed artifacts.
 
+  **Partial delivery (2026-08-27):** the CI release-artifact gate now builds and installs the
+  wheel in a clean venv outside the checkout, proves the shipped static assets and migration
+  namespace match source bytes, loads the single migration head, and exercises the console, CLI,
+  and service entry points. Dependency/secret/static scans, an installed-wheel migration upgrade
+  drill, SBOM generation, build-backend pinning, and artifact signing remain open; this does not
+  satisfy the Phase 2 exit.
+
 ### Real-gateway read-only gate
 
 The owner installs and pins the official IB API, supplies a paper account and market-data

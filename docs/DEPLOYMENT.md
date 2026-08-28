@@ -28,11 +28,13 @@ anything you intend to keep running.
 Verify the toolchain the same way CI does:
 
 ```bash
-.venv/bin/ruff check .
-.venv/bin/ruff format --check .
-.venv/bin/mypy src/chronos
-.venv/bin/pytest -q
+make gates
 ```
+
+The final gate builds the current non-ignored source set in isolation, checks the wheel's terminal
+assets and complete migration namespace byte-for-byte against that source, installs the wheel with
+the hash-locked dependencies in a fresh venv outside the checkout, and exercises its package,
+console, CLI, and service entry points. Run only that check with `make release-gate`.
 
 Reproducibility record: even with the lock, record the resolved environment at deployment
 time (the build backend and pip itself are outside the hash gate — docs/SECURITY.md):
