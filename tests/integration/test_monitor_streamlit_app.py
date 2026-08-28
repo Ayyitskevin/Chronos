@@ -13,7 +13,7 @@ from streamlit.testing.v1 import AppTest
 
 from chronos.control.halt import HaltReason, HaltStore
 
-_APP = "src/chronos/monitoring/streamlit_app.py"
+_APP = Path(__file__).resolve().parents[2] / "src/chronos/monitoring/streamlit_app.py"
 
 
 # Streamlit ``AppTest`` timeout budget (raised 2026-08-08).
