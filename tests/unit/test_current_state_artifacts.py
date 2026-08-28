@@ -18,6 +18,9 @@ from pydantic import ValidationError
 
 from chronos.api.autonomy_wiring import BackendGatherers
 from chronos.autonomy.enums import AutonomyMode, DecisionKind, StrategyForm, TradableAssetClass
+from chronos.broker.demo import DemoBroker
+from chronos.broker.ibkr import IBKRBroker
+from chronos.broker.official_ibkr import OfficialIBKRBroker
 from chronos.config.settings import Settings
 from chronos.domain.enums import BrokerAdapter, BrokerMode, IBEnvironment
 from chronos.runtime import build_runtime
@@ -53,10 +56,10 @@ def _rows(document: dict[str, object] | None = None) -> list[dict[str, object]]:
     return [dict(zip(columns, row, strict=True)) for row in values]
 
 
-def _function_ast(function: object) -> ast.FunctionDef:
+def _function_ast(function: object) -> ast.FunctionDef | ast.AsyncFunctionDef:
     parsed = ast.parse(textwrap.dedent(inspect.getsource(function)))
     node = parsed.body[0]
-    assert isinstance(node, ast.FunctionDef)
+    assert isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
     return node
 
 
@@ -230,10 +233,10 @@ def test_decision_evidence_sources_include_default_and_both_bound_origins() -> N
     assert by_source["backend_served"]["citation_kinds"] == ["worker_evidence_snapshot"]
     assert by_source["alert_attested"]["citation_kinds"] == ["tradingview_alert"]
     assert {row["evidence_source"] for row in rows} == set(by_source)
-    assert {profile["evidence_source"] for profile in document["adapter_profiles"]} == {
+    assert {profile["market_evidence_source"] for profile in document["adapter_profiles"]} == {
         "DEMO_BROKER_FIXTURE",
         "IBKR_GATEWAY_OFFICIAL_API",
-        "IBKR_GATEWAY_IB_ASYNC",
+        "IBKR_GATEWAY_IB_ASYNC_READ_ONLY",
     }
 
 
@@ -258,6 +261,20 @@ def test_instrument_fact_gaps_and_option_default_are_visible() -> None:
     assert {row["instrument_facts_status"] for row in option_closing} == {
         "UNAVAILABLE_IN_PRODUCTION_GATHERER"
     }
+    ib_async_crypto = [
+        row
+        for row in rows
+        if row["asset_family"] == "CRYPTO" and row["broker_adapter"] == "ib_async"
+    ]
+    assert ib_async_crypto
+    assert {row["instrument_facts_status"] for row in ib_async_crypto} == {
+        "UNAVAILABLE_ADAPTER_QUALIFY_CRYPTO"
+    }
+    assert not any(
+        row["current_status"] == "CONDITIONAL_OWNER_AND_EVIDENCE_GATED"
+        for row in rows
+        if row["broker_adapter"] == "ib_async"
+    )
 
 
 def test_adapter_profiles_pin_demo_alias_and_live_adapter_boundary() -> None:
@@ -270,8 +287,11 @@ def test_adapter_profiles_pin_demo_alias_and_live_adapter_boundary() -> None:
     assert by_adapter["demo"]["live_submission_path"] is False
     assert by_adapter["official_ibkr"]["paper_submission_path"] is True
     assert by_adapter["official_ibkr"]["live_submission_path"] is True
-    assert by_adapter["ib_async"]["paper_submission_path"] is True
+    assert by_adapter["ib_async"]["paper_submission_path"] is False
     assert by_adapter["ib_async"]["live_submission_path"] is False
+    assert by_adapter["demo"]["submit_order_status"] == "UNCONDITIONAL_REFUSAL"
+    assert by_adapter["official_ibkr"]["submit_order_status"] == "IMPLEMENTED"
+    assert by_adapter["ib_async"]["submit_order_status"] == "UNCONDITIONAL_REFUSAL"
     assert _matrix()["configuration_findings"] == [
         {
             "id": "BROKER_ADAPTER_DEMO_IBKR_ALIAS",
@@ -341,6 +361,13 @@ def test_adapter_path_claims_match_executable_settings_and_runtime_selection() -
     ]
     assert _assigned_constructor(fallback, "broker") == "OfficialIBKRBroker"
 
+    assert isinstance(_function_ast(DemoBroker.submit_order).body[-1], ast.Raise)
+    assert isinstance(_function_ast(IBKRBroker.submit_order).body[-1], ast.Raise)
+    assert isinstance(_function_ast(OfficialIBKRBroker.submit_order).body[-1], ast.Return)
+    assert isinstance(_function_ast(IBKRBroker.qualify_crypto).body[-1], ast.Raise)
+    assert not isinstance(_function_ast(DemoBroker.qualify_crypto).body[-1], ast.Raise)
+    assert not isinstance(_function_ast(OfficialIBKRBroker.qualify_crypto).body[-1], ast.Raise)
+
 
 def test_instrument_fact_claims_match_the_production_gatherer_branches() -> None:
     gatherer_ast = _function_ast(BackendGatherers.instrument_facts)
@@ -376,6 +403,7 @@ def test_current_state_page_is_generated_and_links_the_machine_artifact() -> Non
     assert "**not authorization**" in page
     assert "INERT_NO_MANDATE" in page
     assert "UNAVAILABLE_IN_PRODUCTION_GATHERER" in page
+    assert "UNAVAILABLE_ADAPTER_QUALIFY_CRYPTO" in page
     assert "BrokerAdapter.DEMO" in page
     assert "placeholder_unbound" in page
     assert "backend_served" in page

@@ -23,22 +23,46 @@ The default runtime is `INERT_NO_MANDATE`: no autonomy runtime starts without an
 
 ## Compiler capabilities
 
-| Asset family | Decision | Strategy | Order intent | Production facts route |
-| --- | --- | --- | --- | --- |
-| CRYPTO | CLOSE | — | CLOSE_LONG_CRYPTO | BROKER_QUALIFIED_CONTRACT_AND_QUOTE |
-| CRYPTO | INCREASE | LONG_EQUITY | OPEN_LONG_CRYPTO | BROKER_QUALIFIED_CONTRACT_AND_QUOTE |
-| CRYPTO | OPEN | LONG_EQUITY | OPEN_LONG_CRYPTO | BROKER_QUALIFIED_CONTRACT_AND_QUOTE |
-| CRYPTO | REDUCE | — | CLOSE_LONG_CRYPTO | BROKER_QUALIFIED_CONTRACT_AND_QUOTE |
-| EQUITY | CLOSE | — | CLOSE_LONG_STOCK | BROKER_QUALIFIED_CONTRACT_AND_QUOTE |
-| EQUITY | INCREASE | LONG_EQUITY | OPEN_LONG_STOCK | BROKER_QUALIFIED_CONTRACT_AND_QUOTE |
-| EQUITY | OPEN | LONG_EQUITY | OPEN_LONG_STOCK | BROKER_QUALIFIED_CONTRACT_AND_QUOTE |
-| EQUITY | REDUCE | — | CLOSE_LONG_STOCK | BROKER_QUALIFIED_CONTRACT_AND_QUOTE |
-| EQUITY_OPTION | CLOSE | — | CLOSE_SHORT_OPTION | UNAVAILABLE_IN_PRODUCTION_GATHERER |
-| EQUITY_OPTION | OPEN | CASH_SECURED_PUT | OPEN_SHORT_PUT | OPTION_SELECTION_RECEIPT_DISABLED_BY_DEFAULT |
-| EQUITY_OPTION | OPEN | COVERED_CALL | OPEN_COVERED_CALL | OPTION_SELECTION_RECEIPT_DISABLED_BY_DEFAULT |
-| EQUITY_OPTION | REDUCE | — | CLOSE_SHORT_OPTION | UNAVAILABLE_IN_PRODUCTION_GATHERER |
+| Asset family | Decision | Strategy | Order intent | Adapter | Production facts route |
+| --- | --- | --- | --- | --- | --- |
+| CRYPTO | CLOSE | — | CLOSE_LONG_CRYPTO | demo | BROKER_QUALIFIED_CONTRACT_AND_QUOTE |
+| CRYPTO | CLOSE | — | CLOSE_LONG_CRYPTO | official_ibkr | BROKER_QUALIFIED_CONTRACT_AND_QUOTE |
+| CRYPTO | CLOSE | — | CLOSE_LONG_CRYPTO | ib_async | UNAVAILABLE_ADAPTER_QUALIFY_CRYPTO |
+| CRYPTO | INCREASE | LONG_EQUITY | OPEN_LONG_CRYPTO | demo | BROKER_QUALIFIED_CONTRACT_AND_QUOTE |
+| CRYPTO | INCREASE | LONG_EQUITY | OPEN_LONG_CRYPTO | official_ibkr | BROKER_QUALIFIED_CONTRACT_AND_QUOTE |
+| CRYPTO | INCREASE | LONG_EQUITY | OPEN_LONG_CRYPTO | ib_async | UNAVAILABLE_ADAPTER_QUALIFY_CRYPTO |
+| CRYPTO | OPEN | LONG_EQUITY | OPEN_LONG_CRYPTO | demo | BROKER_QUALIFIED_CONTRACT_AND_QUOTE |
+| CRYPTO | OPEN | LONG_EQUITY | OPEN_LONG_CRYPTO | official_ibkr | BROKER_QUALIFIED_CONTRACT_AND_QUOTE |
+| CRYPTO | OPEN | LONG_EQUITY | OPEN_LONG_CRYPTO | ib_async | UNAVAILABLE_ADAPTER_QUALIFY_CRYPTO |
+| CRYPTO | REDUCE | — | CLOSE_LONG_CRYPTO | demo | BROKER_QUALIFIED_CONTRACT_AND_QUOTE |
+| CRYPTO | REDUCE | — | CLOSE_LONG_CRYPTO | official_ibkr | BROKER_QUALIFIED_CONTRACT_AND_QUOTE |
+| CRYPTO | REDUCE | — | CLOSE_LONG_CRYPTO | ib_async | UNAVAILABLE_ADAPTER_QUALIFY_CRYPTO |
+| EQUITY | CLOSE | — | CLOSE_LONG_STOCK | demo | BROKER_QUALIFIED_CONTRACT_AND_QUOTE |
+| EQUITY | CLOSE | — | CLOSE_LONG_STOCK | official_ibkr | BROKER_QUALIFIED_CONTRACT_AND_QUOTE |
+| EQUITY | CLOSE | — | CLOSE_LONG_STOCK | ib_async | BROKER_QUALIFIED_CONTRACT_AND_QUOTE |
+| EQUITY | INCREASE | LONG_EQUITY | OPEN_LONG_STOCK | demo | BROKER_QUALIFIED_CONTRACT_AND_QUOTE |
+| EQUITY | INCREASE | LONG_EQUITY | OPEN_LONG_STOCK | official_ibkr | BROKER_QUALIFIED_CONTRACT_AND_QUOTE |
+| EQUITY | INCREASE | LONG_EQUITY | OPEN_LONG_STOCK | ib_async | BROKER_QUALIFIED_CONTRACT_AND_QUOTE |
+| EQUITY | OPEN | LONG_EQUITY | OPEN_LONG_STOCK | demo | BROKER_QUALIFIED_CONTRACT_AND_QUOTE |
+| EQUITY | OPEN | LONG_EQUITY | OPEN_LONG_STOCK | official_ibkr | BROKER_QUALIFIED_CONTRACT_AND_QUOTE |
+| EQUITY | OPEN | LONG_EQUITY | OPEN_LONG_STOCK | ib_async | BROKER_QUALIFIED_CONTRACT_AND_QUOTE |
+| EQUITY | REDUCE | — | CLOSE_LONG_STOCK | demo | BROKER_QUALIFIED_CONTRACT_AND_QUOTE |
+| EQUITY | REDUCE | — | CLOSE_LONG_STOCK | official_ibkr | BROKER_QUALIFIED_CONTRACT_AND_QUOTE |
+| EQUITY | REDUCE | — | CLOSE_LONG_STOCK | ib_async | BROKER_QUALIFIED_CONTRACT_AND_QUOTE |
+| EQUITY_OPTION | CLOSE | — | CLOSE_SHORT_OPTION | demo | UNAVAILABLE_IN_PRODUCTION_GATHERER |
+| EQUITY_OPTION | CLOSE | — | CLOSE_SHORT_OPTION | official_ibkr | UNAVAILABLE_IN_PRODUCTION_GATHERER |
+| EQUITY_OPTION | CLOSE | — | CLOSE_SHORT_OPTION | ib_async | UNAVAILABLE_IN_PRODUCTION_GATHERER |
+| EQUITY_OPTION | OPEN | CASH_SECURED_PUT | OPEN_SHORT_PUT | demo | OPTION_SELECTION_RECEIPT_DISABLED_BY_DEFAULT |
+| EQUITY_OPTION | OPEN | CASH_SECURED_PUT | OPEN_SHORT_PUT | official_ibkr | OPTION_SELECTION_RECEIPT_DISABLED_BY_DEFAULT |
+| EQUITY_OPTION | OPEN | CASH_SECURED_PUT | OPEN_SHORT_PUT | ib_async | OPTION_SELECTION_RECEIPT_DISABLED_BY_DEFAULT |
+| EQUITY_OPTION | OPEN | COVERED_CALL | OPEN_COVERED_CALL | demo | OPTION_SELECTION_RECEIPT_DISABLED_BY_DEFAULT |
+| EQUITY_OPTION | OPEN | COVERED_CALL | OPEN_COVERED_CALL | official_ibkr | OPTION_SELECTION_RECEIPT_DISABLED_BY_DEFAULT |
+| EQUITY_OPTION | OPEN | COVERED_CALL | OPEN_COVERED_CALL | ib_async | OPTION_SELECTION_RECEIPT_DISABLED_BY_DEFAULT |
+| EQUITY_OPTION | REDUCE | — | CLOSE_SHORT_OPTION | demo | UNAVAILABLE_IN_PRODUCTION_GATHERER |
+| EQUITY_OPTION | REDUCE | — | CLOSE_SHORT_OPTION | official_ibkr | UNAVAILABLE_IN_PRODUCTION_GATHERER |
+| EQUITY_OPTION | REDUCE | — | CLOSE_SHORT_OPTION | ib_async | UNAVAILABLE_IN_PRODUCTION_GATHERER |
 
-`UNAVAILABLE_IN_PRODUCTION_GATHERER` means the compiler can express the intent but the backend cannot currently obtain that decision's own qualified contract and quote. Opening equity options have a receipt-bound route, but it is disabled by default.
+`UNAVAILABLE_IN_PRODUCTION_GATHERER` means the compiler can express the intent but the backend cannot currently obtain that decision's own qualified contract and quote. Opening equity options have a receipt-bound route, but it is disabled by default. `UNAVAILABLE_ADAPTER_QUALIFY_CRYPTO` means the production gatherer has a crypto branch but that adapter refuses crypto qualification.
 
 ## Cross-product status
 
@@ -46,8 +70,9 @@ The JSON expands 12 compiler mappings across 3 broker adapters, 7 autonomy modes
 
 | Current status | Rows |
 | --- | --- |
-| CONDITIONAL_OWNER_AND_EVIDENCE_GATED | 96 |
-| REFUSED_ADAPTER_MODE | 120 |
+| CONDITIONAL_OWNER_AND_EVIDENCE_GATED | 72 |
+| REFUSED_ADAPTER_INSTRUMENT_FACTS | 36 |
+| REFUSED_ADAPTER_MODE | 108 |
 | REFUSED_NON_SUBMITTING_MODE | 432 |
 | REFUSED_NO_INSTRUMENT_FACT_ROUTE | 54 |
 | REFUSED_OPTION_SELECTION_DISABLED_BY_DEFAULT | 54 |
@@ -66,13 +91,13 @@ The JSON expands 12 compiler mappings across 3 broker adapters, 7 autonomy modes
 
 Promotion values in a supplied mandate are external owner state. This generator does not load or validate one, so every row reports `NOT_CONFIGURED_BY_DEFAULT` rather than guessing an earned rung.
 
-## Broker adapters and evidence sources
+## Broker adapters and market-evidence sources
 
-| Adapter | Effective implementation | Evidence source | Paper path | Live path |
-| --- | --- | --- | --- | --- |
-| demo | chronos.broker.demo.DemoBroker | DEMO_BROKER_FIXTURE | no | no |
-| official_ibkr | chronos.broker.official_ibkr.OfficialIBKRBroker | IBKR_GATEWAY_OFFICIAL_API | yes | yes |
-| ib_async | chronos.broker.ibkr.IBKRBroker | IBKR_GATEWAY_IB_ASYNC | yes | no |
+| Adapter | Effective implementation | Market-evidence source | Submit implementation | Paper path | Live path |
+| --- | --- | --- | --- | --- | --- |
+| demo | chronos.broker.demo.DemoBroker | DEMO_BROKER_FIXTURE | UNCONDITIONAL_REFUSAL | no | no |
+| official_ibkr | chronos.broker.official_ibkr.OfficialIBKRBroker | IBKR_GATEWAY_OFFICIAL_API | IMPLEMENTED | yes | yes |
+| ib_async | chronos.broker.ibkr.IBKRBroker | IBKR_GATEWAY_IB_ASYNC_READ_ONLY | UNCONDITIONAL_REFUSAL | no | no |
 
 Evidence-source labels identify where the runtime would gather facts; they do not prove that a gateway was connected or that observations were correct. `BrokerAdapter.DEMO` has an unresolved naming alias: with `BrokerMode.IBKR`, the runtime fallback constructs `OfficialIBKRBroker`.
 
@@ -100,12 +125,12 @@ Unmapped means refused by the compiler whitelist. Vocabulary presence alone is n
 | --- | --- |
 | src/chronos/supervisor/compiler.py | `40b9b4a07dd90356f74552bb291296fbc069758b14cd471b122cea92dcd57538` |
 | src/chronos/autonomy/enums.py | `96bcff19f76065a34d75c9fba00b5682de59448c8a8f770a8628494eec15a3e9` |
-| src/chronos/autonomy/mandate.py | `ac9b745396c69be7f296957586c4cbe4414923752f649fbde672ed2488ecc6f7` |
 | src/chronos/config/settings.py | `29522fe160560c8e422a0030a1ed31b70196cb121621bc436fad572bb5154c17` |
 | src/chronos/runtime.py | `e88e292049ace2442a193f99c5bbde9e002750578526496d903a8fdf877a0880` |
 | src/chronos/api/autonomy_wiring.py | `1ffdc1c30ee8771574a64879e3bcf8a2232a8435761d59aaa26f9c81626d2b94` |
-| src/chronos/api/option_selection.py | `ef78d7eefaeeed5aa2d235bf0c904d85e99748bbb7faedcee22ba8f6961bf8e2` |
 | src/chronos/supervisor/evidence_kinds.py | `374d6de281168796200d10b5ae64f83e4b336b0d18d91377fbefbd3d4a488e06` |
-| src/chronos/orders/submission.py | `38c246b5cb8c02b9c88ba827aadc2b237f056be0991b1945ff19c50844ff627c` |
+| src/chronos/broker/demo.py | `0b957a97f993dbc5beb51d167c0cdbb62b80f99d3b008d11083305450c5f1d1c` |
+| src/chronos/broker/official_ibkr.py | `01a9de8212db02d1affcd285847fb398dd56a981344811bc7ea9fdec1598fa5e` |
+| src/chronos/broker/ibkr.py | `5e5fc128b57ec79cdab1fe9340bf79abf3390c978849ad893d8d0d7feac2c62a` |
 
 Machine-readable detail: [`capability-matrix.json`](capability-matrix.json).

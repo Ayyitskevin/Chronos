@@ -16,15 +16,18 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
+import inspect
 import json
 import sys
+import textwrap
 from collections import Counter
 from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from chronos.api.autonomy_wiring import INGRESS_IDENTITY
+from chronos.api.autonomy_wiring import INGRESS_IDENTITY, BackendGatherers
 from chronos.autonomy.enums import (
     MINIMUM_PROMOTION_FOR_MODE,
     SUBMITTING_AUTONOMY_MODES,
@@ -33,8 +36,12 @@ from chronos.autonomy.enums import (
     StrategyForm,
     TradableAssetClass,
 )
+from chronos.broker.demo import DemoBroker
+from chronos.broker.ibkr import IBKRBroker
+from chronos.broker.official_ibkr import OfficialIBKRBroker
 from chronos.config.settings import Settings
-from chronos.domain.enums import BrokerAdapter
+from chronos.domain.enums import BrokerAdapter, BrokerMode, IBEnvironment
+from chronos.runtime import build_runtime
 from chronos.supervisor.compiler import _CAPABILITY_MATRIX, _CLOSING_MATRIX
 from chronos.supervisor.evidence_kinds import BundleKind, citation_kinds_for
 
@@ -59,47 +66,25 @@ MATRIX_COLUMNS = (
 SOURCE_PATHS = (
     Path("src/chronos/supervisor/compiler.py"),
     Path("src/chronos/autonomy/enums.py"),
-    Path("src/chronos/autonomy/mandate.py"),
     Path("src/chronos/config/settings.py"),
     Path("src/chronos/runtime.py"),
     Path("src/chronos/api/autonomy_wiring.py"),
-    Path("src/chronos/api/option_selection.py"),
     Path("src/chronos/supervisor/evidence_kinds.py"),
-    Path("src/chronos/orders/submission.py"),
+    Path("src/chronos/broker/demo.py"),
+    Path("src/chronos/broker/official_ibkr.py"),
+    Path("src/chronos/broker/ibkr.py"),
 )
 
-_ADAPTER_PROFILES: dict[BrokerAdapter, dict[str, Any]] = {
-    BrokerAdapter.DEMO: {
-        "effective_implementation": "chronos.broker.demo.DemoBroker",
-        "evidence_source": "DEMO_BROKER_FIXTURE",
-        "paper_submission_path": False,
-        "live_submission_path": False,
-        "note": (
-            "Effective only when BrokerMode.DEMO is selected; the order boundary refuses "
-            "external submission in that mode. BrokerAdapter.DEMO under BrokerMode.IBKR is "
-            "an unresolved alias to the official adapter, not a demo submission path."
-        ),
-    },
-    BrokerAdapter.OFFICIAL_IBKR: {
-        "effective_implementation": "chronos.broker.official_ibkr.OfficialIBKRBroker",
-        "evidence_source": "IBKR_GATEWAY_OFFICIAL_API",
-        "paper_submission_path": True,
-        "live_submission_path": True,
-        "note": (
-            "Configuration can select paper or live submission, subject to every runtime "
-            "gate; repository generation does not establish gateway evidence or authority."
-        ),
-    },
-    BrokerAdapter.IB_ASYNC: {
-        "effective_implementation": "chronos.broker.ibkr.IBKRBroker",
-        "evidence_source": "IBKR_GATEWAY_IB_ASYNC",
-        "paper_submission_path": True,
-        "live_submission_path": False,
-        "note": (
-            "Configuration can select paper submission; Settings refuses this adapter for "
-            "the live conjunction."
-        ),
-    },
+_ADAPTER_IMPLEMENTATIONS: dict[BrokerAdapter, type[Any]] = {
+    BrokerAdapter.DEMO: DemoBroker,
+    BrokerAdapter.OFFICIAL_IBKR: OfficialIBKRBroker,
+    BrokerAdapter.IB_ASYNC: IBKRBroker,
+}
+
+_ADAPTER_EVIDENCE_SOURCES = {
+    BrokerAdapter.DEMO: "DEMO_BROKER_FIXTURE",
+    BrokerAdapter.OFFICIAL_IBKR: "IBKR_GATEWAY_OFFICIAL_API",
+    BrokerAdapter.IB_ASYNC: "IBKR_GATEWAY_IB_ASYNC_READ_ONLY",
 }
 
 
@@ -113,6 +98,121 @@ def _json_default(value: object) -> object:
 
 def _setting_default(name: str) -> object:
     return Settings.model_fields[name].default
+
+
+def _function_ast(function: object) -> ast.FunctionDef | ast.AsyncFunctionDef:
+    parsed = ast.parse(textwrap.dedent(inspect.getsource(function)))
+    node = parsed.body[0]
+    if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+        raise RuntimeError(f"{function!r} is not a function")
+    return node
+
+
+def _if_chain(node: ast.If) -> tuple[list[str], list[list[ast.stmt]], list[ast.stmt]]:
+    tests: list[str] = []
+    bodies: list[list[ast.stmt]] = []
+    current = node
+    while True:
+        tests.append(ast.unparse(current.test))
+        bodies.append(current.body)
+        if len(current.orelse) == 1 and isinstance(current.orelse[0], ast.If):
+            current = current.orelse[0]
+            continue
+        return tests, bodies, current.orelse
+
+
+def _assigned_constructor(statements: list[ast.stmt], target: str) -> str:
+    for statement in statements:
+        if (
+            isinstance(statement, ast.Assign)
+            and len(statement.targets) == 1
+            and isinstance(statement.targets[0], ast.Name)
+            and statement.targets[0].id == target
+            and isinstance(statement.value, ast.Call)
+            and isinstance(statement.value.func, ast.Name)
+        ):
+            return statement.value.func.id
+    raise RuntimeError(f"no constructor assignment found for {target}")
+
+
+def _runtime_selector() -> dict[str, str]:
+    runtime_ast = _function_ast(build_runtime)
+    selector = next(
+        (
+            node
+            for node in ast.walk(runtime_ast)
+            if isinstance(node, ast.If)
+            and ast.unparse(node.test) == "settings.broker_mode is BrokerMode.DEMO"
+        ),
+        None,
+    )
+    if selector is None:
+        raise RuntimeError("build_runtime no longer has the recognized broker selector")
+    tests, bodies, fallback = _if_chain(selector)
+    if tests != [
+        "settings.broker_mode is BrokerMode.DEMO",
+        "settings.broker_adapter is BrokerAdapter.IB_ASYNC",
+    ]:
+        raise RuntimeError("build_runtime broker selector changed; update reporting derivation")
+    return {
+        "demo_mode": _assigned_constructor(bodies[0], "broker"),
+        "ib_async": _assigned_constructor(bodies[1], "broker"),
+        "ibkr_fallback": _assigned_constructor(fallback, "broker"),
+    }
+
+
+def _production_instrument_routes() -> set[tuple[str, str | None]]:
+    gatherer_ast = _function_ast(BackendGatherers.instrument_facts)
+    try_node = next((node for node in ast.walk(gatherer_ast) if isinstance(node, ast.Try)), None)
+    if try_node is None or not try_node.body or not isinstance(try_node.body[0], ast.If):
+        raise RuntimeError("production instrument gatherer no longer has the recognized selector")
+    tests, _, fallback = _if_chain(try_node.body[0])
+    expected = [
+        "decision.asset_class is TradableAssetClass.EQUITY",
+        "decision.asset_class is TradableAssetClass.CRYPTO",
+        (
+            "decision.asset_class is TradableAssetClass.EQUITY_OPTION and decision.kind is "
+            "DecisionKind.OPEN"
+        ),
+    ]
+    if tests != expected:
+        raise RuntimeError("production instrument routes changed; update reporting derivation")
+    if (
+        len(fallback) != 1
+        or not isinstance(fallback[0], ast.Return)
+        or not isinstance(fallback[0].value, ast.Constant)
+        or fallback[0].value.value is not None
+    ):
+        raise RuntimeError("production instrument gatherer fallback no longer refuses")
+    return {
+        (TradableAssetClass.EQUITY.value, None),
+        (TradableAssetClass.CRYPTO.value, None),
+        (TradableAssetClass.EQUITY_OPTION.value, DecisionKind.OPEN.value),
+    }
+
+
+def _method_refuses_unconditionally(method: object) -> bool:
+    node = _function_ast(method)
+    return bool(node.body) and isinstance(node.body[-1], ast.Raise)
+
+
+def _settings_path_configurable(adapter: BrokerAdapter, *, live: bool) -> bool:
+    broker_mode = BrokerMode.DEMO if adapter is BrokerAdapter.DEMO else BrokerMode.IBKR
+    account_id = "U12345" if live else "DU12345"
+    values = {
+        "broker_mode": broker_mode,
+        "broker_adapter": adapter,
+        "ib_environment": IBEnvironment.LIVE if live else IBEnvironment.PAPER,
+        "allow_order_transmit": True,
+        "allow_live_trading": live,
+        "ib_account_id": account_id,
+        "ib_account_allowlist": (account_id,),
+    }
+    try:
+        settings = Settings.model_validate(values)
+    except ValueError:
+        return False
+    return settings.live_transmission_possible if live else settings.transmission_possible
 
 
 def _source_fingerprints() -> list[dict[str, str]]:
@@ -157,22 +257,27 @@ def _compiler_capabilities() -> list[dict[str, str | None]]:
     )
 
 
-def _instrument_facts_status(capability: dict[str, str | None]) -> str:
+def _instrument_facts_status(capability: dict[str, str | None], adapter: BrokerAdapter) -> str:
     asset = capability["asset_family"]
     decision = capability["decision_kind"]
-    if asset in {TradableAssetClass.EQUITY.value, TradableAssetClass.CRYPTO.value}:
-        return "BROKER_QUALIFIED_CONTRACT_AND_QUOTE"
+    routes = _production_instrument_routes()
+    if (str(asset), str(decision)) not in routes and (str(asset), None) not in routes:
+        return "UNAVAILABLE_IN_PRODUCTION_GATHERER"
+    implementation = _ADAPTER_IMPLEMENTATIONS[adapter]
+    if asset == TradableAssetClass.CRYPTO.value and _method_refuses_unconditionally(
+        implementation.qualify_crypto
+    ):
+        return "UNAVAILABLE_ADAPTER_QUALIFY_CRYPTO"
     if asset == TradableAssetClass.EQUITY_OPTION.value and decision == DecisionKind.OPEN.value:
         if _setting_default("enable_autonomy_option_selection") is not False:
             raise RuntimeError("option selection no longer defaults off; update status derivation")
         return "OPTION_SELECTION_RECEIPT_DISABLED_BY_DEFAULT"
-    return "UNAVAILABLE_IN_PRODUCTION_GATHERER"
+    return "BROKER_QUALIFIED_CONTRACT_AND_QUOTE"
 
 
-def _adapter_mode_status(adapter: BrokerAdapter, mode: AutonomyMode) -> str:
+def _adapter_mode_status(profile: dict[str, object], mode: AutonomyMode) -> str:
     if mode not in SUBMITTING_AUTONOMY_MODES:
         return "NOT_APPLICABLE_NON_SUBMITTING_MODE"
-    profile = _ADAPTER_PROFILES[adapter]
     if mode is AutonomyMode.PAPER_AUTONOMOUS:
         available = bool(profile["paper_submission_path"])
     else:
@@ -185,6 +290,8 @@ def _row_status(*, mode: AutonomyMode, instrument_status: str, adapter_mode_stat
         return "REFUSED_NON_SUBMITTING_MODE"
     if instrument_status == "UNAVAILABLE_IN_PRODUCTION_GATHERER":
         return "REFUSED_NO_INSTRUMENT_FACT_ROUTE"
+    if instrument_status == "UNAVAILABLE_ADAPTER_QUALIFY_CRYPTO":
+        return "REFUSED_ADAPTER_INSTRUMENT_FACTS"
     if instrument_status == "OPTION_SELECTION_RECEIPT_DISABLED_BY_DEFAULT":
         return "REFUSED_OPTION_SELECTION_DISABLED_BY_DEFAULT"
     if adapter_mode_status == "NO_SUBMISSION_PATH":
@@ -207,11 +314,55 @@ def _mode_profiles() -> list[dict[str, object]]:
 
 
 def _adapter_profiles() -> list[dict[str, object]]:
-    if set(_ADAPTER_PROFILES) != set(BrokerAdapter):
+    if set(_ADAPTER_IMPLEMENTATIONS) != set(BrokerAdapter):
         raise RuntimeError("BrokerAdapter vocabulary changed without a reporting profile")
-    return [
-        {"broker_adapter": adapter.value, **_ADAPTER_PROFILES[adapter]} for adapter in BrokerAdapter
-    ]
+    selector = _runtime_selector()
+    expected_selector = {
+        "demo_mode": DemoBroker.__name__,
+        "ib_async": IBKRBroker.__name__,
+        "ibkr_fallback": OfficialIBKRBroker.__name__,
+    }
+    if selector != expected_selector:
+        raise RuntimeError("broker implementation map disagrees with build_runtime")
+
+    profiles: list[dict[str, object]] = []
+    for adapter in BrokerAdapter:
+        implementation = _ADAPTER_IMPLEMENTATIONS[adapter]
+        submit_refused = _method_refuses_unconditionally(implementation.submit_order)
+        paper_path = _settings_path_configurable(adapter, live=False) and not submit_refused
+        live_path = _settings_path_configurable(adapter, live=True) and not submit_refused
+        if adapter is BrokerAdapter.DEMO:
+            note = (
+                "Effective only with BrokerMode.DEMO; its submit_order ends in an "
+                "unconditional refusal. Under BrokerMode.IBKR this enum value aliases to the "
+                "official fallback instead of selecting DemoBroker."
+            )
+        elif submit_refused:
+            note = (
+                "Settings can satisfy the paper conjunction, but this read-only adapter's "
+                "submit_order ends in an unconditional refusal; no submission path exists."
+            )
+        else:
+            note = (
+                "Configuration can select paper or live submission, subject to every runtime "
+                "gate; repository generation does not establish gateway evidence or authority."
+            )
+        profiles.append(
+            {
+                "broker_adapter": adapter.value,
+                "effective_implementation": (
+                    f"{implementation.__module__}.{implementation.__qualname__}"
+                ),
+                "market_evidence_source": _ADAPTER_EVIDENCE_SOURCES[adapter],
+                "submit_order_status": (
+                    "UNCONDITIONAL_REFUSAL" if submit_refused else "IMPLEMENTED"
+                ),
+                "paper_submission_path": paper_path,
+                "live_submission_path": live_path,
+                "note": note,
+            }
+        )
+    return profiles
 
 
 def _evidence_profiles() -> list[dict[str, object]]:
@@ -244,14 +395,20 @@ def _evidence_profiles() -> list[dict[str, object]]:
     return profiles
 
 
-def _matrix_rows(capabilities: list[dict[str, str | None]]) -> list[dict[str, object]]:
+def _matrix_rows(
+    capabilities: list[dict[str, str | None]], adapter_profiles: list[dict[str, object]]
+) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     evidence_profiles = _evidence_profiles()
+    profiles_by_adapter = {
+        BrokerAdapter(str(profile["broker_adapter"])): profile for profile in adapter_profiles
+    }
     for capability in capabilities:
-        instrument_status = _instrument_facts_status(capability)
         for adapter in BrokerAdapter:
+            profile = profiles_by_adapter[adapter]
+            instrument_status = _instrument_facts_status(capability, adapter)
             for mode in AutonomyMode:
-                adapter_status = _adapter_mode_status(adapter, mode)
+                adapter_status = _adapter_mode_status(profile, mode)
                 for evidence in evidence_profiles:
                     rows.append(
                         {
@@ -279,7 +436,9 @@ def build_matrix() -> dict[str, object]:
     """Return the deterministic, repository-scoped matrix document."""
 
     capabilities = _compiler_capabilities()
-    rows = _matrix_rows(capabilities)
+    adapter_profiles = _adapter_profiles()
+    runtime_selector = _runtime_selector()
+    rows = _matrix_rows(capabilities, adapter_profiles)
     mapped_assets = {str(item["asset_family"]) for item in capabilities}
     mapped_decisions = {str(item["decision_kind"]) for item in capabilities}
     mapped_strategies = {
@@ -320,15 +479,15 @@ def build_matrix() -> dict[str, object]:
                 "id": "BROKER_ADAPTER_DEMO_IBKR_ALIAS",
                 "status": "UNRESOLVED",
                 "observation": (
-                    "BrokerMode.DEMO selects DemoBroker without consulting broker_adapter; "
-                    "BrokerMode.IBKR plus BrokerAdapter.DEMO reaches build_runtime's fallback "
-                    "and constructs OfficialIBKRBroker."
+                    f"BrokerMode.DEMO selects {runtime_selector['demo_mode']} without consulting "
+                    "broker_adapter; BrokerMode.IBKR plus BrokerAdapter.DEMO reaches "
+                    f"build_runtime's fallback and constructs {runtime_selector['ibkr_fallback']}."
                 ),
                 "source": "src/chronos/runtime.py:build_runtime",
             }
         ],
         "mode_profiles": _mode_profiles(),
-        "adapter_profiles": _adapter_profiles(),
+        "adapter_profiles": adapter_profiles,
         "evidence_profiles": _evidence_profiles(),
         "compiler_capabilities": capabilities,
         "unmapped_vocabulary": {
@@ -411,6 +570,7 @@ def render_markdown(matrix: dict[str, object]) -> str:
             str(row["asset_family"]),
             str(row["decision_kind"]),
             str(row["strategy_shape"] or "—"),
+            str(row["broker_adapter"]),
         ): str(row["instrument_facts_status"])
         for row in rows
     }
@@ -454,23 +614,33 @@ def render_markdown(matrix: dict[str, object]) -> str:
     )
     capability_rows: list[tuple[str, ...]] = []
     for capability in capabilities:
-        key = (
-            str(capability["asset_family"]),
-            str(capability["decision_kind"]),
-            str(capability["strategy_shape"] or "—"),
-        )
-        capability_rows.append(
-            (
-                key[0],
-                key[1],
-                key[2],
-                str(capability["order_intent"]),
-                instrument_by_key[key],
+        for adapter in BrokerAdapter:
+            key = (
+                str(capability["asset_family"]),
+                str(capability["decision_kind"]),
+                str(capability["strategy_shape"] or "—"),
+                adapter.value,
             )
-        )
+            capability_rows.append(
+                (
+                    key[0],
+                    key[1],
+                    key[2],
+                    str(capability["order_intent"]),
+                    adapter.value,
+                    instrument_by_key[key],
+                )
+            )
     lines.extend(
         _markdown_table(
-            ("Asset family", "Decision", "Strategy", "Order intent", "Production facts route"),
+            (
+                "Asset family",
+                "Decision",
+                "Strategy",
+                "Order intent",
+                "Adapter",
+                "Production facts route",
+            ),
             capability_rows,
         )
     )
@@ -481,7 +651,8 @@ def render_markdown(matrix: dict[str, object]) -> str:
                 "`UNAVAILABLE_IN_PRODUCTION_GATHERER` means the compiler can express the intent "
                 "but the backend cannot currently obtain that decision's own qualified contract "
                 "and quote. Opening equity options have a receipt-bound route, but it is disabled "
-                "by default."
+                "by default. `UNAVAILABLE_ADAPTER_QUALIFY_CRYPTO` means the production gatherer "
+                "has a crypto branch but that adapter refuses crypto qualification."
             ),
             "",
             "## Cross-product status",
@@ -524,18 +695,26 @@ def render_markdown(matrix: dict[str, object]) -> str:
                 "`NOT_CONFIGURED_BY_DEFAULT` rather than guessing an earned rung."
             ),
             "",
-            "## Broker adapters and evidence sources",
+            "## Broker adapters and market-evidence sources",
             "",
         ]
     )
     lines.extend(
         _markdown_table(
-            ("Adapter", "Effective implementation", "Evidence source", "Paper path", "Live path"),
+            (
+                "Adapter",
+                "Effective implementation",
+                "Market-evidence source",
+                "Submit implementation",
+                "Paper path",
+                "Live path",
+            ),
             [
                 (
                     str(item["broker_adapter"]),
                     str(item["effective_implementation"]),
-                    str(item["evidence_source"]),
+                    str(item["market_evidence_source"]),
+                    str(item["submit_order_status"]),
                     "yes" if item["paper_submission_path"] else "no",
                     "yes" if item["live_submission_path"] else "no",
                 )
