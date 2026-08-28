@@ -13,6 +13,7 @@ secret and no token.
 
 from __future__ import annotations
 
+import argparse
 import logging
 import os
 import sys
@@ -23,7 +24,15 @@ from chronos.bridge.app import create_app
 from chronos.bridge.config import BridgeConfigError, load_config
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    # ArgumentParser adds -h/--help and exits before runtime configuration is read.
+    # Source: https://docs.python.org/3.12/library/argparse.html#argumentparser-objects
+    parser = argparse.ArgumentParser(
+        prog="python -m chronos.bridge",
+        description="Run the local TradingView webhook bridge (dry-run by default).",
+    )
+    parser.parse_args(argv)
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",

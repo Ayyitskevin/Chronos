@@ -34,7 +34,9 @@ make gates
 The final gate builds the current non-ignored source set in isolation, checks the wheel's terminal
 assets and complete migration namespace byte-for-byte against that source, installs the wheel with
 the hash-locked dependencies in a fresh venv outside the checkout, and exercises its package,
-console, CLI, and service entry points. Run only that check with `make release-gate`.
+console, and every source-declared `python -m` entry point. A local run includes untracked,
+non-ignored files; CI rebuilds the committed clean tree and is authoritative for that revision.
+Run only that check with `make release-gate`.
 
 Reproducibility record: even with the lock, record the resolved environment at deployment
 time (the build backend and pip itself are outside the hash gate — docs/SECURITY.md):

@@ -49,14 +49,12 @@ chronos = "chronos.app:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
-# The operator terminal's browser client (ADR-0018 §6) is data, not code: three
-# files with no .py extension, which `packages.find` would leave out of a built
-# wheel. The backend mounts them from the installed package directory, so
-# without this an installed Chronos would serve 404 where the terminal should
-# be — and would do it only in the installed case, which is the worst place for
-# a defect to first appear.
+# The operator terminal's browser client (ADR-0018 §6) is data, not code.
+# Package every non-hidden file at any depth; the release-artifact verifier
+# independently discovers the source inventory and rejects packaging drift.
+# Source: https://setuptools.pypa.io/en/stable/userguide/datafiles.html#package-data
 [tool.setuptools.package-data]
-"chronos.terminal" = ["static/*.html", "static/*.css", "static/*.js"]
+"chronos.terminal" = ["static/*", "static/**/*"]
 # Alembic's revision template is non-Python package data. Keep it with the
 # installed migration namespace so the wheel carries the complete script tree.
 # Source: https://setuptools.pypa.io/en/stable/userguide/datafiles.html#package-data

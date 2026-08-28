@@ -14,6 +14,8 @@ forwarding path be asserted at all.
 from __future__ import annotations
 
 import asyncio
+import subprocess
+import sys
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -124,6 +126,19 @@ def _client(
 
 
 # ------------------------------------------------------------------- configuration
+
+
+def test_help_does_not_require_runtime_credentials() -> None:
+    result = subprocess.run(
+        [sys.executable, "-I", "-m", "chronos.bridge", "--help"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert "usage:" in result.stdout
+    assert result.stderr == ""
 
 
 def test_a_missing_secret_refuses_to_start() -> None:

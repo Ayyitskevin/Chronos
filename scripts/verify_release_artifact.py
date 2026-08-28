@@ -24,14 +24,39 @@ from typing import Final
 
 _REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[1]
 _ENTRY_POINT: Final[tuple[str, str]] = ("chronos", "chronos.app:main")
-_STATIC_ASSETS: Final[tuple[str, ...]] = ("index.html", "terminal.css", "terminal.js")
 _MIGRATION_SUPPORT: Final[tuple[str, ...]] = ("env.py", "script.py.mako")
 _MIGRATION_HEAD: Final[str] = "0010"
-_MODULE_ENTRYPOINTS: Final[tuple[str, ...]] = ("chronos.cli", "chronos.service")
 
 
 class ReleaseArtifactError(RuntimeError):
     """The built wheel does not satisfy the release-artifact contract."""
+
+
+def _terminal_assets(source_root: Path) -> tuple[str, ...]:
+    """Discover every terminal asset the current source expects to ship."""
+
+    static_root = source_root / "src/chronos/terminal/static"
+    assets = tuple(
+        path.relative_to(static_root).as_posix()
+        for path in sorted(static_root.rglob("*"))
+        if path.is_file()
+    )
+    if not assets:
+        raise ReleaseArtifactError("source tree contains no terminal static assets")
+    return assets
+
+
+def _module_entrypoints(source_root: Path) -> tuple[str, ...]:
+    """Discover every package runnable through ``python -m``."""
+
+    package_root = source_root / "src/chronos"
+    modules = tuple(
+        ".".join(("chronos", *path.parent.relative_to(package_root).parts))
+        for path in sorted(package_root.rglob("__main__.py"))
+    )
+    if not modules:
+        raise ReleaseArtifactError("source tree contains no module entry points")
+    return modules
 
 
 def _run(command: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -72,9 +97,10 @@ def _copy_source(destination: Path) -> None:
 def _artifact_members(source_root: Path) -> dict[str, Path]:
     """Wheel member names and the source bytes they must contain."""
 
+    static_root = source_root / "src/chronos/terminal/static"
     members = {
-        f"chronos/terminal/static/{name}": source_root / "src/chronos/terminal/static" / name
-        for name in _STATIC_ASSETS
+        f"chronos/terminal/static/{name}": static_root / name
+        for name in _terminal_assets(source_root)
     }
     migration_root = source_root / "src/chronos/persistence/migrations"
     members.update(
@@ -146,9 +172,10 @@ def _installed_smoke() -> None:
     if not callable(entry_points[0].load()):
         raise ReleaseArtifactError("chronos console entry point does not load a callable")
 
+    static_assets = _terminal_assets(_REPO_ROOT)
     static_root = importlib.resources.files("chronos.terminal").joinpath("static")
-    for name in _STATIC_ASSETS:
-        resource = static_root.joinpath(name)
+    for name in static_assets:
+        resource = static_root.joinpath(*Path(name).parts)
         if not resource.is_file() or not resource.read_bytes():
             raise ReleaseArtifactError(f"installed terminal asset is absent or empty: {name}")
 
@@ -169,7 +196,8 @@ def _installed_smoke() -> None:
             f"installed migration chain must have head {_MIGRATION_HEAD!r}, got {heads}"
         )
 
-    for module in _MODULE_ENTRYPOINTS:
+    module_entrypoints = _module_entrypoints(_REPO_ROOT)
+    for module in module_entrypoints:
         result = subprocess.run(
             [sys.executable, "-I", "-m", module, "--help"],
             check=False,
@@ -185,8 +213,8 @@ def _installed_smoke() -> None:
 
     print(
         "Installed artifact smoke passed: package origin, console entry point, "
-        f"{len(_STATIC_ASSETS)} terminal assets, migration head {_MIGRATION_HEAD}, "
-        f"and {len(_MODULE_ENTRYPOINTS)} module entry points."
+        f"{len(static_assets)} terminal assets, migration head {_MIGRATION_HEAD}, "
+        f"and {len(module_entrypoints)} module entry points."
     )
 
 
