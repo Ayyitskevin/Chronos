@@ -21,6 +21,8 @@ def test_build_env_skill_points_to_live_authorities() -> None:
         "AGENTS.md",
         "docs/AGENT_PROTOCOL.md",
         "pyproject.toml",
+        "requirements-build.in",
+        "requirements-build.lock",
         "requirements-dev.lock",
         "Makefile",
         ".github/workflows/ci.yml",
@@ -46,8 +48,12 @@ def test_build_env_skill_derives_interpreter_install_and_gates() -> None:
     required_fragments = (
         "requires-python",
         "<python-that-satisfies-the-repo> -m venv .venv",
+        ".venv/bin/python -m pip install --require-hashes -r requirements-build.lock",
         ".venv/bin/python -m pip install --require-hashes -r requirements-dev.lock",
-        ".venv/bin/python -m pip install -e . --no-deps",
+        (
+            ".venv/bin/python -m pip install -e . --no-deps "
+            "--no-build-isolation --check-build-dependencies"
+        ),
         "sed -n '/^gates:/p' Makefile",
         "make gates",
     )
@@ -62,9 +68,12 @@ def test_build_env_skill_derives_lock_maintenance_process() -> None:
     text = _skill_text()
 
     required_fragments = (
-        "sed -n '1,2p' requirements-dev.lock",
-        "existing requirements-dev.lock",
-        "git diff -- pyproject.toml requirements-dev.lock",
+        "sed -n '1,2p' requirements-build.lock requirements-dev.lock",
+        "existing output file",
+        (
+            "git diff -- pyproject.toml requirements-build.in "
+            "requirements-build.lock requirements-dev.lock"
+        ),
         "owner review",
         "https://docs.astral.sh/uv/pip/compile/",
         "https://pip.pypa.io/en/stable/topics/secure-installs/",

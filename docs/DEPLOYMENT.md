@@ -15,13 +15,16 @@ component for the trading path.
 ```bash
 git clone <your-remote> Chronos && cd Chronos
 python3 -m venv .venv                                        # python 3.12+
+.venv/bin/python -m pip install --require-hashes -r requirements-build.lock
 .venv/bin/python -m pip install --require-hashes -r requirements-dev.lock
-.venv/bin/python -m pip install -e . --no-deps               # the project itself
+.venv/bin/python -m pip install -e . --no-deps --no-build-isolation --check-build-dependencies
 ```
 
-This is the same pinned, hash-verified path CI uses (`.github/workflows/ci.yml`):
-`requirements-dev.lock` pins the full runtime+dev transitive closure to exact versions and
-SHA-256 hashes (docs/SECURITY.md). A quick unpinned dev install
+This uses the same two locked dependency installs and no-isolation build flags as CI
+(`.github/workflows/ci.yml`). CI first upgrades pip, and that frontend remains outside the hash
+gate. `requirements-build.lock` pins the PEP 517 backend and `requirements-dev.lock` pins the
+full runtime+dev transitive closure to exact versions and SHA-256 hashes (docs/SECURITY.md). A
+quick unpinned dev install
 (`pip install -e '.[dev]'`) also works but is not reproducible — prefer the lock for
 anything you intend to keep running.
 
@@ -40,7 +43,7 @@ includes untracked, non-ignored files; CI rebuilds the committed clean tree and 
 for that revision. Run only that check with `make release-gate`.
 
 Reproducibility record: even with the lock, record the resolved environment at deployment
-time (the build backend and pip itself are outside the hash gate — docs/SECURITY.md):
+time (the pip frontend itself remains outside the hash gate — docs/SECURITY.md):
 
 ```bash
 .venv/bin/pip freeze > deploy-freeze-$(date +%F).txt   # keep with your backups

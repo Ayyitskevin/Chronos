@@ -113,6 +113,35 @@ migration head 0010 after a v2 upgrade across 34 model tables, and 4 module entr
 Release artifact gate passed for chronos-0.1.0-py3-none-any.whl.
 ```
 
+## Hash-locked build backend — 2026-08-28
+
+The prior wheel command let pip create an isolated environment and satisfy
+`setuptools>=75` from the network. The artifact could therefore change build backends while every
+runtime lock and test stayed unchanged. A focused test first failed because the verifier had no
+locked build seam; a second test then reproduced that CI's editable install still used isolation.
+
+`pyproject.toml` and `requirements-build.in` now name the same exact backend requirement,
+`setuptools==84.0.0`. The generated `requirements-build.lock` carries both published SHA-256
+digests. The release verifier installs that lock with `--require-hashes`, then runs `pip wheel`
+with `--no-build-isolation --check-build-dependencies`; CI uses the same locked backend and flags
+for its editable install. The preceding `--require-hashes` install verifies artifact integrity;
+`--check-build-dependencies` only verifies that the installed backend version satisfies the
+project requirement. The real release gate passed from a fresh venv with this sequence. This
+follows pip's documented rule that disabling build isolation makes the caller responsible for
+preinstalling build dependencies:
+[pip build-system interface](https://pip.pypa.io/en/stable/reference/build-system/#disabling-build-isolation).
+
+A separate clean-venv probe replayed CI's install order—build lock, runtime/dev lock, then editable
+Chronos with isolation disabled—and reported `setuptools=84.0.0` and `chronos=0.1.0`. The temporary
+probe environment was moved to the system trash after verification.
+
+Only setuptools is locked because modern setuptools supplies its own wheel-building command; the
+separate `wheel` CLI package is not required by this project. The exact version and hashes come
+from the corresponding [setuptools PyPI release](https://pypi.org/project/setuptools/84.0.0/).
+
+This supply-chain control is security-sensitive and remains owner-gated: the branch may be tested
+and independently reviewed, but only the owner may approve and merge it.
+
 ## What this does not prove
 
 The artifact gate now executes the supported v2-baseline-to-head path from the installed wheel. It
@@ -121,6 +150,8 @@ exercise the separately owned platform ledger, which has no migration tooling. L
 integration fixture, it freezes the v2 table names but creates those tables from current installed
 metadata; it therefore does not independently catch a missing column-alteration revision for a v2
 table. That disclosed migration-completeness limit remains unchanged. The gate also does not add
-dependency, secret, or static-analysis scanners, pin the PEP 517 build backend, emit an SBOM, or
-sign the wheel. Those remain separate Phase 2 work, and no broker, account, credential, order path,
-market-data capture, or holdout was accessed by this evaluation.
+dependency, secret, or static-analysis scanners, emit an SBOM, or sign the wheel. The pip frontend
+that bootstraps and invokes the locked backend remains outside the hash lock, and an exact backend
+does not make timestamp-bearing wheel ZIP bytes reproducible. Those remain separate Phase 2 work
+or disclosed limits, and no broker, account, credential, order path, market-data capture, or
+holdout was accessed by this evaluation.
