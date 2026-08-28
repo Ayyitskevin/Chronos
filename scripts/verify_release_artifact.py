@@ -33,21 +33,21 @@ class ReleaseArtifactError(RuntimeError):
 
 
 def _terminal_assets(source_root: Path) -> tuple[str, ...]:
-    """Discover every terminal asset the current source expects to ship."""
+    """Discover every non-hidden terminal asset the current source expects to ship."""
 
     static_root = source_root / "src/chronos/terminal/static"
-    assets = tuple(
-        path.relative_to(static_root).as_posix()
-        for path in sorted(static_root.rglob("*"))
-        if path.is_file()
-    )
+    assets: list[str] = []
+    for path in sorted(static_root.rglob("*")):
+        relative = path.relative_to(static_root)
+        if path.is_file() and not any(part.startswith(".") for part in relative.parts):
+            assets.append(relative.as_posix())
     if not assets:
         raise ReleaseArtifactError("source tree contains no terminal static assets")
-    return assets
+    return tuple(assets)
 
 
 def _module_entrypoints(source_root: Path) -> tuple[str, ...]:
-    """Discover every package runnable through ``python -m``."""
+    """Discover every packaged command surface declared by ``__main__.py``."""
 
     package_root = source_root / "src/chronos"
     modules = tuple(
