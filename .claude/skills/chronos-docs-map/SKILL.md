@@ -16,8 +16,9 @@ description: >
 
 # Chronos docs map — what to trust, what lies, and how to fix it
 
-All facts verified against the repo at HEAD `47a8d72`, 2026-08-02. Every quote below
-carries `file:line`; re-verify line numbers before editing (docs move).
+Base inventory verified against HEAD `47a8d72`, 2026-08-02. Ledger #7 and the validation-doc
+entries were re-verified against exact main `d44fc4ac7d2f`, 2026-08-28. Every quote below carries
+`file:line`; re-verify line numbers before editing (docs move).
 
 Chronos has ~65 markdown documents written across an 11-milestone sprint by multiple
 agent sessions. Most are honest. Several present old state as current truth, and a few
@@ -52,10 +53,10 @@ priorities and it does not grant change authority.
 4. **docs/safety.md + docs/limitations.md + RISK_REGISTER.md** — controls, honest
    capability boundaries, disclosed residuals. (Skip RISK_REGISTER R-01's frozen note;
    trust the dated R-24..R-42 rows after spot-checking code — see Ledger #12.)
-5. **README.md ("Where that stands today") + the CHANGELOG.md head entry** — the
-   freshest status narrative and the ONLY doc carrying the current test count
-   (CHANGELOG.md:69, M11 2026-07-27; live re-measured baseline:
-   chronos-validation-and-qa §2).
+5. **README.md ("Where that stands today") + CHANGELOG.md + docs/TEST_RESULTS.md** — README is
+   the freshest capability narrative, CHANGELOG preserves build history, and TEST_RESULTS carries
+   the latest dated gate artifact. Counts are never live state; re-run `make gates` before citing
+   another tree (suite map: chronos-validation-and-qa §2).
 
 ### The precedence ladder (AGENTS.md:41-54, restated verbatim in structure)
 
@@ -95,7 +96,6 @@ STALE-UNBANNERED (presents old state as current — the worst class):
 
 - **docs/INCIDENT_RESPONSE.md** and **docs/BACKUP_AND_RECOVERY.md** for anything on the
   live order plane — they only know the deterministic platform's halt (Ledger #1).
-- **docs/TEST_RESULTS.md** "Summary (current…)" — 1901 vs the real 2489 (Ledger #7).
 - **docs/IBKR_INTEGRATION.md** ("ONLY code path", Ledger #9), **docs/IBKR_RUNBOOK.md**
   ("no service loop exists yet"), **docs/ibkr_setup.md** ("read-only until M5-7"),
   **docs/DEPLOYMENT.md** §"Future work" ("does not exist") — all Ledger #10.
@@ -108,7 +108,7 @@ MIXED (check the specific line you are about to cite):
   paragraph (Ledger #3), **docs/live_trading_runbook.md** §"Autonomous operation"
   (stale in both directions, Ledger #2), **docs/SECURITY.md** (Ledger #11),
   **RISK_REGISTER.md R-01**, **ASSUMPTIONS.md A-10/A-21/A-22** (Ledger #8),
-  **docs/TEST_PLAN.md** layer counts, **docs/GO_LIVE_CHECKLIST.md** body statuses
+  **docs/GO_LIVE_CHECKLIST.md** body statuses
   ("current as of 2026-07-17", Ledger #4), **TASKS.md** counts and Open list (Ledger #5).
 
 Always, regardless of document (AGENTS.md:35-36): any **branch name, test count,
@@ -238,8 +238,8 @@ All new work must be sequenced and judged against docs/VISION_COMPLETION_PLAN.md
 
 That service loop **exists** — `src/chronos/service/` (`__main__.py`, `cycle.py`,
 `startup.py`), delivered in M2 and described at HANDOFF.md:43-48 and
-GO_LIVE_CHECKLIST.md:117-121. Its counts are stale too: "951 passed" (:13), "1158
-passed" (:40) vs 2489 (CHANGELOG.md:69).
+GO_LIVE_CHECKLIST.md:117-121. Its 951/1158 test counts are historical snapshots, not
+current evidence.
 
 **Winner:** VISION_COMPLETION_PLAN §§5-6 is the only work queue; TASKS.md is context.
 **Status: fix-candidate** (annotate the Open list entries as delivered/stale).
@@ -267,21 +267,21 @@ something routed through it (2026-07-25)". Its test count is stale: "1885 passed
 **Status: fix-candidate** (either update the body wholesale or widen the banner to name
 the internally-mixed eras).
 
-## #7 — TEST_RESULTS.md "current" summary is five milestones behind
+## #7 — TEST_RESULTS.md and TEST_PLAN.md carried stale validation state — RESOLVED 2026-08-28
 
-> "## Summary (current — M2a, 2026-07-25) … `.venv/bin/pytest -q` | **1901 passed,
-> 1 skipped**" (docs/TEST_RESULTS.md:8-12)
+The original defect was an unbannered "current" test result that stopped at M2a while
+TEST_PLAN.md still described the results as forthcoming, the safety suite as 29 cases, and CI as
+four gates under a 10-minute timeout.
 
-vs the real gate: "ruff clean, mypy strict clean (218 files), **2489 passed**, 1
-skipped" (CHANGELOG.md:69, M11 2026-07-27; suite re-verified green at 2489/1 on
-2026-08-02). The irony: TEST_RESULTS.md labels its OLDER table "Summary (historical —
-post-M5 snapshot, superseded)" (:23) — the discipline exists; the "current" header just
-stopped being maintained after M2a. TEST_PLAN.md has the matching defect: ":4-5 results
-… being produced separately" (they exist) and frozen layer counts ("29 tests" for
-tests/safety/, :22, vs "~90" per TEST_RESULTS.md:18).
+The 2026-08-28 refresh replaces the operational CI instructions with the executable six-target
+`make gates` contract, records the 20-minute workflow timeout and installed-wheel gate, updates the
+single safety file to its observed 36 cases, removes volatile whole-suite counts from the plan, and
+dates TEST_RESULTS against exact main `d44fc4ac7d2f`: 4239 passed, one owner-gated skip, 294+10
+mypy files, 548 formatted files, and a passing installed-wheel smoke. Older measurements remain
+explicitly historical.
 
-**Winner:** CHANGELOG head + a fresh `pytest -q` run. Counts drift; never cite any
-doc's number without re-running. **Status: fix-candidate.** Suite map:
+**Winner:** executable CI + a fresh `make gates` run. Counts drift; TEST_RESULTS is a dated artifact,
+not a live counter. **Status: RESOLVED** for the stale-current presentation. Suite map:
 chronos-validation-and-qa.
 
 ## #8 — The capital premise: ~USD 3,000 vs ~USD 110
@@ -453,16 +453,18 @@ becomes Ledger material.
 
 **6. The Phase-0 deliverable rule (where this converges).** The plan's Phase 0 requires:
 "One generated current-state page. Historical documents retain history but cannot
-present old milestone state as current truth." (VISION_COMPLETION_PLAN.md:132-133).
-Until that page exists, README + CHANGELOG head are the stand-in.
+present old milestone state as current truth." (VISION_COMPLETION_PLAN.md §5, Phase 0).
+Until that page exists, README is the capability-status stand-in, TEST_RESULTS carries dated gate
+evidence, and CHANGELOG remains the milestone history.
 
 # How to update docs when state changes
 
 1. **Record the evidence first** — the test run, commit, or artifact that made the old
    claim false. No evidence, no edit (AGENTS.md task contract; chronos-change-control).
 2. **Update the CANONICAL home of the fact** (one home per fact): status narrative →
-   README "Where that stands today"; gate counts → CHANGELOG head entry; risk posture →
-   the RISK_REGISTER row; decision → DECISIONS.md + a new/amended ADR; roadmap →
+   README "Where that stands today"; dated gate evidence → TEST_RESULTS after fresh
+   `make gates` and exact-SHA CI; milestone history → CHANGELOG; risk posture → the
+   RISK_REGISTER row; decision → DECISIONS.md + a new/amended ADR; roadmap →
    VISION_COMPLETION_PLAN (see rule 5).
 3. **Add supersession notes at the stale sites** in house style (§ above): strike or
    annotate in place, date it, point to the canonical home. Do not delete history.
@@ -470,7 +472,7 @@ Until that page exists, README + CHANGELOG head are the stand-in.
    current for the same fact, one of them gets a banner deferring to the other.
 5. **VISION_COMPLETION_PLAN edits are special:** "Update this document only when live
    state, scope, sequencing, or a gate actually changes; record the evidence and commit
-   that caused the change." (VISION_COMPLETION_PLAN.md:355-356). Scope/threshold/gate
+   that caused the change." (VISION_COMPLETION_PLAN.md §13). Scope/threshold/gate
    changes need explicit owner approval — agents may only propose (§13).
 6. **Security-sensitive, money-critical, or safety-mechanism doc changes** (SECURITY.md,
    safety.md, runbooks' halt/kill procedures) require owner review like the code they
@@ -481,21 +483,20 @@ Until that page exists, README + CHANGELOG head are the stand-in.
 
 # Provenance and maintenance
 
-Written 2026-08-02 against HEAD `47a8d72` (branch `claude/chronos-skills-library-bfbj29`;
-GitHub default branch per VISION plan §2: `feat/wheel-dashboard-mvp`). Every quote was
-re-verified against the named file and line on that date. Docs move: treat every
-`file:line` here as a pointer, not an address — grep the quoted text if lines shifted.
+Written 2026-08-02 against HEAD `47a8d72`; validation-document facts re-verified
+2026-08-28 against exact main `d44fc4ac7d2f`. Other entries retain their own dates. Docs move:
+treat every `file:line` here as a pointer, not an address — grep the quoted text if lines shifted.
 
 | Volatile fact | Re-verify with |
 |---|---|
 | HEAD / branch | `git log -1 --format='%h %s' && git branch --show-current` |
-| Current test count (2489/1 as of M11) | `.venv/bin/pytest -q` (or read the CHANGELOG head entry: `sed -n '1,70p' CHANGELOG.md`) |
+| Latest dated gate artifact; live test count | `sed -n '1,35p' docs/TEST_RESULTS.md`; `.venv/bin/python -m pytest -q` |
 | Ledger #1 still open (no "kill" in incident runbook) | `grep -ci kill docs/INCIDENT_RESPONSE.md` (0 = still open) |
 | Ledger #1 backup-table omission | `grep -n live_kill_switch docs/BACKUP_AND_RECOVERY.md` (empty = still open) |
 | Ledger #2 still open (no mandate in orders plane) | `grep -rn mandate src/chronos/orders/*.py` (empty = code still requires arm) and `grep -n "is_armed" src/chronos/orders/submission.py` |
 | Ledger #3 still open | `grep -n "wired into nothing" docs/ARCHITECTURE.md` |
 | Ledger #5 still open | `grep -n "service loop" TASKS.md` |
-| Ledger #7 still open | `grep -n "Summary (current" docs/TEST_RESULTS.md` |
+| Ledger #7 remains resolved | `grep -n "Summary (current — re-measured 2026-08-28)" docs/TEST_RESULTS.md`; `grep -n "20-minute timeout" docs/TEST_PLAN.md` |
 | Ledger #8 still open ($3k sites) | `grep -rn "USD 3,000\|USD 3k\|3,000" *.md docs/*.md docs/adr/*.md \| grep -v OPUS_BUILD` |
 | Ledger #9/#10 still open | `grep -n "ONLY code path" docs/IBKR_INTEGRATION.md; grep -n "does not exist" docs/DEPLOYMENT.md` |
 | Ledger #11 still open | `grep -n "settings validation raise\|remote access, authentication" docs/SECURITY.md` |
