@@ -495,7 +495,7 @@ claim-evidence ladder).
 - IBKR object semantics, ContractDetails field mapping, pacing design, the inert-control
   prevention checklist → **chronos-ibkr-boundary**.
 - Environment/install problems (venv, lockfile, ibapi import) → **chronos-build-and-env**.
-- What a flag means / safe-to-change → **chronos-config-and-flags**.
+- What a flag means / how to derive its safety effect → **chronos-config-and-flags**.
 - After the gate passes, what to do next → **chronos-priorities-and-roadmap**.
 - Whether a change/claim is allowed and how to route the PR → **chronos-change-control**.
 

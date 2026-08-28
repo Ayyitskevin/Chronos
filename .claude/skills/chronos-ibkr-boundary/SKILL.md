@@ -160,13 +160,11 @@ CLAIM that no bytes reached the gateway socket). All calls are serialized throug
 | src/chronos/broker/ibkr.py | `IBKRBroker` (:185) | ib_async-based READ-ONLY secondary. Every order method raises `BrokerSafetyError` (:657-676). Refuses crypto (:591-599) and refuses `historical_bars`, pointing at the official adapter (:609-630) — one pacing behaviour, one parser, on purpose. |
 | src/chronos/broker/demo.py | `DemoBroker` (:61) | Deterministic in-process fake. Cannot submit or modify (:400-413). `historical_bars` emits deterministic synthetic bars stamped `source="demo"` so the terminal labels them, never presenting a synthetic series in a live register (:307-339). Sets option/crypto qualification metadata by fiat (§2 touchpoint 9). |
 
-**Selection rules** (src/chronos/runtime.py:219-241): `BROKER_MODE=demo` ⇒
-`DemoBroker`; else `BROKER_ADAPTER=ib_async` ⇒ `IBKRBroker`; else the production
-default `OfficialIBKRBroker` (`broker_adapter` defaults `OFFICIAL_IBKR`,
-settings.py:46). The live conjunction REQUIRES `BROKER_ADAPTER=official_ibkr` — "the
-only adapter with a validated live order path" (settings.py:174-178) — and
-`live_transmission_possible` re-derives that on every read (settings.py:290-301).
-Full env-var table: chronos-config-and-flags.
+**Selection rules** are owned by `src/chronos/runtime.py`, the `Settings` declaration
+and validators in `src/chronos/config/settings.py`, and the derived
+`live_transmission_possible` property. Derive their current enum values, defaults,
+conjunctions, and consumers with **chronos-config-and-flags** before relying on a
+broker-selection claim.
 
 **The quarantined fourth path (R-28):** `src/chronos/execution/brokers/ibkr_paper.py`
 — the deterministic platform's paper adapter — holds the repository's dormant SECOND

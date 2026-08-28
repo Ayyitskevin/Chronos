@@ -232,7 +232,7 @@ refusal reason names the layer.
 
 | Layer | What it enforces | Where |
 |---|---|---|
-| Symbol/family eligibility | Deny-by-default allowlists: OPTION and STOCK require `SYMBOL_ALLOWLIST` membership (default AAPL, MSFT, SPY); a symbol on both equity and crypto lists refuses as ambiguous | `src/chronos/strategy/eligibility.py:44-74`; settings.py:127; risk check risk.py:186-192; full config table: **chronos-config-and-flags** |
+| Symbol/family eligibility | Deny-by-default allowlists constrain eligible symbols; overlapping family membership refuses ambiguity | Derive the current declaration, validators, and consumers with **chronos-config-and-flags**, then inspect `src/chronos/strategy/eligibility.py` and `src/chronos/orders/risk.py` |
 | Intent validators | `order_type` is `Literal["LMT"]` (market orders impossible); options TIF DAY-only (API 422s non-DAY for non-crypto); option intents limited to OPEN_SHORT_PUT / OPEN_COVERED_CALL / CLOSE_SHORT_OPTION; whole contracts only | `src/chronos/orders/intent.py:107, 108-111, 162-170, 193-198; src/chronos/api/routes/orders.py:149-156` |
 | API propose path | Options require expiration+strike+right; spec hardcodes `multiplier=100` and `trading_class=symbol` (an adjusted series cannot even be *requested*); broker qualification required, else 422 | routes/orders.py:180-198 (190-191 hardcoding) |
 | Risk engine (all tri-state; UNKNOWN blocks; overall PASS only if every check passes) | eligibility, reconciled state, market_open, limit_only, max contracts/order (default **1**), plus per-intent option checks | risk.py:140-178; settings.py:143 |
