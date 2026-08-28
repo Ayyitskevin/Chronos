@@ -67,6 +67,7 @@ SOURCE_PATHS = (
     Path("src/chronos/supervisor/compiler.py"),
     Path("src/chronos/autonomy/enums.py"),
     Path("src/chronos/config/settings.py"),
+    Path("src/chronos/domain/enums.py"),
     Path("src/chronos/runtime.py"),
     Path("src/chronos/api/autonomy_wiring.py"),
     Path("src/chronos/supervisor/evidence_kinds.py"),

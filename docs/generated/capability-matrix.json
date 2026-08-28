@@ -22,6 +22,10 @@
       "sha256": "29522fe160560c8e422a0030a1ed31b70196cb121621bc436fad572bb5154c17"
     },
     {
+      "path": "src/chronos/domain/enums.py",
+      "sha256": "6244760cac081c4ca0cbbec7cfc586efe6fd11471d7e06fbb29c8c4790414828"
+    },
+    {
       "path": "src/chronos/runtime.py",
       "sha256": "e88e292049ace2442a193f99c5bbde9e002750578526496d903a8fdf877a0880"
     },
