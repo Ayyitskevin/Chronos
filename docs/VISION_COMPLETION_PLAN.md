@@ -343,6 +343,14 @@ Deliver:
 - Reproducible package/release validation: clean venv install, all migrations, static
   assets, entry points, dependency/secret/static scans, SBOM, and signed artifacts.
 
+  **Partial delivery (updated 2026-08-29, ADR-0040):** the local API and operator surfaces now
+  share one pure, display-only projection separating liveness, operator-service readiness,
+  and lane-specific new-exposure capability. Polling reads only bounded local/cached facts,
+  retains typed startup/task failures, and cannot be imported by authority modules. Clock
+  evidence remains explicitly unknown; orchestrator probes, external monitoring/alerts,
+  watchdogs, dead-man behavior, SLOs, and operational proof remain open. This does not satisfy
+  the Phase 2 exit.
+
   **Partial delivery (updated 2026-08-29):** the CI release-artifact gate now builds the wheel in
   an isolated builder and installs it with a separate runtime-only hash lock outside the checkout.
   It proves the shipped static assets and migration namespace match source bytes, executes the

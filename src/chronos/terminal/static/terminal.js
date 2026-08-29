@@ -1560,11 +1560,19 @@ function drawStatus() {
   const system = state.system;
   const status = state.systemStatus;
   const seen = state.systemAt ? utcStamp(new Date(state.systemAt)) : "never";
-  const conn = { ok: ["● BACKEND OK", "st st-ok"], stale: ["● BACKEND STALE", "st st-warn"] }[status] || [
+  const operational = status === "ok" && system ? system.operational_health : null;
+  const readiness = operational && operational.service_readiness;
+  let conn = { ok: ["● BACKEND OK", "st st-ok"], stale: ["● BACKEND STALE", "st st-warn"] }[status] || [
     "● BACKEND UNREACHABLE",
     "st st-bad",
   ];
-  badge("st-conn", conn[0], conn[1], { title: `${state.systemError ? `${state.systemError} · ` : ""}last read ${seen}` });
+  if (readiness && readiness.state === "READY") conn = ["● SERVICE READY", "st st-ok"];
+  else if (readiness && readiness.state === "STARTING") conn = ["● SERVICE STARTING", "st st-warn"];
+  else if (readiness && readiness.state === "NOT_READY") conn = ["● SERVICE NOT READY", "st st-bad"];
+  const readinessReasons = readiness && Array.isArray(readiness.reasons) ? readiness.reasons.join(", ") : "";
+  badge("st-conn", conn[0], conn[1], {
+    title: `${readinessReasons ? `${readinessReasons} · ` : ""}${state.systemError ? `${state.systemError} · ` : ""}last read ${seen}`,
+  });
 
   // `state.system` is the last answer, not the current one. Anything but a
   // successful poll therefore makes every fact below *unobserved* rather than
@@ -1585,6 +1593,22 @@ function drawStatus() {
   else if (observed && observed.autonomy_stopped === true) autonomy = ["AUTONOMY STOPPED", "st st-warn"];
   else if (observed && observed.autonomy_stopped === false) autonomy = ["AUTONOMY RUNNING", "st st-ok"];
   badge("st-autonomy", autonomy[0], autonomy[1]);
+
+  const capability = operational && operational.trading_capability;
+  const lanes = capability ? [
+    ["paper", capability.paper_new_exposure],
+    ["live", capability.live_new_exposure],
+    ["autonomous", capability.autonomous_new_exposure],
+  ] : [];
+  const laneStates = lanes.map(([, verdict]) => verdict && verdict.state);
+  let capabilityBadge = ["NEW EXPOSURE UNKNOWN", "st st-warn"];
+  if (lanes.length && laneStates.every((value) => value === "BLOCKED")) capabilityBadge = ["NEW EXPOSURE BLOCKED", "st st-dim"];
+  else if (lanes.length && !laneStates.includes("UNKNOWN") && laneStates.includes("AVAILABLE")) capabilityBadge = ["SOME NEW EXPOSURE AVAILABLE", "st st-ok"];
+  const capabilityTitle = lanes.map(([name, verdict]) => {
+    const reasons = verdict && Array.isArray(verdict.reasons) ? verdict.reasons.join(", ") : "unknown";
+    return `${name}: ${verdict ? verdict.state : "UNKNOWN"}${reasons ? ` (${reasons})` : ""}`;
+  }).join(" · ");
+  badge("st-capability", capabilityBadge[0], capabilityBadge[1], { title: capabilityTitle });
 
   // Engaged is loud and unknown is nearly as loud; only a positively observed
   // "disengaged" is allowed to be silent.

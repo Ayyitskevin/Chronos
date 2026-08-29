@@ -390,6 +390,10 @@ def test_only_the_supervisor_consumes_the_contracts() -> None:
 _MANDATE_ONLY_MODULES = {
     "terminal/views.py",
     "api/routes/terminal.py",
+    # ADR-0040: the health adapter projects whether a loaded mandate is active
+    # and submitting. It reads no decision and grants no authority; the same
+    # conditional guard below applies to this display-only surface.
+    "api/operational_health.py",
     "cli/mandate_check.py",
 }
 

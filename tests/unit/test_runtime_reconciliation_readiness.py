@@ -15,8 +15,14 @@ from chronos.services.reconciliation import ReconciliationResult
 
 
 class _SyncConnection:
+    def __init__(self, broker: FakeBroker) -> None:
+        self._broker = broker
+
     def run(self, coroutine: object) -> object:
         return asyncio.run(cast(Any, coroutine))
+
+    def connection_status(self) -> object:
+        return asyncio.run(self._broker.connection_status())
 
 
 class _RestartService:
@@ -65,8 +71,9 @@ def test_sent_active_intent_keeps_composite_readiness_pending() -> None:
     runtime.reconciliation_readiness = ReconciliationReadiness()
     runtime.order_management = cast(Any, _RestartService(restart))
     runtime.reconciliation = cast(Any, _PortfolioReconciliation())
-    runtime.broker = cast(Any, FakeBroker())
-    runtime.connection = cast(Any, _SyncConnection())
+    broker = FakeBroker()
+    runtime.broker = cast(Any, broker)
+    runtime.connection = cast(Any, _SyncConnection(broker))
 
     report = runtime.reconcile_submission_readiness(now=FIXED_NOW)
 
@@ -86,8 +93,9 @@ def test_broker_open_order_keeps_composite_readiness_pending() -> None:
     runtime.reconciliation_readiness = ReconciliationReadiness()
     runtime.order_management = cast(Any, _RestartService(restart))
     runtime.reconciliation = cast(Any, _PortfolioReconciliation(has_open_orders=True))
-    runtime.broker = cast(Any, FakeBroker())
-    runtime.connection = cast(Any, _SyncConnection())
+    broker = FakeBroker()
+    runtime.broker = cast(Any, broker)
+    runtime.connection = cast(Any, _SyncConnection(broker))
 
     report = runtime.reconcile_submission_readiness(now=FIXED_NOW)
 

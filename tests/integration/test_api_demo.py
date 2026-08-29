@@ -119,6 +119,12 @@ def test_second_backend_starts_read_only(demo_env: Path, monkeypatch: pytest.Mon
             health = test_client.get("/health").json()
             assert health["read_only"] is True
             assert health["writer_lease_held"] is False
+            assert health["service_readiness"]["state"] == "READY"
+            assert health["trading_capability"]["paper_new_exposure"]["state"] == "BLOCKED"
+            assert (
+                "writer_lease_absent"
+                in health["trading_capability"]["paper_new_exposure"]["reasons"]
+            )
     finally:
         external.release()
         database.dispose()

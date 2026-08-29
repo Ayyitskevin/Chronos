@@ -145,6 +145,20 @@ position — never auto-flattened), stale market data, missing account state,
 risk-engine internal error, data-quality blocking issue. Rearm always
 requires an explicit operator note (`python -m chronos.cli rearm --note ...`).
 
+## Operational-health projection (ADR-0040)
+
+`chronos.operations.health` converts one immutable fact snapshot into three distinct
+diagnostic answers: request liveness, readiness to serve operator inspection, and
+lane-specific new-exposure capability. `chronos.api.operational_health` is the bounded
+FastAPI adapter: it reads the local store, retained startup/task observations,
+reconciliation evidence, and a sanitized connection cache. It does not call the broker.
+
+The projection is display-only. Order, supervisor, risk, broker, and runtime authority code
+cannot import it and continues to enforce the actual lease, mandate, reconciliation, arm,
+kill-switch, evidence, and deterministic gates. A read-only backend can therefore remain
+service-ready for inspection while all trading lanes are blocked. Clock state remains
+`UNKNOWN` until the next operations slice supplies a monitored fact.
+
 ## What is intentionally not built
 
 - No live or canary-live order path **in this deterministic platform** (refused in

@@ -147,6 +147,7 @@ from pydantic import Field
 from chronos.api import bars as bar_plane
 from chronos.api.autonomy_wiring import load_persistent_mandate
 from chronos.api.dependencies import BackendState, get_state, require_writer
+from chronos.api.operational_health import collect_operational_health
 from chronos.api.terminal_session import (
     SESSION_COOKIE,
     SESSION_PATH,
@@ -442,6 +443,7 @@ def system(request: Request, state: StateDep) -> views.SystemView:
     runtime = state.runtime
     now = utc_now()
     autonomy = _autonomy_of(request)
+    operational_health = collect_operational_health(request, now=now)
     with runtime.database.sessions.begin() as session:
         return views.system_view(
             session,
@@ -452,6 +454,7 @@ def system(request: Request, state: StateDep) -> views.SystemView:
             mandate=_mandate_in_force(runtime, autonomy),
             kill_switch_engaged=runtime.live_kill_switch.read().engaged,
             live_armed=runtime.live_arming.state(now=now).armed,
+            operational_health=operational_health,
         )
 
 

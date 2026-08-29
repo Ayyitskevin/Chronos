@@ -111,6 +111,7 @@ from chronos.config.limits import (
 )
 from chronos.domain.models import ChronosModel
 from chronos.marketdata.bars import BarSeries
+from chronos.operations.health import OperationalHealth
 from chronos.persistence import hash_chain
 from chronos.persistence.schema import (
     AutonomyOwnerAlertRow,
@@ -226,6 +227,7 @@ class SystemView(ChronosModel):
     mandate_active: bool | None = None
     mandate_id: str | None = None
     account_fingerprint: str | None = None
+    operational_health: OperationalHealth | None = None
     generated_at: str
 
 
@@ -479,6 +481,7 @@ def system_view(
     mandate: AutonomyMandate | None = None,
     kill_switch_engaged: bool | None = None,
     live_armed: bool | None = None,
+    operational_health: OperationalHealth | None = None,
 ) -> SystemView:
     """Assemble the status bar.
 
@@ -519,6 +522,7 @@ def system_view(
         mandate_active=mandate_active,
         mandate_id=None if mandate is None else mandate.mandate_id,
         account_fingerprint=scoped,
+        operational_health=operational_health,
         generated_at=_iso(now),
     )
 

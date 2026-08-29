@@ -47,8 +47,21 @@ def _render_health(client: ApiClient) -> None:
     except ApiClientError as error:
         st.error(str(error))
         return
+    readiness = health.get("service_readiness")
+    readiness_data = readiness if isinstance(readiness, dict) else {}
+    readiness_state = value_or_dash(readiness_data.get("state"))
+    if readiness_state == "READY":
+        st.success("Backend service readiness is READY.")
+    elif readiness_state == "NOT_READY":
+        st.error("Backend service readiness is NOT READY.")
+    else:
+        st.warning(f"Backend service readiness is {readiness_state}.")
+    render_reasons(
+        readiness_data.get("reasons"),
+        empty_message="Service readiness reported no blocking reasons.",
+    )
     columns = st.columns(4)
-    columns[0].metric("Status", value_or_dash(health.get("status")))
+    columns[0].metric("Service", readiness_state)
     columns[1].metric("Broker mode", value_or_dash(health.get("broker_mode")).upper())
     columns[2].metric("Access", "READ-ONLY" if health.get("read_only", True) else "READ-WRITE")
     columns[3].metric("Writer lease", "HELD" if health.get("writer_lease_held") else "NOT HELD")

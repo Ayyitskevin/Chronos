@@ -115,6 +115,8 @@ def test_authority_badges_do_not_survive_a_failed_poll() -> None:
     assert live["armed"]["hidden"] is True
     assert live["role"]["text"] == "WRITER"
     assert live["autonomy"]["text"] == "AUTONOMY RUNNING"
+    assert live["conn"]["text"] == "● SERVICE READY"
+    assert live["capability"]["text"] == "NEW EXPOSURE BLOCKED"
 
     for state in ("afterFailure", "afterUnavailable"):
         bar = seen[state]
@@ -125,6 +127,7 @@ def test_authority_badges_do_not_survive_a_failed_poll() -> None:
         assert bar["armed"]["text"] == "ARM STATE UNKNOWN"
         assert bar["role"]["text"] == "ROLE UNKNOWN"
         assert bar["autonomy"]["text"] == "AUTONOMY UNKNOWN"
+        assert bar["capability"]["text"] == "NEW EXPOSURE UNKNOWN"
         assert bar["alerts"]["text"] == "ALERTS UNKNOWN"
 
 
