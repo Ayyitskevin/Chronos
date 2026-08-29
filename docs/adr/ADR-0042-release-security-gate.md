@@ -97,3 +97,7 @@ capital, schema, deployment, trading mode, or external notification is touched.
   — baseline, audit, and pre-commit behavior; baselines omit raw secret values.
 - [Python 3.12 temporary-file documentation](https://docs.python.org/3.12/library/tempfile.html#tempfile.TemporaryDirectory)
   — private temporary-directory lifecycle and cleanup semantics.
+
+> **Update (2026-08-29):** ADR-0045 closes this record's tip-only Git-history gap for
+> detector-recognized textual additions reachable from candidate `HEAD`. Its disclosed detector,
+> binary, unreachable-ref, and credential-remediation limits remain.

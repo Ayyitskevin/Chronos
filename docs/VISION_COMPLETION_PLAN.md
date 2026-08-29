@@ -356,7 +356,7 @@ Deliver:
   watchdogs, dead-man behavior, SLOs, and operational proof remain open. This does not satisfy
   the Phase 2 exit.
 
-  **Partial delivery (updated 2026-08-29, through ADR-0044):** the CI release-artifact gate now
+  **Partial delivery (updated 2026-08-29, through ADR-0045):** the CI release-artifact gate now
   derives a bounded build epoch from exact Git `HEAD`, overrides ambient timestamp input, and builds
   the same source set twice in separate source/output trees with the exact locked backend. It
   refuses filename, byte, or member-timestamp drift before publishing. The verified wheel is then
@@ -373,9 +373,12 @@ Deliver:
   reviewed false-positive secret baseline. Its first run removed twelve current GitPython advisories
   and a fixed shared `/tmp` path. CI plus both release venvs now prevalidate an exact two-hash pip
   bootstrap lock and independently verify the installed frontend before other dependency operations;
-  the SBOM requires that exact pip component and refuses unlocked environment extras. These scanners
+  the SBOM requires that exact pip component and refuses unlocked environment extras. The secret
+  policy now also scans every textual addition in complete exact-`HEAD` ancestry, including deleted
+  paths and two-parent merge-resolution deltas; shallow, octopus, oversized, unparsable, unreviewed,
+  or stale-exception history blocks without writing remerge objects into the repository. These scanners
   are current advisory/heuristic evidence: artifact
-  signing, Git-history secret review, malicious-package provenance, the interpreter's initial
+  signing, unrecognized/binary/unreachable-ref secret review, malicious-package provenance, the interpreter's initial
   offline `ensurepip` trust, independent/cross-platform rebuild evidence, and compromised-builder resistance remain
   open. This does not satisfy the Phase 2 exit.
 
