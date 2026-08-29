@@ -1,10 +1,16 @@
-"""Unauthenticated liveness/status endpoint (never exposes account data)."""
+"""Unauthenticated health surfaces that never expose account data.
+
+``/health`` remains the compatibility diagnostic and deliberately answers 200
+while degraded.  The two narrower endpoints are machine-readable probe
+signals: liveness means this process can answer, while readiness reuses the
+operator-service verdict and expresses it in the HTTP status code.
+"""
 
 from __future__ import annotations
 
 from typing import Literal
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, Response, status
 from pydantic import AwareDatetime, BaseModel
 
 from chronos.api.dependencies import BackendState
@@ -12,6 +18,7 @@ from chronos.api.operational_health import collect_operational_health
 from chronos.operations.health import (
     LivenessVerdict,
     OperationalObservations,
+    ReadinessState,
     ReadinessVerdict,
     TradingCapability,
 )
@@ -34,6 +41,25 @@ class HealthResponse(BaseModel):
     service_readiness: ReadinessVerdict
     trading_capability: TradingCapability
     observations: OperationalObservations
+
+
+@router.get("/health/live", response_model=LivenessVerdict)
+def liveness_probe(response: Response) -> LivenessVerdict:
+    """Signal only that the request-serving process can answer."""
+
+    response.headers["Cache-Control"] = "no-store"
+    return LivenessVerdict()
+
+
+@router.get("/health/ready", response_model=ReadinessVerdict)
+def readiness_probe(request: Request, response: Response) -> ReadinessVerdict:
+    """Map the bounded operator-service verdict to 200 or 503."""
+
+    verdict = collect_operational_health(request).service_readiness
+    response.headers["Cache-Control"] = "no-store"
+    if verdict.state is not ReadinessState.READY:
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    return verdict
 
 
 @router.get("/health", response_model=HealthResponse)

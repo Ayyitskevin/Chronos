@@ -10,6 +10,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from chronos.api.main import create_app
+from chronos.api.routes import health as health_routes
 from chronos.api.routes.health import router as health_router
 from chronos.config.settings import get_settings
 from chronos.operations import clock as clock_module
@@ -62,6 +63,35 @@ def test_schema_v2_separates_answering_readiness_and_capability(client: TestClie
     }
 
 
+def test_orchestrator_probes_are_unauthenticated_status_code_signals(
+    client: TestClient,
+) -> None:
+    live = client.get("/health/live")
+    ready = client.get("/health/ready")
+
+    assert live.status_code == 200
+    assert live.json() == {"state": "LIVE", "reasons": []}
+    assert live.headers["cache-control"] == "no-store"
+    assert ready.status_code == 200
+    assert ready.json() == {"state": "READY", "reasons": []}
+    assert ready.headers["cache-control"] == "no-store"
+
+
+def test_liveness_probe_performs_no_operational_fact_collection(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def forbidden(_: object) -> object:
+        raise AssertionError("liveness must not touch readiness or capability facts")
+
+    monkeypatch.setattr(health_routes, "collect_operational_health", forbidden)
+
+    response = client.get("/health/live")
+
+    assert response.status_code == 200
+    assert response.json() == {"state": "LIVE", "reasons": []}
+
+
 def test_compatibility_fields_keep_their_original_types(client: TestClient) -> None:
     body = client.get("/health").json()
 
@@ -84,9 +114,11 @@ def test_health_polling_does_not_call_the_broker(
 
     monkeypatch.setattr(broker, "connection_status", forbidden)
 
-    generations = {
-        client.get("/health").json()["observations"]["broker"]["generation"] for _ in range(12)
-    }
+    generations = set()
+    for _ in range(12):
+        generations.add(client.get("/health").json()["observations"]["broker"]["generation"])
+        assert client.get("/health/live").status_code == 200
+        assert client.get("/health/ready").status_code == 200
 
     assert len(generations) == 1
 
@@ -196,6 +228,12 @@ def test_store_read_failure_is_not_hidden_by_compatibility_ok(
     assert body["service_readiness"]["state"] == "NOT_READY"
     assert body["service_readiness"]["reasons"] == [ReasonCode.STORE_UNREADABLE]
     assert body["observations"]["store_readable"] is False
+    probe = client.get("/health/ready")
+    assert probe.status_code == 503
+    assert probe.json() == {
+        "state": "NOT_READY",
+        "reasons": [ReasonCode.STORE_UNREADABLE],
+    }
 
 
 def test_disconnected_cache_blocks_without_a_remote_health_probe(client: TestClient) -> None:
@@ -220,6 +258,7 @@ def test_broker_loop_failure_blocks_trading_but_not_operator_reads(client: TestC
     assert body["service_readiness"]["state"] == "READY"
     assert body["observations"]["broker_loop_running"] is False
     assert "broker_loop_down" in body["trading_capability"]["paper_new_exposure"]["reasons"]
+    assert client.get("/health/ready").status_code == 200
 
 
 def test_pending_reconciliation_blocks_trading_but_not_operator_reads(
@@ -233,6 +272,7 @@ def test_pending_reconciliation_blocks_trading_but_not_operator_reads(
     assert body["service_readiness"]["state"] == "READY"
     assert body["observations"]["reconciliation"]["status"] == "PENDING"
     assert "reconciliation_not_ready" in body["trading_capability"]["paper_new_exposure"]["reasons"]
+    assert client.get("/health/ready").status_code == 200
 
 
 def test_sanitized_startup_fault_makes_service_not_ready(client: TestClient) -> None:
@@ -246,12 +286,25 @@ def test_sanitized_startup_fault_makes_service_not_ready(client: TestClient) -> 
         "reasons": ["startup_degraded"],
     }
     assert body["observations"]["startup_faults"] == ["proposer_registry_invalid"]
+    probe = client.get("/health/ready")
+    assert probe.status_code == 503
+    assert probe.json() == {
+        "state": "NOT_READY",
+        "reasons": ["startup_degraded"],
+    }
 
 
 def test_unauthenticated_health_body_never_discloses_sensitive_inputs(
     client: TestClient,
 ) -> None:
-    body = json.dumps(client.get("/health").json(), sort_keys=True)
+    body = json.dumps(
+        {
+            "diagnostic": client.get("/health").json(),
+            "live": client.get("/health/live").json(),
+            "ready": client.get("/health/ready").json(),
+        },
+        sort_keys=True,
+    )
 
     for forbidden in ("du1234567", "account_id", "fingerprint", "token", "mandate_id"):
         assert forbidden not in body.lower()
@@ -262,7 +315,16 @@ def test_app_without_lifespan_reports_starting_not_ready() -> None:
     app.include_router(health_router)
     with TestClient(app) as client:
         body = client.get("/health").json()
+        live = client.get("/health/live")
+        ready = client.get("/health/ready")
 
     assert body["status"] == "starting"
     assert body["liveness"]["state"] == "LIVE"
     assert body["service_readiness"]["state"] == "STARTING"
+    assert live.status_code == 200
+    assert live.json() == {"state": "LIVE", "reasons": []}
+    assert ready.status_code == 503
+    assert ready.json() == {
+        "state": "STARTING",
+        "reasons": [ReasonCode.BACKEND_STARTING, ReasonCode.STORE_UNKNOWN],
+    }

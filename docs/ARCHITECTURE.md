@@ -152,6 +152,10 @@ diagnostic answers: request liveness, readiness to serve operator inspection, an
 lane-specific new-exposure capability. `chronos.api.operational_health` is the bounded
 FastAPI adapter: it reads the local store, retained startup/task observations,
 reconciliation evidence, and a sanitized connection cache. It does not call the broker.
+The compatibility `/health` diagnostic remains HTTP 200 while degraded. `/health/live`
+answers HTTP 200 with no fact collection when the process can serve the request;
+`/health/ready` maps only operator-service `READY` to 200 and maps `STARTING` or `NOT_READY`
+to 503. Those probe routes expose only their typed verdict, never trading capability.
 
 The projection is display-only. Order, supervisor, risk, broker, and runtime authority code
 cannot import it and continues to enforce the actual lease, mandate, reconciliation, arm,

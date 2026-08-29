@@ -1,6 +1,6 @@
 # ADR-0040 — Operational health is a conservative projection, never authority
 
-Status: **accepted design — owner authorized autonomous merge for this resumed sequence,
+Status: **accepted and implemented — owner authorized autonomous merge for this resumed sequence,
 2026-08-29. This adds observation only; it grants no trading capability.** Index entry:
 DECISIONS.md D-54.
 
@@ -55,8 +55,17 @@ state is explicitly `UNKNOWN` until a separately reviewed monitor supplies evide
 the old `status` field `status_scope: compatibility_only`. The authoritative diagnostic
 content is nested under liveness, service readiness, trading capability, and observations.
 Because HTTP 200–399 is success to a Kubernetes HTTP probe, this diagnostic endpoint must
-not be configured as an orchestrator readiness probe. A future orchestration integration
-needs a dedicated status-code-bearing endpoint rather than overloading operator visibility.
+not be configured as an orchestrator readiness probe. Dedicated unauthenticated endpoints
+now carry that machine contract without overloading operator visibility:
+
+- `/health/live` performs no fact collection and returns the existing liveness verdict with
+  HTTP 200 whenever this request-serving process can answer;
+- `/health/ready` evaluates the same bounded local snapshot as `/health`, returns the existing
+  service-readiness verdict, and maps only `READY` to HTTP 200. `STARTING` and `NOT_READY` map
+  to HTTP 503; and
+- both responses carry `Cache-Control: no-store`, remain on the backend's loopback binding,
+  and expose only closed state/reason enums. Neither endpoint reports or grants trading
+  capability.
 
 The authenticated `/terminal/system` embeds the same projection. Streamlit pages lead with
 service readiness and its reasons. A stale or unavailable terminal poll discards the cached
@@ -79,9 +88,9 @@ retain their old field types, but must migrate away from interpreting `status: o
 readiness.
 
 This does not add an external clock monitor, process supervisor, watchdog, dead-man signal,
-off-host alert, orchestrator probe, service-level objective, or operational campaign. It does
-not establish that any lane is safe to use; W2 intentionally reports clock evidence as
-unknown.
+off-host alert, orchestrator deployment/configuration, service-level objective, or operational
+campaign. It does not establish that any lane is safe to use. Clock evidence is separately
+observed under ADR-0041 and remains display-only rather than an order-authority predicate.
 
 ## Sources
 
@@ -89,6 +98,9 @@ unknown.
   — liveness and readiness have different recovery effects; probe results include Unknown.
 - [Kubernetes, Configure Probes](https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/)
   — HTTP 200 through 399 counts as probe success.
+- [FastAPI, Response — Change Status Code](https://fastapi.tiangolo.com/advanced/response-change-status-code/)
+  — a `Response` parameter can select a dynamic status while retaining response-model
+  validation and serialization.
 - [Prometheus, Instrumentation](https://prometheus.io/docs/practices/instrumentation/)
   — online systems expose query/error/latency behavior, while batch/loop systems expose last
   progress and heartbeat time.

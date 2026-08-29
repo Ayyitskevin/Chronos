@@ -38,6 +38,27 @@ Read the output deliberately:
    not permission. This observer does not configure chronyd and is not yet an actual order gate;
    see ADR-0041 and R-18 before relying on it operationally.
 
+## Backend process probes
+
+The loopback backend exposes two unauthenticated, no-store machine probes:
+
+```bash
+curl -fsS http://127.0.0.1:8765/health/live
+curl -fsS http://127.0.0.1:8765/health/ready
+```
+
+`/health/live` returns HTTP 200 when the request-serving process can answer and performs no
+fact collection. `/health/ready` returns 200 only when local operator inspection is `READY`;
+startup, an unreadable store, a retained startup fault, or a failed required writer task returns
+503 with closed reason codes. A broker disconnect, pending reconciliation, absent writer lease,
+or unavailable trading lane does **not** make operator inspection unready; those conditions remain
+visible under `/health` and block the corresponding trading-capability verdict instead.
+
+Keep these routes loopback-only. Do not use `/health` itself as a readiness probe: it deliberately
+returns HTTP 200 while degraded so a human can read the full diagnostic. The probe endpoints ship
+without a service manager, external monitor, or orchestrator configuration and grant no trading
+authority.
+
 ## Shadow scan (after market close)
 
 For the daily-bar strategies, the shadow workflow is a one-shot scan after the close
