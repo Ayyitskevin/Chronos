@@ -1,9 +1,10 @@
 """Build and verify the installed Chronos wheel outside the source checkout.
 
 The ordinary test suite runs against an editable install. This gate builds from
-the current tracked/untracked source set, installs the wheel into a fresh runtime
-venv, checks the surfaces that an editable checkout can accidentally hide, and
-emits a validated CycloneDX software bill of materials for that environment.
+the current tracked/untracked source set twice, proves the wheel bytes reproduce,
+installs the wheel into a fresh runtime venv, checks the surfaces that an editable
+checkout can accidentally hide, and emits a validated CycloneDX software bill of
+materials for that environment.
 """
 
 from __future__ import annotations
@@ -20,8 +21,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import venv
 import zipfile
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Final
 
@@ -31,6 +34,8 @@ _MIGRATION_SUPPORT: Final[tuple[str, ...]] = ("env.py", "script.py.mako")
 _MIGRATION_HEAD: Final[str] = "0010"
 _CYCLONEDX_SCHEMA: Final[str] = "http://cyclonedx.org/schema/bom-1.6.schema.json"
 _BOOTSTRAP_COMPONENTS: Final[frozenset[str]] = frozenset({"pip", "setuptools"})
+_SOURCE_DATE_EPOCH_MINIMUM: Final[int] = 315532800  # 1980-01-01 00:00:00 UTC
+_SOURCE_DATE_EPOCH_MAXIMUM: Final[int] = 4354819199  # 2107-12-31 23:59:59 UTC
 # Intentionally independent of the pytest manifest: the artifact gate must carry
 # its own frozen legacy contract rather than derive it from another check.
 _V2_BASELINE_TABLES: Final[frozenset[str]] = frozenset(
@@ -85,13 +90,20 @@ def _module_entrypoints(source_root: Path) -> tuple[str, ...]:
     return modules
 
 
-def _run(command: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
+def _run(
+    command: list[str],
+    *,
+    cwd: Path,
+    environment_overrides: Mapping[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     """Run one visible, fail-fast gate command with source import paths removed."""
 
     print(f"+ {shlex.join(command)}", flush=True)
     environment = os.environ.copy()
     environment.pop("PYTHONHOME", None)
     environment.pop("PYTHONPATH", None)
+    if environment_overrides is not None:
+        environment.update(environment_overrides)
     return subprocess.run(
         command,
         check=True,
@@ -99,6 +111,39 @@ def _run(command: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
         env=environment,
         text=True,
     )
+
+
+def _repository_source_date_epoch() -> int:
+    """Return a bounded, source-derived build epoch for the exact repository HEAD."""
+
+    try:
+        result = subprocess.run(
+            ["git", "show", "-s", "--format=%ct", "HEAD"],
+            check=False,
+            cwd=_REPO_ROOT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError as error:
+        raise ReleaseArtifactError("cannot read the repository commit timestamp") from error
+    if result.returncode != 0:
+        raise ReleaseArtifactError(
+            f"git could not read the repository commit timestamp: exit={result.returncode}"
+        )
+    if re.fullmatch(rb"[0-9]+\n?", result.stdout) is None:
+        raise ReleaseArtifactError("repository commit timestamp is not one decimal integer")
+    epoch = int(result.stdout)
+    if epoch > _SOURCE_DATE_EPOCH_MAXIMUM:
+        raise ReleaseArtifactError("repository commit timestamp exceeds the ZIP timestamp range")
+    return epoch
+
+
+def _wheel_zip_timestamp(source_date_epoch: int) -> tuple[int, int, int, int, int, int]:
+    """Normalize an epoch to setuptools' UTC wheel timestamp and ZIP precision."""
+
+    bounded_epoch = max(source_date_epoch, _SOURCE_DATE_EPOCH_MINIMUM)
+    timestamp = time.gmtime(bounded_epoch)[:6]
+    return (*timestamp[:5], timestamp[5] - (timestamp[5] % 2))
 
 
 def _canonical_package_name(name: str) -> str:
@@ -150,6 +195,7 @@ def _build_wheel(
     wheel_directory: Path,
     *,
     cwd: Path,
+    source_date_epoch: int,
 ) -> None:
     """Install the hash-locked backend, then build without isolation."""
 
@@ -161,6 +207,7 @@ def _build_wheel(
             "pip",
             "wheel",
             "--disable-pip-version-check",
+            "--no-cache-dir",
             "--no-build-isolation",
             "--check-build-dependencies",
             "--no-deps",
@@ -169,6 +216,7 @@ def _build_wheel(
             str(source_root),
         ],
         cwd=cwd,
+        environment_overrides={"SOURCE_DATE_EPOCH": str(source_date_epoch)},
     )
 
 
@@ -217,6 +265,55 @@ def _artifact_members(source_root: Path) -> dict[str, Path]:
 
 def _digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def _single_wheel(wheel_directory: Path) -> Path:
+    """Resolve exactly one Chronos wheel from a build output directory."""
+
+    wheels = sorted(wheel_directory.glob("chronos-*.whl"))
+    if len(wheels) != 1:
+        raise ReleaseArtifactError(f"expected one Chronos wheel, found {wheels}")
+    return wheels[0]
+
+
+def _verify_reproducible_wheels(
+    first_directory: Path,
+    second_directory: Path,
+    source_date_epoch: int,
+) -> tuple[Path, str, tuple[int, int, int, int, int, int]]:
+    """Require two isolated wheel builds to have one identity, bytes, and timestamp."""
+
+    first = _single_wheel(first_directory)
+    second = _single_wheel(second_directory)
+    if first.name != second.name:
+        raise ReleaseArtifactError(
+            f"wheel filenames are not reproducible: {first.name!r} != {second.name!r}"
+        )
+
+    first_bytes = first.read_bytes()
+    second_bytes = second.read_bytes()
+    first_digest = _digest(first_bytes)
+    second_digest = _digest(second_bytes)
+    if first_bytes != second_bytes:
+        raise ReleaseArtifactError(
+            "wheel bytes are not reproducible: "
+            f"first_sha256={first_digest}, second_sha256={second_digest}"
+        )
+
+    expected_timestamp = _wheel_zip_timestamp(source_date_epoch)
+    with zipfile.ZipFile(first) as archive:
+        members = archive.infolist()
+        if not members:
+            raise ReleaseArtifactError("wheel archive contains no members")
+        mismatched = sorted(
+            member.filename for member in members if member.date_time != expected_timestamp
+        )
+    if mismatched:
+        raise ReleaseArtifactError(
+            "wheel members do not use the source-derived ZIP timestamp "
+            f"{expected_timestamp}: {mismatched}"
+        )
+    return first, first_digest, expected_timestamp
 
 
 def _verify_archive(wheel: Path, source_root: Path) -> None:
@@ -613,26 +710,45 @@ def _installed_smoke() -> None:
 
 
 def verify_release_artifact(output_directory: Path) -> None:
-    """Build, inspect, install, inventory, and publish one verified release pair."""
+    """Rebuild, inspect, install, inventory, and publish one verified release pair."""
 
     with tempfile.TemporaryDirectory(prefix="chronos-release-") as raw_directory:
         work = Path(raw_directory)
-        source_root = work / "source"
-        wheel_directory = work / "dist"
+        source_root = work / "source-a"
+        second_source_root = work / "source-b"
+        wheel_directory = work / "dist-a"
+        second_wheel_directory = work / "dist-b"
         builder_root = work / "builder-venv"
         runtime_root = work / "runtime-venv"
         _copy_source(source_root)
+        _copy_source(second_source_root)
         wheel_directory.mkdir()
+        second_wheel_directory.mkdir()
         venv.EnvBuilder(with_pip=True).create(builder_root)
         venv.EnvBuilder(with_pip=True).create(runtime_root)
         builder_python = builder_root / "bin/python"
         runtime_python = runtime_root / "bin/python"
+        source_date_epoch = _repository_source_date_epoch()
 
-        _build_wheel(builder_python, source_root, wheel_directory, cwd=work)
-        wheels = sorted(wheel_directory.glob("chronos-*.whl"))
-        if len(wheels) != 1:
-            raise ReleaseArtifactError(f"expected one Chronos wheel, found {wheels}")
-        wheel = wheels[0]
+        _build_wheel(
+            builder_python,
+            source_root,
+            wheel_directory,
+            cwd=work,
+            source_date_epoch=source_date_epoch,
+        )
+        _build_wheel(
+            builder_python,
+            second_source_root,
+            second_wheel_directory,
+            cwd=work,
+            source_date_epoch=source_date_epoch,
+        )
+        wheel, wheel_digest, wheel_timestamp = _verify_reproducible_wheels(
+            wheel_directory,
+            second_wheel_directory,
+            source_date_epoch,
+        )
         _verify_archive(wheel, source_root)
 
         _install_lock(runtime_python, source_root / "requirements-runtime.lock", cwd=work)
@@ -679,8 +795,10 @@ def verify_release_artifact(output_directory: Path) -> None:
             shutil.copy2(artifact, destination)
             published.append(destination)
         print(
-            f"Release artifact gate passed for {wheel.name} with a validated CycloneDX 1.6 "
-            f"SBOM covering {component_count} runtime components. Published "
+            f"Release artifact gate passed for reproducible {wheel.name} "
+            f"(sha256={wheel_digest}, SOURCE_DATE_EPOCH={source_date_epoch}, "
+            f"ZIP timestamp={wheel_timestamp}) with a validated CycloneDX 1.6 SBOM covering "
+            f"{component_count} runtime components. Published "
             f"{', '.join(str(path) for path in published)}."
         )
 

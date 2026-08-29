@@ -39,12 +39,15 @@ requires exact scanner versions, audits the hash-locked runtime set without reso
 and fails closed if the advisory service, a scanner, the tracked-file inventory, or the reviewed
 secret baseline is unavailable or stale.
 
-The final gate builds the current non-ignored source set in an isolated builder, checks the wheel's
-terminal assets and complete migration namespace byte-for-byte against that source, installs only
-`requirements-runtime.lock` plus the wheel in a separate runtime venv, upgrades a disposable v2
-database through the installed migration tree, and exercises the package, console, and every
-packaged `src/chronos/**/__main__.py` command surface. A separately hash-locked CycloneDX tool then
-creates schema-validated, reproducible 1.6 JSON for that exact runtime environment. The verifier
+The final gate derives `SOURCE_DATE_EPOCH` from the exact Git `HEAD`, overriding any ambient value,
+then builds the current non-ignored source set twice in separate source/output trees with the pinned
+backend. It requires one identical wheel filename, exact byte equality, and the normalized
+source-derived timestamp on every ZIP member. It then checks terminal assets and the complete
+migration namespace byte-for-byte against source, installs only `requirements-runtime.lock` plus
+the verified wheel in a separate runtime venv, upgrades a disposable v2 database through the
+installed migration tree, and exercises the package, console, and every packaged
+`src/chronos/**/__main__.py` command surface. A separately hash-locked CycloneDX tool creates
+schema-validated, reproducible 1.6 JSON for that exact runtime environment. The verifier
 cross-checks the component versions and dependency graph against the runtime lock and wheel
 metadata, and publishes the wheel plus `chronos-<version>.cdx.json` under ignored `dist/`.
 
@@ -54,6 +57,8 @@ set, using an explicitly reviewed fingerprint baseline. Exact-main CI requests 9
 the wheel and SBOM in `chronos-release-<commit-sha>`. Run only artifact validation with
 `make release-gate`. The SBOM remains an inventory rather than a signature; the security gate adds
 current advisory and heuristic checks but does not inspect Git history or prove package provenance.
+The wheel comparison proves repeatability inside the exact gate environment; it is not a signature,
+an independent rebuilder attestation, or evidence of cross-platform reproducibility.
 
 Reproducibility record: even with the lock, record the resolved environment at deployment
 time (the pip frontend itself remains outside the hash gate — docs/SECURITY.md):

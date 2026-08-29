@@ -1,5 +1,6 @@
 """Focused tests for source-driven release-artifact inventory."""
 
+import hashlib
 import importlib.resources
 import json
 import os
@@ -19,8 +20,13 @@ from scripts.verify_release_artifact import (
     _generate_sbom,
     _locked_requirements,
     _module_entrypoints,
+    _repository_source_date_epoch,
+    _run,
     _terminal_assets,
+    _verify_reproducible_wheels,
     _verify_sbom,
+    _wheel_zip_timestamp,
+    verify_release_artifact,
 )
 
 from chronos.persistence.schema import Base
@@ -94,6 +100,77 @@ def test_ci_retains_exact_main_release_evidence_with_a_pinned_action() -> None:
     ]
     assert upload_step["with"]["if-no-files-found"] == "error"
     assert upload_step["with"]["retention-days"] == 90
+
+
+def test_gate_overrides_ambient_build_epoch_and_removes_python_import_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, object] = {}
+
+    def record(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setenv("SOURCE_DATE_EPOCH", "999999999")
+    monkeypatch.setenv("PYTHONHOME", "/ambient/home")
+    monkeypatch.setenv("PYTHONPATH", "/ambient/path")
+    monkeypatch.setattr(subprocess, "run", record)
+
+    _run(
+        ["build-tool"],
+        cwd=tmp_path,
+        environment_overrides={"SOURCE_DATE_EPOCH": "123456789"},
+    )
+
+    environment = captured["env"]
+    assert isinstance(environment, dict)
+    assert environment["SOURCE_DATE_EPOCH"] == "123456789"
+    assert "PYTHONHOME" not in environment
+    assert "PYTHONPATH" not in environment
+
+
+def test_source_date_epoch_is_the_exact_repository_commit_timestamp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[tuple[list[str], Path]] = []
+
+    def record(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        commands.append((command, kwargs["cwd"]))
+        return subprocess.CompletedProcess(command, 0, stdout=b"1788000001\n")
+
+    monkeypatch.setattr(subprocess, "run", record)
+
+    assert _repository_source_date_epoch() == 1788000001
+    assert commands == [(["git", "show", "-s", "--format=%ct", "HEAD"], _REPO_ROOT)]
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout", "message"),
+    [
+        (2, b"", "git could not read"),
+        (0, b"-1\n", "not one decimal integer"),
+        (0, b"123\n456\n", "not one decimal integer"),
+        (0, b"4354819200\n", "exceeds the ZIP timestamp range"),
+    ],
+)
+def test_source_date_epoch_rejects_unusable_git_evidence(
+    returncode: int,
+    stdout: bytes,
+    message: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def record(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(command, returncode, stdout=stdout)
+
+    monkeypatch.setattr(subprocess, "run", record)
+
+    with pytest.raises(RuntimeError, match=message):
+        _repository_source_date_epoch()
+
+
+def test_wheel_zip_timestamp_clamps_to_1980_and_uses_two_second_precision() -> None:
+    assert _wheel_zip_timestamp(0) == (1980, 1, 1, 0, 0, 0)
+    assert _wheel_zip_timestamp(1788000001) == (2026, 8, 29, 10, 40, 0)
 
 
 def test_runtime_and_sbom_locks_keep_release_environments_separate() -> None:
@@ -306,15 +383,26 @@ def test_wheel_builder_requests_hashed_backend_before_disabling_isolation(
     source_root = tmp_path / "source"
     wheel_directory = tmp_path / "dist"
     python = tmp_path / "venv/bin/python"
-    commands: list[tuple[list[str], Path]] = []
+    commands: list[tuple[list[str], Path, dict[str, str] | None]] = []
 
-    def record(command: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
-        commands.append((command, cwd))
+    def record(
+        command: list[str],
+        *,
+        cwd: Path,
+        environment_overrides: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        commands.append((command, cwd, environment_overrides))
         return subprocess.CompletedProcess(command, 0)
 
     monkeypatch.setattr("scripts.verify_release_artifact._run", record)
 
-    _build_wheel(python, source_root, wheel_directory, cwd=tmp_path)
+    _build_wheel(
+        python,
+        source_root,
+        wheel_directory,
+        cwd=tmp_path,
+        source_date_epoch=1788000001,
+    )
 
     assert commands == [
         (
@@ -330,6 +418,7 @@ def test_wheel_builder_requests_hashed_backend_before_disabling_isolation(
                 str(source_root / "requirements-build.lock"),
             ],
             tmp_path,
+            None,
         ),
         (
             [
@@ -338,6 +427,7 @@ def test_wheel_builder_requests_hashed_backend_before_disabling_isolation(
                 "pip",
                 "wheel",
                 "--disable-pip-version-check",
+                "--no-cache-dir",
                 "--no-build-isolation",
                 "--check-build-dependencies",
                 "--no-deps",
@@ -346,8 +436,143 @@ def test_wheel_builder_requests_hashed_backend_before_disabling_isolation(
                 str(source_root),
             ],
             tmp_path,
+            {"SOURCE_DATE_EPOCH": "1788000001"},
         ),
     ]
+
+
+def _write_wheel_fixture(
+    directory: Path,
+    *,
+    name: str = "chronos-0.1.0-py3-none-any.whl",
+    content: bytes = b"artifact",
+    timestamp: tuple[int, int, int, int, int, int] = (2026, 8, 29, 10, 40, 0),
+) -> Path:
+    directory.mkdir()
+    wheel = directory / name
+    member = zipfile.ZipInfo("chronos/__init__.py", date_time=timestamp)
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr(member, content)
+    return wheel
+
+
+def test_reproducible_wheel_check_accepts_exact_bytes_and_source_timestamp(
+    tmp_path: Path,
+) -> None:
+    first = _write_wheel_fixture(tmp_path / "dist-a")
+    _write_wheel_fixture(tmp_path / "dist-b")
+
+    wheel, digest, timestamp = _verify_reproducible_wheels(
+        tmp_path / "dist-a",
+        tmp_path / "dist-b",
+        1788000001,
+    )
+
+    assert wheel == first
+    assert digest == hashlib.sha256(first.read_bytes()).hexdigest()
+    assert timestamp == (2026, 8, 29, 10, 40, 0)
+
+
+def test_reproducible_wheel_check_rejects_byte_drift_with_sanitized_digests(
+    tmp_path: Path,
+) -> None:
+    _write_wheel_fixture(tmp_path / "dist-a", content=b"first-private-bytes")
+    _write_wheel_fixture(tmp_path / "dist-b", content=b"second-private-bytes")
+
+    mismatch = r"first_sha256=[0-9a-f]{64}, second_sha256=[0-9a-f]{64}"
+    with pytest.raises(RuntimeError, match=mismatch):
+        _verify_reproducible_wheels(tmp_path / "dist-a", tmp_path / "dist-b", 1788000001)
+
+
+def test_reproducible_wheel_check_rejects_filename_drift(tmp_path: Path) -> None:
+    _write_wheel_fixture(tmp_path / "dist-a")
+    _write_wheel_fixture(tmp_path / "dist-b", name="chronos-0.2.0-py3-none-any.whl")
+
+    with pytest.raises(RuntimeError, match="wheel filenames are not reproducible"):
+        _verify_reproducible_wheels(tmp_path / "dist-a", tmp_path / "dist-b", 1788000001)
+
+
+def test_reproducible_wheel_check_rejects_member_timestamp_drift(tmp_path: Path) -> None:
+    _write_wheel_fixture(tmp_path / "dist-a", timestamp=(2026, 8, 29, 10, 40, 2))
+    _write_wheel_fixture(tmp_path / "dist-b", timestamp=(2026, 8, 29, 10, 40, 2))
+
+    with pytest.raises(RuntimeError, match="source-derived ZIP timestamp"):
+        _verify_reproducible_wheels(tmp_path / "dist-a", tmp_path / "dist-b", 1788000001)
+
+
+def test_release_gate_builds_two_isolated_source_and_output_trees(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    copied_sources: list[Path] = []
+    builds: list[tuple[Path, Path, int]] = []
+    source_date_epoch = 1788000001
+    timestamp = _wheel_zip_timestamp(source_date_epoch)
+
+    def copy_source(destination: Path) -> None:
+        destination.mkdir()
+        copied_sources.append(destination)
+
+    def create_environment(builder: object, destination: Path) -> None:
+        del builder
+        (destination / "bin").mkdir(parents=True)
+
+    def build_wheel(
+        python: Path,
+        source_root: Path,
+        wheel_directory: Path,
+        *,
+        cwd: Path,
+        source_date_epoch: int,
+    ) -> None:
+        del python, cwd
+        builds.append((source_root, wheel_directory, source_date_epoch))
+        member = zipfile.ZipInfo("chronos/__init__.py", date_time=timestamp)
+        with zipfile.ZipFile(wheel_directory / "chronos-0.1.0-py3-none-any.whl", "w") as archive:
+            archive.writestr(member, b"same artifact")
+
+    def generate_sbom(
+        tool_python: Path,
+        runtime_python: Path,
+        source_root: Path,
+        output: Path,
+        *,
+        cwd: Path,
+    ) -> None:
+        del tool_python, runtime_python, source_root, cwd
+        output.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr("scripts.verify_release_artifact._copy_source", copy_source)
+    monkeypatch.setattr(
+        "scripts.verify_release_artifact.venv.EnvBuilder.create", create_environment
+    )
+    monkeypatch.setattr("scripts.verify_release_artifact._build_wheel", build_wheel)
+    monkeypatch.setattr(
+        "scripts.verify_release_artifact._repository_source_date_epoch",
+        lambda: source_date_epoch,
+    )
+    monkeypatch.setattr("scripts.verify_release_artifact._verify_archive", lambda *args: None)
+    monkeypatch.setattr(
+        "scripts.verify_release_artifact._install_lock", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr("scripts.verify_release_artifact._run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "scripts.verify_release_artifact._wheel_identity",
+        lambda wheel: ("chronos", "0.1.0", frozenset()),
+    )
+    monkeypatch.setattr("scripts.verify_release_artifact._generate_sbom", generate_sbom)
+    monkeypatch.setattr("scripts.verify_release_artifact._verify_sbom", lambda *args: 64)
+
+    output_directory = tmp_path / "published"
+    verify_release_artifact(output_directory)
+
+    assert len(copied_sources) == 2
+    assert copied_sources[0] != copied_sources[1]
+    assert len(builds) == 2
+    assert builds[0][0] != builds[1][0]
+    assert builds[0][1] != builds[1][1]
+    assert {build[2] for build in builds} == {source_date_epoch}
+    assert (output_directory / "chronos-0.1.0-py3-none-any.whl").is_file()
+    assert (output_directory / "chronos-0.1.0.cdx.json").is_file()
 
 
 def test_terminal_asset_inventory_discovers_every_file_at_any_depth(tmp_path: Path) -> None:
