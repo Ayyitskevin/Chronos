@@ -1690,6 +1690,10 @@ tzdata==2025.3 \
     #   chronos (pyproject.toml)
     #   ib-async
     #   pandas
+unidiff==1.0.0 \
+    --hash=sha256:2e1fb4eebe2354a26a1f3d51efe2e5d504cae5764b98ed8bdbb4e7a000baff28 \
+    --hash=sha256:5e5d5cfab2dc98be819b74747ab7d9f5af8695369ec8710b93f9ab0f0ae6a449
+    # via chronos (pyproject.toml)
 urllib3==2.7.0 \
     --hash=sha256:231e0ec3b63ceb14667c67be60f2f2c40a518cb38b03af60abc813da26505f4c \
     --hash=sha256:9fb4c81ebbb1ce9531cce37674bbc6f1360472bc18ca9a553ede278ef7276897

@@ -138,7 +138,8 @@ and the release-artifact gate, on Python 3.12 with safety env pins (`BROKER_MODE
   check rather than installing silently. Modern setuptools implements
   `bdist_wheel` itself, so the `wheel` CLI package is not a Chronos build dependency.
 - **Release security tools are exact dev dependencies:** `pip-audit==2.10.1`,
-  `bandit==1.9.4`, and `detect-secrets==1.5.0` are installed from the hash-locked dev set.
+  `bandit==1.9.4`, `detect-secrets==1.5.0`, and its history-diff parser `unidiff==1.0.0`
+  are installed from the hash-locked dev set.
   `scripts/verify_release_security.py` refuses any installed-version drift before scanning.
 - **The release SBOM is a checked artifact, not a best-effort report.** The gate uses the official
   `cyclonedx-py environment` CLI against only the runtime venv, requests reproducible CycloneDX 1.6
@@ -164,10 +165,16 @@ and the release-artifact gate, on Python 3.12 with safety env pins (`BROKER_MODE
   `.secrets.baseline`; every baseline entry is an explicitly reviewed false positive. The wrapper
   scans a temporary copy and refuses if detect-secrets would rewrite it, so stale line fingerprints
   fail without mutating the checkout. The baseline stores hashes, detector names, paths, and lines,
-  never raw candidate values.
+  never raw candidate values. The same policy scans every detector-recognized addition in the
+  exact ancestry reachable from `HEAD`, including deleted-file additions, NUL-bearing files, and
+  two-parent merge-resolution deltas. Git is forced to emit text patches for every blob so its
+  binary-file heuristic cannot silently suppress a hunk.
+  Hosted CI fetches complete history; shallow or octopus history, an over-128-MiB patch, parser
+  failure, unreviewed finding, or stale exact historical exception blocks. Remerge scratch objects
+  live in a private alternate object directory rather than the repository.
   **Residual:** advisory and heuristic results are current evidence, not proof that dependencies are
-  non-malicious, every historical secret is absent, or lower-confidence static issues do not exist.
-  The gate does not scan Git history or sign either artifact. The downloaded pip frontend now has
+  non-malicious, every unrecognized/arbitrarily-encoded/unreachable-ref secret is absent, or lower-confidence
+  static issues do not exist. The gate does not sign either artifact. The downloaded pip frontend now has
   exact version and artifact hashes, but the interpreter and its offline `ensurepip` bundle remain
   the initial trust root that performs that self-replacement. Hash equality does not establish pip's
   publisher, build-system, or source provenance. The measured wheel result
