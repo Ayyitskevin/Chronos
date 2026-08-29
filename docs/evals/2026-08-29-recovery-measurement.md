@@ -1,0 +1,109 @@
+# Recovery measurement capability evaluation — 2026-08-29
+
+## Claim under test
+
+Exact base `6034e1064c63df65a87411f0b668db015dab8c6f` can capture the five bounded
+Chronos recovery artifacts without changing their source bytes, restore them into a new isolated
+directory, and emit honest snapshot-age/local-duration observations. This evaluation does **not**
+claim an operational RPO or RTO.
+
+## Boundary
+
+- Disposable DEMO/PAPER state only; no credential, live service, gateway, broker, mandate, or
+  external network was accessed.
+- `platform_ledger.db` and `chronos.db` were open in WAL mode during capture.
+- The live kill switch was engaged, the deterministic platform was halted, and the audit chain was
+  non-empty.
+- Snapshot and restore roots were temporary and did not exist before the command.
+- The command captured no `.env`, account identifier, or owner mandate. The source label was the
+  non-sensitive string `disposable-evaluation`.
+
+## Positive observation
+
+Command: an isolated Python 3.12 process constructed the real `SqliteLedger` and `Database`, then
+called `capture_snapshot(...)` followed by `restore_snapshot(...)` through the packaged module.
+
+Observed result:
+
+| Observation | Value |
+|---|---:|
+| Snapshot result | `chronos-recovery-snapshot-v1` |
+| Required artifacts | 5 / 5, each SHA-256 and byte-size bound |
+| Artifact capture elapsed | 0.044943684 s |
+| Snapshot capture window | 0.020347 s |
+| Oldest snapshot age at restore start | 0.047581 s |
+| Local restore copy | 0.010234581 s |
+| Local verification | 0.023113364 s |
+| Local recovery elapsed | 0.033347945 s |
+| Restore verdict | `PASS` |
+| Snapshot manifest SHA-256 | `ea97361168e6b7888fe0f5c3519e6f04191cef94c3c339dc8c7b2dc6dfed6039` |
+
+The values above are one same-host disposable observation. They are not performance thresholds and
+must not be compared with an unstated objective.
+
+## Failure-path evidence
+
+`tests/integration/test_recovery_measurement.py` exercises:
+
+- exact deterministic duration/age arithmetic across separate wall and monotonic clocks;
+- source artifacts remaining byte-identical after capture;
+- refusal before writing when the destination already exists;
+- refusal before writing when the live kill switch is disengaged or corrupt;
+- refusal before writing when halt evidence is corrupt;
+- refusal before writing when a snapshot member's size/digest changes;
+- refusal before writing when the restore wall clock predates the capture window; and
+- the installed `python -m chronos.recovery capture|restore` command.
+
+`tests/safety/test_recovery_measurement_isolation.py` scans the shipped package for broker,
+network, subprocess, and destructive filesystem surfaces and proves its scanner sees both direct
+and `from ... import ...` import forms plus deletion calls.
+
+Focused verification after all mutation reversions:
+
+```text
+.venv/bin/python -m pytest -q \
+  tests/integration/test_recovery_measurement.py \
+  tests/safety/test_recovery_measurement_isolation.py \
+  tests/integration/test_backup_restore_drill.py
+18 passed in 4.88s
+
+.venv/bin/ruff check .
+All checks passed!
+
+.venv/bin/ruff format --check .
+569 files already formatted
+
+.venv/bin/mypy src/chronos
+Success: no issues found in 297 source files
+```
+
+Manual mutation checks, each applied alone and then reverted:
+
+| Mutation | Named detector | Observed failure |
+|---|---|---|
+| Replace SQLite online backup with a plain main-file copy | `test_capture_and_restore_emit_bounded_measurements` | Refused the WAL-stale platform copy because required tables/evidence were absent |
+| Compute oldest snapshot age from the newest artifact instead | `test_capture_and_restore_emit_bounded_measurements` | Exact assertion observed 90.0 s instead of the conservative 99.0 s |
+| Skip pre-write snapshot digest verification | `test_restore_refuses_tampered_snapshot_bytes_before_writing` | Restore directory was created, violating the before-writing assertion |
+| Treat every fail-closed `engaged=True` read as valid kill evidence | `test_capture_refuses_a_corrupt_kill_file_even_though_runtime_fails_closed` | Corrupt JSON was accepted and the expected refusal disappeared |
+
+Full candidate gate after the implementation and documentation were present:
+
+```text
+make gates
+ruff: All checks passed; 569 files already formatted
+mypy: 297 Chronos source files and 10 worker files clean
+pytest: 4383 passed, 1 skipped, 24 warnings in 176.45s
+installed-wheel gate: PASS; migration head 0010, 34 model tables, 5 module entry points
+```
+
+The single skip is the expected owner-opt-in read-only IBKR smoke test; no gateway was configured
+or contacted.
+
+## Residuals
+
+Operational evidence still requires an owner-run campaign on the intended recovery host with:
+verified clock health; stated RPO/RTO targets; representative state and snapshot age; off-host and
+encrypted transport/retention; external manifest anchoring; incident detection and infrastructure
+provisioning; mandate/secrets review; and broker order/position reconciliation. Recovery remains
+read-only and unreconciled until those steps finish, and this capability grants no permission to
+rearm.
