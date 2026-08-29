@@ -52,7 +52,7 @@ jobs:
         run: pytest -q
 
       - name: Release security gate
-        run: make security-gate
+        run: make security-gate PY=python
 
       - name: Validate release artifact
         run: python scripts/verify_release_artifact.py

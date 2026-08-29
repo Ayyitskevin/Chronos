@@ -102,6 +102,12 @@ def test_scan_commands_bind_exact_release_inputs_and_thresholds(tmp_path: Path) 
     )
 
 
+def test_hosted_ci_injects_its_python_into_the_make_target() -> None:
+    workflow = (_REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+    assert "run: make security-gate PY=python" in workflow
+
+
 def test_gate_refuses_tool_version_drift_before_running_scans(tmp_path: Path) -> None:
     (tmp_path / ".secrets.baseline").write_text("{}\n", encoding="utf-8")
     called: list[ScanCommand] = []

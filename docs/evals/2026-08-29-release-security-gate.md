@@ -65,7 +65,7 @@ present reported:
 make gates
 ruff: All checks passed; 582 files already formatted
 mypy: 302 Chronos source files and 10 worker files clean
-pytest: 4486 passed, 1 skipped, 25 warnings in 190.46s
+pytest: 4487 passed, 1 skipped, 25 warnings
 security gate: no known vulnerabilities; Bandit and tracked-file secret scan passed
 installed-wheel gate: PASS; migration head 0010, 34 model tables, 5 module entry points
 CycloneDX 1.6 SBOM: valid, reproducible, 64 runtime components
