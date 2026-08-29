@@ -29,6 +29,7 @@ import json
 import sys
 from dataclasses import asdict, replace
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
@@ -130,17 +131,16 @@ def run_one(
     tag: str,
     variant: dict[str, float] | None = None,
 ) -> dict[str, object]:
-    halt = HaltStore(
-        Path("/tmp/claude-research-halt") / f"{strategy_name}_{series.symbol}_{tag}.json"
-    )
-    halt.rearm("research run")
-    result = run_backtest(
-        series=series,
-        strategy=make_strategy(strategy_name, variant),
-        risk_policy=RESEARCH_POLICY,
-        config=config,
-        halt_store=halt,
-    )
+    with TemporaryDirectory(prefix="chronos-research-halt-") as halt_directory:
+        halt = HaltStore(Path(halt_directory) / "halt.json")
+        halt.rearm("research run")
+        result = run_backtest(
+            series=series,
+            strategy=make_strategy(strategy_name, variant),
+            risk_policy=RESEARCH_POLICY,
+            config=config,
+            halt_store=halt,
+        )
     metrics = compute_metrics(result)
     daily_returns: list[float] = []
     curve = result.equity_curve

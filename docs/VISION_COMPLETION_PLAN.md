@@ -364,9 +364,13 @@ Deliver:
   `src/chronos/**/__main__.py` command surface. A separately locked official tool emits validated,
   reproducible CycloneDX 1.6 JSON for that runtime environment; the gate cross-checks its exact
   components and root dependency edge against the runtime lock and wheel metadata. Exact-main CI
-  requests 90-day retention for the wheel/SBOM pair. Dependency, secret, and static-analysis scans plus
-  artifact signing remain open; the pip frontend remains outside the lock and wheel ZIP bytes are
-  not reproducible. This does not satisfy the Phase 2 exit.
+  requests 90-day retention for the wheel/SBOM pair. A separate exact-version, fail-closed release
+  security gate now audits the hash-locked runtime set without resolution, scans shipped Python at
+  medium-severity/medium-confidence or stronger, and checks every tracked file against an explicitly
+  reviewed false-positive secret baseline. Its first run removed twelve current GitPython advisories
+  and a fixed shared `/tmp` path. These scanners are current advisory/heuristic evidence: artifact
+  signing, Git-history secret review, malicious-package provenance, the pip frontend outside the
+  lock, and reproducible wheel ZIP bytes remain open. This does not satisfy the Phase 2 exit.
 
 ### Real-gateway read-only gate
 
