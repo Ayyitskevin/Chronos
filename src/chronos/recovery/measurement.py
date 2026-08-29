@@ -163,7 +163,11 @@ def capture_snapshot(
     normalized_source_id = _normalize_source_id(source_id)
     _assert_new_destination(snapshot_root)
     _assert_disjoint(source_data, snapshot_root)
-    _verify_recovery_data(source_data, exact_application_schema=False)
+    _verify_recovery_data(
+        source_data,
+        exact_application_schema=False,
+        immutable_databases=False,
+    )
 
     capture_started_at = _now_utc(selected_clock)
     capture_started_ns = selected_clock.monotonic_ns()
@@ -182,7 +186,11 @@ def capture_snapshot(
             raise RecoveryMeasurementError(f"wall clock moved backwards while capturing {name}")
         captures.append((name, artifact_started_at, artifact_completed_at))
 
-    _verify_recovery_data(snapshot_root, exact_application_schema=True)
+    _verify_recovery_data(
+        snapshot_root,
+        exact_application_schema=True,
+        immutable_databases=True,
+    )
     artifacts = tuple(
         ArtifactCapture(
             name=name,
@@ -243,8 +251,13 @@ def restore_snapshot(
     copy_completed_ns = selected_clock.monotonic_ns()
 
     _verify_manifest_artifacts(restored_data, manifest)
-    _verify_recovery_data(restored_data, exact_application_schema=True)
+    _verify_recovery_data(
+        restored_data,
+        exact_application_schema=True,
+        immutable_databases=True,
+    )
     _verify_manifest_artifacts(restored_data, manifest)
+    _fsync_directory(restored_data)
     verification_completed_ns = selected_clock.monotonic_ns()
     recovery_completed_at = _now_utc(selected_clock)
     if recovery_completed_at < recovery_started_at:
@@ -272,11 +285,20 @@ def restore_snapshot(
     return observation
 
 
-def _verify_recovery_data(data: Path, *, exact_application_schema: bool) -> None:
+def _verify_recovery_data(
+    data: Path,
+    *,
+    exact_application_schema: bool,
+    immutable_databases: bool,
+) -> None:
     for name in _REQUIRED_ARTIFACTS:
         _require_regular_file(data / name)
-    _verify_platform_database(data / "platform_ledger.db")
-    _verify_application_database(data / "chronos.db", exact_schema=exact_application_schema)
+    _verify_platform_database(data / "platform_ledger.db", immutable=immutable_databases)
+    _verify_application_database(
+        data / "chronos.db",
+        exact_schema=exact_application_schema,
+        immutable=immutable_databases,
+    )
 
     kill_state = LiveKillSwitch(data / "live_kill_switch.json").read()
     if not kill_state.engaged:
@@ -291,15 +313,15 @@ def _verify_recovery_data(data: Path, *, exact_application_schema: bool) -> None
         raise RecoveryMeasurementError("recovery halt evidence is corrupt")
 
     audit_path = data / "platform_audit.jsonl"
-    if audit_path.stat().st_size == 0:
-        raise RecoveryMeasurementError("recovery audit evidence is empty")
+    if not any(line.strip() for line in _read_regular_file(audit_path).splitlines()):
+        raise RecoveryMeasurementError("recovery audit evidence contains no records")
     audit_ok, audit_detail = verify_chain(audit_path)
     if not audit_ok:
         raise RecoveryMeasurementError(f"recovery audit chain failed: {audit_detail}")
 
 
-def _verify_platform_database(path: Path) -> None:
-    with _readonly_sqlite(path) as connection:
+def _verify_platform_database(path: Path, *, immutable: bool) -> None:
+    with _readonly_sqlite(path, immutable=immutable) as connection:
         _require_integrity(path, connection)
         tables = _user_tables(connection)
         if tables != _PLATFORM_TABLES:
@@ -318,8 +340,8 @@ def _verify_platform_database(path: Path) -> None:
             )
 
 
-def _verify_application_database(path: Path, *, exact_schema: bool) -> None:
-    with _readonly_sqlite(path) as connection:
+def _verify_application_database(path: Path, *, exact_schema: bool, immutable: bool) -> None:
+    with _readonly_sqlite(path, immutable=immutable) as connection:
         _require_integrity(path, connection)
         try:
             row = connection.execute(
@@ -346,8 +368,12 @@ def _verify_application_database(path: Path, *, exact_schema: bool) -> None:
         database.dispose()
 
 
-def _readonly_sqlite(path: Path) -> closing[sqlite3.Connection]:
-    uri = f"{path.resolve().as_uri()}?mode=ro"
+def _readonly_sqlite(path: Path, *, immutable: bool) -> closing[sqlite3.Connection]:
+    # SQLite's immutable URI mode skips locking and change detection.  It is
+    # safe only for the private copies this command just created, never for a
+    # live WAL source: https://www.sqlite.org/uri.html#recognized_query_parameters
+    parameters = "mode=ro&immutable=1" if immutable else "mode=ro"
+    uri = f"{path.resolve().as_uri()}?{parameters}"
     try:
         return closing(sqlite3.connect(uri, uri=True))
     except sqlite3.DatabaseError as error:

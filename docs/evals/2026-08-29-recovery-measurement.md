@@ -85,8 +85,11 @@ Manual mutation checks, each applied alone and then reverted:
 | Compute oldest snapshot age from the newest artifact instead | `test_capture_and_restore_emit_bounded_measurements` | Exact assertion observed 90.0 s instead of the conservative 99.0 s |
 | Skip pre-write snapshot digest verification | `test_restore_refuses_tampered_snapshot_bytes_before_writing` | Restore directory was created, violating the before-writing assertion |
 | Treat every fail-closed `engaged=True` read as valid kill evidence | `test_capture_refuses_a_corrupt_kill_file_even_though_runtime_fails_closed` | Corrupt JSON was accepted and the expected refusal disappeared |
+| Open newly created private database copies without SQLite `immutable=1` | `test_capture_and_restore_emit_bounded_measurements` | Unbound `platform_ledger.db-wal` and `platform_ledger.db-shm` appeared in the snapshot directory |
+| Omit the restored `data/` directory fsync | `test_restore_fsyncs_the_restored_data_directory` | The fsync-spy assertion observed only the parent restore-directory fsync |
+| Treat a nonzero-byte audit file as record-bearing evidence | `test_capture_refuses_whitespace_only_audit_evidence_before_writing` | A two-newline, zero-record audit file was accepted |
 
-Full candidate gate after the implementation and documentation were present:
+Initial candidate gate after the implementation and documentation were present:
 
 ```text
 make gates
@@ -98,6 +101,47 @@ installed-wheel gate: PASS; migration head 0010, 34 model tables, 5 module entry
 
 The single skip is the expected owner-opt-in read-only IBKR smoke test; no gateway was configured
 or contacted.
+
+## Independent review and hardening
+
+Kimi independently reviewed exact commit `375a360436e574fc28556e9d3b0b6954226604cc`
+from a detached worktree and returned **PASS** with no Critical, High, or Medium findings. It
+reproduced the full gate (`4383 passed, 1 skipped`), the 18 focused tests, live and crash-state WAL
+capture, latest-state restore, exact source-artifact bytes, refusal-before-write behavior, owner-only
+permissions, installed CLI behavior, and the timing arithmetic. Its probes found three Low issues and
+one documentation nit:
+
+1. restored artifact directory entries were not explicitly fsynced;
+2. whitespace-only audit evidence counted as non-empty;
+3. read-only verification left unbound SQLite WAL/SHM sidecars beside private database copies; and
+4. copy timing included isolated-directory creation, while live WAL reads may update transient source
+   `-shm` coordination bytes.
+
+The follow-up change fsyncs `<restore-root>/data`, requires at least one non-whitespace audit record,
+uses SQLite's documented `immutable=1` mode only for newly created private snapshot/restore copies,
+asserts exact successful bundle contents, and documents both timing and source-WAL behavior. Live
+source databases deliberately remain ordinary `mode=ro` connections so committed WAL content stays
+visible. The immutable-mode constraint follows SQLite's official URI documentation:
+<https://www.sqlite.org/uri.html#recognized_query_parameters>.
+
+Post-remediation verification:
+
+```text
+.venv/bin/python -m pytest -q \
+  tests/integration/test_recovery_measurement.py \
+  tests/safety/test_recovery_measurement_isolation.py \
+  tests/integration/test_backup_restore_drill.py
+20 passed in 5.39s
+
+make gates
+ruff: All checks passed; 569 files already formatted
+mypy: 297 Chronos source files and 10 worker files clean
+pytest: 4385 passed, 1 skipped, 24 warnings in 175.91s
+installed-wheel gate: PASS; migration head 0010, 34 model tables, 5 module entry points
+```
+
+The skip remains the owner-opt-in read-only IBKR smoke test. The warnings remain the existing
+Starlette/FastAPI and multiprocessing deprecations; no gateway was configured or contacted.
 
 ## Residuals
 

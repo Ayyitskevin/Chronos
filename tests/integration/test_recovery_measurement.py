@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 
+import chronos.recovery.measurement as recovery_measurement
 from chronos.auditlog.log import AuditLog
 from chronos.control.halt import HaltReason, HaltStore
 from chronos.domain.enums import OrderSide
@@ -151,6 +152,14 @@ def test_capture_and_restore_emit_bounded_measurements(open_source: _OpenSource)
         stat.S_IMODE((snapshot_root / artifact.name).stat().st_mode) == 0o600
         for artifact in manifest.artifacts
     )
+    assert {path.name for path in snapshot_root.iterdir()} == {
+        "chronos.db",
+        "live_kill_switch.json",
+        "platform_audit.jsonl",
+        "platform_halt.json",
+        "platform_ledger.db",
+        "snapshot-manifest.json",
+    }
 
     restore_root = snapshot_root.parent / "restored"
     restore_clock = _TickingClock(_NOW + timedelta(seconds=100))
@@ -178,6 +187,13 @@ def test_capture_and_restore_emit_bounded_measurements(open_source: _OpenSource)
     assert stat.S_IMODE(restore_root.stat().st_mode) == 0o700
     assert stat.S_IMODE((restore_root / "data").stat().st_mode) == 0o700
     assert stat.S_IMODE((restore_root / "recovery-observation.json").stat().st_mode) == 0o600
+    assert {path.name for path in (restore_root / "data").iterdir()} == {
+        "chronos.db",
+        "live_kill_switch.json",
+        "platform_audit.jsonl",
+        "platform_halt.json",
+        "platform_ledger.db",
+    }
 
     restored_platform = SqliteLedger(restore_root / "data/platform_ledger.db")
     try:
@@ -225,6 +241,47 @@ def test_capture_does_not_change_source_artifact_bytes(open_source: _OpenSource)
     )
 
     assert {name: _sha256(open_source.data / name) for name in before} == before
+
+
+def test_capture_refuses_whitespace_only_audit_evidence_before_writing(
+    open_source: _OpenSource,
+) -> None:
+    (open_source.data / "platform_audit.jsonl").write_text("\n\n", encoding="utf-8")
+    snapshot_root = open_source.data.parent.parent / "snapshot"
+
+    with pytest.raises(RecoveryMeasurementError, match="audit evidence contains no records"):
+        capture_snapshot(
+            source_data=open_source.data,
+            snapshot_root=snapshot_root,
+            source_id="disposable-test-source",
+        )
+
+    assert not snapshot_root.exists()
+
+
+def test_restore_fsyncs_the_restored_data_directory(
+    open_source: _OpenSource,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot_root = open_source.data.parent.parent / "snapshot"
+    capture_snapshot(
+        source_data=open_source.data,
+        snapshot_root=snapshot_root,
+        source_id="disposable-test-source",
+    )
+    restore_root = snapshot_root.parent / "restored"
+    fsynced: list[Path] = []
+    real_fsync_directory = recovery_measurement._fsync_directory
+
+    def record_fsync(path: Path) -> None:
+        fsynced.append(path)
+        real_fsync_directory(path)
+
+    monkeypatch.setattr(recovery_measurement, "_fsync_directory", record_fsync)
+
+    restore_snapshot(snapshot_root=snapshot_root, restore_root=restore_root)
+
+    assert restore_root / "data" in fsynced
 
 
 def test_capture_refuses_an_existing_destination_without_changing_it(

@@ -130,7 +130,9 @@ not atomically with each other or with the control files, so the manifest record
 and completion timestamp for every artifact. The command refuses unless all five artifacts exist as
 regular files, both databases pass integrity/current-version checks, the live kill switch is valid
 and engaged, the deterministic platform is valid and halted, and the audit chain is non-empty and
-intact. It copies no `.env` or autonomy mandate.
+intact. SQLite may update a live source database's transient `-shm` WAL-index while servicing the
+read-only capture; the five named source artifacts remain byte-identical. A source directory must
+therefore permit SQLite's ordinary WAL coordination. It copies no `.env` or autonomy mandate.
 
 `restore` verifies every snapshot member against its manifest before creating the destination,
 copies into `<restore-root>/data`, re-verifies every digest, opens the application schema through
@@ -138,7 +140,9 @@ Chronos's current schema checker, rechecks the control posture and audit chain, 
 `<restore-root>/recovery-observation.json`. Both commands refuse an existing destination instead of
 overwriting it. Directories are mode `0700`; artifacts and JSON evidence are mode `0600`. A failed
 operation deliberately leaves any newly created partial directory in place for diagnosis; the
-operator decides when it is safe to remove it.
+operator decides when it is safe to remove it. Successful snapshot and restored-data directories
+contain only the five bound artifacts plus, for the snapshot, its manifest; verification opens these
+new private database copies as immutable read-only files so it creates no unbound WAL sidecars.
 
 The observation fields are measurements, not SLOs:
 
@@ -146,7 +150,7 @@ The observation fields are measurements, not SLOs:
 |---|---|---|
 | `oldest_snapshot_age_seconds` | Wall-clock time from the earliest per-artifact capture start to this restore attempt | Actual data loss, backup schedule compliance, or any RPO target; it is meaningful only after clock health is verified |
 | `snapshot_capture_window_seconds` | Skew between the earliest artifact start and latest artifact completion | A transactionally atomic snapshot across the two databases and three files |
-| `local_restore_copy_seconds` | Monotonic elapsed time to copy the five bound artifacts locally | Download/decryption/provisioning time |
+| `local_restore_copy_seconds` | Monotonic elapsed time to create the isolated restore directories and copy the five bound artifacts locally | Download/decryption/provisioning time |
 | `local_verification_seconds` | Monotonic elapsed time for digest, database, control, and audit checks | Broker connectivity, order/position reconciliation, secrets, mandate review, or permission to rearm |
 | `local_recovery_elapsed_seconds` | The sum of local copy and verification for this one run | Operational RTO, which also includes detection, human response, infrastructure, and broker reconciliation |
 
