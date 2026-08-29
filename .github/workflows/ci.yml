@@ -53,3 +53,15 @@ jobs:
 
       - name: Validate release artifact
         run: python scripts/verify_release_artifact.py
+
+      - name: Retain exact-main release evidence
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        # v7.0.1: https://github.com/actions/upload-artifact/releases/tag/v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: chronos-release-${{ github.sha }}
+          path: |
+            dist/chronos-*.whl
+            dist/chronos-*.cdx.json
+          if-no-files-found: error
+          retention-days: 90

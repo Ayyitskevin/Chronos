@@ -34,13 +34,19 @@ Verify the toolchain the same way CI does:
 make gates
 ```
 
-The final gate builds the current non-ignored source set in isolation, checks the wheel's terminal
-assets and complete migration namespace byte-for-byte against that source, installs the wheel with
-the hash-locked dependencies in a fresh venv outside the checkout, upgrades a disposable v2
-database through the installed migration tree and validates the resulting schema, and exercises
-the package, console, and every packaged `src/chronos/**/__main__.py` command surface. A local run
-includes untracked, non-ignored files; CI rebuilds the committed clean tree and is authoritative
-for that revision. Run only that check with `make release-gate`.
+The final gate builds the current non-ignored source set in an isolated builder, checks the wheel's
+terminal assets and complete migration namespace byte-for-byte against that source, installs only
+`requirements-runtime.lock` plus the wheel in a separate runtime venv, upgrades a disposable v2
+database through the installed migration tree, and exercises the package, console, and every
+packaged `src/chronos/**/__main__.py` command surface. A separately hash-locked CycloneDX tool then
+creates schema-validated, reproducible 1.6 JSON for that exact runtime environment. The verifier
+cross-checks the component versions and dependency graph against the runtime lock and wheel
+metadata, and publishes the wheel plus `chronos-<version>.cdx.json` under ignored `dist/`.
+
+A local run includes untracked, non-ignored files; CI rebuilds the committed clean tree and is
+authoritative for that revision. Exact-main CI requests 90-day retention for both files in
+`chronos-release-<commit-sha>`. Run only this check with `make release-gate`. The SBOM is an
+inventory, not a vulnerability scan or signature; those remain separate release controls.
 
 Reproducibility record: even with the lock, record the resolved environment at deployment
 time (the pip frontend itself remains outside the hash gate — docs/SECURITY.md):

@@ -5,25 +5,47 @@ root on Python 3.12 using the existing `.venv` directly. Statuses use the plan's
 PASSED / FAILED / SKIPPED / NOT RUNNABLE WITHOUT CREDENTIALS /
 NOT IMPLEMENTED / REQUIRES OWNER ACTION.
 
-## Summary (current — re-measured 2026-08-28)
+## Summary (current — re-measured 2026-08-29)
 
-Measured on exact `main` `7752825bc749a0392be66dc2d15bc6bd9f25ed27`, Python 3.12,
+Measured on exact `main` `6034e1064c63df65a87411f0b668db015dab8c6f`, Python 3.12,
 with all six `make gates` targets in CI order. **These numbers drift with every merged test** —
 rerun before citing them.
 
 | Command | Result |
 |---|---|
-| `pytest -q` | **4365 passed, 1 skipped, 24 warnings** (4366 collected) |
+| `pytest -q` | **4372 passed, 1 skipped, 24 warnings** (4373 collected) |
 | `ruff check .` | clean |
-| `ruff format --check .` | clean (563 files) |
+| `ruff format --check .` | clean (564 files) |
 | `mypy src/chronos` | clean (294 source files) |
 | `mypy --strict worker` | clean (10 source files) |
 | `python scripts/verify_release_artifact.py` | installed package/assets/entry points and v2-to-head migration smoke passed |
-| GitHub Actions `quality` job | [run 33231368543](https://github.com/Ayyitskevin/Chronos/actions/runs/33231368543) succeeded at exact `7752825bc749` |
+| GitHub Actions `quality` job | [run 33232687497](https://github.com/Ayyitskevin/Chronos/actions/runs/33232687497) succeeded at exact `6034e1064c63` |
 
 The single skip is the opt-in, credential-gated, read-only IBKR smoke test — it has never been run
 against a real gateway, which is why it skips; it does not fail. The installed-wheel smoke uses
 only disposable local state and no broker connection.
+
+## Summary (owner-gated SBOM candidate — re-measured 2026-08-29)
+
+Measured on this proposal's complete working tree based on the exact `main` revision above, with
+all six `make gates` targets in CI order. The immutable candidate SHA and CI run belong in the
+PR/handoff after the commit exists; until the owner merges it, these are candidate results rather
+than default-branch evidence.
+
+| Command | Result |
+|---|---|
+| `pytest -q` | **4380 passed, 1 skipped, 24 warnings** (4381 collected) |
+| `ruff check .` | clean |
+| `ruff format --check .` | clean (564 files) |
+| `mypy src/chronos` | clean (294 source files) |
+| `mypy --strict worker` | clean (10 source files) |
+| `python scripts/verify_release_artifact.py` | runtime-only installed package/assets/entry points and v2-to-head migration smoke passed; validated CycloneDX 1.6 SBOM covered 64 components and the wheel/SBOM pair was published under `dist/` |
+| GitHub Actions `quality` job | pending candidate commit/PR; exact-main retention remains owner-gated |
+
+The candidate's installed-wheel/SBOM gate uses only disposable local environments and no broker
+connection. Its runtime lock preserves every shared package version from the dev lock while
+excluding the six direct dev tools and their seven dev-only transitives. The retained SBOM is
+inventory, not a vulnerability scan or signature.
 
 ## Summary (historical — re-measured 2026-08-02, superseded)
 

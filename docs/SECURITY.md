@@ -113,31 +113,46 @@ env pins (`BROKER_MODE=demo`, `ALLOW_ORDER_TRANSMIT=false`, `ALLOW_LIVE_TRADING=
   development dependency (the full transitive closure) to an exact version and SHA-256 hash. It is
   generated from `pyproject.toml` with
   `uv pip compile pyproject.toml --extra dev --generate-hashes --python-version 3.12 -o requirements-dev.lock`.
+  The release gate's `requirements-runtime.lock` is generated from the same project without the
+  `dev` extra, preserving the shared versions:
+  `uv pip compile pyproject.toml --generate-hashes --python-version 3.12 -o requirements-runtime.lock`.
   `requirements-build.lock` separately pins the exact `setuptools` backend declared in
-  `[build-system]`; regenerate it from its one-line maintenance input with
-  `uv pip compile requirements-build.in --generate-hashes --python-version 3.12 -o requirements-build.lock`.
-- **CI installs from the lock, not from the ranges:** the workflow runs
-  `pip install --require-hashes` for the build lock and runtime/dev lock, then disables build
-  isolation and asks pip to check the already-installed backend version against `pyproject.toml`
-  for both the editable CI install and the isolated release wheel. The preceding
+  `[build-system]`, and `requirements-sbom.lock` pins the isolated generator declared in
+  `requirements-sbom.in`; regenerate them with their exact header commands.
+- **CI and the release gate install from locks, not ranges:** CI installs the build and full
+  runtime/dev locks for editable quality checks. The release gate installs the build lock in a
+  builder venv, the runtime-only lock plus the wheel in a separate runtime venv, and the SBOM tool
+  lock back in the builder only after the wheel exists. It disables build isolation and asks pip
+  to check the already-installed backend version against `pyproject.toml`. The preceding
   `--require-hashes` install provides integrity; `--check-build-dependencies` verifies requirement
   compatibility, not hashes. A tampered or substituted locked dependency therefore fails its hash
   check rather than installing silently. Modern setuptools implements
-  `bdist_wheel` itself, so the `wheel` CLI package is not a Chronos build dependency. **Residual:**
-  pip is the frontend that creates/installs into these environments and remains outside the hash
-  lock (CI upgrades it before installation; the release verifier uses the interpreter's bundled
-  pip). Pinning the backend also does not make wheel ZIP bytes reproducible across build times.
-  Note also the runtime lock's `aeventkit` entry is legitimate, not a typosquat: it is the
+  `bdist_wheel` itself, so the `wheel` CLI package is not a Chronos build dependency.
+- **The release SBOM is a checked artifact, not a best-effort report.** The gate uses the official
+  `cyclonedx-py environment` CLI against only the runtime venv, requests reproducible CycloneDX 1.6
+  JSON with schema validation, then independently requires the Chronos application identity,
+  every runtime-lock package and exact version, no component outside that lock except the venv's
+  pip/setuptools bootstrap, a closed dependency graph, and an exact root edge matching the wheel's
+  non-extra `Requires-Dist` metadata. The verified wheel and SBOM are published together under
+  `dist/`; exact-main CI requests 90-day retention under a commit-addressed artifact name.
+  **Residual:** this is inventory, not a vulnerability, secret, or static-analysis scan. It does
+  not sign either artifact. pip remains the frontend that creates/installs into these environments
+  and remains outside the hash lock (CI upgrades it before installation; the release verifier uses
+  the interpreter's bundled pip). Pinning the backend also does not make wheel ZIP bytes
+  reproducible across build times. Note also the runtime lock's `aeventkit` entry is legitimate,
+  not a typosquat: it is the
   dependency `ib_async` itself declares (the ib-api-reloaded republication of `eventkit`; same
   maintainer org, provides the `eventkit` module).
-- Maintenance (owner action): regenerate the relevant lock with the command above when bumping a
-  bound, and review the diff before committing. Keep `requirements-build.in`
-  requirement-aligned with `[build-system].requires`; a focused gate test enforces this.
+- Maintenance (owner action): regenerate the relevant lock with its header command when bumping a
+  bound or tool, and review the diff before committing. Regenerate both application locks when a
+  runtime requirement changes and require their shared package versions to remain equal. Keep
+  `requirements-build.in` requirement-aligned with `[build-system].requires` and
+  `requirements-sbom.in` exact; focused gate tests enforce these boundaries.
   `requirements.txt` remains `-e .` for a quick editable dev install; the locks are the
   reproducible, verified path used by CI and recommended for deployment.
 - **Regenerate INTO the existing lock, never into a fresh file** *(added 2026-08-08)*. The
-  command above writes to `requirements-dev.lock` and `uv` treats the pins already in that file
-  as preferred, so an unrelated addition stays an addition. Compiling to a new path instead —
+  commands above write to existing locks and `uv` treats their current pins as preferred, so an
+  unrelated addition stays an addition. Compiling to a new path instead —
   `-o new.lock` — gives the resolver no prior pins to respect and it re-solves everything from
   the declared ranges.
 
