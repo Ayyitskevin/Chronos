@@ -34,7 +34,7 @@ than default-branch evidence.
 
 | Command | Result |
 |---|---|
-| `pytest -q` | **4378 passed, 1 skipped, 24 warnings** (4379 collected) |
+| `pytest -q` | **4380 passed, 1 skipped, 24 warnings** (4381 collected) |
 | `ruff check .` | clean |
 | `ruff format --check .` | clean (564 files) |
 | `mypy src/chronos` | clean (294 source files) |

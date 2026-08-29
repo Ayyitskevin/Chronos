@@ -267,6 +267,27 @@ def test_sbom_verifier_rejects_a_dev_component_outside_the_runtime_lock(tmp_path
         _verify_sbom(sbom, wheel, runtime_lock, sbom_tool_lock)
 
 
+def test_sbom_verifier_rejects_a_missing_locked_runtime_component(tmp_path: Path) -> None:
+    sbom, wheel, runtime_lock, sbom_tool_lock = _write_sbom_fixture(tmp_path)
+    payload = json.loads(sbom.read_text(encoding="utf-8"))
+    payload["components"] = [item for item in payload["components"] if item["name"] != "starlette"]
+    sbom.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="missing locked runtime components: starlette"):
+        _verify_sbom(sbom, wheel, runtime_lock, sbom_tool_lock)
+
+
+def test_sbom_verifier_rejects_locked_runtime_version_drift(tmp_path: Path) -> None:
+    sbom, wheel, runtime_lock, sbom_tool_lock = _write_sbom_fixture(tmp_path)
+    payload = json.loads(sbom.read_text(encoding="utf-8"))
+    starlette = next(item for item in payload["components"] if item["name"] == "starlette")
+    starlette["version"] = "0.52.0"
+    sbom.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="versions differ from the runtime lock: starlette"):
+        _verify_sbom(sbom, wheel, runtime_lock, sbom_tool_lock)
+
+
 def test_sbom_verifier_rejects_an_application_self_dependency(tmp_path: Path) -> None:
     sbom, wheel, runtime_lock, sbom_tool_lock = _write_sbom_fixture(tmp_path)
     payload = json.loads(sbom.read_text(encoding="utf-8"))

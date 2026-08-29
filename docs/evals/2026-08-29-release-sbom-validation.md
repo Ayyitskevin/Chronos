@@ -58,8 +58,9 @@ than a moving tag; its inputs follow the
 
 - Unchanged baseline `make gates`: 4,372 passed, 1 explicit credential-gated IBKR skip, 24
   warnings; lint, format, both mypy lanes, and the prior installed-wheel gate passed.
-- Focused release tests: 16 passed. They pin the lock split, exact upstream CLI command, exact-main
-  upload contract, valid runtime BOM, and a mutation that inserts pytest outside the runtime lock.
+- Focused release tests: 19 passed. They pin the lock split, exact upstream CLI command, exact-main
+  upload contract, valid runtime BOM, and mutations for an unlocked dev component, a missing locked
+  component, locked-version drift, and an application self-dependency.
 - Two complete release-gate executions passed. The generated BOM identified Chronos 0.1.0 as an
   application, contained 64 components (63 locked runtime packages plus the venv's pip bootstrap),
   contained exactly 13 direct runtime edges, and contained no dev/test component.
