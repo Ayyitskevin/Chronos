@@ -55,8 +55,9 @@ the verified wheel in a separate runtime venv, upgrades a disposable v2 database
 installed migration tree, and exercises the package, console, and every packaged
 `src/chronos/**/__main__.py` command surface. A separately hash-locked CycloneDX tool creates
 schema-validated, reproducible 1.6 JSON for that exact runtime environment. The verifier
-cross-checks the component versions and dependency graph against the runtime lock and wheel
-metadata, and publishes the wheel plus `chronos-<version>.cdx.json` under ignored `dist/`.
+cross-checks the component versions and dependency graph against the runtime lock, bootstrap-pip
+lock, and wheel metadata, and publishes the wheel plus `chronos-<version>.cdx.json` under ignored
+`dist/`.
 
 A local release-artifact run includes untracked, non-ignored files; CI rebuilds the committed clean
 tree and is authoritative for that revision. The secret gate instead covers the Git-tracked file

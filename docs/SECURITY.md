@@ -122,12 +122,13 @@ and the release-artifact gate, on Python 3.12 with safety env pins (`BROKER_MODE
   `requirements-build.lock` separately pins the exact `setuptools` backend declared in
   `[build-system]`, and `requirements-sbom.lock` pins the isolated generator declared in
   `requirements-sbom.in`; regenerate them with their exact header commands.
-- **CI and the release gate install from locks, not ranges:** after Python creates each venv with
-  its offline bundled `ensurepip` frontend, that frontend installs only the exact pip artifact from
-  the bootstrap lock. A stdlib-only command first refuses an inexact, additional, or unsupported
-  lock line, then separately verifies the installed pip distribution identity before any other
-  dependency operation. CI then installs the build and full runtime/dev
-  locks for editable quality checks. The release gate applies the bootstrap+verification sequence
+- **CI and the release gate install from locks, not ranges:** CI begins with the setup-python job
+  interpreter; the release gate creates each fresh venv with Python's offline bundled `ensurepip`
+  frontend. In either path that frontend installs only the exact pip artifact from the bootstrap
+  lock. A stdlib-only command first refuses an inexact, additional, or unsupported lock line, then
+  separately verifies the installed pip distribution identity before any other dependency
+  operation. CI then installs the build and full runtime/dev locks for editable quality checks. The
+  release gate applies the bootstrap+verification sequence
   to both its builder and runtime venvs, installs the build lock in the builder, the runtime-only
   lock plus the wheel in the runtime venv, and the SBOM tool lock back in the builder only after the
   wheel exists. It disables build isolation and asks pip

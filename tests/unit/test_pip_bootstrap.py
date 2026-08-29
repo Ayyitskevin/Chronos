@@ -23,6 +23,24 @@ _PIP_HASHES = frozenset(
 )
 
 
+def _locked_entry(lock: Path, package: str) -> tuple[str, frozenset[str]]:
+    lines = lock.read_text(encoding="utf-8").splitlines()
+    prefix = f"{package}=="
+    for index, raw_line in enumerate(lines):
+        line = raw_line.strip()
+        if not line.startswith(prefix):
+            continue
+        version = line.removeprefix(prefix).removesuffix("\\").strip()
+        hashes: list[str] = []
+        for continuation in lines[index + 1 :]:
+            match = re.fullmatch(r"\s*--hash=sha256:([0-9a-f]{64})\s*\\?", continuation)
+            if match is None:
+                break
+            hashes.append(match.group(1))
+        return version, frozenset(hashes)
+    raise AssertionError(f"{package!r} is absent from {lock}")
+
+
 def test_bootstrap_input_and_lock_pin_the_exact_published_pip_artifacts() -> None:
     input_requirements = tuple(
         line
@@ -39,6 +57,14 @@ def test_bootstrap_input_and_lock_pin_the_exact_published_pip_artifacts() -> Non
     locked_hashes = re.findall(r"--hash=sha256:([0-9a-f]{64})", lock_text)
     assert len(locked_hashes) == len(_PIP_HASHES)
     assert frozenset(locked_hashes) == _PIP_HASHES
+
+
+def test_dev_lock_cannot_replace_pip_with_a_different_same_version_artifact() -> None:
+    bootstrap_entry = _locked_entry(_REPO_ROOT / "requirements-bootstrap.lock", "pip")
+    dev_entry = _locked_entry(_REPO_ROOT / "requirements-dev.lock", "pip")
+
+    assert bootstrap_entry == (_PIP_VERSION, _PIP_HASHES)
+    assert dev_entry == bootstrap_entry
 
 
 def test_bootstrap_verifier_accepts_only_the_locked_installed_version(tmp_path: Path) -> None:
