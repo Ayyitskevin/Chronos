@@ -1,11 +1,24 @@
 # Recovery measurement capability evaluation — 2026-08-29
 
+```yaml
+plan_phase: 2
+primary_kpi: broker_truth
+gate_advanced: none
+files: docs/BACKUP_AND_RECOVERY.md, docs/evals/2026-08-29-recovery-measurement.md, src/chronos/recovery/__init__.py, src/chronos/recovery/__main__.py, src/chronos/recovery/measurement.py, tests/integration/test_recovery_measurement.py, tests/safety/test_recovery_measurement_isolation.py
+verification: focused recovery tests and make gates; exact commands and observed results below
+evidence_artifact: docs/evals/2026-08-29-recovery-measurement.md
+owner_gate: required before merge because recovery evidence is safety-sensitive
+open: operational RPO/RTO campaign, off-host encrypted retention, external anchoring, clock health, watchdog/dead-man monitoring, mandate/secrets review, and broker reconciliation
+```
+
 ## Claim under test
 
-Exact base `6034e1064c63df65a87411f0b668db015dab8c6f` can capture the five bounded
-Chronos recovery artifacts without changing their source bytes, restore them into a new isolated
-directory, and emit honest snapshot-age/local-duration observations. This evaluation does **not**
-claim an operational RPO or RTO.
+Exact rebased implementation commit `86f112e0d656893a4c66e998e456ec1e8919030d`, built on
+base `989abee8154e2bf9606b980a2c5408ecf4227e4f`, can capture the five bounded Chronos recovery
+artifacts without changing their source bytes, restore them into a new isolated directory, and emit
+honest snapshot-age/local-duration observations. The exact post-documentation candidate is bound in
+the review handoff and pull request because a commit cannot contain its own hash. This evaluation
+does **not** claim an operational RPO or RTO.
 
 ## Boundary
 
@@ -39,7 +52,11 @@ Observed result:
 | Snapshot manifest SHA-256 | `ea97361168e6b7888fe0f5c3519e6f04191cef94c3c339dc8c7b2dc6dfed6039` |
 
 The values above are one same-host disposable observation. They are not performance thresholds and
-must not be compared with an unstated objective.
+must not be compared with an unstated objective. The manifest field
+`artifact_capture_elapsed_seconds` measures the end-to-end local capture pipeline from destination
+directory creation through artifact copy/SQLite backup, semantic verification, and hashing. It does
+not include manifest writing or directory fsyncs. The existing schema name is retained to avoid a
+needless evidence-format change before review.
 
 ## Failure-path evidence
 
@@ -155,20 +172,22 @@ schema check. The final follow-up streams the presence check in 1 MiB blocks, fs
 directories, adds mutation-sensitive ordering assertions, and makes that documentation distinction
 explicit.
 
-Final follow-up verification:
+Final rebased-candidate verification after runtime-SBOM PR #123 merged:
 
 ```text
 .venv/bin/python -m pytest -q \
   tests/integration/test_recovery_measurement.py \
   tests/safety/test_recovery_measurement_isolation.py \
-  tests/integration/test_backup_restore_drill.py
-21 passed in 5.60s
+  tests/integration/test_backup_restore_drill.py \
+  tests/unit/test_release_artifact.py
+40 passed in 7.85s
 
 make gates
 ruff: All checks passed; 569 files already formatted
 mypy: 297 Chronos source files and 10 worker files clean
-pytest: 4386 passed, 1 skipped, 24 warnings in 178.12s
-installed-wheel gate: PASS; migration head 0010, 34 model tables, 5 module entry points
+pytest: 4394 passed, 1 skipped, 24 warnings in 218.45s
+release-artifact gate: PASS; migration head 0010, 34 model tables, 5 module entry points,
+validated CycloneDX 1.6 SBOM covering 64 runtime components
 ```
 
 ## Residuals
