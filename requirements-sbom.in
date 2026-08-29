@@ -1,0 +1,2 @@
+# Keep the SBOM generator isolated from Chronos runtime and development dependencies.
+cyclonedx-bom==7.3.1

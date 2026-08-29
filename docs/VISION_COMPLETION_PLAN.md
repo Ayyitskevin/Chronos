@@ -343,13 +343,17 @@ Deliver:
 - Reproducible package/release validation: clean venv install, all migrations, static
   assets, entry points, dependency/secret/static scans, SBOM, and signed artifacts.
 
-  **Partial delivery (2026-08-27):** the CI release-artifact gate now builds and installs the
-  wheel in a clean venv outside the checkout, proves the shipped static assets and migration
-  namespace match source bytes, executes the installed migration tree from the supported v2
-  baseline through its single head and validates the resulting schema, and exercises the console
-  plus every packaged `src/chronos/**/__main__.py` command surface. Dependency/secret/static scans,
-  SBOM generation, and artifact signing remain open; the build backend is exact and hash-locked,
-  but the pip frontend remains outside that lock. This does not satisfy the Phase 2 exit.
+  **Partial delivery (updated 2026-08-29):** the CI release-artifact gate now builds the wheel in
+  an isolated builder and installs it with a separate runtime-only hash lock outside the checkout.
+  It proves the shipped static assets and migration namespace match source bytes, executes the
+  installed migration tree from the supported v2 baseline through its single head and validates
+  the resulting schema, and exercises the console plus every packaged
+  `src/chronos/**/__main__.py` command surface. A separately locked official tool emits validated,
+  reproducible CycloneDX 1.6 JSON for that runtime environment; the gate cross-checks its exact
+  components and root dependency edge against the runtime lock and wheel metadata. Exact-main CI
+  requests 90-day retention for the wheel/SBOM pair. Dependency, secret, and static-analysis scans plus
+  artifact signing remain open; the pip frontend remains outside the lock and wheel ZIP bytes are
+  not reproducible. This does not satisfy the Phase 2 exit.
 
 ### Real-gateway read-only gate
 
