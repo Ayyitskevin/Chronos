@@ -6,6 +6,7 @@ from chronos.operations.health import (
     BackgroundTaskName,
     BrokerConnectionFact,
     CapabilityState,
+    ClockFact,
     ClockState,
     OperationalFacts,
     ReasonCode,
@@ -48,7 +49,14 @@ def test_simultaneous_task_broker_store_and_clock_faults_remain_visible() -> Non
         reconciliation_evidence_at=NOW - timedelta(seconds=11),
         reconciliation_max_age_seconds=10,
         paper_new_exposure_configured=True,
-        clock_state=ClockState.UNSYNCHRONIZED,
+        clock=ClockFact(
+            provider="chrony",
+            state=ClockState.UNSYNCHRONIZED,
+            observed_at=NOW,
+            max_age_seconds=10,
+            maximum_allowed_error_seconds=0.05,
+            failure_code="not_synchronized",
+        ),
     )
 
     report = evaluate_operational_health(facts, now=NOW)
@@ -83,7 +91,14 @@ def test_live_kill_switch_and_unknown_clock_never_raise_a_lane() -> None:
         live_new_exposure_configured=True,
         kill_switch_engaged=True,
         live_armed=True,
-        clock_state=ClockState.UNKNOWN,
+        clock=ClockFact(
+            provider="chrony",
+            state=ClockState.UNKNOWN,
+            observed_at=NOW,
+            max_age_seconds=10,
+            maximum_allowed_error_seconds=0.05,
+            failure_code="command_failed",
+        ),
     )
 
     verdict = evaluate_operational_health(facts, now=NOW).trading_capability.live_new_exposure

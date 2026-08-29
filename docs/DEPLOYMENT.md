@@ -96,6 +96,11 @@ Safe defaults below are the values with no `.env` at all.
 | `LOG_LEVEL` | `INFO` | DEBUG/INFO/WARNING/ERROR/CRITICAL. |
 | `LOG_FILE` | `logs/chronos.log` | Rotating local file. |
 | `MARKET_TIMEZONE` | `America/New_York` | Must be an installed IANA zone. |
+| `CLOCK_HEALTH_PROVIDER` | `disabled` | `disabled` or `chrony`. Enabling runs only the fixed local `/usr/bin/chronyc -n tracking` query. Chronos does not install or configure chronyd. |
+| `CLOCK_HEALTH_MAXIMUM_ERROR_SECONDS` | unset | Required, positive, and finite when the provider is `chrony`; refused while disabled. This is an operator risk decision, not a Chronos default. |
+| `CLOCK_HEALTH_POLL_INTERVAL_SECONDS` | `30` | Background refresh cadence; health requests read the cache only. |
+| `CLOCK_HEALTH_OBSERVATION_MAX_AGE_SECONDS` | `90` | Must exceed the poll interval; stale evidence projects as `UNKNOWN`. |
+| `CLOCK_HEALTH_COMMAND_TIMEOUT_SECONDS` | `2` | Hard bound on the local client query, limited to at most 30 seconds. Combined output is separately capped at 64 KiB. |
 
 The remaining variables in `.env.example` (delta/DTE bands, candidate caps, resolver weights,
 assignment heuristics) tune the wheel dashboard's candidate logic; their defaults are validated

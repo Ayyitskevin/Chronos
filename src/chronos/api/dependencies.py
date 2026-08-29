@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from fastapi import HTTPException, Request, status
 
 from chronos.api.task_observations import TaskObservationRegistry
+from chronos.operations.clock import ClockHealthCache
 from chronos.operations.health import StartupFaultCode
 from chronos.runtime import AppRuntime
 from chronos.utils.locking import WriterLease
@@ -26,6 +27,7 @@ class BackendState:
     lease: WriterLease | None
     read_only: bool
     task_observations: TaskObservationRegistry = field(default_factory=TaskObservationRegistry)
+    clock_health: ClockHealthCache = field(default_factory=ClockHealthCache)
     startup_faults: tuple[StartupFaultCode, ...] = ()
     #: The process's single bar provider, created on first use by
     #: ``chronos.api.bars.provider_for`` and cached here so a panel refresh does

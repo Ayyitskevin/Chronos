@@ -343,11 +343,14 @@ Deliver:
 - Reproducible package/release validation: clean venv install, all migrations, static
   assets, entry points, dependency/secret/static scans, SBOM, and signed artifacts.
 
-  **Partial delivery (updated 2026-08-29, ADR-0040):** the local API and operator surfaces now
+  **Partial delivery (updated 2026-08-29, ADR-0040/ADR-0041):** the local API and operator surfaces now
   share one pure, display-only projection separating liveness, operator-service readiness,
   and lane-specific new-exposure capability. Polling reads only bounded local/cached facts,
-  retains typed startup/task failures, and cannot be imported by authority modules. Clock
-  evidence remains explicitly unknown; orchestrator probes, external monitoring/alerts,
+  retains typed startup/task failures, and cannot be imported by authority modules. An explicit,
+  default-disabled chrony provider now calculates and caches a quantitative maximum-error bound;
+  missing, malformed, local-reference, stale, or future evidence remains unknown. The development
+  host lacks `chronyc`, no acceptable threshold or real capture has been supplied, and the
+  observer is not an order-authority input. Orchestrator probes, external monitoring/alerts,
   watchdogs, dead-man behavior, SLOs, and operational proof remain open. This does not satisfy
   the Phase 2 exit.
 

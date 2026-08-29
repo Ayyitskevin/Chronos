@@ -36,10 +36,15 @@ runbooks.
 - The collector makes no broker call. Connection truth is the last sanitized observation
   captured at an existing broker-status seam and becomes unknown on connection uncertainty.
   It is not a substitute for real-gateway monitoring.
-- Clock health is intentionally `UNKNOWN` in W2. No NTP/chrony observer, process watchdog,
-  dead-man monitor, off-host alert, or measured availability/RPO/RTO SLO is implemented by
-  this slice. Therefore the shipped collector cannot claim a fully evidenced `AVAILABLE`
-  new-exposure lane.
+- Clock health has a default-disabled chrony provider (ADR-0041). When explicitly enabled with
+  an operator-selected maximum-error threshold, it calculates chrony's quantitative bound in a
+  bounded background sample and publishes sanitized cached evidence. Disabled, missing-binary,
+  malformed, local-reference, stale, future, or otherwise uncertain evidence remains `UNKNOWN`.
+  The development host has no `chronyc`, so no real synchronization claim exists. The observer
+  is display-only and is structurally excluded from order authority; actual submission does not
+  yet consume it. No daemon management, process watchdog, dead-man monitor, off-host alert, or
+  measured availability/RPO/RTO SLO is implemented. Therefore automatic observation is code-
+  mitigated, but operational clock safety and a fully evidenced lane are not proven.
 
 ## Crypto family (built, disabled by default)
 

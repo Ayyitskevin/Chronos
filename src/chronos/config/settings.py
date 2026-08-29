@@ -184,6 +184,24 @@ class Settings(BaseSettings):
     reconciliation_interval_closed_seconds: Annotated[float, Field(gt=0)] = 1800.0
     reconciliation_max_evidence_age_seconds: Annotated[float, Field(gt=0)] = 300.0
 
+    # Quantitative local clock observation (ADR-0041). Disabled is intentionally
+    # the default and produces UNKNOWN. Enabling chrony requires an explicit
+    # acceptable-error threshold; Chronos will not invent one that could make an
+    # unavailable observation look sufficient. The provider runs only the fixed
+    # ``/usr/bin/chronyc -n tracking`` argument vector.
+    # Source: https://chrony-project.org/doc/4.8/chronyc.html#tracking
+    clock_health_provider: Literal["disabled", "chrony"] = "disabled"
+    clock_health_maximum_error_seconds: Annotated[
+        float | None, Field(default=None, gt=0, allow_inf_nan=False)
+    ] = None
+    clock_health_poll_interval_seconds: Annotated[float, Field(gt=0, allow_inf_nan=False)] = 30.0
+    clock_health_observation_max_age_seconds: Annotated[float, Field(gt=0, allow_inf_nan=False)] = (
+        90.0
+    )
+    clock_health_command_timeout_seconds: Annotated[
+        float, Field(gt=0, le=30, allow_inf_nan=False)
+    ] = 2.0
+
     # Autonomy runtime (ADR-0017, owner-directed persistent authority). The
     # mandate file is the owner's standing grant: authored once, validated on
     # every boot, auto-activated when present. An empty path means no autonomy
@@ -308,6 +326,27 @@ class Settings(BaseSettings):
                     f"reconciliation_max_evidence_age_seconds={age}s, or reconciliation "
                     "readiness expires before the refresh that would renew it"
                 )
+        return self
+
+    @model_validator(mode="after")
+    def validate_clock_health_posture(self) -> Settings:
+        if self.clock_health_provider == "chrony":
+            if self.clock_health_maximum_error_seconds is None:
+                raise ValueError(
+                    "CLOCK_HEALTH_PROVIDER=chrony requires an explicit "
+                    "CLOCK_HEALTH_MAXIMUM_ERROR_SECONDS"
+                )
+        elif self.clock_health_maximum_error_seconds is not None:
+            raise ValueError(
+                "CLOCK_HEALTH_MAXIMUM_ERROR_SECONDS is set while "
+                "CLOCK_HEALTH_PROVIDER=disabled; refusing an ignored threshold"
+            )
+        if self.clock_health_observation_max_age_seconds <= self.clock_health_poll_interval_seconds:
+            raise ValueError(
+                "CLOCK_HEALTH_OBSERVATION_MAX_AGE_SECONDS must be greater than "
+                "CLOCK_HEALTH_POLL_INTERVAL_SECONDS so evidence does not expire "
+                "before its scheduled refresh"
+            )
         return self
 
     @model_validator(mode="after")

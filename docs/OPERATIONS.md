@@ -31,6 +31,12 @@ Read the output deliberately:
    policy limits — and a zero limit denies by default, `src/chronos/risk/engine.py`).
 5. If a gateway session is part of the day: gateway logged in, correct paper account shown, port
    listening (docs/IBKR_RUNBOOK.md sections 3 and 6).
+6. **Clock evidence:** inspect `observations.clock` and `observations.clock_evidence` in the
+   backend's `/health` response. `SYNCHRONIZED` is possible only when the chrony provider is
+   explicitly enabled, a maximum-error threshold is configured, the sample is current, and the
+   calculated bound is within it. `UNKNOWN` or `UNSYNCHRONIZED` is a stop-and-investigate result,
+   not permission. This observer does not configure chronyd and is not yet an actual order gate;
+   see ADR-0041 and R-18 before relying on it operationally.
 
 ## Shadow scan (after market close)
 
