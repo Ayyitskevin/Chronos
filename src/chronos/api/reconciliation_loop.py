@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
@@ -118,7 +119,11 @@ def reconcile_once(runtime: AppRuntime) -> tuple[bool, bool]:
     return True, positioned
 
 
-async def reconciliation_task(runtime: AppRuntime) -> None:
+async def reconciliation_task(
+    runtime: AppRuntime,
+    *,
+    on_progress: Callable[[], None] | None = None,
+) -> None:
     """Re-arm submission readiness on the ADR-0020 cadence until cancelled.
 
     Writer-only: the lifespan constructs this task only for the writer, because a
@@ -128,11 +133,15 @@ async def reconciliation_task(runtime: AppRuntime) -> None:
     positioned = True  # assume the costlier cadence until evidence says otherwise
     consecutive_failures = 0
     while True:
+        if on_progress is not None:
+            on_progress()
         delay = next_interval(runtime, positioned=positioned, moment=utc_now())
         try:
             await asyncio.sleep(delay)
         except asyncio.CancelledError:
             raise
+        if on_progress is not None:
+            on_progress()
 
         readiness = runtime.reconciliation_readiness
         if readiness.snapshot().status.name == "RECONCILED":
@@ -141,6 +150,8 @@ async def reconciliation_task(runtime: AppRuntime) -> None:
             continue
 
         succeeded, positioned = await asyncio.to_thread(reconcile_once, runtime)
+        if on_progress is not None:
+            on_progress()
         if succeeded:
             consecutive_failures = 0
             continue

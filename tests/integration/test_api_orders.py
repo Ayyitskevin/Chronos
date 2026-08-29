@@ -129,6 +129,10 @@ def test_startup_reconciliation_failure_keeps_api_available_and_locked(
     with TestClient(app) as test_client:
         headers = {"X-Chronos-Token": (demo_env / "backend_api_token").read_text().strip()}
         health = test_client.get("/health").json()
+        assert health["status"] == "ok"
+        assert health["schema_version"] == 2
+        assert health["service_readiness"]["state"] == "NOT_READY"
+        assert "startup_degraded" in health["service_readiness"]["reasons"]
         assert health["reconciliation_status"] == "PENDING"
         assert health["writer_lease_held"] is True
         assert test_client.get("/orders", headers=headers).status_code == 200

@@ -121,7 +121,7 @@ class AppRuntime:
         try:
             restart = self.order_management.reconcile_on_restart_report(now=moment)
             portfolio = self.reconciliation.reconcile()
-            scope_status = self.connection.run(self.broker.connection_status())
+            scope_status = self.connection.connection_status()
         except BaseException:
             self.reconciliation_readiness.complete(
                 expected_generation=generation,
@@ -256,7 +256,7 @@ def build_runtime(*, register_atexit: bool = True) -> AppRuntime:
         connection = BrokerConnectionManager(broker, readiness=reconciliation_readiness)
         connection.connect()
         account = connection.run(broker.account_summary())
-        status = connection.run(broker.connection_status())
+        status = connection.connection_status()
         _validate_scope_observations(account, status)
         runtime_scope = build_bound_runtime_scope(database, settings, account, status)
         reconciliation = ReconciliationCoordinator(

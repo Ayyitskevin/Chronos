@@ -228,6 +228,35 @@ def test_sqlite_schema_timestamps_round_trip_as_aware_utc() -> None:
     assert applied_at.tzinfo is UTC
 
 
+def test_store_readability_probe_executes_a_real_query() -> None:
+    database = Database("sqlite+pysqlite:///:memory:")
+    try:
+        database.initialize()
+        assert database.readable() is True
+    finally:
+        database.dispose()
+
+
+def test_store_readability_probe_refuses_an_uninitialized_store() -> None:
+    database = Database("sqlite+pysqlite:///:memory:")
+    try:
+        assert database.readable() is False
+    finally:
+        database.dispose()
+
+
+def test_store_readability_probe_reports_local_io_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = Database("sqlite+pysqlite:///:memory:")
+
+    def fail_connect() -> None:
+        raise OSError("private filesystem detail")
+
+    monkeypatch.setattr(database.engine, "connect", fail_connect)
+    assert database.readable() is False
+
+
 def test_empty_v1_database_is_refused_without_mutation(tmp_path: Path) -> None:
     database_path = tmp_path / "empty-v1.db"
     database = Database(f"sqlite+pysqlite:///{database_path}")

@@ -29,6 +29,19 @@ def render(client: ApiClient) -> None:
 def _render_health_banner(health: dict[str, Any]) -> None:
     read_only = bool(health.get("read_only", True))
     lease_held = bool(health.get("writer_lease_held", False))
+    readiness = health.get("service_readiness")
+    readiness_data = readiness if isinstance(readiness, dict) else {}
+    readiness_state = value_or_dash(readiness_data.get("state"))
+    if readiness_state == "READY":
+        st.success("Backend service readiness is READY.")
+    elif readiness_state == "NOT_READY":
+        st.error("Backend service readiness is NOT READY.")
+    else:
+        st.warning(f"Backend service readiness is {readiness_state}.")
+    render_reasons(
+        readiness_data.get("reasons"),
+        empty_message="Service readiness reported no blocking reasons.",
+    )
     columns = st.columns(4)
     columns[0].metric("Broker mode", value_or_dash(health.get("broker_mode")).upper())
     columns[1].metric("Environment", value_or_dash(health.get("environment")).upper())

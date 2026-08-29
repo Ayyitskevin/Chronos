@@ -27,11 +27,11 @@
     },
     {
       "path": "src/chronos/runtime.py",
-      "sha256": "e88e292049ace2442a193f99c5bbde9e002750578526496d903a8fdf877a0880"
+      "sha256": "e85ead28e76de6a0265985ea21227367aa5ebaa2418bd74d9bb3c380fe6ec738"
     },
     {
       "path": "src/chronos/api/autonomy_wiring.py",
-      "sha256": "1ffdc1c30ee8771574a64879e3bcf8a2232a8435761d59aaa26f9c81626d2b94"
+      "sha256": "9e84613a37c7af2a1c1c50c3bd3409ca475d75982ef81abd031b1719954b4d0f"
     },
     {
       "path": "src/chronos/supervisor/evidence_kinds.py",

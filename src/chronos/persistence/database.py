@@ -11,6 +11,7 @@ from typing import Any
 
 from sqlalchemy import Engine, UniqueConstraint, create_engine, event, inspect, select
 from sqlalchemy.engine import make_url
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -204,6 +205,18 @@ class Database:
 
     def dispose(self) -> None:
         self.engine.dispose()
+
+    def readable(self) -> bool:
+        """Run one bounded application-store read without leaking failure details."""
+
+        try:
+            with self.engine.connect() as connection:
+                version = connection.scalar(
+                    select(SchemaVersionRow.version).order_by(SchemaVersionRow.id.desc()).limit(1)
+                )
+                return bool(version == SCHEMA_VERSION)
+        except (OSError, RuntimeError, SQLAlchemyError):
+            return False
 
     def _restrict_sqlite_file_mode(self) -> None:
         if self._sqlite_path is None:

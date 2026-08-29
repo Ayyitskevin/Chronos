@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
@@ -66,6 +66,8 @@ from chronos.api.routes.orders import router as orders_router
 from chronos.api.routes.strategy import router as strategy_router
 from chronos.api.routes.terminal import router as terminal_router
 from chronos.api.routes.terminal import session_router as terminal_session_router
+from chronos.api.task_observations import TaskObservationRegistry
+from chronos.operations.health import BackgroundTaskName, StartupFaultCode
 from chronos.runtime import build_runtime
 from chronos.utils.locking import WriterLease
 
@@ -125,7 +127,13 @@ _TERMINAL_SECURITY_HEADER_NAMES = frozenset(name for name, _ in _TERMINAL_SECURI
 _RENEWALS_PER_TTL = 3
 
 
-async def _heartbeat_lease(state: BackendState, lease: WriterLease, period: float) -> None:
+async def _heartbeat_lease(
+    state: BackendState,
+    lease: WriterLease,
+    period: float,
+    *,
+    on_progress: Callable[[], None] | None = None,
+) -> None:
     """Renew the single-writer lease, and demote to read-only if it is lost.
 
     RISK_REGISTER R-24: before this existed, ``WriterLease.renew()`` had no
@@ -148,6 +156,8 @@ async def _heartbeat_lease(state: BackendState, lease: WriterLease, period: floa
             )
             renewed = False
         if renewed:
+            if on_progress is not None:
+                on_progress()
             continue
         state.read_only = True
         state.lease = None
@@ -181,11 +191,14 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                 "Another Chronos backend holds the writer lease; starting READ-ONLY",
                 extra={"event": "backend_read_only", "lease_holder": holder},
             )
+        task_observations = TaskObservationRegistry()
         app.state.backend = BackendState(
             runtime=runtime,
             lease=None if read_only else lease,
             read_only=read_only,
+            task_observations=task_observations,
         )
+        backend_state = app.state.backend
         app.state.api_token = load_or_create_token(runtime.settings.backend_token_file)
         # ADR-0023: the proposal route's authentication posture is resolved
         # once, at startup, from the owner's registry file — for every
@@ -196,6 +209,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         proposer_auth = load_proposer_auth(runtime.settings.autonomy_proposers_file)
         app.state.proposer_auth = proposer_auth
         if proposer_auth.configured and proposer_auth.registry is None:
+            backend_state.note_startup_fault(StartupFaultCode.PROPOSER_REGISTRY_INVALID)
             _logger.error(
                 "Proposer registry is configured but unreadable or invalid; every "
                 "proposal will refuse until the file is fixed",
@@ -210,6 +224,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.evidence_binding = evidence_binding_in_force(runtime.settings)
         app.state.evidence_posture_broken = evidence_posture_is_broken(runtime.settings)
         if app.state.evidence_posture_broken:
+            backend_state.note_startup_fault(StartupFaultCode.EVIDENCE_POSTURE_INVALID)
             _logger.error(
                 "AUTONOMY_EVIDENCE_BUNDLES is set with no AUTONOMY_PROPOSERS_FILE; every "
                 "proposal will refuse until one is configured or the other unset",
@@ -221,8 +236,6 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             # R-24: the boundary re-checks lease ownership in the database
             # immediately before transmitting, instead of trusting the
             # startup-time `writer_lease_held` flag.
-            backend_state = app.state.backend
-
             def _still_the_writer() -> bool:
                 """Both halves must hold, and either alone is insufficient.
 
@@ -262,6 +275,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                     },
                 )
             except Exception as error:
+                backend_state.note_startup_fault(StartupFaultCode.SUBMISSION_RECONCILIATION_FAILED)
                 _logger.error(
                     "Submission reconciliation failed; submission remains locked "
                     "while inspection, cancellation, and recovery stay available",
@@ -287,14 +301,54 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     autonomy_task: asyncio.Task[None] | None = None
     reconcile_task: asyncio.Task[None] | None = None
     if not read_only:
+        task_observations = app.state.backend.task_observations
         # R-24: without this the lease silently lapses after its TTL.
         period = lease.ttl.total_seconds() / _RENEWALS_PER_TTL
-        heartbeat = asyncio.create_task(_heartbeat_lease(app.state.backend, lease, period))
+        heartbeat_age = max(period * 2, 1.0)
+        task_observations.starting(
+            BackgroundTaskName.LEASE_HEARTBEAT,
+            max_age_seconds=heartbeat_age,
+        )
+        heartbeat = asyncio.create_task(
+            _heartbeat_lease(
+                app.state.backend,
+                lease,
+                period,
+                on_progress=lambda: task_observations.progress(BackgroundTaskName.LEASE_HEARTBEAT),
+            )
+        )
+        task_observations.bind(
+            BackgroundTaskName.LEASE_HEARTBEAT,
+            heartbeat,
+            max_age_seconds=heartbeat_age,
+        )
         # ADR-0020: re-arm submission readiness on the owner-frozen cadence.
         # Writer-only, because a read-only backend cannot persist recovery and
         # must stay PENDING. Without this the first opening order of the process
         # consumes readiness and nothing ever re-arms it.
-        reconcile_task = asyncio.create_task(reconciliation_task(runtime))
+        reconciliation_age = (
+            max(
+                runtime.settings.reconciliation_interval_active_seconds,
+                runtime.settings.reconciliation_interval_idle_seconds,
+                runtime.settings.reconciliation_interval_closed_seconds,
+            )
+            + 60.0
+        )
+        task_observations.starting(
+            BackgroundTaskName.RECONCILIATION,
+            max_age_seconds=reconciliation_age,
+        )
+        reconcile_task = asyncio.create_task(
+            reconciliation_task(
+                runtime,
+                on_progress=lambda: task_observations.progress(BackgroundTaskName.RECONCILIATION),
+            )
+        )
+        task_observations.bind(
+            BackgroundTaskName.RECONCILIATION,
+            reconcile_task,
+            max_age_seconds=reconciliation_age,
+        )
         # ADR-0017: the persistent mandate is the owner's standing grant. When
         # one is configured and valid, the autonomy runtime starts with the
         # backend — no per-boot ritual. No grant (the default) boots inert, and
@@ -314,6 +368,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                 is_writer=lambda: bool(autonomy_backend.writer),
             )
         except Exception:
+            app.state.backend.note_startup_fault(StartupFaultCode.AUTONOMY_WIRING_FAILED)
             _logger.exception(
                 "Autonomy wiring failed; the backend continues without it",
                 extra={"event": "autonomy_wiring_failed"},
@@ -321,23 +376,51 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             autonomy = None
         if autonomy is not None:
             app.state.autonomy = autonomy
-            autonomy_task = asyncio.create_task(autonomy_tick_task(autonomy))
+            task_observations.starting(
+                BackgroundTaskName.AUTONOMY,
+                max_age_seconds=5.0,
+            )
+            autonomy_task = asyncio.create_task(
+                autonomy_tick_task(
+                    autonomy,
+                    on_progress=lambda: task_observations.progress(BackgroundTaskName.AUTONOMY),
+                )
+            )
+            task_observations.bind(
+                BackgroundTaskName.AUTONOMY,
+                autonomy_task,
+                max_age_seconds=5.0,
+            )
             _logger.info(
                 "Autonomy runtime started under the persistent mandate",
                 extra={"event": "autonomy_started"},
+            )
+        else:
+            task_observations.not_expected(
+                BackgroundTaskName.AUTONOMY,
+                max_age_seconds=5.0,
+            )
+    else:
+        for task_name in BackgroundTaskName:
+            app.state.backend.task_observations.not_expected(
+                task_name,
+                max_age_seconds=5.0,
             )
     try:
         yield
     finally:
         if autonomy_task is not None:
+            app.state.backend.task_observations.expect_stop(BackgroundTaskName.AUTONOMY)
             autonomy_task.cancel()
             with suppress(asyncio.CancelledError):
                 await autonomy_task
         if reconcile_task is not None:
+            app.state.backend.task_observations.expect_stop(BackgroundTaskName.RECONCILIATION)
             reconcile_task.cancel()
             with suppress(asyncio.CancelledError):
                 await reconcile_task
         if heartbeat is not None:
+            app.state.backend.task_observations.expect_stop(BackgroundTaskName.LEASE_HEARTBEAT)
             heartbeat.cancel()
             with suppress(asyncio.CancelledError):
                 await heartbeat

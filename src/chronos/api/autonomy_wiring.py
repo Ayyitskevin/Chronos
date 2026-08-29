@@ -931,7 +931,11 @@ def _alert_bad_mandate(runtime: AppRuntime, fingerprint: str, now: datetime) -> 
         _logger.exception("Could not record the invalid-mandate alert")
 
 
-async def autonomy_tick_task(autonomy: AutonomyRuntime) -> None:
+async def autonomy_tick_task(
+    autonomy: AutonomyRuntime,
+    *,
+    on_progress: Callable[[], None] | None = None,
+) -> None:
     """Drive ticks forever, off the event loop's back.
 
     One-second poll granularity against the runtime's own schedule (whose floor
@@ -941,12 +945,16 @@ async def autonomy_tick_task(autonomy: AutonomyRuntime) -> None:
     """
 
     while not autonomy.stopped:
+        if on_progress is not None:
+            on_progress()
         now = utc_now()
         wait = autonomy.seconds_until_next_tick(now)
         if wait > 0:
             await asyncio.sleep(min(wait, 1.0))
             continue
         await asyncio.to_thread(autonomy.run_tick, now)
+        if on_progress is not None:
+            on_progress()
     _logger.warning(
         "Autonomy tick task exiting: the runtime stopped itself",
         extra={"event": "autonomy_task_exit"},

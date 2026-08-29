@@ -32,6 +32,65 @@ def test_connection_manager_reuses_one_background_thread() -> None:
     manager.close()
 
 
+def test_connection_status_caches_only_sanitized_broker_truth() -> None:
+    broker = DemoBroker(clock=lambda: FIXED_NOW)
+    manager = BrokerConnectionManager(broker, observation_clock=lambda: FIXED_NOW)
+    try:
+        manager.connect()
+        status = manager.connection_status()
+        observation = manager.connection_observation()
+
+        assert status.account_id
+        assert observation.connected is True
+        assert observation.connection_state == "CONNECTED"
+        assert observation.observed_at == FIXED_NOW
+        assert observation.generation >= 2
+        assert not hasattr(observation, "account_id")
+    finally:
+        manager.close()
+
+
+def test_reading_cached_connection_observation_never_calls_broker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    broker = DemoBroker(clock=lambda: FIXED_NOW)
+    manager = BrokerConnectionManager(broker, observation_clock=lambda: FIXED_NOW)
+    try:
+        manager.connect()
+        expected = manager.connection_status()
+
+        def forbidden() -> object:
+            raise AssertionError("cached observation must not call connection_status")
+
+        monkeypatch.setattr(broker, "connection_status", forbidden)
+        first = manager.connection_observation()
+        second = manager.connection_observation()
+
+        assert expected.connected is True
+        assert second == first
+    finally:
+        manager.close()
+
+
+def test_connection_invalidation_advances_and_unknowns_cached_truth() -> None:
+    broker = DemoBroker(clock=lambda: FIXED_NOW)
+    manager = BrokerConnectionManager(broker, observation_clock=lambda: FIXED_NOW)
+    try:
+        manager.connect()
+        manager.connection_status()
+        connected_generation = manager.connection_observation().generation
+
+        manager.disconnect()
+        disconnected = manager.connection_observation()
+
+        assert disconnected.generation > connected_generation
+        assert disconnected.connected is None
+        assert disconnected.connection_state is None
+        assert disconnected.reason_code == "connection_uncertain"
+    finally:
+        manager.close()
+
+
 def test_closed_manager_fails_loud_without_leaking_coroutine() -> None:
     broker = DemoBroker(clock=lambda: FIXED_NOW)
     manager = BrokerConnectionManager(broker)

@@ -10,10 +10,12 @@ endpoint refuses.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from fastapi import HTTPException, Request, status
 
+from chronos.api.task_observations import TaskObservationRegistry
+from chronos.operations.health import StartupFaultCode
 from chronos.runtime import AppRuntime
 from chronos.utils.locking import WriterLease
 
@@ -23,6 +25,8 @@ class BackendState:
     runtime: AppRuntime
     lease: WriterLease | None
     read_only: bool
+    task_observations: TaskObservationRegistry = field(default_factory=TaskObservationRegistry)
+    startup_faults: tuple[StartupFaultCode, ...] = ()
     #: The process's single bar provider, created on first use by
     #: ``chronos.api.bars.provider_for`` and cached here so a panel refresh does
     #: not become a broker request.
@@ -41,6 +45,13 @@ class BackendState:
     @property
     def writer(self) -> bool:
         return not self.read_only and self.lease is not None
+
+    def note_startup_fault(self, fault: StartupFaultCode) -> None:
+        """Retain a closed, non-secret startup outcome for later health reads."""
+
+        self.startup_faults = tuple(
+            sorted({*self.startup_faults, fault}, key=lambda item: item.value)
+        )
 
 
 def get_state(request: Request) -> BackendState:

@@ -26,6 +26,21 @@ runbooks.
 - Modify-in-place is not implemented on the official live adapter: re-price by cancel +
   re-propose (the full gate walk re-applies).
 
+## Operational health
+
+- `/health` schema v2 separates liveness, service readiness, and PAPER/LIVE/autonomous
+  new-exposure capability, but it is still a diagnostic endpoint that deliberately answers
+  HTTP 200 while degraded so the operator can read the reasons. Its legacy `status: ok` is
+  compatibility-only and is not a readiness or trading claim. Do not configure this route as
+  a Kubernetes-style readiness probe; no status-code-bearing orchestrator endpoint ships yet.
+- The collector makes no broker call. Connection truth is the last sanitized observation
+  captured at an existing broker-status seam and becomes unknown on connection uncertainty.
+  It is not a substitute for real-gateway monitoring.
+- Clock health is intentionally `UNKNOWN` in W2. No NTP/chrony observer, process watchdog,
+  dead-man monitor, off-host alert, or measured availability/RPO/RTO SLO is implemented by
+  this slice. Therefore the shipped collector cannot claim a fully evidenced `AVAILABLE`
+  new-exposure lane.
+
 ## Crypto family (built, disabled by default)
 
 - **IBKR paper accounts do not support crypto.** There is no paper dry-run for this family. Its

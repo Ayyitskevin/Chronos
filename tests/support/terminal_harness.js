@@ -40,7 +40,7 @@ const vm = require("node:vm");
 /** The status-bar and command-bar ids `terminal.js` expects the shell to carry. */
 const SHELL_IDS = [
   "cmdform", "cmd", "cmd-symbol", "suggest", "cmd-msg", "grid", "empty", "empty-keys",
-  "st-panels", "st-reset", "st-conn", "st-role", "st-autonomy", "st-kill", "st-armed",
+  "st-panels", "st-reset", "st-conn", "st-role", "st-autonomy", "st-capability", "st-kill", "st-armed",
   "st-alerts", "st-latency", "st-clock",
 ];
 
@@ -268,6 +268,14 @@ const SYSTEM_OK = {
   mandate_active: true,
   mandate_id: "M-1",
   account_fingerprint: "f".repeat(64),
+  operational_health: {
+    service_readiness: { state: "READY", reasons: [] },
+    trading_capability: {
+      paper_new_exposure: { state: "BLOCKED", reasons: ["lane_not_configured"] },
+      live_new_exposure: { state: "BLOCKED", reasons: ["lane_not_configured"] },
+      autonomous_new_exposure: { state: "BLOCKED", reasons: ["mandate_absent"] },
+    },
+  },
   generated_at: "2026-07-26T12:00:00+00:00",
 };
 
@@ -281,6 +289,7 @@ function statusBar(client) {
     conn: read("st-conn"),
     role: read("st-role"),
     autonomy: read("st-autonomy"),
+    capability: read("st-capability"),
     kill: read("st-kill"),
     armed: read("st-armed"),
     alerts: read("st-alerts"),

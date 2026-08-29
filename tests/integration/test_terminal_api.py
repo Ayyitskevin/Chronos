@@ -141,7 +141,7 @@ def _mandate(now: datetime) -> AutonomyMandate:
     )
 
 
-async def _no_ticks(autonomy: object) -> None:
+async def _no_ticks(autonomy: object, **_kwargs: object) -> None:
     """Stand in for the tick task: these tests exercise routes, not the schedule."""
 
     return None
@@ -333,6 +333,31 @@ def test_the_system_panel_reports_the_mandate_the_runtime_is_under(
     assert body["kill_switch_engaged"] is False
     assert body["live_armed"] is False
     assert body["account_fingerprint"] == _FINGERPRINT
+    operational = body["operational_health"]
+    # This suite replaces the autonomy loop with a coroutine that returns.
+    # Operational health must expose that unexpected lifecycle completion.
+    assert operational["service_readiness"]["state"] == "NOT_READY"
+    assert "required_task_failed" in operational["service_readiness"]["reasons"]
+    autonomy_task = next(
+        task for task in operational["observations"]["tasks"] if task["name"] == "autonomy"
+    )
+    assert autonomy_task["state"] == "FAILED"
+    assert autonomy_task["failure_code"] == "exited_unexpectedly"
+    assert operational["observations"]["clock"] == "UNKNOWN"
+    assert operational["trading_capability"]["paper_new_exposure"]["state"] != ("AVAILABLE")
+
+
+def test_demoted_terminal_exposes_ready_service_and_blocked_trading(
+    read_only_client: TestClient, headers: dict[str, str]
+) -> None:
+    body = read_only_client.get("/terminal/system", headers=headers).json()
+    operational = body["operational_health"]
+
+    assert operational["service_readiness"] == {"state": "READY", "reasons": []}
+    assert operational["observations"]["writer_role"] == "READ_ONLY"
+    for verdict in operational["trading_capability"].values():
+        assert verdict["state"] == "BLOCKED"
+        assert "writer_lease_absent" in verdict["reasons"]
 
 
 def test_a_demoted_backend_still_shows_the_grant_on_disk(

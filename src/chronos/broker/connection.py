@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Coroutine
+from collections.abc import Callable, Coroutine
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FutureTimeoutError
+from dataclasses import dataclass
+from datetime import datetime
 from threading import Event, Lock, Thread
 from typing import Any, Protocol, TypeVar
 
@@ -15,8 +17,22 @@ from chronos.broker.base import (
     BrokerRefusedBeforeSend,
 )
 from chronos.domain.enums import ConnectionState
+from chronos.domain.models import ConnectionStatus
+from chronos.utils.time import utc_now
 
 T = TypeVar("T")
+
+
+@dataclass(frozen=True, slots=True)
+class BrokerConnectionObservation:
+    """Last sanitized broker truth learned at the real connection seam."""
+
+    generation: int = 0
+    connected: bool | None = None
+    connection_state: str | None = None
+    observed_environment: str | None = None
+    observed_at: datetime | None = None
+    reason_code: str = "never_observed"
 
 
 class ConnectionStateInvalidator(Protocol):
@@ -34,23 +50,48 @@ class BrokerConnectionManager:
         *,
         call_timeout_seconds: float = 30.0,
         readiness: ConnectionStateInvalidator | None = None,
+        observation_clock: Callable[[], datetime] = utc_now,
     ) -> None:
         self.broker = broker
         self._call_timeout_seconds = call_timeout_seconds
         self._readiness = readiness
+        self._observation_clock = observation_clock
         self._loop = asyncio.new_event_loop()
         self._thread = Thread(target=self._run_loop, name="chronos-broker-loop", daemon=True)
         self._ready = Event()
         self._lifecycle_lock = Lock()
+        self._observation_lock = Lock()
         self._serialization_lock: asyncio.Lock | None = None
         self._started = False
         self._closing = False
         self._closed = False
         self._logger = logging.getLogger("chronos.broker.connection")
+        self._observation = BrokerConnectionObservation()
 
     @property
     def running(self) -> bool:
         return self._started and self._thread.is_alive() and not self._closed
+
+    def connection_observation(self) -> BrokerConnectionObservation:
+        """Return the cached sanitized observation; never call the broker here."""
+
+        with self._observation_lock:
+            return self._observation
+
+    def connection_status(self) -> ConnectionStatus:
+        """Read broker status once and retain only its non-secret connection facts."""
+
+        status = self.run(self.broker.connection_status())
+        with self._observation_lock:
+            self._observation = BrokerConnectionObservation(
+                generation=self._observation.generation + 1,
+                connected=status.connected and status.state is ConnectionState.CONNECTED,
+                connection_state=status.state.value,
+                observed_environment=status.environment.value,
+                observed_at=self._observation_clock(),
+                reason_code="status_observed",
+            )
+        return status
 
     def start(self) -> None:
         with self._lifecycle_lock:
@@ -118,7 +159,7 @@ class BrokerConnectionManager:
         already_healthy = False
         if self.running:
             try:
-                status = self.run(self.broker.connection_status())
+                status = self.connection_status()
             except BaseException:
                 # The run call already invalidated for an uncertain failure. A
                 # typed local safety refusal still needs explicit invalidation.
@@ -138,6 +179,12 @@ class BrokerConnectionManager:
             self.run(self.broker.disconnect())
 
     def _invalidate(self, reason: str) -> None:
+        with self._observation_lock:
+            self._observation = BrokerConnectionObservation(
+                generation=self._observation.generation + 1,
+                observed_at=self._observation_clock(),
+                reason_code="connection_uncertain",
+            )
         readiness = self._readiness
         if readiness is None:
             return
