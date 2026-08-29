@@ -44,6 +44,7 @@ _RECORD_KEYS = frozenset({"sequence", "at_utc", "kind", "payload", "previous_has
 _ANCHOR_KEYS = frozenset({"count", "last_hash"})
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
 _FILE_FLAGS = os.O_CLOEXEC | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0)
+_ZERO_LINK_STAT_ATTEMPTS = 8
 _THREAD_LOCKS: dict[str, threading.Lock] = {}
 _THREAD_LOCKS_GUARD = threading.Lock()
 _ACTIVE_REGISTRY_DIRECTORIES = threading.local()
@@ -175,10 +176,20 @@ def _open_child_directory(parent_fd: int, component: str, display: Path) -> int:
 
 
 def _entry_metadata(parent_fd: int, name: str) -> os.stat_result | None:
-    try:
-        return os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-    except FileNotFoundError:
-        return None
+    metadata: os.stat_result | None = None
+    for _attempt in range(_ZERO_LINK_STAT_ATTEMPTS):
+        try:
+            metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            if metadata is not None:
+                return metadata
+            return None
+        # A lookup racing atomic replacement can return metadata for the old
+        # destination inode after rename has unlinked it.  Recheck that transient
+        # state; a named file with multiple links remains an immediate refusal below.
+        if metadata.st_nlink != 0:
+            return metadata
+    return metadata
 
 
 def _require_safe_regular_entry(parent_fd: int, name: str, display: Path) -> os.stat_result | None:
@@ -191,7 +202,9 @@ def _require_safe_regular_entry(parent_fd: int, name: str, display: Path) -> os.
         _unsafe_path(display, "registry entry is not a regular file")
     if metadata.st_uid != os.geteuid():
         _unsafe_path(display, "registry entry is not owned by the current user")
-    if metadata.st_nlink != 1:
+    if metadata.st_nlink == 0:
+        _unsafe_path(display, "registry entry remained unlinked during bounded recheck")
+    if metadata.st_nlink > 1:
         _unsafe_path(display, "registry entry has multiple hard links")
     return metadata
 
