@@ -1,0 +1,2 @@
+# Pin the package installer that consumes every other Chronos lock.
+pip==26.2.1

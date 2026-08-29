@@ -356,7 +356,7 @@ Deliver:
   watchdogs, dead-man behavior, SLOs, and operational proof remain open. This does not satisfy
   the Phase 2 exit.
 
-  **Partial delivery (updated 2026-08-29, through ADR-0043):** the CI release-artifact gate now
+  **Partial delivery (updated 2026-08-29, through ADR-0044):** the CI release-artifact gate now
   derives a bounded build epoch from exact Git `HEAD`, overrides ambient timestamp input, and builds
   the same source set twice in separate source/output trees with the exact locked backend. It
   refuses filename, byte, or member-timestamp drift before publishing. The verified wheel is then
@@ -372,8 +372,8 @@ Deliver:
   medium-severity/medium-confidence or stronger, and checks every tracked file against an explicitly
   reviewed false-positive secret baseline. Its first run removed twelve current GitPython advisories
   and a fixed shared `/tmp` path. These scanners are current advisory/heuristic evidence: artifact
-  signing, Git-history secret review, malicious-package provenance, the pip frontend outside the
-  lock, independent/cross-platform rebuild evidence, and compromised-builder resistance remain
+  signing, Git-history secret review, malicious-package provenance, the interpreter's initial
+  offline `ensurepip` trust, independent/cross-platform rebuild evidence, and compromised-builder resistance remain
   open. This does not satisfy the Phase 2 exit.
 
 ### Real-gateway read-only gate

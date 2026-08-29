@@ -15,15 +15,21 @@ component for the trading path.
 ```bash
 git clone <your-remote> Chronos && cd Chronos
 python3 -m venv .venv                                        # python 3.12+
+.venv/bin/python -I scripts/verify_pip_bootstrap.py --lock requirements-bootstrap.lock --check-lock-only
+.venv/bin/python -m pip install --disable-pip-version-check --no-deps --require-hashes -r requirements-bootstrap.lock
+.venv/bin/python -I scripts/verify_pip_bootstrap.py --lock requirements-bootstrap.lock
 .venv/bin/python -m pip install --require-hashes -r requirements-build.lock
 .venv/bin/python -m pip install --require-hashes -r requirements-dev.lock
 .venv/bin/python -m pip install -e . --no-deps --no-build-isolation --check-build-dependencies
 ```
 
-This uses the same two locked dependency installs and no-isolation build flags as CI
-(`.github/workflows/ci.yml`). CI first upgrades pip, and that frontend remains outside the hash
-gate. `requirements-build.lock` pins the PEP 517 backend and `requirements-dev.lock` pins the
-full runtime+dev transitive closure to exact versions and SHA-256 hashes (docs/SECURITY.md). A
+This uses the same locked frontend/dependency installs and no-isolation build flags as CI
+(`.github/workflows/ci.yml`). The interpreter's offline `ensurepip` bundle creates the initial
+frontend; that frontend then installs only the exact pip artifact in `requirements-bootstrap.lock`,
+whose single-package grammar is checked before installation. The separate verifier then confirms
+its installed identity before any other dependency operation.
+`requirements-build.lock` pins the PEP 517 backend and `requirements-dev.lock` pins the full
+runtime+dev transitive closure to exact versions and SHA-256 hashes (docs/SECURITY.md). A
 quick unpinned dev install
 (`pip install -e '.[dev]'`) also works but is not reproducible — prefer the lock for
 anything you intend to keep running.
@@ -39,9 +45,10 @@ requires exact scanner versions, audits the hash-locked runtime set without reso
 and fails closed if the advisory service, a scanner, the tracked-file inventory, or the reviewed
 secret baseline is unavailable or stale.
 
-The final gate derives `SOURCE_DATE_EPOCH` from the exact Git `HEAD`, overriding any ambient value,
-then builds the current non-ignored source set twice in separate source/output trees with the pinned
-backend. It requires one identical wheel filename, exact byte equality, and the normalized
+The final gate first creates separate builder/runtime venvs, installs and independently verifies
+the pip bootstrap lock in both, derives `SOURCE_DATE_EPOCH` from the exact Git `HEAD`, overriding
+any ambient value, then builds the current non-ignored source set twice in separate source/output
+trees with the pinned backend. It requires one identical wheel filename, exact byte equality, and the normalized
 source-derived timestamp on every ZIP member. It then checks terminal assets and the complete
 migration namespace byte-for-byte against source, installs only `requirements-runtime.lock` plus
 the verified wheel in a separate runtime venv, upgrades a disposable v2 database through the
@@ -60,11 +67,12 @@ current advisory and heuristic checks but does not inspect Git history or prove 
 The wheel comparison proves repeatability inside the exact gate environment; it is not a signature,
 an independent rebuilder attestation, or evidence of cross-platform reproducibility.
 
-Reproducibility record: even with the lock, record the resolved environment at deployment
-time (the pip frontend itself remains outside the hash gate — docs/SECURITY.md):
+Reproducibility record: even with the locks, record the resolved environment at deployment time.
+The initial interpreter/`ensurepip` trust and package publisher/builder trust remain disclosed in
+docs/SECURITY.md:
 
 ```bash
-.venv/bin/pip freeze > deploy-freeze-$(date +%F).txt   # keep with your backups
+.venv/bin/python -m pip freeze > deploy-freeze-$(date +%F).txt   # keep with your backups
 ```
 
 ## Initialize directories and state

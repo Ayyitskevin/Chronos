@@ -21,6 +21,8 @@ def test_build_env_skill_points_to_live_authorities() -> None:
         "AGENTS.md",
         "docs/AGENT_PROTOCOL.md",
         "pyproject.toml",
+        "requirements-bootstrap.in",
+        "requirements-bootstrap.lock",
         "requirements-build.in",
         "requirements-build.lock",
         "requirements-dev.lock",
@@ -48,6 +50,15 @@ def test_build_env_skill_derives_interpreter_install_and_gates() -> None:
     required_fragments = (
         "requires-python",
         "<python-that-satisfies-the-repo> -m venv .venv",
+        (
+            ".venv/bin/python -I scripts/verify_pip_bootstrap.py "
+            "--lock requirements-bootstrap.lock --check-lock-only"
+        ),
+        (
+            ".venv/bin/python -m pip install --disable-pip-version-check --no-deps "
+            "--require-hashes -r requirements-bootstrap.lock"
+        ),
+        (".venv/bin/python -I scripts/verify_pip_bootstrap.py --lock requirements-bootstrap.lock"),
         ".venv/bin/python -m pip install --require-hashes -r requirements-build.lock",
         ".venv/bin/python -m pip install --require-hashes -r requirements-dev.lock",
         (
@@ -68,10 +79,11 @@ def test_build_env_skill_derives_lock_maintenance_process() -> None:
     text = _skill_text()
 
     required_fragments = (
-        "sed -n '1,2p' requirements-build.lock requirements-dev.lock",
+        ("sed -n '1,2p' requirements-bootstrap.lock requirements-build.lock requirements-dev.lock"),
         "existing output file",
         (
-            "git diff -- pyproject.toml requirements-build.in "
+            "git diff -- pyproject.toml requirements-bootstrap.in "
+            "requirements-bootstrap.lock requirements-build.in "
             "requirements-build.lock requirements-dev.lock"
         ),
         "owner review",
@@ -139,7 +151,9 @@ def test_build_env_skill_cites_primary_documentation() -> None:
 
     primary_sources = (
         "https://docs.python.org/3.12/library/venv.html",
+        "https://docs.python.org/3.12/library/ensurepip.html",
         "https://packaging.python.org/en/latest/specifications/pyproject-toml/",
+        "https://pip.pypa.io/en/stable/cli/pip_install/",
         "https://setuptools.pypa.io/en/stable/userguide/datafiles.html#package-data",
         "https://alembic.sqlalchemy.org/en/latest/api/commands.html",
     )

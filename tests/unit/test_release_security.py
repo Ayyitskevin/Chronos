@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 from detect_secrets.pre_commit_hook import main as detect_secrets_hook
 from scripts import run_research as research_runner
+from scripts.verify_pip_bootstrap import locked_pip_version
 from scripts.verify_release_security import (
     EXPECTED_TOOL_VERSIONS,
     ScanCommand,
@@ -23,6 +24,12 @@ from scripts.verify_release_security import (
 from chronos.backtest.engine import BacktestResult
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_security_gate_pip_identity_matches_the_bootstrap_lock() -> None:
+    assert EXPECTED_TOOL_VERSIONS["pip"] == locked_pip_version(
+        _REPO_ROOT / "requirements-bootstrap.lock"
+    )
 
 
 class _EmptySeries:

@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 import yaml
 from scripts.verify_release_artifact import (
+    _bootstrap_pip,
     _build_wheel,
     _exercise_installed_migrations,
     _exercise_migration_tree,
@@ -74,11 +75,81 @@ def test_ci_editable_install_uses_the_same_locked_build_backend() -> None:
     commands = tuple(line.strip() for line in install_step["run"].splitlines() if line.strip())
 
     assert commands == (
-        "python -m pip install --upgrade pip",
-        "pip install --require-hashes -r requirements-build.lock",
-        "pip install --require-hashes -r requirements-dev.lock",
-        "pip install -e . --no-deps --no-build-isolation --check-build-dependencies",
+        (
+            "python -I scripts/verify_pip_bootstrap.py "
+            "--lock requirements-bootstrap.lock --check-lock-only"
+        ),
+        (
+            "python -m pip install --disable-pip-version-check --no-deps "
+            "--require-hashes -r requirements-bootstrap.lock"
+        ),
+        "python -I scripts/verify_pip_bootstrap.py --lock requirements-bootstrap.lock",
+        "python -m pip install --require-hashes -r requirements-build.lock",
+        "python -m pip install --require-hashes -r requirements-dev.lock",
+        ("python -m pip install -e . --no-deps --no-build-isolation --check-build-dependencies"),
     )
+
+
+def test_release_environments_bootstrap_and_verify_pip_before_other_inputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    python = tmp_path / "venv/bin/python"
+    source_root = tmp_path / "source"
+    commands: list[tuple[list[str], Path]] = []
+
+    def record(
+        command: list[str],
+        *,
+        cwd: Path,
+        environment_overrides: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        assert environment_overrides is None
+        commands.append((command, cwd))
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr("scripts.verify_release_artifact._run", record)
+
+    _bootstrap_pip(python, source_root, cwd=tmp_path)
+
+    lock = source_root / "requirements-bootstrap.lock"
+    assert commands == [
+        (
+            [
+                str(python),
+                "-I",
+                str(source_root / "scripts/verify_pip_bootstrap.py"),
+                "--lock",
+                str(lock),
+                "--check-lock-only",
+            ],
+            tmp_path,
+        ),
+        (
+            [
+                str(python),
+                "-m",
+                "pip",
+                "install",
+                "--disable-pip-version-check",
+                "--quiet",
+                "--no-deps",
+                "--require-hashes",
+                "-r",
+                str(lock),
+            ],
+            tmp_path,
+        ),
+        (
+            [
+                str(python),
+                "-I",
+                str(source_root / "scripts/verify_pip_bootstrap.py"),
+                "--lock",
+                str(lock),
+            ],
+            tmp_path,
+        ),
+    ]
 
 
 def test_ci_retains_exact_main_release_evidence_with_a_pinned_action() -> None:
@@ -243,7 +314,7 @@ def test_sbom_generator_targets_only_the_installed_runtime_environment(
     ]
 
 
-def _write_sbom_fixture(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
+def _write_sbom_fixture(tmp_path: Path) -> tuple[Path, Path, Path, Path, Path]:
     wheel = tmp_path / "chronos-0.1.0-py3-none-any.whl"
     metadata = """Metadata-Version: 2.4
 Name: chronos
@@ -256,6 +327,8 @@ Requires-Dist: pytest<9,>=8.3; extra == \"dev\"
 
     runtime_lock = tmp_path / "requirements-runtime.lock"
     runtime_lock.write_text("fastapi==0.139.2\nstarlette==0.52.1\n", encoding="utf-8")
+    bootstrap_lock = tmp_path / "requirements-bootstrap.lock"
+    bootstrap_lock.write_text("pip==26.2.1\n", encoding="utf-8")
     sbom_tool_lock = tmp_path / "requirements-sbom.lock"
     sbom_tool_lock.write_text("cyclonedx-bom==7.3.1\n", encoding="utf-8")
     sbom = tmp_path / "chronos-0.1.0.cdx.json"
@@ -298,36 +371,36 @@ Requires-Dist: pytest<9,>=8.3; extra == \"dev\"
                         "version": "0.52.1",
                     },
                     {
-                        "bom-ref": "pip==26.0.1",
+                        "bom-ref": "pip==26.2.1",
                         "name": "pip",
                         "type": "library",
-                        "version": "26.0.1",
+                        "version": "26.2.1",
                     },
                 ],
                 "dependencies": [
                     {"ref": "root-component", "dependsOn": ["fastapi==0.139.2"]},
                     {"ref": "fastapi==0.139.2", "dependsOn": ["starlette==0.52.1"]},
                     {"ref": "starlette==0.52.1", "dependsOn": []},
-                    {"ref": "pip==26.0.1", "dependsOn": []},
+                    {"ref": "pip==26.2.1", "dependsOn": []},
                 ],
             },
             sort_keys=True,
         ),
         encoding="utf-8",
     )
-    return sbom, wheel, runtime_lock, sbom_tool_lock
+    return sbom, wheel, runtime_lock, bootstrap_lock, sbom_tool_lock
 
 
 def test_sbom_verifier_accepts_the_exact_locked_runtime_environment(tmp_path: Path) -> None:
-    sbom, wheel, runtime_lock, sbom_tool_lock = _write_sbom_fixture(tmp_path)
+    sbom, wheel, runtime_lock, bootstrap_lock, sbom_tool_lock = _write_sbom_fixture(tmp_path)
 
-    component_count = _verify_sbom(sbom, wheel, runtime_lock, sbom_tool_lock)
+    component_count = _verify_sbom(sbom, wheel, runtime_lock, bootstrap_lock, sbom_tool_lock)
 
     assert component_count == 3
 
 
 def test_sbom_verifier_rejects_a_dev_component_outside_the_runtime_lock(tmp_path: Path) -> None:
-    sbom, wheel, runtime_lock, sbom_tool_lock = _write_sbom_fixture(tmp_path)
+    sbom, wheel, runtime_lock, bootstrap_lock, sbom_tool_lock = _write_sbom_fixture(tmp_path)
     payload = json.loads(sbom.read_text(encoding="utf-8"))
     payload["components"].append(
         {
@@ -341,32 +414,65 @@ def test_sbom_verifier_rejects_a_dev_component_outside_the_runtime_lock(tmp_path
     sbom.write_text(json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(RuntimeError, match="unlocked components: pytest"):
-        _verify_sbom(sbom, wheel, runtime_lock, sbom_tool_lock)
+        _verify_sbom(sbom, wheel, runtime_lock, bootstrap_lock, sbom_tool_lock)
 
 
 def test_sbom_verifier_rejects_a_missing_locked_runtime_component(tmp_path: Path) -> None:
-    sbom, wheel, runtime_lock, sbom_tool_lock = _write_sbom_fixture(tmp_path)
+    sbom, wheel, runtime_lock, bootstrap_lock, sbom_tool_lock = _write_sbom_fixture(tmp_path)
     payload = json.loads(sbom.read_text(encoding="utf-8"))
     payload["components"] = [item for item in payload["components"] if item["name"] != "starlette"]
     sbom.write_text(json.dumps(payload), encoding="utf-8")
 
-    with pytest.raises(RuntimeError, match="missing locked runtime components: starlette"):
-        _verify_sbom(sbom, wheel, runtime_lock, sbom_tool_lock)
+    with pytest.raises(
+        RuntimeError, match="missing locked runtime/bootstrap components: starlette"
+    ):
+        _verify_sbom(sbom, wheel, runtime_lock, bootstrap_lock, sbom_tool_lock)
 
 
 def test_sbom_verifier_rejects_locked_runtime_version_drift(tmp_path: Path) -> None:
-    sbom, wheel, runtime_lock, sbom_tool_lock = _write_sbom_fixture(tmp_path)
+    sbom, wheel, runtime_lock, bootstrap_lock, sbom_tool_lock = _write_sbom_fixture(tmp_path)
     payload = json.loads(sbom.read_text(encoding="utf-8"))
     starlette = next(item for item in payload["components"] if item["name"] == "starlette")
     starlette["version"] = "0.52.0"
     sbom.write_text(json.dumps(payload), encoding="utf-8")
 
-    with pytest.raises(RuntimeError, match="versions differ from the runtime lock: starlette"):
-        _verify_sbom(sbom, wheel, runtime_lock, sbom_tool_lock)
+    with pytest.raises(
+        RuntimeError, match="versions differ from the runtime/bootstrap locks: starlette"
+    ):
+        _verify_sbom(sbom, wheel, runtime_lock, bootstrap_lock, sbom_tool_lock)
+
+
+def test_sbom_verifier_rejects_pip_bootstrap_version_drift(tmp_path: Path) -> None:
+    sbom, wheel, runtime_lock, bootstrap_lock, sbom_tool_lock = _write_sbom_fixture(tmp_path)
+    payload = json.loads(sbom.read_text(encoding="utf-8"))
+    pip = next(item for item in payload["components"] if item["name"] == "pip")
+    pip["version"] = "26.0.1"
+    sbom.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="versions differ from the runtime/bootstrap locks: pip"):
+        _verify_sbom(sbom, wheel, runtime_lock, bootstrap_lock, sbom_tool_lock)
+
+
+def test_sbom_verifier_rejects_unlocked_environment_bootstrap_tools(tmp_path: Path) -> None:
+    sbom, wheel, runtime_lock, bootstrap_lock, sbom_tool_lock = _write_sbom_fixture(tmp_path)
+    payload = json.loads(sbom.read_text(encoding="utf-8"))
+    payload["components"].append(
+        {
+            "bom-ref": "setuptools==84.0.0",
+            "name": "setuptools",
+            "type": "library",
+            "version": "84.0.0",
+        }
+    )
+    payload["dependencies"].append({"ref": "setuptools==84.0.0", "dependsOn": []})
+    sbom.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="unlocked components: setuptools"):
+        _verify_sbom(sbom, wheel, runtime_lock, bootstrap_lock, sbom_tool_lock)
 
 
 def test_sbom_verifier_rejects_an_application_self_dependency(tmp_path: Path) -> None:
-    sbom, wheel, runtime_lock, sbom_tool_lock = _write_sbom_fixture(tmp_path)
+    sbom, wheel, runtime_lock, bootstrap_lock, sbom_tool_lock = _write_sbom_fixture(tmp_path)
     payload = json.loads(sbom.read_text(encoding="utf-8"))
     root = payload["metadata"]["component"]["bom-ref"]
     root_edge = next(item for item in payload["dependencies"] if item["ref"] == root)
@@ -374,7 +480,7 @@ def test_sbom_verifier_rejects_an_application_self_dependency(tmp_path: Path) ->
     sbom.write_text(json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(RuntimeError, match="application self-reference"):
-        _verify_sbom(sbom, wheel, runtime_lock, sbom_tool_lock)
+        _verify_sbom(sbom, wheel, runtime_lock, bootstrap_lock, sbom_tool_lock)
 
 
 def test_wheel_builder_requests_hashed_backend_before_disabling_isolation(
@@ -504,6 +610,7 @@ def test_release_gate_builds_two_isolated_source_and_output_trees(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     copied_sources: list[Path] = []
+    bootstraps: list[tuple[Path, Path, Path]] = []
     builds: list[tuple[Path, Path, int]] = []
     source_date_epoch = 1788000001
     timestamp = _wheel_zip_timestamp(source_date_epoch)
@@ -547,6 +654,10 @@ def test_release_gate_builds_two_isolated_source_and_output_trees(
     )
     monkeypatch.setattr("scripts.verify_release_artifact._build_wheel", build_wheel)
     monkeypatch.setattr(
+        "scripts.verify_release_artifact._bootstrap_pip",
+        lambda python, source_root, *, cwd: bootstraps.append((python, source_root, cwd)),
+    )
+    monkeypatch.setattr(
         "scripts.verify_release_artifact._repository_source_date_epoch",
         lambda: source_date_epoch,
     )
@@ -567,6 +678,13 @@ def test_release_gate_builds_two_isolated_source_and_output_trees(
 
     assert len(copied_sources) == 2
     assert copied_sources[0] != copied_sources[1]
+    assert len(bootstraps) == 2
+    assert {bootstrap[0].parent.parent.name for bootstrap in bootstraps} == {
+        "builder-venv",
+        "runtime-venv",
+    }
+    assert {bootstrap[1] for bootstrap in bootstraps} == {copied_sources[0]}
+    assert {bootstrap[2] for bootstrap in bootstraps} == {copied_sources[0].parent}
     assert len(builds) == 2
     assert builds[0][0] != builds[1][0]
     assert builds[0][1] != builds[1][1]

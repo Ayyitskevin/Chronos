@@ -37,9 +37,10 @@ Read these before changing the build or environment:
    verification requirements.
 2. `pyproject.toml` for `requires-python`, build backend, dependencies, entry
    points, package data, and tool configuration.
-3. `requirements-build.in`, `requirements-build.lock`, and
-   `requirements-dev.lock` for the exact hash-locked build backend and
-   development environment plus their generator commands.
+3. `requirements-bootstrap.in`, `requirements-bootstrap.lock`,
+   `requirements-build.in`, `requirements-build.lock`, and `requirements-dev.lock`
+   for the exact hash-locked pip frontend, build backend, and development
+   environment plus their generator commands.
 4. `Makefile` and `.github/workflows/ci.yml` for the live local and CI gates.
 5. `docs/DEPLOYMENT.md` and `docs/SECURITY.md` for supported deployment and
    dependency-maintenance policy.
@@ -63,7 +64,7 @@ git rev-parse HEAD
 rg -n '^requires-python|^\[build-system\]|^build-backend' pyproject.toml
 sed -n '/^gates:/p' Makefile
 rg -n '^\s*- name:|^\s*run:|python-version:' .github/workflows/ci.yml
-sed -n '1,2p' requirements-build.lock requirements-dev.lock
+sed -n '1,2p' requirements-bootstrap.lock requirements-build.lock requirements-dev.lock
 ```
 
 Record the commit. Do not compare outcomes from different revisions as though
@@ -94,17 +95,22 @@ equivalent installs the hash-verified dependency closure and then the Chronos
 project without resolving a second dependency graph:
 
 ```bash
-.venv/bin/python -m pip install --upgrade pip
+.venv/bin/python -I scripts/verify_pip_bootstrap.py --lock requirements-bootstrap.lock --check-lock-only
+.venv/bin/python -m pip install --disable-pip-version-check --no-deps --require-hashes -r requirements-bootstrap.lock
+.venv/bin/python -I scripts/verify_pip_bootstrap.py --lock requirements-bootstrap.lock
 .venv/bin/python -m pip install --require-hashes -r requirements-build.lock
 .venv/bin/python -m pip install --require-hashes -r requirements-dev.lock
 .venv/bin/python -m pip install -e . --no-deps --no-build-isolation --check-build-dependencies
 ```
 
-The first command updates the installer and is outside the application dependency
-lock. The build lock must be installed before isolation is disabled: this makes
-the hash-verified backend the build input, while `--check-build-dependencies`
-verifies that it satisfies `pyproject.toml`. Record the resulting toolchain when
-provenance matters:
+Creating the venv uses the interpreter's offline `ensurepip` bundle. The stdlib-only
+verifier first refuses any bootstrap lock outside its single exact-pip grammar. The
+first install then uses the bundled frontend only to replace itself from that lock;
+the verifier must confirm the installed identity before
+any other dependency operation. The build lock must then be installed before
+isolation is disabled: this makes the hash-verified backend the build input, while
+`--check-build-dependencies` verifies that it satisfies `pyproject.toml`. Record the
+resulting toolchain when provenance matters:
 
 ```bash
 .venv/bin/python -m pip --version
@@ -210,14 +216,15 @@ because application startup reported drift.
 
 ## 7. Maintain the dependency lock
 
-Dependency changes are owner-reviewed build-input changes. Keep the exact
+Dependency changes are owner-reviewed build-input changes. Keep
+`requirements-bootstrap.in` limited to one exact pip requirement and keep the exact
 requirement in `requirements-build.in` aligned with `[build-system].requires` in
-`pyproject.toml`. Before regenerating either lock, inspect the declaration diff
-and read the generator commands from the locks themselves:
+`pyproject.toml`. Before regenerating a lock, inspect the declaration diff and read
+the generator commands from the locks themselves:
 
 ```bash
-git diff -- pyproject.toml requirements-build.in requirements-build.lock requirements-dev.lock
-sed -n '1,2p' requirements-build.lock requirements-dev.lock
+git diff -- pyproject.toml requirements-bootstrap.in requirements-bootstrap.lock requirements-build.in requirements-build.lock requirements-dev.lock
+sed -n '1,2p' requirements-bootstrap.lock requirements-build.lock requirements-dev.lock
 ```
 
 Run the applicable checked-in command with its output directed to the existing
@@ -228,7 +235,10 @@ intended owner review explicitly includes that broader change.
 After regeneration:
 
 ```bash
-git diff -- pyproject.toml requirements-build.in requirements-build.lock requirements-dev.lock
+git diff -- pyproject.toml requirements-bootstrap.in requirements-bootstrap.lock requirements-build.in requirements-build.lock requirements-dev.lock
+.venv/bin/python -I scripts/verify_pip_bootstrap.py --lock requirements-bootstrap.lock --check-lock-only
+.venv/bin/python -m pip install --disable-pip-version-check --no-deps --require-hashes -r requirements-bootstrap.lock
+.venv/bin/python -I scripts/verify_pip_bootstrap.py --lock requirements-bootstrap.lock
 .venv/bin/python -m pip install --require-hashes -r requirements-build.lock
 .venv/bin/python -m pip install --require-hashes -r requirements-dev.lock
 .venv/bin/python -m pip install -e . --no-deps --no-build-isolation --check-build-dependencies
@@ -244,6 +254,7 @@ both from the workflow, `docs/SECURITY.md`, and the release verifier.
 | Symptom | Inspect first | Required response |
 |---|---|---|
 | Wrong interpreter or imports | `pyproject.toml`, CI interpreter, `sys.executable` | Recreate `.venv` with a compatible interpreter. |
+| pip bootstrap drift | bootstrap input/lock, verifier output, interpreter `ensurepip` | Reinstall from the bootstrap lock and require the verifier to pass before continuing. |
 | Hash mismatch or resolver failure | lock header, package index, platform, declaration diff | Diagnose the mismatch; do not disable hash checking. |
 | Local gate differs from CI | commit, workflow environment, install block, `Makefile` | Reproduce the safe CI environment and report real configuration drift. |
 | Editable install passes but artifact fails | `scripts/verify_release_artifact.py`, package-data config, clean-tree status | Fix the archive or wheel boundary and rerun `make release-gate`. |
@@ -259,8 +270,7 @@ both from the workflow, `docs/SECURITY.md`, and the release verifier.
   the live gates. Do not conclude it is unverified because the main package type
   check succeeds.
 - `requirements.txt` and `requirements-dev.txt` are convenience inputs, not the
-  hash-locked reproducibility boundary. CI uses both `requirements-build.lock`
-  and `requirements-dev.lock`.
+  hash-locked reproducibility boundary. CI uses the bootstrap, build, and dev locks.
 - Prefer the existing `.venv` executables for evidence commands. Tool convenience
   runners may create unrelated project metadata and dirty the checkout.
 - A clean editable import does not prove package data, migrations, entry points,
@@ -287,10 +297,14 @@ Before reporting success:
 
 - Python virtual environments:
   <https://docs.python.org/3.12/library/venv.html>
+- Python's offline pip bootstrap:
+  <https://docs.python.org/3.12/library/ensurepip.html>
 - Python packaging `pyproject.toml` specification:
   <https://packaging.python.org/en/latest/specifications/pyproject-toml/>
 - pip secure and hash-checked installs:
   <https://pip.pypa.io/en/stable/topics/secure-installs/>
+- pip install command:
+  <https://pip.pypa.io/en/stable/cli/pip_install/>
 - uv lock compilation and existing-output preference:
   <https://docs.astral.sh/uv/pip/compile/>
 - setuptools package-data behavior:
