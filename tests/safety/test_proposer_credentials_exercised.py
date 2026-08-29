@@ -260,6 +260,35 @@ def test_registry_on_credential_decides_and_the_row_records_who(
         assert client.get("/autonomy/alerts", headers={TOKEN_HEADER: token}).status_code == 200
 
 
+def test_authenticated_large_json_integer_is_a_canonical_ingress_refusal(
+    demo_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A small authenticated hostile payload must never become an HTTP 500."""
+
+    registry = _registry_text(_registration("claude-worker", WORKER_CREDENTIAL))
+    hostile_number = "1" * 4_301
+    body = '{"requested_quantity":' + hostile_number + "}"
+    with _boot(monkeypatch, registry, demo_env) as client:
+        response = client.post(
+            "/autonomy/proposals",
+            content=body,
+            headers={
+                PROPOSER_HEADER: WORKER_CREDENTIAL,
+                "Content-Type": "application/json",
+            },
+        )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "accepted": False,
+        "stage": "INGRESS",
+        "refusal": "MALFORMED_PROPOSAL",
+        "detail": "payload is not a single well-formed JSON document",
+    }
+    assert hostile_number not in response.text
+    assert _queue_rows(demo_env) == []
+
+
 #: Every route a registered proposer's credential may open, named one by one.
 #: R-48's rule is that this credential is proposal-only; ADR-0028 widened it by
 #: exactly one route and required the widening to be *named and tested* rather
