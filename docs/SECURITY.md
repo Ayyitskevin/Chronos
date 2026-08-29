@@ -139,6 +139,15 @@ and the release-artifact gate, on Python 3.12 with safety env pins (`BROKER_MODE
   pip/setuptools bootstrap, a closed dependency graph, and an exact root edge matching the wheel's
   non-extra `Requires-Dist` metadata. The verified wheel and SBOM are published together under
   `dist/`; exact-main CI requests 90-day retention under a commit-addressed artifact name.
+- **Wheel reproducibility is measured, not inferred from locked inputs.** The gate derives
+  `SOURCE_DATE_EPOCH` from the exact Git `HEAD` commit, overriding any ambient caller value, then
+  copies the same source set into two isolated source/output trees and invokes the exact locked
+  backend twice with pip's cache disabled. It requires one identical filename and byte-for-byte
+  identical wheel, and checks every ZIP member against the expected UTC source timestamp after the
+  backend's pre-1980 clamp and ZIP's two-second precision. A Git timestamp outside the supported
+  ZIP range, either build failure, byte drift, or member timestamp drift blocks publication. This
+  is same-revision evidence in one pinned build environment, not a cross-platform or independently
+  rebuilt attestation.
 - **The security gate observes three different failure domains and never repairs them.** It asks
   `pip-audit` to audit the exact runtime lock with hashes required and dependency resolution
   disabled; any current known advisory or audit-service/tool failure blocks. Bandit recursively
@@ -152,8 +161,9 @@ and the release-artifact gate, on Python 3.12 with safety env pins (`BROKER_MODE
   non-malicious, every historical secret is absent, or lower-confidence static issues do not exist.
   The gate does not scan Git history or sign either artifact. pip remains the frontend that
   creates/installs into these environments and remains outside the hash lock (CI upgrades it before
-  installation; the release verifier uses the interpreter's bundled pip). Pinning the backend also
-  does not make wheel ZIP bytes reproducible across build times. Note also the runtime lock's
+  installation; the release verifier uses the interpreter's bundled pip). The measured wheel result
+  does not prove reproducibility across different operating systems, Python/pip versions, archive
+  implementations, or compromised builders. Note also the runtime lock's
   `aeventkit` entry is legitimate,
   not a typosquat: it is the
   dependency `ib_async` itself declares (the ib-api-reloaded republication of `eventkit`; same
