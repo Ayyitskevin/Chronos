@@ -32,7 +32,10 @@ runbooks.
   new-exposure capability, but it is still a diagnostic endpoint that deliberately answers
   HTTP 200 while degraded so the operator can read the reasons. Its legacy `status: ok` is
   compatibility-only and is not a readiness or trading claim. Do not configure this route as
-  a Kubernetes-style readiness probe; no status-code-bearing orchestrator endpoint ships yet.
+  a Kubernetes-style readiness probe. Use `/health/live` for process liveness and
+  `/health/ready` for operator-service readiness: the latter returns 200 only for `READY` and
+  503 for `STARTING` or `NOT_READY`. Neither endpoint says that trading is safe or available.
+  No orchestrator service/configuration or external monitor ships with them.
 - The collector makes no broker call. Connection truth is the last sanitized observation
   captured at an existing broker-status seam and becomes unknown on connection uncertainty.
   It is not a substitute for real-gateway monitoring.

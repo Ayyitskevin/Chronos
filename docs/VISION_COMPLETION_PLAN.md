@@ -350,7 +350,9 @@ Deliver:
   default-disabled chrony provider now calculates and caches a quantitative maximum-error bound;
   missing, malformed, local-reference, stale, or future evidence remains unknown. The development
   host lacks `chronyc`, no acceptable threshold or real capture has been supplied, and the
-  observer is not an order-authority input. Orchestrator probes, external monitoring/alerts,
+  observer is not an order-authority input. Dedicated no-store `/health/live` and `/health/ready`
+  endpoints now map the existing process/service verdicts to HTTP 200/503 without exposing
+  trading capability. Orchestrator deployment/configuration, external monitoring/alerts,
   watchdogs, dead-man behavior, SLOs, and operational proof remain open. This does not satisfy
   the Phase 2 exit.
 

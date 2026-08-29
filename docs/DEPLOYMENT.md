@@ -109,6 +109,15 @@ IBKR smoke test (docs/TEST_PLAN.md).
 
 ## Running things
 
+Start the loopback wheel backend with `make backend`. Its machine probes are
+`http://127.0.0.1:8765/health/live` (process liveness) and `/health/ready`
+(operator-service readiness). Readiness returns HTTP 503 when that verdict is `STARTING` or
+`NOT_READY`, so `curl -fsS` is a sufficient local status-code check. The richer `/health`
+diagnostic always
+returns 200 when it can answer and must not be used as an orchestrator readiness probe. See
+`docs/OPERATIONS.md` for the exact semantic boundary. No service-manager or orchestrator
+configuration is installed by this repository.
+
 Research / backtest CLI (no broker, no network):
 
 ```bash
