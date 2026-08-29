@@ -163,7 +163,17 @@ def _parse(payload: bytes | str) -> IngressOutcome:
 
     try:
         document = json.loads(decoded, parse_constant=_refuse_constant)
-    except (json.JSONDecodeError, RecursionError) as error:
+    except IngressRejected:
+        # ``parse_constant`` uses this path for a deliberate, more specific
+        # NaN/Infinity refusal. Do not erase that policy decision by treating
+        # it like a decoder failure merely because IngressRejected is also a
+        # ValueError.
+        raise
+    except (ValueError, RecursionError) as error:
+        # JSONDecodeError is a ValueError, as is CPython's bounded integer
+        # conversion failure when a JSON number exceeds its configured digit
+        # limit (4,300 digits by default).
+        # Both are hostile-document failures; neither may escape the ingress.
         raise IngressRejected("payload is not a single well-formed JSON document") from error
 
     if not isinstance(document, dict):

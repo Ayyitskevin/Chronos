@@ -25,6 +25,8 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 from sqlalchemy.orm import Session
 
 from chronos.autonomy import (
@@ -516,6 +518,41 @@ def _payload(**overrides: Any) -> str:
     return json.dumps(body)
 
 
+@st.composite
+def _structured_ingress_cases(draw: Any) -> tuple[bytes | str, bool]:
+    """Bounded hostile shapes plus honest proposals, generated deterministically."""
+
+    shape = draw(st.sampled_from(("valid", "text", "bytes", "nested", "integer")))
+    if shape == "valid":
+        quantity = draw(st.integers(min_value=1, max_value=1_000))
+        return _payload(requested_quantity=str(quantity)), True
+    if shape == "text":
+        suffix = draw(st.text(alphabet='abcXYZ0123 {}[],:"', max_size=128))
+        return "not-json:" + suffix, False
+    if shape == "bytes":
+        suffix = draw(st.binary(max_size=128))
+        return b"\xff" + suffix, False
+    if shape == "nested":
+        depth = draw(st.integers(min_value=0, max_value=ingress.MAX_NESTING_DEPTH + 5))
+        value: Any = "leaf"
+        for _ in range(depth):
+            value = {"n": value}
+        return json.dumps({"nested": value}), False
+
+    digit_count = draw(st.integers(min_value=4_298, max_value=4_310))
+    sign = draw(st.sampled_from(("", "-")))
+    template = draw(
+        st.sampled_from(
+            (
+                '{"requested_quantity":%s}',
+                '{"nested":{"value":%s}}',
+                "[%s]",
+            )
+        )
+    )
+    return template % (sign + ("1" * digit_count)), False
+
+
 def test_a_well_formed_payload_parses() -> None:
     outcome = ingress.parse_proposal(_payload())
     assert outcome.accepted is True
@@ -540,6 +577,37 @@ def test_malformed_payloads_refuse_without_raising(payload: Any, expected: str) 
     outcome = ingress.parse_proposal(payload)
     assert outcome.accepted is False
     assert expected.lower() in outcome.refusal.lower()
+
+
+@pytest.mark.parametrize(
+    ("digit_count", "expected"),
+    [
+        (4_300, "not a valid proposal"),
+        (4_301, "not a single well-formed JSON document"),
+    ],
+)
+def test_json_integer_conversion_boundary_refuses_without_raising(
+    digit_count: int, expected: str
+) -> None:
+    payload = '{"requested_quantity":' + ("1" * digit_count) + "}"
+
+    outcome = ingress.parse_proposal(payload)
+
+    assert outcome.accepted is False
+    assert f"payload is {expected}" in outcome.refusal
+    assert "1" * 128 not in outcome.refusal
+
+
+@settings(max_examples=64, derandomize=True, deadline=None)
+@given(case=_structured_ingress_cases())
+def test_structured_hostile_ingress_never_raises_and_valid_proposals_still_parse(
+    case: tuple[bytes | str, bool],
+) -> None:
+    payload, should_accept = case
+
+    outcome = ingress.parse_proposal(payload)
+
+    assert outcome.accepted is should_accept
 
 
 def test_an_oversized_payload_is_refused_by_length_before_parsing() -> None:
