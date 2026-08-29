@@ -102,8 +102,9 @@ this is a single-operator local system (ASSUMPTIONS.md A-42).
 ### CI gates
 
 `.github/workflows/ci.yml` runs on every push and PR: `ruff check`, `ruff format --check`,
-`mypy src/chronos` (strict mode per `pyproject.toml`), and `pytest -q`, on Python 3.12 with safety
-env pins (`BROKER_MODE=demo`, `ALLOW_ORDER_TRANSMIT=false`, `ALLOW_LIVE_TRADING=false`).
+`mypy src/chronos` (strict mode per `pyproject.toml`), `pytest -q`, the release security gate,
+and the release-artifact gate, on Python 3.12 with safety env pins (`BROKER_MODE=demo`,
+`ALLOW_ORDER_TRANSMIT=false`, `ALLOW_LIVE_TRADING=false`). `make gates` is the local equivalent.
 
 ### Dependency pinning — current status
 
@@ -128,6 +129,9 @@ env pins (`BROKER_MODE=demo`, `ALLOW_ORDER_TRANSMIT=false`, `ALLOW_LIVE_TRADING=
   compatibility, not hashes. A tampered or substituted locked dependency therefore fails its hash
   check rather than installing silently. Modern setuptools implements
   `bdist_wheel` itself, so the `wheel` CLI package is not a Chronos build dependency.
+- **Release security tools are exact dev dependencies:** `pip-audit==2.10.1`,
+  `bandit==1.9.4`, and `detect-secrets==1.5.0` are installed from the hash-locked dev set.
+  `scripts/verify_release_security.py` refuses any installed-version drift before scanning.
 - **The release SBOM is a checked artifact, not a best-effort report.** The gate uses the official
   `cyclonedx-py environment` CLI against only the runtime venv, requests reproducible CycloneDX 1.6
   JSON with schema validation, then independently requires the Chronos application identity,
@@ -135,11 +139,22 @@ env pins (`BROKER_MODE=demo`, `ALLOW_ORDER_TRANSMIT=false`, `ALLOW_LIVE_TRADING=
   pip/setuptools bootstrap, a closed dependency graph, and an exact root edge matching the wheel's
   non-extra `Requires-Dist` metadata. The verified wheel and SBOM are published together under
   `dist/`; exact-main CI requests 90-day retention under a commit-addressed artifact name.
-  **Residual:** this is inventory, not a vulnerability, secret, or static-analysis scan. It does
-  not sign either artifact. pip remains the frontend that creates/installs into these environments
-  and remains outside the hash lock (CI upgrades it before installation; the release verifier uses
-  the interpreter's bundled pip). Pinning the backend also does not make wheel ZIP bytes
-  reproducible across build times. Note also the runtime lock's `aeventkit` entry is legitimate,
+- **The security gate observes three different failure domains and never repairs them.** It asks
+  `pip-audit` to audit the exact runtime lock with hashes required and dependency resolution
+  disabled; any current known advisory or audit-service/tool failure blocks. Bandit recursively
+  checks `src/chronos`, `worker`, and `scripts`, blocking findings at medium severity and medium
+  confidence or stronger. detect-secrets checks every Git-tracked file except the fingerprint-only
+  `.secrets.baseline`; every baseline entry is an explicitly reviewed false positive. The wrapper
+  scans a temporary copy and refuses if detect-secrets would rewrite it, so stale line fingerprints
+  fail without mutating the checkout. The baseline stores hashes, detector names, paths, and lines,
+  never raw candidate values.
+  **Residual:** advisory and heuristic results are current evidence, not proof that dependencies are
+  non-malicious, every historical secret is absent, or lower-confidence static issues do not exist.
+  The gate does not scan Git history or sign either artifact. pip remains the frontend that
+  creates/installs into these environments and remains outside the hash lock (CI upgrades it before
+  installation; the release verifier uses the interpreter's bundled pip). Pinning the backend also
+  does not make wheel ZIP bytes reproducible across build times. Note also the runtime lock's
+  `aeventkit` entry is legitimate,
   not a typosquat: it is the
   dependency `ib_async` itself declares (the ib-api-reloaded republication of `eventkit`; same
   maintainer org, provides the `eventkit` module).

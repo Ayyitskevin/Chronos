@@ -34,6 +34,11 @@ Verify the toolchain the same way CI does:
 make gates
 ```
 
+`make security-gate` runs only the release dependency, secret, and static-analysis checks. It
+requires exact scanner versions, audits the hash-locked runtime set without resolving or fixing it,
+and fails closed if the advisory service, a scanner, the tracked-file inventory, or the reviewed
+secret baseline is unavailable or stale.
+
 The final gate builds the current non-ignored source set in an isolated builder, checks the wheel's
 terminal assets and complete migration namespace byte-for-byte against that source, installs only
 `requirements-runtime.lock` plus the wheel in a separate runtime venv, upgrades a disposable v2
@@ -43,10 +48,12 @@ creates schema-validated, reproducible 1.6 JSON for that exact runtime environme
 cross-checks the component versions and dependency graph against the runtime lock and wheel
 metadata, and publishes the wheel plus `chronos-<version>.cdx.json` under ignored `dist/`.
 
-A local run includes untracked, non-ignored files; CI rebuilds the committed clean tree and is
-authoritative for that revision. Exact-main CI requests 90-day retention for both files in
-`chronos-release-<commit-sha>`. Run only this check with `make release-gate`. The SBOM is an
-inventory, not a vulnerability scan or signature; those remain separate release controls.
+A local release-artifact run includes untracked, non-ignored files; CI rebuilds the committed clean
+tree and is authoritative for that revision. The secret gate instead covers the Git-tracked file
+set, using an explicitly reviewed fingerprint baseline. Exact-main CI requests 90-day retention for
+the wheel and SBOM in `chronos-release-<commit-sha>`. Run only artifact validation with
+`make release-gate`. The SBOM remains an inventory rather than a signature; the security gate adds
+current advisory and heuristic checks but does not inspect Git history or prove package provenance.
 
 Reproducibility record: even with the lock, record the resolved environment at deployment
 time (the pip frontend itself remains outside the hash gate — docs/SECURITY.md):
