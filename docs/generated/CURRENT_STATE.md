@@ -125,7 +125,7 @@ Unmapped means refused by the compiler whitelist. Vocabulary presence alone is n
 | --- | --- |
 | src/chronos/supervisor/compiler.py | `40b9b4a07dd90356f74552bb291296fbc069758b14cd471b122cea92dcd57538` |
 | src/chronos/autonomy/enums.py | `96bcff19f76065a34d75c9fba00b5682de59448c8a8f770a8628494eec15a3e9` |
-| src/chronos/config/settings.py | `29522fe160560c8e422a0030a1ed31b70196cb121621bc436fad572bb5154c17` |
+| src/chronos/config/settings.py | `64cc814dac1a85b365c02091b04a85a7aeb0316a729b605a7b9602b5a17016cb` |
 | src/chronos/domain/enums.py | `6244760cac081c4ca0cbbec7cfc586efe6fd11471d7e06fbb29c8c4790414828` |
 | src/chronos/runtime.py | `e85ead28e76de6a0265985ea21227367aa5ebaa2418bd74d9bb3c380fe6ec738` |
 | src/chronos/api/autonomy_wiring.py | `9e84613a37c7af2a1c1c50c3bd3409ca475d75982ef81abd031b1719954b4d0f` |

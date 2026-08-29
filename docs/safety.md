@@ -35,6 +35,13 @@ The model's authority is narrow by construction:
   only deterministic risk-reducing behavior allowed by policy, records the denial, and alerts
   the owner.
 
+  **Clock implementation boundary (ADR-0041):** automatic quantitative clock observation now
+  feeds the display-only operational-health projection, but it is structurally excluded from
+  order authority. It therefore detects and reports unavailable, stale, future, local, or
+  over-bound evidence without yet enforcing the submission predicate promised above. That
+  authority wiring, an owner-selected threshold, and real-host evidence remain open; the
+  diagnostic must not be treated as proof that clock failure currently blocks an order.
+
 **Status:** the stack is built and wired (M1 contracts through M7.5's app-plane wiring,
 ADR-0017). A backend booted with a valid `AUTONOMY_MANDATE_FILE` auto-activates it and
 drives the autonomy tick; without one, autonomy is inert and nothing is constructed. The

@@ -156,8 +156,14 @@ reconciliation evidence, and a sanitized connection cache. It does not call the 
 The projection is display-only. Order, supervisor, risk, broker, and runtime authority code
 cannot import it and continues to enforce the actual lease, mandate, reconciliation, arm,
 kill-switch, evidence, and deterministic gates. A read-only backend can therefore remain
-service-ready for inspection while all trading lanes are blocked. Clock state remains
-`UNKNOWN` until the next operations slice supplies a monitored fact.
+service-ready for inspection while all trading lanes are blocked.
+
+`chronos.operations.clock` (ADR-0041) optionally samples one fixed local chrony query into a
+thread-safe cache for both backend roles. The projection compares chrony's quantitative
+maximum-error bound with an explicitly configured threshold and applies freshness separately;
+health requests never execute the query. Disabled or uncertain observation remains `UNKNOWN`.
+The same structural boundary excludes this observer from authority modules, so it describes
+clock evidence but does not itself enforce an order predicate.
 
 ## What is intentionally not built
 

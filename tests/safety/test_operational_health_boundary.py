@@ -17,14 +17,17 @@ FORBIDDEN = (
 )
 
 
-def _imports_health(path: Path) -> bool:
+PROJECTION_MODULES = ("chronos.operations.health", "chronos.operations.clock")
+
+
+def _imports_operational_projection(path: Path) -> bool:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            if any(alias.name.startswith("chronos.operations.health") for alias in node.names):
+            if any(alias.name.startswith(PROJECTION_MODULES) for alias in node.names):
                 return True
-        elif isinstance(node, ast.ImportFrom) and (node.module or "").startswith(
-            "chronos.operations.health"
+        elif isinstance(node, ast.ImportFrom) and any(
+            (node.module or "").startswith(module) for module in PROJECTION_MODULES
         ):
             return True
     return False
@@ -35,7 +38,23 @@ def test_operational_health_cannot_become_an_authority_dependency() -> None:
     for target in FORBIDDEN:
         paths = (target,) if target.is_file() else tuple(target.rglob("*.py"))
         offenders.extend(
-            str(path.relative_to(REPO_ROOT)) for path in paths if _imports_health(path)
+            str(path.relative_to(REPO_ROOT))
+            for path in paths
+            if _imports_operational_projection(path)
         )
 
     assert offenders == []
+
+
+def test_initial_clock_sample_stays_inside_startup_cleanup_guard() -> None:
+    """Cancellation during the bounded sample must not leak runtime or lease."""
+
+    source = (REPO_ROOT / "src" / "chronos" / "api" / "main.py").read_text(encoding="utf-8")
+    sample = source.index("await refresh_clock_health(backend_state.clock_health, clock_sampler)")
+    cleanup_guard = source.index("except BaseException:", sample)
+    monitor_task = source.index("clock_task = asyncio.create_task", cleanup_guard)
+
+    assert sample < cleanup_guard < monitor_task
+    guarded_cleanup = source[cleanup_guard:monitor_task]
+    assert "lease.release()" in guarded_cleanup
+    assert "runtime.close()" in guarded_cleanup

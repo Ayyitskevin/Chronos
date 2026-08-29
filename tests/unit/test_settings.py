@@ -27,6 +27,39 @@ def test_safe_demo_defaults() -> None:
     assert settings.market_timezone == "America/New_York"
     assert settings.enable_autonomy_option_selection is False
     assert settings.autonomy_option_resolver_promotion_file is None
+    assert settings.clock_health_provider == "disabled"
+    assert settings.clock_health_maximum_error_seconds is None
+
+
+def test_chrony_clock_health_requires_an_explicit_error_threshold() -> None:
+    with pytest.raises(ValidationError, match="CLOCK_HEALTH_MAXIMUM_ERROR_SECONDS"):
+        Settings(_env_file=None, clock_health_provider="chrony")
+
+    settings = Settings(
+        _env_file=None,
+        clock_health_provider="chrony",
+        clock_health_maximum_error_seconds=0.05,
+    )
+    assert settings.clock_health_maximum_error_seconds == 0.05
+
+
+def test_disabled_clock_health_rejects_an_ignored_threshold() -> None:
+    with pytest.raises(ValidationError, match="ignored threshold"):
+        Settings(_env_file=None, clock_health_maximum_error_seconds=0.05)
+
+
+def test_clock_observation_age_must_outlast_poll_interval() -> None:
+    with pytest.raises(ValidationError, match="must be greater"):
+        Settings(
+            _env_file=None,
+            clock_health_poll_interval_seconds=30,
+            clock_health_observation_max_age_seconds=30,
+        )
+
+
+def test_clock_command_timeout_has_a_hard_startup_bound() -> None:
+    with pytest.raises(ValidationError, match="less than or equal to 30"):
+        Settings(_env_file=None, clock_health_command_timeout_seconds=31)
 
 
 @pytest.mark.parametrize(

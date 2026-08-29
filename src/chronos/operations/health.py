@@ -11,7 +11,9 @@ from __future__ import annotations
 from datetime import datetime
 from enum import StrEnum
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
+
+from chronos.operations.clock import ClockFailureCode, ClockProvider, ClockState
 
 
 class _HealthModel(BaseModel):
@@ -63,12 +65,6 @@ class TaskFailureCode(StrEnum):
 class WriterRole(StrEnum):
     WRITER = "WRITER"
     READ_ONLY = "READ_ONLY"
-    UNKNOWN = "UNKNOWN"
-
-
-class ClockState(StrEnum):
-    SYNCHRONIZED = "SYNCHRONIZED"
-    UNSYNCHRONIZED = "UNSYNCHRONIZED"
     UNKNOWN = "UNKNOWN"
 
 
@@ -130,6 +126,35 @@ class BrokerConnectionFact(_HealthModel):
     generation: int = Field(default=0, ge=0)
 
 
+class ClockFact(_HealthModel):
+    provider: ClockProvider = ClockProvider.DISABLED
+    state: ClockState = ClockState.UNKNOWN
+    observed_at: AwareDatetime | None = None
+    max_age_seconds: float = Field(default=90.0, gt=0)
+    maximum_error_seconds: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    maximum_allowed_error_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    failure_code: ClockFailureCode | None = ClockFailureCode.DISABLED
+    generation: int = Field(default=0, ge=0)
+
+    @model_validator(mode="after")
+    def validate_positive_evidence(self) -> ClockFact:
+        if self.state is not ClockState.SYNCHRONIZED:
+            return self
+        if (
+            self.provider is not ClockProvider.CHRONY
+            or self.observed_at is None
+            or self.maximum_error_seconds is None
+            or self.maximum_allowed_error_seconds is None
+            or self.maximum_error_seconds > self.maximum_allowed_error_seconds
+            or self.failure_code is not None
+        ):
+            raise ValueError(
+                "SYNCHRONIZED clock state requires current chrony evidence at or below "
+                "the configured maximum error"
+            )
+        return self
+
+
 class OperationalFacts(_HealthModel):
     backend_initialized: bool = False
     writer_role: WriterRole = WriterRole.UNKNOWN
@@ -149,7 +174,7 @@ class OperationalFacts(_HealthModel):
     live_armed: bool | None = None
     mandate_active: bool | None = None
     promotion_present: bool | None = None
-    clock_state: ClockState = ClockState.UNKNOWN
+    clock: ClockFact = Field(default_factory=ClockFact)
 
 
 class LivenessVerdict(_HealthModel):
@@ -198,6 +223,16 @@ class ReconciliationObservationReport(_HealthModel):
     generation: int = Field(ge=0)
 
 
+class ClockObservationReport(_HealthModel):
+    provider: ClockProvider
+    observation_state: ObservationState
+    age_seconds: float | None = None
+    maximum_error_seconds: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    maximum_allowed_error_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    failure_code: ClockFailureCode | None = None
+    generation: int = Field(ge=0)
+
+
 class OperationalObservations(_HealthModel):
     writer_role: WriterRole
     store_readable: bool | None
@@ -207,6 +242,7 @@ class OperationalObservations(_HealthModel):
     broker: BrokerObservationReport
     reconciliation: ReconciliationObservationReport
     clock: ClockState
+    clock_evidence: ClockObservationReport
 
 
 class OperationalHealth(_HealthModel):
@@ -347,9 +383,19 @@ def evaluate_operational_health(
     elif reconciliation_state is ObservationState.UNKNOWN:
         common_unknown.add(ReasonCode.RECONCILIATION_UNKNOWN)
 
-    if facts.clock_state is ClockState.UNSYNCHRONIZED:
+    clock_observation_state, clock_age = _observation(
+        facts.clock.observed_at,
+        max_age_seconds=facts.clock.max_age_seconds,
+        now=now,
+    )
+    effective_clock_state = (
+        facts.clock.state
+        if clock_observation_state is ObservationState.CURRENT
+        else ClockState.UNKNOWN
+    )
+    if effective_clock_state is ClockState.UNSYNCHRONIZED:
         common_known.add(ReasonCode.CLOCK_UNSYNCHRONIZED)
-    elif facts.clock_state is ClockState.UNKNOWN:
+    elif effective_clock_state is ClockState.UNKNOWN:
         common_unknown.add(ReasonCode.CLOCK_UNKNOWN)
 
     paper_known = set(common_known)
@@ -415,6 +461,15 @@ def evaluate_operational_health(
                 age_seconds=reconciliation_age,
                 generation=facts.reconciliation_generation,
             ),
-            clock=facts.clock_state,
+            clock=effective_clock_state,
+            clock_evidence=ClockObservationReport(
+                provider=facts.clock.provider,
+                observation_state=clock_observation_state,
+                age_seconds=clock_age,
+                maximum_error_seconds=facts.clock.maximum_error_seconds,
+                maximum_allowed_error_seconds=facts.clock.maximum_allowed_error_seconds,
+                failure_code=facts.clock.failure_code,
+                generation=facts.clock.generation,
+            ),
         ),
     )

@@ -10,6 +10,7 @@ from chronos.operations.health import (
     BackgroundTaskName,
     BrokerConnectionFact,
     CapabilityState,
+    ClockFact,
     ClockState,
     ObservationState,
     OperationalFacts,
@@ -64,7 +65,16 @@ def _positive_facts() -> OperationalFacts:
         live_armed=True,
         mandate_active=True,
         promotion_present=True,
-        clock_state=ClockState.SYNCHRONIZED,
+        clock=ClockFact(
+            provider="chrony",
+            state=ClockState.SYNCHRONIZED,
+            observed_at=NOW,
+            max_age_seconds=30,
+            maximum_error_seconds=0.01,
+            maximum_allowed_error_seconds=0.05,
+            generation=3,
+            failure_code=None,
+        ),
     )
 
 
@@ -122,13 +132,28 @@ def test_every_positive_conjunct_is_required_for_available() -> None:
     assert report.trading_capability.paper_new_exposure.reasons == ()
 
 
-def test_w2_clock_unknown_prevents_a_false_available_claim() -> None:
-    facts = _positive_facts().model_copy(update={"clock_state": ClockState.UNKNOWN})
+def test_clock_unknown_prevents_a_false_available_claim() -> None:
+    unknown = _positive_facts().clock.model_copy(
+        update={"state": ClockState.UNKNOWN, "failure_code": "command_failed"}
+    )
+    facts = _positive_facts().model_copy(update={"clock": unknown})
 
     verdict = evaluate_operational_health(facts, now=NOW).trading_capability.paper_new_exposure
 
     assert verdict.state is CapabilityState.UNKNOWN
     assert verdict.reasons == (ReasonCode.CLOCK_UNKNOWN,)
+
+
+def test_synchronized_clock_fact_requires_a_bound_at_or_below_threshold() -> None:
+    with pytest.raises(ValueError, match="requires current chrony evidence"):
+        ClockFact(
+            provider="chrony",
+            state=ClockState.SYNCHRONIZED,
+            observed_at=NOW,
+            maximum_error_seconds=0.051,
+            maximum_allowed_error_seconds=0.05,
+            failure_code=None,
+        )
 
 
 @pytest.mark.parametrize(
@@ -143,7 +168,15 @@ def test_w2_clock_unknown_prevents_a_false_available_claim() -> None:
         ),
         ({"broker_loop_running": False}, ReasonCode.BROKER_LOOP_DOWN, False),
         ({"reconciliation_status": "PENDING"}, ReasonCode.RECONCILIATION_NOT_READY, False),
-        ({"clock_state": ClockState.UNSYNCHRONIZED}, ReasonCode.CLOCK_UNSYNCHRONIZED, False),
+        (
+            {
+                "clock": _positive_facts().clock.model_copy(
+                    update={"state": ClockState.UNSYNCHRONIZED}
+                )
+            },
+            ReasonCode.CLOCK_UNSYNCHRONIZED,
+            False,
+        ),
     ],
 )
 def test_known_degradation_blocks_without_becoming_permission(
@@ -227,6 +260,35 @@ def test_future_broker_observation_is_unknown_not_fresh() -> None:
     assert report.trading_capability.paper_new_exposure.state is CapabilityState.UNKNOWN
 
 
+def test_stale_synchronized_clock_is_reported_unknown() -> None:
+    stale_clock = _positive_facts().clock.model_copy(
+        update={"observed_at": NOW - timedelta(seconds=31)}
+    )
+    report = evaluate_operational_health(
+        _positive_facts().model_copy(update={"clock": stale_clock}), now=NOW
+    )
+
+    assert report.observations.clock is ClockState.UNKNOWN
+    assert report.observations.clock_evidence.observation_state is ObservationState.STALE
+    assert report.observations.clock_evidence.age_seconds == 31.0
+    assert report.trading_capability.paper_new_exposure.state is CapabilityState.UNKNOWN
+    assert ReasonCode.CLOCK_UNKNOWN in report.trading_capability.paper_new_exposure.reasons
+
+
+def test_future_synchronized_clock_is_reported_unknown() -> None:
+    future_clock = _positive_facts().clock.model_copy(
+        update={"observed_at": NOW + timedelta(microseconds=1)}
+    )
+    report = evaluate_operational_health(
+        _positive_facts().model_copy(update={"clock": future_clock}), now=NOW
+    )
+
+    assert report.observations.clock is ClockState.UNKNOWN
+    assert report.observations.clock_evidence.observation_state is ObservationState.UNKNOWN
+    assert report.observations.clock_evidence.age_seconds is None
+    assert report.trading_capability.paper_new_exposure.state is CapabilityState.UNKNOWN
+
+
 def test_reconciliation_staleness_is_distinct_from_known_not_ready() -> None:
     facts = _positive_facts().model_copy(
         update={"reconciliation_evidence_at": NOW - timedelta(seconds=31)}
@@ -268,7 +330,7 @@ def test_multiple_faults_are_all_retained_in_deterministic_order() -> None:
             "store_readable": False,
             "broker_loop_running": False,
             "reconciliation_status": "PENDING",
-            "clock_state": ClockState.UNKNOWN,
+            "clock": _positive_facts().clock.model_copy(update={"state": ClockState.UNKNOWN}),
         }
     )
 
@@ -299,7 +361,7 @@ def test_weakening_one_fact_never_strengthens_a_verdict() -> None:
         {"store_readable": None},
         {"broker_loop_running": False},
         {"reconciliation_status": "PENDING"},
-        {"clock_state": ClockState.UNKNOWN},
+        {"clock": _positive_facts().clock.model_copy(update={"state": ClockState.UNKNOWN})},
     )
 
     for update in weakenings:

@@ -67,6 +67,13 @@ from chronos.api.routes.strategy import router as strategy_router
 from chronos.api.routes.terminal import router as terminal_router
 from chronos.api.routes.terminal import session_router as terminal_session_router
 from chronos.api.task_observations import TaskObservationRegistry
+from chronos.operations.clock import (
+    ChronyClockSampler,
+    ClockHealthCache,
+    ClockProvider,
+    clock_health_monitor,
+    refresh_clock_health,
+)
 from chronos.operations.health import BackgroundTaskName, StartupFaultCode
 from chronos.runtime import build_runtime
 from chronos.utils.locking import WriterLease
@@ -183,6 +190,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # the runtime AND leave the single-writer lease held by a dead process, so a
     # restart would boot read-only.
     read_only = True
+    clock_sampler: ChronyClockSampler | None = None
     try:
         read_only = not lease.acquire()
         if read_only:
@@ -192,13 +200,30 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                 extra={"event": "backend_read_only", "lease_holder": holder},
             )
         task_observations = TaskObservationRegistry()
+        clock_provider = ClockProvider(runtime.settings.clock_health_provider)
+        clock_health = ClockHealthCache(
+            provider=clock_provider,
+            maximum_allowed_error_seconds=runtime.settings.clock_health_maximum_error_seconds,
+        )
         app.state.backend = BackendState(
             runtime=runtime,
             lease=None if read_only else lease,
             read_only=read_only,
             task_observations=task_observations,
+            clock_health=clock_health,
         )
         backend_state = app.state.backend
+        if runtime.settings.clock_health_provider == "chrony":
+            maximum_error = runtime.settings.clock_health_maximum_error_seconds
+            assert maximum_error is not None  # Settings validation makes this structural.
+            clock_sampler = ChronyClockSampler(
+                maximum_allowed_error_seconds=maximum_error,
+                timeout_seconds=runtime.settings.clock_health_command_timeout_seconds,
+            )
+            # Both writer and read-only services observe the same host clock.
+            # Sampling stays inside the startup cleanup guard: cancellation or
+            # an unexpected failure here must release the lease and runtime.
+            await refresh_clock_health(backend_state.clock_health, clock_sampler)
         app.state.api_token = load_or_create_token(runtime.settings.backend_token_file)
         # ADR-0023: the proposal route's authentication posture is resolved
         # once, at startup, from the owner's registry file — for every
@@ -300,6 +325,15 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     heartbeat: asyncio.Task[None] | None = None
     autonomy_task: asyncio.Task[None] | None = None
     reconcile_task: asyncio.Task[None] | None = None
+    clock_task: asyncio.Task[None] | None = None
+    if clock_sampler is not None:
+        clock_task = asyncio.create_task(
+            clock_health_monitor(
+                app.state.backend.clock_health,
+                clock_sampler,
+                poll_interval_seconds=runtime.settings.clock_health_poll_interval_seconds,
+            )
+        )
     if not read_only:
         task_observations = app.state.backend.task_observations
         # R-24: without this the lease silently lapses after its TTL.
@@ -409,6 +443,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        if clock_task is not None:
+            clock_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await clock_task
         if autonomy_task is not None:
             app.state.backend.task_observations.expect_stop(BackgroundTaskName.AUTONOMY)
             autonomy_task.cancel()

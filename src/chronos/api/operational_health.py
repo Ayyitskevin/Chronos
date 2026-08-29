@@ -10,7 +10,7 @@ from chronos.api.dependencies import BackendState
 from chronos.autonomy import SUBMITTING_AUTONOMY_MODES, AutonomyMode
 from chronos.operations.health import (
     BrokerConnectionFact,
-    ClockState,
+    ClockFact,
     OperationalFacts,
     OperationalHealth,
     WriterRole,
@@ -80,6 +80,7 @@ def collect_operational_health(
             autonomous_configured = settings.live_transmission_possible
 
     max_evidence_age = settings.reconciliation_max_evidence_age_seconds
+    clock = state.clock_health.snapshot()
     facts = OperationalFacts(
         backend_initialized=True,
         writer_role=WriterRole.WRITER if state.writer else WriterRole.READ_ONLY,
@@ -106,6 +107,15 @@ def collect_operational_health(
         live_armed=live_armed,
         mandate_active=mandate_active,
         promotion_present=promotion_present,
-        clock_state=ClockState.UNKNOWN,
+        clock=ClockFact(
+            provider=clock.provider,
+            state=clock.state,
+            observed_at=clock.observed_at,
+            max_age_seconds=settings.clock_health_observation_max_age_seconds,
+            maximum_error_seconds=clock.maximum_error_seconds,
+            maximum_allowed_error_seconds=clock.maximum_allowed_error_seconds,
+            failure_code=clock.failure_code,
+            generation=clock.generation,
+        ),
     )
     return evaluate_operational_health(facts, now=moment)
