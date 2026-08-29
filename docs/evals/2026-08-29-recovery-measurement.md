@@ -88,6 +88,7 @@ Manual mutation checks, each applied alone and then reverted:
 | Open newly created private database copies without SQLite `immutable=1` | `test_capture_and_restore_emit_bounded_measurements` | Unbound `platform_ledger.db-wal` and `platform_ledger.db-shm` appeared in the snapshot directory |
 | Omit the restored `data/` directory fsync | `test_restore_fsyncs_the_restored_data_directory` | The fsync-spy assertion observed only the parent restore-directory fsync |
 | Treat a nonzero-byte audit file as record-bearing evidence | `test_capture_refuses_whitespace_only_audit_evidence_before_writing` | A two-newline, zero-record audit file was accepted |
+| Omit the snapshot/restore parent-directory fsyncs | `test_capture_fsyncs_the_snapshot_root_and_parent` and `test_restore_fsyncs_the_restored_data_directory` | Both tests failed because the new root entries were not made durable in their existing parents |
 
 Initial candidate gate after the implementation and documentation were present:
 
@@ -142,6 +143,33 @@ installed-wheel gate: PASS; migration head 0010, 34 model tables, 5 module entry
 
 The skip remains the owner-opt-in read-only IBKR smoke test. The warnings remain the existing
 Starlette/FastAPI and multiprocessing deprecations; no gateway was configured or contacted.
+
+Kimi then reviewed exact remediation commit `8552788c4070923a565d43bdefe2148dac1509c2`
+and returned **PASS** with no Critical, High, or Medium findings. Its detached-worktree run observed
+20 focused tests passing, scoped Ruff/format and mypy passing, and an independent live-WAL probe in
+which latest committed rows survived capture while immutable private copies contained no sidecars.
+It identified three remaining Low findings: the audit-presence guard buffered the complete log; the
+new snapshot/restore root entries were not fsynced in their existing parent directories; and the
+runbook wording did not distinguish low-level immutable reads from Chronos's separate application
+schema check. The final follow-up streams the presence check in 1 MiB blocks, fsyncs both parent
+directories, adds mutation-sensitive ordering assertions, and makes that documentation distinction
+explicit.
+
+Final follow-up verification:
+
+```text
+.venv/bin/python -m pytest -q \
+  tests/integration/test_recovery_measurement.py \
+  tests/safety/test_recovery_measurement_isolation.py \
+  tests/integration/test_backup_restore_drill.py
+21 passed in 5.60s
+
+make gates
+ruff: All checks passed; 569 files already formatted
+mypy: 297 Chronos source files and 10 worker files clean
+pytest: 4386 passed, 1 skipped, 24 warnings in 178.12s
+installed-wheel gate: PASS; migration head 0010, 34 model tables, 5 module entry points
+```
 
 ## Residuals
 

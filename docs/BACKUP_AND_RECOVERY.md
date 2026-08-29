@@ -141,8 +141,10 @@ Chronos's current schema checker, rechecks the control posture and audit chain, 
 overwriting it. Directories are mode `0700`; artifacts and JSON evidence are mode `0600`. A failed
 operation deliberately leaves any newly created partial directory in place for diagnosis; the
 operator decides when it is safe to remove it. Successful snapshot and restored-data directories
-contain only the five bound artifacts plus, for the snapshot, its manifest; verification opens these
-new private database copies as immutable read-only files so it creates no unbound WAL sidecars.
+contain only the five bound artifacts plus, for the snapshot, its manifest. Low-level integrity
+checks open these new private copies as immutable read-only files; the application schema checker
+separately opens `chronos.db` through Chronos, after which digests and exact contents are rechecked.
+Successful bundles contain no unbound WAL sidecars.
 
 The observation fields are measurements, not SLOs:
 

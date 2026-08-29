@@ -243,6 +243,29 @@ def test_capture_does_not_change_source_artifact_bytes(open_source: _OpenSource)
     assert {name: _sha256(open_source.data / name) for name in before} == before
 
 
+def test_capture_fsyncs_the_snapshot_root_and_parent(
+    open_source: _OpenSource,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot_root = open_source.data.parent.parent / "snapshot"
+    fsynced: list[Path] = []
+    real_fsync_directory = recovery_measurement._fsync_directory
+
+    def record_fsync(path: Path) -> None:
+        fsynced.append(path)
+        real_fsync_directory(path)
+
+    monkeypatch.setattr(recovery_measurement, "_fsync_directory", record_fsync)
+
+    capture_snapshot(
+        source_data=open_source.data,
+        snapshot_root=snapshot_root,
+        source_id="disposable-test-source",
+    )
+
+    assert fsynced == [snapshot_root, snapshot_root.parent]
+
+
 def test_capture_refuses_whitespace_only_audit_evidence_before_writing(
     open_source: _OpenSource,
 ) -> None:
@@ -281,7 +304,7 @@ def test_restore_fsyncs_the_restored_data_directory(
 
     restore_snapshot(snapshot_root=snapshot_root, restore_root=restore_root)
 
-    assert restore_root / "data" in fsynced
+    assert fsynced == [restore_root / "data", restore_root, restore_root.parent]
 
 
 def test_capture_refuses_an_existing_destination_without_changing_it(

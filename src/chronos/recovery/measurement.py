@@ -215,6 +215,7 @@ def capture_snapshot(
     )
     _write_new_json(snapshot_root / SNAPSHOT_MANIFEST_NAME, manifest.to_dict())
     _fsync_directory(snapshot_root)
+    _fsync_directory(snapshot_root.parent)
     return manifest
 
 
@@ -282,6 +283,7 @@ def restore_snapshot(
     )
     _write_new_json(restore_root / RECOVERY_OBSERVATION_NAME, observation.to_dict())
     _fsync_directory(restore_root)
+    _fsync_directory(restore_root.parent)
     return observation
 
 
@@ -313,7 +315,7 @@ def _verify_recovery_data(
         raise RecoveryMeasurementError("recovery halt evidence is corrupt")
 
     audit_path = data / "platform_audit.jsonl"
-    if not any(line.strip() for line in _read_regular_file(audit_path).splitlines()):
+    if not _contains_non_whitespace(audit_path):
         raise RecoveryMeasurementError("recovery audit evidence contains no records")
     audit_ok, audit_detail = verify_chain(audit_path)
     if not audit_ok:
@@ -654,6 +656,22 @@ def _read_regular_file(path: Path) -> bytes:
     try:
         with os.fdopen(descriptor, "rb", closefd=False) as handle:
             return handle.read()
+    finally:
+        os.close(descriptor)
+
+
+def _contains_non_whitespace(path: Path) -> bool:
+    _require_regular_file(path)
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise RecoveryMeasurementError(
+            f"cannot open recovery artifact {path.name}: {error}"
+        ) from error
+    try:
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            return any(block.strip() for block in iter(lambda: handle.read(1024 * 1024), b""))
     finally:
         os.close(descriptor)
 
