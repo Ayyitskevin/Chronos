@@ -99,10 +99,67 @@ switch, a halted deterministic platform, and the hash-chained audit log. Negativ
 an omitted or disengaged live kill switch, a rearmed platform, audit tamper, and database corruption
 are rejected by the drill assertions.
 
-This is repeatable integration-test evidence, not an operational backup system. It does not create
-an off-host or encrypted backup, measure RPO/RTO, inspect an owner mandate, connect to a broker,
-reconcile positions/orders, or grant permission to start or rearm a restored deployment. Follow the
-manual procedure below and treat those residuals as open.
+This is repeatable integration-test evidence, not an operational backup system. The test itself does
+not create an off-host or encrypted backup, emit recovery-time observations, inspect an owner
+mandate, connect to a broker, reconcile positions/orders, or grant permission to start or rearm a
+restored deployment. Follow the manual procedure below and treat those residuals as open.
+
+## Recovery measurement campaign
+
+The packaged recovery command turns the same bounded file-level contract into reusable evidence.
+It has two deliberately separate steps so a snapshot can age before a later isolated restore:
+
+```bash
+# Preconditions: the parent directories exist; both output roots do not.
+# Use a non-sensitive label. Do not put an account number or host path in source-id.
+.venv/bin/python -m chronos.recovery capture \
+  --source-data data \
+  --snapshot-root /owner-controlled/chronos-snapshots/drill-2026-08-29 \
+  --source-id paper-drill
+
+.venv/bin/python -m chronos.recovery restore \
+  --snapshot-root /owner-controlled/chronos-snapshots/drill-2026-08-29 \
+  --restore-root /owner-controlled/chronos-restores/drill-2026-08-29
+```
+
+`capture` opens the source databases read-only and uses Python 3.12's SQLite online-backup API.
+That API works while other clients access the source and creates a snapshot of each database as its
+copy commences ([Python API](https://docs.python.org/3.12/library/sqlite3.html#sqlite3.Connection.backup),
+[SQLite semantics](https://www.sqlite.org/backup.html)). The databases are captured sequentially,
+not atomically with each other or with the control files, so the manifest records a separate start
+and completion timestamp for every artifact. The command refuses unless all five artifacts exist as
+regular files, both databases pass integrity/current-version checks, the live kill switch is valid
+and engaged, the deterministic platform is valid and halted, and the audit chain is non-empty and
+intact. SQLite may update a live source database's transient `-shm` WAL-index while servicing the
+read-only capture; the five named source artifacts remain byte-identical. A source directory must
+therefore permit SQLite's ordinary WAL coordination. It copies no `.env` or autonomy mandate.
+
+`restore` verifies every snapshot member against its manifest before creating the destination,
+copies into `<restore-root>/data`, re-verifies every digest, opens the application schema through
+Chronos's current schema checker, rechecks the control posture and audit chain, then writes
+`<restore-root>/recovery-observation.json`. Both commands refuse an existing destination instead of
+overwriting it. Directories are mode `0700`; artifacts and JSON evidence are mode `0600`. A failed
+operation deliberately leaves any newly created partial directory in place for diagnosis; the
+operator decides when it is safe to remove it. Successful snapshot and restored-data directories
+contain only the five bound artifacts plus, for the snapshot, its manifest. Low-level integrity
+checks open these new private copies as immutable read-only files; the application schema checker
+separately opens `chronos.db` through Chronos, after which digests and exact contents are rechecked.
+Successful bundles contain no unbound WAL sidecars.
+
+The observation fields are measurements, not SLOs:
+
+| Field | What it measures | What it does **not** prove |
+|---|---|---|
+| `oldest_snapshot_age_seconds` | Wall-clock time from the earliest per-artifact capture start to this restore attempt | Actual data loss, backup schedule compliance, or any RPO target; it is meaningful only after clock health is verified |
+| `snapshot_capture_window_seconds` | Skew between the earliest artifact start and latest artifact completion | A transactionally atomic snapshot across the two databases and three files |
+| `local_restore_copy_seconds` | Monotonic elapsed time to create the isolated restore directories and copy the five bound artifacts locally | Download/decryption/provisioning time |
+| `local_verification_seconds` | Monotonic elapsed time for digest, database, control, and audit checks | Broker connectivity, order/position reconciliation, secrets, mandate review, or permission to rearm |
+| `local_recovery_elapsed_seconds` | The sum of local copy and verification for this one run | Operational RTO, which also includes detection, human response, infrastructure, and broker reconciliation |
+
+Retain the snapshot manifest and observation together, record verified clock status and the intended
+RPO/RTO targets outside this command, and repeat on the actual recovery host with representative
+state. A fast disposable or same-host run is capability evidence only. Phase 2's measured operational
+RPO/RTO, encrypted/off-host backup, and external integrity anchor remain open.
 
 ## Restore procedure
 
