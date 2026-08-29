@@ -173,6 +173,52 @@ def test_ci_retains_exact_main_release_evidence_with_a_pinned_action() -> None:
     assert upload_step["with"]["retention-days"] == 90
 
 
+def test_ci_attests_exact_main_release_evidence_with_least_privilege() -> None:
+    workflow = yaml.safe_load((_REPO_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+    assert workflow["permissions"] == {"contents": "read"}
+
+    quality_steps = workflow["jobs"]["quality"]["steps"]
+    checkout_step = next(
+        step for step in quality_steps if step.get("name") == "Check out repository"
+    )
+    setup_step = next(step for step in quality_steps if step.get("name") == "Set up Python")
+    assert checkout_step["uses"] == "actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09"
+    assert setup_step["uses"] == "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1"
+
+    job = workflow["jobs"]["release_provenance"]
+
+    assert job["if"] == "github.event_name == 'push' && github.ref == 'refs/heads/main'"
+    assert job["needs"] == "quality"
+    assert job["timeout-minutes"] == 5
+    assert job["permissions"] == {
+        "contents": "read",
+        "id-token": "write",
+        "attestations": "write",
+    }
+    assert "permissions" not in workflow["jobs"]["quality"]
+
+    download_step = next(
+        step for step in job["steps"] if step.get("name") == "Download exact-main release evidence"
+    )
+    assert download_step["uses"] == (
+        "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
+    )
+    assert download_step["with"] == {
+        "name": "chronos-release-${{ github.sha }}",
+        "path": "dist",
+        "digest-mismatch": "error",
+    }
+
+    attest_step = next(
+        step for step in job["steps"] if step.get("name") == "Attest exact-main release evidence"
+    )
+    assert attest_step["uses"] == "actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6"
+    assert attest_step["with"]["subject-path"].splitlines() == [
+        "dist/chronos-*.whl",
+        "dist/chronos-*.cdx.json",
+    ]
+
+
 def test_gate_overrides_ambient_build_epoch_and_removes_python_import_paths(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
