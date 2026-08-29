@@ -307,6 +307,114 @@ def test_anchor_publish_is_atomic_and_fsyncs_file_and_parent(
     assert not list(tmp_path.glob(".*.tmp"))
 
 
+def test_reader_rechecks_a_zero_link_stat_from_concurrent_anchor_replace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ledger = _ledger(tmp_path)
+    _run(ledger, "atomic-anchor")
+    real_stat = os.stat
+    returned_transient = False
+
+    def stat_with_one_unlinked_anchor_result(
+        path: str | bytes | int,
+        *,
+        dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ) -> os.stat_result:
+        nonlocal returned_transient
+        metadata = real_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+        if path == ledger.anchor_path.name and dir_fd is not None and not returned_transient:
+            returned_transient = True
+            fields = list(metadata)
+            fields[stat.ST_NLINK] = 0
+            return os.stat_result(fields)
+        return metadata
+
+    monkeypatch.setattr(os, "stat", stat_with_one_unlinked_anchor_result)
+
+    reopened = RegistryLedger(ledger.path)
+
+    assert returned_transient is True
+    assert reopened.verify()[0] is True
+
+
+def test_reader_refuses_an_anchor_that_remains_unlinked_after_bounded_rechecks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ledger = _ledger(tmp_path)
+    _run(ledger, "atomic-anchor")
+    real_stat = os.stat
+    anchor_stat_calls = 0
+
+    def stat_with_persistently_unlinked_anchor(
+        path: str | bytes | int,
+        *,
+        dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ) -> os.stat_result:
+        nonlocal anchor_stat_calls
+        metadata = real_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+        if path == ledger.anchor_path.name and dir_fd is not None:
+            anchor_stat_calls += 1
+            fields = list(metadata)
+            fields[stat.ST_NLINK] = 0
+            return os.stat_result(fields)
+        return metadata
+
+    monkeypatch.setattr(os, "stat", stat_with_persistently_unlinked_anchor)
+
+    with pytest.raises(RegistryIntegrityError, match="remained unlinked"):
+        RegistryLedger(ledger.path)
+
+    assert 1 < anchor_stat_calls < 100
+
+
+def test_reader_does_not_downgrade_zero_then_missing_to_safe_absence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ledger = _ledger(tmp_path)
+    _run(ledger, "atomic-anchor")
+    real_stat = os.stat
+    anchor_stat_calls = 0
+
+    def stat_with_unlinked_then_missing_anchor(
+        path: str | bytes | int,
+        *,
+        dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ) -> os.stat_result:
+        nonlocal anchor_stat_calls
+        metadata = real_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+        if path != ledger.anchor_path.name or dir_fd is None:
+            return metadata
+        anchor_stat_calls += 1
+        if anchor_stat_calls > 1:
+            raise FileNotFoundError(path)
+        fields = list(metadata)
+        fields[stat.ST_NLINK] = 0
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(os, "stat", stat_with_unlinked_then_missing_anchor)
+
+    with pytest.raises(RegistryIntegrityError, match="remained unlinked"):
+        RegistryLedger(ledger.path)
+
+    assert 1 < anchor_stat_calls < 100
+
+
+def test_reader_still_refuses_a_real_anchor_hard_link(tmp_path: Path) -> None:
+    ledger = _ledger(tmp_path)
+    _run(ledger, "atomic-anchor")
+    peer = tmp_path / "anchor-hard-link"
+    os.link(ledger.anchor_path, peer)
+
+    with pytest.raises(RegistryIntegrityError, match="multiple hard links"):
+        RegistryLedger(ledger.path)
+
+
 def test_verify_detects_tampering(tmp_path: Path) -> None:
     ledger = _ledger(tmp_path)
     _run(ledger, "regime_trend_v1")
