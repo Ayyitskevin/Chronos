@@ -7,19 +7,19 @@ NOT IMPLEMENTED / REQUIRES OWNER ACTION.
 
 ## Summary (current — re-measured 2026-08-28)
 
-Measured on exact `main` `d44fc4ac7d2f37475e81ebdc15ccd9ba301247a2`, Python 3.12,
+Measured on exact `main` `7752825bc749a0392be66dc2d15bc6bd9f25ed27`, Python 3.12,
 with all six `make gates` targets in CI order. **These numbers drift with every merged test** —
 rerun before citing them.
 
 | Command | Result |
 |---|---|
-| `pytest -q` | **4239 passed, 1 skipped, 24 warnings** (4240 collected) |
+| `pytest -q` | **4365 passed, 1 skipped, 24 warnings** (4366 collected) |
 | `ruff check .` | clean |
-| `ruff format --check .` | clean (548 files) |
+| `ruff format --check .` | clean (563 files) |
 | `mypy src/chronos` | clean (294 source files) |
 | `mypy --strict worker` | clean (10 source files) |
 | `python scripts/verify_release_artifact.py` | installed package/assets/entry points and v2-to-head migration smoke passed |
-| GitHub Actions `quality` job | [run 33139504555](https://github.com/Ayyitskevin/Chronos/actions/runs/33139504555) succeeded at exact `d44fc4ac7d2f` |
+| GitHub Actions `quality` job | [run 33231368543](https://github.com/Ayyitskevin/Chronos/actions/runs/33231368543) succeeded at exact `7752825bc749` |
 
 The single skip is the opt-in, credential-gated, read-only IBKR smoke test — it has never been run
 against a real gateway, which is why it skips; it does not fail. The installed-wheel smoke uses
@@ -159,7 +159,7 @@ milestones.
 | TradingView parity fixtures | REQUIRES OWNER ACTION (exports; see fixtures/tradingview/README.md) |
 | Property-based (hypothesis) tests | IMPLEMENTED (M4): `tests/platform_unit/test_property_invariants.py` — intent identity, state-machine legality, sizer bounds, deny-monotonicity; complemented by the concrete breach⇒deny matrix (`test_risk_engine_limits.py`, M5) |
 | Long-running shadow service tests | IMPLEMENTED (M2): `tests/platform_unit/test_service.py`, `tests/chaos/test_service_faults.py` |
-| Backup/restore drill automation | NOT IMPLEMENTED as a test; manual procedure in docs/BACKUP_AND_RECOVERY.md |
+| Backup/restore drill automation | IMPLEMENTED as an isolated integration test: `tests/integration/test_backup_restore_drill.py` exercises online backups of both live WAL-backed stores, restored schema/scope/order evidence, control files, audit integrity, and rejection cases entirely under `tmp_path`. Off-host/encrypted backup, measured RPO/RTO, owner-mandate inspection, and broker reconciliation remain NOT IMPLEMENTED / REQUIRES OWNER ACTION; see `docs/BACKUP_AND_RECOVERY.md`. |
 
 No test result above is claimed without having been run in this environment;
 the CI status on the PR is the independent confirmation channel.

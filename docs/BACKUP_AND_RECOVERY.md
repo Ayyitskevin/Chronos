@@ -84,6 +84,26 @@ tar czf chronos-backup-$(date +%F).tar.gz data/ config/ specs/ research/ .env
 Keep at least one copy off the machine. The audit log's tamper evidence is only as good as an
 off-machine copy to compare against (docs/SECURITY.md).
 
+## Automated isolated drill
+
+The repository continuously exercises the file-level recovery contract against disposable state:
+
+```bash
+.venv/bin/python -m pytest -q tests/integration/test_backup_restore_drill.py
+```
+
+The drill keeps both real WAL-backed Chronos databases open, captures them through SQLite's online
+backup API, restores them under `tmp_path`, and reopens them through `SqliteLedger` and `Database`.
+It checks committed order/fill evidence, schema and scope, SQLite integrity, an engaged live kill
+switch, a halted deterministic platform, and the hash-chained audit log. Negative cases prove that
+an omitted or disengaged live kill switch, a rearmed platform, audit tamper, and database corruption
+are rejected by the drill assertions.
+
+This is repeatable integration-test evidence, not an operational backup system. It does not create
+an off-host or encrypted backup, measure RPO/RTO, inspect an owner mandate, connect to a broker,
+reconcile positions/orders, or grant permission to start or rearm a restored deployment. Follow the
+manual procedure below and treat those residuals as open.
+
 ## Restore procedure
 
 1. **Stop everything.** No Chronos process may be running.
