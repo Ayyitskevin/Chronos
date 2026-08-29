@@ -33,7 +33,6 @@ _ENTRY_POINT: Final[tuple[str, str]] = ("chronos", "chronos.app:main")
 _MIGRATION_SUPPORT: Final[tuple[str, ...]] = ("env.py", "script.py.mako")
 _MIGRATION_HEAD: Final[str] = "0010"
 _CYCLONEDX_SCHEMA: Final[str] = "http://cyclonedx.org/schema/bom-1.6.schema.json"
-_BOOTSTRAP_COMPONENTS: Final[frozenset[str]] = frozenset({"pip", "setuptools"})
 _SOURCE_DATE_EPOCH_MINIMUM: Final[int] = 315532800  # 1980-01-01 00:00:00 UTC
 _SOURCE_DATE_EPOCH_MAXIMUM: Final[int] = 4354819199  # 2107-12-31 23:59:59 UTC
 # Intentionally independent of the pytest manifest: the artifact gate must carry
@@ -183,6 +182,49 @@ def _install_lock(python: Path, lock: Path, *, cwd: Path) -> None:
             "--quiet",
             "--require-hashes",
             "-r",
+            str(lock),
+        ],
+        cwd=cwd,
+    )
+
+
+def _bootstrap_pip(python: Path, source_root: Path, *, cwd: Path) -> None:
+    """Install and independently verify the exact pip frontend before other inputs."""
+
+    lock = source_root / "requirements-bootstrap.lock"
+    verifier = source_root / "scripts/verify_pip_bootstrap.py"
+    _run(
+        [
+            str(python),
+            "-I",
+            str(verifier),
+            "--lock",
+            str(lock),
+            "--check-lock-only",
+        ],
+        cwd=cwd,
+    )
+    _run(
+        [
+            str(python),
+            "-m",
+            "pip",
+            "install",
+            "--disable-pip-version-check",
+            "--quiet",
+            "--no-deps",
+            "--require-hashes",
+            "-r",
+            str(lock),
+        ],
+        cwd=cwd,
+    )
+    _run(
+        [
+            str(python),
+            "-I",
+            str(verifier),
+            "--lock",
             str(lock),
         ],
         cwd=cwd,
@@ -412,9 +454,10 @@ def _verify_sbom(
     sbom: Path,
     wheel: Path,
     runtime_lock: Path,
+    bootstrap_lock: Path,
     sbom_tool_lock: Path,
 ) -> int:
-    """Cross-check the generated BOM against the wheel and both lock domains."""
+    """Cross-check the generated BOM against the wheel and all runtime domains."""
 
     try:
         payload = json.loads(sbom.read_text(encoding="utf-8"))
@@ -494,19 +537,26 @@ def _verify_sbom(
     if project_name in components:
         raise ReleaseArtifactError("wheel application is duplicated in SBOM components")
     runtime_requirements = _locked_requirements(runtime_lock)
-    missing = sorted(set(runtime_requirements) - set(components))
+    bootstrap_requirements = _locked_requirements(bootstrap_lock)
+    if set(bootstrap_requirements) != {"pip"}:
+        raise ReleaseArtifactError(
+            "bootstrap lock must contain exactly the pip frontend for SBOM validation"
+        )
+    expected_components = runtime_requirements | bootstrap_requirements
+    missing = sorted(set(expected_components) - set(components))
     if missing:
         raise ReleaseArtifactError(
-            f"SBOM is missing locked runtime components: {', '.join(missing)}"
+            f"SBOM is missing locked runtime/bootstrap components: {', '.join(missing)}"
         )
     mismatched = sorted(
-        name for name, version in runtime_requirements.items() if components[name][0] != version
+        name for name, version in expected_components.items() if components[name][0] != version
     )
     if mismatched:
         raise ReleaseArtifactError(
-            f"SBOM component versions differ from the runtime lock: {', '.join(mismatched)}"
+            "SBOM component versions differ from the runtime/bootstrap locks: "
+            f"{', '.join(mismatched)}"
         )
-    unlocked = sorted(set(components) - set(runtime_requirements) - _BOOTSTRAP_COMPONENTS)
+    unlocked = sorted(set(components) - set(expected_components))
     if unlocked:
         raise ReleaseArtifactError(f"SBOM contains unlocked components: {', '.join(unlocked)}")
 
@@ -730,6 +780,9 @@ def verify_release_artifact(output_directory: Path) -> None:
         runtime_python = runtime_root / "bin/python"
         source_date_epoch = _repository_source_date_epoch()
 
+        _bootstrap_pip(builder_python, source_root, cwd=work)
+        _bootstrap_pip(runtime_python, source_root, cwd=work)
+
         _build_wheel(
             builder_python,
             source_root,
@@ -783,6 +836,7 @@ def verify_release_artifact(output_directory: Path) -> None:
             sbom,
             wheel,
             source_root / "requirements-runtime.lock",
+            source_root / "requirements-bootstrap.lock",
             source_root / "requirements-sbom.lock",
         )
 

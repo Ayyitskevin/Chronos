@@ -31,10 +31,12 @@ jobs:
 
       - name: Install pinned, hash-verified dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install --require-hashes -r requirements-build.lock
-          pip install --require-hashes -r requirements-dev.lock
-          pip install -e . --no-deps --no-build-isolation --check-build-dependencies
+          python -I scripts/verify_pip_bootstrap.py --lock requirements-bootstrap.lock --check-lock-only
+          python -m pip install --disable-pip-version-check --no-deps --require-hashes -r requirements-bootstrap.lock
+          python -I scripts/verify_pip_bootstrap.py --lock requirements-bootstrap.lock
+          python -m pip install --require-hashes -r requirements-build.lock
+          python -m pip install --require-hashes -r requirements-dev.lock
+          python -m pip install -e . --no-deps --no-build-isolation --check-build-dependencies
 
       - name: Lint
         run: ruff check .

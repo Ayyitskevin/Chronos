@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parent.parent
 EXPECTED_TOOL_VERSIONS = {
     "bandit": "1.9.4",
     "detect-secrets": "1.5.0",
+    "pip": "26.2.1",
     "pip-audit": "2.10.1",
 }
 

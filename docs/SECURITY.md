@@ -110,7 +110,9 @@ and the release-artifact gate, on Python 3.12 with safety env pins (`BROKER_MODE
 
 - `pyproject.toml` uses bounded ranges (e.g. `ib_async>=2.0,<3`, `pydantic>=2.9,<3`), which
   express intent but do NOT by themselves give reproducible installs.
-- **Hash-verified lockfiles are committed:** `requirements-dev.lock` pins every runtime and
+- **Hash-verified lockfiles are committed:** `requirements-bootstrap.lock` pins the sole pip
+  frontend artifact from exact `requirements-bootstrap.in`; regenerate it with its header command.
+  `requirements-dev.lock` pins every runtime and
   development dependency (the full transitive closure) to an exact version and SHA-256 hash. It is
   generated from `pyproject.toml` with
   `uv pip compile pyproject.toml --extra dev --generate-hashes --python-version 3.12 -o requirements-dev.lock`.
@@ -120,10 +122,16 @@ and the release-artifact gate, on Python 3.12 with safety env pins (`BROKER_MODE
   `requirements-build.lock` separately pins the exact `setuptools` backend declared in
   `[build-system]`, and `requirements-sbom.lock` pins the isolated generator declared in
   `requirements-sbom.in`; regenerate them with their exact header commands.
-- **CI and the release gate install from locks, not ranges:** CI installs the build and full
-  runtime/dev locks for editable quality checks. The release gate installs the build lock in a
-  builder venv, the runtime-only lock plus the wheel in a separate runtime venv, and the SBOM tool
-  lock back in the builder only after the wheel exists. It disables build isolation and asks pip
+- **CI and the release gate install from locks, not ranges:** CI begins with the setup-python job
+  interpreter; the release gate creates each fresh venv with Python's offline bundled `ensurepip`
+  frontend. In either path that frontend installs only the exact pip artifact from the bootstrap
+  lock. A stdlib-only command first refuses an inexact, additional, or unsupported lock line, then
+  separately verifies the installed pip distribution identity before any other dependency
+  operation. CI then installs the build and full runtime/dev locks for editable quality checks. The
+  release gate applies the bootstrap+verification sequence
+  to both its builder and runtime venvs, installs the build lock in the builder, the runtime-only
+  lock plus the wheel in the runtime venv, and the SBOM tool lock back in the builder only after the
+  wheel exists. It disables build isolation and asks pip
   to check the already-installed backend version against `pyproject.toml`. The preceding
   `--require-hashes` install provides integrity; `--check-build-dependencies` verifies requirement
   compatibility, not hashes. A tampered or substituted locked dependency therefore fails its hash
@@ -135,8 +143,8 @@ and the release-artifact gate, on Python 3.12 with safety env pins (`BROKER_MODE
 - **The release SBOM is a checked artifact, not a best-effort report.** The gate uses the official
   `cyclonedx-py environment` CLI against only the runtime venv, requests reproducible CycloneDX 1.6
   JSON with schema validation, then independently requires the Chronos application identity,
-  every runtime-lock package and exact version, no component outside that lock except the venv's
-  pip/setuptools bootstrap, a closed dependency graph, and an exact root edge matching the wheel's
+  every runtime-lock package and exact version, the exact pip identity from the bootstrap lock, no
+  component outside those locks, a closed dependency graph, and an exact root edge matching the wheel's
   non-extra `Requires-Dist` metadata. The verified wheel and SBOM are published together under
   `dist/`; exact-main CI requests 90-day retention under a commit-addressed artifact name.
 - **Wheel reproducibility is measured, not inferred from locked inputs.** The gate derives
@@ -159,9 +167,10 @@ and the release-artifact gate, on Python 3.12 with safety env pins (`BROKER_MODE
   never raw candidate values.
   **Residual:** advisory and heuristic results are current evidence, not proof that dependencies are
   non-malicious, every historical secret is absent, or lower-confidence static issues do not exist.
-  The gate does not scan Git history or sign either artifact. pip remains the frontend that
-  creates/installs into these environments and remains outside the hash lock (CI upgrades it before
-  installation; the release verifier uses the interpreter's bundled pip). The measured wheel result
+  The gate does not scan Git history or sign either artifact. The downloaded pip frontend now has
+  exact version and artifact hashes, but the interpreter and its offline `ensurepip` bundle remain
+  the initial trust root that performs that self-replacement. Hash equality does not establish pip's
+  publisher, build-system, or source provenance. The measured wheel result
   does not prove reproducibility across different operating systems, Python/pip versions, archive
   implementations, or compromised builders. Note also the runtime lock's
   `aeventkit` entry is legitimate,
@@ -171,7 +180,8 @@ and the release-artifact gate, on Python 3.12 with safety env pins (`BROKER_MODE
 - Maintenance (owner action): regenerate the relevant lock with its header command when bumping a
   bound or tool, and review the diff before committing. Regenerate both application locks when a
   runtime requirement changes and require their shared package versions to remain equal. Keep
-  `requirements-build.in` requirement-aligned with `[build-system].requires` and
+  `requirements-bootstrap.in` limited to one exact pip requirement,
+  `requirements-build.in` requirement-aligned with `[build-system].requires`, and
   `requirements-sbom.in` exact; focused gate tests enforce these boundaries.
   `requirements.txt` remains `-e .` for a quick editable dev install; the locks are the
   reproducible, verified path used by CI and recommended for deployment.
