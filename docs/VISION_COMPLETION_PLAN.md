@@ -374,11 +374,12 @@ Deliver:
   and a fixed shared `/tmp` path. CI plus both release venvs now prevalidate an exact two-hash pip
   bootstrap lock and independently verify the installed frontend before other dependency operations;
   the SBOM requires that exact pip component and refuses unlocked environment extras. The secret
-  policy now also scans every textual addition in complete exact-`HEAD` ancestry, including deleted
-  paths and two-parent merge-resolution deltas; shallow, octopus, oversized, unparsable, unreviewed,
+  policy now also scans every detector-recognized addition in complete exact-`HEAD` ancestry,
+  including deleted paths, NUL-bearing files, and two-parent merge-resolution deltas; shallow,
+  octopus, oversized, unparsable, unreviewed,
   or stale-exception history blocks without writing remerge objects into the repository. These scanners
   are current advisory/heuristic evidence: artifact
-  signing, unrecognized/binary/unreachable-ref secret review, malicious-package provenance, the interpreter's initial
+  signing, unrecognized/arbitrarily-encoded/unreachable-ref secret review, malicious-package provenance, the interpreter's initial
   offline `ensurepip` trust, independent/cross-platform rebuild evidence, and compromised-builder resistance remain
   open. This does not satisfy the Phase 2 exit.
 
