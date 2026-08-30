@@ -289,7 +289,7 @@ to the §7 capture list:
 | Completed orders | `completed_orders` gap marker | The `Broker` protocol has no completed-orders read (src/chronos/broker/base.py:82-86 has open_orders/executions only). GAP: record it; feeds VCP §7 Phase-2 work |
 | Contract qualification (the R-26/R-27 fields) | `symbol:<S>:qualify_underlying`, `…:qualify_option_contracts` | REAL `liquid_hours`, `time_zone_id`, `min_tick`, `underlying_con_id`, `deliverable_*` vs fixture assumptions is a first-class deliverable → 2.3 |
 | Option chains | `…:option_chain_parameters`, `…:option_specs` | Bounded: 1 expiration × 2 strikes, PUT (hard caps: chronos-ibkr-boundary) |
-| Market rules / minimum ticks | `min_tick` on qualified contracts | GAP: `marketRuleIds` on ContractDetails is read nowhere in src (grep-verified 2026-08-02); market-rule callbacks exist but the id→contract linkage is unbuilt — record as gateway-unobservable today |
+| Market rules / minimum ticks | `…:option_market_rules` plus `min_tick` on qualified contracts | The manager calls each adapter's bounded `option_market_rules` path, which resolves the qualified route's `marketRuleIds`/`validExchanges` pair and requests the complete increment schedule. Missing, malformed, partial, or ambiguous evidence is recorded as an error rather than guessed. |
 | Trading sessions | `derived_liquid_hours.json` | parse + `confirms_open` at the captured probe instant, replayable offline |
 | Quote permissions | `…:underlying_quote` → `data_quality` | Record which quality tier the account actually gets (LIVE vs DELAYED vs FROZEN) |
 | Pacing | `…:historical_bars_1d_30d` result/error + any error text | BASELINE: record codes/messages verbatim. The official adapter classifies NO pacing codes (callbacks.py has only benign/connection-uncertain sets); the ib_async adapter assumes {100, 420} (src/chronos/broker/ibkr.py:86). Which codes a real gateway sends is exactly the unknown being measured |
@@ -311,6 +311,12 @@ contract, compare reality against the fixture-era assumptions and record verbati
   (liquid_hours.py:59-73)? An unmapped zone = permanent AMBIGUOUS for that contract.
 - Options: did `deliverable_verified` come back `True` with `deliverable_shares ==
   multiplier`? A standard-looking contract failing the screen = record the raw fields.
+- Market rules: did each successfully qualified option produce exactly one
+  `option_market_rules` entry with the same `con_id` and exchange, one positive
+  `market_rule_id`, and an increment schedule beginning at zero? A
+  `not_captured` marker means no option qualified; an error means the adapter or
+  gateway could not supply a complete, unambiguous schedule. Record either rather
+  than substituting `min_tick` or a guessed increment.
 - **Recording the divergence IS the deliverable.** A fixture-derived expectation being
   wrong is the campaign succeeding, not failing. File each divergence in the evidence doc
   with the captured string; fixes to parsers/fixtures happen AFTER the campaign, through
@@ -517,7 +523,7 @@ Volatile facts → re-verify before trusting (all read-only):
 | Paper ports {7497,4002}; account-id required | `grep -n "_PAPER_PORTS\|IB_ACCOUNT_ID is required" src/chronos/broker/official_ibkr.py` |
 | Missing kill-switch file ⇒ DISENGAGED | `sed -n 80,95p src/chronos/orders/kill_switch.py` |
 | Mandate auto-activation on boot | `grep -n "AUTONOMY_MANDATE_FILE" .env.example src/chronos/config/settings.py` |
-| `marketRuleIds` still unread (capture-map gap) | `grep -rn "marketRuleIds" src/ \|\| echo "still unread"` |
+| Market-rule capture remains wired through the manager and both adapters | `rg -n "option_market_rules|marketRuleIds|validExchanges" .claude/skills/chronos-real-gateway-campaign/scripts/capture_readonly.py src/chronos/broker/market_data.py src/chronos/broker/official_ibkr.py src/chronos/broker/ibkr.py` |
 | Completed-orders read still absent | `grep -n "completed" src/chronos/broker/base.py \|\| echo "still absent"` |
 | R-26/R-27 residuals still fixture-only | `grep -n "R-26\|R-27" RISK_REGISTER.md` |
 | ibkr_setup.md staleness (0.4) still present | `sed -n 1,8p docs/ibkr_setup.md` |
