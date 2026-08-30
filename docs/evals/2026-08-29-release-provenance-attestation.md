@@ -67,11 +67,44 @@ API checks established:
 The corrected exact candidate requires the original review seat to withdraw its HOLD after
 re-verifying these facts and the amended tests.
 
+## Exact-main observation
+
+PR #135 squash-merged the independently reviewed candidate
+`454d1debe28675bf6d23333c30953a3507f53967` as
+`a296880e09a82981b769caf661812fd7249df707`. Both commits resolve to tree
+`7c75dbe8609a3101ca99a33f972dff733681af5d`, so the reviewed final state and the main result
+are byte-identical across the entire repository.
+
+Exact-main run `33283092740` passed `quality` and `release_provenance`. The quality job reported
+4,530 passing tests, one expected owner-opt-in read-only IBKR smoke skip, the complete release
+security gate, reproducible wheel validation, and a validated CycloneDX 1.6 SBOM with 64 runtime
+components. The retained `chronos-release-a296880e09a82981b769caf661812fd7249df707`
+artifact is ID `9723680514` and contains exactly:
+
+- `chronos-0.1.0-py3-none-any.whl`, SHA-256
+  `50390d70c327f025ac6d33281508cb7e2731094ef90f488886468d46795a8d68`;
+- `chronos-0.1.0.cdx.json`, SHA-256
+  `d8867fea341a525884b8f78a3f78801392ce6dec033474f300bea115c35aeeee`.
+
+The downstream job created GitHub attestation `43903455` for both subjects, reported SLSA
+provenance v1, signed through the Public Good Sigstore instance, and uploaded the signature to
+Rekor. The host's installed GitHub CLI predated attestation support, so verification used an
+official GitHub CLI v2.98.0 tarball only after its bytes matched GitHub's published checksum.
+Each downloaded subject then passed:
+
+```text
+gh attestation verify <subject> --repo Ayyitskevin/Chronos \
+  --signer-workflow Ayyitskevin/Chronos/.github/workflows/ci.yml
+```
+
+Both verification results resolved to the same SLSA provenance statement and the same complete
+two-subject name/digest set above. This is the post-merge observation ADR-0046 required; R-62 is
+therefore mitigated operationally rather than merely in code.
+
 ## Residuals
 
-The post-merge main run is the first live proof because the job is deliberately unavailable to a
-pull request. A valid attestation proves subject digest and workflow origin; it does not prove
-correctness, safety, independent reproducibility, external publisher identity, or package-native
-signing. A compromised authorized workflow, runner, pinned action, or GitHub/Sigstore service can
-still attest bad bytes. Exact-main run and CLI verification identities are therefore recorded in
-the pull request and final handoff rather than predicted here.
+A valid attestation proves subject digest and workflow origin; it does not prove correctness,
+safety, independent reproducibility, external publisher identity, or package-native signing. A
+compromised authorized workflow, runner, pinned action, or GitHub/Sigstore service can still attest
+bad bytes. The retained Actions artifact and attestation also depend on GitHub availability and
+retention. Nothing in this observation publishes a package or grants runtime or trading authority.
