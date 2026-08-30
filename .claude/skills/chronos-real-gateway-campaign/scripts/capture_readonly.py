@@ -264,14 +264,29 @@ async def run_capture(settings: Any, args: argparse.Namespace) -> dict[str, Any]
                     f"{prefix}:qualify_option_contracts",
                     manager.qualify_option_contracts(specs, force_refresh=True),
                 )
+                qualified_options = tuple(batch or ())
                 if batch is None:
                     # Isolate which spec failed: qualify one at a time and record each
-                    # outcome (the manager refuses a batch on any incomplete return).
+                    # outcome (the manager refuses a batch on any incomplete return),
+                    # and retain the successful contracts for the next read-only step.
+                    recovered = []
                     for spec in specs:
-                        await step(
+                        qualified = await step(
                             f"{prefix}:qualify_option:{spec.expiration}:{spec.strike}:{spec.right.value}",
                             manager.qualify_option_contracts([spec], force_refresh=True),
                         )
+                        if qualified is not None:
+                            recovered.extend(qualified)
+                    qualified_options = tuple(recovered)
+                if qualified_options:
+                    await step(
+                        f"{prefix}:option_market_rules",
+                        manager.option_market_rules(qualified_options),
+                    )
+                else:
+                    steps[f"{prefix}:option_market_rules"] = {
+                        "not_captured": "no option contract qualified for a market-rule read"
+                    }
 
         if not args.skip_bars and symbols:
             first = steps.get(f"symbol:{symbols[0]}:qualify_underlying")
