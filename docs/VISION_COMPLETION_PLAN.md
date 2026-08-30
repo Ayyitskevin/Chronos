@@ -367,8 +367,10 @@ Deliver:
   `src/chronos/**/__main__.py` command surface. A separately locked official tool emits validated,
   reproducible CycloneDX 1.6 JSON for that runtime environment; the gate cross-checks its exact
   components and root dependency edge against the runtime lock and wheel metadata. Exact-main CI
-  requests 90-day retention for the wheel/SBOM pair. A separate exact-version, fail-closed release
-  security gate now audits the hash-locked runtime set without resolution, scans shipped Python at
+  requests 90-day retention for the wheel/SBOM pair. After the quality job succeeds, a separate
+  main-only, least-privilege job downloads that same-run artifact with digest-mismatch refusal and
+  creates one Sigstore-signed GitHub build-provenance attestation over both exact files. A separate
+  exact-version, fail-closed release security gate now audits the hash-locked runtime set without resolution, scans shipped Python at
   medium-severity/medium-confidence or stronger, and checks every tracked file against an explicitly
   reviewed false-positive secret baseline. Its first run removed twelve current GitPython advisories
   and a fixed shared `/tmp` path. CI plus both release venvs now prevalidate an exact two-hash pip
@@ -378,8 +380,8 @@ Deliver:
   including deleted paths, NUL-bearing files, and two-parent merge-resolution deltas; shallow,
   octopus, oversized, unparsable, unreviewed,
   or stale-exception history blocks without writing remerge objects into the repository. These scanners
-  are current advisory/heuristic evidence: artifact
-  signing, unrecognized/arbitrarily-encoded/unreachable-ref secret review, malicious-package provenance, the interpreter's initial
+  are current advisory/heuristic evidence. Package-native signatures,
+  unrecognized/arbitrarily-encoded/unreachable-ref secret review, malicious-package provenance, the interpreter's initial
   offline `ensurepip` trust, independent/cross-platform rebuild evidence, and compromised-builder resistance remain
   open. This does not satisfy the Phase 2 exit.
 
