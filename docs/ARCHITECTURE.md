@@ -169,6 +169,12 @@ health requests never execute the query. Disabled or uncertain observation remai
 The same structural boundary excludes this observer from authority modules, so it describes
 clock evidence but does not itself enforce an order predicate.
 
+`chronos.operations.external_probe` (ADR-0047) is the first consumer outside the backend process.
+It performs timeout-constrained, credential-free, no-redirect GETs against only `/health/live`
+and `/health/ready`, consumes status headers rather than bodies, and emits a closed JSON verdict
+plus machine exit status. It has no state, scheduler, notification, restart, or trading-capability
+input, and the same structural boundary excludes it from authority modules.
+
 ## What is intentionally not built
 
 - No live or canary-live order path **in this deterministic platform** (refused in

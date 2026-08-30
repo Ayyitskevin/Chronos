@@ -55,9 +55,26 @@ or unavailable trading lane does **not** make operator inspection unready; those
 visible under `/health` and block the corresponding trading-capability verdict instead.
 
 Keep these routes loopback-only. Do not use `/health` itself as a readiness probe: it deliberately
-returns HTTP 200 while degraded so a human can read the full diagnostic. The probe endpoints ship
-without a service manager, external monitor, or orchestrator configuration and grant no trading
-authority.
+returns HTTP 200 while degraded so a human can read the full diagnostic. The probe endpoints grant
+no trading authority.
+
+Chronos ships a default-off, one-shot consumer for an operator-owned scheduler or remote runner:
+
+```bash
+python -m chronos.operations.external_probe --base-url http://127.0.0.1:8765
+```
+
+It prints one JSON report and exits 0 only when both exact endpoints answer 200, 1 for unhealthy
+or unknown evidence, and 2 for invalid configuration. The URL must be a plain credential-free
+HTTP(S) origin. The client ignores proxy environment variables, refuses redirects, applies its
+HTTPX network-inactivity timeout per endpoint, sends no credential, and never consumes response
+bodies. The invoking scheduler must impose its own outer wall-clock deadline. For an off-host run,
+provide a separately managed authenticated tunnel or protected network path; do not widen the
+backend listener merely for this command.
+
+The command is an observation primitive, not a watchdog: it installs no service/timer, retains
+no last-success state, detects no silence, restarts nothing, and sends no alert. ADR-0047 records
+that boundary.
 
 ## Shadow scan (after market close)
 

@@ -17,19 +17,28 @@ FORBIDDEN = (
 )
 
 
-PROJECTION_MODULES = ("chronos.operations.health", "chronos.operations.clock")
+PROJECTION_MODULES = (
+    "chronos.operations.health",
+    "chronos.operations.clock",
+    "chronos.operations.external_probe",
+)
+
+
+def _is_projection_module(name: str) -> bool:
+    return any(name == module or name.startswith(f"{module}.") for module in PROJECTION_MODULES)
 
 
 def _imports_operational_projection(path: Path) -> bool:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            if any(alias.name.startswith(PROJECTION_MODULES) for alias in node.names):
+            if any(_is_projection_module(alias.name) for alias in node.names):
                 return True
-        elif isinstance(node, ast.ImportFrom) and any(
-            (node.module or "").startswith(module) for module in PROJECTION_MODULES
-        ):
-            return True
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            imported_modules = (module, *(f"{module}.{alias.name}" for alias in node.names))
+            if any(_is_projection_module(candidate) for candidate in imported_modules):
+                return True
     return False
 
 
@@ -44,6 +53,20 @@ def test_operational_health_cannot_become_an_authority_dependency() -> None:
         )
 
     assert offenders == []
+
+
+def test_external_probe_is_inside_the_authority_import_boundary() -> None:
+    assert "chronos.operations.external_probe" in PROJECTION_MODULES
+
+
+def test_authority_boundary_detects_from_package_imports(tmp_path: Path) -> None:
+    candidate = tmp_path / "authority.py"
+    candidate.write_text(
+        "from chronos.operations import external_probe\n",
+        encoding="utf-8",
+    )
+
+    assert _imports_operational_projection(candidate)
 
 
 def test_initial_clock_sample_stays_inside_startup_cleanup_guard() -> None:
