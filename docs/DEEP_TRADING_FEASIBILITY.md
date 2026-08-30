@@ -17,8 +17,10 @@ path, and the deferral stays in force until the owner picks.
 
 ## 1. What the list actually is
 
-[`cbailes/awesome-deep-trading`](https://github.com/cbailes/awesome-deep-trading)
-(© 2021, last substantive era 2016–2020) is a curated link list: papers
+[`cbailes/awesome-deep-trading`](https://github.com/cbailes/awesome-deep-trading),
+whose latest commit is
+[`91eee43`, 2021-01-01](https://github.com/cbailes/awesome-deep-trading/commit/91eee433ec7791915ad20b15330f0eee04798f07),
+is a curated link list of papers
 (CNNs, LSTMs, GANs, high-frequency, portfolio, reinforcement learning,
 cryptocurrency, sentiment/behavioral), 2017–2019-era repositories, dataset
 pointers, and courses. **It contains no indicator code.** "Implementing the
@@ -85,14 +87,14 @@ A candidate family is *feasible* only if all five hold:
 | List category | Verdict | Why (concrete, not vibes) |
 |---|---|---|
 | **Deep momentum networks** (Lim/Zohren/Roberts 2019, "Enhancing Time Series Momentum Strategies Using Deep Neural Networks") | **FEASIBLE — recommended C1** | Daily bars suffice. Direct descendant of the momentum evidence Chronos already preregistered (H-5T-002 cites Moskowitz/Ooi/Pedersen; Moreira & Muir already motivates the vol-scaling arm). Natural deterministic baseline: classical TSMOM with volatility scaling. |
-| **CNN/LSTM direction classifiers** (Sezer/Ozbayoglu 2018/2019; the `huseinzol05/Stock-Prediction-Models` repo as a reference zoo, **never a dependency**) | **FEASIBLE — recommended C2** | Daily (later hourly) bars suffice. Supervised classification is the easiest shape to preregister: frozen label definition, frozen features, logistic-regression twin on identical features. |
+| **CNN/LSTM direction classifiers** (separate Sezer/Ozbayoglu CNN and Fischer/Krauss LSTM lines; the `huseinzol05/Stock-Prediction-Models` repo as a reference zoo, **never a dependency**) | **FEASIBLE — recommended C2** | Daily (later hourly) bars suffice. C2 is a new Chronos experiment inspired by separate sources, not a replication of a published CNN/LSTM hybrid. Each architecture is a separately preregistered and multiplicity-counted arm with frozen labels/features and a logistic-regression twin on identical inputs. |
 | GANs (price simulation / augmentation) | **DEFER** | Augmentation is only meaningful after a baseline model exists and its data hunger is measured. A GAN result is also not a strategy — nothing to promote. Revisit after C1/C2 verdicts. |
 | Portfolio / multi-asset allocation | **DEFER** | Phase 5 discipline: one asset family, one vertical first. Cross-sectional allocation multiplies the certified-data requirement across the whole panel and adds sizing authority questions D3 deliberately avoids. |
 | DeepLOB / high-frequency | **NOT FEASIBLE** | Needs historical limit-order-book depth. Chronos has none and the IBKR historical API does not supply order-book history. Also collides with the loop's design (time-driven cycles, no event path). |
-| Reinforcement learning (all RL rows and repos) | **NOT FEASIBLE NOW — and autonomy-adjacent, so deliberately deferred** | Needs a trusted market simulator (fill model, costs, impact) that does not exist; the causal fill adapter is campaign infrastructure, not an RL gym. Sample-inefficient on daily bars (757–6000 rows). And an RL agent *is* a decision policy — training one blurs the research/autonomy boundary the Five-Tool plane keeps sharp. Requires its own ADR if ever revisited. |
+| Reinforcement learning (all RL rows and repos) | **NOT FEASIBLE NOW — and autonomy-adjacent, so deliberately deferred** | Historical-replay RL can run without a complete simulator, but only under restrictive environment assumptions such as no market impact. Chronos has no approved RL environment/accounting contract, and an RL agent *is* a decision policy — training one blurs the research/autonomy boundary the Five-Tool plane keeps sharp. Requires its own ADR if ever revisited. |
 | Cryptocurrency | **NOT FEASIBLE** | Asset family not enabled (Phase 5: equities/ETFs first; promotion never transfers across families). |
 | Sentiment / behavioral / social | **NOT FEASIBLE** | No point-in-time text corpus (survivorship-safe, timestamped); scraped text is also exactly the R-30 prompt-injection surface the worker's threat model bounds. |
-| Vulnerabilities (adversarial attacks on trading policies) | Out of scope as a strategy; **relevant reading** for whoever reviews D3's model-loading code. |
+| Vulnerabilities (adversarial attacks on trading policies) | Out of scope as a strategy; **adopt as future test-method input** for stale/malformed observations and model integrity after a candidate exists. It supplies no Chronos pass threshold and is not evidence of edge. |
 | Guides / courses / datasets rows | Context only. The Kaggle/AlphaVantage/Quandl dataset pointers are **not** certified sources and must not shortcut D2. |
 
 ## 5. The two recommended candidates
@@ -105,30 +107,31 @@ alone is the better-evidenced literature bet.
 
 ### C1 — Deep momentum network (Lim/Zohren 2019 family)
 
-- **Shape:** small sequence model (the paper's own scale: LSTM on ~63-day
-  windows of returns/vol features) emitting a position-direction score per
-  instrument per day, volatility-scaled.
+- **Shape:** small sequence model (the paper uses a 63-step LSTM trajectory;
+  input features include horizons through one year) emitting a
+  position-direction score per instrument per day, volatility-scaled.
 - **Deterministic twin (same frame, mandatory):** classical time-series
   momentum (sign of trailing 12-1 return) with the identical vol-scaling
   rule. The twin is not a formality — it is the null the paper itself had
   to beat.
-- **Honest prior:** the paper's gains are modest and cost-sensitive;
-  Chronos's cost model (commission, spread, slippage — Phase 3 gate) may
-  erase them. A recorded "does not beat its twin after costs" is a
-  successful trial outcome.
+- **Evidence boundary:** the paper explicitly incorporates turnover into
+  cost-adjusted training/evaluation. Chronos must use its own certified cost
+  model and cannot transfer the paper's costs or results. A recorded "does
+  not beat its twin after costs" remains a successful trial outcome.
 
-### C2 — CNN/LSTM direction classifier (Sezer/Ozbayoglu family)
+### C2 — separately counted CNN and LSTM direction classifiers
 
 - **Shape:** windowed OHLCV features → {up, down, flat} over a frozen
   horizon with a frozen dead-zone; long/flat signal only at first (no short
   authority question inside the research plane).
 - **Deterministic twin:** logistic regression on the identical feature
   window, identical labels, identical splits.
-- **Honest prior:** the 2018–2019 accuracy claims in this family are widely
-  suspected to be adjustment/lookahead artifacts; on certified unadjusted
-  data with embargoed splits, the expected result is near-chance. That is
-  worth knowing and cheap to establish; it also validates the harness for
-  C1.
+- **Evidence boundary:** this shape is Chronos-designed. The cited Sezer
+  work proposes CNN image representations, while the LSTM evidence is a
+  separate classifier line; neither source supports treating "CNN/LSTM" as
+  one uncounted hybrid. The sources do not establish Chronos-grade leakage,
+  corporate-action, or tuning-isolation controls, so no expected accuracy or
+  profitability is inferred from them.
 
 ## 6. What the owner's pick unlocks (and what it does not)
 
@@ -177,3 +180,64 @@ Decided 2026-08-21 (owner, in-session direction; D-29):
 The pick makes the preregistration revision the next research artifact
 after D2. Nothing else is unlocked: D2 remains the gate, and the §6
 ordering stands.
+
+## 8. Primary-source mining pass (2026-08-29)
+
+The catalog was used only as an index. Its latest commit is dated
+2021-01-01 (§1), so it is stale evidence for the current state of libraries,
+data access, and deployment practice. The papers and first-party repositories
+below supply hypotheses, data-contract checks, and falsification methods —
+**not broker evidence, a validated edge, or proof of autonomous trading**.
+Synthetic data cannot satisfy D2, a trial gate, a prospective holdout, or a
+broker/paper/live promotion gate.
+
+### Finding ledger
+
+| Claim | Primary source | Confidence and one-line reason | Chronos disposition |
+|---|---|---|---|
+| C1 directly combines volatility-scaled time-series momentum with sequence models and cost/turnover-aware objectives; its 63-day value is the LSTM trajectory length, while features extend through one year. | [Lim, Zohren & Roberts (2019)](https://arxiv.org/abs/1904.04912) | **High on method; Medium on transfer** — the design is explicit, but its futures corpus is not a Chronos ETF replication set and no official code was located. | **Adopt after D2** as H-DT-001, inseparable from its deterministic TSMOM/MACD twin and Chronos-native costs. |
+| The Sezer/Ozbayoglu 2018 source is a CNN over a 15×15 technical-indicator image; it does not publish a CNN/LSTM hybrid. | [Sezer & Ozbayoglu (2018)](https://doi.org/10.1016/j.asoc.2018.04.024) | **High** — the architecture and representation are the paper's stated method. | **Adopt after D2** only as inspiration for a separately registered CNN arm; do not call C2 a replication. |
+| The related CNN-BI proof of concept renders 30-day bar-chart images, derives labels from future-price slopes, and describes tuning by observing experiment results without a Chronos-grade isolated-validation contract. | [Sezer & Ozbayoglu (2019)](https://arxiv.org/abs/1903.04610) | **High on the documented protocol** — labels and tuning are described directly; this is a control gap, not a claim that leakage occurred. | **Adopt now as test design:** training-only label calibration, full-horizon purge/embargo, duplicate-window checks, and a frozen tuning budget. |
+| Published LSTM direction classification is a separate model line with logistic regression among its comparators, not evidence for merging CNN and LSTM into one arm. | [Fischer & Krauss (2018)](https://doi.org/10.1016/j.ejor.2017.11.054) | **High on comparison design; Medium on transfer** — the publisher source identifies the models, but its equity universe and period do not establish Chronos results. | **Adopt after D2** as its own multiplicity-counted arm with the same labels, splits, features, and logistic twin. |
+| The archived `Stock-Prediction-Models` project is a notebook/reference zoo rather than a governed reproducibility base. | [First-party repository](https://github.com/huseinzol05/Stock-Prediction-Models) | **High** — GitHub marks it archived and its README presents many example models/agents. | **Reject** as a dependency, benchmark, or evidence source; retain only as an idea index. |
+| Observation-channel attacks on DQN trading policies include one-step delays and bounded, financially coherent perturbations. | [Faghan et al. (2020)](https://arxiv.org/abs/2010.11388) | **Medium for test transfer; Low for quantitative generalization** — the threat shapes are concrete, but the paper studies DQN policies in limited environments, not C1/C2. | **Defer** execution until a model exists; adopt the threat shapes now as non-numeric test cases with no imported pass threshold. |
+| Stock-GAN requires message-level orders, cancellations, quantities, and order-book state; its real-market demonstration is intentionally narrow. | [Stock-GAN (AAAI 2020)](https://ojs.aaai.org/index.php/AAAI/article/view/5415) | **High on the data contract; Low on broad generalization** — required inputs are explicit and the paper frames the market experiment as an initial step. | **Reject for the current wedge**: Chronos has no LOB/tick corpus or HFT event path. Synthetic order flow would not validate broker fills. |
+| Equity-options simulation consumes full strike/maturity surfaces and uses a discrete-local-volatility representation to preserve static no-arbitrage structure. | [Wiese et al. (2019)](https://arxiv.org/abs/1911.01700) | **High on required data; Medium-Low on temporal generalization** — the representation is explicit, while the evaluation uses a random rather than prospective temporal split. | **Defer** to the options/Phase 5 data program; bars-only D2 cannot support it, and synthetic surfaces cannot replace lifecycle or fill evidence. |
+| DeepLOB consumes raw limit-order-book price/size tensors and combines convolutional and recurrent components. | [Zhang, Zohren & Roberts (2018)](https://arxiv.org/abs/1808.03668), [authors' repository](https://github.com/zcakhaa/DeepLOB-Deep-Convolutional-Neural-Networks-for-Limit-Order-Books) | **High** — the paper and first-party repository expose the LOB input contract. | **Reject for current Chronos**: OHLCV cannot reconstruct queue state, fills, latency, or cross-venue semantics. |
+| Replay-based RL is technically possible without a complete simulator, but published examples assume away market impact and depend on a chosen environment/reward contract. | [Théate & Ernst (2020)](https://arxiv.org/abs/2004.06627), [authors' code](https://github.com/ThibautTheate/An-Application-of-Deep-Reinforcement-Learning-to-Algorithmic-Trading) | **High on the limitation** — the paper states the no-impact assumption; that makes replay possible but not broker-realistic. | **Defer**, not categorically reject: revisit only via a separate ADR covering deterministic accounting, costs/slippage, terminal liquidation, seeds/trial counts, reward mismatch, and zero order authority. |
+
+### Action map to exact Chronos gaps
+
+| Timing | What is mined | Gap it addresses or gate it waits on |
+|---|---|---|
+| **Adopt now (research specification only)** | Deterministic twins; training-only transforms/label calibration; chronological walk-forward splits; full-label-horizon purge/embargo; duplicate-window assertions; trial counting across architecture/loss/seed/tuning choices; adversarial input-shape checklist; simulator-fidelity checklist. | Tightens the future preregistration and leakage controls without reading data, running a trial, adding a framework, or advancing a gate. |
+| **Adopt after D2** | C1 plus TSMOM/MACD twins; separately preregistered C2 CNN and LSTM arms plus logistic twin; all using identical certified releases, split manifests, sizing, and Chronos costs. | Waits on the missing certified daily/hourly ETF release, corporate-action reconciliation, session coverage, clean/seen/burned map, and frozen digest. |
+| **Defer** | Adversarial execution tests; options-surface simulation; all RL; GAN augmentation; multi-asset allocation. | Each waits respectively on a trained candidate; real option surfaces/lifecycle capture; a separate environment/authority ADR; demonstrated baseline data need; or Phase 5 cross-asset and sizing governance. |
+| **Reject for the current wedge** | DeepLOB/HFT; notebook-zoo dependency; synthetic streams/surfaces as trial, broker, or promotion evidence. | Chronos lacks message-level LOB/tick state and an HFT event runtime; examples lack Chronos governance; synthetic fidelity cannot prove real costs, fills, edge, or autonomy safety. |
+
+### Concrete experiment and test extractions
+
+- **Cost and turnover:** preregister separate C1 objectives only if selected;
+  charge every arm through the same Chronos commission/spread/slippage model,
+  report turnover alongside post-cost output, and import no paper cost number.
+- **Deterministic baselines:** run TSMOM/MACD before C1 and logistic regression
+  before each C2 architecture using identical release bytes, timestamps,
+  labels, split manifests, sizing, and costs. A neural-only result is invalid.
+- **Leakage and multiplicity:** fit scalers, volatility estimates, feature
+  transforms, and label thresholds inside each training fold; purge/embargo at
+  least the complete frozen label horizon; reject duplicated dates/windows
+  across partitions; count every architecture, loss, seed, feature set, and
+  tuning choice in the append-only registry. The preregistration, not this
+  document, sets numeric thresholds and budgets.
+- **Adversarial stress:** after a candidate exists, replay one-cycle stale,
+  missing, duplicated, reordered, and corrected observations; add bounded
+  OHLC-consistent feature perturbations and model-hash mismatch. Assert
+  deterministic refusal or bounded signal behavior and zero order-authority
+  escalation; freeze pass criteria before execution.
+- **Simulator limits:** any future LOB simulator must reproduce exchange
+  ordering, queue priority, cancels, partial fills, intensity, and spread
+  behavior on untouched regimes. Any future options simulator must enforce
+  calendar/butterfly/spread invariants and pass held-out density, tail,
+  cross-correlation, and autocorrelation diagnostics. Passing those checks is
+  simulator validation only — never strategy edge, broker evidence, or
+  autonomous proof.
