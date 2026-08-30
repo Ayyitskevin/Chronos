@@ -352,9 +352,11 @@ Deliver:
   host lacks `chronyc`, no acceptable threshold or real capture has been supplied, and the
   observer is not an order-authority input. Dedicated no-store `/health/live` and `/health/ready`
   endpoints now map the existing process/service verdicts to HTTP 200/503 without exposing
-  trading capability. Orchestrator deployment/configuration, external monitoring/alerts,
-  watchdogs, dead-man behavior, SLOs, and operational proof remain open. This does not satisfy
-  the Phase 2 exit.
+  trading capability. A default-off, one-shot external observer now consumes the two exact probe
+  endpoints with timeout-constrained credential-free/no-redirect requests, sanitized JSON, and
+  machine exit status; it retains no state and grants no authority. Orchestrator
+  deployment/configuration, outer deadlines, always-on alerts, watchdogs, dead-man behavior,
+  SLOs, and operational proof remain open. This does not satisfy the Phase 2 exit.
 
   **Partial delivery (updated 2026-08-29, through ADR-0045):** the CI release-artifact gate now
   derives a bounded build epoch from exact Git `HEAD`, overrides ambient timestamp input, and builds

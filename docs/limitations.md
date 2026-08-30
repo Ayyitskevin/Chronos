@@ -35,7 +35,10 @@ runbooks.
   a Kubernetes-style readiness probe. Use `/health/live` for process liveness and
   `/health/ready` for operator-service readiness: the latter returns 200 only for `READY` and
   503 for `STARTING` or `NOT_READY`. Neither endpoint says that trading is safe or available.
-  No orchestrator service/configuration or external monitor ships with them.
+  A default-off one-shot external probe client now consumes both exact endpoints with
+  timeout-constrained, credential-free, no-redirect requests and a machine exit status
+  (ADR-0047). It installs no scheduler/service, retains no state, sends no alert, enforces no
+  outer wall-clock deadline, and cannot detect its own silence.
 - The collector makes no broker call. Connection truth is the last sanitized observation
   captured at an existing broker-status seam and becomes unknown on connection uncertainty.
   It is not a substitute for real-gateway monitoring.
@@ -45,9 +48,10 @@ runbooks.
   malformed, local-reference, stale, future, or otherwise uncertain evidence remains `UNKNOWN`.
   The development host has no `chronyc`, so no real synchronization claim exists. The observer
   is display-only and is structurally excluded from order authority; actual submission does not
-  yet consume it. No daemon management, process watchdog, dead-man monitor, off-host alert, or
-  measured availability/RPO/RTO SLO is implemented. Therefore automatic observation is code-
-  mitigated, but operational clock safety and a fully evidenced lane are not proven.
+  yet consume it. No daemon management, process watchdog, dead-man monitor, always-on off-host
+  alert sidecar, or measured availability/RPO/RTO SLO is implemented. Therefore automatic
+  observation is code-mitigated, but operational clock safety and a fully evidenced lane are not
+  proven.
 
 ## Crypto family (built, disabled by default)
 
