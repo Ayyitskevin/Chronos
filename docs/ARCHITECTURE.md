@@ -38,10 +38,13 @@ built and wired through M7.5/ADR-0017: the deterministic gateway, admission and 
 market-local session counters (M5), owner-alert delivery (M6), the time-driven tick
 runtime (M7), and the app-plane wiring that auto-activates a valid
 `AUTONOMY_MANDATE_FILE` on boot (M7.5). See README "Current status" and
-`chronos.api.autonomy_wiring`. Two honest qualifications: **no model worker ships in
-this repository** — `chronos.supervisor.ingress` accepts proposals from a separate
-process, so an unconfigured deployment produces no decisions — and autonomous **live**
-submission is still blocked by the unresolved arming contradiction (open finding 4,
+`chronos.api.autonomy_wiring`. Two honest qualifications. ~~**No model worker ships in
+this repository.**~~ *(Corrected 2026-09-03: it does — `worker/`, ADR-0027 / D-23, D-28 —
+as a separate top-level package and process that imports nothing from `chronos`, proposes
+only through `chronos.supervisor.ingress`, and ships with forwarding off; an unconfigured
+deployment still produces no decisions, because the worker must be run, keyed, and pointed
+at an owner-authored mandate. The ADR's owner gate (§8) remains open.)* And autonomous
+**live** submission is still blocked by the unresolved arming contradiction (open finding 4,
 `docs/VISION_COMPLETION_PLAN.md` §6; details in `docs/live_trading_runbook.md`).
 
 ## Three planes (ADR-0004)

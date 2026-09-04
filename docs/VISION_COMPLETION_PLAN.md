@@ -241,6 +241,12 @@ the live commit and coordinate with any branch already addressing it before edit
 1. Reconciliation readiness is consumed after one opening submission, while a complete
    supervised callback consumer and bounded periodic convergence loop were not found
    (`src/chronos/orders/reconciliation_readiness.py`).
+   **Periodic half observed present 2026-09-03 (status note, not a closure):** a bounded
+   periodic reconciliation task exists (`src/chronos/api/reconciliation_loop.py`, started
+   from the backend lifespan in `src/chronos/api/main.py`) and is exercised by
+   `tests/safety/test_periodic_reconciliation.py`; readiness is still consumed per
+   submission. Whether the callback-consumer half is complete is not asserted here —
+   re-verify against the live commit before closing this finding.
 2. The incident runbook invokes the deterministic-platform halt while the live order plane
    has a separate kill switch (`docs/INCIDENT_RESPONSE.md`,
    `src/chronos/orders/kill_switch.py`).
