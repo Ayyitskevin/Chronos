@@ -33,7 +33,11 @@ from pathlib import Path
 from fastapi import Depends, HTTPException, Request, status
 
 from chronos.supervisor.proposers import ProposerRegistry, load_proposer_registry
-from chronos.utils.secure_files import secure_owner_only
+from chronos.utils.secure_files import (
+    UnsafeAuthorityFile,
+    create_authority_file,
+    read_authority_file,
+)
 from chronos.utils.time import utc_now
 
 _logger = logging.getLogger("chronos.api.auth")
@@ -47,16 +51,42 @@ _PROPOSER_HEADER = "X-Chronos-Proposer-Token"
 
 
 def load_or_create_token(path: Path) -> str:
-    """Return the local API token, generating and securing it on first use."""
+    """Return the local API token, generating it on first use.
 
-    if path.exists():
-        token = path.read_text(encoding="utf-8").strip()
+    The token decides who may drive the order-writing service on this host, so
+    it is read through the descriptor-bound authority-file contract
+    (``chronos.utils.secure_files``): no symlink, a regular file owned by this
+    effective user, exactly 0600, one link, and the bytes read from the same
+    descriptor every check ran against. The previous shape asked
+    ``path.exists()`` and then ``path.read_text()`` — two resolutions of a path
+    an attacker may control between them, following any symlink, and never
+    looking at the mode.
+
+    An unsafe file is **refused, not repaired**. Widening or narrowing a
+    credential's permissions on the operator's behalf hides the fact that
+    something put it in that state; startup fails with a CRITICAL log line
+    naming the file and the fix.
+    """
+
+    try:
+        contents = read_authority_file(path, label="local API token")
+    except FileNotFoundError:
+        contents = None
+    except UnsafeAuthorityFile as error:
+        _logger.critical("Local API token file is unsafe; refusing to start: %s", error)
+        raise
+    if contents is not None:
+        token = contents.data.decode("utf-8", errors="strict").strip()
         if token:
             return token
+        # Present but empty: the file exists in a state no run can have written.
+        # It is already proven safe by the read above (owned, 0600, one link,
+        # not a link), so removing it and creating the token afresh is the same
+        # first-use path rather than an overwrite of anyone's data.
+        _logger.warning("Local API token file %s was empty; regenerating it", path)
+        path.unlink()
     token = secrets.token_hex(_TOKEN_BYTES)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(token + "\n", encoding="utf-8")
-    secure_owner_only(path)
+    create_authority_file(path, token.encode("utf-8") + b"\n", label="local API token")
     return token
 
 
