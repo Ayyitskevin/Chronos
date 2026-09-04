@@ -515,7 +515,16 @@ def test_deeply_nested_valid_hash_payload_fails_closed_without_recursion_error(
     assert entry["record_hash_valid"] is True
     assert entry["receipt_valid"] is False
     assert entry["record_valid"] is False
-    assert "record payload is not valid JSON" in entry["invalid_detail"]
+    # Which refusal fires depends on the interpreter's recursion behaviour, not on
+    # Chronos: CPython 3.12 raises RecursionError inside json.loads at this depth
+    # ("not valid JSON"), while 3.14 parses the 10,000-deep array and the object
+    # check refuses it ("not a JSON object"). Both are the fail-closed outcome the
+    # test exists to prove; the record is invalid either way, and nothing recursed
+    # out of the view. Pinning one string pinned the interpreter, not the property.
+    assert entry["invalid_detail"] in {
+        "record payload is not valid JSON",
+        "record payload is not a JSON object",
+    }
 
 
 def test_oversized_invalid_receipt_is_not_echoed_by_the_bounded_view(
