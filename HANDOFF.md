@@ -24,11 +24,13 @@
   *(Corrected 2026-08-02: this described the M1 build and contradicted this file's own later
   M11 sections.)* The autonomy stack is built and wired through M7.5/ADR-0017 — gateway,
   admission, sizing, durable state, compiler, queue, session counters, alert delivery, tick
-  runtime, and boot-time mandate auto-activation. Two qualifications: **no model worker
-  ships here** (proposals arrive from a separate process via
-  `chronos.supervisor.ingress`), and autonomous **live** submission remains blocked by the
-  open arming contradiction (finding 4, `docs/VISION_COMPLETION_PLAN.md` §6). See
-  `docs/ARCHITECTURE.md` and `docs/live_trading_runbook.md`.
+  runtime, and boot-time mandate auto-activation. Two qualifications. ~~**No model worker
+  ships here.**~~ *(Corrected 2026-09-03: the worker ships — `worker/`, ADR-0027 / D-23 — as
+  a separate process that proposes only through `chronos.supervisor.ingress`, forwarding
+  off by default; its owner gate is still open.)* And autonomous **live** submission
+  remains blocked by the open arming contradiction (finding 4,
+  `docs/VISION_COMPLETION_PLAN.md` §6). See `docs/ARCHITECTURE.md`,
+  `docs/model_worker.md`, and `docs/live_trading_runbook.md`.
 - **Tests:** 1885 passed, 1 credential-gated skip (2026-07-25). `ruff`, `ruff format`, and
   `mypy --strict` clean. CI installs from a hash-verified lockfile.
 
