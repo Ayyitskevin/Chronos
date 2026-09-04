@@ -64,12 +64,19 @@ SEV-1/SEV-2: do not trade (do not rearm) until the incident is explained and doc
      -d '{"reason":"SEV-n: <one line>"}'
    ```
 
-> **The two stop mechanisms fail in OPPOSITE directions — do not assume symmetry.** A
-> missing `data/platform_halt.json` reads as **HALTED** (safe;
-> `src/chronos/control/halt.py:102-109`). A missing `data/live_kill_switch.json` reads as
-> **DISENGAGED** (`src/chronos/orders/kill_switch.py:83-85`) — deleting or failing to
-> restore that file **disarms** the emergency stop. After engaging, confirm the file is
-> present; after any restore, engage it again before starting the backend.
+> **Both stop mechanisms fail closed, but by different routes — and one has a fresh-install
+> exception.** A missing `data/platform_halt.json` reads as **HALTED** unconditionally
+> (`src/chronos/control/halt.py:102-109`). A missing `data/live_kill_switch.json` reads as
+> **ENGAGED** whenever the `data/state_generation.json` marker beside it records that this
+> installation ever wrote one — a deletion, a lost volume, or a restore that omitted the
+> file (`src/chronos/orders/kill_switch.py:108-124`; R-66, ADR-0049, 2026-09-03). Only a
+> genuinely fresh installation, which never materialised the file, still reads
+> **DISENGAGED**.
+>
+> **The marker is what makes that true, so back it up with the state it describes.** Losing
+> the marker *and* the kill-switch file together is indistinguishable from a first boot, and
+> reads DISENGAGED. After engaging, confirm the file is present; after any restore, engage it
+> again before starting the backend.
 2. **Stop making changes.** No code edits, no config edits, no cleanup, until evidence is
    captured.
 

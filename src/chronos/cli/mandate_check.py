@@ -605,9 +605,11 @@ def _review_posture(mandate: AutonomyMandate) -> list[Finding]:
                 "live-mode",
                 "this is a LIVE-capable mandate, and a mandate alone enables nothing: the "
                 "ADR-0009 nine-conjunct settings validation and the ten-gate live stack still "
-                "apply. Note the two stop mechanisms fail in OPPOSITE directions — a missing "
-                "platform halt file reads HALTED, a missing live kill-switch file reads "
-                "DISENGAGED (docs/INCIDENT_RESPONSE.md)",
+                "apply. Note how the two stop mechanisms fail: a missing platform halt file "
+                "reads HALTED, and a missing live kill-switch file reads ENGAGED once this "
+                "installation has written one — only a never-materialised fresh install "
+                "still reads DISENGAGED, so back up the state-generation marker with the "
+                "state it describes (docs/INCIDENT_RESPONSE.md)",
             )
         )
     return findings
