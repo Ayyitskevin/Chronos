@@ -104,6 +104,51 @@ def test_a_lease_verifier_may_not_be_bound_twice() -> None:
         boundary.bind_lease_verifier(lambda: True)
 
 
+def test_the_unbound_sentinel_denies_and_yields_to_the_real_verifier() -> None:
+    """R-64: unbound is a state, and it must be a refusing one.
+
+    `bind_lease_verifier` runs in the backend lifespan, after construction, so a
+    LIVE boundary is briefly -- or permanently, if that lifespan raised first --
+    without a verifier. That state used to skip the pre-transmit re-check
+    entirely. It now carries a sentinel that denies, which startup replaces
+    exactly once; a second bind is still two leases and still refused.
+    """
+
+    from chronos.orders.submission import OrderSubmissionBoundary, _unbound_lease_denies
+
+    assert _unbound_lease_denies() is False
+
+    boundary = object.__new__(OrderSubmissionBoundary)
+    boundary._lease_verifier = _unbound_lease_denies  # type: ignore[attr-defined]
+    boundary.bind_lease_verifier(lambda: True)
+    assert boundary._lease_verifier() is True  # type: ignore[attr-defined]
+    with pytest.raises(RuntimeError):
+        boundary.bind_lease_verifier(lambda: True)
+
+
+def test_a_live_boundary_never_leaves_the_lease_verifier_unset() -> None:
+    """The constructor is the place the sentinel is installed, so read it there.
+
+    The behavioural proof that an unbound LIVE boundary transmits nothing lives in
+    `tests/integration/test_live_submission.py`; this pins the source-level rule
+    that makes it true, so a refactor that drops the install is visible here too.
+    """
+
+    source = (_SRC / "orders" / "submission.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    init = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "__init__"
+    )
+    installs = [
+        node
+        for node in ast.walk(init)
+        if isinstance(node, ast.Name) and node.id == "_unbound_lease_denies"
+    ]
+    assert installs, "the LIVE constructor must install the unbound-lease sentinel"
+
+
 def test_the_backend_lifespan_renews_and_binds_the_verifier() -> None:
     """Structural guard: production wiring must do both halves of R-24.
 
