@@ -31,7 +31,7 @@ from typing import Final
 _REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[1]
 _ENTRY_POINT: Final[tuple[str, str]] = ("chronos", "chronos.app:main")
 _MIGRATION_SUPPORT: Final[tuple[str, ...]] = ("env.py", "script.py.mako")
-_MIGRATION_HEAD: Final[str] = "0010"
+_MIGRATION_HEAD: Final[str] = "0011"
 _CYCLONEDX_SCHEMA: Final[str] = "http://cyclonedx.org/schema/bom-1.6.schema.json"
 _SOURCE_DATE_EPOCH_MINIMUM: Final[int] = 315532800  # 1980-01-01 00:00:00 UTC
 _SOURCE_DATE_EPOCH_MAXIMUM: Final[int] = 4354819199  # 2107-12-31 23:59:59 UTC

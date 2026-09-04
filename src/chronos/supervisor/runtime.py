@@ -98,14 +98,12 @@ MandateSource = Callable[[], AutonomyMandate | None]
 
 @dataclass(frozen=True, slots=True)
 class ResolvedIdentity:
-    """Who a queued proposal is stamped as, or why it cannot be (ADR-0023, A3).
+    """Who a queued proposal is stamped as, or why it cannot be (ADR-0023/0048, A3).
 
     A bare ``HarnessIdentity | None`` was enough while there was one way to fail
-    — the registration was not current. A revoked credential is a different
-    event with a different response (the owner killed this proposer mid-session,
-    on purpose), and a journal that cannot tell the two apart cannot answer the
-    first question of an incident review: was this a credential we killed, or
-    one that simply aged out?
+    — the registration was not current. Revocation, replacement, and a legacy
+    unbound row are distinct events with different owner responses, and a
+    journal that collapses them cannot support incident review.
 
     So the resolver returns its refusal alongside. ``refusal`` and ``detail``
     are ignored when ``identity`` is present, and default to today's values, so
@@ -113,21 +111,25 @@ class ResolvedIdentity:
     """
 
     identity: queue.HarnessIdentity | None = None
+    proposer_credential_epoch: str | None = None
+    proposer_registry_entry_digest: str | None = None
     refusal: str = "PROPOSER_UNRESOLVED"
     detail: str = ""
 
 
 #: Resolves the identity a queued proposal is stamped with (ADR-0023): the
-#: verified proposer_id recorded at enqueue (or ``None`` for pre-registry
-#: rows), judged against the tick's clock and the durable revocation ledger
-#: (A3), to the registration's HarnessIdentity — or to a refusal the cycle
-#: records at the STAMP stage rather than guessing an author.
+#: verified proposer id and immutable ADR-0048 binding recorded at enqueue (or
+#: ``None`` for pre-registry rows), judged against the tick's clock and the
+#: durable revocation ledger (A3), to the registration's HarnessIdentity — or
+#: to a refusal the cycle records at STAMP rather than guessing an author.
 #:
 #: The session is passed in because revocation is durable state read at the
 #: moment authority is exercised, and the tick already holds the transaction it
 #: must be read in: a resolver that opened its own would be reading a different
 #: instant than the one it is judging.
-IdentityResolver = Callable[[Session, str | None, datetime], ResolvedIdentity]
+IdentityResolver = Callable[
+    [Session, str | None, str | None, str | None, datetime], ResolvedIdentity
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -409,12 +411,41 @@ class AutonomyRuntime:
                         # still a boot-time snapshot for everything else: file edits
                         # such as disabling an entry are honored at the next restart;
                         # see build_identity_resolver.)
-                        resolved = self._resolve_identity(session, item.proposer_id, facts.now)
+                        resolved = self._resolve_identity(
+                            session,
+                            item.proposer_id,
+                            item.proposer_credential_epoch,
+                            item.proposer_registry_entry_digest,
+                            facts.now,
+                        )
+                    elif any(
+                        marker is not None
+                        for marker in (
+                            item.proposer_id,
+                            item.proposer_credential_epoch,
+                            item.proposer_registry_entry_digest,
+                        )
+                    ):
+                        # ADR-0048: removing the registry at restart cannot
+                        # convert previously authenticated work into the static
+                        # legacy posture. Only a genuinely all-NULL pre-registry
+                        # row may use that identity until S3 retires it above
+                        # SHADOW.
+                        resolved = ResolvedIdentity(
+                            refusal="PROPOSER_REGISTRY_REMOVED",
+                            detail=(
+                                "the proposal records registered authentication but this "
+                                "runtime has no proposer registry; authority cannot be "
+                                "downgraded to the static legacy identity"
+                            ),
+                        )
                     outcome = run_cycle(
                         item.payload,
                         session=session,
                         mandate=mandate,
                         identity=resolved.identity,
+                        proposer_credential_epoch=resolved.proposer_credential_epoch,
+                        proposer_registry_entry_digest=resolved.proposer_registry_entry_digest,
                         identity_refusal=resolved.refusal,
                         identity_detail=resolved.detail,
                         facts=facts,

@@ -373,6 +373,8 @@ def test_v8_database_gains_the_evidence_bundle_table_and_keeps_its_rows(tmp_path
         "account_fingerprint",
         "bundle_id",
         "proposer_id",
+        "proposer_credential_epoch",
+        "proposer_registry_entry_digest",
         "kind",
         "digest",
         "bundle_version",
@@ -520,6 +522,95 @@ def test_v10_database_gains_managed_position_bindings_empty(tmp_path: Path) -> N
             sa.text("SELECT version FROM schema_version ORDER BY id DESC LIMIT 1")
         ).scalar()
     engine.dispose()
+    assert version == SCHEMA_VERSION
+
+    database = Database(f"sqlite:///{db_path}")
+    try:
+        database.initialize()
+    finally:
+        database.dispose()
+
+
+def test_v11_database_gains_credential_bindings_without_relabelling_rows(
+    tmp_path: Path,
+) -> None:
+    """Migration 0011 preserves old work as explicitly unbound.
+
+    This fixture removes the four columns from current metadata to construct the
+    true pre-0011 shapes. Inferring their values from the registry during an
+    upgrade would let whichever credential currently reuses a proposer id adopt
+    historical authority, so the only conservative migration value is NULL.
+    """
+
+    db_path = tmp_path / "chronos.db"
+    engine = sa.create_engine(f"sqlite:///{db_path}")
+    Base.metadata.create_all(engine)
+    with engine.begin() as connection:
+        for table in ("autonomy_proposal_queue", "autonomy_evidence_bundles"):
+            connection.execute(
+                sa.text(f"ALTER TABLE {table} DROP COLUMN proposer_credential_epoch")
+            )
+            connection.execute(
+                sa.text(f"ALTER TABLE {table} DROP COLUMN proposer_registry_entry_digest")
+            )
+        connection.execute(
+            sa.text(
+                "INSERT INTO autonomy_proposal_queue "
+                "(account_fingerprint, payload, received_at, status, cycle_stage, refusal, "
+                "proposer_id) VALUES ('f', '{\"kind\":\"HOLD\"}', "
+                "'2026-01-01 00:00:00.000000', 'PENDING', '', '', 'claude-worker')"
+            )
+        )
+        connection.execute(
+            sa.text(
+                "INSERT INTO autonomy_evidence_bundles "
+                "(account_fingerprint, bundle_id, proposer_id, kind, digest, bundle_version, "
+                "issued_at, expires_at) VALUES ('f', 'evb_old', 'claude-worker', "
+                "'backend_served', :digest, '1', '2026-01-01 00:00:00.000000', "
+                "'2030-01-01 00:00:00.000000')"
+            ),
+            {"digest": "d" * 64},
+        )
+        for version in range(2, 12):
+            connection.execute(
+                sa.text(
+                    "INSERT INTO schema_version (version, applied_at) "
+                    f"VALUES ({version}, '2026-01-01 00:00:00.000000')"
+                )
+            )
+    engine.dispose()
+
+    config = _alembic_config(db_path)
+    command.stamp(config, "0010")
+    command.upgrade(config, "head")
+
+    engine = sa.create_engine(f"sqlite:///{db_path}")
+    inspector = sa.inspect(engine)
+    for table in ("autonomy_proposal_queue", "autonomy_evidence_bundles"):
+        columns = {column["name"]: column for column in inspector.get_columns(table)}
+        for name in ("proposer_credential_epoch", "proposer_registry_entry_digest"):
+            assert name in columns
+            assert columns[name]["nullable"] is True
+    with engine.connect() as connection:
+        proposal = connection.execute(
+            sa.text(
+                "SELECT payload, proposer_id, proposer_credential_epoch, "
+                "proposer_registry_entry_digest FROM autonomy_proposal_queue"
+            )
+        ).one()
+        bundle = connection.execute(
+            sa.text(
+                "SELECT bundle_id, proposer_id, digest, proposer_credential_epoch, "
+                "proposer_registry_entry_digest FROM autonomy_evidence_bundles"
+            )
+        ).one()
+        version = connection.execute(
+            sa.text("SELECT version FROM schema_version ORDER BY id DESC LIMIT 1")
+        ).scalar()
+    engine.dispose()
+
+    assert proposal == ('{"kind":"HOLD"}', "claude-worker", None, None)
+    assert bundle == ("evb_old", "claude-worker", "d" * 64, None, None)
     assert version == SCHEMA_VERSION
 
     database = Database(f"sqlite:///{db_path}")

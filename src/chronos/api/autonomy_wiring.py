@@ -322,14 +322,15 @@ def classify_submission_outcome(outcome: SubmissionOutcome) -> HandoffResult:
 
 def build_identity_resolver(
     settings_path: Path | None,
-) -> Callable[[Session, str | None, datetime], ResolvedIdentity] | None:
+) -> Callable[[Session, str | None, str | None, str | None, datetime], ResolvedIdentity] | None:
     """The per-proposal identity resolver, or None for the pre-registry posture.
 
-    ADR-0023: identity comes from which credential authenticated. The route
-    records the verified proposer_id on the queue row; this resolver turns it
-    back into the registration's identity at drain time — re-checking currency
-    against the drain's clock, so a registration that EXPIRED between enqueue
-    and drain refuses at the moment authority is exercised. Be precise about
+    ADR-0023/ADR-0048: identity comes from which exact credential authenticated.
+    The route records the verified proposer id, credential epoch, and complete
+    entry digest on the queue row; this resolver requires that immutable binding
+    before reconstructing identity at drain — re-checking currency against the
+    drain's clock, so a registration that EXPIRED between enqueue and drain
+    refuses at the moment authority is exercised. Be precise about
     what "currency" means here: the registry itself is read once, at wiring
     time, exactly like the mandate file — so disabling or deleting a
     registration in the file takes effect at the next backend restart, not
@@ -338,11 +339,11 @@ def build_identity_resolver(
     and a restart.
 
     Fail-closed by shape: with a registry configured, EVERY path that cannot
-    positively resolve — a pre-registry row, an unknown id, a disabled or
-    expired registration, an unreadable file — returns None, which the cycle
-    records as a STAMP-stage refusal. A configured-but-broken registry never
-    falls back to the static identity, because that would let a file error
-    silently reopen anonymous proposing.
+    positively resolve — a pre-registry or legacy-unbound row, an unknown id, a
+    replaced, disabled or expired registration, an unreadable file — returns no
+    identity, which the cycle records as a STAMP-stage refusal. A
+    configured-but-broken registry never falls back to the static identity,
+    because that would let a file error silently reopen anonymous proposing.
     """
 
     if settings_path is None:
@@ -356,7 +357,11 @@ def build_identity_resolver(
         )
 
         def _refuse_all(
-            session: Session, proposer_id: str | None, now: datetime
+            session: Session,
+            proposer_id: str | None,
+            proposer_credential_epoch: str | None,
+            proposer_registry_entry_digest: str | None,
+            now: datetime,
         ) -> ResolvedIdentity:
             return ResolvedIdentity(
                 refusal="PROPOSER_REGISTRY_INVALID",
@@ -376,7 +381,13 @@ def build_identity_resolver(
         extra={"event": "autonomy_proposers_loaded"},
     )
 
-    def _resolve(session: Session, proposer_id: str | None, now: datetime) -> ResolvedIdentity:
+    def _resolve(
+        session: Session,
+        proposer_id: str | None,
+        proposer_credential_epoch: str | None,
+        proposer_registry_entry_digest: str | None,
+        now: datetime,
+    ) -> ResolvedIdentity:
         if proposer_id is None:
             # A row enqueued under the pre-registry posture, met by a
             # registry-on runtime: refusing beats stamping the static identity
@@ -388,31 +399,57 @@ def build_identity_resolver(
                     "with the static identity the owner has since replaced"
                 )
             )
-        registration = registry.find(proposer_id)
-        if registration is None or not registration.is_current(now):
+        if proposer_credential_epoch is None or proposer_registry_entry_digest is None:
             return ResolvedIdentity(
+                refusal="PROPOSER_REGISTRATION_UNBOUND",
                 detail=(
-                    "the proposal's credential does not resolve to a current registered "
-                    "proposer, so identity cannot be stamped; re-registering or renewing "
-                    "the proposer is an owner act"
-                )
+                    "the proposal predates immutable registration binding, so its credential "
+                    "epoch cannot be inferred from current configuration"
+                ),
             )
-        # A3: the durable ledger, read inside the tick's own transaction. The
-        # registry snapshot cannot know about a credential the owner killed
-        # after boot, and "after boot" is when leaks are discovered.
-        if revocation.is_revoked(session, secret_sha256=registration.secret_sha256):
+        # A3/ADR-0048: ask about the exact persisted credential before looking
+        # up today's entry by reusable id. Rotation must not hide that the owner
+        # revoked the credential which authenticated this queued work.
+        if revocation.is_revoked(session, secret_sha256=proposer_credential_epoch):
             _logger.warning(
                 "Refused a revoked proposer at STAMP: %s",
-                registration.proposer_id,
+                proposer_id,
                 extra={"event": "proposer_revoked_refused"},
             )
             return ResolvedIdentity(
                 refusal="PROPOSER_REVOKED",
                 detail=(
-                    f"the credential registered to {registration.proposer_id} was revoked by "
-                    "the owner; revocation is permanent for that credential, and re-granting "
-                    "means minting a new one and restarting"
+                    f"the credential epoch recorded for {proposer_id} was revoked by the "
+                    "owner; revocation is permanent for that credential, and queued work "
+                    "does not transfer to a replacement"
                 ),
+            )
+        registration = registry.find(proposer_id)
+        if registration is None:
+            return ResolvedIdentity(
+                detail=(
+                    "the proposal's registered proposer is missing from the current registry, "
+                    "so identity cannot be stamped; re-registering is an owner act"
+                )
+            )
+        current_binding = proposers.registration_binding(registration)
+        if (
+            current_binding.credential_epoch != proposer_credential_epoch
+            or current_binding.registry_entry_digest != proposer_registry_entry_digest
+        ):
+            return ResolvedIdentity(
+                refusal="PROPOSER_REGISTRATION_REPLACED",
+                detail=(
+                    "the proposal was authenticated under a different credential epoch or "
+                    "registry entry; queued authority does not transfer across replacement"
+                ),
+            )
+        if not registration.is_current(now):
+            return ResolvedIdentity(
+                detail=(
+                    "the proposal's exact registration is disabled or expired, so identity "
+                    "cannot be stamped; re-registering or renewing the proposer is an owner act"
+                )
             )
         return ResolvedIdentity(
             identity=queue.HarnessIdentity(
@@ -426,7 +463,9 @@ def build_identity_resolver(
                 proposer_id=registration.proposer_id,
                 evidence_bundle_id=INGRESS_IDENTITY.evidence_bundle_id,
                 evidence_bundle_digest=INGRESS_IDENTITY.evidence_bundle_digest,
-            )
+            ),
+            proposer_credential_epoch=proposer_credential_epoch,
+            proposer_registry_entry_digest=proposer_registry_entry_digest,
         )
 
     return _resolve

@@ -57,14 +57,14 @@ import logging
 from datetime import datetime
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 
 from chronos.api import bars as bar_plane
 from chronos.api.auth import require_proposer, require_token
 from chronos.api.dependencies import BackendState, require_writer
 from chronos.domain.models import ChronosModel
 from chronos.marketdata.bars import BarInterval
-from chronos.supervisor import evidence_bundles, evidence_kinds, ingress
+from chronos.supervisor import evidence_bundles, evidence_kinds, ingress, proposers
 from chronos.terminal import views
 from chronos.utils.identifiers import account_fingerprint
 from chronos.utils.time import utc_now
@@ -93,6 +93,40 @@ ProposerDep = Annotated[str | None, Depends(require_proposer)]
 #: The ingress has its own bound; this one stops a large body being read into
 #: memory by the server at all.
 MAX_BODY_BYTES = ingress.MAX_PAYLOAD_BYTES
+
+
+def _registration_binding_of(
+    request: Request, proposer_id: str | None, *, now: datetime
+) -> proposers.RegistrationBinding | None:
+    """Recover the exact entry already authenticated by ``require_proposer``.
+
+    The dependency and this route read the same frozen, boot-scoped registry
+    object. Looking up its unique id is therefore recovery of the matched entry,
+    not a second mutable resolution. Any impossible app-state disagreement
+    refuses before a queue or bundle row is written.
+    """
+
+    auth = getattr(request.app.state, "proposer_auth", None)
+    if proposer_id is None:
+        if auth is not None and getattr(auth, "configured", False):
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="authenticated proposer state is inconsistent; no work was recorded",
+            )
+        return None
+    registry = getattr(auth, "registry", None)
+    if auth is None or not getattr(auth, "configured", False) or registry is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="authenticated proposer state is unavailable; no work was recorded",
+        )
+    registration = registry.find(proposer_id)
+    if registration is None or not registration.is_current(now):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="authenticated proposer state changed; no work was recorded",
+        )
+    return proposers.registration_binding(registration)
 
 
 class ProposalAccepted(ChronosModel):
@@ -171,6 +205,8 @@ async def submit_proposal(
     from chronos.supervisor import proposals as proposal_queue
     from chronos.utils.time import utc_now
 
+    now = utc_now()
+    binding = _registration_binding_of(request, proposer_id, now=now)
     with runtime.database.sessions.begin() as db_session:
         # `proposer_id` is what the credential check verified, never anything
         # the payload said (ADR-0023). Recording it on the queue row is what
@@ -180,8 +216,10 @@ async def submit_proposal(
             db_session,
             account_fingerprint=fingerprint,
             payload=body.decode("utf-8"),
-            now=utc_now(),
+            now=now,
             proposer_id=proposer_id,
+            proposer_credential_epoch=binding.credential_epoch if binding else None,
+            proposer_registry_entry_digest=binding.registry_entry_digest if binding else None,
         )
     if not queued.queued:
         # 429: the queue is a load condition the worker should back off from,
@@ -381,12 +419,20 @@ async def issue_evidence(
         digest = request.digest.strip().lower()
 
     now = utc_now()
+    binding = _registration_binding_of(http_request, proposer_id, now=now)
+    if binding is None:  # guarded above; retained as a fail-closed type/runtime assertion
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="authenticated proposer binding is unavailable; no evidence was recorded",
+        )
     try:
         with runtime.database.sessions.begin() as db_session:
             issued = evidence_bundles.issue(
                 db_session,
                 account_fingerprint=fingerprint,
                 proposer_id=proposer_id,
+                proposer_credential_epoch=binding.credential_epoch,
+                proposer_registry_entry_digest=binding.registry_entry_digest,
                 kind=kind,
                 digest=digest,
                 now=now,

@@ -58,7 +58,11 @@ from chronos.api.autonomy_wiring import build_identity_resolver
 from chronos.persistence.database import Database
 from chronos.persistence.schema import AutonomyProposerRevocationRow, HashChainRow
 from chronos.supervisor import revocation
-from chronos.supervisor.proposers import credential_hash
+from chronos.supervisor.proposers import (
+    ProposerRegistration,
+    credential_hash,
+    registration_binding,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -107,6 +111,11 @@ def _registration(
 
 def _registry_text(*entries: dict[str, Any]) -> str:
     return json.dumps({"schema_version": 1, "proposers": list(entries)})
+
+
+def _binding_values(entry: dict[str, Any]) -> tuple[str, str]:
+    binding = registration_binding(ProposerRegistration.model_validate(entry))
+    return binding.credential_epoch, binding.registry_entry_digest
 
 
 @pytest.fixture
@@ -476,14 +485,14 @@ def test_a_queued_proposal_refuses_at_stamp_with_its_own_code(
     """
 
     registry_path = tmp_path / "proposers.json"
-    registry_path.write_text(
-        _registry_text(_registration("claude-worker", WORKER_CREDENTIAL)), encoding="utf-8"
-    )
+    entry = _registration("claude-worker", WORKER_CREDENTIAL)
+    registry_path.write_text(_registry_text(entry), encoding="utf-8")
     resolve = build_identity_resolver(registry_path)
     assert resolve is not None
+    epoch, digest = _binding_values(entry)
 
     with sessions.begin() as session:
-        before = resolve(session, "claude-worker", _NOW)
+        before = resolve(session, "claude-worker", epoch, digest, _NOW)
     assert before.identity is not None, "the registration must resolve before revocation"
 
     with sessions.begin() as session:
@@ -496,7 +505,7 @@ def test_a_queued_proposal_refuses_at_stamp_with_its_own_code(
         )
 
     with sessions.begin() as session:
-        after = resolve(session, "claude-worker", _NOW)
+        after = resolve(session, "claude-worker", epoch, digest, _NOW)
     assert after.identity is None, "a revoked credential must not resolve to an author"
 
 
@@ -512,11 +521,11 @@ def test_the_revoked_stamp_refusal_names_itself(
     """
 
     registry_path = tmp_path / "proposers.json"
-    registry_path.write_text(
-        _registry_text(_registration("claude-worker", WORKER_CREDENTIAL)), encoding="utf-8"
-    )
+    entry = _registration("claude-worker", WORKER_CREDENTIAL)
+    registry_path.write_text(_registry_text(entry), encoding="utf-8")
     resolve = build_identity_resolver(registry_path)
     assert resolve is not None
+    epoch, digest = _binding_values(entry)
     with sessions.begin() as session:
         revocation.revoke(
             session,
@@ -526,12 +535,41 @@ def test_the_revoked_stamp_refusal_names_itself(
             now=_NOW,
         )
     with sessions.begin() as session:
-        refused = resolve(session, "claude-worker", _NOW)
+        refused = resolve(session, "claude-worker", epoch, digest, _NOW)
 
     assert refused.refusal == "PROPOSER_REVOKED"
     assert refused.refusal != "PROPOSER_UNRESOLVED"
     assert "revoked by the owner" in refused.detail
     assert "permanent" in refused.detail
+
+
+def test_same_id_rotation_cannot_hide_the_queued_credentials_revocation(
+    tmp_path: Path, sessions: sessionmaker[Session]
+) -> None:
+    """Drain asks about the stored epoch before resolving the reusable id."""
+
+    old_entry = _registration("claude-worker", WORKER_CREDENTIAL)
+    old_epoch, old_digest = _binding_values(old_entry)
+    registry_path = tmp_path / "proposers.json"
+    registry_path.write_text(
+        _registry_text(_registration("claude-worker", REMINTED_CREDENTIAL)),
+        encoding="utf-8",
+    )
+    resolve = build_identity_resolver(registry_path)
+    assert resolve is not None
+    with sessions.begin() as session:
+        revocation.revoke(
+            session,
+            proposer_id="claude-worker",
+            secret_sha256=old_epoch,
+            reason="credential leaked before rotation",
+            now=_NOW,
+        )
+        refused = resolve(session, "claude-worker", old_epoch, old_digest, _NOW)
+
+    assert refused.identity is None
+    assert refused.refusal == "PROPOSER_REVOKED"
+    assert "does not transfer to a replacement" in refused.detail
 
 
 def test_the_stamp_refusal_reaches_the_journal(

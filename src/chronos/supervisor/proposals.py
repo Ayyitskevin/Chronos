@@ -22,9 +22,10 @@ queue is where those two clocks meet.
   the process that holds the broker connection. Past the cap, enqueueing
   refuses — the newest proposal is dropped rather than the oldest, because
   dropping the oldest would let a flood erase a legitimate earlier proposal.
-- **Queued is not authorized.** A row here means *received*. Everything that
-  decides whether it may become an order happens later, in gates the enqueuing
-  caller cannot reach.
+- **Queued is not authorized.** A row here means *received*. Registered rows
+  retain the exact credential epoch and registry-entry digest that arrived;
+  everything that decides whether they remain current or may become an order
+  happens later, in gates the enqueuing caller cannot reach.
 """
 
 from __future__ import annotations
@@ -56,6 +57,10 @@ class QueuedProposal:
     #: ``None`` for a row accepted under the pre-registry posture. Written from
     #: the verified match, never from the payload.
     proposer_id: str | None = None
+    #: Immutable credential/registration facts captured with ``proposer_id``.
+    #: NULL marks a legacy or pre-registry row and is never inferred later.
+    proposer_credential_epoch: str | None = None
+    proposer_registry_entry_digest: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +94,8 @@ def enqueue(
     payload: str,
     now: datetime,
     proposer_id: str | None = None,
+    proposer_credential_epoch: str | None = None,
+    proposer_registry_entry_digest: str | None = None,
 ) -> EnqueueOutcome:
     """Accept a proposal for later judging, or refuse because the queue is full.
 
@@ -97,6 +104,23 @@ def enqueue(
     gets the depth back so a worker can back off on its own rather than
     hammering a queue it cannot see.
     """
+
+    binding = (proposer_credential_epoch, proposer_registry_entry_digest)
+    if proposer_id is None and binding != (None, None):
+        raise ValueError("an unauthenticated proposal cannot carry a registration binding")
+    if proposer_id is not None:
+        for label, value in zip(
+            ("credential epoch", "registry entry digest"), binding, strict=True
+        ):
+            if (
+                value is None
+                or len(value) != 64
+                or any(character not in "0123456789abcdef" for character in value)
+            ):
+                raise ValueError(
+                    f"a registered proposal's {label} must be a 64-character lowercase "
+                    "SHA-256 digest"
+                )
 
     depth = pending_depth(session, account_fingerprint=account_fingerprint)
     if depth >= MAX_PENDING:
@@ -117,6 +141,8 @@ def enqueue(
         cycle_stage="",
         refusal="",
         proposer_id=proposer_id,
+        proposer_credential_epoch=proposer_credential_epoch,
+        proposer_registry_entry_digest=proposer_registry_entry_digest,
     )
     session.add(row)
     session.flush()
@@ -149,6 +175,8 @@ def claim_batch(
             payload=row.payload,
             received_at=row.received_at,
             proposer_id=row.proposer_id,
+            proposer_credential_epoch=row.proposer_credential_epoch,
+            proposer_registry_entry_digest=row.proposer_registry_entry_digest,
         )
         for row in rows
     )

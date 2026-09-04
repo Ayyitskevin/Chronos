@@ -48,10 +48,11 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import logging
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -70,6 +71,20 @@ def credential_hash(credential: str) -> str:
     """The only form of a credential the registry ever stores or compares."""
 
     return hashlib.sha256(credential.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class RegistrationBinding:
+    """Immutable identifiers for the exact registration that authenticated.
+
+    ``credential_epoch`` is the already non-secret credential hash used by the
+    revocation ledger. ``registry_entry_digest`` additionally binds every
+    owner-authored identity/version/expiry field, so changing a registration
+    without rotating its credential still invalidates outstanding work.
+    """
+
+    credential_epoch: str
+    registry_entry_digest: str
 
 
 class ProposerRegistration(BaseModel):
@@ -123,6 +138,33 @@ class ProposerRegistration(BaseModel):
         """Enabled and unexpired. Everything else about authority lives elsewhere."""
 
         return self.enabled and now < self.expires_at
+
+
+def registration_binding(registration: ProposerRegistration) -> RegistrationBinding:
+    """Bind durable work to one complete validated registry entry.
+
+    The domain and registry schema version make the encoding explicit and
+    evolvable. Canonical JSON prevents key order or whitespace from changing
+    the digest of semantically identical validated registrations.
+    """
+
+    registration_document = registration.model_dump(mode="json")
+    registration_document["expires_at"] = registration.expires_at.astimezone(UTC).isoformat()
+    canonical = json.dumps(
+        {
+            "domain": "chronos.proposer-registration.v1",
+            "registry_schema_version": SCHEMA_VERSION,
+            "registration": registration_document,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return RegistrationBinding(
+        credential_epoch=registration.secret_sha256,
+        registry_entry_digest=hashlib.sha256(canonical).hexdigest(),
+    )
 
 
 class ProposerRegistry(BaseModel):

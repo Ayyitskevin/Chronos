@@ -342,6 +342,8 @@ def run_cycle(
     submit: Handoff | None = None,
     gather_instrument: InstrumentGatherer | None = None,
     bind_evidence: bool = False,
+    proposer_credential_epoch: str | None = None,
+    proposer_registry_entry_digest: str | None = None,
     identity_refusal: str = "PROPOSER_UNRESOLVED",
     identity_detail: str = "",
 ) -> CycleOutcome:
@@ -359,9 +361,9 @@ def run_cycle(
     ``bind_evidence`` is ADR-0028's posture switch, and ``False`` is today's
     behavior verbatim: the expectation comes from ``CycleFacts`` and check 9
     compares the constant against itself, as it has since M2. ``True`` requires
-    every proposal to cite an evidence bundle this backend issued to *this*
-    proposer and has not expired — resolved here, at the drain, against the
-    drain's own clock.
+    every proposal to cite an evidence bundle this backend issued to this exact
+    credential epoch and registry entry and has not expired — resolved here, at
+    the drain, against the drain's own clock.
     """
 
     # --- ingress -----------------------------------------------------------
@@ -420,6 +422,8 @@ def run_cycle(
             account_fingerprint=facts.account_fingerprint,
             cited_ids=tuple(citation.evidence_id for citation in proposal.evidence),
             proposer_id=identity.proposer_id,
+            proposer_credential_epoch=proposer_credential_epoch,
+            proposer_registry_entry_digest=proposer_registry_entry_digest,
             now=facts.now,
         )
         if resolution.bundle is None:
