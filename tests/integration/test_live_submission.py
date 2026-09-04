@@ -170,7 +170,14 @@ class _CannedEvidence:
 
 
 class _LiveHarness:
-    def __init__(self, broker: LiveSpyBroker, settings: Settings, tmp_path: Path) -> None:
+    def __init__(
+        self,
+        broker: LiveSpyBroker,
+        settings: Settings,
+        tmp_path: Path,
+        *,
+        bind_lease: bool = True,
+    ) -> None:
         self.broker = broker
         self.settings = settings
         self.clock = _Clock(FIXED_NOW)
@@ -213,6 +220,14 @@ class _LiveHarness:
             clock=self.clock,
             reconciliation_readiness=self.readiness,
         )
+        # Production binds the lease verifier in the backend lifespan
+        # (chronos/api/main.py); the harness mirrors that, and the R-24 tests
+        # steer the two flags below instead of binding their own. `bind_lease=False`
+        # is the unbound boundary R-64 refuses.
+        self.lease_holds = True
+        self.lease_error: Exception | None = None
+        if bind_lease:
+            self.boundary.bind_lease_verifier(self._verify_lease)
         self.service = OrderManagementService(
             settings=settings,
             environment=IBEnvironment.LIVE,
@@ -248,6 +263,13 @@ class _LiveHarness:
             risk_decisions=risk_decisions,
             broker_environment_is_paper=False,
         )
+
+    def _verify_lease(self) -> bool:
+        """Stand in for the backend lifespan's `WriterLease.holds()` call."""
+
+        if self.lease_error is not None:
+            raise self.lease_error
+        return self.lease_holds
 
     def _read_quote(self, intent: WheelOrderIntent) -> MarketQuote | None:
         if self.quote_reader_error is not None:
@@ -917,7 +939,7 @@ def test_a_lost_lease_refuses_at_the_transmit_boundary(live: _LiveHarness) -> No
     """The split-brain case: this process lost the lease mid-submission."""
 
     live.arm()
-    live.boundary.bind_lease_verifier(lambda: False)
+    live.lease_holds = False
     intent = _live_intent()
     _confirmed(live, intent)
     outcome = _submit(live, intent)
@@ -938,11 +960,8 @@ def test_an_unverifiable_lease_fails_closed_at_the_transmit_boundary(
     recorded. A lease we cannot verify is a lease we do not have.
     """
 
-    def _explode() -> bool:
-        raise RuntimeError("database unavailable during the CAS-to-transmit window")
-
     live.arm()
-    live.boundary.bind_lease_verifier(_explode)
+    live.lease_error = RuntimeError("database unavailable during the CAS-to-transmit window")
     intent = _live_intent()
     _confirmed(live, intent)
     outcome = _submit(live, intent)
@@ -958,9 +977,34 @@ def test_a_held_lease_still_transmits(live: _LiveHarness) -> None:
     """
 
     live.arm()
-    live.boundary.bind_lease_verifier(lambda: True)
     intent = _live_intent()
     _confirmed(live, intent)
     outcome = _submit(live, intent)
     assert outcome.submitted is True  # type: ignore[attr-defined]
     assert len(live.broker.submit_calls) == 1
+
+
+def test_a_live_boundary_with_no_bound_lease_verifier_transmits_nothing(
+    tmp_path: Path,
+) -> None:
+    """R-64 / P1-03: the unbound boundary is the case nobody exercised.
+
+    Every test above binds a verifier and production binds one in the backend
+    lifespan, so the gate was only ever measured in its bound state. Unbound, the
+    pre-transmit re-check was skipped outright and a LIVE order went to the venue
+    with no ownership evidence at all. The assertion that matters is the spy: a
+    refusal code alone would still pass if the order had already been sent.
+    """
+
+    harness = _LiveHarness(LiveSpyBroker(), live_settings(), tmp_path, bind_lease=False)
+    try:
+        harness.arm()
+        intent = _live_intent()
+        _confirmed(harness, intent)
+        outcome = _submit(harness, intent)
+        _assert_refused(harness, outcome, SubmissionRefusalCode.READ_ONLY_LEASE)
+        assert harness.broker.submit_calls == []
+        stored = harness.service.get("live-1")
+        assert stored is not None and stored.status is not OrderLifecycle.SUBMISSION_UNKNOWN
+    finally:
+        harness.close()

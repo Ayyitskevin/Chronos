@@ -134,6 +134,19 @@ def _tick_conforms(limit_price: Decimal, min_tick: Decimal) -> bool:
     return limit_price % min_tick == 0
 
 
+def _unbound_lease_denies() -> bool:
+    """The verifier a LIVE boundary carries until startup binds the real one (R-64).
+
+    ``bind_lease_verifier`` runs in the backend lifespan, so between construction
+    and that call -- or forever, if the lifespan raised first, or a future wiring
+    change forgot -- a LIVE boundary has no lease check at all. It used to submit
+    anyway. A lease nobody can verify is a lease we do not hold, so the unbound
+    state refuses and the refusal is provably not-sent, exactly like a lost lease.
+    """
+
+    return False
+
+
 class OrderSubmissionBoundary:
     """Fail-closed gate chains culminating in the sole ``transmit=True`` site.
 
@@ -189,6 +202,13 @@ class OrderSubmissionBoundary:
         # that fakes and the demo path need not supply one; production wiring
         # always does, and a structural test asserts that it does.
         self._lease_verifier = lease_verifier
+        if settings.ib_environment is IBEnvironment.LIVE and self._lease_verifier is None:
+            # R-64: a LIVE boundary whose verifier was never bound used to skip the
+            # pre-transmit re-check entirely -- `if self._lease_verifier is not
+            # None` -- and transmit. Binding happens in the backend lifespan, after
+            # construction, so requiring a verifier here would refuse the legitimate
+            # wiring order; the unbound state denies instead.
+            self._lease_verifier = _unbound_lease_denies
 
     def bind_lease_verifier(self, verifier: Callable[[], bool]) -> None:
         """Attach the live single-writer ownership check (R-24).
@@ -200,7 +220,10 @@ class OrderSubmissionBoundary:
         precisely the condition this exists to detect.
         """
 
-        if self._lease_verifier is not None:
+        already_bound = (
+            self._lease_verifier is not None and self._lease_verifier is not _unbound_lease_denies
+        )
+        if already_bound:
             raise RuntimeError("a lease verifier is already bound to this submission boundary")
         self._lease_verifier = verifier
 
