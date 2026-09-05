@@ -89,10 +89,12 @@ def test_the_pending_blocker_pin_matches_production() -> None:
 
 #: PINNED, not imported. This is the EXPECTED OUTPUT of the compiler: the assertion below
 #: compares the blocker codes a compiled cell actually carries against these. Production
-#: builds those blockers FROM ``_REQUIRED_CELL_PENDING_CODES``, so importing it would turn
-#: that assertion into "the output equals the input that produced it" — true by
-#: construction and worth nothing. ``test_the_pending_blocker_pin_matches_production``
-#: keeps the copy honest instead.
+#: VALIDATES those blockers against ``_REQUIRED_CELL_PENDING_CODES`` — a pending cell whose
+#: codes do not match it exactly is refused with ``ABLATION_POLICY_INVALID`` — so importing
+#: it would compare the output against the very set that already guarantees the output.
+#: True by construction, and worth nothing, exactly as it would be if the compiler built
+#: the blockers from that mapping rather than checking them against it.
+#: ``test_the_pending_blocker_pin_matches_production`` keeps the copy honest instead.
 _PENDING_BLOCKERS_BY_CELL = {
     "5t-trend-directional-paired": {
         "unrepresentable_ablation",
