@@ -24,6 +24,40 @@ set -uo pipefail
 
 readonly SELF="${0##*/}"
 
+# §6.3's patch comparison, and the reason it exists.
+#
+# Byte equality is the right first question: it asks whether the merged file IS the reviewed
+# file. But it answers "no" for a reason that is not a defect — an unrelated PR landing in the
+# same file between review and merge moves this branch's hunks without changing them, and the
+# merged file then differs from the reviewed one everywhere the neighbour touched. #185 hit
+# exactly that on cli/main.py, where #184's hunks landed beside it.
+#
+# So when byte equality breaks, compare the PATCHES instead: what the PR changed, against what
+# the merge commit changed. `index` lines are blob hashes and `@@` lines are coordinates; both
+# move under a rebase without the content moving, so both are stripped.
+#
+# `-U0` is why the neighbour may land NEAR these hunks and not only elsewhere in the file. With
+# context lines included, a neighbour changing a line within three of ours makes the two patches
+# differ on a line neither PR authored, and the proof reports divergence for someone else's edit.
+# `-U0` asks only what each patch ADDED and REMOVED.
+#
+# What `-U0` stops seeing, stated because it is a real cost: the surrounding code. Two patches
+# that add and remove the same lines compare equal here even if the merge applied them into
+# different surroundings or at a different point in the file. That is deliberate — byte equality
+# is the stronger question and is still asked first, this branch is only reached when it says no,
+# and the path set is still bounded by the PR's own file list — but it means a PASS here proves
+# "the same lines landed", not "the same file landed".
+normalised_patch () {
+  git diff -U0 "$1" "$2" -- "${@:3}" | grep -v '^index ' | sed 's/^@@.*/@@/'
+}
+
+# Sourced with POST_MERGE_PROOF_LIB=1, this file defines its helpers and stops, so the patch
+# comparison above can be exercised on known-divergent inputs. A fallback that has only ever
+# been run on inputs that agree has not been shown to discriminate.
+if [[ "${POST_MERGE_PROOF_LIB:-0}" == "1" ]]; then
+  return 0 2>/dev/null || exit 0
+fi
+
 if [[ $# -lt 3 ]]; then
   cat >&2 <<USAGE
 usage: ${SELF} <pr-number> <reviewed-head-sha> <path>...
@@ -152,7 +186,24 @@ else
   if git diff --exit-code "${HEAD_OID}" "${MERGE_SHA}" -- "${PATHS[@]}" >/dev/null 2>&1; then
     pass "byte-for-byte equal on the given path(s): git diff --exit-code ${HEAD_OID} ${MERGE_SHA} -- ${PATHS[*]}"
   else
-    fail "the merge result differs from the reviewed candidate on: $(git diff --name-only "${HEAD_OID}" "${MERGE_SHA}" -- "${PATHS[@]}" 2>/dev/null | tr '\n' ' ')"
+    # Byte equality stays the first question; this is only reached when it says no.
+    PR_BASE="$(git merge-base "${HEAD_OID}" "${MERGE_SHA}^" 2>/dev/null || true)"
+    if [[ -z "${PR_BASE}" ]]; then
+      fail "the merge result differs from the reviewed candidate and the PR's base cannot be derived (no first parent of ${MERGE_SHA}), so the patch comparison cannot run"
+    else
+      while IFS= read -r changed; do
+        [[ -z "${changed}" ]] && continue
+        pr_patch="$(normalised_patch "${PR_BASE}" "${HEAD_OID}" "${changed}")"
+        merge_patch="$(normalised_patch "${MERGE_SHA}^" "${MERGE_SHA}" "${changed}")"
+        if [[ "${pr_patch}" != "${merge_patch}" ]]; then
+          fail "${changed}: the merge commit's patch is not the PR's patch — this is a real difference in what landed, not an adjacent landing"
+        elif [[ -z "${pr_patch}" ]]; then
+          pass "${changed}: ok (main moved, not this PR) — neither the PR nor the merge commit changed this path, so nothing of this PR's was compared here; the head/merge difference is main moving beneath the branch"
+        else
+          pass "${changed}: ok (adjacent landing) — byte equality broke, and the PR's patch equals the merge commit's patch once index/@@ are stripped"
+        fi
+      done < <(git diff --name-only "${HEAD_OID}" "${MERGE_SHA}" -- "${PATHS[@]}" 2>/dev/null)
+    fi
   fi
 fi
 
