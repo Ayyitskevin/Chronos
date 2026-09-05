@@ -496,7 +496,12 @@ def load_intake(delivery: Path) -> IntakeDelivery:
 def verify_intake(delivery: Path) -> CertificationReport:
     """Run the existing frozen certification gates over a byte-bound delivery."""
 
-    intake = load_intake(delivery)
+    return certify_loaded_intake(load_intake(delivery), delivery=delivery)
+
+
+def certify_loaded_intake(intake: IntakeDelivery, *, delivery: Path) -> CertificationReport:
+    """Run the frozen gates over an intake that has already been byte-bound."""
+
     try:
         return certify_export(
             dataset_id=intake.delivery_id,
@@ -519,6 +524,7 @@ __all__ = [
     "IntakeDelivery",
     "IntakeProvenance",
     "IntakeUnverified",
+    "certify_loaded_intake",
     "load_intake",
     "verify_intake",
 ]
