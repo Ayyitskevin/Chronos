@@ -1,4 +1,5 @@
 """``python -m chronos.cli`` — safe operator commands.
+# ruff: noqa: E501
 
 ~~Every command prints the mode banner first.~~ *(Corrected 2026-08-08: the
 trading-plane commands do — status, halt, rearm, risk-show, verify-corpus,
@@ -160,7 +161,7 @@ def cmd_campaign_preflight(args: argparse.Namespace) -> int:
     if not failures or not any("symbols:" in item for item in failures):
         print(f"PASS [§1/§3] symbols: demo contract set {','.join(sorted(contracts))}")
 
-    if worker is not None and mandate is not None:
+    if worker is not None:
         expected = f"http://{args.backend_host}:{args.backend_port}"
         parsed = worker.backend_url
         if parsed != expected or parsed.split("://", 1)[-1].split(":", 1)[0] not in {
@@ -185,6 +186,7 @@ def cmd_campaign_preflight(args: argparse.Namespace) -> int:
 
     marker = StateGenerationMarker(args.state_dir / "state_generation.json")
     marker_id = None
+    marker_present = args.state_dir.joinpath("state_generation.json").exists()
     unreadable = False
     try:
         generation = marker.read()
@@ -192,21 +194,35 @@ def cmd_campaign_preflight(args: argparse.Namespace) -> int:
     except CorruptStateGeneration:
         unreadable = True
     recorded = None
+    identity_row_present = False
     db = args.state_dir / "chronos.db"
     try:
         with sqlite3.connect(f"file:{db}?mode=ro", uri=True) as connection:
             row = connection.execute(
                 "SELECT installation_id FROM installation_identity WHERE id=1"
             ).fetchone()
+            identity_row_present = row is not None
             recorded = row[0] if row else None
     except (OSError, sqlite3.Error):
         pass
-    hold = evaluate_recovery_hold(
+    if not marker_present or not identity_row_present:
+        missing = []
+        if not marker_present:
+            missing.append("state_generation marker")
+        if not identity_row_present:
+            missing.append("installation_identity row")
+        fail("ADR-0054", "state identity", "UNVERIFIED; missing " + " and ".join(missing) + "; boot the backend writer once, then re-run preflight")
+        hold = None
+    elif recorded is None:
+        print("PASS [ADR-0054] state identity: 0012 adoption sentinel pending first writer boot")
+        hold = None
+    else:
+        hold = evaluate_recovery_hold(
         marker_installation_id=marker_id,
         marker_unreadable=unreadable,
         recorded_installation_id=recorded,
         restore_pending_token=read_restore_pending_token(args.state_dir / "recovery_pending.json"),
-    )
+        )
     if hold is not None:
         fail("ADR-0054", "state identity", hold.reason.value)
     else:
