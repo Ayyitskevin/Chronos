@@ -77,6 +77,21 @@ Generated from `research/skb/skb.json` by `scripts/build_skb.py` (`chronos.skb.d
 | 39 | Monte Carlo Option-Inspired Equity Probability Bands v1.0 | statistical_readout | none | NON_EXECUTABLE_INDICATOR | non_executable_indicator |
 | 40 | Black-Scholes Regime-Adjusted Implied Edge Gauge v1.0 | valuation_context | none | NON_EXECUTABLE_INDICATOR | non_executable_indicator |
 
+## Source-measured properties
+
+Read from the Pine source line by line (issue #181); no corpus input states these. Every other script is **unmeasured** — `unknown` here means nobody looked, not that the property is absent.
+
+- Measured: **5** of 42
+- Timeframe binding: `chart_tf` 5, `unknown` 37
+
+| # | Title | Max concurrent positions | Timeframe binding | Evidence |
+|---|---|---:|---|---|
+| 00 | Five-Tool Confluence AIO v3.6 | 1 | chart_tf | max_concurrent_positions=1 from 00_five_tool_confluence_aio.pine:1469 (strategy.position_size == 0), 00_five_tool_confluence_aio.pine:32 (pyramiding = 3); timeframe_binding=chart_tf from 00_five_tool_confluence_aio.pine:743 (timeframe.period), 00_five_tool_confluence_aio.pine:33 (calc_on_every_tick = false). pyramiding is leg-splitting, not concurrency: entry is gated on flat, and the same-bar strategy.entry calls place legs of one scaled entry. The script pins no timeframe; it evaluates on the chart's, at bar close. |
+| 01 | Markov Regime BULL+ v1.1 | 1 | chart_tf | max_concurrent_positions=1 from 01_markov_regime_bull_plus.pine:1086 (strategy.position_size == 0), 01_markov_regime_bull_plus.pine:52 (pyramiding = 3); timeframe_binding=chart_tf from 01_markov_regime_bull_plus.pine:712 (timeframe.period), 01_markov_regime_bull_plus.pine:53 (calc_on_every_tick = false). pyramiding is leg-splitting, not concurrency: entry is gated on flat, and the same-bar strategy.entry calls place legs of one scaled entry. The script pins no timeframe; it evaluates on the chart's, at bar close. |
+| 02 | Markov Regime BEAR+ v1.1 | 1 | chart_tf | max_concurrent_positions=1 from 02_markov_regime_bear_plus.pine:1076 (strategy.position_size == 0), 02_markov_regime_bear_plus.pine:55 (pyramiding = 3); timeframe_binding=chart_tf from 02_markov_regime_bear_plus.pine:715 (timeframe.period), 02_markov_regime_bear_plus.pine:56 (calc_on_every_tick = false). pyramiding is leg-splitting, not concurrency: entry is gated on flat, and the same-bar strategy.entry calls place legs of one scaled entry. The script pins no timeframe; it evaluates on the chart's, at bar close. |
+| 0A | Confluence Swing Strategy v1.0 (ARCHIVED) | 1 | chart_tf | max_concurrent_positions=1 from 0A_confluence_swing_strategy_archived.pine:356 (strategy.position_size == 0), 0A_confluence_swing_strategy_archived.pine:78 (pyramiding = 0); timeframe_binding=chart_tf from 0A_confluence_swing_strategy_archived.pine:259 (timeframe.period), 0A_confluence_swing_strategy_archived.pine:79 (calc_on_every_tick = false). The only pyramiding = 0 script: one strategy.entry, scaled OUT in three strategy.exit tranches. The script pins no timeframe; it evaluates on the chart's, at bar close. |
+| 16 | Pullback-to-Value Playbook v1.0 | 1 | chart_tf | max_concurrent_positions=1 from 16_pullback_to_value_playbook.pine:310 (strategy.position_size == 0), 16_pullback_to_value_playbook.pine:311 (strategy.position_size == 0), 16_pullback_to_value_playbook.pine:32 (pyramiding = 3); timeframe_binding=chart_tf from 16_pullback_to_value_playbook.pine:192 (timeframe.period), 16_pullback_to_value_playbook.pine:33 (calc_on_every_tick = false). Both the long and short gate require flat. pyramiding is leg-splitting, not concurrency: entry is gated on flat, and the same-bar strategy.entry calls place legs of one scaled entry. The script pins no timeframe; it evaluates on the chart's, at bar close. |
+
 ## Derived strategies
 
 | id | version | family | status | candidate | from | runs |

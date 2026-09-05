@@ -348,6 +348,7 @@ def cmd_skb_query(args: argparse.Namespace) -> int:
         Disposition,
         DispositionReason,
         StrategyFamily,
+        TimeframeBinding,
     )
 
     store = load_store(REPO_ROOT / STORE_PATH)
@@ -361,6 +362,10 @@ def cmd_skb_query(args: argparse.Namespace) -> int:
         executable=(True if args.executable else None),
         ported=args.ported,
         tradable_direction=Direction(args.tradable) if args.tradable else None,
+        max_concurrent_positions=args.max_concurrent_positions,
+        timeframe_binding=(
+            TimeframeBinding(args.timeframe_binding) if args.timeframe_binding else None
+        ),
     )
     if args.format == "ids":
         print(" ".join(e.catalog_number for e in results))
@@ -368,10 +373,13 @@ def cmd_skb_query(args: argparse.Namespace) -> int:
         print(json.dumps([e.model_dump(mode="json") for e in results], indent=2))
     else:
         for e in results:
+            measured_positions = e.max_concurrent_positions
+            positions = "?" if measured_positions is None else str(measured_positions)
             print(
                 f"{e.catalog_number:>3}  {e.disposition.value:<10} "
                 f"{e.disposition_reason.value:<34} "
-                f"{e.strategy_family.value:<22} {e.direction.value:<13} {e.title}"
+                f"{e.strategy_family.value:<22} {e.direction.value:<13} "
+                f"pos={positions:<2} tf={e.timeframe_binding.value:<8} {e.title}"
             )
     print(f"# {len(results)} script(s)", file=sys.stderr)
     return 0
@@ -391,6 +399,8 @@ def cmd_skb_stats(args: argparse.Namespace) -> int:
                 "corpus_hash": store.corpus_hash,
                 "by_disposition": skb_query.disposition_counts(store),
                 "by_family": skb_query.family_counts(store),
+                "by_timeframe_binding": skb_query.timeframe_binding_counts(store),
+                "source_measured": len(skb_query.measured_scripts(store)),
             },
             indent=2,
         )
@@ -712,6 +722,7 @@ def _add_skb_commands(sub: argparse._SubParsersAction) -> None:  # type: ignore[
         Disposition,
         DispositionReason,
         StrategyFamily,
+        TimeframeBinding,
     )
 
     skb = sub.add_parser("skb", help="query the Strategy Knowledge Base (read-only)")
@@ -734,6 +745,19 @@ def _add_skb_commands(sub: argparse._SubParsersAction) -> None:  # type: ignore[
     ported = query.add_mutually_exclusive_group()
     ported.add_argument("--ported", dest="ported", action="store_true", default=None)
     ported.add_argument("--not-ported", dest="ported", action="store_false", default=None)
+    query.add_argument(
+        "--max-concurrent-positions",
+        dest="max_concurrent_positions",
+        type=int,
+        metavar="N",
+        help="source-measured position count (issue #181); unmeasured scripts never match",
+    )
+    query.add_argument(
+        "--timeframe-binding",
+        dest="timeframe_binding",
+        choices=[b.value for b in TimeframeBinding],
+        help="source-measured timeframe binding; 'unknown' selects the unmeasured scripts",
+    )
     query.add_argument("--format", choices=["table", "ids", "json"], default="table")
     query.set_defaults(func=cmd_skb_query)
 

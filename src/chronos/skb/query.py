@@ -10,6 +10,11 @@ Honesty note: the corpus tags timeframe and data dependencies only in prose, so
 questions like "blocked on intraday data" are NOT answerable as a structured
 query — the disposition/reason vocabulary is the structured surface, and prose
 feasibility text is carried per script for a human to read, never inferred.
+
+Issue #181 makes two of those questions structured for the five scripts whose
+Pine was read: ``max_concurrent_positions`` and ``timeframe_binding``. The other
+37 stay unmeasured and answer no filter on a measured value, which keeps "we read
+this and it holds one position" distinct from "we never looked".
 """
 
 from __future__ import annotations
@@ -24,6 +29,7 @@ from chronos.skb.schema import (
     PineScriptEntry,
     SKBStore,
     StrategyFamily,
+    TimeframeBinding,
 )
 
 
@@ -39,12 +45,21 @@ def query_scripts(
     executable: bool | None = None,
     ported: bool | None = None,
     tradable_direction: Direction | None = None,
+    max_concurrent_positions: int | None = None,
+    timeframe_binding: TimeframeBinding | None = None,
 ) -> tuple[PineScriptEntry, ...]:
     """Filter the Pine scripts by any combination of structured fields.
 
     ``executable`` selects integrity PASS_WITH_CONSTRAINTS. ``tradable_direction``
     matches a side inclusively — LONG also matches BIDIRECTIONAL, SHORT also
     matches BIDIRECTIONAL — for "long strategies" style questions.
+
+    ``max_concurrent_positions`` and ``timeframe_binding`` filter the
+    source-measured fields (issue #181). Both match exactly, so an unmeasured
+    script is never returned by a filter on a measured value — asking for
+    ``max_concurrent_positions=1`` yields the scripts read and found to hold one
+    position, not the scripts assumed to. ``timeframe_binding=UNKNOWN`` is the
+    query for "not yet measured".
     """
 
     def matches(entry: PineScriptEntry) -> bool:
@@ -65,6 +80,13 @@ def query_scripts(
             if is_exec is not executable:
                 return False
         if ported is not None and (entry.disposition is Disposition.PORTED) is not ported:
+            return False
+        if (
+            max_concurrent_positions is not None
+            and entry.max_concurrent_positions != max_concurrent_positions
+        ):
+            return False
+        if timeframe_binding is not None and entry.timeframe_binding is not timeframe_binding:
             return False
         return tradable_direction is None or _tradable(entry.direction, tradable_direction)
 
@@ -92,6 +114,25 @@ def disposition_counts(store: SKBStore) -> dict[str, int]:
     for entry in store.pine_scripts:
         counts[entry.disposition.value] += 1
     return {k: v for k, v in counts.items() if v}
+
+
+def timeframe_binding_counts(store: SKBStore) -> dict[str, int]:
+    """How many scripts carry each timeframe binding, ``unknown`` included.
+
+    ``unknown`` is reported rather than filtered out: the count of unmeasured
+    scripts is the honest headline of this field, not noise to hide.
+    """
+
+    counts: dict[str, int] = {b.value: 0 for b in TimeframeBinding}
+    for entry in store.pine_scripts:
+        counts[entry.timeframe_binding.value] += 1
+    return counts
+
+
+def measured_scripts(store: SKBStore) -> tuple[PineScriptEntry, ...]:
+    """The scripts whose Pine source was read for the #181 properties."""
+
+    return tuple(e for e in store.pine_scripts if e.source_property_citation)
 
 
 def family_counts(store: SKBStore) -> dict[str, int]:
