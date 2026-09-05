@@ -8,8 +8,9 @@ import socket
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
-import pytest
 from types import SimpleNamespace
+
+import pytest
 
 from chronos.cli.main import cmd_campaign_preflight
 
