@@ -250,8 +250,26 @@ the live commit and coordinate with any branch already addressing it before edit
 2. The incident runbook invokes the deterministic-platform halt while the live order plane
    has a separate kill switch (`docs/INCIDENT_RESPONSE.md`,
    `src/chronos/orders/kill_switch.py`).
-3. Restore guidance overstates safety: a missing live kill-switch file defaults disengaged.
-   Recovery must always boot kill-engaged, read-only, and unreconciled.
+3. ~~Restore guidance overstates safety: a missing live kill-switch file defaults disengaged.
+   Recovery must always boot kill-engaged, read-only, and unreconciled.~~
+   **Kill-engaged half addressed 2026-09-03 (D-63/ADR-0049, R-66):** the state directory
+   carries an installation marker, and a live-safety file missing *after this installation
+   wrote one* reads ENGAGED (kill switch) or refuses rather than re-baselining (session
+   drawdown). **Read-only and unreconciled addressed 2026-09-04 (D-69/ADR-0054, R-72):**
+   the marker's installation id is also recorded in the Chronos database, and a
+   disagreement between the two stores boots the backend under a recovery hold —
+   `require_writer` and the submission boundary both refuse (so the autonomy handoff,
+   which passes through no route, is refused too), submission readiness stays `PENDING`
+   with no refresher task, and `build_autonomy_runtime` is not called, so ADR-0017's
+   mandate auto-activation cannot re-arm a restored grant. Clearing is a typed operator
+   note bound to the exact observation, effective at the next start. Proof:
+   `tests/safety/test_restore_recovery_hold.py`.
+   **Still open from this finding — one disclosed residual (R-72):** the kill-switch file
+   and the database live in the same directory, so a *self-consistent wholesale restore*
+   carries both witnesses from one snapshot and cannot be told from a clean restart.
+   `chronos.recovery restore` leaves an outside witness and the manual procedure asks for
+   one by hand; a hand-made wholesale restore that skips that step is not detected, and
+   `docs/BACKUP_AND_RECOVERY.md`'s manual step remains its only control.
 4. Standing-authority prose says the mandate replaces arming, while submission still
    requires a current arm (`src/chronos/api/autonomy_wiring.py`,
    `src/chronos/orders/submission.py`). Choose and implement one reviewed authority model.

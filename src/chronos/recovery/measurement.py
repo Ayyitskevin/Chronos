@@ -33,6 +33,11 @@ SNAPSHOT_SCHEMA_VERSION: Final = "chronos-recovery-snapshot-v1"
 OBSERVATION_SCHEMA_VERSION: Final = "chronos-recovery-observation-v1"
 SNAPSHOT_MANIFEST_NAME: Final = "snapshot-manifest.json"
 RECOVERY_OBSERVATION_NAME: Final = "recovery-observation.json"
+#: Left in the restored data directory so a backend started from it boots
+#: read-only and unreconciled (ADR-0054). A wholesale restore carries both of
+#: the backend's own witnesses from one snapshot and so cannot be detected
+#: from inside the directory; this file is the outside witness.
+RESTORE_PENDING_NAME: Final = "recovery_pending.json"
 
 _SQLITE_ARTIFACTS: Final = ("platform_ledger.db", "chronos.db")
 _FILE_ARTIFACTS: Final = (
@@ -260,6 +265,21 @@ def restore_snapshot(
     _verify_manifest_artifacts(restored_data, manifest)
     _fsync_directory(restored_data)
     verification_completed_ns = selected_clock.monotonic_ns()
+    # After verification, so a failed restore leaves no witness claiming success,
+    # and inside `data/` so it travels with the files an operator copies into
+    # place. The token distinguishes this restore from the next, so acknowledging
+    # one does not silently cover another.
+    _write_new_json(
+        restored_data / RESTORE_PENDING_NAME,
+        {
+            "token": hashlib.sha256(
+                (manifest.source_id + recovery_started_at.isoformat()).encode("utf-8")
+            ).hexdigest(),
+            "restored_at_utc": recovery_started_at.isoformat(),
+            "source_id": manifest.source_id,
+        },
+    )
+    _fsync_directory(restored_data)
     recovery_completed_at = _now_utc(selected_clock)
     if recovery_completed_at < recovery_started_at:
         raise RecoveryMeasurementError("wall clock moved backwards during snapshot restore")

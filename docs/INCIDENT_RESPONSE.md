@@ -74,9 +74,17 @@ SEV-1/SEV-2: do not trade (do not rearm) until the incident is explained and doc
 > **DISENGAGED**.
 >
 > **The marker is what makes that true, so back it up with the state it describes.** Losing
-> the marker *and* the kill-switch file together is indistinguishable from a first boot, and
-> reads DISENGAGED. After engaging, confirm the file is present; after any restore, engage it
-> again before starting the backend.
+> the marker *and* the kill-switch file together is indistinguishable from a first boot *to the
+> kill switch*, and reads DISENGAGED. It is no longer indistinguishable to the backend: since
+> 2026-09-04 the installation id is also recorded in the Chronos database, so a state directory
+> that vanished under a surviving database boots the backend under a **recovery hold** —
+> read-only and unreconciled, with no mandate activation — until an operator acknowledges it
+> with a note (R-72, ADR-0054; `docs/BACKUP_AND_RECOVERY.md`). After engaging, confirm the file
+> is present; after any restore, engage it again before starting the backend.
+>
+> **Under a recovery hold, `POST /live/kill` and `POST /live/disarm` still work** — they only
+> ever remove authority. `POST /live/kill/disengage` does not, because it grants authority
+> back: acknowledge the restore first, then decide about the stop.
 2. **Stop making changes.** No code edits, no config edits, no cleanup, until evidence is
    captured.
 

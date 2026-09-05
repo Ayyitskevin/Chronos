@@ -134,6 +134,33 @@ class StateGenerationMarker:
             return False
         return component in generation.materialized
 
+    def ensure_installation(self, installation_id: str, *, now: datetime) -> str:
+        """Name this state directory's installation, once, without claiming a write.
+
+        The marker is otherwise created lazily by whichever component first
+        materialises its own file, which leaves a window where the directory has
+        an identity nobody has written down. ADR-0054's cross-store witness needs
+        that identity to exist from the first boot, so the backend seeds it here
+        with an **empty** ``materialized`` set: seeding says "this installation
+        exists", never "a file was written", so every R-66 reading is unchanged.
+
+        An existing marker is never rewritten and its id is returned instead --
+        that id is the evidence the cross-store comparison is about, and a
+        reseed would manufacture the agreement the comparison exists to test.
+        """
+
+        if not installation_id:
+            raise ValueError("an installation id must not be blank")
+        if now.tzinfo is None:
+            raise ValueError("seeding an installation requires a timezone-aware timestamp")
+        existing = self.read()
+        if existing is not None:
+            return existing.installation_id
+        self._write(
+            StateGeneration(installation_id=installation_id, created_at=now, materialized=())
+        )
+        return installation_id
+
     def record_materialized(self, component: str, *, now: datetime) -> None:
         """Record that ``component`` has just written its state file.
 

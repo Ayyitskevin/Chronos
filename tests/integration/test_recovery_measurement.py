@@ -193,6 +193,11 @@ def test_capture_and_restore_emit_bounded_measurements(open_source: _OpenSource)
         "platform_audit.jsonl",
         "platform_halt.json",
         "platform_ledger.db",
+        # ADR-0054: the witness that makes a backend started from this directory
+        # boot read-only and unreconciled. A wholesale restore carries both of the
+        # backend's own witnesses from one snapshot, so nothing inside the
+        # directory can tell it apart from a clean restart -- this file can.
+        "recovery_pending.json",
     }
 
     restored_platform = SqliteLedger(restore_root / "data/platform_ledger.db")
@@ -304,7 +309,17 @@ def test_restore_fsyncs_the_restored_data_directory(
 
     restore_snapshot(snapshot_root=snapshot_root, restore_root=restore_root)
 
-    assert fsynced == [restore_root / "data", restore_root, restore_root.parent]
+    # `data` twice: once when the copied artifacts are durable, and again after
+    # the ADR-0054 restore witness is written. The witness is written AFTER
+    # verification on purpose -- a failed restore must leave no witness claiming
+    # success -- which puts it outside the measured verification window, so it
+    # costs its own fsync rather than contaminating `local_verification_seconds`.
+    assert fsynced == [
+        restore_root / "data",
+        restore_root / "data",
+        restore_root,
+        restore_root.parent,
+    ]
 
 
 def test_capture_refuses_an_existing_destination_without_changing_it(
@@ -460,3 +475,35 @@ def test_packaged_command_runs_capture_then_restore(open_source: _OpenSource) ->
     )
     assert restored.returncode == 0, restored.stderr
     assert json.loads(restored.stdout)["result"] == "PASS"
+
+
+def test_a_restore_leaves_a_witness_the_backend_will_refuse_to_ignore(
+    open_source: _OpenSource,
+) -> None:
+    """The restored data directory carries a token unique to this restore (ADR-0054).
+
+    Two properties, and the second is the one worth a test: the file is a real
+    JSON object with a non-empty token, and two restores of the same snapshot do
+    not share it — otherwise the operator note acknowledging the first restore
+    would silently cover the second.
+    """
+
+    root = open_source.data.parent.parent
+    snapshot_root = root / "snapshot"
+    capture_snapshot(
+        source_data=open_source.data,
+        snapshot_root=snapshot_root,
+        source_id="paper-drill",
+    )
+
+    tokens: list[str] = []
+    for attempt in ("first", "second"):
+        restore_root = root / f"restore-{attempt}"
+        restore_snapshot(snapshot_root=snapshot_root, restore_root=restore_root)
+        witness = restore_root / "data" / "recovery_pending.json"
+        assert stat.S_IMODE(witness.stat().st_mode) == 0o600
+        payload = json.loads(witness.read_text(encoding="utf-8"))
+        assert isinstance(payload["token"], str) and payload["token"]
+        tokens.append(payload["token"])
+
+    assert tokens[0] != tokens[1]

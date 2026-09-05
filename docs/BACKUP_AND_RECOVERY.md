@@ -30,13 +30,25 @@ reconciliation passes again (`src/chronos/execution/engine.py`).~~
 >
 > The vision plan's required end state is that recovery always boots kill-engaged,
 > read-only, and unreconciled (`docs/VISION_COMPLETION_PLAN.md` §6, finding 3 —
-> **partially closed 2026-09-03**). The *kill-engaged* half now holds for a lost or
-> partially restored state directory (R-66, ADR-0049); **read-only and unreconciled on
-> restore remain open**, as does the mandate auto-activation above, and a restore that
-> brings back nothing at all still reads as a fresh install. Until those land, the manual
-> step in the restore procedure below is the compensating control. Changing the code's boot
-> defaults is a safety-mechanism modification requiring owner review, not a documentation
-> fix.
+> **closed 2026-09-04 except for one disclosed residual**). The *kill-engaged* half holds
+> for a lost or partially restored state directory (R-66, ADR-0049). **Read-only and
+> unreconciled now hold too** (R-72, ADR-0054): the state directory's installation id is
+> also recorded in the Chronos database, and when the two stores disagree the backend
+> boots under a **recovery hold** — every writer route and the submission boundary refuse,
+> submission readiness stays `PENDING` with no refresher running, and the autonomy runtime
+> is not built, so a restored mandate **cannot auto-activate**. An operator clears one
+> observation with a typed note (`POST /live/recovery/acknowledge`), effective at the next
+> start.
+>
+> **The residual, precisely.** `data/live_kill_switch.json` and `data/chronos.db` live in
+> the same directory, so a *self-consistent wholesale restore* of `data/` carries both
+> witnesses from one snapshot and is indistinguishable from a clean restart. Only a witness
+> from outside the directory can tell: `python -m chronos.recovery restore` now leaves
+> `recovery_pending.json` in the restored data directory, and step 3 of the procedure below
+> asks you to create one by hand when you restore with `tar`/`cp`. **A hand-made wholesale
+> restore that skips that step is not detected**, and the manual steps below remain its only
+> control. Changing the code's boot defaults is a safety-mechanism modification requiring
+> owner review, not a documentation fix.
 
 ## What to back up
 
@@ -45,7 +57,8 @@ reconciliation passes again (`src/chronos/execution/engine.py`).~~
 | `data/platform_ledger.db` | Platform order ledger (intents, transitions, fills) | Lose the platform's own order history; reconciliation can no longer explain broker state |
 | `data/platform_halt.json` | Persistent halt state (deterministic platform) | Low (missing file fails closed to HALTED), but back it up to preserve the recorded reason/note |
 | `data/live_kill_switch.json` | **Live order-plane kill switch** (`live_kill_switch_file`) — *added 2026-08-02, previously missing from this table* | **HIGH.** Since 2026-09-03 (R-66) a file missing while `state_generation.json` records that this installation wrote one reads as **ENGAGED**, so a partial restore fails closed. Restoring *neither* file still reads as a fresh install and comes up disarmed. Always restore both, or engage the kill switch again before starting the backend. |
-| `data/state_generation.json` | **Installation marker** for the live-safety state directory (`chronos.orders.state_generation`) — records which state files this installation has ever written | **HIGH, and it must travel with the files it describes.** Restoring the marker without the state files is the fail-closed direction (the system boots kill-engaged); restoring the state files without the marker silently restores the old permissive reading. |
+| `data/state_generation.json` | **Installation marker** for the live-safety state directory (`chronos.orders.state_generation`) — names this installation and records which state files it has ever written | **HIGH, and it must travel with the files it describes.** Restoring the marker without the state files is the fail-closed direction (the system boots kill-engaged); restoring the state files without the marker no longer restores the old permissive reading silently — since 2026-09-04 (R-72) the database remembers the installation id, so the backend boots under a recovery hold instead. |
+| `data/recovery_pending.json` | **Restore witness** (ADR-0054) — written by `python -m chronos.recovery restore`, or by hand in step 3 below | Not a backup artifact: **never restore one from a snapshot**, and never capture one. Its presence tells the next boot that this directory was restored, which is exactly the fact a wholesale restore otherwise erases. |
 | your `AUTONOMY_MANDATE_FILE` (if configured) | Owner-authored autonomy grant — *added 2026-08-02* | Restoring it **re-arms autonomy on the next boot** (ADR-0017 auto-activation). Treat it as an authority document: back it up securely, and move it aside during any recovery you do not intend to resume trading from. |
 | `data/platform_audit.jsonl` | Hash-chained audit trail | Lose the tamper-evident record of decisions and operator actions |
 | `config/` | Risk policies (`risk.example.yaml` plus your local `risk.yaml`) | Lose the exact limits runs were made under; policy hashes in results become unverifiable |
@@ -177,6 +190,14 @@ RPO/RTO, encrypted/off-host backup, and external integrity anchor remain open.
 
 ## Restore procedure
 
+> **Before you begin — if this deployment has not yet run migration 0012, upgrade it BEFORE
+> you restore, never after.** The installation witness is resolved by the first writer boot
+> after that migration, and until then there is nothing for a restored state directory to
+> disagree with: on that one boot a restore is *adopted* rather than held (R-72, ADR-0054).
+> If you have already restored onto a pre-0012 database, engage the kill switch by hand once
+> the backend starts and treat the state as unverified — the automatic hold will not fire
+> for you.
+
 1. **Stop everything.** No Chronos process may be running.
 2. **Restore files** into place (`data/`, `config/`, `specs/`, `research/`). For SQLite files
    restored from `.backup` snapshots, just put the `.db` file in place; delete any leftover
@@ -190,21 +211,47 @@ RPO/RTO, encrypted/off-host backup, and external integrity anchor remain open.
    does not fail closed on its own; see the corrected premise at the top of this document)*:
 
    ```bash
-   # a. Confirm the live kill switch exists. Missing AND this installation wrote one
+   # a. Leave the restore witness so the backend knows this directory was restored.
+   #    `chronos.recovery restore` writes one; a tar/cp restore does not, and a
+   #    wholesale restore is otherwise indistinguishable from a clean restart.
+   #    THIS IS THE ONE STEP THAT CANNOT BE RECOVERED LATER — write it now.
+   [ -f data/recovery_pending.json ] || printf '{"token": "%s"}\n' "$(date -u +%Y%m%dT%H%M%SZ)-$$" \
+     > data/recovery_pending.json
+   # b. Confirm the live kill switch exists. Missing AND this installation wrote one
    #    (data/state_generation.json says so) reads ENGAGED; missing with no marker
    #    either — a restore that brought back neither — reads DISENGAGED.
    ls -l data/live_kill_switch.json data/state_generation.json \
      || echo "MISSING → if the marker is gone too, the emergency stop is DISARMED"
-   # b. Move any autonomy mandate aside so boot cannot auto-activate it.
+   # c. Move any autonomy mandate aside so boot cannot auto-activate it.
    #    (Restore it deliberately, later, when you intend to resume.)
    grep -n '^AUTONOMY_MANDATE_FILE' .env || echo "no mandate configured — nothing to move"
-   # c. Take a read-only state inventory before the process runs.
+   # d. Take a read-only state inventory before the process runs.
    python3 .claude/skills/chronos-diagnostics/scripts/state_inventory.py
    ```
 
    If the kill-switch file is missing, engage the kill switch immediately after the backend
    starts (`POST /live/kill`, see `docs/INCIDENT_RESPONSE.md`) and confirm the file appears —
-   or start with live capability unconfigured until you have.
+   or start with live capability unconfigured until you have. `POST /live/kill` and
+   `POST /live/disarm` stay reachable under a recovery hold; every other writer route,
+   **including `POST /live/kill/disengage`**, refuses until the hold is acknowledged. That
+   order is deliberate: establish where this state came from before deciding the emergency
+   stop may go.
+
+   **Clearing the recovery hold** — after steps 4–6 below have satisfied you about the
+   restored state:
+
+   ```bash
+   curl -fsS -X POST http://127.0.0.1:8000/live/recovery/acknowledge \
+     -H "X-Chronos-Token: $(cat data/backend_api_token)" \
+     -H 'Content-Type: application/json' \
+     -d '{"note": "restore from backup <date>; audit chain OK; recon clean: <evidence>"}'
+   rm -f data/recovery_pending.json   # only after the acknowledgement succeeds
+   ```
+
+   The note is mandatory. The acknowledgement binds the exact observation it was written
+   for, so it retires this restore and not the next one, and it takes effect **at the next
+   start** — restart the backend afterwards. It does not disengage the kill switch and does
+   not activate a mandate; those remain their own typed acts.
 4. **Verify the audit chain:**
    ```bash
    python -m chronos.cli verify-audit-log
@@ -245,12 +292,20 @@ be relied on:
 |---|---|
 | `data/live_kill_switch.json` present + engaged | Stop holds (correct). |
 | `data/live_kill_switch.json` **absent**, `data/state_generation.json` restored | Reads **ENGAGED** — the marker proves this installation wrote one (R-66). |
-| `data/live_kill_switch.json` **absent**, marker absent too | Reads **DISENGAGED** — indistinguishable from a fresh install; the manual step above is the control. |
-| Valid `AUTONOMY_MANDATE_FILE` present | Autonomy **auto-activates** (ADR-0017). |
+| `data/live_kill_switch.json` **absent**, marker absent too | Kill switch reads **DISENGAGED** — but the database still remembers the installation, so the backend boots under a **recovery hold** and writes nothing (R-72). |
+| `data/state_generation.json` restored beside a **new or replaced** `chronos.db` | **Recovery hold** — the directory names an installation this database never witnessed. |
+| Both restored, from **different** snapshots | **Recovery hold** — the two stores name different installations. |
+| Valid `AUTONOMY_MANDATE_FILE` present, no recovery hold | Autonomy **auto-activates** (ADR-0017). |
+| Valid `AUTONOMY_MANDATE_FILE` present, **under a recovery hold** | Autonomy is **not built and does not activate** (R-72). |
+| Whole `data/` restored self-consistently, no `recovery_pending.json` | **Not detected** — the disclosed residual; both witnesses came from one snapshot. |
 | Mandate previously revoked | Stays revoked across restart (correct). |
 
 Live submission still requires the full ADR-0009 conjunction, a current session arm,
-reconciliation, and the writer lease — so a restore alone does not place an order. But "the code
-guarantees a restored system cannot resume" is false for this plane, and the manual steps in the
-restore procedure above are what close the gap. Making recovery boot kill-engaged, read-only, and
-unreconciled is open finding 3 in `docs/VISION_COMPLETION_PLAN.md` §6 and requires owner review.
+reconciliation, and the writer lease — so a restore alone does not place an order. Since
+2026-09-04 the code *does* guarantee a resumption block for every restore it can detect
+(R-72/ADR-0054): the backend boots read-only and unreconciled, and no mandate activates, until an
+operator acknowledges with a note. The claim is still not unconditional, and the condition is
+exactly the residual above — a self-consistent wholesale restore of `data/` with no
+`recovery_pending.json` looks like a clean restart, and for that case the manual steps in the
+restore procedure remain the whole control. Finding 3 in `docs/VISION_COMPLETION_PLAN.md` §6 is
+closed to that residual, not beyond it.

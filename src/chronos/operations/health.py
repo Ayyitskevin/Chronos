@@ -74,6 +74,7 @@ class StartupFaultCode(StrEnum):
     AUTONOMY_POSTURE_UNAUTHENTICATED = "autonomy_posture_unauthenticated"
     SUBMISSION_RECONCILIATION_FAILED = "submission_reconciliation_failed"
     AUTONOMY_WIRING_FAILED = "autonomy_wiring_failed"
+    RECOVERY_UNVERIFIED = "recovery_unverified"
 
 
 class ReasonCode(StrEnum):

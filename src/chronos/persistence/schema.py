@@ -502,6 +502,55 @@ class WriterLeaseRow(Base):
     expires_at: Mapped[str] = mapped_column(Text, nullable=False)
 
 
+# --- Installation identity and recovery acknowledgement (schema v13, ADR-0054) --
+#
+# The second witness. `chronos.orders.state_generation` records, in the state
+# directory, which installation wrote which live-safety file; these two tables
+# record the same installation id here, in a store that a partial restore takes
+# or leaves independently. Neither grants anything: one names an installation,
+# the other records that an operator looked at a specific disagreement and typed
+# a note about it.
+
+
+class InstallationIdentityRow(Base):
+    """Which installation's state directory this database belongs to (ADR-0054).
+
+    Exactly one row (id=1). ``installation_id`` is NULL in exactly one state: the
+    adoption sentinel migration 0012 writes into databases that predate this
+    witness, so an upgrade adopts the marker beside it instead of reading the
+    upgrade itself as a replaced database. A database created by ``create_all``
+    has no row at all, and that difference is load-bearing -- see
+    ``chronos.orders.recovery_hold.resolve_installation``.
+    """
+
+    __tablename__ = "installation_identity"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    installation_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    first_seen_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+
+
+class RecoveryAcknowledgementRow(Base):
+    """An operator's typed act retiring one recovery observation (ADR-0054).
+
+    ``binding`` is the digest of the exact observation -- reason, both
+    installation ids, and the restore witness token -- so a row here retires the
+    restore it was written for and never becomes a standing permission.
+    """
+
+    __tablename__ = "recovery_acknowledgements"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    binding: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    marker_installation_id: Mapped[str] = mapped_column(Text, nullable=False)
+    recorded_installation_id: Mapped[str] = mapped_column(Text, nullable=False)
+    witness_token: Mapped[str] = mapped_column(Text, nullable=False)
+    note: Mapped[str] = mapped_column(Text, nullable=False)
+    acknowledged_by: Mapped[str] = mapped_column(Text, nullable=False)
+    acknowledged_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
+
+
 # --- Autonomy: the supervisor's durable state (schema v5, M3) ----------------
 #
 # Everything below exists because M2 shipped a gateway with no memory. Its
