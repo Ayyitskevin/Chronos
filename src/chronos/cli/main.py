@@ -223,7 +223,8 @@ def cmd_campaign_preflight(args: argparse.Namespace) -> int:
         fail(
             "ADR-0054",
             "state identity",
-            "UNVERIFIED; pending 0012 adoption sentinel; boot the backend writer once, then re-run preflight",
+            "UNVERIFIED; pending 0012 adoption sentinel; "
+            "boot the backend writer once, then re-run preflight",
         )
         hold = None
     else:
