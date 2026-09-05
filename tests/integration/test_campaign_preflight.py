@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from chronos.cli.main import cmd_campaign_preflight
+from chronos.cli.campaign_preflight import cmd_campaign_preflight
 
 
 def _args(root: Path, **overrides: object) -> argparse.Namespace:
