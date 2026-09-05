@@ -76,7 +76,9 @@ def test_preflight_passes_with_explicit_inputs_and_no_dotenv(monkeypatch, tmp_pa
             )
         ),
     )
-    monkeypatch.setattr(socket.socket, "connect", lambda *args: (_ for _ in ()).throw(AssertionError("network")))
+    monkeypatch.setattr(
+        socket.socket, "connect", lambda *args: (_ for _ in ()).throw(AssertionError("network"))
+    )
     code = cmd_campaign_preflight(_args(tmp_path))
     output = capsys.readouterr().out
     assert code == 0
@@ -91,8 +93,16 @@ def test_preflight_rejects_forwarding_and_binds_read_only_guarantees(monkeypatch
     monkeypatch.setattr(
         "chronos.orders.recovery_hold.evaluate_recovery_hold", lambda **kwargs: None
     )
-    monkeypatch.setattr("chronos.orders.state_generation.resolve_installation", lambda *a, **k: (_ for _ in ()).throw(AssertionError("seeder")), raising=False)
-    monkeypatch.setattr("chronos.orders.recovery_hold.evaluate_startup_recovery_hold", lambda *a, **k: (_ for _ in ()).throw(AssertionError("seeder")), raising=False)
+    monkeypatch.setattr(
+        "chronos.orders.state_generation.resolve_installation",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("seeder")),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "chronos.orders.recovery_hold.evaluate_startup_recovery_hold",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("seeder")),
+        raising=False,
+    )
     code = cmd_campaign_preflight(_args(tmp_path, evidence=False, worker_symbols="GLD"))
     output = capsys.readouterr().out
     assert code == 1
@@ -105,8 +115,12 @@ def test_preflight_rejects_forwarding_and_binds_read_only_guarantees(monkeypatch
 
 def test_preflight_unverified_empty_state_and_backend_failure_without_mandate(tmp_path, capsys):
     (tmp_path / "policy.md").write_text("policy", encoding="utf-8")
-    (tmp_path / "worker.service").write_text("UnsetEnvironment=CHRONOS_WORKER_FORWARD\n", encoding="utf-8")
-    code = cmd_campaign_preflight(_args(tmp_path, mandate=tmp_path / "missing", worker_backend_url="http://127.0.0.1:8000"))
+    (tmp_path / "worker.service").write_text(
+        "UnsetEnvironment=CHRONOS_WORKER_FORWARD\n", encoding="utf-8"
+    )
+    code = cmd_campaign_preflight(
+        _args(tmp_path, mandate=tmp_path / "missing", worker_backend_url="http://127.0.0.1:8000")
+    )
     output = capsys.readouterr().out
     assert code == 1
     assert "UNVERIFIED" in output
@@ -115,17 +129,43 @@ def test_preflight_unverified_empty_state_and_backend_failure_without_mandate(tm
 
 def test_preflight_accepts_0012_adoption_sentinel(tmp_path, capsys):
     (tmp_path / "policy.md").write_text("policy", encoding="utf-8")
-    (tmp_path / "worker.service").write_text("UnsetEnvironment=CHRONOS_WORKER_FORWARD\n", encoding="utf-8")
+    (tmp_path / "worker.service").write_text(
+        "UnsetEnvironment=CHRONOS_WORKER_FORWARD\n", encoding="utf-8"
+    )
     from chronos.autonomy import AutonomyMode
+
     now = datetime.now(UTC)
     monkeypatch = pytest.MonkeyPatch()
-    monkeypatch.setattr("chronos.api.autonomy_wiring.load_persistent_mandate", lambda path: SimpleNamespace(mandate=SimpleNamespace(mode=AutonomyMode.SHADOW, effective_from=now, expires_at=now.replace(year=2099), scope=SimpleNamespace(symbols=("SPY",)))))
-    monkeypatch.setattr("chronos.supervisor.proposers.load_proposer_registry", lambda path: SimpleNamespace(registry=SimpleNamespace(proposers=(SimpleNamespace(enabled=True, is_current=lambda now: True),))))
-    (tmp_path / "state_generation.json").write_text('{"schema":1,"installation_id":"install","created_at":"2026-01-01T00:00:00+00:00","materialized":[]}', encoding="utf-8")
+    monkeypatch.setattr(
+        "chronos.api.autonomy_wiring.load_persistent_mandate",
+        lambda path: SimpleNamespace(
+            mandate=SimpleNamespace(
+                mode=AutonomyMode.SHADOW,
+                effective_from=now,
+                expires_at=now.replace(year=2099),
+                scope=SimpleNamespace(symbols=("SPY",)),
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        "chronos.supervisor.proposers.load_proposer_registry",
+        lambda path: SimpleNamespace(
+            registry=SimpleNamespace(
+                proposers=(SimpleNamespace(enabled=True, is_current=lambda now: True),)
+            )
+        ),
+    )
+    (tmp_path / "state_generation.json").write_text(
+        '{"schema":1,"installation_id":"install","created_at":"2026-01-01T00:00:00+00:00","materialized":[]}',
+        encoding="utf-8",
+    )
     connection = sqlite3.connect(tmp_path / "chronos.db")
-    connection.execute("CREATE TABLE installation_identity (id INTEGER PRIMARY KEY, installation_id TEXT)")
+    connection.execute(
+        "CREATE TABLE installation_identity (id INTEGER PRIMARY KEY, installation_id TEXT)"
+    )
     connection.execute("INSERT INTO installation_identity VALUES (1, NULL)")
-    connection.commit(); connection.close()
+    connection.commit()
+    connection.close()
     code = cmd_campaign_preflight(_args(tmp_path))
     output = capsys.readouterr().out
     assert code == 0

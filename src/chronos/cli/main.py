@@ -224,10 +224,12 @@ def cmd_campaign_preflight(args: argparse.Namespace) -> int:
         hold = None
     else:
         hold = evaluate_recovery_hold(
-        marker_installation_id=marker_id,
-        marker_unreadable=unreadable,
-        recorded_installation_id=recorded,
-        restore_pending_token=read_restore_pending_token(args.state_dir / "recovery_pending.json"),
+            marker_installation_id=marker_id,
+            marker_unreadable=unreadable,
+            recorded_installation_id=recorded,
+            restore_pending_token=read_restore_pending_token(
+                args.state_dir / "recovery_pending.json"
+            ),
         )
     if hold is not None:
         fail("ADR-0054", "state identity", hold.reason.value)
