@@ -605,3 +605,21 @@ def test_research_run_uses_private_halt_state_and_cleans_it(
     assert result["risk_rejections"] == 0
     assert len(halt_paths) == 1
     assert not halt_paths[0].parent.exists()
+
+
+def test_the_success_line_names_the_check_this_gate_does_not_make(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """P2-09: a standalone green must not read as manifest/lock coherence.
+
+    This gate never compares ``pyproject.toml`` to the locks; that comparison is
+    the release-artifact gate's. A success line silent about it invites exactly
+    the over-reading the two-gate split exists to prevent.
+    """
+
+    monkeypatch.setattr(security_module, "verify_release_security", lambda: None)
+    assert security_module.main() == 0
+    line = capsys.readouterr().out.strip()
+    assert line.startswith("release security gate passed (")
+    assert "manifest/lock coherence" in line
+    assert "release-artifact gate" in line

@@ -1,4 +1,8 @@
-"""Run the fail-closed release dependency, static, and secret scans."""
+"""Run the fail-closed release dependency, static, and secret scans.
+
+This gate does not compare ``pyproject.toml`` to the hash locks. Manifest/lock coherence is the
+release-artifact gate's check (``scripts/verify_release_artifact.py``); ``make gates`` runs both.
+"""
 
 from __future__ import annotations
 
@@ -441,7 +445,10 @@ def main() -> int:
     versions = ", ".join(
         f"{name} {version}" for name, version in sorted(EXPECTED_TOOL_VERSIONS.items())
     )
-    print(f"release security gate passed ({versions})")
+    print(
+        f"release security gate passed ({versions}); manifest/lock coherence is the "
+        "release-artifact gate's check (scripts/verify_release_artifact.py), not this one's"
+    )
     return 0
 
 
