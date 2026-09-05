@@ -32,7 +32,11 @@ from pathlib import Path
 
 from fastapi import Depends, HTTPException, Request, status
 
-from chronos.supervisor.proposers import ProposerRegistry, load_proposer_registry
+from chronos.supervisor.proposers import (
+    ProposerRegistry,
+    UnsafeProposerRegistry,
+    load_proposer_registry,
+)
 from chronos.utils.secure_files import (
     AuthorityMode,
     UnsafeAuthorityFile,
@@ -150,7 +154,7 @@ def load_proposer_auth(path: Path | None) -> ProposerAuth:
         return ProposerAuth(configured=False)
     try:
         loaded = load_proposer_registry(path)
-    except UnsafeAuthorityFile as error:
+    except UnsafeProposerRegistry as error:
         # Refused, never repaired. The owner hears which file and what to fix.
         _logger.critical("Proposer registry file is unsafe; every proposal refuses: %s", error)
         return ProposerAuth(configured=True, registry=None, unsafe=True)

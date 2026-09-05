@@ -40,6 +40,7 @@ from chronos.api.autonomy_wiring import (
     ConfirmationRefusedByOrderPlane,
     RiskRefusedByOrderPlane,
     UnauthenticatedSubmittingMandate,
+    UnsafeMandateFile,
     _market_evidence,
     _quote_evidence,
     _reference_price,
@@ -374,6 +375,35 @@ def test_an_invalid_mandate_file_boots_inert_with_a_critical_alert(
     assert any(
         alert.kind == "autonomy.mandate_invalid" and alert.severity is alerts.AlertSeverity.CRITICAL
         for alert in raised
+    )
+
+
+def test_an_unsafe_mandate_alerts_under_its_own_kind(database: Database, tmp_path: Path) -> None:
+    """ADR-0056: "you typed it wrong" and "someone else can rewrite it" page differently.
+
+    Both are CRITICAL and both leave autonomy inert, so severity and outcome
+    cannot tell them apart. An alert consumer filtering on ``kind`` is the only
+    thing that can, which is why the kind is distinct rather than reused.
+    """
+
+    path = _write_mandate(tmp_path, _mandate())
+    path.chmod(0o666)
+    runtime = _runtime(database, tmp_path, mandate_file=path)
+
+    with pytest.raises(UnsafeMandateFile):
+        build_autonomy_runtime(runtime, process_generation=1, is_writer=lambda: True)
+
+    with database.sessions.begin() as session:
+        raised = alerts.unacknowledged(session, account_fingerprint=_FINGERPRINT)
+    kinds = {alert.kind for alert in raised}
+    assert "autonomy.mandate_unsafe" in kinds
+    assert "autonomy.mandate_invalid" not in kinds, (
+        "an untrusted file must not be reported with the kind that means a typo"
+    )
+    assert all(
+        alert.severity is alerts.AlertSeverity.CRITICAL
+        for alert in raised
+        if alert.kind == "autonomy.mandate_unsafe"
     )
 
 

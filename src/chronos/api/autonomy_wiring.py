@@ -133,6 +133,21 @@ class LoadedMandate:
     digest: str
 
 
+class UnsafeMandateFile(RuntimeError):
+    """The owner-authored mandate is not a file this process may trust.
+
+    ADR-0056. Symlinked, group- or other-writable, owned by another user, or
+    not UTF-8 — every shape ``AuthorityMode.GRANT`` refuses. Raised from the
+    loader so the backend boots inert with a typed startup fault rather than
+    reporting the grant as merely *absent*, which is the same screen an owner
+    sees when they have never authored one.
+
+    Sibling of :class:`UnauthenticatedSubmittingMandate` in placement and
+    purpose: the owner must be able to tell "the file cannot be trusted" from
+    "assembly crashed" and from "there is no grant".
+    """
+
+
 def load_persistent_mandate(path: Path) -> LoadedMandate | None:
     """Read and validate the owner's standing grant. Invalid is None, loudly.
 
@@ -158,12 +173,13 @@ def load_persistent_mandate(path: Path) -> LoadedMandate | None:
         return None
     except UnsafeAuthorityFile as error:
         # Not "invalid content" — the file is not one this process may trust at
-        # all. CRITICAL, and refused rather than repaired: chmodding an
-        # owner-authored grant on the owner's behalf is the process editing the
-        # grant. The typed startup fault for this path is noted where the
-        # runtime is assembled.
+        # all, and not "absent" either. Raised rather than returned as None so
+        # the three states stay distinguishable at every call site: startup
+        # notes a typed fault, and the terminal says which. Refused rather than
+        # repaired: chmodding an owner-authored grant on the owner's behalf is
+        # the process editing the grant.
         _logger.critical("Autonomy mandate file is unsafe; autonomy stays inert: %s", error)
-        return None
+        raise UnsafeMandateFile(str(error)) from error
     try:
         mandate = AutonomyMandate.model_validate_json(contents.data)
     except ValidationError:
@@ -852,9 +868,26 @@ def build_autonomy_runtime(
     path = settings.autonomy_mandate_file
     if path is None:
         return None
-    loaded = load_persistent_mandate(path)
     fingerprint = account_fingerprint(runtime.order_management.account_id)
     now = utc_now()
+    try:
+        loaded = load_persistent_mandate(path)
+    except UnsafeMandateFile:
+        # Alert here, where the mandate's other failures alert, then let it
+        # reach the lifespan: the owner needs the record AND /health needs the
+        # typed fault, and neither substitutes for the other.
+        _alert_bad_mandate(
+            runtime,
+            fingerprint,
+            now,
+            kind="autonomy.mandate_unsafe",
+            summary=(
+                "the persistent mandate file is not one this process may trust — a "
+                "symlink, writable by group or other, owned by another user, or not "
+                "UTF-8; autonomy is inert until the file is repaired by hand"
+            ),
+        )
+        raise
     if loaded is None:
         _alert_bad_mandate(runtime, fingerprint, now)
         return None
@@ -1051,18 +1084,25 @@ def _alert_unauthenticated_submitting_mandate(
         _logger.exception("Could not record the unauthenticated-posture alert")
 
 
-def _alert_bad_mandate(runtime: AppRuntime, fingerprint: str, now: datetime) -> None:
+def _alert_bad_mandate(
+    runtime: AppRuntime,
+    fingerprint: str,
+    now: datetime,
+    *,
+    kind: str = "autonomy.mandate_invalid",
+    summary: str = (
+        "the persistent mandate file is unreadable, invalid, or scoped to a "
+        "different account; autonomy is inert until it is fixed"
+    ),
+) -> None:
     try:
         with runtime.database.sessions.begin() as session:
             alerts.raise_alert(
                 session,
                 account_fingerprint=fingerprint,
                 severity=alerts.AlertSeverity.CRITICAL,
-                kind="autonomy.mandate_invalid",
-                summary=(
-                    "the persistent mandate file is unreadable, invalid, or scoped to a "
-                    "different account; autonomy is inert until it is fixed"
-                ),
+                kind=kind,
+                summary=summary,
                 now=now,
             )
     except Exception:

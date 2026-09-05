@@ -57,7 +57,11 @@ from pathlib import Path
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from chronos.utils.secure_files import AuthorityMode, read_authority_file
+from chronos.utils.secure_files import (
+    AuthorityMode,
+    UnsafeAuthorityFile,
+    read_authority_file,
+)
 
 _logger = logging.getLogger("chronos.supervisor.proposers")
 
@@ -67,6 +71,17 @@ SCHEMA_VERSION = 1
 #: Proposer ids appear in logs, the journal, and provenance — bound them to an
 #: alphabet that is safe everywhere text is rendered.
 _PROPOSER_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+
+
+class UnsafeProposerRegistry(RuntimeError):
+    """The proposer registry is not a file this process may trust.
+
+    ``build_autonomy_runtime`` reaches two owner-authored grants — the mandate
+    and this registry — and both raise on an unsafe file. If either let the bare
+    ``UnsafeAuthorityFile`` escape, the one handler that has to explain itself
+    to an operator could not say *which* grant was unsafe, and would name the
+    wrong file half the time. Wrapping at each loader keeps them apart.
+    """
 
 
 def credential_hash(credential: str) -> str:
@@ -258,6 +273,8 @@ def load_proposer_registry(path: Path) -> LoadedRegistry | None:
         # change them all for no safety gain.
         _logger.error("Proposer registry file %s is unreadable", path)
         return None
+    except UnsafeAuthorityFile as error:
+        raise UnsafeProposerRegistry(str(error)) from error
     try:
         registry = ProposerRegistry.model_validate_json(contents.data)
     except ValueError:

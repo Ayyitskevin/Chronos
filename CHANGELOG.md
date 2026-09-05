@@ -1,5 +1,26 @@
 # CHANGELOG
 
+## [Unreleased] — an unsafe grant reports as itself, on both arms (2026-09-05)
+
+ADR-0053 wired the typed `authority_file_unsafe` fault for the proposer registry and filed
+the mandate half as a region decision. This closes it, and closes a second defect the same
+change left behind.
+
+An unsafe **mandate** — symlinked, group- or other-writable, owned by another user, or not
+UTF-8 — used to return `None`, exactly like "no mandate configured" and "does not validate".
+So it booted inert with no startup fault and the terminal read `NO MANDATE LOADED`: the
+screen an owner sees when they have never authored a grant. It now raises `UnsafeMandateFile`,
+`/health` carries `authority_file_unsafe`, the owner is alerted under the distinct kind
+`autonomy.mandate_unsafe`, and the panel says `MANDATE FILE UNSAFE`.
+
+An unsafe **registry** escaped assembly into the lifespan's generic handler, so `/health`
+also said `autonomy_wiring_failed` — assembly crashed — when assembly had correctly refused.
+It now raises `UnsafeProposerRegistry` and is caught by the same typed arm.
+
+Contract change: both loaders raise where they previously returned `None`, on the unsafe path
+only; absent and invalid are unchanged. Nothing is repaired, every path still boots inert,
+and no trading authority moves. See D-72 / ADR-0056 / R-74.
+
 ## [Unreleased] — cycle-journal rows record their posture, read from the queue row (2026-09-05)
 
 Every row in the `autonomy.cycles` stream — all 23 `_record` call sites, every stage, not only the

@@ -30,9 +30,8 @@ from pathlib import Path
 import pytest
 
 from chronos.api.auth import load_proposer_auth
-from chronos.api.autonomy_wiring import load_persistent_mandate
-from chronos.supervisor.proposers import load_proposer_registry
-from chronos.utils.secure_files import UnsafeAuthorityFile
+from chronos.api.autonomy_wiring import UnsafeMandateFile, load_persistent_mandate
+from chronos.supervisor.proposers import UnsafeProposerRegistry, load_proposer_registry
 
 _REGISTRY = {"schema_version": 1, "proposers": []}
 #: A string that can only have come from reading a symlink's target.
@@ -106,7 +105,7 @@ def test_a_registry_anyone_else_can_write_is_refused(tmp_path: Path, mode: int) 
     """Whoever can write this file decides who may propose."""
 
     path = _grant(tmp_path / "proposers.json", json.dumps(_REGISTRY), mode)
-    with pytest.raises(UnsafeAuthorityFile, match="writable by"):
+    with pytest.raises(UnsafeProposerRegistry, match="writable by"):
         load_proposer_registry(path)
     assert stat.S_IMODE(path.stat().st_mode) == mode, "refused, never repaired"
 
@@ -117,7 +116,7 @@ def test_a_symlinked_registry_is_refused_and_the_target_is_never_read(
     target = _grant(tmp_path / "real.json", json.dumps(_REGISTRY), 0o644)
     link = tmp_path / "proposers.json"
     link.symlink_to(target)
-    with pytest.raises(UnsafeAuthorityFile, match="symlink"):
+    with pytest.raises(UnsafeProposerRegistry, match="symlink"):
         load_proposer_registry(link)
 
 
@@ -184,7 +183,8 @@ def test_a_mandate_anyone_else_can_write_is_refused(tmp_path: Path) -> None:
     """Autonomy stays inert rather than honouring a grant a second account owns."""
 
     path = _grant(tmp_path / "mandate.json", _mandate_json(), 0o664)
-    assert load_persistent_mandate(path) is None
+    with pytest.raises(UnsafeMandateFile, match="writable by"):
+        load_persistent_mandate(path)
     assert stat.S_IMODE(path.stat().st_mode) == 0o664, "refused, never repaired"
 
 
@@ -203,13 +203,14 @@ def test_a_symlinked_mandate_is_refused_and_the_target_is_never_read(
     link = tmp_path / "mandate.json"
     link.symlink_to(target)
 
-    with _wiring_logs() as logged:
-        assert load_persistent_mandate(link) is None
+    with _wiring_logs() as logged, pytest.raises(UnsafeMandateFile, match="symlink") as caught:
+        load_persistent_mandate(link)
 
     text = "\n".join(record.getMessage() for record in logged)
     assert logged, "nothing was logged; the assertions below would be vacuous"
     assert "unsafe" in text, "the symlink must be refused, not followed and then rejected"
     assert _DECOY not in text, "the target's bytes must never be read"
+    assert _DECOY not in str(caught.value), "nor may the refusal quote them"
     assert "does not validate" not in text, "validation was reached, so the link was followed"
 
 
@@ -218,9 +219,10 @@ def test_a_mandate_at_0644_is_read_and_refused_by_validation_not_by_mode(
 ) -> None:
     """0644 is what the documented creation path produces; it must not be refused.
 
-    Both outcomes are ``None``, so the return value proves nothing on its own —
-    which refusal *fired* is the whole claim. At 0644 the read succeeds and
-    validation rejects the body; at 0664 the read never happens.
+    Since ADR-0056 the two outcomes are different types, not both ``None`` — at
+    0644 the read succeeds and validation returns ``None``; at 0664 the read
+    never happens and the loader raises. The log assertions stay, because
+    *which* refusal fired is still the claim.
     """
 
     path = _grant(tmp_path / "mandate.json", _mandate_json(), 0o644)
@@ -232,8 +234,8 @@ def test_a_mandate_at_0644_is_read_and_refused_by_validation_not_by_mode(
     assert "unsafe" not in accepted_text, "0644 must not trip the mode check"
 
     widened = _grant(tmp_path / "widened.json", _mandate_json(), 0o664)
-    with _wiring_logs() as refused:
-        assert load_persistent_mandate(widened) is None
+    with _wiring_logs() as refused, pytest.raises(UnsafeMandateFile):
+        load_persistent_mandate(widened)
     refused_text = "\n".join(record.getMessage() for record in refused)
     assert "unsafe" in refused_text
     assert "does not validate" not in refused_text, "the body was never reached"
@@ -243,7 +245,7 @@ def test_an_absent_mandate_is_inert_not_a_crash(tmp_path: Path) -> None:
     assert load_persistent_mandate(tmp_path / "missing.json") is None
 
 
-def test_a_non_utf8_mandate_refuses_instead_of_raising(tmp_path: Path) -> None:
+def test_a_non_utf8_mandate_refuses_with_the_typed_exception(tmp_path: Path) -> None:
     path = tmp_path / "mandate.json"
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
@@ -251,4 +253,27 @@ def test_a_non_utf8_mandate_refuses_instead_of_raising(tmp_path: Path) -> None:
     finally:
         os.close(descriptor)
     os.chmod(path, 0o644)
-    assert load_persistent_mandate(path) is None
+    with pytest.raises(UnsafeMandateFile, match="not valid UTF-8"):
+        load_persistent_mandate(path)
+
+
+def test_the_two_grants_raise_distinguishable_exceptions(tmp_path: Path) -> None:
+    """The whole reason each loader wraps rather than letting the helper's escape.
+
+    ``build_autonomy_runtime`` reaches both grants. If they raised the same
+    type, the one handler that has to explain itself to an operator could not
+    say which file was unsafe — and would name the wrong one half the time.
+    """
+
+    registry = _grant(tmp_path / "proposers.json", json.dumps(_REGISTRY), 0o666)
+    mandate = _grant(tmp_path / "mandate.json", _mandate_json(), 0o666)
+
+    with pytest.raises(UnsafeProposerRegistry) as registry_error:
+        load_proposer_registry(registry)
+    with pytest.raises(UnsafeMandateFile) as mandate_error:
+        load_persistent_mandate(mandate)
+
+    assert not isinstance(registry_error.value, UnsafeMandateFile)
+    assert not isinstance(mandate_error.value, UnsafeProposerRegistry)
+    assert "proposer registry" in str(registry_error.value)
+    assert "autonomy mandate" in str(mandate_error.value)

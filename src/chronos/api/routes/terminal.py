@@ -137,6 +137,7 @@ builds a runtime only for the writer. The order matters:
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from typing import Annotated
@@ -145,7 +146,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response,
 from pydantic import Field
 
 from chronos.api import bars as bar_plane
-from chronos.api.autonomy_wiring import load_persistent_mandate
+from chronos.api.autonomy_wiring import UnsafeMandateFile, load_persistent_mandate
 from chronos.api.dependencies import BackendState, get_state, require_writer
 from chronos.api.operational_health import collect_operational_health
 from chronos.api.terminal_session import (
@@ -444,6 +445,7 @@ def system(request: Request, state: StateDep) -> views.SystemView:
     now = utc_now()
     autonomy = _autonomy_of(request)
     operational_health = collect_operational_health(request, now=now)
+    in_force = _mandate_in_force(runtime, autonomy)
     with runtime.database.sessions.begin() as session:
         return views.system_view(
             session,
@@ -451,7 +453,8 @@ def system(request: Request, state: StateDep) -> views.SystemView:
             now=now,
             read_only=not state.writer,
             autonomy=autonomy,
-            mandate=_mandate_in_force(runtime, autonomy),
+            mandate=in_force.mandate,
+            mandate_unavailable=in_force.unavailable,
             kill_switch_engaged=runtime.live_kill_switch.read().engaged,
             live_armed=runtime.live_arming.state(now=now).armed,
             operational_health=operational_health,
@@ -470,12 +473,14 @@ def mandate(request: Request, state: StateDep) -> views.MandateView:
 
     runtime = state.runtime
     autonomy = _autonomy_of(request)
+    in_force = _mandate_in_force(runtime, autonomy)
     with runtime.database.sessions.begin() as session:
         return views.mandate_view(
             session,
             account_fingerprint=_fingerprint_of(runtime),
             now=utc_now(),
-            mandate=_mandate_in_force(runtime, autonomy),
+            mandate=in_force.mandate,
+            mandate_unavailable=in_force.unavailable,
         )
 
 
@@ -898,7 +903,7 @@ def revoke_mandate(body: RevokeRequest, request: Request, state: WriterDep) -> R
                 "this would revoke; nothing was revoked"
             ),
         )
-    in_force = _mandate_in_force(runtime, _autonomy_of(request))
+    in_force = _mandate_in_force(runtime, _autonomy_of(request)).mandate
     if in_force is None:
         return RevokeResult(
             revoked=False,
@@ -1003,9 +1008,23 @@ def _autonomy_of(request: Request) -> AutonomyRuntime | None:
     return candidate if isinstance(candidate, AutonomyRuntime) else None
 
 
-def _mandate_in_force(
-    runtime: AppRuntime, autonomy: AutonomyRuntime | None
-) -> AutonomyMandate | None:
+@dataclass(frozen=True, slots=True)
+class _MandateInForce:
+    """The grant this backend is under, and why there is none when there is none.
+
+    ``unavailable`` separates the two ways ``mandate`` can be ``None``. Absent
+    is ``None``/``None`` — the honest empty screen. An unsafe grant file is
+    ``None``/``"unsafe"``, because rendering it as the absent case would show
+    the owner exactly the panel they see when they have never authored a
+    mandate, and this module's own ordering rule exists to stop the panel
+    looking safer than the process it describes (ADR-0056).
+    """
+
+    mandate: AutonomyMandate | None
+    unavailable: str | None = None
+
+
+def _mandate_in_force(runtime: AppRuntime, autonomy: AutonomyRuntime | None) -> _MandateInForce:
     """The grant this backend is under: the runtime's first, the file second.
 
     See the module docstring for why that order is the safe one. Both arms can
@@ -1014,9 +1033,15 @@ def _mandate_in_force(
     """
 
     if autonomy is not None:
-        return autonomy.mandate
+        return _MandateInForce(autonomy.mandate)
     path = runtime.settings.autonomy_mandate_file
     if path is None:
-        return None
-    loaded = load_persistent_mandate(path)
-    return None if loaded is None else loaded.mandate
+        return _MandateInForce(None)
+    try:
+        loaded = load_persistent_mandate(path)
+    except UnsafeMandateFile:
+        # The read still answers. A terminal route that starts failing is the
+        # worse outcome, and this one feeds three of them — including the
+        # revoke path an owner reaches for during an incident.
+        return _MandateInForce(None, unavailable="unsafe")
+    return _MandateInForce(None if loaded is None else loaded.mandate)
