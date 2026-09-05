@@ -223,6 +223,7 @@ def main() -> int:
     # only ever be computed by an explicit `--stage final`, so it cannot be
     # consumed as a side effect of a routine re-run (M5 review finding — this
     # is exactly how QQQ's 2022-2024 holdout got burned).
+    # The committed research_all.json predates this guard: 170 runs, 5 final. Never regenerate it.
     parser.add_argument("--stage", choices=["dev", "val", "final", "all"], default="all")
     args = parser.parse_args()
 
