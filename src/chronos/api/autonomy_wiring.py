@@ -72,6 +72,7 @@ from chronos.autonomy import (
     StrategyForm,
     TradableAssetClass,
 )
+from chronos.autonomy.enums import SUBMITTING_AUTONOMY_MODES
 from chronos.config.settings import Settings
 from chronos.domain.enums import OptionRight, OrderLifecycle
 from chronos.domain.models import Instrument, MarketQuote
@@ -839,6 +840,27 @@ def build_autonomy_runtime(
         _logger.error("Persistent mandate is scoped to a different account; autonomy stays inert")
         _alert_bad_mandate(runtime, fingerprint, now)
         return None
+    if submitting_posture_is_unauthenticated(settings, loaded.mandate):
+        # ADR-0051. Refused BEFORE activation: an unauthenticated submitting
+        # grant never becomes an activation row, so nothing downstream can read
+        # it as a mandate that was once in force on this posture.
+        _logger.critical(
+            "Mandate %s is %s, a submitting mode, but this backend's proposer identity "
+            "is static (AUTONOMY_PROPOSERS_FILE %s, AUTONOMY_EVIDENCE_BUNDLES %s); "
+            "refusing to assemble autonomy. A submitting mandate requires a proposer "
+            "registry AND evidence binding, or re-author it at SHADOW",
+            loaded.mandate.mandate_id,
+            loaded.mandate.mode.value,
+            "set" if settings.autonomy_proposers_file is not None else "unset",
+            "on" if settings.autonomy_evidence_bundles else "off",
+            extra={"event": "autonomy_posture_unauthenticated", "passed": False},
+        )
+        _alert_unauthenticated_submitting_mandate(runtime, fingerprint, now, loaded.mandate)
+        raise UnauthenticatedSubmittingMandate(
+            f"mandate {loaded.mandate.mandate_id} is {loaded.mandate.mode.value} but the "
+            "proposer posture is static; configure AUTONOMY_PROPOSERS_FILE and "
+            "AUTONOMY_EVIDENCE_BUNDLES or author the mandate at SHADOW"
+        )
     if not ensure_activation(
         runtime,
         loaded,
@@ -896,6 +918,39 @@ def evidence_posture_is_broken(settings: Settings) -> bool:
     return settings.autonomy_evidence_bundles and settings.autonomy_proposers_file is None
 
 
+class UnauthenticatedSubmittingMandate(RuntimeError):
+    """A PAPER- or LIVE-capable mandate met a backend whose proposer identity is static.
+
+    ADR-0051: a mandate in a submitting mode assembles only on the authenticated
+    provenance posture — a proposer registry (ADR-0023) AND evidence binding
+    (ADR-0028), together. On the static posture the stamped identity is the
+    ingress placeholder and admission check 9 compares a constant against
+    itself; that is a SHADOW-grade posture, and a decision that can reach the
+    wire is not admitted on it. Raised from assembly so the backend boots inert
+    with a typed startup fault rather than running a submitting mandate on
+    declarations nobody authenticated.
+    """
+
+
+def authenticated_provenance_in_force(settings: Settings) -> bool:
+    """Proposals are attributed to a registered credential AND bound to issued evidence.
+
+    Both halves, deliberately: a registry alone authenticates *who* proposed but
+    leaves check 9 comparing the placeholder against itself; evidence binding
+    alone has no credential to issue a bundle to (:func:`evidence_posture_is_broken`).
+    """
+
+    return settings.autonomy_proposers_file is not None and settings.autonomy_evidence_bundles
+
+
+def submitting_posture_is_unauthenticated(settings: Settings, mandate: AutonomyMandate) -> bool:
+    """ADR-0051's cap: a submitting mandate on the static posture may not assemble."""
+
+    return mandate.mode in SUBMITTING_AUTONOMY_MODES and not authenticated_provenance_in_force(
+        settings
+    )
+
+
 def alert_broken_evidence_posture(runtime: AppRuntime) -> None:
     """CRITICAL owner alert: evidence binding is on with no proposer registry.
 
@@ -950,6 +1005,28 @@ def alert_invalid_proposer_registry(runtime: AppRuntime) -> None:
             )
     except Exception:
         _logger.exception("Could not record the invalid-proposer-registry alert")
+
+
+def _alert_unauthenticated_submitting_mandate(
+    runtime: AppRuntime, fingerprint: str, now: datetime, mandate: AutonomyMandate
+) -> None:
+    try:
+        with runtime.database.sessions.begin() as session:
+            alerts.raise_alert(
+                session,
+                account_fingerprint=fingerprint,
+                severity=alerts.AlertSeverity.CRITICAL,
+                kind="autonomy.posture_unauthenticated",
+                summary=(
+                    f"mandate {mandate.mandate_id} is {mandate.mode.value} but this backend "
+                    "attributes proposals to a static identity; autonomy is inert until a "
+                    "proposer registry and evidence binding are configured, or the mandate "
+                    "is re-authored at SHADOW (ADR-0051)"
+                ),
+                now=now,
+            )
+    except Exception:
+        _logger.exception("Could not record the unauthenticated-posture alert")
 
 
 def _alert_bad_mandate(runtime: AppRuntime, fingerprint: str, now: datetime) -> None:

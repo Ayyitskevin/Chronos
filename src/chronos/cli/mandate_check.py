@@ -205,6 +205,7 @@ def review_mandate(
     findings.extend(_review_promotions(mandate))
     findings.extend(_review_posture(mandate))
     findings.extend(_review_evidence_posture(evidence))
+    findings.extend(_review_submitting_posture(mandate, registry=registry, evidence=evidence))
     return findings
 
 
@@ -249,6 +250,45 @@ def _review_evidence_posture(evidence: EvidencePosture | None) -> list[Finding]:
             "at STAMP even with a valid credential. Note the honest bound: equality between "
             "the cited digest and the issued record catches accidental rendering drift, not "
             "a proposer that reasons on other text and cites the issued digest.",
+        )
+    ]
+
+
+def _review_submitting_posture(
+    mandate: AutonomyMandate,
+    *,
+    registry: RegistryPosture | None,
+    evidence: EvidencePosture | None,
+) -> list[Finding]:
+    """ADR-0051: a submitting mandate assembles only on the authenticated posture.
+
+    The backend refuses to build autonomy for a PAPER- or LIVE-capable mandate
+    unless a proposer registry is configured AND evidence binding is on; it boots
+    inert with the typed startup fault ``autonomy_posture_unauthenticated``.
+    Finding that at authoring time is what this tool is for. ``registry`` and
+    ``evidence`` are None both when unconfigured and when settings could not be
+    resolved — deny-by-default reads both as "not proven authenticated", which
+    is exactly what the backend will conclude.
+    """
+
+    if mandate.mode not in SUBMITTING_AUTONOMY_MODES:
+        return []
+    missing: list[str] = []
+    if registry is None:
+        missing.append("AUTONOMY_PROPOSERS_FILE is not configured")
+    if evidence is None or not evidence.enabled:
+        missing.append("AUTONOMY_EVIDENCE_BUNDLES is not set")
+    if not missing:
+        return []
+    return [
+        _finding(
+            Severity.BLOCKING,
+            "SUBMITTING_MODE_ON_STATIC_POSTURE",
+            f"mode is {mandate.mode.value}, a submitting mode, but {' and '.join(missing)}: "
+            "the backend refuses to assemble autonomy on the static proposer posture and "
+            "boots inert with startup fault autonomy_posture_unauthenticated (ADR-0051). "
+            "Configure a proposer registry and evidence binding, or author this mandate at "
+            "SHADOW",
         )
     ]
 

@@ -18,7 +18,9 @@ control that cannot fire.
 
 from __future__ import annotations
 
+import hashlib
 import json
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -42,12 +44,14 @@ from chronos.autonomy import (
 )
 from chronos.cli.main import main
 from chronos.cli.mandate_check import (
+    EvidencePosture,
     RegisteredPins,
     RegistryPosture,
     Severity,
     load_mandate_text,
     review_mandate,
 )
+from chronos.config.settings import get_settings
 from chronos.domain.enums import DataQuality
 from chronos.utils.identifiers import account_fingerprint
 
@@ -131,6 +135,7 @@ def _codes(mandate: AutonomyMandate, **kwargs: object) -> dict[str, Severity]:
         fingerprint_source="test",
         ingress_pins=kwargs.pop("ingress_pins", dict(_INGRESS_PINS)),  # type: ignore[arg-type]
         registry=kwargs.pop("registry", None),  # type: ignore[arg-type]
+        evidence=kwargs.pop("evidence", None),  # type: ignore[arg-type]
     )
     assert not kwargs, f"unexpected kwargs {sorted(kwargs)}"
     return {finding.code: finding.severity for finding in findings}
@@ -448,9 +453,55 @@ def test_a_rung_above_shadow_is_reported_as_self_declared() -> None:
     assert "self-declared-rung" not in _codes(_shadow())
 
 
+@pytest.fixture()
+def authenticated_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[None]:
+    """The posture a submitting mandate needs (ADR-0051), resolved through real settings.
+
+    The registry entry carries the test mandate's own pins, so the only thing the
+    registry changes here is the posture — not which author the pins authorize.
+    """
+
+    registry = tmp_path / "autonomy_proposers.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "proposers": [
+                    {
+                        "proposer_id": "test-proposer",
+                        "secret_sha256": hashlib.sha256(b"test-credential").hexdigest(),
+                        **_INGRESS_PINS,
+                        "expires_at": "2099-01-01T00:00:00+00:00",
+                        "enabled": True,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AUTONOMY_PROPOSERS_FILE", str(registry))
+    monkeypatch.setenv("AUTONOMY_EVIDENCE_BUNDLES", "true")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+@pytest.fixture()
+def static_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """No registry, no evidence binding: the pre-ADR-0023 posture, through real settings."""
+
+    monkeypatch.delenv("AUTONOMY_PROPOSERS_FILE", raising=False)
+    monkeypatch.delenv("AUTONOMY_EVIDENCE_BUNDLES", raising=False)
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
 def test_strict_turns_important_findings_into_a_nonzero_exit(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], authenticated_env: None
 ) -> None:
+    # A PAPER mandate is BLOCKING on the static posture (ADR-0051); this test is
+    # about --strict promoting IMPORTANT, so it runs on the authenticated one.
     mandate = _paper(
         concentration=ConcentrationLimits(
             max_symbol_exposure_pct=Decimal("0.5"),
@@ -463,6 +514,59 @@ def test_strict_turns_important_findings_into_a_nonzero_exit(
     assert main(argv) == 0
     assert main([*argv, "--strict"]) == 1
     capsys.readouterr()
+
+
+# ------------------------------------------------- ADR-0051: the posture cap
+
+
+def test_a_submitting_mandate_on_the_static_posture_is_blocking() -> None:
+    """What the backend will refuse to assemble, said at authoring time."""
+
+    assert _codes(_paper())["SUBMITTING_MODE_ON_STATIC_POSTURE"] is Severity.BLOCKING
+
+
+def test_either_half_of_the_posture_alone_is_still_blocking() -> None:
+    registry = RegistryPosture(path="proposers.json", proposers=())
+    evidence_only = EvidencePosture(enabled=True, registry_configured=False, ttl_seconds=300.0)
+
+    assert _codes(_paper(), registry=registry)["SUBMITTING_MODE_ON_STATIC_POSTURE"] is (
+        Severity.BLOCKING
+    )
+    assert _codes(_paper(), evidence=evidence_only)["SUBMITTING_MODE_ON_STATIC_POSTURE"] is (
+        Severity.BLOCKING
+    )
+
+
+def test_the_authenticated_posture_clears_the_cap_and_shadow_never_trips_it() -> None:
+    registry = RegistryPosture(path="proposers.json", proposers=())
+    evidence = EvidencePosture(enabled=True, registry_configured=True, ttl_seconds=300.0)
+
+    assert "SUBMITTING_MODE_ON_STATIC_POSTURE" not in _codes(
+        _paper(), registry=registry, evidence=evidence
+    )
+    assert "SUBMITTING_MODE_ON_STATIC_POSTURE" not in _codes(_shadow())
+
+
+def test_the_cli_exit_code_carries_the_cap_on_the_static_posture(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], static_env: None
+) -> None:
+    """End to end through settings: the backend would boot inert, so the tool says so."""
+
+    path = tmp_path / "mandate.json"
+    path.write_text(_paper().model_dump_json(), encoding="utf-8")
+
+    assert main(["mandate", "check", "--file", str(path), "--account-id", _ACCOUNT]) == 1
+    assert "SUBMITTING_MODE_ON_STATIC_POSTURE" in capsys.readouterr().out
+
+
+def test_the_cli_clears_the_cap_on_the_authenticated_posture(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], authenticated_env: None
+) -> None:
+    path = tmp_path / "mandate.json"
+    path.write_text(_paper().model_dump_json(), encoding="utf-8")
+
+    assert main(["mandate", "check", "--file", str(path), "--account-id", _ACCOUNT]) == 0
+    assert "SUBMITTING_MODE_ON_STATIC_POSTURE" not in capsys.readouterr().out
 
 
 def test_the_report_lists_every_inert_field_not_only_the_ones_set(

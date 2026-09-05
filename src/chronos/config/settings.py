@@ -214,6 +214,10 @@ class Settings(BaseSettings):
     # identity is stamped. Set, it flips the proposal route to proposer-only
     # credentials and provenance to credential-derived identity; an invalid or
     # unreadable file means proposals refuse, never that identity is guessed.
+    # For a PAPER- or LIVE-capable mandate the registry is not optional: with it
+    # unset (or evidence binding off) the backend refuses to assemble autonomy
+    # and notes a typed startup fault — the static posture is SHADOW-grade
+    # (ADR-0051).
     autonomy_proposers_file: Path | None = None
     # The per-job evidence protocol (ADR-0028 Option C). Unset (the default) is
     # the pre-ADR-0028 posture byte-for-byte: every proposal cites the
@@ -225,7 +229,8 @@ class Settings(BaseSettings):
     # Set WITHOUT a proposer registry refuses every proposal rather than falling
     # back: a bundle is issued *to* a credential, and with no registry there is
     # no author to issue to. That combination is a configuration error the owner
-    # must see, never a quiet return to anonymous proposing.
+    # must see, never a quiet return to anonymous proposing. Required, together
+    # with the registry, by any submitting mandate (ADR-0051).
     autonomy_evidence_bundles: bool = False
     # How long an issued bundle stays citable, judged at the drain. 300 s is a
     # disclosed judgment, not a derived number (the MARKET_PROTECTION_COLLAR
