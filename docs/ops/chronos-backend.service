@@ -1,0 +1,38 @@
+# TEMPLATE — nothing in this repository installs, enables, or starts this unit.
+#
+# Copy to ~/.config/systemd/user/chronos-backend.service and replace every
+# <PLACEHOLDER>. The runbook this belongs to is docs/SHADOW_CAMPAIGN.md; §3
+# explains every variable in the environment file and why it is set the way it
+# is. Read that before editing this.
+#
+# The environment file is NOT in this repository and must not be: it carries the
+# backend's own configuration, and the paths in it are the owner's. Create it
+# mode 0600, owned by the account this unit runs as.
+
+[Unit]
+Description=Chronos backend (autonomy SHADOW campaign, demo broker)
+Documentation=file:%h/<CHRONOS_CHECKOUT>/docs/SHADOW_CAMPAIGN.md
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/<CHRONOS_CHECKOUT>
+EnvironmentFile=%h/<PRIVATE_ENV_DIR>/chronos-backend.env
+ExecStart=%h/<CHRONOS_CHECKOUT>/.venv/bin/python scripts/run_backend.py
+
+# on-failure, deliberately NOT always: a backend that refuses to start is
+# usually refusing for a reason a restart cannot fix — a recovery hold
+# (ADR-0054), an invalid mandate, a broken proposer registry — and a restart
+# loop turns one legible refusal into a wall of noise.
+Restart=on-failure
+RestartSec=10
+
+# The campaign touches nothing outside its own state directory.
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/<CHRONOS_STATE_DIR> %h/<CHRONOS_CHECKOUT>
+
+[Install]
+WantedBy=default.target

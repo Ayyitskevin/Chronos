@@ -1,0 +1,51 @@
+# TEMPLATE — nothing in this repository installs, enables, or starts this unit.
+#
+# Copy to ~/.config/systemd/user/chronos-worker.service and replace every
+# <PLACEHOLDER>. See docs/SHADOW_CAMPAIGN.md §3 for every variable.
+#
+# Forwarding is OFF here and stays off until the owner decides otherwise
+# (docs/SHADOW_CAMPAIGN.md §2). With it off the worker gathers, thinks, and logs,
+# and proposes nothing — which is a worker-stability campaign, not
+# promotion-ladder rung 1. The runbook says so in those words; so does this
+# comment, because this file is what an operator actually edits.
+
+[Unit]
+Description=Chronos model worker (local inference, proposal-only, forwarding off)
+Documentation=file:%h/<CHRONOS_CHECKOUT>/docs/SHADOW_CAMPAIGN.md
+After=chronos-backend.service
+Wants=chronos-backend.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/<CHRONOS_CHECKOUT>
+EnvironmentFile=%h/<PRIVATE_ENV_DIR>/chronos-worker.env
+
+# UnsetEnvironment=, not Environment=CHRONOS_WORKER_FORWARD=false.
+#
+# systemd.exec(5): settings from EnvironmentFile= OVERRIDE settings made with
+# Environment=. So an `Environment=...=false` line here would NOT win over the
+# private environment file, and a comment claiming it did would be false — an
+# earlier revision of this file made exactly that claim.
+#
+# UnsetEnvironment= is applied last and removes the variable from the executed
+# process entirely, so neither this unit nor the environment file can set it.
+# The worker's own parser returns its default (False) for an ABSENT variable
+# (worker/config.py `_parse_bool`), so absence is off.
+#
+# What that buys: turning forwarding on for Phase B is an edit to THIS file plus
+# `systemctl --user daemon-reload` — a reviewed unit and a visible act — rather
+# than a one-word change to a private file nobody rereads and no test can see.
+UnsetEnvironment=CHRONOS_WORKER_FORWARD
+
+ExecStart=%h/<CHRONOS_CHECKOUT>/.venv/bin/python -m worker
+Restart=on-failure
+RestartSec=30
+
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/<CHRONOS_CHECKOUT>
+
+[Install]
+WantedBy=default.target

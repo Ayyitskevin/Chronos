@@ -181,6 +181,14 @@ directory into more than one running instance (SQLite + halt-file semantics assu
 
 ## Shadow/paper service
 
+> **Not the autonomy SHADOW campaign.** This section is the *deterministic platform's*
+> shadow loop (`chronos.execution` / `chronos.research`). The autonomy stack's SHADOW
+> campaign — a `SHADOW` mandate driving the model worker and the supervisor — is a
+> different subsystem with its own units (`docs/ops/chronos-backend.service`,
+> `docs/ops/chronos-worker.service`) and its own runbook,
+> [`SHADOW_CAMPAIGN.md`](SHADOW_CAMPAIGN.md). `chronos-shadow.service` below is neither of
+> those units and does not replace them.
+
 *(Corrected 2026-08-02. This section previously read "Future work — shadow/paper service (NOT
 IMPLEMENTED)" and stated that no service entry point existed. That was true of an earlier build
 and is false today: `python -m chronos.service` ships and is tested —
