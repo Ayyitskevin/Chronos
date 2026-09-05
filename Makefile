@@ -19,6 +19,17 @@ type-worker:
 	.venv/bin/mypy --strict worker
 
 security-gate:
+	@untracked="$$(git ls-files --others --exclude-standard)"; \
+	if [ -n "$$untracked" ]; then \
+	  { \
+	    echo "security-gate refuses to run: untracked files in the working tree."; \
+	    echo "The tracked-file secret scan enumerates 'git ls-files', so it cannot see these"; \
+	    echo "files. Running anyway would report a pass over a file set that excludes them:"; \
+	    printf '%s\n' "$$untracked" | sed 's/^/  /'; \
+	    echo "Stage them (git add) or remove them, then re-run."; \
+	  } >&2; \
+	  exit 1; \
+	fi
 	$(PY) scripts/verify_release_security.py
 
 release-gate:
