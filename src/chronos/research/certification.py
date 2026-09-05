@@ -44,6 +44,7 @@ from typing import Any
 from chronos.histdata.corporate_actions import ActionKind, CorporateAction
 from chronos.marketdata.bars import BarInterval, BarSeries
 from chronos.marketdata.quality import validate_series
+from chronos.research.holdout_map import HoldoutMapError, HoldoutSpan, validate_holdout_map
 from chronos.research.session_calendar import CalendarCoverageError, SessionCalendar
 
 #: Phase 3, frozen before collection. Not tunable at call sites on purpose: a floor a
@@ -482,6 +483,7 @@ def certify_export(
     actions_by_symbol: Mapping[str, Sequence[CorporateAction]],
     attestation: CorporateActionAttestation | NoCorporateActionAttestation | None,
     classified_moves: Sequence[ClassifiedMove] = (),
+    holdout_map: Sequence[HoldoutSpan] | None = None,
     calendar: SessionCalendar | None = None,
     interval: BarInterval = BarInterval.DAY_1,
 ) -> CertificationReport:
@@ -517,6 +519,16 @@ def certify_export(
                 f"the {interval} certification requested — a verdict must judge the bars "
                 "it was handed, not a lookalike"
             )
+
+    if holdout_map is not None:
+        try:
+            validate_holdout_map(
+                expected_symbols={window.symbol for window in windows},
+                series_by_symbol=series_by_symbol,
+                spans=holdout_map,
+            )
+        except HoldoutMapError as error:
+            raise CertificationError(str(error)) from error
 
     calendar = calendar or SessionCalendar()
     findings: list[Finding] = []

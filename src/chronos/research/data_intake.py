@@ -22,7 +22,7 @@ from chronos.research.certification import (
     SymbolWindow,
     certify_export,
 )
-from chronos.research.dataset_release import HoldoutSpan, HoldoutStatus
+from chronos.research.holdout_map import HoldoutSpan, HoldoutStatus
 from chronos.research.session_calendar import CalendarCoverageError, SessionCalendar
 
 INTAKE_SCHEMA_VERSION = 1
@@ -510,6 +510,7 @@ def certify_loaded_intake(intake: IntakeDelivery, *, delivery: Path) -> Certific
             actions_by_symbol=intake.actions_by_symbol,
             attestation=intake.attestation,
             classified_moves=intake.classified_moves,
+            holdout_map=intake.holdout_map,
             interval=BarInterval.DAY_1,
         )
     except CertificationError as error:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import socket
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -152,7 +152,7 @@ def test_data_verify_certifies_synthetic_delivery_without_network_dotenv_or_writ
     output = capsys.readouterr().out
     assert code == 0
     assert output.count("\n") == 1
-    assert output.startswith(f"CERTIFIED {delivery / 'INTAKE.json'}: ")
+    assert output.startswith(f"CERTIFIED {delivery / 'INTAKE.json'}: certification_report_sha256=")
     assert "DOTENV_SECRET_SENTINEL" not in output
     assert before == after
 
@@ -307,3 +307,120 @@ def test_data_verify_returns_not_certified_only_after_the_gates_run(
     assert output.startswith(f"NOT_CERTIFIED {delivery / 'INTAKE.json'}: ")
     assert "MISSING_SESSION" in output
     assert output.count("\n") == 1
+
+
+def test_data_verify_refuses_an_incomplete_holdout_map_exactly(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    delivery = _write_synthetic_delivery(tmp_path)
+    manifest = _manifest(delivery)
+    holdout_map = manifest["holdout_map"]
+    assert isinstance(holdout_map, list)
+    manifest["holdout_map"] = [span for span in holdout_map if span["symbol"] == "QQQ"]
+    _rewrite_manifest(delivery, manifest)
+
+    code = main(["data", "verify", "--delivery", str(delivery)])
+
+    output = capsys.readouterr().out
+    assert code == 2
+    assert output == (
+        f"UNVERIFIED {delivery / 'INTAKE.json'}: certification request is invalid "
+        "(holdout map symbols differ from the certification request: map-only=[], "
+        "certification-only=['DIA', 'GLD', 'IWM', 'SPY', 'TLT'])\n"
+    )
+
+
+@pytest.mark.parametrize(
+    ("topology", "reason"),
+    [
+        ("late", "leaving session 2024-01-02 undeclared"),
+        ("early", "leaving session 2024-03-28 undeclared"),
+        ("gap", "leaves session 2024-02-02 undeclared"),
+        ("overlap", "overlap"),
+    ],
+)
+def test_data_verify_refuses_invalid_holdout_topology(
+    topology: str,
+    reason: str,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    delivery = _write_synthetic_delivery(tmp_path)
+    manifest = _manifest(delivery)
+    spans = manifest["holdout_map"]
+    assert isinstance(spans, list)
+    qqq = next(span for span in spans if span["symbol"] == "QQQ")
+    if topology == "late":
+        qqq["start"] = "2024-01-03"
+    elif topology == "early":
+        qqq["end"] = "2024-03-27"
+    elif topology == "gap":
+        qqq["end"] = "2024-02-01"
+        spans.append({**qqq, "name": "qqq-second", "start": "2024-02-03", "end": "2024-03-28"})
+    else:
+        qqq["end"] = "2024-02-15"
+        spans.append({**qqq, "name": "qqq-second", "start": "2024-02-01", "end": "2024-03-28"})
+    _rewrite_manifest(delivery, manifest)
+
+    code = main(["data", "verify", "--delivery", str(delivery)])
+
+    output = capsys.readouterr().out
+    assert code == 2
+    assert output.startswith(
+        f"UNVERIFIED {delivery / 'INTAKE.json'}: certification request is invalid "
+    )
+    assert reason in output
+
+
+def test_data_verify_holdout_tiling_covers_pre_window_warmup_rows(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    delivery = _write_synthetic_delivery(tmp_path)
+    bar_path = delivery / "bars/QQQ.csv"
+    rows = bar_path.read_text(encoding="utf-8").splitlines()
+    warmup = rows[1].replace(_START.isoformat(), (_START - timedelta(days=4)).isoformat())
+    bar_path.write_text("\n".join([rows[0], warmup, *rows[1:]]) + "\n", encoding="utf-8")
+    manifest = _manifest(delivery)
+    qqq = manifest["symbols"]["QQQ"]
+    raw = bar_path.read_bytes()
+    qqq["bars_sha256"] = hashlib.sha256(raw).hexdigest()
+    qqq["bar_count"] = len(rows)
+    _rewrite_manifest(delivery, manifest)
+
+    code = main(["data", "verify", "--delivery", str(delivery)])
+
+    output = capsys.readouterr().out
+    assert code == 2
+    assert "leaving session 2023-12-29 undeclared" in output
+
+
+def test_data_verify_names_the_report_digest_without_claiming_content_identity(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    delivery = _write_synthetic_delivery(tmp_path)
+    first_code = main(["data", "verify", "--delivery", str(delivery)])
+    first = capsys.readouterr().out
+
+    bar_path = delivery / "bars/QQQ.csv"
+    rows = bar_path.read_text(encoding="utf-8").splitlines()
+    shifted = [rows[0]]
+    for row in rows[1:]:
+        day, open_, high, low, close, volume = row.split(",")
+        shifted.append(
+            ",".join(
+                [day, *(str(float(value) + 10.0) for value in (open_, high, low, close)), volume]
+            )
+        )
+    bar_path.write_text("\n".join(shifted) + "\n", encoding="utf-8")
+    manifest = _manifest(delivery)
+    manifest["symbols"]["QQQ"]["bars_sha256"] = hashlib.sha256(bar_path.read_bytes()).hexdigest()
+    _rewrite_manifest(delivery, manifest)
+
+    second_code = main(["data", "verify", "--delivery", str(delivery)])
+    second = capsys.readouterr().out
+
+    prefix = f"CERTIFIED {delivery / 'INTAKE.json'}: certification_report_sha256="
+    assert first_code == second_code == 0
+    assert first.startswith(prefix)
+    assert second.startswith(prefix)
+    assert first.removeprefix(prefix) == second.removeprefix(prefix)

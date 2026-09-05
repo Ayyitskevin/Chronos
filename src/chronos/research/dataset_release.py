@@ -37,14 +37,18 @@ import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date
-from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
 from chronos.marketdata.bars import BarInterval, BarSeries
 from chronos.research.certification import CertificationReport
-from chronos.research.certified_data import CATALOG_SCHEMA_VERSION, DataClassification
+from chronos.research.certified_data import CATALOG_SCHEMA_VERSION
+from chronos.research.holdout_map import (
+    HoldoutMapError,
+    HoldoutSpan,
+    HoldoutStatus,
+    validate_holdout_map,
+)
 
 # v2 added the per-release interval and the hourly partition schema. Bumped while
 # zero production release digests existed; see certification.py's matching note.
@@ -56,57 +60,6 @@ _HOURLY_BARS_HEADER = "timestamp_utc,session_date,open,high,low,close,volume"
 
 class DatasetReleaseError(RuntimeError):
     """A release could not be frozen as declared."""
-
-
-class HoldoutStatus(StrEnum):
-    """How much of research has already seen a span of dates."""
-
-    CLEAN = "clean"
-    SEEN = "seen"
-    BURNED = "burned"
-
-    @property
-    def catalog_classification(self) -> DataClassification:
-        if self is HoldoutStatus.CLEAN:
-            return DataClassification.HOLDOUT
-        return DataClassification.ORDINARY
-
-
-@dataclass(frozen=True, slots=True)
-class HoldoutSpan:
-    """One inclusive date range of one symbol, with its declared status."""
-
-    symbol: str
-    name: str
-    start: date
-    end: date
-    status: HoldoutStatus
-    reason: str = ""
-
-    def __post_init__(self) -> None:
-        if not self.symbol:
-            raise ValueError("HoldoutSpan.symbol must be non-empty")
-        if not self.name:
-            raise ValueError("HoldoutSpan.name must be non-empty")
-        if self.start > self.end:
-            raise ValueError(f"{self.symbol}/{self.name}: start must not follow end")
-        if self.status is HoldoutStatus.BURNED and not self.reason.strip():
-            raise ValueError(
-                f"{self.symbol}/{self.name}: a burned span must record why it was consumed"
-            )
-
-    def contains(self, day: date) -> bool:
-        return self.start <= day <= self.end
-
-    def to_mapping(self) -> dict[str, Any]:
-        return {
-            "symbol": self.symbol,
-            "name": self.name,
-            "start": self.start.isoformat(),
-            "end": self.end.isoformat(),
-            "status": str(self.status),
-            "reason": self.reason,
-        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -257,37 +210,6 @@ def _render_partition(series: BarSeries, span: HoldoutSpan) -> tuple[str, int]:
     return "\n".join(lines) + "\n", rows
 
 
-def _require_tiling(spans: Sequence[HoldoutSpan], symbol: str, start: date, end: date) -> None:
-    """Every date in ``[start, end]`` is claimed by exactly one span."""
-
-    ordered = sorted(spans, key=lambda span: (span.start, span.end))
-    if not ordered:
-        raise DatasetReleaseError(f"{symbol}: no holdout map declared for the release window")
-    if ordered[0].start > start:
-        raise DatasetReleaseError(
-            f"{symbol}: holdout map starts {ordered[0].start.isoformat()}, leaving "
-            f"{start.isoformat()} undeclared — undeclared is how a holdout gets read"
-        )
-    if ordered[-1].end < end:
-        raise DatasetReleaseError(
-            f"{symbol}: holdout map ends {ordered[-1].end.isoformat()}, leaving "
-            f"{end.isoformat()} undeclared — undeclared is how a holdout gets read"
-        )
-    previous = ordered[0]
-    for span in ordered[1:]:
-        if span.start <= previous.end:
-            raise DatasetReleaseError(
-                f"{symbol}: spans {previous.name!r} and {span.name!r} overlap; a date "
-                "cannot hold two classifications"
-            )
-        if (span.start - previous.end).days != 1:
-            raise DatasetReleaseError(
-                f"{symbol}: gap between {previous.name!r} and {span.name!r} leaves "
-                f"{(previous.end).isoformat()}..{span.start.isoformat()} undeclared"
-            )
-        previous = span
-
-
 def freeze_release(
     *,
     dataset_id: str,
@@ -311,20 +233,18 @@ def freeze_release(
         raise DatasetReleaseError(
             f"refusing to freeze a release over a NOT_CERTIFIED export ({blocking})"
         )
-    if not spans:
-        raise DatasetReleaseError("a release requires a complete holdout map")
+    try:
+        validate_holdout_map(
+            expected_symbols={entry.symbol for entry in certification.coverage},
+            series_by_symbol=series_by_symbol,
+            spans=spans,
+        )
+    except HoldoutMapError as error:
+        raise DatasetReleaseError(str(error)) from error
 
     by_symbol: dict[str, list[HoldoutSpan]] = {}
     for span in spans:
         by_symbol.setdefault(span.symbol, []).append(span)
-
-    covered = {entry.symbol for entry in certification.coverage}
-    declared = set(by_symbol)
-    if declared != covered:
-        raise DatasetReleaseError(
-            "the holdout map and the certified export describe different symbols: "
-            f"map-only={sorted(declared - covered)}, certified-only={sorted(covered - declared)}"
-        )
 
     partitions: list[PartitionRelease] = []
     output_root.mkdir(parents=True, exist_ok=True)
@@ -340,17 +260,7 @@ def freeze_release(
                 "what was judged, never a lookalike"
             )
         symbol_spans = by_symbol[symbol]
-        _require_tiling(
-            symbol_spans,
-            symbol,
-            series.bars[0].session_date,
-            series.bars[-1].session_date,
-        )
-        seen_names: set[str] = set()
         for span in sorted(symbol_spans, key=lambda item: item.start):
-            if span.name in seen_names:
-                raise DatasetReleaseError(f"{symbol}: duplicate span name {span.name!r}")
-            seen_names.add(span.name)
             body, rows = _render_partition(series, span)
             payload = body.encode("utf-8")
             relative_path = f"{symbol}/{span.name}.csv"

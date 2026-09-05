@@ -20,7 +20,9 @@ def cmd_data_verify(args: argparse.Namespace) -> int:
         return 2
 
     if report.certified:
-        print(f"CERTIFIED {manifest_path}: {report.certification_digest}")
+        print(
+            f"CERTIFIED {manifest_path}: certification_report_sha256={report.certification_digest}"
+        )
         return 0
     finding_kinds = ",".join(finding.kind for finding in report.findings)
     print(
@@ -64,8 +66,10 @@ def cmd_data_certify(args: argparse.Namespace) -> int:
 
     assert result.release is not None
     print(
-        f"CERTIFIED {manifest_path}: {result.report.certification_digest}; "
-        f"RELEASE {args.output / 'release.json'}: {result.release.release_digest}; "
+        f"CERTIFIED {manifest_path}: "
+        f"certification_report_sha256={result.report.certification_digest}; "
+        f"RELEASE {args.output / 'release.json'}: "
+        f"release_digest={result.release.release_digest}; "
         f"STORED {result.history_root}: {result.bars_added} bars, "
         f"{result.actions_stored} actions"
     )
