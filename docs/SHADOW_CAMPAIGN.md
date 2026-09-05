@@ -394,7 +394,7 @@ they call for different actions.
 Observed on this backend: after a first writer boot, exit **0** with eight `PASS` lines; against
 an empty state directory, exit **1** with
 `UNVERIFIED; missing state_generation marker and installation_identity row`; with a worker URL on
-the wrong port, exit **1** with `backend URL: http://127.0.0.1:8000 does not match
+the wrong port, exit **1** with `backend URL: http://127.0.0.1:<other-port> does not match
 http://127.0.0.1:8765`.
 
 **What a PASS does not mean.** It is a statement about local files and configuration only. It
