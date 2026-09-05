@@ -28,13 +28,15 @@ from chronos.registry import (
     register_run,
 )
 from chronos.registry.ledger import verified_registry_transaction
+from chronos.registry.trials import _START_KEYS as _SOURCE_START_KEYS
+from chronos.registry.trials import _TERMINAL_KEYS as _SOURCE_TERMINAL_KEYS
 
 _MANIFEST_SHA = "a" * 64
 _CONFIG_SHA = "b" * 64
 _COMMIT = "c" * 40
 _EVIDENCE_SHA = "e" * 64
 
-_START_KEYS = {
+_EXPECTED_START_PAYLOAD_KEYS = {
     "schema_version",
     "attempt_id",
     "trial_id",
@@ -48,7 +50,7 @@ _START_KEYS = {
     "criteria_ref",
     "touched_data",
 }
-_TERMINAL_KEYS = {
+_EXPECTED_TERMINAL_PAYLOAD_KEYS = {
     "schema_version",
     "attempt_id",
     "trial_id",
@@ -60,6 +62,33 @@ _TERMINAL_KEYS = {
     "evidence_digest",
     "error_type",
 }
+
+
+def test_the_pinned_payload_schemas_match_the_registry_module() -> None:
+    """The two sets above are PINS, not mirrors, and this is what makes them safe.
+
+    They were previously named ``_START_KEYS``/``_TERMINAL_KEYS`` — the same names the
+    module under test uses — so a reader had every reason to think there was one
+    definition. There are two, and that is deliberate: these records are a durable,
+    hash-chained v1 wire format, and the assertions above exist to pin it. Importing the
+    module's sets instead would make those assertions say only "the writer agrees with the
+    reader", so adding a field to both would change what is written to the ledger forever
+    with nothing failing.
+
+    Keeping an independent expectation only helps if it is checked against the source, so
+    that is this test's whole job: change the module's sets and this fails here, by name,
+    rather than the pins drifting quietly apart from the code they describe. A deliberate
+    schema change updates both sides and bumps ``TRIAL_SCHEMA_VERSION``.
+    """
+
+    assert set(_SOURCE_START_KEYS) == _EXPECTED_START_PAYLOAD_KEYS, (
+        "trial_started payload schema changed in chronos.registry.trials; if that is "
+        "deliberate, update the pin above and bump TRIAL_SCHEMA_VERSION"
+    )
+    assert set(_SOURCE_TERMINAL_KEYS) == _EXPECTED_TERMINAL_PAYLOAD_KEYS, (
+        "trial_terminal payload schema changed in chronos.registry.trials; if that is "
+        "deliberate, update the pin above and bump TRIAL_SCHEMA_VERSION"
+    )
 
 
 def _registry(tmp_path: Path) -> CanonicalTrialRegistry:
@@ -215,7 +244,7 @@ def test_start_is_the_counting_event_and_has_the_exact_v1_schema(tmp_path: Path)
     assert len(records) == 1
     start = records[0]
     assert start.kind == KIND_TRIAL_STARTED
-    assert set(start.payload) == _START_KEYS
+    assert set(start.payload) == _EXPECTED_START_PAYLOAD_KEYS
     assert start.payload["schema_version"] == TRIAL_SCHEMA_VERSION
     assert start.payload["touched_data"] is True
     assert receipt.start_sequence == 0
@@ -229,7 +258,7 @@ def test_failures_orphans_and_retries_remain_counted(tmp_path: Path) -> None:
     registry = _registry(tmp_path)
     failed = _start(registry, "same-semantic-trial", attempt_id="1" * 32)
     failure = registry.terminalize_failed(failed, error_type="DatasetReadError")
-    assert set(failure.payload) == _TERMINAL_KEYS
+    assert set(failure.payload) == _EXPECTED_TERMINAL_PAYLOAD_KEYS
     assert failure.payload["outcome"] == "failed"
     assert registry.multiplicity_snapshot().count == 1
 
@@ -239,7 +268,7 @@ def test_failures_orphans_and_retries_remain_counted(tmp_path: Path) -> None:
         evidence_digest=_EVIDENCE_SHA,
     )
     assert completion.kind == KIND_TRIAL_TERMINAL
-    assert set(completion.payload) == _TERMINAL_KEYS
+    assert set(completion.payload) == _EXPECTED_TERMINAL_PAYLOAD_KEYS
     assert completion.payload["evidence_digest"] == _EVIDENCE_SHA
 
     _start(registry, "interrupted-orphan", attempt_id="3" * 32)
