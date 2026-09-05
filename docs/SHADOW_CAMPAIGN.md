@@ -350,6 +350,59 @@ NOTE     the revocation ledger could not be read (NoLedgerFile); an entry shown
                  policy=b6ac5639ccc1a4a1 expires=2027-02-02T02:59:07+00:00
 ```
 
+### First run: `campaign preflight`, once the backend has booted
+
+Everything §1–§3 asks the owner to get right by hand, `python -m chronos.cli campaign preflight`
+checks in one read-only pass (PR #167). It opens no socket, starts nothing, reads no `.env`, and
+writes nothing — every path and value is an explicit argument:
+
+```bash
+python -m chronos.cli campaign preflight \
+  --mandate "$AUTONOMY_MANDATE_FILE" \
+  --registry "$AUTONOMY_PROPOSERS_FILE" \
+  --state-dir data \
+  --policy worker/policy.md \
+  --model "$CHRONOS_WORKER_MODEL" \
+  --worker-backend-url "$CHRONOS_WORKER_BACKEND_URL" \
+  --worker-symbols "$CHRONOS_WORKER_SYMBOLS" \
+  --backend-symbols "$SYMBOL_ALLOWLIST" \
+  --evidence
+```
+
+`--unit` defaults to `docs/ops/chronos-worker.service`, `--provider` to `local`, `--backend-host`
+to `127.0.0.1` and `--backend-port` to `8765`; pass them when yours differ. `--evidence` is a
+flag, and it asserts the posture D-71 requires — omit it and the run fails, which is the point.
+
+**Run it after the backend has booted once as writer, not before.** The eighth check compares
+ADR-0054's two installation witnesses, and neither exists until the first writer boot creates
+them — so before that boot the command reports `UNVERIFIED`, by design. That is not a defect and
+not something to work around: the witnesses are seeded by the backend, and a read-only command
+will not seed them for you.
+
+Three verdicts, **two exit codes**:
+
+| verdict | means | exit |
+|---|---|---|
+| `PREFLIGHT PASS` | all eight checks hold — the local inputs are coherent | **0** |
+| `FAIL … UNVERIFIED; …` | a check **could not be evaluated** — no witnesses yet, or the 0012 adoption sentinel is still pending. The message names the repair, usually *"boot the backend writer once, then re-run preflight"* | **1** |
+| `FAIL [SHADOW_CAMPAIGN §n] …` | a check was evaluated and **failed**; the bracket names the section of this runbook that fixes it | **1** |
+
+`UNVERIFIED` shares its exit code with `FAIL` deliberately: a check that was not examined must
+not read as a check that passed, so both stop the sequence. Read the word, not just the code —
+they call for different actions.
+
+Observed on this backend: after a first writer boot, exit **0** with eight `PASS` lines; against
+an empty state directory, exit **1** with
+`UNVERIFIED; missing state_generation marker and installation_identity row`; with a worker URL on
+the wrong port, exit **1** with `backend URL: http://127.0.0.1:8000 does not match
+http://127.0.0.1:8765`.
+
+**What a PASS does not mean.** It is a statement about local files and configuration only. It
+does not prove a backend is listening, a model tag is installed, a worker can reach anything, or
+that a campaign has begun — the backend-URL check is an exact configuration comparison and says
+`(not probed)` in its own output. Reachability is still §5's health check and the facts check
+below.
+
 ### First run: confirm the first tick actually gathered facts
 
 A scope the demo broker cannot quote fails *silently* on the daily check above (§1), so check
