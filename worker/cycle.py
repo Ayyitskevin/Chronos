@@ -175,7 +175,17 @@ def run_loop(config: WorkerConfig, *, once: bool = False) -> None:
     """
 
     budget = DailyTokenBudget(config.max_daily_tokens)
-    with httpx.Client() as backend, httpx.Client() as anthropic:
+    # ``trust_env=False`` on both: httpx honours HTTP_PROXY/HTTPS_PROXY/ALL_PROXY
+    # by default and does NOT bypass 127.0.0.1 unless NO_PROXY says so, so an
+    # inherited proxy variable would route the backend's API token and the whole
+    # evidence snapshot off this host while every loopback check still passed.
+    # The cost is deliberate and worth stating: a hosted provider behind a
+    # corporate proxy, and env-var TLS configuration (SSL_CERT_FILE) and .netrc,
+    # stop being picked up from the environment here too.
+    with (
+        httpx.Client(trust_env=False) as backend,
+        httpx.Client(trust_env=False) as anthropic,
+    ):
         while True:
             started = time.monotonic()
             try:
