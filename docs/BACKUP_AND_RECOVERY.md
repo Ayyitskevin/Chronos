@@ -11,19 +11,32 @@ reconciliation passes again (`src/chronos/execution/engine.py`).~~
 > passes. It is **not** true of the `chronos.orders` live plane, which is the plane that can
 > place an order:
 >
-> - A **missing** `data/live_kill_switch.json` reads as **DISENGAGED**
->   (`src/chronos/orders/kill_switch.py:83-85`) — the opposite default. Restoring a backup
->   that omits this file therefore comes up with the emergency stop **disarmed**. (A
->   *corrupt* file reads as ENGAGED, so only absence is dangerous.)
+> - A **missing** `data/live_kill_switch.json` used to read as **DISENGAGED** — the opposite
+>   default — so restoring a backup that omitted it came up with the emergency stop
+>   **disarmed**. **Closed in code 2026-09-03 (R-66, ADR-0049)** for the case that matters:
+>   the state directory carries a `state_generation.json` installation marker, and a
+>   kill-switch file missing *after this installation wrote one* now reads **ENGAGED** until
+>   an operator disengages with a note. A *corrupt* file still reads ENGAGED.
+>   **Residual:** a restore that omits the whole state directory — marker included —
+>   presents as a fresh install and still reads DISENGAGED, so the manual step below
+>   remains the control for that case.
+> - A **missing** `data/session_drawdown.json` used to re-establish the session baseline at
+>   whatever the account was worth after the loss, reporting no breach for a drawdown that
+>   had already happened. Same marker, same date: a baseline missing after this installation
+>   established one now refuses and engages the kill switch instead of re-baselining.
 > - A valid, account-matching `AUTONOMY_MANDATE_FILE` **auto-activates on boot** (ADR-0017),
 >   so restoring one and starting the backend re-arms autonomy without any operator action.
 >   Revocation, by contrast, survives restart.
 >
 > The vision plan's required end state is that recovery always boots kill-engaged,
-> read-only, and unreconciled (`docs/VISION_COMPLETION_PLAN.md` §6, finding 3 — **open**;
-> the code does not do this yet). Until that lands, the manual step in the restore procedure
-> below is the compensating control. Changing the code's boot defaults is a
-> safety-mechanism modification requiring owner review, not a documentation fix.
+> read-only, and unreconciled (`docs/VISION_COMPLETION_PLAN.md` §6, finding 3 —
+> **partially closed 2026-09-03**). The *kill-engaged* half now holds for a lost or
+> partially restored state directory (R-66, ADR-0049); **read-only and unreconciled on
+> restore remain open**, as does the mandate auto-activation above, and a restore that
+> brings back nothing at all still reads as a fresh install. Until those land, the manual
+> step in the restore procedure below is the compensating control. Changing the code's boot
+> defaults is a safety-mechanism modification requiring owner review, not a documentation
+> fix.
 
 ## What to back up
 
@@ -31,7 +44,8 @@ reconciliation passes again (`src/chronos/execution/engine.py`).~~
 |---|---|---|
 | `data/platform_ledger.db` | Platform order ledger (intents, transitions, fills) | Lose the platform's own order history; reconciliation can no longer explain broker state |
 | `data/platform_halt.json` | Persistent halt state (deterministic platform) | Low (missing file fails closed to HALTED), but back it up to preserve the recorded reason/note |
-| `data/live_kill_switch.json` | **Live order-plane kill switch** (`live_kill_switch_file`) — *added 2026-08-02, previously missing from this table* | **HIGH, and inverted from the row above: a missing file reads as DISENGAGED**, so restoring without it brings the system up with the emergency stop disarmed. Always restore it, or engage the kill switch again before starting the backend. |
+| `data/live_kill_switch.json` | **Live order-plane kill switch** (`live_kill_switch_file`) — *added 2026-08-02, previously missing from this table* | **HIGH.** Since 2026-09-03 (R-66) a file missing while `state_generation.json` records that this installation wrote one reads as **ENGAGED**, so a partial restore fails closed. Restoring *neither* file still reads as a fresh install and comes up disarmed. Always restore both, or engage the kill switch again before starting the backend. |
+| `data/state_generation.json` | **Installation marker** for the live-safety state directory (`chronos.orders.state_generation`) — records which state files this installation has ever written | **HIGH, and it must travel with the files it describes.** Restoring the marker without the state files is the fail-closed direction (the system boots kill-engaged); restoring the state files without the marker silently restores the old permissive reading. |
 | your `AUTONOMY_MANDATE_FILE` (if configured) | Owner-authored autonomy grant — *added 2026-08-02* | Restoring it **re-arms autonomy on the next boot** (ADR-0017 auto-activation). Treat it as an authority document: back it up securely, and move it aside during any recovery you do not intend to resume trading from. |
 | `data/platform_audit.jsonl` | Hash-chained audit trail | Lose the tamper-evident record of decisions and operator actions |
 | `config/` | Risk policies (`risk.example.yaml` plus your local `risk.yaml`) | Lose the exact limits runs were made under; policy hashes in results become unverifiable |
@@ -176,8 +190,11 @@ RPO/RTO, encrypted/off-host backup, and external integrity anchor remain open.
    does not fail closed on its own; see the corrected premise at the top of this document)*:
 
    ```bash
-   # a. Confirm the live kill switch exists; a MISSING file means DISENGAGED.
-   ls -l data/live_kill_switch.json || echo "MISSING → emergency stop is DISARMED"
+   # a. Confirm the live kill switch exists. Missing AND this installation wrote one
+   #    (data/state_generation.json says so) reads ENGAGED; missing with no marker
+   #    either — a restore that brought back neither — reads DISENGAGED.
+   ls -l data/live_kill_switch.json data/state_generation.json \
+     || echo "MISSING → if the marker is gone too, the emergency stop is DISARMED"
    # b. Move any autonomy mandate aside so boot cannot auto-activate it.
    #    (Restore it deliberately, later, when you intend to resume.)
    grep -n '^AUTONOMY_MANDATE_FILE' .env || echo "no mandate configured — nothing to move"
@@ -227,7 +244,8 @@ be relied on:
 | Restored artifact | Effect on boot |
 |---|---|
 | `data/live_kill_switch.json` present + engaged | Stop holds (correct). |
-| `data/live_kill_switch.json` **absent** | Reads **DISENGAGED** — the stop is disarmed. |
+| `data/live_kill_switch.json` **absent**, `data/state_generation.json` restored | Reads **ENGAGED** — the marker proves this installation wrote one (R-66). |
+| `data/live_kill_switch.json` **absent**, marker absent too | Reads **DISENGAGED** — indistinguishable from a fresh install; the manual step above is the control. |
 | Valid `AUTONOMY_MANDATE_FILE` present | Autonomy **auto-activates** (ADR-0017). |
 | Mandate previously revoked | Stays revoked across restart (correct). |
 

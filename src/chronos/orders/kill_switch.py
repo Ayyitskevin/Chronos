@@ -1,11 +1,14 @@
 """Live-Wheel kill switch: a durable, fail-closed emergency stop.
 
 Distinct from the autonomous platform's ``chronos.control.halt.HaltStore``
-(whose fresh-deploy default is HALTED): this kill switch defaults DISENGAGED so
-a fresh backend trades subject to the *other* gates, but it fails CLOSED
-(reads as ENGAGED) on a missing-but-unreadable or corrupt file, and any
-component may engage it. Writes are atomic (temp file + fsync + rename) so a
-crash cannot leave a torn flag, and an engaged switch survives a restart.
+(whose fresh-deploy default is HALTED): this kill switch defaults DISENGAGED on
+a *fresh install* so a new backend trades subject to the *other* gates, but it
+fails CLOSED (reads as ENGAGED) on a corrupt or unreadable file — and, since
+R-66, on a file that is missing after this installation wrote one, which is a
+restore or a lost volume rather than a fresh install
+(``chronos.orders.state_generation``). Any component may engage it. Writes are
+atomic (temp file + fsync + rename) so a crash cannot leave a torn flag, and an
+engaged switch survives a restart.
 
 Only an explicit operator ``disengage`` (with a non-empty note) clears it.
 """
@@ -16,12 +19,13 @@ import json
 import os
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
 from typing import Protocol
 
 from chronos.domain.models import ChronosModel
+from chronos.orders.state_generation import KILL_SWITCH, StateGenerationMarker
 
 _SCHEMA_VERSION = 1
 
@@ -47,13 +51,34 @@ class NullKillSwitchAuditSink:
         del action, initiated_by, detail, occurred_at
 
 
+def _write_moment(state: KillSwitchState) -> datetime:
+    """The timestamp to stamp a materialisation with.
+
+    An engagement carries its own moment; a disengagement does not, and the
+    marker only needs a creation time for the first write of an installation.
+    """
+
+    return state.engaged_at or datetime.now(tz=UTC)
+
+
 class LiveKillSwitch:
     """Durable emergency stop with a DISENGAGED default and fail-closed reads."""
 
-    def __init__(self, path: Path, *, audit: KillSwitchAuditSink | None = None) -> None:
+    def __init__(
+        self,
+        path: Path,
+        *,
+        audit: KillSwitchAuditSink | None = None,
+        generation: StateGenerationMarker | None = None,
+    ) -> None:
         self._path = path
         self._audit = audit or NullKillSwitchAuditSink()
         self._lock = Lock()
+        # The installation marker that separates "never written" from "written
+        # and now gone" (R-66). It lives beside the state file, so a restore or a
+        # lost volume that takes one takes both -- and a marker missing with the
+        # state file missing is the fresh-install case, which stays DISENGAGED.
+        self._generation = generation or StateGenerationMarker.beside(path)
 
     def read(self) -> KillSwitchState:
         with self._lock:
@@ -81,7 +106,21 @@ class LiveKillSwitch:
                 note=str(payload.get("note", "")),
             )
         except FileNotFoundError:
-            # No file: a fresh deploy is DISENGAGED (trades subject to other gates).
+            if self._generation.was_materialized(KILL_SWITCH):
+                # This installation wrote a kill-switch file and no longer has
+                # one: a restore that omitted it, a lost sidecar volume, or a
+                # deletion. The state it recorded is unknown, and an unknown
+                # emergency stop is an engaged one (R-66).
+                return KillSwitchState(
+                    engaged=True,
+                    reason=(
+                        "kill-switch file is missing but this installation wrote one; "
+                        "failing closed until an operator disengages with a note"
+                    ),
+                    initiated_by="system",
+                )
+            # No file and none was ever written: a fresh deploy is DISENGAGED
+            # (trades subject to the other gates).
             return KillSwitchState(engaged=False)
         except (OSError, ValueError, KeyError, TypeError) as error:
             # Unreadable/corrupt: fail closed — assume ENGAGED.
@@ -156,3 +195,6 @@ class LiveKillSwitch:
             os.fsync(dir_fd)
         finally:
             os.close(dir_fd)
+        # Record the materialisation only after the durable write succeeded, so
+        # the marker never claims a file that was never there.
+        self._generation.record_materialized(KILL_SWITCH, now=_write_moment(state))

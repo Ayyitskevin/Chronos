@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 
 from chronos.domain.models import ChronosModel
 from chronos.orders.kill_switch import LiveKillSwitch
+from chronos.orders.state_generation import SESSION_DRAWDOWN, StateGenerationMarker
 
 
 class _CorruptBaseline(Exception):
@@ -44,12 +45,16 @@ class SessionDrawdownBreaker:
         max_drawdown_pct: Decimal,
         market_timezone: str,
         kill_switch: LiveKillSwitch | None = None,
+        generation: StateGenerationMarker | None = None,
     ) -> None:
         self._path = path
         self._max_usd = max_drawdown_usd
         self._max_pct = max_drawdown_pct
         self._tz = ZoneInfo(market_timezone)
         self._kill_switch = kill_switch
+        # See `chronos.orders.state_generation`: absence means "establish a fresh
+        # baseline" only while this installation has never established one (R-66).
+        self._generation = generation or StateGenerationMarker.beside(path)
 
     def _session_date(self, now: datetime) -> str:
         if now.tzinfo is None:
@@ -70,7 +75,17 @@ class SessionDrawdownBreaker:
         try:
             text = self._path.read_text(encoding="utf-8")
         except FileNotFoundError:
-            return None  # absent: establish a fresh baseline
+            if self._generation.was_materialized(SESSION_DRAWDOWN):
+                # This installation established a baseline and the file is gone.
+                # Re-baselining here would anchor the session at the post-loss
+                # net liquidation value and report no breach for a drawdown that
+                # already happened -- the exact hazard the directory fsync above
+                # was added for, arriving by deletion instead of power loss.
+                raise _CorruptBaseline(
+                    "baseline file is missing but this installation established one; "
+                    "refusing to re-baseline at the current net liquidation value"
+                ) from None
+            return None  # absent, and none was ever established: fresh baseline
         except OSError as error:
             raise _CorruptBaseline(f"baseline file unreadable: {error}") from error
         try:
@@ -112,6 +127,8 @@ class SessionDrawdownBreaker:
             os.fsync(dir_fd)
         finally:
             os.close(dir_fd)
+        # Only after the durable write: from here a missing baseline is a loss.
+        self._generation.record_materialized(SESSION_DRAWDOWN, now=now)
 
     def _tripped(
         self, session_date: str, current_nlv: Decimal, reason: str, now: datetime

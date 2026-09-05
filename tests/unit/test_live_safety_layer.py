@@ -25,6 +25,12 @@ from chronos.orders.live_gate import (
     evaluate_live_gates,
 )
 from chronos.orders.session_drawdown import SessionDrawdownBreaker
+from chronos.orders.state_generation import (
+    KILL_SWITCH,
+    SESSION_DRAWDOWN,
+    CorruptStateGeneration,
+    StateGenerationMarker,
+)
 
 _NOW = datetime(2026, 7, 17, 15, 0, tzinfo=UTC)
 
@@ -191,6 +197,119 @@ def test_drawdown_breach_engages_kill_switch(tmp_path: Path) -> None:
     decision = breaker.check(Decimal("98500"), now=_NOW)  # -1500 breaches both limits
     assert decision.breached
     assert switch.is_engaged()
+
+
+# --- R-66: a lost state file is not a fresh install -------------------------
+#
+# Both readers answered a missing file with the permissive reading, and the two
+# cases -- "never written" and "written, then lost" -- are indistinguishable from
+# absence alone. The installation marker distinguishes them, so these exercise the
+# loss, the fresh install that must stay permissive, and the marker's own failure.
+
+
+def test_a_kill_switch_file_lost_after_engagement_reads_engaged(tmp_path: Path) -> None:
+    """Delete an engaged switch's file and the switch must still read ENGAGED.
+
+    Before the marker this restored trading: absence was the fresh-deploy case,
+    so the emergency stop an operator had pulled simply evaporated.
+    """
+
+    path = tmp_path / "ks.json"
+    switch = LiveKillSwitch(path)
+    switch.engage(reason="operator stop", initiated_by="operator", now=_NOW)
+    assert switch.is_engaged()
+
+    path.unlink()
+
+    state = LiveKillSwitch(path).read()
+    assert state.engaged is True
+    assert "missing but this installation wrote one" in state.reason
+
+
+def test_a_kill_switch_file_lost_after_a_disengagement_also_reads_engaged(
+    tmp_path: Path,
+) -> None:
+    """Materialisation is about the file existing, not about its last value."""
+
+    path = tmp_path / "ks.json"
+    switch = LiveKillSwitch(path)
+    switch.engage(reason="operator stop", initiated_by="operator", now=_NOW)
+    switch.disengage(operator_note="resolved", initiated_by="operator", now=_NOW)
+    assert not switch.is_engaged()
+
+    path.unlink()
+
+    assert LiveKillSwitch(path).is_engaged() is True
+
+
+def test_a_fresh_install_kill_switch_is_still_disengaged(tmp_path: Path) -> None:
+    """Guard the guard: nothing written, nothing lost, and the default holds.
+
+    A rule that read ENGAGED for every missing file would pass the two tests
+    above and make every fresh deploy boot killed.
+    """
+
+    switch = LiveKillSwitch(tmp_path / "ks.json")
+    assert switch.is_engaged() is False
+    assert switch.is_engaged() is False  # and still, on the second read
+    assert not (tmp_path / "state_generation.json").exists()
+
+
+def test_a_baseline_lost_mid_session_refuses_instead_of_re_baselining(
+    tmp_path: Path,
+) -> None:
+    """The probe from the 2026-09-03 review, as a test.
+
+    Establish a 100,000 baseline, delete the file, then check at 98,000. Before
+    the marker the breaker re-established at 98,000 and reported no breach -- the
+    drawdown that had already happened became the new normal.
+    """
+
+    switch = LiveKillSwitch(tmp_path / "ks.json")
+    breaker = _breaker(tmp_path, kill_switch=switch)
+    first = breaker.check(Decimal("100000"), now=_NOW)
+    assert first.baseline_nlv == Decimal("100000")
+
+    (tmp_path / "baseline.json").unlink()
+
+    decision = _breaker(tmp_path, kill_switch=switch).check(Decimal("98000"), now=_NOW)
+    assert decision.breached is True
+    assert "missing but this installation established one" in decision.reason
+    assert switch.is_engaged() is True
+
+
+def test_a_fresh_install_baseline_is_still_established(tmp_path: Path) -> None:
+    """Guard the guard: the first session of a new installation must baseline."""
+
+    decision = _breaker(tmp_path).check(Decimal("100000"), now=_NOW)
+    assert decision.breached is False
+    assert decision.baseline_nlv == Decimal("100000")
+
+
+def test_an_unreadable_marker_is_read_as_materialized(tmp_path: Path) -> None:
+    """A marker we cannot read is not evidence that a file was never written."""
+
+    marker = StateGenerationMarker(tmp_path / "state_generation.json")
+    marker.path.write_text("{ not json", encoding="utf-8")
+    with pytest.raises(CorruptStateGeneration):
+        marker.read()
+    assert marker.was_materialized(KILL_SWITCH) is True
+    assert LiveKillSwitch(tmp_path / "ks.json").is_engaged() is True
+
+
+def test_the_marker_records_each_component_without_dropping_the_other(
+    tmp_path: Path,
+) -> None:
+    """Two components share one marker; recording one must not erase the other."""
+
+    switch = LiveKillSwitch(tmp_path / "ks.json")
+    switch.engage(reason="operator stop", initiated_by="operator", now=_NOW)
+    _breaker(tmp_path).check(Decimal("100000"), now=_NOW)
+
+    generation = StateGenerationMarker(tmp_path / "state_generation.json").read()
+    assert generation is not None
+    assert generation.materialized == (KILL_SWITCH, SESSION_DRAWDOWN)
+    assert generation.installation_id
 
 
 def test_drawdown_new_session_resets_baseline(tmp_path: Path) -> None:
