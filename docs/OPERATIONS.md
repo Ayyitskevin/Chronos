@@ -78,6 +78,10 @@ that boundary.
 
 ## Shadow scan (after market close)
 
+> **Not the autonomy SHADOW campaign.** This is the deterministic platform's one-shot
+> after-close scan. The autonomy stack's unattended campaign, its daily owner check and
+> its stop conditions are in [`SHADOW_CAMPAIGN.md`](SHADOW_CAMPAIGN.md).
+
 For the daily-bar strategies, the shadow workflow is a one-shot scan after the close
 (`src/chronos/research/shadow.py`, `cmd_shadow_scan` in `src/chronos/cli/main.py`):
 

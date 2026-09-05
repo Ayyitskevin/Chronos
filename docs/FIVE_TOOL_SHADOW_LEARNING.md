@@ -3,6 +3,10 @@
 Status: **code-only / SHADOW journal**. No paper, live, or promotion authority.
 `gate_advanced: none`.
 
+> **Not the autonomy SHADOW campaign.** This document is the five-tool research lane.
+> The autonomy stack's SHADOW campaign — mandate, model worker, supervisor journal — is
+> [`SHADOW_CAMPAIGN.md`](SHADOW_CAMPAIGN.md), and shares only the word.
+
 This is the path Chronos will accept for a model that trains on its own
 closed-bar facts. It does not manufacture more trades by weakening
 `min_score` or pairing vetoes.
