@@ -66,10 +66,26 @@ closing inside a still-open position is not a closed trade.
 cell either clears twenty closed trades or does not. Counts are never pooled across symbols, and no
 candidate is credited with a C4 pass it did not earn on a single symbol.
 
-Both readings are **conservative by direction**: each can only shrink the set of candidates that
-pass, never enlarge it. That is the test this ADR applies to the word "conservative", and it is why
-recording these after results exist is defensible where a relaxation would not be. Neither may be
-loosened by implication, by a refactor, or by a later document; only by the owner, in writing.
+Both readings are **conservative by direction on the clause they were ruled about** — the trade
+count. Round trips are never more numerous than legs, and a per-symbol count is never larger than a
+pooled one, so under both readings the ">= 20 closed trades" test is harder to satisfy and never
+easier. That much is proved.
+
+**It is not proved for C4 as a whole, and this ADR does not claim it.** C4 is a conjunction, and its
+other half — profit factor >= 1.1 — is computed over whatever "closed trades" denotes, so changing
+the denotation changes the profit factor too, and not monotonically. One counterexample settles it: a
+candidate whose trades are one round trip of legs (+60, -20, -20) and one single-leg round trip of
+(-15) has, counted as round trips, gross profit 20 against gross loss 15 — **PF 1.33, which passes**;
+counted as legs, gross profit 60 against gross loss 55 — **PF 1.09, which fails**. On that clause the
+round-trip reading is the *more permissive* one. Neither reading dominates the other on the
+conjunction, so the set of candidates passing C4 is not a subset under either, and the unqualified
+claim this ADR first made was too strong.
+
+What survives is the claim worth making, and it is the one the ruling rests on: each reading tightens
+the clause it was ruled about, neither was chosen because it let something through, and the
+profit-factor clause's direction is recorded as unproven in R-76 rather than assumed away. Neither
+reading may be loosened by implication, by a refactor, or by a later document; only by the owner, in
+writing.
 
 ## Consequences
 
