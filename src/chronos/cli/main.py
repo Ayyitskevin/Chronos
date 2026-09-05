@@ -1,5 +1,4 @@
 """``python -m chronos.cli`` — safe operator commands.
-# ruff: noqa: E501
 
 ~~Every command prints the mode banner first.~~ *(Corrected 2026-08-08: the
 trading-plane commands do — status, halt, rearm, risk-show, verify-corpus,

@@ -1,5 +1,4 @@
 """Read-only campaign preflight contract tests."""
-# ruff: noqa: E501,E702
 
 from __future__ import annotations
 
