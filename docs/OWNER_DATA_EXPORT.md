@@ -209,11 +209,18 @@ is a `NO_ACTION_ATTESTATION_MISMATCH`:
  "note": "<what was reviewed>"}
 ```
 
-This form is also contradicted by evidence: if the delivery supplies **any** corporate action
-at all, a `reviewed_no_actions` attestation earns a
-`NO_ACTION_ATTESTATION_CONTRADICTED` finding. In practice a six-symbol equity-ETF delivery
-over a multi-year window will have dividends, so `sampled_actions` is the form you will
-almost certainly use.
+This form is also contradicted by evidence, but only by evidence **inside the windows it
+covers**. Before counting, `_action_evidence` in `research/certification.py` keeps only the
+actions whose ex-date falls within one of that symbol's certified windows, and counts distinct
+records (repeats are collapsed and separately reported as `DUPLICATE_CORPORATE_ACTION`). A
+`reviewed_no_actions` attestation earns `NO_ACTION_ATTESTATION_CONTRADICTED` when that
+in-window distinct count is non-zero — so an action dated outside every certified window does
+not contradict it, and neither does a duplicate of one already counted.
+
+In practice a six-symbol equity-ETF delivery over a multi-year window will contain dividends
+inside its windows, so `sampled_actions` is the form you will almost certainly use.
+`reviewed_no_actions` fits a window genuinely free of actions — a non-distributing instrument,
+or a window chosen to exclude them.
 
 Do **not** use the sampled form with a count against an empty action panel. That combination
 is refused on purpose: an unexpectedly empty multi-decade capture needs separately reviewed
