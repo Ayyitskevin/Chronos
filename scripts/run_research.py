@@ -40,6 +40,7 @@ from chronos.control.halt import HaltStore  # noqa: E402
 from chronos.marketdata.bars import BarSeries  # noqa: E402
 from chronos.marketdata.csv_provider import load_daily_csv  # noqa: E402
 from chronos.marketdata.quality import validate_series  # noqa: E402
+from chronos.research.data_intake import CAMPAIGN_SYMBOLS  # noqa: E402
 from chronos.risk.policy import RiskPolicy  # noqa: E402
 from chronos.strategies.base import Strategy  # noqa: E402
 from chronos.strategies.baselines import (  # noqa: E402
@@ -58,7 +59,24 @@ from chronos.strategies.regime_trend import (  # noqa: E402
 
 DATA_DIR = ROOT / "research" / "data" / "raw"
 RESULTS_DIR = ROOT / "research" / "results"
+#: The campaign universe in the order THIS script's committed results encode.
+#:
+#: Membership is the production constant's; the ORDER is this script's own and is
+#: load-bearing. ``runs`` is emitted in iteration order and ``research_dev.json`` /
+#: ``research_val.json`` pin it, so adopting ``CAMPAIGN_SYMBOLS``' order verbatim
+#: would rewrite committed research artifacts — measured, not assumed: swapping SPY
+#: and QQQ reorders every run row and dirties ``research_dev.json``.
+#:
+#: The order is therefore declared here and the MEMBERSHIP is checked against the
+#: constant at import, so the universe can no longer drift silently in either
+#: direction while the run order stays fixed.
 SYMBOLS = ("SPY", "QQQ", "IWM", "DIA", "GLD", "TLT")
+if set(SYMBOLS) != set(CAMPAIGN_SYMBOLS):
+    raise RuntimeError(
+        "run_research's symbol universe has drifted from "
+        "chronos.research.data_intake.CAMPAIGN_SYMBOLS: "
+        f"here={sorted(SYMBOLS)} constant={sorted(CAMPAIGN_SYMBOLS)}"
+    )
 
 DEV_END = "2017-12-31"
 VAL_START, VAL_END = "2018-01-01", "2021-12-31"

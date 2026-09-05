@@ -9,9 +9,33 @@ from typing import Any
 
 import pytest
 
+from chronos.research.data_intake import CAMPAIGN_SYMBOLS
+
 ROOT = Path(__file__).resolve().parents[2]
 HELPER = ROOT / "scripts" / "prepare_qqq_certified_data.py"
-SYMBOLS = ("QQQ", "SPY", "IWM", "DIA", "GLD", "TLT")
+#: The production constant, so this test cannot agree with a drifted helper.
+SYMBOLS = CAMPAIGN_SYMBOLS
+
+
+def test_the_campaign_universe_is_the_frozen_six() -> None:
+    """The six-symbol identity is a frozen contract, pinned here by name.
+
+    ``SYMBOLS`` is imported from ``CAMPAIGN_SYMBOLS`` above so this file cannot agree
+    with a drifted helper — but that also means it can no longer *notice* the universe
+    itself changing: test and helper now move together by construction. This is the one
+    deliberate restatement, and its job is the opposite of the copies it replaced. It is
+    not a mirror of the constant; it is an assertion ABOUT the constant, so changing the
+    campaign universe fails here, by name, instead of silently propagating to everything
+    that reads it.
+
+    Order is pinned too: ``prepare_qqq_certified_data`` serializes ``list(SYMBOLS)`` into
+    the receipt's ``capture.symbols`` and the attestation, so a reordering changes emitted
+    bytes.
+    """
+
+    assert CAMPAIGN_SYMBOLS == ("QQQ", "SPY", "IWM", "DIA", "GLD", "TLT")
+
+
 END_DATE = "2026-08-21"
 IBKR_SOURCE_ALIASES = (
     "IBKR corporate actions",

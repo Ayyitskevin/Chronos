@@ -30,8 +30,14 @@ from typing import Any
 
 from chronos.histdata.corporate_actions import CorporateAction
 from chronos.histdata.store import write_actions
+from chronos.research.data_intake import CAMPAIGN_SYMBOLS
 
-SYMBOLS = ("QQQ", "SPY", "IWM", "DIA", "GLD", "TLT")
+#: What this script produces is keyed on the campaign universe — receipt
+#: ``capture.symbols``, the attestation's symbol list, and the per-symbol
+#: outcome order are all serialized from it — so it reads the production
+#: constant rather than restating it. The declaration order matches, so the
+#: emitted bytes are unchanged.
+SYMBOLS = CAMPAIGN_SYMBOLS
 SYMBOL_SET = frozenset(SYMBOLS)
 END_DATE = "2026-08-21"
 DURATION_DAYS = 9_500
