@@ -236,7 +236,7 @@ Three outcomes, and the distinction between the last two is the important one:
 
 | output | exit | meaning | what to do |
 |---|---|---|---|
-| `CERTIFIED <path>: <digest>` | 0 | the certification gates passed — see the scope note below | record the digest |
+| `CERTIFIED <path>: certification_report_sha256=<digest>` | 0 | the certification gates and complete holdout-map tiling passed — see the scope note below | record the report digest |
 | `NOT_CERTIFIED <path>: N blocking finding(s): ...` | 1 | the gates **ran** and something failed | fix the data or supply the missing classification |
 | `UNVERIFIED <path>: <reason>` | 2 | the gates **could not run** | fix the delivery, then re-run |
 
@@ -249,6 +249,8 @@ the data has been established either way. Its common causes:
   unreadable
 - a `holdout_map` span that is malformed — a bad date, an unknown `status`, or a `burned`
   span with no `reason`
+- a holdout map that omits a symbol, leaves supplied sessions unclassified, overlaps spans,
+  or repeats a span name
 - a `bars_sha256` or `corporate_actions_sha256` that disagrees with the file on disk
 - a `bar_count` or `corporate_action_count` that disagrees with what parsed
 - a CSV that is unparseable, or a date cell carrying a time component
@@ -260,14 +262,9 @@ manifest does.
 
 ### What `CERTIFIED` does and does not cover
 
-Two limits, stated because both are easy to over-read:
-
-**It is not a check of your holdout map.** `data verify` parses every `holdout_map` span and
-refuses a malformed one, but it does **not** pass the map to the certification gates, so
-**complete tiling is not checked here**. A delivery whose map covers one symbol's window and
-omits the rest still reports `CERTIFIED`. The requirement that the map tile each symbol's
-window exactly once is enforced when a certified delivery is frozen into a release — a later
-step, not this one.
+One limit is easy to over-read. `data verify` checks that the holdout map covers every
+supplied symbol's full bar range exactly once. That includes bars outside the attested
+certification window, such as warmup history: no supplied session may remain undeclared.
 
 **The printed digest identifies the certification report, not your bar content.** It is a
 digest over the evidence — coverage, findings, the attestation, the corporate-action

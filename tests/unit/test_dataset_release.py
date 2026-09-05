@@ -259,6 +259,7 @@ def test_a_gap_in_the_map_refuses(tmp_path: Path) -> None:
     ]
     with pytest.raises(DatasetReleaseError, match="undeclared"):
         _freeze(tmp_path, spans=spans)
+    assert not (tmp_path / "release").exists()
 
 
 def test_an_overlap_in_the_map_refuses(tmp_path: Path) -> None:
@@ -284,8 +285,16 @@ def test_a_map_that_ends_early_refuses(tmp_path: Path) -> None:
 
 def test_map_and_export_must_describe_the_same_symbols(tmp_path: Path) -> None:
     spans = _spans("QQQ")
-    with pytest.raises(DatasetReleaseError, match="different symbols"):
+    with pytest.raises(DatasetReleaseError, match="symbols differ"):
         _freeze(tmp_path, spans=spans)
+
+
+def test_duplicate_span_names_refuse_before_any_release_write(tmp_path: Path) -> None:
+    spans = _spans()
+    spans[1] = HoldoutSpan("SPY", spans[0].name, spans[1].start, spans[1].end, spans[1].status)
+    with pytest.raises(DatasetReleaseError, match="duplicate holdout span name"):
+        _freeze(tmp_path, spans=spans)
+    assert not (tmp_path / "release").exists()
 
 
 # ------------------------------------------------------- refusals: the release itself

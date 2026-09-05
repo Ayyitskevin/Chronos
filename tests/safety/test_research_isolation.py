@@ -56,6 +56,7 @@ _C3_MODULES = (
     # D2 certification: judges an export and freezes it; owns no order path either.
     "certification",
     "dataset_release",
+    "holdout_map",
     "data_intake",
     "data_certification",
     "session_calendar",

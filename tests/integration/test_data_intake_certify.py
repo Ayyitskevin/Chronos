@@ -158,8 +158,8 @@ def test_data_certify_freezes_release_then_merges_existing_store_without_network
     stdout = capsys.readouterr().out
     assert code == 0
     assert stdout.count("\n") == 1
-    assert stdout.startswith(f"CERTIFIED {delivery / 'INTAKE.json'}: ")
-    assert f"RELEASE {output / 'release.json'}: " in stdout
+    assert stdout.startswith(f"CERTIFIED {delivery / 'INTAKE.json'}: certification_report_sha256=")
+    assert f"RELEASE {output / 'release.json'}: release_digest=" in stdout
     assert f"STORED {history}: " in stdout
     assert "DOTENV_SECRET_SENTINEL" not in stdout
     assert before == after
@@ -178,7 +178,7 @@ def test_data_certify_freezes_release_then_merges_existing_store_without_network
     } == {"2026-09-05T00:00:00+00:00"}
 
 
-@pytest.mark.parametrize("failure", ["unverified", "not-certified"])
+@pytest.mark.parametrize("failure", ["unverified", "incomplete-map", "not-certified"])
 def test_data_certify_writes_nothing_until_the_existing_gates_certify(
     failure: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -196,6 +196,12 @@ def test_data_certify_writes_nothing_until_the_existing_gates_certify(
         assert isinstance(qqq, dict)
         qqq["bars_sha256"] = "f" * 64
         _rewrite_manifest(delivery, manifest)
+    elif failure == "incomplete-map":
+        manifest = _manifest(delivery)
+        holdout_map = manifest["holdout_map"]
+        assert isinstance(holdout_map, list)
+        manifest["holdout_map"] = [span for span in holdout_map if span["symbol"] == "QQQ"]
+        _rewrite_manifest(delivery, manifest)
     else:
         _make_not_certified(delivery)
     monkeypatch.setattr("chronos.research.data_certification.HISTORY_ROOT", history)
@@ -206,8 +212,8 @@ def test_data_certify_writes_nothing_until_the_existing_gates_certify(
     code = main(["data", "certify", "--delivery", str(delivery), "--output", str(output)])
 
     stdout = capsys.readouterr().out
-    assert code == (2 if failure == "unverified" else 1)
-    assert stdout.startswith("UNVERIFIED " if failure == "unverified" else "NOT_CERTIFIED ")
+    assert code == (1 if failure == "not-certified" else 2)
+    assert stdout.startswith("NOT_CERTIFIED " if failure == "not-certified" else "UNVERIFIED ")
     assert stdout.count("\n") == 1
     assert not output.exists()
     assert not history.exists()
