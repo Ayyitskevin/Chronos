@@ -20,7 +20,6 @@ import json
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -553,37 +552,6 @@ def test_the_runtime_imports_nothing_that_can_transmit() -> None:
 
 class _PowerLoss(RuntimeError):
     """Process death between the broker handoff answering and the tick committing."""
-
-
-@pytest.fixture
-def file_sessions(tmp_path: Path) -> Iterator[sessionmaker[Session]]:
-    """A FILE-backed database: the topology production actually runs.
-
-    Be precise about what this buys, because the obvious claim is wrong. This
-    test's verdict is the SAME on both pools — measured four ways, file and
-    ``:memory:`` crossed with the commit present and absent, and the reservation
-    survives in both and dies in both. It has to be: ADR-0052 commits the
-    cycle's OWN session, so no second connection is ever involved and
-    ``StaticPool`` has nothing to hide.
-
-    What ``StaticPool`` does hide is the failure of the designs this one
-    replaced. It gives an in-memory URL one connection shared by every session,
-    so a *second* session's commit adopts the first's pending writes — which is
-    exactly how a reserve-from-another-session shape appears to work in tests
-    while deadlocking against SQLite's single writer in production.
-
-    So this fixture is not what makes the test valid; it is what keeps it
-    honest if the implementation ever moves back toward a second connection.
-    A durability test should run the durability configuration (WAL,
-    ``synchronous=FULL``) rather than one chosen for speed.
-    """
-
-    database = Database(f"sqlite+pysqlite:///{tmp_path / 'chronos.db'}")
-    database.initialize()
-    try:
-        yield database.sessions
-    finally:
-        database.dispose()
 
 
 def test_a_crash_between_the_handoff_and_the_commit_leaves_the_attempt_spent(
