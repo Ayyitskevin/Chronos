@@ -82,6 +82,7 @@ def test_the_package_contains_the_modules_this_file_guards() -> None:
         "cycle",
         "evidence",
         "model",
+        "model_local",
         "model_xai",
         "propose",
         "vocabulary",
@@ -102,7 +103,8 @@ def test_worker_modules_import_nothing_forbidden() -> None:
 
 def test_importing_the_worker_leaks_no_forbidden_module() -> None:
     probe = (
-        "import worker, worker.cycle, worker.model, worker.model_xai, worker.__main__, sys; "
+        "import worker, worker.cycle, worker.model, worker.model_xai, worker.model_local, "
+        "worker.__main__, sys; "
         f"bad=[m for m in sys.modules if m.startswith({_FORBIDDEN!r})]; "
         "print(';'.join(sorted(bad)))"
     )

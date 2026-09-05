@@ -1,5 +1,28 @@
 # CHANGELOG
 
+## [Unreleased] — local-inference worker provider, SHADOW only (2026-09-04)
+
+`CHRONOS_WORKER_PROVIDER=local` selects a raw-httpx OpenAI-compatible Chat Completions
+transport (`worker/model_local.py`) that forces `propose_decision`, mirroring the xAI path,
+so a SHADOW campaign can run on loopback inference at zero dollars. Anthropic remains the
+default. Three provider-specific rules: `CHRONOS_WORKER_LOCAL_BASE_URL` is loopback-enforced
+(default `http://127.0.0.1:11434/v1`) because the request body carries the whole evidence
+snapshot; `CHRONOS_WORKER_LOCAL_API_KEY` is optional, and unset sends no `Authorization`
+header at all; and `CHRONOS_WORKER_MODEL` is required — there is no default tag to guess.
+
+Both of the worker's HTTP clients are now built `trust_env=False`, so an inherited
+`HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` cannot capture the loopback request (httpx does not
+bypass `127.0.0.1` on its own); URL userinfo is refused for both the local and backend URLs;
+and the local server's error text is stripped of the configured key and capped before it
+reaches a log line. Operator-visible consequence: proxy, `SSL_CERT_FILE`, and `.netrc`
+environment configuration is no longer honoured by the worker process.
+
+`CHRONOS_WORKER_FORWARD` still defaults false. No new authority, no broker-process network
+channel, no live path, nothing under `src/chronos/orders` or `src/chronos/supervisor`.
+Register a local worker as its own proposer — do not reuse the Claude or Grok credential.
+Expect more `NO_DECISION` cycles: small models honour tool forcing unevenly, and the
+deny-by-default extract refuses prose rather than parse it. See D-65 / ADR-0050 / R-68.
+
 ## [Unreleased] — QQQ source independence recognizes IBKR/TWS aliases (2026-08-26)
 
 The frozen QQQ packet now refuses IBKR-family identities at both evidence seams: the

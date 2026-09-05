@@ -14,8 +14,9 @@ posture is `RISK_REGISTER.md` **R-47**.
 designed the whole autonomy stack around and nothing had ever implemented. Each
 cycle it reads what an operator can read (account summary, positions, open
 orders, recent daily bars for your watchlist), freezes that into a digested
-evidence snapshot, asks the configured provider (Claude by default, or Grok
-via `CHRONOS_WORKER_PROVIDER=xai`) for exactly one decision through a forced
+evidence snapshot, asks the configured provider (Claude by default, Grok via
+`CHRONOS_WORKER_PROVIDER=xai`, or a local OpenAI-compatible server via
+`CHRONOS_WORKER_PROVIDER=local`) for exactly one decision through a forced
 tool call, validates the result as hostile input, and — only if you
 turned forwarding on — POSTs the candidate to the same loopback proposal
 ingress everything else uses. Every proposal walks the full gate stack:
@@ -64,7 +65,10 @@ export CHRONOS_WORKER_KINDS="HOLD,OPEN,REDUCE,CLOSE"
 
 Optional, with defaults: `CHRONOS_WORKER_BACKEND_URL` (`http://127.0.0.1:8000`,
 loopback enforced), `CHRONOS_WORKER_PROVIDER` (`anthropic`),
-`CHRONOS_WORKER_MODEL` (`claude-opus-5` for anthropic, `grok-4.6` for xai),
+`CHRONOS_WORKER_MODEL` (`claude-opus-5` for anthropic, `grok-4.6` for xai —
+**no default for `local`, which requires it**),
+`CHRONOS_WORKER_LOCAL_BASE_URL` (`http://127.0.0.1:11434/v1`, loopback
+enforced) and `CHRONOS_WORKER_LOCAL_API_KEY` (unset; local provider only),
 `CHRONOS_WORKER_POLICY_FILE` (`worker/policy.md`),
 `CHRONOS_WORKER_INTERVAL_SECONDS` (`300`), `CHRONOS_WORKER_LOOKBACK_DAYS`
 (`30`), `CHRONOS_WORKER_FORWARD` (`false`), `CHRONOS_WORKER_MAX_DAILY_TOKENS`
@@ -103,9 +107,71 @@ xAI's Chat Completions tool-calling does not expose Anthropic's `strict: true`.
 Illegal kinds/symbols still die in `worker.propose` and at the gateway; that
 gap is a disclosed residual, not a second schema.
 
-The worker refuses to start on a missing key, missing token, empty watchlist,
-empty kind allowlist, unreadable policy, or non-loopback backend URL — an
-allow-nothing worker beats an allow-everything one.
+### Local inference (Ollama, or a gateway with the same shape) instead of Claude
+
+Same process, same policy file, same ingress, same forced tool — and no bill.
+This is the provider the first SHADOW rung is meant to run on: a long, boring
+campaign of cycles costs nothing on hardware you already own.
+
+```bash
+export CHRONOS_WORKER_PROVIDER=local
+export CHRONOS_WORKER_MODEL="your-local-tag"   # REQUIRED — there is no default
+export CHRONOS_WORKER_API_TOKEN="$(cat data/api_token)"
+export CHRONOS_WORKER_SYMBOLS="SPY,IWM"
+export CHRONOS_WORKER_KINDS="HOLD,OPEN,REDUCE,CLOSE"
+# optional:
+# export CHRONOS_WORKER_LOCAL_BASE_URL="http://127.0.0.1:11434/v1"   # the default
+# export CHRONOS_WORKER_LOCAL_API_KEY="..."    # only if your gateway wants one
+```
+
+Three rules are specific to this provider, and each is why it is safe to point
+the worker at something you configured rather than something the source pins:
+
+- **`CHRONOS_WORKER_MODEL` is required and has no default.** A local roster
+  changes without notice, so a guessed tag is either absent — every cycle dies
+  on the call — or it names a different model than you believe is thinking.
+  Startup refuses rather than guess.
+- **The base URL must be loopback.** It defaults to `http://127.0.0.1:11434/v1`
+  and startup refuses any other host, exactly as it refuses a non-loopback
+  backend URL, for a stronger reason: the request body is the whole evidence
+  snapshot — your cash, buying power, positions, and open orders. To use a
+  model server on another machine, forward its port to this one
+  (`ssh -N -L 11434:127.0.0.1:11434 <host>`) and point the worker at the local
+  end. That is deliberate.
+- **The key is optional.** Ollama authenticates nothing, so leave
+  `CHRONOS_WORKER_LOCAL_API_KEY` unset and no `Authorization` header is sent at
+  all. Set it only for a gateway that wants one; it rides that header and
+  nothing else — never the request body, and it is stripped out of the server's
+  own error text before that reaches a log line. Do **not** put credentials in
+  the URL: `http://<name>:<value>@127.0.0.1:11434/v1` is refused at startup,
+  because httpx would turn them into an `Authorization` header and the URL is
+  printed whole by every line that reports the endpoint.
+
+The worker ignores proxy environment variables entirely (`trust_env=False` on
+both of its HTTP clients): `HTTP_PROXY`, `HTTPS_PROXY`, and `ALL_PROXY` would
+otherwise capture even the `127.0.0.1` request, since httpx does not bypass
+loopback unless `NO_PROXY` says so. If you reach a hosted provider through a
+corporate proxy, that is the trade — and `SSL_CERT_FILE` and `.netrc` are not
+read from the environment here either.
+
+Mint a **distinct** proposer for it, as for Grok (`python -m chronos.cli
+proposer mint --proposer-id local-worker --provider local --model-id
+<your-local-tag> --policy-file worker/policy.md`). Reusing the Claude
+credential would stamp one model's decisions with another's identity.
+
+Expect many more `NO_DECISION` cycles than a frontier model produces. Small
+models honour tool forcing unevenly, and some OpenAI-compatible servers ignore
+`tool_choice` outright. The forced tool is a request; the deny-by-default
+extract is the guarantee — prose is never parsed into a trade, so a weak model
+costs you decisions and never safety. Read a HOLD-heavy local log as the
+transport working, not as your policy speaking, and do not read a local
+campaign's decision *count* as a quality signal against a hosted one's.
+
+The worker refuses to start on a missing key (except `local`, which needs
+none), a missing token, an empty watchlist, an empty kind allowlist, an
+unreadable policy, a non-loopback backend or local-server URL, or — for
+`local` — a missing model tag. An allow-nothing worker beats an
+allow-everything one.
 
 ### 3. Run it
 

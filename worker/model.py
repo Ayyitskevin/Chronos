@@ -160,6 +160,11 @@ def think(
 
         return think_xai(config, snapshot, client, budget)
 
+    if config.provider == "local":
+        from worker.model_local import think as think_local
+
+        return think_local(config, snapshot, client, budget)
+
     request = build_request(config, snapshot)
     try:
         response = client.post(
