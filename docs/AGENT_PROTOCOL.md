@@ -124,6 +124,10 @@ grep -E '^\s+run:' .github/workflows/ci.yml    # the authoritative step list, de
   at *your* commit, in the house form:
   `Gate: ruff check clean, format clean, mypy clean on <N> source files, <N> passed / <N> skipped / 0 failed.`
   Copying a count from a document or a previous commit is a claim you did not verify.
+  The footer is measured at the **committed head** — stage or commit every file of the
+  change before running the gates, because the tracked-file secret scan enumerates
+  `git ls-files` and cannot see an un-added file (`make security-gate` now refuses
+  rather than measuring the wrong file set).
 - Commit trailers are part of the spec: `Co-Authored-By:` for the authoring model,
   plus the seat's session trailer (e.g. `Claude-Session:`) where the harness provides
   one. Narrative bodies — what was wrong, what changed, what proves it — are the house
