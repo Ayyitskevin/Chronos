@@ -225,6 +225,13 @@ class SystemView(ChronosModel):
     kill_switch_engaged: bool | None = None
     live_armed: bool | None = None
     mandate_active: bool | None = None
+    #: Why no mandate is shown, when the reason is worse than "none authored".
+    #: ``None`` for an absent grant — that screen is honest. ``"unsafe"`` when
+    #: the grant file exists and this process refused it (ADR-0056): a panel
+    #: that rendered that as "NO MANDATE LOADED" would look *safer* than the
+    #: process it describes, which is the failure this module's own ordering
+    #: rule exists to prevent.
+    mandate_unavailable: str | None = None
     mandate_id: str | None = None
     account_fingerprint: str | None = None
     operational_health: OperationalHealth | None = None
@@ -249,6 +256,13 @@ class MandateView(ChronosModel):
     """
 
     mandate_known: bool
+    #: Why no mandate is shown, when the reason is worse than "none authored".
+    #: ``None`` for an absent grant — that screen is honest. ``"unsafe"`` when
+    #: the grant file exists and this process refused it (ADR-0056): a panel
+    #: that rendered that as "NO MANDATE LOADED" would look *safer* than the
+    #: process it describes, which is the failure this module's own ordering
+    #: rule exists to prevent.
+    mandate_unavailable: str | None = None
     mandate_id: str | None = None
     mandate_version: int | None = None
     mode: str | None = None
@@ -482,6 +496,7 @@ def system_view(
     kill_switch_engaged: bool | None = None,
     live_armed: bool | None = None,
     operational_health: OperationalHealth | None = None,
+    mandate_unavailable: str | None = None,
 ) -> SystemView:
     """Assemble the status bar.
 
@@ -520,6 +535,7 @@ def system_view(
         kill_switch_engaged=kill_switch_engaged,
         live_armed=live_armed,
         mandate_active=mandate_active,
+        mandate_unavailable=mandate_unavailable,
         mandate_id=None if mandate is None else mandate.mandate_id,
         account_fingerprint=scoped,
         operational_health=operational_health,
@@ -533,12 +549,18 @@ def mandate_view(
     account_fingerprint: str,
     now: datetime,
     mandate: AutonomyMandate | None = None,
+    mandate_unavailable: str | None = None,
 ) -> MandateView:
     """Assemble the grant panel from the mandate in force and its activation."""
 
     scoped = _scope(account_fingerprint)
     if mandate is None:
-        return MandateView(mandate_known=False, account_fingerprint=scoped, generated_at=_iso(now))
+        return MandateView(
+            mandate_known=False,
+            mandate_unavailable=mandate_unavailable,
+            account_fingerprint=scoped,
+            generated_at=_iso(now),
+        )
 
     activation = None
     if scoped is not None:

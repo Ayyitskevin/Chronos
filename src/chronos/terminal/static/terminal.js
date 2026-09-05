@@ -155,6 +155,8 @@ const COPY = {
     "The backend refused this session. It has either expired, or the backend restarted — sessions are held in memory and do not survive a restart, so a bounce signs every terminal out. Panels keep their last reading, marked stale.",
   noMandate:
     "This backend has no mandate in force, so no authority has been established. That is not the same as a mandate granting nothing — nothing has been granted or refused.",
+  unsafeMandate:
+    "A mandate file IS configured, and this backend refused to read it: it is a symlink, writable by group or other, owned by another user, or not UTF-8. Autonomy is inert. This is not the same as having no mandate — the grant exists and cannot be trusted, so repair the file by hand rather than authoring a new one.",
   mandateActive:
     "active reports that an unrevoked activation covers now. It is a display, never a permission: admission re-derives every gate before anything trades.",
   noCycles:
@@ -559,7 +561,11 @@ const MANDATE_SCOPES = [
 function renderMandate(data, body) {
   const list = el("dl", "kv");
   if (!data.mandate_known) {
-    append(body, stateBlock("warn", "NO MANDATE LOADED", COPY.noMandate));
+    if (data.mandate_unavailable === "unsafe") {
+      append(body, stateBlock("danger", "MANDATE FILE UNSAFE", COPY.unsafeMandate));
+    } else {
+      append(body, stateBlock("warn", "NO MANDATE LOADED", COPY.noMandate));
+    }
     kv(list, "account", fingerprintNode(data.account_fingerprint));
     kv(list, "generated", timeNode(data.generated_at));
     return append(body, list);

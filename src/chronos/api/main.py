@@ -50,6 +50,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from chronos.api.auth import load_or_create_token, load_proposer_auth
 from chronos.api.autonomy_wiring import (
     UnauthenticatedSubmittingMandate,
+    UnsafeMandateFile,
     alert_broken_evidence_posture,
     alert_invalid_proposer_registry,
     autonomy_tick_task,
@@ -79,6 +80,7 @@ from chronos.operations.health import BackgroundTaskName, StartupFaultCode
 from chronos.orders.recovery_hold import evaluate_startup_recovery_hold
 from chronos.orders.state_generation import StateGenerationMarker
 from chronos.runtime import build_runtime
+from chronos.supervisor.proposers import UnsafeProposerRegistry
 from chronos.utils.locking import WriterLease
 from chronos.utils.time import utc_now
 
@@ -480,6 +482,20 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                     "until AUTONOMY_PROPOSERS_FILE and AUTONOMY_EVIDENCE_BUNDLES are configured "
                     "or the mandate is re-authored at SHADOW",
                     extra={"event": "autonomy_posture_unauthenticated", "passed": False},
+                )
+                autonomy = None
+            except (UnsafeMandateFile, UnsafeProposerRegistry) as error:
+                # ADR-0056, and ABOVE the generic handler on purpose: an unsafe
+                # grant is assembly correctly REFUSING, not assembly crashing.
+                # Reporting it as a wiring failure sends the owner looking for a
+                # bug instead of at their file's permissions. Both grants note
+                # the same fault because it is a property of the file; which one
+                # it was is in this line and in the owner alert.
+                app.state.backend.note_startup_fault(StartupFaultCode.AUTHORITY_FILE_UNSAFE)
+                _logger.critical(
+                    "An owner-authored grant is unsafe; autonomy stays inert: %s",
+                    error,
+                    extra={"event": "authority_file_unsafe", "passed": False},
                 )
                 autonomy = None
             except Exception:

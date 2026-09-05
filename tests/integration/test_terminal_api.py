@@ -284,6 +284,142 @@ def test_a_merely_invalid_registry_does_not_claim_the_file_is_unsafe(
     assert "authority_file_unsafe" not in faults
 
 
+# ------------------------------------- ADR-0056: the mandate half of the same fault
+
+
+def _unsafe_mandate(demo_env: Path, how: str) -> Path:
+    """Put the configured mandate into one of the shapes GRANT refuses."""
+
+    mandate_file = demo_env / "mandate.json"
+    if how == "group_writable":
+        mandate_file.chmod(0o666)
+    elif how == "symlink":
+        target = demo_env / "elsewhere.json"
+        target.write_bytes(mandate_file.read_bytes())
+        mandate_file.unlink()
+        mandate_file.symlink_to(target)
+    elif how == "not_utf8":
+        mandate_file.write_bytes(b"\xff\xfe not text")
+        mandate_file.chmod(0o644)
+    else:  # pragma: no cover - guard against a typo in a parametrisation
+        raise AssertionError(how)
+    return mandate_file
+
+
+@pytest.mark.parametrize("how", ["group_writable", "symlink", "not_utf8"])
+def test_an_unsafe_mandate_boots_with_the_authority_file_fault(demo_env: Path, how: str) -> None:
+    """An unsafe MANDATE must report as itself, not as "no mandate".
+
+    Before ADR-0056 every unsafe shape logged CRITICAL and returned None, which
+    is also what absent and invalid return — so /health carried no fault at all
+    and the terminal showed the screen an owner sees when they have never
+    authored a grant.
+    """
+
+    _unsafe_mandate(demo_env, how)
+
+    with TestClient(create_app()) as test_client:
+        faults = test_client.get("/health").json()["observations"]["startup_faults"]
+        assert getattr(test_client.app.state, "autonomy", None) is None
+
+    assert "authority_file_unsafe" in faults
+
+
+def test_an_unsafe_mandate_is_refused_never_repaired(demo_env: Path) -> None:
+    mandate_file = _unsafe_mandate(demo_env, "group_writable")
+    before = mandate_file.read_bytes()
+
+    with TestClient(create_app()):
+        pass
+
+    assert stat.S_IMODE(mandate_file.stat().st_mode) == 0o666
+    assert mandate_file.read_bytes() == before
+
+
+def test_a_merely_invalid_mandate_does_not_claim_the_file_is_unsafe(
+    demo_env: Path,
+) -> None:
+    """Guard the guard: a typo must not raise the fault that means "untrusted"."""
+
+    mandate_file = demo_env / "mandate.json"
+    mandate_file.write_text("{ not a mandate", encoding="utf-8")
+    mandate_file.chmod(0o644)
+
+    with TestClient(create_app()) as test_client:
+        faults = test_client.get("/health").json()["observations"]["startup_faults"]
+
+    assert "authority_file_unsafe" not in faults
+
+
+def test_an_absent_mandate_raises_no_fault_at_all(
+    demo_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fresh install with no grant must still boot clean."""
+
+    monkeypatch.delenv("AUTONOMY_MANDATE_FILE")
+    get_settings.cache_clear()
+
+    with TestClient(create_app()) as test_client:
+        faults = test_client.get("/health").json()["observations"]["startup_faults"]
+
+    assert "authority_file_unsafe" not in faults
+
+
+def test_an_unsafe_registry_no_longer_reports_as_a_wiring_crash(
+    demo_env: Path,
+) -> None:
+    """The registry double-report ADR-0053 left behind.
+
+    An unsafe registry escaped ``build_identity_resolver`` and landed in the
+    generic handler, so /health said assembly crashed as well as saying the
+    file was unsafe. Assembly did not crash; it correctly refused.
+    """
+
+    (demo_env / "autonomy_proposers.json").chmod(0o666)
+
+    with TestClient(create_app()) as test_client:
+        faults = test_client.get("/health").json()["observations"]["startup_faults"]
+
+    assert "authority_file_unsafe" in faults
+    assert "autonomy_wiring_failed" not in faults
+
+
+@pytest.mark.parametrize("route", ["/terminal/mandate", "/terminal/system"])
+def test_the_terminal_answers_and_says_the_grant_is_untrusted(
+    demo_env: Path, headers: dict[str, str], route: str
+) -> None:
+    """The panel must not look safer than the process it describes.
+
+    ``_mandate_in_force`` feeds three routes, and mapping unsafe onto ``None``
+    would render the same "NO MANDATE LOADED" an owner sees when they have
+    never written one. The read still answers — a terminal route that starts
+    failing is the worse outcome — and it says which.
+    """
+
+    _unsafe_mandate(demo_env, "group_writable")
+
+    with TestClient(create_app()) as test_client:
+        response = test_client.get(route, headers=headers)
+
+    assert response.status_code == 200
+    assert response.json()["mandate_unavailable"] == "unsafe"
+
+
+def test_an_absent_mandate_leaves_the_panel_reason_empty(
+    demo_env: Path, headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Guard the guard: "no grant" and "untrusted grant" stay different screens."""
+
+    monkeypatch.delenv("AUTONOMY_MANDATE_FILE")
+    get_settings.cache_clear()
+
+    with TestClient(create_app()) as test_client:
+        body = test_client.get("/terminal/mandate", headers=headers).json()
+
+    assert body["mandate_known"] is False
+    assert body["mandate_unavailable"] is None
+
+
 @pytest.fixture()
 def headers(demo_env: Path) -> dict[str, str]:
     """The local API token, created here rather than read after a backend made it.
