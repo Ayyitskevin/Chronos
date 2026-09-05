@@ -70,7 +70,6 @@ def _write_synthetic_delivery(root: Path) -> Path:
                 "start": _START.isoformat(),
                 "end": _END.isoformat(),
                 "status": "seen",
-                "reason": "synthetic integration fixture; never owner evidence",
             }
         )
 
@@ -215,6 +214,24 @@ def test_data_verify_requires_the_dia_files_declared_by_the_six_symbol_identity(
     output = capsys.readouterr().out
     assert code == 2
     assert output == f"UNVERIFIED {missing}: file is missing\n"
+
+
+def test_data_verify_requires_dia_in_the_manifest_identity(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    delivery = _write_synthetic_delivery(tmp_path)
+    manifest = _manifest(delivery)
+    symbols = manifest["symbols"]
+    assert isinstance(symbols, dict)
+    del symbols["DIA"]
+    _rewrite_manifest(delivery, manifest)
+
+    code = main(["data", "verify", "--delivery", str(delivery)])
+
+    output = capsys.readouterr().out
+    assert code == 2
+    assert output.startswith(f"UNVERIFIED {delivery / 'INTAKE.json'}: symbols must be exactly ")
+    assert "DIA" in output
 
 
 @pytest.mark.parametrize(

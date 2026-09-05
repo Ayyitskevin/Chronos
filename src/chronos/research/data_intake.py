@@ -293,12 +293,13 @@ def _holdout_map(value: object, *, path: Path) -> tuple[HoldoutSpan, ...]:
     for index, raw_span in enumerate(_array(value, path=path, field="holdout_map")):
         field = f"holdout_map[{index}]"
         item = _mapping(raw_span, path=path, field=field)
-        _exact_keys(
-            item,
-            expected={"symbol", "name", "start", "end", "status", "reason"},
-            path=path,
-            field=field,
-        )
+        required = {"symbol", "name", "start", "end", "status"}
+        missing = sorted(required - item.keys())
+        extra = sorted(item.keys() - required - {"reason"})
+        if missing:
+            raise _unverified(path, f"{field} is missing field(s): {', '.join(missing)}")
+        if extra:
+            raise _unverified(path, f"{field} has unknown field(s): {', '.join(extra)}")
         try:
             spans.append(
                 HoldoutSpan(
@@ -310,7 +311,10 @@ def _holdout_map(value: object, *, path: Path) -> tuple[HoldoutSpan, ...]:
                         _string(item["status"], path=path, field=f"{field}.status")
                     ),
                     reason=_string(
-                        item["reason"], path=path, field=f"{field}.reason", allow_empty=True
+                        item.get("reason", ""),
+                        path=path,
+                        field=f"{field}.reason",
+                        allow_empty=True,
                     ),
                 )
             )
