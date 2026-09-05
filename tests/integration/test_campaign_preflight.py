@@ -126,7 +126,7 @@ def test_preflight_unverified_empty_state_and_backend_failure_without_mandate(tm
     assert "backend URL" in output
 
 
-def test_preflight_accepts_0012_adoption_sentinel(tmp_path, capsys):
+def test_preflight_flags_0012_adoption_sentinel_for_writer_boot(tmp_path, capsys):
     (tmp_path / "policy.md").write_text("policy", encoding="utf-8")
     (tmp_path / "worker.service").write_text(
         "UnsetEnvironment=CHRONOS_WORKER_FORWARD\n", encoding="utf-8"
@@ -167,8 +167,9 @@ def test_preflight_accepts_0012_adoption_sentinel(tmp_path, capsys):
     connection.close()
     code = cmd_campaign_preflight(_args(tmp_path))
     output = capsys.readouterr().out
-    assert code == 0
+    assert code == 1
     assert "0012 adoption sentinel" in output
+    assert "boot the backend writer once" in output
     monkeypatch.undo()
 
 

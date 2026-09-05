@@ -204,6 +204,7 @@ def cmd_campaign_preflight(args: argparse.Namespace) -> int:
             recorded = row[0] if row else None
     except (OSError, sqlite3.Error):
         pass
+    state_verified = False
     if not marker_present or not identity_row_present:
         missing = []
         if not marker_present:
@@ -219,9 +220,14 @@ def cmd_campaign_preflight(args: argparse.Namespace) -> int:
         )
         hold = None
     elif recorded is None:
-        print("PASS [ADR-0054] state identity: 0012 adoption sentinel pending first writer boot")
+        fail(
+            "ADR-0054",
+            "state identity",
+            "UNVERIFIED; pending 0012 adoption sentinel; boot the backend writer once, then re-run preflight",
+        )
         hold = None
     else:
+        state_verified = True
         hold = evaluate_recovery_hold(
             marker_installation_id=marker_id,
             marker_unreadable=unreadable,
@@ -232,7 +238,7 @@ def cmd_campaign_preflight(args: argparse.Namespace) -> int:
         )
     if hold is not None:
         fail("ADR-0054", "state identity", hold.reason.value)
-    else:
+    elif state_verified:
         print("PASS [ADR-0054] state identity: marker/database pair consistent; no recovery hold")
     if failures:
         for item in failures:
