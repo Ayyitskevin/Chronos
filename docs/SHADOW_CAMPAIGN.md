@@ -116,6 +116,31 @@ no supervisor journal row, and no owner alert from a cycle. Phase B adds exactly
 The honesty rule is unchanged by Phase A being worth more: **evidence-issuance rows are not
 rung-1 evidence.**
 
+**Both halves are proved offline, in the repository, against the real application.** Neither
+test binds TCP, starts a process or unit, validates a real model, or contacts a broker; both
+run the actual routes, auth and file-backed persistence with only the model response
+simulated. They are what "the loop works" means here — and they are not campaign evidence,
+because no calendar time and no owner grant is involved.
+
+- **`tests/integration/test_worker_phase_a.py`** — the *offline Phase A integration test*.
+  Three cases against one real worker cycle with forwarding off: **binding-on** (the issued
+  bundle is consumed directly, one `POST /autonomy/evidence` and no separate reads),
+  **binding-off** (a real 404 then the four GETs), and **unreachable** (`NO_EVIDENCE` at the
+  first request, before any GET and before any model call). **Every case asserts zero
+  proposals** — none attempted, none received at ingress, and no committed queue or
+  decision-attempt row.
+- **`tests/integration/test_worker_phase_b.py`** — the *offline Phase B SHADOW path test*.
+  Forwarding on **only inside a private dict passed to `load_config`** — no environment, unit,
+  file or default sets it, so this is not the operator switch of §2. It follows one proposal
+  worker → ingress → drain → admission, where a SHADOW mandate refuses it with
+  `MODE_CANNOT_SUBMIT` as the *first* failing check, journaled with the posture that judged it;
+  plus evidence expiry before drain and a rollback after provisional admission. **Zero broker
+  submissions in every case.**
+
+What they do not establish: an admitted trade, reservation survival at the order-plane handoff
+(that is #151's fault-injection evidence), sustained operation, or promotion eligibility. Phase
+A remains the forwarding-off evidence proof; Phase B proves the refusal path, not a trade.
+
 > **The relabel rule.** A run with `CHRONOS_WORKER_FORWARD=false` is a **worker-stability
 > campaign**. It is never counted as promotion-ladder rung 1, in any document, summary or
 > promotion record. Rung 1 requires decision, receipt, scheduler and alert evidence; a worker
@@ -172,7 +197,7 @@ that lives **outside this repository**.
 | `BROKER_MODE` | `demo` | no broker, no TWS, no gateway |
 | `SYMBOL_ALLOWLIST` | a subset of the demo contract set | must be drawn from **AAPL, MSFT, SPY, AMD, NVDA, IWM, TSLA** (`src/chronos/broker/demo.py:511-518`) — see §1. The default `AAPL,MSFT,SPY` is already inside it |
 | `DATABASE_URL` | `sqlite:///<state>/chronos.db` | the campaign's journal |
-| `LIVE_KILL_SWITCH_FILE`, `SESSION_BASELINE_FILE` | under `<state>/` | keep them with the database — good practice today, and what ADR-0054's two installation witnesses will require once PR #153 lands |
+| `LIVE_KILL_SWITCH_FILE`, `SESSION_BASELINE_FILE` | under `<state>/` | keep them with the database: ADR-0054's two installation witnesses must travel together, and a state directory that disagrees with the database boots the backend under a recovery hold |
 | `BACKEND_TOKEN_FILE` | `<state>/backend_api_token` | the worker is given this file's **value**, never its path |
 | `AUTONOMY_MANDATE_FILE` | the SHADOW mandate | ADR-0017 auto-activates it on boot |
 | `AUTONOMY_PROPOSERS_FILE` | the registry | §1 |
@@ -374,9 +399,10 @@ Stop, and do not restart until the cause is understood:
 
 - `/health` reports any `startup_fault` — check `.observations.startup_faults`, and read `[]`
   as healthy and `null` as a broken selector (§5). `autonomy_posture_unauthenticated` is the
-  one to expect. (`recovery_unverified` arrives with ADR-0054, which is **not merged yet** —
-  PR #153; until it lands there is no automatic restore hold and the manual restore steps in
-  `docs/BACKUP_AND_RECOVERY.md` are the whole control.)
+  one to expect. `recovery_unverified` (ADR-0054) means this host's state directory and its
+  database disagree — a restore, a lost volume, or a replaced database — and the backend has
+  booted read-only and unreconciled until an operator acknowledges it with a note. The
+  wholesale-restore residual stays manual: see `docs/BACKUP_AND_RECOVERY.md`.
 - `mandate check` returns a `BLOCKING` finding; the proposer credential expires or is revoked.
 - The kill switch reads ENGAGED with no operator having engaged it.
 - `verify-audit-log` reports a broken platform chain, or a terminal journal row fails its own recomputation (§5 — these are two different chains).
