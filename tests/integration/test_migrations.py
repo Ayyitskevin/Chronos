@@ -8,6 +8,8 @@ accepts it (version current, zero drift).
 
 from __future__ import annotations
 
+import ast
+import importlib
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -18,37 +20,88 @@ from alembic.config import Config
 from chronos.persistence.database import SCHEMA_VERSION, Database
 from chronos.persistence.schema import Base
 
-_V3_TABLES = {
-    "order_intents",
-    "order_confirmations",
-    "live_arm_events",
-    "kill_switch_events",
-    "cash_reservations",
-    "share_reservations",
-    "writer_lease",
+_VERSIONS_DIR = (
+    Path(__file__).resolve().parents[2]
+    / "src"
+    / "chronos"
+    / "persistence"
+    / "migrations"
+    / "versions"
+)
+
+#: One row per migration that DECLARES a table list, naming the module and the attribute
+#: to read. A new revision joins by adding a row here — one line — never by copying its
+#: tables into this file. Migrations that only add columns (0005, 0007, 0011) declare no
+#: creation list and correctly do not appear; 0011's ``_BOUND_TABLES`` names tables it
+#: ALTERS, which is why this is an explicit map rather than a scan for ``*_TABLES``.
+_DECLARED_TABLE_SETS = {
+    "_V3_TABLES": ("0002_live_wheel_tables", "_V3_TABLES"),
+    "_V4_TABLES": ("0003_order_management", "_V4_TABLES"),
+    "_V5_TABLES": ("0004_autonomy_durable_state", "_V5_TABLES"),
+    "_V7_TABLES": ("0006_proposal_queue", "_V7_TABLES"),
+    "_V9_TABLES": ("0008_evidence_bundles", "_V9_TABLES"),
+    "_V10_TABLES": ("0009_proposer_revocation", "_V10_TABLES"),
+    "_V11_TABLES": ("0010_managed_position_bindings", "_V11_TABLES"),
 }
 
-_V4_TABLES = {
-    "order_events",
-    "risk_decisions",
-    "risk_check_results",
-}
+#: Migrations that build their tables inline and so have no list to import. Each needs a
+#: pin below, checked by ``test_inline_migrations_match_their_pins``.
+_INLINE_TABLE_MIGRATIONS = {"_V12_TABLES": "0012_installation_identity"}
 
-_V5_TABLES = {
-    "hash_chain_records",
-    "autonomy_mandate_activations",
-    "autonomy_session_counters",
-    "autonomy_decision_attempts",
-    "autonomy_owner_alerts",
-}
 
-_V7_TABLES = {
-    "autonomy_proposal_queue",
-}
+def _declared_tables(module_stem: str, attribute: str) -> set[str]:
+    """The table set a migration declares, read from the migration module itself."""
 
-# Frozen v2 baseline (the pre-alembic create_all schema, migration 0001 no-op).
-# This set is deliberately hardcoded, NOT derived from Base.metadata, so a table
-# added to the models without a migration cannot hide inside it.
+    module = importlib.import_module(f"chronos.persistence.migrations.versions.{module_stem}")
+    return set(getattr(module, attribute))
+
+
+def _migration_source(module_stem: str) -> ast.Module:
+    return ast.parse((_VERSIONS_DIR / f"{module_stem}.py").read_text(encoding="utf-8"))
+
+
+def _inline_created_tables(module_stem: str) -> set[str]:
+    """Tables a migration creates with literal ``op.create_table("name", ...)`` calls.
+
+    Read by AST rather than by import: a migration that builds its tables inline has no
+    list to import, and parsing is what lets its pin be *checked against* the migration
+    instead of merely sitting beside it.
+    """
+
+    created: set[str] = set()
+    for node in ast.walk(_migration_source(module_stem)):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "create_table"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)
+        ):
+            created.add(node.args[0].value)
+    return created
+
+
+def _creates_tables(module_stem: str) -> bool:
+    """Whether a migration creates any table, by either shape."""
+
+    return any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in ("create_table", "create_all")
+        for node in ast.walk(_migration_source(module_stem))
+    )
+
+
+# Derived: each set IS the migration's own declared list, not a copy of it (issue #195).
+_V3_TABLES = _declared_tables(*_DECLARED_TABLE_SETS["_V3_TABLES"])
+_V4_TABLES = _declared_tables(*_DECLARED_TABLE_SETS["_V4_TABLES"])
+_V5_TABLES = _declared_tables(*_DECLARED_TABLE_SETS["_V5_TABLES"])
+_V7_TABLES = _declared_tables(*_DECLARED_TABLE_SETS["_V7_TABLES"])
+_V9_TABLES = _declared_tables(*_DECLARED_TABLE_SETS["_V9_TABLES"])
+_V10_TABLES = _declared_tables(*_DECLARED_TABLE_SETS["_V10_TABLES"])
+_V11_TABLES = _declared_tables(*_DECLARED_TABLE_SETS["_V11_TABLES"])
+
 _V2_BASELINE_TABLES = {
     "application_events",
     "candidate_evaluations",
@@ -82,6 +135,10 @@ _V11_TABLES = {
     "managed_position_bindings",
 }
 
+#: PINNED, not derived: revision 0012 builds its tables with inline
+#: ``op.create_table`` calls and declares no list to import.
+#: ``test_inline_migrations_match_their_pins`` reads those calls out of the
+#: migration and fails when they change.
 _V12_TABLES = {
     "installation_identity",
     "recovery_acknowledgements",
@@ -99,7 +156,115 @@ _ALL_MIGRATED_TABLES = (
     | _V12_TABLES
 )
 
+#: Every table the migration chain creates after the v2 baseline, written out once.
+#:
+#: What this pin sees, stated narrowly because the obvious wider claim is false: a table
+#: entering or leaving the migrated set AS A WHOLE fails here, by name, with a message
+#: saying which table and what to do. It compares a union, so it is blind to anything that
+#: leaves the union unchanged. Two such cases exist and both were measured:
+#:
+#:   * a table MOVED between two revisions — ``writer_lease`` from 0002 to 0003 changes
+#:     what both migrations create and the whole file stays green;
+#:   * a table already in ``_V2_BASELINE_TABLES`` added to a migration's list — the
+#:     subtraction below removes it again, and the file stays green.
+#:
+#: Catching either needs a per-version expectation, which is the copied-list shape this
+#: slice exists to delete, so neither is guarded here. That is a deliberate trade, not an
+#: oversight.
+#:
+#: Nor does this pin add detection the derived sets lacked. Measured both ways: adding a
+#: non-baseline table to revision 0003 fails 6 tests without this pin and 7 with it;
+#: removing ``writer_lease`` from 0002 fails 2 without and 3 with. What it adds is the
+#: NAMED failure — one assertion that says which table moved in or out and that updating
+#: this list is the deliberate act of recording a schema change — instead of leaving a
+#: maintainer to infer it from a handful of fixture and drift errors.
+_EXPECTED_MIGRATED_TABLES = {
+    "autonomy_decision_attempts",
+    "autonomy_evidence_bundles",
+    "autonomy_mandate_activations",
+    "autonomy_owner_alerts",
+    "autonomy_proposal_queue",
+    "autonomy_proposer_revocations",
+    "autonomy_session_counters",
+    "cash_reservations",
+    "hash_chain_records",
+    "installation_identity",
+    "kill_switch_events",
+    "live_arm_events",
+    "managed_position_bindings",
+    "order_confirmations",
+    "order_events",
+    "order_intents",
+    "recovery_acknowledgements",
+    "risk_check_results",
+    "risk_decisions",
+    "share_reservations",
+    "writer_lease",
+}
+
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+
+
+def test_inline_migrations_match_their_pins() -> None:
+    """A migration that creates tables inline must still agree with its pin here.
+
+    ``_V12_TABLES`` cannot be derived — revision 0012 declares no list — so it is written
+    out above. A pin nobody checks is a copy with better manners, so this reads the literal
+    ``op.create_table`` calls out of the migration and compares them.
+    """
+
+    for pin_name, module_stem in _INLINE_TABLE_MIGRATIONS.items():
+        created = _inline_created_tables(module_stem)
+        assert created, f"{module_stem} declares no inline create_table calls to pin"
+        assert created == globals()[pin_name], (
+            f"{module_stem} creates {sorted(created)} but {pin_name} pins "
+            f"{sorted(globals()[pin_name])}; update the pin deliberately"
+        )
+
+
+def test_every_table_creating_migration_is_accounted_for() -> None:
+    """No migration may create a table this file does not know about.
+
+    This is what keeps a new revision to one line instead of a copied list: add a
+    migration that creates tables and forget to register it, and this fails by name. It
+    scans structurally (``op.create_table`` or ``metadata.create_all``) rather than
+    trusting a naming convention, so a column-only migration — 0005, 0007, 0011 — is not
+    required to appear.
+    """
+
+    registered = {stem for stem, _ in _DECLARED_TABLE_SETS.values()} | set(
+        _INLINE_TABLE_MIGRATIONS.values()
+    )
+    creating = {
+        path.stem for path in sorted(_VERSIONS_DIR.glob("0*.py")) if _creates_tables(path.stem)
+    }
+    assert creating, "no table-creating migrations found; the glob or the scan is wrong"
+    missing = sorted(creating - registered)
+    assert not missing, (
+        f"migration(s) {missing} create tables but are not registered in "
+        "_DECLARED_TABLE_SETS or _INLINE_TABLE_MIGRATIONS"
+    )
+    stale = sorted(registered - creating)
+    assert not stale, f"registered migration(s) {stale} no longer create tables"
+
+
+def test_the_migrated_table_universe_matches_its_pin() -> None:
+    """What the migrations create must equal what this file records them as creating.
+
+    The per-version sets are derived, so they cannot catch a migration changing its own
+    list — they change with it. This compares the derived union against a written-out
+    expectation, which is the only place in this file that a table appearing in or
+    disappearing from any migration is visible.
+    """
+
+    derived = _ALL_MIGRATED_TABLES - _V2_BASELINE_TABLES
+    added = sorted(derived - _EXPECTED_MIGRATED_TABLES)
+    removed = sorted(_EXPECTED_MIGRATED_TABLES - derived)
+    assert not added and not removed, (
+        f"the migration chain now creates {added or 'nothing new'} and no longer creates "
+        f"{removed or 'nothing'}; if that is a deliberate schema change, update "
+        "_EXPECTED_MIGRATED_TABLES and bump SCHEMA_VERSION with its migration"
+    )
 
 
 def _make_v2_database(path: Path) -> None:
