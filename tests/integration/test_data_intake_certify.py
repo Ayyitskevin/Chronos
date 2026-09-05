@@ -13,6 +13,7 @@ import pytest
 from chronos.cli.main import main
 from chronos.histdata import store
 from chronos.research import data_intake, dataset_release
+from chronos.research.data_certification import HISTORY_ROOT
 from chronos.research.session_calendar import SessionCalendar
 
 _SYMBOLS = ("QQQ", "SPY", "IWM", "DIA", "GLD", "TLT")
@@ -277,16 +278,56 @@ def test_data_certify_release_refusal_stops_before_store(
     monkeypatch.setattr(
         dataset_release,
         "freeze_release",
-        _tripwire("synthetic release refusal after certification"),
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            dataset_release.DatasetReleaseError("synthetic release refusal after certification")
+        ),
     )
     monkeypatch.setattr(store, "write_bars", _tripwire("bar writer called"))
     monkeypatch.setattr(store, "write_actions", _tripwire("action writer called"))
 
-    with pytest.raises(AssertionError, match="synthetic release refusal"):
-        main(["data", "certify", "--delivery", str(delivery), "--output", str(output)])
+    code = main(["data", "certify", "--delivery", str(delivery), "--output", str(output)])
 
+    stdout = capsys.readouterr().out
+    assert code == 2
+    assert stdout == (
+        f"WRITE_FAILED {output}: release freeze failed "
+        "(synthetic release refusal after certification)\n"
+    )
     assert not history.exists()
-    capsys.readouterr()
+
+
+def test_data_certify_refuses_to_modify_a_frozen_release_target(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    delivery = _write_synthetic_delivery(tmp_path)
+    output = tmp_path / "release"
+    history = tmp_path / "history"
+    output.mkdir()
+    sentinel = output / "release.json"
+    sentinel.write_text("immutable-existing-release\n", encoding="utf-8")
+    before = _snapshot(output)
+    monkeypatch.setattr("chronos.research.data_certification.HISTORY_ROOT", history)
+    monkeypatch.setattr(dataset_release, "freeze_release", _tripwire("release writer called"))
+    monkeypatch.setattr(store, "write_bars", _tripwire("bar writer called"))
+    monkeypatch.setattr(store, "write_actions", _tripwire("action writer called"))
+
+    code = main(["data", "certify", "--delivery", str(delivery), "--output", str(output)])
+
+    assert code == 2
+    assert capsys.readouterr().out == (
+        f"WRITE_FAILED {output}: release target is not empty; frozen releases are immutable\n"
+    )
+    assert _snapshot(output) == before
+    assert not history.exists()
+
+
+def test_data_certify_default_store_is_the_existing_history_tree() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+
+    assert HISTORY_ROOT == repo_root / "research/data/history"
+    assert "research/data/raw" not in str(HISTORY_ROOT)
 
 
 def test_data_certify_keeps_corrections_fail_closed_until_slice_c(
@@ -337,4 +378,3 @@ def test_data_certify_keeps_corrections_fail_closed_until_slice_c(
     assert "stored row" in stdout
     assert (history / "bars/QQQ.csv").read_bytes() == before
     assert output.exists()  # freeze precedes the deliberately fail-closed store merge
-
