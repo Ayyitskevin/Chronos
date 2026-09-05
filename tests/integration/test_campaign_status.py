@@ -354,6 +354,23 @@ def test_status_trips_broken_campaign_and_terminal_digest(
     assert "terminal journal recomputation: TRIPPED" in output
 
 
+def test_status_reports_empty_campaign_and_terminal_chains_as_unverified(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    now = datetime(2026, 9, 15, 12, tzinfo=UTC)
+    _artifacts(tmp_path, now=now)
+    _grant_fixtures(monkeypatch, now=now)
+    with sqlite3.connect(tmp_path / "chronos.db") as database:
+        database.execute("DELETE FROM hash_chain_records")
+
+    code = cmd_campaign_status(_arguments(tmp_path, now=now))
+
+    output = capsys.readouterr().out
+    assert code == 1
+    assert "campaign audit chain: UNVERIFIED" in output
+    assert "terminal journal recomputation: UNVERIFIED" in output
+
+
 def test_status_trips_recovery_witness_mismatch(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
