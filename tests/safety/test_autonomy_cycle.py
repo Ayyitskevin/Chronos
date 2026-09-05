@@ -796,8 +796,12 @@ def test_a_row_with_an_epoch_but_no_entry_digest_reads_unbound(session: Session)
         session,
         mandate=mandate,
         registry_configured=True,
-        proposer_credential_epoch="e" * 64,
-        proposer_registry_entry_digest=None,
+        # ADR-0057: the posture reads the QUEUE ROW's binding, not the resolved
+        # pair — the resolver returns none of it on a refusal, and a row that was
+        # bound at enqueue must not be described as unbound because the drain
+        # later refused it.
+        row_credential_epoch="e" * 64,
+        row_registry_entry_digest=None,
     )
     assert outcome.admission is not None and outcome.admission.admitted
     stream = durable.stream_for(durable.DECISION_STREAM, _FINGERPRINT)
@@ -809,3 +813,111 @@ def test_a_row_with_an_epoch_but_no_entry_digest_reads_unbound(session: Session)
         "a registry alone does not authenticate a half-bound row"
     )
     assert posture["registry"] == "configured"
+
+
+#: The INGRESS cycle-journal row's bytes BEFORE ADR-0057, captured at 6530ef3 in exactly the
+#: scenario below. The delta this ADR adds is the ``posture`` key and nothing else.
+_PRE_ADR_0057_INGRESS_ROW = (
+    '{"decision_id":"","detail":"","limit_price":null,"option_selection_digest":null,"optio'
+    'n_selection_status":null,"quantity":null,"refusal":"payload is not a single well-forme'
+    'd JSON document","stage":"INGRESS"}'
+)
+
+
+def test_every_record_call_site_states_the_posture() -> None:
+    """Guard the guard for every `_record` site: one that forgot writes a silent row.
+
+    The block is only a property of the journal if EVERY row carries it. A missed
+    call site would not fail anything else — it would quietly reintroduce the
+    "absent means what, exactly?" question ADR-0055 retired one stream over.
+    """
+
+    import ast
+    import inspect
+
+    from chronos.supervisor import loop as loop_module
+
+    tree = ast.parse(inspect.getsource(loop_module))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_record"
+    ]
+    assert len(calls) >= 20, f"found only {len(calls)} _record calls; an empty walk proves nothing"
+    missing = [
+        call.lineno for call in calls if not any(kw.arg == "posture" for kw in call.keywords)
+    ]
+    assert not missing, f"_record call sites that state no posture, at lines {missing}"
+
+
+def test_record_refuses_to_write_without_a_posture(session: Session) -> None:
+    """No default (ADR-0055's rule, carried over): a default is the silent path back."""
+
+    from chronos.supervisor.loop import CycleOutcome, _record
+
+    with pytest.raises(TypeError, match="posture"):
+        _record(  # type: ignore[call-arg]
+            session, _facts(), CycleOutcome(stage=CycleStage.INGRESS, refusal="anything")
+        )
+
+
+def test_an_ingress_refusal_records_the_posture_from_the_row(session: Session) -> None:
+    """The earliest possible refusal still knows what authority the row rested on.
+
+    Nothing has been parsed and nothing resolved, but the three facts are all in
+    hand: the drain's wiring, and the row's own ADR-0048 binding.
+    """
+
+    outcome = _run(
+        session,
+        payload="{not json",
+        registry_configured=True,
+        row_credential_epoch="e" * 64,
+        row_registry_entry_digest="d" * 64,
+    )
+    assert outcome.stage is CycleStage.INGRESS
+
+    stream = durable.stream_for("autonomy.cycles", _FINGERPRINT)
+    rows = session.query(HashChainRow).filter(HashChainRow.stream == stream).all()
+    assert [row.kind for row in rows] == ["INGRESS"]
+    payload = json.loads(rows[0].payload_json)
+    assert payload["posture"] == {
+        "version": 1,
+        "identity": "authenticated",
+        "registry": "configured",
+        "evidence_binding": "unset",
+        "credential_epoch_bound": True,
+    }
+    without_posture = {key: value for key, value in payload.items() if key != "posture"}
+    assert hash_chain.canonical_payload(without_posture) == _PRE_ADR_0057_INGRESS_ROW
+
+
+def test_the_cycle_row_and_the_admission_row_agree_on_the_posture(session: Session) -> None:
+    """One value, two streams: written in the same transaction, they cannot disagree.
+
+    This is the cost of putting the block on every row rather than only where no
+    admission row exists — and the cost is bounded exactly here.
+    """
+
+    mandate = _mandate()
+    _activate(session, mandate)
+    outcome = _run(
+        session,
+        mandate=mandate,
+        registry_configured=True,
+        row_credential_epoch="e" * 64,
+        row_registry_entry_digest="d" * 64,
+    )
+    assert outcome.stage is CycleStage.HANDOFF
+
+    def _latest_posture(stream_base: str) -> dict[str, Any]:
+        stream = durable.stream_for(stream_base, _FINGERPRINT)
+        rows = session.query(HashChainRow).filter(HashChainRow.stream == stream).all()
+        assert rows, f"{stream_base} wrote no row"
+        return dict(json.loads(rows[-1].payload_json)["posture"])
+
+    cycle_block = _latest_posture("autonomy.cycles")
+    assert cycle_block == _latest_posture(durable.DECISION_STREAM)
+    assert cycle_block["identity"] == "authenticated"

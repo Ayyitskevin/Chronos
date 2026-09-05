@@ -455,6 +455,12 @@ class AutonomyRuntime:
                         # ADR-0055: the cycle cannot see this wiring; it records
                         # what the drain tells it, so the flag is stated here.
                         registry_configured=self._resolve_identity is not None,
+                        # ADR-0057: the ROW's own binding, straight off the queue
+                        # row and never the resolver's answer — a row refused at
+                        # STAMP was still bound at enqueue, and its journal row
+                        # must say so.
+                        row_credential_epoch=item.proposer_credential_epoch,
+                        row_registry_entry_digest=item.proposer_registry_entry_digest,
                         # ADR-0052: the drain owns a plain session, so it is the
                         # caller that can honour the split. The cycle spends the
                         # mandate's activity before the handoff and commits it

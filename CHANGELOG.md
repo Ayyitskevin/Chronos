@@ -1,5 +1,22 @@
 # CHANGELOG
 
+## [Unreleased] — cycle-journal rows record their posture, read from the queue row (2026-09-05)
+
+Every row in the `autonomy.cycles` stream — all 23 `_record` call sites, every stage, not only the
+INGRESS and STAMP refusals ADR-0055 named — now carries the same five-key `posture` block the
+admission rows have carried since ADR-0055. `_record` requires it as a keyword-only argument.
+
+The fact `credential_epoch_bound` is now read from the **queue row's** ADR-0048 binding rather than
+from the resolved identity, **for the admission rows too**. The drain passes the row's own epoch and
+entry digest alongside the resolved pair, which keeps its separate job in evidence resolution. This
+matters because every refusal path in the identity resolver returns no binding at all: a row bound at
+enqueue whose registration was later revoked, replaced or expired would otherwise have been journalled
+as `static` and unbound. It also makes ADR-0055's prose true of its plumbing; no admission row's bytes
+move, and that ADR's goldens are the proof.
+
+No schema change, no migration, and `version` does not bump. Rows written earlier carry no block, which
+`read_posture` reports as "not recorded" and never infers. See D-73 / ADR-0057 / R-75.
+
 ## [Unreleased] — admission journal rows record their provenance posture (2026-09-04)
 
 Every `admitted` / `refused` row in the autonomy decision stream now carries a `posture` block:

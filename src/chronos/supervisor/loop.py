@@ -344,6 +344,8 @@ def run_cycle(
     gather_instrument: InstrumentGatherer | None = None,
     bind_evidence: bool = False,
     registry_configured: bool = False,
+    row_credential_epoch: str | None = None,
+    row_registry_entry_digest: str | None = None,
     proposer_credential_epoch: str | None = None,
     proposer_registry_entry_digest: str | None = None,
     identity_refusal: str = "PROPOSER_UNRESOLVED",
@@ -385,9 +387,28 @@ def run_cycle(
     ``registry_configured`` is ADR-0055's one input the cycle cannot see for
     itself: whether the runtime wired a proposer registry. Together with
     ``bind_evidence`` and the row's own epoch binding it becomes the ``posture``
-    block on the admission journal row, so the row says which provenance posture
-    judged it rather than leaving a reader to infer one.
+    block on the journal rows, so a row says which provenance posture it rests on
+    rather than leaving a reader to infer one.
+
+    ``row_credential_epoch`` and ``row_registry_entry_digest`` are the QUEUE ROW's
+    ADR-0048 binding, and they are deliberately NOT the ``proposer_*`` pair below
+    (ADR-0057). Those carry the *resolved* identity's binding and keep their own
+    job. The resolver returns none of it on any refusal, so a posture derived from
+    them would describe a row that WAS bound at enqueue as unbound, purely because
+    the drain later refused it. The posture reads the row.
     """
+
+    # ADR-0055/0057: the posture this row rests on, built once from facts the cycle
+    # holds before it parses anything — the drain's wiring, and the queue row's own
+    # ADR-0048 binding. Every journal row this cycle writes carries it, so a row is
+    # self-describing about the authority behind it whatever stage it stops at.
+    posture = durable.DecisionPosture(
+        registry_configured=registry_configured,
+        evidence_binding=bind_evidence,
+        credential_epoch_bound=(
+            row_credential_epoch is not None and row_registry_entry_digest is not None
+        ),
+    )
 
     # --- ingress -----------------------------------------------------------
     if isinstance(payload, ProposedDecision):
@@ -399,6 +420,7 @@ def run_cycle(
                 session,
                 facts,
                 CycleOutcome(stage=CycleStage.INGRESS, refusal=parsed.refusal),
+                posture=posture,
             )
         proposal = parsed.proposal
 
@@ -429,6 +451,7 @@ def run_cycle(
                     "the proposer is an owner act"
                 ),
             ),
+            posture=posture,
         )
     # The authority half of ADR-0028's evidence binding, in the same stage and
     # for the same reason as the identity resolution above: the drain re-resolves
@@ -459,6 +482,7 @@ def run_cycle(
                     refusal=refusal.value if refusal else "EVIDENCE_BUNDLE_UNRESOLVED",
                     detail=resolution.detail,
                 ),
+                posture=posture,
             )
         expected_evidence = resolution.bundle
         identity = replace(
@@ -475,7 +499,12 @@ def run_cycle(
             account_fingerprint=facts.account_fingerprint,
         )
     except queue.ProposalRejected as error:
-        return _record(session, facts, CycleOutcome(stage=CycleStage.STAMP, refusal=str(error)))
+        return _record(
+            session,
+            facts,
+            CycleOutcome(stage=CycleStage.STAMP, refusal=str(error)),
+            posture=posture,
+        )
 
     # --- admission ---------------------------------------------------------
     # No mandate is a refusal, and it is checked here rather than inside
@@ -492,6 +521,7 @@ def run_cycle(
                 decision_id=decision.decision_id,
                 decision=decision,
             ),
+            posture=posture,
         )
     try:
         state = durable.build_state(
@@ -532,19 +562,9 @@ def run_cycle(
                 decision_id=decision.decision_id,
                 decision=decision,
             ),
+            posture=posture,
         )
 
-    # ADR-0055: the row records the posture it was judged under, from the facts
-    # this cycle actually had — never re-read from settings, which can change
-    # between rows. ``identity`` is derived inside the dataclass, so a
-    # registry-configured runtime meeting an unbound legacy row reads ``static``.
-    posture = durable.DecisionPosture(
-        registry_configured=registry_configured,
-        evidence_binding=bind_evidence,
-        credential_epoch_bound=(
-            proposer_credential_epoch is not None and proposer_registry_entry_digest is not None
-        ),
-    )
     durable.record_outcome(
         session,
         account_fingerprint=facts.account_fingerprint,
@@ -575,6 +595,7 @@ def run_cycle(
                 admission=admission,
                 alerts_raised=alert_kinds,
             ),
+            posture=posture,
         )
     # --- instrument facts (M7.5) -------------------------------------------
     # A batch tick judges proposals about different symbols; pricing one
@@ -616,6 +637,7 @@ def run_cycle(
                     admission=admission,
                     alerts_raised=alert_kinds,
                 ),
+                posture=posture,
             )
         if instrument is None:
             option_selection = _requires_option_selection(decision)
@@ -647,6 +669,7 @@ def run_cycle(
                     admission=admission,
                     alerts_raised=alert_kinds,
                 ),
+                posture=posture,
             )
         contract = instrument.contract
         quote = instrument.quote
@@ -679,6 +702,7 @@ def run_cycle(
                     admission=admission,
                     alerts_raised=alert_kinds,
                 ),
+                posture=posture,
             )
         binding_error = _selection_binding_error(decision, mandate, selection_receipt)
         if binding_error:
@@ -702,6 +726,7 @@ def run_cycle(
                     selection_receipt=selection_receipt,
                     alerts_raised=alert_kinds,
                 ),
+                posture=posture,
             )
         try:
             _persist_selection_receipt(
@@ -731,6 +756,7 @@ def run_cycle(
                     selection_receipt=selection_receipt,
                     alerts_raised=alert_kinds,
                 ),
+                posture=posture,
             )
         if selection_receipt.status is SelectionStatus.NO_TRADE:
             selection_alert = _alert_for_selection_failure(
@@ -754,6 +780,7 @@ def run_cycle(
                     selection_receipt=selection_receipt,
                     alerts_raised=alert_kinds,
                 ),
+                posture=posture,
             )
         selected = selection_receipt.selected
         assert selected is not None
@@ -789,6 +816,7 @@ def run_cycle(
                 sizing=sizing,
                 alerts_raised=alert_kinds,
             ),
+            posture=posture,
         )
 
     # --- compilation -------------------------------------------------------
@@ -816,6 +844,7 @@ def run_cycle(
                 compilation=compilation,
                 alerts_raised=alert_kinds,
             ),
+            posture=posture,
         )
 
     if selection_receipt is not None:
@@ -850,6 +879,7 @@ def run_cycle(
                     compilation=compilation,
                     alerts_raised=alert_kinds,
                 ),
+                posture=posture,
             )
 
     # --- handoff -----------------------------------------------------------
@@ -872,6 +902,7 @@ def run_cycle(
                 intent=compilation.intent,
                 alerts_raised=alert_kinds,
             ),
+            posture=posture,
         )
 
     # ADR-0052: a configured handoff with no durable seam refuses, rather than
@@ -902,6 +933,7 @@ def run_cycle(
                 intent=compilation.intent,
                 alerts_raised=alert_kinds,
             ),
+            posture=posture,
         )
 
     if selection_receipt is not None:
@@ -936,6 +968,7 @@ def run_cycle(
                     intent=compilation.intent,
                     alerts_raised=alert_kinds,
                 ),
+                posture=posture,
             )
         if mandate.mode in LIVE_AUTONOMY_MODES:
             if selection_receipt.promotion_digest is None or selection_activation_validator is None:
@@ -965,6 +998,7 @@ def run_cycle(
                         intent=compilation.intent,
                         alerts_raised=alert_kinds,
                     ),
+                    posture=posture,
                 )
             promotion_error = selection_activation_validator(selection_receipt)
             if promotion_error:
@@ -991,6 +1025,7 @@ def run_cycle(
                         intent=compilation.intent,
                         alerts_raised=alert_kinds,
                     ),
+                    posture=posture,
                 )
 
     # ADR-0052 (P1-02): the attempt is spent BEFORE the handoff can reach the wire,
@@ -1045,6 +1080,7 @@ def run_cycle(
                 intent=compilation.intent,
                 alerts_raised=alert_kinds,
             ),
+            posture=posture,
         )
 
     # The handoff answered. What it *said* now decides the journal, the counter
@@ -1107,6 +1143,7 @@ def run_cycle(
             handoff_result=handoff_result,
             alerts_raised=alert_kinds,
         ),
+        posture=posture,
     )
 
 
@@ -1601,7 +1638,13 @@ def _notional(quantity: Decimal, price: Decimal, multiplier: Decimal) -> Decimal
         return Decimal(0)
 
 
-def _record(session: Session, facts: CycleFacts, outcome: CycleOutcome) -> CycleOutcome:
+def _record(
+    session: Session,
+    facts: CycleFacts,
+    outcome: CycleOutcome,
+    *,
+    posture: durable.DecisionPosture,
+) -> CycleOutcome:
     """Append one hash-chained record for this cycle, whatever happened.
 
     Recording refusals is the point. "Why did it not trade" is asked far more
@@ -1649,6 +1692,11 @@ def _record(session: Session, facts: CycleFacts, outcome: CycleOutcome) -> Cycle
             payload={
                 "stage": outcome.stage.value,
                 "refusal": outcome.refusal,
+                # ADR-0057: which provenance posture this row rests on.
+                # Required, never defaulted: a default is the silent path
+                # back to a row that says nothing about the authority
+                # behind it.
+                "posture": posture.as_payload(),
                 "detail": outcome.detail,
                 "decision_id": outcome.decision_id,
                 "option_selection_status": (

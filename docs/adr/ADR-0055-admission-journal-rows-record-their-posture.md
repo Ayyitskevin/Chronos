@@ -43,6 +43,15 @@ ADR-0048 and ADR-0051 spent the same sprint removing from the queue and the asse
 3. The block lives **in the hash-chained payload**, not in a column. The journal row is the
    tamper-evident record; a column on `autonomy_decision_attempts` would be a second, mutable
    copy of the same claim. No migration; `SCHEMA_VERSION` 12 is unchanged.
+> **Amendment, 2026-09-05 (ADR-0057).** Decision 2 below says `credential_epoch_bound` is read
+> from the row's own epoch and entry digest. Until ADR-0057 the *code* read `run_cycle`'s
+> `proposer_*` parameters, which the drain fills from the **resolved** identity. No admission row
+> was ever wrong — an admission row is written only after resolution succeeds, and the resolver
+> hands back the values it was given, so the two sources are identical on that path — but the
+> divergence became a false statement the moment the block was written before resolution.
+> ADR-0057 moves the source to the queue row, for both streams, and this ADR's goldens are the
+> proof that no admission byte moved.
+
 4. **Absence reads "not recorded", never "static".** `durable.read_posture` returns `None` for a
    row with no block, refuses a version it does not know, and never infers a posture from
    `proposer_id` or check details. That is ADR-0048's NULL rule applied to the journal.

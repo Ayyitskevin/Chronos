@@ -120,6 +120,12 @@ class DecisionPosture:
     registry was configured AND the row itself was bound to an epoch. A
     registry-configured runtime meeting an unbound legacy row therefore reads
     ``static`` about itself instead of inheriting the runtime's posture.
+
+    It names **the authority the row rests on** — what the enqueue authenticated —
+    and never claims the cycle got far enough to exercise it (ADR-0057). A row
+    refused at STAMP can honestly read ``authenticated`` while its ``refusal``
+    says the registration no longer resolves; both are true, and both are on the
+    row.
     """
 
     registry_configured: bool
