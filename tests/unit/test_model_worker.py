@@ -225,6 +225,19 @@ def test_a_non_loopback_backend_refuses_to_start() -> None:
         load_config(_env(CHRONOS_WORKER_BACKEND_URL="https://example.com"))
 
 
+@pytest.mark.parametrize(
+    ("override", "expected"),
+    [
+        ("http://127.0.0.1:8000", "http://127.0.0.1:8000"),
+        (" http://localhost:9123/ ", "http://localhost:9123"),
+    ],
+)
+def test_an_explicit_backend_url_overrides_the_default(override: str, expected: str) -> None:
+    """Changing the fallback must not redirect an explicitly configured worker."""
+
+    assert load_config(_env(CHRONOS_WORKER_BACKEND_URL=override)).backend_url == expected
+
+
 def test_a_missing_policy_file_refuses_to_start(tmp_path: Any) -> None:
     with pytest.raises(WorkerConfigError, match="policy"):
         load_config(_env(CHRONOS_WORKER_POLICY_FILE=str(tmp_path / "absent.md")))

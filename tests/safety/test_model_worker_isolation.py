@@ -31,6 +31,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SRC = _REPO_ROOT / "src" / "chronos"
 _WORKER = _REPO_ROOT / "worker"
@@ -156,6 +158,40 @@ def test_no_provider_sdk_in_the_declared_dependencies() -> None:
 
 
 # --------------------------------------------------------- the restatements do not drift
+
+
+@pytest.mark.parametrize("override", [None, "", " \t "], ids=["unset", "empty", "blank"])
+def test_worker_default_backend_url_matches_backend_bind_settings(
+    tmp_path: Path, override: str | None
+) -> None:
+    """The two processes must meet without an explicit worker URL override.
+
+    Compare the loaded worker config with the backend's declared defaults, not
+    another port literal. Field metadata avoids loading ambient env or dotenv;
+    the cross-process import belongs only in this test, never in the worker.
+    """
+
+    from worker.config import load_config
+
+    from chronos.config.settings import Settings
+
+    policy = tmp_path / "policy.md"
+    policy.write_text("Hold unless the case is overwhelming.", encoding="utf-8")
+    environ = {
+        "CHRONOS_WORKER_PROVIDER": "local",
+        "CHRONOS_WORKER_MODEL": "test-model",
+        "CHRONOS_WORKER_API_TOKEN": "test-backend-token",
+        "CHRONOS_WORKER_SYMBOLS": "SPY",
+        "CHRONOS_WORKER_KINDS": "HOLD",
+        "CHRONOS_WORKER_POLICY_FILE": str(policy),
+    }
+    if override is not None:
+        environ["CHRONOS_WORKER_BACKEND_URL"] = override
+
+    config = load_config(environ)
+    host = Settings.model_fields["backend_host"].default
+    port = Settings.model_fields["backend_port"].default
+    assert config.backend_url == f"http://{host}:{port}"
 
 
 def test_restated_decision_vocabulary_matches_the_contract() -> None:

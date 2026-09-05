@@ -63,7 +63,7 @@ export CHRONOS_WORKER_SYMBOLS="SPY,IWM"
 export CHRONOS_WORKER_KINDS="HOLD,OPEN,REDUCE,CLOSE"
 ```
 
-Optional, with defaults: `CHRONOS_WORKER_BACKEND_URL` (`http://127.0.0.1:8000`,
+Optional, with defaults: `CHRONOS_WORKER_BACKEND_URL` (`http://127.0.0.1:8765`,
 loopback enforced), `CHRONOS_WORKER_PROVIDER` (`anthropic`),
 `CHRONOS_WORKER_MODEL` (`claude-opus-5` for anthropic, `grok-4.6` for xai —
 **no default for `local`, which requires it**),
