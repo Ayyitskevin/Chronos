@@ -45,6 +45,7 @@ from chronos.autonomy import (
 from chronos.cli.main import main
 from chronos.cli.mandate_check import (
     EvidencePosture,
+    Finding,
     RegisteredPins,
     RegistryPosture,
     Severity,
@@ -584,3 +585,67 @@ def test_the_report_lists_every_inert_field_not_only_the_ones_set(
         "sessions.permitted_sessions",
     ):
         assert field in printed
+
+
+# ----------------------------------------------------------- evidence posture
+
+
+def _evidence(**overrides: object) -> EvidencePosture:
+    base: dict[str, object] = {"enabled": True, "registry_configured": True, "ttl_seconds": 4321.0}
+    return EvidencePosture(**{**base, **overrides})  # type: ignore[arg-type]
+
+
+def _evidence_findings(evidence: EvidencePosture | None) -> list[Finding]:
+    """Only the evidence-posture findings, for a mandate that is otherwise clean."""
+
+    findings = review_mandate(
+        _shadow(),
+        now=_NOW,
+        expected_fingerprint=_FINGERPRINT,
+        fingerprint_source="test",
+        ingress_pins=dict(_INGRESS_PINS),
+        evidence=evidence,
+    )
+    return [finding for finding in findings if finding.code.startswith("EVIDENCE_")]
+
+
+def test_evidence_binding_without_a_registry_is_blocking() -> None:
+    """ADR-0028: a bundle is issued TO a credential, so with no registry every proposal refuses.
+
+    The owner should learn that at authoring time, not from a run of STAMP
+    refusals. ``registry_configured`` is the flag the CLI derives from settings;
+    the review reads the flag, not the registry object.
+    """
+
+    codes = _codes(_shadow(), evidence=_evidence(registry_configured=False))
+    assert codes["EVIDENCE_WITHOUT_REGISTRY"] is Severity.BLOCKING
+    assert "EVIDENCE_BINDING_IN_FORCE" not in codes
+
+
+def test_evidence_binding_with_a_registry_is_a_note_naming_the_ttl() -> None:
+    """Configured correctly, the posture still earns a line: proposers must now ask for a bundle.
+
+    The note carries the two facts an owner acts on — the TTL the drain judges
+    against, and the honest bound that equality catches drift, not a proposer
+    that reasons on other text.
+    """
+
+    findings = _evidence_findings(_evidence(ttl_seconds=4321.0))
+    assert [finding.code for finding in findings] == ["EVIDENCE_BINDING_IN_FORCE"]
+    (note,) = findings
+    assert note.severity is Severity.NOTE
+    assert "4321s" in note.message
+    assert "STAMP" in note.message
+    assert "accidental rendering drift" in note.message
+
+
+def test_evidence_binding_not_configured_says_nothing() -> None:
+    """Guard the guard: the pre-ADR-0028 posture is what every existing mandate was written against.
+
+    Both spellings of "not configured" are silent — no posture resolved at all,
+    and a posture whose flag is off, with or without a registry beside it.
+    """
+
+    assert _evidence_findings(None) == []
+    assert _evidence_findings(_evidence(enabled=False)) == []
+    assert _evidence_findings(_evidence(enabled=False, registry_configured=False)) == []
