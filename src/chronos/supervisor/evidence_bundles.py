@@ -146,6 +146,10 @@ class ResolutionRefusal(StrEnum):
     UNISSUED = "EVIDENCE_BUNDLE_UNISSUED"
     #: A record exists and was issued to a different registered proposer.
     FOREIGN = "EVIDENCE_BUNDLE_FOREIGN"
+    #: A pre-0011 record carries no immutable credential/registration binding.
+    REGISTRATION_UNBOUND = "EVIDENCE_BUNDLE_REGISTRATION_UNBOUND"
+    #: The record belongs to another credential epoch or registry entry.
+    REGISTRATION_REPLACED = "EVIDENCE_BUNDLE_REGISTRATION_REPLACED"
     #: A record exists and has expired against the drain's clock.
     EXPIRED = "EVIDENCE_BUNDLE_EXPIRED"
 
@@ -156,6 +160,8 @@ class IssuedBundle:
 
     bundle_id: str
     proposer_id: str
+    proposer_credential_epoch: str
+    proposer_registry_entry_digest: str
     kind: BundleKind
     digest: str
     bundle_version: str
@@ -218,6 +224,8 @@ def issue(
     *,
     account_fingerprint: str,
     proposer_id: str,
+    proposer_credential_epoch: str,
+    proposer_registry_entry_digest: str,
     kind: BundleKind,
     digest: str,
     now: datetime,
@@ -252,6 +260,14 @@ def issue(
             "author to issue to, and an unattributed bundle is the constant this protocol "
             "exists to remove"
         )
+    for label, value in (
+        ("credential epoch", proposer_credential_epoch),
+        ("registry entry digest", proposer_registry_entry_digest),
+    ):
+        if len(value) != 64 or any(c not in "0123456789abcdef" for c in value):
+            raise IssuanceRefused(
+                f"the proposer {label} must be a 64-character lowercase SHA-256 digest"
+            )
 
     live = live_bundle_count(
         session,
@@ -272,6 +288,8 @@ def issue(
         account_fingerprint=account_fingerprint,
         bundle_id=bundle_id,
         proposer_id=proposer_id,
+        proposer_credential_epoch=proposer_credential_epoch,
+        proposer_registry_entry_digest=proposer_registry_entry_digest,
         kind=kind.value,
         digest=normalized,
         bundle_version=bundle_version,
@@ -287,6 +305,8 @@ def issue(
         payload={
             "bundle_id": bundle_id,
             "proposer_id": proposer_id,
+            "proposer_credential_epoch": proposer_credential_epoch,
+            "proposer_registry_entry_digest": proposer_registry_entry_digest,
             # The kind travels in the chain because "issued" and "attested" are
             # different claims, and a journal that recorded only "evidence" would
             # let an attested record later read as one the backend witnessed.
@@ -300,6 +320,8 @@ def issue(
     return IssuedBundle(
         bundle_id=bundle_id,
         proposer_id=proposer_id,
+        proposer_credential_epoch=proposer_credential_epoch,
+        proposer_registry_entry_digest=proposer_registry_entry_digest,
         kind=kind,
         digest=normalized,
         bundle_version=bundle_version,
@@ -333,6 +355,8 @@ def resolve(
     account_fingerprint: str,
     cited_ids: tuple[str, ...],
     proposer_id: str,
+    proposer_credential_epoch: str | None,
+    proposer_registry_entry_digest: str | None,
     now: datetime,
 ) -> Resolution:
     """Bind a proposal's citations to an issued record — the authority half.
@@ -370,6 +394,30 @@ def resolve(
                     "proposer; a bundle is issued to a credential and is not transferable"
                 ),
             )
+        if (
+            row.proposer_credential_epoch is None
+            or row.proposer_registry_entry_digest is None
+            or proposer_credential_epoch is None
+            or proposer_registry_entry_digest is None
+        ):
+            return Resolution(
+                refusal=ResolutionRefusal.REGISTRATION_UNBOUND,
+                detail=(
+                    "the cited evidence bundle or proposal predates immutable registration "
+                    "binding; its credential epoch cannot be inferred from current configuration"
+                ),
+            )
+        if (
+            row.proposer_credential_epoch != proposer_credential_epoch
+            or row.proposer_registry_entry_digest != proposer_registry_entry_digest
+        ):
+            return Resolution(
+                refusal=ResolutionRefusal.REGISTRATION_REPLACED,
+                detail=(
+                    "the cited evidence bundle was issued under a different credential epoch "
+                    "or registry entry; queued authority does not transfer across replacement"
+                ),
+            )
         if now >= row.expires_at:
             return Resolution(
                 refusal=ResolutionRefusal.EXPIRED,
@@ -382,6 +430,8 @@ def resolve(
             bundle=IssuedBundle(
                 bundle_id=row.bundle_id,
                 proposer_id=row.proposer_id,
+                proposer_credential_epoch=row.proposer_credential_epoch,
+                proposer_registry_entry_digest=row.proposer_registry_entry_digest,
                 kind=BundleKind(row.kind),
                 digest=row.digest,
                 bundle_version=row.bundle_version,

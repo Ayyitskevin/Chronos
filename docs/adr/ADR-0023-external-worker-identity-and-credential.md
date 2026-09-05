@@ -10,6 +10,11 @@ D-24. Implemented the same day: the proposer registry
 drain time, and the digest honesty change (`"0" * 64` → `None`). Every "Requires"
 proof below is exercised in `tests/safety/test_proposer_credentials_exercised.py`.
 
+**Amended by ADR-0048 (2026-09-03):** credential-derived identity now means the exact
+authenticated credential epoch and canonical complete-registration digest are persisted at
+enqueue and rechecked at drain. A reusable `proposer_id` alone is not provenance and cannot
+transfer queued work across a registration replacement.
+
 Date: 2026-08-02
 
 Closes, if accepted: `docs/VISION_COMPLETION_PLAN.md` §6 finding 6.

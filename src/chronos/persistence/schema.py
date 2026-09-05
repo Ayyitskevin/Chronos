@@ -735,6 +735,11 @@ class AutonomyProposalQueueRow(Base):
     #: The value is written by the route from the *verified* registration —
     #: never from the payload — and read at drain time to stamp provenance.
     proposer_id: Mapped[str | None] = mapped_column(String(64))
+    #: The credential hash and canonical complete-entry digest authenticated at
+    #: enqueue (ADR-0048). NULL is deliberately reserved for legacy and
+    #: pre-registry rows; drain never reconstructs either from mutable config.
+    proposer_credential_epoch: Mapped[str | None] = mapped_column(String(64))
+    proposer_registry_entry_digest: Mapped[str | None] = mapped_column(String(64))
 
 
 class AutonomyEvidenceBundleRow(Base):
@@ -784,6 +789,11 @@ class AutonomyEvidenceBundleRow(Base):
     #: different proposer refuses at STAMP: issuance is per-credential, and a
     #: shared bundle would make attribution ambiguous again.
     proposer_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    #: Exact authenticated registration at issuance (ADR-0048). Nullable only
+    #: so migration 0011 can preserve old rows without inventing provenance;
+    #: new issuance requires both fields and drain refuses legacy NULLs.
+    proposer_credential_epoch: Mapped[str | None] = mapped_column(String(64))
+    proposer_registry_entry_digest: Mapped[str | None] = mapped_column(String(64))
     #: ``backend_served`` or ``alert_attested`` — see the class docstring.
     kind: Mapped[str] = mapped_column(String(32), nullable=False)
     #: SHA-256, lowercase hex, over the exact bytes served (or attested).

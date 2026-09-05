@@ -102,7 +102,11 @@ from chronos.supervisor.admission import AdmissionRefusal, MarketDataEvidence
 from chronos.supervisor.compiler import QuoteEvidence
 from chronos.supervisor.evidence_kinds import BundleKind
 from chronos.supervisor.loop import CycleFacts, CycleStage
-from chronos.supervisor.proposers import credential_hash
+from chronos.supervisor.proposers import (
+    ProposerRegistration,
+    credential_hash,
+    registration_binding,
+)
 from chronos.supervisor.runtime import AutonomyRuntime, RuntimeConfig
 from chronos.supervisor.sizing import AccountEvidence
 
@@ -117,6 +121,7 @@ PROPOSER_HEADER = "X-Chronos-Proposer-Token"
 
 WORKER_CREDENTIAL = "w" * 64
 BRIDGE_CREDENTIAL = "b" * 64
+ROTATED_CREDENTIAL = "r" * 64
 
 _FAR_EXPIRY = "2030-01-01T00:00:00+00:00"
 
@@ -316,7 +321,7 @@ class _NullSink:
 
 def _runtime(
     sessions: sessionmaker[Session],
-    registry_path: Path,
+    registry_path: Path | None,
     mandate: AutonomyMandate,
     *,
     bind_evidence: bool = True,
@@ -354,12 +359,28 @@ def _issue(
     digest: str = _SERVED_DIGEST,
     now: datetime = _NOW,
     ttl_seconds: float = _TTL,
+    credential: str | None = None,
 ) -> evidence_bundles.IssuedBundle:
+    if not proposer_id:
+        epoch = "0" * 64
+        registration_digest = "0" * 64
+    else:
+        if credential is None:
+            credential = (
+                BRIDGE_CREDENTIAL if proposer_id == "tradingview-bridge" else WORKER_CREDENTIAL
+            )
+        binding = registration_binding(
+            ProposerRegistration.model_validate(_registration(proposer_id, credential))
+        )
+        epoch = binding.credential_epoch
+        registration_digest = binding.registry_entry_digest
     with sessions.begin() as session:
         return evidence_bundles.issue(
             session,
             account_fingerprint=_FINGERPRINT,
             proposer_id=proposer_id,
+            proposer_credential_epoch=epoch,
+            proposer_registry_entry_digest=registration_digest,
             kind=kind,
             digest=digest,
             now=now,
@@ -367,7 +388,18 @@ def _issue(
         )
 
 
-def _enqueue(sessions: sessionmaker[Session], payload: str, proposer_id: str) -> None:
+def _enqueue(
+    sessions: sessionmaker[Session],
+    payload: str,
+    proposer_id: str,
+    *,
+    credential: str | None = None,
+) -> None:
+    if credential is None:
+        credential = BRIDGE_CREDENTIAL if proposer_id == "tradingview-bridge" else WORKER_CREDENTIAL
+    binding = registration_binding(
+        ProposerRegistration.model_validate(_registration(proposer_id, credential))
+    )
     with sessions.begin() as session:
         proposals.enqueue(
             session,
@@ -375,6 +407,8 @@ def _enqueue(sessions: sessionmaker[Session], payload: str, proposer_id: str) ->
             payload=payload,
             now=_NOW,
             proposer_id=proposer_id,
+            proposer_credential_epoch=binding.credential_epoch,
+            proposer_registry_entry_digest=binding.registry_entry_digest,
         )
 
 
@@ -386,6 +420,101 @@ def _drain(runtime: AutonomyRuntime, now: datetime = _NOW) -> Any:
 
 
 # ================================================== the authority half (at STAMP)
+
+
+def test_restart_after_credential_rotation_refuses_prior_proposal_and_bundle(
+    tmp_path: Path,
+) -> None:
+    """Replacing one credential must not revive work authenticated by its predecessor.
+
+    This is an actual persistence restart against one file-backed database.
+    It independently exercises the proposal and bundle seams, then runs a
+    replacement-epoch positive control so a blanket refusal cannot pass.
+    """
+
+    database = Database(f"sqlite+pysqlite:///{tmp_path / 'chronos.db'}")
+    database.initialize()
+    registry = _registry_file(tmp_path, _registration("claude-worker", WORKER_CREDENTIAL))
+    mandate = _mandate()
+    try:
+        _activate(database.sessions, mandate)
+        old_bundle = _issue(database.sessions)
+        _enqueue(
+            database.sessions,
+            _payload(evidence_id=old_bundle.bundle_id, digest=old_bundle.digest),
+            "claude-worker",
+        )
+    finally:
+        database.dispose()
+
+    registry.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "proposers": [_registration("claude-worker", ROTATED_CREDENTIAL)],
+            }
+        ),
+        encoding="utf-8",
+    )
+    restarted = Database(f"sqlite+pysqlite:///{tmp_path / 'chronos.db'}")
+    restarted.initialize()
+    try:
+        proposal_outcome = _drain(_runtime(restarted.sessions, registry, mandate))
+
+        _enqueue(
+            restarted.sessions,
+            _payload(evidence_id=old_bundle.bundle_id, digest=old_bundle.digest),
+            "claude-worker",
+            credential=ROTATED_CREDENTIAL,
+        )
+        bundle_outcome = _drain(_runtime(restarted.sessions, registry, mandate))
+
+        replacement_bundle = _issue(
+            restarted.sessions,
+            credential=ROTATED_CREDENTIAL,
+        )
+        _enqueue(
+            restarted.sessions,
+            _payload(evidence_id=replacement_bundle.bundle_id, digest=replacement_bundle.digest),
+            "claude-worker",
+            credential=ROTATED_CREDENTIAL,
+        )
+        positive_control = _drain(_runtime(restarted.sessions, registry, mandate))
+        _enqueue(
+            restarted.sessions,
+            _payload(evidence_id=replacement_bundle.bundle_id, digest=replacement_bundle.digest),
+            "claude-worker",
+            credential=ROTATED_CREDENTIAL,
+        )
+    finally:
+        restarted.dispose()
+
+    registry_removed = Database(f"sqlite+pysqlite:///{tmp_path / 'chronos.db'}")
+    registry_removed.initialize()
+    try:
+        removed_outcome = _drain(
+            _runtime(
+                registry_removed.sessions,
+                None,
+                mandate,
+                bind_evidence=False,
+            )
+        )
+    finally:
+        registry_removed.dispose()
+
+    assert proposal_outcome.stage is CycleStage.STAMP
+    assert proposal_outcome.refusal == "PROPOSER_REGISTRATION_REPLACED"
+    assert proposal_outcome.decision is None
+    assert bundle_outcome.stage is CycleStage.STAMP
+    assert bundle_outcome.refusal == evidence_bundles.ResolutionRefusal.REGISTRATION_REPLACED.value
+    assert bundle_outcome.decision is None
+    assert positive_control.stage is CycleStage.HANDOFF
+    assert positive_control.refusal == "NO_SUBMISSION_CONFIGURED"
+    assert positive_control.decision is not None
+    assert removed_outcome.stage is CycleStage.STAMP
+    assert removed_outcome.refusal == "PROPOSER_REGISTRY_REMOVED"
+    assert removed_outcome.decision is None
 
 
 def test_an_unissued_bundle_id_refuses_at_the_drain(
@@ -473,6 +602,37 @@ def test_a_bundle_that_expired_between_enqueue_and_drain_refuses(
 
     assert outcome.stage is CycleStage.STAMP
     assert outcome.refusal == evidence_bundles.ResolutionRefusal.EXPIRED.value
+
+
+def test_a_legacy_bundle_binding_is_never_inferred_from_the_current_registry(
+    sessions: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """Migration-preserved NULLs refuse instead of adopting today's credential."""
+
+    mandate = _mandate()
+    _activate(sessions, mandate)
+    registry = _registry_file(tmp_path, _registration("claude-worker", WORKER_CREDENTIAL))
+    issued = _issue(sessions)
+    with sessions.begin() as session:
+        row = evidence_bundles.load(
+            session,
+            account_fingerprint=_FINGERPRINT,
+            bundle_id=issued.bundle_id,
+        )
+        assert row is not None
+        row.proposer_credential_epoch = None
+        row.proposer_registry_entry_digest = None
+    _enqueue(
+        sessions,
+        _payload(evidence_id=issued.bundle_id, digest=issued.digest),
+        "claude-worker",
+    )
+
+    outcome = _drain(_runtime(sessions, registry, mandate))
+
+    assert outcome.stage is CycleStage.STAMP
+    assert outcome.refusal == evidence_bundles.ResolutionRefusal.REGISTRATION_UNBOUND.value
+    assert outcome.decision is None
 
 
 def test_a_proposal_with_no_citation_at_all_refuses(
@@ -1203,6 +1363,23 @@ def test_the_issuance_route_is_the_credentials_one_named_exception(
         assert record["bundle_id"].startswith("evb_")
         assert record["kind"] == BundleKind.ALERT_ATTESTED.value
         assert record["digest"] == _SERVED_DIGEST
+        expected = registration_binding(
+            ProposerRegistration.model_validate(
+                _registration("tradingview-bridge", BRIDGE_CREDENTIAL)
+            )
+        )
+        with sqlite3.connect(demo_env / "chronos.db") as connection:
+            stored = connection.execute(
+                "SELECT proposer_id, proposer_credential_epoch, "
+                "proposer_registry_entry_digest FROM autonomy_evidence_bundles "
+                "WHERE bundle_id = ?",
+                (record["bundle_id"],),
+            ).fetchone()
+        assert stored == (
+            "tradingview-bridge",
+            expected.credential_epoch,
+            expected.registry_entry_digest,
+        )
 
         # The local API token does not — issuance is proposer surface, and the
         # asymmetry ADR-0023 built is preserved rather than eroded by the
@@ -1212,6 +1389,45 @@ def test_the_issuance_route_is_the_credentials_one_named_exception(
 
         # And nothing at all does not.
         assert client.post("/autonomy/evidence", json=body).status_code == 401
+
+
+def test_inconsistent_authenticated_registry_state_writes_no_work(
+    demo_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The route carrier fails closed if its authentication invariant breaks.
+
+    Production authentication and persistence consult the same frozen registry.
+    This override deliberately makes the dependency claim an id absent from that
+    registry; both write origins must answer 503 and leave no partial row.
+    """
+
+    from chronos.api.auth import ProposerAuth, require_proposer
+    from chronos.supervisor.proposers import ProposerRegistry
+
+    with _boot_with_evidence(monkeypatch, demo_env) as client:
+        client.app.dependency_overrides[require_proposer] = lambda: "claude-worker"  # type: ignore[attr-defined]
+        client.app.state.proposer_auth = ProposerAuth(  # type: ignore[attr-defined]
+            configured=True,
+            registry=ProposerRegistry(schema_version=1),
+        )
+        proposal = client.post(
+            "/autonomy/proposals",
+            content=_payload(evidence_id="evb_probe", digest=_SERVED_DIGEST),
+        )
+        evidence = client.post(
+            "/autonomy/evidence",
+            json={"kind": "alert_attested", "digest": _SERVED_DIGEST},
+        )
+
+        assert proposal.status_code == 503
+        assert evidence.status_code == 503
+        with sqlite3.connect(demo_env / "chronos.db") as connection:
+            assert connection.execute(
+                "SELECT COUNT(*) FROM autonomy_proposal_queue"
+            ).fetchone() == (0,)
+            assert connection.execute(
+                "SELECT COUNT(*) FROM autonomy_evidence_bundles"
+            ).fetchone() == (0,)
 
 
 def test_issuance_refuses_a_caller_supplied_digest_on_the_served_kind(

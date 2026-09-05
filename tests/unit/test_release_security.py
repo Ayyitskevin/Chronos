@@ -85,7 +85,7 @@ def test_reviewed_baseline_contains_only_explicit_false_positive_fingerprints() 
     ]
 
     assert candidates
-    assert len(historical_candidates) == 7
+    assert len(historical_candidates) == 8
     assert {item["type"] for item in candidates} == {
         "Hex High Entropy String",
         "Secret Keyword",

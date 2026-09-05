@@ -128,7 +128,7 @@ Unmapped means refused by the compiler whitelist. Vocabulary presence alone is n
 | src/chronos/config/settings.py | `64cc814dac1a85b365c02091b04a85a7aeb0316a729b605a7b9602b5a17016cb` |
 | src/chronos/domain/enums.py | `6244760cac081c4ca0cbbec7cfc586efe6fd11471d7e06fbb29c8c4790414828` |
 | src/chronos/runtime.py | `e85ead28e76de6a0265985ea21227367aa5ebaa2418bd74d9bb3c380fe6ec738` |
-| src/chronos/api/autonomy_wiring.py | `9e84613a37c7af2a1c1c50c3bd3409ca475d75982ef81abd031b1719954b4d0f` |
+| src/chronos/api/autonomy_wiring.py | `dcb4fcf76465f338485b6536905b1007d58fb8dc3dbc77ada15ddbdc22c8b151` |
 | src/chronos/supervisor/evidence_kinds.py | `374d6de281168796200d10b5ae64f83e4b336b0d18d91377fbefbd3d4a488e06` |
 | src/chronos/broker/demo.py | `0b957a97f993dbc5beb51d167c0cdbb62b80f99d3b008d11083305450c5f1d1c` |
 | src/chronos/broker/official_ibkr.py | `01a9de8212db02d1affcd285847fb398dd56a981344811bc7ea9fdec1598fa5e` |

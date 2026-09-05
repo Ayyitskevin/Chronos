@@ -804,7 +804,7 @@ def test_installed_migration_drill_executes_revision_bodies(
 ) -> None:
     migration_root = tmp_path / "migrations"
     shutil.copytree(_REPO_ROOT / "src/chronos/persistence/migrations", migration_root)
-    head_revision = migration_root / "versions/0010_managed_position_bindings.py"
+    head_revision = migration_root / "versions/0011_credential_epoch_binding.py"
     source = head_revision.read_text(encoding="utf-8")
     signature = "def upgrade() -> None:\n"
     assert source.count(signature) == 1
@@ -830,7 +830,7 @@ def test_installed_migration_drill_resolves_the_package_resource(
 ) -> None:
     migration_root = tmp_path / "packaged-migrations"
     shutil.copytree(_REPO_ROOT / "src/chronos/persistence/migrations", migration_root)
-    head_revision = migration_root / "versions/0010_managed_position_bindings.py"
+    head_revision = migration_root / "versions/0011_credential_epoch_binding.py"
     source = head_revision.read_text(encoding="utf-8")
     signature = "def upgrade() -> None:\n"
     assert source.count(signature) == 1
@@ -858,7 +858,7 @@ def test_installed_migration_drill_resolves_the_package_resource(
 def test_migration_drill_rejects_schema_drift_after_reaching_head(tmp_path: Path) -> None:
     migration_root = tmp_path / "migrations"
     shutil.copytree(_REPO_ROOT / "src/chronos/persistence/migrations", migration_root)
-    head_revision = migration_root / "versions/0010_managed_position_bindings.py"
+    head_revision = migration_root / "versions/0011_credential_epoch_binding.py"
     source = head_revision.read_text(encoding="utf-8")
     marker = "\n\ndef downgrade() -> None:\n"
     assert source.count(marker) == 1

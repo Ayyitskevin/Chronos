@@ -6,8 +6,13 @@ opus build it", Kevin, 2026-08-14). Recorded as D-25. Implemented the same day: 
 durable `autonomy_evidence_bundles` record (migration 0008, schema v9), the
 `POST /autonomy/evidence` issuance route, resolution at STAMP against the drain's clock,
 and admission check 9's payload-side half. Every "Requires" proof in the Option C list
-below is exercised in `tests/safety/test_evidence_bundles_exercised.py` (25 tests), with
+below is exercised in `tests/safety/test_evidence_bundles_exercised.py`, with
 each conjunct verified by reverting it alone and watching a named test fail (18/18).
+
+**Amended by ADR-0048 (2026-09-03):** “issued to a credential” is now durable and exact.
+Bundles persist the authenticated credential epoch and canonical complete-registration digest;
+drain requires both to match the proposal's validated binding, so same-id credential rotation
+cannot transfer an old bundle to a replacement registration.
 
 **Recommended parameters, as built.** All honored: expiry judged by the drain's clock
 with a disclosed 300 s default (`AUTONOMY_EVIDENCE_TTL_SECONDS`, hard ceiling 3600 s, an

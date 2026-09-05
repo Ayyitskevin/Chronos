@@ -70,7 +70,11 @@ from chronos.supervisor import durable, proposals, queue
 from chronos.supervisor.admission import MarketDataEvidence
 from chronos.supervisor.compiler import QuoteEvidence
 from chronos.supervisor.loop import CycleFacts, CycleStage, run_cycle
-from chronos.supervisor.proposers import credential_hash
+from chronos.supervisor.proposers import (
+    ProposerRegistration,
+    credential_hash,
+    registration_binding,
+)
 from chronos.supervisor.runtime import AutonomyRuntime, RuntimeConfig
 from chronos.supervisor.sizing import AccountEvidence
 
@@ -128,6 +132,24 @@ def _registry_text(*entries: dict[str, Any]) -> str:
     return json.dumps({"schema_version": 1, "proposers": list(entries)})
 
 
+def _binding_values(entry: dict[str, Any]) -> tuple[str, str]:
+    binding = registration_binding(ProposerRegistration.model_validate(entry))
+    return binding.credential_epoch, binding.registry_entry_digest
+
+
+def test_registration_binding_is_semantic_per_entry_and_rotation_sensitive() -> None:
+    base = _registration("claude-worker", WORKER_CREDENTIAL)
+    equivalent_offset = dict(base, expires_at="2029-12-31T19:00:00-05:00")
+    relabelled = dict(base, policy_version="pol-6")
+    rotated = _registration("claude-worker", "r" * 64)
+
+    assert _binding_values(base) == _binding_values(equivalent_offset)
+    assert _binding_values(base)[0] == _binding_values(relabelled)[0]
+    assert _binding_values(base)[1] != _binding_values(relabelled)[1]
+    assert _binding_values(base)[0] != _binding_values(rotated)[0]
+    assert _binding_values(base)[1] != _binding_values(rotated)[1]
+
+
 # ----------------------------------------------------------- the route plane
 
 
@@ -173,9 +195,14 @@ def _api_token(tmp_path: Path) -> str:
     return (tmp_path / "backend_api_token").read_text(encoding="utf-8").strip()
 
 
-def _queue_rows(tmp_path: Path) -> list[tuple[str | None, str]]:
+def _queue_rows(tmp_path: Path) -> list[tuple[str | None, str | None, str | None, str]]:
     with sqlite3.connect(tmp_path / "chronos.db") as connection:
-        return list(connection.execute("SELECT proposer_id, payload FROM autonomy_proposal_queue"))
+        return list(
+            connection.execute(
+                "SELECT proposer_id, proposer_credential_epoch, "
+                "proposer_registry_entry_digest, payload FROM autonomy_proposal_queue"
+            )
+        )
 
 
 def test_registry_on_credential_decides_and_the_row_records_who(
@@ -235,6 +262,8 @@ def test_registry_on_credential_decides_and_the_row_records_who(
         rows = _queue_rows(demo_env)
         assert len(rows) == 1
         assert rows[0][0] == "claude-worker"
+        epoch, digest = _binding_values(_registration("claude-worker", WORKER_CREDENTIAL))
+        assert rows[0][1:3] == (epoch, digest)
 
         # The payload cannot vote on identity: it has no such field, and a
         # payload that tries to carry provenance is refused by the ingress
@@ -630,7 +659,18 @@ def _activate(sessions: sessionmaker[Session], mandate: AutonomyMandate) -> None
         )
 
 
-def _enqueue(sessions: sessionmaker[Session], *, proposer_id: str | None) -> None:
+def _enqueue(
+    sessions: sessionmaker[Session],
+    *,
+    proposer_id: str | None,
+    registration_entry: dict[str, Any] | None = None,
+) -> None:
+    epoch: str | None = None
+    digest: str | None = None
+    if proposer_id is not None:
+        epoch, digest = _binding_values(
+            registration_entry or _registration("claude-worker", WORKER_CREDENTIAL)
+        )
     with sessions.begin() as session:
         outcome = proposals.enqueue(
             session,
@@ -638,6 +678,8 @@ def _enqueue(sessions: sessionmaker[Session], *, proposer_id: str | None) -> Non
             payload=_payload(),
             now=_NOW,
             proposer_id=proposer_id,
+            proposer_credential_epoch=epoch,
+            proposer_registry_entry_digest=digest,
         )
         assert outcome.queued
 
@@ -652,6 +694,35 @@ def _stream_payloads(
             select(HashChainRow).where(HashChainRow.stream == stream).order_by(HashChainRow.id)
         ).all()
         return [hash_chain.payload_of(row) for row in rows if kind is None or row.kind == kind]
+
+
+@pytest.mark.parametrize(
+    ("epoch", "digest"),
+    [
+        pytest.param(None, "a" * 64, id="missing-epoch"),
+        pytest.param("a" * 64, None, id="missing-digest"),
+        pytest.param("not-a-digest", "a" * 64, id="malformed-epoch"),
+        pytest.param("a" * 64, "A" * 64, id="noncanonical-digest"),
+    ],
+)
+def test_registered_enqueue_requires_a_complete_canonical_binding(
+    sessions: sessionmaker[Session], epoch: str | None, digest: str | None
+) -> None:
+    with (
+        sessions.begin() as session,
+        pytest.raises(ValueError, match="64-character lowercase"),
+    ):
+        proposals.enqueue(
+            session,
+            account_fingerprint=_FINGERPRINT,
+            payload=_payload(),
+            now=_NOW,
+            proposer_id="claude-worker",
+            proposer_credential_epoch=epoch,
+            proposer_registry_entry_digest=digest,
+        )
+    with sessions.begin() as session:
+        assert proposals.pending_depth(session, account_fingerprint=_FINGERPRINT) == 0
 
 
 def test_the_journaled_identity_matches_the_credential_used(
@@ -722,19 +793,15 @@ def test_an_unresolvable_proposer_refuses_at_stamp(
     """
 
     registry_path = tmp_path / "proposers.json"
-    registry_path.write_text(
-        _registry_text(
-            _registration(
-                "claude-worker",
-                WORKER_CREDENTIAL,
-                expires_at=(_NOW + timedelta(hours=1)).isoformat(),
-            )
-        ),
-        encoding="utf-8",
+    entry = _registration(
+        "claude-worker",
+        WORKER_CREDENTIAL,
+        expires_at=(_NOW + timedelta(hours=1)).isoformat(),
     )
+    registry_path.write_text(_registry_text(entry), encoding="utf-8")
     mandate = _mandate(expires_at=_NOW + timedelta(days=7))
     _activate(sessions, mandate)
-    _enqueue(sessions, proposer_id=proposer_id)
+    _enqueue(sessions, proposer_id=proposer_id, registration_entry=entry)
 
     runtime = _drain_runtime(sessions, registry_path, mandate)
     drain_at = _NOW + timedelta(hours=2)  # past the registration's expiry
@@ -769,17 +836,17 @@ def test_the_resolver_postures_are_fail_closed(
     assert build_identity_resolver(None) is None
 
     registry_path = tmp_path / "proposers.json"
+    current_entry = _registration("claude-worker", WORKER_CREDENTIAL)
+    disabled_entry = _registration("disabled-worker", DISABLED_CREDENTIAL, enabled=False)
     registry_path.write_text(
-        _registry_text(
-            _registration("claude-worker", WORKER_CREDENTIAL),
-            _registration("disabled-worker", DISABLED_CREDENTIAL, enabled=False),
-        ),
+        _registry_text(current_entry, disabled_entry),
         encoding="utf-8",
     )
     resolve = build_identity_resolver(registry_path)
     assert resolve is not None
+    current_epoch, current_digest = _binding_values(current_entry)
     with sessions.begin() as session:
-        resolution = resolve(session, "claude-worker", _NOW)
+        resolution = resolve(session, "claude-worker", current_epoch, current_digest, _NOW)
     identity = resolution.identity
     assert identity is not None
     assert identity.proposer_id == "claude-worker"
@@ -798,11 +865,17 @@ def test_the_resolver_postures_are_fail_closed(
     with sessions.begin() as session:
         # Each refusing posture names itself (A3), so the journal can tell an
         # aged-out registration from a pre-registry row from a broken file.
-        for proposer_id in ("disabled-worker", "ghost"):
-            refused = resolve(session, proposer_id, _NOW)
-            assert refused.identity is None, proposer_id
-            assert refused.refusal == "PROPOSER_UNRESOLVED", proposer_id
-        pre_registry = resolve(session, None, _NOW)
+        disabled_epoch, disabled_digest = _binding_values(disabled_entry)
+        refused = resolve(session, "disabled-worker", disabled_epoch, disabled_digest, _NOW)
+        assert refused.identity is None
+        assert refused.refusal == "PROPOSER_UNRESOLVED"
+        legacy = resolve(session, "claude-worker", None, None, _NOW)
+        assert legacy.identity is None
+        assert legacy.refusal == "PROPOSER_REGISTRATION_UNBOUND"
+        ghost = resolve(session, "ghost", current_epoch, current_digest, _NOW)
+        assert ghost.identity is None
+        assert ghost.refusal == "PROPOSER_UNRESOLVED"
+        pre_registry = resolve(session, None, None, None, _NOW)
         assert pre_registry.identity is None
         assert pre_registry.refusal == "PROPOSER_UNRESOLVED"
         assert "before a proposer registry was configured" in pre_registry.detail
@@ -810,7 +883,7 @@ def test_the_resolver_postures_are_fail_closed(
     broken = build_identity_resolver(tmp_path / "does-not-exist.json")
     assert broken is not None  # configured-but-broken is NOT the None posture
     with sessions.begin() as session:
-        unreadable = broken(session, "claude-worker", _NOW)
+        unreadable = broken(session, "claude-worker", current_epoch, current_digest, _NOW)
     assert unreadable.identity is None
     assert unreadable.refusal == "PROPOSER_REGISTRY_INVALID"
 
