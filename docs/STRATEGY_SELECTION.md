@@ -18,8 +18,14 @@ evidence in `docs/RESEARCH_REPORT.md`; results in `research/results/`.
   that none of the strategies is currently suitable for live trading rather
   than inventing confidence that the evidence does not support."
 - The binding gate is C4's ≥ 20-closed-trade floor, and **no candidate reaches
-  20 trades on any symbol** (max 18). Broadening from 2 to 5 symbols confirmed
-  this is a structural low-trade-frequency property, not a QQQ artifact.
+  20 trades on any symbol in its base configuration** (max 18). Broadening from
+  2 to 5 symbols confirmed this is a structural low-trade-frequency property,
+  not a QQQ artifact. Swept variants do reach 20–24 closed trades
+  (`research/results/research_val.json`: `lookback=15` → 23 and
+  `atr_stop_mult=1.5` → 20 for `regime_trend_v1`; `oversold=15.0` → 22 on QQQ
+  and 24 on IWM for `mean_reversion_v1`), and selecting on them is precisely
+  the bias the freeze exists to prevent — so the base configuration is the
+  number this gate reads.
 - Bending a frozen criterion after seeing a favorable result would be textbook
   selection bias; the floor exists exactly for this moment.
 - `mean_reversion_v1`'s IWM result (+16.2%, PF 3.35) is the single strongest
