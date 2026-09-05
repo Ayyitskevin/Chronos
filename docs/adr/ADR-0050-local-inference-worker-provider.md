@@ -107,14 +107,17 @@ extract mutation proved in this PR fails that test as well as its own. If a thir
 OpenAI-compatible provider arrives, hoist then, with the pin already in place to prove the
 hoist changed nothing.
 
-That choice has one visible cost, and it is recorded rather than hidden. A JSON body that
+That choice had one visible cost, and it was recorded rather than hidden. A JSON body that
 parses but is not an object (`[]`, `"str"`, `42`) has no `.get`, and raised `AttributeError`
-out of `think` on **both** providers. This PR guards it in `think_local` only — deliberately
-in `think`, not in `_extract_decision`, so the drift test still pins the two extracts equal.
-The identical shape remains in `worker/model_xai.py`, where `run_loop` catches it and keeps
-cadence, so it costs a cycle and a noisy log rather than authority. Fixing a shipped
-provider's live path is not this PR's to do (R10); it is the first thing the hoist above
-should carry.
+out of `think` on **both** providers. This PR guarded it in `think_local` only —
+deliberately in `think`, not in `_extract_decision`, so the drift test still pins the two
+extracts equal — and left the identical shape in `worker/model_xai.py`, on the grounds that
+fixing a shipped provider's live path was not this PR's to do (R10).
+
+*Closed 2026-09-05:* `think_xai` now refuses the same four bodies the same way, and the
+assertion is a single parametrisation over both providers rather than a copy per provider,
+so the next such fix cannot land on one and miss the other. The debt was real: it lived on
+main for exactly as long as it took to write the follow-up.
 
 **Let the local base URL name any host.** Rejected — see decision 1. The remote-gateway case
 is served by a port-forward, and this fleet already reaches its loopback-bound services that

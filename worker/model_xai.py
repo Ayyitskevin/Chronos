@@ -78,6 +78,15 @@ def think(
     except ValueError:
         _logger.error("xAI API returned a non-JSON body")
         return None
+    if not isinstance(body, dict):
+        # A JSON array, string, or number parses fine and then has no ``.get``.
+        # Refusing here rather than in ``_extract_decision`` keeps that function
+        # byte-faithful to the local one, which the drift test pins.
+        _logger.error(
+            "xAI API returned a JSON %s rather than an object; none proposed",
+            type(body).__name__,
+        )
+        return None
     if budget is not None:
         usage = body.get("usage") or {}
         budget.spend(charged_tokens(usage.get("prompt_tokens"), usage.get("completion_tokens")))
