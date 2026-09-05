@@ -8,7 +8,8 @@ for session counters.
 Introducing a calendar for research coverage therefore introduces exactly one new
 hazard — that some later change wires it into the authority plane and quietly reverses
 that decision. This test is the structural answer, and it runs in **both** directions:
-the module reaches nothing, and nothing outside research/histdata reaches *it*.
+the module reaches nothing, and nothing outside research/histdata reaches *it* except
+an explicitly named, independently read-only operator adapter.
 
 Two weaknesses in the first version of this guard were found by cross-seat review
 (codex HOLD, GLM concurring) and are fixed here, because a guard with a known bypass is
@@ -34,6 +35,15 @@ from pathlib import Path
 import chronos
 
 _CALENDAR_MODULE = "chronos.research.session_calendar"
+
+# The data-intake CLI is an inspection-only adapter into the research plane. Ignore
+# exactly this edge when asking whether another package can acquire the calendar;
+# every other edge remains default-denied, including any future second route from
+# this command module. The command's no-network/no-write boundary is independently
+# bound by tests/integration/test_data_intake_verify.py.
+_READ_ONLY_RESEARCH_EDGES = {
+    ("chronos.cli.data_commands", "chronos.research.data_intake"),
+}
 
 #: The planes allowed to hold the calendar. Everything else is denied by default.
 _ALLOWED_PACKAGES = ("research", "histdata")
@@ -216,19 +226,31 @@ def _reaches(graph: dict[str, set[str]], start: str, target: str) -> list[str] |
     return None
 
 
-def test_no_module_outside_research_can_reach_the_calendar_transitively() -> None:
-    """The escape codex's second HOLD named, closed at the level it actually lives.
+def _without_read_only_research_edges(graph: dict[str, set[str]]) -> dict[str, set[str]]:
+    """Remove only the named inspection edge before authority reachability checks."""
+
+    guarded = {name: set(imports) for name, imports in graph.items()}
+    for source, target in _READ_ONLY_RESEARCH_EDGES:
+        assert target in guarded.get(source, set()), (
+            f"missing reviewed read-only edge {source}->{target}"
+        )
+        guarded[source].remove(target)
+    return guarded
+
+
+def test_no_unreviewed_module_outside_research_can_reach_the_calendar_transitively() -> None:
+    """Default-deny reachability, with one exact read-only intake edge removed.
 
     Denying every importer of ``chronos.histdata`` outright would be wrong and would
     fail today: ``chronos.cli`` and ``chronos.registry`` legitimately import
     ``histdata.store``/``holdout``, neither of which loads the calendar. Only
     ``histdata.official_client`` holds a module-level ``SessionCalendar`` (its hourly
     parser needs the session close). The honest invariant is therefore reachability,
-    not a package list and not a single hop — and unlike a list, a transitive closure
-    cannot be defeated by adding a module nobody remembered to enumerate.
+    not a package list and not a single hop. Removing the single reviewed edge before
+    computing reachability keeps any second route from the intake CLI visible.
     """
 
-    graph = _import_graph()
+    graph = _without_read_only_research_edges(_import_graph())
     offenders: list[str] = []
     for name in sorted(graph):
         if name.startswith(("chronos.research", "chronos.histdata")):
@@ -251,9 +273,20 @@ def test_the_reachability_graph_is_real() -> None:
     assert graph["chronos.histdata.official_client"] >= {_CALENDAR_MODULE}
     # A known-good multi-hop path exists, so BFS is genuinely traversing edges.
     assert _reaches(graph, "chronos.histdata.holdout", "chronos.marketdata.quality")
-    # And the legitimate cli/registry -> histdata edges must NOT reach the calendar.
-    for benign in ("chronos.cli.main", "chronos.registry.holdout_guardian"):
-        assert _reaches(graph, benign, _CALENDAR_MODULE) is None
+    assert _reaches(graph, "chronos.cli.data_commands", _CALENDAR_MODULE) == [
+        "chronos.cli.data_commands",
+        "chronos.research.data_intake",
+        _CALENDAR_MODULE,
+    ]
+    guarded = _without_read_only_research_edges(graph)
+    # The reviewed inspection edge is removed; cli/registry have no other route.
+    for benign in (
+        "chronos.cli.__main__",
+        "chronos.cli.main",
+        "chronos.cli.data_commands",
+        "chronos.registry.holdout_guardian",
+    ):
+        assert _reaches(guarded, benign, _CALENDAR_MODULE) is None
 
 
 def test_importing_the_calendar_pulls_in_no_trading_module() -> None:
