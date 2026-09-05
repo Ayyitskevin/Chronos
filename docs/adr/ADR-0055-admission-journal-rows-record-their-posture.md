@@ -43,9 +43,10 @@ ADR-0048 and ADR-0051 spent the same sprint removing from the queue and the asse
 3. The block lives **in the hash-chained payload**, not in a column. The journal row is the
    tamper-evident record; a column on `autonomy_decision_attempts` would be a second, mutable
    copy of the same claim. No migration; `SCHEMA_VERSION` untouched. [Corrected
-   2026-09-05: this sentence read "`SCHEMA_VERSION` 12 is unchanged", which was true at
-   writing and moved when ADR-0054's migration 0012 took the version to 13. The claim
-   was always that this ADR adds no migration, which is unchanged.]
+   2026-09-05: this sentence named a specific schema version, which was true at writing
+   and moved when ADR-0054's migration 0012 advanced it. The claim was always that this
+   ADR adds no migration, which is unchanged. Naming the number is now refused by
+   `tests/unit/test_adr_point_in_time_claims.py`.]
 > **Amendment, 2026-09-05 (ADR-0057).** Decision 2 below says `credential_epoch_bound` is read
 > from the row's own epoch and entry digest. Until ADR-0057 the *code* read `run_cycle`'s
 > `proposer_*` parameters, which the drain fills from the **resolved** identity. No admission row
