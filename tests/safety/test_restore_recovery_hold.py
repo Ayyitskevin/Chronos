@@ -27,6 +27,8 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, sessionmaker
 
 from chronos.api.main import create_app
 from chronos.autonomy import (
@@ -52,9 +54,11 @@ from chronos.orders.recovery_hold import (
     RecoveryHold,
     RecoveryHoldReason,
     evaluate_recovery_hold,
+    evaluate_startup_recovery_hold,
     read_restore_pending_token,
 )
 from chronos.orders.state_generation import StateGenerationMarker
+from chronos.persistence.schema import Base, InstallationIdentityRow
 from chronos.utils.identifiers import account_fingerprint
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -193,6 +197,72 @@ def test_a_present_but_unreadable_restore_witness_still_holds(tmp_path: Path) ->
     path.write_text("{ not json", encoding="utf-8")
     token = read_restore_pending_token(path)
     assert token is not None
+
+
+# --- Migration 0012's adoption sentinel, on the side that CONSUMES it ---------
+#
+# The sentinel has two halves and only the write was bound. `test_migrations.py`
+# asserts that migration 0012 leaves `(id=1, installation_id=NULL)`; nothing drove
+# the branch in `resolve_installation` that lets a row-with-no-name adopt the marker
+# beside it. Treating the sentinel as no-row turned every upgraded deployment's first
+# boot into a DATABASE_REPLACED hold and 88 tests still passed (opus-2's on-main
+# re-probe, 2026-09-05). The blast radius is every existing installation, so the
+# consumption gets its own test.
+
+
+def _upgraded_database(state: Path) -> sessionmaker[Session]:
+    """A database that has just taken 0012: schema present, sentinel row, no name."""
+
+    engine = create_engine(f"sqlite:///{state / 'chronos.db'}")
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(bind=engine, expire_on_commit=False)
+    with sessions.begin() as session:
+        session.add(InstallationIdentityRow(id=1, installation_id=None, first_seen_at=None))
+    return sessions
+
+
+def test_an_upgraded_database_adopts_the_marker_beside_it(tmp_path: Path) -> None:
+    """The sentinel is consumed: an existing deployment does not boot held.
+
+    This is the scenario migration 0012 exists for — a marker that predates the
+    cross-store witness, beside a database that has just gained the identity table.
+    Adoption must be silent and must record the marker's own id, because the id is
+    the evidence every later comparison is against.
+    """
+
+    marker = StateGenerationMarker(tmp_path / "state_generation.json")
+    marker.ensure_installation("existing-installation-abc", now=_NOW)
+    sessions = _upgraded_database(tmp_path)
+
+    hold = evaluate_startup_recovery_hold(sessions, marker, state_directory=tmp_path, now=_NOW)
+
+    assert hold is None
+    with sessions.begin() as session:
+        row = session.get(InstallationIdentityRow, 1)
+        assert row is not None
+        assert row.installation_id == "existing-installation-abc"
+        assert row.first_seen_at is not None
+
+
+def test_a_database_with_no_row_at_all_still_holds_beside_a_marker(tmp_path: Path) -> None:
+    """Guard the guard: adoption must not swallow the case it is next to.
+
+    A database created by `create_all` has no identity row — it has never run this
+    code — so a marker beside it names an installation it never witnessed. If this
+    read as adoption too, the sentinel branch would be indistinguishable from the
+    replaced-database branch and the comparison could never refuse.
+    """
+
+    marker = StateGenerationMarker(tmp_path / "state_generation.json")
+    marker.ensure_installation("some-other-installation", now=_NOW)
+    engine = create_engine(f"sqlite:///{tmp_path / 'chronos.db'}")
+    Base.metadata.create_all(engine)  # no sentinel row: never migrated, never booted
+    sessions = sessionmaker(bind=engine, expire_on_commit=False)
+
+    hold = evaluate_startup_recovery_hold(sessions, marker, state_directory=tmp_path, now=_NOW)
+
+    assert hold is not None
+    assert hold.reason is RecoveryHoldReason.DATABASE_REPLACED
 
 
 # --- The consequences, over the real app and its real lifespan ---------------
