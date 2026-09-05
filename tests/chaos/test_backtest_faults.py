@@ -12,6 +12,8 @@ from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+
 from chronos.backtest.engine import BacktestConfig, BacktestResult, run_backtest
 from chronos.control.halt import HaltStore
 from chronos.execution.brokers.simulated import FaultPlan
@@ -89,6 +91,43 @@ def entry_proposal_for(bar: Bar) -> StrategyProposal:
     )
 
 
+EXIT_ON = date(2024, 1, 10)
+
+
+class EnterThenExitOnDateStrategy:
+    """Enters once while flat, then exits on a fixed session date.
+
+    The exit is keyed to a DATE rather than to ``bars_held`` on purpose. A
+    partial fill changes how long the engine thinks the position has been held,
+    so a hold-count exit would move the exit bar as well as the entry basis and
+    the two effects could not be read apart.
+    """
+
+    strategy_id = AlwaysEnterStrategy.strategy_id
+    version = AlwaysEnterStrategy.version
+    warmup_bars = 1
+
+    def on_bar(self, context: StrategyContext) -> StrategyProposal | None:
+        bar = context.bars[-1]
+        if context.position.side is PositionSide.FLAT:
+            if bar.session_date >= EXIT_ON:
+                return None
+            return entry_proposal_for(bar)
+        if bar.session_date < EXIT_ON:
+            return None
+        return StrategyProposal(
+            strategy_id=self.strategy_id,
+            strategy_version=self.version,
+            timestamp_utc=bar.timestamp_utc,
+            symbol=bar.symbol,
+            direction=ProposalDirection.EXIT_LONG,
+            desired_exposure_fraction=0.0,
+            stop_fraction=None,
+            source_bar_ids=(bar.sequence_id,),
+            reason="date exit",
+        )
+
+
 def permissive_policy() -> RiskPolicy:
     return RiskPolicy.model_validate(
         {
@@ -143,12 +182,17 @@ def harvest_flat_entry_intent_ids(series: BarSeries) -> list[str]:
     return ids
 
 
-def run(tmp_path: Path, name: str, faults: FaultPlan | None) -> BacktestResult:
+def run(
+    tmp_path: Path,
+    name: str,
+    faults: FaultPlan | None,
+    strategy: object | None = None,
+) -> BacktestResult:
     halt_store = HaltStore(tmp_path / f"halt-{name}.json")
     halt_store.rearm("armed for backtest chaos")
     return run_backtest(
         series=make_series(),
-        strategy=AlwaysEnterStrategy(),
+        strategy=strategy if strategy is not None else AlwaysEnterStrategy(),
         risk_policy=permissive_policy(),
         config=config(),
         halt_store=halt_store,
@@ -205,3 +249,95 @@ class TestPartialFillEntries:
         # must diverge there while both end fully invested.
         assert faulted_one.equity_curve != clean.equity_curve
         assert faulted_one.equity_curve[-1] != INITIAL_CASH
+
+
+class TestMultiFillEntryBasis:
+    """A position filled in two parts is valued at the quantity-weighted average.
+
+    Issue #187: the engine accumulated ``quantity`` from ``cumulative_filled``
+    while overwriting ``entry_price`` with the newest fill, so a position built
+    from more than one BUY fill was valued at its LAST fill rather than its
+    average — and ``entry_date``/``bars_held`` likewise recorded the completing
+    fill instead of the opening one.
+
+    The arithmetic this pins, with slippage at zero so every figure is exact.
+    The first entry intent is 14 shares at a limit of 100.10; the injected
+    partial splits it 1/2:
+
+        PARTIAL_FILL  2024-01-02   7 shares @ 100.00   commission 1.00
+        FILLED        2024-01-03   7 shares @ 100.10   commission 1.00
+
+        weighted entry = (7 * 100.00 + 7 * 100.10) / 14
+                       = 1400.70 / 14
+                       = 100.05          <- what the engine must record
+                         100.10          <- what it recorded before the fix
+
+    Exiting all 14 on 2024-01-11 at 103.50, with 1.00 exit commission against
+    2.00 of accumulated entry commission:
+
+        corrected   (103.50 - 100.05) * 14 - 1.00 - 2.00 = 45.30
+        before fix  (103.50 - 100.10) * 14 - 1.00 - 2.00 = 44.60
+
+    The 0.70 gap is ``(last_fill_price - weighted_average) * quantity``. Its
+    sign follows the direction between the fills, so the defect is a bias and
+    not a constant: this series rises, so the dearer fill was last, the basis
+    was overstated, and the trade read worse than it was.
+
+    This is not only a reporting error. ``net_pnl`` is written into
+    ``realized_by_day``/``realized_by_week``, which feed ``AccountView`` and so
+    the risk engine's daily and weekly loss limits and ``consecutive_losses`` —
+    a mis-valued trade can change a later risk decision, and thus which trades
+    happen at all.
+    """
+
+    def test_two_fill_entry_is_valued_at_the_weighted_average(self, tmp_path: Path) -> None:
+        series = make_series()
+        first_entry_id = harvest_flat_entry_intent_ids(series)[0]
+        faults = FaultPlan(partial_fill_intent_ids=frozenset({first_entry_id}))
+
+        result = run(tmp_path, "legged", faults, EnterThenExitOnDateStrategy())
+
+        assert len(result.trades) == 1
+        trade = result.trades[0]
+        assert trade.quantity == 14
+
+        # The basis is the weighted average of the two fills, not the last one.
+        assert trade.entry_price == pytest.approx(100.05)
+        assert trade.entry_price != pytest.approx(100.10)
+
+        # The position opened on the first fill, not on the one that completed it.
+        assert trade.entry_date == date(2024, 1, 2)
+        assert trade.exit_date == date(2024, 1, 11)
+        assert trade.exit_price == pytest.approx(103.50)
+
+        # Commissions accumulate across both entry fills (this was already right).
+        assert trade.entry_commission == pytest.approx(2.00)
+        assert trade.exit_commission == pytest.approx(1.00)
+
+        # ...so the realized PnL follows from the weighted basis.
+        assert trade.net_pnl == pytest.approx(45.30)
+        assert trade.net_pnl != pytest.approx(44.60)
+
+        # bars_held counts from the opening fill and is not reset by the second.
+        assert trade.bars_held == 7
+
+    def test_single_fill_entry_is_unchanged_by_the_weighting(self, tmp_path: Path) -> None:
+        """The control: with one fill, the weighted average IS that fill.
+
+        Every strategy in the corpus takes exactly one BUY fill per position
+        (``convert_proposal`` refuses ENTER_LONG while held, and no research
+        call site injects partial fills), so this is the path the committed
+        research results actually exercise. It must not move.
+        """
+
+        clean = run(tmp_path, "clean-basis", None, EnterThenExitOnDateStrategy())
+
+        assert len(clean.trades) == 1
+        trade = clean.trades[0]
+        assert trade.entry_price == pytest.approx(100.00)
+        assert trade.entry_date == date(2024, 1, 2)
+        assert trade.bars_held == 7
+        # One fill, so one entry commission (the legged run pays two) and the
+        # basis is that fill: (103.50 - 100.00) * 14 - 1.00 - 1.00 = 47.00.
+        assert trade.entry_commission == pytest.approx(1.00)
+        assert trade.net_pnl == pytest.approx(47.00)
