@@ -65,6 +65,7 @@ without a database, and that property is worth preserving.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
@@ -95,6 +96,79 @@ _logger = logging.getLogger("chronos.supervisor.durable")
 #: refused. Named per account so one account's history cannot be invalidated by
 #: another's, and so a stream can be verified in isolation.
 DECISION_STREAM = "autonomy.decisions"
+
+#: Schema version of the ``posture`` block every admission journal row carries
+#: (ADR-0055). A new field or a changed meaning bumps this; readers refuse a
+#: version they do not know rather than guess at it.
+POSTURE_VERSION = 1
+
+
+@dataclass(frozen=True, slots=True)
+class DecisionPosture:
+    """The provenance posture one decision was judged under (ADR-0055).
+
+    Three facts the cycle already holds when it journals an admission outcome,
+    recorded *as that cycle saw them* — never re-read from settings, which can
+    change between rows:
+
+    - ``registry_configured`` — a proposer registry was wired (ADR-0023);
+    - ``evidence_binding`` — evidence binding was in force (ADR-0028);
+    - ``credential_epoch_bound`` — THIS row carried a credential epoch and a
+      registry-entry digest (ADR-0048); legacy rows do not.
+
+    ``identity`` is derived, never set: a row is ``authenticated`` only when a
+    registry was configured AND the row itself was bound to an epoch. A
+    registry-configured runtime meeting an unbound legacy row therefore reads
+    ``static`` about itself instead of inheriting the runtime's posture.
+    """
+
+    registry_configured: bool
+    evidence_binding: bool
+    credential_epoch_bound: bool
+
+    @property
+    def identity(self) -> str:
+        if self.registry_configured and self.credential_epoch_bound:
+            return "authenticated"
+        return "static"
+
+    def as_payload(self) -> dict[str, Any]:
+        """The journal block. Exactly these five keys at ``POSTURE_VERSION`` 1."""
+
+        return {
+            "version": POSTURE_VERSION,
+            "identity": self.identity,
+            "registry": "configured" if self.registry_configured else "unset",
+            "evidence_binding": "in_force" if self.evidence_binding else "unset",
+            "credential_epoch_bound": self.credential_epoch_bound,
+        }
+
+
+def read_posture(payload: Mapping[str, Any]) -> DecisionPosture | None:
+    """Read a journal row's posture, or ``None`` for a row that predates ADR-0055.
+
+    Absence means **not recorded** — never ``static``. Rows written before the
+    posture block existed carry no key, and inferring one from ``proposer_id``
+    or check 9's detail is exactly the back-inference this record replaces. A
+    version this reader does not know is refused, not approximated.
+    """
+
+    block = payload.get("posture")
+    if block is None:
+        return None
+    if not isinstance(block, Mapping):
+        raise ValueError(f"posture block is not an object: {type(block).__name__}")
+    version = block.get("version")
+    if version != POSTURE_VERSION:
+        raise ValueError(
+            f"unknown posture version {version!r}; this reader knows {POSTURE_VERSION}"
+        )
+    return DecisionPosture(
+        registry_configured=block.get("registry") == "configured",
+        evidence_binding=block.get("evidence_binding") == "in_force",
+        credential_epoch_bound=bool(block.get("credential_epoch_bound")),
+    )
+
 
 #: Hash-chain stream carrying owner authority events: activation and revocation.
 AUTHORITY_STREAM = "autonomy.authority"
@@ -537,6 +611,7 @@ def record_outcome(
     decision_id: str,
     outcome: AdmissionOutcome,
     now: datetime,
+    posture: DecisionPosture,
     decision_payload: dict[str, Any] | None = None,
 ) -> None:
     """Persist what the supervisor decided, and chain it.
@@ -544,6 +619,10 @@ def record_outcome(
     Both halves happen in the caller's transaction: the attempt counter that
     bounds re-submission and the journal entry that explains it commit together,
     so a counter can never claim a refusal the journal cannot account for.
+
+    ``posture`` is required, not defaulted (ADR-0055): the row must say which
+    provenance posture judged it, and a default would be a path back to the
+    silent row this field exists to retire.
     """
 
     row = session.scalar(
@@ -583,6 +662,7 @@ def record_outcome(
             }
             for check in outcome.checks
         ],
+        "posture": posture.as_payload(),
     }
     if decision_payload:
         payload["decision"] = decision_payload

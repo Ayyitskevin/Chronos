@@ -452,6 +452,9 @@ class AutonomyRuntime:
                         submit=self._submit,
                         gather_instrument=self._gather_instrument,
                         bind_evidence=self._bind_evidence,
+                        # ADR-0055: the cycle cannot see this wiring; it records
+                        # what the drain tells it, so the flag is stated here.
+                        registry_configured=self._resolve_identity is not None,
                         # ADR-0052: the drain owns a plain session, so it is the
                         # caller that can honour the split. The cycle spends the
                         # mandate's activity before the handoff and commits it

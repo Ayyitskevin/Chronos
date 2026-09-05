@@ -279,6 +279,13 @@ following `AUTONOMY_MANDATE_FILE` and `AUTONOMY_PROPOSERS_FILE`.
   byte-identical journal rows to `a74cd09`, proven by test, because a posture switch that
   quietly changes the default posture is the failure this repository fixes rather than
   ships.
+
+  > **Amendment, 2026-09-04 (ADR-0055).** The criterion above is kept for the *meaning* and
+  > retired for the *bytes*: every admission row now carries a `posture` block, so an unset-posture
+  > row's bytes gained exactly that one key. The test is renamed
+  > `test_the_unset_posture_is_semantically_identical_to_the_pre_adr_0028_journal`, keeps every
+  > behavioural assertion, and pins the byte delta against a golden captured before the change —
+  > behaviour did not move, the record gained a key.
 - **Set — evidence binding in force.** Check 9's expectation no longer comes from
   `CycleFacts` at all; it comes from the per-proposal record the drain resolved. A missing
   record never reaches check 9 (STAMP refused it); an unresolvable one reaching check 9

@@ -95,6 +95,7 @@ from chronos.autonomy import (
 )
 from chronos.domain.enums import DataQuality
 from chronos.domain.models import UnderlyingContract
+from chronos.persistence import hash_chain
 from chronos.persistence.database import Database
 from chronos.persistence.schema import AutonomyEvidenceBundleRow, HashChainRow
 from chronos.supervisor import durable, evidence_bundles, proposals
@@ -130,6 +131,31 @@ _FAR_EXPIRY = "2030-01-01T00:00:00+00:00"
 #: about what the *comparison* does with it.
 _SERVED_DIGEST = "1" * 64
 _OTHER_DIGEST = "2" * 64
+
+#: The admitted-row payload the unset evidence posture produced BEFORE ADR-0055, captured at
+#: db12587 (#151's head) with this file's own fixtures and re-run twice for determinism. The
+#: semantic test below asserts that today's payload, minus its ``posture`` key, canonicalises
+#: to exactly these bytes — the byte delta of ADR-0055 is the posture key and nothing else.
+_PRE_ADR_0055_UNSET_POSTURE_ROW = (
+    '{"admitted":true,"checks":[{"detail":"mandate m-adr28 v1","evaluated":true,"name":"activ'
+    'e_mandate","passed":true},{"detail":"","evaluated":true,"name":"system_not_degraded","pa'
+    'ssed":true},{"detail":"owner event owner-event-1","evaluated":true,"name":"mandate_activ'
+    'ated","passed":true},{"detail":"","evaluated":true,"name":"mandate_effective","passed":t'
+    'rue},{"detail":"","evaluated":true,"name":"account_scope","passed":true},{"detail":"PAPE'
+    'R_AUTONOMOUS","evaluated":true,"name":"mode_may_submit","passed":true},{"detail":"0 prio'
+    'r refusals","evaluated":true,"name":"not_a_replay","passed":true},{"detail":"agrees with'
+    ' mandate pins (authorship not yet enforced)","evaluated":true,"name":"version_pins","pas'
+    'sed":true},{"detail":"owner-workspace","evaluated":true,"name":"evidence_bundle","passed'
+    '":true},{"detail":"OPEN","evaluated":true,"name":"executable_kind","passed":true},{"deta'
+    'il":"EQUITY","evaluated":true,"name":"asset_class_permitted","passed":true},{"detail":"S'
+    'PY","evaluated":true,"name":"instrument_permitted","passed":true},{"detail":"LONG_EQUITY'
+    '","evaluated":true,"name":"strategy_permitted","passed":true},{"detail":"NEUTRAL","evalu'
+    'ated":true,"name":"direction_permitted","passed":true},{"detail":"PAPER_AUTONOMOUS","eva'
+    'luated":true,"name":"family_promoted","passed":true},{"detail":"LIMIT","evaluated":true,'
+    '"name":"order_form_available","passed":true},{"detail":"LIVE @ 1s","evaluated":true,"nam'
+    'e":"market_data_fresh","passed":true}],"decision_id":"9ba95b85da175c49bdfb60e4fdc97253",'
+    '"detail":"PAPER_AUTONOMOUS admission for OPEN","refusal":null}'
+)
 
 
 # --------------------------------------------------------------- shared fixtures
@@ -1079,7 +1105,7 @@ def test_two_bundles_never_share_an_id(sessions: sessionmaker[Session]) -> None:
 # ================================================================ posture proofs
 
 
-def test_the_unset_posture_is_byte_identical_to_the_pre_adr_0028_journal(
+def test_the_unset_posture_is_semantically_identical_to_the_pre_adr_0028_journal(
     sessions: sessionmaker[Session], tmp_path: Path
 ) -> None:
     """The acceptance criterion ADR-0028 states in exactly these terms.
@@ -1126,6 +1152,25 @@ def test_the_unset_posture_is_byte_identical_to_the_pre_adr_0028_journal(
     assert not [row for row in rows if row.kind == "evidence_bundle_issued"], (
         "the unset posture must write no evidence records at all"
     )
+
+    # ADR-0055: the row now says which posture judged it. The evidence posture is unset
+    # here, but this fixture runs WITH a registry and enqueues a bound row, so the identity
+    # half is authenticated and the evidence half is unset — the row records exactly that.
+    decision_stream = durable.stream_for(durable.DECISION_STREAM, _FINGERPRINT)
+    (journal,) = [row for row in rows if row.stream == decision_stream]
+    assert journal.kind == "admitted"
+    payload = json.loads(journal.payload_json)
+    assert payload["posture"] == {
+        "version": 1,
+        "identity": "authenticated",
+        "registry": "configured",
+        "evidence_binding": "unset",
+        "credential_epoch_bound": True,
+    }
+    # And the retired guarantee, kept as an exact delta: minus the posture key, today's
+    # bytes ARE the pre-ADR-0055 bytes. The unset posture's behaviour did not move.
+    without_posture = {key: value for key, value in payload.items() if key != "posture"}
+    assert hash_chain.canonical_payload(without_posture) == _PRE_ADR_0055_UNSET_POSTURE_ROW
 
 
 def test_a_configured_posture_with_no_registry_is_broken_and_refuses(tmp_path: Path) -> None:
@@ -1545,3 +1590,39 @@ def test_issuance_is_absent_under_the_unset_posture(
     with sqlite3.connect(demo_env / "chronos.db") as connection:
         rows = list(connection.execute("SELECT COUNT(*) FROM autonomy_evidence_bundles"))
     assert rows == [(0,)]
+
+
+def test_an_authenticated_row_under_evidence_binding_records_its_posture(
+    sessions: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """ADR-0055: registry configured, evidence binding in force, row bound → the row says so."""
+
+    mandate = _mandate()
+    _activate(sessions, mandate)
+    registry = _registry_file(tmp_path, _registration("claude-worker", WORKER_CREDENTIAL))
+    issued = _issue(sessions)
+    _enqueue(
+        sessions,
+        _payload(evidence_id=issued.bundle_id, digest=issued.digest),
+        "claude-worker",
+    )
+
+    outcome = _drain(_runtime(sessions, registry, mandate))
+
+    assert outcome.admission is not None and outcome.admission.admitted, outcome.admission
+    decision_stream = durable.stream_for(durable.DECISION_STREAM, _FINGERPRINT)
+    with sessions.begin() as session:
+        (journal,) = list(
+            session.scalars(select(HashChainRow).where(HashChainRow.stream == decision_stream))
+        )
+        payload = json.loads(journal.payload_json)
+    assert payload["posture"] == {
+        "version": 1,
+        "identity": "authenticated",
+        "registry": "configured",
+        "evidence_binding": "in_force",
+        "credential_epoch_bound": True,
+    }
+    assert durable.read_posture(payload) == durable.DecisionPosture(
+        registry_configured=True, evidence_binding=True, credential_epoch_bound=True
+    )

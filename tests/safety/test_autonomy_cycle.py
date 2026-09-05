@@ -52,6 +52,7 @@ from chronos.domain.models import UnderlyingContract
 from chronos.orders.intent import WheelOrderIntent
 from chronos.persistence import hash_chain
 from chronos.persistence.database import Database
+from chronos.persistence.schema import HashChainRow
 from chronos.supervisor import durable, ingress, queue
 from chronos.supervisor.admission import MarketDataEvidence
 from chronos.supervisor.compiler import QuoteEvidence
@@ -775,3 +776,36 @@ def test_shadow_is_unaffected_by_the_seam_requirement(session: Session) -> None:
 
     assert outcome.stage is CycleStage.HANDOFF
     assert outcome.refusal == "NO_SUBMISSION_CONFIGURED"
+
+
+# ------------------------------- ADR-0055: a half-bound row is not a bound row
+
+
+def test_a_row_with_an_epoch_but_no_entry_digest_reads_unbound(session: Session) -> None:
+    """ADR-0048 binds a row with BOTH values; the posture must not call one of them enough.
+
+    The drain refuses a half-bound row before admission, so this state never
+    reaches the journal through the runtime — which is exactly why the rule needs
+    a direct pin: nothing else would notice if the posture started judging on the
+    epoch alone.
+    """
+
+    mandate = _mandate()
+    _activate(session, mandate)
+    outcome = _run(
+        session,
+        mandate=mandate,
+        registry_configured=True,
+        proposer_credential_epoch="e" * 64,
+        proposer_registry_entry_digest=None,
+    )
+    assert outcome.admission is not None and outcome.admission.admitted
+    stream = durable.stream_for(durable.DECISION_STREAM, _FINGERPRINT)
+    rows = session.query(HashChainRow).filter(HashChainRow.stream == stream).all()
+    assert [row.kind for row in rows] == ["admitted"]
+    posture = json.loads(rows[0].payload_json)["posture"]
+    assert posture["credential_epoch_bound"] is False
+    assert posture["identity"] == "static", (
+        "a registry alone does not authenticate a half-bound row"
+    )
+    assert posture["registry"] == "configured"
