@@ -34,6 +34,7 @@ from fastapi import Depends, HTTPException, Request, status
 
 from chronos.supervisor.proposers import ProposerRegistry, load_proposer_registry
 from chronos.utils.secure_files import (
+    AuthorityMode,
     UnsafeAuthorityFile,
     create_authority_file,
     read_authority_file,
@@ -56,8 +57,11 @@ def load_or_create_token(path: Path) -> str:
     The token decides who may drive the order-writing service on this host, so
     it is read through the descriptor-bound authority-file contract
     (``chronos.utils.secure_files``): no symlink, a regular file owned by this
-    effective user, exactly 0600, one link, and the bytes read from the same
-    descriptor every check ran against. The previous shape asked
+    effective user, exactly 0600 (``AuthorityMode.SECRET`` — the token IS the
+    credential), one link, and the bytes read from the same descriptor every
+    check ran against. The decode happens inside that read too, so a file
+    that is not UTF-8 refuses like every other unsafe shape instead of
+    raising ``UnicodeDecodeError`` out of startup. The previous shape asked
     ``path.exists()`` and then ``path.read_text()`` — two resolutions of a path
     an attacker may control between them, following any symlink, and never
     looking at the mode.
@@ -69,14 +73,14 @@ def load_or_create_token(path: Path) -> str:
     """
 
     try:
-        contents = read_authority_file(path, label="local API token")
+        contents = read_authority_file(path, label="local API token", mode=AuthorityMode.SECRET)
     except FileNotFoundError:
         contents = None
     except UnsafeAuthorityFile as error:
         _logger.critical("Local API token file is unsafe; refusing to start: %s", error)
         raise
     if contents is not None:
-        token = contents.data.decode("utf-8", errors="strict").strip()
+        token = contents.text.strip()
         if token:
             return token
         # Present but empty: the file exists in a state no run can have written.
@@ -126,10 +130,17 @@ class ProposerAuth:
       the file is unreadable or invalid. Every proposal refuses until it is
       fixed. Deliberately **not** a fallback to the token posture: a file
       error must not silently reopen anonymous proposing.
+
+    ``unsafe`` narrows that third state. "Invalid JSON" and "a file this
+    process may not trust" both refuse proposals, but they are different
+    operator problems and deserve different startup faults: one is a typo in a
+    grant document, the other is a symlink, a foreign owner, or a
+    group-writable file that anyone could rewrite.
     """
 
     configured: bool
     registry: ProposerRegistry | None = None
+    unsafe: bool = False
 
 
 def load_proposer_auth(path: Path | None) -> ProposerAuth:
@@ -137,7 +148,12 @@ def load_proposer_auth(path: Path | None) -> ProposerAuth:
 
     if path is None:
         return ProposerAuth(configured=False)
-    loaded = load_proposer_registry(path)
+    try:
+        loaded = load_proposer_registry(path)
+    except UnsafeAuthorityFile as error:
+        # Refused, never repaired. The owner hears which file and what to fix.
+        _logger.critical("Proposer registry file is unsafe; every proposal refuses: %s", error)
+        return ProposerAuth(configured=True, registry=None, unsafe=True)
     if loaded is None:
         return ProposerAuth(configured=True, registry=None)
     return ProposerAuth(configured=True, registry=loaded.registry)

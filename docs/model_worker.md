@@ -40,11 +40,28 @@ demo backend and a SHADOW (non-submitting) mandate:
 
 ```bash
 python -m chronos.cli mandate template > data/autonomy_mandate.json
+chmod go-w data/autonomy_mandate.json     # REQUIRED — see below
 # edit: account fingerprint (python -m chronos.cli mandate fingerprint <account>),
 #       scope.symbols to your watchlist
 python -m chronos.cli mandate check --file data/autonomy_mandate.json
 # then boot the backend with AUTONOMY_MANDATE_FILE=data/autonomy_mandate.json
 ```
+
+**Why the `chmod`.** The mandate and the proposer registry are read as
+*authority*, so the backend refuses to honour either if it is writable by
+group or other — anyone who can write the file can change what this system is
+authorized to do (ADR-0053). The redirect above creates the file with your
+umask: `0644` under the common `022`, which is accepted, but **`0664` under
+`002`** — the default on Debian and Ubuntu, where each user gets their own
+group — which is refused. The `chmod` makes the result the same either way.
+Reading is unrestricted on purpose: a mandate is a decision, not a secret, and
+`0644` is fine. The same applies to whatever file `AUTONOMY_PROPOSERS_FILE`
+names.
+
+A refused grant does not crash the backend: it boots, autonomy stays inert or
+every proposal refuses, and a CRITICAL line names the file, its mode, and the
+fix. Nothing is repaired for you — chmodding an owner-authored grant on your
+behalf would be the process editing the grant.
 
 `mandate check` tells you what the file actually grants before anything trusts
 it. SHADOW mode is structurally non-submitting — decisions are judged and

@@ -238,11 +238,22 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         proposer_auth = load_proposer_auth(runtime.settings.autonomy_proposers_file)
         app.state.proposer_auth = proposer_auth
         if proposer_auth.configured and proposer_auth.registry is None:
+            # Two different operator problems behind one refusal: a grant
+            # document that does not parse, and a file this process may not
+            # trust at all (symlinked, foreign-owned, group-writable). Both
+            # refuse every proposal; only the second says someone else could
+            # have written the document that says who may propose.
+            if proposer_auth.unsafe:
+                backend_state.note_startup_fault(StartupFaultCode.AUTHORITY_FILE_UNSAFE)
             backend_state.note_startup_fault(StartupFaultCode.PROPOSER_REGISTRY_INVALID)
             _logger.error(
                 "Proposer registry is configured but unreadable or invalid; every "
                 "proposal will refuse until the file is fixed",
-                extra={"event": "proposer_registry_invalid", "passed": False},
+                extra={
+                    "event": "proposer_registry_invalid",
+                    "passed": False,
+                    "unsafe_file": proposer_auth.unsafe,
+                },
             )
             if not read_only:
                 alert_invalid_proposer_registry(runtime)

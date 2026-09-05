@@ -75,6 +75,7 @@ class StartupFaultCode(StrEnum):
     SUBMISSION_RECONCILIATION_FAILED = "submission_reconciliation_failed"
     AUTONOMY_WIRING_FAILED = "autonomy_wiring_failed"
     RECOVERY_UNVERIFIED = "recovery_unverified"
+    AUTHORITY_FILE_UNSAFE = "authority_file_unsafe"
 
 
 class ReasonCode(StrEnum):

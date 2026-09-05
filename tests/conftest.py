@@ -1,5 +1,7 @@
 """Shared deterministic test constants and process-wide safety tripwires."""
 
+import os
+from collections.abc import Iterator
 from datetime import UTC, datetime
 
 import pytest
@@ -7,6 +9,30 @@ import pytest
 from chronos.broker.demo import DemoBroker
 
 FIXED_NOW = datetime(2026, 1, 15, 15, 30, tzinfo=UTC)
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _deterministic_umask() -> Iterator[None]:
+    """Pin the umask, because file modes are now load-bearing (ADR-0053).
+
+    The mandate and proposer-registry loaders read through
+    ``AuthorityMode.GRANT``, which refuses a group- or other-writable grant.
+    A fixture that writes a grant with plain ``write_text`` inherits the
+    developer's umask: 0644 under the common 022, but **0664 under 002** — the
+    Debian/Ubuntu per-user-group default — which the loader then correctly
+    refuses. Without this pin the suite passes in CI and fails on a developer's
+    machine for reasons that have nothing to do with the change under test.
+
+    This does not hide the rule it makes room for: every mode case has its own
+    test in ``tests/safety/test_authority_file_contract.py``, each chmodding
+    explicitly rather than relying on whatever the umask happened to be.
+    """
+
+    previous = os.umask(0o022)
+    try:
+        yield
+    finally:
+        os.umask(previous)
 
 
 @pytest.fixture

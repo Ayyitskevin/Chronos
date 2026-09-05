@@ -33,6 +33,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import stat
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -220,6 +221,67 @@ def test_a_submitting_mandate_on_the_static_posture_boots_inert_with_a_typed_fau
         assert body["observations"]["startup_faults"] == ["autonomy_posture_unauthenticated"]
         assert body["service_readiness"]["state"] == "NOT_READY"
         assert getattr(test_client.app.state, "autonomy", None) is None
+
+
+def test_a_group_writable_registry_boots_with_the_authority_file_fault(
+    demo_env: Path,
+) -> None:
+    """ADR-0053 through the real lifespan: the typed fault reaches /health.
+
+    ``ProposerAuth.unsafe`` is the flag *before* the lifespan; this asserts the
+    fault *after* it. Without this the emission in ``api/main.py`` could be
+    deleted outright and the whole suite stayed green — which is exactly what a
+    non-author reviewer measured.
+
+    Both faults are expected and they say different things: the registry is
+    unusable (`proposer_registry_invalid`, the pre-existing posture) *and* it is
+    unusable because the file is one no process should trust
+    (`authority_file_unsafe`). Reporting only the first would tell the owner
+    there is a typo in a document that anyone on the machine can rewrite.
+    """
+
+    registry_file = demo_env / "autonomy_proposers.json"
+    before = registry_file.read_bytes()
+    registry_file.chmod(0o666)
+
+    with TestClient(create_app()) as test_client:
+        faults = test_client.get("/health").json()["observations"]["startup_faults"]
+
+    assert "authority_file_unsafe" in faults
+    assert "proposer_registry_invalid" in faults
+    assert stat.S_IMODE(registry_file.stat().st_mode) == 0o666, "refused, never repaired"
+    assert registry_file.read_bytes() == before
+
+
+def test_a_symlinked_registry_boots_with_the_same_fault(demo_env: Path) -> None:
+    """The other unsafe shape, so the fault is not bound to the mode check alone."""
+
+    registry_file = demo_env / "autonomy_proposers.json"
+    target = demo_env / "elsewhere.json"
+    target.write_bytes(registry_file.read_bytes())
+    registry_file.unlink()
+    registry_file.symlink_to(target)
+
+    with TestClient(create_app()) as test_client:
+        faults = test_client.get("/health").json()["observations"]["startup_faults"]
+
+    assert "authority_file_unsafe" in faults
+
+
+def test_a_merely_invalid_registry_does_not_claim_the_file_is_unsafe(
+    demo_env: Path,
+) -> None:
+    """Guard the guard: a typo must not raise the fault that means "untrusted"."""
+
+    registry_file = demo_env / "autonomy_proposers.json"
+    registry_file.write_text("{ not json", encoding="utf-8")
+    registry_file.chmod(0o644)
+
+    with TestClient(create_app()) as test_client:
+        faults = test_client.get("/health").json()["observations"]["startup_faults"]
+
+    assert "proposer_registry_invalid" in faults
+    assert "authority_file_unsafe" not in faults
 
 
 @pytest.fixture()

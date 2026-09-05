@@ -57,6 +57,8 @@ from pathlib import Path
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from chronos.utils.secure_files import AuthorityMode, read_authority_file
+
 _logger = logging.getLogger("chronos.supervisor.proposers")
 
 #: The registry file's schema version. Bumping it is a reviewed act.
@@ -235,18 +237,32 @@ def load_proposer_registry(path: Path) -> LoadedRegistry | None:
     Mirrors ``load_persistent_mandate``: the digest is over the raw bytes, so
     logs record exactly which document defined who may propose, and an edited
     file is distinguishable from the one before it.
+
+    Read through the descriptor-bound authority-file contract in
+    ``AuthorityMode.GRANT``: no symlink, a regular file owned by this effective
+    user, one link, not writable by group or other, and the digest taken over
+    the same bytes every check ran against. GRANT rather than SECRET because a
+    registry is an owner-authored decision, not a secret — anyone who can WRITE
+    it can change who may propose, while reading it discloses no credential
+    (entries hold only hashes). ``FileNotFoundError`` and
+    ``UnsafeAuthorityFile`` both propagate: absence and unsafety are the
+    caller's to distinguish, and neither is "invalid content".
     """
 
     try:
-        raw = path.read_bytes()
-    except OSError:
-        _logger.exception("Proposer registry file %s is unreadable", path)
+        contents = read_authority_file(path, label="proposer registry", mode=AuthorityMode.GRANT)
+    except FileNotFoundError:
+        # The previous shape caught OSError, so an absent registry returned
+        # None. Keep that exactly: absence is a configuration state every
+        # caller already handles, and widening it into an exception would
+        # change them all for no safety gain.
+        _logger.error("Proposer registry file %s is unreadable", path)
         return None
     try:
-        registry = ProposerRegistry.model_validate_json(raw)
+        registry = ProposerRegistry.model_validate_json(contents.data)
     except ValueError:
         _logger.exception(
             "Proposer registry file %s does not validate; proposals will refuse", path
         )
         return None
-    return LoadedRegistry(registry=registry, digest=hashlib.sha256(raw).hexdigest())
+    return LoadedRegistry(registry=registry, digest=contents.sha256)

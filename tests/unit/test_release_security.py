@@ -85,7 +85,11 @@ def test_reviewed_baseline_contains_only_explicit_false_positive_fingerprints() 
     ]
 
     assert candidates
-    assert len(historical_candidates) == 10
+    # 11 since ADR-0053: regenerating docs/generated/capability-matrix.json for
+    # this change gave its source-inventory line a new fingerprint, and the
+    # superseded one stays reachable in git history, so it joins the reviewed
+    # set rather than being dropped.
+    assert len(historical_candidates) == 11
     assert {item["type"] for item in candidates} == {
         "Hex High Entropy String",
         "Secret Keyword",
