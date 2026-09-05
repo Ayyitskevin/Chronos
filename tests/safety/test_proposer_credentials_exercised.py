@@ -64,6 +64,7 @@ from chronos.autonomy import (
 )
 from chronos.domain.enums import DataQuality
 from chronos.domain.models import UnderlyingContract
+from chronos.persistence import hash_chain
 from chronos.persistence.database import Database
 from chronos.persistence.schema import HashChainRow
 from chronos.supervisor import durable, proposals, queue
@@ -1088,3 +1089,116 @@ def test_check_reports_current_disabled_and_expired_and_writes_nothing(
         == 1
     )
     assert "INVALID" in capsys.readouterr().out
+
+
+#: The two STAMP cycle-journal rows' bytes BEFORE ADR-0057, captured at 6530ef3 in exactly the
+#: scenarios below: a row bound at enqueue whose registration expired, and a genuinely unbound
+#: pre-registry row. The delta is the ``posture`` key and nothing else.
+_PRE_ADR_0057_STAMP_ROW = (
+    '{"decision_id":"","detail":"the proposal\'s exact registration is disabled or expired, '
+    "so identity cannot be stamped; re-registering or renewing the proposer is an owner act"
+    '","limit_price":null,"option_selection_digest":null,"option_selection_status":null,"qu'
+    'antity":null,"refusal":"PROPOSER_UNRESOLVED","stage":"STAMP"}'
+)
+
+#: (the unbound row's, same capture)
+_PRE_ADR_0057_STAMP_UNBOUND_ROW = (
+    '{"decision_id":"","detail":"the proposal was enqueued before a proposer registry was c'
+    "onfigured, so it has no author to resolve; it is refused rather than stamped with the "
+    'static identity the owner has since replaced","limit_price":null,"option_selection_dig'
+    'est":null,"option_selection_status":null,"quantity":null,"refusal":"PROPOSER_UNRESOLVE'
+    'D","stage":"STAMP"}'
+)
+
+
+def test_a_stamp_refusal_on_a_bound_row_still_says_the_row_was_bound(
+    sessions: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """The defect this ADR exists to avoid, pinned.
+
+    The row carried a real ADR-0048 binding at enqueue; the drain refused it
+    because the registration expired in between. Every refusal path in
+    ``build_identity_resolver`` returns a bare ``ResolvedIdentity``, whose binding
+    fields default to ``None`` — so a posture derived from the RESOLVED pair would
+    call this bound, registry-authenticated row ``static`` and unbound. That is a
+    false statement about authority in a hash-chained row, which is the whole
+    class of defect this family of ADRs removes. The block reads the queue row.
+    """
+
+    registry_path = tmp_path / "proposers.json"
+    entry = _registration(
+        "claude-worker", WORKER_CREDENTIAL, expires_at=(_NOW + timedelta(hours=1)).isoformat()
+    )
+    registry_path.write_text(_registry_text(entry), encoding="utf-8")
+    mandate = _mandate(expires_at=_NOW + timedelta(days=7))
+    _activate(sessions, mandate)
+    _enqueue(sessions, proposer_id="claude-worker", registration_entry=entry)
+
+    _drain_runtime(sessions, registry_path, mandate).run_tick(_NOW + timedelta(hours=2))
+
+    row = _stream_payloads(sessions, f"autonomy.cycles:{_FINGERPRINT}")[-1]
+    assert row["stage"] == CycleStage.STAMP.value
+    assert row["refusal"] == "PROPOSER_UNRESOLVED"
+    assert row["posture"] == {
+        "version": 1,
+        "identity": "authenticated",
+        "registry": "configured",
+        "evidence_binding": "unset",
+        "credential_epoch_bound": True,
+    }, "the row WAS bound; only the resolution failed, and `refusal` says so"
+    without_posture = {key: value for key, value in row.items() if key != "posture"}
+    assert hash_chain.canonical_payload(without_posture) == _PRE_ADR_0057_STAMP_ROW
+
+
+def test_a_stamp_refusal_on_an_unbound_row_says_static(
+    sessions: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """The honest negative: the fix must not call every refused row authenticated."""
+
+    registry_path = tmp_path / "proposers.json"
+    registry_path.write_text(
+        _registry_text(_registration("claude-worker", WORKER_CREDENTIAL)), encoding="utf-8"
+    )
+    mandate = _mandate()
+    _activate(sessions, mandate)
+    _enqueue(sessions, proposer_id=None)  # a pre-registry row: no binding at all
+
+    _drain_runtime(sessions, registry_path, mandate).run_tick(_NOW)
+
+    row = _stream_payloads(sessions, f"autonomy.cycles:{_FINGERPRINT}")[-1]
+    assert row["stage"] == CycleStage.STAMP.value
+    assert row["posture"] == {
+        "version": 1,
+        "identity": "static",
+        "registry": "configured",
+        "evidence_binding": "unset",
+        "credential_epoch_bound": False,
+    }
+    without_posture = {key: value for key, value in row.items() if key != "posture"}
+    assert hash_chain.canonical_payload(without_posture) == _PRE_ADR_0057_STAMP_UNBOUND_ROW
+
+
+def test_the_resolver_echoes_the_row_binding_on_success(
+    sessions: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """Why moving the posture's source to the row costs no admission-row byte.
+
+    An admission row is written only after resolution SUCCEEDS, and on success the
+    resolver hands back the very values it was given. So on that path the resolved
+    pair and the row's pair are the same two strings, and ADR-0055's existing
+    goldens are the regression proof.
+    """
+
+    registry_path = tmp_path / "proposers.json"
+    entry = _registration("claude-worker", WORKER_CREDENTIAL)
+    registry_path.write_text(_registry_text(entry), encoding="utf-8")
+    epoch, digest = _binding_values(entry)
+
+    resolver = build_identity_resolver(registry_path)
+    assert resolver is not None
+    with sessions.begin() as session:
+        resolved = resolver(session, "claude-worker", epoch, digest, _NOW)
+
+    assert resolved.identity is not None, "the registration is current; this must resolve"
+    assert resolved.proposer_credential_epoch == epoch
+    assert resolved.proposer_registry_entry_digest == digest

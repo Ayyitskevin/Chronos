@@ -71,6 +71,13 @@ _NOW = datetime(2026, 7, 26, 15, 30, tzinfo=UTC)
 _ACCOUNT_ID = "U7654321"
 _FINGERPRINT = account_fingerprint(_ACCOUNT_ID)
 
+#: ADR-0057: every journal row states the posture it rests on, so these view
+#: fixtures state one too. The static posture is right here — these tests are
+#: about rendering, and the view reads named keys and never this block.
+_POSTURE = durable.DecisionPosture(
+    registry_configured=False, evidence_binding=False, credential_epoch_bound=False
+)
+
 
 @pytest.fixture
 def database() -> Iterator[Database]:
@@ -820,6 +827,7 @@ def test_journal_reads_the_stream_the_cycle_actually_writes(
                 detail="TSLA is not in the mandate's symbols scope",
                 decision_id="dec-1",
             ),
+            posture=_POSTURE,
         )
         view = views.journal_view(session, account_fingerprint=_FINGERPRINT, now=_NOW)
 
@@ -844,6 +852,7 @@ def test_journal_is_newest_first_and_bounded(sessions: sessionmaker[Session]) ->
                 session,
                 facts,
                 CycleOutcome(stage=CycleStage.SIZING, decision_id=f"dec-{index}"),
+                posture=_POSTURE,
             )
         view = views.journal_view(session, account_fingerprint=_FINGERPRINT, now=_NOW, limit=3)
 
@@ -891,11 +900,13 @@ def test_journal_detail_is_carried_verbatim_and_bounded_out_loud(
             session,
             facts,
             CycleOutcome(stage=CycleStage.INGRESS, refusal="MALFORMED", detail=markup),
+            posture=_POSTURE,
         )
         _record(
             session,
             facts,
             CycleOutcome(stage=CycleStage.INGRESS, detail="x" * (views.MAX_DETAIL_CHARS + 50)),
+            posture=_POSTURE,
         )
         view = views.journal_view(session, account_fingerprint=_FINGERPRINT, now=_NOW)
 
@@ -1174,6 +1185,7 @@ def test_no_assembled_view_carries_the_raw_account_id(
             session,
             _facts(),
             CycleOutcome(stage=CycleStage.HANDOFF, decision_id="dec-1"),
+            posture=_POSTURE,
         )
         proposals.enqueue(
             session,
@@ -1355,6 +1367,7 @@ def test_the_journal_now_records_the_narrative_it_always_claimed_to(
                 decision_id="d-thesis-1",
                 decision=_thesis_decision(),
             ),
+            posture=_POSTURE,
         )
         view = views.theses_view(
             session, account_fingerprint=_FINGERPRINT, now=_NOW, positions=None
@@ -1384,6 +1397,7 @@ def test_a_holding_the_system_never_spoke_about_is_listed_not_omitted(
             session,
             _facts(),
             CycleOutcome(stage=CycleStage.COMPLETE, decision_id="d-1", decision=_thesis_decision()),
+            posture=_POSTURE,
         )
         view = views.theses_view(
             session,
@@ -1409,6 +1423,7 @@ def test_unreadable_positions_never_render_as_not_held(
             session,
             _facts(),
             CycleOutcome(stage=CycleStage.COMPLETE, decision_id="d-1", decision=_thesis_decision()),
+            posture=_POSTURE,
         )
         view = views.theses_view(
             session, account_fingerprint=_FINGERPRINT, now=_NOW, positions=None
@@ -1433,6 +1448,7 @@ def test_only_the_latest_belief_per_symbol_is_shown(
                 decision_id="d-1",
                 decision=_thesis_decision(thesis="the older view"),
             ),
+            posture=_POSTURE,
         )
         _record(
             session,
@@ -1442,6 +1458,7 @@ def test_only_the_latest_belief_per_symbol_is_shown(
                 decision_id="d-2",
                 decision=_thesis_decision(thesis="the newer view"),
             ),
+            posture=_POSTURE,
         )
         view = views.theses_view(session, account_fingerprint=_FINGERPRINT, now=_NOW, positions={})
 
@@ -1462,6 +1479,7 @@ def test_a_cycle_with_no_decision_contributes_no_thesis(
             session,
             _facts(),
             CycleOutcome(stage=CycleStage.INGRESS, refusal="MALFORMED_PROPOSAL"),
+            posture=_POSTURE,
         )
         view = views.theses_view(session, account_fingerprint=_FINGERPRINT, now=_NOW, positions={})
 
@@ -1484,6 +1502,7 @@ def test_long_narrative_is_truncated_for_display_and_says_so(
                 decision_id="d-1",
                 decision=_thesis_decision(thesis=long_thesis),
             ),
+            posture=_POSTURE,
         )
         view = views.theses_view(session, account_fingerprint=_FINGERPRINT, now=_NOW, positions={})
 
