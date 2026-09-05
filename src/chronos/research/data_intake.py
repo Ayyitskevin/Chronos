@@ -499,9 +499,7 @@ def verify_intake(delivery: Path) -> CertificationReport:
     return certify_loaded_intake(load_intake(delivery), delivery=delivery)
 
 
-def certify_loaded_intake(
-    intake: IntakeDelivery, *, delivery: Path
-) -> CertificationReport:
+def certify_loaded_intake(intake: IntakeDelivery, *, delivery: Path) -> CertificationReport:
     """Run the frozen gates over an intake that has already been byte-bound."""
 
     try:

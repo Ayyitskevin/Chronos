@@ -80,9 +80,7 @@ def add_data_commands(sub: Any) -> None:
     verify = data_sub.add_parser("verify", help="verify an on-disk delivery without writes")
     verify.add_argument("--delivery", type=Path, required=True)
     verify.set_defaults(func=cmd_data_verify)
-    certify = data_sub.add_parser(
-        "certify", help="certify, freeze, and merge an on-disk delivery"
-    )
+    certify = data_sub.add_parser("certify", help="certify, freeze, and merge an on-disk delivery")
     certify.add_argument("--delivery", type=Path, required=True)
     certify.add_argument("--output", type=Path, required=True)
     certify.set_defaults(func=cmd_data_certify)

@@ -146,15 +146,11 @@ def test_data_certify_freezes_release_then_merges_existing_store_without_network
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("chronos.research.data_certification.HISTORY_ROOT", history)
     monkeypatch.setattr(socket, "socket", _tripwire("network attempted"))
-    monkeypatch.setattr(
-        "chronos.config.settings.Settings", _tripwire("Settings constructed")
-    )
+    monkeypatch.setattr("chronos.config.settings.Settings", _tripwire("Settings constructed"))
     before = _snapshot(delivery)
     delivery.chmod(0o500)
     try:
-        code = main(
-            ["data", "certify", "--delivery", str(delivery), "--output", str(output)]
-        )
+        code = main(["data", "certify", "--delivery", str(delivery), "--output", str(output)])
         after = _snapshot(delivery)
     finally:
         delivery.chmod(0o700)
@@ -174,12 +170,11 @@ def test_data_certify_freezes_release_then_merges_existing_store_without_network
     assert len(release["partitions"]) == len(_SYMBOLS)
     history_manifest = json.loads((history / "MANIFEST.json").read_text(encoding="utf-8"))
     assert set(history_manifest["symbols"]) == set(_SYMBOLS)
+    assert {item["bars"]["captured_at"] for item in history_manifest["symbols"].values()} == {
+        "2026-09-05T00:00:00+00:00"
+    }
     assert {
-        item["bars"]["captured_at"] for item in history_manifest["symbols"].values()
-    } == {"2026-09-05T00:00:00+00:00"}
-    assert {
-        item["corporate_actions"]["captured_at"]
-        for item in history_manifest["symbols"].values()
+        item["corporate_actions"]["captured_at"] for item in history_manifest["symbols"].values()
     } == {"2026-09-05T00:00:00+00:00"}
 
 
