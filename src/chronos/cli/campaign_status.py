@@ -326,7 +326,7 @@ def _kill_switch_status(path: Path) -> ConditionResult:
         "kill switch provenance",
         ConditionState.CLEAR,
         "SHADOW_CAMPAIGN §5",
-        f"state attributable to operator {state.initiated_by}",
+        "state has a complete operator attribution",
         "retain the operator record",
     )
 
@@ -414,7 +414,7 @@ def _campaign_chain_status(database: Path) -> ConditionResult:
             "campaign audit chain",
             ConditionState.TRIPPED,
             "SHADOW_CAMPAIGN §5",
-            f"stream {broken.stream} failed at record {broken.broken_at}",
+            f"a campaign stream failed at record {broken.broken_at}",
             "stop the campaign and follow the journal integrity procedure",
         )
     records = sum(result.records for result in results)
@@ -477,7 +477,7 @@ def _terminal_status(database: Path) -> ConditionResult:
                     "terminal journal recomputation",
                     ConditionState.TRIPPED,
                     "SHADOW_CAMPAIGN §5",
-                    f"cycle record {sequence} in stream {stream} does not match its digest",
+                    f"cycle record {sequence} does not match its digest",
                     "stop the campaign and follow the journal integrity procedure",
                 )
     except (OverflowError, TypeError, ValueError):
@@ -506,7 +506,8 @@ def _health_status(path: Path, *, now: datetime) -> ConditionResult:
     )
 
     try:
-        health = HealthResponse.model_validate_json(path.read_bytes())
+        raw = path.read_bytes()
+        health = HealthResponse.model_validate_json(raw, extra="forbid")
     except (OSError, ValueError):
         return _result(
             "worker liveness",

@@ -449,6 +449,24 @@ def test_status_rejects_non_health_response_shape(
     assert "worker liveness: UNVERIFIED" in capsys.readouterr().out
 
 
+def test_status_rejects_health_snapshot_with_extra_fields(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    now = datetime(2026, 9, 15, 12, tzinfo=UTC)
+    _artifacts(tmp_path, now=now)
+    _grant_fixtures(monkeypatch, now=now)
+    health = _health(now)
+    health["invented_status"] = "ARTIFACT_SENTINEL"
+    (tmp_path / "health.json").write_text(json.dumps(health), encoding="utf-8")
+
+    code = cmd_campaign_status(_arguments(tmp_path, now=now))
+
+    output = capsys.readouterr().out
+    assert code == 1
+    assert "worker liveness: UNVERIFIED" in output
+    assert "ARTIFACT_SENTINEL" not in output
+
+
 def test_status_trips_stale_worker_liveness(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
