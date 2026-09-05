@@ -52,7 +52,6 @@ to keep a tick alive.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -97,6 +96,11 @@ from chronos.supervisor.runtime import (
 )
 from chronos.supervisor.sizing import AccountEvidence
 from chronos.utils.identifiers import account_fingerprint
+from chronos.utils.secure_files import (
+    AuthorityMode,
+    UnsafeAuthorityFile,
+    read_authority_file,
+)
 from chronos.utils.time import utc_now
 
 _logger = logging.getLogger("chronos.api.autonomy")
@@ -135,19 +139,37 @@ def load_persistent_mandate(path: Path) -> LoadedMandate | None:
     The digest is over the raw bytes, so the activation row records exactly
     which document authorized trading — edit the file and the next boot writes
     a new, distinguishable activation.
+
+    Read through the descriptor-bound authority-file contract in
+    ``AuthorityMode.GRANT``: no symlink, a regular file owned by this effective
+    user, one link, not writable by group or other, and the digest taken over
+    the same bytes every check ran against. GRANT rather than SECRET because a
+    mandate is an owner-authored decision, not a secret — what matters is that
+    nobody else could have WRITTEN it. 0644 is accepted, which is what
+    ``chronos.cli mandate template > file`` produces under a normal umask;
+    demanding 0600 would refuse the mandate our own docs tell the owner to
+    create.
     """
 
     try:
-        raw = path.read_bytes()
-    except OSError:
-        _logger.exception("Autonomy mandate file %s is unreadable", path)
+        contents = read_authority_file(path, label="autonomy mandate", mode=AuthorityMode.GRANT)
+    except FileNotFoundError:
+        _logger.error("Autonomy mandate file %s does not exist; autonomy stays inert", path)
+        return None
+    except UnsafeAuthorityFile as error:
+        # Not "invalid content" — the file is not one this process may trust at
+        # all. CRITICAL, and refused rather than repaired: chmodding an
+        # owner-authored grant on the owner's behalf is the process editing the
+        # grant. The typed startup fault for this path is noted where the
+        # runtime is assembled.
+        _logger.critical("Autonomy mandate file is unsafe; autonomy stays inert: %s", error)
         return None
     try:
-        mandate = AutonomyMandate.model_validate_json(raw)
+        mandate = AutonomyMandate.model_validate_json(contents.data)
     except ValidationError:
         _logger.exception("Autonomy mandate file %s does not validate; autonomy stays inert", path)
         return None
-    return LoadedMandate(mandate=mandate, digest=hashlib.sha256(raw).hexdigest())
+    return LoadedMandate(mandate=mandate, digest=contents.sha256)
 
 
 def ensure_activation(
