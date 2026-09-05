@@ -93,14 +93,12 @@ def test_preflight_rejects_forwarding_and_binds_read_only_guarantees(monkeypatch
         "chronos.orders.recovery_hold.evaluate_recovery_hold", lambda **kwargs: None
     )
     monkeypatch.setattr(
-        "chronos.orders.state_generation.resolve_installation",
+        "chronos.orders.recovery_hold.resolve_installation",
         lambda *a, **k: (_ for _ in ()).throw(AssertionError("seeder")),
-        raising=False,
     )
     monkeypatch.setattr(
         "chronos.orders.recovery_hold.evaluate_startup_recovery_hold",
         lambda *a, **k: (_ for _ in ()).throw(AssertionError("seeder")),
-        raising=False,
     )
     code = cmd_campaign_preflight(_args(tmp_path, evidence=False, worker_symbols="GLD"))
     output = capsys.readouterr().out
@@ -122,7 +120,7 @@ def test_preflight_unverified_empty_state_and_backend_failure_without_mandate(tm
     )
     output = capsys.readouterr().out
     assert code == 1
-    assert "UNVERIFIED" in output
+    assert "missing state_generation marker and installation_identity row" in output
     assert "backend URL" in output
 
 
@@ -171,6 +169,22 @@ def test_preflight_flags_0012_adoption_sentinel_for_writer_boot(tmp_path, capsys
     assert "0012 adoption sentinel" in output
     assert "boot the backend writer once" in output
     monkeypatch.undo()
+
+
+def test_preflight_does_not_write_read_only_state_dir(tmp_path, capsys):
+    (tmp_path / "worker.service").write_text(
+        "UnsetEnvironment=CHRONOS_WORKER_FORWARD\n", encoding="utf-8"
+    )
+    (tmp_path / "policy.md").write_text("policy", encoding="utf-8")
+    before = sorted((p.name, p.stat().st_size, p.stat().st_mtime_ns) for p in tmp_path.iterdir())
+    tmp_path.chmod(0o500)
+    try:
+        code = cmd_campaign_preflight(_args(tmp_path))
+        after = sorted((p.name, p.stat().st_size, p.stat().st_mtime_ns) for p in tmp_path.iterdir())
+    finally:
+        tmp_path.chmod(0o700)
+    assert code == 1
+    assert before == after
 
 
 def test_preflight_preserves_landed_unsafe_artifact_state(monkeypatch, tmp_path, capsys):
