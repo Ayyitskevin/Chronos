@@ -63,7 +63,7 @@ _KEY_VARS: Final[dict[str, str]] = {
 #: inventing a placeholder to satisfy the check would be worse.
 _KEYLESS_PROVIDERS: Final[frozenset[str]] = frozenset({"local"})
 
-_DEFAULT_BACKEND_URL: Final[str] = "http://127.0.0.1:8000"
+_DEFAULT_BACKEND_URL: Final[str] = "http://127.0.0.1:8765"
 _DEFAULT_LOCAL_BASE_URL: Final[str] = "http://127.0.0.1:11434/v1"
 _DEFAULT_INTERVAL_SECONDS: Final[int] = 300
 _DEFAULT_POLICY_FILE: Final[str] = "worker/policy.md"
