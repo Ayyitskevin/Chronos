@@ -43,6 +43,7 @@ from chronos.autonomy import (
 from chronos.domain.enums import DataQuality
 from chronos.domain.models import UnderlyingContract
 from chronos.persistence.database import Database
+from chronos.persistence.schema import HashChainRow
 from chronos.supervisor import alerts, durable, proposals, queue
 from chronos.supervisor.admission import MarketDataEvidence
 from chronos.supervisor.compiler import QuoteEvidence
@@ -677,3 +678,79 @@ def test_the_drain_supplies_the_durable_seam_to_every_cycle(
     # the only thing that makes the reservation outlive the cycle's rollback.
     assert getattr(seam, "__name__", None) == "commit"
     assert isinstance(getattr(seam, "__self__", None), Session)
+
+
+# --------------------------------- ADR-0055: the drain tells the cycle its posture
+
+
+def test_the_drain_tells_the_cycle_whether_a_registry_is_configured(
+    sessions: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pin the production wiring: ``registry_configured`` follows the resolver's presence.
+
+    The cycle cannot see the runtime's wiring; it records what the drain tells it.
+    A drain that stopped passing the flag would journal every row as ``static``
+    under a configured registry — quietly wrong, and only this pin would say so.
+    """
+
+    from chronos.supervisor import runtime as runtime_module
+
+    seen: list[Any] = []
+    real = runtime_module.run_cycle
+
+    def _capture(payload: Any, **kwargs: Any) -> Any:
+        seen.append(kwargs.get("registry_configured"))
+        return real(payload, **kwargs)
+
+    monkeypatch.setattr(runtime_module, "run_cycle", _capture)
+    mandate = _mandate()
+
+    _activate(sessions, mandate)
+    _enqueue(sessions)
+    _runtime(sessions, mandate=mandate).run_tick(_NOW)
+    assert seen == [False], "no resolver wired → the cycle is told the registry is unset"
+
+    seen.clear()
+    _enqueue(sessions)
+    with_resolver = AutonomyRuntime(
+        sessions=sessions,
+        config=RuntimeConfig(account_fingerprint=_FINGERPRINT),
+        identity=_identity(),
+        mandate_source=lambda: mandate,
+        gather_facts=_facts,
+        sinks=(_NullSink(),),
+        submit=None,
+        resolve_identity=lambda session, proposer_id, epoch, digest, now: (
+            runtime_module.ResolvedIdentity(identity=_identity())
+        ),
+    )
+    with_resolver.run_tick(_NOW)
+    assert seen == [True], "a resolver wired → the cycle is told the registry is configured"
+
+
+def test_a_tick_without_a_registry_journals_the_static_posture(
+    sessions: sessionmaker[Session],
+) -> None:
+    """The all-static block through the real drain: no registry, no binding, no epoch."""
+
+    mandate = _mandate()
+    _activate(sessions, mandate)
+    _enqueue(sessions)
+    report = _runtime(sessions, mandate=mandate).run_tick(_NOW)
+    assert report.proposals_judged == 1
+
+    stream = durable.stream_for(durable.DECISION_STREAM, _FINGERPRINT)
+    with sessions.begin() as session:
+        rows = list(session.query(HashChainRow).filter(HashChainRow.stream == stream))
+    assert [row.kind for row in rows] == ["admitted"], [row.kind for row in rows]
+    payload = json.loads(rows[0].payload_json)
+    assert payload["posture"] == {
+        "version": 1,
+        "identity": "static",
+        "registry": "unset",
+        "evidence_binding": "unset",
+        "credential_epoch_bound": False,
+    }
+    assert durable.read_posture(payload) == durable.DecisionPosture(
+        registry_configured=False, evidence_binding=False, credential_epoch_bound=False
+    )

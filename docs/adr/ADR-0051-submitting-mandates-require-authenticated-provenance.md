@@ -71,11 +71,13 @@ exactly where it is SHADOW-grade.
 
 ## Residuals (stated, not solved here)
 
-- **Admission-time journal field.** The cap lives at assembly and in the health document.
+- ~~**Admission-time journal field.** The cap lives at assembly and in the health document.
   A per-decision security-posture field in the admission journal (so a journal row is
   self-describing about the posture it was judged under) is a separate change: it alters
   every journal row and therefore the byte-identical compatibility test, and belongs in its
-  own PR.
+  own PR.~~ **Closed by ADR-0055 (2026-09-04):** every admission row carries a `posture` block;
+  the byte-identical criterion is kept for the meaning and retired for the bytes, with the delta
+  pinned. The `_record` rows at INGRESS/STAMP remain a follow-up named there.
 - **Registration labels are declarations.** Model, prompt, and policy pins on a registration
   are what the owner wrote, not runtime attestation (P1-06, owner design decision).
 - **Not covered by this cap:** a registry that is configured but invalid. That posture

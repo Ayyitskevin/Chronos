@@ -21,6 +21,7 @@ tamper-proof; the honest bound is in the module docstring there.
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -68,6 +69,12 @@ from chronos.supervisor import durable as dur
 _NOW = datetime(2026, 7, 25, 14, 0, tzinfo=UTC)
 _FINGERPRINT = "a" * 64
 _TARGET_REF = "CHR-ORD-" + "A" * 32
+
+#: The posture every direct ``record_outcome`` call in this file was judged under: no
+#: registry, no evidence binding, no credential epoch on the row (ADR-0055).
+_STATIC_POSTURE = dur.DecisionPosture(
+    registry_configured=False, evidence_binding=False, credential_epoch_bound=False
+)
 
 
 @pytest.fixture
@@ -508,6 +515,7 @@ def test_a_refusal_cannot_be_outwaited_by_restarting(session: Session) -> None:
             decision_id="d-loop",
             outcome=outcome,
             now=_NOW,
+            posture=_STATIC_POSTURE,
         )
 
     # A fresh state -- exactly what a restart produces -- still knows.
@@ -527,6 +535,7 @@ def test_an_admitted_decision_cannot_be_replayed_after_a_restart(session: Sessio
         decision_id="d-once",
         outcome=outcome,
         now=_NOW,
+        posture=_STATIC_POSTURE,
     )
     replayed = admit(decision, mandate, _state(session, mandate))
     assert replayed.refusal is AdmissionRefusal.DECISION_REPLAY
@@ -545,6 +554,7 @@ def test_every_judged_decision_lands_in_the_chain(session: Session) -> None:
         decision_id="d-1",
         outcome=outcome,
         now=_NOW,
+        posture=_STATIC_POSTURE,
     )
     stream = dur.stream_for(dur.DECISION_STREAM, _FINGERPRINT)
     verification = hash_chain.verify(session, stream)
@@ -749,6 +759,7 @@ def test_the_counter_and_its_journal_entry_commit_together(session: Session) -> 
         decision_id="d-1",
         outcome=outcome,
         now=_NOW,
+        posture=_STATIC_POSTURE,
     )
     admitted, refusals = dur.load_attempts(session, account_fingerprint=_FINGERPRINT)
     chain = hash_chain.verify(session, dur.stream_for(dur.DECISION_STREAM, _FINGERPRINT))
@@ -1192,3 +1203,90 @@ def test_an_exact_release_is_silent(session: Session) -> None:
         logger.removeHandler(handler)
 
     assert [r for r in seen if getattr(r, "event", None) == "activity_release_clamped"] == []
+
+
+# ------------------------------------- ADR-0055: the row says which posture judged it
+
+
+def _decision_row(session: Session) -> HashChainRow:
+    stream = dur.stream_for(dur.DECISION_STREAM, _FINGERPRINT)
+    rows = session.query(HashChainRow).filter(HashChainRow.stream == stream).all()
+    assert len(rows) == 1, [row.kind for row in rows]
+    return rows[0]
+
+
+def test_record_outcome_refuses_to_write_without_a_posture(session: Session) -> None:
+    """No default: a row that omits its posture is the silent row this ADR retires."""
+
+    mandate = _mandate()
+    _activate(session, mandate)
+    outcome = admit(_decision(), mandate, _state(session, mandate))
+    with pytest.raises(TypeError, match="posture"):
+        dur.record_outcome(  # type: ignore[call-arg]
+            session,
+            account_fingerprint=_FINGERPRINT,
+            decision_id="d-no-posture",
+            outcome=outcome,
+            now=_NOW,
+        )
+
+
+def test_the_posture_block_is_exactly_five_keys_at_version_one(session: Session) -> None:
+    """Shape and version pinned: a sixth key, or a new meaning, bumps ``version``."""
+
+    mandate = _mandate()
+    _activate(session, mandate)
+    outcome = admit(_decision(), mandate, _state(session, mandate))
+    dur.record_outcome(
+        session,
+        account_fingerprint=_FINGERPRINT,
+        decision_id="d-posture",
+        outcome=outcome,
+        now=_NOW,
+        posture=_STATIC_POSTURE,
+    )
+    payload = json.loads(_decision_row(session).payload_json)
+    assert set(payload) == {"admitted", "checks", "decision_id", "detail", "refusal", "posture"}
+    assert payload["posture"] == {
+        "version": 1,
+        "identity": "static",
+        "registry": "unset",
+        "evidence_binding": "unset",
+        "credential_epoch_bound": False,
+    }
+    assert dur.POSTURE_VERSION == 1
+
+
+@pytest.mark.parametrize("registry", [False, True])
+@pytest.mark.parametrize("binding", [False, True])
+@pytest.mark.parametrize("bound", [False, True])
+def test_identity_is_authenticated_only_when_the_registry_and_the_epoch_agree(
+    registry: bool, binding: bool, bound: bool
+) -> None:
+    """``identity`` is derived, never set: a registry alone does not authenticate a row.
+
+    A registry-configured runtime can still meet a row that carries no epoch
+    (ADR-0048's legacy NULLs); that row must read ``static`` about itself instead
+    of inheriting the runtime's posture. Evidence binding does not enter into
+    identity at all — it is recorded beside it.
+    """
+
+    posture = dur.DecisionPosture(
+        registry_configured=registry, evidence_binding=binding, credential_epoch_bound=bound
+    )
+    assert posture.identity == ("authenticated" if registry and bound else "static")
+    block = posture.as_payload()
+    assert block["registry"] == ("configured" if registry else "unset")
+    assert block["evidence_binding"] == ("in_force" if binding else "unset")
+    assert block["credential_epoch_bound"] is bound
+
+
+def test_a_pre_change_row_reads_not_recorded_never_static() -> None:
+    """Absence is 'not recorded'. Back-inference from other fields is what this ADR retires."""
+
+    legacy = {"admitted": True, "checks": [], "decision_id": "d-old", "detail": "", "refusal": None}
+    assert dur.read_posture(legacy) is None
+    recorded = dict(legacy, posture=_STATIC_POSTURE.as_payload())
+    assert dur.read_posture(recorded) == _STATIC_POSTURE
+    with pytest.raises(ValueError, match="version"):
+        dur.read_posture(dict(legacy, posture={**_STATIC_POSTURE.as_payload(), "version": 2}))

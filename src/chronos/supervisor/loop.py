@@ -343,6 +343,7 @@ def run_cycle(
     commit_before_handoff: Callable[[], None] | None = None,
     gather_instrument: InstrumentGatherer | None = None,
     bind_evidence: bool = False,
+    registry_configured: bool = False,
     proposer_credential_epoch: str | None = None,
     proposer_registry_entry_digest: str | None = None,
     identity_refusal: str = "PROPOSER_UNRESOLVED",
@@ -380,6 +381,12 @@ def run_cycle(
     HANDOFF stage and never calls the handoff, because a caller that wired
     submission but not durability has not shown it can spend the mandate's budget
     across a crash. Only omitting ``submit`` — SHADOW — is unchanged.
+
+    ``registry_configured`` is ADR-0055's one input the cycle cannot see for
+    itself: whether the runtime wired a proposer registry. Together with
+    ``bind_evidence`` and the row's own epoch binding it becomes the ``posture``
+    block on the admission journal row, so the row says which provenance posture
+    judged it rather than leaving a reader to infer one.
     """
 
     # --- ingress -----------------------------------------------------------
@@ -527,12 +534,24 @@ def run_cycle(
             ),
         )
 
+    # ADR-0055: the row records the posture it was judged under, from the facts
+    # this cycle actually had — never re-read from settings, which can change
+    # between rows. ``identity`` is derived inside the dataclass, so a
+    # registry-configured runtime meeting an unbound legacy row reads ``static``.
+    posture = durable.DecisionPosture(
+        registry_configured=registry_configured,
+        evidence_binding=bind_evidence,
+        credential_epoch_bound=(
+            proposer_credential_epoch is not None and proposer_registry_entry_digest is not None
+        ),
+    )
     durable.record_outcome(
         session,
         account_fingerprint=facts.account_fingerprint,
         decision_id=decision.decision_id,
         outcome=admission,
         now=facts.now,
+        posture=posture,
     )
     raised = alerts.alert_for_refusal(
         session,

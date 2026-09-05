@@ -1,5 +1,17 @@
 # CHANGELOG
 
+## [Unreleased] — admission journal rows record their provenance posture (2026-09-04)
+
+Every `admitted` / `refused` row in the autonomy decision stream now carries a `posture` block:
+`version`, a derived `identity` (`static` / `authenticated`), `registry` (`configured` / `unset`),
+`evidence_binding` (`in_force` / `unset`) and `credential_epoch_bound`. It is written from the facts
+the cycle actually held — the drain now tells the cycle whether a proposer registry is wired — and
+never re-read from settings. `durable.record_outcome` requires it; `durable.read_posture` returns
+`None` for rows that predate the block ("not recorded", never "static") and refuses unknown versions.
+No schema change. ADR-0028's byte-identical criterion for the unset posture is kept for the meaning
+and retired for the bytes: the delta is exactly the new key, pinned in the test. See D-70 / ADR-0055 /
+R-73.
+
 ## [Unreleased] — the xAI worker path refuses a non-object body (2026-09-05)
 
 A JSON body that parses but is not an object (`[]`, `"str"`, `42`) has no `.get`, and raised
