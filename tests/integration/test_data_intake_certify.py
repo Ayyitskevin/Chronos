@@ -326,7 +326,7 @@ def test_data_certify_refuses_to_modify_a_frozen_release_target(
 def test_data_certify_default_store_is_the_existing_history_tree() -> None:
     repo_root = Path(__file__).resolve().parents[2]
 
-    assert HISTORY_ROOT == repo_root / "research/data/history"
+    assert repo_root / "research/data/history" == HISTORY_ROOT
     assert "research/data/raw" not in str(HISTORY_ROOT)
 
 
