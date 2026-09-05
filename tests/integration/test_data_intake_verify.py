@@ -11,9 +11,11 @@ from pathlib import Path
 import pytest
 
 from chronos.cli.main import main
+from chronos.research.data_intake import CAMPAIGN_SYMBOLS
 from chronos.research.session_calendar import SessionCalendar
 
-_SYMBOLS = ("QQQ", "SPY", "IWM", "DIA", "GLD", "TLT")
+#: The campaign universe under test IS the production constant, not a copy of it.
+_SYMBOLS = CAMPAIGN_SYMBOLS
 _START = date(2024, 1, 2)
 _END = date(2024, 3, 28)
 
