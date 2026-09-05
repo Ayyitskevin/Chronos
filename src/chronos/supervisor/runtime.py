@@ -452,6 +452,12 @@ class AutonomyRuntime:
                         submit=self._submit,
                         gather_instrument=self._gather_instrument,
                         bind_evidence=self._bind_evidence,
+                        # ADR-0052: the drain owns a plain session, so it is the
+                        # caller that can honour the split. The cycle spends the
+                        # mandate's activity before the handoff and commits it
+                        # here, which is why losing the process between the broker
+                        # answering and the commit below no longer refunds it.
+                        commit_before_handoff=session.commit,
                     )
                     proposals.mark_processed(
                         session,

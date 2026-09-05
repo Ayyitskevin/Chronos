@@ -68,10 +68,16 @@ _ACCOUNT = "DU1234567"
 def session() -> Iterator[Session]:
     database = Database("sqlite+pysqlite:///:memory:")
     database.initialize()
+    # A plain session, not ``sessionmaker.begin()``: since ADR-0052 a cycle with a
+    # handoff commits before the wire, and SQLAlchemy refuses to operate on a
+    # transaction closed inside a context manager. Production's drain holds a
+    # plain session for the same reason, so this is also the truer harness.
+    db_session = database.sessions()
     try:
-        with database.sessions.begin() as db_session:
-            yield db_session
+        yield db_session
+        db_session.commit()
     finally:
+        db_session.close()
         database.dispose()
 
 
@@ -202,6 +208,10 @@ def _run(session: Session, **overrides: Any) -> Any:
         "mandate": _mandate(),
         "identity": _identity(),
         "facts": _facts(),
+        # ADR-0052: a configured handoff without this seam refuses. The helper
+        # supplies what production supplies; the shadow cases pass no submit and
+        # return before it is consulted.
+        "commit_before_handoff": session.commit,
     }
     base.update(overrides)
     payload = base.pop("payload")
@@ -720,3 +730,48 @@ def test_the_cycle_honours_the_configured_market_timezone(session: Session) -> N
         market_timezone="America/New_York",
     )
     assert counters.orders_submitted == 1
+
+
+# ------------------------------ ADR-0052: no durable seam, no handoff
+
+
+def test_a_configured_handoff_without_the_durable_seam_refuses_and_sends_nothing(
+    session: Session,
+) -> None:
+    """Deny-by-default applies to a missing mechanism, not only a missing fact.
+
+    ``commit_before_handoff`` is what makes the pre-wire reservation survive a
+    crash. A caller that wired submission but not the seam has not proven it can
+    spend the mandate's budget durably, and the tempting reading — "then just
+    behave the way it did before ADR-0052" — is precisely the one that lets an
+    unattended backend transmit on accounting a power cut can undo. So the cycle
+    refuses at the door, journals which mechanism was absent, and the handoff is
+    never called.
+    """
+
+    mandate = _mandate()
+    _activate(session, mandate)
+    called: list[Any] = []
+    outcome = _run(
+        session,
+        mandate=mandate,
+        submit=lambda intent: called.append(intent) or HandoffResult.submitted(),
+        commit_before_handoff=None,
+    )
+
+    assert outcome.stage is CycleStage.HANDOFF
+    assert outcome.refusal == "NO_DURABLE_RESERVATION"
+    assert called == [], "the handoff must not be reached without the durable seam"
+    with_counters = durable.load_counters(session, account_fingerprint=_FINGERPRINT, now=_NOW)
+    assert with_counters.orders_submitted == 0, "a refusal at the door spends nothing"
+
+
+def test_shadow_is_unaffected_by_the_seam_requirement(session: Session) -> None:
+    """No submit configured is still SHADOW, seam or not — the walk runs, nothing is sent."""
+
+    mandate = _mandate()
+    _activate(session, mandate)
+    outcome = _run(session, mandate=mandate, commit_before_handoff=None)
+
+    assert outcome.stage is CycleStage.HANDOFF
+    assert outcome.refusal == "NO_SUBMISSION_CONFIGURED"

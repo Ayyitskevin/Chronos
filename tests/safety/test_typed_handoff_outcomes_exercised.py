@@ -100,10 +100,16 @@ _ACCOUNT = "DU1234567"
 def session() -> Iterator[Session]:
     database = Database("sqlite+pysqlite:///:memory:")
     database.initialize()
+    # A plain session, not ``sessionmaker.begin()``: since ADR-0052 a cycle with a
+    # handoff commits before the wire, and SQLAlchemy refuses to operate on a
+    # transaction closed inside a context manager. Production's drain holds a
+    # plain session for the same reason, so this is also the truer harness.
+    db_session = database.sessions()
     try:
-        with database.sessions.begin() as db_session:
-            yield db_session
+        yield db_session
+        db_session.commit()
     finally:
+        db_session.close()
         database.dispose()
 
 
@@ -242,6 +248,7 @@ def _run(session: Session, handoff: Any, **overrides: Any) -> Any:
         identity=_identity(),
         facts=overrides.pop("facts", None) or _facts(),
         submit=handoff,
+        commit_before_handoff=session.commit,
         **overrides,
     )
 
@@ -428,10 +435,22 @@ def test_a_confirmed_send_still_journals_complete_and_counts(session: Session) -
     assert _journaled(session)["handoff_disposition"] == "SUBMITTED"
 
 
-def test_an_exception_out_of_the_handoff_still_refuses_without_counting(
+def test_an_exception_out_of_the_handoff_refuses_and_keeps_the_reservation(
     session: Session,
 ) -> None:
-    """The pre-A1 exception path is untouched: no existing refusal weakens."""
+    """The refusal is unchanged; what it costs is not (ADR-0052).
+
+    Before ADR-0052 a raise out of the handoff counted nothing, which was only
+    safe while the raise proved the wire stayed quiet — and ``loop.py`` has always
+    disclosed that it does not: a handoff that raises *after* transmitting is
+    recorded here as not-sent. Now the attempt is reserved before the handoff and
+    released only on positive proof of a quiet wire, so an exception keeps the
+    reservation. Over-counting narrows the mandate's own authority; under-counting
+    hands back budget the venue may already hold.
+
+    The journal side of the pre-A1 path is untouched, deliberately: same stage,
+    same refusal code, same rule that the exception's message is never recorded.
+    """
 
     def _raising(intent: Any) -> Any:
         raise RuntimeError("kill switch engaged")
@@ -442,8 +461,8 @@ def test_an_exception_out_of_the_handoff_still_refuses_without_counting(
     assert outcome.refusal == "ORDER_PLANE_REFUSED"
     assert "RuntimeError" in outcome.detail
     assert "kill switch engaged" not in outcome.detail, "the message is never journaled"
-    assert _counted(session) == 0
     assert outcome.handoff_result is None
+    assert _counted(session) == 1, "an ambiguous raise is never auto-refunded"
 
 
 def test_the_activity_ceiling_survives_a_refusal_and_binds_on_a_real_attempt(
@@ -475,6 +494,7 @@ def test_the_activity_ceiling_survives_a_refusal_and_binds_on_a_real_attempt(
         identity=_identity(),
         facts=_facts(),
         submit=lambda intent: HandoffResult.submitted(),
+        commit_before_handoff=session.commit,
     )
     assert sent.stage is CycleStage.COMPLETE
     assert _counted(session) == 1
@@ -487,6 +507,7 @@ def test_the_activity_ceiling_survives_a_refusal_and_binds_on_a_real_attempt(
         identity=_identity(),
         facts=_facts(),
         submit=lambda intent: HandoffResult.submitted(),
+        commit_before_handoff=session.commit,
     )
     assert exhausted.stage is CycleStage.ADMISSION
     assert exhausted.refusal == "DEGRADED_RISK_REDUCTION_ONLY"

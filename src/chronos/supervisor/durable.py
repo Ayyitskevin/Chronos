@@ -42,6 +42,18 @@ describes can outlive a rolled-back decision, or be lost while the decision
 survives. Both are worse than an atomic write, and both are the kind of drift
 that is invisible until someone tries to reconstruct what happened.
 
+**The activity counters are now one deliberate exception, and the exception is
+the point** (ADR-0052, P1-02). ``run_cycle`` spends the mandate's order count and
+turnover and commits *before* the order-plane handoff, so the counter survives a
+crash in the window between a broker answering and the cycle recording what it
+said. There, an atomic write is the wrong guarantee: rolling the counter back
+with the cycle hands back an allowance the venue may already hold. The counter
+therefore outlives its journal entry in exactly that window, by design, and
+:func:`release_activity_reservation` gives it back only for the one disposition
+that proves nothing was sent. These functions still take a ``Session``; what
+changed is *when the caller commits it*, which keeps the exception visible at the
+call site instead of hidden here.
+
 ## What this module does NOT do
 
 It does not decide anything. It reads and writes state and hands it to
@@ -52,6 +64,7 @@ without a database, and that property is worth preserving.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
@@ -75,6 +88,8 @@ from chronos.supervisor.admission import (
     MarketDataEvidence,
     SupervisorState,
 )
+
+_logger = logging.getLogger("chronos.supervisor.durable")
 
 #: Hash-chain stream carrying every decision the supervisor judged, admitted or
 #: refused. Named per account so one account's history cannot be invalidated by
@@ -399,6 +414,71 @@ def record_activity(
     row.replacements += replacements
     row.turnover_usd += turnover_usd
     row.realized_loss_usd += realized_loss_usd
+    row.updated_at = now
+    return load_counters(
+        session, account_fingerprint=account_fingerprint, now=now, market_timezone=market_timezone
+    )
+
+
+def release_activity_reservation(
+    session: Session,
+    *,
+    account_fingerprint: str,
+    now: datetime,
+    orders_submitted: int = 0,
+    turnover_usd: Decimal = Decimal(0),
+    market_timezone: str | None = None,
+) -> SessionCounters:
+    """Give back a reservation the order plane proved it never spent (ADR-0052).
+
+    **The only decrement in this module.** :func:`record_activity` refuses to
+    decrease a count because a caller that can restore headroom under an activity
+    ceiling makes the ceiling advisory. That argument is still correct, which is
+    why this is not a general "adjust the counters" primitive: it exists for one
+    caller and one disposition.
+
+    ADR-0052 spends the attempt before the handoff. The cost of reserving early is
+    that a refusal which never reached the wire would otherwise burn an allowance,
+    and a backend sitting read-only would exhaust the day's budget without ever
+    asking the venue for anything — the defect ``supervisor.handoff`` fixed from
+    the other direction. So the release is bound to the single disposition that
+    carries positive proof of a quiet wire, ``REFUSED_NOT_SENT``.
+
+    Ambiguity is never released. ``SENT_AMBIGUOUS``, ``REJECTED_AFTER_SEND``, a
+    submission that raised, and a result this process could not classify all keep
+    the reservation: over-counting narrows the system's own authority, while
+    under-counting hands back budget that may already be spent at the venue.
+
+    The floor is zero — a release larger than what is outstanding clamps rather
+    than going negative, because a negative counter would *widen* headroom, the
+    same reasoning :attr:`SessionCounters.drawdown_usd` uses.
+    """
+
+    if orders_submitted < 0:
+        raise ValueError(f"orders_submitted release must not be negative, got {orders_submitted}")
+    if turnover_usd < 0:
+        raise ValueError(f"turnover_usd release must not be negative, got {turnover_usd}")
+
+    key = session_key(now, market_timezone=market_timezone)
+    row = _ensure_counter_row(session, account_fingerprint=account_fingerprint, session_date=key)
+    if orders_submitted > row.orders_submitted or turnover_usd > row.turnover_usd:
+        # Clamping is the safe direction, but it means the books disagreed: a
+        # release was asked for that is larger than what is outstanding, so
+        # either a reservation was already released or one was never taken. The
+        # counter must not go negative — that would widen headroom under a
+        # ceiling — but silently absorbing the discrepancy would hide the only
+        # evidence that the reserve/release pairing broke.
+        _logger.warning(
+            "Activity release exceeds the outstanding reservation and was clamped at zero "
+            "(orders outstanding %d, released %d; turnover outstanding %s, released %s)",
+            row.orders_submitted,
+            orders_submitted,
+            row.turnover_usd,
+            turnover_usd,
+            extra={"event": "activity_release_clamped", "passed": False},
+        )
+    row.orders_submitted = max(0, row.orders_submitted - orders_submitted)
+    row.turnover_usd = max(Decimal(0), row.turnover_usd - turnover_usd)
     row.updated_at = now
     return load_counters(
         session, account_fingerprint=account_fingerprint, now=now, market_timezone=market_timezone
