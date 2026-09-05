@@ -1,5 +1,19 @@
 # CHANGELOG
 
+## [Unreleased] — the xAI worker path refuses a non-object body (2026-09-05)
+
+A JSON body that parses but is not an object (`[]`, `"str"`, `42`) has no `.get`, and raised
+`AttributeError` out of `think_xai`. `run_loop` caught it and kept cadence, so it cost a cycle
+and a noisy log rather than authority — but the local provider had refused the same shape with
+a typed ERROR line since ADR-0050, and one provider's fix being the other's outstanding defect
+is the drift this repository keeps paying for.
+
+`think_xai` now refuses identically, in `think` rather than `_extract_decision` so the
+cross-provider extract drift test still pins the two equal. The four cases are asserted through
+a single parametrisation over both providers, so the next fix of this shape cannot land on one
+and miss the other. No other change to the shipped provider; no new authority, and
+`CHRONOS_WORKER_FORWARD` still defaults false. Closes the debt ADR-0050 recorded.
+
 ## [Unreleased] — local-inference worker provider, SHADOW only (2026-09-04)
 
 `CHRONOS_WORKER_PROVIDER=local` selects a raw-httpx OpenAI-compatible Chat Completions

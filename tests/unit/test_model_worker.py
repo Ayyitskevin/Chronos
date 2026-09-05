@@ -714,14 +714,34 @@ def test_a_non_json_local_body_yields_no_decision() -> None:
         assert think_local(_local_config(), SNAPSHOT, client) is None
 
 
+#: The two OpenAI-compatible providers, paired with a config that selects each.
+#: Anything asserted through this parametrisation is asserted for both, which is
+#: what stops one provider's fix from being the other's outstanding defect —
+#: exactly what a non-object body was between #147 and this change.
+_OPENAI_COMPATIBLE = [
+    pytest.param(think_local, _local_config, id="local"),
+    pytest.param(think_xai, _xai_config, id="xai"),
+]
+
+
+@pytest.mark.parametrize(("think_fn", "config_fn"), _OPENAI_COMPATIBLE)
 @pytest.mark.parametrize("payload", [[], "a string", 42, [{"choices": []}]])
 def test_a_json_body_that_is_not_an_object_refuses_instead_of_raising(
     payload: Any,
+    think_fn: Any,
+    config_fn: Any,
 ) -> None:
-    """Valid JSON, no ``.get`` — this used to raise AttributeError out of think()."""
+    """Valid JSON, no ``.get`` — this used to raise AttributeError out of think().
+
+    Both providers, one parametrisation. #147 guarded ``think_local`` and left
+    the identical shape in ``think_xai`` (R10 — a shipped provider's live path
+    was not that PR's to change), where ``run_loop`` caught the AttributeError
+    and kept cadence: a cycle and a noisy log rather than authority. Asserting
+    it here for both is what keeps that from happening again.
+    """
 
     with _anthropic_client(payload) as client:  # type: ignore[arg-type]
-        assert think_local(_local_config(), SNAPSHOT, client) is None
+        assert think_fn(config_fn(), SNAPSHOT, client) is None
 
 
 def test_an_unreachable_local_server_yields_no_decision() -> None:
