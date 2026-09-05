@@ -12,6 +12,7 @@ from typing import Any, cast
 import chronos.research.five_tool as five_tool_package
 from chronos.research.five_tool import compile_campaign_manifest as public_compile_campaign
 from chronos.research.five_tool.campaign import (
+    _EXPECTED_CELL_HYPOTHESES,
     ABLATION_POLICY_SCHEMA_VERSION,
     CAMPAIGN_ID,
     CAMPAIGN_SCHEMA_VERSION,
@@ -45,15 +46,17 @@ _COMMIT = "1" * 40
 _PINE_SHA = load_contract().pine.source_sha256
 _INPUT_SHA = input_contract_digest()
 _SEMANTIC_SHA = semantic_contract_digest()
-_CELL_HYPOTHESES = {
-    "5t-trend-directional-paired": "H-5T-001-TREND",
-    "5t-momentum-score-paired": "H-5T-002-MOMENTUM",
-    "5t-vol-scaling-paired": "H-5T-003-VOL-SCALING",
-    "5t-rsi-divergence-paired": "H-5T-004-DIVERGENCE",
-    "5t-mfi-divergence-paired": "H-5T-004-DIVERGENCE",
-    "5t-relative-strength-paired": "H-5T-005-RELATIVE-STRENGTH",
-    "5t-regime-filter-paired": "H-5T-006-REGIME-FILTER",
-}
+#: IMPORTED, not copied: this is fixture INPUT — the manifest below is built from it —
+#: and the compiler validates what it builds against the same production mapping
+#: (``if seen != set(_EXPECTED_CELL_HYPOTHESES)``), so a disagreeing copy was rejected by
+#: that check rather than pinning anything of its own.
+#:
+#: Measured, because the tempting claim is that importing costs nothing: changing one
+#: hypothesis id in production fails 9 tests in this file with the old copy and 3 with the
+#: import. The mutation is still caught — by the compiler's own consistency checks — but by
+#: fewer tests. Breadth was traded for deleting a seven-row restatement that could drift;
+#: detection was not.
+_CELL_HYPOTHESES = _EXPECTED_CELL_HYPOTHESES
 _HELD_FIXED = {
     "pine_inputs": "all_except_allowed_differences",
     "settings_fields": [
