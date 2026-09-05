@@ -162,6 +162,7 @@ def test_a_second_write_transaction_is_refused_on_a_file(
         s1.close()
 
 
+@pytest.mark.in_memory_sqlite_is_the_subject
 def test_on_memory_a_second_session_commits_the_first_sessions_pending_write(
     sessions_for: Callable[[str], sessionmaker[Session]],
 ) -> None:

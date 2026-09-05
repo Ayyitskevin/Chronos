@@ -29,12 +29,15 @@ statement of what the two backends actually differ on.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from itertools import count
 from pathlib import Path
 
 import pytest
 from sqlalchemy.orm import Session, sessionmaker
 
 from chronos.persistence.database import Database
+
+_MEMORY_IS_THE_SUBJECT = "in_memory_sqlite_is_the_subject"
 
 
 @pytest.fixture
@@ -66,3 +69,45 @@ def file_sessions(tmp_path: Path) -> Iterator[sessionmaker[Session]]:
         yield database.sessions
     finally:
         database.dispose()
+
+
+@pytest.fixture(autouse=True)
+def _file_backed_sqlite_lane(
+    request: pytest.FixtureRequest, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[None]:
+    """Under ``--file-backed-sqlite``, give every ``:memory:`` database a real file.
+
+    Inert without the flag, which is the point: the default suite keeps the
+    speed the audit justified, and CI runs the same tests a second time on the
+    topology production uses. What it buys is **not** coverage of today's tests
+    — measured, they do not care (185/185 unchanged, issue #154) — it is a red
+    build the first time a test starts depending on ``StaticPool``'s shared
+    connection without saying so. That dependency is invisible by construction:
+    the test passes, and the design it implies deadlocks in production.
+
+    Each construction gets its **own** file, because each ``:memory:`` URL is
+    its own database; pointing them at one file would introduce sharing the
+    original code never had and fail for a reason the lane is not about.
+
+    Tests whose subject *is* in-memory behaviour opt out with
+    ``@pytest.mark.in_memory_sqlite_is_the_subject`` — redirecting those would
+    assert the opposite of what they exist to pin.
+    """
+
+    if not request.config.getoption("--file-backed-sqlite"):
+        yield
+        return
+    if request.node.get_closest_marker(_MEMORY_IS_THE_SUBJECT):
+        yield
+        return
+
+    real_init = Database.__init__
+    counter = count(1)
+
+    def _init(self: Database, url: str) -> None:
+        if isinstance(url, str) and url.endswith(":memory:"):
+            url = f"sqlite+pysqlite:///{tmp_path / f'lane-{next(counter)}.db'}"
+        real_init(self, url)
+
+    monkeypatch.setattr(Database, "__init__", _init)
+    yield
