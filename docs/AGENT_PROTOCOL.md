@@ -206,6 +206,10 @@ worth having; it deserved — and got — a written close.
      exhibit: `grep -oE '^\| [DR]-[0-9]+[^ |]*' DECISIONS.md RISK_REGISTER.md | sort | uniq -d`
      (match the full ID cell — a looser pattern false-positives on the `R-nn-orig`
      historical rows, which this command's first rehearsal proved)
+- **Executable form:** `scripts/post_merge_proof.sh <pr> <reviewed-head-sha> <path>...`
+  runs steps 1-6 above against the live PR and exits non-zero on any failure — including
+  a path set narrower than the PR's own file list, which is how a byte-equality proof
+  reads complete while covering one file of three.
 - The branch auto-deletes on merge. Expected. Anything you still need from it should
   already be in the merge or in `refs/preserve/*`.
 
