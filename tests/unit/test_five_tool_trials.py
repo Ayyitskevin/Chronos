@@ -15,6 +15,7 @@ import pytest
 from chronos.auditlog.log import AuditRecord
 from chronos.registry.ledger import RegistryLedger
 from chronos.research.five_tool.campaign import (
+    _REQUIRED_CELL_PENDING_CODES,
     ABLATION_POLICY_SCHEMA_VERSION,
     EVALUATOR_BINDING_SCHEMA_VERSION,
     EXECUTION_BINDINGS_SCHEMA_VERSION,
@@ -61,6 +62,37 @@ _DEVELOPMENT_DATA = b"content-addressed-certified-five-tool-development-partitio
 _DEVELOPMENT_DATA_SHA256 = hashlib.sha256(_DEVELOPMENT_DATA).hexdigest()
 _CODE_COMMIT = "1" * 40
 _DEFAULT_CELL_ID = "5t-trend-directional-paired"
+
+
+def test_the_pending_blocker_pin_matches_production() -> None:
+    """The pin above must still describe what the compiler is configured to emit.
+
+    A pin nobody checks is a copy with better manners. This compares it against
+    ``_REQUIRED_CELL_PENDING_CODES`` — the production mapping the compiler reads — so a
+    cell gaining or losing a required blocker code fails here, by name, instead of
+    surfacing as an opaque set-inequality inside a compiled-cell assertion.
+
+    Kept as a comparison rather than an import for the reason in the pin's own comment:
+    the assertion it feeds checks compiler OUTPUT, and importing would make that output
+    agree with its own input by construction.
+    """
+
+    production = {
+        cell_id: {str(code) for code in codes}
+        for cell_id, codes in _REQUIRED_CELL_PENDING_CODES.items()
+    }
+    assert production == _PENDING_BLOCKERS_BY_CELL, (
+        "the compiler's required pending blocker codes no longer match the pin in this "
+        "file; if the change is deliberate, update _PENDING_BLOCKERS_BY_CELL"
+    )
+
+
+#: PINNED, not imported. This is the EXPECTED OUTPUT of the compiler: the assertion below
+#: compares the blocker codes a compiled cell actually carries against these. Production
+#: builds those blockers FROM ``_REQUIRED_CELL_PENDING_CODES``, so importing it would turn
+#: that assertion into "the output equals the input that produced it" — true by
+#: construction and worth nothing. ``test_the_pending_blocker_pin_matches_production``
+#: keeps the copy honest instead.
 _PENDING_BLOCKERS_BY_CELL = {
     "5t-trend-directional-paired": {
         "unrepresentable_ablation",
