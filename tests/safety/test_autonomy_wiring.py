@@ -24,6 +24,7 @@ allowed to change and the ones it is *not*:
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -38,6 +39,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from chronos.api.autonomy_wiring import (
     ConfirmationRefusedByOrderPlane,
     RiskRefusedByOrderPlane,
+    UnauthenticatedSubmittingMandate,
     _market_evidence,
     _quote_evidence,
     _reference_price,
@@ -45,6 +47,7 @@ from chronos.api.autonomy_wiring import (
     ensure_activation,
     load_persistent_mandate,
     order_plane_handoff,
+    submitting_posture_is_unauthenticated,
 )
 from chronos.autonomy import (
     AutonomyMandate,
@@ -60,6 +63,7 @@ from chronos.autonomy import (
     TradableAssetClass,
     VersionPins,
 )
+from chronos.autonomy.enums import SUBMITTING_AUTONOMY_MODES
 from chronos.domain.enums import DataQuality
 from chronos.domain.models import MarketQuote, UnderlyingContract
 from chronos.orders.submission import SubmissionOutcome, SubmissionRefusalCode
@@ -171,6 +175,42 @@ def _settings(
     )
 
 
+def _registry(tmp_path: Path) -> Path:
+    """A valid one-entry proposer registry: the authenticated half ADR-0023 supplies."""
+
+    path = tmp_path / "autonomy_proposers.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "proposers": [
+                    {
+                        "proposer_id": "test-proposer",
+                        "secret_sha256": hashlib.sha256(b"test-credential").hexdigest(),
+                        "provider": "anthropic",
+                        "model_id": "model-x",
+                        "model_version": "mv-7",
+                        "prompt_version": "pv-3",
+                        "tool_schema_version": "ts-2",
+                        "decision_schema_version": "ds-4",
+                        "policy_version": "pol-5",
+                        "expires_at": "2099-01-01T00:00:00+00:00",
+                        "enabled": True,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _authenticated(tmp_path: Path) -> dict[str, Any]:
+    """The posture a submitting mandate needs to assemble (ADR-0051): both halves."""
+
+    return {"proposers_file": _registry(tmp_path), "evidence_bundles": True}
+
+
 def _runtime(
     database: Database,
     tmp_path: Path,
@@ -178,9 +218,16 @@ def _runtime(
     mandate_file: Path | None = None,
     account_id: str = _ACCOUNT_ID,
     order_management: Any = None,
+    proposers_file: Path | None = None,
+    evidence_bundles: bool = False,
 ) -> SimpleNamespace:
     return SimpleNamespace(
-        settings=_settings(tmp_path, mandate_file=mandate_file),
+        settings=_settings(
+            tmp_path,
+            mandate_file=mandate_file,
+            proposers_file=proposers_file,
+            evidence_bundles=evidence_bundles,
+        ),
         database=database,
         order_management=order_management or SimpleNamespace(account_id=account_id),
     )
@@ -345,8 +392,10 @@ def test_a_mandate_for_another_account_boots_inert(database: Database, tmp_path:
 
 
 def test_a_matching_mandate_assembles_a_live_runtime(database: Database, tmp_path: Path) -> None:
+    """On the authenticated posture — a PAPER mandate is a submitting one (ADR-0051)."""
+
     path = _write_mandate(tmp_path, _mandate())
-    runtime = _runtime(database, tmp_path, mandate_file=path)
+    runtime = _runtime(database, tmp_path, mandate_file=path, **_authenticated(tmp_path))
 
     autonomy = build_autonomy_runtime(runtime, process_generation=9, is_writer=lambda: True)
     assert isinstance(autonomy, AutonomyRuntime)
@@ -385,8 +434,81 @@ def test_a_revoked_persistent_mandate_stays_inert_after_restart(
         )
 
     path = _write_mandate(tmp_path, mandate)
-    runtime = _runtime(database, tmp_path, mandate_file=path)
+    runtime = _runtime(database, tmp_path, mandate_file=path, **_authenticated(tmp_path))
     assert build_autonomy_runtime(runtime, process_generation=2, is_writer=lambda: True) is None
+
+
+# ------------------------------------------------- ADR-0051: the posture cap
+
+
+@pytest.mark.parametrize(
+    ("registry", "evidence"),
+    [(False, False), (True, False), (False, True)],
+    ids=["static", "registry-only", "evidence-only"],
+)
+def test_a_submitting_mandate_refuses_to_assemble_on_the_static_posture(
+    database: Database, tmp_path: Path, registry: bool, evidence: bool
+) -> None:
+    """A PAPER-capable grant needs a registry AND evidence binding; either half alone is
+    SHADOW-grade — a registry without binding leaves check 9 comparing the placeholder
+    against itself, binding without a registry has nobody to issue evidence to."""
+
+    path = _write_mandate(tmp_path, _mandate())  # PAPER_AUTONOMOUS
+    runtime = _runtime(
+        database,
+        tmp_path,
+        mandate_file=path,
+        proposers_file=_registry(tmp_path) if registry else None,
+        evidence_bundles=evidence,
+    )
+
+    with pytest.raises(UnauthenticatedSubmittingMandate):
+        build_autonomy_runtime(runtime, process_generation=1, is_writer=lambda: True)
+
+    # Refused BEFORE activation: no row ever says this grant was in force here.
+    assert _activation_count(database.sessions) == 0
+    with database.sessions.begin() as session:
+        raised = alerts.unacknowledged(session, account_fingerprint=_FINGERPRINT)
+    assert any(
+        alert.kind == "autonomy.posture_unauthenticated"
+        and alert.severity is alerts.AlertSeverity.CRITICAL
+        for alert in raised
+    )
+
+
+def test_a_shadow_mandate_still_assembles_on_the_static_posture(
+    database: Database, tmp_path: Path
+) -> None:
+    """The compatibility posture survives exactly where it is SHADOW-grade: at SHADOW."""
+
+    shadow = _mandate(
+        mode=AutonomyMode.SHADOW,
+        promotions=(
+            FamilyPromotion(asset_class=TradableAssetClass.EQUITY, level=PromotionLevel.SHADOW),
+        ),
+    )
+    path = _write_mandate(tmp_path, shadow)
+    runtime = _runtime(database, tmp_path, mandate_file=path)
+
+    autonomy = build_autonomy_runtime(runtime, process_generation=1, is_writer=lambda: True)
+
+    assert isinstance(autonomy, AutonomyRuntime)
+    assert _activation_count(database.sessions) == 1
+
+
+def test_the_cap_is_exactly_the_submitting_modes_on_a_static_posture(tmp_path: Path) -> None:
+    """Every mode, both postures: the cap bites on SUBMITTING_AUTONOMY_MODES and nowhere else."""
+
+    static = _settings(tmp_path, mandate_file=None)
+    authenticated = _settings(
+        tmp_path, mandate_file=None, proposers_file=tmp_path / "r.json", evidence_bundles=True
+    )
+    for mode in AutonomyMode:
+        mandate = SimpleNamespace(mode=mode)
+        assert submitting_posture_is_unauthenticated(static, mandate) is (  # type: ignore[arg-type]
+            mode in SUBMITTING_AUTONOMY_MODES
+        ), mode
+        assert submitting_posture_is_unauthenticated(authenticated, mandate) is False, mode  # type: ignore[arg-type]
 
 
 # ------------------------------------------------------------- order_plane_handoff

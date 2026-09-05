@@ -49,6 +49,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from chronos.api.auth import load_or_create_token, load_proposer_auth
 from chronos.api.autonomy_wiring import (
+    UnauthenticatedSubmittingMandate,
     alert_broken_evidence_posture,
     alert_invalid_proposer_registry,
     autonomy_tick_task,
@@ -401,6 +402,17 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                 process_generation=int(app.state.backend.lease is not None),
                 is_writer=lambda: bool(autonomy_backend.writer),
             )
+        except UnauthenticatedSubmittingMandate:
+            # ADR-0051: typed, not the generic wiring fault — the owner must be
+            # able to tell "the posture is wrong" from "assembly crashed".
+            app.state.backend.note_startup_fault(StartupFaultCode.AUTONOMY_POSTURE_UNAUTHENTICATED)
+            _logger.critical(
+                "A submitting mandate met a static proposer posture; autonomy stays inert "
+                "until AUTONOMY_PROPOSERS_FILE and AUTONOMY_EVIDENCE_BUNDLES are configured "
+                "or the mandate is re-authored at SHADOW",
+                extra={"event": "autonomy_posture_unauthenticated", "passed": False},
+            )
+            autonomy = None
         except Exception:
             app.state.backend.note_startup_fault(StartupFaultCode.AUTONOMY_WIRING_FAILED)
             _logger.exception(

@@ -31,6 +31,7 @@ test about routes into a test about timing — and the routes never call it.
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -161,6 +162,36 @@ def demo_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[Path]:
     monkeypatch.setenv("SESSION_BASELINE_FILE", str(tmp_path / "baseline.json"))
     monkeypatch.setenv("AUTONOMY_MANDATE_FILE", str(mandate_file))
     monkeypatch.setenv("AUTONOMY_ALERT_FILE", str(tmp_path / "owner_alerts.jsonl"))
+    # ADR-0051: a PAPER mandate assembles only on the authenticated posture — a
+    # proposer registry AND evidence binding. This suite is about the windows,
+    # so it boots on the posture the backend requires rather than the one it
+    # refuses.
+    registry_file = tmp_path / "autonomy_proposers.json"
+    registry_file.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "proposers": [
+                    {
+                        "proposer_id": "test-proposer",
+                        "secret_sha256": hashlib.sha256(b"test-credential").hexdigest(),
+                        "provider": "anthropic",
+                        "model_id": "model-x",
+                        "model_version": "mv-7",
+                        "prompt_version": "pv-3",
+                        "tool_schema_version": "ts-2",
+                        "decision_schema_version": "ds-4",
+                        "policy_version": "pol-5",
+                        "expires_at": "2099-01-01T00:00:00+00:00",
+                        "enabled": True,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AUTONOMY_PROPOSERS_FILE", str(registry_file))
+    monkeypatch.setenv("AUTONOMY_EVIDENCE_BUNDLES", "true")
     monkeypatch.setattr("chronos.api.main.autonomy_tick_task", _no_ticks)
     get_settings.cache_clear()
     yield tmp_path
@@ -171,6 +202,24 @@ def demo_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[Path]:
 def client(demo_env: Path) -> Iterator[TestClient]:
     with TestClient(create_app()) as test_client:
         yield test_client
+
+
+def test_a_submitting_mandate_on_the_static_posture_boots_inert_with_a_typed_fault(
+    demo_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0051 through the real lifespan: the same PAPER mandate, registry and
+    evidence binding withdrawn — the backend boots, autonomy does not, and the
+    health document says exactly why rather than "wiring failed"."""
+
+    monkeypatch.delenv("AUTONOMY_PROPOSERS_FILE")
+    monkeypatch.delenv("AUTONOMY_EVIDENCE_BUNDLES")
+    get_settings.cache_clear()
+
+    with TestClient(create_app()) as test_client:
+        body = test_client.get("/health").json()
+        assert body["observations"]["startup_faults"] == ["autonomy_posture_unauthenticated"]
+        assert body["service_readiness"]["state"] == "NOT_READY"
+        assert getattr(test_client.app.state, "autonomy", None) is None
 
 
 @pytest.fixture()

@@ -71,6 +71,7 @@ class WriterRole(StrEnum):
 class StartupFaultCode(StrEnum):
     PROPOSER_REGISTRY_INVALID = "proposer_registry_invalid"
     EVIDENCE_POSTURE_INVALID = "evidence_posture_invalid"
+    AUTONOMY_POSTURE_UNAUTHENTICATED = "autonomy_posture_unauthenticated"
     SUBMISSION_RECONCILIATION_FAILED = "submission_reconciliation_failed"
     AUTONOMY_WIRING_FAILED = "autonomy_wiring_failed"
 
