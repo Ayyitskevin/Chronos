@@ -43,9 +43,11 @@ from typing import Any
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from pydantic_core import PydanticUndefined
 
 from chronos.api.auth import load_or_create_token
 from chronos.api.main import create_app
+from chronos.api.routes import terminal as terminal_routes
 from chronos.api.terminal_session import SESSION_COOKIE
 from chronos.autonomy import (
     AutonomyMandate,
@@ -76,8 +78,11 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 _FINGERPRINT = account_fingerprint(DEMO_ACCOUNT_ID)
 
-#: Every read route, which is also every route that must survive demotion.
-READ_ROUTES = (
+#: The seven paths ``READ_ROUTES`` listed by hand. Kept as a positive control, not as
+#: the sweep's input: the derived tuple must still contain every one of them, so a
+#: derivation that returns nothing — wrong attribute, wrong router, a FastAPI change to
+#: ``routes`` — fails loudly here instead of making every sweep below vacuously pass.
+_PREVIOUSLY_SWEPT = (
     "/terminal/commands",
     "/terminal/system",
     "/terminal/mandate",
@@ -86,6 +91,101 @@ READ_ROUTES = (
     "/terminal/queue",
     "/terminal/alerts",
 )
+
+
+def _declared_read_routes() -> tuple[str, ...]:
+    """Every ``GET`` path the terminal router declares, in declaration order.
+
+    Derived rather than listed because a hand-maintained list is only correct on the
+    day it is written: it stood at seven of ten while three real read routes —
+    ``/terminal/bars``, ``/terminal/option-selections``, ``/terminal/theses`` — sat
+    outside every sweep below, and nothing failed when they were added. A route now
+    joins the token, demotion, account-id, host-header and order-plane sweeps the
+    moment it is declared, and a route removed from the router leaves them the same way.
+    """
+
+    seen: dict[str, None] = {}
+    for route in terminal_routes.router.routes:
+        methods = getattr(route, "methods", None) or frozenset()
+        if "GET" in methods:
+            seen.setdefault(getattr(route, "path", ""), None)
+    return tuple(path for path in seen if path)
+
+
+#: Every read route, which is also every route that must survive demotion.
+READ_ROUTES = _declared_read_routes()
+
+
+#: Query strings for read routes that declare a REQUIRED parameter. ``/terminal/bars`` is
+#: the only one today: ``symbol`` has no default, so a bare GET is a correct 422 and the
+#: sweeps below could never reach the route. Supplying the parameter is not a softened
+#: assertion — every sweep still demands exactly what it demanded before (200, no broker
+#: account id, no host reflection, no order-plane call); it only gives the route the input
+#: it requires so those demands actually run against it. Excluding the route instead would
+#: reproduce the gap this change exists to close.
+_ROUTE_QUERY = {
+    "/terminal/bars": "?symbol=SPY",
+}
+
+
+def _sweep_url(path: str) -> str:
+    """The URL a sweep should request for ``path``."""
+
+    return path + _ROUTE_QUERY.get(path, "")
+
+
+def _required_query_params(route: object) -> tuple[str, ...]:
+    """Names of ``route``'s query parameters that have no default.
+
+    The signal is ``field_info.default is PydanticUndefined``, not a ``.required``
+    attribute: FastAPI's ``ModelField`` here exposes no such attribute, so the obvious
+    ``getattr(parameter, "required", False)`` silently returns ``False`` for every
+    parameter and makes the check below vacuous. That version was written, mutation-tested
+    against a removed ``_ROUTE_QUERY`` entry, and survived — which is how this comment
+    exists.
+    """
+
+    dependant = getattr(route, "dependant", None)
+    if dependant is None:
+        return ()
+    return tuple(
+        parameter.name
+        for parameter in dependant.query_params
+        if getattr(getattr(parameter, "field_info", None), "default", None) is PydanticUndefined
+    )
+
+
+def test_every_read_route_with_a_required_parameter_has_a_sweep_query() -> None:
+    """A new read route with a required parameter must join the sweeps, not 422 out of them.
+
+    Without this, adding such a route makes six sweeps request it bare, get 422, and —
+    for the four that assert 200 — fail in a way that invites deleting the route from the
+    list rather than giving it a query. This states the obligation instead.
+    """
+
+    uncovered = {
+        route.path: _required_query_params(route)
+        for route in terminal_routes.router.routes
+        if "GET" in (getattr(route, "methods", None) or frozenset())
+        and _required_query_params(route)
+        and route.path not in _ROUTE_QUERY
+    }
+    assert not uncovered, (
+        "read route(s) declare required query parameters but have no _ROUTE_QUERY entry, "
+        f"so the sweeps below cannot exercise them: {uncovered}"
+    )
+
+
+def test_the_read_route_sweep_is_derived_and_covers_what_it_used_to_list() -> None:
+    """The sweeps below are parametrized on ``READ_ROUTES``; an empty tuple would make
+    every one of them pass without exercising a single route."""
+
+    assert READ_ROUTES, (
+        "no GET routes were derived from terminal.router — the sweeps below would be "
+        "vacuous; check the router attribute and FastAPI's route objects"
+    )
+    missing = [path for path in _PREVIOUSLY_SWEPT if path not in READ_ROUTES]
+    assert not missing, f"derivation lost previously-swept read route(s): {missing}"
 
 
 def _mandate(now: datetime) -> AutonomyMandate:
@@ -479,7 +579,7 @@ def _raise_alert(client: TestClient, *, kind: str = "terminal.test") -> int:
 
 @pytest.mark.parametrize("path", READ_ROUTES)
 def test_every_data_route_requires_the_token(client: TestClient, path: str) -> None:
-    assert client.get(path).status_code == 401
+    assert client.get(_sweep_url(path)).status_code == 401
 
 
 def test_mutating_routes_require_the_token(client: TestClient) -> None:
@@ -494,7 +594,7 @@ def test_mutating_routes_require_the_token(client: TestClient) -> None:
 def test_every_read_route_answers_on_a_writer(
     client: TestClient, headers: dict[str, str], path: str
 ) -> None:
-    assert client.get(path, headers=headers).status_code == 200
+    assert client.get(_sweep_url(path), headers=headers).status_code == 200
 
 
 @pytest.mark.parametrize("path", READ_ROUTES)
@@ -503,7 +603,7 @@ def test_every_read_route_answers_on_a_read_only_backend(
 ) -> None:
     """Doctrine, not preference: a demoted terminal degrades, it does not go dark."""
 
-    assert read_only_client.get(path, headers=headers).status_code == 200
+    assert read_only_client.get(_sweep_url(path), headers=headers).status_code == 200
 
 
 def test_the_read_only_badge_matches_what_the_writer_gate_will_decide(
@@ -841,7 +941,7 @@ def test_no_response_body_carries_a_broker_account_id(
     """The pseudonym travels; the identity it stands for never does."""
 
     _raise_alert(client)
-    bodies = [client.get(path, headers=headers).text for path in READ_ROUTES]
+    bodies = [client.get(_sweep_url(path), headers=headers).text for path in READ_ROUTES]
     bodies.append(
         client.post(
             "/terminal/mandate/revoke", json={"reason": "disclosure check"}, headers=headers
@@ -919,7 +1019,9 @@ def test_no_terminal_path_reflects_the_host_header_into_a_redirect(
         assert "location" not in response.headers, path
 
     for path in READ_ROUTES:
-        response = client.get(path, headers={**headers, **hostile}, follow_redirects=False)
+        response = client.get(
+            _sweep_url(path), headers={**headers, **hostile}, follow_redirects=False
+        )
         assert response.status_code == 200
         assert "location" not in response.headers
 
@@ -1021,7 +1123,7 @@ def test_no_terminal_route_calls_the_order_plane(
         monkeypatch.setattr(OrderManagementService, name, _forbidden)
 
     for path in READ_ROUTES:
-        assert client.get(path, headers=headers).status_code == 200
+        assert client.get(_sweep_url(path), headers=headers).status_code == 200
     alert_id = _raise_alert(client)
     assert (
         client.post(
