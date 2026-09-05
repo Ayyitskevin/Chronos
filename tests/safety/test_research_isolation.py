@@ -124,3 +124,125 @@ def test_importing_walkforward_leaks_no_order_or_broker_module() -> None:
     )
     leaked = [name for name in result.stdout.strip().split(";") if name]
     assert leaked == [], f"research walk-forward import leaked forbidden modules: {leaked}"
+
+
+# --------------------------------------------------------------------------
+# The other direction: the ORDER plane must not import subsystem 2.
+#
+# Everything above pins research -> orders. README's plane claim is the
+# reverse -- "it is separate from, and never imported by, the Live Wheel order
+# pipeline in subsystem 1" -- and nothing executed it. A test whose name matches
+# a claim is not evidence for the claim until its direction is read; these two
+# now sit together so the next reader sees both arrows.
+# --------------------------------------------------------------------------
+
+#: The non-trading planes the order plane must not import.
+#:
+#: `research`, `backtest`, `skb`, `strategies`, `registry` and `specs` are subsystem 2 —
+#: the deterministic research/strategy platform README's claim is about. `histdata` is a
+#: THIRD plane (the historical-data plane, C1/ADR-0011), included on fable-2's
+#: observation: `tests/safety/test_histdata_isolation` pins histdata -> orders, and
+#: nothing pinned orders -> histdata, so the reverse direction was unguarded there for
+#: the same reason it was unguarded for subsystem 2. The constant is named for what it
+#: holds rather than for subsystem 2 alone, because a set whose name overstates its
+#: contents is the defect this file's neighbours keep finding.
+#:
+#: Named exactly, one package per entry, and compared segment-by-segment rather than
+#: by substring -- because ``chronos.strategy`` and ``chronos.strategies`` both exist
+#: and belong to *different subsystems*. ``chronos.strategy`` (singular) is subsystem
+#: 1's own "Deterministic Wheel strategy engines", which ``orders/risk`` imports by
+#: design; ``chronos.strategies`` (plural) is subsystem 2. A substring match on
+#: "strategy" reports a plane violation that does not exist, which is exactly the
+#: false finding this comment exists to prevent.
+_PLANES_THE_ORDER_PLANE_MUST_NOT_IMPORT = frozenset(
+    {"research", "backtest", "skb", "strategies", "registry", "specs", "histdata"}
+)
+
+_ORDER_PLANE = Path(__file__).resolve().parents[2] / "src" / "chronos" / "orders"
+
+
+def _chronos_imports(root: Path) -> dict[Path, set[str]]:
+    """Every ``chronos.<package>`` imported under ``root``, by importing file.
+
+    An ``ast.walk`` rather than a grep, so a function-local import counts: the one
+    that motivated this test (``from chronos.strategy.eligibility import evaluate``)
+    sits inside a method body, where a line-oriented scan of the import block would
+    never look.
+    """
+
+    found: dict[Path, set[str]] = {}
+    for path in sorted(root.rglob("*.py")):
+        packages: set[str] = set()
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                # level > 0 is a relative import: it cannot name another top-level
+                # chronos package, so it is not this test's business.
+                names = [node.module] if node.module and not node.level else []
+            else:
+                continue
+            for name in names:
+                parts = name.split(".")
+                if len(parts) >= 2 and parts[0] == "chronos":
+                    packages.add(parts[1])
+        if packages:
+            found[path] = packages
+    return found
+
+
+def test_the_scan_finds_an_import_nested_in_a_function_body(tmp_path: Path) -> None:
+    """The positive control, on a literal source whose ONLY import is nested.
+
+    The first version of this control anchored on ``chronos.strategy`` in the real
+    order plane — which ``orders/risk`` imports at module level *as well as* inside a
+    method. A walk crippled to top-level imports therefore passed it, so the control
+    proved nothing about the property it exists for. fable-2 measured exactly that:
+    an injected violation plus a crippled walk left the file green.
+
+    A fixture whose only ``chronos`` import is inside a function body cannot pass
+    unless the walk descends, which is the whole claim. Mirrors this file's own
+    ``test_import_matcher_sees_subpackage_aliases``: feed literal source, assert the
+    matcher's answer.
+    """
+
+    module = tmp_path / "nested_only.py"
+    module.write_text(
+        "import os\n"
+        "\n"
+        "\n"
+        "def loader():\n"
+        "    from chronos.strategies import registry\n"
+        "    return registry, os\n",
+        encoding="utf-8",
+    )
+
+    found = _chronos_imports(tmp_path)
+
+    assert found, "the walk found no chronos import at all in the fixture"
+    assert found[module] == {"strategies"}, (
+        "the only chronos import in the fixture is inside a function body; not finding "
+        "it means the walk does not descend, and the isolation check below is blind to "
+        "exactly the import that motivated it"
+    )
+
+
+def test_the_order_plane_import_scan_sees_something() -> None:
+    """And the real scan reaches the real order plane, so it is not scanning nothing."""
+
+    imports = _chronos_imports(_ORDER_PLANE)
+    assert len(imports) > 5, f"only {len(imports)} order-plane modules import chronos at all"
+
+
+def test_the_order_plane_imports_no_subsystem_two_package() -> None:
+    """README: the deterministic platform is never imported by the order pipeline."""
+
+    offenders = [
+        f"{path.relative_to(_ORDER_PLANE.parents[2])}: chronos.{package}"
+        for path, packages in _chronos_imports(_ORDER_PLANE).items()
+        for package in sorted(packages & _PLANES_THE_ORDER_PLANE_MUST_NOT_IMPORT)
+    ]
+    assert not offenders, (
+        "the order plane imports a subsystem-2 package; README says it never does:\n"
+        + "\n".join(offenders)
+    )
