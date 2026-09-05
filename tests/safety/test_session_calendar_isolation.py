@@ -36,13 +36,14 @@ import chronos
 
 _CALENDAR_MODULE = "chronos.research.session_calendar"
 
-# The data-intake CLI is an inspection-only adapter into the research plane. Ignore
-# exactly this edge when asking whether another package can acquire the calendar;
-# every other edge remains default-denied, including any future second route from
-# this command module. The command's no-network/no-write boundary is independently
-# bound by tests/integration/test_data_intake_verify.py.
-_READ_ONLY_RESEARCH_EDGES = {
+# The data-intake CLI has two reviewed edges into the research plane: read-only verify,
+# and certify's local import of the write orchestrator. Ignore exactly those edges when
+# asking whether another package can acquire the calendar; every other edge remains
+# default-denied. Their distinct write boundaries are independently bound by the two
+# tests/integration/test_data_intake_*.py suites.
+_REVIEWED_RESEARCH_CLI_EDGES = {
     ("chronos.cli.data_commands", "chronos.research.data_intake"),
+    ("chronos.cli.data_commands", "chronos.research.data_certification"),
 }
 
 #: The planes allowed to hold the calendar. Everything else is denied by default.
@@ -226,13 +227,13 @@ def _reaches(graph: dict[str, set[str]], start: str, target: str) -> list[str] |
     return None
 
 
-def _without_read_only_research_edges(graph: dict[str, set[str]]) -> dict[str, set[str]]:
-    """Remove only the named inspection edge before authority reachability checks."""
+def _without_reviewed_research_cli_edges(graph: dict[str, set[str]]) -> dict[str, set[str]]:
+    """Remove only the named intake edges before authority reachability checks."""
 
     guarded = {name: set(imports) for name, imports in graph.items()}
-    for source, target in _READ_ONLY_RESEARCH_EDGES:
+    for source, target in _REVIEWED_RESEARCH_CLI_EDGES:
         assert target in guarded.get(source, set()), (
-            f"missing reviewed read-only edge {source}->{target}"
+            f"missing reviewed research CLI edge {source}->{target}"
         )
         guarded[source].remove(target)
     return guarded
@@ -250,7 +251,7 @@ def test_no_unreviewed_module_outside_research_can_reach_the_calendar_transitive
     computing reachability keeps any second route from the intake CLI visible.
     """
 
-    graph = _without_read_only_research_edges(_import_graph())
+    graph = _without_reviewed_research_cli_edges(_import_graph())
     offenders: list[str] = []
     for name in sorted(graph):
         if name.startswith(("chronos.research", "chronos.histdata")):
@@ -278,7 +279,7 @@ def test_the_reachability_graph_is_real() -> None:
         "chronos.research.data_intake",
         _CALENDAR_MODULE,
     ]
-    guarded = _without_read_only_research_edges(graph)
+    guarded = _without_reviewed_research_cli_edges(graph)
     # The reviewed inspection edge is removed; cli/registry have no other route.
     for benign in (
         "chronos.cli.__main__",
