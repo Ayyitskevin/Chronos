@@ -172,12 +172,23 @@ def run_backtest(
                 # is reconstructed from the position delta.
                 increment = event.cumulative_filled - position.quantity
                 cash -= effective * increment + commission
+                if position.quantity == 0:
+                    # Opening from flat: this fill is the whole basis.
+                    position.entry_price = effective
+                    position.entry_date = bar.session_date
+                    position.bars_held = 0
+                elif increment > 0:
+                    # Adding to an open position (a partial fill completing, or
+                    # a second leg): the basis is the quantity-weighted average,
+                    # not the newest fill. `entry_date` keeps the date the
+                    # position opened and `bars_held` keeps counting from it.
+                    prior_notional = position.entry_price * position.quantity
+                    position.entry_price = (prior_notional + effective * increment) / (
+                        position.quantity + increment
+                    )
                 position.quantity = event.cumulative_filled
-                position.entry_price = effective
                 position.entry_commission += commission
-                position.entry_date = bar.session_date
                 position.stop_price = pending_stop.get(event.intent_id)
-                position.bars_held = 0
             else:
                 effective = fill_price * (1.0 - slip)
                 increment = min(event.cumulative_filled, position.quantity)
