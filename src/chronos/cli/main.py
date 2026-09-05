@@ -25,6 +25,7 @@ import sys
 from pathlib import Path
 
 from chronos.auditlog.log import verify_chain
+from chronos.cli.campaign_status import add_campaign_status_command
 from chronos.cli.mandate_check import add_mandate_commands
 from chronos.cli.proposer_commands import add_proposer_commands
 from chronos.control.halt import HaltReason, HaltStore
@@ -675,6 +676,7 @@ def build_parser() -> argparse.ArgumentParser:
     preflight.add_argument("--backend-port", type=int, default=8765)
     preflight.add_argument("--evidence", action="store_true")
     preflight.set_defaults(func=cmd_campaign_preflight)
+    add_campaign_status_command(campaign_sub)
 
     monitor = sub.add_parser(
         "monitor", help="read-only platform monitor (mode, halt, reconciliation, audit, data)"
