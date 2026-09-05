@@ -211,7 +211,13 @@ def cmd_campaign_preflight(args: argparse.Namespace) -> int:
             missing.append("state_generation marker")
         if not identity_row_present:
             missing.append("installation_identity row")
-        fail("ADR-0054", "state identity", "UNVERIFIED; missing " + " and ".join(missing) + "; boot the backend writer once, then re-run preflight")
+        fail(
+            "ADR-0054",
+            "state identity",
+            "UNVERIFIED; missing "
+            + " and ".join(missing)
+            + "; boot the backend writer once, then re-run preflight",
+        )
         hold = None
     elif recorded is None:
         print("PASS [ADR-0054] state identity: 0012 adoption sentinel pending first writer boot")
