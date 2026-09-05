@@ -11,6 +11,34 @@ from chronos.broker.demo import DemoBroker
 FIXED_NOW = datetime(2026, 1, 15, 15, 30, tzinfo=UTC)
 
 
+def pytest_addoption(parser: pytest.Parser) -> None:
+    """Register the file-backed sqlite lane (see ``tests/safety/conftest.py``).
+
+    A command-line flag rather than an environment variable, deliberately. This
+    file already carries two tripwires whose whole subject is ambient
+    environment leaking into the suite; switching the *storage topology* of the
+    tests on an env var would run against that grain, and a flag cannot arrive
+    from a shell someone forgot to clean. It also shows up in ``pytest --help``,
+    where a mechanism nobody can find is a mechanism that has already stopped
+    working.
+
+    It lives here because ``pytest_addoption`` is honoured only in an initial
+    conftest; the fixture that acts on it lives in ``tests/safety/conftest.py``,
+    which is the only suite it applies to.
+    """
+
+    parser.addoption(
+        "--file-backed-sqlite",
+        action="store_true",
+        default=False,
+        help=(
+            "Run tests/safety against file-backed sqlite instead of ':memory:'. "
+            "CI lane: fails the first test that starts depending on StaticPool's "
+            "shared connection."
+        ),
+    )
+
+
 @pytest.fixture(autouse=True, scope="session")
 def _deterministic_umask() -> Iterator[None]:
     """Pin the umask, because file modes are now load-bearing (ADR-0053).

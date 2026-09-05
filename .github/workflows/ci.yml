@@ -57,6 +57,13 @@ jobs:
       - name: Test
         run: pytest -q
 
+      # Issue #154: the same supervisor safety tests, a second time, on the storage
+      # topology production runs. Buys nothing against today's suite by measurement;
+      # it goes red the first time a test starts depending on StaticPool's shared
+      # connection, which is exactly the dependency that is invisible while green.
+      - name: Test supervisor safety suites file-backed
+        run: pytest tests/safety -q --file-backed-sqlite
+
       - name: Release security gate
         run: make security-gate PY=python
 

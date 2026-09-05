@@ -70,6 +70,7 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
   "ibkr: read-only integration tests that require a configured TWS or IB Gateway",
+  "in_memory_sqlite_is_the_subject: the test pins :memory:/StaticPool behaviour itself, so the --file-backed-sqlite lane must not redirect it",
 ]
 
 [tool.ruff]
