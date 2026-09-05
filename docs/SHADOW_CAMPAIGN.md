@@ -403,6 +403,12 @@ Stop, and do not restart until the cause is understood:
   database disagree — a restore, a lost volume, or a replaced database — and the backend has
   booted read-only and unreconciled until an operator acknowledges it with a note. The
   wholesale-restore residual stays manual: see `docs/BACKUP_AND_RECOVERY.md`.
+  `evidence_posture_invalid` means `AUTONOMY_EVIDENCE_BUNDLES` is on with no
+  `AUTONOMY_PROPOSERS_FILE` — a bundle is issued *to* a credential, so there is no
+  author to issue to, and every proposal refuses until one of the two settings changes
+  (`api/main.py:269`). `submission_reconciliation_failed` means the startup submission
+  reconciliation raised: submission remains locked, while inspection, cancellation and
+  recovery stay available (`api/main.py:353`).
 - `mandate check` returns a `BLOCKING` finding; the proposer credential expires or is revoked.
 - The kill switch reads ENGAGED with no operator having engaged it.
 - `verify-audit-log` reports a broken platform chain, or a terminal journal row fails its own recomputation (§5 — these are two different chains).

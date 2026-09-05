@@ -241,7 +241,7 @@ RPO/RTO, encrypted/off-host backup, and external integrity anchor remain open.
    restored state:
 
    ```bash
-   curl -fsS -X POST http://127.0.0.1:8000/live/recovery/acknowledge \
+   curl -fsS -X POST http://127.0.0.1:8765/live/recovery/acknowledge \
      -H "X-Chronos-Token: $(cat data/backend_api_token)" \
      -H 'Content-Type: application/json' \
      -d '{"note": "restore from backup <date>; audit chain OK; recon clean: <evidence>"}'
