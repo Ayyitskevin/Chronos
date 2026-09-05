@@ -33,6 +33,7 @@ from itertools import count
 from pathlib import Path
 
 import pytest
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session, sessionmaker
 
 from chronos.persistence.database import Database
@@ -71,6 +72,41 @@ def file_sessions(tmp_path: Path) -> Iterator[sessionmaker[Session]]:
         database.dispose()
 
 
+def _is_in_memory_sqlite(url: str) -> bool:
+    """Mirror ``Database``'s own StaticPool predicate, rather than approximate it.
+
+    ``Database`` applies ``StaticPool`` when the backend is sqlite **and** the URL
+    names no database — ``configured_url.database in {None, "", ":memory:"}``
+    (``persistence/database.py:100-101``). A redirect keyed on
+    ``url.endswith(":memory:")`` is narrower than that: ``sqlite+pysqlite://``
+    names no database either, gets ``StaticPool`` just the same, and so slipped
+    through the lane entirely. Predicting the pool with a different rule than the
+    one that chooses it is the whole defect; this asks the same question.
+
+    Both halves are load-bearing, in opposite directions. Drop the database check
+    and every sqlite file URL gets redirected. Drop the **backend** check and
+    ``postgresql://host/`` (database ``""``) or ``postgresql+psycopg://user@host``
+    (database ``None``) would be rewritten to a sqlite file — measured, both parse
+    that way.
+
+    A URL this cannot parse is not the lane's business: return ``False`` and let
+    the constructor raise on it exactly as it would have. ``make_url`` raises more
+    than one type — ``ArgumentError`` for ``"not a url"``, ``ValueError`` for
+    ``"sqlite://:memory:"`` — and the point here is "should this be redirected",
+    to which any unparseable answer is no.
+    """
+
+    try:
+        configured = make_url(url)
+    except Exception:
+        return False
+    return configured.get_backend_name() == "sqlite" and configured.database in {
+        None,
+        "",
+        ":memory:",
+    }
+
+
 @pytest.fixture(autouse=True)
 def _file_backed_sqlite_lane(
     request: pytest.FixtureRequest, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -105,7 +141,7 @@ def _file_backed_sqlite_lane(
     counter = count(1)
 
     def _init(self: Database, url: str) -> None:
-        if isinstance(url, str) and url.endswith(":memory:"):
+        if isinstance(url, str) and _is_in_memory_sqlite(url):
             url = f"sqlite+pysqlite:///{tmp_path / f'lane-{next(counter)}.db'}"
         real_init(self, url)
 
