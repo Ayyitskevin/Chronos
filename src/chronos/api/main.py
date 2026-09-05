@@ -76,8 +76,11 @@ from chronos.operations.clock import (
     refresh_clock_health,
 )
 from chronos.operations.health import BackgroundTaskName, StartupFaultCode
+from chronos.orders.recovery_hold import evaluate_startup_recovery_hold
+from chronos.orders.state_generation import StateGenerationMarker
 from chronos.runtime import build_runtime
 from chronos.utils.locking import WriterLease
+from chronos.utils.time import utc_now
 
 _logger = logging.getLogger("chronos.api")
 
@@ -259,6 +262,31 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             if not read_only:
                 alert_broken_evidence_posture(runtime)
         if not read_only:
+            # ADR-0054: before anything is bound or published, ask whether this
+            # boot can prove it does not follow a restore. Writer-only: seeding
+            # the first witness is a write, and a read-only backend already
+            # satisfies everything a hold enforces.
+            backend_state.recovery_hold = evaluate_startup_recovery_hold(
+                runtime.database.sessions,
+                StateGenerationMarker.beside(runtime.settings.live_kill_switch_file),
+                state_directory=runtime.settings.live_kill_switch_file.parent,
+                now=utc_now(),
+            )
+            if backend_state.recovery_hold is not None:
+                backend_state.note_startup_fault(StartupFaultCode.RECOVERY_UNVERIFIED)
+                _logger.error(
+                    "This boot cannot prove it does not follow a restore (%s); the "
+                    "backend is read-only and unreconciled until an operator "
+                    "acknowledges it with a note",
+                    backend_state.recovery_hold.reason.value,
+                    extra={
+                        "event": "recovery_hold_engaged",
+                        "recovery_hold_reason": backend_state.recovery_hold.reason.value,
+                        "outcome": "locked",
+                        "passed": False,
+                    },
+                )
+
             # R-24: the boundary re-checks lease ownership in the database
             # immediately before transmitting, instead of trusting the
             # startup-time `writer_lease_held` flag.
@@ -272,46 +300,55 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                 a startup-time flag, which is the R-24 defect itself.
                 """
 
-                return not backend_state.read_only and lease.holds()
+                return backend_state.may_write and lease.holds()
 
             runtime.order_management.submission_boundary.bind_lease_verifier(_still_the_writer)
             # A writer publishes submission readiness only after both restart-order
             # recovery and full portfolio reconciliation complete against broker
             # truth. Read-only backends cannot persist recovery and stay PENDING.
-            try:
-                report = runtime.reconcile_submission_readiness()
-                readiness = report.readiness
-                log = _logger.info if readiness.ready else _logger.warning
-                log(
-                    "Submission reconciliation finished %s "
-                    "(applied=%d unresolved=%d remaining_active=%d)",
-                    readiness.status.value,
-                    len(report.restart.applied_updates),
-                    len(report.restart.unresolved),
-                    len(report.restart.remaining_active),
-                    extra={
-                        "event": "submission_reconciliation_finished",
-                        "reconciliation_status": readiness.status.value,
-                        "applied_count": len(report.restart.applied_updates),
-                        "outcome": "ready" if readiness.ready else "locked",
-                        "passed": readiness.ready,
-                        "proven_count": len(report.restart.proven),
-                        "unresolved_count": len(report.restart.unresolved),
-                        "remaining_active_count": len(report.restart.remaining_active),
-                    },
+            if backend_state.recovery_hold is not None:
+                _logger.warning(
+                    "Skipping startup reconciliation under a recovery hold; submission "
+                    "readiness stays PENDING",
+                    extra={"event": "submission_reconciliation_skipped", "outcome": "locked"},
                 )
-            except Exception as error:
-                backend_state.note_startup_fault(StartupFaultCode.SUBMISSION_RECONCILIATION_FAILED)
-                _logger.error(
-                    "Submission reconciliation failed; submission remains locked "
-                    "while inspection, cancellation, and recovery stay available",
-                    extra={
-                        "event": "submission_reconciliation_failed",
-                        "error_type": type(error).__name__,
-                        "outcome": "locked",
-                        "passed": False,
-                    },
-                )
+            else:
+                try:
+                    report = runtime.reconcile_submission_readiness()
+                    readiness = report.readiness
+                    log = _logger.info if readiness.ready else _logger.warning
+                    log(
+                        "Submission reconciliation finished %s "
+                        "(applied=%d unresolved=%d remaining_active=%d)",
+                        readiness.status.value,
+                        len(report.restart.applied_updates),
+                        len(report.restart.unresolved),
+                        len(report.restart.remaining_active),
+                        extra={
+                            "event": "submission_reconciliation_finished",
+                            "reconciliation_status": readiness.status.value,
+                            "applied_count": len(report.restart.applied_updates),
+                            "outcome": "ready" if readiness.ready else "locked",
+                            "passed": readiness.ready,
+                            "proven_count": len(report.restart.proven),
+                            "unresolved_count": len(report.restart.unresolved),
+                            "remaining_active_count": len(report.restart.remaining_active),
+                        },
+                    )
+                except Exception as error:
+                    backend_state.note_startup_fault(
+                        StartupFaultCode.SUBMISSION_RECONCILIATION_FAILED
+                    )
+                    _logger.error(
+                        "Submission reconciliation failed; submission remains locked "
+                        "while inspection, cancellation, and recovery stay available",
+                        extra={
+                            "event": "submission_reconciliation_failed",
+                            "error_type": type(error).__name__,
+                            "outcome": "locked",
+                            "passed": False,
+                        },
+                    )
     except BaseException:
         if not read_only:
             try:
@@ -369,57 +406,78 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             )
             + 60.0
         )
-        task_observations.starting(
-            BackgroundTaskName.RECONCILIATION,
-            max_age_seconds=reconciliation_age,
-        )
-        reconcile_task = asyncio.create_task(
-            reconciliation_task(
-                runtime,
-                on_progress=lambda: task_observations.progress(BackgroundTaskName.RECONCILIATION),
+        # ADR-0054: not under a recovery hold. The refresher would re-arm exactly
+        # the readiness the hold exists to withhold, so "unreconciled" has to mean
+        # the task does not run, not merely that startup skipped one cycle.
+        recovery_held = app.state.backend.recovery_hold is not None
+        if recovery_held:
+            task_observations.not_expected(
+                BackgroundTaskName.RECONCILIATION,
+                max_age_seconds=reconciliation_age,
             )
-        )
-        task_observations.bind(
-            BackgroundTaskName.RECONCILIATION,
-            reconcile_task,
-            max_age_seconds=reconciliation_age,
-        )
+        else:
+            task_observations.starting(
+                BackgroundTaskName.RECONCILIATION,
+                max_age_seconds=reconciliation_age,
+            )
+            reconcile_task = asyncio.create_task(
+                reconciliation_task(
+                    runtime,
+                    on_progress=lambda: task_observations.progress(
+                        BackgroundTaskName.RECONCILIATION
+                    ),
+                )
+            )
+            task_observations.bind(
+                BackgroundTaskName.RECONCILIATION,
+                reconcile_task,
+                max_age_seconds=reconciliation_age,
+            )
         # ADR-0017: the persistent mandate is the owner's standing grant. When
         # one is configured and valid, the autonomy runtime starts with the
         # backend — no per-boot ritual. No grant (the default) boots inert, and
         # a broken grant alerts and boots inert: absence of the owner act is
         # absence of the authority, never a crash of the process that can still
         # close positions.
-        try:
-            # `is_writer` is read per submission, never captured: the lease
-            # heartbeat can demote this process mid-session, and the autonomous
-            # path must see that at gate 1 exactly as the human path does
-            # (`state.writer` in routes/orders.py) rather than being turned away
-            # later by the CAS-window re-check.
-            autonomy_backend = app.state.backend
-            autonomy = build_autonomy_runtime(
-                runtime,
-                process_generation=int(app.state.backend.lease is not None),
-                is_writer=lambda: bool(autonomy_backend.writer),
-            )
-        except UnauthenticatedSubmittingMandate:
-            # ADR-0051: typed, not the generic wiring fault — the owner must be
-            # able to tell "the posture is wrong" from "assembly crashed".
-            app.state.backend.note_startup_fault(StartupFaultCode.AUTONOMY_POSTURE_UNAUTHENTICATED)
-            _logger.critical(
-                "A submitting mandate met a static proposer posture; autonomy stays inert "
-                "until AUTONOMY_PROPOSERS_FILE and AUTONOMY_EVIDENCE_BUNDLES are configured "
-                "or the mandate is re-authored at SHADOW",
-                extra={"event": "autonomy_posture_unauthenticated", "passed": False},
-            )
-            autonomy = None
-        except Exception:
-            app.state.backend.note_startup_fault(StartupFaultCode.AUTONOMY_WIRING_FAILED)
-            _logger.exception(
-                "Autonomy wiring failed; the backend continues without it",
-                extra={"event": "autonomy_wiring_failed"},
-            )
-            autonomy = None
+        # ADR-0054: and not under a recovery hold either. `build_autonomy_runtime`
+        # is where ADR-0017's auto-activation happens, so not calling it is what
+        # keeps a restored mandate file from re-arming autonomy on this boot.
+        # Not calling it is deliberately not the same as revoking: no revocation
+        # row is written, so acknowledging the hold costs the owner nothing.
+        autonomy = None
+        if not recovery_held:
+            try:
+                # `is_writer` is read per submission, never captured: the lease
+                # heartbeat can demote this process mid-session, and the autonomous
+                # path must see that at gate 1 exactly as the human path does
+                # (`state.writer` in routes/orders.py) rather than being turned away
+                # later by the CAS-window re-check.
+                autonomy_backend = app.state.backend
+                autonomy = build_autonomy_runtime(
+                    runtime,
+                    process_generation=int(app.state.backend.lease is not None),
+                    is_writer=lambda: bool(autonomy_backend.writer),
+                )
+            except UnauthenticatedSubmittingMandate:
+                # ADR-0051: typed, not the generic wiring fault — the owner must be
+                # able to tell "the posture is wrong" from "assembly crashed".
+                app.state.backend.note_startup_fault(
+                    StartupFaultCode.AUTONOMY_POSTURE_UNAUTHENTICATED
+                )
+                _logger.critical(
+                    "A submitting mandate met a static proposer posture; autonomy stays inert "
+                    "until AUTONOMY_PROPOSERS_FILE and AUTONOMY_EVIDENCE_BUNDLES are configured "
+                    "or the mandate is re-authored at SHADOW",
+                    extra={"event": "autonomy_posture_unauthenticated", "passed": False},
+                )
+                autonomy = None
+            except Exception:
+                app.state.backend.note_startup_fault(StartupFaultCode.AUTONOMY_WIRING_FAILED)
+                _logger.exception(
+                    "Autonomy wiring failed; the backend continues without it",
+                    extra={"event": "autonomy_wiring_failed"},
+                )
+                autonomy = None
         if autonomy is not None:
             app.state.autonomy = autonomy
             task_observations.starting(

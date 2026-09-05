@@ -1309,6 +1309,12 @@ def demo_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[Path]:
     monkeypatch.setenv("BROKER_MODE", "demo")
     monkeypatch.setenv("DEMO_PROFILE", "empty_account")
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'chronos.db'}")
+    # ADR-0054: the first writer boot of a fresh database seeds an installation
+    # marker in the state directory. Redirect it with the database, or these
+    # tests would leave one in the repository's own `data/` and the next test
+    # would read a fresh database beside a surviving marker as a replaced one.
+    monkeypatch.setenv("LIVE_KILL_SWITCH_FILE", str(tmp_path / "live_kill_switch.json"))
+    monkeypatch.setenv("SESSION_BASELINE_FILE", str(tmp_path / "session_drawdown.json"))
     monkeypatch.setenv("LOG_FILE", str(tmp_path / "chronos.log"))
     monkeypatch.setenv("BACKEND_TOKEN_FILE", str(tmp_path / "backend_api_token"))
     get_settings.cache_clear()

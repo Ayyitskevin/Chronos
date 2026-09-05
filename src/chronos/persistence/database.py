@@ -18,7 +18,7 @@ from sqlalchemy.pool import StaticPool
 from chronos.persistence.schema import Base, DatabaseScopeRow, SchemaVersionRow
 from chronos.utils.identifiers import account_fingerprint
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 _DATABASE_RECOVERY_GUIDANCE = (
     "Preserve and back up this database first. A prior-version schema can be upgraded with "

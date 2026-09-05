@@ -183,13 +183,18 @@ def test_schema_initialization_creates_required_evidence_tables() -> None:
         "autonomy_evidence_bundles",
         # A3: durable proposer revocation, the ledger both planes consult (v10).
         "autonomy_proposer_revocations",
+        # The second installation witness and its operator acknowledgements
+        # (v13, ADR-0054, migration 0012).
+        "installation_identity",
+        "recovery_acknowledgements",
     } <= names
     # v8: autonomy_proposal_queue gains proposer_id (ADR-0023, migration 0007).
     # v9: autonomy_evidence_bundles arrives (ADR-0028, migration 0008).
     # v10: autonomy_proposer_revocations (A3, migration 0009).
     # v11: managed_position_bindings (ADR-0035, migration 0010).
     # v12: proposal and evidence registration bindings (ADR-0048, migration 0011).
-    assert SCHEMA_VERSION == 12
+    # v13: installation identity + recovery acknowledgements (ADR-0054, migration 0012).
+    assert SCHEMA_VERSION == 13
 
 
 def test_application_events_are_append_only_and_queryable() -> None:

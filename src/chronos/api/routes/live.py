@@ -11,6 +11,7 @@ Endpoint                     Lease?      Why
 ``POST /live/kill/disengage``required    restores trading after a halt
 ``POST /live/disarm``        NOT req'd   only ever removes authority
 ``POST /live/kill``          NOT req'd   the emergency stop must always be reachable
+``POST /live/recovery/…``    lease only  must be reachable *while* a hold is in force
 ===========================  ==========  ==========================================
 
 The M2 review found this asymmetry missing, and the writer-lease heartbeat
@@ -40,16 +41,23 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from chronos.api.auth import require_token
-from chronos.api.dependencies import BackendState, get_state, require_writer
+from chronos.api.dependencies import (
+    BackendState,
+    get_state,
+    require_lease_holder,
+    require_writer,
+)
 from chronos.domain.models import ChronosModel
 from chronos.orders.arming import ArmState, LiveArmingError
 from chronos.orders.kill_switch import KillSwitchState
+from chronos.orders.recovery_hold import record_acknowledgement
 from chronos.utils.time import utc_now
 
 router = APIRouter(dependencies=[Depends(require_token)])
 
 StateDep = Annotated[BackendState, Depends(get_state)]
 WriterDep = Annotated[BackendState, Depends(require_writer)]
+LeaseHolderDep = Annotated[BackendState, Depends(require_lease_holder)]
 
 
 class ArmRequest(ChronosModel):
@@ -131,3 +139,67 @@ def disengage_kill_switch(request: DisengageRequest, state: WriterDep) -> KillSw
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)
         ) from error
+
+
+class RecoveryAcknowledgeRequest(ChronosModel):
+    note: str
+
+
+class RecoveryAcknowledgement(ChronosModel):
+    """What was acknowledged, so the response is evidence rather than an OK."""
+
+    acknowledged: bool
+    reason: str
+    binding: str
+    effective: str
+
+
+@router.post("/live/recovery/acknowledge", response_model=RecoveryAcknowledgement)
+def acknowledge_recovery_hold(
+    request: RecoveryAcknowledgeRequest, state: LeaseHolderDep
+) -> RecoveryAcknowledgement:
+    """Retire one recovery observation with a typed note (ADR-0054).
+
+    Deliberately ``require_lease_holder`` and not ``require_writer``: a hold
+    refuses every writer route, so an acknowledgement gated on ``require_writer``
+    would be the one escape the hold locks out.
+
+    Three properties are the point. The note is mandatory, exactly as the kill
+    switch's disengage requires one. The record binds the **exact** observation,
+    so it retires this restore and not restores in general. And it takes effect
+    at the next start: the startup work a hold skipped -- reconciliation, the
+    refresher, the mandate -- is not re-run mid-process, because "acknowledge,
+    then restart" is the procedure `docs/BACKUP_AND_RECOVERY.md` already walks and
+    re-running it here would be more machinery than the case earns.
+
+    It does not disengage the kill switch and does not activate a mandate. Those
+    are their own typed acts, each with its own note.
+    """
+
+    hold = state.recovery_hold
+    if hold is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "this backend did not boot under a recovery hold; there is nothing to acknowledge"
+            ),
+        )
+    try:
+        with state.runtime.database.sessions.begin() as session:
+            record_acknowledgement(
+                session,
+                hold,
+                note=request.note,
+                acknowledged_by="operator",
+                now=_now(),
+            )
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)
+        ) from error
+    return RecoveryAcknowledgement(
+        acknowledged=True,
+        reason=hold.reason.value,
+        binding=hold.binding,
+        effective="next start",
+    )

@@ -82,6 +82,11 @@ _V11_TABLES = {
     "managed_position_bindings",
 }
 
+_V12_TABLES = {
+    "installation_identity",
+    "recovery_acknowledgements",
+}
+
 _ALL_MIGRATED_TABLES = (
     _V2_BASELINE_TABLES
     | _V3_TABLES
@@ -91,6 +96,7 @@ _ALL_MIGRATED_TABLES = (
     | _V9_TABLES
     | _V10_TABLES
     | _V11_TABLES
+    | _V12_TABLES
 )
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -102,7 +108,14 @@ def _make_v2_database(path: Path) -> None:
     url = f"sqlite:///{path}"
     engine = sa.create_engine(url)
     post_v2 = (
-        _V3_TABLES | _V4_TABLES | _V5_TABLES | _V7_TABLES | _V9_TABLES | _V10_TABLES | _V11_TABLES
+        _V3_TABLES
+        | _V4_TABLES
+        | _V5_TABLES
+        | _V7_TABLES
+        | _V9_TABLES
+        | _V10_TABLES
+        | _V11_TABLES
+        | _V12_TABLES
     )
     v2_tables = [table for name, table in Base.metadata.tables.items() if name not in post_v2]
     Base.metadata.create_all(engine, tables=v2_tables)
@@ -121,7 +134,9 @@ def _make_v3_database(path: Path) -> None:
 
     url = f"sqlite:///{path}"
     engine = sa.create_engine(url)
-    post_v3 = _V4_TABLES | _V5_TABLES | _V7_TABLES | _V9_TABLES | _V10_TABLES | _V11_TABLES
+    post_v3 = (
+        _V4_TABLES | _V5_TABLES | _V7_TABLES | _V9_TABLES | _V10_TABLES | _V11_TABLES | _V12_TABLES
+    )
     v3_tables = [table for name, table in Base.metadata.tables.items() if name not in post_v3]
     Base.metadata.create_all(engine, tables=v3_tables)
     with engine.begin() as connection:
@@ -139,7 +154,7 @@ def _make_v4_database(path: Path) -> None:
 
     url = f"sqlite:///{path}"
     engine = sa.create_engine(url)
-    post_v4 = _V5_TABLES | _V7_TABLES | _V9_TABLES | _V10_TABLES | _V11_TABLES
+    post_v4 = _V5_TABLES | _V7_TABLES | _V9_TABLES | _V10_TABLES | _V11_TABLES | _V12_TABLES
     v4_tables = [table for name, table in Base.metadata.tables.items() if name not in post_v4]
     Base.metadata.create_all(engine, tables=v4_tables)
     with engine.begin() as connection:
@@ -232,7 +247,7 @@ def test_v4_database_upgrades_to_current_schema(tmp_path: Path) -> None:
 
     engine = sa.create_engine(f"sqlite:///{db_path}")
     tables = set(sa.inspect(engine).get_table_names())
-    assert tables >= _V5_TABLES | _V7_TABLES | _V9_TABLES | _V10_TABLES | _V11_TABLES
+    assert tables >= _V5_TABLES | _V7_TABLES | _V9_TABLES | _V10_TABLES | _V11_TABLES | _V12_TABLES
     with engine.connect() as connection:
         version = connection.execute(
             sa.text("SELECT version FROM schema_version ORDER BY id DESC LIMIT 1")
@@ -267,6 +282,9 @@ def test_v7_database_gains_the_proposer_column_and_keeps_its_rows(tmp_path: Path
     engine = sa.create_engine(f"sqlite:///{db_path}")
     Base.metadata.create_all(engine)
     with engine.begin() as connection:
+        # v12 and earlier predate migration 0012 (ADR-0054).
+        connection.execute(sa.text("DROP TABLE installation_identity"))
+        connection.execute(sa.text("DROP TABLE recovery_acknowledgements"))
         connection.execute(sa.text("ALTER TABLE autonomy_proposal_queue DROP COLUMN proposer_id"))
         connection.execute(
             sa.text(
@@ -339,6 +357,9 @@ def test_v8_database_gains_the_evidence_bundle_table_and_keeps_its_rows(tmp_path
     engine = sa.create_engine(f"sqlite:///{db_path}")
     Base.metadata.create_all(engine)
     with engine.begin() as connection:
+        # v12 and earlier predate migration 0012 (ADR-0054).
+        connection.execute(sa.text("DROP TABLE installation_identity"))
+        connection.execute(sa.text("DROP TABLE recovery_acknowledgements"))
         connection.execute(sa.text("DROP TABLE autonomy_evidence_bundles"))
         connection.execute(
             sa.text(
@@ -428,6 +449,9 @@ def test_v9_database_gains_the_revocation_table_and_keeps_its_rows(tmp_path: Pat
     engine = sa.create_engine(f"sqlite:///{db_path}")
     Base.metadata.create_all(engine)
     with engine.begin() as connection:
+        # v12 and earlier predate migration 0012 (ADR-0054).
+        connection.execute(sa.text("DROP TABLE installation_identity"))
+        connection.execute(sa.text("DROP TABLE recovery_acknowledgements"))
         connection.execute(sa.text("DROP TABLE autonomy_proposer_revocations"))
         connection.execute(
             sa.text(
@@ -491,6 +515,9 @@ def test_v10_database_gains_managed_position_bindings_empty(tmp_path: Path) -> N
     engine = sa.create_engine(f"sqlite:///{db_path}")
     Base.metadata.create_all(engine)
     with engine.begin() as connection:
+        # v12 and earlier predate migration 0012 (ADR-0054).
+        connection.execute(sa.text("DROP TABLE installation_identity"))
+        connection.execute(sa.text("DROP TABLE recovery_acknowledgements"))
         connection.execute(sa.text("DROP TABLE managed_position_bindings"))
         for version in range(2, 11):
             connection.execute(
@@ -546,6 +573,9 @@ def test_v11_database_gains_credential_bindings_without_relabelling_rows(
     engine = sa.create_engine(f"sqlite:///{db_path}")
     Base.metadata.create_all(engine)
     with engine.begin() as connection:
+        # v12 and earlier predate migration 0012 (ADR-0054).
+        connection.execute(sa.text("DROP TABLE installation_identity"))
+        connection.execute(sa.text("DROP TABLE recovery_acknowledgements"))
         for table in ("autonomy_proposal_queue", "autonomy_evidence_bundles"):
             connection.execute(
                 sa.text(f"ALTER TABLE {table} DROP COLUMN proposer_credential_epoch")
@@ -634,6 +664,7 @@ def test_fresh_database_needs_no_alembic(tmp_path: Path) -> None:
             | _V9_TABLES
             | _V10_TABLES
             | _V11_TABLES
+            | _V12_TABLES
         )
     finally:
         database.dispose()
@@ -697,3 +728,33 @@ def test_migration_chain_builds_exactly_the_current_models(tmp_path: Path) -> No
     tables.discard("alembic_version")  # alembic's own bookkeeping, not a model
 
     assert tables == set(Base.metadata.tables)
+
+
+def test_v11_database_adopts_its_marker_instead_of_reading_itself_as_replaced(
+    tmp_path: Path,
+) -> None:
+    """Migration 0012 leaves the adoption sentinel, and it is load-bearing (ADR-0054).
+
+    An existing deployment already has a state-generation marker beside its state
+    files and no identity row. Without the sentinel, the first boot after this
+    upgrade would compare a present marker against an absent row and read its own
+    upgrade as a replaced database — every existing installation would boot held.
+
+    The sentinel is what separates that from the case the comparison is FOR: a
+    database created fresh by ``create_all`` has no row at all, and a marker
+    beside it really does belong to an installation it never witnessed.
+    """
+
+    db_path = tmp_path / "chronos.db"
+    _make_v2_database(db_path)
+    config = _alembic_config(db_path)
+    command.stamp(config, "0001")
+    command.upgrade(config, "head")
+
+    engine = sa.create_engine(f"sqlite:///{db_path}")
+    with engine.begin() as connection:
+        rows = connection.execute(
+            sa.text("SELECT id, installation_id FROM installation_identity")
+        ).all()
+    engine.dispose()
+    assert rows == [(1, None)]  # the sentinel: present, and deliberately unnamed
