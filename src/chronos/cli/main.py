@@ -30,6 +30,7 @@ from chronos.cli.campaign_status import add_campaign_status_command
 from chronos.cli.data_commands import add_data_commands
 from chronos.cli.mandate_check import add_mandate_commands
 from chronos.cli.proposer_commands import add_proposer_commands
+from chronos.cli.selection_commands import add_selection_command
 from chronos.control.halt import HaltReason, HaltStore
 from chronos.control.modes import TradingMode, resolve_mode_lock
 from chronos.risk.policy import load_risk_policy
@@ -604,6 +605,8 @@ def _add_research_commands(sub: argparse._SubParsersAction) -> None:  # type: ig
         help="treat code_commit drift as a hard failure (default: advisory only)",
     )
     compare.set_defaults(func=cmd_research_repro_compare)
+
+    add_selection_command(research_sub)
 
 
 def cmd_research_repro_produce(args: argparse.Namespace) -> int:
