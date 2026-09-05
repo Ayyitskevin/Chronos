@@ -232,6 +232,11 @@ def _run(
         facts=facts or _facts(now=_NOW),
         gather_instrument=gather_instrument,
         submit=submit,
+        # ADR-0052: a configured handoff needs the durable seam or it refuses.
+        # Every session in this module is a plain one — `_persist_selection_receipt`
+        # has committed mid-cycle since the receipt barrier landed — so the
+        # cycle's own commit is what production supplies here too.
+        commit_before_handoff=session.commit,
     )
 
 

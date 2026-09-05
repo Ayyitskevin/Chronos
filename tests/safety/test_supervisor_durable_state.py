@@ -21,6 +21,7 @@ tamper-proof; the honest bound is in the module docstring there.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -1086,3 +1087,108 @@ def test_the_alerting_module_opens_no_network_connection() -> None:
         "delivery is a disclosed gap and a promotion criterion, not something to add "
         "quietly next to a trading system."
     )
+
+
+# ------------------------- ADR-0052: the release, and its one loud edge
+
+
+def test_a_release_never_drives_a_counter_negative(session: Session) -> None:
+    """Clamping is the safe direction: a negative counter would widen headroom."""
+
+    dur.record_activity(
+        session,
+        account_fingerprint=_FINGERPRINT,
+        now=_NOW,
+        orders_submitted=1,
+        turnover_usd=Decimal(4000),
+    )
+    counters = dur.release_activity_reservation(
+        session,
+        account_fingerprint=_FINGERPRINT,
+        now=_NOW,
+        orders_submitted=3,
+        turnover_usd=Decimal(9000),
+    )
+
+    assert counters.orders_submitted == 0
+    assert counters.turnover_usd == Decimal(0)
+
+
+def test_a_release_larger_than_the_reservation_says_so_out_loud(session: Session) -> None:
+    """A clamp means the reserve/release pairing broke; absorbing it silently hides that.
+
+    Attached to the named logger rather than read through ``caplog``: propagation
+    is a global the rest of the suite can turn off, and a test that quietly
+    stopped observing would look exactly like a warning that stopped being
+    emitted — which is the failure this test exists to catch.
+    """
+
+    logger = logging.getLogger("chronos.supervisor.durable")
+
+    class _Capture(logging.Handler):
+        def __init__(self) -> None:
+            super().__init__()
+            self.records: list[logging.LogRecord] = []
+
+        def emit(self, record: logging.LogRecord) -> None:
+            self.records.append(record)
+
+    handler = _Capture()
+    logger.addHandler(handler)
+    try:
+        dur.record_activity(
+            session,
+            account_fingerprint=_FINGERPRINT,
+            now=_NOW,
+            orders_submitted=1,
+            turnover_usd=Decimal(4000),
+        )
+        dur.release_activity_reservation(
+            session,
+            account_fingerprint=_FINGERPRINT,
+            now=_NOW,
+            orders_submitted=2,
+            turnover_usd=Decimal(4000),
+        )
+    finally:
+        logger.removeHandler(handler)
+
+    clamped = [
+        r for r in handler.records if getattr(r, "event", None) == "activity_release_clamped"
+    ]
+    assert len(clamped) == 1
+    assert clamped[0].levelno == logging.WARNING
+    assert clamped[0].getMessage().startswith("Activity release exceeds the outstanding")
+
+
+def test_an_exact_release_is_silent(session: Session) -> None:
+    """Only the discrepancy is loud — the ordinary REFUSED_NOT_SENT path says nothing."""
+
+    logger = logging.getLogger("chronos.supervisor.durable")
+    seen: list[logging.LogRecord] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            seen.append(record)
+
+    handler = _Capture()
+    logger.addHandler(handler)
+    try:
+        dur.record_activity(
+            session,
+            account_fingerprint=_FINGERPRINT,
+            now=_NOW,
+            orders_submitted=1,
+            turnover_usd=Decimal(4000),
+        )
+        dur.release_activity_reservation(
+            session,
+            account_fingerprint=_FINGERPRINT,
+            now=_NOW,
+            orders_submitted=1,
+            turnover_usd=Decimal(4000),
+        )
+    finally:
+        logger.removeHandler(handler)
+
+    assert [r for r in seen if getattr(r, "event", None) == "activity_release_clamped"] == []

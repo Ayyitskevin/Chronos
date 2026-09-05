@@ -340,6 +340,7 @@ def run_cycle(
     identity: queue.HarnessIdentity | None,
     facts: CycleFacts,
     submit: Handoff | None = None,
+    commit_before_handoff: Callable[[], None] | None = None,
     gather_instrument: InstrumentGatherer | None = None,
     bind_evidence: bool = False,
     proposer_credential_epoch: str | None = None,
@@ -364,6 +365,21 @@ def run_cycle(
     every proposal to cite an evidence bundle this backend issued to this exact
     credential epoch and registry entry and has not expired — resolved here, at
     the drain, against the drain's own clock.
+
+    ``commit_before_handoff`` is ADR-0052's crash-accounting seam. The attempt is
+    always spent before the handoff; this callable is what makes that spend
+    *durable*, by committing the caller's transaction at the one point where an
+    atomic cycle is the wrong guarantee. It is injected rather than called as
+    ``session.commit()`` because the caller owns its transaction scope: the drain
+    holds a plain session and supplies ``session.commit``, while callers whose
+    session lives inside a ``sessionmaker.begin()`` block cannot commit mid-scope
+    at all.
+
+    Omitting it does **not** fall back to the pre-ADR-0052 accounting. A cycle
+    with a ``submit`` and no seam refuses ``NO_DURABLE_RESERVATION`` at the
+    HANDOFF stage and never calls the handoff, because a caller that wired
+    submission but not durability has not shown it can spend the mandate's budget
+    across a crash. Only omitting ``submit`` — SHADOW — is unchanged.
     """
 
     # --- ingress -----------------------------------------------------------
@@ -839,6 +855,36 @@ def run_cycle(
             ),
         )
 
+    # ADR-0052: a configured handoff with no durable seam refuses, rather than
+    # quietly running the pre-ADR-0052 accounting. Deny-by-default applies to a
+    # missing safety mechanism exactly as it applies to a missing fact: a caller
+    # that wired submission but not the commit hook has NOT proven it can spend
+    # the mandate's budget durably, and "it behaves like it used to" is the
+    # reading that lets an unattended backend transmit on accounting a crash can
+    # undo. Nothing is sent, and the journal says which mechanism was absent.
+    if commit_before_handoff is None:
+        return _record(
+            session,
+            facts,
+            CycleOutcome(
+                stage=CycleStage.HANDOFF,
+                refusal="NO_DURABLE_RESERVATION",
+                detail=(
+                    "a submission handoff is configured but no commit_before_handoff seam is, "
+                    "so the mandate's activity could not be spent durably before the wire; "
+                    "nothing was sent"
+                ),
+                decision_id=decision.decision_id,
+                decision=decision,
+                admission=admission,
+                selection_receipt=selection_receipt,
+                sizing=sizing,
+                compilation=compilation,
+                intent=compilation.intent,
+                alerts_raised=alert_kinds,
+            ),
+        )
+
     if selection_receipt is not None:
         try:
             _verify_persisted_selection_receipt(
@@ -928,6 +974,27 @@ def run_cycle(
                     ),
                 )
 
+    # ADR-0052 (P1-02): the attempt is spent BEFORE the handoff can reach the wire,
+    # and committed there. Everything from here until the cycle's next commit is a
+    # window in which the venue may hold an order this process has not recorded;
+    # reserving first is what stops losing the process there from handing the
+    # allowance back to a mandate that already spent it. Sizing is the same
+    # expression the post-handoff counter used, moved rather than rewritten.
+    reserved_turnover = _notional(sizing.quantity, reference_price, multiplier)
+    durable.record_activity(
+        session,
+        account_fingerprint=facts.account_fingerprint,
+        now=facts.now,
+        orders_submitted=1,
+        turnover_usd=reserved_turnover,
+        market_timezone=facts.market_timezone,
+    )
+    if commit_before_handoff is not None:
+        # The split that makes the reservation outlive a crash. It also commits
+        # the admission attempt record, which strengthens R-31: a replay after
+        # restart is refused by a row that used to die with the same crash.
+        commit_before_handoff()
+
     try:
         result = submit(compilation.intent)
     except Exception as error:
@@ -939,6 +1006,10 @@ def run_cycle(
         # the boundary a raise mid-submit does not prove the wire stayed quiet.
         # A caller who supplies a handoff that raises after transmitting would be
         # recorded here as not-sent — disclosed in the risk register, not hidden.
+        #
+        # ADR-0052 changes what that residual COSTS: the reservation is not
+        # released here. A raise does not prove the wire stayed quiet, so the
+        # ambiguity is paid out of the mandate's budget rather than handed back.
         return _record(
             session,
             facts,
@@ -967,13 +1038,19 @@ def run_cycle(
     # (the rule, and the argument for it, live in `supervisor.handoff`). A
     # refusal before the wire attempted nothing, so it must not spend budget an
     # activity ceiling exists to ration.
-    if handoff_result.counts_activity_attempt:
-        durable.record_activity(
+    #
+    # Since ADR-0052 the attempt is already reserved, so this reads the same rule
+    # from the other end: the reservation stands unless the disposition carries
+    # positive proof that nothing left the process. It is driven by the same
+    # ``counts_activity_attempt`` flag the counting used, so the reserve and the
+    # release can never disagree about what an attempt is.
+    if not handoff_result.counts_activity_attempt:
+        durable.release_activity_reservation(
             session,
             account_fingerprint=facts.account_fingerprint,
             now=facts.now,
             orders_submitted=1,
-            turnover_usd=_notional(sizing.quantity, reference_price, multiplier),
+            turnover_usd=reserved_turnover,
             market_timezone=facts.market_timezone,
         )
     if handoff_result.requires_owner_alert:

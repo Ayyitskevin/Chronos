@@ -20,6 +20,7 @@ import json
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -544,3 +545,135 @@ def test_the_runtime_imports_nothing_that_can_transmit() -> None:
             imported.append(node.module)
     for name in imported:
         assert not name.startswith(("chronos.broker", "chronos.execution", "chronos.orders")), name
+
+
+# ------------------------------------ P1-02: activity spent before the wire
+
+
+class _PowerLoss(RuntimeError):
+    """Process death between the broker handoff answering and the tick committing."""
+
+
+@pytest.fixture
+def file_sessions(tmp_path: Path) -> Iterator[sessionmaker[Session]]:
+    """A FILE-backed database: the topology production actually runs.
+
+    Be precise about what this buys, because the obvious claim is wrong. This
+    test's verdict is the SAME on both pools — measured four ways, file and
+    ``:memory:`` crossed with the commit present and absent, and the reservation
+    survives in both and dies in both. It has to be: ADR-0052 commits the
+    cycle's OWN session, so no second connection is ever involved and
+    ``StaticPool`` has nothing to hide.
+
+    What ``StaticPool`` does hide is the failure of the designs this one
+    replaced. It gives an in-memory URL one connection shared by every session,
+    so a *second* session's commit adopts the first's pending writes — which is
+    exactly how a reserve-from-another-session shape appears to work in tests
+    while deadlocking against SQLite's single writer in production.
+
+    So this fixture is not what makes the test valid; it is what keeps it
+    honest if the implementation ever moves back toward a second connection.
+    A durability test should run the durability configuration (WAL,
+    ``synchronous=FULL``) rather than one chosen for speed.
+    """
+
+    database = Database(f"sqlite+pysqlite:///{tmp_path / 'chronos.db'}")
+    database.initialize()
+    try:
+        yield database.sessions
+    finally:
+        database.dispose()
+
+
+def test_a_crash_between_the_handoff_and_the_commit_leaves_the_attempt_spent(
+    file_sessions: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The mandate's activity budget must not be restored by losing the process.
+
+    ``_drain`` records the attempt inside the tick's transaction and commits it
+    only after ``run_cycle`` returns, so everything between the order plane
+    answering and that commit is a window in which the venue may hold an order
+    the supervisor is about to forget. Losing power there rolls the cycle back
+    and hands the budget back: a different decision after restart can spend an
+    allowance that was already spent at the broker.
+
+    The crash is injected at ``proposals.mark_processed`` because that is the
+    real seam — it runs after the handoff has answered and before
+    ``session.commit()``, and ``_drain``'s own ``except BaseException:
+    session.rollback()`` is what unwinds it. Nothing here is simulated except
+    the power cut.
+    """
+
+    sessions = file_sessions
+    mandate = _mandate()
+    _activate(sessions, mandate)
+    _enqueue(sessions)
+
+    def _die(*_args: Any, **_kwargs: Any) -> None:
+        raise _PowerLoss("the process died before the supervisor transaction committed")
+
+    monkeypatch.setattr(proposals, "mark_processed", _die)
+
+    handed_off: list[Any] = []
+    runtime = _runtime(
+        sessions,
+        mandate=mandate,
+        submit=lambda intent: handed_off.append(intent) or HandoffResult.submitted(),
+    )
+
+    report = runtime.run_tick(_NOW)
+
+    # The handoff really did answer, and the tick really did lose the process.
+    assert len(handed_off) == 1
+    assert report.failure == "tick raised _PowerLoss"
+
+    # A fresh session is the restarted process reading its own durable memory.
+    with sessions.begin() as session:
+        counters = durable.load_counters(session, account_fingerprint=_FINGERPRINT, now=_NOW)
+    assert counters.orders_submitted == 1, (
+        "the attempt was handed to the order plane and must stay spent across the crash"
+    )
+    assert counters.turnover_usd > 0, "turnover is consumed with the attempt, not after it"
+
+
+def test_the_drain_supplies_the_durable_seam_to_every_cycle(
+    file_sessions: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pin the production wiring, not only its effect.
+
+    The crash test proves the reservation survives; this proves *why*, at the one
+    call site that decides it. A refactor that dropped ``commit_before_handoff``
+    from the drain would not crash and would not transmit — every cycle would
+    refuse ``NO_DURABLE_RESERVATION`` and the backend would go quietly inert.
+    That failure reads as "autonomy stopped trading", which is a bad thing to
+    debug from the outside; this makes it read as a failing test instead.
+    """
+
+    from chronos.supervisor import runtime as runtime_module
+
+    seen: list[Any] = []
+    real = runtime_module.run_cycle
+
+    def _capture(payload: Any, **kwargs: Any) -> Any:
+        seen.append(kwargs.get("commit_before_handoff"))
+        return real(payload, **kwargs)
+
+    monkeypatch.setattr(runtime_module, "run_cycle", _capture)
+
+    sessions = file_sessions
+    mandate = _mandate()
+    _activate(sessions, mandate)
+    _enqueue(sessions)
+    runtime = _runtime(sessions, mandate=mandate, submit=lambda intent: HandoffResult.submitted())
+
+    report = runtime.run_tick(_NOW)
+
+    assert report.proposals_judged == 1
+    assert report.orders_handed_off == 1, "the cycle reached the handoff, so the seam mattered"
+    assert len(seen) == 1
+    seam = seen[0]
+    assert seam is not None, "the drain must supply the durable seam"
+    # Not merely "something callable": the drain's own session's commit, which is
+    # the only thing that makes the reservation outlive the cycle's rollback.
+    assert getattr(seam, "__name__", None) == "commit"
+    assert isinstance(getattr(seam, "__self__", None), Session)
