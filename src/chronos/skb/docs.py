@@ -69,6 +69,33 @@ def render_catalog(store: SKBStore) -> str:
             )
         lines.append("")
 
+    measured = query.measured_scripts(store)
+    bindings = query.timeframe_binding_counts(store)
+    lines.append("## Source-measured properties")
+    lines.append("")
+    lines.append(
+        "Read from the Pine source line by line (issue #181); no corpus input states "
+        "these. Every other script is **unmeasured** — `unknown` here means nobody "
+        "looked, not that the property is absent."
+    )
+    lines.append("")
+    lines.append(f"- Measured: **{len(measured)}** of {store.pine_script_count}")
+    lines.append(
+        "- Timeframe binding: " + ", ".join(f"`{k}` {v}" for k, v in bindings.items() if v)
+    )
+    lines.append("")
+    if measured:
+        lines.append("| # | Title | Max concurrent positions | Timeframe binding | Evidence |")
+        lines.append("|---|---|---:|---|---|")
+        for e in measured:
+            title = e.title.replace("|", "\\|")
+            citation = e.source_property_citation.replace("|", "\\|")
+            lines.append(
+                f"| {e.catalog_number} | {title} | {e.max_concurrent_positions} | "
+                f"{e.timeframe_binding.value} | {citation} |"
+            )
+        lines.append("")
+
     lines.append("## Derived strategies")
     lines.append("")
     lines.append("| id | version | family | status | candidate | from | runs |")

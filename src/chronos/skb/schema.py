@@ -18,13 +18,23 @@ regime-tag/disposition are defined here; B1 populates the ones the corpus states
 directly (family, direction) and derives disposition where a spec proves it
 (PORTED). Timeframe/asset-class/regime-tag stay UNKNOWN/empty pending the B2
 backfill — never guessed.
+
+Issue #181 adds two source-measured fields — ``max_concurrent_positions`` and
+``timeframe_binding`` — which no corpus input states and which cannot be derived
+from the existing categoricals. They are backfilled only for the scripts whose
+Pine source was read line by line (see ``skb/source_properties.py``, whose every
+claim carries a checked file/line citation); the rest keep the null/unknown
+default. Notably ``forensic_flags.pyramiding_gt_0`` does NOT answer the position
+question: the corpus's standalone strategies declare ``pyramiding = 3`` yet gate
+every entry on ``strategy.position_size == 0``, so the setting buys three
+same-bar legs of one scaled entry, not concurrent positions.
 """
 
 from __future__ import annotations
 
 from enum import StrEnum
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class _Frozen(BaseModel):
@@ -118,6 +128,26 @@ class Timeframe(StrEnum):
     UNKNOWN = "unknown"
 
 
+class TimeframeBinding(StrEnum):
+    """How a script fixes the timeframe it evaluates on (issue #181).
+
+    Kept separate from :class:`Timeframe` because "the script pins no timeframe"
+    and "nobody has measured it" are different facts, and a single interval field
+    cannot tell them apart — every entry reading ``unknown`` would be ambiguous
+    between the two. Measurement of the corpus found the distinction is
+    load-bearing: the standalone strategies read ``timeframe.period`` at every
+    ``request.security`` call and so inherit whatever chart they run on, which is
+    a positive finding, not a gap.
+
+    ``PINNED`` is the only binding under which a concrete :class:`Timeframe`
+    interval is meaningful; :class:`PineScriptEntry` enforces that.
+    """
+
+    PINNED = "pinned"
+    CHART_TF = "chart_tf"
+    UNKNOWN = "unknown"
+
+
 class AssetClass(StrEnum):
     EQUITY = "equity"
     ETF = "etf"
@@ -189,6 +219,26 @@ class PineScriptEntry(_Frozen):
     timeframe: Timeframe = Timeframe.UNKNOWN
     asset_class: AssetClass = AssetClass.UNKNOWN
     regime_tags: tuple[RegimeTag, ...] = ()
+    # Source-measured properties (issue #181). Backfilled by the compiler from
+    # `skb/source_properties.py` for the scripts whose Pine was actually read;
+    # every other entry keeps the null/unknown default — never inferred.
+    max_concurrent_positions: int | None = Field(default=None, ge=1)
+    timeframe_binding: TimeframeBinding = TimeframeBinding.UNKNOWN
+    source_property_citation: str = ""
+
+    @model_validator(mode="after")
+    def _interval_only_when_pinned(self) -> PineScriptEntry:
+        """A concrete interval is only meaningful when the script pins one."""
+
+        if (
+            self.timeframe is not Timeframe.UNKNOWN
+            and self.timeframe_binding is not TimeframeBinding.PINNED
+        ):
+            raise ValueError(
+                f"catalog {self.catalog_number}: timeframe={self.timeframe.value} requires "
+                f"timeframe_binding=pinned, got {self.timeframe_binding.value}"
+            )
+        return self
 
 
 class StrategyResult(_Frozen):
@@ -248,7 +298,7 @@ class SourceHashes(_Frozen):
 class SKBStore(_Frozen):
     """The complete validated Strategy Knowledge Base."""
 
-    schema_version: int = 1
+    schema_version: int = 2
     corpus_hash: str
     source_hashes: SourceHashes
     pine_script_count: int = Field(ge=0)

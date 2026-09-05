@@ -8,6 +8,10 @@ Joins the five corpus inputs into one validated :class:`SKBStore`:
 - ``research/selection_manifest.json``— the frozen selection criteria
 - ``research/results/research_all.json`` — backtest results (all partitions)
 
+plus ``skb/source_properties.py`` — the source-measured position/timeframe
+properties (issue #181), which no corpus input states. The compile fails closed
+if that table cites a catalog number or filename the corpus does not have.
+
 Fails closed on any unjoinable record: the registry↔findings join must be a
 complete 1:1 over the corpus, every spec Pine-reference must resolve to a real
 registry entry, and every categorical must be in the controlled vocabulary
@@ -36,6 +40,7 @@ from chronos.skb.schema import (
     SourceHashes,
     StrategyResult,
 )
+from chronos.skb.source_properties import SOURCE_PROPERTIES
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 STORE_PATH = Path("research/skb/skb.json")
@@ -183,7 +188,28 @@ def compile_skb(root: Path = REPO_ROOT) -> SKBStore:
                 "disposition_detail": detail,
             }
         )
+        measured = SOURCE_PROPERTIES.get(catalog_number)
+        if measured is not None:
+            if measured.filename != base:
+                raise SKBCompileError(
+                    f"catalog {catalog_number}: source_properties cites "
+                    f"{measured.filename!r} but the corpus filename is {base!r}"
+                )
+            entry = entry.model_copy(
+                update={
+                    "max_concurrent_positions": measured.max_concurrent_positions,
+                    "timeframe_binding": measured.timeframe_binding,
+                    "source_property_citation": measured.render_citation(),
+                }
+            )
         pine_scripts.append(entry)
+
+    unmatched = set(SOURCE_PROPERTIES) - {e.catalog_number for e in pine_scripts}
+    if unmatched:
+        raise SKBCompileError(
+            "source_properties references catalog numbers absent from the corpus: "
+            + ", ".join(sorted(unmatched))
+        )
 
     # --- build the derived strategies -----------------------------------------
     candidates = set(_tuple_of_str(manifest.get("candidates")))
