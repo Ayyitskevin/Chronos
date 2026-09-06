@@ -67,11 +67,28 @@ SPLIT_RECONCILIATION_TOLERANCE = 0.02
 # mechanically consistent with distinct supplied events. Both bumps occurred while
 # zero production digests existed (no real release had ever been minted); after the
 # first real release this constant moves only with a migration story.
-CERTIFICATION_SCHEMA_VERSION = "chronos-dataset-certification-v3"
+CERTIFICATION_SCHEMA_VERSION = "chronos-dataset-certification-v4"
 
 
 class CertificationError(RuntimeError):
     """Certification could not be attempted as requested."""
+
+
+class ProviderPriceBasis(StrEnum):
+    """How the provider produced the delivered OHLC prices — a vendor fact, not a contract.
+
+    ``adjustment_policy`` says what the delivery CLAIMS to satisfy; this says how the bytes
+    were actually made. One field was carrying both, which is how a split-adjusted capture
+    could be labelled ``unadjusted_as_traded`` with nothing objecting (ADR-0059).
+
+    The vocabulary is closed and covers every delivered OHLC price for every symbol and date.
+    Mixed sources, mixed bases, another vendor's adjusted format and later normalisations are
+    unsupported: they must refuse, never coerce into ``UNADJUSTED_AS_TRADED``.
+    """
+
+    UNADJUSTED_AS_TRADED = "unadjusted_as_traded"
+    IBKR_TRADES_SPLIT_ADJUSTED = "ibkr_trades_split_adjusted"
+    IBKR_ADJUSTED_LAST_TOTAL_RETURN = "ibkr_adjusted_last_total_return"
 
 
 class Verdict(StrEnum):
@@ -311,6 +328,11 @@ class CertificationReport:
     findings: tuple[Finding, ...]
     attestation: CorporateActionAttestation | NoCorporateActionAttestation | None
     corporate_actions: tuple[CorporateActionEvidence, ...]
+    #: The provider basis this verdict was reached over. It is RECORDED here and DOES NOT
+    #: ENFORCE downstream use: a consumer that reads these bytes is not prevented from
+    #: treating them as raw by this field's presence. Enforcement at the reader boundary is
+    #: a separate, separately-reviewed slice (ADR-0059 §sequencing).
+    provider_price_basis: ProviderPriceBasis
     classified_moves: tuple[ClassifiedMove, ...] = field(default=())
 
     @property
@@ -326,6 +348,7 @@ class CertificationReport:
             "schema_version": CERTIFICATION_SCHEMA_VERSION,
             "dataset_id": self.dataset_id,
             "interval": str(self.interval),
+            "provider_price_basis": str(self.provider_price_basis),
             "verdict": str(self.verdict),
             "minimum_session_coverage": MINIMUM_SESSION_COVERAGE,
             "material_return_threshold": MATERIAL_RETURN_THRESHOLD,
@@ -482,12 +505,18 @@ def certify_export(
     series_by_symbol: Mapping[str, BarSeries],
     actions_by_symbol: Mapping[str, Sequence[CorporateAction]],
     attestation: CorporateActionAttestation | NoCorporateActionAttestation | None,
+    provider_price_basis: ProviderPriceBasis,
     classified_moves: Sequence[ClassifiedMove] = (),
     holdout_map: Sequence[HoldoutSpan] | None = None,
     calendar: SessionCalendar | None = None,
     interval: BarInterval = BarInterval.DAY_1,
 ) -> CertificationReport:
     """Judge one export against the frozen gates and return the verdict with evidence.
+
+    ``provider_price_basis`` is REQUIRED and has no default. A default would reintroduce the
+    silent assumption ADR-0059 exists to remove: every caller must state how its bytes were
+    produced, or fail to compile. It is recorded in the report and does not enforce anything
+    downstream.
 
     DAY_1 coverage is judged at session granularity against the calendar's expected
     sessions. HOUR_1 coverage is judged at BAR granularity against
@@ -845,6 +874,7 @@ def certify_export(
         findings=tuple(findings),
         attestation=attestation,
         corporate_actions=action_evidence,
+        provider_price_basis=provider_price_basis,
         classified_moves=tuple(classified_moves),
     )
 
@@ -862,6 +892,7 @@ __all__ = [
     "Finding",
     "FindingKind",
     "NoCorporateActionAttestation",
+    "ProviderPriceBasis",
     "SymbolCoverage",
     "SymbolWindow",
     "Verdict",

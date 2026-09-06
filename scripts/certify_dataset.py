@@ -60,6 +60,7 @@ from chronos.research.certification import (
     ClassifiedMove,
     CorporateActionAttestation,
     NoCorporateActionAttestation,
+    ProviderPriceBasis,
     SymbolWindow,
     certify_export,
 )
@@ -84,6 +85,25 @@ def _windows(document: dict[str, Any]) -> list[SymbolWindow]:
         )
         for entry in document.get("windows", [])
     ]
+
+
+def _provider_price_basis(document: dict[str, Any]) -> ProviderPriceBasis:
+    """Read the declaration's provider price basis, refusing absence and unknown values.
+
+    Deliberately no default. A default of raw here would let an old declaration certify as
+    unadjusted without ever saying so — the exact silent assumption ADR-0059 removes.
+    """
+
+    raw = document.get("provider_price_basis")
+    if raw is None:
+        raise SystemExit(
+            "declaration has no provider_price_basis; state how the bytes were produced "
+            f"(one of: {', '.join(sorted(m.value for m in ProviderPriceBasis))})"
+        )
+    try:
+        return ProviderPriceBasis(str(raw))
+    except ValueError as error:
+        raise SystemExit(f"declaration provider_price_basis {raw!r} is not supported") from error
 
 
 def _attestation(
@@ -168,6 +188,7 @@ def _run_certification(
         series_by_symbol=series_by_symbol,
         actions_by_symbol=actions_by_symbol,
         attestation=_attestation(document),
+        provider_price_basis=_provider_price_basis(document),
         classified_moves=_classified_moves(document),
         interval=interval,
     )

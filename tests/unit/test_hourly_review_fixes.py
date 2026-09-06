@@ -29,6 +29,7 @@ from chronos.marketdata.pacing import PacingController
 from chronos.research.certification import (
     CertificationError,
     NoCorporateActionAttestation,
+    ProviderPriceBasis,
     SymbolWindow,
     certify_export,
 )
@@ -139,6 +140,7 @@ def test_certification_refuses_an_hourly_series_under_a_daily_verdict() -> None:
 
     with pytest.raises(CertificationError, match="not a lookalike"):
         certify_export(
+            provider_price_basis=ProviderPriceBasis.UNADJUSTED_AS_TRADED,
             dataset_id="chronos-etf-daily-v1",
             windows=[SymbolWindow("SPY", _MON, _FRI)],
             series_by_symbol={"SPY": _hourly(keep_first_only=True)},
@@ -152,6 +154,7 @@ def test_certification_refuses_a_daily_series_under_an_hourly_verdict() -> None:
     daily = BarSeries("SPY", BarInterval.DAY_1, tuple(_daily(d) for d in _CAL.sessions(_MON, _FRI)))
     with pytest.raises(CertificationError, match="does not match"):
         certify_export(
+            provider_price_basis=ProviderPriceBasis.UNADJUSTED_AS_TRADED,
             dataset_id="chronos-etf-hourly-v1",
             windows=[SymbolWindow("SPY", _MON, _FRI)],
             series_by_symbol={"SPY": daily},
@@ -327,6 +330,7 @@ def test_an_est_hourly_week_certifies_end_to_end() -> None:
 
     start, end = date(2024, 1, 16), date(2024, 1, 19)
     report = certify_export(
+        provider_price_basis=ProviderPriceBasis.UNADJUSTED_AS_TRADED,
         dataset_id="chronos-etf-hourly-v1",
         windows=[SymbolWindow("SPY", start, end)],
         series_by_symbol={"SPY": _hourly(start, end)},
@@ -346,6 +350,7 @@ def test_an_hourly_clean_span_is_refused_through_the_catalog(tmp_path: Path) -> 
     """The freeze test read partition bytes off disk, never through the reader seam."""
 
     report = certify_export(
+        provider_price_basis=ProviderPriceBasis.UNADJUSTED_AS_TRADED,
         dataset_id="chronos-etf-hourly-v1",
         windows=[SymbolWindow("SPY", _MON, _FRI)],
         series_by_symbol={"SPY": _hourly()},
@@ -421,7 +426,7 @@ def test_a_minute_series_has_no_partition_schema(tmp_path: Path) -> None:
 # ------------------------------------------------------------ evidence shape is pinned
 
 
-def test_the_v3_evidence_mapping_shape_is_frozen() -> None:
+def test_the_v4_evidence_mapping_shape_is_frozen() -> None:
     """A renamed or added field silently re-identifies every future digest.
 
     This pins the key set, not the values — values move with the data, identity
@@ -429,6 +434,7 @@ def test_the_v3_evidence_mapping_shape_is_frozen() -> None:
     """
 
     report = certify_export(
+        provider_price_basis=ProviderPriceBasis.UNADJUSTED_AS_TRADED,
         dataset_id="chronos-etf-hourly-v1",
         windows=[SymbolWindow("SPY", _MON, _FRI)],
         series_by_symbol={"SPY": _hourly()},
@@ -438,11 +444,12 @@ def test_the_v3_evidence_mapping_shape_is_frozen() -> None:
         interval=BarInterval.HOUR_1,
     )
     mapping = json.loads(report.canonical_json())
-    assert mapping["schema_version"] == "chronos-dataset-certification-v3"
+    assert mapping["schema_version"] == "chronos-dataset-certification-v4"
     assert set(mapping) == {
         "schema_version",
         "dataset_id",
         "interval",
+        "provider_price_basis",
         "verdict",
         "minimum_session_coverage",
         "material_return_threshold",
