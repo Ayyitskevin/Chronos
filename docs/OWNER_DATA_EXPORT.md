@@ -128,8 +128,10 @@ Keys are **exact**: a missing or unknown key is `UNVERIFIED`, not a warning.
     proceeds.**
   - `ibkr_trades_split_adjusted` — IBKR's `TRADES` feed, which back-adjusts history for splits.
     `UNVERIFIED`, always. §4 says why, and no per-symbol declaration lifts it.
-  - `ibkr_adjusted_last_total_return` — `ADJUSTED_LAST`, split *and* dividend adjusted. Refused
-    outright: the dividend adjustment is unrecoverable from the bars.
+  - `ibkr_adjusted_last_split_and_dividend_adjusted` — IBKR's `ADJUSTED_LAST`, adjusted for splits
+    *and* dividends. Refused outright: the dividend adjustment is not recoverable from the bars.
+    The name states the documented operation and deliberately claims nothing about an exact
+    total-return index.
   There is deliberately **no default**. An absent, misspelled, or non-string value is
   `UNVERIFIED` — a silently assumed basis is the exact failure this key exists to prevent.
 - `no_split_in_window` is a per-symbol boolean you assert: *this symbol's action file declares

@@ -52,7 +52,7 @@ hazard.
 |---|---|---|
 | `unadjusted_as_traded` | proceeds | as-traded levels, never restated — the only accepted basis |
 | `ibkr_trades_split_adjusted` | `UNVERIFIED` (exit 2) | back-adjusted for splits; a post-window split rescales the file undetectably |
-| `ibkr_adjusted_last_total_return` | `UNVERIFIED` (exit 2) | split *and* dividend adjusted; the dividend adjustment is not recoverable from the bars |
+| `ibkr_adjusted_last_split_and_dividend_adjusted` | `UNVERIFIED` (exit 2) | split *and* dividend adjusted; the dividend adjustment is not recoverable from the bars |
 | absent, non-string, or unknown | `UNVERIFIED` (exit 2) | no default — a default would reintroduce the silent assumption this ADR removes |
 
 Each symbol additionally declares `no_split_in_window` (a strict JSON boolean), checked in **both**
@@ -63,6 +63,13 @@ names the symbol and ex-date, and a `false` over an empty split set refuses too.
 The certification report and the frozen release both **record** the basis. The release takes it
 from the certification rather than from a parameter of its own, so a release cannot disagree with
 the verdict it froze.
+
+**Admission is one rule, in one place** — `admit_provider_price_basis` in
+`research/certification.py`. Every path that can certify or freeze must call it. Recording the
+field without calling it grants admission by omission: the owner script `scripts/certify_dataset.py`
+parsed the basis, passed it to `certify_export`, and froze a release for a delivery the intake CLI
+refuses, because `certify_export` records the field and does not judge it. Both entry points now
+call the shared rule and map its refusal to their own failure mode (`UNVERIFIED` / non-zero exit).
 
 ## Sequencing
 
@@ -93,7 +100,20 @@ Deliberately three slices; only the first is accepted here.
 
 Every existing `INTAKE.json` is now `schema_version: 1` and refuses; the runbook's §2 sample,
 §3 lead-in note, and §4 evidence paragraph are updated so the next delivery carries the field.
-No delivery has been certified to date, so nothing in the repository is invalidated. The
-certification schema moves to `chronos-dataset-certification-v4` and the release schema to
+The certification schema moves to `chronos-dataset-certification-v4` and the release schema to
 `chronos-dataset-release-v3`, both because a recorded field that is not bound into the digest is
 decoration.
+
+**What the blast radius of those two schema moves is, is NOT established here.** Revision 2 R2.5
+withdrew the premise that it could be inferred from this repository: the absence of a tracked
+`INTAKE.json` says nothing about which releases, catalogs or registry entries exist elsewhere.
+The verified and much narrower claim is that **this change alters no tracked frozen dataset or
+results artifact** — confirmed by `git diff --quiet <base>...<head> -- research/data
+research/results/research_all.json`. Establishing the affected release/catalog/registry identity
+set from approved owner metadata remains outstanding and is the owner's, under R2.5. Nothing here
+rewrites, rehashes or reads an existing release.
+
+**Refusal precedence**, recorded because it is a deliberate choice rather than an accident: the
+per-symbol `no_split_in_window` contradiction is reported BEFORE either basis refusal, because it
+is the more specific fault and names a symbol and its ex-dates. Both refused bases are then
+decided together by the single admission rule, so precedence is uniform across them.

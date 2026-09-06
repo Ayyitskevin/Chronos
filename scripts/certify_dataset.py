@@ -23,6 +23,7 @@ be inferred:
       "catalog_id": "chronos-etf-daily-v1-release-001",
       "source_id": "ibkr-tws-historical",
       "source_receipt_sha256": "<64 hex>",
+      "provider_price_basis": "unadjusted_as_traded",
       "attestation": {
         "kind": "sampled_actions",
         "source_id": "nasdaq-dividend-history-2026-08-21",
@@ -42,6 +43,13 @@ be inferred:
 
 ``interval`` is ``"1d"`` (default) or ``"1h"``; hourly reads the ``bars_1h/``
 store lane and certifies at bar granularity.
+
+``provider_price_basis`` is REQUIRED and has no default (ADR-0059). Only
+``unadjusted_as_traded`` is admitted; ``ibkr_trades_split_adjusted`` and
+``ibkr_adjusted_last_split_and_dividend_adjusted`` refuse here exactly as they do in
+``chronos data verify``. A declaration written by the older owner packet helper carries no
+such field and now fails: that is the required fail-closed consequence, and an honest IBKR
+TRADES packet must refuse rather than be relabelled raw to keep the sequence working.
 """
 
 from __future__ import annotations
@@ -61,7 +69,9 @@ from chronos.research.certification import (
     CorporateActionAttestation,
     NoCorporateActionAttestation,
     ProviderPriceBasis,
+    ProviderPriceBasisRefused,
     SymbolWindow,
+    admit_provider_price_basis,
     certify_export,
 )
 from chronos.research.dataset_release import HoldoutSpan, HoldoutStatus, freeze_release
@@ -88,10 +98,15 @@ def _windows(document: dict[str, Any]) -> list[SymbolWindow]:
 
 
 def _provider_price_basis(document: dict[str, Any]) -> ProviderPriceBasis:
-    """Read the declaration's provider price basis, refusing absence and unknown values.
+    """Read and ADMIT the declaration's provider price basis.
 
     Deliberately no default. A default of raw here would let an old declaration certify as
     unadjusted without ever saying so — the exact silent assumption ADR-0059 removes.
+
+    A declaration produced by the older owner packet helper carries no basis at all and now
+    fails here by design: that sequence emits no such field, and tagging its output raw to
+    keep it working would reintroduce exactly that assumption. An honest IBKR TRADES packet
+    must refuse under Option A, not be relabelled.
     """
 
     raw = document.get("provider_price_basis")
@@ -101,9 +116,20 @@ def _provider_price_basis(document: dict[str, Any]) -> ProviderPriceBasis:
             f"(one of: {', '.join(sorted(m.value for m in ProviderPriceBasis))})"
         )
     try:
-        return ProviderPriceBasis(str(raw))
+        basis = ProviderPriceBasis(str(raw))
     except ValueError as error:
         raise SystemExit(f"declaration provider_price_basis {raw!r} is not supported") from error
+
+    # The ONE admission rule, shared with the intake CLI. Parsing the field is not admitting
+    # it: before this call the script recorded the basis on the report and froze a release
+    # anyway, so a delivery the intake CLI refuses as UNVERIFIED still certified here.
+    # _run_certification runs before either subcommand branches, so this refuses ahead of
+    # every write for `certify` and `freeze` alike.
+    try:
+        admit_provider_price_basis(basis)
+    except ProviderPriceBasisRefused as refused:
+        raise SystemExit(f"declaration {refused.reason}") from None
+    return basis
 
 
 def _attestation(

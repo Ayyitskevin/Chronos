@@ -169,10 +169,11 @@ def test_a_split_adjusted_basis_refuses_even_with_no_in_window_split(
 
 
 def test_a_dividend_adjusted_basis_is_refused_outright(tmp_path: Path) -> None:
-    delivery = build_delivery(tmp_path, basis="ibkr_adjusted_last_total_return")
+    delivery = build_delivery(tmp_path, basis="ibkr_adjusted_last_split_and_dividend_adjusted")
     with pytest.raises(IntakeUnverified) as caught:
         load_intake(delivery)
-    assert "split- AND dividend-adjusted" in caught.value.reason
+    assert "adjusted for splits AND dividends" in caught.value.reason
+    assert "the dividend adjustment is not recoverable from the bars" in caught.value.reason
     assert "no declaration rescues it" in caught.value.reason
 
 

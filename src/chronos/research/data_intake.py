@@ -20,7 +20,9 @@ from chronos.research.certification import (
     CorporateActionAttestation,
     NoCorporateActionAttestation,
     ProviderPriceBasis,
+    ProviderPriceBasisRefused,
     SymbolWindow,
+    admit_provider_price_basis,
     certify_export,
 )
 from chronos.research.holdout_map import HoldoutSpan, HoldoutStatus
@@ -340,6 +342,10 @@ def _strict_bool(value: object, *, path: Path, field: str) -> bool:
 def _provider_price_basis(value: object, *, path: Path) -> ProviderPriceBasis:
     """Parse the closed provider-basis vocabulary, refusing anything outside it.
 
+    Vocabulary only. Whether a KNOWN basis may be certified is
+    :func:`admit_provider_price_basis`, applied below — one rule, shared with the owner
+    script, so the two entry points cannot drift apart.
+
     Refusals here are UNVERIFIED, not NOT_CERTIFIED: an unknown or unsupported basis means
     the gates would be judging bytes whose provenance the manifest does not describe, so no
     verdict about the data is possible (ADR-0059).
@@ -357,37 +363,20 @@ def _provider_price_basis(value: object, *, path: Path) -> ProviderPriceBasis:
             path,
             f"provider_price_basis {value!r} is not one of: {allowed}",
         ) from None
-    if basis is ProviderPriceBasis.IBKR_ADJUSTED_LAST_TOTAL_RETURN:
-        raise _unverified(
-            path,
-            "provider_price_basis ibkr_adjusted_last_total_return is split- AND "
-            "dividend-adjusted and can never satisfy adjustment_policy "
-            "unadjusted_as_traded; no declaration rescues it",
-        )
     return basis
 
 
-def _refuse_split_adjusted_basis(path: Path) -> None:
-    """Option A: a split-adjusted feed cannot satisfy the raw contract, split-free or not.
+def _admit_basis(basis: ProviderPriceBasis, *, path: Path) -> None:
+    """Apply the ONE admission rule, reporting its refusal as UNVERIFIED.
 
-    A split AFTER the delivered window rescales the whole series if the provider restates
-    history, and nothing in the pipeline sees it: ``certification`` reconciles split-implied
-    returns only inside the declared window, ``adjust`` skips actions dated after the last
-    bar, and its dividend factor is computed from the DELIVERED close — so halved closes
-    double ``d / C_ref``. An empty in-window split set therefore proves relative continuity
-    and never absolute level.
-
-    Accepting such a delivery is a contract change requiring the owner's written admission
-    and a reviewed consumer boundary; it is deliberately not reachable from here.
+    The rule itself is :func:`admit_provider_price_basis`; this only maps its refusal onto
+    this entry point's failure mode. Nothing about which bases are admissible is decided here.
     """
 
-    raise _unverified(
-        path,
-        "provider_price_basis ibkr_trades_split_adjusted cannot satisfy adjustment_policy "
-        "unadjusted_as_traded: a split after the delivered window rescales the whole series "
-        "and no in-window check can see it, so an empty in-window split set is not evidence "
-        "of raw levels",
-    )
+    try:
+        admit_provider_price_basis(basis)
+    except ProviderPriceBasisRefused as refused:
+        raise _unverified(path, refused.reason) from None
 
 
 def load_intake(delivery: Path) -> IntakeDelivery:
@@ -575,10 +564,10 @@ def load_intake(delivery: Path) -> IntakeDelivery:
                 "split ex-date inside the window",
             )
 
-    # Ordered last of the basis checks so a contradicted per-symbol declaration — the more
-    # specific fault, and the one that names a symbol — is reported before this one.
-    if basis is ProviderPriceBasis.IBKR_TRADES_SPLIT_ADJUSTED:
-        _refuse_split_adjusted_basis(manifest_path)
+    # Ordered after the symbol loop so a contradicted per-symbol declaration — the more
+    # specific fault, and the one that names a symbol and its ex-dates — is reported first.
+    # Both refused bases are decided here, by the shared rule, so precedence is uniform.
+    _admit_basis(basis, path=manifest_path)
 
     return IntakeDelivery(
         delivery_id=delivery_id,

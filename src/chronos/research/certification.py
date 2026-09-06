@@ -88,7 +88,53 @@ class ProviderPriceBasis(StrEnum):
 
     UNADJUSTED_AS_TRADED = "unadjusted_as_traded"
     IBKR_TRADES_SPLIT_ADJUSTED = "ibkr_trades_split_adjusted"
-    IBKR_ADJUSTED_LAST_TOTAL_RETURN = "ibkr_adjusted_last_total_return"
+    IBKR_ADJUSTED_LAST_SPLIT_AND_DIVIDEND_ADJUSTED = (
+        "ibkr_adjusted_last_split_and_dividend_adjusted"
+    )
+
+
+class ProviderPriceBasisRefused(Exception):
+    """The declared basis cannot produce as-traded levels, so no verdict about it is possible.
+
+    Raised by :func:`admit_provider_price_basis`. Each entry point maps it to its own failure
+    mode — ``UNVERIFIED`` for the intake CLI, a non-zero exit for the owner script — but the
+    rule itself lives in one place so an entry point cannot quietly hold a laxer one.
+    """
+
+    def __init__(self, basis: ProviderPriceBasis, reason: str) -> None:
+        super().__init__(reason)
+        self.basis = basis
+        self.reason = reason
+
+
+def admit_provider_price_basis(basis: ProviderPriceBasis) -> None:
+    """Option A (ADR-0059): admit as-traded levels and nothing else.
+
+    THE ONLY admission rule for the declared basis. Every path that can certify or freeze a
+    delivery must call it before doing either — a path that merely records the field grants
+    admission by omission, which is how the owner script came to freeze a release declaring a
+    basis the intake CLI refuses.
+
+    Option B — admitting a split-adjusted feed under compensating controls — is a contract
+    change requiring the owner's written admission and a reviewed consumer boundary. It is
+    deliberately not reachable from here.
+    """
+
+    if basis is ProviderPriceBasis.IBKR_ADJUSTED_LAST_SPLIT_AND_DIVIDEND_ADJUSTED:
+        raise ProviderPriceBasisRefused(
+            basis,
+            f"provider_price_basis {basis.value} is adjusted for splits AND dividends and can "
+            "never satisfy adjustment_policy unadjusted_as_traded: the dividend adjustment is "
+            "not recoverable from the bars, so no declaration rescues it",
+        )
+    if basis is ProviderPriceBasis.IBKR_TRADES_SPLIT_ADJUSTED:
+        raise ProviderPriceBasisRefused(
+            basis,
+            f"provider_price_basis {basis.value} cannot satisfy adjustment_policy "
+            "unadjusted_as_traded: a split after the delivered window rescales the whole "
+            "series and no in-window check can see it, so an empty in-window split set is "
+            "not evidence of raw levels",
+        )
 
 
 class Verdict(StrEnum):
@@ -893,8 +939,10 @@ __all__ = [
     "FindingKind",
     "NoCorporateActionAttestation",
     "ProviderPriceBasis",
+    "ProviderPriceBasisRefused",
     "SymbolCoverage",
     "SymbolWindow",
     "Verdict",
+    "admit_provider_price_basis",
     "certify_export",
 ]
