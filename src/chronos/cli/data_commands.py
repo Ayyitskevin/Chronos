@@ -112,6 +112,51 @@ def _session_date(value: str) -> date:
         raise argparse.ArgumentTypeError(f"expected YYYY-MM-DD, got {value!r}") from error
 
 
+def cmd_data_assemble(args: argparse.Namespace) -> int:
+    """Turn a capture store into a delivery directory. Read-only on the store."""
+
+    # Local import for the same reason certify's is local: keep the module that reaches the
+    # research plane off the import path of every command that does not need it.
+    from chronos.research.data_assemble import AssembleRefusal, assemble_delivery
+
+    provenance = {
+        "source_id": args.source_id,
+        "source_receipt_sha256": args.source_receipt_sha256,
+        "retrieved_at": args.retrieved_at,
+        "retrieval_method": args.retrieval_method,
+        "license_note": args.license_note,
+    }
+    try:
+        result = assemble_delivery(
+            args.store,
+            args.out,
+            delivery_id=args.delivery_id,
+            provenance=provenance,
+            provider_price_basis=args.provider_price_basis,
+            attestation_path=args.attestation,
+            classified_moves_path=args.classified_moves,
+            supersedes=args.supersedes,
+        )
+    except AssembleRefusal as error:
+        print(f"REFUSED {error.path}: {error.reason}")
+        return 2
+
+    # An owner-declared empty action stream is indistinguishable from a full one downstream,
+    # so it is named here rather than passed over: assemble refuses an ABSENT stream, but an
+    # explicit `[]` is a statement the owner made and the operator should see it echoed back.
+    declared_empty = (
+        f"; owner-declared-no-actions: {', '.join(result.owner_declared_no_actions)}"
+        if result.owner_declared_no_actions
+        else ""
+    )
+    print(
+        f"ASSEMBLED {result.delivery / 'INTAKE.json'}: {len(result.symbols)} symbols, "
+        f"{result.bar_rows} bars, {result.action_count} actions, "
+        f"{result.holdout_spans} holdout span(s){declared_empty}; run data verify next"
+    )
+    return 0
+
+
 def add_data_commands(sub: Any) -> None:
     """Register the market-data intake command group."""
 
@@ -133,10 +178,31 @@ def add_data_commands(sub: Any) -> None:
     synth.add_argument("--start", type=_session_date, default=None)
     synth.add_argument("--end", type=_session_date, default=None)
     synth.set_defaults(func=cmd_data_synth_store)
+    assemble = data_sub.add_parser(
+        "assemble", help="turn a capture store into a delivery directory (read-only on the store)"
+    )
+    assemble.add_argument("--store", type=Path, required=True)
+    assemble.add_argument("--out", type=Path, required=True)
+    assemble.add_argument("--delivery-id", required=True)
+    # Provenance is an owner assertion; every field is explicit and none has a default.
+    assemble.add_argument("--source-id", default="")
+    assemble.add_argument("--source-receipt-sha256", default="")
+    assemble.add_argument("--retrieved-at", default="")
+    assemble.add_argument("--retrieval-method", default="")
+    assemble.add_argument("--license-note", default="")
+    # Schema 2's vendor fact (ADR-0059). Empty by default rather than argparse-required, so
+    # the refusal that names it comes from the assembler with its reasoning attached, the
+    # same way a missing provenance field is reported.
+    assemble.add_argument("--provider-price-basis", default="")
+    assemble.add_argument("--attestation", type=Path, default=None)
+    assemble.add_argument("--classified-moves", type=Path, default=None)
+    assemble.add_argument("--supersedes", default=None)
+    assemble.set_defaults(func=cmd_data_assemble)
 
 
 __all__ = [
     "add_data_commands",
+    "cmd_data_assemble",
     "cmd_data_certify",
     "cmd_data_synth_store",
     "cmd_data_verify",

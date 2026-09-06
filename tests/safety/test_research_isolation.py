@@ -59,6 +59,7 @@ _C3_MODULES = (
     "holdout_map",
     "data_intake",
     "data_certification",
+    "data_assemble",
     "session_calendar",
 )
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent

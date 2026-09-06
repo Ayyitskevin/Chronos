@@ -36,8 +36,10 @@ import chronos
 
 _CALENDAR_MODULE = "chronos.research.session_calendar"
 
-# The data-intake CLI has two reviewed edges into the research plane: read-only verify,
-# and certify's local import of the write orchestrator. Ignore exactly those edges when
+# The data-intake CLI has three reviewed edges into the research plane: read-only verify,
+# certify's local import of the write orchestrator, and assemble's local import of the
+# store-to-delivery converter (read-only on the store; it writes only under --out).
+# Ignore exactly those edges when
 # asking whether another package can acquire the calendar; every other edge remains
 # default-denied. Their distinct write boundaries are independently bound by the two
 # tests/integration/test_data_intake_*.py suites.
@@ -52,6 +54,7 @@ _REVIEWED_RESEARCH_CLI_EDGES = {
     # The hazard R-26 names is a calendar wired INTO the authority plane; this is a
     # generator wired out of it. Bound by tests/unit/test_synth_store.py.
     ("chronos.cli.data_commands", "chronos.research.synth_store"),
+    ("chronos.cli.data_commands", "chronos.research.data_assemble"),
 }
 
 #: The planes allowed to hold the calendar. Everything else is denied by default.
