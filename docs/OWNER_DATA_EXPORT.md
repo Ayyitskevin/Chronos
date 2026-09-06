@@ -345,12 +345,64 @@ id, opens no trading database, holds no writer lease, and imports no order or br
 Set-up, ports, and reconnect handling are in `docs/IBKR_RUNBOOK.md`; pacing is handled by the
 process.
 
+What the capture is, stated plainly (lane C, 2026-09-06): the `bars` command writes bars and
+their manifest only; it does not fetch corporate actions or supply independent review. IBKR
+TRADES prices are split-adjusted, so a successful capture is not yet proof of the
+unadjusted-as-traded delivery contract; complete native-basis action files, source/basis
+evidence and the owner's declarations remain prerequisites.
+
 **Two honest caveats before you rely on it:**
 
-1. **It populates the store, not a delivery.** That command writes into
-   `research/data/history/` with the store's own manifest. It does **not** produce an
-   `INTAKE.json` delivery directory, so assembling §2's layout from its output is a manual
-   step today. The two paths converge later, not here.
+1. **It populates the store, not a delivery — and `data assemble` now converts one to the
+   other.** That command writes into `research/data/history/` with the store's own manifest;
+   it does not write an `INTAKE.json`. Since 2026-09-06 that last step is one command rather
+   than a manual transcription:
+
+   ```
+   python -m chronos.cli data assemble --store research/data/history --out <delivery> \
+       --delivery-id <id> --attestation <your attestation.json> \
+       --source-id <who exported it> --source-receipt-sha256 <64 hex> \
+       --retrieved-at <ISO-8601> --retrieval-method <UI export|API pull|download> \
+       --license-note <redistribution status>
+   ```
+
+   It is read-only on the store — including refusing an `--out` that resolves inside it, so
+   pick a delivery directory beside the store rather than under it. It copies `bars/` and
+   `corporate_actions/` for exactly the six symbols and derives `INTAKE.json` — windows,
+   counts and digests computed from the bytes it validated rather than read out of
+   `MANIFEST.json`, since §2 wants those to be independent claims the verifier can
+   contradict. Each source file is read once and those same bytes are what get published, so
+   a capture writing to the store mid-assembly cannot slip unvalidated bytes into a delivery.
+
+   The store's own witnesses are still checked: if `MANIFEST.json` records a row count,
+   digest or window for a symbol that disagrees with that symbol's bytes, assemble refuses
+   and names the symbol and the field. A store that disagrees with itself is not one to
+   build a delivery from.
+
+   **What it will not do is invent the half you have to assert.** The five provenance fields
+   and the §4 attestation are owner declarations; a missing one is a refusal that names it,
+   never a default. `--classified-moves <path>` is optional and defaults to an empty list;
+   `--supersedes` defaults to `null`.
+
+   Two consequences of the sentence above are worth spelling out, because the capture leaves
+   both to you:
+
+   - **A `corporate_actions/<SYMBOL>.json` must exist for every one of the six symbols.** The
+     capture does not write them, and `histdata.store` returns an empty stream for a file that
+     is merely absent — so assemble refuses, naming the symbol, rather than authoring an empty
+     file that would read downstream as "reviewed, no actions". If a symbol genuinely has no
+     actions in the window, write `[]` yourself: that is your statement, it assembles, and the
+     result reports those symbols as owner-declared-no-actions rather than passing over them.
+   - **`HOLDOUTS.json` has no `status` field and assemble does not ask you for one.** The
+     store's schema is windows; the delivery's `holdout_map` is a per-symbol tiling in which
+     every supplied session is claimed exactly once. A declared window becomes `clean`, the
+     untouched remainder of each symbol's supplied range becomes `seen` — it has been
+     available to research all along — and `burned` is never derived, because it asserts a
+     consumed reserve and §2 requires a reason for it. Refusals exit 2 and name the
+   store file that caused them, so a timestamped date cell or a five-symbol capture is
+   reported against the file that has it rather than as an opaque `UNVERIFIED` later.
+
+   The path is now: capture → `data assemble` → `data verify` → `data certify`.
 2. **Whether IBKR can supply the full window for all six symbols is unverified.** Duration
    limits, pacing, and per-instrument availability are properties of your entitlement, and
    `DIA` in particular has never been obtained from any source in this repository. Pull a
