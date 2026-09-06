@@ -61,6 +61,7 @@ def _write_synthetic_delivery(root: Path) -> Path:
             "bar_count": len(sessions),
             "corporate_actions_sha256": hashlib.sha256(action_bytes).hexdigest(),
             "corporate_action_count": 0,
+            "no_split_in_window": True,
         }
         attested_windows.append(
             {"symbol": symbol, "start": _START.isoformat(), "end": _END.isoformat()}
@@ -76,11 +77,12 @@ def _write_synthetic_delivery(root: Path) -> Path:
         )
 
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "delivery_id": "synthetic-test-only-do-not-use",
         "supersedes": None,
         "interval": "1d",
         "adjustment_policy": "unadjusted_as_traded",
+        "provider_price_basis": "unadjusted_as_traded",
         "provenance": {
             "source_id": "synthetic-test-generator-not-a-vendor",
             "source_receipt_sha256": "0" * 64,
@@ -175,7 +177,7 @@ def test_data_verify_missing_intake_is_unverified(
     ("mutation", "reason"),
     [
         (lambda manifest: "{", "invalid JSON"),
-        (lambda manifest: {**manifest, "schema_version": 2}, "schema_version must be 1"),
+        (lambda manifest: {**manifest, "schema_version": 1}, "schema_version must be 2"),
     ],
 )
 def test_data_verify_unparseable_or_wrong_schema_is_unverified(

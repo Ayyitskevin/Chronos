@@ -10,7 +10,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
-from chronos.histdata.corporate_actions import CorporateAction
+from chronos.histdata.corporate_actions import ActionKind, CorporateAction
 from chronos.marketdata.bars import BarInterval, BarSeries
 from chronos.marketdata.csv_provider import load_daily_csv_bytes
 from chronos.research.certification import (
@@ -19,13 +19,16 @@ from chronos.research.certification import (
     ClassifiedMove,
     CorporateActionAttestation,
     NoCorporateActionAttestation,
+    ProviderPriceBasis,
+    ProviderPriceBasisRefused,
     SymbolWindow,
+    admit_provider_price_basis,
     certify_export,
 )
 from chronos.research.holdout_map import HoldoutSpan, HoldoutStatus
 from chronos.research.session_calendar import CalendarCoverageError, SessionCalendar
 
-INTAKE_SCHEMA_VERSION = 1
+INTAKE_SCHEMA_VERSION = 2
 CAMPAIGN_SYMBOLS = ("QQQ", "SPY", "IWM", "DIA", "GLD", "TLT")
 _HEX_DIGITS = frozenset("0123456789abcdef")
 
@@ -57,6 +60,7 @@ class IntakeDelivery:
     series_by_symbol: Mapping[str, BarSeries]
     actions_by_symbol: Mapping[str, tuple[CorporateAction, ...]]
     attestation: CorporateActionAttestation | NoCorporateActionAttestation
+    provider_price_basis: ProviderPriceBasis
     classified_moves: tuple[ClassifiedMove, ...]
     holdout_map: tuple[HoldoutSpan, ...]
 
@@ -323,6 +327,58 @@ def _holdout_map(value: object, *, path: Path) -> tuple[HoldoutSpan, ...]:
     return tuple(spans)
 
 
+def _strict_bool(value: object, *, path: Path, field: str) -> bool:
+    """A JSON boolean and nothing else.
+
+    ``isinstance(True, int)`` is True in Python, so an unguarded truthiness check accepts
+    ``1``, ``"true"`` and ``0``. A declaration that coerces is not a declaration.
+    """
+
+    if not isinstance(value, bool):
+        raise _unverified(path, f"{field} must be a JSON boolean, got {type(value).__name__}")
+    return value
+
+
+def _provider_price_basis(value: object, *, path: Path) -> ProviderPriceBasis:
+    """Parse the closed provider-basis vocabulary, refusing anything outside it.
+
+    Vocabulary only. Whether a KNOWN basis may be certified is
+    :func:`admit_provider_price_basis`, applied below — one rule, shared with the owner
+    script, so the two entry points cannot drift apart.
+
+    Refusals here are UNVERIFIED, not NOT_CERTIFIED: an unknown or unsupported basis means
+    the gates would be judging bytes whose provenance the manifest does not describe, so no
+    verdict about the data is possible (ADR-0059).
+    """
+
+    if not isinstance(value, str):
+        raise _unverified(
+            path, f"provider_price_basis must be a string, got {type(value).__name__}"
+        )
+    try:
+        basis = ProviderPriceBasis(value)
+    except ValueError:
+        allowed = ", ".join(sorted(member.value for member in ProviderPriceBasis))
+        raise _unverified(
+            path,
+            f"provider_price_basis {value!r} is not one of: {allowed}",
+        ) from None
+    return basis
+
+
+def _admit_basis(basis: ProviderPriceBasis, *, path: Path) -> None:
+    """Apply the ONE admission rule, reporting its refusal as UNVERIFIED.
+
+    The rule itself is :func:`admit_provider_price_basis`; this only maps its refusal onto
+    this entry point's failure mode. Nothing about which bases are admissible is decided here.
+    """
+
+    try:
+        admit_provider_price_basis(basis)
+    except ProviderPriceBasisRefused as refused:
+        raise _unverified(path, refused.reason) from None
+
+
 def load_intake(delivery: Path) -> IntakeDelivery:
     """Load and byte-bind a delivery without writing to it or any repository store."""
 
@@ -340,6 +396,7 @@ def load_intake(delivery: Path) -> IntakeDelivery:
             "supersedes",
             "interval",
             "adjustment_policy",
+            "provider_price_basis",
             "provenance",
             "symbols",
             "corporate_action_attestation",
@@ -366,6 +423,7 @@ def load_intake(delivery: Path) -> IntakeDelivery:
         raise _unverified(manifest_path, "interval must be 1d")
     if document["adjustment_policy"] != "unadjusted_as_traded":
         raise _unverified(manifest_path, "adjustment_policy must be unadjusted_as_traded")
+    basis = _provider_price_basis(document["provider_price_basis"], path=manifest_path)
     provenance = _provenance(document["provenance"], path=manifest_path)
 
     symbols = _mapping(document["symbols"], path=manifest_path, field="symbols")
@@ -392,6 +450,7 @@ def load_intake(delivery: Path) -> IntakeDelivery:
                 "bar_count",
                 "corporate_actions_sha256",
                 "corporate_action_count",
+                "no_split_in_window",
             },
             path=manifest_path,
             field=field,
@@ -480,6 +539,36 @@ def load_intake(delivery: Path) -> IntakeDelivery:
             )
         actions_by_symbol[symbol] = tuple(actions)
 
+        # Additional evidence, never an acceptance path: the owner's claim about in-window
+        # splits is compared with the file in BOTH directions, so a template-copied value is
+        # caught whichever way it is wrong. This runs for every basis, including the raw one.
+        declared_no_split = _strict_bool(
+            item["no_split_in_window"], path=manifest_path, field=f"{field}.no_split_in_window"
+        )
+        in_window_splits = [
+            action.ex_date
+            for action in actions
+            if action.kind is ActionKind.SPLIT and window.start <= action.ex_date <= window.end
+        ]
+        if declared_no_split and in_window_splits:
+            raise _unverified(
+                action_path,
+                f"{symbol}: no_split_in_window is true but the action file declares "
+                f"{len(in_window_splits)} split ex-date(s) inside the window "
+                f"({', '.join(d.isoformat() for d in sorted(in_window_splits))})",
+            )
+        if not declared_no_split and not in_window_splits:
+            raise _unverified(
+                action_path,
+                f"{symbol}: no_split_in_window is false but the action file declares no "
+                "split ex-date inside the window",
+            )
+
+    # Ordered after the symbol loop so a contradicted per-symbol declaration — the more
+    # specific fault, and the one that names a symbol and its ex-dates — is reported first.
+    # Both refused bases are decided here, by the shared rule, so precedence is uniform.
+    _admit_basis(basis, path=manifest_path)
+
     return IntakeDelivery(
         delivery_id=delivery_id,
         supersedes=supersedes,
@@ -490,6 +579,7 @@ def load_intake(delivery: Path) -> IntakeDelivery:
         attestation=_attestation(document["corporate_action_attestation"], path=manifest_path),
         classified_moves=_classified_moves(document["classified_moves"], path=manifest_path),
         holdout_map=_holdout_map(document["holdout_map"], path=manifest_path),
+        provider_price_basis=basis,
     )
 
 
@@ -510,6 +600,7 @@ def certify_loaded_intake(intake: IntakeDelivery, *, delivery: Path) -> Certific
             actions_by_symbol=intake.actions_by_symbol,
             attestation=intake.attestation,
             classified_moves=intake.classified_moves,
+            provider_price_basis=intake.provider_price_basis,
             holdout_map=intake.holdout_map,
             interval=BarInterval.DAY_1,
         )

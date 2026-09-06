@@ -10,6 +10,7 @@ out-of-band trusted SHA-256, and read ordinary bytes through the broker seam.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
@@ -18,6 +19,7 @@ import pytest
 from chronos.marketdata.bars import Bar, BarInterval, BarSeries, BarStatus
 from chronos.research.certification import (
     NoCorporateActionAttestation,
+    ProviderPriceBasis,
     SymbolWindow,
     certify_export,
 )
@@ -72,6 +74,7 @@ def _series(symbol: str = "SPY") -> BarSeries:
 
 def _certification(symbol: str = "SPY"):
     return certify_export(
+        provider_price_basis=ProviderPriceBasis.UNADJUSTED_AS_TRADED,
         dataset_id="chronos-etf-daily-v1",
         windows=[SymbolWindow(symbol, _START, _END)],
         series_by_symbol={symbol: _series(symbol)},
@@ -304,6 +307,7 @@ def test_a_failed_certification_cannot_be_frozen(tmp_path: Path) -> None:
     """A release digest must be evidence, not a label typed over a failure."""
 
     failed = certify_export(
+        provider_price_basis=ProviderPriceBasis.UNADJUSTED_AS_TRADED,
         dataset_id="chronos-etf-daily-v1",
         windows=[SymbolWindow("SPY", _START, _END)],
         series_by_symbol={"SPY": _series()},
@@ -349,3 +353,33 @@ def test_identical_partition_bytes_refuse(tmp_path: Path) -> None:
 def test_a_release_needs_a_map(tmp_path: Path) -> None:
     with pytest.raises(DatasetReleaseError, match="complete holdout map"):
         _freeze(tmp_path, spans=[])
+
+
+# --------------------------------------------------- the recorded provider price basis
+
+
+def test_the_release_document_records_the_provider_price_basis(tmp_path: Path) -> None:
+    """Without this, dropping the field from the document breaks nothing in the suite.
+
+    Verified by mutation: before this test existed, deleting the emission line left every
+    release and dataset test in the suite green (133 selected by ``-k "release or dataset"``).
+    """
+
+    document = _freeze(tmp_path).release_document()
+    assert document["provider_price_basis"] == "unadjusted_as_traded"
+
+
+def test_the_release_basis_is_taken_from_the_certification_it_froze(tmp_path: Path) -> None:
+    """The field is read from the certification, not restated — so the two cannot disagree.
+
+    Swapping the basis on the certification alone must move the release's value with it. A
+    hardcoded or separately-parameterised field would keep saying ``unadjusted_as_traded``.
+    """
+
+    certification = replace(
+        _certification(), provider_price_basis=ProviderPriceBasis.IBKR_TRADES_SPLIT_ADJUSTED
+    )
+    release = _freeze(tmp_path, certification=certification)
+
+    assert release.provider_price_basis is ProviderPriceBasis.IBKR_TRADES_SPLIT_ADJUSTED
+    assert release.release_document()["provider_price_basis"] == "ibkr_trades_split_adjusted"

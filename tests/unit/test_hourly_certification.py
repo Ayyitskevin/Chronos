@@ -23,6 +23,7 @@ from chronos.research.certification import (
     CorporateActionAttestation,
     FindingKind,
     NoCorporateActionAttestation,
+    ProviderPriceBasis,
     SymbolWindow,
     Verdict,
     certify_export,
@@ -100,6 +101,7 @@ def _certify(**overrides: object):
         "attestation": _no_action_attestation(tuple(windows)),
         "calendar": _CALENDAR,
         "interval": BarInterval.HOUR_1,
+        "provider_price_basis": ProviderPriceBasis.UNADJUSTED_AS_TRADED,
     }
     kwargs.update(overrides)
     return certify_export(**kwargs)  # type: ignore[arg-type]

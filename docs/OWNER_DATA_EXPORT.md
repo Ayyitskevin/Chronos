@@ -85,11 +85,12 @@ Keys are **exact**: a missing or unknown key is `UNVERIFIED`, not a warning.
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "delivery_id": "owner-2026Q3-sixsym-daily",
   "supersedes": null,
   "interval": "1d",
   "adjustment_policy": "unadjusted_as_traded",
+  "provider_price_basis": "unadjusted_as_traded",
   "provenance": {
     "source_id": "<vendor or export tool identity>",
     "source_receipt_sha256": "<64 hex chars: digest of the vendor's own receipt or export log>",
@@ -103,7 +104,8 @@ Keys are **exact**: a missing or unknown key is `UNVERIFIED`, not a warning.
       "bars_sha256": "<64 hex chars of bars/QQQ.csv>",
       "bar_count": 2637,
       "corporate_actions_sha256": "<64 hex chars of corporate_actions/QQQ.json>",
-      "corporate_action_count": 42
+      "corporate_action_count": 42,
+      "no_split_in_window": true
     }
   },
   "corporate_action_attestation": { "...": "see §4" },
@@ -118,6 +120,26 @@ Keys are **exact**: a missing or unknown key is `UNVERIFIED`, not a warning.
 
 - `interval` must be `1d` and `adjustment_policy` must be `unadjusted_as_traded`; both are
   declarations, not options.
+- `provider_price_basis` says **how the vendor produced the bytes you are sending**, which is a
+  different question from `adjustment_policy` above. `adjustment_policy` is the contract Chronos
+  holds you to; `provider_price_basis` is the fact about the export. Exactly one value is
+  accepted:
+  - `unadjusted_as_traded` — as-traded levels, never restated. **This is the only value that
+    proceeds.**
+  - `ibkr_trades_split_adjusted` — IBKR's `TRADES` feed, which back-adjusts history for splits.
+    `UNVERIFIED`, always. §4 says why, and no per-symbol declaration lifts it.
+  - `ibkr_adjusted_last_split_and_dividend_adjusted` — IBKR's `ADJUSTED_LAST`, adjusted for splits
+    *and* dividends. Refused outright: the dividend adjustment is not recoverable from the bars.
+    The name states the documented operation and deliberately claims nothing about an exact
+    total-return index.
+  There is deliberately **no default**. An absent, misspelled, or non-string value is
+  `UNVERIFIED` — a silently assumed basis is the exact failure this key exists to prevent.
+- `no_split_in_window` is a per-symbol boolean you assert: *this symbol's action file declares
+  no split with an ex-date inside this symbol's window.* It must be a JSON `true`/`false` —
+  `1`, `"true"` and `null` are refused rather than coerced. It is checked **in both
+  directions** against the action file you shipped, so a `true` copied across symbols from a
+  template contradicts the first symbol that actually split, by name and ex-date. It is
+  additional evidence, never an acceptance path — see §4.
 - `supersedes` is `null` for a first delivery, otherwise the prior release digest.
 - `bar_count` and `corporate_action_count` are deliberately redundant with the files. They
   are independent claims the verifier can contradict, which is the point.
@@ -149,6 +171,12 @@ window, warm-up comes out of the window itself. The existing corpus shows the co
 > **Request every symbol from 2016-01-01 or earlier** even if you only care about 2018
 > onward. Roughly two years of lead-in covers a 200-bar warm-up with margin and costs
 > almost nothing at daily resolution.
+
+The lead-in bars are covered by the same `provider_price_basis` declaration as the rest of the
+file, and they are the bars most exposed to a restatement: the further back a bar sits, the more
+later corporate actions a split-adjusting vendor has had the chance to fold into it. Requesting
+more history therefore widens the surface the basis declaration has to be true across — which is
+an argument for an as-traded export, not against the lead-in.
 
 **(b) `SPY` must span the full evaluation window, because it is the benchmark.** Any
 strategy with a relative-strength term reads `SPY` alongside the candidate, so a bar only
@@ -217,6 +245,17 @@ records (repeats are collapsed and separately reported as `DUPLICATE_CORPORATE_A
 in-window distinct count is non-zero — so an action dated outside every certified window does
 not contradict it, and neither does a duplicate of one already counted.
 
+**A split-free window is not evidence of as-traded levels.** The paragraph above is about what
+contradicts an *attestation*; this is about what a clean window does and does not tell you about
+the *prices*. A split with an ex-date **after** your delivered window rescales every bar in the
+file if the vendor restates history — and nothing downstream can see it. Certification reconciles
+split-implied returns only inside the certified windows; `research/adjust.py` skips actions dated
+after the window entirely, and its dividend factor divides by the *delivered* close, so halved
+closes silently double the adjustment. So `no_split_in_window: true` on every symbol is
+consistent with a fully restated file, which is why `ibkr_trades_split_adjusted` is refused even
+when no symbol split in-window. The boolean is corroborating evidence for a raw declaration; the
+declaration is what is load-bearing.
+
 In practice a six-symbol equity-ETF delivery over a multi-year window will contain dividends
 inside its windows, so `sampled_actions` is the form you will almost certainly use.
 `reviewed_no_actions` fits a window genuinely free of actions — a non-distributing instrument,
@@ -229,8 +268,12 @@ evidence naming exact windows, not a free-form note. Use `reviewed_no_actions`.
 ## 5. Verify the delivery
 
 ```
-chronos data verify --delivery /path/to/delivery
+python -m chronos.cli data verify --delivery /path/to/delivery
 ```
+
+Use this module form, not a bare `chronos` — the `chronos` console script is the Streamlit
+operator terminal (`chronos.app:main`), which ignores these arguments and exits **0** without
+verifying anything. Every other document in the repository already uses `python -m chronos.cli`.
 
 Three outcomes, and the distinction between the last two is the important one:
 

@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import Any
 
 from chronos.marketdata.bars import BarInterval, BarSeries
-from chronos.research.certification import CertificationReport
+from chronos.research.certification import CertificationReport, ProviderPriceBasis
 from chronos.research.certified_data import CATALOG_SCHEMA_VERSION
 from chronos.research.holdout_map import (
     HoldoutMapError,
@@ -52,7 +52,7 @@ from chronos.research.holdout_map import (
 
 # v2 added the per-release interval and the hourly partition schema. Bumped while
 # zero production release digests existed; see certification.py's matching note.
-RELEASE_SCHEMA_VERSION = "chronos-dataset-release-v2"
+RELEASE_SCHEMA_VERSION = "chronos-dataset-release-v3"
 
 _BARS_HEADER = "date,open,high,low,close,volume"
 _HOURLY_BARS_HEADER = "timestamp_utc,session_date,open,high,low,close,volume"
@@ -101,6 +101,10 @@ class DatasetRelease:
     partitions: tuple[PartitionRelease, ...]
     spans: tuple[HoldoutSpan, ...]
     certification_digest: str
+    #: The provider basis of the frozen bytes. RECORDED, not enforced: a reader that
+    #: ignores it is not stopped by it, and the catalog this release mints does not
+    #: carry it (ADR-0059 names that boundary as a later slice).
+    provider_price_basis: ProviderPriceBasis
 
     def catalog_manifest(self) -> dict[str, Any]:
         """The exact document ``CertifiedDatasetCatalog.from_manifest`` authenticates."""
@@ -137,6 +141,7 @@ class DatasetRelease:
             "source_id": self.source_id,
             "source_receipt_sha256": self.source_receipt_sha256,
             "certification_digest": self.certification_digest,
+            "provider_price_basis": str(self.provider_price_basis),
             "catalog_manifest_sha256": self.catalog_manifest_sha256,
             "holdout_map": [span.to_mapping() for span in self.spans],
             "partitions": [
@@ -296,6 +301,9 @@ def freeze_release(
         partitions=tuple(partitions),
         spans=tuple(sorted(spans, key=lambda span: (span.symbol, span.start))),
         certification_digest=certification.certification_digest,
+        # Taken from the certification rather than a parameter of its own, so a release
+        # cannot disagree with the verdict it froze.
+        provider_price_basis=certification.provider_price_basis,
     )
 
 

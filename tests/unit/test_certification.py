@@ -21,6 +21,7 @@ from chronos.research.certification import (
     CorporateActionAttestation,
     FindingKind,
     NoCorporateActionAttestation,
+    ProviderPriceBasis,
     SymbolWindow,
     Verdict,
     certify_export,
@@ -112,6 +113,7 @@ def _certify(**overrides: object):
         "actions_by_symbol": {"SPY": (_action(),)},
         "attestation": _attestation(),
         "calendar": _CALENDAR,
+        "provider_price_basis": ProviderPriceBasis.UNADJUSTED_AS_TRADED,
     }
     kwargs.update(overrides)
     return certify_export(**kwargs)  # type: ignore[arg-type]
@@ -477,6 +479,7 @@ def test_an_inverted_window_is_rejected_at_construction() -> None:
 
 def test_multiple_symbols_are_reported_in_a_stable_order() -> None:
     report = certify_export(
+        provider_price_basis=ProviderPriceBasis.UNADJUSTED_AS_TRADED,
         dataset_id="chronos-etf-daily-v1",
         windows=[SymbolWindow("QQQ", _START, _END), SymbolWindow("SPY", _START, _END)],
         series_by_symbol={"SPY": _series("SPY"), "QQQ": _series("QQQ")},
