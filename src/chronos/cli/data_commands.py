@@ -132,6 +132,7 @@ def cmd_data_assemble(args: argparse.Namespace) -> int:
             args.out,
             delivery_id=args.delivery_id,
             provenance=provenance,
+            provider_price_basis=args.provider_price_basis,
             attestation_path=args.attestation,
             classified_moves_path=args.classified_moves,
             supersedes=args.supersedes,
@@ -189,6 +190,10 @@ def add_data_commands(sub: Any) -> None:
     assemble.add_argument("--retrieved-at", default="")
     assemble.add_argument("--retrieval-method", default="")
     assemble.add_argument("--license-note", default="")
+    # Schema 2's vendor fact (ADR-0059). Empty by default rather than argparse-required, so
+    # the refusal that names it comes from the assembler with its reasoning attached, the
+    # same way a missing provenance field is reported.
+    assemble.add_argument("--provider-price-basis", default="")
     assemble.add_argument("--attestation", type=Path, default=None)
     assemble.add_argument("--classified-moves", type=Path, default=None)
     assemble.add_argument("--supersedes", default=None)

@@ -8,8 +8,9 @@ a manifest, a holdout declaration — so the conversion is a copy plus a derived
 ## What this module will not do
 
 **It never invents a field an owner has to assert.** Provenance (who exported the data, the
-digest of their receipt, when, how, under what licence), the corporate-action attestation,
-and the classified-move list are owner acts; §4 says so of the attestation in as many words —
+digest of their receipt, when, how, under what licence), the **provider price basis**, the
+corporate-action attestation, and the classified-move list are owner acts; §4 says so of the
+attestation in as many words —
 "code cannot do this half". A missing one is a refusal that names the field, never a default
 and never an empty string. A delivery that certifies on a fabricated provenance line is worse
 than no delivery, because the certification digest would then attest to nothing.
@@ -44,7 +45,9 @@ here would be a second definition of it, and the first one to drift.
 | `symbols[].bar_count`, `corporate_action_count` | the parsed files, not the manifest |
 | `symbols[].window` | the first and last parsed session date, cross-checked against the manifest |
 | `holdout_map` | `HOLDOUTS.json`, with the status and reason rules of §2 |
+| `symbols[].no_split_in_window` | the parsed actions: no split ex-date inside the window |
 | `interval`, `adjustment_policy` | fixed declarations, per §2 |
+| `provider_price_basis` | **not derived** — a vendor fact, supplied by the owner or refused |
 
 The counts and digests are deliberately re-derived from the bytes rather than copied out of
 `MANIFEST.json`: §2 calls them "independent claims the verifier can contradict", and a claim
@@ -60,8 +63,9 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
-from chronos.histdata.corporate_actions import CorporateAction
+from chronos.histdata.corporate_actions import ActionKind, CorporateAction
 from chronos.marketdata.csv_provider import load_daily_csv_bytes
+from chronos.research.certification import ProviderPriceBasis
 from chronos.research.data_intake import CAMPAIGN_SYMBOLS, INTAKE_SCHEMA_VERSION
 
 INTERVAL = "1d"
@@ -254,6 +258,55 @@ def _day_after(day: date) -> date:
     return day + timedelta(days=1)
 
 
+def _provider_price_basis(value: str | None, out: Path) -> ProviderPriceBasis:
+    """The one schema-2 field that cannot be derived, so it is required and never defaulted.
+
+    ADR-0059 split `adjustment_policy` (what the delivery CLAIMS to satisfy) from
+    `provider_price_basis` (how the vendor MADE the bytes) precisely because one key carrying
+    both let a split-adjusted export satisfy the raw contract by restating it. The store
+    cannot answer it: `MANIFEST.json` records `adjusted: false`, which is the capture's claim
+    about the same bytes rather than the vendor's account of how they were produced. A
+    default here — even the accepted value — would reintroduce the silent assumption the ADR
+    removed, so an absent flag refuses and names it, exactly like the five provenance fields.
+
+    The vocabulary is imported, never restated: a value outside `ProviderPriceBasis` refuses
+    here with the allowed list. Whether an in-vocabulary basis is ADMISSIBLE is not judged
+    here — `ibkr_trades_split_adjusted` assembles and `data verify` refuses it, because the
+    reasoning for that refusal (a post-window split rescales the series invisibly) belongs
+    with the verdict and must not be duplicated into a second place that can drift.
+    """
+
+    if not value:
+        raise _refuse(
+            out,
+            "provider_price_basis is absent: pass --provider-price-basis. It is a vendor "
+            "fact about how the delivered prices were produced, not something this command "
+            "can derive from the store — MANIFEST's `adjusted: false` is the capture's own "
+            "claim about the same bytes. There is no default, by design (ADR-0059)",
+        )
+    try:
+        return ProviderPriceBasis(value)
+    except ValueError:
+        allowed = ", ".join(sorted(member.value for member in ProviderPriceBasis))
+        raise _refuse(out, f"provider_price_basis {value!r} is not one of: {allowed}") from None
+
+
+def _no_split_in_window(actions: tuple[CorporateAction, ...], first: date, last: date) -> bool:
+    """True iff no split ex-date falls inside the symbol's delivered window.
+
+    Derived from the same snapshot that gets published, which is the honest thing available
+    here and also the limit of what it proves: the verifier cross-checks this declaration
+    against the shipped action file in both directions, and for an ASSEMBLED delivery those
+    two cannot disagree. That check keeps its force for a hand-built delivery, where the
+    declaration and the file have separate authors; here it is a tautology, and a reviewer
+    should read the green as consistency rather than as corroboration.
+    """
+
+    return not any(
+        action.kind is ActionKind.SPLIT and first <= action.ex_date <= last for action in actions
+    )
+
+
 def _owner_json(
     path: Path | None, *, field: str, flag: str, default: Any, required: bool, shape: type
 ) -> Any:
@@ -288,6 +341,7 @@ def assemble_delivery(
     *,
     delivery_id: str,
     provenance: dict[str, str],
+    provider_price_basis: str | None,
     attestation_path: Path | None,
     classified_moves_path: Path | None = None,
     supersedes: str | None = None,
@@ -299,6 +353,7 @@ def assemble_delivery(
     """
 
     _require_disjoint(store, out)
+    basis = _provider_price_basis(provider_price_basis, out)
     manifest_path = store / "MANIFEST.json"
     entries = _require_symbol_set(manifest_path, _read_json(manifest_path))
     provenance_block = _provenance_block(provenance, out)
@@ -380,6 +435,7 @@ def assemble_delivery(
             actions_sha256=hashlib.sha256(actions_raw).hexdigest(),
         )
         read[symbol] = {
+            "no_split_in_window": _no_split_in_window(actions, first, last),
             "bars_bytes": raw,
             "actions_bytes": actions_raw,
             "bar_count": len(series.bars),
@@ -416,6 +472,7 @@ def assemble_delivery(
             "bar_count": item["bar_count"],
             "corporate_actions_sha256": hashlib.sha256(actions_bytes).hexdigest(),
             "corporate_action_count": item["action_count"],
+            "no_split_in_window": item["no_split_in_window"],
         }
         total_rows += item["bar_count"]
         total_actions += item["action_count"]
@@ -426,6 +483,7 @@ def assemble_delivery(
         "supersedes": supersedes,
         "interval": INTERVAL,
         "adjustment_policy": ADJUSTMENT_POLICY,
+        "provider_price_basis": basis.value,
         "provenance": provenance_block,
         "symbols": symbols_block,
         "corporate_action_attestation": attestation,

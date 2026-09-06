@@ -361,6 +361,7 @@ evidence and the owner's declarations remain prerequisites.
    ```
    python -m chronos.cli data assemble --store research/data/history --out <delivery> \
        --delivery-id <id> --attestation <your attestation.json> \
+       --provider-price-basis <unadjusted_as_traded|ibkr_trades_split_adjusted|...> \
        --source-id <who exported it> --source-receipt-sha256 <64 hex> \
        --retrieved-at <ISO-8601> --retrieval-method <UI export|API pull|download> \
        --license-note <redistribution status>
@@ -379,9 +380,21 @@ evidence and the owner's declarations remain prerequisites.
    and names the symbol and the field. A store that disagrees with itself is not one to
    build a delivery from.
 
-   **What it will not do is invent the half you have to assert.** The five provenance fields
-   and the §4 attestation are owner declarations; a missing one is a refusal that names it,
-   never a default. `--classified-moves <path>` is optional and defaults to an empty list;
+   **What it will not do is invent the half you have to assert.** The five provenance fields,
+   the §4 attestation and `--provider-price-basis` are owner declarations; a missing one is a
+   refusal that names it, never a default. The basis is schema 2's vendor fact (§2, ADR-0059)
+   and the store cannot supply it — `MANIFEST.json` records `adjusted: false`, which is the
+   capture's claim about the same bytes, not the vendor's account of how they were made.
+   assemble checks the value is in the vocabulary and stops there: it does **not** decide
+   whether a basis is admissible. `--provider-price-basis ibkr_trades_split_adjusted`
+   assembles and then `data verify` refuses it, with the reasoning attached to the verdict
+   where it belongs.
+
+   `no_split_in_window` is derived per symbol from the action file being delivered — true iff
+   no split ex-date falls inside that symbol's window — so you do not declare it by hand.
+   Note what that means for the verifier's both-directions check: for an assembled delivery
+   the declaration and the file cannot disagree, because one came from the other. That check
+   is doing real work only on a hand-built delivery. `--classified-moves <path>` is optional and defaults to an empty list;
    `--supersedes` defaults to `null`.
 
    Two consequences of the sentence above are worth spelling out, because the capture leaves

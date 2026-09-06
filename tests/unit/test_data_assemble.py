@@ -25,6 +25,7 @@ import pytest
 
 from chronos.cli.main import main
 from chronos.research import data_assemble
+from chronos.research.certification import ProviderPriceBasis
 from chronos.research.data_assemble import AssembleRefusal, assemble_delivery
 from chronos.research.data_intake import CAMPAIGN_SYMBOLS, verify_intake
 from chronos.research.session_calendar import SessionCalendar
@@ -45,7 +46,7 @@ PROVENANCE = {
 }
 
 
-def write_store(root: Path, *, seed: int = 7) -> Path:
+def write_store(root: Path, *, seed: int = 7, start: date = START, end: date = END) -> Path:
     """Lane B1's generator, used rather than imitated.
 
     A second store-shaped builder here would be a second definition of the store's format,
@@ -53,7 +54,7 @@ def write_store(root: Path, *, seed: int = 7) -> Path:
     `histdata.store`, so these tests exercise the same bytes Kevin's rehearsal will.
     """
 
-    generate_store(root, seed=seed, start=START, end=END)
+    generate_store(root, seed=seed, start=start, end=end)
     return root
 
 
@@ -101,6 +102,7 @@ def _assemble(tmp_path: Path, **overrides: Any) -> Any:
     kwargs: dict[str, Any] = {
         "delivery_id": "fixture-2026Q3-sixsym-daily",
         "provenance": dict(PROVENANCE),
+        "provider_price_basis": "unadjusted_as_traded",
         "attestation_path": _sampled_attestation(tmp_path),
         "classified_moves_path": None,
         "supersedes": None,
@@ -158,6 +160,15 @@ def _independent_intake(store: Path, attestation: Path) -> dict[str, Any]:
             "bar_count": len(rows),
             "corporate_actions_sha256": hashlib.sha256(actions).hexdigest(),
             "corporate_action_count": len(json.loads(actions)),
+            # derived here from the raw JSON and string date comparison, not from ActionKind
+            # or the module's parser, so a mistake in the assembler's derivation cannot be
+            # reproduced by the thing checking it
+            "no_split_in_window": not [
+                action
+                for action in json.loads(actions)
+                if action["kind"] == "split"
+                and rows[0].split(",")[0] <= action["ex_date"] <= rows[-1].split(",")[0]
+            ],
         }
 
     window = json.loads((store / "HOLDOUTS.json").read_text())["windows"][0]
@@ -186,11 +197,12 @@ def _independent_intake(store: Path, attestation: Path) -> dict[str, Any]:
         )
 
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "delivery_id": "fixture-2026Q3-sixsym-daily",
         "supersedes": None,
         "interval": "1d",
         "adjustment_policy": "unadjusted_as_traded",
+        "provider_price_basis": "unadjusted_as_traded",
         "provenance": dict(PROVENANCE),
         "symbols": symbols,
         "corporate_action_attestation": json.loads(attestation.read_text()),
@@ -481,6 +493,8 @@ def _cli_argv(store: Path, out: Path, attestation: Path) -> list[str]:
         str(out),
         "--delivery-id",
         "fixture-2026Q3-sixsym-daily",
+        "--provider-price-basis",
+        "unadjusted_as_traded",
         "--attestation",
         str(attestation),
         "--source-id",
@@ -691,3 +705,102 @@ def test_a_classified_moves_file_that_is_not_an_array_is_refused(tmp_path: Path)
         _assemble(tmp_path, classified_moves_path=path)
     assert "classified_moves must be a JSON array, got dict" in caught.value.reason
     assert "--classified-moves" in caught.value.reason
+
+
+def test_a_missing_provider_price_basis_is_refused_naming_the_flag(tmp_path: Path) -> None:
+    """Schema 2's one field this command cannot derive (ADR-0059).
+
+    The store records `adjusted: false`, but that is the capture's claim about the bytes, not
+    the vendor's account of how they were produced — which is the distinction the ADR exists
+    to keep. A default would put the assumption back.
+    """
+
+    with pytest.raises(AssembleRefusal) as caught:
+        _assemble(tmp_path, provider_price_basis=None)
+    assert "provider_price_basis is absent" in caught.value.reason
+    assert "--provider-price-basis" in caught.value.reason
+    assert not (tmp_path / "delivery").exists()
+
+
+def test_a_basis_outside_the_vocabulary_is_refused_with_the_allowed_list(tmp_path: Path) -> None:
+    """The enum is imported from certification.py, so this list cannot drift from it."""
+
+    with pytest.raises(AssembleRefusal) as caught:
+        _assemble(tmp_path, provider_price_basis="raw")
+    assert "'raw' is not one of" in caught.value.reason
+    for member in ProviderPriceBasis:
+        assert member.value in caught.value.reason
+
+
+def test_an_inadmissible_basis_assembles_and_verify_is_the_one_that_refuses(
+    tmp_path: Path,
+) -> None:
+    """assemble does not pre-judge admission — that reasoning belongs with the verdict.
+
+    `ibkr_trades_split_adjusted` is IN the vocabulary and is refused by `data verify`, because
+    a split after the delivered window rescales the series and no in-window check can see it.
+    Duplicating that refusal here would be a second place for it to drift; assembling and
+    letting the verifier speak keeps one authority for the contract.
+    """
+
+    result = _assemble(tmp_path, provider_price_basis="ibkr_trades_split_adjusted")
+    document = json.loads((result.delivery / "INTAKE.json").read_text())
+    assert document["provider_price_basis"] == "ibkr_trades_split_adjusted"
+
+    from chronos.research.data_intake import IntakeUnverified
+
+    with pytest.raises(IntakeUnverified) as caught:
+        verify_intake(result.delivery)
+    assert "ibkr_trades_split_adjusted cannot satisfy adjustment_policy" in caught.value.reason
+
+
+def test_no_split_in_window_is_derived_per_symbol_from_the_shipped_actions(
+    tmp_path: Path,
+) -> None:
+    """True iff no split ex-date falls inside that symbol's delivered window.
+
+    The generator splits QQQ inside the range and leaves the other five alone, so the derived
+    value is not constant across symbols — a constant would pass a check that only compared
+    it with itself.
+    """
+
+    store = write_store(tmp_path / "store", seed=7, start=date(2024, 1, 2), end=date(2024, 12, 31))
+    result = _assemble(tmp_path, store=store)
+    document = json.loads((result.delivery / "INTAKE.json").read_text())
+    derived = {
+        symbol: document["symbols"][symbol]["no_split_in_window"] for symbol in CAMPAIGN_SYMBOLS
+    }
+    assert derived["QQQ"] is False, "QQQ splits inside this range"
+    assert all(value is True for symbol, value in derived.items() if symbol != "QQQ"), derived
+    assert verify_intake(result.delivery).certified is True
+
+
+def test_the_declaration_follows_the_WINDOW_not_merely_the_action_file(tmp_path: Path) -> None:
+    """The same symbol, the same split, moved outside the delivered window: True.
+
+    A value derived from the action file alone would answer False here and contradict the
+    delivery it describes. The pairing is the informative part: with the ex-date outside the
+    window the declaration is honestly `true`, and the bars' unexplained discontinuity is
+    then caught by certification as an UNCLASSIFIED_MATERIAL_MOVE — the declaration is
+    evidence, never an acceptance path (§4).
+    """
+
+    store = write_store(tmp_path / "store")
+    actions = json.loads((store / "corporate_actions" / "QQQ.json").read_text())
+    moved = 0
+    for action in actions:
+        if action["kind"] == "split":
+            action["ex_date"] = "2024-06-03"  # after this delivery's window
+            moved += 1
+    assert moved == 1, "the fixture must carry exactly one split to move"
+    set_actions(store, "QQQ", json.dumps(actions))
+
+    result = _assemble(tmp_path, store=store)
+    document = json.loads((result.delivery / "INTAKE.json").read_text())
+    assert document["symbols"]["QQQ"]["no_split_in_window"] is True
+
+    report = verify_intake(result.delivery)
+    assert report.certified is False
+    assert [(f.kind.value, f.symbol) for f in report.findings] == [
+        ("UNCLASSIFIED_MATERIAL_MOVE", "QQQ")
+    ]
