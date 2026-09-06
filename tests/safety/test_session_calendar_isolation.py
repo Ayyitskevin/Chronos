@@ -44,6 +44,14 @@ _CALENDAR_MODULE = "chronos.research.session_calendar"
 _REVIEWED_RESEARCH_CLI_EDGES = {
     ("chronos.cli.data_commands", "chronos.research.data_intake"),
     ("chronos.cli.data_commands", "chronos.research.data_certification"),
+    # Third reviewed edge (Sprint 3 B1): the synthetic-store generator. It uses the
+    # calendar in the one direction R-26 is indifferent to — choosing which dates a
+    # FIXTURE gets bars on, so the fixture agrees with the expectation certification
+    # measures against. It supplies market-open evidence to nothing: it reads no market
+    # data, touches no gateway, and writes only to an operator-named --out directory.
+    # The hazard R-26 names is a calendar wired INTO the authority plane; this is a
+    # generator wired out of it. Bound by tests/unit/test_synth_store.py.
+    ("chronos.cli.data_commands", "chronos.research.synth_store"),
 }
 
 #: The planes allowed to hold the calendar. Everything else is denied by default.

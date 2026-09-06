@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -76,6 +77,41 @@ def cmd_data_certify(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_data_synth_store(args: argparse.Namespace) -> int:
+    """Write a deterministic synthetic six-symbol store; no network, no market data."""
+
+    # Import inside the command so the repeatedly-run read-only verify path does not carry
+    # a generator it never calls.
+    from chronos.research.synth_store import DEFAULT_END, DEFAULT_START, generate_store
+
+    # Defaults are resolved here, not as argparse defaults: importing synth_store at module
+    # scope would put chronos.research.session_calendar on the CLI's import graph, which
+    # tests/safety/test_session_calendar_isolation.py forbids (R-26 keeps market-open
+    # evidence on the venue's own CLOSED token, so the research calendar must not become
+    # reachable from the trading plane).
+    start = args.start if args.start is not None else DEFAULT_START
+    end = args.end if args.end is not None else DEFAULT_END
+    try:
+        written = generate_store(args.out, seed=args.seed, start=start, end=end)
+    except ValueError as error:
+        print(f"REFUSED {args.out}: {error}")
+        return 2
+    total = sum(written.values())
+    detail = ", ".join(f"{symbol} {rows}" for symbol, rows in sorted(written.items()))
+    print(
+        f"SYNTH_STORE {args.out}: {total} synthetic bars across {len(written)} symbols ({detail})"
+    )
+    print("These are generated prices, not market data; the manifest records source=synthetic.")
+    return 0
+
+
+def _session_date(value: str) -> date:
+    try:
+        return date.fromisoformat(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(f"expected YYYY-MM-DD, got {value!r}") from error
+
+
 def add_data_commands(sub: Any) -> None:
     """Register the market-data intake command group."""
 
@@ -88,6 +124,20 @@ def add_data_commands(sub: Any) -> None:
     certify.add_argument("--delivery", type=Path, required=True)
     certify.add_argument("--output", type=Path, required=True)
     certify.set_defaults(func=cmd_data_certify)
+    synth = data_sub.add_parser(
+        "synth-store",
+        help="write a deterministic synthetic six-symbol store (no network, no market data)",
+    )
+    synth.add_argument("--out", type=Path, required=True)
+    synth.add_argument("--seed", type=int, required=True)
+    synth.add_argument("--start", type=_session_date, default=None)
+    synth.add_argument("--end", type=_session_date, default=None)
+    synth.set_defaults(func=cmd_data_synth_store)
 
 
-__all__ = ["add_data_commands", "cmd_data_certify", "cmd_data_verify"]
+__all__ = [
+    "add_data_commands",
+    "cmd_data_certify",
+    "cmd_data_synth_store",
+    "cmd_data_verify",
+]
