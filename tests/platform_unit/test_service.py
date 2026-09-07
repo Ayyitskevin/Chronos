@@ -6,7 +6,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
 
-from chronos.auditlog.log import AuditLog, verify_chain
+from chronos.auditlog.log import AuditLog, ChainState, verify_chain
 from chronos.control.halt import HaltReason, HaltStore
 from chronos.control.modes import TradingMode, resolve_mode_lock
 from chronos.execution.engine import ExecutionEngine
@@ -252,5 +252,4 @@ class TestCycleShadow:
         c = build_components(tmp_path)
         run_startup(c, now_utc=NOW)
         ServiceCycle(c).run_once(now_utc=NOW)
-        ok, _ = verify_chain(tmp_path / "audit.jsonl")
-        assert ok
+        assert verify_chain(tmp_path / "audit.jsonl").state is ChainState.VALID

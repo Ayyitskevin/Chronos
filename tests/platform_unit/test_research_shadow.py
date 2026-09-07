@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
-from chronos.auditlog.log import AuditLog, verify_chain
+from chronos.auditlog.log import AuditLog, ChainState, verify_chain
 from chronos.control.halt import HaltStore
 from chronos.research.runner import STRATEGY_FACTORIES
 from chronos.research.shadow import shadow_scan
@@ -91,8 +91,7 @@ def test_shadow_scan_reports_and_audits_every_decision(tmp_path: Path) -> None:
     # SHADOW is structurally incapable of submitting.
     assert report["capability"] == "NO_ORDERS"
     # Every report is appended to the hash-chained audit log.
-    ok, _ = verify_chain(audit_path)
-    assert ok
+    assert verify_chain(audit_path).state is ChainState.VALID
     contents = audit_path.read_text(encoding="utf-8")
     assert "shadow_scan" in contents
 

@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from chronos.auditlog.log import AuditLog, verify_chain
+from chronos.auditlog.log import AuditLog, ChainState, verify_chain
 from chronos.control.halt import HaltReason, HaltStore
 from chronos.domain.enums import OrderSide
 from chronos.execution.intents import IntentStatus, OrderIntent, TimeInForce
@@ -111,8 +111,8 @@ def _assert_recovery_evidence(restored: _RestoredCopy) -> None:
     assert audit_path.is_file() and audit_path.stat().st_size > 0, (
         "restored audit evidence is missing or empty"
     )
-    audit_ok, audit_detail = verify_chain(audit_path)
-    assert audit_ok, audit_detail
+    verification = verify_chain(audit_path)
+    assert verification.state is ChainState.VALID, verification.detail
 
 
 def _build_isolated_restore(tmp_path: Path) -> _RestoredCopy:

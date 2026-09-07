@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 import chronos.monitoring.snapshot as snapshot_mod
-from chronos.auditlog.log import AuditLog
+from chronos.auditlog.log import AuditLog, ChainState
 from chronos.control.halt import HaltReason, HaltStore
 from chronos.control.modes import TradingMode
 from chronos.monitoring.snapshot import build_snapshot, render_markdown, render_text
@@ -35,7 +35,7 @@ def test_snapshot_from_armed_state(tmp_path: Path) -> None:
     assert snap.capability == "NO_ORDERS"
     assert snap.live_capable is False
     assert snap.reconciliation_status == "reconciled"
-    assert snap.audit_ok
+    assert snap.audit_state is ChainState.VALID
     assert snap.audit_records == 2
 
 
@@ -72,7 +72,7 @@ def test_snapshot_flags_corrupt_audit(tmp_path: Path) -> None:
     halt = tmp_path / "halt.json"
     HaltStore(halt).rearm("ready")
     snap = build_snapshot(mode=TradingMode.SHADOW, halt_file=halt, audit_file=audit, now_utc=NOW)
-    assert not snap.audit_ok
+    assert snap.audit_state is ChainState.BROKEN
     assert any("audit chain" in w for w in snap.warnings)
 
 
@@ -348,3 +348,29 @@ def test_streamlit_config_snapshot_bad_mode_falls_back(
 
     snap = streamlit_mod._config_snapshot()
     assert snap.mode == "shadow"  # invalid mode falls back to SHADOW
+
+
+def test_an_absent_audit_file_does_not_read_as_a_verified_chain(tmp_path: Path) -> None:
+    """The snapshot rendered "OK — no audit log yet" for a chain it had never examined.
+
+    `_read_audit` took `verify_chain`'s True-for-missing answer straight into `audit_ok`,
+    which the text, markdown and Streamlit renderers all printed as OK. Absence is now its
+    own state and raises an operator warning instead.
+    """
+
+    halt = tmp_path / "halt.json"
+    snap = build_snapshot(
+        mode=TradingMode.SHADOW,
+        halt_file=halt,
+        audit_file=tmp_path / "never-written.jsonl",
+        now_utc=NOW,
+    )
+
+    assert snap.audit_state is ChainState.ABSENT
+    assert snap.audit_state is not ChainState.VALID
+    assert any("audit chain not verified" in w for w in snap.warnings), snap.warnings
+
+    text = render_text(snap)
+    assert "audit chain:    ABSENT" in text
+    assert "audit chain:    OK" not in text
+    assert "ABSENT" in render_markdown(snap)

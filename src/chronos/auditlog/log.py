@@ -17,6 +17,7 @@ import json
 import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 
 from chronos.utils.secure_files import secure_owner_only
@@ -107,11 +108,58 @@ class AuditLog:
         return record
 
 
-def verify_chain(path: Path) -> tuple[bool, str]:
-    """Verify the whole chain; returns (ok, detail)."""
+class ChainState(StrEnum):
+    """The three distinguishable outcomes of verifying an audit chain.
+
+    ABSENT is not a weaker VALID. A missing audit log means the chain could not be
+    examined at all, so nothing about tamper-evidence has been established — the same
+    distinction the certification plane draws between NOT_CERTIFIED and UNVERIFIED.
+    """
+
+    VALID = "VALID"
+    BROKEN = "BROKEN"
+    ABSENT = "ABSENT"
+
+
+@dataclass(frozen=True, slots=True)
+class ChainVerification:
+    """The verdict and its detail.
+
+    Deliberately NOT a ``(bool, str)`` tuple and deliberately not unpackable: the old
+    signature returned ``True`` for a missing file, so every caller that wrote
+    ``ok, detail = verify_chain(...)`` silently reported an absent chain as verified.
+    Making the type un-unpackable turns each of those into a loud failure rather than a
+    wrong answer, which is why the migration is by type rather than by convention.
+
+    No ``.ok`` is provided on purpose: it would have to choose a truthiness for ABSENT,
+    which is the defect this exists to remove. ``__bool__`` RAISES for the same reason —
+    omitting it is not enough, because a dataclass without ``__bool__`` is truthy by
+    default, so ``if verify_chain(path):`` answered True for a missing chain and
+    reproduced the original bug one layer down.
+    """
+
+    state: ChainState
+    detail: str
+
+    def __bool__(self) -> bool:
+        """Refuse truth-testing; there is no correct answer for ABSENT.
+
+        Raising means ``if verify_chain(path):`` and ``assert verify_chain(path)`` fail
+        loudly at the call site instead of silently reporting an unexamined chain as a
+        verified one. Compare ``.state`` against a :class:`ChainState` member instead.
+        """
+
+        raise TypeError(
+            f"ChainVerification({self.state.value}) has no truth value: compare .state "
+            f"against a ChainState member (VALID, BROKEN or ABSENT) instead"
+        )
+
+
+def verify_chain(path: Path) -> ChainVerification:
+    """Verify the whole chain, distinguishing absent from valid from broken."""
 
     if not path.exists():
-        return True, "no audit log yet"
+        return ChainVerification(ChainState.ABSENT, "no audit log yet")
     previous = _GENESIS
     expected_sequence = 0
     with path.open("r", encoding="utf-8") as handle:
@@ -129,13 +177,15 @@ def verify_chain(path: Path) -> tuple[bool, str]:
                     str(record["previous_hash"]),
                 )
             except (KeyError, ValueError, TypeError) as error:
-                return False, f"line {line_number}: unreadable record: {error}"
+                return ChainVerification(
+                    ChainState.BROKEN, f"line {line_number}: unreadable record: {error}"
+                )
             if int(record["sequence"]) != expected_sequence:
-                return False, f"line {line_number}: sequence gap"
+                return ChainVerification(ChainState.BROKEN, f"line {line_number}: sequence gap")
             if record["previous_hash"] != previous:
-                return False, f"line {line_number}: chain break"
+                return ChainVerification(ChainState.BROKEN, f"line {line_number}: chain break")
             if recomputed != record["record_hash"]:
-                return False, f"line {line_number}: hash mismatch"
+                return ChainVerification(ChainState.BROKEN, f"line {line_number}: hash mismatch")
             previous = str(record["record_hash"])
             expected_sequence += 1
-    return True, f"chain intact ({expected_sequence} records)"
+    return ChainVerification(ChainState.VALID, f"chain intact ({expected_sequence} records)")

@@ -68,8 +68,10 @@ this is a single-operator local system (ASSUMPTIONS.md A-42).
 
 - `data/platform_audit.jsonl` is a hash chain: each record embeds the SHA-256 of the previous
   record; edits, deletions, and reordering break the chain (`src/chronos/auditlog/log.py`).
-- Verify with `python -m chronos.cli verify-audit-log` (exit code 1 on failure). A verification
-  failure is an incident (docs/INCIDENT_RESPONSE.md), not a nuisance.
+- Verify with `python -m chronos.cli verify-audit-log`: exit **0** valid, **1** broken, **2**
+  absent. A broken chain is an incident (docs/INCIDENT_RESPONSE.md), not a nuisance. Exit 2 is
+  not a weaker exit 1 — it means the chain was never examined, so nothing about
+  tamper-evidence has been established. Do not treat a missing audit log as a passing one.
 - Appends are flushed and fsynced; a failed audit write is designed to halt trading, not be
   dropped.
 - Limitation, honestly: a hash chain proves internal consistency, not authenticity — an attacker

@@ -24,7 +24,7 @@ from typing import Final, Protocol
 
 from sqlalchemy.exc import SQLAlchemyError
 
-from chronos.auditlog.log import verify_chain
+from chronos.auditlog.log import ChainState, verify_chain
 from chronos.control.halt import HaltReason, HaltStore
 from chronos.orders.kill_switch import LiveKillSwitch
 from chronos.persistence.database import SCHEMA_VERSION, Database
@@ -337,9 +337,15 @@ def _verify_recovery_data(
     audit_path = data / "platform_audit.jsonl"
     if not _contains_non_whitespace(audit_path):
         raise RecoveryMeasurementError("recovery audit evidence contains no records")
-    audit_ok, audit_detail = verify_chain(audit_path)
-    if not audit_ok:
-        raise RecoveryMeasurementError(f"recovery audit chain failed: {audit_detail}")
+    verification = verify_chain(audit_path)
+    if verification.state is not ChainState.VALID:
+        # Absence cannot reach here — _contains_non_whitespace above calls
+        # _require_regular_file, which raises for a missing file. Branching on VALID rather
+        # than on "not broken" keeps that true if the guards above are ever reordered:
+        # this refuses on ABSENT too, instead of inheriting the old True-for-missing answer.
+        raise RecoveryMeasurementError(
+            f"recovery audit chain is {verification.state.value}: {verification.detail}"
+        )
 
 
 def _verify_platform_database(path: Path, *, immutable: bool) -> None:

@@ -287,6 +287,32 @@ def test_capture_refuses_whitespace_only_audit_evidence_before_writing(
     assert not snapshot_root.exists()
 
 
+def test_capture_refuses_a_missing_audit_file_and_never_calls_it_verified(
+    open_source: _OpenSource,
+) -> None:
+    """#179 caller-level pin for recovery/measurement.
+
+    This site never actually conflated absent with valid — `_contains_non_whitespace`
+    calls `_require_regular_file`, which raises for a missing file two lines before
+    `verify_chain` is reached. That guard is what this pins, because the refusal depends
+    on statement ORDER: if it were ever reordered below the chain check, the old
+    True-for-missing answer would have passed a recovery snapshot with no audit evidence
+    at all. The chain check itself now also refuses on anything that is not VALID.
+    """
+
+    (open_source.data / "platform_audit.jsonl").unlink()
+    snapshot_root = open_source.data.parent.parent / "snapshot"
+
+    with pytest.raises(RecoveryMeasurementError, match=r"is missing: platform_audit\.jsonl"):
+        capture_snapshot(
+            source_data=open_source.data,
+            snapshot_root=snapshot_root,
+            source_id="disposable-test-source",
+        )
+
+    assert not snapshot_root.exists()
+
+
 def test_restore_fsyncs_the_restored_data_directory(
     open_source: _OpenSource,
     monkeypatch: pytest.MonkeyPatch,
