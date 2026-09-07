@@ -256,7 +256,9 @@ RPO/RTO, encrypted/off-host backup, and external integrity anchor remain open.
    ```bash
    python -m chronos.cli verify-audit-log
    ```
-   `OK — chain intact (N records)` or a precise first-failure line. If it fails, treat it as an
+   `VALID — chain intact (N records)` (exit 0), or `BROKEN` with a precise first-failure line
+   (exit 1), or `ABSENT — no audit log yet` (exit 2). `ABSENT` is not a pass: the chain was
+   never examined. If it is `BROKEN`, treat it as an
    incident (docs/INCIDENT_RESPONSE.md) — a restore from an older backup legitimately has fewer
    records, but a broken chain within the restored file is corruption or tamper.
 5. **Verify corpus integrity** (if research state was restored):

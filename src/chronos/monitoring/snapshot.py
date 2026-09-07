@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from chronos.auditlog.log import verify_chain
+from chronos.auditlog.log import ChainState, verify_chain
 from chronos.control.halt import HaltStore
 from chronos.control.modes import ExecutionCapability, TradingMode, resolve_mode_lock
 from chronos.marketdata.csv_provider import load_daily_csv
@@ -60,7 +60,7 @@ class MonitoringSnapshot:
     halt_reason: str | None
     halt_detail: str
     reconciliation_status: str
-    audit_ok: bool
+    audit_state: ChainState
     audit_detail: str
     audit_records: int
     recent_decisions: tuple[dict[str, object], ...]
@@ -91,8 +91,10 @@ def _code_commit(repo_root: Path) -> str:
         return "unknown"
 
 
-def _read_audit(audit_file: Path, *, tail: int) -> tuple[bool, str, int, list[dict[str, object]]]:
-    ok, detail = verify_chain(audit_file)
+def _read_audit(
+    audit_file: Path, *, tail: int
+) -> tuple[ChainState, str, int, list[dict[str, object]]]:
+    verification = verify_chain(audit_file)
     records: list[dict[str, object]] = []
     if audit_file.exists():
         with audit_file.open("r", encoding="utf-8") as handle:
@@ -103,7 +105,7 @@ def _read_audit(audit_file: Path, *, tail: int) -> tuple[bool, str, int, list[di
                     except json.JSONDecodeError:
                         break
     decisions = [r for r in records if r.get("kind") in ("service_decision", "service_startup")]
-    return ok, detail, len(records), decisions[-tail:]
+    return verification.state, verification.detail, len(records), decisions[-tail:]
 
 
 def _active_limits(policy: RiskPolicy) -> tuple[tuple[str, str], ...]:
@@ -159,9 +161,13 @@ def build_snapshot(
     if halt.halted:
         warnings.append(f"platform is HALTED ({halt.reason.value if halt.reason else 'unknown'})")
 
-    audit_ok, audit_detail, audit_records, decisions = _read_audit(audit_file, tail=tail)
-    if not audit_ok:
+    audit_state, audit_detail, audit_records, decisions = _read_audit(audit_file, tail=tail)
+    if audit_state is ChainState.BROKEN:
         warnings.append(f"audit chain verification failed: {audit_detail}")
+    elif audit_state is ChainState.ABSENT:
+        # Previously this rendered as "OK — no audit log yet": a missing chain read as a
+        # verified one in the operator snapshot. Absence is unverified, so it warns.
+        warnings.append(f"audit chain not verified: {audit_detail}")
 
     freshness: list[DataFreshness] = []
     if data_dir is not None:
@@ -229,7 +235,7 @@ def build_snapshot(
         halt_reason=halt.reason.value if halt.reason else None,
         halt_detail=halt.detail,
         reconciliation_status=_reconciliation_status(decisions),
-        audit_ok=audit_ok,
+        audit_state=audit_state,
         audit_detail=audit_detail,
         audit_records=audit_records,
         recent_decisions=tuple(decisions),
@@ -265,7 +271,7 @@ def render_text(snapshot: MonitoringSnapshot) -> str:
         f"generated:      {snapshot.generated_at_utc}   commit {snapshot.code_commit}",
         f"halt:           {halt_line}",
         f"reconciliation: {snapshot.reconciliation_status}",
-        f"audit chain:    {'OK' if snapshot.audit_ok else 'FAILED'} — {snapshot.audit_detail}",
+        f"audit chain:    {snapshot.audit_state.value} — {snapshot.audit_detail}",
         f"risk policy:    {snapshot.risk_policy_version or 'none'} "
         f"(hash {snapshot.risk_policy_hash or '-'})",
     ]
@@ -320,7 +326,7 @@ def render_markdown(snapshot: MonitoringSnapshot) -> str:
         f"- **Halt:** {status}"
         + (f" — `{snapshot.halt_reason}` ({snapshot.halt_detail})" if snapshot.halted else ""),
         f"- **Reconciliation:** {snapshot.reconciliation_status}",
-        f"- **Audit chain:** {'OK' if snapshot.audit_ok else 'FAILED'} — {snapshot.audit_detail} "
+        f"- **Audit chain:** {snapshot.audit_state.value} — {snapshot.audit_detail} "
         f"({snapshot.audit_records} records)",
         f"- **Risk policy:** {snapshot.risk_policy_version or 'none'} "
         f"(`{snapshot.risk_policy_hash or '-'}`)",

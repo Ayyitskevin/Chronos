@@ -192,7 +192,7 @@ means "armed".
 
 ### Audit-chain verification failure
 
-`python -m chronos.cli verify-audit-log` reports a sequence gap, chain break, hash mismatch, or
+`python -m chronos.cli verify-audit-log` reports `BROKEN` with a sequence gap, chain break, hash mismatch, or
 unreadable record with its line number (`src/chronos/auditlog/log.py`).
 
 **Treat as a tamper-or-corruption incident. Do not trade until explained.**

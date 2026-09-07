@@ -432,7 +432,7 @@ file (`chronos.auditlog.verify_chain` over `--audit-file`). It is worth running,
 **not this campaign's chain.** On a fresh state directory it prints:
 
 ```text
-audit log: OK — no audit log yet
+audit log: ABSENT — no audit log yet
 ```
 
 The campaign's decision stream is the hash chain in **`hash_chain_records`**, verified in code

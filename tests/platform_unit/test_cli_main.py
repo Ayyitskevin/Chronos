@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from chronos.auditlog.log import AuditLog
 from chronos.cli.main import build_parser, main
 from chronos.control.halt import HaltStore
 
@@ -99,8 +100,55 @@ def test_risk_show_command(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -
     assert "policy version: cli-test" in capsys.readouterr().out
 
 
-def test_verify_audit_log_on_empty_is_ok(tmp_path: Path) -> None:
+def test_verify_audit_log_on_a_missing_file_is_absent_not_ok(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """This test was `test_verify_audit_log_on_empty_is_ok` and asserted exit 0.
+
+    `_base_args` never creates the audit file, so it pinned the #179 defect: a missing
+    chain exited 0, the machine-readable "verified". Absent is now exit 2, and the state
+    is printed rather than "OK".
+    """
+
+    assert main([*_base_args(tmp_path), "verify-audit-log"]) == 2
+    out = capsys.readouterr().out
+    assert "ABSENT" in out
+    assert "OK" not in out
+
+
+def test_verify_audit_log_separates_valid_from_broken(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The positive control for the test above: a real chain still exits 0, and a
+    corrupted one exits 1 — so exit 2 means absent, not merely "not valid"."""
+
+    audit = tmp_path / "audit.jsonl"
+    log = AuditLog(audit)
+    log.append("startup", {"n": 1})
+    log.append("startup", {"n": 2})
     assert main([*_base_args(tmp_path), "verify-audit-log"]) == 0
+    assert "VALID" in capsys.readouterr().out
+
+    lines = audit.read_text(encoding="utf-8").splitlines()
+    tampered = lines[0].replace('"n":1', '"n":99')
+    # Assert the tamper actually landed. A replace() that matches nothing leaves the chain
+    # intact and the test would then be asserting against an unmodified file.
+    assert tampered != lines[0], lines[0]
+    lines[0] = tampered
+    audit.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    assert main([*_base_args(tmp_path), "verify-audit-log"]) == 1
+    assert "BROKEN" in capsys.readouterr().out
+
+
+def test_status_reports_an_absent_audit_chain_as_absent(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`status` printed "OK — no audit log yet" for a chain it had never examined."""
+
+    assert main([*_base_args(tmp_path), "status"]) == 0
+    out = capsys.readouterr().out
+    assert "audit log: ABSENT" in out
+    assert "audit log: OK" not in out
 
 
 def test_verify_corpus_detects_match_and_mismatch(tmp_path: Path) -> None:

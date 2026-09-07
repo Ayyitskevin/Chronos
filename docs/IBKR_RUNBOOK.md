@@ -174,7 +174,7 @@ python -m chronos.cli risk-show [--policy config/risk.example.yaml]
                                                    # print the validated risk policy + hash
 python -m chronos.cli verify-corpus [--registry research/strategy_registry.yaml]
                                                    # verify Pine corpus SHA-256 vs registry
-python -m chronos.cli verify-audit-log             # verify the audit hash chain (exit 1 on fail)
+python -m chronos.cli verify-audit-log             # verify the audit hash chain (0 valid, 1 broken, 2 absent)
 python -m chronos.cli shadow-scan \
     [--strategies regime_trend_v1,mean_reversion_v1] [--symbols SPY,QQQ,IWM,DIA,GLD,TLT] \
     [--data-dir research/data/raw] [--policy config/risk.example.yaml] [--equity 3000.0]

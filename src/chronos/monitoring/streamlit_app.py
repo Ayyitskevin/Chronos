@@ -86,7 +86,7 @@ def render_monitor(snapshot: MonitoringSnapshot) -> None:
     columns[2].metric("Reconciliation", snapshot.reconciliation_status)
 
     audit_columns = st.columns(3)
-    audit_columns[0].metric("Audit chain", "OK" if snapshot.audit_ok else "FAILED")
+    audit_columns[0].metric("Audit chain", snapshot.audit_state.value)
     audit_columns[1].metric("Audit records", str(snapshot.audit_records))
     audit_columns[2].metric("Code commit", snapshot.code_commit)
     st.caption(f"audit detail: {snapshot.audit_detail}")

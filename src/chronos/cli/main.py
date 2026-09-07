@@ -24,7 +24,7 @@ import json
 import sys
 from pathlib import Path
 
-from chronos.auditlog.log import verify_chain
+from chronos.auditlog.log import ChainState, verify_chain
 from chronos.cli.campaign_preflight import add_campaign_preflight_command
 from chronos.cli.campaign_status import add_campaign_status_command
 from chronos.cli.data_commands import add_data_commands
@@ -65,8 +65,8 @@ def _banner(mode: TradingMode, halt_store: HaltStore) -> None:
 def cmd_status(args: argparse.Namespace) -> int:
     store = HaltStore(args.halt_file)
     _banner(TradingMode.RESEARCH, store)
-    ok, detail = verify_chain(args.audit_file)
-    print(f"audit log: {'OK' if ok else 'FAILED'} — {detail}")
+    result = verify_chain(args.audit_file)
+    print(f"audit log: {result.state.value} — {result.detail}")
     return 0
 
 
@@ -130,9 +130,19 @@ def cmd_verify_corpus(args: argparse.Namespace) -> int:
 
 
 def cmd_verify_audit(args: argparse.Namespace) -> int:
-    ok, detail = verify_chain(args.audit_file)
-    print(f"audit log: {'OK' if ok else 'FAILED'} — {detail}")
-    return 0 if ok else 1
+    """0 valid, 1 broken, 2 absent — the house 0/1/2 verdict convention.
+
+    ABSENT must not exit 0. Exit 0 is the machine-readable "chain verified", and a caller
+    gating on it (CI, a runbook step, an operator script) is exactly who the old
+    True-for-missing answer misled; printing the state while still exiting 0 would fix
+    only the half a human reads.
+    """
+
+    result = verify_chain(args.audit_file)
+    print(f"audit log: {result.state.value} — {result.detail}")
+    if result.state is ChainState.VALID:
+        return 0
+    return 1 if result.state is ChainState.BROKEN else 2
 
 
 def cmd_shadow_scan(args: argparse.Namespace) -> int:

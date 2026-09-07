@@ -332,18 +332,10 @@ def _kill_switch_status(path: Path) -> ConditionResult:
 
 
 def _audit_status(path: Path) -> ConditionResult:
-    from chronos.auditlog.log import verify_chain
+    from chronos.auditlog.log import ChainState, verify_chain
 
-    if not path.exists():
-        return _result(
-            "platform audit chain",
-            ConditionState.UNVERIFIED,
-            "SHADOW_CAMPAIGN §5",
-            "platform audit file is absent",
-            "run verify-audit-log against the campaign audit file",
-        )
     try:
-        ok, detail = verify_chain(path)
+        verification = verify_chain(path)
     except OSError:
         return _result(
             "platform audit chain",
@@ -352,11 +344,22 @@ def _audit_status(path: Path) -> ConditionResult:
             "platform audit file is unreadable",
             "preserve the file and run verify-audit-log",
         )
+    if verification.state is ChainState.ABSENT:
+        # Absence was already UNVERIFIED here, via a separate path.exists() pre-check.
+        # It now comes from the returned state, so this caller and the verifier cannot
+        # disagree about what "absent" means.
+        return _result(
+            "platform audit chain",
+            ConditionState.UNVERIFIED,
+            "SHADOW_CAMPAIGN §5",
+            "platform audit file is absent",
+            "run verify-audit-log against the campaign audit file",
+        )
     return _result(
         "platform audit chain",
-        ConditionState.CLEAR if ok else ConditionState.TRIPPED,
+        ConditionState.CLEAR if verification.state is ChainState.VALID else ConditionState.TRIPPED,
         "SHADOW_CAMPAIGN §5",
-        detail,
+        verification.detail,
         "run verify-audit-log and investigate the first broken record",
     )
 
