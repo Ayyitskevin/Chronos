@@ -55,6 +55,12 @@ _REVIEWED_RESEARCH_CLI_EDGES = {
     # generator wired out of it. Bound by tests/unit/test_synth_store.py.
     ("chronos.cli.data_commands", "chronos.research.synth_store"),
     ("chronos.cli.data_commands", "chronos.research.data_assemble"),
+    # Fifth reviewed edge (Sprint 4): `data check`, the partial-store dry run. It reads the
+    # calendar for the same reason the intake edges do — coverage is measured against the
+    # sessions the exchange held — and it is the most read-only route of the five: it opens
+    # store files, returns findings, writes nothing and produces no verdict. Market-open
+    # evidence flows to no decision from here. Bound by tests/unit/test_data_check.py.
+    ("chronos.cli.data_commands", "chronos.research.data_check"),
 }
 
 #: The planes allowed to hold the calendar. Everything else is denied by default.
@@ -285,11 +291,17 @@ def test_the_reachability_graph_is_real() -> None:
     assert graph["chronos.histdata.official_client"] >= {_CALENDAR_MODULE}
     # A known-good multi-hop path exists, so BFS is genuinely traversing edges.
     assert _reaches(graph, "chronos.histdata.holdout", "chronos.marketdata.quality")
-    assert _reaches(graph, "chronos.cli.data_commands", _CALENDAR_MODULE) == [
-        "chronos.cli.data_commands",
-        "chronos.research.data_intake",
-        _CALENDAR_MODULE,
-    ]
+    # Pinned as a SHAPE, not as one exact path: BFS returns whichever reviewed research
+    # module it reaches first, which is a lexicographic accident of the module names and
+    # changed the day a fifth edge was added. What the control is for is that a real
+    # multi-hop path is traversed, and that the middle hop is one of the edges the list
+    # above claims to be removing.
+    path = _reaches(graph, "chronos.cli.data_commands", _CALENDAR_MODULE)
+    assert path is not None and len(path) == 3
+    assert path[0] == "chronos.cli.data_commands" and path[-1] == _CALENDAR_MODULE
+    assert path[1] in {target for _, target in _REVIEWED_RESEARCH_CLI_EDGES}
+    # and the intake edge specifically is still there, whichever one BFS happened to find
+    assert _reaches(graph, "chronos.research.data_intake", _CALENDAR_MODULE)
     guarded = _without_reviewed_research_cli_edges(graph)
     # The reviewed inspection edge is removed; cli/registry have no other route.
     for benign in (

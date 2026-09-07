@@ -112,6 +112,49 @@ def _session_date(value: str) -> date:
         raise argparse.ArgumentTypeError(f"expected YYYY-MM-DD, got {value!r}") from error
 
 
+def cmd_data_check(args: argparse.Namespace) -> int:
+    """Report the per-symbol gates over a partial capture store. Read-only, no verdict.
+
+    Exit code is a count, not a judgement: 0 when the gates found nothing, 1 when they
+    found something, 2 when the store could not be read as a subject at all. There is
+    deliberately no word here that a reader could mistake for a certification.
+    """
+
+    # Local import for the same reason assemble's and certify's are: keep the research
+    # plane off the import path of every command that does not need it.
+    from chronos.research.data_check import CheckRefusal, check_store
+
+    symbols = tuple(part.strip() for part in args.symbols.split(",") if part.strip())
+    try:
+        result = check_store(args.store, symbols or None)
+    except CheckRefusal as error:
+        print(f"REFUSED {error.path}: {error.reason}")
+        return 2
+
+    for item in result.symbols:
+        actions = (
+            "no action file" if item.action_count is None else f"{item.action_count} action(s)"
+        )
+        witnesses = (
+            "manifest witnesses checked" if item.manifest_checked else "no manifest witnesses"
+        )
+        print(
+            f"CHECKED {item.symbol}: {item.bar_count} bars {item.start.isoformat()}.."
+            f"{item.end.isoformat()}, coverage {item.coverage:.4f}, {actions}, {witnesses}, "
+            f"{len(item.findings)} finding(s)"
+        )
+        for finding in item.findings:
+            where = f" {finding.session_date.isoformat()}" if finding.session_date else ""
+            print(f"  FINDING {finding.kind}{where}: {finding.detail}")
+
+    print(
+        f"GATES RUN over {len(result.symbols)} symbol(s) in {args.store}: "
+        f"{result.finding_count} finding(s). This is not a certification — "
+        "a delivery of all six symbols still has to pass data verify."
+    )
+    return 1 if result.finding_count else 0
+
+
 def cmd_data_assemble(args: argparse.Namespace) -> int:
     """Turn a capture store into a delivery directory. Read-only on the store."""
 
@@ -178,6 +221,15 @@ def add_data_commands(sub: Any) -> None:
     synth.add_argument("--start", type=_session_date, default=None)
     synth.add_argument("--end", type=_session_date, default=None)
     synth.set_defaults(func=cmd_data_synth_store)
+    check = data_sub.add_parser(
+        "check",
+        help="run the per-symbol gates over a partial capture store (read-only, no verdict)",
+    )
+    check.add_argument("--store", type=Path, required=True)
+    # One flag for both spellings: --symbol DIA and --symbols DIA,SPY are the same argument,
+    # because an owner capturing one symbol should not have to notice the plural.
+    check.add_argument("--symbol", "--symbols", dest="symbols", default="")
+    check.set_defaults(func=cmd_data_check)
     assemble = data_sub.add_parser(
         "assemble", help="turn a capture store into a delivery directory (read-only on the store)"
     )
@@ -204,6 +256,7 @@ __all__ = [
     "add_data_commands",
     "cmd_data_assemble",
     "cmd_data_certify",
+    "cmd_data_check",
     "cmd_data_synth_store",
     "cmd_data_verify",
 ]

@@ -420,10 +420,10 @@ def assemble_delivery(
         if isinstance(bars_meta, dict) and bars_meta.get("adjusted"):
             raise _refuse(manifest_path, f"{symbol}: MANIFEST records adjusted bars")
         first, last = series.bars[0].session_date, series.bars[-1].session_date
-        actions = _parse_actions(actions_raw, actions_src)
+        actions = parse_actions(actions_raw, actions_src)
         if not actions:
             empty_action_symbols.append(symbol)
-        _cross_check_manifest(
+        cross_check_manifest(
             manifest_path,
             symbol,
             entry,
@@ -503,7 +503,7 @@ def assemble_delivery(
     )
 
 
-def _parse_actions(payload: bytes, path: Path) -> tuple[CorporateAction, ...]:
+def parse_actions(payload: bytes, path: Path) -> tuple[CorporateAction, ...]:
     """Parse exactly as the verifier does, so a refusal names the store file that has it.
 
     Takes the snapshot rather than the path: the parse and the published bytes must be the
@@ -527,7 +527,7 @@ def _parse_actions(payload: bytes, path: Path) -> tuple[CorporateAction, ...]:
     return tuple(parsed)
 
 
-def _cross_check_manifest(
+def cross_check_manifest(
     manifest_path: Path,
     symbol: str,
     entry: Any,
@@ -625,4 +625,6 @@ __all__ = [
     "AssembleRefusal",
     "AssembleResult",
     "assemble_delivery",
+    "cross_check_manifest",
+    "parse_actions",
 ]

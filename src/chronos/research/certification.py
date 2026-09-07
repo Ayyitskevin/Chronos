@@ -544,6 +544,229 @@ def _action_evidence(
 # ------------------------------------------------------------------------------ certify
 
 
+def gate_symbol_bars(
+    window: SymbolWindow,
+    series: BarSeries,
+    actions: Sequence[CorporateAction] = (),
+    *,
+    calendar: SessionCalendar,
+    interval: BarInterval = BarInterval.DAY_1,
+    classified_moves: Sequence[ClassifiedMove] = (),
+) -> tuple[SymbolCoverage, tuple[Finding, ...]]:
+    """The per-symbol data gates: one symbol's bars, judged against one symbol's window.
+
+    Lifted out of ``certify_export``'s loop rather than reimplemented, so the two cannot
+    diverge — coverage against the calendar, the store's own blocking quality issues,
+    unclassified material moves and split reconciliation, in that order, with the same
+    ``FindingKind`` values. ``certify_export`` calls this for every window it judges.
+
+    It judges BARS, not a delivery. The attestation, provider-basis, holdout-map and
+    six-symbol identity gates stay with the verdict, because none of them is answerable
+    from one symbol's files — which is also why this returns evidence and never a
+    ``Verdict``: a caller holding a partial capture can see exactly what these gates say
+    about its bytes without minting a verdict the frozen criteria do not support.
+    """
+
+    classified = {(move.symbol, move.session_date): move for move in classified_moves}
+    findings: list[Finding] = []
+    symbol = window.symbol
+    try:
+        session_days = calendar.sessions(window.start, window.end)
+        expected = set(session_days)
+        expected_slots: dict[date, tuple[datetime, ...]] = {}
+        if interval is BarInterval.HOUR_1:
+            expected_slots = {
+                day: calendar.expected_close_timestamps_utc(day) for day in session_days
+            }
+    except CalendarCoverageError as error:
+        findings.append(
+            Finding(
+                kind=FindingKind.CALENDAR_NOT_COVERED,
+                symbol=symbol,
+                detail=str(error),
+            )
+        )
+        return (
+            SymbolCoverage(
+                symbol=symbol,
+                expected_sessions=0,
+                observed_bars=len(series),
+                missing_sessions=(),
+                unexpected_bars=(),
+            ),
+            tuple(findings),
+        )
+
+    in_window = [bar for bar in series.bars if window.start <= bar.session_date <= window.end]
+    observed = {bar.session_date for bar in in_window}
+    missing = tuple(sorted(expected - observed))
+    unexpected = tuple(sorted(observed - expected))
+
+    if interval is BarInterval.HOUR_1:
+        observed_by_session: dict[date, set[datetime]] = {}
+        for bar in in_window:
+            observed_by_session.setdefault(bar.session_date, set()).add(bar.timestamp_utc)
+        expected_bar_total = sum(len(slots) for slots in expected_slots.values())
+        observed_slot_bars = 0
+        missing_bar_ts: list[datetime] = []
+        partial_missing: list[tuple[date, datetime]] = []
+        for day, slots in expected_slots.items():
+            got = observed_by_session.get(day, set())
+            for slot in slots:
+                if slot in got:
+                    observed_slot_bars += 1
+                else:
+                    missing_bar_ts.append(slot)
+                    if got:
+                        partial_missing.append((day, slot))
+        off_slot: list[tuple[date, datetime]] = []
+        for day, got in sorted(observed_by_session.items()):
+            for ts in sorted(got - set(expected_slots.get(day, ()))):
+                if day in expected:
+                    off_slot.append((day, ts))
+        entry = SymbolCoverage(
+            symbol=symbol,
+            expected_sessions=len(expected),
+            observed_bars=len(in_window),
+            missing_sessions=missing,
+            unexpected_bars=unexpected,
+            expected_bar_total=expected_bar_total,
+            observed_slot_bars=observed_slot_bars,
+            missing_bar_timestamps=tuple(sorted(missing_bar_ts)),
+            unexpected_bar_timestamps=tuple(ts for _, ts in off_slot),
+        )
+    else:
+        entry = SymbolCoverage(
+            symbol=symbol,
+            expected_sessions=len(expected),
+            observed_bars=len(in_window),
+            missing_sessions=missing,
+            unexpected_bars=unexpected,
+        )
+
+    for day in missing:
+        findings.append(
+            Finding(
+                kind=FindingKind.MISSING_SESSION,
+                symbol=symbol,
+                detail=(
+                    "the exchange held a session and the export has no bar for it"
+                    if interval is BarInterval.DAY_1
+                    else "the exchange held a session and the export has no bars for it"
+                ),
+                session_date=day,
+            )
+        )
+    for day in unexpected:
+        reason = calendar.closure_reason(day) or "outside the declared window"
+        findings.append(
+            Finding(
+                kind=FindingKind.UNEXPECTED_BAR,
+                symbol=symbol,
+                detail=f"bar delivered for a non-session day ({reason})",
+                session_date=day,
+            )
+        )
+    if interval is BarInterval.HOUR_1:
+        # A fully-empty session is already one MISSING_SESSION finding; per-slot
+        # findings are for sessions the export partially covered, so the evidence
+        # names the exact bar without seven-fold noise on a wholly missing day.
+        for day, slot in partial_missing:
+            findings.append(
+                Finding(
+                    kind=FindingKind.MISSING_BAR,
+                    symbol=symbol,
+                    detail="the session ran and the export is missing this bar",
+                    session_date=day,
+                    timestamp_utc=slot,
+                )
+            )
+        for day, ts in off_slot:
+            findings.append(
+                Finding(
+                    kind=FindingKind.UNEXPECTED_BAR,
+                    symbol=symbol,
+                    detail=(
+                        "bar timestamp is not an expected session slot "
+                        "(pre/post-market, misaligned, or a phantom extra bar)"
+                    ),
+                    session_date=day,
+                    timestamp_utc=ts,
+                )
+            )
+    if not entry.meets_floor:
+        findings.append(
+            Finding(
+                kind=FindingKind.COVERAGE_BELOW_FLOOR,
+                symbol=symbol,
+                detail=(
+                    f"coverage {entry.coverage:.4f} is below the frozen floor "
+                    f"{MINIMUM_SESSION_COVERAGE}"
+                ),
+            )
+        )
+
+    report = validate_series(series)
+    for issue in report.issues:
+        if issue.blocking:
+            findings.append(
+                Finding(
+                    kind=FindingKind.BLOCKING_QUALITY_ISSUE,
+                    symbol=symbol,
+                    detail=f"{issue.kind}: {issue.detail}",
+                )
+            )
+
+    splits = _splits_by_date(actions)
+    moves = {day: change for day, change in _material_moves(_session_closes(series))}
+
+    for day, change in sorted(moves.items()):
+        if not (window.start <= day <= window.end):
+            continue
+        action = splits.get(day)
+        if action is not None and _reconciles(change, action):
+            continue
+        if (symbol, day) in classified:
+            continue
+        findings.append(
+            Finding(
+                kind=FindingKind.UNCLASSIFIED_MATERIAL_MOVE,
+                symbol=symbol,
+                detail=(
+                    f"close-to-close move {change:+.4f} is unexplained: no split on "
+                    "this ex-date reconciles it and no owner classification covers it"
+                ),
+                session_date=day,
+            )
+        )
+
+    for day, action in sorted(splits.items()):
+        if not (window.start <= day <= window.end):
+            continue
+        observed_change = moves.get(day)
+        implied = _split_implied_return(action.value)
+        if observed_change is None or not _reconciles(observed_change, action):
+            findings.append(
+                Finding(
+                    kind=FindingKind.UNRECONCILED_SPLIT,
+                    symbol=symbol,
+                    detail=(
+                        f"the action stream declares a {action.value:g}-for-1 split "
+                        f"(implying {implied:+.4f}) but the prices show "
+                        + (
+                            f"{observed_change:+.4f}"
+                            if observed_change is not None
+                            else "no material move"
+                        )
+                        + " — the bars or the action stream is wrong"
+                    ),
+                    session_date=day,
+                )
+            )
+
+    return entry, tuple(findings)
+
+
 def certify_export(
     *,
     dataset_id: str,
@@ -681,7 +904,6 @@ def certify_export(
                 )
             )
 
-    classified = {(move.symbol, move.session_date): move for move in classified_moves}
     attested_symbols = set(attestation.symbols) if attestation else set()
 
     for window in sorted(windows, key=lambda item: item.symbol):
@@ -718,200 +940,16 @@ def certify_export(
                 )
             )
 
-        try:
-            session_days = calendar.sessions(window.start, window.end)
-            expected = set(session_days)
-            expected_slots: dict[date, tuple[datetime, ...]] = {}
-            if interval is BarInterval.HOUR_1:
-                expected_slots = {
-                    day: calendar.expected_close_timestamps_utc(day) for day in session_days
-                }
-        except CalendarCoverageError as error:
-            findings.append(
-                Finding(
-                    kind=FindingKind.CALENDAR_NOT_COVERED,
-                    symbol=symbol,
-                    detail=str(error),
-                )
-            )
-            coverage.append(
-                SymbolCoverage(
-                    symbol=symbol,
-                    expected_sessions=0,
-                    observed_bars=len(series),
-                    missing_sessions=(),
-                    unexpected_bars=(),
-                )
-            )
-            continue
-
-        in_window = [bar for bar in series.bars if window.start <= bar.session_date <= window.end]
-        observed = {bar.session_date for bar in in_window}
-        missing = tuple(sorted(expected - observed))
-        unexpected = tuple(sorted(observed - expected))
-
-        if interval is BarInterval.HOUR_1:
-            observed_by_session: dict[date, set[datetime]] = {}
-            for bar in in_window:
-                observed_by_session.setdefault(bar.session_date, set()).add(bar.timestamp_utc)
-            expected_bar_total = sum(len(slots) for slots in expected_slots.values())
-            observed_slot_bars = 0
-            missing_bar_ts: list[datetime] = []
-            partial_missing: list[tuple[date, datetime]] = []
-            for day, slots in expected_slots.items():
-                got = observed_by_session.get(day, set())
-                for slot in slots:
-                    if slot in got:
-                        observed_slot_bars += 1
-                    else:
-                        missing_bar_ts.append(slot)
-                        if got:
-                            partial_missing.append((day, slot))
-            off_slot: list[tuple[date, datetime]] = []
-            for day, got in sorted(observed_by_session.items()):
-                for ts in sorted(got - set(expected_slots.get(day, ()))):
-                    if day in expected:
-                        off_slot.append((day, ts))
-            entry = SymbolCoverage(
-                symbol=symbol,
-                expected_sessions=len(expected),
-                observed_bars=len(in_window),
-                missing_sessions=missing,
-                unexpected_bars=unexpected,
-                expected_bar_total=expected_bar_total,
-                observed_slot_bars=observed_slot_bars,
-                missing_bar_timestamps=tuple(sorted(missing_bar_ts)),
-                unexpected_bar_timestamps=tuple(ts for _, ts in off_slot),
-            )
-        else:
-            entry = SymbolCoverage(
-                symbol=symbol,
-                expected_sessions=len(expected),
-                observed_bars=len(in_window),
-                missing_sessions=missing,
-                unexpected_bars=unexpected,
-            )
+        entry, symbol_findings = gate_symbol_bars(
+            window,
+            series,
+            actions_by_symbol.get(symbol, ()),
+            calendar=calendar,
+            interval=interval,
+            classified_moves=classified_moves,
+        )
         coverage.append(entry)
-
-        for day in missing:
-            findings.append(
-                Finding(
-                    kind=FindingKind.MISSING_SESSION,
-                    symbol=symbol,
-                    detail=(
-                        "the exchange held a session and the export has no bar for it"
-                        if interval is BarInterval.DAY_1
-                        else "the exchange held a session and the export has no bars for it"
-                    ),
-                    session_date=day,
-                )
-            )
-        for day in unexpected:
-            reason = calendar.closure_reason(day) or "outside the declared window"
-            findings.append(
-                Finding(
-                    kind=FindingKind.UNEXPECTED_BAR,
-                    symbol=symbol,
-                    detail=f"bar delivered for a non-session day ({reason})",
-                    session_date=day,
-                )
-            )
-        if interval is BarInterval.HOUR_1:
-            # A fully-empty session is already one MISSING_SESSION finding; per-slot
-            # findings are for sessions the export partially covered, so the evidence
-            # names the exact bar without seven-fold noise on a wholly missing day.
-            for day, slot in partial_missing:
-                findings.append(
-                    Finding(
-                        kind=FindingKind.MISSING_BAR,
-                        symbol=symbol,
-                        detail="the session ran and the export is missing this bar",
-                        session_date=day,
-                        timestamp_utc=slot,
-                    )
-                )
-            for day, ts in off_slot:
-                findings.append(
-                    Finding(
-                        kind=FindingKind.UNEXPECTED_BAR,
-                        symbol=symbol,
-                        detail=(
-                            "bar timestamp is not an expected session slot "
-                            "(pre/post-market, misaligned, or a phantom extra bar)"
-                        ),
-                        session_date=day,
-                        timestamp_utc=ts,
-                    )
-                )
-        if not entry.meets_floor:
-            findings.append(
-                Finding(
-                    kind=FindingKind.COVERAGE_BELOW_FLOOR,
-                    symbol=symbol,
-                    detail=(
-                        f"coverage {entry.coverage:.4f} is below the frozen floor "
-                        f"{MINIMUM_SESSION_COVERAGE}"
-                    ),
-                )
-            )
-
-        report = validate_series(series)
-        for issue in report.issues:
-            if issue.blocking:
-                findings.append(
-                    Finding(
-                        kind=FindingKind.BLOCKING_QUALITY_ISSUE,
-                        symbol=symbol,
-                        detail=f"{issue.kind}: {issue.detail}",
-                    )
-                )
-
-        splits = _splits_by_date(actions_by_symbol.get(symbol, ()))
-        moves = {day: change for day, change in _material_moves(_session_closes(series))}
-
-        for day, change in sorted(moves.items()):
-            if not (window.start <= day <= window.end):
-                continue
-            action = splits.get(day)
-            if action is not None and _reconciles(change, action):
-                continue
-            if (symbol, day) in classified:
-                continue
-            findings.append(
-                Finding(
-                    kind=FindingKind.UNCLASSIFIED_MATERIAL_MOVE,
-                    symbol=symbol,
-                    detail=(
-                        f"close-to-close move {change:+.4f} is unexplained: no split on "
-                        "this ex-date reconciles it and no owner classification covers it"
-                    ),
-                    session_date=day,
-                )
-            )
-
-        for day, action in sorted(splits.items()):
-            if not (window.start <= day <= window.end):
-                continue
-            observed_change = moves.get(day)
-            implied = _split_implied_return(action.value)
-            if observed_change is None or not _reconciles(observed_change, action):
-                findings.append(
-                    Finding(
-                        kind=FindingKind.UNRECONCILED_SPLIT,
-                        symbol=symbol,
-                        detail=(
-                            f"the action stream declares a {action.value:g}-for-1 split "
-                            f"(implying {implied:+.4f}) but the prices show "
-                            + (
-                                f"{observed_change:+.4f}"
-                                if observed_change is not None
-                                else "no material move"
-                            )
-                            + " — the bars or the action stream is wrong"
-                        ),
-                        session_date=day,
-                    )
-                )
+        findings.extend(symbol_findings)
 
     return CertificationReport(
         dataset_id=dataset_id,
@@ -945,4 +983,5 @@ __all__ = [
     "Verdict",
     "admit_provider_price_basis",
     "certify_export",
+    "gate_symbol_bars",
 ]
