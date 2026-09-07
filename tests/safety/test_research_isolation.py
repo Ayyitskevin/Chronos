@@ -60,6 +60,7 @@ _C3_MODULES = (
     "data_intake",
     "data_certification",
     "data_assemble",
+    "data_check",
     "session_calendar",
 )
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent

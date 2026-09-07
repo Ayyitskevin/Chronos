@@ -415,7 +415,23 @@ evidence and the owner's declarations remain prerequisites.
    store file that caused them, so a timestamped date cell or a five-symbol capture is
    reported against the file that has it rather than as an opaque `UNVERIFIED` later.
 
-   The path is now: capture → `data assemble` → `data verify` → `data certify`.
+   **Run `data check` on your first capture, before anything else.** `data verify` judges a
+   delivery of all six symbols, so a DIA-first pull cannot be verified until the other five
+   exist — which would mean discovering a problem with the export after five more captures
+   rather than after the first. `python -m chronos.cli data check --store
+   research/data/history --symbol DIA` runs the per-symbol gates over whatever subset the
+   store holds — session coverage against the exchange calendar, the store's own quality
+   checks, unexplained material moves, split reconciliation against the symbol's action file
+   if you have one — and prints the same finding codes `data verify` prints. It is read-only
+   and writes nothing. It deliberately issues **no verdict**: a partial capture cannot satisfy
+   the frozen criteria, so a clean run means "these gates found nothing in these bars", never
+   "certified". Exit 0 is no findings, 1 is findings, 2 is a store that could not be read
+   (a missing file, an adjusted-close column, or a `MANIFEST.json` disagreeing with its own
+   bytes). The attestation, the provider price basis and the holdout map are not checked
+   there at all — none of them is answerable from one symbol's files.
+
+   The path is now: capture → `data check` (per symbol, as you go) → `data assemble` →
+   `data verify` → `data certify`.
 2. **Whether IBKR can supply the full window for all six symbols is unverified.** Duration
    limits, pacing, and per-instrument availability are properties of your entitlement, and
    `DIA` in particular has never been obtained from any source in this repository. Pull a
