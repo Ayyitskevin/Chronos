@@ -427,6 +427,32 @@ constraints are what that purchase has to satisfy.
 
 ## 7. What this runbook does not do
 
+### Rehearse before you capture
+
+The complete path can be rehearsed without a gateway or market data. The synthetic store is
+explicitly generated test material and must stay in a temporary tree:
+
+```sh
+tmp=$(mktemp -d)
+python -m chronos.cli data synth-store --out "$tmp/store" --seed 7
+cat >"$tmp/attestation.json" <<'JSON'
+{"kind":"sampled_actions","source_id":"synthetic-independent-fixture","sampled_action_count":1,"symbols":["QQQ","SPY","IWM","DIA","GLD","TLT"],"note":"synthetic fixture only; not market data"}
+JSON
+python -m chronos.cli data assemble --store "$tmp/store" --out "$tmp/delivery" \
+  --delivery-id rehearsal --provider-price-basis unadjusted_as_traded \
+  --attestation "$tmp/attestation.json" --source-id synthetic-test-generator \
+  --source-receipt-sha256 "$(printf '%064d' 0)" --retrieved-at 2026-09-05T00:00:00Z \
+  --retrieval-method generated --license-note 'synthetic fixture; not licensed market data'
+python -m chronos.cli data verify --delivery "$tmp/delivery"
+python -m chronos.cli data certify --delivery "$tmp/delivery" --output "$tmp/release" \
+  --history-root "$tmp/history"
+```
+
+The `no_split_in_window` value is corroboration on a hand-built delivery and tautological on
+an assembled one because assemble derives it from the action file it copies. To rehearse the
+refusal, repeat assemble with `--provider-price-basis ibkr_trades_split_adjusted`: assembly
+completes, while verify, certify, and freeze refuse with the shared basis-admission reason.
+
 It does not make data trustworthy, authorize a campaign, count a trial, unlock a holdout, or
 select a strategy. `chronos data verify` reports a verdict over bytes you supplied and writes
 nothing. Freezing a certified delivery into an immutable release, and everything downstream

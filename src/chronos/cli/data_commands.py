@@ -43,12 +43,27 @@ def cmd_data_certify(args: argparse.Namespace) -> int:
         certify_delivery,
     )
 
+    history_root = (args.history_root or HISTORY_ROOT).expanduser()
+    default_history = HISTORY_ROOT.resolve()
+    requested_history = history_root.resolve()
+    targets = (
+        ("history", requested_history),
+        ("release", args.output.expanduser().resolve()),
+    )
+    for label, target in targets:
+        if target != default_history and default_history in target.parents:
+            print(
+                f"UNVERIFIED {target}: refusing a {label} target inside the repository "
+                "store; choose a separate temporary target"
+            )
+            return 2
+
     manifest_path = args.delivery / "INTAKE.json"
     try:
         result = certify_delivery(
             args.delivery,
             output_root=args.output,
-            history_root=HISTORY_ROOT,
+            history_root=history_root,
         )
     except IntakeUnverified as error:
         print(f"UNVERIFIED {error.path}: {error.reason}")
@@ -168,6 +183,12 @@ def add_data_commands(sub: Any) -> None:
     certify = data_sub.add_parser("certify", help="certify, freeze, and merge an on-disk delivery")
     certify.add_argument("--delivery", type=Path, required=True)
     certify.add_argument("--output", type=Path, required=True)
+    certify.add_argument(
+        "--history-root",
+        type=Path,
+        default=None,
+        help="history store target (default: the repository history store)",
+    )
     certify.set_defaults(func=cmd_data_certify)
     synth = data_sub.add_parser(
         "synth-store",
