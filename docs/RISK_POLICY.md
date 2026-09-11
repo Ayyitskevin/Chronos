@@ -39,6 +39,32 @@ limits, drawdown from peak equity, consecutive-loss count.
 Behavioral: pyramiding denied unless enabled, sells capped at held shares
 (no shorts), no market-order type exists at all in the platform.
 
+## Declared, not enforced (awaiting owner disposition)
+
+Eight `RiskPolicy` fields are **declared, not enforced**: the schema validates
+them, `config_hash` digests them, every checked-in profile sets them, and
+nothing under `src/chronos` reads them (verified at `a1a9f59`, 2026-09-11;
+pinned by `tests/safety/test_risk_policy_inert_fields_disclosed.py`, which
+fails if the set changes in either direction). Setting any of them changes no
+decision. What each name promises, and what actually holds today:
+
+| Field | Promise | What holds today |
+|---|---|---|
+| `allow_short_entries` | enable short entries | Shorts are impossible by construction: the sizer cannot create one (ADR-0004 §2) and the engine denies sells beyond held shares (`SELL_WITHOUT_POSITION`). The flag is read by nothing. |
+| `max_order_rejections_per_day` | stop after N rejections in a day | Nothing counts rejections against it. The backtest reports `risk_rejections`; no caller supplies a per-day count to the engine. |
+| `cooldown_bars_after_loss_halt` | wait N bars after a loss halt | No bar-counted cooldown exists. A halt clears only by an explicit operator rearm. |
+| `allow_market_orders` | permit market orders | Unrepresentable: `OrderIntent` is limit-only. The autonomy plane's protected `MARKET` form is granted by the mandate's `order_forms` (ADR-0017 §3), not by this flag. |
+| `allow_margin` | never buy beyond cash | **Not guaranteed by the engine.** `AccountView.cash_usd` is never read and no check compares notional to cash; the only cash bound is the sizer's budget, upstream of the engine. |
+| `allow_overnight_positions` | flat by the close when false | No session clock and no end-of-session flatten exist; positions are always carried overnight, whatever the flag says. |
+| `allow_averaging_down` | never add to a losing position | Subsumed while `allow_pyramiding` is false (`PYRAMIDING_FORBIDDEN` denies any add). Under a pyramiding grant nothing would distinguish an add below cost. |
+| `allow_options` | permit option orders | Unrepresentable: this plane has no option intent (see "Options" below). |
+
+Choosing enforce / advisory / remove for each is a capital and risk-limit
+decision and therefore the owner's (AGENTS.md; `docs/AGENT_PROTOCOL.md` §5,
+§9). Until that disposition lands, read these keys as documentation of intent,
+not as controls, and rely on none of them for safety. Recorded as
+RISK_REGISTER R-78.
+
 ## Safe defaults in force
 
 | Control | Default |
@@ -47,8 +73,8 @@ Behavioral: pyramiding denied unless enabled, sells capped at held shares
 | Live account allowlist | not even representable; paper allowlist empty by default |
 | Live capital authorization | zero (no field exists to set it) |
 | Bot capital / notional / exposure limits | 0 (deny) |
-| Margin, shorts, options, market orders | disabled |
-| Averaging down / martingale / pyramiding | disabled |
+| Margin, shorts, options, market orders | disabled — shorts, options and market orders by structure (unrepresentable or denied by construction); margin **only** by the sizer's cash budget, not by the engine. The `allow_*` flags for all four are declared, not enforced (section above). |
+| Averaging down / martingale / pyramiding | disabled — via `PYRAMIDING_FORBIDDEN` (any add to an existing position is denied); `allow_averaging_down` itself is declared, not enforced (section above). |
 | Trading on stale data | denied (zero default age limit) |
 | Trading with unknown account state | denied |
 | Auto-resume after restart or disconnect | denied (halt + reconciliation gates) |
@@ -82,4 +108,5 @@ not current executable scope. Corrected 2026-08-01 by ADR-0030.
 
 - Engine: `src/chronos/risk/engine.py` · Policy schema: `src/chronos/risk/policy.py`
 - Example policy: `config/risk.example.yaml` (all-deny; copy to `config/risk.yaml`)
-- Tests: `tests/safety/test_safety_invariants.py`, `tests/platform_unit/`, `tests/chaos/`
+- Tests: `tests/safety/test_safety_invariants.py`, `tests/platform_unit/`, `tests/chaos/`;
+  `tests/safety/test_risk_policy_inert_fields_disclosed.py` pins the declared-not-enforced set
