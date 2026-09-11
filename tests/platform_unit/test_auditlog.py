@@ -423,7 +423,11 @@ class TestTransactionShape:
         thread_b = threading.Thread(target=run_second)
         thread_b.start()
         assert not second_done.wait(timeout=0.5), "writer B crossed the lock while A was inside"
-        assert not path.exists(), "something was written while A was parked before its write"
+        # The transaction may already have created the (empty) log: O_CREAT happens when the
+        # descriptor is opened, before recovery. No RECORD may exist while A is parked.
+        assert not path.exists() or path.read_text(encoding="utf-8") == "", (
+            "something was written while A was parked before its write"
+        )
 
         release.set()
         thread_a.join(timeout=10)
