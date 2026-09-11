@@ -24,8 +24,9 @@ from pathlib import Path
 
 import streamlit as st
 
+from chronos.auditlog.log import ChainState
 from chronos.control.modes import TradingMode
-from chronos.monitoring.snapshot import MonitoringSnapshot, build_snapshot
+from chronos.monitoring.snapshot import MonitoringSnapshot, audit_count_phrase, build_snapshot
 
 _DEFAULT_HALT = "data/platform_halt.json"
 _DEFAULT_AUDIT = "data/platform_audit.jsonl"
@@ -87,7 +88,12 @@ def render_monitor(snapshot: MonitoringSnapshot) -> None:
 
     audit_columns = st.columns(3)
     audit_columns[0].metric("Audit chain", snapshot.audit_state.value)
-    audit_columns[1].metric("Audit records", str(snapshot.audit_records))
+    count_label = (
+        "Audit records"
+        if snapshot.audit_state is ChainState.VALID
+        else audit_count_phrase(snapshot.audit_state).capitalize()
+    )
+    audit_columns[1].metric(count_label, str(snapshot.audit_records))
     audit_columns[2].metric("Code commit", snapshot.code_commit)
     st.caption(f"audit detail: {snapshot.audit_detail}")
 
