@@ -4,6 +4,15 @@ Everything here is a pure read of files the platform already wrote (halt
 state, audit log, risk policy) plus config-derived mode information. No broker
 adapter is imported and no network call is made — the snapshot is exactly as
 trustworthy as the files on disk, and no more.
+
+Fail closed on the audit chain (D1 §6, 2026-09-11): when ``verify_chain`` does
+not return VALID, nothing derived from the chain's rows is reported. The
+reconciliation status reads ``unverified (audit chain BROKEN|ABSENT)`` — never
+an outcome copied from a row a verifier has just refused to vouch for — and
+``recent_decisions`` is empty; the warning carries the record count and the
+first bad line so the operator knows what to go and look at. Before this, a
+BROKEN chain still produced a reconciliation status derived from its rows and
+listed them as recent audit events with only a warning line above.
 """
 
 from __future__ import annotations
@@ -162,8 +171,21 @@ def build_snapshot(
         warnings.append(f"platform is HALTED ({halt.reason.value if halt.reason else 'unknown'})")
 
     audit_state, audit_detail, audit_records, decisions = _read_audit(audit_file, tail=tail)
+    if audit_state is ChainState.VALID:
+        reconciliation_status = _reconciliation_status(decisions)
+        shown_decisions: tuple[dict[str, object], ...] = tuple(decisions)
+    else:
+        # Nothing derived from an unverified chain may read as a verified state: not the
+        # reconciliation outcome copied from a row the verifier refused to vouch for, and
+        # not the rows themselves listed as history. The count and the first bad line stay
+        # in the warning so the operator knows what to inspect.
+        reconciliation_status = f"unverified (audit chain {audit_state.value})"
+        shown_decisions = ()
     if audit_state is ChainState.BROKEN:
-        warnings.append(f"audit chain verification failed: {audit_detail}")
+        warnings.append(
+            f"audit chain verification failed: {audit_detail}; {audit_records} record(s) "
+            "parsed, none shown and no reconciliation status derived from them"
+        )
     elif audit_state is ChainState.ABSENT:
         # Previously this rendered as "OK — no audit log yet": a missing chain read as a
         # verified one in the operator snapshot. Absence is unverified, so it warns.
@@ -234,11 +256,11 @@ def build_snapshot(
         halted=halt.halted,
         halt_reason=halt.reason.value if halt.reason else None,
         halt_detail=halt.detail,
-        reconciliation_status=_reconciliation_status(decisions),
+        reconciliation_status=reconciliation_status,
         audit_state=audit_state,
         audit_detail=audit_detail,
         audit_records=audit_records,
-        recent_decisions=tuple(decisions),
+        recent_decisions=shown_decisions,
         data_freshness=tuple(freshness),
         risk_policy_version=policy_version,
         risk_policy_hash=policy_hash,

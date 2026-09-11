@@ -121,7 +121,10 @@ CHRONOS_MONITOR_MODE=shadow CHRONOS_LEDGER_FILE=data/platform_ledger.db \
 
 It surfaces: operating mode and live-lock capability (the paper/live distinction is shown by an
 explicit text banner and a boolean `live_capable`, **never by colour alone**), halt reason,
-reconciliation outcome (from the last `service_startup` audit record), audit-chain integrity,
+reconciliation outcome (from the last `service_startup` audit record — only while the audit
+chain verifies VALID; a BROKEN or ABSENT chain reads `unverified (audit chain BROKEN|ABSENT)`
+and no audit rows are listed, because nothing derived from an unverified chain may read as a
+verified state), audit-chain integrity,
 market-data freshness, the active risk limits, code commit, and — when a ledger is supplied —
 open orders, fill-derived net positions, and recent fills. Realized/unrealized P&L is **not**
 reconstructed here: this build runs SHADOW with a flat account and submits nothing, so those rows
