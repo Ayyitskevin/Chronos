@@ -576,9 +576,9 @@ class TestTransactionShape:
             events.append("fsync")
             real_fsync(descriptor)
 
-        def recover(self: log_module.AuditLog) -> tuple[int, str]:
+        def recover(self: log_module.AuditLog, *args: object, **kwargs: object) -> tuple[int, str]:
             events.append("recover")
-            return real_recover(self)
+            return real_recover(self, *args, **kwargs)
 
         monkeypatch.setattr(log_module.fcntl, "flock", flock)
         monkeypatch.setattr(log_module.os, "fsync", fsync)
@@ -665,4 +665,98 @@ class TestTransactionShape:
         sequences = _sequences(path)
         assert sequences == list(range(len(sequences)))
         assert record.sequence == sequences[-1]
+        assert verify_chain(path).state is ChainState.VALID
+
+
+class TestLogPathCapability:
+    """The LOG path is handled descriptor-relative and no-follow, like the lock (D1 §6 bullet 1).
+
+    Before this the writer followed the log target for read and append and only then let
+    ``secure_owner_only`` notice a symlink — so a planted link redirected the write before
+    anything refused. Conductor's ruling on the F2 addendum: fold the log-path hardening in
+    with the lock's, mirroring the registry ledger's rule (``registry/ledger.py:1-12``).
+    """
+
+    def test_a_symlinked_log_path_is_refused_before_any_read_or_write_of_the_target(
+        self, tmp_path: Path
+    ) -> None:
+        victim = tmp_path / "victim.jsonl"
+        write_records(victim, 2)  # a VALID chain, so a follower would happily extend it
+        before = victim.read_bytes()
+        victim_mode = stat.S_IMODE(victim.stat().st_mode)
+
+        path = tmp_path / "audit.jsonl"
+        path.symlink_to(victim)
+        with pytest.raises(AuditLogCorruptionError, match="symlink"):
+            AuditLog(path).append("through_the_link", {"n": 3})
+
+        assert victim.read_bytes() == before, "the write went through the symlink"
+        assert stat.S_IMODE(victim.stat().st_mode) == victim_mode
+        assert path.is_symlink()  # the link itself was not replaced or removed
+
+    def test_a_log_replaced_under_a_running_writer_is_refused(self, tmp_path: Path) -> None:
+        """Path swap after construction: same bytes, different inode. The RUNNING writer
+        pinned the inode it recovered from and must refuse; a fresh instance (a restart)
+        re-pins and continues — detecting a rollback across restarts is the anchor lane's job."""
+
+        path = tmp_path / "audit.jsonl"
+        log = AuditLog(path)
+        log.append("first", {"n": 1})
+        swap = tmp_path / "swap.jsonl"
+        swap.write_bytes(path.read_bytes())
+        os.replace(swap, path)  # atomic rename: new inode, identical content
+
+        with pytest.raises(AuditLogCorruptionError, match="replaced"):
+            log.append("after_swap", {"n": 2})
+        assert _sequences(path) == [0]
+        assert AuditLog(path).append("after_restart", {"n": 2}).sequence == 1
+        assert verify_chain(path).state is ChainState.VALID
+
+    def test_a_log_swapped_for_a_symlink_is_refused_without_touching_the_victim(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "audit.jsonl"
+        log = AuditLog(path)
+        log.append("first", {"n": 1})
+        victim = tmp_path / "victim.jsonl"
+        write_records(victim, 2)
+        before = victim.read_bytes()
+
+        path.unlink()
+        path.symlink_to(victim)
+        with pytest.raises(AuditLogCorruptionError, match="symlink"):
+            log.append("through_the_link", {"n": 2})
+        assert victim.read_bytes() == before
+        assert stat.S_IMODE(victim.stat().st_mode) == 0o600
+
+    def test_a_hard_linked_log_is_refused(self, tmp_path: Path) -> None:
+        # A second name for the same inode is a handle an actor keeps after the writer
+        # believes the file is private; the registry refuses it and so does this.
+        path = tmp_path / "audit.jsonl"
+        log = AuditLog(path)
+        log.append("first", {"n": 1})
+        os.link(path, tmp_path / "alias.jsonl")
+        with pytest.raises(AuditLogCorruptionError, match="links"):
+            log.append("second", {"n": 2})
+        assert _sequences(path) == [0]
+
+    def test_a_symlinked_parent_directory_is_refused_without_creating_anything(
+        self, tmp_path: Path
+    ) -> None:
+        real = tmp_path / "real"
+        real.mkdir()
+        link = tmp_path / "link"
+        link.symlink_to(real, target_is_directory=True)
+        with pytest.raises(AuditLogCorruptionError, match=r"symlink|real directory"):
+            AuditLog(link / "audit.jsonl")
+        assert list(real.iterdir()) == [], "something was created through the parent symlink"
+
+    def test_a_missing_parent_is_still_created_and_the_log_stays_private(
+        self, tmp_path: Path
+    ) -> None:
+        # The behaviour consumers rely on: a fresh data directory appears on first use.
+        path = tmp_path / "nested" / "deeper" / "audit.jsonl"
+        AuditLog(path).append("first", {"n": 1})
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        assert path.parent.is_dir() and not path.parent.is_symlink()
         assert verify_chain(path).state is ChainState.VALID
