@@ -349,7 +349,7 @@ class TestSerializedAppend:
         victim.chmod(0o644)
         _lock_path(path).symlink_to(victim)
 
-        with pytest.raises(AuditLogCorruptionError, match="symlink"):
+        with pytest.raises(AuditLogCorruptionError, match=r"is a symlink"):
             AuditLog(path)
         assert victim.read_text(encoding="utf-8") == "do not touch"
         assert stat.S_IMODE(victim.stat().st_mode) == 0o644
@@ -727,7 +727,7 @@ class TestLogPathCapability:
 
         path = tmp_path / "audit.jsonl"
         path.symlink_to(victim)
-        with pytest.raises(AuditLogCorruptionError, match="symlink"):
+        with pytest.raises(AuditLogCorruptionError, match=r"is a symlink"):
             AuditLog(path).append("through_the_link", {"n": 3})
 
         assert victim.read_bytes() == before, "the write went through the symlink"
@@ -764,7 +764,7 @@ class TestLogPathCapability:
 
         path.unlink()
         path.symlink_to(victim)
-        with pytest.raises(AuditLogCorruptionError, match="symlink"):
+        with pytest.raises(AuditLogCorruptionError, match=r"is a symlink"):
             log.append("through_the_link", {"n": 2})
         assert victim.read_bytes() == before
         assert stat.S_IMODE(victim.stat().st_mode) == 0o600
@@ -787,7 +787,7 @@ class TestLogPathCapability:
         real.mkdir()
         link = tmp_path / "link"
         link.symlink_to(real, target_is_directory=True)
-        with pytest.raises(AuditLogCorruptionError, match=r"symlink|real directory"):
+        with pytest.raises(AuditLogCorruptionError, match=r"is a symlink or not a real directory"):
             AuditLog(link / "audit.jsonl")
         assert list(real.iterdir()) == [], "something was created through the parent symlink"
 

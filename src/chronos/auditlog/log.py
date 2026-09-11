@@ -27,6 +27,24 @@ the log's inode identity so a path swapped underneath it refuses instead of
 being followed. Before this, the writer followed the log target for read and
 append and only afterwards let ``secure_owner_only`` notice a symlink (D1 §6).
 
+The capability is held in NAME space for the whole transaction, not only at the
+opens (F2 security review, HOLD at c770267): the canonical parent path, the lock
+name and the log name are re-established to designate the held descriptors
+after the lock is taken, immediately before the write, and after fsync before
+success is reported. A lock unlinked and recreated after the first check, a
+parent renamed away and replaced, or a log swapped after open used to let two
+writers each complete against the same head; each now refuses, and a refusal
+after fsync says plainly that the record may be durable in a displaced file and
+that success is not reported. ``_assert_transaction_bound`` is that check, one
+helper for every boundary, so the anchor lane can call it again before and
+after publishing the head anchor.
+
+Residual, not fixable here: ``flock`` that FAILS is a catchable refusal
+(``AuditLogCorruptionError``), but a filesystem that returns success without
+enforcing advisory locks — some NFS mounts — cannot be told apart from one that
+does. Two writers on such a mount can still fork the chain; the platform's data
+directory is expected to be local.
+
 No secrets, credentials, or raw account identifiers may be written here;
 callers pass already-sanitized payloads. Payload values are JSON-serializable
 primitives only.
@@ -43,7 +61,7 @@ import os
 import stat
 import threading
 from collections.abc import Callable, Iterable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -77,10 +95,12 @@ class AuditLogCorruptionError(RuntimeError):
     ``append`` both re-verify the whole chain — or when the log, its lock, or a
     parent directory cannot be trusted (a symlink, not a regular file or real
     directory, not ours, more than one link, replaced under a running writer,
-    replaced while the lock was being taken). One specific, catchable exception
-    rather than a raw ``json.JSONDecodeError``, ``KeyError`` or ``OSError`` so a
-    caller can halt trading cleanly (see ``HaltReason.AUDIT_LOG_FAILURE``).
-    Nothing is repaired: the writer refuses and says why.
+    replaced while the lock was being taken, displaced during the transaction),
+    or when the OS lock itself cannot be taken. One specific, catchable
+    exception rather than a raw ``json.JSONDecodeError``, ``KeyError`` or
+    ``OSError`` so a caller can halt trading cleanly (see
+    ``HaltReason.AUDIT_LOG_FAILURE``). Nothing is repaired: the writer refuses
+    and says why.
     """
 
 
@@ -192,14 +212,14 @@ class AuditLog:
         # inode under the same name refuses rather than following the swap.
         self._pinned_parent: tuple[int, int] | None = None
         self._pinned_log: tuple[int, int] | None = None
-        with self._exclusive() as parent_fd:
+        with self._exclusive() as (parent_fd, _lock_fd):
             self._sequence, self._last_hash = self._recover_at(parent_fd)
 
     # ------------------------------------------------------------------ the transaction
 
     @contextmanager
-    def _exclusive(self) -> Iterator[int]:
-        """Hold the per-path thread lock and an exclusive ``flock``; yield the parent fd.
+    def _exclusive(self) -> Iterator[tuple[int, int]]:
+        """Hold the per-path thread lock and an exclusive ``flock``; yield (parent fd, lock fd).
 
         Both locks, because neither substitutes for the other: ``flock`` binds an
         open file description, which a second thread in this process does not
@@ -223,18 +243,36 @@ class AuditLog:
                 try:
                     lock_fd = self._open_lock(parent_fd)
                     try:
-                        fcntl.flock(lock_fd, fcntl.LOCK_EX)
-                        self._assert_lock_still_named(parent_fd, lock_fd)
+                        self._lock_exclusive(lock_fd)
+                        self._assert_transaction_bound(
+                            parent_fd, lock_fd, None, when="after taking the lock"
+                        )
                         try:
-                            yield parent_fd
+                            yield parent_fd, lock_fd
                         finally:
-                            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                            # Closing the descriptor releases the lock anyway; a failing
+                            # LOCK_UN must not mask the exception that is unwinding.
+                            with suppress(OSError):
+                                fcntl.flock(lock_fd, fcntl.LOCK_UN)
                     finally:
                         os.close(lock_fd)
                 finally:
                     os.close(parent_fd)
             finally:
                 held.discard(self._lock_key)
+
+    def _lock_exclusive(self, lock_fd: int) -> None:
+        """Take the OS lock; a filesystem that cannot is an audit refusal, not a crash."""
+
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        except OSError as error:
+            _refuse(
+                f"audit log lock at {self._parent / self._lock_name}",
+                f"could not be locked (flock failed: {error.strerror or error}, errno "
+                f"{error.errno}); the filesystem may not support advisory locking",
+                error,
+            )
 
     def _open_parent(self) -> int:
         """Open the parent directory by an ``O_NOFOLLOW`` walk from the root; pin its identity.
@@ -304,23 +342,108 @@ class AuditLog:
             os.close(descriptor)
             raise
 
-    def _assert_lock_still_named(self, parent_fd: int, lock_fd: int) -> None:
-        """After ``flock``: the lock name must still point at the inode we hold.
+    # ------------------------------------------------------------ the binding assertion
 
-        ``flock`` binds an inode, not a name. If the lock file were unlinked
-        and recreated between our open and our lock, two writers would each
-        hold an exclusive lock on a different inode and neither would exclude
-        the other. A symlink or a fresh file at the name has a different inode.
+    def _assert_transaction_bound(
+        self,
+        parent_fd: int,
+        lock_fd: int,
+        log_fd: int | None,
+        *,
+        when: str,
+        record_written: bool = False,
+    ) -> None:
+        """Re-establish that the canonical names still designate the held descriptors.
+
+        Descriptors bind inodes, not names. A lock unlinked and recreated after
+        our check lets a second writer lock a different inode; a parent renamed
+        away and replaced lets a second writer operate at the canonical path
+        while we write into the displaced directory; a log swapped after open
+        leaves our record on an inode nothing names. Each is a fork nothing
+        downstream would attribute to a single writer, so the names are checked
+        at every boundary: after the lock is taken, immediately before the write,
+        and after fsync before success is reported. Called once per boundary; the
+        anchor lane calls it again around anchor publication.
+
+        ``record_written`` selects the after-fsync wording: the record may then
+        be durable in a displaced file, and success is still not reported.
         """
 
-        subject = f"audit log lock at {self._parent / self._lock_name}"
-        held = os.fstat(lock_fd)
+        self._assert_parent_designates(parent_fd, when=when, record_written=record_written)
+        self._assert_name_designates(
+            parent_fd,
+            self._lock_name,
+            lock_fd,
+            subject=f"audit log lock at {self._parent / self._lock_name}",
+            when=when,
+            record_written=record_written,
+        )
+        if log_fd is not None:
+            self._assert_name_designates(
+                parent_fd,
+                self._name,
+                log_fd,
+                subject=f"audit log at {self._parent / self._name}",
+                when=when,
+                record_written=record_written,
+            )
+
+    def _assert_parent_designates(self, parent_fd: int, *, when: str, record_written: bool) -> None:
+        """A fresh no-follow walk from the root must reach the directory we hold."""
+
+        components = self._parent.parts[1:]
+        subject = f"audit log parent {self._parent}"
+        descriptor = os.open(os.sep, _DIR_FLAGS)
         try:
-            named = os.stat(self._lock_name, dir_fd=parent_fd, follow_symlinks=False)
+            for depth, component in enumerate(components, start=1):
+                try:
+                    child = os.open(component, _DIR_FLAGS, dir_fd=descriptor)
+                except OSError as error:
+                    display = Path(os.sep, *components[:depth])
+                    _refuse(
+                        f"audit log parent {display}",
+                        f"no longer designates a real directory ({when})"
+                        + _durability_clause(record_written),
+                        error,
+                    )
+                os.close(descriptor)
+                descriptor = child
+            if _identity(os.fstat(descriptor)) != _identity(os.fstat(parent_fd)):
+                _refuse(
+                    subject,
+                    f"was displaced or replaced under this transaction ({when})"
+                    + _durability_clause(record_written),
+                )
+        finally:
+            os.close(descriptor)
+
+    def _assert_name_designates(
+        self,
+        parent_fd: int,
+        name: str,
+        held_fd: int,
+        *,
+        subject: str,
+        when: str,
+        record_written: bool,
+    ) -> None:
+        """The name, resolved against the held parent, must be the inode we hold."""
+
+        held = os.fstat(held_fd)
+        try:
+            named = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
         except FileNotFoundError as error:
-            _refuse(subject, "was removed while the lock was being acquired", error)
+            _refuse(
+                subject,
+                f"was removed under this transaction ({when})" + _durability_clause(record_written),
+                error,
+            )
         if _identity(named) != _identity(held):
-            _refuse(subject, "was replaced while the lock was being acquired")
+            _refuse(
+                subject,
+                f"was replaced under this transaction ({when})"
+                + _durability_clause(record_written),
+            )
 
     def _open_log(self, parent_fd: int, *, create: bool) -> int | None:
         """Open the log by name against the parent, no-follow; ``None`` if absent and not creating.
@@ -397,7 +520,7 @@ class AuditLog:
 
     def append(self, kind: str, payload: dict[str, object]) -> AuditRecord:
         payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-        with self._exclusive() as parent_fd:
+        with self._exclusive() as (parent_fd, lock_fd):
             descriptor = self._open_log(parent_fd, create=True)
             if descriptor is None:  # pragma: no cover - O_CREAT never yields "absent"
                 _refuse(f"audit log at {self._parent / self._name}", "could not be created")
@@ -429,12 +552,33 @@ class AuditLog:
                     sort_keys=True,
                     separators=(",", ":"),
                 )
+                # The names must still designate what we hold, right before the mutation...
+                self._assert_transaction_bound(
+                    parent_fd, lock_fd, handle.fileno(), when="before the write"
+                )
                 handle.write(line + "\n")
                 handle.flush()
                 os.fsync(handle.fileno())
+                # ...and again after durability, before anyone is told it succeeded.
+                self._assert_transaction_bound(
+                    parent_fd,
+                    lock_fd,
+                    handle.fileno(),
+                    when="after fsync",
+                    record_written=True,
+                )
             self._sequence = sequence + 1
             self._last_hash = record_hash
         return record
+
+
+def _durability_clause(record_written: bool) -> str:
+    if not record_written:
+        return ""
+    return (
+        "; the record was written and fsynced to the inode this writer held, so it may be "
+        "durable in a displaced file, and success is NOT reported"
+    )
 
 
 class ChainState(StrEnum):
