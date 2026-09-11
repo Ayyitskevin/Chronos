@@ -341,3 +341,29 @@ class TestSerializedAppend:
         assert victim.read_text(encoding="utf-8") == "do not touch"
         assert stat.S_IMODE(victim.stat().st_mode) == 0o644
         assert not path.exists()
+
+    def test_a_lock_file_replaced_during_acquisition_is_refused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``flock`` binds an inode, not a name. If the lock file is unlinked and recreated
+        between our open and our lock, two writers can each hold "the" lock on different
+        inodes; the writer must notice the name no longer points at the inode it holds."""
+
+        import fcntl
+
+        from chronos.auditlog import log as log_module
+
+        path = tmp_path / "audit.jsonl"
+        lock = _lock_path(path)
+        real_flock = fcntl.flock
+
+        def swap_then_lock(descriptor: int, operation: int) -> None:
+            if operation == fcntl.LOCK_EX:
+                lock.unlink()
+                lock.write_text("", encoding="utf-8")  # a different inode under the same name
+            real_flock(descriptor, operation)
+
+        monkeypatch.setattr(log_module.fcntl, "flock", swap_then_lock)
+        with pytest.raises(AuditLogCorruptionError, match="replaced"):
+            AuditLog(path)
+        assert not path.exists()
