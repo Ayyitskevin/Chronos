@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import stat
@@ -584,9 +585,39 @@ class TestTransactionShape:
             events.append("recover")
             return real_recover(self, *args, **kwargs)
 
+        real_fdopen = os.fdopen
+
+        class _Observed:
+            """Wraps the transaction's text handle so write and flush are events too."""
+
+            def __init__(self, inner: object) -> None:
+                self._inner = inner
+
+            def __enter__(self) -> _Observed:
+                self._inner.__enter__()  # type: ignore[attr-defined]
+                return self
+
+            def __exit__(self, *exc: object) -> None:
+                self._inner.__exit__(*exc)  # type: ignore[attr-defined]
+
+            def write(self, data: str) -> int:
+                events.append("write")
+                return self._inner.write(data)  # type: ignore[attr-defined, no-any-return]
+
+            def flush(self) -> None:
+                events.append("flush")
+                self._inner.flush()  # type: ignore[attr-defined]
+
+            def __getattr__(self, name: str) -> object:
+                return getattr(self._inner, name)
+
+        def fdopen(*args: object, **kwargs: object) -> _Observed:
+            return _Observed(real_fdopen(*args, **kwargs))  # type: ignore[arg-type]
+
         monkeypatch.setattr(log_module.fcntl, "flock", flock)
         monkeypatch.setattr(log_module.os, "fsync", fsync)
         monkeypatch.setattr(log_module.AuditLog, "_recover", recover)
+        monkeypatch.setattr(log_module.os, "fdopen", fdopen)
 
         path = tmp_path / "audit.jsonl"
         log = AuditLog(path)
@@ -599,7 +630,12 @@ class TestTransactionShape:
         assert events[0] == "lock", events
         assert events[-1] == "unlock" and events.count("unlock") == 1, events
         assert "seam" in events, "the seam did not fire inside the transaction"
-        order = [events.index(name) for name in ("lock", "recover", "seam", "fsync")]
+        # write -> flush -> fsync -> unlock: a buffered write that is fsynced before it is
+        # flushed is not durable, and closing the handle after fsync would flush it too late.
+        assert "write" in events and "flush" in events, events
+        order = [
+            events.index(name) for name in ("lock", "recover", "seam", "write", "flush", "fsync")
+        ]
         assert order == sorted(order), events
         assert events.index("fsync") < len(events) - 1, events  # fsync strictly before the unlock
 
@@ -764,3 +800,185 @@ class TestLogPathCapability:
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
         assert path.parent.is_dir() and not path.parent.is_symlink()
         assert verify_chain(path).state is ChainState.VALID
+
+
+_CHILD_APPEND = textwrap.dedent(
+    """
+    import sys
+    from pathlib import Path
+    from chronos.auditlog.log import AuditLog
+    print(AuditLog(Path(sys.argv[1])).append("child", {"who": "child"}).sequence)
+    """
+)
+
+
+def _child_appends(path: Path) -> int:
+    """A second PROCESS appends once at ``path`` and returns the sequence it was given."""
+
+    proc = subprocess.run(
+        [sys.executable, "-c", _CHILD_APPEND, str(path)],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return int(proc.stdout.strip())
+
+
+class TestCapabilityHeldEndToEnd:
+    """The names must designate the held descriptors for the WHOLE transaction (F2 review §3).
+
+    Daybreak's probe: unlink and recreate the lock from the seam — after the one post-flock
+    check — then let a child append through the replacement lock; both writers returned
+    sequence 0 and the chain read BROKEN. Same with the parent renamed away and replaced
+    (two VALID one-record chains). The fix re-establishes, at every boundary, that the
+    canonical parent path, the lock name and the log name still designate what this writer
+    holds: after taking the lock, immediately before the write, and after fsync before
+    success is reported. The registry ledger asserts its binding the same way around its
+    write and its anchor publication.
+    """
+
+    def test_a_lock_replaced_after_the_check_cannot_yield_two_successful_writers(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "audit.jsonl"
+        lock = _lock_path(path)
+        log = AuditLog(path)
+        inside, release = threading.Event(), threading.Event()
+
+        def swap_the_lock_then_park() -> None:
+            lock.unlink()
+            lock.write_text("", encoding="utf-8")  # a fresh inode under the lock's name
+            inside.set()
+            assert release.wait(timeout=10)
+
+        log._after_recovery = swap_the_lock_then_park
+        outcome: dict[str, object] = {}
+
+        def run_first() -> None:
+            try:
+                outcome["sequence"] = log.append("first", {}).sequence
+            except AuditLogCorruptionError as error:
+                outcome["error"] = error
+
+        thread = threading.Thread(target=run_first)
+        thread.start()
+        assert inside.wait(timeout=10)
+        # The child locks the REPLACEMENT inode, so nothing holds it out; it appends.
+        assert _child_appends(path) == 0
+        release.set()
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+
+        error = outcome.get("error")
+        assert isinstance(error, AuditLogCorruptionError), outcome
+        assert "lock" in str(error) and "replaced" in str(error), str(error)
+        assert _sequences(path) == [0], "two writers completed against one head"
+        assert verify_chain(path).state is ChainState.VALID
+
+    def test_a_displaced_parent_cannot_report_success_outside_the_configured_path(
+        self, tmp_path: Path
+    ) -> None:
+        base = tmp_path / "data"
+        base.mkdir()
+        path = base / "audit.jsonl"
+        displaced = tmp_path / "data-displaced"
+        log = AuditLog(path)
+        inside, release = threading.Event(), threading.Event()
+
+        def displace_the_parent_then_park() -> None:
+            os.rename(base, displaced)  # our descriptors now point into data-displaced/
+            base.mkdir()  # a fresh, empty directory at the canonical path
+            inside.set()
+            assert release.wait(timeout=10)
+
+        log._after_recovery = displace_the_parent_then_park
+        outcome: dict[str, object] = {}
+
+        def run_first() -> None:
+            try:
+                outcome["sequence"] = log.append("first", {}).sequence
+            except AuditLogCorruptionError as error:
+                outcome["error"] = error
+
+        thread = threading.Thread(target=run_first)
+        thread.start()
+        assert inside.wait(timeout=10)
+        assert _child_appends(path) == 0  # a second writer at the canonical path
+        release.set()
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+
+        error = outcome.get("error")
+        assert isinstance(error, AuditLogCorruptionError), outcome
+        assert "parent" in str(error) and ("displaced" in str(error) or "replaced" in str(error))
+        # Nothing was reported as appended outside the configured path...
+        assert (displaced / "audit.jsonl").read_text(encoding="utf-8") == ""
+        # ...and the canonical path holds exactly the child's record.
+        assert _sequences(path) == [0]
+        assert verify_chain(path).state is ChainState.VALID
+
+    def test_a_log_replaced_after_open_is_not_reported_durable(self, tmp_path: Path) -> None:
+        path = tmp_path / "audit.jsonl"
+        log = AuditLog(path)
+        log.append("first", {"n": 1})
+        before = path.read_bytes()
+
+        def swap_the_log() -> None:
+            swap = tmp_path / "swap.jsonl"
+            swap.write_bytes(before)
+            os.replace(swap, path)  # the held descriptor now points at an unnamed inode
+
+        log._after_recovery = swap_the_log
+        with pytest.raises(AuditLogCorruptionError, match="replaced"):
+            log.append("second", {"n": 2})
+        assert path.read_bytes() == before, (
+            "the canonical log gained a record nobody was told about"
+        )
+
+    def test_a_log_replaced_after_fsync_refuses_to_report_success(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The record IS durable — on an inode the name no longer designates. The writer
+        must say so and must not return an AuditRecord as if the canonical log had it."""
+
+        from chronos.auditlog import log as log_module
+
+        path = tmp_path / "audit.jsonl"
+        log = AuditLog(path)
+        log.append("first", {"n": 1})
+        before = path.read_bytes()
+        real_fsync = os.fsync
+
+        def fsync_then_swap(descriptor: int) -> None:
+            real_fsync(descriptor)
+            swap = tmp_path / "swap.jsonl"
+            swap.write_bytes(before)
+            os.replace(swap, path)
+
+        monkeypatch.setattr(log_module.os, "fsync", fsync_then_swap)
+        with pytest.raises(AuditLogCorruptionError) as info:
+            log.append("second", {"n": 2})
+        message = str(info.value)
+        assert "replaced" in message and "durable" in message and "NOT reported" in message
+        assert _sequences(path) == [0]  # the canonical name shows the pre-append chain
+
+    def test_flock_failure_is_a_catchable_audit_refusal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A filesystem without advisory locking must refuse as an audit failure the
+        callers already halt on, not escape as a raw OSError (cli/main.py catches only
+        AuditLogCorruptionError)."""
+
+        from chronos.auditlog import log as log_module
+
+        def no_flock(descriptor: int, operation: int) -> None:
+            raise OSError(errno.ENOSYS, "Function not implemented")
+
+        monkeypatch.setattr(log_module.fcntl, "flock", no_flock)
+        path = tmp_path / "audit.jsonl"
+        with pytest.raises(AuditLogCorruptionError, match="flock"):
+            AuditLog(path)
+        assert not path.exists(), "the log was created before the lock was known to be unusable"
