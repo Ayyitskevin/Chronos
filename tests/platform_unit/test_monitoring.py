@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -374,3 +375,167 @@ def test_an_absent_audit_file_does_not_read_as_a_verified_chain(tmp_path: Path) 
     assert "audit chain:    ABSENT" in text
     assert "audit chain:    OK" not in text
     assert "ABSENT" in render_markdown(snap)
+
+
+def _broken_chain_with_intact_startup(tmp_path: Path) -> tuple[Path, Path]:
+    """A 3-record log whose FIRST record (service_startup, outcome=reconciled) is intact and
+    whose second record is tampered, so the chain is BROKEN at line 2 while a last-row or
+    prefix reader still finds a clean-looking startup outcome to derive from."""
+
+    halt = tmp_path / "halt.json"
+    HaltStore(halt).rearm("ready")
+    audit = tmp_path / "audit.jsonl"
+    log = AuditLog(audit)
+    log.append("service_startup", {"outcome": "reconciled"})
+    log.append("service_decision", {"symbol": "SPY", "direction": "ENTER_LONG"})
+    log.append("service_decision", {"symbol": "QQQ", "direction": "HOLD"})
+    lines = audit.read_text(encoding="utf-8").splitlines()
+    assert "ENTER_LONG" in lines[1]
+    lines[1] = lines[1].replace("ENTER_LONG", "ENTER_XXXX")
+    audit.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return halt, audit
+
+
+class _FakeColumn:
+    def __init__(self, sink: list[tuple[str, tuple[object, ...]]]) -> None:
+        self._sink = sink
+
+    def metric(self, label: str, value: object) -> None:
+        self._sink.append(("metric", (label, value)))
+
+
+class _FakeStreamlit:
+    """Records every primitive `render_monitor` calls; no Streamlit runtime involved."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, tuple[object, ...]]] = []
+
+    def __getattr__(self, name: str) -> Callable[..., None]:
+        def record(*args: object, **_kwargs: object) -> None:
+            self.calls.append((name, args))
+
+        return record
+
+    def columns(self, count: int) -> list[_FakeColumn]:
+        return [_FakeColumn(self.calls) for _ in range(count)]
+
+
+class TestUnverifiedChainFailsClosed:
+    """Nothing derived from an unverified audit chain may read as a verified state.
+
+    Daybreak D1 §6 bullet 3 (verified by the conductor at a1a9f59, re-verified here at the
+    branch tip): `_read_audit` called `verify_chain` and then, independently, parsed the file
+    and returned its rows regardless of the verdict; `build_snapshot` derived
+    `reconciliation_status` from those rows and listed them as recent audit events with
+    only a warning line above. AGENTS.md: fail closed under missing or ambiguous facts.
+    """
+
+    def test_a_broken_chain_yields_an_unverified_status_never_a_derived_one(
+        self, tmp_path: Path
+    ) -> None:
+        halt, audit = _broken_chain_with_intact_startup(tmp_path)
+        snap = build_snapshot(
+            mode=TradingMode.SHADOW, halt_file=halt, audit_file=audit, now_utc=NOW
+        )
+
+        assert snap.audit_state is ChainState.BROKEN
+        assert snap.reconciliation_status == "unverified (audit chain BROKEN)"
+        # The intact startup row said "reconciled"; it must not leak through.
+        assert "reconciled" not in snap.reconciliation_status.lower()
+
+    def test_a_broken_chain_shows_no_recent_decisions_and_says_where_to_look(
+        self, tmp_path: Path
+    ) -> None:
+        halt, audit = _broken_chain_with_intact_startup(tmp_path)
+        snap = build_snapshot(
+            mode=TradingMode.SHADOW, halt_file=halt, audit_file=audit, now_utc=NOW
+        )
+
+        assert snap.recent_decisions == ()
+        assert snap.audit_records == 3  # the count is still reported; the rows are not
+        [warning] = [w for w in snap.warnings if w.startswith("audit chain verification failed")]
+        assert "line 2" in warning and "hash mismatch" in warning  # the first bad line
+        assert "3 record" in warning  # how much is there to go and look at
+        assert "none shown" in warning
+
+        text = render_text(snap)
+        assert "recent audit events" not in text
+        assert "ENTER_LONG" not in text and "HOLD" not in text
+        assert "reconciliation: unverified (audit chain BROKEN)" in text
+        assert "**Reconciliation:** unverified (audit chain BROKEN)" in render_markdown(snap)
+
+    def test_a_truncated_last_line_is_also_unverified_end_to_end(self, tmp_path: Path) -> None:
+        # The pre-existing corrupt-tail case: the valid prefix used to be returned as rows.
+        audit = tmp_path / "audit.jsonl"
+        AuditLog(audit).append("service_startup", {"outcome": "reconciled"})
+        with audit.open("a", encoding="utf-8") as handle:
+            handle.write('{"broken')
+        halt = tmp_path / "halt.json"
+        HaltStore(halt).rearm("ready")
+        snap = build_snapshot(
+            mode=TradingMode.SHADOW, halt_file=halt, audit_file=audit, now_utc=NOW
+        )
+
+        assert snap.audit_state is ChainState.BROKEN
+        assert snap.reconciliation_status == "unverified (audit chain BROKEN)"
+        assert snap.recent_decisions == ()
+
+    def test_an_absent_chain_yields_an_unverified_status_and_no_rows(self, tmp_path: Path) -> None:
+        halt = tmp_path / "halt.json"
+        HaltStore(halt).rearm("ready")
+        snap = build_snapshot(
+            mode=TradingMode.SHADOW,
+            halt_file=halt,
+            audit_file=tmp_path / "never-written.jsonl",
+            now_utc=NOW,
+        )
+
+        assert snap.audit_state is ChainState.ABSENT
+        assert snap.reconciliation_status == "unverified (audit chain ABSENT)"
+        assert snap.recent_decisions == ()
+        assert any(w.startswith("audit chain not verified") for w in snap.warnings), snap.warnings
+
+    def test_a_valid_chain_is_unchanged(self, tmp_path: Path) -> None:
+        # Positive control alongside test_snapshot_from_armed_state: VALID still derives.
+        halt = tmp_path / "halt.json"
+        HaltStore(halt).rearm("ready")
+        audit = tmp_path / "audit.jsonl"
+        log = AuditLog(audit)
+        log.append("service_startup", {"outcome": "reconciled"})
+        log.append("service_decision", {"symbol": "SPY", "direction": "ENTER_LONG"})
+        snap = build_snapshot(
+            mode=TradingMode.SHADOW, halt_file=halt, audit_file=audit, now_utc=NOW
+        )
+
+        assert snap.audit_state is ChainState.VALID
+        assert snap.reconciliation_status == "reconciled"
+        assert [r["kind"] for r in snap.recent_decisions] == ["service_startup", "service_decision"]
+        assert "recent audit events (2)" in render_text(snap)
+        assert not any("audit chain" in w for w in snap.warnings)
+
+    def test_the_streamlit_renderer_shows_the_unverified_status_and_no_events(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The page renders the snapshot's fields directly, so it inherits the discipline;
+        pinned through a recording fake of the `st` module rather than a Streamlit runtime."""
+
+        import chronos.monitoring.streamlit_app as streamlit_mod
+
+        halt, audit = _broken_chain_with_intact_startup(tmp_path)
+        snap = build_snapshot(
+            mode=TradingMode.SHADOW, halt_file=halt, audit_file=audit, now_utc=NOW
+        )
+        fake = _FakeStreamlit()
+        monkeypatch.setattr(streamlit_mod, "st", fake)
+
+        streamlit_mod.render_monitor(snap)
+
+        metrics = {args[0]: args[1] for name, args in fake.calls if name == "metric"}
+        assert metrics["Reconciliation"] == "unverified (audit chain BROKEN)"
+        assert metrics["Audit chain"] == "BROKEN"
+        subheaders = [args[0] for name, args in fake.calls if name == "subheader"]
+        assert "Recent audit events" not in subheaders
+        rendered = " ".join(str(a) for _name, args in fake.calls for a in args)
+        assert "ENTER_LONG" not in rendered and "ENTER_XXXX" not in rendered
+        warnings = [args[0] for name, args in fake.calls if name == "warning"]
+        assert any("audit chain verification failed" in str(w) for w in warnings), warnings
