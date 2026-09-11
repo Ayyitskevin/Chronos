@@ -32,7 +32,7 @@ import json
 import os
 import stat
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -55,6 +55,10 @@ _LOCK_FLAGS = (
 )
 _THREAD_LOCKS: dict[str, threading.Lock] = {}
 _THREAD_LOCKS_GUARD = threading.Lock()
+#: Lock keys held by the current thread. ``threading.Lock`` is not reentrant, so an
+#: append that reaches ``append`` again on the same thread would deadlock on itself;
+#: this lets it refuse instead.
+_HELD_BY_THIS_THREAD = threading.local()
 
 
 class AuditLogCorruptionError(RuntimeError):
@@ -137,6 +141,14 @@ def _thread_lock_for(key: str) -> threading.Lock:
         return lock
 
 
+def _held_keys() -> set[str]:
+    keys = getattr(_HELD_BY_THIS_THREAD, "keys", None)
+    if keys is None:
+        keys = set()
+        _HELD_BY_THIS_THREAD.keys = keys
+    return keys
+
+
 def _refuse_lock(lock_path: Path, problem: str, cause: BaseException | None = None) -> NoReturn:
     raise AuditLogCorruptionError(
         f"audit log lock at {lock_path} {problem}; refusing to touch the log"
@@ -151,7 +163,12 @@ class AuditLog:
         self._lock_path = path.with_name(path.name + _LOCK_SUFFIX)
         # Keyed lexically (no symlink resolution) so two spellings of one path
         # share a lock in-process; the flock covers the cross-process case.
-        self._thread_lock = _thread_lock_for(os.path.abspath(os.fspath(path)))
+        self._lock_key = os.path.abspath(os.fspath(path))
+        self._thread_lock = _thread_lock_for(self._lock_key)
+        #: Test seam. When set, called inside the transaction after fresh recovery and
+        #: before the write, with both locks held, so a test can park one writer inside
+        #: the critical section and prove another cannot cross. No effect when None.
+        self._after_recovery: Callable[[], None] | None = None
         with self._exclusive():
             self._sequence, self._last_hash = self._recover()
 
@@ -163,21 +180,33 @@ class AuditLog:
         open file description, which a second thread in this process does not
         share, and a ``threading.Lock`` says nothing about another process
         (the registry reasons the same way, ``registry/ledger.py``). Neither is
-        reentrant; nothing here re-enters.
+        reentrant, and nothing legitimate re-enters: an append reached from inside an
+        append on the same thread is refused, because the alternative is a deadlock.
         """
 
+        held = _held_keys()
+        if self._lock_key in held:
+            raise AuditLogCorruptionError(
+                f"re-entrant audit log transaction on {self._path}: an append cannot run "
+                "inside another append on the same thread; the lock is not reentrant, so "
+                "this refuses rather than deadlocking"
+            )
         with self._thread_lock:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            descriptor = self._open_lock()
+            held.add(self._lock_key)
             try:
-                fcntl.flock(descriptor, fcntl.LOCK_EX)
-                self._assert_lock_still_named(descriptor)
+                self._path.parent.mkdir(parents=True, exist_ok=True)
+                descriptor = self._open_lock()
                 try:
-                    yield
+                    fcntl.flock(descriptor, fcntl.LOCK_EX)
+                    self._assert_lock_still_named(descriptor)
+                    try:
+                        yield
+                    finally:
+                        fcntl.flock(descriptor, fcntl.LOCK_UN)
                 finally:
-                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+                    os.close(descriptor)
             finally:
-                os.close(descriptor)
+                held.discard(self._lock_key)
 
     def _open_lock(self) -> int:
         """Open (creating if absent) the sibling lock as an owned, owner-only regular file.
@@ -252,6 +281,8 @@ class AuditLog:
         with self._exclusive():
             # Fresh head, under the lock: never the cached one.
             sequence, previous_hash = self._recover()
+            if self._after_recovery is not None:
+                self._after_recovery()
             at = datetime.now(tz=UTC).isoformat()
             record_hash = _hash_record(sequence, at, kind, payload_json, previous_hash)
             record = AuditRecord(
