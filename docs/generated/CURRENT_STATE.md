@@ -139,7 +139,7 @@ These change without a commit, so this page carries the command that measures ea
 | --- | --- |
 | `DECISIONS.md` D-nn | D-75 |
 | `docs/adr/` ADR-nnnn | ADR-0059 |
-| `RISK_REGISTER.md` R-nn | R-78 |
+| `RISK_REGISTER.md` R-nn | R-79 |
 
 The next id is `max + 1`, scanned in the same session by the same PR that claims it (docs/AGENT_PROTOCOL.md §7); this table is a reading, not a reservation. The scans, verbatim:
 
@@ -157,8 +157,8 @@ grep -oE '^\| R-[0-9]+'  RISK_REGISTER.md  | grep -oE '[0-9]+' | sort -n | tail 
 | CLOSED | 4 |
 | MITIGATED | 50 |
 | MITIGATED IN CODE | 17 |
-| OPEN | 5 |
-| all rows | 80 |
+| OPEN | 6 |
+| all rows | 81 |
 
 Status is the register's own column with its parenthetical qualifier stripped; `MITIGATED` is not `CLOSED`. Open rows:
 
@@ -169,6 +169,7 @@ Status is the register's own column with its parenthetical qualifier stripped; `
 | R-12 | ib_async maintenance / TWS API changes | M |
 | R-29 | Autonomous model authority materially expands risk | C |
 | R-37 | Model self-sizing widens the size envelope (`model_discretion`) | C |
+| R-79 | Platform audit head anchor remains locally owner-rewritable | M |
 
 ### Vision plan §6 findings
 
@@ -187,7 +188,7 @@ Status is read mechanically from the plan's own markers: a struck-through findin
 
 ### `chronos.auditlog` public names
 
-`AuditLog`, `AuditLogCorruptionError`, `AuditRecord`, `ChainState`, `ChainVerification`, `verify_chain`, `verify_chain_text` — from `chronos.auditlog.__all__`, in declared order.
+`AuditLog`, `AuditLogCorruptionError`, `AuditRecord`, `ChainState`, `ChainVerification`, `bootstrap_anchor`, `read_audit_pair`, `verify_chain`, `verify_chain_text`, `verify_pair_text` — from `chronos.auditlog.__all__`, in declared order.
 
 ### Forwarding flags — declared, never read here
 
@@ -203,9 +204,9 @@ Both are built inert and enabled only by the owner (plan §11); a value would be
 | Source | SHA-256 |
 | --- | --- |
 | DECISIONS.md | `a29eaaea431b955fafd8eca8f8c5254a1989dffaf3388ac3a6c2c881ff7a5ab7` |
-| RISK_REGISTER.md | `347f04f379dee0e1ded4afc0f1f5428842a51a95d758ee3e35bd005a805c7d79` |
+| RISK_REGISTER.md | `dad971c82318dc860f67566f241d7cc130bcf30c9cfa36da84579aef9b1bae85` |
 | docs/VISION_COMPLETION_PLAN.md | `f7cff45f7389c480d11720fe6251d5b04fd9a908de0488812c71a1442ad5d5c2` |
-| src/chronos/auditlog/__init__.py | `8e74d373bf30d14a8d92ce55432fee525fa021a1afbe9293c5360619bea05a8b` |
+| src/chronos/auditlog/__init__.py | `5ec898d0ab735be6f0a7773bbeb9d8aacf4c3ea3b5eceff2d446a914d5a1647b` |
 | src/chronos/bridge/config.py | `25f2f9a369d625440eb21d0d55f10386aa47d33dfb1843731788295b03cec636` |
 | worker/config.py | `6b3763ec4280a65160442eb2fb63d523ae069ae70754842635681f855573dffe` |
 
