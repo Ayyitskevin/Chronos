@@ -87,7 +87,7 @@ this is a single-operator local system (ASSUMPTIONS.md A-42).
   service, `shadow-scan` — refuses a bare log rather than anchoring it silently.
 - Limitation, honestly: a hash chain proves internal consistency, not authenticity, and the
   local anchor is not an external one — an actor with file write access who rewrites both
-  files consistently, or restores both from one older snapshot, is not detected (R-78). There
+  files consistently, or restores both from one older snapshot, is not detected (R-79). There
   is still no off-host copy or signature. Off-machine backups (docs/BACKUP_AND_RECOVERY.md)
   are the compensating control.
 - A truncated final record (e.g. a process killed mid-append) is detected on the next

@@ -37,8 +37,8 @@ legacy log may be bootstrapped explicitly (count 0).
 a log one record ahead of its anchor (a crash between the log fsync and the anchor publication) is
 BROKEN as a `crash window` and needs the reviewed recovery in that document. Mode is now a capability
 condition: a log, lock or anchor found looser than `0600` is refused and reported, not silently
-tightened. Restoring both files from one older snapshot is not detected locally (R-78). See R-14 /
-R-78, `docs/safety.md` "Platform audit integrity", `docs/SECURITY.md`.
+tightened. Restoring both files from one older snapshot is not detected locally (R-79). See R-14 /
+R-79, `docs/safety.md` "Platform audit integrity", `docs/SECURITY.md`.
 
 ## [Unreleased] — an unsafe grant reports as itself, on both arms (2026-09-05)
 

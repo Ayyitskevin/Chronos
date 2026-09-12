@@ -175,7 +175,7 @@ runbooks.
   local pair.** `data/platform_audit.jsonl` carries a sibling head anchor
   (`platform_audit.head.json`: record count + head hash); a deleted tail, a restored older
   log beside a newer anchor, a missing or malformed anchor, or a concurrent-writer fork is
-  BROKEN. **Out of scope (disclosed, R-78):** an owner-user actor who recomputes or
+  BROKEN. **Out of scope (disclosed, R-79):** an owner-user actor who recomputes or
   co-restores both files consistently — the anchor is a local sibling, not a signed or
   off-host root of trust, and restoring log and anchor together from one older snapshot is
   locally indistinguishable from the truth (exactly as a wholesale restore of `data/`

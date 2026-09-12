@@ -372,7 +372,7 @@ before the anchor publication leaves the log one record ahead of its anchor: tha
 closed as a "crash window", every writer refuses it, and it needs reviewed recovery
 (docs/BACKUP_AND_RECOVERY.md); a lock-free reader racing an append can observe the same
 window. This is tamper-evidence, not protection from the owner: an owner-user actor who
-rewrites or co-restores both files consistently is not detected (R-78), and only a
+rewrites or co-restores both files consistently is not detected (R-79), and only a
 separately administered off-host receipt narrows that.
 
 ## Human responsibility
