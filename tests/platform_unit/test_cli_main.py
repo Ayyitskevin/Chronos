@@ -311,3 +311,50 @@ def test_live_capability_is_unreachable_through_the_cli() -> None:
         assert not name.startswith("chronos.broker")
         assert "brokers" not in name
         assert "ibkr" not in name.lower()
+
+
+def _anchor_path(path: Path) -> Path:
+    return path.with_name(path.stem + ".head.json")
+
+
+def test_verify_audit_log_fails_closed_on_tail_truncation_and_on_a_missing_anchor(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D1 Gap A at the CLI: a valid prefix is no longer VALID once the head anchor
+    disagrees, and a log with no anchor is BROKEN until the owner bootstraps it."""
+
+    audit = tmp_path / "audit.jsonl"
+    log = AuditLog(audit)
+    log.append("startup", {"n": 1})
+    log.append("startup", {"n": 2})
+    assert main([*_base_args(tmp_path), "verify-audit-log"]) == 0
+    out = capsys.readouterr().out
+    assert "VALID" in out and "anchor" in out, out
+
+    lines = audit.read_text(encoding="utf-8").splitlines()
+    audit.write_text(lines[0] + "\n", encoding="utf-8")  # a complete, internally valid prefix
+    assert main([*_base_args(tmp_path), "verify-audit-log"]) == 1
+    out = capsys.readouterr().out
+    assert "BROKEN" in out and "truncation" in out, out
+
+    audit.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    _anchor_path(audit).unlink(missing_ok=True)
+    assert main([*_base_args(tmp_path), "verify-audit-log"]) == 1
+    out = capsys.readouterr().out
+    assert "BROKEN" in out and "owner bootstrap required" in out, out
+
+
+def test_status_reports_an_anchor_mismatch_as_broken_and_still_exits_zero(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    audit = tmp_path / "audit.jsonl"
+    AuditLog(audit).append("startup", {"n": 1})
+    assert main([*_base_args(tmp_path), "status"]) == 0
+    out = capsys.readouterr().out
+    assert "audit log: VALID — chain + anchor intact (1 records)" in out, out
+
+    _anchor_path(audit).unlink(missing_ok=True)
+    assert main([*_base_args(tmp_path), "status"]) == 0  # status never gates on the verdict
+    out = capsys.readouterr().out
+    assert "audit log: BROKEN — head anchor missing" in out, out
+    assert "owner bootstrap required" in out, out

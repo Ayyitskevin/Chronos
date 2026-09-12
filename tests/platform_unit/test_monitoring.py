@@ -730,3 +730,34 @@ class TestTheCountIsLabelledUnverified:
         metrics = {args[0]: args[1] for name, args in fake.calls if name == "metric"}
         assert metrics.get("Audit records") == "2", metrics
         assert "Parsed rows, unverified" not in metrics
+
+
+def test_consumers_fail_closed_on_anchor_behind_and_ahead(tmp_path: Path) -> None:
+    """The snapshot's BROKEN mapping is unchanged; the anchor mismatch details now drive it."""
+
+    import json
+
+    halt = tmp_path / "halt.json"
+    HaltStore(halt).rearm("ready")
+    audit = tmp_path / "audit.jsonl"
+    log = AuditLog(audit)
+    first = log.append("service_startup", {"outcome": "reconciled"})
+    log.append("service_decision", {"symbol": "SPY", "direction": "ENTER_LONG"})
+    anchor = audit.with_name(audit.stem + ".head.json")
+
+    # Ahead: the anchor expects more than the log holds (tail truncation / rollback).
+    anchor.write_text(json.dumps({"count": 3, "last_hash": "a" * 64}, sort_keys=True) + "\n")
+    snap = build_snapshot(mode=TradingMode.SHADOW, halt_file=halt, audit_file=audit, now_utc=NOW)
+    assert snap.audit_state is ChainState.BROKEN
+    assert "truncation" in snap.audit_detail, snap.audit_detail
+    assert any("audit chain verification failed" in w and "truncation" in w for w in snap.warnings)
+    assert "BROKEN" in render_text(snap)
+
+    # Behind: the log holds more than the anchor expects (a crash between log and anchor).
+    anchor.write_text(
+        json.dumps({"count": 1, "last_hash": first.record_hash}, sort_keys=True) + "\n"
+    )
+    snap = build_snapshot(mode=TradingMode.SHADOW, halt_file=halt, audit_file=audit, now_utc=NOW)
+    assert snap.audit_state is ChainState.BROKEN
+    assert "crash window" in snap.audit_detail, snap.audit_detail
+    assert any("crash window" in w for w in snap.warnings), snap.warnings

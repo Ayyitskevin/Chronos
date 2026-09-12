@@ -982,3 +982,567 @@ class TestCapabilityHeldEndToEnd:
         with pytest.raises(AuditLogCorruptionError, match="flock"):
             AuditLog(path)
         assert not path.exists(), "the log was created before the lock was known to be unusable"
+
+
+# ---------------------------------------------------------------------- the head anchor
+
+_ZERO_HASH = "0" * 64
+
+
+def _anchor_path(path: Path) -> Path:
+    # The sibling the writer publishes beside the log, named like the registry's
+    # (`<stem>.head.json`): `audit.jsonl` owns `audit.head.json`.
+    return path.with_name(path.stem + ".head.json")
+
+
+def _anchor_bytes(count: int, last_hash: str) -> bytes:
+    # D2 §1: the one deterministic representation, `json.dumps(sort_keys=True) + "\n"`.
+    return (json.dumps({"count": count, "last_hash": last_hash}, sort_keys=True) + "\n").encode(
+        "utf-8"
+    )
+
+
+def _record_hashes(path: Path) -> list[str]:
+    lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    return [str(json.loads(line)["record_hash"]) for line in lines]
+
+
+def test_verify_detects_complete_tail_truncation(tmp_path: Path) -> None:
+    path = tmp_path / "audit.jsonl"
+    write_records(path, 3)
+    lines = path.read_text(encoding="utf-8").splitlines()
+    path.write_text("\n".join(lines[:-1]) + "\n", encoding="utf-8")
+    result = verify_chain(path)
+    assert result.state is ChainState.BROKEN
+    assert "truncation" in result.detail
+
+
+def _materialize_pair(tmp_path: Path, log_kind: str, anchor_kind: str) -> Path:
+    """Build one D2 §2 matrix cell: a ``log_kind`` log beside an ``anchor_kind`` anchor."""
+
+    path = tmp_path / "audit.jsonl"
+    anchor = _anchor_path(path)
+    hashes: list[str] = []
+    if log_kind == "empty":
+        path.write_text("", encoding="utf-8")
+    elif log_kind in ("valid", "broken"):
+        write_records(path, 3)
+        hashes = _record_hashes(path)
+        if log_kind == "broken":
+            lines = path.read_text(encoding="utf-8").splitlines()
+            assert "payload-1" in lines[1]
+            lines[1] = lines[1].replace("payload-1", "payload-X")
+            path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    else:
+        assert log_kind == "absent"
+    count = len(hashes)
+    last = hashes[-1] if hashes else _ZERO_HASH
+    anchor.unlink(missing_ok=True)
+    if anchor_kind == "malformed":
+        anchor.write_bytes(b"not an anchor\n")
+    elif anchor_kind == "matches":
+        # For an absent log "matches" cannot mean anything; any well-formed anchor is the cell.
+        anchor.write_bytes(
+            _anchor_bytes(count, last) if log_kind != "absent" else _anchor_bytes(1, "a" * 64)
+        )
+    elif anchor_kind == "behind":
+        anchor.write_bytes(_anchor_bytes(count - 1, hashes[-2]))
+    elif anchor_kind == "ahead":
+        anchor.write_bytes(_anchor_bytes(count + 1, "a" * 64))
+    elif anchor_kind == "wrong-hash":
+        anchor.write_bytes(_anchor_bytes(count, "a" * 64))
+    else:
+        assert anchor_kind == "absent"
+    return path
+
+
+_MALFORMED_ANCHORS: dict[str, bytes] = {
+    "not-json": b"not an anchor\n",
+    "not-an-object": b'["count", 1]\n',
+    "boolean-count": b'{"count": true, "last_hash": "' + b"a" * 64 + b'"}\n',
+    "negative-count": b'{"count": -1, "last_hash": "' + b"a" * 64 + b'"}\n',
+    "float-count": b'{"count": 1.0, "last_hash": "' + b"a" * 64 + b'"}\n',
+    "duplicate-keys": b'{"count": 3, "count": 3, "last_hash": "' + b"a" * 64 + b'"}\n',
+    "missing-key": b'{"count": 3}\n',
+    "unknown-key": b'{"count": 3, "last_hash": "' + b"a" * 64 + b'", "path": "x"}\n',
+    "not-utf8": b'\xff\xfe{"count": 3, "last_hash": "' + b"a" * 64 + b'"}\n',
+    "trailing-value": (
+        b'{"count": 3, "last_hash": "' + b"a" * 64 + b'"}\n'
+        b'{"count": 3, "last_hash": "' + b"a" * 64 + b'"}\n'
+    ),
+    "short-hash": b'{"count": 3, "last_hash": "' + b"a" * 63 + b'"}\n',
+    "uppercase-hash": b'{"count": 3, "last_hash": "' + b"A" * 64 + b'"}\n',
+    "non-hex-hash": b'{"count": 3, "last_hash": "' + b"g" * 64 + b'"}\n',
+    "zero-count-with-a-hash": b'{"count": 0, "last_hash": "' + b"a" * 64 + b'"}\n',
+    "hash-not-a-string": b'{"count": 3, "last_hash": 3}\n',
+    "empty": b"",
+}
+
+
+class TestVerifyChainPair:
+    """``verify_chain`` judges the log AND its sibling head anchor (D2 §2).
+
+    A valid prefix used to be VALID: deleting the tail, or restoring an older copy of the
+    file, left nothing to disagree with (D1 Gap A). The anchor carries the expected count
+    and head hash; the chain is validated first so its precise first-line failure still
+    wins, then the pair. Verification stays read-only and lock-free, and reaches both
+    leaves descriptor-relative and no-follow.
+    """
+
+    @pytest.mark.parametrize(
+        ("log_kind", "anchor_kind", "state", "fragments"),
+        [
+            ("absent", "absent", ChainState.ABSENT, ("no audit log",)),
+            ("absent", "malformed", ChainState.BROKEN, ("head anchor unreadable", "absent")),
+            ("absent", "matches", ChainState.BROKEN, ("truncation/deletion",)),
+            ("absent", "ahead", ChainState.BROKEN, ("truncation/deletion",)),
+            ("empty", "absent", ChainState.BROKEN, ("owner bootstrap required",)),
+            ("empty", "malformed", ChainState.BROKEN, ("head anchor unreadable",)),
+            ("empty", "matches", ChainState.VALID, ("chain + anchor intact (0 records)",)),
+            (
+                "empty",
+                "ahead",
+                ChainState.BROKEN,
+                ("truncation/rollback", "0 records but anchor expects 1"),
+            ),
+            ("valid", "absent", ChainState.BROKEN, ("owner bootstrap required",)),
+            ("valid", "malformed", ChainState.BROKEN, ("head anchor unreadable",)),
+            ("valid", "matches", ChainState.VALID, ("chain + anchor intact (3 records)",)),
+            (
+                "valid",
+                "behind",
+                ChainState.BROKEN,
+                ("crash window", "3 records but anchor expects 2"),
+            ),
+            (
+                "valid",
+                "ahead",
+                ChainState.BROKEN,
+                ("truncation/rollback", "3 records but anchor expects 4"),
+            ),
+            ("valid", "wrong-hash", ChainState.BROKEN, ("head hash mismatch",)),
+            ("broken", "absent", ChainState.BROKEN, ("line 2", "hash mismatch")),
+            ("broken", "matches", ChainState.BROKEN, ("line 2", "hash mismatch")),
+            ("broken", "ahead", ChainState.BROKEN, ("line 2", "hash mismatch")),
+        ],
+    )
+    def test_verify_chain_log_anchor_matrix(
+        self,
+        tmp_path: Path,
+        log_kind: str,
+        anchor_kind: str,
+        state: ChainState,
+        fragments: tuple[str, ...],
+    ) -> None:
+        path = _materialize_pair(tmp_path, log_kind, anchor_kind)
+        result = verify_chain(path)
+        assert result.state is state, result.detail
+        for fragment in fragments:
+            assert fragment in result.detail, result.detail
+
+    @pytest.mark.parametrize("shape", sorted(_MALFORMED_ANCHORS))
+    def test_every_malformed_anchor_shape_is_broken_not_ignored(
+        self, tmp_path: Path, shape: str
+    ) -> None:
+        path = tmp_path / "audit.jsonl"
+        write_records(path, 3)
+        _anchor_path(path).write_bytes(_MALFORMED_ANCHORS[shape])
+        result = verify_chain(path)
+        assert result.state is ChainState.BROKEN, result.detail
+        assert "head anchor unreadable" in result.detail, result.detail
+
+    def test_the_writer_publishes_exact_anchor_bytes_the_verifier_accepts(
+        self, tmp_path: Path
+    ) -> None:
+        # The positive control for the matrix: what the writer publishes is the "matches" cell.
+        path = tmp_path / "audit.jsonl"
+        write_records(path, 3)
+        assert _anchor_path(path).read_bytes() == _anchor_bytes(3, _record_hashes(path)[-1])
+        result = verify_chain(path)
+        assert result.state is ChainState.VALID, result.detail
+
+    def test_verify_refuses_symlinked_log_and_anchor_without_touching_target(
+        self, tmp_path: Path
+    ) -> None:
+        # (a) The log is a symlink to a VALID paired chain, with a byte-exact anchor planted
+        # under the link's own name, so a verifier that followed the link would say VALID.
+        victim = tmp_path / "victim.jsonl"
+        write_records(victim, 2)
+        victim_bytes = victim.read_bytes()
+        victim_anchor_bytes = _anchor_path(victim).read_bytes()
+        linked = tmp_path / "audit.jsonl"
+        linked.symlink_to(victim)
+        _anchor_path(linked).write_bytes(victim_anchor_bytes)
+        result = verify_chain(linked)
+        assert result.state is ChainState.BROKEN, result.detail
+        assert "is a symlink" in result.detail, result.detail
+        assert linked.is_symlink() and victim.read_bytes() == victim_bytes
+
+        # (b) A real log whose anchor is a symlink to a byte-exact valid anchor elsewhere.
+        real = tmp_path / "real.jsonl"
+        write_records(real, 2)
+        real_anchor = _anchor_path(real)
+        decoy = tmp_path / "decoy.head.json"
+        decoy.write_bytes(real_anchor.read_bytes())
+        real_anchor.unlink()
+        real_anchor.symlink_to(decoy)
+        result = verify_chain(real)
+        assert result.state is ChainState.BROKEN, result.detail
+        assert "is a symlink" in result.detail, result.detail
+        assert real_anchor.is_symlink() and decoy.read_bytes() == _anchor_path(victim).read_bytes()
+
+        # (c) A hard-linked anchor and (d) a FIFO at the anchor path: neither is a regular,
+        # single-link file; the FIFO must be refused without hanging.
+        real_anchor.unlink()
+        real_anchor.write_bytes(decoy.read_bytes())
+        os.link(real_anchor, tmp_path / "alias.head.json")
+        result = verify_chain(real)
+        assert result.state is ChainState.BROKEN, result.detail
+        assert "links" in result.detail, result.detail
+        (tmp_path / "alias.head.json").unlink()
+        real_anchor.unlink()
+        os.mkfifo(real_anchor, mode=0o600)
+        result = verify_chain(real)
+        assert result.state is ChainState.BROKEN, result.detail
+        assert "is not a regular file" in result.detail, result.detail
+
+        # (e) A parent directory reached through a symlink.
+        real_dir = tmp_path / "realdir"
+        real_dir.mkdir()
+        write_records(real_dir / "audit.jsonl", 1)
+        link_dir = tmp_path / "linkdir"
+        link_dir.symlink_to(real_dir, target_is_directory=True)
+        result = verify_chain(link_dir / "audit.jsonl")
+        assert result.state is ChainState.BROKEN, result.detail
+        assert "is a symlink or not a real directory" in result.detail, result.detail
+
+    def test_verify_creates_nothing_and_takes_no_lock(self, tmp_path: Path) -> None:
+        # Read-only by contract: monitoring and campaign status snapshot the directory.
+        path = tmp_path / "audit.jsonl"
+        write_records(path, 2)
+        _lock_path(path).unlink()
+        before = sorted(p.name for p in tmp_path.iterdir())
+        assert verify_chain(path).state is ChainState.VALID
+        assert sorted(p.name for p in tmp_path.iterdir()) == before
+
+
+class TestHeadAnchor:
+    """Every append publishes ``<stem>.head.json`` = exact ``{"count", "last_hash"}`` bytes (D2 §1).
+
+    Published through a unique same-directory temp opened ``O_EXCL`` at 0600, fsynced, renamed
+    over the anchor with directory descriptors, then a parent fsync — after the log fsync and
+    before the cache update and unlock, with the name-space binding re-established both
+    before the anchor is touched and after it is durable. The anchor and its temp are
+    capability entries like the log and the lock: a symlink, FIFO, hard link or swap is
+    refused without touching its target, and only the unpublished temp is ever removed.
+    """
+
+    def test_append_publishes_exact_private_anchor_after_log_fsync_before_unlock(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import fcntl
+
+        from chronos.auditlog import log as log_module
+
+        path = tmp_path / "audit.jsonl"
+        anchor = _anchor_path(path)
+        log = AuditLog(path)
+        log.append("first", {"n": 1})  # a prior anchor now exists; the next append is observed
+
+        events: list[str] = []
+        replacements: list[tuple[str, str, int | None, int | None]] = []
+        real_flock, real_fsync, real_replace = fcntl.flock, os.fsync, os.replace
+        real_bind = log_module.AuditLog._assert_transaction_bound
+
+        def flock(descriptor: int, operation: int) -> None:
+            if operation == fcntl.LOCK_UN:
+                events.append("unlock")
+            real_flock(descriptor, operation)
+
+        def fsync(descriptor: int) -> None:
+            kind = "dir" if stat.S_ISDIR(os.fstat(descriptor).st_mode) else "file"
+            events.append(f"{kind} fsync")
+            real_fsync(descriptor)
+
+        def replace(
+            source: str,
+            destination: str,
+            *,
+            src_dir_fd: int | None = None,
+            dst_dir_fd: int | None = None,
+        ) -> None:
+            replacements.append((source, destination, src_dir_fd, dst_dir_fd))
+            events.append("rename")
+            real_replace(source, destination, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+        def bind(self: log_module.AuditLog, *args: object, when: str, **kwargs: object) -> None:
+            events.append(f"bind: {when}")
+            real_bind(self, *args, when=when, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(log_module.fcntl, "flock", flock)
+        monkeypatch.setattr(log_module.os, "fsync", fsync)
+        monkeypatch.setattr(log_module.os, "replace", replace)
+        monkeypatch.setattr(log_module.AuditLog, "_assert_transaction_bound", bind)
+
+        record = log.append("second", {"n": 2})
+
+        # Exact bytes, private mode, no leftover temp.
+        assert anchor.read_bytes() == _anchor_bytes(2, record.record_hash)
+        assert stat.S_IMODE(anchor.lstat().st_mode) == 0o600
+        assert not list(tmp_path.glob(".*.tmp"))
+        # Atomic replace through the held parent descriptor, from a unique temp name.
+        assert len(replacements) == 1, replacements
+        source, destination, source_dir, destination_dir = replacements[0]
+        assert source.startswith(".audit.head.json.") and source.endswith(".tmp"), source
+        assert destination == "audit.head.json"
+        assert source_dir is not None and source_dir == destination_dir
+        # Order: log fsync < pre-anchor binding < temp fsync < rename < dir fsync <
+        # post-anchor binding < unlock.
+        file_fsyncs = [index for index, event in enumerate(events) if event == "file fsync"]
+        assert len(file_fsyncs) == 2, events  # the log, then the anchor temp
+        log_fsync, temp_fsync = file_fsyncs
+        pre = events.index("bind: before the anchor")
+        rename = events.index("rename")
+        dir_fsync = events.index("dir fsync")
+        post = events.index("bind: after the anchor")
+        unlock = events.index("unlock")
+        assert log_fsync < pre < temp_fsync < rename < dir_fsync < post < unlock, events
+        assert events.count("unlock") == 1 and events.count("dir fsync") == 1, events
+
+    def test_pre_anchor_binding_call_is_required(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A name swap right after the LOG fsync must refuse BEFORE the anchor is touched.
+
+        The post-anchor call would also refuse — but only after publishing an anchor
+        beside a log the canonical name no longer designates. So this pins WHERE the
+        refusal happens: no rename, the prior anchor byte-identical, no temp left.
+        """
+
+        from chronos.auditlog import log as log_module
+
+        path = tmp_path / "audit.jsonl"
+        anchor = _anchor_path(path)
+        log = AuditLog(path)
+        log.append("first", {"n": 1})
+        before_log, before_anchor = path.read_bytes(), anchor.read_bytes()
+        real_fsync, real_replace = os.fsync, os.replace
+        swapped = False
+        renames: list[tuple[str, str]] = []
+
+        def fsync_then_swap_the_log(descriptor: int) -> None:
+            nonlocal swapped
+            real_fsync(descriptor)
+            if not swapped and stat.S_ISREG(os.fstat(descriptor).st_mode):
+                swapped = True
+                swap = tmp_path / "swap.jsonl"
+                swap.write_bytes(before_log)
+                real_replace(swap, path)  # the held log descriptor now points at an unnamed inode
+
+        def replace(source: str, destination: str, **kwargs: object) -> None:
+            renames.append((source, destination))
+            real_replace(source, destination, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(log_module.os, "fsync", fsync_then_swap_the_log)
+        monkeypatch.setattr(log_module.os, "replace", replace)
+        with pytest.raises(AuditLogCorruptionError, match="replaced"):
+            log.append("second", {"n": 2})
+        assert swapped, "the swap never fired; the probe proved nothing"
+        assert renames == [], "the anchor was renamed into place after the swap"
+        assert anchor.read_bytes() == before_anchor
+        assert not list(tmp_path.glob(".*.tmp"))
+
+    def test_post_anchor_binding_call_is_required(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A swap AFTER the anchor is durable (after the parent fsync) can only be caught by
+        the final binding call; without it the writer returns success for a pair the
+        canonical names no longer designate."""
+
+        from chronos.auditlog import log as log_module
+
+        path = tmp_path / "audit.jsonl"
+        log = AuditLog(path)
+        log.append("first", {"n": 1})
+        before_log = path.read_bytes()
+        real_fsync = os.fsync
+        swapped = False
+
+        def fsync_then_swap_after_the_directory(descriptor: int) -> None:
+            nonlocal swapped
+            real_fsync(descriptor)
+            if not swapped and stat.S_ISDIR(os.fstat(descriptor).st_mode):
+                swapped = True
+                swap = tmp_path / "swap.jsonl"
+                swap.write_bytes(before_log)
+                os.replace(swap, path)
+
+        monkeypatch.setattr(log_module.os, "fsync", fsync_then_swap_after_the_directory)
+        with pytest.raises(AuditLogCorruptionError) as info:
+            log.append("second", {"n": 2})
+        assert swapped, "the swap never fired; the probe proved nothing"
+        message = str(info.value)
+        assert "replaced" in message and "durable" in message and "NOT reported" in message
+        # What the canonical names now designate: the pre-append log beside the new anchor.
+        assert _sequences(path) == [0]
+        result = verify_chain(path)
+        assert result.state is ChainState.BROKEN
+        assert "truncation" in result.detail, result.detail
+
+    @pytest.mark.parametrize(
+        "case",
+        [
+            "anchor-symlink",
+            "anchor-hard-link",
+            "anchor-fifo",
+            "temp-symlink",
+            "write",
+            "fsync",
+            "rename",
+        ],
+    )
+    def test_anchor_publish_refuses_symlink_hardlink_fifo_and_cleans_its_unique_temp(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+    ) -> None:
+        from chronos.auditlog import log as log_module
+
+        path = tmp_path / "audit.jsonl"
+        anchor = _anchor_path(path)
+        log = AuditLog(path)
+        log.append("first", {"n": 1})
+        before_log, before_anchor = path.read_bytes(), anchor.read_bytes()
+        victim = tmp_path / "victim.head.json"
+        victim.write_bytes(before_anchor)  # byte-exact: a follower would accept it
+        fixed_temp = f".{anchor.name}.{'f' * 32}.tmp"
+
+        if case == "anchor-symlink":
+            anchor.unlink()
+            anchor.symlink_to(victim)
+        elif case == "anchor-hard-link":
+            os.link(anchor, tmp_path / "alias.head.json")
+        elif case == "anchor-fifo":
+            anchor.unlink()
+            os.mkfifo(anchor, mode=0o600)
+        elif case == "temp-symlink":
+            monkeypatch.setattr(
+                log_module.uuid, "uuid4", lambda: type("U", (), {"hex": "f" * 32})()
+            )
+            (tmp_path / fixed_temp).symlink_to(victim)
+        elif case == "write":
+            monkeypatch.setattr(
+                log_module.os, "write", lambda *a, **k: (_ for _ in ()).throw(OSError("no write"))
+            )
+        elif case == "fsync":
+            real_fsync = os.fsync
+            file_fsyncs = 0
+
+            def fail_the_temp_fsync(descriptor: int) -> None:
+                nonlocal file_fsyncs
+                if stat.S_ISREG(os.fstat(descriptor).st_mode):
+                    file_fsyncs += 1
+                    if file_fsyncs == 2:  # the log's fsync succeeded; the anchor temp's fails
+                        raise OSError("temp fsync failed")
+                real_fsync(descriptor)
+
+            monkeypatch.setattr(log_module.os, "fsync", fail_the_temp_fsync)
+        else:
+            assert case == "rename"
+            monkeypatch.setattr(
+                log_module.os,
+                "replace",
+                lambda *a, **k: (_ for _ in ()).throw(OSError("no rename")),
+            )
+
+        with pytest.raises((AuditLogCorruptionError, OSError)) as info:
+            log.append("second", {"n": 2})
+
+        if case == "anchor-symlink":
+            assert "is a symlink" in str(info.value)
+            assert anchor.is_symlink() and victim.read_bytes() == before_anchor
+            assert path.read_bytes() == before_log, "the log was extended beside an unsafe anchor"
+        elif case == "anchor-hard-link":
+            assert "links" in str(info.value)
+            assert anchor.read_bytes() == before_anchor
+            assert path.read_bytes() == before_log
+        elif case == "anchor-fifo":
+            assert "is not a regular file" in str(info.value)
+            assert stat.S_ISFIFO(anchor.lstat().st_mode)
+            assert path.read_bytes() == before_log
+        elif case == "temp-symlink":
+            # We did not create that entry, so it is not ours to remove; the victim is untouched.
+            assert (tmp_path / fixed_temp).is_symlink() and victim.read_bytes() == before_anchor
+            assert anchor.read_bytes() == before_anchor
+        else:
+            assert anchor.read_bytes() == before_anchor, "a failed publication changed the anchor"
+        # In every case: no stray temp of ours, and the prior anchor still names the prior head.
+        assert not [
+            p for p in tmp_path.iterdir() if p.name.endswith(".tmp") and p.name != fixed_temp
+        ]
+
+    def test_crash_after_log_fsync_before_anchor_publish_is_broken(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from chronos.auditlog import log as log_module
+
+        path = tmp_path / "audit.jsonl"
+        anchor = _anchor_path(path)
+        log = AuditLog(path)
+        log.append("first", {"n": 1})
+        before_anchor = anchor.read_bytes()
+
+        def crash(*args: object, **kwargs: object) -> None:
+            raise OSError("simulated crash before the anchor replace")
+
+        monkeypatch.setattr(log_module.os, "replace", crash)
+        with pytest.raises(OSError, match="simulated crash"):
+            log.append("second", {"n": 2})
+        monkeypatch.undo()
+
+        # The record is durable in the log; the anchor still names the previous head.
+        assert _sequences(path) == [0, 1]
+        assert anchor.read_bytes() == before_anchor
+        assert not list(tmp_path.glob(".*.tmp"))
+        result = verify_chain(path)
+        assert result.state is ChainState.BROKEN
+        assert "crash window" in result.detail, result.detail
+        assert "2 records but anchor expects 1" in result.detail, result.detail
+        # No writer may extend past it: reviewed recovery, not silent repair.
+        with pytest.raises(AuditLogCorruptionError, match="crash window"):
+            AuditLog(path)
+        assert _sequences(path) == [0, 1]
+
+    def test_existing_bare_log_is_not_auto_anchored(self, tmp_path: Path) -> None:
+        """A valid legacy log with no anchor is BROKEN until the owner bootstraps it (D2 §3).
+
+        Creating the anchor automatically would certify whatever the file happens to hold —
+        including an already rolled-back copy — so construction and append refuse and
+        leave the file byte-identical.
+        """
+
+        path = tmp_path / "audit.jsonl"
+        write_records(path, 3)
+        _anchor_path(path).unlink(missing_ok=True)  # the shape a pre-anchor deployment left behind
+        before = path.read_bytes()
+
+        with pytest.raises(AuditLogCorruptionError, match="owner bootstrap required"):
+            AuditLog(path)
+        assert path.read_bytes() == before
+        assert not _anchor_path(path).exists()
+        assert not list(tmp_path.glob(".*.tmp"))
+        result = verify_chain(path)
+        assert result.state is ChainState.BROKEN
+        assert "owner bootstrap required" in result.detail, result.detail
+
+    def test_first_append_creates_the_pair_only_when_both_are_absent(self, tmp_path: Path) -> None:
+        path = tmp_path / "audit.jsonl"
+        anchor = _anchor_path(path)
+        # An anchor with no log is deletion/truncation of the log, never a fresh start.
+        anchor.write_bytes(_anchor_bytes(1, "a" * 64))
+        with pytest.raises(AuditLogCorruptionError, match="truncation/deletion"):
+            AuditLog(path)
+        assert not path.exists(), "a log was created beside an orphaned anchor"
+        anchor.unlink()
+        record = AuditLog(path).append("first", {"n": 1})
+        assert record.sequence == 0
+        assert anchor.read_bytes() == _anchor_bytes(1, record.record_hash)
+        assert verify_chain(path).state is ChainState.VALID

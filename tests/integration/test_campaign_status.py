@@ -520,3 +520,41 @@ def test_status_cannot_write_chmod_state_directory(
     assert code == 0
     assert after == before
     assert "CAMPAIGN STATUS: CLEAR" in capsys.readouterr().out
+
+
+def test_consumers_fail_closed_on_anchor_behind_and_ahead(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Campaign status keeps its CLEAR/TRIPPED/UNVERIFIED mapping; the head-anchor
+    mismatch details from ``verify_chain`` now trip it, and it stays read-only."""
+
+    from chronos.auditlog.log import AuditLog
+
+    now = datetime(2026, 9, 15, 12, tzinfo=UTC)
+    _artifacts(tmp_path, now=now)
+    _grant_fixtures(monkeypatch, now=now)
+    audit = tmp_path / "platform_audit.jsonl"
+    audit.unlink()
+    audit.with_name("platform_audit.head.json").unlink(missing_ok=True)
+    log = AuditLog(audit)
+    first = log.append("service_startup", {"outcome": "reconciled"})
+    log.append("service_cycle", {"outcome": "ran"})
+    anchor = audit.with_name("platform_audit.head.json")
+
+    anchor.write_text(json.dumps({"count": 3, "last_hash": "a" * 64}, sort_keys=True) + "\n")
+    before = _snapshot(tmp_path)
+    assert cmd_campaign_status(_arguments(tmp_path, now=now)) == 1
+    output = capsys.readouterr().out
+    assert "platform audit chain: TRIPPED" in output, output
+    assert "truncation" in output, output
+    assert _snapshot(tmp_path) == before
+
+    anchor.write_text(
+        json.dumps({"count": 1, "last_hash": first.record_hash}, sort_keys=True) + "\n"
+    )
+    before = _snapshot(tmp_path)
+    assert cmd_campaign_status(_arguments(tmp_path, now=now)) == 1
+    output = capsys.readouterr().out
+    assert "platform audit chain: TRIPPED" in output, output
+    assert "crash window" in output, output
+    assert _snapshot(tmp_path) == before
