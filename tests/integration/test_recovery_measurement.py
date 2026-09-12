@@ -141,6 +141,7 @@ def test_capture_and_restore_emit_bounded_measurements(open_source: _OpenSource)
     assert {artifact.name for artifact in manifest.artifacts} == {
         "chronos.db",
         "live_kill_switch.json",
+        "platform_audit.head.json",
         "platform_audit.jsonl",
         "platform_halt.json",
         "platform_ledger.db",
@@ -155,6 +156,7 @@ def test_capture_and_restore_emit_bounded_measurements(open_source: _OpenSource)
     assert {path.name for path in snapshot_root.iterdir()} == {
         "chronos.db",
         "live_kill_switch.json",
+        "platform_audit.head.json",
         "platform_audit.jsonl",
         "platform_halt.json",
         "platform_ledger.db",
@@ -173,7 +175,7 @@ def test_capture_and_restore_emit_bounded_measurements(open_source: _OpenSource)
     assert observation.result == "PASS"
     assert observation.source_id == "disposable-test-source"
     assert observation.oldest_snapshot_age_seconds == 99.0
-    assert observation.snapshot_capture_window_seconds == 9.0
+    assert observation.snapshot_capture_window_seconds == 11.0  # six members, two ticks each
     assert observation.local_restore_copy_seconds == 1.0
     assert observation.local_verification_seconds == 1.0
     assert observation.local_recovery_elapsed_seconds == 2.0
@@ -190,6 +192,7 @@ def test_capture_and_restore_emit_bounded_measurements(open_source: _OpenSource)
     assert {path.name for path in (restore_root / "data").iterdir()} == {
         "chronos.db",
         "live_kill_switch.json",
+        "platform_audit.head.json",
         "platform_audit.jsonl",
         "platform_halt.json",
         "platform_ledger.db",
@@ -233,6 +236,7 @@ def test_capture_does_not_change_source_artifact_bytes(open_source: _OpenSource)
         for name in (
             "chronos.db",
             "live_kill_switch.json",
+            "platform_audit.head.json",
             "platform_audit.jsonl",
             "platform_halt.json",
             "platform_ledger.db",

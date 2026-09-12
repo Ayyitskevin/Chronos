@@ -125,7 +125,12 @@ def _artifacts(root: Path, *, now: datetime) -> None:
         ),
         encoding="utf-8",
     )
+    # An empty platform audit log beside its matching zero anchor: VALID (0 records). A
+    # bare log with no anchor is BROKEN until the owner bootstraps it (chronos.auditlog).
     (root / "platform_audit.jsonl").write_text("", encoding="utf-8")
+    (root / "platform_audit.head.json").write_text(
+        json.dumps({"count": 0, "last_hash": "0" * 64}, sort_keys=True) + "\n", encoding="utf-8"
+    )
     (root / "health.json").write_text(json.dumps(_health(now)), encoding="utf-8")
     with sqlite3.connect(root / "chronos.db") as database:
         database.executescript(

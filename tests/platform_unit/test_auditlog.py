@@ -685,6 +685,11 @@ class TestTransactionShape:
     def test_a_failed_fsync_releases_the_lock_and_the_chain_stays_consistent(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """A failed log fsync leaves the record written but never anchored: the anchor still
+        names the previous head. This pin used to allow either "continue" or "fail closed";
+        the head anchor decides it (D2 §1) — the next writer refuses the pair as a crash
+        window, the chain is neither extended nor forked, and the locks are released."""
+
         from chronos.auditlog import log as log_module
 
         path = tmp_path / "audit.jsonl"
@@ -699,13 +704,16 @@ class TestTransactionShape:
             log.append("second", {})
         monkeypatch.undo()
         assert not log._thread_lock.locked()
-        # The next append either continues (the line was fully written before fsync failed)
-        # or fails closed on verification — never hangs, never forks the chain.
-        record = AuditLog(path).append("third", {})
         sequences = _sequences(path)
-        assert sequences == list(range(len(sequences)))
-        assert record.sequence == sequences[-1]
-        assert verify_chain(path).state is ChainState.VALID
+        assert sequences == list(range(len(sequences)))  # written in order, never forked
+        result = verify_chain(path)
+        assert result.state is ChainState.BROKEN
+        assert "crash window" in result.detail, result.detail
+        # A fresh instance needs the OS lock too; it must not hang, and it must not extend
+        # or repair the pair: reviewed recovery, not silent repair.
+        with pytest.raises(AuditLogCorruptionError, match="crash window"):
+            AuditLog(path)
+        assert _sequences(path) == sequences
 
 
 class TestLogPathCapability:
@@ -1182,14 +1190,15 @@ class TestVerifyChainPair:
         real = tmp_path / "real.jsonl"
         write_records(real, 2)
         real_anchor = _anchor_path(real)
+        real_anchor_bytes = real_anchor.read_bytes()
         decoy = tmp_path / "decoy.head.json"
-        decoy.write_bytes(real_anchor.read_bytes())
+        decoy.write_bytes(real_anchor_bytes)
         real_anchor.unlink()
         real_anchor.symlink_to(decoy)
         result = verify_chain(real)
         assert result.state is ChainState.BROKEN, result.detail
         assert "is a symlink" in result.detail, result.detail
-        assert real_anchor.is_symlink() and decoy.read_bytes() == _anchor_path(victim).read_bytes()
+        assert real_anchor.is_symlink() and decoy.read_bytes() == real_anchor_bytes
 
         # (c) A hard-linked anchor and (d) a FIFO at the anchor path: neither is a regular,
         # single-link file; the FIFO must be refused without hanging.
