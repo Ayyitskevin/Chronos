@@ -27,6 +27,8 @@ from pathlib import Path
 from types import ModuleType
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 import chronos.auditlog as auditlog_pkg
 
@@ -224,6 +226,15 @@ def test_finding_status_rules_on_synthetic_text() -> None:
         "**partially addressed**",
         "**The owner later addressed this in conversation.**",
         "**Status note, not a closure: observed 2026-09-03.**",
+        # Daybreak's re-verification of #223: a denylist of negating words let these through.
+        "**No longer addressed 2026-09-01.**",
+        "**Partly addressed 2026-09-01.**",
+        "**Still not addressed 2026-09-01 (waiting on D-80).**",
+        "**Never addressed 2026-09-01 (owner declined).**",
+        "**Not half addressed 2026-09-01.**",
+        "**Half addressed 2026-09-01.**",
+        "**Owner-declined half addressed 2026-09-01.**",
+        "**addressed 2026-09-01 (lowercase lead).**",
     ],
 )
 def test_negative_and_unqualified_markers_stay_unknown(marker: str) -> None:
@@ -245,12 +256,42 @@ def test_negative_and_unqualified_markers_stay_unknown(marker: str) -> None:
         "**Kill-engaged half addressed 2026-09-03 (D-63/ADR-0049, R-66):**",
         "**Read-only and unreconciled addressed 2026-09-04 (D-69/ADR-0054, R-72):**",
         "**Evidence half addressed 2026-08-14 (A2) — finding 6 is now closed on both halves.**",
+        "**Addressed: fixed in the same PR.**",
+        "**Addressed (A1; R-49).**",
+        "**Closed — superseded by ADR-0060.**",
     ],
 )
 def test_the_plan_s_own_positive_markers_are_recognised(marker: str) -> None:
     module = _generator()
     assert module._is_positive_marker(marker.strip("*")) is True, marker
     assert module._finding_status(f"~~Old statement.~~ {marker}") == "ADDRESSED", marker
+
+
+_POSITIVE_FORMS = (
+    "Addressed 2026-08-13 (A1; R-49):",
+    "Closed 2026-08-13 (D-1):",
+    "Kill-engaged half addressed 2026-09-03 (D-63/ADR-0049, R-66):",
+    "Read-only and unreconciled addressed 2026-09-04 (D-69/ADR-0054, R-72):",
+    "Evidence half addressed 2026-08-14 (A2):",
+)
+
+
+@given(
+    prefix=st.from_regex(r"[A-Za-z][A-Za-z\-']{0,14}( [A-Za-z][A-Za-z\-']{0,14})?", fullmatch=True)
+)
+@settings(max_examples=200, deadline=None)
+def test_any_prefix_on_a_positive_marker_yields_unknown_by_construction(prefix: str) -> None:
+    """The grammar is anchored: a marker is positive only when it BEGINS with one of the plan's
+    closure forms. So `Not`, `No longer`, `Partly`, `Still not`, `Never`, `Un`, or any word at
+    all in front of a positive marker falls through to UNKNOWN — by construction, not because
+    the word is on a list. Hypothesis draws the word; the plan's own words are included."""
+
+    module = _generator()
+    for form in _POSITIVE_FORMS:
+        assert module._is_positive_marker(form) is True, form
+        prefixed = f"{prefix} {form}"
+        assert module._is_positive_marker(prefixed) is False, prefixed
+        assert module._finding_status(f"~~Old statement.~~ **{prefixed}**") == "UNKNOWN", prefixed
 
 
 def test_a_missing_findings_section_yields_unknown_rows_not_silence(tmp_path: Path) -> None:
