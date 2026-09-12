@@ -187,7 +187,7 @@ Status is read mechanically from the plan's own markers: a struck-through findin
 
 ### `chronos.auditlog` public names
 
-`AuditLog`, `AuditLogCorruptionError`, `AuditRecord`, `ChainState`, `ChainVerification`, `verify_chain` — from `chronos.auditlog.__all__`, in declared order.
+`AuditLog`, `AuditLogCorruptionError`, `AuditRecord`, `ChainState`, `ChainVerification`, `verify_chain`, `verify_chain_text` — from `chronos.auditlog.__all__`, in declared order.
 
 ### Forwarding flags — declared, never read here
 
@@ -205,7 +205,7 @@ Both are built inert and enabled only by the owner (plan §11); a value would be
 | DECISIONS.md | `a29eaaea431b955fafd8eca8f8c5254a1989dffaf3388ac3a6c2c881ff7a5ab7` |
 | RISK_REGISTER.md | `347f04f379dee0e1ded4afc0f1f5428842a51a95d758ee3e35bd005a805c7d79` |
 | docs/VISION_COMPLETION_PLAN.md | `f7cff45f7389c480d11720fe6251d5b04fd9a908de0488812c71a1442ad5d5c2` |
-| src/chronos/auditlog/__init__.py | `17aa058d83d22c79cac383744a7c433204ec2130b24e54cdba1148733c103522` |
+| src/chronos/auditlog/__init__.py | `8e74d373bf30d14a8d92ce55432fee525fa021a1afbe9293c5360619bea05a8b` |
 | src/chronos/bridge/config.py | `25f2f9a369d625440eb21d0d55f10386aa47d33dfb1843731788295b03cec636` |
 | worker/config.py | `6b3763ec4280a65160442eb2fb63d523ae069ae70754842635681f855573dffe` |
 
