@@ -247,3 +247,40 @@ def test_each_denial_is_attributable(tmp_path: Path) -> None:
     # (or denied under a different code) and the assertion would fail.
     decision = _decide(tmp_path, _policy())
     assert decision.approved and decision.codes == ()
+
+
+# ---------------------------------------------------------------- allow_margin (P3-B-1)
+
+
+def test_margin_forbidden(tmp_path: Path) -> None:
+    """Breach ⇒ deny: notional 1000 against 500 cash with margin disabled (the default).
+
+    Every other limit stays generous (equity 3000 keeps the exposure fractions and per-trade
+    risk within bounds), so only the cash rule binds and the denial is attributable to it.
+    """
+
+    decision = _decide(tmp_path, _policy(), account=_account(cash_usd=500.0))
+    assert not decision.approved
+    assert decision.codes == (RiskRejectionCode.MARGIN_FORBIDDEN,), decision.explanations
+    assert "margin" in decision.explanations[0] and "$500.00" in decision.explanations[0]
+
+
+def test_margin_allowed_approves(tmp_path: Path) -> None:
+    """The same breach with ``allow_margin=True`` is approved: the flag is what the rule reads."""
+
+    decision = _decide(tmp_path, _policy(allow_margin=True), account=_account(cash_usd=500.0))
+    assert decision.approved, decision.explanations
+    assert RiskRejectionCode.MARGIN_FORBIDDEN not in decision.codes
+
+
+def test_margin_rule_binds_strictly_above_cash(tmp_path: Path) -> None:
+    """Notional exactly equal to cash is not margin (the comparison is ``>``, not ``>=``), and
+    the generous baseline (cash 3000 ≥ notional 1000) is untouched by the new rule."""
+
+    at_cash = _decide(tmp_path, _policy(), account=_account(cash_usd=1000.0))
+    assert at_cash.approved, at_cash.explanations
+    baseline = _decide(tmp_path, _policy())
+    assert baseline.approved and baseline.codes == ()
+    one_cent_short = _decide(tmp_path, _policy(), account=_account(cash_usd=999.99))
+    assert not one_cent_short.approved
+    assert RiskRejectionCode.MARGIN_FORBIDDEN in one_cent_short.codes
