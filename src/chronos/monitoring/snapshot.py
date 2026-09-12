@@ -4,17 +4,36 @@ Everything here is a pure read of files the platform already wrote (halt
 state, audit log, risk policy) plus config-derived mode information. No broker
 adapter is imported and no network call is made — the snapshot is exactly as
 trustworthy as the files on disk, and no more.
+
+Fail closed on the audit chain (D1 §6, 2026-09-11): when ``verify_chain`` does
+not return VALID, nothing derived from the chain's rows is reported. The
+reconciliation status reads ``unverified (audit chain BROKEN|ABSENT)`` — never
+an outcome copied from a row a verifier has just refused to vouch for — and
+``recent_decisions`` is empty; the warning carries the record count and the
+first bad line so the operator knows what to go and look at. Before this, a
+BROKEN chain still produced a reconciliation status derived from its rows and
+listed them as recent audit events with only a warning line above.
+
+Verification and derivation run over ONE read (F4 review, HOLD at 9a2a107):
+``_read_audit`` captures the file once and hands that text to both
+``verify_chain_text`` and the row parser, so a file replaced between "verify"
+and "parse" can no longer let a VALID verdict authorise rows the verifier never
+saw. The one exception to "nothing derived" is ``audit_records``: the number of
+rows parsed from those same bytes stays as forensic telemetry — how big the thing
+to inspect is — and every surface labels it ``parsed rows, unverified`` when the
+chain is not VALID.
 """
 
 from __future__ import annotations
 
+import io
 import json
 import subprocess
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from chronos.auditlog.log import ChainState, verify_chain
+from chronos.auditlog.log import ChainState, ChainVerification, verify_chain_text
 from chronos.control.halt import HaltStore
 from chronos.control.modes import ExecutionCapability, TradingMode, resolve_mode_lock
 from chronos.marketdata.csv_provider import load_daily_csv
@@ -94,18 +113,39 @@ def _code_commit(repo_root: Path) -> str:
 def _read_audit(
     audit_file: Path, *, tail: int
 ) -> tuple[ChainState, str, int, list[dict[str, object]]]:
-    verification = verify_chain(audit_file)
+    """One read of the audit file; verdict and rows both come from that same text.
+
+    Reading the path twice — once to verify, once to parse — was the F4 HOLD: a
+    file replaced in between let a VALID verdict authorise rows the verifier
+    never saw. ABSENT is answered without opening anything, with the same detail
+    ``verify_chain`` gives for a missing path.
+    """
+
+    try:
+        text = audit_file.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        absent = ChainVerification(ChainState.ABSENT, "no audit log yet")
+        return absent.state, absent.detail, 0, []
+    verification = verify_chain_text(text)
     records: list[dict[str, object]] = []
-    if audit_file.exists():
-        with audit_file.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                if line.strip():
-                    try:
-                        records.append(json.loads(line))
-                    except json.JSONDecodeError:
-                        break
+    for line in io.StringIO(text):
+        if line.strip():
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                break
     decisions = [r for r in records if r.get("kind") in ("service_decision", "service_startup")]
     return verification.state, verification.detail, len(records), decisions[-tail:]
+
+
+def audit_count_phrase(state: ChainState) -> str:
+    """How every surface names ``audit_records``: plain under VALID, qualified otherwise.
+
+    The count is forensic telemetry — parsed from the same bytes the verdict
+    judged — not a claim about them; when the chain is not VALID the phrase says so.
+    """
+
+    return "records" if state is ChainState.VALID else "parsed rows, unverified"
 
 
 def _active_limits(policy: RiskPolicy) -> tuple[tuple[str, str], ...]:
@@ -162,8 +202,22 @@ def build_snapshot(
         warnings.append(f"platform is HALTED ({halt.reason.value if halt.reason else 'unknown'})")
 
     audit_state, audit_detail, audit_records, decisions = _read_audit(audit_file, tail=tail)
+    if audit_state is ChainState.VALID:
+        reconciliation_status = _reconciliation_status(decisions)
+        shown_decisions: tuple[dict[str, object], ...] = tuple(decisions)
+    else:
+        # Nothing derived from an unverified chain may read as a verified state: not the
+        # reconciliation outcome copied from a row the verifier refused to vouch for, and
+        # not the rows themselves listed as history. The count and the first bad line stay
+        # in the warning so the operator knows what to inspect.
+        reconciliation_status = f"unverified (audit chain {audit_state.value})"
+        shown_decisions = ()
     if audit_state is ChainState.BROKEN:
-        warnings.append(f"audit chain verification failed: {audit_detail}")
+        warnings.append(
+            f"audit chain verification failed: {audit_detail}; {audit_records} "
+            f"{audit_count_phrase(audit_state)} — none shown and no reconciliation status "
+            "derived from them"
+        )
     elif audit_state is ChainState.ABSENT:
         # Previously this rendered as "OK — no audit log yet": a missing chain read as a
         # verified one in the operator snapshot. Absence is unverified, so it warns.
@@ -234,11 +288,11 @@ def build_snapshot(
         halted=halt.halted,
         halt_reason=halt.reason.value if halt.reason else None,
         halt_detail=halt.detail,
-        reconciliation_status=_reconciliation_status(decisions),
+        reconciliation_status=reconciliation_status,
         audit_state=audit_state,
         audit_detail=audit_detail,
         audit_records=audit_records,
-        recent_decisions=tuple(decisions),
+        recent_decisions=shown_decisions,
         data_freshness=tuple(freshness),
         risk_policy_version=policy_version,
         risk_policy_hash=policy_hash,
@@ -327,7 +381,7 @@ def render_markdown(snapshot: MonitoringSnapshot) -> str:
         + (f" — `{snapshot.halt_reason}` ({snapshot.halt_detail})" if snapshot.halted else ""),
         f"- **Reconciliation:** {snapshot.reconciliation_status}",
         f"- **Audit chain:** {snapshot.audit_state.value} — {snapshot.audit_detail} "
-        f"({snapshot.audit_records} records)",
+        f"({snapshot.audit_records} {audit_count_phrase(snapshot.audit_state)})",
         f"- **Risk policy:** {snapshot.risk_policy_version or 'none'} "
         f"(`{snapshot.risk_policy_hash or '-'}`)",
         f"- **Positions/orders/fills:** {snapshot.pnl_note}",

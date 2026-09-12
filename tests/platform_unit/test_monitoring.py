@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import ast
+import json
+import os
+import pathlib
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -374,3 +378,355 @@ def test_an_absent_audit_file_does_not_read_as_a_verified_chain(tmp_path: Path) 
     assert "audit chain:    ABSENT" in text
     assert "audit chain:    OK" not in text
     assert "ABSENT" in render_markdown(snap)
+
+
+def _broken_chain_with_intact_startup(tmp_path: Path) -> tuple[Path, Path]:
+    """A 3-record log whose FIRST record (service_startup, outcome=reconciled) is intact and
+    whose second record is tampered, so the chain is BROKEN at line 2 while a last-row or
+    prefix reader still finds a clean-looking startup outcome to derive from."""
+
+    halt = tmp_path / "halt.json"
+    HaltStore(halt).rearm("ready")
+    audit = tmp_path / "audit.jsonl"
+    log = AuditLog(audit)
+    log.append("service_startup", {"outcome": "reconciled"})
+    log.append("service_decision", {"symbol": "SPY", "direction": "ENTER_LONG"})
+    log.append("service_decision", {"symbol": "QQQ", "direction": "HOLD"})
+    lines = audit.read_text(encoding="utf-8").splitlines()
+    assert "ENTER_LONG" in lines[1]
+    lines[1] = lines[1].replace("ENTER_LONG", "ENTER_XXXX")
+    audit.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return halt, audit
+
+
+class _FakeColumn:
+    def __init__(self, sink: list[tuple[str, tuple[object, ...]]]) -> None:
+        self._sink = sink
+
+    def metric(self, label: str, value: object) -> None:
+        self._sink.append(("metric", (label, value)))
+
+
+class _FakeStreamlit:
+    """Records every primitive `render_monitor` calls; no Streamlit runtime involved."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, tuple[object, ...]]] = []
+
+    def __getattr__(self, name: str) -> Callable[..., None]:
+        def record(*args: object, **_kwargs: object) -> None:
+            self.calls.append((name, args))
+
+        return record
+
+    def columns(self, count: int) -> list[_FakeColumn]:
+        return [_FakeColumn(self.calls) for _ in range(count)]
+
+
+class TestUnverifiedChainFailsClosed:
+    """Nothing derived from an unverified audit chain may read as a verified state.
+
+    Daybreak D1 §6 bullet 3 (verified by the conductor at a1a9f59, re-verified here at the
+    branch tip): `_read_audit` called `verify_chain` and then, independently, parsed the file
+    and returned its rows regardless of the verdict; `build_snapshot` derived
+    `reconciliation_status` from those rows and listed them as recent audit events with
+    only a warning line above. AGENTS.md: fail closed under missing or ambiguous facts.
+    """
+
+    def test_a_broken_chain_yields_an_unverified_status_never_a_derived_one(
+        self, tmp_path: Path
+    ) -> None:
+        halt, audit = _broken_chain_with_intact_startup(tmp_path)
+        snap = build_snapshot(
+            mode=TradingMode.SHADOW, halt_file=halt, audit_file=audit, now_utc=NOW
+        )
+
+        assert snap.audit_state is ChainState.BROKEN
+        assert snap.reconciliation_status == "unverified (audit chain BROKEN)"
+        # The intact startup row said "reconciled"; it must not leak through.
+        assert "reconciled" not in snap.reconciliation_status.lower()
+
+    def test_a_broken_chain_shows_no_recent_decisions_and_says_where_to_look(
+        self, tmp_path: Path
+    ) -> None:
+        halt, audit = _broken_chain_with_intact_startup(tmp_path)
+        snap = build_snapshot(
+            mode=TradingMode.SHADOW, halt_file=halt, audit_file=audit, now_utc=NOW
+        )
+
+        assert snap.recent_decisions == ()
+        assert snap.audit_records == 3  # the count is still reported; the rows are not
+        [warning] = [w for w in snap.warnings if w.startswith("audit chain verification failed")]
+        assert "line 2" in warning and "hash mismatch" in warning  # the first bad line
+        assert "3 parsed rows, unverified" in warning  # how much there is to go and look at
+        assert "none shown" in warning
+
+        text = render_text(snap)
+        assert "recent audit events" not in text
+        assert "ENTER_LONG" not in text and "HOLD" not in text
+        assert "reconciliation: unverified (audit chain BROKEN)" in text
+        assert "**Reconciliation:** unverified (audit chain BROKEN)" in render_markdown(snap)
+
+    def test_a_truncated_last_line_is_also_unverified_end_to_end(self, tmp_path: Path) -> None:
+        # The pre-existing corrupt-tail case: the valid prefix used to be returned as rows.
+        audit = tmp_path / "audit.jsonl"
+        AuditLog(audit).append("service_startup", {"outcome": "reconciled"})
+        with audit.open("a", encoding="utf-8") as handle:
+            handle.write('{"broken')
+        halt = tmp_path / "halt.json"
+        HaltStore(halt).rearm("ready")
+        snap = build_snapshot(
+            mode=TradingMode.SHADOW, halt_file=halt, audit_file=audit, now_utc=NOW
+        )
+
+        assert snap.audit_state is ChainState.BROKEN
+        assert snap.reconciliation_status == "unverified (audit chain BROKEN)"
+        assert snap.recent_decisions == ()
+
+    def test_an_absent_chain_yields_an_unverified_status_and_no_rows(self, tmp_path: Path) -> None:
+        halt = tmp_path / "halt.json"
+        HaltStore(halt).rearm("ready")
+        snap = build_snapshot(
+            mode=TradingMode.SHADOW,
+            halt_file=halt,
+            audit_file=tmp_path / "never-written.jsonl",
+            now_utc=NOW,
+        )
+
+        assert snap.audit_state is ChainState.ABSENT
+        assert snap.reconciliation_status == "unverified (audit chain ABSENT)"
+        assert snap.recent_decisions == ()
+        assert any(w.startswith("audit chain not verified") for w in snap.warnings), snap.warnings
+
+    def test_a_valid_chain_is_unchanged(self, tmp_path: Path) -> None:
+        # Positive control alongside test_snapshot_from_armed_state: VALID still derives.
+        halt = tmp_path / "halt.json"
+        HaltStore(halt).rearm("ready")
+        audit = tmp_path / "audit.jsonl"
+        log = AuditLog(audit)
+        log.append("service_startup", {"outcome": "reconciled"})
+        log.append("service_decision", {"symbol": "SPY", "direction": "ENTER_LONG"})
+        snap = build_snapshot(
+            mode=TradingMode.SHADOW, halt_file=halt, audit_file=audit, now_utc=NOW
+        )
+
+        assert snap.audit_state is ChainState.VALID
+        assert snap.reconciliation_status == "reconciled"
+        assert [r["kind"] for r in snap.recent_decisions] == ["service_startup", "service_decision"]
+        assert "recent audit events (2)" in render_text(snap)
+        assert not any("audit chain" in w for w in snap.warnings)
+
+    def test_the_streamlit_renderer_shows_the_unverified_status_and_no_events(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The page renders the snapshot's fields directly, so it inherits the discipline;
+        pinned through a recording fake of the `st` module rather than a Streamlit runtime."""
+
+        import chronos.monitoring.streamlit_app as streamlit_mod
+
+        halt, audit = _broken_chain_with_intact_startup(tmp_path)
+        snap = build_snapshot(
+            mode=TradingMode.SHADOW, halt_file=halt, audit_file=audit, now_utc=NOW
+        )
+        fake = _FakeStreamlit()
+        monkeypatch.setattr(streamlit_mod, "st", fake)
+
+        streamlit_mod.render_monitor(snap)
+
+        metrics = {args[0]: args[1] for name, args in fake.calls if name == "metric"}
+        assert metrics["Reconciliation"] == "unverified (audit chain BROKEN)"
+        assert metrics["Audit chain"] == "BROKEN"
+        subheaders = [args[0] for name, args in fake.calls if name == "subheader"]
+        assert "Recent audit events" not in subheaders
+        rendered = " ".join(str(a) for _name, args in fake.calls for a in args)
+        assert "ENTER_LONG" not in rendered and "ENTER_XXXX" not in rendered
+        warnings = [args[0] for name, args in fake.calls if name == "warning"]
+        assert any("audit chain verification failed" in str(w) for w in warnings), warnings
+
+
+def _valid_chain_bytes(directory: Path, startup_outcome: str, direction: str) -> bytes:
+    """Bytes of a VALID two-record chain, built where nothing is watching."""
+
+    directory.mkdir()
+    log = AuditLog(directory / "audit.jsonl")
+    log.append("service_startup", {"outcome": startup_outcome})
+    log.append("service_decision", {"symbol": "SPY", "direction": direction})
+    return (directory / "audit.jsonl").read_bytes()
+
+
+class TestVerifyAndDeriveOverTheSameBytes:
+    """The rows the snapshot derives from must be the bytes that received the verdict (F4 HOLD).
+
+    Daybreak's probe: `_read_audit` verified the pathname, then re-opened the pathname to
+    parse rows; replacing the file between the two reads produced snapshot VALID,
+    reconciliation "reconciled-forged" and two shown rows including ENTER_EVIL. Verification
+    and derivation must run over ONE captured read.
+    """
+
+    def test_a_swap_after_verification_cannot_change_what_is_derived(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        halt = tmp_path / "halt.json"
+        HaltStore(halt).rearm("ready")
+        audit = tmp_path / "audit.jsonl"
+        audit.write_bytes(_valid_chain_bytes(tmp_path / "genuine", "reconciled", "ENTER_LONG"))
+        forged = tmp_path / "forged.jsonl"
+        forged.write_bytes(_valid_chain_bytes(tmp_path / "evil", "reconciled-forged", "ENTER_EVIL"))
+
+        # Both the verifier and the row parser decode rows with json.loads; the FIRST call
+        # happens inside verification, so swapping the file there is "after verification
+        # started, before derivation" — Daybreak's window, made deterministic.
+        real_loads = json.loads
+        swapped: list[bool] = []
+
+        def swap_once_then_load(payload: str, *args: object, **kwargs: object) -> object:
+            # build_snapshot decodes the halt file first; only an audit ROW carries
+            # record_hash, so the swap lands at the first decode inside verification.
+            if not swapped and "record_hash" in payload:
+                swapped.append(True)
+                os.replace(forged, audit)
+            return real_loads(payload, *args, **kwargs)
+
+        monkeypatch.setattr(json, "loads", swap_once_then_load)
+        snap = build_snapshot(
+            mode=TradingMode.SHADOW, halt_file=halt, audit_file=audit, now_utc=NOW
+        )
+
+        assert swapped, "the probe never fired; the test proves nothing"
+        assert snap.audit_state is ChainState.VALID  # the genuine bytes were verified...
+        assert snap.reconciliation_status == "reconciled"  # ...and only they were derived from
+        directions = [r.get("payload", {}).get("direction") for r in snap.recent_decisions]
+        assert directions == [None, "ENTER_LONG"], snap.recent_decisions
+        rendered = render_text(snap) + render_markdown(snap)
+        assert "ENTER_EVIL" not in rendered and "forged" not in rendered
+
+    def test_a_tampered_read_yields_an_unverified_snapshot_even_if_the_file_is_valid(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The converse: whatever bytes the single read returns are what is judged AND derived
+        from. A tampered read of a VALID file must read BROKEN with no rows."""
+
+        halt = tmp_path / "halt.json"
+        HaltStore(halt).rearm("ready")
+        audit = tmp_path / "audit.jsonl"
+        audit.write_bytes(_valid_chain_bytes(tmp_path / "genuine", "reconciled", "ENTER_LONG"))
+        tampered = audit.read_text(encoding="utf-8").replace("ENTER_LONG", "ENTER_XXXX")
+        real_read_text = pathlib.Path.read_text
+
+        def tampered_read(self: pathlib.Path, *args: object, **kwargs: object) -> str:
+            if self == audit:
+                return tampered
+            return real_read_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(pathlib.Path, "read_text", tampered_read)
+        snap = build_snapshot(
+            mode=TradingMode.SHADOW, halt_file=halt, audit_file=audit, now_utc=NOW
+        )
+
+        assert snap.audit_state is ChainState.BROKEN
+        assert snap.reconciliation_status == "unverified (audit chain BROKEN)"
+        assert snap.recent_decisions == ()
+        assert snap.audit_records == 2  # parsed from the same tampered bytes, labelled below
+
+    def test_the_audit_file_is_read_exactly_once(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No second open: a re-open for parsing is the race, so the pin counts opens."""
+
+        halt = tmp_path / "halt.json"
+        HaltStore(halt).rearm("ready")
+        audit = tmp_path / "audit.jsonl"
+        audit.write_bytes(_valid_chain_bytes(tmp_path / "genuine", "reconciled", "ENTER_LONG"))
+        opens: list[str] = []
+        real_open, real_read_text = pathlib.Path.open, pathlib.Path.read_text
+
+        def counting_open(self: pathlib.Path, *args: object, **kwargs: object) -> object:
+            if self == audit:
+                opens.append("open")
+            return real_open(self, *args, **kwargs)
+
+        def counting_read_text(self: pathlib.Path, *args: object, **kwargs: object) -> str:
+            if self == audit:
+                opens.append("read_text")
+            return real_read_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(pathlib.Path, "open", counting_open)
+        monkeypatch.setattr(pathlib.Path, "read_text", counting_read_text)
+        snap = build_snapshot(
+            mode=TradingMode.SHADOW, halt_file=halt, audit_file=audit, now_utc=NOW
+        )
+
+        assert snap.audit_state is ChainState.VALID
+        # read_text opens the file once internally; that one open is the whole read.
+        assert opens == ["read_text", "open"], opens
+
+    def test_an_absent_file_reports_the_same_detail_as_verify_chain(self, tmp_path: Path) -> None:
+        from chronos.auditlog.log import verify_chain
+
+        halt = tmp_path / "halt.json"
+        HaltStore(halt).rearm("ready")
+        missing = tmp_path / "never-written.jsonl"
+        snap = build_snapshot(
+            mode=TradingMode.SHADOW, halt_file=halt, audit_file=missing, now_utc=NOW
+        )
+        assert snap.audit_state is ChainState.ABSENT
+        assert snap.audit_detail == verify_chain(missing).detail
+        assert snap.audit_records == 0
+
+
+class TestTheCountIsLabelledUnverified:
+    """`audit_records` stays as forensic telemetry (how big is the thing to inspect) but is
+    labelled "parsed rows, unverified" on every surface when the chain is not VALID (F4 HOLD
+    finding 2, conductor's default). Under VALID the label is unchanged."""
+
+    def test_markdown_and_warning_label_the_count_under_broken(self, tmp_path: Path) -> None:
+        halt, audit = _broken_chain_with_intact_startup(tmp_path)
+        snap = build_snapshot(
+            mode=TradingMode.SHADOW, halt_file=halt, audit_file=audit, now_utc=NOW
+        )
+        markdown = render_markdown(snap)
+        assert "(3 parsed rows, unverified)" in markdown, markdown
+        assert "(3 records)" not in markdown
+        assert any("3 parsed rows, unverified" in w for w in snap.warnings), snap.warnings
+
+    def test_markdown_keeps_the_plain_count_under_valid(self, tmp_path: Path) -> None:
+        halt = tmp_path / "halt.json"
+        HaltStore(halt).rearm("ready")
+        audit = tmp_path / "audit.jsonl"
+        audit.write_bytes(_valid_chain_bytes(tmp_path / "genuine", "reconciled", "ENTER_LONG"))
+        snap = build_snapshot(
+            mode=TradingMode.SHADOW, halt_file=halt, audit_file=audit, now_utc=NOW
+        )
+        assert "(2 records)" in render_markdown(snap)
+        assert "unverified" not in render_markdown(snap)
+
+    def test_the_streamlit_metric_is_relabelled_under_broken_only(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import chronos.monitoring.streamlit_app as streamlit_mod
+
+        halt, audit = _broken_chain_with_intact_startup(tmp_path)
+        broken = build_snapshot(
+            mode=TradingMode.SHADOW, halt_file=halt, audit_file=audit, now_utc=NOW
+        )
+        fake = _FakeStreamlit()
+        monkeypatch.setattr(streamlit_mod, "st", fake)
+        streamlit_mod.render_monitor(broken)
+        metrics = {args[0]: args[1] for name, args in fake.calls if name == "metric"}
+        assert metrics.get("Parsed rows, unverified") == "3", metrics
+        assert "Audit records" not in metrics
+
+        valid_dir = tmp_path / "valid"
+        valid_dir.mkdir()
+        valid_audit = valid_dir / "audit.jsonl"
+        valid_audit.write_bytes(
+            _valid_chain_bytes(tmp_path / "genuine", "reconciled", "ENTER_LONG")
+        )
+        valid = build_snapshot(
+            mode=TradingMode.SHADOW, halt_file=halt, audit_file=valid_audit, now_utc=NOW
+        )
+        fake.calls.clear()
+        streamlit_mod.render_monitor(valid)
+        metrics = {args[0]: args[1] for name, args in fake.calls if name == "metric"}
+        assert metrics.get("Audit records") == "2", metrics
+        assert "Parsed rows, unverified" not in metrics

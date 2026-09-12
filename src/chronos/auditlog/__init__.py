@@ -7,6 +7,7 @@ from chronos.auditlog.log import (
     ChainState,
     ChainVerification,
     verify_chain,
+    verify_chain_text,
 )
 
 __all__ = [
@@ -16,4 +17,5 @@ __all__ = [
     "ChainState",
     "ChainVerification",
     "verify_chain",
+    "verify_chain_text",
 ]

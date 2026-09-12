@@ -628,18 +628,32 @@ class ChainVerification:
         )
 
 
+def verify_chain_text(text: str) -> ChainVerification:
+    """Verify a chain from text a caller already holds; VALID or BROKEN, never ABSENT.
+
+    A consumer that verifies a PATH and then re-reads the path to derive from it
+    has two reads, and a file replaced between them lets a VALID verdict
+    authorise BROKEN rows (the monitoring snapshot did exactly this). Verifying
+    the captured text lets verification and derivation run over one read. Line
+    numbers and detail strings are the same as ``verify_chain``'s over the same
+    bytes. ABSENT is a statement about a path, so only ``verify_chain`` says it.
+    """
+
+    try:
+        count, _last_hash = _walk_chain(io.StringIO(text))
+    except _ChainBreak as error:
+        return ChainVerification(ChainState.BROKEN, str(error))
+    return ChainVerification(ChainState.VALID, f"chain intact ({count} records)")
+
+
 def verify_chain(path: Path) -> ChainVerification:
     """Verify the whole chain, distinguishing absent from valid from broken.
 
     Read-only and lock-free: it creates no lock file, because its consumers
     (monitoring, campaign status, the CLI verifier) are read-only by contract.
+    One read: the file is captured once and judged by ``verify_chain_text``.
     """
 
     if not path.exists():
         return ChainVerification(ChainState.ABSENT, "no audit log yet")
-    try:
-        with path.open("r", encoding="utf-8") as handle:
-            count, _last_hash = _walk_chain(handle)
-    except _ChainBreak as error:
-        return ChainVerification(ChainState.BROKEN, str(error))
-    return ChainVerification(ChainState.VALID, f"chain intact ({count} records)")
+    return verify_chain_text(path.read_text(encoding="utf-8"))
