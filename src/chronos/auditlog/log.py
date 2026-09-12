@@ -62,8 +62,10 @@ concurrent-writer forks. It is not an off-host root of trust: an owner-user
 actor can recompute or co-restore log and anchor consistently.
 
 Log, lock, anchor and temp are capability entries: owned regular files with one
-link and mode exactly 0600. Entries this module creates are ``fchmod``-ed to
-0600; an existing entry found looser is refused and reported, never tightened —
+link and mode exactly 0600. Only an inode this module demonstrably created —
+``O_CREAT|O_EXCL`` succeeded — is ``fchmod``-ed to 0600; on ``EEXIST`` the name
+is reopened and judged as found (``_create_or_open_entry``, HOLD round 2). An
+existing entry found looser is refused and reported, never tightened —
 unlike ``secure_owner_only`` for the halt and ledger files, whose silent
 tightening would here hide an exposure event from the owner (HOLD F3). Every
 failure of anchor publication is the one catchable ``AuditLogCorruptionError``
@@ -110,8 +112,8 @@ _NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 # Directory components of the parent walk: real directories only, never through a link.
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | _CLOEXEC | _NOFOLLOW
 # The lock: O_NOFOLLOW refuses a planted symlink; O_NONBLOCK keeps a planted FIFO from
-# turning the refusal into a hang (the S_ISREG check below then refuses it). O_CREAT is added
-# only when the name was observed absent; an existing lock is opened as found and must be exact.
+# turning the refusal into a hang (the S_ISREG check below then refuses it). Created through
+# `_create_or_open_entry` (O_CREAT|O_EXCL, else reopened as found).
 _LOCK_FLAGS = os.O_RDWR | _CLOEXEC | _NOFOLLOW | _NONBLOCK
 # The log: one descriptor per transaction, read from the start and appended at the end.
 _LOG_FLAGS = os.O_RDWR | os.O_APPEND | _CLOEXEC | _NOFOLLOW | _NONBLOCK
@@ -439,6 +441,51 @@ def _publication_step(step: str, subject: str, clause: str) -> Iterator[None]:
         _refuse(subject, f"failed while {step}: {cause}" + clause, error)
 
 
+def _create_or_open_entry(parent_fd: int, name: str, flags: int, subject: str) -> tuple[int, bool]:
+    """Create ``name`` exclusively, or open it exactly as found; say which happened.
+
+    The atomic create-own distinction (HOLD round 2, F3-RACE). ``O_CREAT|O_EXCL`` either
+    creates an inode that demonstrably did not exist — and only that inode, this
+    transaction's, is ``fchmod``-ed to 0600 so the process umask cannot widen it — or fails
+    with ``EEXIST``, in which case the name is reopened WITHOUT ``O_CREAT`` and whatever is
+    there is returned as found for ``_require_owned_regular`` to judge: a planted loose file,
+    hard link or FIFO refuses typed with its mode, bytes and link count untouched, and a
+    legitimate racing creator (two fresh processes constructing at once) opens the winner's
+    lock instead of refusing. Inferring ownership from an earlier absence observation, as the
+    previous design did, chmod-ed an entry it had not created.
+
+    Residual: a racing loser can reopen the winner's inode before the winner's ``fchmod``
+    lands. Under any umask that keeps the owner bits (022, 077) the created mode is already
+    0600 and there is no window; under an owner-narrowing umask (0277) the loser refuses,
+    typed, and the next construction succeeds — fail-closed, never a chmod of what it did
+    not create.
+    """
+
+    try:
+        descriptor = os.open(name, flags | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=parent_fd)
+    except FileExistsError:
+        pass  # a racing creator or a planted entry: open it as found below, judge, never chmod
+    except OSError as error:
+        _refuse(subject, f"could not be created safely: {error}", error)
+    else:
+        try:
+            os.fchmod(descriptor, 0o600)
+        except OSError as error:
+            os.close(descriptor)
+            _refuse(subject, f"could not be made private after creation: {error}", error)
+        return descriptor, True
+    try:
+        descriptor = os.open(name, flags, dir_fd=parent_fd)
+    except FileNotFoundError as error:
+        _refuse(subject, "was removed while this transaction was opening it", error)
+    except OSError as error:
+        if error.errno in (errno.ELOOP, errno.EMLINK):
+            # O_NOFOLLOW reports ELOOP for a symlink at the final component.
+            _refuse(subject, "is a symlink", error)
+        _refuse(subject, f"could not be opened safely: {error}", error)
+    return descriptor, False
+
+
 def _open_entry(parent_fd: int, name: str, subject: str) -> int | None:
     """Open ``name`` read-only against the held parent, no-follow; ``None`` if absent.
 
@@ -663,35 +710,18 @@ class AuditLog:
         """Open (creating if absent) the sibling lock as an owned, owner-only regular file.
 
         Every check runs on the descriptor that is then locked, so nothing can be swapped
-        between check and use. When the name is observed absent the lock is created with
-        ``O_CREAT`` (deliberately not ``O_EXCL``: two fresh processes constructing at once
-        both legitimately create it, and the loser must open the winner's lock, not
-        refuse) and ``fchmod``-ed to 0600 so the process umask cannot widen it — a file that
-        appeared in that window was created moments ago by this program, not exposed. An
-        existing lock is opened as found and must already be exact: a looser mode is
-        refused, not repaired (see ``_require_owned_regular``).
+        between check and use. Creation is the atomic create-own distinction of
+        ``_create_or_open_entry``: an inode this transaction created is ``fchmod``-ed to
+        0600; anything already there — a racing creator's lock, or a planted entry — is
+        opened as found and must already be exact, or is refused untouched (see
+        ``_require_owned_regular``).
         """
 
         subject = f"audit log lock at {self._parent / self._lock_name}"
+        descriptor, _created = _create_or_open_entry(
+            parent_fd, self._lock_name, _LOCK_FLAGS, subject
+        )
         try:
-            os.stat(self._lock_name, dir_fd=parent_fd, follow_symlinks=False)
-        except FileNotFoundError:
-            creating = True
-        else:
-            creating = False
-        flags = _LOCK_FLAGS | (os.O_CREAT if creating else 0)
-        try:
-            descriptor = os.open(self._lock_name, flags, 0o600, dir_fd=parent_fd)
-        except FileNotFoundError as error:
-            _refuse(subject, "was removed while this transaction was opening it", error)
-        except OSError as error:
-            if error.errno in (errno.ELOOP, errno.EMLINK):
-                # O_NOFOLLOW reports ELOOP for a symlink at the final component.
-                _refuse(subject, "is a symlink", error)
-            _refuse(subject, f"could not be opened safely: {error}", error)
-        try:
-            if creating:
-                os.fchmod(descriptor, 0o600)
             self._require_owned_regular(descriptor, subject)
             return descriptor
         except BaseException:
@@ -810,26 +840,27 @@ class AuditLog:
         pinned the first time this writer sees the file, so a later transaction that
         finds a different inode under the same name (a swap, a restore over a running
         writer) refuses instead of extending whatever is there now. ``create`` is used
-        only after an absent name was observed under the lock: the log is then created
-        ``O_CREAT`` and ``fchmod``-ed to 0600 (the umask cannot widen it; a name that
-        appeared meanwhile can only belong to a writer holding a different lock inode, and
-        the binding checks refuse that transaction before it writes). An existing log is
-        opened as found and a looser mode is refused, never tightened.
+        only after an absent name was observed under the lock, and goes through the atomic
+        create-own distinction of ``_create_or_open_entry``: an inode this transaction
+        created is ``fchmod``-ed to 0600; a name that appeared meanwhile (only a writer
+        holding a different lock inode, or a planted entry, can do that) is opened as found
+        and judged, never tightened — the binding checks then refuse the transaction. An
+        existing log is opened as found and a looser mode is refused.
         """
 
         subject = f"audit log at {self._parent / self._name}"
-        flags = _LOG_FLAGS | (os.O_CREAT if create else 0)
+        if create:
+            descriptor, _created = _create_or_open_entry(parent_fd, self._name, _LOG_FLAGS, subject)
+        else:
+            try:
+                descriptor = os.open(self._name, _LOG_FLAGS, dir_fd=parent_fd)
+            except FileNotFoundError:
+                return None
+            except OSError as error:
+                if error.errno in (errno.ELOOP, errno.EMLINK):
+                    _refuse(subject, "is a symlink", error)
+                _refuse(subject, f"could not be opened safely: {error}", error)
         try:
-            descriptor = os.open(self._name, flags, 0o600, dir_fd=parent_fd)
-        except FileNotFoundError:
-            return None
-        except OSError as error:
-            if error.errno in (errno.ELOOP, errno.EMLINK):
-                _refuse(subject, "is a symlink", error)
-            _refuse(subject, f"could not be opened safely: {error}", error)
-        try:
-            if create:
-                os.fchmod(descriptor, 0o600)
             opened = self._require_owned_regular(descriptor, subject)
             identity = _identity(opened)
             if self._pinned_log is None:
