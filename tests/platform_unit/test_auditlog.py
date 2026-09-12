@@ -752,6 +752,9 @@ class TestLogPathCapability:
         log.append("first", {"n": 1})
         swap = tmp_path / "swap.jsonl"
         swap.write_bytes(path.read_bytes())
+        swap.chmod(
+            0o600
+        )  # mode is a capability condition (HOLD F3); the swap differs by inode only
         os.replace(swap, path)  # atomic rename: new inode, identical content
 
         with pytest.raises(AuditLogCorruptionError, match="replaced"):
@@ -859,6 +862,7 @@ class TestCapabilityHeldEndToEnd:
         def swap_the_lock_then_park() -> None:
             lock.unlink()
             lock.write_text("", encoding="utf-8")  # a fresh inode under the lock's name
+            lock.chmod(0o600)  # at the required mode, so the child exercises the binding, not F3
             inside.set()
             assert release.wait(timeout=10)
 
@@ -882,7 +886,10 @@ class TestCapabilityHeldEndToEnd:
 
         error = outcome.get("error")
         assert isinstance(error, AuditLogCorruptionError), outcome
-        assert "lock" in str(error) and "replaced" in str(error), str(error)
+        # The exact reason phrase: pytest's tmp-path name contains "lock" and "replaced", so a
+        # looser match was satisfied by a refusal for any reason at all.
+        message = str(error)
+        assert "audit log lock at" in message and "was replaced under this transaction" in message
         assert _sequences(path) == [0], "two writers completed against one head"
         assert verify_chain(path).state is ChainState.VALID
 
@@ -921,7 +928,10 @@ class TestCapabilityHeldEndToEnd:
 
         error = outcome.get("error")
         assert isinstance(error, AuditLogCorruptionError), outcome
-        assert "parent" in str(error) and ("displaced" in str(error) or "replaced" in str(error))
+        # Exact phrase, for the same reason as above (the tmp-path name contains "displaced").
+        message = str(error)
+        assert "audit log parent" in message, message
+        assert "was displaced or replaced under this transaction" in message, message
         # Nothing was reported as appended outside the configured path...
         assert (displaced / "audit.jsonl").read_text(encoding="utf-8") == ""
         # ...and the canonical path holds exactly the child's record.
@@ -1010,6 +1020,13 @@ def _anchor_bytes(count: int, last_hash: str) -> bytes:
     )
 
 
+def _write_private(path: Path, data: bytes) -> None:
+    """Materialize an entry by hand at the mode the capability requires (0600, HOLD F3)."""
+
+    path.write_bytes(data)
+    path.chmod(0o600)
+
+
 def _record_hashes(path: Path) -> list[str]:
     lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
     return [str(json.loads(line)["record_hash"]) for line in lines]
@@ -1032,7 +1049,7 @@ def _materialize_pair(tmp_path: Path, log_kind: str, anchor_kind: str) -> Path:
     anchor = _anchor_path(path)
     hashes: list[str] = []
     if log_kind == "empty":
-        path.write_text("", encoding="utf-8")
+        _write_private(path, b"")
     elif log_kind in ("valid", "broken"):
         write_records(path, 3)
         hashes = _record_hashes(path)
@@ -1047,18 +1064,19 @@ def _materialize_pair(tmp_path: Path, log_kind: str, anchor_kind: str) -> Path:
     last = hashes[-1] if hashes else _ZERO_HASH
     anchor.unlink(missing_ok=True)
     if anchor_kind == "malformed":
-        anchor.write_bytes(b"not an anchor\n")
+        _write_private(anchor, b"not an anchor\n")
     elif anchor_kind == "matches":
         # For an absent log "matches" cannot mean anything; any well-formed anchor is the cell.
-        anchor.write_bytes(
-            _anchor_bytes(count, last) if log_kind != "absent" else _anchor_bytes(1, "a" * 64)
+        _write_private(
+            anchor,
+            _anchor_bytes(count, last) if log_kind != "absent" else _anchor_bytes(1, "a" * 64),
         )
     elif anchor_kind == "behind":
-        anchor.write_bytes(_anchor_bytes(count - 1, hashes[-2]))
+        _write_private(anchor, _anchor_bytes(count - 1, hashes[-2]))
     elif anchor_kind == "ahead":
-        anchor.write_bytes(_anchor_bytes(count + 1, "a" * 64))
+        _write_private(anchor, _anchor_bytes(count + 1, "a" * 64))
     elif anchor_kind == "wrong-hash":
-        anchor.write_bytes(_anchor_bytes(count, "a" * 64))
+        _write_private(anchor, _anchor_bytes(count, "a" * 64))
     else:
         assert anchor_kind == "absent"
     return path
@@ -1180,7 +1198,7 @@ class TestVerifyChainPair:
         victim_anchor_bytes = _anchor_path(victim).read_bytes()
         linked = tmp_path / "audit.jsonl"
         linked.symlink_to(victim)
-        _anchor_path(linked).write_bytes(victim_anchor_bytes)
+        _write_private(_anchor_path(linked), victim_anchor_bytes)
         result = verify_chain(linked)
         assert result.state is ChainState.BROKEN, result.detail
         assert "is a symlink" in result.detail, result.detail
@@ -1203,7 +1221,7 @@ class TestVerifyChainPair:
         # (c) A hard-linked anchor and (d) a FIFO at the anchor path: neither is a regular,
         # single-link file; the FIFO must be refused without hanging.
         real_anchor.unlink()
-        real_anchor.write_bytes(decoy.read_bytes())
+        _write_private(real_anchor, decoy.read_bytes())
         os.link(real_anchor, tmp_path / "alias.head.json")
         result = verify_chain(real)
         assert result.state is ChainState.BROKEN, result.detail
@@ -1410,7 +1428,7 @@ class TestHeadAnchor:
             if not swapped and stat.S_ISDIR(os.fstat(descriptor).st_mode):
                 swapped = True
                 swap = tmp_path / "swap.jsonl"
-                swap.write_bytes(before_log)
+                _write_private(swap, before_log)  # differs by inode only
                 os.replace(swap, path)
 
         monkeypatch.setattr(log_module.os, "fsync", fsync_then_swap_after_the_directory)
@@ -1575,7 +1593,7 @@ class TestHeadAnchor:
         path = tmp_path / "audit.jsonl"
         anchor = _anchor_path(path)
         # An anchor with no log is deletion/truncation of the log, never a fresh start.
-        anchor.write_bytes(_anchor_bytes(1, "a" * 64))
+        _write_private(anchor, _anchor_bytes(1, "a" * 64))
         with pytest.raises(AuditLogCorruptionError, match="truncation/deletion"):
             AuditLog(path)
         assert not path.exists(), "a log was created beside an orphaned anchor"

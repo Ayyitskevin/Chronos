@@ -131,6 +131,8 @@ def _artifacts(root: Path, *, now: datetime) -> None:
     (root / "platform_audit.head.json").write_text(
         json.dumps({"count": 0, "last_hash": "0" * 64}, sort_keys=True) + "\n", encoding="utf-8"
     )
+    for name in ("platform_audit.jsonl", "platform_audit.head.json"):
+        (root / name).chmod(0o600)  # exact mode is a capability condition (chronos.auditlog)
     (root / "health.json").write_text(json.dumps(_health(now)), encoding="utf-8")
     with sqlite3.connect(root / "chronos.db") as database:
         database.executescript(

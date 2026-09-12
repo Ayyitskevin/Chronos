@@ -61,6 +61,15 @@ window. The anchor detects accidental tail loss, single-file rollback, and
 concurrent-writer forks. It is not an off-host root of trust: an owner-user
 actor can recompute or co-restore log and anchor consistently.
 
+Log, lock, anchor and temp are capability entries: owned regular files with one
+link and mode exactly 0600. Entries this module creates are ``fchmod``-ed to
+0600; an existing entry found looser is refused and reported, never tightened —
+unlike ``secure_owner_only`` for the halt and ledger files, whose silent
+tightening would here hide an exposure event from the owner (HOLD F3). Every
+failure of anchor publication is the one catchable ``AuditLogCorruptionError``
+naming the step and the cause, and the unwind removes the unique temp name only
+while it still designates this transaction's inode (HOLD F1, F2).
+
 Residual, not fixable here: ``flock`` that FAILS is a catchable refusal
 (``AuditLogCorruptionError``), but a filesystem that returns success without
 enforcing advisory locks — some NFS mounts — cannot be told apart from one that
@@ -101,8 +110,9 @@ _NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 # Directory components of the parent walk: real directories only, never through a link.
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | _CLOEXEC | _NOFOLLOW
 # The lock: O_NOFOLLOW refuses a planted symlink; O_NONBLOCK keeps a planted FIFO from
-# turning the refusal into a hang (the S_ISREG check below then refuses it).
-_LOCK_FLAGS = os.O_RDWR | os.O_CREAT | _CLOEXEC | _NOFOLLOW | _NONBLOCK
+# turning the refusal into a hang (the S_ISREG check below then refuses it). O_CREAT is added
+# only when the name was observed absent; an existing lock is opened as found and must be exact.
+_LOCK_FLAGS = os.O_RDWR | _CLOEXEC | _NOFOLLOW | _NONBLOCK
 # The log: one descriptor per transaction, read from the start and appended at the end.
 _LOG_FLAGS = os.O_RDWR | os.O_APPEND | _CLOEXEC | _NOFOLLOW | _NONBLOCK
 # A leaf read by name (the anchor; the verifier's log): no-follow, and non-blocking so a
@@ -365,6 +375,17 @@ def _refuse(subject: str, problem: str, cause: BaseException | None = None) -> N
 
 
 def _require_owned_regular(descriptor: int, subject: str) -> os.stat_result:
+    """A regular file owned by this effective user, exactly one link, mode exactly 0600.
+
+    Mode is a capability condition (D2 §1), not something to repair on the way past. An
+    existing log, lock or anchor found looser than 0600 has been exposed, and silently
+    re-tightening it — what ``chronos.utils.secure_files.secure_owner_only`` does for the
+    halt and ledger files, whose contract that remains — would hide the exposure event
+    from the owner. The audit capability refuses and reports the mode as found. Entries
+    this transaction CREATES are ``fchmod``-ed to 0600 before this check runs, so the
+    process umask cannot fail them.
+    """
+
     opened = os.fstat(descriptor)
     if not stat.S_ISREG(opened.st_mode):
         _refuse(subject, "is not a regular file")
@@ -372,6 +393,13 @@ def _require_owned_regular(descriptor: int, subject: str) -> os.stat_result:
         _refuse(subject, f"is owned by uid {opened.st_uid}, not this process's effective user")
     if opened.st_nlink != 1:
         _refuse(subject, f"has {opened.st_nlink} links; it must have exactly one")
+    mode = stat.S_IMODE(opened.st_mode)
+    if mode != 0o600:
+        _refuse(
+            subject,
+            f"has mode {oct(mode)}, not 0o600; a looser mode is an exposure for the owner to "
+            "review, not something to tighten silently",
+        )
     return opened
 
 
@@ -391,6 +419,24 @@ def _write_all(descriptor: int, content: bytes) -> None:
         if written <= 0:
             raise OSError("audit head anchor write made no progress")
         view = view[written:]
+
+
+@contextmanager
+def _publication_step(step: str, subject: str, clause: str) -> Iterator[None]:
+    """Turn an ``OSError`` from one publication step into the one catchable error.
+
+    The detail names the step, the entry and the cause (strerror and errno), and carries
+    the durability clause when a record is already fsynced. Callers that catch only
+    ``AuditLogCorruptionError`` — the CLI, the service — then refuse instead of crashing.
+    """
+
+    try:
+        yield
+    except OSError as error:
+        cause = error.strerror or str(error)
+        if error.errno is not None:
+            cause += f" (errno {error.errno})"
+        _refuse(subject, f"failed while {step}: {cause}" + clause, error)
 
 
 def _open_entry(parent_fd: int, name: str, subject: str) -> int | None:
@@ -616,22 +662,37 @@ class AuditLog:
     def _open_lock(self, parent_fd: int) -> int:
         """Open (creating if absent) the sibling lock as an owned, owner-only regular file.
 
-        Every check runs on the descriptor that is then locked, so nothing can
-        be swapped between check and use; the mode is set with ``fchmod`` so it
-        is exact regardless of the process umask.
+        Every check runs on the descriptor that is then locked, so nothing can be swapped
+        between check and use. When the name is observed absent the lock is created with
+        ``O_CREAT`` (deliberately not ``O_EXCL``: two fresh processes constructing at once
+        both legitimately create it, and the loser must open the winner's lock, not
+        refuse) and ``fchmod``-ed to 0600 so the process umask cannot widen it — a file that
+        appeared in that window was created moments ago by this program, not exposed. An
+        existing lock is opened as found and must already be exact: a looser mode is
+        refused, not repaired (see ``_require_owned_regular``).
         """
 
         subject = f"audit log lock at {self._parent / self._lock_name}"
         try:
-            descriptor = os.open(self._lock_name, _LOCK_FLAGS, 0o600, dir_fd=parent_fd)
+            os.stat(self._lock_name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            creating = True
+        else:
+            creating = False
+        flags = _LOCK_FLAGS | (os.O_CREAT if creating else 0)
+        try:
+            descriptor = os.open(self._lock_name, flags, 0o600, dir_fd=parent_fd)
+        except FileNotFoundError as error:
+            _refuse(subject, "was removed while this transaction was opening it", error)
         except OSError as error:
             if error.errno in (errno.ELOOP, errno.EMLINK):
                 # O_NOFOLLOW reports ELOOP for a symlink at the final component.
                 _refuse(subject, "is a symlink", error)
             _refuse(subject, f"could not be opened safely: {error}", error)
         try:
+            if creating:
+                os.fchmod(descriptor, 0o600)
             self._require_owned_regular(descriptor, subject)
-            os.fchmod(descriptor, 0o600)
             return descriptor
         except BaseException:
             os.close(descriptor)
@@ -745,10 +806,15 @@ class AuditLog:
         """Open the log by name against the parent, no-follow; ``None`` if absent and not creating.
 
         The descriptor is checked before use — a regular file, owned by this
-        effective user, with exactly one link — and its identity is pinned the
-        first time this writer sees the file, so a later transaction that finds a
-        different inode under the same name (a swap, a restore over a running
-        writer) refuses instead of extending whatever is there now.
+        effective user, with exactly one link, mode exactly 0600 — and its identity is
+        pinned the first time this writer sees the file, so a later transaction that
+        finds a different inode under the same name (a swap, a restore over a running
+        writer) refuses instead of extending whatever is there now. ``create`` is used
+        only after an absent name was observed under the lock: the log is then created
+        ``O_CREAT`` and ``fchmod``-ed to 0600 (the umask cannot widen it; a name that
+        appeared meanwhile can only belong to a writer holding a different lock inode, and
+        the binding checks refuse that transaction before it writes). An existing log is
+        opened as found and a looser mode is refused, never tightened.
         """
 
         subject = f"audit log at {self._parent / self._name}"
@@ -762,13 +828,14 @@ class AuditLog:
                 _refuse(subject, "is a symlink", error)
             _refuse(subject, f"could not be opened safely: {error}", error)
         try:
+            if create:
+                os.fchmod(descriptor, 0o600)
             opened = self._require_owned_regular(descriptor, subject)
             identity = _identity(opened)
             if self._pinned_log is None:
                 self._pinned_log = identity
             elif self._pinned_log != identity:
                 _refuse(subject, "was replaced after this writer pinned it")
-            os.fchmod(descriptor, 0o600)
             return descriptor
         except BaseException:
             os.close(descriptor)
@@ -815,9 +882,15 @@ class AuditLog:
         and the destination is still the entry validated at the start of the transaction
         (``prior``, or still absent); renames through the held parent descriptor; fsyncs the
         parent; re-opens the published entry by name and requires the inode that was
-        written, byte for byte, with the temp name gone; then binds the names again. Only
-        this transaction's unpublished temp is ever removed. Mirrors the registry's
-        ``publish_anchor``. Any failure raises; the caller has reported nothing yet.
+        written, byte for byte, with the temp name gone; then binds the names again.
+
+        Every step's ``OSError`` becomes the one catchable ``AuditLogCorruptionError``
+        naming the step and the cause (HOLD F1); the durable pair is then exactly what the
+        disk holds — a stale anchor beside the new record (a crash window) for a failure
+        before the rename, a complete pair for a failure of the parent fsync after it. The
+        unwind removes the unique temp name only while it still designates this
+        transaction's inode (HOLD F2): a name is not ours to delete just because we chose
+        it. Mirrors the registry's ``publish_anchor``. The caller has reported nothing yet.
         """
 
         self._assert_transaction_bound(
@@ -832,13 +905,16 @@ class AuditLog:
             descriptor = os.open(temporary, _TEMP_FLAGS, 0o600, dir_fd=parent_fd)
         except OSError as error:
             _refuse(temp_subject, f"could not be created exclusively: {error}" + clause, error)
+        written_identity = _identity(os.fstat(descriptor))
         published = False
         try:
-            written = _require_owned_regular(descriptor, temp_subject)
-            os.fchmod(descriptor, 0o600)
-            written_identity = _identity(written)
-            _write_all(descriptor, content)
-            os.fsync(descriptor)
+            with _publication_step("making the temporary private", temp_subject, clause):
+                os.fchmod(descriptor, 0o600)
+            _require_owned_regular(descriptor, temp_subject)
+            with _publication_step("writing the temporary", temp_subject, clause):
+                _write_all(descriptor, content)
+            with _publication_step("fsyncing the temporary", temp_subject, clause):
+                os.fsync(descriptor)
             self._assert_name_designates(
                 parent_fd,
                 temporary,
@@ -850,14 +926,25 @@ class AuditLog:
             self._assert_anchor_destination(
                 parent_fd, prior, subject=anchor_subject, record_written=record_written
             )
-            os.replace(temporary, self._anchor_name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+            with _publication_step(
+                "renaming the temporary over the anchor", anchor_subject, clause
+            ):
+                os.replace(temporary, self._anchor_name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
             published = True
-            os.fsync(parent_fd)
-        finally:
+            with _publication_step("fsyncing the parent directory", anchor_subject, clause):
+                os.fsync(parent_fd)
+        except BaseException as error:
             os.close(descriptor)
+            descriptor = -1
+            note = ""
             if not published:
-                with suppress(FileNotFoundError):
-                    os.unlink(temporary, dir_fd=parent_fd)
+                note = self._unlink_only_own_temp(parent_fd, temporary, written_identity)
+            if note and isinstance(error, AuditLogCorruptionError):
+                raise AuditLogCorruptionError(f"{error}{note}") from error
+            raise
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
         self._assert_anchor_published(
             parent_fd,
             temporary,
@@ -869,6 +956,34 @@ class AuditLog:
         )
         self._assert_transaction_bound(
             parent_fd, lock_fd, log_fd, when="after the anchor", record_written=record_written
+        )
+
+    def _unlink_only_own_temp(
+        self, parent_fd: int, temporary: str, written_identity: tuple[int, int]
+    ) -> str:
+        """Remove the unique temp name only while it still designates this transaction's inode.
+
+        After the fsync an actor can rename our inode away and plant its own entry under
+        the unique name; deleting that entry would destroy something this transaction did
+        not create and leave our inode stranded under the actor's name. So the name is
+        unlinked only when it still names the inode we wrote; otherwise it is left in place
+        and the returned note says so, for the raised detail. Returns "" when nothing needs
+        saying (removed, or already gone).
+        """
+
+        try:
+            named = os.stat(temporary, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return ""
+        if _identity(named) == written_identity:
+            with suppress(FileNotFoundError):
+                os.unlink(temporary, dir_fd=parent_fd)
+            return ""
+        return (
+            f"; the temporary name {temporary} no longer designates this transaction's inode "
+            f"(dev {written_identity[0]}, inode {written_identity[1]}) and was left in place "
+            "because this transaction did not create what is there now; the inode this "
+            "transaction wrote may be stranded under another name"
         )
 
     def _assert_anchor_destination(
@@ -919,7 +1034,9 @@ class AuditLog:
         try:
             if _identity(os.fstat(descriptor)) != written_identity:
                 _refuse(subject, "is not the inode this transaction published" + clause)
-            if _read_all(descriptor) != content:
+            with _publication_step("re-reading the published anchor", subject, clause):
+                published = _read_all(descriptor)
+            if published != content:
                 _refuse(subject, "does not hold the bytes this transaction published" + clause)
         finally:
             os.close(descriptor)

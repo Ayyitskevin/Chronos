@@ -430,6 +430,7 @@ def test_bootstrap_valid_bare_chain_once(
 
     empty = tmp_path / "empty.jsonl"
     empty.write_text("", encoding="utf-8")
+    empty.chmod(0o600)  # a legacy log at the required mode; a looser one is refused (HOLD F3)
     assert main([*_audit_args(tmp_path, empty), "bootstrap-audit-anchor"]) == 0
     assert '"count": 0' in capsys.readouterr().out
     assert _anchor_path(empty).read_bytes() == _anchor_bytes(0, "0" * 64)

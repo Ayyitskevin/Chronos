@@ -21,7 +21,13 @@ Read the output deliberately:
 2. **Audit chain.** `status` verifies the hash chain and prints
    `audit log: VALID — chain + anchor intact (N records)` or a failure naming the first bad line
    or the head-anchor mismatch (`platform_audit.head.json`). A failure is
-   an incident (docs/INCIDENT_RESPONSE.md), not something to shrug at.
+   an incident (docs/INCIDENT_RESPONSE.md), not something to shrug at. **Upgrade note (2026-09-12):**
+   a log written before the head anchor existed reads `BROKEN — head anchor missing for existing
+   audit log; owner bootstrap required` — and `verify-audit-log`, monitoring, `campaign status`,
+   the service and recovery capture all refuse it — until you run, once, after reviewing the file:
+   `python -m chronos.cli --audit-file data/platform_audit.jsonl bootstrap-audit-anchor`
+   (exit 0 published / 1 refused / 2 absent). The full note is the 2026-09-12 entry in
+   `CHANGELOG.md`.
 3. **Mode banner.** For `status` the banner shows `MODE: RESEARCH | CAPABILITY: NO_ORDERS` and
    `LIVE TRADING | hard-disabled`. It reflects the command's own context — it is not a status
    readout of any running service.
