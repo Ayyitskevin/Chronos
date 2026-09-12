@@ -279,12 +279,14 @@ _FORWARD_FLAGS = (
 )
 _REGISTER_ROW = re.compile(r"^\| (R-\d+[^ |]*) \| ([^|]+) \| ([^|]+) \| ([^|]+) \|")
 _STRUCK = re.compile(r"~~.*?~~", re.S)
-_ADDRESSED_MARKER = re.compile(r"\*\*[^*]*?addressed[^*]*?\*\*", re.I | re.S)
+_BOLD_SPAN = re.compile(r"\*\*([^*]+?)\*\*", re.S)
+_LEADING_CLOSURE = re.compile(r"^\s*(?:addressed|closed)\b", re.I)
+_QUALIFIED_CLOSURE = re.compile(r"^\s*(?P<qualifier>[^:.;]*?)\baddressed\s+\d{4}-\d{2}-\d{2}", re.I)
+_NEGATING_QUALIFIERS = frozenset({"not", "never", "un", "partially", "partial", "unaddressed"})
 _RESIDUAL_MARKER = re.compile(r"Still open from this\s+finding", re.I)
 _PLAN_SECTION_6 = re.compile(r"^## 6\. .*$", re.M)
 _PLAN_SECTION_END = re.compile(r"^(Required design outcomes:|## )", re.M)
 _PLAN_ITEM = re.compile(r"^(\d+)\. ", re.M)
-_BOLD = re.compile(r"\*\*(.+?)\*\*", re.S)
 _TITLE_LIMIT = 96
 
 
@@ -321,13 +323,34 @@ def _register_rows(path: Path) -> list[dict[str, str]]:
     return rows
 
 
+def _is_positive_marker(bold_text: str) -> bool:
+    """Is one bold marker a positive closure statement, by the plan's own two forms?
+
+    Positive, and nothing else: bold text that BEGINS with the word "Addressed" or
+    "Closed" (``**Addressed 2026-08-13 (A1; R-49):**``), or "<qualifier> addressed <date>"
+    where the qualifier carries no negation (``**Kill-engaged half addressed 2026-09-03
+    (…):**``).  "Unaddressed", "Not addressed", "Partially addressed", "Never addressed"
+    and a sentence that merely contains the word are not closure — Daybreak's HOLD on
+    #221 found the substring match reading every one of them as ADDRESSED.
+    """
+
+    if _LEADING_CLOSURE.match(bold_text) is not None:
+        return True
+    qualified = _QUALIFIED_CLOSURE.match(bold_text)
+    if qualified is None:
+        return False
+    qualifier_words = set(re.findall(r"[a-z]+", qualified.group("qualifier").lower()))
+    return not (qualifier_words & _NEGATING_QUALIFIERS)
+
+
 def _finding_status(text: str) -> str:
     """Read a §6 finding's status from the plan's own markers; UNKNOWN whenever unsure.
 
-    A finding whose statement is struck through and that carries a bold "addressed" marker
-    is ADDRESSED — ADDRESSED_WITH_RESIDUAL when unstruck text still says "Still open from
-    this finding".  An unstruck statement is OPEN.  Anything else (struck with no reason,
-    empty) is UNKNOWN: the reader never infers closure.
+    A finding whose statement is struck through and that carries a positive bold marker
+    (``_is_positive_marker``) is ADDRESSED — ADDRESSED_WITH_RESIDUAL when unstruck text
+    still says "Still open from this finding".  An unstruck statement is OPEN.  Anything
+    else (struck with no positive marker, a negated marker, empty) is UNKNOWN: the reader
+    never infers closure.
     """
 
     stripped = text.strip()
@@ -336,7 +359,7 @@ def _finding_status(text: str) -> str:
     unstruck = _STRUCK.sub("", stripped)
     if not stripped.startswith("~~"):
         return "OPEN"
-    if _ADDRESSED_MARKER.search(unstruck) is None:
+    if not any(_is_positive_marker(span) for span in _BOLD_SPAN.findall(unstruck)):
         return "UNKNOWN"
     if _RESIDUAL_MARKER.search(unstruck) is not None:
         return "ADDRESSED_WITH_RESIDUAL"
@@ -359,7 +382,7 @@ def _finding_title(raw: str) -> str:
 
 def _finding_marker(raw: str) -> str:
     unstruck = _STRUCK.sub("", raw)
-    match = _BOLD.search(unstruck)
+    match = _BOLD_SPAN.search(unstruck)
     if match is None:
         return "—"
     return " ".join(match.group(1).split()).rstrip(":")
