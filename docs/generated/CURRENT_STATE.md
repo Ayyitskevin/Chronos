@@ -119,6 +119,96 @@ Evidence-source labels identify where the runtime would gather facts; they do no
 
 Unmapped means refused by the compiler whitelist. Vocabulary presence alone is not a capability.
 
+## Repository state
+
+Milestone facts derived from the table documents and source listed under *State inputs* — never from HANDOFF.md, TASKS.md or any other prose, which retain history but cannot present old milestone state as current truth (plan §5).
+
+### Volatile facts — run, do not copy
+
+These change without a commit, so this page carries the command that measures each one and never its value.
+
+| Fact | Command |
+| --- | --- |
+| Default branch | `git ls-remote --symref origin HEAD` |
+| Current commit | `git rev-parse HEAD` |
+| Test / skip / fail counts | `make gates` — read the pytest line; a commit's `Gate:` footer carries what its author measured at that head, never what this page says |
+
+### ID watermarks (protocol §7 scans)
+
+| Namespace | Highest allocated |
+| --- | --- |
+| `DECISIONS.md` D-nn | D-75 |
+| `docs/adr/` ADR-nnnn | ADR-0059 |
+| `RISK_REGISTER.md` R-nn | R-78 |
+
+The next id is `max + 1`, scanned in the same session by the same PR that claims it (docs/AGENT_PROTOCOL.md §7); this table is a reading, not a reservation. The scans, verbatim:
+
+```bash
+grep -oE '^\| D-[0-9]+'  DECISIONS.md      | grep -oE '[0-9]+' | sort -n | tail -1
+ls docs/adr/ | grep -oE 'ADR-[0-9]{4}' | sort | tail -1
+grep -oE '^\| R-[0-9]+'  RISK_REGISTER.md  | grep -oE '[0-9]+' | sort -n | tail -1
+```
+
+### Risk register
+
+| Status | Rows |
+| --- | --- |
+| ACCEPTED | 4 |
+| CLOSED | 4 |
+| MITIGATED | 50 |
+| MITIGATED IN CODE | 17 |
+| OPEN | 5 |
+| all rows | 80 |
+
+Status is the register's own column with its parenthetical qualifier stripped; `MITIGATED` is not `CLOSED`. Open rows:
+
+| ID | Risk | Sev |
+| --- | --- | --- |
+| R-08 | Research data provenance (public mirrors, not broker data) | H |
+| R-09 | Overfitting / selection bias in strategy choice | H |
+| R-12 | ib_async maintenance / TWS API changes | M |
+| R-29 | Autonomous model authority materially expands risk | C |
+| R-37 | Model self-sizing widens the size envelope (`model_discretion`) | C |
+
+### Vision plan §6 findings
+
+| # | Finding | Status | Marker |
+| --- | --- | --- | --- |
+| 1 | Reconciliation readiness is consumed after one opening submission, while a complete supervised… | OPEN | Periodic half observed present 2026-09-03 (status note, not a closure) |
+| 2 | The incident runbook invokes the deterministic-platform halt while the live order plane has a s… | OPEN | — |
+| 3 | Restore guidance overstates safety: a missing live kill-switch file defaults disengaged. | ADDRESSED_WITH_RESIDUAL | Kill-engaged half addressed 2026-09-03 (D-63/ADR-0049, R-66) |
+| 4 | Standing-authority prose says the mandate replaces arming, while submission still requires a cu… | OPEN | — |
+| 5 | The supervisor treats any non-exception handoff return as `COMPLETE`, although `SubmissionOutco… | ADDRESSED_WITH_RESIDUAL | Addressed 2026-08-13 (A1; R-49) |
+| 6 | External-worker provenance is static and its credential is not proposal-only. | ADDRESSED | Addressed 2026-08-12 (ADR-0023 Option A, owner-directed; D-24/R-48) |
+| 7 | Several economic-looking fields do not mechanically affect execution. | OPEN | — |
+| 8 | Promotion is not mechanically bound to the strategy and evidence that earned the prior rung. | OPEN | — |
+
+Status is read mechanically from the plan's own markers: a struck-through finding carrying a bold *addressed* marker is `ADDRESSED`, or `ADDRESSED_WITH_RESIDUAL` when unstruck text still says "Still open from this finding"; an unstruck finding is `OPEN`; anything else is `UNKNOWN`. UNKNOWN is never closed.
+
+### `chronos.auditlog` public names
+
+`AuditLog`, `AuditLogCorruptionError`, `AuditRecord`, `ChainState`, `ChainVerification`, `verify_chain` — from `chronos.auditlog.__all__`, in declared order.
+
+### Forwarding flags — declared, never read here
+
+| Flag | Declared in | Declared default | Value |
+| --- | --- | --- | --- |
+| `CHRONOS_TV_BRIDGE_FORWARD` | `src/chronos/bridge/config.py` | `False` | not read (this page reads no environment) |
+| `CHRONOS_WORKER_FORWARD` | `worker/config.py` | `False` | not read (this page reads no environment) |
+
+Both are built inert and enabled only by the owner (plan §11); a value would be a claim about a deployment, which this page cannot make.
+
+### State inputs
+
+| Source | SHA-256 |
+| --- | --- |
+| DECISIONS.md | `a29eaaea431b955fafd8eca8f8c5254a1989dffaf3388ac3a6c2c881ff7a5ab7` |
+| RISK_REGISTER.md | `347f04f379dee0e1ded4afc0f1f5428842a51a95d758ee3e35bd005a805c7d79` |
+| docs/VISION_COMPLETION_PLAN.md | `f7cff45f7389c480d11720fe6251d5b04fd9a908de0488812c71a1442ad5d5c2` |
+| src/chronos/auditlog/__init__.py | `17aa058d83d22c79cac383744a7c433204ec2130b24e54cdba1148733c103522` |
+| src/chronos/bridge/config.py | `25f2f9a369d625440eb21d0d55f10386aa47d33dfb1843731788295b03cec636` |
+| worker/config.py | `6b3763ec4280a65160442eb2fb63d523ae069ae70754842635681f855573dffe` |
+
 ## Source fingerprint
 
 | Source | SHA-256 |

@@ -7,6 +7,15 @@ a broker.  Consequently it can report code paths and repository defaults, but
 it can never report that a deployment is authorized or that operational
 evidence exists.
 
+The page also carries the repository's milestone state (VCP §5: one generated
+current-state page), derived from the table documents and source rather than
+from HANDOFF.md/TASKS.md prose: the D/ADR/R id watermarks by the §7 scans, the
+risk register's status counts and OPEN rows, the plan's §6 findings with a
+status read mechanically from the plan's own markers (UNKNOWN when it cannot),
+the public ``chronos.auditlog`` names, and the forwarding flags as declared in
+source.  Facts that change without a commit — the default branch, HEAD, a test
+count — appear as the command that measures them, never as a copied value.
+
 Usage:
 
     .venv/bin/python scripts/build_current_state.py
@@ -20,6 +29,7 @@ import ast
 import hashlib
 import inspect
 import json
+import re
 import sys
 import textwrap
 from collections import Counter
@@ -27,6 +37,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+import chronos.auditlog
 from chronos.api.autonomy_wiring import INGRESS_IDENTITY, BackendGatherers
 from chronos.autonomy.enums import (
     MINIMUM_PROMOTION_FOR_MODE,
@@ -224,6 +235,398 @@ def _source_fingerprints() -> list[dict[str, str]]:
         }
         for path in SOURCE_PATHS
     ]
+
+
+# ------------------------------------------------ repository state (VCP §5: one generated page)
+#
+# Milestone facts a reader used to take from HANDOFF.md / TASKS.md prose, derived from the
+# table documents and source instead.  Still a pure function of committed bytes: anything that
+# changes without a commit (the default branch, HEAD, a test count) is a COMMAND here, never a
+# copied value — docs/AGENT_PROTOCOL.md: "copied values are how sixteen skills went stale".
+
+STATE_SOURCE_PATHS = (
+    Path("DECISIONS.md"),
+    Path("RISK_REGISTER.md"),
+    Path("docs/VISION_COMPLETION_PLAN.md"),
+    Path("src/chronos/auditlog/__init__.py"),
+    Path("src/chronos/bridge/config.py"),
+    Path("worker/config.py"),
+)
+ADR_DIR = Path("docs/adr")
+_VOLATILE_FACTS = (
+    ("Default branch", "`git ls-remote --symref origin HEAD`"),
+    ("Current commit", "`git rev-parse HEAD`"),
+    (
+        "Test / skip / fail counts",
+        "`make gates` — read the pytest line; a commit's `Gate:` footer carries what its author "
+        "measured at that head, never what this page says",
+    ),
+)
+_ID_SCANS = (
+    (
+        "`DECISIONS.md` D-nn",
+        "grep -oE '^\\| D-[0-9]+'  DECISIONS.md      | grep -oE '[0-9]+' | sort -n | tail -1",
+    ),
+    ("`docs/adr/` ADR-nnnn", "ls docs/adr/ | grep -oE 'ADR-[0-9]{4}' | sort | tail -1"),
+    (
+        "`RISK_REGISTER.md` R-nn",
+        "grep -oE '^\\| R-[0-9]+'  RISK_REGISTER.md  | grep -oE '[0-9]+' | sort -n | tail -1",
+    ),
+)
+_FORWARD_FLAGS = (
+    ("CHRONOS_TV_BRIDGE_FORWARD", Path("src/chronos/bridge/config.py")),
+    ("CHRONOS_WORKER_FORWARD", Path("worker/config.py")),
+)
+_REGISTER_ROW = re.compile(r"^\| (R-\d+[^ |]*) \| ([^|]+) \| ([^|]+) \| ([^|]+) \|")
+_STRUCK = re.compile(r"~~.*?~~", re.S)
+_ADDRESSED_MARKER = re.compile(r"\*\*[^*]*?addressed[^*]*?\*\*", re.I | re.S)
+_RESIDUAL_MARKER = re.compile(r"Still open from this\s+finding", re.I)
+_PLAN_SECTION_6 = re.compile(r"^## 6\. .*$", re.M)
+_PLAN_SECTION_END = re.compile(r"^(Required design outcomes:|## )", re.M)
+_PLAN_ITEM = re.compile(r"^(\d+)\. ", re.M)
+_BOLD = re.compile(r"\*\*(.+?)\*\*", re.S)
+_TITLE_LIMIT = 96
+
+
+def _max_row_id(path: Path, prefix: str) -> int | None:
+    """Protocol §7 scan: the highest ``| <prefix>-nn`` table row id — max, not last row."""
+
+    pattern = rf"^\| {re.escape(prefix)}-(\d+)"
+    numbers = re.findall(pattern, path.read_text(encoding="utf-8"), re.M)
+    return max((int(number) for number in numbers), default=None)
+
+
+def _max_adr(directory: Path) -> str | None:
+    listing = "\n".join(sorted(entry.name for entry in directory.iterdir()))
+    names: list[str] = [str(name) for name in re.findall(r"ADR-\d{4}", listing)]
+    return max(names, default=None)
+
+
+def _status_phrase(cell: str) -> str:
+    """``MITIGATED (posture restated 2026-07-25)`` counts as ``MITIGATED``."""
+
+    return re.sub(r"\s*\(.*$", "", cell, flags=re.S).strip()
+
+
+def _register_rows(path: Path) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        match = _REGISTER_ROW.match(line)
+        if match is None:
+            continue
+        row_id, risk, severity, status = (cell.strip() for cell in match.groups())
+        rows.append(
+            {"id": row_id, "risk": risk, "severity": severity, "status": _status_phrase(status)}
+        )
+    return rows
+
+
+def _finding_status(text: str) -> str:
+    """Read a §6 finding's status from the plan's own markers; UNKNOWN whenever unsure.
+
+    A finding whose statement is struck through and that carries a bold "addressed" marker
+    is ADDRESSED — ADDRESSED_WITH_RESIDUAL when unstruck text still says "Still open from
+    this finding".  An unstruck statement is OPEN.  Anything else (struck with no reason,
+    empty) is UNKNOWN: the reader never infers closure.
+    """
+
+    stripped = text.strip()
+    if not stripped:
+        return "UNKNOWN"
+    unstruck = _STRUCK.sub("", stripped)
+    if not stripped.startswith("~~"):
+        return "OPEN"
+    if _ADDRESSED_MARKER.search(unstruck) is None:
+        return "UNKNOWN"
+    if _RESIDUAL_MARKER.search(unstruck) is not None:
+        return "ADDRESSED_WITH_RESIDUAL"
+    return "ADDRESSED"
+
+
+def _finding_title(raw: str) -> str:
+    """The finding's first sentence (struck or not), whitespace collapsed, bounded."""
+
+    statement = _STRUCK.match(raw.strip())
+    text = statement.group(0) if statement is not None else raw
+    plain = " ".join(text.replace("~~", "").replace("**", "").split())
+    sentence = re.match(r".+?[.!?](?=\s|$)", plain)
+    if sentence is not None:
+        plain = sentence.group(0)
+    if len(plain) > _TITLE_LIMIT:
+        return plain[: _TITLE_LIMIT - 1].rstrip() + "…"
+    return plain
+
+
+def _finding_marker(raw: str) -> str:
+    unstruck = _STRUCK.sub("", raw)
+    match = _BOLD.search(unstruck)
+    if match is None:
+        return "—"
+    return " ".join(match.group(1).split()).rstrip(":")
+
+
+def _unknown_finding(reason: str) -> dict[str, str]:
+    return {"number": "—", "finding": reason, "status": "UNKNOWN", "marker": "—"}
+
+
+def _plan_findings(path: Path) -> list[dict[str, str]]:
+    """The VCP §6 numbered findings with their mechanically read status."""
+
+    text = path.read_text(encoding="utf-8")
+    heading = _PLAN_SECTION_6.search(text)
+    if heading is None:
+        return [_unknown_finding(f"§6 heading not found in {path.name}")]
+    body = text[heading.end() :]
+    end = _PLAN_SECTION_END.search(body)
+    if end is not None:
+        body = body[: end.start()]
+    parts = _PLAN_ITEM.split(body)
+    if len(parts) < 3:
+        return [_unknown_finding(f"§6 numbered findings not found in {path.name}")]
+    findings: list[dict[str, str]] = []
+    for number, raw in zip(parts[1::2], parts[2::2], strict=True):
+        findings.append(
+            {
+                "number": number,
+                "finding": _finding_title(raw),
+                "status": _finding_status(raw),
+                "marker": _finding_marker(raw),
+            }
+        )
+    return findings
+
+
+def _declared_flag_default(path: Path, name: str) -> str:
+    """The ``default=`` a source file declares for an environment flag, read by AST.
+
+    ``worker/`` is never imported (D-23): its source is parsed as text.  ``not declared``
+    when no call names the flag; ``unspecified`` when the call has no ``default`` keyword.
+    """
+
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if not any(isinstance(arg, ast.Constant) and arg.value == name for arg in node.args):
+            continue
+        for keyword in node.keywords:
+            if keyword.arg == "default" and isinstance(keyword.value, ast.Constant):
+                return repr(keyword.value.value)
+        return "unspecified"
+    return "not declared"
+
+
+def _state_fingerprints() -> list[dict[str, str]]:
+    return [
+        {
+            "path": str(path),
+            "sha256": hashlib.sha256((ROOT / path).read_bytes()).hexdigest(),
+        }
+        for path in STATE_SOURCE_PATHS
+    ]
+
+
+def build_state() -> dict[str, object]:
+    """The repository-state document: milestone facts derived from the tree."""
+
+    rows = _register_rows(ROOT / "RISK_REGISTER.md")
+    counts = Counter(row["status"] for row in rows)
+    return {
+        "volatile_facts": [{"fact": fact, "command": command} for fact, command in _VOLATILE_FACTS],
+        "id_watermarks": [
+            {
+                "namespace": _ID_SCANS[0][0],
+                "highest": _display_id("D", _max_row_id(ROOT / "DECISIONS.md", "D")),
+                "scan": _ID_SCANS[0][1],
+            },
+            {
+                "namespace": _ID_SCANS[1][0],
+                "highest": _max_adr(ROOT / ADR_DIR) or "none",
+                "scan": _ID_SCANS[1][1],
+            },
+            {
+                "namespace": _ID_SCANS[2][0],
+                "highest": _display_id("R", _max_row_id(ROOT / "RISK_REGISTER.md", "R")),
+                "scan": _ID_SCANS[2][1],
+            },
+        ],
+        "register_status_counts": [
+            {"status": status, "rows": count} for status, count in sorted(counts.items())
+        ],
+        "register_row_count": len(rows),
+        "register_open_rows": [row for row in rows if row["status"] == "OPEN"],
+        "plan_findings": _plan_findings(ROOT / "docs/VISION_COMPLETION_PLAN.md"),
+        "auditlog_public_names": list(chronos.auditlog.__all__),
+        "forwarding_flags": [
+            {
+                "flag": flag,
+                "declared_in": str(path),
+                "declared_default": _declared_flag_default(ROOT / path, flag),
+            }
+            for flag, path in _FORWARD_FLAGS
+        ],
+        "state_fingerprints": _state_fingerprints(),
+    }
+
+
+def _display_id(prefix: str, number: int | None) -> str:
+    return "none" if number is None else f"{prefix}-{number}"
+
+
+def render_state(state: dict[str, object]) -> list[str]:
+    """The ``## Repository state`` section of the page."""
+
+    volatile = state["volatile_facts"]
+    assert isinstance(volatile, list)
+    watermarks = state["id_watermarks"]
+    assert isinstance(watermarks, list)
+    counts = state["register_status_counts"]
+    assert isinstance(counts, list)
+    open_rows = state["register_open_rows"]
+    assert isinstance(open_rows, list)
+    findings = state["plan_findings"]
+    assert isinstance(findings, list)
+    names = state["auditlog_public_names"]
+    assert isinstance(names, list)
+    flags = state["forwarding_flags"]
+    assert isinstance(flags, list)
+    fingerprints = state["state_fingerprints"]
+    assert isinstance(fingerprints, list)
+
+    lines = [
+        "## Repository state",
+        "",
+        (
+            "Milestone facts derived from the table documents and source listed under "
+            "*State inputs* — never from HANDOFF.md, TASKS.md or any other prose, which retain "
+            "history but cannot present old milestone state as current truth (plan §5)."
+        ),
+        "",
+        "### Volatile facts — run, do not copy",
+        "",
+        (
+            "These change without a commit, so this page carries the command that measures "
+            "each one and never its value."
+        ),
+        "",
+    ]
+    lines.extend(
+        _markdown_table(
+            ("Fact", "Command"),
+            [(str(item["fact"]), str(item["command"])) for item in volatile],
+        )
+    )
+    lines.extend(["", "### ID watermarks (protocol §7 scans)", ""])
+    lines.extend(
+        _markdown_table(
+            ("Namespace", "Highest allocated"),
+            [(str(item["namespace"]), str(item["highest"])) for item in watermarks],
+        )
+    )
+    lines.extend(
+        [
+            "",
+            (
+                "The next id is `max + 1`, scanned in the same session by the same PR that "
+                "claims it (docs/AGENT_PROTOCOL.md §7); this table is a reading, not a "
+                "reservation. The scans, verbatim:"
+            ),
+            "",
+            "```bash",
+        ]
+    )
+    lines.extend(str(item["scan"]) for item in watermarks)
+    lines.extend(["```", "", "### Risk register", ""])
+    count_rows: list[tuple[str, ...]] = [
+        (str(item["status"]), str(item["rows"])) for item in counts
+    ]
+    count_rows.append(("all rows", str(state["register_row_count"])))
+    lines.extend(_markdown_table(("Status", "Rows"), count_rows))
+    lines.extend(
+        [
+            "",
+            (
+                "Status is the register's own column with its parenthetical qualifier "
+                "stripped; `MITIGATED` is not `CLOSED`. Open rows:"
+            ),
+            "",
+        ]
+    )
+    lines.extend(
+        _markdown_table(
+            ("ID", "Risk", "Sev"),
+            [(str(row["id"]), str(row["risk"]), str(row["severity"])) for row in open_rows]
+            or [("—", "no OPEN rows", "—")],
+        )
+    )
+    lines.extend(["", "### Vision plan §6 findings", ""])
+    lines.extend(
+        _markdown_table(
+            ("#", "Finding", "Status", "Marker"),
+            [
+                (
+                    str(item["number"]),
+                    str(item["finding"]),
+                    str(item["status"]),
+                    str(item["marker"]),
+                )
+                for item in findings
+            ],
+        )
+    )
+    lines.extend(
+        [
+            "",
+            (
+                "Status is read mechanically from the plan's own markers: a struck-through "
+                "finding carrying a bold *addressed* marker is `ADDRESSED`, or "
+                '`ADDRESSED_WITH_RESIDUAL` when unstruck text still says "Still open from '
+                'this finding"; an unstruck finding is `OPEN`; anything else is `UNKNOWN`. '
+                "UNKNOWN is never closed."
+            ),
+            "",
+            "### `chronos.auditlog` public names",
+            "",
+            ", ".join(f"`{name}`" for name in names)
+            + " — from `chronos.auditlog.__all__`, in declared order.",
+            "",
+            "### Forwarding flags — declared, never read here",
+            "",
+        ]
+    )
+    lines.extend(
+        _markdown_table(
+            ("Flag", "Declared in", "Declared default", "Value"),
+            [
+                (
+                    f"`{item['flag']}`",
+                    f"`{item['declared_in']}`",
+                    f"`{item['declared_default']}`",
+                    "not read (this page reads no environment)",
+                )
+                for item in flags
+            ],
+        )
+    )
+    lines.extend(
+        [
+            "",
+            (
+                "Both are built inert and enabled only by the owner (plan §11); a value "
+                "would be a claim about a deployment, which this page cannot make."
+            ),
+            "",
+            "### State inputs",
+            "",
+        ]
+    )
+    lines.extend(
+        _markdown_table(
+            ("Source", "SHA-256"),
+            [(str(item["path"]), "`" + str(item["sha256"]) + "`") for item in fingerprints],
+        )
+    )
+    return lines
 
 
 def _compiler_capabilities() -> list[dict[str, str | None]]:
@@ -546,9 +949,11 @@ def _display_default(value: object) -> str:
     return json.dumps(value, default=_json_default)
 
 
-def render_markdown(matrix: dict[str, object]) -> str:
-    """Render the human page from the same matrix document."""
+def render_markdown(matrix: dict[str, object], state: dict[str, object] | None = None) -> str:
+    """Render the human page from the matrix document and the repository-state document."""
 
+    if state is None:
+        state = build_state()
     defaults = matrix["repository_defaults"]
     assert isinstance(defaults, dict)
     capabilities = matrix["compiler_capabilities"]
@@ -772,10 +1177,10 @@ def render_markdown(matrix: dict[str, object]) -> str:
                 "not a capability."
             ),
             "",
-            "## Source fingerprint",
-            "",
         ]
     )
+    lines.extend(render_state(state))
+    lines.extend(["", "## Source fingerprint", ""])
     lines.extend(
         _markdown_table(
             ("Source", "SHA-256"),
@@ -810,7 +1215,7 @@ def main() -> int:
 
     matrix = build_matrix()
     matrix_text = render_json(matrix)
-    current_state_text = render_markdown(matrix)
+    current_state_text = render_markdown(matrix, build_state())
 
     if args.check:
         errors = [
