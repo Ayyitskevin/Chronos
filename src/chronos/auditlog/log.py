@@ -639,34 +639,11 @@ def verify_chain_text(text: str) -> ChainVerification:
     bytes. ABSENT is a statement about a path, so only ``verify_chain`` says it.
     """
 
-    previous = _GENESIS
-    expected_sequence = 0
-    for line_number, line in enumerate(io.StringIO(text), start=1):
-        if not line.strip():
-            continue
-        try:
-            record = json.loads(line)
-            payload_json = json.dumps(record["payload"], sort_keys=True, separators=(",", ":"))
-            recomputed = _hash_record(
-                int(record["sequence"]),
-                str(record["at_utc"]),
-                str(record["kind"]),
-                payload_json,
-                str(record["previous_hash"]),
-            )
-        except (KeyError, ValueError, TypeError) as error:
-            return ChainVerification(
-                ChainState.BROKEN, f"line {line_number}: unreadable record: {error}"
-            )
-        if int(record["sequence"]) != expected_sequence:
-            return ChainVerification(ChainState.BROKEN, f"line {line_number}: sequence gap")
-        if record["previous_hash"] != previous:
-            return ChainVerification(ChainState.BROKEN, f"line {line_number}: chain break")
-        if recomputed != record["record_hash"]:
-            return ChainVerification(ChainState.BROKEN, f"line {line_number}: hash mismatch")
-        previous = str(record["record_hash"])
-        expected_sequence += 1
-    return ChainVerification(ChainState.VALID, f"chain intact ({expected_sequence} records)")
+    try:
+        count, _last_hash = _walk_chain(io.StringIO(text))
+    except _ChainBreak as error:
+        return ChainVerification(ChainState.BROKEN, str(error))
+    return ChainVerification(ChainState.VALID, f"chain intact ({count} records)")
 
 
 def verify_chain(path: Path) -> ChainVerification:
