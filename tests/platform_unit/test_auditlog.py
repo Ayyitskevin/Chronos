@@ -1771,6 +1771,145 @@ class TestPublicationContract:
         assert verify_chain(path).state is ChainState.BROKEN  # log 2 records, anchor 1
 
 
+class TestCreateOwnDistinction:
+    """HOLD round 2 (Daybreak F3-RACE): only an inode this transaction demonstrably created may be
+    ``fchmod``-ed. An entry planted between the absence check and the open — a loose file, a FIFO,
+    a hard link to a victim — must be refused, typed, without its mode, bytes or link count being
+    touched. Creation is therefore ``O_CREAT|O_EXCL``; on ``EEXIST`` the entry is reopened without
+    ``O_CREAT`` and validated as found."""
+
+    @staticmethod
+    def _plant_between_check_and_open(
+        monkeypatch: pytest.MonkeyPatch, name: str, plant: Callable[[], None]
+    ) -> dict[str, bool]:
+        """Model "the name appears between the absence check and the open" for BOTH designs.
+
+        While armed, a descriptor-relative ``os.stat`` of ``name`` reports it absent (the stale
+        observation a stat-then-create design acts on); the first descriptor-relative ``os.open``
+        of ``name`` plants the entry immediately before the real open and disarms the lie, so
+        every later stat — the binding checks — is real.
+        """
+
+        from chronos.auditlog import log as log_module
+
+        state = {"armed": True, "planted": False}
+        real_stat, real_open = os.stat, os.open
+
+        def stat(path: object, *args: object, **kwargs: object) -> os.stat_result:
+            if state["armed"] and kwargs.get("dir_fd") is not None and path == name:
+                raise FileNotFoundError(errno.ENOENT, "planted later", path)
+            return real_stat(path, *args, **kwargs)  # type: ignore[arg-type]
+
+        def open_(path: object, flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
+            if dir_fd is not None and path == name:
+                state["armed"] = False
+                if not state["planted"]:
+                    state["planted"] = True
+                    plant()
+            return real_open(path, flags, mode, dir_fd=dir_fd)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(log_module.os, "stat", stat)
+        monkeypatch.setattr(log_module.os, "open", open_)
+        return state
+
+    @pytest.mark.parametrize("shape", ["loose-file", "hard-link", "fifo"])
+    def test_an_entry_planted_at_the_lock_name_between_check_and_open_is_refused_untouched(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shape: str
+    ) -> None:
+        path = tmp_path / "audit.jsonl"
+        lock = _lock_path(path)
+        victim = tmp_path / "victim"
+        victim.write_bytes(b"do not touch\n")
+        victim.chmod(0o644)
+
+        def plant() -> None:
+            if shape == "loose-file":
+                lock.write_bytes(b"planted\n")
+                lock.chmod(0o644)
+            elif shape == "hard-link":
+                os.link(victim, lock)
+            else:
+                os.mkfifo(lock, mode=0o600)
+
+        state = self._plant_between_check_and_open(monkeypatch, lock.name, plant)
+        with pytest.raises(AuditLogCorruptionError) as info:
+            AuditLog(path)
+        assert state["planted"], "the probe never planted; it proved nothing"
+        message = str(info.value)
+        if shape == "loose-file":
+            assert "mode" in message and "0o644" in message, message
+            assert stat.S_IMODE(lock.lstat().st_mode) == 0o644, "the planted lock was tightened"
+            assert lock.read_bytes() == b"planted\n"
+        elif shape == "hard-link":
+            assert "links" in message, message
+            assert stat.S_IMODE(victim.lstat().st_mode) == 0o644, "the victim's mode was touched"
+            assert victim.lstat().st_nlink == 2 and victim.read_bytes() == b"do not touch\n"
+        else:
+            assert "is not a regular file" in message, message
+            assert stat.S_ISFIFO(lock.lstat().st_mode)
+        assert not path.exists()
+
+    def test_a_hard_link_planted_at_the_log_name_at_the_seam_is_refused_untouched(
+        self, tmp_path: Path
+    ) -> None:
+        """Daybreak's probe 3 verbatim: fresh log, the name observed absent, a hard link to a
+        victim planted at the ``_after_recovery`` seam before the creating open."""
+
+        path = tmp_path / "audit.jsonl"
+        victim = tmp_path / "victim.jsonl"
+        victim.write_bytes(b"victim bytes\n")
+        victim.chmod(0o644)
+        log = AuditLog(path)
+        log._after_recovery = lambda: os.link(victim, path)
+
+        with pytest.raises(AuditLogCorruptionError) as info:
+            log.append("first", {"n": 1})
+        assert "links" in str(info.value), str(info.value)
+        assert stat.S_IMODE(victim.lstat().st_mode) == 0o644, "the victim's mode was touched"
+        assert victim.lstat().st_nlink == 2 and victim.read_bytes() == b"victim bytes\n"
+        assert path.read_bytes() == b"victim bytes\n"  # the link itself was not written through
+        assert not _anchor_path(path).exists()
+        assert not list(tmp_path.glob(".*.tmp"))
+
+    def test_first_ever_construction_and_append_still_create_lock_and_log_at_0600(
+        self, tmp_path: Path
+    ) -> None:
+        """The positive control, under a umask that narrows the creation mode: the entries this
+        transaction created are fchmod-ed to exactly 0600; a racing fresh creator still gets in."""
+
+        path = tmp_path / "audit.jsonl"
+        previous = os.umask(0o277)  # creation would land at 0400 without the fchmod
+        try:
+            record = AuditLog(path).append("first", {"n": 1})
+        finally:
+            os.umask(previous)
+        assert record.sequence == 0
+        for entry in (path, _lock_path(path), _anchor_path(path)):
+            assert stat.S_IMODE(entry.lstat().st_mode) == 0o600, entry.name
+        assert verify_chain(path).state is ChainState.VALID
+        # Two fresh processes constructing on an absent path at once: the loser must open the
+        # winner's lock, not refuse (the first draft of this fix refused it; see the handoff).
+        fresh = tmp_path / "fresh" / "audit.jsonl"
+        fresh.parent.mkdir()
+        outcomes: list[str] = []
+        barrier = threading.Barrier(2)
+
+        def construct() -> None:
+            barrier.wait(timeout=10)
+            try:
+                AuditLog(fresh)
+                outcomes.append("ok")
+            except AuditLogCorruptionError as error:
+                outcomes.append(str(error))
+
+        workers = [threading.Thread(target=construct) for _ in range(2)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=10)
+        assert outcomes == ["ok", "ok"], outcomes
+
+
 class TestBootstrapAnchor:
     """``bootstrap_anchor`` is the one public addition: the owner's explicit, once-only
     publication of a first anchor for a legacy log, under the same lock and binding as an
