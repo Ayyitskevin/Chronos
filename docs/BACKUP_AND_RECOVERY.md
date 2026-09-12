@@ -61,6 +61,7 @@ reconciliation passes again (`src/chronos/execution/engine.py`).~~
 | `data/recovery_pending.json` | **Restore witness** (ADR-0054) — written by `python -m chronos.recovery restore`, or by hand in step 3 below | Not a backup artifact: **never restore one from a snapshot**, and never capture one. Its presence tells the next boot that this directory was restored, which is exactly the fact a wholesale restore otherwise erases. |
 | your `AUTONOMY_MANDATE_FILE` (if configured) | Owner-authored autonomy grant — *added 2026-08-02* | Restoring it **re-arms autonomy on the next boot** (ADR-0017 auto-activation). Treat it as an authority document: back it up securely, and move it aside during any recovery you do not intend to resume trading from. |
 | `data/platform_audit.jsonl` | Hash-chained audit trail | Lose the tamper-evident record of decisions and operator actions |
+| `data/platform_audit.head.json` | **Head anchor** for the audit log — the expected record count and head hash (`chronos.auditlog`, added 2026-09-12) | **It must travel with the log.** A log restored without it is BROKEN until the owner bootstraps it; an older log restored beside a newer anchor is BROKEN as a truncation/rollback. Restoring both from one older snapshot passes and is not locally detectable — the disclosed residual (R-78). |
 | `config/` | Risk policies (`risk.example.yaml` plus your local `risk.yaml`) | Lose the exact limits runs were made under; policy hashes in results become unverifiable |
 | `specs/` | Canonical strategy specifications | Versioned in git, but back up local edits |
 | `research/strategy_registry.yaml`, `research/strategy_catalog.*` | Pine corpus registry with pinned SHA-256 hashes | Lose corpus integrity verification (`verify-corpus`) |
@@ -97,9 +98,11 @@ cp data/platform_ledger.db data/platform_ledger.db-wal data/platform_ledger.db-s
 
 Never plain-copy a live WAL database without its sidecars — you get a stale or torn snapshot.
 
-The JSON/JSONL/YAML files (`platform_halt.json`, `platform_audit.jsonl`, configs, manifests) are
-plain files; copy them normally. For the audit log, prefer copying while stopped, or accept that a
-mid-append copy may end in a truncated last line (the verifier will point at exactly that line).
+The JSON/JSONL/YAML files (`platform_halt.json`, `platform_audit.jsonl`,
+`platform_audit.head.json`, configs, manifests) are plain files; copy them normally. Copy the
+audit log and its head anchor **together**, and prefer copying while stopped: a copy taken
+mid-append can catch the log one record ahead of the anchor (the verifier reports a
+`crash window`), or end in a truncated last line (the verifier points at exactly that line).
 
 A complete cold backup, simplest form:
 
@@ -154,32 +157,39 @@ That API works while other clients access the source and creates a snapshot of e
 copy commences ([Python API](https://docs.python.org/3.12/library/sqlite3.html#sqlite3.Connection.backup),
 [SQLite semantics](https://www.sqlite.org/backup.html)). The databases are captured sequentially,
 not atomically with each other or with the control files, so the manifest records a separate start
-and completion timestamp for every artifact. The command refuses unless all five artifacts exist as
+and completion timestamp for every artifact. The command refuses unless all six artifacts exist as
 regular files, both databases pass integrity/current-version checks, the live kill switch is valid
-and engaged, the deterministic platform is valid and halted, and the audit chain is non-empty and
-intact. SQLite may update a live source database's transient `-shm` WAL-index while servicing the
-read-only capture; the five named source artifacts remain byte-identical. A source directory must
+and engaged, the deterministic platform is valid and halted, and the audit log is non-empty and its chain
+and head anchor verify as a pair. SQLite may update a live source database's transient `-shm` WAL-index while servicing the
+read-only capture; the six named source artifacts remain byte-identical. A source directory must
 therefore permit SQLite's ordinary WAL coordination. It copies no `.env` or autonomy mandate.
 
 `restore` verifies every snapshot member against its manifest before creating the destination,
 copies into `<restore-root>/data`, re-verifies every digest, opens the application schema through
-Chronos's current schema checker, rechecks the control posture and audit chain, then writes
+Chronos's current schema checker, rechecks the control posture and the audit log/anchor pair, then writes
 `<restore-root>/recovery-observation.json`. Both commands refuse an existing destination instead of
 overwriting it. Directories are mode `0700`; artifacts and JSON evidence are mode `0600`. A failed
 operation deliberately leaves any newly created partial directory in place for diagnosis; the
 operator decides when it is safe to remove it. Successful snapshot and restored-data directories
-contain only the five bound artifacts plus, for the snapshot, its manifest. Low-level integrity
+contain only the six bound artifacts plus, for the snapshot, its manifest. Low-level integrity
 checks open these new private copies as immutable read-only files; the application schema checker
 separately opens `chronos.db` through Chronos, after which digests and exact contents are rechecked.
 Successful bundles contain no unbound WAL sidecars.
+
+The head anchor is captured beside the log and bound in the manifest like every other member. A
+restore whose log is an older valid prefix of the anchor it travels with is refused as a
+truncation. A snapshot whose log and anchor are both older is self-consistent and restores
+cleanly, and the observation's residuals say so: the pair detects single-file rollback, not a
+restore of the pair — the same reason `recovery_pending.json` exists, because a wholesale
+restore is otherwise invisible from inside the directory.
 
 The observation fields are measurements, not SLOs:
 
 | Field | What it measures | What it does **not** prove |
 |---|---|---|
 | `oldest_snapshot_age_seconds` | Wall-clock time from the earliest per-artifact capture start to this restore attempt | Actual data loss, backup schedule compliance, or any RPO target; it is meaningful only after clock health is verified |
-| `snapshot_capture_window_seconds` | Skew between the earliest artifact start and latest artifact completion | A transactionally atomic snapshot across the two databases and three files |
-| `local_restore_copy_seconds` | Monotonic elapsed time to create the isolated restore directories and copy the five bound artifacts locally | Download/decryption/provisioning time |
+| `snapshot_capture_window_seconds` | Skew between the earliest artifact start and latest artifact completion | A transactionally atomic snapshot across the two databases and four files |
+| `local_restore_copy_seconds` | Monotonic elapsed time to create the isolated restore directories and copy the six bound artifacts locally | Download/decryption/provisioning time |
 | `local_verification_seconds` | Monotonic elapsed time for digest, database, control, and audit checks | Broker connectivity, order/position reconciliation, secrets, mandate review, or permission to rearm |
 | `local_recovery_elapsed_seconds` | The sum of local copy and verification for this one run | Operational RTO, which also includes detection, human response, infrastructure, and broker reconciliation |
 
@@ -256,11 +266,21 @@ RPO/RTO, encrypted/off-host backup, and external integrity anchor remain open.
    ```bash
    python -m chronos.cli verify-audit-log
    ```
-   `VALID — chain intact (N records)` (exit 0), or `BROKEN` with a precise first-failure line
-   (exit 1), or `ABSENT — no audit log yet` (exit 2). `ABSENT` is not a pass: the chain was
-   never examined. If it is `BROKEN`, treat it as an
-   incident (docs/INCIDENT_RESPONSE.md) — a restore from an older backup legitimately has fewer
-   records, but a broken chain within the restored file is corruption or tamper.
+   `VALID — chain + anchor intact (N records)` (exit 0), or `BROKEN` with a precise reason
+   (exit 1) — a first-failure line inside the file, `head anchor missing for existing audit
+   log; owner bootstrap required`, `audit log truncation/rollback: N records but anchor
+   expects A`, `uncommitted audit append/crash window: N records but anchor expects A`, or
+   `head hash mismatch` — or `ABSENT — no audit log or head anchor yet` (exit 2). `ABSENT` is
+   not a pass: the chain was never examined. If it is `BROKEN`, treat it as an incident
+   (docs/INCIDENT_RESPONSE.md). A restore from an older backup legitimately has fewer records
+   **only when its own anchor came with it**: a log restored without its anchor, or beside a
+   newer anchor, is BROKEN — restore the matching `platform_audit.head.json` from the same
+   snapshot. Only for a log that predates the anchor (written before 2026-09-12), and after
+   reviewing the whole file, run `python -m chronos.cli bootstrap-audit-anchor` (exit 0
+   published, 1 refused, 2 absent); it appends nothing and refuses if any anchor exists. A
+   `crash window` after an unclean stop means the last record was fsynced but its anchor was
+   not: review that record against the operational record, then — as an owner act, never
+   automatically — remove the stale anchor and bootstrap the reviewed chain.
 5. **Verify corpus integrity** (if research state was restored):
    ```bash
    python -m chronos.cli verify-corpus

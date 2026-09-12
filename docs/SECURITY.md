@@ -68,16 +68,28 @@ this is a single-operator local system (ASSUMPTIONS.md A-42).
 
 - `data/platform_audit.jsonl` is a hash chain: each record embeds the SHA-256 of the previous
   record; edits, deletions, and reordering break the chain (`src/chronos/auditlog/log.py`).
+  Beside it, `data/platform_audit.head.json` holds the expected record count and head hash;
+  every append publishes it atomically (unique temp, fsync, rename, directory fsync) after the
+  record is durable, inside the same serialized, descriptor-relative transaction.
 - Verify with `python -m chronos.cli verify-audit-log`: exit **0** valid, **1** broken, **2**
   absent. A broken chain is an incident (docs/INCIDENT_RESPONSE.md), not a nuisance. Exit 2 is
   not a weaker exit 1 — it means the chain was never examined, so nothing about
   tamper-evidence has been established. Do not treat a missing audit log as a passing one.
+  BROKEN also covers the anchor: a deleted tail or a restored older copy of the log reads as
+  `truncation/rollback`, a log with more records than its anchor as a `crash window`, and a
+  missing, malformed, or mismatched anchor by name.
 - Appends are flushed and fsynced; a failed audit write is designed to halt trading, not be
   dropped.
-- Limitation, honestly: a hash chain proves internal consistency, not authenticity — an attacker
-  with file write access could rewrite the whole chain. There is no external anchor (no remote
-  copy, no signing). Off-machine backups (docs/BACKUP_AND_RECOVERY.md) are the compensating
-  control.
+- Legacy logs written before the anchor existed (2026-09-12) are BROKEN until the owner runs
+  `python -m chronos.cli bootstrap-audit-anchor` (same `--audit-file` as the other commands),
+  which verifies the entire bare chain, publishes the first anchor, appends no record, and
+  refuses if anything already exists at the anchor's path. `AuditLog` construction — the
+  service, `shadow-scan` — refuses a bare log rather than anchoring it silently.
+- Limitation, honestly: a hash chain proves internal consistency, not authenticity, and the
+  local anchor is not an external one — an actor with file write access who rewrites both
+  files consistently, or restores both from one older snapshot, is not detected (R-78). There
+  is still no off-host copy or signature. Off-machine backups (docs/BACKUP_AND_RECOVERY.md)
+  are the compensating control.
 - A truncated final record (e.g. a process killed mid-append) is detected on the next
   construction: `AuditLog(...)` raises `AuditLogCorruptionError` and the CLI shadow-scan path
   halts with `AUDIT_LOG_FAILURE` rather than crashing with a raw traceback.

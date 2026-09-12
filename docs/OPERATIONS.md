@@ -19,7 +19,8 @@ Read the output deliberately:
    If halted: find out why before anything else. Do not rearm reflexively — the reason and detail
    name the trigger (`src/chronos/control/halt.py` lists all reasons).
 2. **Audit chain.** `status` verifies the hash chain and prints
-   `audit log: OK — chain intact (N records)` or a failure with the first bad line. A failure is
+   `audit log: VALID — chain + anchor intact (N records)` or a failure naming the first bad line
+   or the head-anchor mismatch (`platform_audit.head.json`). A failure is
    an incident (docs/INCIDENT_RESPONSE.md), not something to shrug at.
 3. **Mode banner.** For `status` the banner shows `MODE: RESEARCH | CAPABILITY: NO_ORDERS` and
    `LIVE TRADING | hard-disabled`. It reflects the command's own context — it is not a status

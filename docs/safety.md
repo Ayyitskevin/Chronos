@@ -355,6 +355,26 @@ symbols, account data, balances, positions, contracts, or order fields. An attem
 that fails is not retried and cannot replace the locked result. It does not trigger another read,
 persist state, or unlock an action.
 
+## Platform audit integrity
+
+The platform audit log (`data/platform_audit.jsonl`) is a hash chain with a sibling head
+anchor, `data/platform_audit.head.json`, holding exactly the expected record count and head
+hash (`chronos.auditlog`, 2026-09-12). Every append is one serialized transaction: whole-chain
+verification under a lock, the record written and fsynced, then the anchor published
+atomically (unique temp, fsync, rename, directory fsync); the log, lock, anchor and temp are
+reached descriptor-relative and no-follow, and the names are re-checked before and after each
+mutation. Verification judges the pair: a missing, malformed, behind, ahead, or mismatched
+anchor is BROKEN, so a deleted tail or a restored older log no longer reads as intact. A log
+with no anchor is BROKEN until the owner bootstraps it explicitly
+(`python -m chronos.cli bootstrap-audit-anchor`, which verifies the entire bare chain and
+appends nothing); nothing anchors a legacy file silently. A crash after the log fsync and
+before the anchor publication leaves the log one record ahead of its anchor: that pair fails
+closed as a "crash window", every writer refuses it, and it needs reviewed recovery
+(docs/BACKUP_AND_RECOVERY.md); a lock-free reader racing an append can observe the same
+window. This is tamper-evidence, not protection from the owner: an owner-user actor who
+rewrites or co-restores both files consistently is not detected (R-78), and only a
+separately administered off-host receipt narrows that.
+
 ## Human responsibility
 
 The operator must verify account, symbol, contract, quantity, limit price, obligation, and

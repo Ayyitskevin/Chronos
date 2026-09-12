@@ -501,6 +501,15 @@ class AuditLog:
         self._pinned_parent: tuple[int, int] | None = None
         self._pinned_log: tuple[int, int] | None = None
 
+    @classmethod
+    def _capability_only(cls, path: Path) -> AuditLog:
+        """The path capability with no recovery — for ``bootstrap_anchor``, which judges the
+        bare chain itself because construction would (correctly) refuse it."""
+
+        instance = cls.__new__(cls)
+        instance._bind(path)
+        return instance
+
     # ------------------------------------------------------------------ the transaction
 
     @contextmanager
@@ -1037,6 +1046,54 @@ def _durability_clause(record_written: bool) -> str:
         "; the record was written and fsynced to the inode this writer held, so it may be "
         "durable in a displaced file, and success is NOT reported"
     )
+
+
+def bootstrap_anchor(path: Path) -> Path | None:
+    """Publish the first head anchor for a legacy log that has none — an owner's act (D2 §3).
+
+    Runs under the same thread lock, ``flock`` and path capability as an append. Refuses
+    if anything at all exists at the anchor's name — a matching anchor, a malformed one, a
+    symlink, a FIFO, a hard link; none is touched — verifies the ENTIRE bare chain, then
+    publishes ``{count, last_hash}`` through the same temp/fsync/rename/parent-fsync
+    sequence as an append, with the names bound before and after. No audit record is
+    appended: the durable act is the anchor itself, and a bootstrap row would make the
+    chain attest its own trust transition. Returns the anchor path, or ``None`` when there
+    is no log to anchor. An empty but readable legacy log may be bootstrapped explicitly
+    (count 0, genesis hash).
+    """
+
+    writer = AuditLog._capability_only(path)
+    with writer._exclusive() as (parent_fd, lock_fd):
+        anchor_subject = f"audit head anchor at {writer._parent / writer._anchor_name}"
+        try:
+            os.stat(writer._anchor_name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            _refuse(
+                anchor_subject,
+                "already exists; bootstrap publishes only a first anchor and never overwrites",
+            )
+        descriptor = writer._open_log(parent_fd, create=False)
+        if descriptor is None:
+            return None
+        with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+            try:
+                count, last_hash = _walk_chain(io.StringIO(handle.read()))
+            except _ChainBreak as error:
+                raise AuditLogCorruptionError(
+                    f"audit log at {path} is BROKEN: {error}; refusing to anchor a broken chain"
+                ) from error
+            writer._publish_anchor(
+                parent_fd,
+                lock_fd,
+                handle.fileno(),
+                count=count,
+                last_hash=last_hash,
+                prior=None,
+                record_written=False,
+            )
+    return writer._parent / writer._anchor_name
 
 
 class ChainState(StrEnum):

@@ -95,6 +95,7 @@ Copy, don't move; timestamp everything:
 ```bash
 mkdir -p incidents/$(date +%F-%H%M)
 cp data/platform_audit.jsonl incidents/$(date +%F-%H%M)/
+cp data/platform_audit.head.json incidents/$(date +%F-%H%M)/   # the log's head anchor travels with it
 sqlite3 data/platform_ledger.db ".backup 'incidents/$(date +%F-%H%M)/platform_ledger.db'"
 cp data/platform_halt.json incidents/$(date +%F-%H%M)/ 2>/dev/null
 python -m chronos.cli status > incidents/$(date +%F-%H%M)/status.txt 2>&1
@@ -193,7 +194,9 @@ means "armed".
 ### Audit-chain verification failure
 
 `python -m chronos.cli verify-audit-log` reports `BROKEN` with a sequence gap, chain break, hash mismatch, or
-unreadable record with its line number (`src/chronos/auditlog/log.py`).
+unreadable record with its line number (`src/chronos/auditlog/log.py`) — or, since 2026-09-12, a head-anchor
+failure against the sibling `platform_audit.head.json`: `truncation/rollback`, `crash window`,
+`head hash mismatch`, `head anchor missing`, or `head anchor unreadable`.
 
 **Treat as a tamper-or-corruption incident. Do not trade until explained.**
 
