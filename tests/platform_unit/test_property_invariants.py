@@ -385,3 +385,70 @@ def test_tightening_notional_below_intent_denies() -> None:
     tightened = dict(generous)
     tightened["max_position_notional_usd"] = 500  # below the 1000 notional
     assert approved(tightened) is False
+
+
+# ``allow_margin``'s cash bound is an ACCOUNT quantity, not a policy limit, so it cannot join
+# the scaled-limit set above; its monotonicity is stated on its own axes: with margin
+# disabled, reducing cash never turns a denial into an approval, and enabling margin never
+# turns an approval into a denial.
+@given(
+    cash=st.floats(min_value=0.0, max_value=10_000.0),
+    scale=st.floats(min_value=0.0, max_value=1.0),
+    quantity=st.integers(min_value=1, max_value=20),
+)
+@settings(max_examples=250, deadline=None)
+def test_reducing_cash_never_flips_deny_to_approve_without_margin(
+    cash: float, scale: float, quantity: int
+) -> None:
+    intent = _intent(quantity=quantity, limit_price="100.00", stop_price="95.00")
+    market = MarketViewEntry(last_price=100.0, bar_close_utc=NOW, quote_utc=NOW)
+    generous = {
+        "max_bot_capital_usd": 10_000,
+        "max_position_notional_usd": 10_000,
+        "max_aggregate_exposure_usd": 10_000,
+        "max_symbol_exposure_fraction": 1.0,
+        "max_risk_per_trade_fraction": 1.0,
+        "max_simultaneous_positions": 5,
+        "max_open_orders": 5,
+        "max_daily_loss_usd": 1_000,
+        "max_weekly_loss_usd": 2_000,
+        "max_drawdown_fraction": 1.0,
+        "max_consecutive_losses": 10,
+        "max_price_deviation_fraction": 0.5,
+    }
+
+    def decide(cash_usd: float, *, allow_margin: bool) -> bool:
+        account = AccountView(
+            account_equity_usd=10_000.0,
+            cash_usd=cash_usd,
+            position_shares={},
+            position_notional_usd={},
+            open_order_count=0,
+            realized_pnl_today_usd=0.0,
+            realized_pnl_week_usd=0.0,
+            peak_equity_usd=10_000.0,
+            consecutive_losses=0,
+            as_of_utc=NOW,
+        )
+        policy = _policy({**generous, "allow_margin": allow_margin})
+        return (
+            RiskEngine(policy)
+            .validate(
+                intent,
+                account=account,
+                market=market,
+                halt=_ARMED_HALT,
+                mode_lock=_sim_lock(),  # type: ignore[arg-type]
+                now_utc=NOW,
+            )
+            .approved
+        )
+
+    loose_cash, strict_cash = cash, cash * scale
+    if decide(strict_cash, allow_margin=False):
+        assert decide(loose_cash, allow_margin=False), (loose_cash, strict_cash, quantity)
+    if decide(loose_cash, allow_margin=False):
+        assert decide(loose_cash, allow_margin=True), (loose_cash, quantity)
+    # And the rule is live on these axes: a notional above cash is denied without margin.
+    if float(intent.notional) > loose_cash:
+        assert not decide(loose_cash, allow_margin=False), (loose_cash, quantity)

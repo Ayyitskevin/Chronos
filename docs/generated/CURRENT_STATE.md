@@ -204,7 +204,7 @@ Both are built inert and enabled only by the owner (plan §11); a value would be
 | Source | SHA-256 |
 | --- | --- |
 | DECISIONS.md | `a29eaaea431b955fafd8eca8f8c5254a1989dffaf3388ac3a6c2c881ff7a5ab7` |
-| RISK_REGISTER.md | `dad971c82318dc860f67566f241d7cc130bcf30c9cfa36da84579aef9b1bae85` |
+| RISK_REGISTER.md | `52bfe7604b157992f770c17fa2579d5229876b5f3235832ca48858f5633fa383` |
 | docs/VISION_COMPLETION_PLAN.md | `f7cff45f7389c480d11720fe6251d5b04fd9a908de0488812c71a1442ad5d5c2` |
 | src/chronos/auditlog/__init__.py | `5ec898d0ab735be6f0a7773bbeb9d8aacf4c3ea3b5eceff2d446a914d5a1647b` |
 | src/chronos/bridge/config.py | `25f2f9a369d625440eb21d0d55f10386aa47d33dfb1843731788295b03cec636` |
