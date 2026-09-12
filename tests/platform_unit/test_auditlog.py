@@ -1555,3 +1555,89 @@ class TestHeadAnchor:
         assert record.sequence == 0
         assert anchor.read_bytes() == _anchor_bytes(1, record.record_hash)
         assert verify_chain(path).state is ChainState.VALID
+
+
+class TestBootstrapAnchor:
+    """``bootstrap_anchor`` is the one public addition: the owner's explicit, once-only
+    publication of a first anchor for a legacy log, under the same lock and binding as an
+    append, appending nothing (D2 §3)."""
+
+    def test_bootstrap_is_exported_runs_under_the_lock_and_binds_around_publication(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import fcntl
+
+        from chronos.auditlog import bootstrap_anchor
+        from chronos.auditlog import log as log_module
+
+        path = tmp_path / "audit.jsonl"
+        write_records(path, 3)
+        anchor = _anchor_path(path)
+        anchor.unlink()
+        before = path.read_bytes()
+        hashes = _record_hashes(path)
+
+        events: list[str] = []
+        real_flock, real_fsync, real_replace = fcntl.flock, os.fsync, os.replace
+        real_bind = log_module.AuditLog._assert_transaction_bound
+
+        def flock(descriptor: int, operation: int) -> None:
+            events.append({fcntl.LOCK_EX: "lock", fcntl.LOCK_UN: "unlock"}.get(operation, "flock?"))
+            real_flock(descriptor, operation)
+
+        def fsync(descriptor: int) -> None:
+            kind = "dir" if stat.S_ISDIR(os.fstat(descriptor).st_mode) else "file"
+            events.append(f"{kind} fsync")
+            real_fsync(descriptor)
+
+        def replace(source: str, destination: str, **kwargs: object) -> None:
+            events.append("rename")
+            real_replace(source, destination, **kwargs)  # type: ignore[arg-type]
+
+        def bind(self: log_module.AuditLog, *args: object, when: str, **kwargs: object) -> None:
+            events.append(f"bind: {when}")
+            real_bind(self, *args, when=when, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(log_module.fcntl, "flock", flock)
+        monkeypatch.setattr(log_module.os, "fsync", fsync)
+        monkeypatch.setattr(log_module.os, "replace", replace)
+        monkeypatch.setattr(log_module.AuditLog, "_assert_transaction_bound", bind)
+
+        published = bootstrap_anchor(path)
+
+        assert published == anchor
+        assert anchor.read_bytes() == _anchor_bytes(3, hashes[-1])
+        assert stat.S_IMODE(anchor.lstat().st_mode) == 0o600
+        assert path.read_bytes() == before, "bootstrap appended a record"
+        assert not list(tmp_path.glob(".*.tmp"))
+        order = [
+            events.index(name)
+            for name in (
+                "lock",
+                "bind: before the anchor",
+                "file fsync",
+                "rename",
+                "dir fsync",
+                "bind: after the anchor",
+                "unlock",
+            )
+        ]
+        assert order == sorted(order), events
+        assert events.count("file fsync") == 1 and events.count("unlock") == 1, events
+        assert verify_chain(path).state is ChainState.VALID
+        assert AuditLog(path).append("after_bootstrap", {"n": 3}).sequence == 3
+
+    def test_bootstrap_returns_none_only_for_an_absent_log(self, tmp_path: Path) -> None:
+        from chronos.auditlog import bootstrap_anchor
+
+        path = tmp_path / "audit.jsonl"
+        anchor = _anchor_path(path)
+        assert bootstrap_anchor(path) is None
+        assert not path.exists() and not anchor.exists()
+        # An anchor with no log is a truncation/deletion state, never "absent": refused, and
+        # neither entry is created or touched.
+        anchor.write_bytes(_anchor_bytes(1, "a" * 64))
+        with pytest.raises(AuditLogCorruptionError, match="already exists"):
+            bootstrap_anchor(path)
+        assert not path.exists()
+        assert anchor.read_bytes() == _anchor_bytes(1, "a" * 64)
