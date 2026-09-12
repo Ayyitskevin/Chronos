@@ -1294,12 +1294,15 @@ class ChainVerification:
 def verify_chain_text(text: str) -> ChainVerification:
     """Verify a chain from text a caller already holds; VALID or BROKEN, never ABSENT.
 
-    A consumer that verifies a PATH and then re-reads the path to derive from it
-    has two reads, and a file replaced between them lets a VALID verdict
-    authorise BROKEN rows (the monitoring snapshot did exactly this). Verifying
-    the captured text lets verification and derivation run over one read. Line
-    numbers and detail strings are the same as ``verify_chain``'s over the same
-    bytes. ABSENT is a statement about a path, so only ``verify_chain`` says it.
+    Chain-only: this judges the records against each other and does NOT judge the
+    head anchor, so a tail-truncated log beside its stale anchor is VALID here and
+    BROKEN to ``verify_pair_text`` / ``verify_chain`` — pinned in
+    ``tests/platform_unit/test_auditlog_verify_text.py``. It is for a caller that
+    holds nothing but log text and says so; a consumer that must see truncation
+    (monitoring, the CLI verifier, recovery) judges the pair. Line numbers and
+    per-line detail strings are the pair's over the same bytes; the VALID detail
+    says "chain intact", never "chain + anchor intact". ABSENT is a statement about
+    a path, so only ``verify_chain`` says it.
     """
 
     try:
@@ -1309,41 +1312,65 @@ def verify_chain_text(text: str) -> ChainVerification:
     return ChainVerification(ChainState.VALID, f"chain intact ({count} records)")
 
 
-def verify_chain(path: Path) -> ChainVerification:
-    """Verify the chain AND its head anchor, distinguishing absent from valid from broken.
+def verify_pair_text(log_text: str | None, anchor_bytes: bytes | None) -> ChainVerification:
+    """The D2 §2 verdict over content a caller already holds: the log beside its anchor.
 
-    Read-only and lock-free: it creates no lock file, because its consumers
-    (monitoring, campaign status, the CLI verifier) are read-only by contract.
-    The parent is reached by a no-follow component walk that creates nothing, and
-    both leaves are read by name against it, no-follow: a symlink, FIFO, hard link
-    or foreign file at either name is BROKEN without its target being read. The
-    anchor is read before the log so that a reader racing an append (which fsyncs
-    the log first, then publishes the anchor) can only observe the in-flight
-    window as the honestly named "crash window", never as a truncation.
+    ``None`` means absent for either side. Pure and content-level, and the ONE place
+    the pair matrix lives: ``verify_chain`` delegates here after its capability reads,
+    and the monitoring snapshot judges the bytes it captured with it before deriving
+    anything from them, so a path-level and a content-level reader cannot disagree.
+    Both absent is the only ABSENT; a log with no anchor is BROKEN until the owner
+    bootstraps it; an anchor with no log is deletion, never a fresh start.
+    """
+
+    return _verify_pair(log_text, anchor_bytes).verification
+
+
+def read_audit_pair(path: Path) -> tuple[str | None, bytes | None]:
+    """One capability read each of the audit log (as text) and its head anchor (bytes).
+
+    ``None`` for an absent file; ``(None, None)`` when the parent does not exist. The
+    parent is reached by a no-follow component walk that creates nothing, and both
+    leaves are read by name against it, no-follow, each exactly once: a symlink, FIFO,
+    hard link, foreign-owned or looser-than-0600 file at either name raises
+    ``AuditLogCorruptionError`` without its target being read, and is reported as
+    found, never repaired. The anchor is read before the log so that a reader racing
+    an append (which fsyncs the log first, then publishes the anchor) can only observe
+    the in-flight window as the honestly named "crash window", never as a truncation.
+    A log that is not UTF-8 raises the same error type. Shared by ``verify_chain`` and
+    the monitoring snapshot, which derives its rows from the very text returned here.
     """
 
     absolute = Path(os.path.abspath(os.fspath(path)))
     parent, name = absolute.parent, absolute.name
     anchor_name = _anchor_name_for(name)
+    parent_fd = _open_existing_parent(parent)
+    if parent_fd is None:
+        return None, None
     try:
-        parent_fd = _open_existing_parent(parent)
-        if parent_fd is None:
-            return _verify_pair(None, None).verification
-        try:
-            anchor = _read_entry(
-                parent_fd, anchor_name, f"audit head anchor at {parent / anchor_name}"
-            )
-            log = _read_entry(parent_fd, name, f"audit log at {parent / name}")
-        finally:
-            os.close(parent_fd)
+        anchor = _read_entry(parent_fd, anchor_name, f"audit head anchor at {parent / anchor_name}")
+        log = _read_entry(parent_fd, name, f"audit log at {parent / name}")
+    finally:
+        os.close(parent_fd)
+    if log is None:
+        return None, anchor
+    try:
+        return log.decode("utf-8"), anchor
+    except UnicodeDecodeError as error:
+        raise AuditLogCorruptionError(f"audit log is not UTF-8: {error}") from error
+
+
+def verify_chain(path: Path) -> ChainVerification:
+    """Verify the chain AND its head anchor, distinguishing absent from valid from broken.
+
+    Read-only and lock-free: it creates no lock file, because its consumers
+    (monitoring, campaign status, the CLI verifier) are read-only by contract.
+    One capability read of each file (``read_audit_pair``), then the pair verdict
+    (``verify_pair_text``); a refused read is BROKEN with the refusal as its detail.
+    """
+
+    try:
+        text, anchor = read_audit_pair(path)
     except AuditLogCorruptionError as error:
         return ChainVerification(ChainState.BROKEN, str(error))
-    text: str | None
-    if log is None:
-        text = None
-    else:
-        try:
-            text = log.decode("utf-8")
-        except UnicodeDecodeError as error:
-            return ChainVerification(ChainState.BROKEN, f"audit log is not UTF-8: {error}")
-    return _verify_pair(text, anchor).verification
+    return verify_pair_text(text, anchor)

@@ -7,8 +7,10 @@ from chronos.auditlog.log import (
     ChainState,
     ChainVerification,
     bootstrap_anchor,
+    read_audit_pair,
     verify_chain,
     verify_chain_text,
+    verify_pair_text,
 )
 
 __all__ = [
@@ -18,6 +20,8 @@ __all__ = [
     "ChainState",
     "ChainVerification",
     "bootstrap_anchor",
+    "read_audit_pair",
     "verify_chain",
     "verify_chain_text",
+    "verify_pair_text",
 ]
