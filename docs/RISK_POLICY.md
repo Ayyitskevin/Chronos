@@ -24,7 +24,14 @@
 ## Checks evaluated per intent (chronos.risk.engine)
 
 Identity/permission: strategy allowlist, symbol allowlist, direction
-enablement, mode capability, halt state, duplicate intent id.
+enablement, mode capability, halt state, duplicate intent id. A completed
+validation consumes the intent id for that engine instance whatever it
+decided: an ordinarily denied intent (for example, missing account evidence)
+re-presented to the same engine is refused as a duplicate, not re-judged
+(fail-closed). Only a new engine instance resets the in-memory set — a
+`--watch` service reuses one engine across cycles; backtests and SHADOW scans
+build a fresh one per run. An `INTERNAL_ERROR_FAIL_CLOSED` result does not
+consume the id, because that path returns before the set is written.
 
 Evidence: account state present, market snapshot present with positive last
 price, quote age and bar age within limits (a zero limit denies), limit-price

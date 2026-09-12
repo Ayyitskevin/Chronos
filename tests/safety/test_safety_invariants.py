@@ -370,6 +370,81 @@ class TestRiskEngineDenyByDefault:
         assert not second.approved
         assert RiskRejectionCode.DUPLICATE_INTENT in second.codes
 
+    def test_ordinary_denial_also_consumes_the_intent_id(self, tmp_path: Path) -> None:
+        """A completed validation consumes the intent id for this engine, approved or denied.
+
+        ``_seen_intent_ids`` is written before the approve/deny branch, so an
+        ordinary denial (here: no account evidence) is final for that intent on
+        this engine instance — the retry with healthy inputs is refused as a
+        duplicate, not re-judged. Fail-closed: the cost is a missed identical
+        intent, never a second judgement of it. Only a new engine instance
+        resets the set. Pinned so the semantic is deliberate; a change to "only
+        approvals are remembered" must change this test on purpose. The
+        internal-error path is the exception and is pinned separately below.
+        """
+        engine = RiskEngine(permissive_policy())
+        halt = armed_halt(tmp_path).read()
+        intent = make_intent()
+        first = engine.validate(
+            intent,
+            account=None,
+            market=fresh_market(),
+            halt=halt,
+            mode_lock=sim_lock(),  # type: ignore[arg-type]
+            now_utc=NOW,
+        )
+        second = engine.validate(
+            intent,
+            account=healthy_account(),
+            market=fresh_market(),
+            halt=halt,
+            mode_lock=sim_lock(),  # type: ignore[arg-type]
+            now_utc=NOW,
+        )
+        assert not first.approved
+        assert RiskRejectionCode.ACCOUNT_STATE_MISSING in first.codes
+        assert not second.approved
+        assert RiskRejectionCode.DUPLICATE_INTENT in second.codes
+        assert RiskRejectionCode.ACCOUNT_STATE_MISSING not in second.codes
+
+    def test_internal_error_result_does_not_consume_the_intent_id(self, tmp_path: Path) -> None:
+        """Pins current behaviour, not a design endorsement.
+
+        ``validate`` returns INTERNAL_ERROR_FAIL_CLOSED from its ``except``
+        before ``_validate`` reaches the seen-set write, so the same intent is
+        re-judged once the fault clears. Whether an internal error should also
+        consume the id is an owner-gate behaviour question; this test makes the
+        documented exception mechanically true until that is decided.
+        """
+        engine = RiskEngine(permissive_policy())
+        halt = armed_halt(tmp_path).read()
+        intent = make_intent()
+        broken_market = MarketViewEntry(
+            last_price=500.0,
+            bar_close_utc=NOW,
+            quote_utc=None,  # type: ignore[arg-type]
+        )
+        first = engine.validate(
+            intent,
+            account=healthy_account(),
+            market=broken_market,
+            halt=halt,
+            mode_lock=sim_lock(),  # type: ignore[arg-type]
+            now_utc=NOW,
+        )
+        second = engine.validate(
+            intent,
+            account=healthy_account(),
+            market=fresh_market(),
+            halt=halt,
+            mode_lock=sim_lock(),  # type: ignore[arg-type]
+            now_utc=NOW,
+        )
+        assert not first.approved
+        assert RiskRejectionCode.INTERNAL_ERROR_FAIL_CLOSED in first.codes
+        assert second.approved
+        assert RiskRejectionCode.DUPLICATE_INTENT not in second.codes
+
     def test_risk_engine_internal_error_fails_closed(self, tmp_path: Path) -> None:
         engine = RiskEngine(permissive_policy())
         broken_market = MarketViewEntry(
