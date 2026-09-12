@@ -1,8 +1,19 @@
 # Incident Response
 
-For the single operator. The theme of every playbook: halt first (always safe), gather evidence,
-resolve at the broker manually, document, and only then rearm with a note. The platform never
-auto-flattens and never auto-resumes; those are features, not gaps.
+For the single operator. The theme of every playbook: **stop both planes first** (always safe),
+gather evidence, resolve at the broker manually, document, and only then re-enable — each plane
+with its own command and its own note. The platform never auto-flattens and never auto-resumes;
+those are features, not gaps.
+
+Chronos has **two independent stop mechanisms on two planes**, and neither reaches the other:
+
+| Plane | What it does | Stop | Re-enable (grants authority) |
+|---|---|---|---|
+| Live order plane — `chronos.orders` | the only code that can place a broker order | `POST /live/kill` (kill switch, HTTP; also the terminal's **ENGAGE KILL SWITCH** button) | `POST /live/kill/disengage`, then `POST /live/arm` |
+| Deterministic platform — `chronos.execution` / `chronos.risk` | intent generation, risk, the paper/shadow pipeline | `python -m chronos.cli halt --reason "…"` (file: `data/platform_halt.json`) | `python -m chronos.cli rearm --note "…"` |
+
+Every "stop" step below means **both**. A playbook step that stopped only one plane was VCP §6
+finding 2; the pins in `tests/unit/test_incident_runbook_commands.py` hold every step to both.
 
 ## Severity levels
 
@@ -12,7 +23,8 @@ auto-flattens and never auto-resumes; those are features, not gaps.
 | SEV-2 | Safety machinery degraded | audit-chain verification failure, halt-file corruption, ledger write failure, illegal state transition halt |
 | SEV-3 | Operational disruption, safety intact | gateway disconnects, pacing violations, data-quality blocks, stuck-but-explained orders |
 
-SEV-1/SEV-2: do not trade (do not rearm) until the incident is explained and documented.
+SEV-1/SEV-2: do not trade — do not `rearm` the deterministic platform and do not
+`POST /live/kill/disengage` the live plane — until the incident is explained and documented.
 
 ## Immediate actions (any incident)
 
@@ -85,7 +97,13 @@ SEV-1/SEV-2: do not trade (do not rearm) until the incident is explained and doc
 > **Under a recovery hold, `POST /live/kill` and `POST /live/disarm` still work** — they only
 > ever remove authority. `POST /live/kill/disengage` does not, because it grants authority
 > back: acknowledge the restore first, then decide about the stop.
-2. **Stop making changes.** No code edits, no config edits, no cleanup, until evidence is
+4. **If the backend is not running** (crashed, stopped, or you stopped it): nothing on the
+   live plane can place an order while it is down, but `POST /live/kill` is unreachable too —
+   the kill switch is HTTP-only and has no CLI. Before any restart: move `AUTONOMY_MANDATE_FILE`
+   aside (step 3 — a valid mandate auto-activates on boot), `python -m chronos.cli halt` (works
+   with the backend down; it writes `data/platform_halt.json`), then engage the kill switch as
+   the first action after the backend is up, before arming anything.
+5. **Stop making changes.** No code edits, no config edits, no cleanup, until evidence is
    captured.
 
 ## Evidence capture
@@ -98,6 +116,7 @@ cp data/platform_audit.jsonl incidents/$(date +%F-%H%M)/
 cp data/platform_audit.head.json incidents/$(date +%F-%H%M)/   # the log's head anchor travels with it
 sqlite3 data/platform_ledger.db ".backup 'incidents/$(date +%F-%H%M)/platform_ledger.db'"
 cp data/platform_halt.json incidents/$(date +%F-%H%M)/ 2>/dev/null
+cp data/live_kill_switch.json data/state_generation.json incidents/$(date +%F-%H%M)/ 2>/dev/null
 python -m chronos.cli status > incidents/$(date +%F-%H%M)/status.txt 2>&1
 ```
 
@@ -117,7 +136,9 @@ economic content), the risk engine's per-instance duplicate check, the ledger pr
 and `orderRef` at the broker (`src/chronos/execution/intents.py`, `sqlite_ledger.py`,
 `brokers/ibkr_paper.py`).
 
-1. Halt.
+1. **Stop both planes** (Immediate actions 1–3): `POST /live/kill` for the live order plane and
+   `python -m chronos.cli halt --reason "SEV-n: <one line>"` for the deterministic platform;
+   revoke or move aside any mandate.
 2. In the ledger: does the intent id appear more than once in `intents`? (It cannot — PK — so two
    suspicious broker orders should map to two DIFFERENT intent ids. Diff their economic content.)
    ```bash
@@ -137,7 +158,10 @@ and `orderRef` at the broker (`src/chronos/execution/intents.py`, `sqlite_ledger
 Reconciliation reports `UNEXPLAINED_POSITION`; trading is blocked; **no auto-flatten exists**
 (`src/chronos/execution/reconciliation.py`).
 
-1. Halt (reconciliation already blocks, but the halt records your involvement).
+1. **Stop both planes** (Immediate actions 1–3): `POST /live/kill` for the live order plane —
+   reconciliation blocks the deterministic platform, not the live plane — and
+   `python -m chronos.cli halt --reason "SEV-n: <one line>"`, which records your involvement;
+   revoke or move aside any mandate.
 2. Identify the position's origin at the broker: TWS trade log, execution reports, other API
    client ids, manual trades. Check whether the ledger has fills for that symbol:
    ```bash
@@ -153,7 +177,9 @@ Reconciliation reports `UNEXPLAINED_POSITION`; trading is blocked; **no auto-fla
 
 A fill event or commission report for something the ledger cannot match.
 
-1. Halt.
+1. **Stop both planes** (Immediate actions 1–3): `POST /live/kill` for the live order plane and
+   `python -m chronos.cli halt --reason "SEV-n: <one line>"` for the deterministic platform;
+   revoke or move aside any mandate.
 2. Pull the broker execution report (time, symbol, quantity, price, orderRef).
 3. Match against `intents`/`fills` by orderRef (= intent id). No match: which client id placed
    it? Another API client or a manual TWS action is the usual answer; the platform-side
@@ -167,16 +193,19 @@ Should be impossible: the risk engine denies on stale evidence — `STALE_MARKET
 or bar age exceeds the policy limit, and a zero (default) limit denies everything; missing
 snapshots deny as `MARKET_STATE_MISSING`/`ACCOUNT_STATE_MISSING` (`src/chronos/risk/engine.py`).
 
-1. If you suspect an order was generated on stale data, check the decision trail. Shadow scans
-   append the full risk decision — codes such as `STALE_MARKET_DATA` plus explanations — to the
-   audit log as `shadow_scan` records. Backtest summaries count rejections in `risk_rejections`.
-   Note the ledger only ever contains intents that passed risk and reached submission; a rejected
-   intent leaves no ledger row, so its absence there is expected.
-2. Verify the policy actually in force: `python -m chronos.cli risk-show --policy <path>` (check
+1. **Stop both planes** (Immediate actions 1–3): `POST /live/kill` for the live order plane and
+   `python -m chronos.cli halt --reason "SEV-n: <one line>"` for the deterministic platform;
+   revoke or move aside any mandate.
+2. Check the decision trail. Shadow scans append the full risk decision — codes such as
+   `STALE_MARKET_DATA` plus explanations — to the audit log as `shadow_scan` records. Backtest
+   summaries count rejections in `risk_rejections`. Note the ledger only ever contains intents
+   that passed risk and reached submission; a rejected intent leaves no ledger row, so its
+   absence there is expected.
+3. Verify the policy actually in force: `python -m chronos.cli risk-show --policy <path>` (check
    `max_quote_age_seconds` / `max_bar_age_seconds` are the values you intended — zero means deny
    everything, not "no limit").
-3. If an order truly passed with stale data, that is a SEV-1 code bug: halt, capture evidence, do
-   not rearm until the check is fixed and covered by a test.
+4. If an order truly passed with stale data, that is a SEV-1 code bug: capture evidence and do
+   not re-enable either plane until the check is fixed and covered by a test.
 
 ### Halt-file corruption
 
@@ -184,7 +213,11 @@ By design this fails closed: a corrupt/unreadable `data/platform_halt.json` read
 reason `STATE_CORRUPTION` (`src/chronos/control/halt.py`). There is no window where corruption
 means "armed".
 
-1. Nothing is trading; confirm with `python -m chronos.cli status`.
+1. **Stop both planes** (Immediate actions 1–3): the corrupt file already reads HALTED for the
+   deterministic platform — confirm with `python -m chronos.cli status`, and
+   `python -m chronos.cli halt --reason "SEV-2: halt-file corruption"` records your involvement
+   once the file is writable again — but the halt file is not read by the live order plane at
+   all, so engage `POST /live/kill` and revoke or move aside any mandate.
 2. Investigate cause (disk full? crash mid-write? — writes are atomic temp+rename, so torn files
    should not occur; their appearance suggests filesystem trouble).
 3. Restore the halt file from backup if you want the previous reason/note preserved
@@ -200,7 +233,9 @@ failure against the sibling `platform_audit.head.json`: `truncation/rollback`, `
 
 **Treat as a tamper-or-corruption incident. Do not trade until explained.**
 
-1. Halt.
+1. **Stop both planes** (Immediate actions 1–3): `POST /live/kill` for the live order plane and
+   `python -m chronos.cli halt --reason "SEV-n: <one line>"` for the deterministic platform;
+   revoke or move aside any mandate.
 2. Preserve the file immediately (copy with timestamps) before anything appends to it.
 3. Compare against your most recent off-machine backup: the chain should be a prefix match up to
    the backup's last record. Divergence before that point means the file was modified after the
@@ -219,5 +254,13 @@ failure against the sibling `platform_audit.head.json`: `truncation/rollback`, `
   evidence directory.
 - Update RISK_REGISTER.md if the incident revealed a new risk or changed a mitigation's status
   (owner action — this file is maintained by hand).
-- Rearm only with a note that references the incident:
-  `python -m chronos.cli rearm --note "incident <date> resolved: <summary>"`.
+- Re-enable **each plane separately**, each with a note that references the incident, and in
+  this order — the deterministic platform first, the plane that can place orders last:
+  1. `python -m chronos.cli rearm --note "incident <date> resolved: <summary>"` — re-arms the
+     deterministic platform (`data/platform_halt.json`).
+  2. `POST /live/kill/disengage` with an operator note, then `POST /live/arm` — re-enable the
+     live order plane. **Both grant authority**: they remain token-and-lease actions, are
+     deliberately absent from the terminal panel, and are refused under a recovery hold until
+     the restore is acknowledged (`docs/live_trading_runbook.md`).
+  3. A moved-aside mandate file re-activates on the next boot if it is put back (ADR-0017): put
+     it back last, deliberately, or have the owner re-issue it.
