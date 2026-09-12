@@ -37,6 +37,9 @@ release-gate:
 
 gates: lint format-check type type-worker test security-gate release-gate
 
+current-state:
+	$(PY) scripts/build_current_state.py
+
 backend:
 	$(PY) scripts/run_backend.py
 

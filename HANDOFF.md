@@ -1,5 +1,7 @@
 # Chronos — Handoff
 
+> Current repository state is **generated, not written**: [docs/generated/CURRENT_STATE.md](docs/generated/CURRENT_STATE.md) (`make current-state`) — this file keeps its history and is not current truth.
+
 > **This document describes the deterministic strategy platform as of 2026-07-17 and is
 > partly stale.** Since it was written: Milestones 5-7C delivered the gated paper and live
 > order pipeline in `chronos.orders` (ADR-0009, ADR-0010), and ADR-0016/D-16 (2026-07-25)

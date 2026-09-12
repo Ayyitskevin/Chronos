@@ -1,5 +1,7 @@
 # TASKS
 
+> Current repository state is **generated, not written**: [docs/generated/CURRENT_STATE.md](docs/generated/CURRENT_STATE.md) (`make current-state`) — this file keeps its history and is not current truth.
+
 > **Legacy board.** This file primarily tracks the deterministic strategy-platform build
 > and is not repository-wide current truth. All new work must be sequenced and judged
 > against [docs/VISION_COMPLETION_PLAN.md](docs/VISION_COMPLETION_PLAN.md); verify every
