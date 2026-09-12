@@ -16,6 +16,7 @@ Every order intent passes through ``RiskEngine.validate``. The engine:
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -70,6 +71,45 @@ class AccountView:
     peak_equity_usd: float
     consecutive_losses: int
     as_of_utc: datetime
+
+
+def _unusable_account_evidence(account: AccountView) -> list[tuple[str, str]]:
+    """Name every float evidence field the checks below could not honestly compare.
+
+    A value of the right type but outside its domain raises nothing: ``notional > nan`` is
+    False, ``nan > 0`` is False, ``nan >= limit`` is False — so a NaN silently switches a
+    check off rather than failing it (Daybreak's #220 review approved a NaN-cash entry under
+    ``allow_margin=False``), and an infinity zeroes or explodes a ratio. The fail-closed
+    catch-all only sees exceptions. So, as ``last_price > 0`` treats a non-positive price as
+    missing market evidence, every float field on the view must be finite, and cash must be
+    non-negative besides: this plane has no debit-balance model, so a negative cash figure is
+    evidence outside it, not a margin loan the engine knows how to bound. One site, every field.
+    """
+
+    problems: list[tuple[str, str]] = []
+    for name, value in (
+        ("account_equity_usd", account.account_equity_usd),
+        ("cash_usd", account.cash_usd),
+        ("realized_pnl_today_usd", account.realized_pnl_today_usd),
+        ("realized_pnl_week_usd", account.realized_pnl_week_usd),
+        ("peak_equity_usd", account.peak_equity_usd),
+    ):
+        if not math.isfinite(value):
+            problems.append((name, f"{value!r} is not a finite number"))
+    if math.isfinite(account.cash_usd) and account.cash_usd < 0:
+        problems.append(
+            (
+                "cash_usd",
+                f"{account.cash_usd!r} is negative; this plane has no debit-balance model, so "
+                "a negative cash figure is evidence outside it",
+            )
+        )
+    for symbol, notional in account.position_notional_usd.items():
+        if not math.isfinite(notional):
+            problems.append(
+                (f"position_notional_usd[{symbol}]", f"{notional!r} is not a finite number")
+            )
+    return problems
 
 
 @dataclass(frozen=True, slots=True)
@@ -234,6 +274,13 @@ class RiskEngine:
                 deny(RiskRejectionCode.MARKET_STATE_MISSING, "market last price is not positive")
 
         if account is not None:
+            # Unusable evidence is missing evidence (see _unusable_account_evidence); every
+            # check below still runs and reports, in the engine's evaluate-everything style.
+            for field_name, problem in _unusable_account_evidence(account):
+                deny(
+                    RiskRejectionCode.ACCOUNT_STATE_MISSING,
+                    f"account evidence is unusable: {field_name} {problem}",
+                )
             equity = account.account_equity_usd
             notional = float(intent.notional)
             gross_exposure = sum(abs(v) for v in account.position_notional_usd.values())

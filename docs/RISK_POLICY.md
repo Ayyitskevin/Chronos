@@ -40,7 +40,11 @@ deviation from last trade within bounds.
 Financial: authorized capital nonzero, order notional, aggregate exposure,
 cash (an entry whose notional exceeds `AccountView.cash_usd` is denied with
 `MARGIN_FORBIDDEN` unless `allow_margin` is true — strictly above cash, so a
-notional equal to cash is not margin; enforced 2026-09-12), per-symbol
+notional equal to cash is not margin; enforced 2026-09-12; unusable cash
+evidence — NaN, ±inf, or negative — is denied as `ACCOUNT_STATE_MISSING`
+whatever the flag says, and so is any non-finite equity, realized-P&L, peak
+or position-notional figure, because a comparison against NaN is silently
+false), per-symbol
 exposure fraction, per-trade risk from the mandatory stop (entries without a
 stop are denied; stops at/above the limit are denied), max simultaneous
 positions, max open orders, daily and weekly realized-loss limits, drawdown
@@ -87,7 +91,7 @@ RISK_REGISTER R-78.
 | Margin, shorts, options, market orders | disabled — margin by the engine (`MARGIN_FORBIDDEN`: an entry's notional may not exceed the account's cash unless `allow_margin`; the sizer's cash budget also caps it upstream); shorts, options and market orders by structure (unrepresentable or denied by construction) — their `allow_*` flags are declared, not enforced (section above). The cash the engine compares against is whatever the caller supplies as `AccountView.cash_usd`: the backtest supplies simulated cash; the service and shadow-scan currently pass configured equity, so there the rule bounds entries by configured equity, not by broker-reported cash. |
 | Averaging down / martingale / pyramiding | disabled — via `PYRAMIDING_FORBIDDEN` (any add to an existing position is denied); `allow_averaging_down` itself is declared, not enforced (section above). |
 | Trading on stale data | denied (zero default age limit) |
-| Trading with unknown account state | denied |
+| Trading with unknown account state | denied — including account evidence that is present but unusable (non-finite equity, cash, P&L, peak or position notionals; negative cash), which is denied as `ACCOUNT_STATE_MISSING` rather than compared |
 | Auto-resume after restart or disconnect | denied (halt + reconciliation gates) |
 | Auto-promotion between modes | denied (promotion records are evidence only) |
 
