@@ -26,6 +26,8 @@ import re
 from pathlib import Path
 from types import ModuleType
 
+import pytest
+
 import chronos.auditlog as auditlog_pkg
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -207,6 +209,48 @@ def test_finding_status_rules_on_synthetic_text() -> None:
     assert classify("   \n  ") == "UNKNOWN"
     for text in ("", "~~x~~", "garbage ~~ half struck"):
         assert classify(text) not in {"ADDRESSED", "ADDRESSED_WITH_RESIDUAL", "CLOSED"}
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [
+        "**Unaddressed: waiting on the owner.**",
+        "**Not addressed: waiting.**",
+        "**Not addressed 2026-09-01: still waiting.**",
+        "**Partially addressed 2026-09-01 (half the fields).**",
+        "**Never addressed 2026-09-01.**",
+        "**unaddressed 2026-09-01**",
+        "**not addressed**",
+        "**partially addressed**",
+        "**The owner later addressed this in conversation.**",
+        "**Status note, not a closure: observed 2026-09-03.**",
+    ],
+)
+def test_negative_and_unqualified_markers_stay_unknown(marker: str) -> None:
+    """Daybreak's HOLD on #221: the substring 'addressed' inside '**Unaddressed: …**' or
+    '**Not addressed: …**' classified as ADDRESSED. Only a bold marker that BEGINS with
+    Addressed/Closed, or that reads '<qualifier> addressed <date>' with no negating qualifier,
+    is positive. Everything else on a struck finding is UNKNOWN — never closed."""
+
+    module = _generator()
+    assert module._finding_status(f"~~Old statement.~~ {marker}") == "UNKNOWN", marker
+    assert module._is_positive_marker(marker.strip("*")) is False, marker
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [
+        "**Addressed 2026-08-13 (A1; R-49):**",
+        "**Closed 2026-08-13 (D-1):**",
+        "**Kill-engaged half addressed 2026-09-03 (D-63/ADR-0049, R-66):**",
+        "**Read-only and unreconciled addressed 2026-09-04 (D-69/ADR-0054, R-72):**",
+        "**Evidence half addressed 2026-08-14 (A2) — finding 6 is now closed on both halves.**",
+    ],
+)
+def test_the_plan_s_own_positive_markers_are_recognised(marker: str) -> None:
+    module = _generator()
+    assert module._is_positive_marker(marker.strip("*")) is True, marker
+    assert module._finding_status(f"~~Old statement.~~ {marker}") == "ADDRESSED", marker
 
 
 def test_a_missing_findings_section_yields_unknown_rows_not_silence(tmp_path: Path) -> None:
