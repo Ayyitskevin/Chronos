@@ -15,6 +15,8 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+
 from chronos.control.halt import HaltStore
 from chronos.control.modes import ModeLock, TradingMode, resolve_mode_lock
 from chronos.domain.enums import OrderSide
@@ -284,3 +286,81 @@ def test_margin_rule_binds_strictly_above_cash(tmp_path: Path) -> None:
     one_cent_short = _decide(tmp_path, _policy(), account=_account(cash_usd=999.99))
     assert not one_cent_short.approved
     assert RiskRejectionCode.MARGIN_FORBIDDEN in one_cent_short.codes
+
+
+# ------------------------------------------ unusable account evidence (Daybreak HOLD on #220)
+
+_NAN, _INF = float("nan"), float("inf")
+
+
+@pytest.mark.parametrize("cash", [_NAN, _INF, -_INF, -1.0], ids=["nan", "+inf", "-inf", "negative"])
+def test_unusable_cash_evidence_fails_closed(tmp_path: Path, cash: float) -> None:
+    """Daybreak's probe at d7f734b: ``notional > nan`` is False, so NaN cash was APPROVED under
+    ``allow_margin=False``. Evidence of the right type but outside its domain raises nothing, so
+    the catch-all never sees it; it is denied explicitly, the way a non-positive last price is
+    (MARKET_STATE_MISSING): unusable evidence is missing evidence — whatever the flag says."""
+
+    for allow_margin in (False, True):
+        decision = _decide(
+            tmp_path, _policy(allow_margin=allow_margin), account=_account(cash_usd=cash)
+        )
+        assert not decision.approved, (cash, allow_margin)
+        assert RiskRejectionCode.ACCOUNT_STATE_MISSING in decision.codes, (cash, decision.codes)
+        explanation = decision.explanations[
+            decision.codes.index(RiskRejectionCode.ACCOUNT_STATE_MISSING)
+        ]
+        assert "cash_usd" in explanation, explanation
+        assert (
+            RiskRejectionCode.INTERNAL_ERROR_FAIL_CLOSED not in decision.codes
+        )  # explicit, not the catch-all
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("account_equity_usd", _NAN),
+        ("account_equity_usd", _INF),
+        ("account_equity_usd", -_INF),
+        ("realized_pnl_today_usd", _NAN),
+        ("realized_pnl_week_usd", _NAN),
+        ("peak_equity_usd", _NAN),
+    ],
+    ids=["equity-nan", "equity-+inf", "equity--inf", "pnl-today-nan", "pnl-week-nan", "peak-nan"],
+)
+def test_unusable_float_evidence_fails_closed_at_the_same_site(
+    tmp_path: Path, field: str, value: float
+) -> None:
+    """The same hole, same guard: a NaN equity silently skips the exposure-fraction and per-trade
+    risk checks (``equity > 0`` is False), a NaN P&L skips the loss limits, a NaN peak skips the
+    drawdown check. One site names every unusable field."""
+
+    decision = _decide(tmp_path, _policy(), account=_account(**{field: value}))
+    assert not decision.approved, (field, value)
+    assert RiskRejectionCode.ACCOUNT_STATE_MISSING in decision.codes, (field, decision.codes)
+    explanation = decision.explanations[
+        decision.codes.index(RiskRejectionCode.ACCOUNT_STATE_MISSING)
+    ]
+    assert field in explanation, explanation
+
+
+def test_unusable_position_notional_fails_closed(tmp_path: Path) -> None:
+    # A NaN notional on an unrelated symbol makes gross exposure NaN, and "nan > cap" is False.
+    decision = _decide(
+        tmp_path,
+        _policy(max_aggregate_exposure_usd=1500),
+        account=_account(position_shares={"QQQ": 3}, position_notional_usd={"QQQ": _NAN}),
+    )
+    assert not decision.approved
+    assert RiskRejectionCode.ACCOUNT_STATE_MISSING in decision.codes, decision.codes
+    explanation = decision.explanations[
+        decision.codes.index(RiskRejectionCode.ACCOUNT_STATE_MISSING)
+    ]
+    assert "position_notional_usd[QQQ]" in explanation, explanation
+
+
+def test_negative_realized_pnl_is_a_loss_not_unusable_evidence(tmp_path: Path) -> None:
+    """Non-negativity is a cash rule only: a realized loss is legitimate evidence and stays
+    governed by the loss limits, so the generous baseline approves it."""
+
+    decision = _decide(tmp_path, _policy(), account=_account(realized_pnl_today_usd=-50.0))
+    assert decision.approved, decision.explanations
