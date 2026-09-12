@@ -280,9 +280,26 @@ _FORWARD_FLAGS = (
 _REGISTER_ROW = re.compile(r"^\| (R-\d+[^ |]*) \| ([^|]+) \| ([^|]+) \| ([^|]+) \|")
 _STRUCK = re.compile(r"~~.*?~~", re.S)
 _BOLD_SPAN = re.compile(r"\*\*([^*]+?)\*\*", re.S)
-_LEADING_CLOSURE = re.compile(r"^\s*(?:addressed|closed)\b", re.I)
-_QUALIFIED_CLOSURE = re.compile(r"^\s*(?P<qualifier>[^:.;]*?)\baddressed\s+\d{4}-\d{2}-\d{2}", re.I)
-_NEGATING_QUALIFIERS = frozenset({"not", "never", "un", "partially", "partial", "unaddressed"})
+# The plan's closure forms, and nothing else (a positive grammar — Daybreak's HOLD on #223):
+# a marker is positive only when the bold text BEGINS with one of these heads, optionally
+# followed by a date, then a parenthetical, colon, dash, period or the end. Case-sensitive, as
+# the plan writes them. Anything in front of a head — "Not", "No longer", "Partly", "Still
+# not", "Never", "Un-", any word at all — fails at the anchor, by construction. A qualified
+# form the plan has not used yet ("<Part> half addressed …") reads UNKNOWN until it is added
+# here, deliberately: the safe direction is a closure the page refuses to see.
+_CLOSURE_HEADS = (
+    "Addressed",
+    "Closed",
+    "Kill-engaged half addressed",
+    "Evidence half addressed",
+    "Read-only and unreconciled addressed",
+)
+_POSITIVE_MARKER = re.compile(
+    r"^\s*(?:" + "|".join(re.escape(head) for head in _CLOSURE_HEADS) + r")"
+    r"(?:\s+\d{4}-\d{2}-\d{2})?"
+    r"\s*(?:[(:.]|\u2014|\u2013|$)",  # "(", ":", ".", em dash, en dash, or the end
+    re.S,
+)
 _RESIDUAL_MARKER = re.compile(r"Still open from this\s+finding", re.I)
 _PLAN_SECTION_6 = re.compile(r"^## 6\. .*$", re.M)
 _PLAN_SECTION_END = re.compile(r"^(Required design outcomes:|## )", re.M)
@@ -324,23 +341,22 @@ def _register_rows(path: Path) -> list[dict[str, str]]:
 
 
 def _is_positive_marker(bold_text: str) -> bool:
-    """Is one bold marker a positive closure statement, by the plan's own two forms?
+    """Is one bold marker one of the plan's closure forms? A grammar, not a denylist.
 
-    Positive, and nothing else: bold text that BEGINS with the word "Addressed" or
-    "Closed" (``**Addressed 2026-08-13 (A1; R-49):**``), or "<qualifier> addressed <date>"
-    where the qualifier carries no negation (``**Kill-engaged half addressed 2026-09-03
-    (…):**``).  "Unaddressed", "Not addressed", "Partially addressed", "Never addressed"
-    and a sentence that merely contains the word are not closure — Daybreak's HOLD on
-    #221 found the substring match reading every one of them as ADDRESSED.
+    Positive: the text begins with a closure head from ``_CLOSURE_HEADS`` — ``Addressed``,
+    ``Closed``, or one of the exact qualified phrases the plan uses — then optionally a
+    date, then a parenthetical, colon, dash, period or the end: ``**Addressed 2026-08-13
+    (A1; R-49):**``, ``**Kill-engaged half addressed 2026-09-03 (…):**``, ``**Closed —
+    superseded.**``.  Nothing else.  "Unaddressed", "Not addressed", "No longer addressed",
+    "Partly addressed", "Still not addressed", "Never addressed", a qualified phrase the
+    plan never used, and a sentence that merely contains the word all fail at the anchor:
+    Daybreak's HOLD on #221 found a substring match reading the first of these as
+    ADDRESSED, and its re-verification of #223 found a denylist of negating words letting
+    the third and fourth through.  A list of words to refuse can always be widened by one
+    more; a list of forms to accept cannot be.
     """
 
-    if _LEADING_CLOSURE.match(bold_text) is not None:
-        return True
-    qualified = _QUALIFIED_CLOSURE.match(bold_text)
-    if qualified is None:
-        return False
-    qualifier_words = set(re.findall(r"[a-z]+", qualified.group("qualifier").lower()))
-    return not (qualifier_words & _NEGATING_QUALIFIERS)
+    return _POSITIVE_MARKER.match(bold_text) is not None
 
 
 def _finding_status(text: str) -> str:
