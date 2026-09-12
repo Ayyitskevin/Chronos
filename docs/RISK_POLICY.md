@@ -38,22 +38,27 @@ price, quote age and bar age within limits (a zero limit denies), limit-price
 deviation from last trade within bounds.
 
 Financial: authorized capital nonzero, order notional, aggregate exposure,
-per-symbol exposure fraction, per-trade risk from the mandatory stop
-(entries without a stop are denied; stops at/above the limit are denied),
-max simultaneous positions, max open orders, daily and weekly realized-loss
-limits, drawdown from peak equity, consecutive-loss count.
+cash (an entry whose notional exceeds `AccountView.cash_usd` is denied with
+`MARGIN_FORBIDDEN` unless `allow_margin` is true — strictly above cash, so a
+notional equal to cash is not margin; enforced 2026-09-12), per-symbol
+exposure fraction, per-trade risk from the mandatory stop (entries without a
+stop are denied; stops at/above the limit are denied), max simultaneous
+positions, max open orders, daily and weekly realized-loss limits, drawdown
+from peak equity, consecutive-loss count.
 
 Behavioral: pyramiding denied unless enabled, sells capped at held shares
 (no shorts), no market-order type exists at all in the platform.
 
 ## Declared, not enforced (awaiting owner disposition)
 
-Eight `RiskPolicy` fields are **declared, not enforced**: the schema validates
+Seven `RiskPolicy` fields are **declared, not enforced**: the schema validates
 them, `config_hash` digests them, every checked-in profile sets them, and
-nothing under `src/chronos` reads them (verified at `a1a9f59`, 2026-09-11;
-pinned by `tests/safety/test_risk_policy_inert_fields_disclosed.py`, which
-fails if the set changes in either direction). Setting any of them changes no
-decision. What each name promises, and what actually holds today:
+nothing under `src/chronos` reads them (eight were found at `a1a9f59`,
+2026-09-11; `allow_margin` was enforced on 2026-09-12 and is now listed under
+the financial checks above; pinned by
+`tests/safety/test_risk_policy_inert_fields_disclosed.py`, which fails if the
+set changes in either direction). Setting any of them changes no decision.
+What each name promises, and what actually holds today:
 
 | Field | Promise | What holds today |
 |---|---|---|
@@ -61,7 +66,6 @@ decision. What each name promises, and what actually holds today:
 | `max_order_rejections_per_day` | stop after N rejections in a day | Nothing counts rejections against it. The backtest reports `risk_rejections`; no caller supplies a per-day count to the engine. |
 | `cooldown_bars_after_loss_halt` | wait N bars after a loss halt | No bar-counted cooldown exists. A halt clears only by an explicit operator rearm. |
 | `allow_market_orders` | permit market orders | Unrepresentable: `OrderIntent` is limit-only. The autonomy plane's protected `MARKET` form is granted by the mandate's `order_forms` (ADR-0017 §3), not by this flag. |
-| `allow_margin` | never buy beyond cash | **Not guaranteed by the engine.** `AccountView.cash_usd` is never read and no check compares notional to cash; the only cash bound is the sizer's budget, upstream of the engine. |
 | `allow_overnight_positions` | flat by the close when false | No session clock and no end-of-session flatten exist; positions are always carried overnight, whatever the flag says. |
 | `allow_averaging_down` | never add to a losing position | Subsumed while `allow_pyramiding` is false (`PYRAMIDING_FORBIDDEN` denies any add). Under a pyramiding grant nothing would distinguish an add below cost. |
 | `allow_options` | permit option orders | Unrepresentable: this plane has no option intent (see "Options" below). |
@@ -80,7 +84,7 @@ RISK_REGISTER R-78.
 | Live account allowlist | not even representable; paper allowlist empty by default |
 | Live capital authorization | zero (no field exists to set it) |
 | Bot capital / notional / exposure limits | 0 (deny) |
-| Margin, shorts, options, market orders | disabled — shorts, options and market orders by structure (unrepresentable or denied by construction); margin **only** by the sizer's cash budget, not by the engine. The `allow_*` flags for all four are declared, not enforced (section above). |
+| Margin, shorts, options, market orders | disabled — margin by the engine (`MARGIN_FORBIDDEN`: an entry's notional may not exceed the account's cash unless `allow_margin`; the sizer's cash budget also caps it upstream); shorts, options and market orders by structure (unrepresentable or denied by construction) — their `allow_*` flags are declared, not enforced (section above). The cash the engine compares against is whatever the caller supplies as `AccountView.cash_usd`: the backtest supplies simulated cash; the service and shadow-scan currently pass configured equity, so there the rule bounds entries by configured equity, not by broker-reported cash. |
 | Averaging down / martingale / pyramiding | disabled — via `PYRAMIDING_FORBIDDEN` (any add to an existing position is denied); `allow_averaging_down` itself is declared, not enforced (section above). |
 | Trading on stale data | denied (zero default age limit) |
 | Trading with unknown account state | denied |

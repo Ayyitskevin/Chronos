@@ -41,6 +41,7 @@ class RiskRejectionCode(StrEnum):
     ZERO_CAPITAL_AUTHORIZED = "ZERO_CAPITAL_AUTHORIZED"
     NOTIONAL_LIMIT = "NOTIONAL_LIMIT"
     AGGREGATE_EXPOSURE_LIMIT = "AGGREGATE_EXPOSURE_LIMIT"
+    MARGIN_FORBIDDEN = "MARGIN_FORBIDDEN"
     SYMBOL_EXPOSURE_LIMIT = "SYMBOL_EXPOSURE_LIMIT"
     RISK_PER_TRADE_LIMIT = "RISK_PER_TRADE_LIMIT"
     MAX_POSITIONS = "MAX_POSITIONS"
@@ -256,6 +257,17 @@ class RiskEngine:
                         RiskRejectionCode.AGGREGATE_EXPOSURE_LIMIT,
                         f"gross exposure ${gross_exposure + notional:,.2f} would exceed "
                         f"${policy.max_aggregate_exposure_usd:,.2f}",
+                    )
+                # The independent cash bound (2026-09-12, P3-B-1). The sizer already budgets
+                # min(equity * fraction, cash) upstream, but this engine is the check that
+                # must hold when a strategy-shaped bug or a new caller bypasses the sizer:
+                # an entry may not buy beyond the account's cash unless margin is enabled.
+                # Strictly above cash: a notional equal to cash is not margin.
+                if not policy.allow_margin and notional > account.cash_usd:
+                    deny(
+                        RiskRejectionCode.MARGIN_FORBIDDEN,
+                        f"order notional ${notional:,.2f} exceeds cash "
+                        f"${account.cash_usd:,.2f} and margin is not enabled",
                     )
                 if equity > 0 and (symbol_exposure + notional) / equity > (
                     policy.max_symbol_exposure_fraction

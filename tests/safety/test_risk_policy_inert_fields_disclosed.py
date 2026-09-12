@@ -5,6 +5,9 @@ advisory, or forbidden. Inert authority, risk, exit, or protection fields are re
 blockers."  A read-only review at ``a1a9f59`` (2026-09-11) found eight ``RiskPolicy``
 fields that nothing under ``src/chronos`` reads: the schema validates them, ``config_hash``
 digests them, every checked-in profile sets them, and none of them can change a decision.
+One has since moved: ``allow_margin`` is ENFORCED as of 2026-09-12 (``MARGIN_FORBIDDEN``,
+P3-B-1) — this pin failed in its designed direction when the engine first named the field,
+and was reclassified only after that failure was recorded. Seven remain inert.
 
 They are not a live defect. The deterministic platform's mode lock hard-denies live
 (ADR-0007), the sizer cannot create a short (ADR-0004 §2), ``OrderIntent`` has no market
@@ -104,9 +107,11 @@ POLICY_ENFORCEMENT = MappingProxyType(
         # limit-only); the autonomy plane's protected MARKET form is granted by the
         # mandate's ``order_forms``, not by this flag.
         "allow_market_orders": INERT,
-        # Nothing compares notional to cash in the engine (``AccountView.cash_usd`` is
-        # unread); the only cash bound is the sizer's budget, upstream of the engine.
-        "allow_margin": INERT,
+        # MARGIN_FORBIDDEN: an entry whose notional exceeds ``AccountView.cash_usd`` is
+        # denied unless the flag is set (engine.py, 2026-09-12). Breach ⇒ deny, the flag
+        # lifting it, and the strict-above-cash boundary are pinned in
+        # ``tests/platform_unit/test_risk_engine_limits.py``.
+        "allow_margin": ENFORCED,
         # No session clock and no end-of-session flatten exist in this plane; positions
         # are always carried overnight, whatever the flag says.
         "allow_overnight_positions": INERT,
