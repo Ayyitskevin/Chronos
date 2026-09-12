@@ -8,15 +8,21 @@ equality; otherwise we use pytest.approx with a tight tolerance.
 
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from chronos.indicators.core import (
     atr,
+    change,
+    crossover,
+    crossunder,
     ema,
     highest,
     lowest,
     percentrank,
     rma,
+    roc,
     rsi,
     sma,
     stdev,
@@ -169,3 +175,146 @@ class TestHighestLowest:
         # [3,1,4,1] -> hi 4 lo 1; [1,4,1,5] -> hi 5 lo 1
         assert highest(source, 4)[3:] == [4.0, 5.0]
         assert lowest(source, 4)[3:] == [1.0, 1.0]
+
+
+class TestChange:
+    def test_change_warmup_none_and_hand_computed(self) -> None:
+        # deltas: -[0] undefined (warm-up None at index 0),
+        # 3-1 = 2, 2-3 = -1, 5-2 = 3. All exact in binary.
+        # Index 0 can never be a delta: the series starts None there.
+        assert change([1.0, 3.0, 2.0, 5.0]) == [None, 2.0, -1.0, 3.0]
+
+    def test_change_nan_input_propagates_nan(self) -> None:
+        # change takes Sequence[float] (core.py:86) — a float('nan') is in
+        # contract; a Python None is not. NaN propagates through the
+        # subtraction: once one term is NaN, every following delta containing
+        # it is NaN.
+        out = change([1.0, float("nan"), 4.0])
+        assert out[0] is None
+        assert math.isnan(out[1])  # nan - 1.0
+        assert math.isnan(out[2])  # 4.0 - nan
+
+
+class TestRoc:
+    def test_roc_warmup_none_prefix(self) -> None:
+        # First value at index `length`; before it, `length` Nones.
+        # Flat source: every 100*(1-1)/1 = 0.0 is exact.
+        out = roc([1.0] * 6, 3)
+        assert out[:3] == [None, None, None]
+        assert out[3:] == [0.0, 0.0, 0.0]
+
+    def test_roc_hand_computed_percent_series(self) -> None:
+        # source = [10, 12, 9, 11], length 1 (base = previous bar):
+        # i=1: 100*(12-10)/10 = +20.0   (200/10, exact)
+        # i=2: 100*(9-12)/12  = -25.0   (-300/12, exact)
+        # i=3: 100*(11-9)/9   = +200/9  (22.222..., not dyadic -> approx)
+        out = roc([10.0, 12.0, 9.0, 11.0], 1)
+        assert out[0] is None
+        assert out[1] == 20.0
+        assert out[2] == -25.0
+        assert out[3] == pytest.approx(200.0 / 9.0, abs=APPROX)
+
+    def test_roc_zero_base_yields_none_not_exception(self) -> None:
+        # Pins CURRENT behaviour, not a design endorsement: when the base
+        # bar is exactly 0, core.py:99 returns None for that bar instead of
+        # raising ZeroDivisionError. Whether an interior None (as opposed to
+        # an exception, or +/inf) is the right contract is open.
+        # i=1: 100*(0-10)/10 = -100.0 (exact);  i=2: base == 0 -> None.
+        assert roc([10.0, 0.0, 5.0], 1) == [None, -100.0, None]
+
+
+class TestCrossover:
+    def test_crossover_hand_derived(self) -> None:
+        # a = [1, 3, 2.5, 3.5]; b = [2, 2, 4, 4]
+        # i=0: never a cross (no previous bar) -> False.
+        # i=1: a_now 3 > b_now 2, a_prev 1 <= b_prev 2 -> True.
+        # i=2: a_now 2.5 > b_now 4 is false -> False.
+        # i=3: a_now 3.5 > b_now 4 is false -> False.
+        # Pins the strict-`>` now side and the non-strict-`<=` prev side.
+        assert crossover([1.0, 3.0, 2.5, 3.5], [2.0, 2.0, 4.0, 4.0]) == [
+            False,
+            True,
+            False,
+            False,
+        ]
+
+    def test_crossover_equal_current_bar_does_not_cross(self) -> None:
+        # a = [1, 2]; b = [2, 2]: i=0 has no previous bar -> False.
+        # i=1: previous-bar predicate a_prev 1 <= b_prev 2 is TRUE, so the
+        # result is decided by the current-bar predicate alone: a_now 2 >
+        # b_now 2 is false -> False. This pins the strict `>`: with `>=`
+        # the bar would be True and this test would fail.
+        assert crossover([1.0, 2.0], [2.0, 2.0]) == [False, False]
+
+    def test_crossover_equal_previous_bar_counts(self) -> None:
+        # a = [2, 3]; b = [2, 2.5]: i=1 has a_now 3 > b_now 2.5 and the
+        # previous bar is EQUAL (2 <= 2); the non-strict `<=` side means an
+        # equality before the move still counts as a crossover.
+        assert crossover([2.0, 3.0], [2.0, 2.5]) == [False, True]
+
+    def test_crossover_false_when_previous_is_none(self) -> None:
+        # a = [None, 10, 1]; b = [20, 1, 1]: at i=1 the arithmetic would
+        # hold (10 > 1 and 10 <= 20), but a_prev is None, so per core.py:203
+        # the bar is False.
+        assert crossover([None, 10.0, 1.0], [20.0, 1.0, 1.0]) == [
+            False,
+            False,
+            False,
+        ]
+
+    def test_crossover_false_when_current_is_none(self) -> None:
+        # a = [5, 10, None]; b = [20, 1, 1]: i=1 is a legitimate True (10 > 1
+        # and 5 <= 20) as the control; i=2 has a_now None, so per core.py:203
+        # the bar is False.
+        assert crossover([5.0, 10.0, None], [20.0, 1.0, 1.0]) == [
+            False,
+            True,
+            False,
+        ]
+
+
+class TestCrossunder:
+    def test_crossunder_hand_derived(self) -> None:
+        # a = [1, 3, 2.5, 3.5]; b = [2, 2, 4, 4]
+        # i=0: never a cross -> False.
+        # i=1: a_now 3 < b_now 2 is false -> False.
+        # i=2: a_now 2.5 < b_now 4, a_prev 3 >= b_prev 2 -> True.
+        # i=3: a_now 3.5 < b_now 4 is true but a_prev 2.5 >= b_prev 4 is
+        # false -> False.
+        assert crossunder([1.0, 3.0, 2.5, 3.5], [2.0, 2.0, 4.0, 4.0]) == [
+            False,
+            False,
+            True,
+            False,
+        ]
+
+    def test_crossunder_equal_current_bar_does_not_cross(self) -> None:
+        # a = [2, 2]; b = [1, 2]: i=1 has a_now == b_now, so the strict `<`
+        # fails; equality is not a cross.
+        assert crossunder([2.0, 2.0], [1.0, 2.0]) == [False, False]
+
+    def test_crossunder_equal_previous_bar_counts(self) -> None:
+        # a = [2, 1]; b = [2, 1.5]: i=1 has a_now 1 < b_now 1.5 and the
+        # previous bar is EQUAL (2 >= 2); the non-strict `>=` side means an
+        # equality before the move still counts as a crossunder.
+        assert crossunder([2.0, 1.0], [2.0, 1.5]) == [False, True]
+
+    def test_crossunder_false_when_previous_is_none(self) -> None:
+        # a = [None, 1, 10]; b = [0, 10, 10]: at i=1 the arithmetic would
+        # hold (1 < 10 and 10 >= 0), but a_prev is None, so per core.py:214
+        # the bar is False.
+        assert crossunder([None, 1.0, 10.0], [0.0, 10.0, 10.0]) == [
+            False,
+            False,
+            False,
+        ]
+
+    def test_crossunder_false_when_current_is_none(self) -> None:
+        # a = [5, 1, None]; b = [2, 5, 5]: i=1 is a legitimate True (1 < 5
+        # and 5 >= 2) as the control; i=2 has a_now None, so per
+        # core.py:214 the bar is False.
+        assert crossunder([5.0, 1.0, None], [2.0, 5.0, 5.0]) == [
+            False,
+            True,
+            False,
+        ]
