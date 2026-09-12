@@ -508,3 +508,49 @@ def test_bootstrap_refuses_every_existing_anchor_without_overwrite(
     assert victim.read_bytes() == victim_before
     assert audit.read_bytes() == log_before
     assert not list(tmp_path.glob(".*.tmp"))
+
+
+def test_bootstrap_publication_failure_exits_1(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D2 §3: a publication failure is exit 1 — the typed refusal the CLI already catches —
+    not a traceback out of ``main()`` (HOLD F1, probe 16). Nothing is consumed by the failure:
+    the same command then succeeds."""
+
+    from chronos.auditlog import log as log_module
+
+    audit = tmp_path / "audit.jsonl"
+    before = _write_bare_legacy_log(audit, 2)
+
+    def injected_rename_failure(*args: object, **kwargs: object) -> None:
+        raise OSError(5, "injected rename failure")
+
+    monkeypatch.setattr(log_module.os, "replace", injected_rename_failure)
+    assert main([*_audit_args(tmp_path, audit), "bootstrap-audit-anchor"]) == 1
+    out = capsys.readouterr().out
+    assert "REFUSED" in out and "injected rename failure" in out, out
+    assert audit.read_bytes() == before
+    assert not _anchor_path(audit).exists()
+    assert not list(tmp_path.glob(".*.tmp"))
+
+    monkeypatch.undo()
+    assert main([*_audit_args(tmp_path, audit), "bootstrap-audit-anchor"]) == 0
+    assert _anchor_path(audit).read_bytes() == _anchor_bytes(2, _last_hash(audit))
+
+
+def test_bootstrap_refuses_a_loose_mode_legacy_log(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Exact mode 0600 is a capability condition (D2 §1, HOLD F3): a 0644 legacy log is
+    refused, typed, and left exactly as found — never tightened on the way past."""
+
+    audit = tmp_path / "audit.jsonl"
+    before = _write_bare_legacy_log(audit, 2)
+    audit.chmod(0o644)
+
+    assert main([*_audit_args(tmp_path, audit), "bootstrap-audit-anchor"]) == 1
+    out = capsys.readouterr().out
+    assert "REFUSED" in out and "mode" in out and "0o644" in out, out
+    assert stat.S_IMODE(audit.lstat().st_mode) == 0o644
+    assert audit.read_bytes() == before
+    assert not _anchor_path(audit).exists()

@@ -1225,6 +1225,33 @@ class TestVerifyChainPair:
         assert result.state is ChainState.BROKEN, result.detail
         assert "is a symlink or not a real directory" in result.detail, result.detail
 
+    def test_a_loose_mode_log_or_anchor_is_broken_and_never_tightened(self, tmp_path: Path) -> None:
+        """D2 §1: exact mode 0600 is a capability condition for every existing entry (HOLD F3).
+        The verifier reports the exposure and changes nothing; it must not read a looser file
+        as intact, and it must not repair it either."""
+
+        path = tmp_path / "audit.jsonl"
+        write_records(path, 2)
+        anchor = _anchor_path(path)
+        assert verify_chain(path).state is ChainState.VALID  # positive control: 0600 / 0600
+
+        anchor.chmod(0o644)
+        result = verify_chain(path)
+        assert result.state is ChainState.BROKEN, result.detail
+        assert "mode" in result.detail and "0o644" in result.detail, result.detail
+        assert stat.S_IMODE(anchor.lstat().st_mode) == 0o644, "the verifier tightened the anchor"
+        anchor.chmod(0o600)
+        assert verify_chain(path).state is ChainState.VALID
+
+        for mode in (0o644, 0o640, 0o400):
+            path.chmod(mode)
+            result = verify_chain(path)
+            assert result.state is ChainState.BROKEN, (oct(mode), result.detail)
+            assert "mode" in result.detail and oct(mode) in result.detail, result.detail
+            assert stat.S_IMODE(path.lstat().st_mode) == mode, "the verifier tightened the log"
+        path.chmod(0o600)
+        assert verify_chain(path).state is ChainState.VALID
+
     def test_verify_creates_nothing_and_takes_no_lock(self, tmp_path: Path) -> None:
         # Read-only by contract: monitoring and campaign status snapshot the directory.
         path = tmp_path / "audit.jsonl"
@@ -1462,7 +1489,7 @@ class TestHeadAnchor:
                 lambda *a, **k: (_ for _ in ()).throw(OSError("no rename")),
             )
 
-        with pytest.raises((AuditLogCorruptionError, OSError)) as info:
+        with pytest.raises(AuditLogCorruptionError) as info:
             log.append("second", {"n": 2})
 
         if case == "anchor-symlink":
@@ -1503,9 +1530,11 @@ class TestHeadAnchor:
             raise OSError("simulated crash before the anchor replace")
 
         monkeypatch.setattr(log_module.os, "replace", crash)
-        with pytest.raises(OSError, match="simulated crash"):
+        # The one catchable error, naming the step and carrying the cause (HOLD F1).
+        with pytest.raises(AuditLogCorruptionError, match="simulated crash") as info:
             log.append("second", {"n": 2})
         monkeypatch.undo()
+        assert "renaming" in str(info.value) and "NOT reported" in str(info.value), str(info.value)
 
         # The record is durable in the log; the anchor still names the previous head.
         assert _sequences(path) == [0, 1]
@@ -1555,6 +1584,173 @@ class TestHeadAnchor:
         assert record.sequence == 0
         assert anchor.read_bytes() == _anchor_bytes(1, record.record_hash)
         assert verify_chain(path).state is ChainState.VALID
+
+    def test_the_writer_refuses_a_loose_mode_entry_instead_of_tightening_it(
+        self, tmp_path: Path
+    ) -> None:
+        """A loose mode on an existing log, lock or anchor is an exposure event. Silently
+        re-tightening it (what ``secure_owner_only`` does for the halt and ledger files)
+        would hide that event; the audit capability refuses, typed, and leaves the mode as
+        found for the owner to see (HOLD F3, D2 §1)."""
+
+        from chronos.auditlog import bootstrap_anchor
+
+        path = tmp_path / "audit.jsonl"
+        write_records(path, 2)
+        anchor = _anchor_path(path)
+        lock = _lock_path(path)
+        before = path.read_bytes()
+
+        for entry in (path, anchor, lock):
+            entry.chmod(0o644)
+            with pytest.raises(AuditLogCorruptionError, match="mode") as info:
+                AuditLog(path)
+            assert "0o644" in str(info.value), str(info.value)
+            assert stat.S_IMODE(entry.lstat().st_mode) == 0o644, f"{entry.name} was tightened"
+            entry.chmod(0o600)
+        assert path.read_bytes() == before
+        assert AuditLog(path).append("after", {"n": 2}).sequence == 2  # positive control
+
+        bare = tmp_path / "bare.jsonl"
+        write_records(bare, 1)
+        _anchor_path(bare).unlink()
+        bare.chmod(0o644)
+        with pytest.raises(AuditLogCorruptionError, match="mode"):
+            bootstrap_anchor(bare)
+        assert not _anchor_path(bare).exists()
+        assert stat.S_IMODE(bare.lstat().st_mode) == 0o644
+        assert not list(tmp_path.glob(".*.tmp"))
+
+
+class TestPublicationContract:
+    """Daybreak's HOLD at d98bbcd, F1 and F2.
+
+    F1: every step of anchor publication — writing the temp, fsyncing it, renaming it over
+    the anchor, fsyncing the parent — can fail with an ``OSError``; each must surface as the
+    one catchable ``AuditLogCorruptionError`` naming the step and the cause, and the durable
+    pair afterwards is exactly what the disk holds (probe 16: BROKEN, BROKEN, BROKEN, VALID).
+    F2: the unwind may remove the unique temp name ONLY while it still designates this
+    transaction's inode (probe 15).
+    """
+
+    @pytest.mark.parametrize(
+        ("step", "named", "expected_state", "expected_fragment"),
+        [
+            ("write", "writing", ChainState.BROKEN, "crash window"),
+            ("temp-fsync", "fsyncing the temporary", ChainState.BROKEN, "crash window"),
+            ("rename", "renaming", ChainState.BROKEN, "crash window"),
+            ("parent-fsync", "fsyncing the parent", ChainState.VALID, "2 records"),
+        ],
+    )
+    def test_publication_failures_are_typed_and_leave_the_durable_pair_as_observed(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        step: str,
+        named: str,
+        expected_state: ChainState,
+        expected_fragment: str,
+    ) -> None:
+        from chronos.auditlog import log as log_module
+
+        path = tmp_path / "audit.jsonl"
+        anchor = _anchor_path(path)
+        log = AuditLog(path)
+        log.append("first", {"n": 1})
+        before_anchor = anchor.read_bytes()
+        injected = OSError(errno.EIO, f"injected {step} failure")
+        real_fsync = os.fsync
+        file_fsyncs = 0
+
+        def fsync(descriptor: int) -> None:
+            nonlocal file_fsyncs
+            is_dir = stat.S_ISDIR(os.fstat(descriptor).st_mode)
+            if not is_dir:
+                file_fsyncs += 1
+            if step == "temp-fsync" and not is_dir and file_fsyncs == 2:
+                raise injected  # the log's fsync succeeded; the anchor temp's fails
+            if step == "parent-fsync" and is_dir:
+                raise injected
+            real_fsync(descriptor)
+
+        def raise_injected(*args: object, **kwargs: object) -> None:
+            raise injected
+
+        if step == "write":
+            monkeypatch.setattr(log_module.os, "write", raise_injected)
+        elif step == "rename":
+            monkeypatch.setattr(log_module.os, "replace", raise_injected)
+        else:
+            monkeypatch.setattr(log_module.os, "fsync", fsync)
+
+        with pytest.raises(AuditLogCorruptionError) as info:
+            log.append("second", {"n": 2})
+        monkeypatch.undo()
+
+        message = str(info.value)
+        assert not isinstance(info.value, OSError)
+        assert named in message, message
+        assert f"injected {step} failure" in message and "errno 5" in message, message
+        assert "NOT reported" in message, message
+        assert not list(tmp_path.glob(".*.tmp"))
+        assert _sequences(path) == [0, 1]  # the record was durable before publication began
+        result = verify_chain(path)
+        assert result.state is expected_state, result.detail
+        assert expected_fragment in result.detail, result.detail
+        if expected_state is ChainState.BROKEN:
+            assert anchor.read_bytes() == before_anchor
+            with pytest.raises(AuditLogCorruptionError, match="crash window"):
+                AuditLog(path)
+        else:
+            assert anchor.read_bytes() == _anchor_bytes(2, _record_hashes(path)[-1])
+            assert AuditLog(path).append("third", {"n": 3}).sequence == 2
+
+    def test_a_temp_name_swapped_after_fsync_is_left_alone_and_the_stranded_inode_is_reported(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Daybreak's probe 15: after the temp fsync, rename the writer's inode away and plant a
+        sentinel at the unique name. The writer must refuse (the name no longer designates its
+        descriptor), must NOT delete the sentinel it did not create, and must say that its own
+        inode is stranded under another name."""
+
+        from chronos.auditlog import log as log_module
+
+        path = tmp_path / "audit.jsonl"
+        anchor = _anchor_path(path)
+        log = AuditLog(path)
+        log.append("first", {"n": 1})
+        before_anchor = anchor.read_bytes()
+        fixed_temp = f".{anchor.name}.{'e' * 32}.tmp"
+        monkeypatch.setattr(log_module.uuid, "uuid4", lambda: type("U", (), {"hex": "e" * 32})())
+        stranded = tmp_path / "stranded-by-attacker"
+        sentinel = b"ATTACKER-SENTINEL\n"
+        real_fsync = os.fsync
+        file_fsyncs = 0
+        swapped = False
+
+        def fsync_then_swap_the_temp_name(descriptor: int) -> None:
+            nonlocal file_fsyncs, swapped
+            real_fsync(descriptor)
+            if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
+                file_fsyncs += 1
+                if file_fsyncs == 2 and not swapped:  # the temp is durable under its unique name
+                    swapped = True
+                    os.rename(tmp_path / fixed_temp, stranded)
+                    (tmp_path / fixed_temp).write_bytes(sentinel)
+
+        monkeypatch.setattr(log_module.os, "fsync", fsync_then_swap_the_temp_name)
+        with pytest.raises(AuditLogCorruptionError) as info:
+            log.append("second", {"n": 2})
+        assert swapped, "the swap never fired; the probe proved nothing"
+
+        message = str(info.value)
+        assert "replaced" in message and "NOT reported" in message, message
+        assert (tmp_path / fixed_temp).read_bytes() == sentinel, "the sentinel was deleted"
+        assert stranded.read_bytes() == _anchor_bytes(2, _record_hashes(path)[-1])
+        assert "stranded" in message and stranded.name not in message, message
+        assert fixed_temp in message, message
+        assert anchor.read_bytes() == before_anchor
+        assert verify_chain(path).state is ChainState.BROKEN  # log 2 records, anchor 1
 
 
 class TestBootstrapAnchor:
