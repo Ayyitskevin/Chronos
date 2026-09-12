@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 import chronos.recovery.measurement as recovery_measurement
-from chronos.auditlog.log import AuditLog
+from chronos.auditlog.log import AuditLog, ChainState, verify_chain
 from chronos.control.halt import HaltReason, HaltStore
 from chronos.domain.enums import OrderSide
 from chronos.execution.intents import IntentStatus, OrderIntent, TimeInForce
@@ -533,3 +533,146 @@ def test_a_restore_leaves_a_witness_the_backend_will_refuse_to_ignore(
         tokens.append(payload["token"])
 
     assert tokens[0] != tokens[1]
+
+
+# ---------------------------------------------------------------- the audit head anchor
+
+_AUDIT_NAME = "platform_audit.jsonl"
+_ANCHOR_NAME = "platform_audit.head.json"
+_SIX_ARTIFACTS = {
+    "chronos.db",
+    "live_kill_switch.json",
+    "platform_audit.head.json",
+    "platform_audit.jsonl",
+    "platform_halt.json",
+    "platform_ledger.db",
+}
+
+
+def _anchor_bytes(count: int, last_hash: str) -> bytes:
+    return (json.dumps({"count": count, "last_hash": last_hash}, sort_keys=True) + "\n").encode(
+        "utf-8"
+    )
+
+
+def _last_record_hash(audit: Path) -> str:
+    lines = [line for line in audit.read_text(encoding="utf-8").splitlines() if line.strip()]
+    return str(json.loads(lines[-1])["record_hash"])
+
+
+def _rebind_manifest_artifact(snapshot_root: Path, name: str) -> None:
+    """After replacing one snapshot member's bytes, rebind only its size and digest."""
+
+    manifest_path = snapshot_root / "snapshot-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    rebound = 0
+    for artifact in manifest["artifacts"]:
+        if artifact["name"] == name:
+            artifact["size_bytes"] = (snapshot_root / name).stat().st_size
+            artifact["sha256"] = _sha256(snapshot_root / name)
+            rebound += 1
+    assert rebound == 1, manifest["artifacts"]
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+
+def test_recovery_manifest_binds_audit_log_and_anchor(open_source: _OpenSource) -> None:
+    """The head anchor travels with the log: six exact members, digests, modes, names."""
+
+    audit = open_source.data / _AUDIT_NAME
+    snapshot_root = open_source.data.parent.parent / "snapshot"
+    manifest = capture_snapshot(
+        source_data=open_source.data,
+        snapshot_root=snapshot_root,
+        source_id="disposable-test-source",
+    )
+
+    assert {artifact.name for artifact in manifest.artifacts} == _SIX_ARTIFACTS
+    assert len(manifest.artifacts) == 6
+    for name in (_AUDIT_NAME, _ANCHOR_NAME):
+        source = open_source.data / name
+        captured = snapshot_root / name
+        assert captured.read_bytes() == source.read_bytes()
+        assert stat.S_IMODE(captured.stat().st_mode) == 0o600
+        entry = next(artifact for artifact in manifest.artifacts if artifact.name == name)
+        assert entry.sha256 == _sha256(source)
+        assert entry.size_bytes == source.stat().st_size
+    assert (snapshot_root / _ANCHOR_NAME).read_bytes() == _anchor_bytes(1, _last_record_hash(audit))
+    assert {path.name for path in snapshot_root.iterdir()} == _SIX_ARTIFACTS | {
+        "snapshot-manifest.json"
+    }
+
+    restore_root = snapshot_root.parent / "restored"
+    observation = restore_snapshot(snapshot_root=snapshot_root, restore_root=restore_root)
+    assert observation.result == "PASS"
+    restored = restore_root / "data"
+    assert {path.name for path in restored.iterdir()} == _SIX_ARTIFACTS | {"recovery_pending.json"}
+    assert (restored / _ANCHOR_NAME).read_bytes() == (open_source.data / _ANCHOR_NAME).read_bytes()
+    verification = verify_chain(restored / _AUDIT_NAME)
+    assert verification.state is ChainState.VALID, verification.detail
+    assert "anchor" in verification.detail
+
+
+def test_restore_refuses_old_log_with_newer_anchor_as_truncation(open_source: _OpenSource) -> None:
+    """A snapshot whose log is an older valid prefix of the anchor it travels with is a
+    truncation/rollback, bound in the manifest or not: the pair check refuses it."""
+
+    audit = open_source.data / _AUDIT_NAME
+    AuditLog(audit).append("recovery_measurement_second", {"safe": True})
+    lines = audit.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    snapshot_root = open_source.data.parent.parent / "snapshot"
+    capture_snapshot(
+        source_data=open_source.data,
+        snapshot_root=snapshot_root,
+        source_id="disposable-test-source",
+    )
+    # Replace the captured log with its own first record — internally complete — and
+    # rebind ONLY that member's size/digest, so the manifest itself still verifies.
+    (snapshot_root / _AUDIT_NAME).write_text(lines[0] + "\n", encoding="utf-8")
+    _rebind_manifest_artifact(snapshot_root, _AUDIT_NAME)
+    restore_root = snapshot_root.parent / "restored"
+
+    with pytest.raises(RecoveryMeasurementError, match="truncation") as info:
+        restore_snapshot(snapshot_root=snapshot_root, restore_root=restore_root)
+
+    assert "1 records but anchor expects 2" in str(info.value), str(info.value)
+    # A failed restore leaves no observation and no witness claiming success.
+    assert not (restore_root / "recovery-observation.json").exists()
+    assert not (restore_root / "data" / "recovery_pending.json").exists()
+
+
+def test_restore_accepts_co_restored_old_audit_pair_and_discloses_residual(
+    open_source: _OpenSource,
+) -> None:
+    """An older log restored WITH its own older anchor is self-consistent and passes —
+    locally indistinguishable from the truth, exactly as a wholesale restore already is.
+    The observation says so rather than implying the anchor caught it."""
+
+    audit = open_source.data / _AUDIT_NAME
+    snapshot_root = open_source.data.parent.parent / "snapshot"
+    capture_snapshot(
+        source_data=open_source.data,
+        snapshot_root=snapshot_root,
+        source_id="disposable-test-source",
+    )
+    older_anchor = (snapshot_root / _ANCHOR_NAME).read_bytes()
+    AuditLog(audit).append("recovery_measurement_second", {"safe": True})
+    assert (open_source.data / _ANCHOR_NAME).read_bytes() != older_anchor  # the source moved on
+
+    restore_root = snapshot_root.parent / "restored"
+    observation = restore_snapshot(snapshot_root=snapshot_root, restore_root=restore_root)
+
+    assert observation.result == "PASS"
+    restored = restore_root / "data"
+    assert (restored / _ANCHOR_NAME).read_bytes() == older_anchor
+    verification = verify_chain(restored / _AUDIT_NAME)
+    assert verification.state is ChainState.VALID, verification.detail
+    assert "1 records" in verification.detail
+    residuals = observation.residuals
+    assert any(
+        "co-restored" in residual and "not detected" in residual for residual in residuals
+    ), residuals
+    persisted = json.loads((restore_root / "recovery-observation.json").read_text())
+    assert persisted["residuals"] == list(residuals)
