@@ -685,6 +685,11 @@ class TestTransactionShape:
     def test_a_failed_fsync_releases_the_lock_and_the_chain_stays_consistent(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """A failed log fsync leaves the record written but never anchored: the anchor still
+        names the previous head. This pin used to allow either "continue" or "fail closed";
+        the head anchor decides it (D2 §1) — the next writer refuses the pair as a crash
+        window, the chain is neither extended nor forked, and the locks are released."""
+
         from chronos.auditlog import log as log_module
 
         path = tmp_path / "audit.jsonl"
@@ -699,13 +704,16 @@ class TestTransactionShape:
             log.append("second", {})
         monkeypatch.undo()
         assert not log._thread_lock.locked()
-        # The next append either continues (the line was fully written before fsync failed)
-        # or fails closed on verification — never hangs, never forks the chain.
-        record = AuditLog(path).append("third", {})
         sequences = _sequences(path)
-        assert sequences == list(range(len(sequences)))
-        assert record.sequence == sequences[-1]
-        assert verify_chain(path).state is ChainState.VALID
+        assert sequences == list(range(len(sequences)))  # written in order, never forked
+        result = verify_chain(path)
+        assert result.state is ChainState.BROKEN
+        assert "crash window" in result.detail, result.detail
+        # A fresh instance needs the OS lock too; it must not hang, and it must not extend
+        # or repair the pair: reviewed recovery, not silent repair.
+        with pytest.raises(AuditLogCorruptionError, match="crash window"):
+            AuditLog(path)
+        assert _sequences(path) == sequences
 
 
 class TestLogPathCapability:
@@ -744,6 +752,9 @@ class TestLogPathCapability:
         log.append("first", {"n": 1})
         swap = tmp_path / "swap.jsonl"
         swap.write_bytes(path.read_bytes())
+        swap.chmod(
+            0o600
+        )  # mode is a capability condition (HOLD F3); the swap differs by inode only
         os.replace(swap, path)  # atomic rename: new inode, identical content
 
         with pytest.raises(AuditLogCorruptionError, match="replaced"):
@@ -851,6 +862,7 @@ class TestCapabilityHeldEndToEnd:
         def swap_the_lock_then_park() -> None:
             lock.unlink()
             lock.write_text("", encoding="utf-8")  # a fresh inode under the lock's name
+            lock.chmod(0o600)  # at the required mode, so the child exercises the binding, not F3
             inside.set()
             assert release.wait(timeout=10)
 
@@ -874,7 +886,10 @@ class TestCapabilityHeldEndToEnd:
 
         error = outcome.get("error")
         assert isinstance(error, AuditLogCorruptionError), outcome
-        assert "lock" in str(error) and "replaced" in str(error), str(error)
+        # The exact reason phrase: pytest's tmp-path name contains "lock" and "replaced", so a
+        # looser match was satisfied by a refusal for any reason at all.
+        message = str(error)
+        assert "audit log lock at" in message and "was replaced under this transaction" in message
         assert _sequences(path) == [0], "two writers completed against one head"
         assert verify_chain(path).state is ChainState.VALID
 
@@ -913,7 +928,10 @@ class TestCapabilityHeldEndToEnd:
 
         error = outcome.get("error")
         assert isinstance(error, AuditLogCorruptionError), outcome
-        assert "parent" in str(error) and ("displaced" in str(error) or "replaced" in str(error))
+        # Exact phrase, for the same reason as above (the tmp-path name contains "displaced").
+        message = str(error)
+        assert "audit log parent" in message, message
+        assert "was displaced or replaced under this transaction" in message, message
         # Nothing was reported as appended outside the configured path...
         assert (displaced / "audit.jsonl").read_text(encoding="utf-8") == ""
         # ...and the canonical path holds exactly the child's record.
@@ -982,3 +1000,997 @@ class TestCapabilityHeldEndToEnd:
         with pytest.raises(AuditLogCorruptionError, match="flock"):
             AuditLog(path)
         assert not path.exists(), "the log was created before the lock was known to be unusable"
+
+
+# ---------------------------------------------------------------------- the head anchor
+
+_ZERO_HASH = "0" * 64
+
+
+def _anchor_path(path: Path) -> Path:
+    # The sibling the writer publishes beside the log, named like the registry's
+    # (`<stem>.head.json`): `audit.jsonl` owns `audit.head.json`.
+    return path.with_name(path.stem + ".head.json")
+
+
+def _anchor_bytes(count: int, last_hash: str) -> bytes:
+    # D2 §1: the one deterministic representation, `json.dumps(sort_keys=True) + "\n"`.
+    return (json.dumps({"count": count, "last_hash": last_hash}, sort_keys=True) + "\n").encode(
+        "utf-8"
+    )
+
+
+def _write_private(path: Path, data: bytes) -> None:
+    """Materialize an entry by hand at the mode the capability requires (0600, HOLD F3)."""
+
+    path.write_bytes(data)
+    path.chmod(0o600)
+
+
+def _record_hashes(path: Path) -> list[str]:
+    lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    return [str(json.loads(line)["record_hash"]) for line in lines]
+
+
+def test_verify_detects_complete_tail_truncation(tmp_path: Path) -> None:
+    path = tmp_path / "audit.jsonl"
+    write_records(path, 3)
+    lines = path.read_text(encoding="utf-8").splitlines()
+    path.write_text("\n".join(lines[:-1]) + "\n", encoding="utf-8")
+    result = verify_chain(path)
+    assert result.state is ChainState.BROKEN
+    assert "truncation" in result.detail
+
+
+def _materialize_pair(tmp_path: Path, log_kind: str, anchor_kind: str) -> Path:
+    """Build one D2 §2 matrix cell: a ``log_kind`` log beside an ``anchor_kind`` anchor."""
+
+    path = tmp_path / "audit.jsonl"
+    anchor = _anchor_path(path)
+    hashes: list[str] = []
+    if log_kind == "empty":
+        _write_private(path, b"")
+    elif log_kind in ("valid", "broken"):
+        write_records(path, 3)
+        hashes = _record_hashes(path)
+        if log_kind == "broken":
+            lines = path.read_text(encoding="utf-8").splitlines()
+            assert "payload-1" in lines[1]
+            lines[1] = lines[1].replace("payload-1", "payload-X")
+            path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    else:
+        assert log_kind == "absent"
+    count = len(hashes)
+    last = hashes[-1] if hashes else _ZERO_HASH
+    anchor.unlink(missing_ok=True)
+    if anchor_kind == "malformed":
+        _write_private(anchor, b"not an anchor\n")
+    elif anchor_kind == "matches":
+        # For an absent log "matches" cannot mean anything; any well-formed anchor is the cell.
+        _write_private(
+            anchor,
+            _anchor_bytes(count, last) if log_kind != "absent" else _anchor_bytes(1, "a" * 64),
+        )
+    elif anchor_kind == "behind":
+        _write_private(anchor, _anchor_bytes(count - 1, hashes[-2]))
+    elif anchor_kind == "ahead":
+        _write_private(anchor, _anchor_bytes(count + 1, "a" * 64))
+    elif anchor_kind == "wrong-hash":
+        _write_private(anchor, _anchor_bytes(count, "a" * 64))
+    else:
+        assert anchor_kind == "absent"
+    return path
+
+
+_MALFORMED_ANCHORS: dict[str, bytes] = {
+    "not-json": b"not an anchor\n",
+    "not-an-object": b'["count", 1]\n',
+    "boolean-count": b'{"count": true, "last_hash": "' + b"a" * 64 + b'"}\n',
+    "negative-count": b'{"count": -1, "last_hash": "' + b"a" * 64 + b'"}\n',
+    "float-count": b'{"count": 1.0, "last_hash": "' + b"a" * 64 + b'"}\n',
+    "duplicate-keys": b'{"count": 3, "count": 3, "last_hash": "' + b"a" * 64 + b'"}\n',
+    "missing-key": b'{"count": 3}\n',
+    "unknown-key": b'{"count": 3, "last_hash": "' + b"a" * 64 + b'", "path": "x"}\n',
+    "not-utf8": b'\xff\xfe{"count": 3, "last_hash": "' + b"a" * 64 + b'"}\n',
+    "trailing-value": (
+        b'{"count": 3, "last_hash": "' + b"a" * 64 + b'"}\n'
+        b'{"count": 3, "last_hash": "' + b"a" * 64 + b'"}\n'
+    ),
+    "short-hash": b'{"count": 3, "last_hash": "' + b"a" * 63 + b'"}\n',
+    "uppercase-hash": b'{"count": 3, "last_hash": "' + b"A" * 64 + b'"}\n',
+    "non-hex-hash": b'{"count": 3, "last_hash": "' + b"g" * 64 + b'"}\n',
+    "zero-count-with-a-hash": b'{"count": 0, "last_hash": "' + b"a" * 64 + b'"}\n',
+    "hash-not-a-string": b'{"count": 3, "last_hash": 3}\n',
+    "empty": b"",
+}
+
+
+class TestVerifyChainPair:
+    """``verify_chain`` judges the log AND its sibling head anchor (D2 §2).
+
+    A valid prefix used to be VALID: deleting the tail, or restoring an older copy of the
+    file, left nothing to disagree with (D1 Gap A). The anchor carries the expected count
+    and head hash; the chain is validated first so its precise first-line failure still
+    wins, then the pair. Verification stays read-only and lock-free, and reaches both
+    leaves descriptor-relative and no-follow.
+    """
+
+    @pytest.mark.parametrize(
+        ("log_kind", "anchor_kind", "state", "fragments"),
+        [
+            ("absent", "absent", ChainState.ABSENT, ("no audit log",)),
+            ("absent", "malformed", ChainState.BROKEN, ("head anchor unreadable", "absent")),
+            ("absent", "matches", ChainState.BROKEN, ("truncation/deletion",)),
+            ("absent", "ahead", ChainState.BROKEN, ("truncation/deletion",)),
+            ("empty", "absent", ChainState.BROKEN, ("owner bootstrap required",)),
+            ("empty", "malformed", ChainState.BROKEN, ("head anchor unreadable",)),
+            ("empty", "matches", ChainState.VALID, ("chain + anchor intact (0 records)",)),
+            (
+                "empty",
+                "ahead",
+                ChainState.BROKEN,
+                ("truncation/rollback", "0 records but anchor expects 1"),
+            ),
+            ("valid", "absent", ChainState.BROKEN, ("owner bootstrap required",)),
+            ("valid", "malformed", ChainState.BROKEN, ("head anchor unreadable",)),
+            ("valid", "matches", ChainState.VALID, ("chain + anchor intact (3 records)",)),
+            (
+                "valid",
+                "behind",
+                ChainState.BROKEN,
+                ("crash window", "3 records but anchor expects 2"),
+            ),
+            (
+                "valid",
+                "ahead",
+                ChainState.BROKEN,
+                ("truncation/rollback", "3 records but anchor expects 4"),
+            ),
+            ("valid", "wrong-hash", ChainState.BROKEN, ("head hash mismatch",)),
+            ("broken", "absent", ChainState.BROKEN, ("line 2", "hash mismatch")),
+            ("broken", "matches", ChainState.BROKEN, ("line 2", "hash mismatch")),
+            ("broken", "ahead", ChainState.BROKEN, ("line 2", "hash mismatch")),
+        ],
+    )
+    def test_verify_chain_log_anchor_matrix(
+        self,
+        tmp_path: Path,
+        log_kind: str,
+        anchor_kind: str,
+        state: ChainState,
+        fragments: tuple[str, ...],
+    ) -> None:
+        path = _materialize_pair(tmp_path, log_kind, anchor_kind)
+        result = verify_chain(path)
+        assert result.state is state, result.detail
+        for fragment in fragments:
+            assert fragment in result.detail, result.detail
+
+    @pytest.mark.parametrize("shape", sorted(_MALFORMED_ANCHORS))
+    def test_every_malformed_anchor_shape_is_broken_not_ignored(
+        self, tmp_path: Path, shape: str
+    ) -> None:
+        path = tmp_path / "audit.jsonl"
+        write_records(path, 3)
+        _anchor_path(path).write_bytes(_MALFORMED_ANCHORS[shape])
+        result = verify_chain(path)
+        assert result.state is ChainState.BROKEN, result.detail
+        assert "head anchor unreadable" in result.detail, result.detail
+
+    def test_the_writer_publishes_exact_anchor_bytes_the_verifier_accepts(
+        self, tmp_path: Path
+    ) -> None:
+        # The positive control for the matrix: what the writer publishes is the "matches" cell.
+        path = tmp_path / "audit.jsonl"
+        write_records(path, 3)
+        assert _anchor_path(path).read_bytes() == _anchor_bytes(3, _record_hashes(path)[-1])
+        result = verify_chain(path)
+        assert result.state is ChainState.VALID, result.detail
+
+    def test_verify_refuses_symlinked_log_and_anchor_without_touching_target(
+        self, tmp_path: Path
+    ) -> None:
+        # (a) The log is a symlink to a VALID paired chain, with a byte-exact anchor planted
+        # under the link's own name, so a verifier that followed the link would say VALID.
+        victim = tmp_path / "victim.jsonl"
+        write_records(victim, 2)
+        victim_bytes = victim.read_bytes()
+        victim_anchor_bytes = _anchor_path(victim).read_bytes()
+        linked = tmp_path / "audit.jsonl"
+        linked.symlink_to(victim)
+        _write_private(_anchor_path(linked), victim_anchor_bytes)
+        result = verify_chain(linked)
+        assert result.state is ChainState.BROKEN, result.detail
+        assert "is a symlink" in result.detail, result.detail
+        assert linked.is_symlink() and victim.read_bytes() == victim_bytes
+
+        # (b) A real log whose anchor is a symlink to a byte-exact valid anchor elsewhere.
+        real = tmp_path / "real.jsonl"
+        write_records(real, 2)
+        real_anchor = _anchor_path(real)
+        real_anchor_bytes = real_anchor.read_bytes()
+        decoy = tmp_path / "decoy.head.json"
+        decoy.write_bytes(real_anchor_bytes)
+        real_anchor.unlink()
+        real_anchor.symlink_to(decoy)
+        result = verify_chain(real)
+        assert result.state is ChainState.BROKEN, result.detail
+        assert "is a symlink" in result.detail, result.detail
+        assert real_anchor.is_symlink() and decoy.read_bytes() == real_anchor_bytes
+
+        # (c) A hard-linked anchor and (d) a FIFO at the anchor path: neither is a regular,
+        # single-link file; the FIFO must be refused without hanging.
+        real_anchor.unlink()
+        _write_private(real_anchor, decoy.read_bytes())
+        os.link(real_anchor, tmp_path / "alias.head.json")
+        result = verify_chain(real)
+        assert result.state is ChainState.BROKEN, result.detail
+        assert "links" in result.detail, result.detail
+        (tmp_path / "alias.head.json").unlink()
+        real_anchor.unlink()
+        os.mkfifo(real_anchor, mode=0o600)
+        result = verify_chain(real)
+        assert result.state is ChainState.BROKEN, result.detail
+        assert "is not a regular file" in result.detail, result.detail
+
+        # (e) A parent directory reached through a symlink.
+        real_dir = tmp_path / "realdir"
+        real_dir.mkdir()
+        write_records(real_dir / "audit.jsonl", 1)
+        link_dir = tmp_path / "linkdir"
+        link_dir.symlink_to(real_dir, target_is_directory=True)
+        result = verify_chain(link_dir / "audit.jsonl")
+        assert result.state is ChainState.BROKEN, result.detail
+        assert "is a symlink or not a real directory" in result.detail, result.detail
+
+    def test_a_loose_mode_log_or_anchor_is_broken_and_never_tightened(self, tmp_path: Path) -> None:
+        """D2 §1: exact mode 0600 is a capability condition for every existing entry (HOLD F3).
+        The verifier reports the exposure and changes nothing; it must not read a looser file
+        as intact, and it must not repair it either."""
+
+        path = tmp_path / "audit.jsonl"
+        write_records(path, 2)
+        anchor = _anchor_path(path)
+        assert verify_chain(path).state is ChainState.VALID  # positive control: 0600 / 0600
+
+        anchor.chmod(0o644)
+        result = verify_chain(path)
+        assert result.state is ChainState.BROKEN, result.detail
+        assert "mode" in result.detail and "0o644" in result.detail, result.detail
+        assert stat.S_IMODE(anchor.lstat().st_mode) == 0o644, "the verifier tightened the anchor"
+        anchor.chmod(0o600)
+        assert verify_chain(path).state is ChainState.VALID
+
+        for mode in (0o644, 0o640, 0o400):
+            path.chmod(mode)
+            result = verify_chain(path)
+            assert result.state is ChainState.BROKEN, (oct(mode), result.detail)
+            assert "mode" in result.detail and oct(mode) in result.detail, result.detail
+            assert stat.S_IMODE(path.lstat().st_mode) == mode, "the verifier tightened the log"
+        path.chmod(0o600)
+        assert verify_chain(path).state is ChainState.VALID
+
+    def test_verify_creates_nothing_and_takes_no_lock(self, tmp_path: Path) -> None:
+        # Read-only by contract: monitoring and campaign status snapshot the directory.
+        path = tmp_path / "audit.jsonl"
+        write_records(path, 2)
+        _lock_path(path).unlink()
+        before = sorted(p.name for p in tmp_path.iterdir())
+        assert verify_chain(path).state is ChainState.VALID
+        assert sorted(p.name for p in tmp_path.iterdir()) == before
+
+
+class TestHeadAnchor:
+    """Every append publishes ``<stem>.head.json`` = exact ``{"count", "last_hash"}`` bytes (D2 §1).
+
+    Published through a unique same-directory temp opened ``O_EXCL`` at 0600, fsynced, renamed
+    over the anchor with directory descriptors, then a parent fsync — after the log fsync and
+    before the cache update and unlock, with the name-space binding re-established both
+    before the anchor is touched and after it is durable. The anchor and its temp are
+    capability entries like the log and the lock: a symlink, FIFO, hard link or swap is
+    refused without touching its target, and only the unpublished temp is ever removed.
+    """
+
+    def test_append_publishes_exact_private_anchor_after_log_fsync_before_unlock(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import fcntl
+
+        from chronos.auditlog import log as log_module
+
+        path = tmp_path / "audit.jsonl"
+        anchor = _anchor_path(path)
+        log = AuditLog(path)
+        log.append("first", {"n": 1})  # a prior anchor now exists; the next append is observed
+
+        events: list[str] = []
+        replacements: list[tuple[str, str, int | None, int | None]] = []
+        real_flock, real_fsync, real_replace = fcntl.flock, os.fsync, os.replace
+        real_bind = log_module.AuditLog._assert_transaction_bound
+
+        def flock(descriptor: int, operation: int) -> None:
+            if operation == fcntl.LOCK_UN:
+                events.append("unlock")
+            real_flock(descriptor, operation)
+
+        def fsync(descriptor: int) -> None:
+            kind = "dir" if stat.S_ISDIR(os.fstat(descriptor).st_mode) else "file"
+            events.append(f"{kind} fsync")
+            real_fsync(descriptor)
+
+        def replace(
+            source: str,
+            destination: str,
+            *,
+            src_dir_fd: int | None = None,
+            dst_dir_fd: int | None = None,
+        ) -> None:
+            replacements.append((source, destination, src_dir_fd, dst_dir_fd))
+            events.append("rename")
+            real_replace(source, destination, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+        def bind(self: log_module.AuditLog, *args: object, when: str, **kwargs: object) -> None:
+            events.append(f"bind: {when}")
+            real_bind(self, *args, when=when, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(log_module.fcntl, "flock", flock)
+        monkeypatch.setattr(log_module.os, "fsync", fsync)
+        monkeypatch.setattr(log_module.os, "replace", replace)
+        monkeypatch.setattr(log_module.AuditLog, "_assert_transaction_bound", bind)
+
+        record = log.append("second", {"n": 2})
+
+        # Exact bytes, private mode, no leftover temp.
+        assert anchor.read_bytes() == _anchor_bytes(2, record.record_hash)
+        assert stat.S_IMODE(anchor.lstat().st_mode) == 0o600
+        assert not list(tmp_path.glob(".*.tmp"))
+        # Atomic replace through the held parent descriptor, from a unique temp name.
+        assert len(replacements) == 1, replacements
+        source, destination, source_dir, destination_dir = replacements[0]
+        assert source.startswith(".audit.head.json.") and source.endswith(".tmp"), source
+        assert destination == "audit.head.json"
+        assert source_dir is not None and source_dir == destination_dir
+        # Order: log fsync < pre-anchor binding < temp fsync < rename < dir fsync <
+        # post-anchor binding < unlock.
+        file_fsyncs = [index for index, event in enumerate(events) if event == "file fsync"]
+        assert len(file_fsyncs) == 2, events  # the log, then the anchor temp
+        log_fsync, temp_fsync = file_fsyncs
+        pre = events.index("bind: before the anchor")
+        rename = events.index("rename")
+        dir_fsync = events.index("dir fsync")
+        post = events.index("bind: after the anchor")
+        unlock = events.index("unlock")
+        assert log_fsync < pre < temp_fsync < rename < dir_fsync < post < unlock, events
+        assert events.count("unlock") == 1 and events.count("dir fsync") == 1, events
+
+    def test_pre_anchor_binding_call_is_required(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A name swap right after the LOG fsync must refuse BEFORE the anchor is touched.
+
+        The post-anchor call would also refuse — but only after publishing an anchor
+        beside a log the canonical name no longer designates. So this pins WHERE the
+        refusal happens: no rename, the prior anchor byte-identical, no temp left.
+        """
+
+        from chronos.auditlog import log as log_module
+
+        path = tmp_path / "audit.jsonl"
+        anchor = _anchor_path(path)
+        log = AuditLog(path)
+        log.append("first", {"n": 1})
+        before_log, before_anchor = path.read_bytes(), anchor.read_bytes()
+        real_fsync, real_replace = os.fsync, os.replace
+        swapped = False
+        renames: list[tuple[str, str]] = []
+
+        def fsync_then_swap_the_log(descriptor: int) -> None:
+            nonlocal swapped
+            real_fsync(descriptor)
+            if not swapped and stat.S_ISREG(os.fstat(descriptor).st_mode):
+                swapped = True
+                swap = tmp_path / "swap.jsonl"
+                swap.write_bytes(before_log)
+                real_replace(swap, path)  # the held log descriptor now points at an unnamed inode
+
+        def replace(source: str, destination: str, **kwargs: object) -> None:
+            renames.append((source, destination))
+            real_replace(source, destination, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(log_module.os, "fsync", fsync_then_swap_the_log)
+        monkeypatch.setattr(log_module.os, "replace", replace)
+        with pytest.raises(AuditLogCorruptionError, match="replaced"):
+            log.append("second", {"n": 2})
+        assert swapped, "the swap never fired; the probe proved nothing"
+        assert renames == [], "the anchor was renamed into place after the swap"
+        assert anchor.read_bytes() == before_anchor
+        assert not list(tmp_path.glob(".*.tmp"))
+
+    def test_post_anchor_binding_call_is_required(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A swap AFTER the anchor is durable (after the parent fsync) can only be caught by
+        the final binding call; without it the writer returns success for a pair the
+        canonical names no longer designate."""
+
+        from chronos.auditlog import log as log_module
+
+        path = tmp_path / "audit.jsonl"
+        log = AuditLog(path)
+        log.append("first", {"n": 1})
+        before_log = path.read_bytes()
+        real_fsync = os.fsync
+        swapped = False
+
+        def fsync_then_swap_after_the_directory(descriptor: int) -> None:
+            nonlocal swapped
+            real_fsync(descriptor)
+            if not swapped and stat.S_ISDIR(os.fstat(descriptor).st_mode):
+                swapped = True
+                swap = tmp_path / "swap.jsonl"
+                _write_private(swap, before_log)  # differs by inode only
+                os.replace(swap, path)
+
+        monkeypatch.setattr(log_module.os, "fsync", fsync_then_swap_after_the_directory)
+        with pytest.raises(AuditLogCorruptionError) as info:
+            log.append("second", {"n": 2})
+        assert swapped, "the swap never fired; the probe proved nothing"
+        message = str(info.value)
+        assert "replaced" in message and "durable" in message and "NOT reported" in message
+        # What the canonical names now designate: the pre-append log beside the new anchor.
+        assert _sequences(path) == [0]
+        result = verify_chain(path)
+        assert result.state is ChainState.BROKEN
+        assert "truncation" in result.detail, result.detail
+
+    @pytest.mark.parametrize(
+        "case",
+        [
+            "anchor-symlink",
+            "anchor-hard-link",
+            "anchor-fifo",
+            "temp-symlink",
+            "write",
+            "fsync",
+            "rename",
+        ],
+    )
+    def test_anchor_publish_refuses_symlink_hardlink_fifo_and_cleans_its_unique_temp(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+    ) -> None:
+        from chronos.auditlog import log as log_module
+
+        path = tmp_path / "audit.jsonl"
+        anchor = _anchor_path(path)
+        log = AuditLog(path)
+        log.append("first", {"n": 1})
+        before_log, before_anchor = path.read_bytes(), anchor.read_bytes()
+        victim = tmp_path / "victim.head.json"
+        victim.write_bytes(before_anchor)  # byte-exact: a follower would accept it
+        fixed_temp = f".{anchor.name}.{'f' * 32}.tmp"
+
+        if case == "anchor-symlink":
+            anchor.unlink()
+            anchor.symlink_to(victim)
+        elif case == "anchor-hard-link":
+            os.link(anchor, tmp_path / "alias.head.json")
+        elif case == "anchor-fifo":
+            anchor.unlink()
+            os.mkfifo(anchor, mode=0o600)
+        elif case == "temp-symlink":
+            monkeypatch.setattr(
+                log_module.uuid, "uuid4", lambda: type("U", (), {"hex": "f" * 32})()
+            )
+            (tmp_path / fixed_temp).symlink_to(victim)
+        elif case == "write":
+            monkeypatch.setattr(
+                log_module.os, "write", lambda *a, **k: (_ for _ in ()).throw(OSError("no write"))
+            )
+        elif case == "fsync":
+            real_fsync = os.fsync
+            file_fsyncs = 0
+
+            def fail_the_temp_fsync(descriptor: int) -> None:
+                nonlocal file_fsyncs
+                if stat.S_ISREG(os.fstat(descriptor).st_mode):
+                    file_fsyncs += 1
+                    if file_fsyncs == 2:  # the log's fsync succeeded; the anchor temp's fails
+                        raise OSError("temp fsync failed")
+                real_fsync(descriptor)
+
+            monkeypatch.setattr(log_module.os, "fsync", fail_the_temp_fsync)
+        else:
+            assert case == "rename"
+            monkeypatch.setattr(
+                log_module.os,
+                "replace",
+                lambda *a, **k: (_ for _ in ()).throw(OSError("no rename")),
+            )
+
+        with pytest.raises(AuditLogCorruptionError) as info:
+            log.append("second", {"n": 2})
+
+        if case == "anchor-symlink":
+            assert "is a symlink" in str(info.value)
+            assert anchor.is_symlink() and victim.read_bytes() == before_anchor
+            assert path.read_bytes() == before_log, "the log was extended beside an unsafe anchor"
+        elif case == "anchor-hard-link":
+            assert "links" in str(info.value)
+            assert anchor.read_bytes() == before_anchor
+            assert path.read_bytes() == before_log
+        elif case == "anchor-fifo":
+            assert "is not a regular file" in str(info.value)
+            assert stat.S_ISFIFO(anchor.lstat().st_mode)
+            assert path.read_bytes() == before_log
+        elif case == "temp-symlink":
+            # We did not create that entry, so it is not ours to remove; the victim is untouched.
+            assert (tmp_path / fixed_temp).is_symlink() and victim.read_bytes() == before_anchor
+            assert anchor.read_bytes() == before_anchor
+        else:
+            assert anchor.read_bytes() == before_anchor, "a failed publication changed the anchor"
+        # In every case: no stray temp of ours, and the prior anchor still names the prior head.
+        assert not [
+            p for p in tmp_path.iterdir() if p.name.endswith(".tmp") and p.name != fixed_temp
+        ]
+
+    def test_crash_after_log_fsync_before_anchor_publish_is_broken(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from chronos.auditlog import log as log_module
+
+        path = tmp_path / "audit.jsonl"
+        anchor = _anchor_path(path)
+        log = AuditLog(path)
+        log.append("first", {"n": 1})
+        before_anchor = anchor.read_bytes()
+
+        def crash(*args: object, **kwargs: object) -> None:
+            raise OSError("simulated crash before the anchor replace")
+
+        monkeypatch.setattr(log_module.os, "replace", crash)
+        # The one catchable error, naming the step and carrying the cause (HOLD F1).
+        with pytest.raises(AuditLogCorruptionError, match="simulated crash") as info:
+            log.append("second", {"n": 2})
+        monkeypatch.undo()
+        assert "renaming" in str(info.value) and "NOT reported" in str(info.value), str(info.value)
+
+        # The record is durable in the log; the anchor still names the previous head.
+        assert _sequences(path) == [0, 1]
+        assert anchor.read_bytes() == before_anchor
+        assert not list(tmp_path.glob(".*.tmp"))
+        result = verify_chain(path)
+        assert result.state is ChainState.BROKEN
+        assert "crash window" in result.detail, result.detail
+        assert "2 records but anchor expects 1" in result.detail, result.detail
+        # No writer may extend past it: reviewed recovery, not silent repair.
+        with pytest.raises(AuditLogCorruptionError, match="crash window"):
+            AuditLog(path)
+        assert _sequences(path) == [0, 1]
+
+    def test_existing_bare_log_is_not_auto_anchored(self, tmp_path: Path) -> None:
+        """A valid legacy log with no anchor is BROKEN until the owner bootstraps it (D2 §3).
+
+        Creating the anchor automatically would certify whatever the file happens to hold —
+        including an already rolled-back copy — so construction and append refuse and
+        leave the file byte-identical.
+        """
+
+        path = tmp_path / "audit.jsonl"
+        write_records(path, 3)
+        _anchor_path(path).unlink(missing_ok=True)  # the shape a pre-anchor deployment left behind
+        before = path.read_bytes()
+
+        with pytest.raises(AuditLogCorruptionError, match="owner bootstrap required"):
+            AuditLog(path)
+        assert path.read_bytes() == before
+        assert not _anchor_path(path).exists()
+        assert not list(tmp_path.glob(".*.tmp"))
+        result = verify_chain(path)
+        assert result.state is ChainState.BROKEN
+        assert "owner bootstrap required" in result.detail, result.detail
+
+    def test_first_append_creates_the_pair_only_when_both_are_absent(self, tmp_path: Path) -> None:
+        path = tmp_path / "audit.jsonl"
+        anchor = _anchor_path(path)
+        # An anchor with no log is deletion/truncation of the log, never a fresh start.
+        _write_private(anchor, _anchor_bytes(1, "a" * 64))
+        with pytest.raises(AuditLogCorruptionError, match="truncation/deletion"):
+            AuditLog(path)
+        assert not path.exists(), "a log was created beside an orphaned anchor"
+        anchor.unlink()
+        record = AuditLog(path).append("first", {"n": 1})
+        assert record.sequence == 0
+        assert anchor.read_bytes() == _anchor_bytes(1, record.record_hash)
+        assert verify_chain(path).state is ChainState.VALID
+
+    def test_the_writer_refuses_a_loose_mode_entry_instead_of_tightening_it(
+        self, tmp_path: Path
+    ) -> None:
+        """A loose mode on an existing log, lock or anchor is an exposure event. Silently
+        re-tightening it (what ``secure_owner_only`` does for the halt and ledger files)
+        would hide that event; the audit capability refuses, typed, and leaves the mode as
+        found for the owner to see (HOLD F3, D2 §1)."""
+
+        from chronos.auditlog import bootstrap_anchor
+
+        path = tmp_path / "audit.jsonl"
+        write_records(path, 2)
+        anchor = _anchor_path(path)
+        lock = _lock_path(path)
+        before = path.read_bytes()
+
+        for entry in (path, anchor, lock):
+            entry.chmod(0o644)
+            with pytest.raises(AuditLogCorruptionError, match="mode") as info:
+                AuditLog(path)
+            assert "0o644" in str(info.value), str(info.value)
+            assert stat.S_IMODE(entry.lstat().st_mode) == 0o644, f"{entry.name} was tightened"
+            entry.chmod(0o600)
+        assert path.read_bytes() == before
+        assert AuditLog(path).append("after", {"n": 2}).sequence == 2  # positive control
+
+        bare = tmp_path / "bare.jsonl"
+        write_records(bare, 1)
+        _anchor_path(bare).unlink()
+        bare.chmod(0o644)
+        with pytest.raises(AuditLogCorruptionError, match="mode"):
+            bootstrap_anchor(bare)
+        assert not _anchor_path(bare).exists()
+        assert stat.S_IMODE(bare.lstat().st_mode) == 0o644
+        assert not list(tmp_path.glob(".*.tmp"))
+
+
+class TestPublicationContract:
+    """Daybreak's HOLD at d98bbcd, F1 and F2.
+
+    F1: every step of anchor publication — writing the temp, fsyncing it, renaming it over
+    the anchor, fsyncing the parent — can fail with an ``OSError``; each must surface as the
+    one catchable ``AuditLogCorruptionError`` naming the step and the cause, and the durable
+    pair afterwards is exactly what the disk holds (probe 16: BROKEN, BROKEN, BROKEN, VALID).
+    F2: the unwind may remove the unique temp name ONLY while it still designates this
+    transaction's inode (probe 15).
+    """
+
+    @pytest.mark.parametrize(
+        ("step", "named", "expected_state", "expected_fragment"),
+        [
+            ("write", "writing", ChainState.BROKEN, "crash window"),
+            ("temp-fsync", "fsyncing the temporary", ChainState.BROKEN, "crash window"),
+            ("rename", "renaming", ChainState.BROKEN, "crash window"),
+            ("parent-fsync", "fsyncing the parent", ChainState.VALID, "2 records"),
+        ],
+    )
+    def test_publication_failures_are_typed_and_leave_the_durable_pair_as_observed(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        step: str,
+        named: str,
+        expected_state: ChainState,
+        expected_fragment: str,
+    ) -> None:
+        from chronos.auditlog import log as log_module
+
+        path = tmp_path / "audit.jsonl"
+        anchor = _anchor_path(path)
+        log = AuditLog(path)
+        log.append("first", {"n": 1})
+        before_anchor = anchor.read_bytes()
+        injected = OSError(errno.EIO, f"injected {step} failure")
+        real_fsync = os.fsync
+        file_fsyncs = 0
+
+        def fsync(descriptor: int) -> None:
+            nonlocal file_fsyncs
+            is_dir = stat.S_ISDIR(os.fstat(descriptor).st_mode)
+            if not is_dir:
+                file_fsyncs += 1
+            if step == "temp-fsync" and not is_dir and file_fsyncs == 2:
+                raise injected  # the log's fsync succeeded; the anchor temp's fails
+            if step == "parent-fsync" and is_dir:
+                raise injected
+            real_fsync(descriptor)
+
+        def raise_injected(*args: object, **kwargs: object) -> None:
+            raise injected
+
+        if step == "write":
+            monkeypatch.setattr(log_module.os, "write", raise_injected)
+        elif step == "rename":
+            monkeypatch.setattr(log_module.os, "replace", raise_injected)
+        else:
+            monkeypatch.setattr(log_module.os, "fsync", fsync)
+
+        with pytest.raises(AuditLogCorruptionError) as info:
+            log.append("second", {"n": 2})
+        monkeypatch.undo()
+
+        message = str(info.value)
+        assert not isinstance(info.value, OSError)
+        assert named in message, message
+        assert f"injected {step} failure" in message and "errno 5" in message, message
+        assert "NOT reported" in message, message
+        assert not list(tmp_path.glob(".*.tmp"))
+        assert _sequences(path) == [0, 1]  # the record was durable before publication began
+        result = verify_chain(path)
+        assert result.state is expected_state, result.detail
+        assert expected_fragment in result.detail, result.detail
+        if expected_state is ChainState.BROKEN:
+            assert anchor.read_bytes() == before_anchor
+            with pytest.raises(AuditLogCorruptionError, match="crash window"):
+                AuditLog(path)
+        else:
+            assert anchor.read_bytes() == _anchor_bytes(2, _record_hashes(path)[-1])
+            assert AuditLog(path).append("third", {"n": 3}).sequence == 2
+
+    def test_a_temp_name_swapped_after_fsync_is_left_alone_and_the_stranded_inode_is_reported(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Daybreak's probe 15: after the temp fsync, rename the writer's inode away and plant a
+        sentinel at the unique name. The writer must refuse (the name no longer designates its
+        descriptor), must NOT delete the sentinel it did not create, and must say that its own
+        inode is stranded under another name."""
+
+        from chronos.auditlog import log as log_module
+
+        path = tmp_path / "audit.jsonl"
+        anchor = _anchor_path(path)
+        log = AuditLog(path)
+        log.append("first", {"n": 1})
+        before_anchor = anchor.read_bytes()
+        fixed_temp = f".{anchor.name}.{'e' * 32}.tmp"
+        monkeypatch.setattr(log_module.uuid, "uuid4", lambda: type("U", (), {"hex": "e" * 32})())
+        stranded = tmp_path / "stranded-by-attacker"
+        sentinel = b"ATTACKER-SENTINEL\n"
+        real_fsync = os.fsync
+        file_fsyncs = 0
+        swapped = False
+
+        def fsync_then_swap_the_temp_name(descriptor: int) -> None:
+            nonlocal file_fsyncs, swapped
+            real_fsync(descriptor)
+            if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
+                file_fsyncs += 1
+                if file_fsyncs == 2 and not swapped:  # the temp is durable under its unique name
+                    swapped = True
+                    os.rename(tmp_path / fixed_temp, stranded)
+                    (tmp_path / fixed_temp).write_bytes(sentinel)
+
+        monkeypatch.setattr(log_module.os, "fsync", fsync_then_swap_the_temp_name)
+        with pytest.raises(AuditLogCorruptionError) as info:
+            log.append("second", {"n": 2})
+        assert swapped, "the swap never fired; the probe proved nothing"
+
+        message = str(info.value)
+        assert "replaced" in message and "NOT reported" in message, message
+        assert (tmp_path / fixed_temp).read_bytes() == sentinel, "the sentinel was deleted"
+        assert stranded.read_bytes() == _anchor_bytes(2, _record_hashes(path)[-1])
+        assert "stranded" in message and stranded.name not in message, message
+        assert fixed_temp in message, message
+        assert anchor.read_bytes() == before_anchor
+        assert verify_chain(path).state is ChainState.BROKEN  # log 2 records, anchor 1
+
+
+class TestCreateOwnDistinction:
+    """HOLD round 2 (Daybreak F3-RACE): only an inode this transaction demonstrably created may be
+    ``fchmod``-ed. An entry planted between the absence check and the open — a loose file, a FIFO,
+    a hard link to a victim — must be refused, typed, without its mode, bytes or link count being
+    touched. Creation is therefore ``O_CREAT|O_EXCL``; on ``EEXIST`` the entry is reopened without
+    ``O_CREAT`` and validated as found."""
+
+    @staticmethod
+    def _plant_between_check_and_open(
+        monkeypatch: pytest.MonkeyPatch, name: str, plant: Callable[[], None]
+    ) -> dict[str, bool]:
+        """Model "the name appears between the absence check and the open" for BOTH designs.
+
+        While armed, a descriptor-relative ``os.stat`` of ``name`` reports it absent (the stale
+        observation a stat-then-create design acts on); the first descriptor-relative ``os.open``
+        of ``name`` plants the entry immediately before the real open and disarms the lie, so
+        every later stat — the binding checks — is real.
+        """
+
+        from chronos.auditlog import log as log_module
+
+        state = {"armed": True, "planted": False}
+        real_stat, real_open = os.stat, os.open
+
+        def stat(path: object, *args: object, **kwargs: object) -> os.stat_result:
+            if state["armed"] and kwargs.get("dir_fd") is not None and path == name:
+                raise FileNotFoundError(errno.ENOENT, "planted later", path)
+            return real_stat(path, *args, **kwargs)  # type: ignore[arg-type]
+
+        def open_(path: object, flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
+            if dir_fd is not None and path == name:
+                state["armed"] = False
+                if not state["planted"]:
+                    state["planted"] = True
+                    plant()
+            return real_open(path, flags, mode, dir_fd=dir_fd)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(log_module.os, "stat", stat)
+        monkeypatch.setattr(log_module.os, "open", open_)
+        return state
+
+    @pytest.mark.parametrize("shape", ["loose-file", "hard-link", "fifo"])
+    def test_an_entry_planted_at_the_lock_name_between_check_and_open_is_refused_untouched(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shape: str
+    ) -> None:
+        path = tmp_path / "audit.jsonl"
+        lock = _lock_path(path)
+        victim = tmp_path / "victim"
+        victim.write_bytes(b"do not touch\n")
+        victim.chmod(0o644)
+
+        def plant() -> None:
+            if shape == "loose-file":
+                lock.write_bytes(b"planted\n")
+                lock.chmod(0o644)
+            elif shape == "hard-link":
+                os.link(victim, lock)
+            else:
+                os.mkfifo(lock, mode=0o600)
+
+        state = self._plant_between_check_and_open(monkeypatch, lock.name, plant)
+        with pytest.raises(AuditLogCorruptionError) as info:
+            AuditLog(path)
+        assert state["planted"], "the probe never planted; it proved nothing"
+        message = str(info.value)
+        if shape == "loose-file":
+            assert "mode" in message and "0o644" in message, message
+            assert stat.S_IMODE(lock.lstat().st_mode) == 0o644, "the planted lock was tightened"
+            assert lock.read_bytes() == b"planted\n"
+        elif shape == "hard-link":
+            assert "links" in message, message
+            assert stat.S_IMODE(victim.lstat().st_mode) == 0o644, "the victim's mode was touched"
+            assert victim.lstat().st_nlink == 2 and victim.read_bytes() == b"do not touch\n"
+        else:
+            assert "is not a regular file" in message, message
+            assert stat.S_ISFIFO(lock.lstat().st_mode)
+        assert not path.exists()
+
+    def test_a_hard_link_planted_at_the_log_name_at_the_seam_is_refused_untouched(
+        self, tmp_path: Path
+    ) -> None:
+        """Daybreak's probe 3 verbatim: fresh log, the name observed absent, a hard link to a
+        victim planted at the ``_after_recovery`` seam before the creating open."""
+
+        path = tmp_path / "audit.jsonl"
+        victim = tmp_path / "victim.jsonl"
+        victim.write_bytes(b"victim bytes\n")
+        victim.chmod(0o644)
+        log = AuditLog(path)
+        log._after_recovery = lambda: os.link(victim, path)
+
+        with pytest.raises(AuditLogCorruptionError) as info:
+            log.append("first", {"n": 1})
+        assert "links" in str(info.value), str(info.value)
+        assert stat.S_IMODE(victim.lstat().st_mode) == 0o644, "the victim's mode was touched"
+        assert victim.lstat().st_nlink == 2 and victim.read_bytes() == b"victim bytes\n"
+        assert path.read_bytes() == b"victim bytes\n"  # the link itself was not written through
+        assert not _anchor_path(path).exists()
+        assert not list(tmp_path.glob(".*.tmp"))
+
+    def test_first_ever_construction_and_append_still_create_lock_and_log_at_0600(
+        self, tmp_path: Path
+    ) -> None:
+        """The positive control, under a umask that narrows the creation mode: the entries this
+        transaction created are fchmod-ed to exactly 0600; a racing fresh creator still gets in."""
+
+        path = tmp_path / "audit.jsonl"
+        previous = os.umask(0o277)  # creation would land at 0400 without the fchmod
+        try:
+            record = AuditLog(path).append("first", {"n": 1})
+        finally:
+            os.umask(previous)
+        assert record.sequence == 0
+        for entry in (path, _lock_path(path), _anchor_path(path)):
+            assert stat.S_IMODE(entry.lstat().st_mode) == 0o600, entry.name
+        assert verify_chain(path).state is ChainState.VALID
+        # Two fresh processes constructing on an absent path at once: the loser must open the
+        # winner's lock, not refuse (the first draft of this fix refused it; see the handoff).
+        fresh = tmp_path / "fresh" / "audit.jsonl"
+        fresh.parent.mkdir()
+        outcomes: list[str] = []
+        barrier = threading.Barrier(2)
+
+        def construct() -> None:
+            barrier.wait(timeout=10)
+            try:
+                AuditLog(fresh)
+                outcomes.append("ok")
+            except AuditLogCorruptionError as error:
+                outcomes.append(str(error))
+
+        workers = [threading.Thread(target=construct) for _ in range(2)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=10)
+        assert outcomes == ["ok", "ok"], outcomes
+
+
+class TestBootstrapAnchor:
+    """``bootstrap_anchor`` is the one public addition: the owner's explicit, once-only
+    publication of a first anchor for a legacy log, under the same lock and binding as an
+    append, appending nothing (D2 §3)."""
+
+    def test_bootstrap_is_exported_runs_under_the_lock_and_binds_around_publication(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import fcntl
+
+        from chronos.auditlog import bootstrap_anchor
+        from chronos.auditlog import log as log_module
+
+        path = tmp_path / "audit.jsonl"
+        write_records(path, 3)
+        anchor = _anchor_path(path)
+        anchor.unlink()
+        before = path.read_bytes()
+        hashes = _record_hashes(path)
+
+        events: list[str] = []
+        real_flock, real_fsync, real_replace = fcntl.flock, os.fsync, os.replace
+        real_bind = log_module.AuditLog._assert_transaction_bound
+
+        def flock(descriptor: int, operation: int) -> None:
+            events.append({fcntl.LOCK_EX: "lock", fcntl.LOCK_UN: "unlock"}.get(operation, "flock?"))
+            real_flock(descriptor, operation)
+
+        def fsync(descriptor: int) -> None:
+            kind = "dir" if stat.S_ISDIR(os.fstat(descriptor).st_mode) else "file"
+            events.append(f"{kind} fsync")
+            real_fsync(descriptor)
+
+        def replace(source: str, destination: str, **kwargs: object) -> None:
+            events.append("rename")
+            real_replace(source, destination, **kwargs)  # type: ignore[arg-type]
+
+        def bind(self: log_module.AuditLog, *args: object, when: str, **kwargs: object) -> None:
+            events.append(f"bind: {when}")
+            real_bind(self, *args, when=when, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(log_module.fcntl, "flock", flock)
+        monkeypatch.setattr(log_module.os, "fsync", fsync)
+        monkeypatch.setattr(log_module.os, "replace", replace)
+        monkeypatch.setattr(log_module.AuditLog, "_assert_transaction_bound", bind)
+
+        published = bootstrap_anchor(path)
+
+        assert published == anchor
+        assert anchor.read_bytes() == _anchor_bytes(3, hashes[-1])
+        assert stat.S_IMODE(anchor.lstat().st_mode) == 0o600
+        assert path.read_bytes() == before, "bootstrap appended a record"
+        assert not list(tmp_path.glob(".*.tmp"))
+        order = [
+            events.index(name)
+            for name in (
+                "lock",
+                "bind: before the anchor",
+                "file fsync",
+                "rename",
+                "dir fsync",
+                "bind: after the anchor",
+                "unlock",
+            )
+        ]
+        assert order == sorted(order), events
+        assert events.count("file fsync") == 1 and events.count("unlock") == 1, events
+        assert verify_chain(path).state is ChainState.VALID
+        assert AuditLog(path).append("after_bootstrap", {"n": 3}).sequence == 3
+
+    def test_bootstrap_returns_none_only_for_an_absent_log(self, tmp_path: Path) -> None:
+        from chronos.auditlog import bootstrap_anchor
+
+        path = tmp_path / "audit.jsonl"
+        anchor = _anchor_path(path)
+        assert bootstrap_anchor(path) is None
+        assert not path.exists() and not anchor.exists()
+        # An anchor with no log is a truncation/deletion state, never "absent": refused, and
+        # neither entry is created or touched.
+        anchor.write_bytes(_anchor_bytes(1, "a" * 64))
+        with pytest.raises(AuditLogCorruptionError, match="already exists"):
+            bootstrap_anchor(path)
+        assert not path.exists()
+        assert anchor.read_bytes() == _anchor_bytes(1, "a" * 64)

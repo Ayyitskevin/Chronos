@@ -15,13 +15,18 @@ BROKEN chain still produced a reconciliation status derived from its rows and
 listed them as recent audit events with only a warning line above.
 
 Verification and derivation run over ONE read (F4 review, HOLD at 9a2a107):
-``_read_audit`` captures the file once and hands that text to both
-``verify_chain_text`` and the row parser, so a file replaced between "verify"
-and "parse" can no longer let a VALID verdict authorise rows the verifier never
-saw. The one exception to "nothing derived" is ``audit_records``: the number of
-rows parsed from those same bytes stays as forensic telemetry — how big the thing
-to inspect is — and every surface labels it ``parsed rows, unverified`` when the
-chain is not VALID.
+``_read_audit`` captures the file once and hands that text to both the verifier
+and the row parser, so a file replaced between "verify" and "parse" can no
+longer let a VALID verdict authorise rows the verifier never saw. Since the
+head anchor (P1, 2026-09-12) the verdict is the log+anchor PAIR's, reached
+through ``chronos.auditlog.read_audit_pair`` — the same capability read
+``verify_chain`` uses (descriptor-relative, no-follow, exact 0600, anchor first,
+each file exactly once) — and ``verify_pair_text`` over the captured bytes, so a
+truncated log, a stale anchor or an exposed file is BROKEN on this surface
+exactly as it is at the CLI. The one exception to "nothing derived" is
+``audit_records``: the number of rows parsed from those same bytes stays as
+forensic telemetry — how big the thing to inspect is — and every surface labels
+it ``parsed rows, unverified`` when the chain is not VALID.
 """
 
 from __future__ import annotations
@@ -33,7 +38,12 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from chronos.auditlog.log import ChainState, ChainVerification, verify_chain_text
+from chronos.auditlog.log import (
+    AuditLogCorruptionError,
+    ChainState,
+    read_audit_pair,
+    verify_pair_text,
+)
 from chronos.control.halt import HaltStore
 from chronos.control.modes import ExecutionCapability, TradingMode, resolve_mode_lock
 from chronos.marketdata.csv_provider import load_daily_csv
@@ -113,20 +123,27 @@ def _code_commit(repo_root: Path) -> str:
 def _read_audit(
     audit_file: Path, *, tail: int
 ) -> tuple[ChainState, str, int, list[dict[str, object]]]:
-    """One read of the audit file; verdict and rows both come from that same text.
+    """One capability read of the log and one of its head anchor; the verdict is the
+    PAIR's (D2 §2) and the rows come from the very text that received it.
 
     Reading the path twice — once to verify, once to parse — was the F4 HOLD: a
     file replaced in between let a VALID verdict authorise rows the verifier
-    never saw. ABSENT is answered without opening anything, with the same detail
-    ``verify_chain`` gives for a missing path.
+    never saw. Judging the chain alone was the P1 composition defect: a tail-
+    truncated log beside its stale anchor read VALID here while the CLI said
+    BROKEN. ``read_audit_pair`` is the same descriptor-relative, no-follow,
+    exact-0600 read ``verify_chain`` performs — anchor first, each file once — so
+    an exposed or replaced entry is BROKEN on this surface too, with the refusal
+    as the detail and nothing repaired. ABSENT is answered by the pair verdict
+    with the same detail ``verify_chain`` gives for a missing path.
     """
 
     try:
-        text = audit_file.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        absent = ChainVerification(ChainState.ABSENT, "no audit log yet")
-        return absent.state, absent.detail, 0, []
-    verification = verify_chain_text(text)
+        text, anchor = read_audit_pair(audit_file)
+    except AuditLogCorruptionError as error:
+        return ChainState.BROKEN, str(error), 0, []
+    verification = verify_pair_text(text, anchor)
+    if text is None:
+        return verification.state, verification.detail, 0, []
     records: list[dict[str, object]] = []
     for line in io.StringIO(text):
         if line.strip():

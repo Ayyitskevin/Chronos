@@ -125,7 +125,14 @@ def _artifacts(root: Path, *, now: datetime) -> None:
         ),
         encoding="utf-8",
     )
+    # An empty platform audit log beside its matching zero anchor: VALID (0 records). A
+    # bare log with no anchor is BROKEN until the owner bootstraps it (chronos.auditlog).
     (root / "platform_audit.jsonl").write_text("", encoding="utf-8")
+    (root / "platform_audit.head.json").write_text(
+        json.dumps({"count": 0, "last_hash": "0" * 64}, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    for name in ("platform_audit.jsonl", "platform_audit.head.json"):
+        (root / name).chmod(0o600)  # exact mode is a capability condition (chronos.auditlog)
     (root / "health.json").write_text(json.dumps(_health(now)), encoding="utf-8")
     with sqlite3.connect(root / "chronos.db") as database:
         database.executescript(
@@ -520,3 +527,41 @@ def test_status_cannot_write_chmod_state_directory(
     assert code == 0
     assert after == before
     assert "CAMPAIGN STATUS: CLEAR" in capsys.readouterr().out
+
+
+def test_consumers_fail_closed_on_anchor_behind_and_ahead(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Campaign status keeps its CLEAR/TRIPPED/UNVERIFIED mapping; the head-anchor
+    mismatch details from ``verify_chain`` now trip it, and it stays read-only."""
+
+    from chronos.auditlog.log import AuditLog
+
+    now = datetime(2026, 9, 15, 12, tzinfo=UTC)
+    _artifacts(tmp_path, now=now)
+    _grant_fixtures(monkeypatch, now=now)
+    audit = tmp_path / "platform_audit.jsonl"
+    audit.unlink()
+    audit.with_name("platform_audit.head.json").unlink(missing_ok=True)
+    log = AuditLog(audit)
+    first = log.append("service_startup", {"outcome": "reconciled"})
+    log.append("service_cycle", {"outcome": "ran"})
+    anchor = audit.with_name("platform_audit.head.json")
+
+    anchor.write_text(json.dumps({"count": 3, "last_hash": "a" * 64}, sort_keys=True) + "\n")
+    before = _snapshot(tmp_path)
+    assert cmd_campaign_status(_arguments(tmp_path, now=now)) == 1
+    output = capsys.readouterr().out
+    assert "platform audit chain: TRIPPED" in output, output
+    assert "truncation" in output, output
+    assert _snapshot(tmp_path) == before
+
+    anchor.write_text(
+        json.dumps({"count": 1, "last_hash": first.record_hash}, sort_keys=True) + "\n"
+    )
+    before = _snapshot(tmp_path)
+    assert cmd_campaign_status(_arguments(tmp_path, now=now)) == 1
+    output = capsys.readouterr().out
+    assert "platform audit chain: TRIPPED" in output, output
+    assert "crash window" in output, output
+    assert _snapshot(tmp_path) == before

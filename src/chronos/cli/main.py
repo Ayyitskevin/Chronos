@@ -3,7 +3,8 @@
 ~~Every command prints the mode banner first.~~ *(Corrected 2026-08-08: the
 trading-plane commands do — status, halt, rearm, risk-show, verify-corpus,
 shadow-scan, monitor, backtest, and the research commands. ``verify-audit-log``,
-``skb``, ``registry``, ``holdout`` and ``mandate`` do not, and never did; they
+``bootstrap-audit-anchor``, ``skb``, ``registry``, ``holdout`` and ``mandate`` do not,
+and never did; they
 read artifacts rather than describe a trading posture.)* There is no command
 that enables
 live trading, no ``--force`` flag, and nothing here can bypass the risk
@@ -143,6 +144,34 @@ def cmd_verify_audit(args: argparse.Namespace) -> int:
     if result.state is ChainState.VALID:
         return 0
     return 1 if result.state is ChainState.BROKEN else 2
+
+
+def cmd_bootstrap_audit_anchor(args: argparse.Namespace) -> int:
+    """0 published, 1 refused, 2 absent — the same 0/1/2 convention as ``verify-audit-log``.
+
+    The owner's one crossing of the "legacy log without a head anchor" state
+    (``chronos.auditlog``, D2 §3): the entire bare chain is verified under the append lock,
+    then the first ``<stem>.head.json`` is published. Nothing is appended to the log — the
+    durable act is the anchor, and this receipt is stdout plus the exit code. Any existing
+    entry at the anchor's name refuses, untouched: this never overwrites, and it is not a
+    repair for a broken or rolled-back pair.
+    """
+
+    from chronos.auditlog.log import AuditLogCorruptionError, bootstrap_anchor
+
+    try:
+        anchor = bootstrap_anchor(args.audit_file)
+    except AuditLogCorruptionError as error:
+        print(f"audit head anchor: REFUSED — {error}")
+        return 1
+    if anchor is None:
+        print(f"audit log: ABSENT — no audit log to anchor at {args.audit_file}")
+        return 2
+    print(f"audit head anchor: PUBLISHED — {anchor}")
+    print(f"audit head anchor: {anchor.read_text(encoding='utf-8').strip()}")
+    result = verify_chain(args.audit_file)
+    print(f"audit log: {result.state.value} — {result.detail}")
+    return 0 if result.state is ChainState.VALID else 1
 
 
 def cmd_shadow_scan(args: argparse.Namespace) -> int:
@@ -451,6 +480,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     audit = sub.add_parser("verify-audit-log", help="verify the audit log hash chain")
     audit.set_defaults(func=cmd_verify_audit)
+
+    bootstrap = sub.add_parser(
+        "bootstrap-audit-anchor",
+        help="publish the first head anchor for a legacy audit log that has none (owner act)",
+    )
+    bootstrap.set_defaults(func=cmd_bootstrap_audit_anchor)
 
     shadow = sub.add_parser(
         "shadow-scan", help="evaluate latest closed bars; report would-be intents (no orders)"

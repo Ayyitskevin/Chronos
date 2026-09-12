@@ -544,14 +544,18 @@ class TestUnverifiedChainFailsClosed:
         assert any("audit chain verification failed" in str(w) for w in warnings), warnings
 
 
-def _valid_chain_bytes(directory: Path, startup_outcome: str, direction: str) -> bytes:
-    """Bytes of a VALID two-record chain, built where nothing is watching."""
+def _valid_chain_at(audit: Path, startup_outcome: str, direction: str) -> None:
+    """A VALID two-record chain AND its head anchor, written in place by the writer itself
+    (both 0600): the pair a capability reader accepts. Copying the log's bytes elsewhere
+    would leave a 0644, anchor-less file — BROKEN to every reader since P1."""
 
-    directory.mkdir()
-    log = AuditLog(directory / "audit.jsonl")
+    log = AuditLog(audit)
     log.append("service_startup", {"outcome": startup_outcome})
     log.append("service_decision", {"symbol": "SPY", "direction": direction})
-    return (directory / "audit.jsonl").read_bytes()
+
+
+def _anchor_of(audit: Path) -> Path:
+    return audit.with_name(audit.stem + ".head.json")
 
 
 class TestVerifyAndDeriveOverTheSameBytes:
@@ -569,9 +573,10 @@ class TestVerifyAndDeriveOverTheSameBytes:
         halt = tmp_path / "halt.json"
         HaltStore(halt).rearm("ready")
         audit = tmp_path / "audit.jsonl"
-        audit.write_bytes(_valid_chain_bytes(tmp_path / "genuine", "reconciled", "ENTER_LONG"))
-        forged = tmp_path / "forged.jsonl"
-        forged.write_bytes(_valid_chain_bytes(tmp_path / "evil", "reconciled-forged", "ENTER_EVIL"))
+        _valid_chain_at(audit, "reconciled", "ENTER_LONG")
+        (tmp_path / "evil").mkdir()
+        forged = tmp_path / "evil" / "audit.jsonl"
+        _valid_chain_at(forged, "reconciled-forged", "ENTER_EVIL")
 
         # Both the verifier and the row parser decode rows with json.loads; the FIRST call
         # happens inside verification, so swapping the file there is "after verification
@@ -609,16 +614,16 @@ class TestVerifyAndDeriveOverTheSameBytes:
         halt = tmp_path / "halt.json"
         HaltStore(halt).rearm("ready")
         audit = tmp_path / "audit.jsonl"
-        audit.write_bytes(_valid_chain_bytes(tmp_path / "genuine", "reconciled", "ENTER_LONG"))
-        tampered = audit.read_text(encoding="utf-8").replace("ENTER_LONG", "ENTER_XXXX")
-        real_read_text = pathlib.Path.read_text
+        _valid_chain_at(audit, "reconciled", "ENTER_LONG")
+        real_read = snapshot_mod.read_audit_pair
 
-        def tampered_read(self: pathlib.Path, *args: object, **kwargs: object) -> str:
-            if self == audit:
-                return tampered
-            return real_read_text(self, *args, **kwargs)
+        def tampered_read(path: Path) -> tuple[str | None, bytes | None]:
+            text, anchor = real_read(path)
+            if path == audit and text is not None:
+                return text.replace("ENTER_LONG", "ENTER_XXXX"), anchor
+            return text, anchor
 
-        monkeypatch.setattr(pathlib.Path, "read_text", tampered_read)
+        monkeypatch.setattr(snapshot_mod, "read_audit_pair", tampered_read)
         snap = build_snapshot(
             mode=TradingMode.SHADOW, halt_file=halt, audit_file=audit, now_utc=NOW
         )
@@ -628,28 +633,40 @@ class TestVerifyAndDeriveOverTheSameBytes:
         assert snap.recent_decisions == ()
         assert snap.audit_records == 2  # parsed from the same tampered bytes, labelled below
 
-    def test_the_audit_file_is_read_exactly_once(
+    def test_each_file_of_the_pair_is_opened_exactly_once(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """No second open: a re-open for parsing is the race, so the pin counts opens."""
+        """No second open of either file: a re-open for parsing is the race, so the pin
+        counts descriptor opens by name — the anchor first (a reader racing an append may
+        then see only the honestly named crash window), the log once — and no pathname
+        read of the log at all (the pre-P1 primitive)."""
 
         halt = tmp_path / "halt.json"
         HaltStore(halt).rearm("ready")
         audit = tmp_path / "audit.jsonl"
-        audit.write_bytes(_valid_chain_bytes(tmp_path / "genuine", "reconciled", "ENTER_LONG"))
+        _valid_chain_at(audit, "reconciled", "ENTER_LONG")
+        anchor_name = _anchor_of(audit).name
         opens: list[str] = []
+        pathname_reads: list[str] = []
+        real_os_open = os.open
         real_open, real_read_text = pathlib.Path.open, pathlib.Path.read_text
+
+        def counting_os_open(path: object, flags: int, *args: object, **kwargs: object) -> int:
+            if isinstance(path, str) and path in (audit.name, anchor_name):
+                opens.append(path)
+            return real_os_open(path, flags, *args, **kwargs)  # type: ignore[arg-type]
 
         def counting_open(self: pathlib.Path, *args: object, **kwargs: object) -> object:
             if self == audit:
-                opens.append("open")
+                pathname_reads.append("open")
             return real_open(self, *args, **kwargs)
 
         def counting_read_text(self: pathlib.Path, *args: object, **kwargs: object) -> str:
             if self == audit:
-                opens.append("read_text")
+                pathname_reads.append("read_text")
             return real_read_text(self, *args, **kwargs)
 
+        monkeypatch.setattr(os, "open", counting_os_open)
         monkeypatch.setattr(pathlib.Path, "open", counting_open)
         monkeypatch.setattr(pathlib.Path, "read_text", counting_read_text)
         snap = build_snapshot(
@@ -657,8 +674,8 @@ class TestVerifyAndDeriveOverTheSameBytes:
         )
 
         assert snap.audit_state is ChainState.VALID
-        # read_text opens the file once internally; that one open is the whole read.
-        assert opens == ["read_text", "open"], opens
+        assert opens == [anchor_name, audit.name], opens
+        assert pathname_reads == [], pathname_reads
 
     def test_an_absent_file_reports_the_same_detail_as_verify_chain(self, tmp_path: Path) -> None:
         from chronos.auditlog.log import verify_chain
@@ -672,6 +689,84 @@ class TestVerifyAndDeriveOverTheSameBytes:
         assert snap.audit_state is ChainState.ABSENT
         assert snap.audit_detail == verify_chain(missing).detail
         assert snap.audit_records == 0
+
+
+class TestMonitoringJudgesThePair:
+    """After the head anchor (P1), the verdict the dashboard shows is the PAIR's (D2 §2),
+    reached through the same capability read as ``verify_chain`` — one descriptor-relative,
+    no-follow, exact-0600 read of each file — so a truncated log, a stale anchor, or an
+    exposed file is BROKEN on the operator's primary window exactly as it is at the CLI.
+    Unsafe entries are reported, never repaired: a reader mutates nothing."""
+
+    def test_a_valid_pair_is_valid_with_the_pair_detail(self, tmp_path: Path) -> None:
+        from chronos.auditlog.log import verify_chain
+
+        halt = tmp_path / "halt.json"
+        HaltStore(halt).rearm("ready")
+        audit = tmp_path / "audit.jsonl"
+        _valid_chain_at(audit, "reconciled", "ENTER_LONG")
+        snap = build_snapshot(
+            mode=TradingMode.SHADOW, halt_file=halt, audit_file=audit, now_utc=NOW
+        )
+        assert snap.audit_state is ChainState.VALID
+        assert snap.audit_detail == "chain + anchor intact (2 records)"
+        assert snap.audit_detail == verify_chain(audit).detail
+        assert snap.reconciliation_status == "reconciled"
+        assert len(snap.recent_decisions) == 2
+
+    @pytest.mark.parametrize("which", ["anchor", "log"])
+    def test_a_loose_mode_entry_is_broken_and_not_tightened(
+        self, tmp_path: Path, which: str
+    ) -> None:
+        halt = tmp_path / "halt.json"
+        HaltStore(halt).rearm("ready")
+        audit = tmp_path / "audit.jsonl"
+        _valid_chain_at(audit, "reconciled", "ENTER_LONG")
+        target = _anchor_of(audit) if which == "anchor" else audit
+        os.chmod(target, 0o644)
+        snap = build_snapshot(
+            mode=TradingMode.SHADOW, halt_file=halt, audit_file=audit, now_utc=NOW
+        )
+        assert snap.audit_state is ChainState.BROKEN
+        assert "mode 0o644, not 0o600" in snap.audit_detail, snap.audit_detail
+        assert snap.reconciliation_status == "unverified (audit chain BROKEN)"
+        assert snap.recent_decisions == ()
+        assert (target.stat().st_mode & 0o777) == 0o644  # reported, not repaired
+        assert any("mode 0o644" in w for w in snap.warnings), snap.warnings
+
+    def test_a_symlinked_anchor_is_broken_without_reading_through(self, tmp_path: Path) -> None:
+        halt = tmp_path / "halt.json"
+        HaltStore(halt).rearm("ready")
+        audit = tmp_path / "audit.jsonl"
+        _valid_chain_at(audit, "reconciled", "ENTER_LONG")
+        genuine = _anchor_of(audit)
+        elsewhere = tmp_path / "elsewhere.json"
+        elsewhere.write_bytes(genuine.read_bytes())
+        os.chmod(elsewhere, 0o600)
+        genuine.unlink()
+        genuine.symlink_to(elsewhere)
+        snap = build_snapshot(
+            mode=TradingMode.SHADOW, halt_file=halt, audit_file=audit, now_utc=NOW
+        )
+        assert snap.audit_state is ChainState.BROKEN
+        assert "is a symlink" in snap.audit_detail, snap.audit_detail
+        assert snap.recent_decisions == ()
+
+    def test_a_legacy_log_without_an_anchor_is_broken_until_bootstrapped(
+        self, tmp_path: Path
+    ) -> None:
+        halt = tmp_path / "halt.json"
+        HaltStore(halt).rearm("ready")
+        audit = tmp_path / "audit.jsonl"
+        _valid_chain_at(audit, "reconciled", "ENTER_LONG")
+        _anchor_of(audit).unlink()
+        snap = build_snapshot(
+            mode=TradingMode.SHADOW, halt_file=halt, audit_file=audit, now_utc=NOW
+        )
+        assert snap.audit_state is ChainState.BROKEN
+        assert "owner bootstrap required" in snap.audit_detail, snap.audit_detail
+        assert snap.recent_decisions == ()
+        assert snap.audit_records == 2  # forensic count from the captured text, labelled
 
 
 class TestTheCountIsLabelledUnverified:
@@ -693,7 +788,7 @@ class TestTheCountIsLabelledUnverified:
         halt = tmp_path / "halt.json"
         HaltStore(halt).rearm("ready")
         audit = tmp_path / "audit.jsonl"
-        audit.write_bytes(_valid_chain_bytes(tmp_path / "genuine", "reconciled", "ENTER_LONG"))
+        _valid_chain_at(audit, "reconciled", "ENTER_LONG")
         snap = build_snapshot(
             mode=TradingMode.SHADOW, halt_file=halt, audit_file=audit, now_utc=NOW
         )
@@ -719,9 +814,7 @@ class TestTheCountIsLabelledUnverified:
         valid_dir = tmp_path / "valid"
         valid_dir.mkdir()
         valid_audit = valid_dir / "audit.jsonl"
-        valid_audit.write_bytes(
-            _valid_chain_bytes(tmp_path / "genuine", "reconciled", "ENTER_LONG")
-        )
+        _valid_chain_at(valid_audit, "reconciled", "ENTER_LONG")
         valid = build_snapshot(
             mode=TradingMode.SHADOW, halt_file=halt, audit_file=valid_audit, now_utc=NOW
         )
@@ -730,3 +823,34 @@ class TestTheCountIsLabelledUnverified:
         metrics = {args[0]: args[1] for name, args in fake.calls if name == "metric"}
         assert metrics.get("Audit records") == "2", metrics
         assert "Parsed rows, unverified" not in metrics
+
+
+def test_consumers_fail_closed_on_anchor_behind_and_ahead(tmp_path: Path) -> None:
+    """The snapshot's BROKEN mapping is unchanged; the anchor mismatch details now drive it."""
+
+    import json
+
+    halt = tmp_path / "halt.json"
+    HaltStore(halt).rearm("ready")
+    audit = tmp_path / "audit.jsonl"
+    log = AuditLog(audit)
+    first = log.append("service_startup", {"outcome": "reconciled"})
+    log.append("service_decision", {"symbol": "SPY", "direction": "ENTER_LONG"})
+    anchor = audit.with_name(audit.stem + ".head.json")
+
+    # Ahead: the anchor expects more than the log holds (tail truncation / rollback).
+    anchor.write_text(json.dumps({"count": 3, "last_hash": "a" * 64}, sort_keys=True) + "\n")
+    snap = build_snapshot(mode=TradingMode.SHADOW, halt_file=halt, audit_file=audit, now_utc=NOW)
+    assert snap.audit_state is ChainState.BROKEN
+    assert "truncation" in snap.audit_detail, snap.audit_detail
+    assert any("audit chain verification failed" in w and "truncation" in w for w in snap.warnings)
+    assert "BROKEN" in render_text(snap)
+
+    # Behind: the log holds more than the anchor expects (a crash between log and anchor).
+    anchor.write_text(
+        json.dumps({"count": 1, "last_hash": first.record_hash}, sort_keys=True) + "\n"
+    )
+    snap = build_snapshot(mode=TradingMode.SHADOW, halt_file=halt, audit_file=audit, now_utc=NOW)
+    assert snap.audit_state is ChainState.BROKEN
+    assert "crash window" in snap.audit_detail, snap.audit_detail
+    assert any("crash window" in w for w in snap.warnings), snap.warnings

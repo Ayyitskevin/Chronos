@@ -12,6 +12,7 @@ non-transmitting capability and that the CLI imports no broker adapter.
 from __future__ import annotations
 
 import hashlib
+import stat
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -311,3 +312,246 @@ def test_live_capability_is_unreachable_through_the_cli() -> None:
         assert not name.startswith("chronos.broker")
         assert "brokers" not in name
         assert "ibkr" not in name.lower()
+
+
+def _anchor_path(path: Path) -> Path:
+    return path.with_name(path.stem + ".head.json")
+
+
+def test_verify_audit_log_fails_closed_on_tail_truncation_and_on_a_missing_anchor(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D1 Gap A at the CLI: a valid prefix is no longer VALID once the head anchor
+    disagrees, and a log with no anchor is BROKEN until the owner bootstraps it."""
+
+    audit = tmp_path / "audit.jsonl"
+    log = AuditLog(audit)
+    log.append("startup", {"n": 1})
+    log.append("startup", {"n": 2})
+    assert main([*_base_args(tmp_path), "verify-audit-log"]) == 0
+    out = capsys.readouterr().out
+    assert "VALID" in out and "anchor" in out, out
+
+    lines = audit.read_text(encoding="utf-8").splitlines()
+    audit.write_text(lines[0] + "\n", encoding="utf-8")  # a complete, internally valid prefix
+    assert main([*_base_args(tmp_path), "verify-audit-log"]) == 1
+    out = capsys.readouterr().out
+    assert "BROKEN" in out and "truncation" in out, out
+
+    audit.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    _anchor_path(audit).unlink(missing_ok=True)
+    assert main([*_base_args(tmp_path), "verify-audit-log"]) == 1
+    out = capsys.readouterr().out
+    assert "BROKEN" in out and "owner bootstrap required" in out, out
+
+
+def test_status_reports_an_anchor_mismatch_as_broken_and_still_exits_zero(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    audit = tmp_path / "audit.jsonl"
+    AuditLog(audit).append("startup", {"n": 1})
+    assert main([*_base_args(tmp_path), "status"]) == 0
+    out = capsys.readouterr().out
+    assert "audit log: VALID — chain + anchor intact (1 records)" in out, out
+
+    _anchor_path(audit).unlink(missing_ok=True)
+    assert main([*_base_args(tmp_path), "status"]) == 0  # status never gates on the verdict
+    out = capsys.readouterr().out
+    assert "audit log: BROKEN — head anchor missing" in out, out
+    assert "owner bootstrap required" in out, out
+
+
+# ------------------------------------------------------------ the owner bootstrap command
+
+
+def _write_bare_legacy_log(path: Path, records: int) -> bytes:
+    """A valid chain with no anchor: the shape a pre-anchor deployment left behind."""
+
+    log = AuditLog(path)
+    for index in range(records):
+        log.append("legacy", {"n": index})
+    _anchor_path(path).unlink(missing_ok=True)
+    return path.read_bytes()
+
+
+def _anchor_bytes(count: int, last_hash: str) -> bytes:
+    import json
+
+    return (json.dumps({"count": count, "last_hash": last_hash}, sort_keys=True) + "\n").encode(
+        "utf-8"
+    )
+
+
+def _last_hash(path: Path) -> str:
+    import json
+
+    lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    return str(json.loads(lines[-1])["record_hash"]) if lines else "0" * 64
+
+
+def _names(directory: Path) -> set[str]:
+    return {entry.name for entry in directory.iterdir()}
+
+
+def _audit_args(tmp_path: Path, audit: Path) -> list[str]:
+    return ["--halt-file", str(tmp_path / "halt.json"), "--audit-file", str(audit)]
+
+
+def test_bootstrap_valid_bare_chain_once(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The owner's one crossing of the "legacy log, no anchor" state (D2 §3): exit 0, the log
+    byte-identical (no bootstrap record), the matching anchor published, the receipt printed;
+    a second run refuses (exit 1) and touches nothing; an empty readable log may be
+    bootstrapped explicitly."""
+
+    audit = tmp_path / "audit.jsonl"
+    before = _write_bare_legacy_log(audit, 2)
+    assert main([*_audit_args(tmp_path, audit), "verify-audit-log"]) == 1
+    assert "owner bootstrap required" in capsys.readouterr().out
+
+    assert main([*_audit_args(tmp_path, audit), "bootstrap-audit-anchor"]) == 0
+    out = capsys.readouterr().out
+    anchor = _anchor_path(audit)
+    assert str(anchor) in out, out
+    assert '"count": 2' in out and _last_hash(audit) in out, out
+    assert "VALID" in out and "2 records" in out, out
+    assert audit.read_bytes() == before, "bootstrap appended to the log"
+    assert anchor.read_bytes() == _anchor_bytes(2, _last_hash(audit))
+    assert stat.S_IMODE(anchor.lstat().st_mode) == 0o600
+    assert not list(tmp_path.glob(".*.tmp"))
+    assert main([*_audit_args(tmp_path, audit), "verify-audit-log"]) == 0
+    assert "chain + anchor intact (2 records)" in capsys.readouterr().out
+
+    anchor_before = anchor.read_bytes()
+    assert main([*_audit_args(tmp_path, audit), "bootstrap-audit-anchor"]) == 1
+    assert "already exists" in capsys.readouterr().out
+    assert anchor.read_bytes() == anchor_before and audit.read_bytes() == before
+
+    empty = tmp_path / "empty.jsonl"
+    empty.write_text("", encoding="utf-8")
+    empty.chmod(0o600)  # a legacy log at the required mode; a looser one is refused (HOLD F3)
+    assert main([*_audit_args(tmp_path, empty), "bootstrap-audit-anchor"]) == 0
+    assert '"count": 0' in capsys.readouterr().out
+    assert _anchor_path(empty).read_bytes() == _anchor_bytes(0, "0" * 64)
+    assert empty.read_bytes() == b""
+    assert main([*_audit_args(tmp_path, empty), "verify-audit-log"]) == 0
+
+
+def test_bootstrap_absent_is_2_and_broken_is_1_without_writes(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    audit = tmp_path / "audit.jsonl"
+    before = _names(tmp_path)
+    assert main([*_audit_args(tmp_path, audit), "bootstrap-audit-anchor"]) == 2
+    assert "ABSENT" in capsys.readouterr().out
+    # The serialization lock is F2's artifact and may appear; nothing else may.
+    assert _names(tmp_path) - before <= {"audit.jsonl.lock"}, _names(tmp_path)
+    assert not audit.exists() and not _anchor_path(audit).exists()
+
+    tampered = tmp_path / "tampered.jsonl"
+    bytes_before = _write_bare_legacy_log(tampered, 2)
+    lines = tampered.read_text(encoding="utf-8").splitlines()
+    flipped = lines[0].replace('"n":0', '"n":9')
+    assert flipped != lines[0], lines[0]
+    lines[0] = flipped
+    tampered.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    bytes_before = tampered.read_bytes()
+    names_before = _names(tmp_path)
+    assert main([*_audit_args(tmp_path, tampered), "bootstrap-audit-anchor"]) == 1
+    out = capsys.readouterr().out
+    assert "BROKEN" in out and "line 1" in out, out
+    assert tampered.read_bytes() == bytes_before
+    assert not _anchor_path(tampered).exists()
+    assert _names(tmp_path) - names_before <= {"tampered.jsonl.lock"}, _names(tmp_path)
+    assert not list(tmp_path.glob(".*.tmp"))
+
+
+@pytest.mark.parametrize("shape", ["matching", "malformed", "symlink", "fifo", "hard-link"])
+def test_bootstrap_refuses_every_existing_anchor_without_overwrite(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], shape: str
+) -> None:
+    import os
+
+    audit = tmp_path / "audit.jsonl"
+    log_before = _write_bare_legacy_log(audit, 2)
+    anchor = _anchor_path(audit)
+    victim = tmp_path / "victim.head.json"
+    victim.write_bytes(_anchor_bytes(2, _last_hash(audit)))
+    if shape == "matching":
+        anchor.write_bytes(_anchor_bytes(2, _last_hash(audit)))
+    elif shape == "malformed":
+        anchor.write_bytes(b"not an anchor\n")
+    elif shape == "symlink":
+        anchor.symlink_to(victim)
+    elif shape == "fifo":
+        os.mkfifo(anchor, mode=0o600)
+    else:
+        assert shape == "hard-link"
+        os.link(victim, anchor)
+    entry_before = anchor.lstat()
+    victim_before = victim.read_bytes()
+
+    assert main([*_audit_args(tmp_path, audit), "bootstrap-audit-anchor"]) == 1
+    assert "already exists" in capsys.readouterr().out
+
+    entry_after = anchor.lstat()
+    assert (entry_after.st_ino, entry_after.st_mode, entry_after.st_nlink, entry_after.st_size) == (
+        entry_before.st_ino,
+        entry_before.st_mode,
+        entry_before.st_nlink,
+        entry_before.st_size,
+    )
+    if shape in ("matching", "malformed"):
+        assert anchor.read_bytes() == (
+            _anchor_bytes(2, _last_hash(audit)) if shape == "matching" else b"not an anchor\n"
+        )
+    assert victim.read_bytes() == victim_before
+    assert audit.read_bytes() == log_before
+    assert not list(tmp_path.glob(".*.tmp"))
+
+
+def test_bootstrap_publication_failure_exits_1(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D2 §3: a publication failure is exit 1 — the typed refusal the CLI already catches —
+    not a traceback out of ``main()`` (HOLD F1, probe 16). Nothing is consumed by the failure:
+    the same command then succeeds."""
+
+    from chronos.auditlog import log as log_module
+
+    audit = tmp_path / "audit.jsonl"
+    before = _write_bare_legacy_log(audit, 2)
+
+    def injected_rename_failure(*args: object, **kwargs: object) -> None:
+        raise OSError(5, "injected rename failure")
+
+    monkeypatch.setattr(log_module.os, "replace", injected_rename_failure)
+    assert main([*_audit_args(tmp_path, audit), "bootstrap-audit-anchor"]) == 1
+    out = capsys.readouterr().out
+    assert "REFUSED" in out and "injected rename failure" in out, out
+    assert audit.read_bytes() == before
+    assert not _anchor_path(audit).exists()
+    assert not list(tmp_path.glob(".*.tmp"))
+
+    monkeypatch.undo()
+    assert main([*_audit_args(tmp_path, audit), "bootstrap-audit-anchor"]) == 0
+    assert _anchor_path(audit).read_bytes() == _anchor_bytes(2, _last_hash(audit))
+
+
+def test_bootstrap_refuses_a_loose_mode_legacy_log(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Exact mode 0600 is a capability condition (D2 §1, HOLD F3): a 0644 legacy log is
+    refused, typed, and left exactly as found — never tightened on the way past."""
+
+    audit = tmp_path / "audit.jsonl"
+    before = _write_bare_legacy_log(audit, 2)
+    audit.chmod(0o644)
+
+    assert main([*_audit_args(tmp_path, audit), "bootstrap-audit-anchor"]) == 1
+    out = capsys.readouterr().out
+    assert "REFUSED" in out and "mode" in out and "0o644" in out, out
+    assert stat.S_IMODE(audit.lstat().st_mode) == 0o644
+    assert audit.read_bytes() == before
+    assert not _anchor_path(audit).exists()

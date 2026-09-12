@@ -44,6 +44,11 @@ _FILE_ARTIFACTS: Final = (
     "platform_halt.json",
     "live_kill_switch.json",
     "platform_audit.jsonl",
+    # The audit log's head anchor (count + last hash, `chronos.auditlog`). It travels with
+    # the log: a restored log without it is BROKEN, and an older log beside a newer anchor
+    # is a truncation/rollback. The disposable `.lock` and `recovery_pending.json` are not
+    # artifacts and are never captured.
+    "platform_audit.head.json",
 )
 _REQUIRED_ARTIFACTS: Final = (*_SQLITE_ARTIFACTS, *_FILE_ARTIFACTS)
 _PLATFORM_TABLES: Final = frozenset({"schema_info", "intents", "transitions", "fills"})
@@ -54,6 +59,8 @@ _RESIDUALS: Final = (
     "snapshot age is meaningful only when wall-clock synchronization is verified",
     "no off-host placement, encryption, retention, or external integrity anchor is verified",
     "no owner mandate, broker state, order reconciliation, or permission to rearm is verified",
+    "a co-restored older audit log and head anchor are self-consistent and are not detected "
+    "locally; the anchor detects single-file rollback, not a restore of the pair",
 )
 
 

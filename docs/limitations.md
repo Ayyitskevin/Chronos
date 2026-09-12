@@ -169,6 +169,23 @@ runbooks.
   horizon and strikes within the band of spot are captured; anything outside is absent
   *by policy*, not missing data, and the applied bounds are stored in every snapshot.
 
+## Platform audit log (`chronos.auditlog`)
+
+- **Tail truncation and single-file rollback are detected, not prevented — and only by the
+  local pair.** `data/platform_audit.jsonl` carries a sibling head anchor
+  (`platform_audit.head.json`: record count + head hash); a deleted tail, a restored older
+  log beside a newer anchor, a missing or malformed anchor, or a concurrent-writer fork is
+  BROKEN. **Out of scope (disclosed, R-79):** an owner-user actor who recomputes or
+  co-restores both files consistently — the anchor is a local sibling, not a signed or
+  off-host root of trust, and restoring log and anchor together from one older snapshot is
+  locally indistinguishable from the truth (exactly as a wholesale restore of `data/`
+  already is). A crash between the log fsync and the anchor publication fails closed as a
+  "crash window" and needs reviewed recovery; a lock-free reader (monitoring, campaign
+  status) racing an append can observe that window as BROKEN. Legacy logs written before
+  the anchor existed are BROKEN until the owner bootstraps them
+  (`python -m chronos.cli bootstrap-audit-anchor`); nothing anchors them silently. The
+  research registry's anchor (below) protects the registry ledger only, never this log.
+
 ## Experiment registry + holdout guardian (C2, `chronos.registry`)
 
 - **The M5 "burned holdout" failure is detected and refused, not absolutely impossible.**

@@ -174,7 +174,12 @@ def _build_isolated_restore(tmp_path: Path) -> _RestoredCopy:
     audit = AuditLog(source_data / "platform_audit.jsonl")
     audit.append("backup_started", {"kind": "isolated_restore_drill"})
     audit.append("backup_completed", {"databases": 2})
-    for name in ("platform_halt.json", "live_kill_switch.json", "platform_audit.jsonl"):
+    for name in (
+        "platform_halt.json",
+        "live_kill_switch.json",
+        "platform_audit.jsonl",
+        "platform_audit.head.json",  # the log's head anchor travels with it
+    ):
         shutil.copy2(source_data / name, restored_data / name)
 
     return _RestoredCopy(root=restored_data.parent, intent=intent)

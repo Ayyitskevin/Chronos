@@ -1,5 +1,45 @@
 # CHANGELOG
 
+## [Unreleased] — the platform audit log gains a head anchor; every existing log needs an owner bootstrap before first start (2026-09-12)
+
+**What breaks on upgrade.** `data/platform_audit.jsonl` now travels with a sibling head anchor,
+`data/platform_audit.head.json` (`{"count": N, "last_hash": H}`), published atomically on every
+append inside the serialized transaction. Verification judges the pair, and a log with no anchor
+is BROKEN — deliberately: every audit log written before this release is such a log, and creating
+its anchor automatically would certify whatever the file happens to hold, an already rolled-back
+copy included. Until the owner bootstraps it:
+
+- `python -m chronos.cli verify-audit-log` exits **1** and prints
+  `BROKEN — head anchor missing for existing audit log; owner bootstrap required`;
+- `status` prints the same BROKEN line (it still exits 0); the monitoring snapshot warns
+  `audit chain verification failed: …`; `campaign status` reports
+  `platform audit chain: TRIPPED` and exits 1;
+- the service (`AuditLog` construction at startup) and `shadow-scan` refuse to run on the bare log
+  (`AUDIT LOG CORRUPT — halted, refusing to run`);
+- `python -m chronos.recovery capture` refuses: six artifacts are now required, the anchor among them.
+
+**The one command, once, before the first start on this release:**
+
+```bash
+python -m chronos.cli --audit-file data/platform_audit.jsonl bootstrap-audit-anchor
+```
+
+Exit **0**: the entire bare chain verified and the anchor was published — it prints the anchor path,
+its count/hash line and `VALID — chain + anchor intact (N records)`; no record is appended and the log
+is byte-identical. Exit **1**: refused — a broken or unreadable log, a log whose mode is not exactly
+`0600`, a publication failure, or anything already present at the anchor's path (it never overwrites).
+Exit **2**: no log exists; nothing to bootstrap — the first append creates the pair. Review the file
+before bootstrapping: the command certifies the chain exactly as it stands. An empty but readable
+legacy log may be bootstrapped explicitly (count 0).
+
+**Afterwards.** Back up and restore `platform_audit.jsonl` and `platform_audit.head.json` together
+(`docs/BACKUP_AND_RECOVERY.md`): a log restored without its anchor, or beside a newer one, is BROKEN;
+a log one record ahead of its anchor (a crash between the log fsync and the anchor publication) is
+BROKEN as a `crash window` and needs the reviewed recovery in that document. Mode is now a capability
+condition: a log, lock or anchor found looser than `0600` is refused and reported, not silently
+tightened. Restoring both files from one older snapshot is not detected locally (R-79). See R-14 /
+R-79, `docs/safety.md` "Platform audit integrity", `docs/SECURITY.md`.
+
 ## [Unreleased] — an unsafe grant reports as itself, on both arms (2026-09-05)
 
 ADR-0053 wired the typed `authority_file_unsafe` fault for the proposer registry and filed

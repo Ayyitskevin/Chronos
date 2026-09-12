@@ -19,8 +19,15 @@ Read the output deliberately:
    If halted: find out why before anything else. Do not rearm reflexively — the reason and detail
    name the trigger (`src/chronos/control/halt.py` lists all reasons).
 2. **Audit chain.** `status` verifies the hash chain and prints
-   `audit log: OK — chain intact (N records)` or a failure with the first bad line. A failure is
-   an incident (docs/INCIDENT_RESPONSE.md), not something to shrug at.
+   `audit log: VALID — chain + anchor intact (N records)` or a failure naming the first bad line
+   or the head-anchor mismatch (`platform_audit.head.json`). A failure is
+   an incident (docs/INCIDENT_RESPONSE.md), not something to shrug at. **Upgrade note (2026-09-12):**
+   a log written before the head anchor existed reads `BROKEN — head anchor missing for existing
+   audit log; owner bootstrap required` — and `verify-audit-log`, monitoring, `campaign status`,
+   the service and recovery capture all refuse it — until you run, once, after reviewing the file:
+   `python -m chronos.cli --audit-file data/platform_audit.jsonl bootstrap-audit-anchor`
+   (exit 0 published / 1 refused / 2 absent). The full note is the 2026-09-12 entry in
+   `CHANGELOG.md`.
 3. **Mode banner.** For `status` the banner shows `MODE: RESEARCH | CAPABILITY: NO_ORDERS` and
    `LIVE TRADING | hard-disabled`. It reflects the command's own context — it is not a status
    readout of any running service.
@@ -124,10 +131,12 @@ explicit text banner and a boolean `live_capable`, **never by colour alone**), h
 reconciliation outcome (from the last `service_startup` audit record — only while the audit
 chain verifies VALID; a BROKEN or ABSENT chain reads `unverified (audit chain BROKEN|ABSENT)`
 and no audit rows are listed, because nothing derived from an unverified chain may read as a
-verified state; the verdict and the rows come from one read of the file, so a file replaced
-mid-snapshot cannot pair a VALID verdict with rows the verifier never saw; the row count is
-kept as forensic telemetry and labelled `parsed rows, unverified` whenever the chain is not
-VALID), audit-chain integrity,
+verified state; the verdict is the log+anchor pair's, reached through the same capability read
+as `verify-audit-log` — one no-follow, exact-0600 read of the anchor and one of the log — and
+the rows come from that same read of the log, so a file replaced mid-snapshot cannot pair a
+VALID verdict with rows the verifier never saw, and a truncated log, stale anchor or exposed
+file is BROKEN here exactly as at the CLI; the row count is kept as forensic telemetry and
+labelled `parsed rows, unverified` whenever the chain is not VALID), audit-chain integrity,
 market-data freshness, the active risk limits, code commit, and — when a ledger is supplied —
 open orders, fill-derived net positions, and recent fills. Realized/unrealized P&L is **not**
 reconstructed here: this build runs SHADOW with a flat account and submits nothing, so those rows
