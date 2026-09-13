@@ -17,6 +17,10 @@ them moves without the other this file fails rather than an operator's expectati
   someone wires callback-driven reconciliation, the limitation text must move with it;
 - the limitations bullet states the callers the source has, and no longer says the timer
   is unimplemented; the operator route it names is registered;
+- the set of source files that CALL the reconcile method is exactly the three the bullet
+  names — a fourth caller anywhere under `src/chronos` fails here (Daybreak's HOLD P2);
+- the bullet promises no unconditional recovery: a pass re-establishes readiness only if
+  the composite proof succeeds, else PENDING / MANUAL_REVIEW (Daybreak's HOLD P1);
 - `AccountView.__doc__` names the three sources and does not open with "Broker-derived",
   and the constructor set it describes is the one the source has.
 """
@@ -36,7 +40,15 @@ BROKER_PACKAGE = ROOT / "src" / "chronos" / "broker"
 CHRONOS_PACKAGE = ROOT / "src" / "chronos"
 
 RECONCILE_TOKEN = "reconcile_submission_readiness"
+_RECONCILE_CALL = re.compile(r"(?<![A-Za-z0-9_])reconcile_submission_readiness\(")
 _ACCOUNT_VIEW_CALL = re.compile(r"(?<![A-Za-z_])AccountView\(")
+
+#: The callers docs/limitations.md names: startup, the periodic task, the operator route.
+DECLARED_RECONCILE_CALLERS = {
+    "src/chronos/api/main.py",
+    "src/chronos/api/reconciliation_loop.py",
+    "src/chronos/api/routes/orders.py",
+}
 
 
 def _limitations_section() -> str:
@@ -77,6 +89,24 @@ def test_no_broker_module_calls_reconciliation() -> None:
     )
 
 
+def _reconcile_call_sites() -> set[str]:
+    """Files under src/chronos with a CALL of the reconcile method (its `def` excluded)."""
+
+    sites: set[str] = set()
+    for module in CHRONOS_PACKAGE.rglob("*.py"):
+        for line in module.read_text(encoding="utf-8").splitlines():
+            if _RECONCILE_CALL.search(line) and not line.lstrip().startswith("def "):
+                sites.add(module.relative_to(ROOT).as_posix())
+    return sites
+
+
+def test_the_reconcile_call_site_set_is_exactly_the_three_the_limitation_names() -> None:
+    assert _reconcile_call_sites() == DECLARED_RECONCILE_CALLERS, (
+        "a caller of reconcile_submission_readiness appeared or vanished; "
+        "docs/limitations.md says exactly three and must move with the source"
+    )
+
+
 # -------------------------------------------------------- (c) the limitation says what is
 
 
@@ -93,6 +123,26 @@ def test_limitations_states_the_reconciliation_callers_the_source_has() -> None:
         "order/fill-event-driven reconciliation is absent",
     ):
         assert phrase in section, phrase
+
+
+def test_limitations_promises_no_unconditional_readiness_recovery() -> None:
+    """A pass ATTEMPTS re-establishment; RECONCILED needs the composite proof to succeed.
+
+    ``AppRuntime._reconcile_submission_readiness_generation`` publishes RECONCILED on one
+    branch of five; the others leave PENDING or MANUAL_REVIEW
+    (``tests/unit/test_runtime_reconciliation_readiness.py`` pins two of them). The bullet
+    may not read as "wait for the next pass and submission unlocks".
+    """
+
+    section = _limitations_section()
+    for phrase in (
+        "attempt to re-establish",
+        "only if the composite broker/local proof succeeds",
+        "`PENDING` or `MANUAL_REVIEW`",
+    ):
+        assert phrase in section, phrase
+    for promise in ("is re-established by", "readiness returns on the next"):
+        assert promise not in section, promise
 
 
 def test_the_operator_route_the_limitation_names_is_registered() -> None:
