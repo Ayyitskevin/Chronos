@@ -7,6 +7,12 @@ say plainly that no gateway has ever been connected and that it has not been reh
 mark as ``[GAP]`` only mechanisms the repository really lacks. Each pin reads the plan, the
 source or the tree at test time — nothing is hard-coded — so a VCP edit, a renamed script,
 a new Settings default, or a tool that quietly appears fails here, not in an owner session.
+
+Daybreak's HOLD at 6ab2016 added two safety pins: the checklist may never call
+``scripts/paper_soak_report.py`` read-only (its ``Database.initialize()`` creates a schema on
+an empty target) and every database command it labels read-only must open read-only on a
+snapshot; and the ``ALLOW_LIVE_TRADING`` sentence must carry its qualifier — a bare true is
+refused, the full live conjunction is accepted by design (``tests/unit/test_settings.py``).
 """
 
 from __future__ import annotations
@@ -172,3 +178,34 @@ def test_every_gap_line_names_a_mechanism_the_repository_lacks() -> None:
             if token in path.read_text(encoding="utf-8", errors="ignore")
         ]
         assert holders == [], f"[GAP] mechanism {token!r} now appears in {holders}"
+
+
+# ------------------------------------------ (f) the database check is genuinely read-only
+
+
+def test_the_soak_report_is_never_called_read_only_and_its_side_effect_is_stated() -> None:
+    lines = _checklist().splitlines()
+    mentions = [index for index, line in enumerate(lines) if "paper_soak_report" in line]
+    assert mentions, "the checklist no longer mentions scripts/paper_soak_report.py"
+    for index in mentions:
+        window = " ".join(lines[max(0, index - 2) : index + 3]).lower()
+        assert "read-only" not in window and "read only" not in window, lines[index]
+    assert "initializes a schema on an empty target" in _collapsed(_checklist())
+
+
+def test_every_database_command_opens_read_only_on_a_snapshot() -> None:
+    commands = [line for line in _checklist().splitlines() if "sqlite3 " in line]
+    assert commands, "no sqlite3 command in the checklist (the read-only check is gone)"
+    for line in commands:
+        assert "-readonly" in line or "mode=ro" in line, line
+        assert "snapshot" in line, line
+
+
+# ------------------------------------------ (g) the live-flag sentence keeps its qualifier
+
+
+def test_the_live_flag_sentence_carries_its_qualifier() -> None:
+    text = _collapsed(_checklist())
+    assert "`ALLOW_LIVE_TRADING=true` by itself" in text
+    assert "full live conjunction" in text
+    assert "does not enable anything" not in text
