@@ -279,12 +279,31 @@ _FORWARD_FLAGS = (
 )
 _REGISTER_ROW = re.compile(r"^\| (R-\d+[^ |]*) \| ([^|]+) \| ([^|]+) \| ([^|]+) \|")
 _STRUCK = re.compile(r"~~.*?~~", re.S)
-_ADDRESSED_MARKER = re.compile(r"\*\*[^*]*?addressed[^*]*?\*\*", re.I | re.S)
+_BOLD_SPAN = re.compile(r"\*\*([^*]+?)\*\*", re.S)
+# The plan's closure forms, and nothing else (a positive grammar — Daybreak's HOLD on #223):
+# a marker is positive only when the bold text BEGINS with one of these heads, optionally
+# followed by a date, then a parenthetical, colon, dash, period or the end. Case-sensitive, as
+# the plan writes them. Anything in front of a head — "Not", "No longer", "Partly", "Still
+# not", "Never", "Un-", any word at all — fails at the anchor, by construction. A qualified
+# form the plan has not used yet ("<Part> half addressed …") reads UNKNOWN until it is added
+# here, deliberately: the safe direction is a closure the page refuses to see.
+_CLOSURE_HEADS = (
+    "Addressed",
+    "Closed",
+    "Kill-engaged half addressed",
+    "Evidence half addressed",
+    "Read-only and unreconciled addressed",
+)
+_POSITIVE_MARKER = re.compile(
+    r"^\s*(?:" + "|".join(re.escape(head) for head in _CLOSURE_HEADS) + r")"
+    r"(?:\s+\d{4}-\d{2}-\d{2})?"
+    r"\s*(?:[(:.]|\u2014|\u2013|$)",  # "(", ":", ".", em dash, en dash, or the end
+    re.S,
+)
 _RESIDUAL_MARKER = re.compile(r"Still open from this\s+finding", re.I)
 _PLAN_SECTION_6 = re.compile(r"^## 6\. .*$", re.M)
 _PLAN_SECTION_END = re.compile(r"^(Required design outcomes:|## )", re.M)
 _PLAN_ITEM = re.compile(r"^(\d+)\. ", re.M)
-_BOLD = re.compile(r"\*\*(.+?)\*\*", re.S)
 _TITLE_LIMIT = 96
 
 
@@ -321,13 +340,33 @@ def _register_rows(path: Path) -> list[dict[str, str]]:
     return rows
 
 
+def _is_positive_marker(bold_text: str) -> bool:
+    """Is one bold marker one of the plan's closure forms? A grammar, not a denylist.
+
+    Positive: the text begins with a closure head from ``_CLOSURE_HEADS`` — ``Addressed``,
+    ``Closed``, or one of the exact qualified phrases the plan uses — then optionally a
+    date, then a parenthetical, colon, dash, period or the end: ``**Addressed 2026-08-13
+    (A1; R-49):**``, ``**Kill-engaged half addressed 2026-09-03 (…):**``, ``**Closed —
+    superseded.**``.  Nothing else.  "Unaddressed", "Not addressed", "No longer addressed",
+    "Partly addressed", "Still not addressed", "Never addressed", a qualified phrase the
+    plan never used, and a sentence that merely contains the word all fail at the anchor:
+    Daybreak's HOLD on #221 found a substring match reading the first of these as
+    ADDRESSED, and its re-verification of #223 found a denylist of negating words letting
+    the third and fourth through.  A list of words to refuse can always be widened by one
+    more; a list of forms to accept cannot be.
+    """
+
+    return _POSITIVE_MARKER.match(bold_text) is not None
+
+
 def _finding_status(text: str) -> str:
     """Read a §6 finding's status from the plan's own markers; UNKNOWN whenever unsure.
 
-    A finding whose statement is struck through and that carries a bold "addressed" marker
-    is ADDRESSED — ADDRESSED_WITH_RESIDUAL when unstruck text still says "Still open from
-    this finding".  An unstruck statement is OPEN.  Anything else (struck with no reason,
-    empty) is UNKNOWN: the reader never infers closure.
+    A finding whose statement is struck through and that carries a positive bold marker
+    (``_is_positive_marker``) is ADDRESSED — ADDRESSED_WITH_RESIDUAL when unstruck text
+    still says "Still open from this finding".  An unstruck statement is OPEN.  Anything
+    else (struck with no positive marker, a negated marker, empty) is UNKNOWN: the reader
+    never infers closure.
     """
 
     stripped = text.strip()
@@ -336,7 +375,7 @@ def _finding_status(text: str) -> str:
     unstruck = _STRUCK.sub("", stripped)
     if not stripped.startswith("~~"):
         return "OPEN"
-    if _ADDRESSED_MARKER.search(unstruck) is None:
+    if not any(_is_positive_marker(span) for span in _BOLD_SPAN.findall(unstruck)):
         return "UNKNOWN"
     if _RESIDUAL_MARKER.search(unstruck) is not None:
         return "ADDRESSED_WITH_RESIDUAL"
@@ -359,7 +398,7 @@ def _finding_title(raw: str) -> str:
 
 def _finding_marker(raw: str) -> str:
     unstruck = _STRUCK.sub("", raw)
-    match = _BOLD.search(unstruck)
+    match = _BOLD_SPAN.search(unstruck)
     if match is None:
         return "—"
     return " ".join(match.group(1).split()).rstrip(":")
