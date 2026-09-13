@@ -450,6 +450,42 @@ def test_the_cli_refuses_a_manifest_listed_symbol_with_no_bars_and_checks_nothin
     assert "bars/DIA.csv" in output
 
 
+@pytest.mark.parametrize("shape", ["absolute", "traversal", "lower-case", "nul"])
+def test_a_manifest_key_that_is_not_a_symbol_stem_is_refused_even_when_its_path_exists(
+    tmp_path: Path, shape: str
+) -> None:
+    """A manifest key is untrusted text; only an upper-case filename stem can name a bars file.
+
+    Daybreak's C-2 probe: an absolute key makes ``store / "bars" / f"{key}.csv"`` resolve
+    OUTSIDE the store (pathlib discards the prefix), so a matching external file would have
+    counted as the in-store bars the key claims. The key is refused before any path is built
+    from it — with the file present where the key would resolve, so the pin cannot pass by
+    the file's absence — and a NUL is refused rather than surfacing as pathlib's ValueError.
+    """
+
+    store = full_store(tmp_path / "store")
+    outside = tmp_path / "OUTSIDE"
+    outside.mkdir()
+    shutil.copyfile(store / "bars" / "DIA.csv", outside / "DIA.csv")
+    key = {
+        "absolute": str(outside / "DIA"),
+        "traversal": "../../OUTSIDE/DIA",
+        "lower-case": "dia",
+        "nul": "DIA\x00",
+    }[shape]
+    if shape == "traversal":  # the join really would land on the copy
+        assert (store / "bars" / f"{key}.csv").resolve() == (outside / "DIA.csv").resolve()
+    manifest = json.loads((store / "MANIFEST.json").read_text())
+    manifest["symbols"][key] = manifest["symbols"]["DIA"]
+    (store / "MANIFEST.json").write_text(json.dumps(manifest))
+
+    with pytest.raises(CheckRefusal) as caught:
+        check_store(store, ("SPY",))
+    assert caught.value.path == store / "MANIFEST.json"
+    assert repr(key) in caught.value.reason
+    assert "upper-case symbol stem" in caught.value.reason
+
+
 def test_a_symbol_the_manifest_does_not_list_is_still_checked_without_witnesses(
     tmp_path: Path,
 ) -> None:

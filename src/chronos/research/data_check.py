@@ -151,6 +151,20 @@ def available_symbols(store: Path) -> tuple[str, ...]:
     return tuple(sorted(by_symbol))
 
 
+def _is_symbol_stem(symbol: object) -> bool:
+    """True when ``symbol`` is the one thing a manifest key may be: an upper-case filename stem.
+
+    The same rule ``available_symbols`` applies to the bars filenames, read from the other
+    side: ``f"{symbol}.csv"`` must be a single POSIX path component (no ``/``, no NUL) whose
+    stem is its own upper-case. Anything else cannot name ``bars/<SYMBOL>.csv`` and must
+    not be joined onto the store path at all.
+    """
+
+    if not isinstance(symbol, str) or not symbol or symbol != symbol.upper():
+        return False
+    return "/" not in symbol and "\x00" not in symbol
+
+
 def _manifest_entries(store: Path) -> dict[str, Any] | None:
     """The manifest's per-symbol witnesses, or None when the store has no manifest.
 
@@ -196,6 +210,18 @@ def check_store(store: Path, symbols: tuple[str, ...] | None = None) -> CheckRes
 
     entries = _manifest_entries(store)
     if entries is not None:
+        # A manifest key is untrusted text. Only an upper-case filename stem can name
+        # bars/<SYMBOL>.csv; an absolute or traversal-shaped key would make the join below
+        # resolve OUTSIDE the store (pathlib drops the prefix), so no path is built from a
+        # key until every key has passed the same rule the bars filenames must.
+        malformed = sorted(repr(symbol) for symbol in entries if not _is_symbol_stem(symbol))
+        if malformed:
+            raise _refuse(
+                store / "MANIFEST.json",
+                f"MANIFEST 'symbols' key(s) {', '.join(malformed)} are not an upper-case "
+                "symbol stem (bars/<SYMBOL>.csv, the histdata.store layout); a key that "
+                "cannot name a bars file is refused rather than resolved as a path",
+            )
         # The mirror of the witness cross-check below: a symbol the manifest records whose
         # bars file is ABSENT was silently skipped (five symbols checked, exit 0, DIA gone).
         # It is the store's own record disagreeing with its bytes, so it is refused at the
