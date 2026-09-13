@@ -381,8 +381,10 @@ evidence and the owner's declarations remain prerequisites.
    build a delivery from.
 
    **What it will not do is invent the half you have to assert.** The five provenance fields,
-   the §4 attestation and `--provider-price-basis` are owner declarations; a missing one is a
-   refusal that names it, never a default. The basis is schema 2's vendor fact (§2, ADR-0059)
+   the §4 attestation, `--provider-price-basis` and `--delivery-id` are owner declarations; a
+   missing or blank one is a refusal that names it, never a default (a blank `--supersedes` is
+   refused the same way — omit it for a first delivery). The basis is schema 2's vendor fact
+   (§2, ADR-0059)
    and the store cannot supply it — `MANIFEST.json` records `adjusted: false`, which is the
    capture's claim about the same bytes, not the vendor's account of how they were made.
    assemble checks the value is in the vocabulary and stops there: it does **not** decide

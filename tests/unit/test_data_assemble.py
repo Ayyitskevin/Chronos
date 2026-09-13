@@ -540,6 +540,60 @@ def test_the_cli_refuses_a_missing_action_file_with_exit_2_and_the_symbol(
     assert "DIA" in output
 
 
+@pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
+def test_a_blank_delivery_id_is_refused_naming_the_flag(tmp_path: Path, blank: str) -> None:
+    """The delivery id is an owner assertion of the same class as the five provenance fields.
+
+    `--delivery-id` is argparse-required, which `""` satisfies, so a shell slip
+    (`--delivery-id "$ID"` with ID unset) assembled, printed ASSEMBLED with exit 0, and
+    then failed `data verify` as "delivery_id must be a non-empty string" — one step after
+    the input that has it, against a delivery the operator may already have moved. The
+    same slip on `--out` is refused at assemble; this pins the same treatment here.
+    """
+
+    with pytest.raises(AssembleRefusal) as caught:
+        _assemble(tmp_path, delivery_id=blank)
+    assert "--delivery-id" in caught.value.reason, caught.value.reason
+    assert not (tmp_path / "delivery").exists(), "a refusal writes nothing"
+
+
+@pytest.mark.parametrize("blank", ["", "  "])
+def test_a_blank_supersedes_is_refused_naming_the_flag(tmp_path: Path, blank: str) -> None:
+    """An empty `--supersedes` is neither absent nor a digest.
+
+    `None` (flag omitted) publishes `null` for a first delivery and still does; a blank
+    STRING can only come from `--supersedes "$PREV"` with PREV unset, and the verifier
+    refuses it as "supersedes must be a non-empty string". Presence is checked here; the
+    digest's SHAPE stays with `data verify`, so the positive control below is a value of the
+    right shape that is published verbatim without this module judging it.
+    """
+
+    store = write_store(tmp_path / "store")
+    with pytest.raises(AssembleRefusal) as caught:
+        _assemble(tmp_path, store=store, supersedes=blank)
+    assert "--supersedes" in caught.value.reason, caught.value.reason
+    assert not (tmp_path / "delivery").exists(), "a refusal writes nothing"
+
+    result = _assemble(tmp_path, store=store, out=tmp_path / "control", supersedes="b" * 64)
+    document = json.loads((result.delivery / "INTAKE.json").read_text())
+    assert document["supersedes"] == "b" * 64
+
+
+def test_the_cli_refuses_a_blank_delivery_id_with_exit_2(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    store = write_store(tmp_path / "store")
+    argv = _cli_argv(store, tmp_path / "delivery", _sampled_attestation(tmp_path))
+    argv[argv.index("--delivery-id") + 1] = ""
+    code = main(argv)
+
+    output = capsys.readouterr().out
+    assert code == 2, output
+    assert output.startswith("REFUSED "), output
+    assert "--delivery-id" in output, output
+    assert not (tmp_path / "delivery").exists(), "a refusal writes nothing"
+
+
 def _tree(root: Path) -> dict[str, str]:
     """Every entry under root, not only the files that were there before.
 
