@@ -341,7 +341,10 @@ def test_1_cli_refuses_a_near_miss_extension_with_exit_2_before_any_gate(
     code = main(["data", "check", "--store", str(store)])
     output = capsys.readouterr().out
     assert code == 2, output
-    assert output.startswith("REFUSED "), output
+    lines = output.splitlines()
+    assert len(lines) == 1, output  # ONE line: the refusal, and nothing before or after it
+    assert lines[0].startswith("REFUSED "), output
+    assert sum(line.startswith("REFUSED ") for line in lines) == 1, output
     assert "CHECKED" not in output, output
     assert "DIA.CSV" in output and "bars/DIA.csv" in output, output
 
@@ -369,8 +372,26 @@ def test_3_a_conforming_store_is_checked_exactly_as_before(
     code = main(["data", "check", "--store", str(store)])
     output = capsys.readouterr().out
     assert code == 0, output
-    assert output.count("\nCHECKED ") + output.startswith("CHECKED ") == 6, output
-    assert "GATES RUN over 6 symbol(s)" in output, output
+    # The complete canonical report for the seed-7 store over START..END, compared whole:
+    # six CHECKED lines (sorted symbols, 61 sessions each, coverage to four decimals, the
+    # generator's action counts — one quarterly dividend each, GLD none, QQQ plus its split)
+    # and the one summary line. Any drift in wording, precision, order or count fails here.
+    expected = "".join(
+        f"CHECKED {symbol}: 61 bars 2024-01-02..2024-03-28, coverage 1.0000, {actions} action(s), "
+        "manifest witnesses checked, 0 finding(s)\n"
+        for symbol, actions in (
+            ("DIA", 1),
+            ("GLD", 0),
+            ("IWM", 1),
+            ("QQQ", 2),
+            ("SPY", 1),
+            ("TLT", 1),
+        )
+    ) + (
+        f"GATES RUN over 6 symbol(s) in {store}: 0 finding(s). This is not a certification — "
+        "a delivery of all six symbols still has to pass data verify.\n"
+    )
+    assert output == expected, output
 
 
 def test_4_non_csv_files_in_bars_are_still_ignored(
