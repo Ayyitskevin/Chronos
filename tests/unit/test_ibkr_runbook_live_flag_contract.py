@@ -28,11 +28,28 @@ OPS_README = OPS / "README.md"
 
 ABSOLUTE_FORM = "does not enable anything"
 QUALIFIER = "`ALLOW_LIVE_TRADING=true` by itself"
+PASSAGE_END = "Never put IBKR usernames"
 M4_CHECKLIST = "m4-read-only-gate-session-checklist.md"
+# The source proves a CONFIGURATION property (validation accepts; live_transmission_possible is
+# True), never that a process starts or fails to start: build_runtime can still fail after
+# settings load (database, adapter construction, broker connection, account scope).
+PROCESS_CLAIMS = (
+    "the process starts",
+    "process never starts",
+    "starts live-capable",
+    "the process does not start",
+    "refuses to start",
+)
 
 
 def _collapsed(path: Path) -> str:
     return " ".join(path.read_text(encoding="utf-8").split())
+
+
+def _live_flag_passage() -> str:
+    text = _collapsed(RUNBOOK)
+    start = text.index(QUALIFIER)
+    return text[start : text.index(PASSAGE_END, start)]
 
 
 # ------------------------------------------------ (a) the runbook's live-flag sentence
@@ -48,6 +65,14 @@ def test_the_runbook_qualifies_the_live_flag_by_the_conjunction() -> None:
     assert "full live conjunction" in text
     assert "`validate_safety_and_ranges`" in text
     assert "`tests/unit/test_settings.py`" in text
+
+
+def test_the_live_flag_passage_claims_a_configuration_property_not_a_process_outcome() -> None:
+    passage = _live_flag_passage()
+    for claim in PROCESS_CLAIMS:
+        assert claim not in passage, claim
+    assert "`live_transmission_possible` is true" in passage
+    assert "says nothing about whether a process starts" in passage
 
 
 def test_the_qualifier_matches_the_validator_and_its_executable_proof() -> None:
