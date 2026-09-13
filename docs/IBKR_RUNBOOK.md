@@ -61,17 +61,18 @@ ALLOW_ORDER_TRANSMIT=false
 ALLOW_LIVE_TRADING=false
 ```
 
-`ALLOW_LIVE_TRADING=true` by itself — with the other settings above at their values — is refused:
-settings validation raises and the process does not start. With the full live conjunction
-(`BROKER_MODE=ibkr`, `BROKER_ADAPTER=official_ibkr`, `IB_ENVIRONMENT=live`,
-`ALLOW_ORDER_TRANSMIT=true`, a live `U…` account on `IB_ACCOUNT_ALLOWLIST`, arming and typed
-confirmation required) settings validation accepts and the process starts **live-capable** —
-`validate_safety_and_ranges` in `src/chronos/config/settings.py`, pinned by
-`tests/unit/test_settings.py`; the port is checked separately, at adapter construction
-(`verify_environment_port` in `src/chronos/broker/official_ibkr.py` refuses an
-environment/port mismatch). That is why the paper `.env` above keeps both transmit flags
-false: the flag is a switch, not a decoration. Never put IBKR usernames or passwords in any
-Chronos file.
+`ALLOW_LIVE_TRADING=true` by itself — with the other settings above at their values — is refused
+at settings validation (`Settings()` raises). With the full live conjunction (`BROKER_MODE=ibkr`,
+`BROKER_ADAPTER=official_ibkr`, `IB_ENVIRONMENT=live`, `ALLOW_ORDER_TRANSMIT=true`, a live `U…`
+account on `IB_ACCOUNT_ALLOWLIST`, arming and typed confirmation required) settings validation
+accepts the configuration and `live_transmission_possible` is true — `validate_safety_and_ranges`
+in `src/chronos/config/settings.py`, pinned by `tests/unit/test_settings.py`. That is a
+statement about the configuration and says nothing about whether a process starts:
+`build_runtime` can still fail afterwards (database initialization, adapter construction —
+where `verify_environment_port` in `src/chronos/broker/official_ibkr.py` refuses an
+environment/port mismatch — broker connection, account summary and scope). It is why the
+paper `.env` above keeps both transmit flags false: the flag is a switch, not a decoration.
+Never put IBKR usernames or passwords in any Chronos file.
 
 ## 5. Daily maintenance window and restarts
 
