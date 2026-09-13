@@ -143,7 +143,34 @@ class HaltStore:
         self._write(state)
         return state
 
+    def _require_writable_file_path(self) -> None:
+        """The halt path must be a file path, refused BEFORE the temp file is opened.
+
+        A directory (or another non-file) at the path used to reach ``os.replace`` and die
+        with IsADirectoryError after ``<path>.tmp`` had already been written beside it; a
+        parent that is a file died in ``mkdir`` with FileExistsError. Both left the operator
+        a traceback and no halt — fail-closed by accident. This is the one place the rule
+        lives (the CLI only prints it), and it raises the same ValueError the blank-note rule
+        does. A symlink is left to ``os.replace``, which replaces the link itself as before,
+        and a MISSING parent is still created below: refusing it would change what the kill
+        switch does on a fresh deployment, where ``data/`` does not exist yet.
+        """
+
+        path = self._path
+        if path.exists() and not path.is_file() and not path.is_symlink():
+            raise ValueError(
+                f"halt file path {path} is not a writable file path (it is a directory or "
+                "another non-file)"
+            )
+        parent = path.parent
+        if parent.exists() and not parent.is_dir():
+            raise ValueError(
+                f"halt file path {path} is not a writable file path (parent {parent} is not "
+                "a directory)"
+            )
+
     def _write(self, state: HaltState) -> None:
+        self._require_writable_file_path()
         payload = {
             "schema": _SCHEMA_VERSION,
             "halted": state.halted,

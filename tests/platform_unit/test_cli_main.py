@@ -162,6 +162,81 @@ def test_rearm_success_output_keeps_its_order(
     assert HaltStore(halt_file).read().halted is False
 
 
+def _halt_path_args(tmp_path: Path, halt_path: Path) -> list[str]:
+    return ["--halt-file", str(halt_path), "--audit-file", str(tmp_path / "audit.jsonl")]
+
+
+@pytest.mark.parametrize("command", [["halt", "--reason", "x"], ["rearm", "--note", "x"]])
+def test_a_directory_halt_file_is_refused_before_any_temp_file(
+    tmp_path: Path, command: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--halt-file <directory>` is one REFUSED line, not IsADirectoryError plus a stray `.tmp`.
+
+    HaltStore._write wrote `<path>.tmp` beside the directory and then died in os.replace;
+    the operator got a traceback (exit 1), no halt, and a temp file to clean up. The store
+    now refuses a path that is not a writable file path BEFORE it opens the temp file, and
+    the CLI prints the store's reason. No decision changes: the halt that could not be
+    written still is not written — it is refused explicitly and cleanly.
+    """
+
+    target = tmp_path / "adir"
+    target.mkdir()
+    listing_before = sorted(item.name for item in tmp_path.iterdir())
+
+    code = main([*_halt_path_args(tmp_path, target), *command])
+    output = capsys.readouterr().out
+    assert code == 2, output
+    assert output.startswith(f"REFUSED {command[0]}:"), output
+    assert "is not a writable file path" in output, output
+    assert str(target) in output, output
+    assert not (tmp_path / "adir.tmp").exists(), "the refusal must precede the temp file"
+    assert target.is_dir()
+    assert sorted(item.name for item in tmp_path.iterdir()) == listing_before, (
+        "nothing else written"
+    )
+
+
+def test_a_halt_file_whose_parent_is_a_file_is_refused(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--halt-file <file>/h.json` died in mkdir with FileExistsError; now the same REFUSED line."""
+
+    parent = tmp_path / "afile"
+    parent.write_bytes(b"x")
+    target = parent / "h.json"
+
+    code = main([*_halt_path_args(tmp_path, target), "halt", "--reason", "x"])
+    output = capsys.readouterr().out
+    assert code == 2, output
+    assert output.startswith("REFUSED halt:"), output
+    assert "is not a writable file path" in output, output
+    assert parent.read_bytes() == b"x"
+    assert not (tmp_path / "afile.tmp").exists() and not target.exists()
+
+
+def test_a_missing_parent_is_still_created_by_halt(tmp_path: Path) -> None:
+    """Positive control, green before the change: the first halt of a fresh deployment
+    creates its parent directory (`data/` does not exist on a fresh checkout). Refusing a
+    missing parent would change what the kill switch DOES, so it is deliberately unchanged."""
+
+    target = tmp_path / "missing" / "h.json"
+    assert main([*_halt_path_args(tmp_path, target), "halt", "--reason", "x"]) == 0
+    assert HaltStore(target).read().halted is True
+
+
+def test_status_on_a_directory_halt_file_stays_typed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Positive control, green before the change: the read path already fails closed as
+    STATE_CORRUPTION and `status` reports it in the banner without a traceback."""
+
+    target = tmp_path / "adir"
+    target.mkdir()
+    assert main([*_halt_path_args(tmp_path, target), "status"]) == 0
+    output = capsys.readouterr().out
+    assert "TRADING HALTED" in output and "STATE_CORRUPTION" in output, output
+
+
 def test_risk_show_command(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     policy = _permissive_policy(tmp_path / "risk.yaml")
     assert main([*_base_args(tmp_path), "risk-show", "--policy", str(policy)]) == 0
