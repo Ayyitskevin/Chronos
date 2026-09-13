@@ -57,6 +57,14 @@ def test_the_qualifier_matches_the_validator_and_its_executable_proof() -> None:
     assert "def live_transmission_possible(" in settings
     tests = SETTINGS_TESTS.read_text(encoding="utf-8")
     assert "def test_full_live_conjunction_is_accepted_and_live_transmission_possible(" in tests
+    # The port is NOT a settings conjunct: the adapter refuses a mismatch at construction.
+    assert (
+        "ib_port"
+        not in settings[settings.index("def validate_safety_and_ranges(") :].split("def ", 2)[1]
+    )
+    adapter = (ROOT / "src" / "chronos" / "broker" / "official_ibkr.py").read_text(encoding="utf-8")
+    assert "def verify_environment_port(" in adapter
+    assert "`verify_environment_port`" in _collapsed(RUNBOOK)
 
 
 # ------------------------------------------------ (b) docs/ops/README.md indexes checklists

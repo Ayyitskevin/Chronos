@@ -1,4 +1,4 @@
-# `docs/ops/` — service unit templates
+# `docs/ops/` — service unit templates and operator checklists
 
 **These are templates. Nothing in this repository installs, enables, or starts any of
 them, and CI never touches them.** They exist so an operator copies a reviewed shape
@@ -8,6 +8,13 @@ instead of writing a unit from memory.
 |---|---|---|
 | `chronos-backend.service` | the loopback backend on the **demo** broker, for the autonomy SHADOW campaign | [`../SHADOW_CAMPAIGN.md`](../SHADOW_CAMPAIGN.md) §3 |
 | `chronos-worker.service` | the model worker on **local** inference, forwarding off | [`../SHADOW_CAMPAIGN.md`](../SHADOW_CAMPAIGN.md) §3 |
+
+Operator checklists also live here — owner-facing, step-by-step procedures that a contract
+test holds to the plan and the source (e.g. `m4-read-only-gate-session-checklist.md`, the
+per-session checklist for the VCP §7 real-gateway read-only gate, when present). The
+template rules below apply to the `.service` files only; a checklist is indexed in this
+paragraph by filename, and `tests/unit/test_ibkr_runbook_live_flag_contract.py` fails if a
+markdown file appears in this directory without being named here.
 
 ## Rules these templates keep, and a test that enforces them
 
