@@ -701,10 +701,17 @@ the store beneath it:
   have.
 - **The EvidenceBundle store is still M4.** Bundles are bound by id and digest; individual
   citations are still not resolved against a store.
-- **Nothing counts *for* the counters yet.** `record_activity` and `record_equity` are the
-  supervisor's API, but no production caller invokes them, because the order plane is not
-  yet routed through the supervisor — compilation is M4. The limits are enforced in the
-  sense that a recorded breach binds; they are not yet *fed* by live trading.
+- **The activity counters are fed by the cycle; the equity counter is not.** `run_cycle`
+  (`src/chronos/supervisor/loop.py`) calls `record_activity` to reserve one order attempt
+  and the sized turnover before the order-plane handoff — durably, committed there when the
+  wiring supplies a pre-handoff commit (ADR-0052) — so a process lost mid-handoff cannot
+  hand an allowance back to a mandate that already spent it. After the handoff its typed
+  disposition decides: a refusal that proves nothing reached the wire releases the
+  reservation (`release_activity_reservation`); a raise, an unconfirmed send or a venue
+  rejection keeps it, because ambiguity is paid out of the mandate's budget rather than
+  handed back. The residual is `record_equity`: it remains the supervisor's API with no
+  production caller, so the equity-drawdown limit binds on a recorded breach but is not fed
+  by live observation.
 - **The M1 contracts shipped with real defects, found by adversarial review and fixed in M2a.**
   The worst was an authority-escalation vector: `model_copy(update=...)` bypassed every mandate
   validator, so a one-day SHADOW mandate could be copied into a ten-year `LIVE_AUTONOMOUS` one.
@@ -713,11 +720,17 @@ the store beneath it:
   `from chronos import <subpackage>`. All are fixed and regression-tested; the full list is
   ADR-0016 §"Known limitations and residuals" item 0. The honest lesson recorded here: these
   contracts are young, and their first adversarial pass found a hole per lens.
-- **Prompt injection is an open problem.** EvidenceBundles will be redacted, versioned, and
-  hash-pinned and tools allowlisted, but evidence derived from external text (news, filings)
-  is an untrusted input to a non-deterministic component. The deterministic kernel is the
-  control that holds when injection succeeds; explicit injection tests are owed by M4 and are
-  a frozen promotion criterion.
+- **Prompt injection is an open problem.** An `EvidenceBundle` is immutable, carries a
+  `bundle_version` the mandate pins, is content-digested and compared at admission against
+  the digest the supervisor issued, and is refused at issue on a `redaction_violations` hit;
+  external text (news, filings) rides in it as `TextualEvidence` whose `untrusted` flag
+  cannot be set false, and the model's tools are a frozen read-only registry. The explicit
+  injection tests exist in `tests/safety/test_model_tool_surface.py` — among them
+  `test_injected_narrative_changes_no_compiled_order_parameter` and
+  `test_no_deterministic_module_reads_a_bundle_text_body`. What none of that changes is
+  the residual: evidence derived from external text is an untrusted input to a
+  non-deterministic component, and injection is bounded, not prevented. The deterministic
+  kernel is the control that holds when injection succeeds.
 - **Kernel defects the autonomy programme inherits.** The M0 audit found four that unattended
   operation makes strictly more dangerous, tracked as RISK_REGISTER R-24…R-27. Status after
   M2:
