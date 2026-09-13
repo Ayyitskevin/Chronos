@@ -7,10 +7,10 @@ a manifest, a holdout declaration — so the conversion is a copy plus a derived
 
 ## What this module will not do
 
-**It never invents a field an owner has to assert.** Provenance (who exported the data, the
-digest of their receipt, when, how, under what licence), the **provider price basis**, the
-corporate-action attestation, and the classified-move list are owner acts; §4 says so of the
-attestation in as many words —
+**It never invents a field an owner has to assert.** The delivery id, provenance (who
+exported the data, the digest of their receipt, when, how, under what licence), the
+**provider price basis**, the corporate-action attestation, and the classified-move list
+are owner acts; §4 says so of the attestation in as many words —
 "code cannot do this half". A missing one is a refusal that names the field, never a default
 and never an empty string. A delivery that certifies on a fabricated provenance line is worse
 than no delivery, because the certification digest would then attest to nothing.
@@ -353,6 +353,24 @@ def assemble_delivery(
     """
 
     _require_disjoint(store, out)
+    # `--delivery-id` is argparse-required, which `""` satisfies, and `--supersedes` takes any
+    # string: a shell slip (`"$ID"` with ID unset) therefore assembled, printed ASSEMBLED with
+    # exit 0, and failed `data verify` one step later as "must be a non-empty string" — the
+    # same late report the `null` attestation used to get (Astra, A1). The verifier's presence
+    # rule is applied here, at the input that has it. The digest SHAPE of `supersedes` stays
+    # with the verifier, and `None` (flag omitted) still publishes `null`.
+    if not delivery_id.strip():
+        raise _refuse(
+            out,
+            "delivery_id is blank; it is an owner assertion (the id the release will carry) "
+            "and cannot be derived from the store — pass --delivery-id <id>",
+        )
+    if supersedes is not None and not supersedes.strip():
+        raise _refuse(
+            out,
+            "supersedes is blank, which is neither absent nor a digest; omit --supersedes for "
+            "a first delivery or pass the superseded release digest",
+        )
     basis = _provider_price_basis(provider_price_basis, out)
     manifest_path = store / "MANIFEST.json"
     entries = _require_symbol_set(manifest_path, _read_json(manifest_path))
