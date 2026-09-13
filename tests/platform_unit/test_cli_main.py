@@ -95,6 +95,73 @@ def test_halt_then_rearm_roundtrip(tmp_path: Path) -> None:
     assert HaltStore(halt_file).read().halted is False
 
 
+def _halt_args(tmp_path: Path) -> tuple[Path, list[str]]:
+    halt_file = tmp_path / "halt.json"
+    return halt_file, ["--halt-file", str(halt_file), "--audit-file", str(tmp_path / "audit.jsonl")]
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_rearm_with_a_blank_note_is_refused_and_leaves_the_halt_alone(
+    tmp_path: Path, blank: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--note "$NOTE"` with NOTE unset is one REFUSED line, not a crash after "clearing halt".
+
+    The store already refuses a blank note (tests/safety/test_safety_invariants.py pins it);
+    what was wrong was the CLI's report: it printed `clearing halt (...)` first, then let the
+    store's ValueError escape `main` as a traceback, exit 1. The halt file was never touched,
+    so the outcome was safe and the message was false. The rule stays the store's; the CLI
+    only reports it, before it prints anything else.
+    """
+
+    halt_file, args = _halt_args(tmp_path)
+    assert main([*args, "halt", "--reason", "manual test"]) == 0
+    before = halt_file.read_bytes()
+    capsys.readouterr()
+
+    code = main([*args, "rearm", "--note", blank])
+    output = capsys.readouterr().out
+    assert code == 2, output
+    assert output.startswith("REFUSED rearm:"), output
+    assert "clearing halt" not in output, output
+    assert "rearmed" not in output, output
+    assert halt_file.read_bytes() == before, "a refused rearm must not touch the halt file"
+    assert HaltStore(halt_file).read().halted is True
+
+
+def test_rearm_with_a_blank_note_on_a_fresh_deployment_is_refused(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    halt_file, args = _halt_args(tmp_path)
+    code = main([*args, "rearm", "--note", ""])
+    output = capsys.readouterr().out
+    assert code == 2, output
+    assert output.startswith("REFUSED rearm:"), output
+    assert "clearing halt" not in output, output
+    assert not halt_file.exists(), "a fresh deployment stays without a halt file"
+
+
+def test_rearm_success_output_keeps_its_order(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Control, green before the change: `clearing halt` still precedes the banner.
+
+    The refusal above moves that print to after the store has accepted the note, which must
+    be invisible on success — same lines, same order.
+    """
+
+    halt_file, args = _halt_args(tmp_path)
+    assert main([*args, "halt", "--reason", "manual test"]) == 0
+    capsys.readouterr()
+    assert main([*args, "rearm", "--note", "cleared after review"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    clearing = next(i for i, line in enumerate(lines) if line.startswith("clearing halt ("))
+    banner = next(i for i, line in enumerate(lines) if line.startswith("===="))
+    rearmed = next(i for i, line in enumerate(lines) if line.startswith("rearmed."))
+    assert "manual test" in lines[clearing], lines
+    assert clearing < banner < rearmed, lines
+    assert HaltStore(halt_file).read().halted is False
+
+
 def test_risk_show_command(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     policy = _permissive_policy(tmp_path / "risk.yaml")
     assert main([*_base_args(tmp_path), "risk-show", "--policy", str(policy)]) == 0
