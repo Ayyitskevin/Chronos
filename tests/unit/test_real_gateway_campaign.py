@@ -74,7 +74,7 @@ def test_gateway_skill_describes_the_executable_market_rule_capture() -> None:
 
 # --------------------------------------------------------------------------- G-1
 # The capture harness pseudonymizes broker identifiers (execution_id, broker_order_id,
-# permanent_id), not only account ids — the M4 checklist's "[GAP] no sanitize_order_ids".
+# permanent_id), not only account ids — the M4 checklist's [GAP] that no order-id sanitizer exists.
 # Tests are numbered to the G-1 contract.
 
 REPLAY_CHECK = ROOT / ".claude/skills/chronos-real-gateway-campaign/scripts/replay_check.py"
