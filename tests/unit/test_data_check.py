@@ -406,3 +406,59 @@ def test_4_non_csv_files_in_bars_are_still_ignored(
     assert available_symbols(store) == ("DIA",)
     assert main(["data", "check", "--store", str(store)]) == 0
     assert "GATES RUN over 1 symbol(s)" in capsys.readouterr().out
+
+
+# ------------------------------------------------ manifest lists a symbol the bytes lack
+
+
+def test_a_manifest_listed_symbol_with_no_bars_file_is_refused_before_any_gate(
+    tmp_path: Path,
+) -> None:
+    """The store's own record disagrees with its bytes — the mirror of the witness refusal.
+
+    A listed symbol whose bars file is PRESENT but disagrees is refused today; a listed
+    symbol whose bars file is ABSENT was silently skipped: five symbols checked, exit 0,
+    and DIA gone. Store-level: it is refused whichever symbol was requested.
+    """
+
+    store = full_store(tmp_path / "store")
+    (store / "bars" / "DIA.csv").unlink()
+
+    with pytest.raises(CheckRefusal) as caught:
+        check_store(store)
+    assert caught.value.path == store / "MANIFEST.json"
+    assert "DIA" in caught.value.reason
+    assert "bars/DIA.csv" in caught.value.reason
+    assert "disagrees with its bytes" in caught.value.reason
+
+    with pytest.raises(CheckRefusal) as caught_subset:  # not just the missing one
+        check_store(store, ("SPY",))
+    assert "bars/DIA.csv" in caught_subset.value.reason
+
+
+def test_the_cli_refuses_a_manifest_listed_symbol_with_no_bars_and_checks_nothing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    store = full_store(tmp_path / "store")
+    (store / "bars" / "DIA.csv").unlink()
+
+    code = main(["data", "check", "--store", str(store)])
+    output = capsys.readouterr().out
+    assert code == 2
+    assert output.startswith("REFUSED "), output
+    assert "CHECKED" not in output, output  # the refusal precedes every per-symbol gate
+    assert "bars/DIA.csv" in output
+
+
+def test_a_symbol_the_manifest_does_not_list_is_still_checked_without_witnesses(
+    tmp_path: Path,
+) -> None:
+    """The other direction is not a refusal: bytes the manifest never claimed are disclosed."""
+
+    store = full_store(tmp_path / "store")
+    shutil.copyfile(store / "bars" / "DIA.csv", store / "bars" / "AAPL.csv")
+
+    result = check_store(store, ("AAPL",))
+    (item,) = result.symbols
+    assert item.symbol == "AAPL"
+    assert item.manifest_checked is False

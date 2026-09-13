@@ -195,6 +195,21 @@ def check_store(store: Path, symbols: tuple[str, ...] | None = None) -> CheckRes
         )
 
     entries = _manifest_entries(store)
+    if entries is not None:
+        # The mirror of the witness cross-check below: a symbol the manifest records whose
+        # bars file is ABSENT was silently skipped (five symbols checked, exit 0, DIA gone).
+        # It is the store's own record disagreeing with its bytes, so it is refused at the
+        # store level, before any gate, whichever subset was requested.
+        unbacked = sorted(
+            str(symbol) for symbol in entries if not (store / "bars" / f"{symbol}.csv").exists()
+        )
+        if unbacked:
+            named = ", ".join(f"{symbol} (bars/{symbol}.csv)" for symbol in unbacked)
+            raise _refuse(
+                store / "MANIFEST.json",
+                f"MANIFEST records bars for {named} but the store has no such file; "
+                "the store's own record disagrees with its bytes",
+            )
     calendar = SessionCalendar()
     checked: list[SymbolCheck] = []
     for symbol in chosen:
