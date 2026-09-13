@@ -211,6 +211,22 @@ def holdout_windows(sessions: list[date]) -> tuple[HoldoutWindow, ...]:
     )
 
 
+def _require_directory_or_absent(out: Path) -> None:
+    """``out`` is a directory that does not exist yet, or one that does — never a file.
+
+    `--out afile.txt` used to reach ``write_bars``, whose mkdir of ``afile.txt/bars`` raised
+    NotADirectoryError out of the CLI as a traceback. The target's shape is knowable before
+    a single bar is generated, and ValueError is the type this module already refuses with
+    (a reversed or session-less range), so the CLI's existing mapping prints REFUSED.
+    """
+
+    if (out.exists() or out.is_symlink()) and not out.is_dir():
+        raise ValueError(
+            f"{out} exists and is not a directory; --out must name a new or existing store "
+            "directory"
+        )
+
+
 def generate_store(
     out: Path,
     *,
@@ -225,6 +241,7 @@ def generate_store(
     on every run — which is the one property a fixture cannot afford.
     """
 
+    _require_directory_or_absent(out)
     sessions = _sessions(start, end)
     if not sessions:
         raise ValueError(f"no sessions between {start} and {end}")

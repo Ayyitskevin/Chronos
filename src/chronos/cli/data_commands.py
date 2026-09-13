@@ -97,6 +97,7 @@ def cmd_data_synth_store(args: argparse.Namespace) -> int:
 
     # Import inside the command so the repeatedly-run read-only verify path does not carry
     # a generator it never calls.
+    from chronos.histdata.store import StoreError
     from chronos.research.synth_store import DEFAULT_END, DEFAULT_START, generate_store
 
     # Defaults are resolved here, not as argparse defaults: importing synth_store at module
@@ -110,6 +111,17 @@ def cmd_data_synth_store(args: argparse.Namespace) -> int:
         written = generate_store(args.out, seed=args.seed, start=start, end=end)
     except ValueError as error:
         print(f"REFUSED {args.out}: {error}")
+        return 2
+    except StoreError as error:
+        # The store refuses to overwrite rows it already holds, and its remedy line names
+        # `allow_correction` — a flag this command does not have and must not grow: a
+        # synthetic fixture is regenerated in place only with the seed and range that wrote
+        # it. Quote the store's reason, then say what the operator can actually do.
+        print(
+            f"REFUSED {args.out}: existing store disagrees with seed {args.seed} ({error}); "
+            "a store is regenerated in place only with the seed and range that wrote it — "
+            "choose a fresh --out"
+        )
         return 2
     total = sum(written.values())
     detail = ", ".join(f"{symbol} {rows}" for symbol, rows in sorted(written.items()))
