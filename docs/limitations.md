@@ -560,8 +560,13 @@ provenance claim from *agreement* to *authorship*.
   the queue row. At drain, `build_identity_resolver` (`src/chronos/api/autonomy_wiring.py`)
   reconstructs the stamped identity from exactly that registration and refuses — it never
   falls back to the static identity — when the binding is unbound, unknown, replaced,
-  revoked, disabled or expired. A registered bridge and a registered worker are therefore
-  distinct authors in `provenance`. The residual is the optional static SHADOW posture: with
+  revoked, disabled or expired. Distinct registrations are therefore distinct authors: a
+  bridge and a worker minted as separate proposers are told apart in `provenance` by
+  `proposer_id`. What the registry authenticates is the credential, not the process
+  presenting it — one credential configured in two processes is one author, and nothing in
+  the registry can tell those two apart; the mitigation is the operator requirement to mint
+  a distinct proposer per process and never reuse a credential (`docs/model_worker.md`,
+  `docs/tradingview_bridge.md`). The residual is the optional static SHADOW posture: with
   no registry configured, a TradingView-sourced decision's `provenance` is byte-identical to
   a model worker's, and the bridge compensates only as far as an evidence citation can —
   kind `tradingview_alert`, digested over the exact alert text — so the audit chain still

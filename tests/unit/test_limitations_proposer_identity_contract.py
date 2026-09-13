@@ -15,6 +15,12 @@ facts the prose rests on — the FastAPI route's *dependant* names ``require_pro
 substring of the file), ``build_identity_resolver`` on a real registration yields the
 registration's identity, and ``require_proposer`` with no registry configured is exactly
 the token check plus ``None`` (the only path where identity is not credential-derived).
+
+(5) The r2 qualifier (Daybreak P1): the registry authenticates a CREDENTIAL, not the
+process presenting it. Distinct registrations are distinct authors; one credential
+configured in two processes is one author and the registry cannot tell them apart. The
+doc must say exactly that, the bare "distinct authors in provenance" claim must be gone
+from the whole document, and the source pin reproduces the reviewer's probe.
 """
 
 from __future__ import annotations
@@ -24,9 +30,10 @@ import re
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 from fastapi.routing import APIRoute
 
 from chronos.api import auth as api_auth
@@ -36,6 +43,7 @@ from chronos.api.routes import autonomy as autonomy_routes
 from chronos.persistence.database import Database
 from chronos.supervisor.proposers import (
     ProposerRegistration,
+    ProposerRegistry,
     credential_hash,
     registration_binding,
 )
@@ -123,13 +131,13 @@ def _proposals_route() -> APIRoute:
         for route in autonomy_routes.router.routes
         if isinstance(route, APIRoute) and route.path == "/autonomy/proposals"
     ]
-    assert len(routes) == 1, [r.path for r in autonomy_routes.router.routes]
+    assert len(routes) == 1, [getattr(r, "path", "?") for r in autonomy_routes.router.routes]
     return routes[0]
 
 
 def test_4a_the_proposals_route_depends_on_require_proposer_by_object() -> None:
     route = _proposals_route()
-    assert "POST" in route.methods
+    assert route.methods is not None and "POST" in route.methods
     calls = [dependency.call for dependency in route.dependant.dependencies]
     assert api_auth.require_proposer in calls, calls
     # judged before the writer lease: the proposer dependency is declared first
@@ -199,13 +207,61 @@ def test_4c_no_registry_means_the_token_check_and_no_proposer_and_no_resolver() 
     state = SimpleNamespace(api_token="doc6-local-token-not-a-real-secret")
     without_token = SimpleNamespace(app=SimpleNamespace(state=state), headers={})
     with pytest.raises(HTTPException) as refused:
-        api_auth.require_proposer(without_token)
+        api_auth.require_proposer(cast(Request, without_token))
     assert refused.value.status_code == 401
     assert "X-Chronos-Token" in str(refused.value.detail)
     with_token = SimpleNamespace(
         app=SimpleNamespace(state=state),
         headers={"X-Chronos-Token": "doc6-local-token-not-a-real-secret"},
     )
-    assert api_auth.require_proposer(with_token) is None
+    assert api_auth.require_proposer(cast(Request, with_token)) is None
     # and with no registry path there is no resolver at all: the drain uses the static identity
     assert build_identity_resolver(None) is None
+
+
+# ----------------------------------------------------------- (5) credential is not process
+
+
+def test_5a_author_bullet_qualifies_distinct_authors_by_registration_not_process() -> None:
+    bullet = _bullet(AUTHOR_ANCHOR)
+    for phrase in (
+        "Distinct registrations are therefore distinct authors",
+        "authenticates is the credential, not the process",
+        "one credential configured in two processes is one author",
+        "`docs/model_worker.md`",
+        "`docs/tradingview_bridge.md`",
+    ):
+        assert phrase in bullet, phrase
+    # the unqualified claim is gone from the whole document, not just this bullet
+    whole = " ".join(LIMITATIONS.read_text(encoding="utf-8").split())
+    assert "registered worker are therefore distinct authors" not in whole
+    assert "distinct authors in `provenance`" not in whole
+
+
+def test_5b_one_credential_is_one_author_whoever_presents_it() -> None:
+    now = datetime(2026, 9, 13, 20, 0, tzinfo=UTC)
+    shared = _registration("shared-client", "doc6-shared-credential-not-a-real-secret")
+    registry = ProposerRegistry.model_validate({"schema_version": 1, "proposers": [shared]})
+    # Daybreak's probe: the same credential presented "as the bridge" and "as the worker"
+    # verifies to the same registration -- the presenter label is not an input.
+    presented = {
+        label: registry.verify("doc6-shared-credential-not-a-real-secret", now=now)
+        for label in ("bridge", "worker")
+    }
+    assert all(match is not None for match in presented.values()), presented
+    assert {match.proposer_id for match in presented.values() if match} == {"shared-client"}
+    distinct = presented["bridge"] is not presented["worker"]
+    assert distinct is False
+    # positive control: two registrations with their own credentials ARE distinct authors
+    bridge = _registration("tradingview-bridge", "doc6-bridge-credential-not-a-real-secret")
+    worker = _registration("claude-worker", "doc6-worker-credential-not-a-real-secret")
+    two = ProposerRegistry.model_validate({"schema_version": 1, "proposers": [bridge, worker]})
+    as_bridge = two.verify("doc6-bridge-credential-not-a-real-secret", now=now)
+    as_worker = two.verify("doc6-worker-credential-not-a-real-secret", now=now)
+    assert as_bridge is not None and as_worker is not None
+    assert (as_bridge.proposer_id, as_worker.proposer_id) == ("tradingview-bridge", "claude-worker")
+    # and "distinct registrations" means distinct credentials by construction: the registry
+    # refuses two entries that share a credential hash
+    twin = dict(bridge, proposer_id="claude-worker")
+    with pytest.raises(ValueError, match="share a credential hash"):
+        ProposerRegistry.model_validate({"schema_version": 1, "proposers": [bridge, twin]})
