@@ -388,18 +388,22 @@ def test_two_consecutive_failures_alert_exactly_once_at_the_second(
     The loop keeps running either way; what the operator is owed is the difference
     between "blocked because the market is shut" and "blocked because reconciliation
     has been broken for two cycles" — one alert, at the threshold, not one per cycle.
+    Three failing crossings are driven, not two, so the third proves the alert does
+    not fire AGAIN once the streak passes the threshold: ``==`` at the threshold, not
+    ``>=`` — a loop that alerted every cycle from the second on would be a pager, not
+    a threshold.
     """
 
     runtime = _Runtime(error=RuntimeError("broker unreachable"))
     runtime.reconciliation_readiness = _Latch("PENDING")  # type: ignore[attr-defined]
 
     with _captured(caplog):
-        _drive(runtime, crossings=2, moment=WEDNESDAY_MIDDAY_UTC, monkeypatch=monkeypatch)
+        _drive(runtime, crossings=3, moment=WEDNESDAY_MIDDAY_UTC, monkeypatch=monkeypatch)
 
-    assert runtime.calls == 2
-    assert len(_events(caplog, "periodic_reconciliation_failed")) == 2
+    assert runtime.calls == 3
+    assert len(_events(caplog, "periodic_reconciliation_failed")) == 3
     degraded = _events(caplog, "periodic_reconciliation_degraded")
-    assert len(degraded) == 1
+    assert len(degraded) == 1, [record.consecutive_failures for record in degraded]  # type: ignore[attr-defined]
     assert degraded[0].consecutive_failures == 2  # type: ignore[attr-defined]
     assert degraded[0].levelno == logging.ERROR
 
