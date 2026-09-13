@@ -3,11 +3,13 @@
 The honest, consolidated list of what Chronos does NOT do, cannot yet prove, or defers to an
 owner action. Chronos is pre-release, local-first software built for autonomous trading
 (ADR-0016 / D-16, maximal under ADR-0017 / D-17); **whether it trades autonomously is an
-owner configuration fact** — a backend with a valid, account-matching `AUTONOMY_MANDATE_FILE`
-activates autonomy at boot unless a recovery hold is in force or, for a submitting mode, the
-proposer posture is static, and then trades inside that mandate; without one, autonomy is
-inert. See the autonomy section below for the full activation predicate and for exactly what
-has and has not been delivered. It is not an investment adviser or a
+owner configuration fact** — a backend assembles the autonomy runtime at boot only when every
+conjunct holds: a valid, account-matching `AUTONOMY_MANDATE_FILE`, no recovery hold, a durable
+activation that has not been revoked, and, for a submitting mode, an authenticated proposer and
+evidence posture; an assembled runtime judges proposals inside that mandate and, in a
+submitting mode, may submit an order through the existing execution plane — or refuse, or, in
+SHADOW, place none; without a mandate file, autonomy is inert. See the autonomy section below
+for the full activation predicate and for exactly what has and has not been delivered. It is not an investment adviser or a
 promise of profitable trading. Equities, futures, options, and crypto can produce rapid,
 substantial losses, and an autonomous system can produce them without waiting for you. This
 document is the single source of truth for limitations referenced by the README and the

@@ -168,9 +168,24 @@ def test_3d_account_scope_and_durable_activation_gate_assembly_in_the_wiring_sou
 # ----------------------------------- 5. the introduction makes the same (qualified) claim
 
 
+# The WHOLE accepted sentence (whitespace-collapsed), not a fragment: any rewording of the
+# activation claim or of what an assembled runtime may do fails this pin (Daybreak, r2 HOLD).
 INTRO_ACCEPTED = (
-    "activates autonomy at boot unless a recovery hold is in force or, for a submitting mode, "
-    "the proposer posture is static"
+    "a backend assembles the autonomy runtime at boot only when every conjunct holds: a valid, "
+    "account-matching `AUTONOMY_MANDATE_FILE`, no recovery hold, a durable activation that has "
+    "not been revoked, and, for a submitting mode, an authenticated proposer and evidence "
+    "posture; an assembled runtime judges proposals inside that mandate and, in a submitting "
+    "mode, may submit an order through the existing execution plane — or refuse, or, in SHADOW, "
+    "place none; without a mandate file, autonomy is inert."
+)
+# Sufficiency grammar and guaranteed-trade clauses that must appear NOWHERE in the document.
+FORBIDDEN_FORMS = (
+    r"\bactivates\b[^.]*\bunless\b",
+    r"auto-activates",
+    r"and then trades",
+    r"trades inside that mandate",
+    r"always transmits",
+    r"transmits orders",
 )
 
 
@@ -188,10 +203,17 @@ def test_5_the_introduction_carries_the_qualified_claim_and_the_bare_form_appear
 
     intro = _intro()
     assert INTRO_ACCEPTED in intro, intro
-    assert "account-matching" in intro, intro
-    assert "without one, autonomy is inert" in intro, intro
-    whole = LIMITATIONS.read_text(encoding="utf-8")
-    assert "auto-activates" not in whole, "the bare unconditional form must not survive anywhere"
+    for conjunct in (
+        "account-matching",
+        "no recovery hold",
+        "durable activation that has not been revoked",
+        "authenticated proposer and evidence posture",
+    ):
+        assert conjunct in intro, conjunct
+    assert "in SHADOW, place none" in intro, "SHADOW's no-order behaviour stays true in the intro"
+    whole = " ".join(LIMITATIONS.read_text(encoding="utf-8").split())
+    for pattern in FORBIDDEN_FORMS:
+        assert re.search(pattern, whole) is None, f"forbidden form present: {pattern}"
 
 
 # ---------------------------------- 6. the service-supervision residual is supportable
