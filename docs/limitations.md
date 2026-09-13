@@ -13,12 +13,16 @@ runbooks.
 
 ## Broker integration
 
-- **The official `ibapi` package is not installable in this build/CI environment.** The
-  `OfficialIBKRBroker` order path (`placeOrder`/`cancelOrder`, order-object construction) is
-  therefore validated against fake-ibapi objects and a recording spy, not a live gateway.
-  **Owner gateway verification against a running paper/live TWS or IB Gateway is an owner
-  action** and is the one remaining live integration seam. The complete pipeline drives any
-  `Broker` implementation, so this seam is narrow and well-typed.
+- **The official `ibapi` package is absent from the locked build/CI dependency set.** It is
+  not on PyPI and no `requirements-*.lock` pins it; `OfficialIBKRBroker` imports it lazily
+  (`_load_ibapi`, `src/chronos/broker/official_ibkr.py`) and fails fast with install guidance
+  when it is missing, and the owner installs it from the TWS API distribution
+  (`docs/ibkr_setup.md`). The `OfficialIBKRBroker` order path (`placeOrder`/`cancelOrder`,
+  order-object construction) is therefore validated in CI against fake-ibapi objects and a
+  recording spy, not a live gateway. **Owner gateway verification against a running paper/live
+  TWS or IB Gateway is an owner action** (M4). This document does not enumerate a
+  live-acceptance list, so it makes no claim about which seam is the last one remaining. The
+  complete pipeline drives any `Broker` implementation, so this seam is narrow and well-typed.
 - **Live trading has never been exercised from this codebase.** No test, CI run, or development
   path places an order. Any live acceptance is an owner action through the finished app.
 - The real-network IBKR smoke test is opt-in (`CHRONOS_RUN_IBKR_SMOKE=1`), read-only, and
@@ -99,14 +103,23 @@ runbooks.
   audited operator endpoint (`POST /orders/{id}/resolve`) refreshes evidence but cannot turn
   snapshot absence into a rejection — never an auto-retry.
 - The confirmation summary hash and idempotency key canonicalize the quantity but **not** the
-  limit price, so two economically-identical spellings of a limit price (e.g. trailing zeros)
-  would produce distinct hashes. This is a recorded, low-impact limitation: changing the
-  limit-price serialization would alter every existing hash, so it is deliberately left as-is.
+  limit price (`src/chronos/orders/intent.py`: quantity via `canonical_quantity`, price via
+  `format(limit_price, "f")`), so two economically-identical spellings of a limit price (e.g.
+  trailing zeros) would produce distinct hashes. This is a recorded, low-impact limitation:
+  changing the limit-price serialization would alter existing hashes whose persisted price
+  spelling is non-canonical (`format(Decimal("3.20"), "f")` is `3.20` and normalizes to `3.2`;
+  `Decimal("3.2")` and integral prices are unchanged by normalization), so it is deliberately
+  left as-is.
 - Covered-call scenarios remain blocked on complete stock-allocation provenance; strategy basis,
-  arbitrary quantities, real-broker margin, and IBKR order what-if beyond the demo path are not
-  fully wired. Stock allocation valuation requires a current underlying quote at the service layer.
-  Dividend, borrow, and corporate-action inputs are optional because the broker port does not
-  provide them yet.
+  arbitrary quantities, and real-broker margin are still incomplete. IBKR order what-if on the
+  official path is wired — outside demo mode the runtime constructs `OfficialIBKRBroker` and
+  injects its connection into `OrderPreviewService` (`src/chronos/runtime.py`), and the adapter
+  sends `whatIf=True` and returns commission and margin deltas (`preview_order`,
+  `src/chronos/broker/official_ibkr.py`) — but it has never been exercised against a real
+  gateway: validated against fake-ibapi objects only, so owner gateway verification (M4) is
+  what remains. Stock allocation valuation requires a current underlying quote at the service
+  layer. Dividend, borrow, and corporate-action inputs are optional because the broker port
+  does not provide them yet.
 
 ## Persistence and migrations
 
