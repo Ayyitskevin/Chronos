@@ -430,10 +430,16 @@ runbooks.
 - **The autonomy stack is built and wired (M1–M7.5).** Contracts, gateway, durable state,
   compiler, queue, counters, alert delivery, the tick runtime, and — since ADR-0017 — the
   app-plane wiring (`chronos.api.autonomy_wiring`) that assembles them in the backend
-  lifespan. A backend booted with a valid `AUTONOMY_MANDATE_FILE` auto-activates it and
-  judges proposals arriving over the ingress; with no mandate file configured, autonomy is
-  inert (no runtime is constructed). The consumer-isolation test now names the wiring
-  module as the single permitted app-plane consumer of the contracts.
+  lifespan. Activation at boot is a conjunction, not a switch. The lifespan
+  (`src/chronos/api/main.py`) does not construct the runtime at all under a recovery hold
+  (ADR-0054); with no mandate file configured, autonomy is inert (no runtime is
+  constructed); a configured mandate must load as a trusted file and be scoped to this
+  account, or the backend alerts and stays inert; a mandate in a submitting mode
+  additionally requires a proposer registry and evidence binding, or assembly refuses
+  (ADR-0051); and the activation is recorded durably before a runtime exists
+  (`src/chronos/api/autonomy_wiring.py`). A valid `AUTONOMY_MANDATE_FILE` is therefore
+  necessary, not sufficient. The consumer-isolation test names the wiring module as the
+  single permitted app-plane consumer of the contracts.
 - **ADR-0017 changed the envelope, not the gates.** Owner-directed supersessions: the
   persistent auto-activating mandate (revocation still survives restart; invalid or
   wrong-account files boot inert with a CRITICAL alert), the live ceiling at 365 days,
@@ -624,12 +630,15 @@ provenance claim from *agreement* to *authorship*.
 
 **Known gaps after M6:**
 
-- ~~**The proposal route does not run the cycle (R-36)**~~ — **the runtime exists since M7.**
-  The route enqueues into a bounded durable queue; `AutonomyRuntime` judges on a time-driven
-  tick where events are hints that coalesce to a floor, never triggers. What remains of R-36:
-  the runtime is a class, not a daemon — no shipped entrypoint constructs it with a real
-  `FactGatherer` and handoff, so wiring it into the backend lifespan or a service unit is the
-  operational step left.
+- ~~**The proposal route does not run the cycle (R-36)**~~ — **the runtime exists since M7
+  and the backend constructs it.** The route enqueues into a bounded durable queue;
+  `AutonomyRuntime` judges on a time-driven tick where events are hints that coalesce to a
+  floor, never triggers. The entrypoint exists: the backend lifespan
+  (`src/chronos/api/main.py`) calls `build_autonomy_runtime`, which assembles the runtime
+  with the backend's own fact gatherers, and binds the result to the app. What remains of
+  R-36 is operational, not structural: no service unit supervises that process as a
+  long-running daemon, and there is no operational proof of the runtime judging over a real
+  session.
 - **No process supervisor for the model worker.** Running the external worker is operational.
 - **R-32's residual:** a local file does not follow you off the machine. Genuinely unattended
   operation *away from the host* still needs a networked channel and its own ADR.
