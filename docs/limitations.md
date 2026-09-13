@@ -552,12 +552,20 @@ provenance claim from *agreement* to *authorship*.
   `chronos.bridge` translates a TradingView alert into a candidate proposal and posts it to
   the same loopback ingress. It is a *client* of that endpoint, not a second door into it,
   and it holds no Chronos capability — it imports no order, broker, supervisor, or
-  persistence module, and not `chronos.autonomy` either. The honest consequence is that
-  **the static ingress provenance now covers two genuinely different kinds of author and
-  cannot distinguish them**: a TradingView-sourced decision's `provenance` is byte-identical
-  to a model worker's. The bridge compensates only as far as an evidence citation can — kind
-  `tradingview_alert`, digested over the exact alert text — so the audit chain records which
-  alert produced which decision. The gap below is therefore wider than it was, not narrower.
+  persistence module, and not `chronos.autonomy` either. Who authored a decision is answered
+  by the proposer registry (ADR-0023, `src/chronos/supervisor/proposers.py`): a registration
+  binds a credential hash to a proposer-specific identity — `proposer_id`, provider, model
+  and the version fields (model, prompt, tool schema, decision schema, policy) — and the
+  route persists the verified `proposer_id`, credential epoch and registry-entry digest on
+  the queue row. At drain, `build_identity_resolver` (`src/chronos/api/autonomy_wiring.py`)
+  reconstructs the stamped identity from exactly that registration and refuses — it never
+  falls back to the static identity — when the binding is unbound, unknown, replaced,
+  revoked, disabled or expired. A registered bridge and a registered worker are therefore
+  distinct authors in `provenance`. The residual is the optional static SHADOW posture: with
+  no registry configured, a TradingView-sourced decision's `provenance` is byte-identical to
+  a model worker's, and the bridge compensates only as far as an evidence citation can —
+  kind `tradingview_alert`, digested over the exact alert text — so the audit chain still
+  records which alert produced which decision.
 
 ### What M5 added, and what it deliberately did not
 
@@ -598,9 +606,16 @@ provenance claim from *agreement* to *authorship*.
   optional JSONL file sink (0600, fsync'd, `O_NOFOLLOW` per R-21) that composes with whatever
   the operator already runs.
 - **The ingress transport** (`POST /autonomy/proposals`), which answers M5's "who is calling"
-  question by **reusing what exists** rather than inventing a weaker scheme: loopback-only
-  binding, the same local API token every mutating endpoint requires, and the single-writer
-  lease. Nothing here is weaker than the surface it sits beside.
+  question with a dependency of its own rather than the shared token: loopback-only binding,
+  `require_proposer` (`src/chronos/api/auth.py`) declared on the route ahead of the
+  single-writer lease (`src/chronos/api/routes/autonomy.py`). With a proposer registry
+  configured (ADR-0023) the route verifies a registered proposer credential in
+  `X-Chronos-Proposer-Token`, refuses the shared `X-Chronos-Token` with a distinct 401 that
+  says what changed, and records the matched registration on the queue row. The exact
+  fallback is the pre-registry posture: with no registry, `require_proposer` calls
+  `require_token` and returns no proposer, so the route is gated by the same local API token
+  as every other mutating endpoint and by nothing more. Nothing here is weaker than the
+  surface it sits beside; with a registry it demands more.
 
 **Known gaps after M6:**
 
@@ -614,8 +629,12 @@ provenance claim from *agreement* to *authorship*.
 - **R-32's residual:** a local file does not follow you off the machine. Genuinely unattended
   operation *away from the host* still needs a networked channel and its own ADR.
 - **R-34's residual:** market *calendar day*, not session calendar — no holidays or half-days.
-- **Who is calling, beyond the token.** The transport authenticates that a caller has local
-  access and the token; it does not distinguish one local worker from another.
+- **Who is calling, beyond the token.** Only on the static posture: with no
+  `AUTONOMY_PROPOSERS_FILE` the route accepts the shared local token and every proposal is
+  stamped `INGRESS_IDENTITY`, so one local worker is not told apart from another. Closing it
+  is an owner act — an owner-authored proposer registry (ADR-0023) gives each caller its own
+  credential and identity — and a submitting (PAPER/LIVE) mandate refuses to assemble on the
+  static posture at all (ADR-0051), so the residual is SHADOW-grade.
 
 ### What M3 added, and what it deliberately did not
 
