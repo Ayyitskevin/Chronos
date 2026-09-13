@@ -107,9 +107,10 @@ runbooks.
   `format(limit_price, "f")`), so two economically-identical spellings of a limit price (e.g.
   trailing zeros) would produce distinct hashes. This is a recorded, low-impact limitation:
   changing the limit-price serialization would alter existing hashes whose persisted price
-  spelling is non-canonical (`format(Decimal("3.20"), "f")` is `3.20` and normalizes to `3.2`;
-  `Decimal("3.2")` and integral prices are unchanged by normalization), so it is deliberately
-  left as-is.
+  spelling is non-canonical — the boundary is the spelling, not the value:
+  `format(Decimal("3.20"), "f")` is `3.20` and normalizes to `3.2`, and `Decimal("100.00")`
+  normalizes to `100` the same way, while already-canonical spellings such as `Decimal("3.2")`
+  and `Decimal("100")` are unchanged — so it is deliberately left as-is.
 - Covered-call scenarios remain blocked on complete stock-allocation provenance; strategy basis,
   arbitrary quantities, and real-broker margin are still incomplete. IBKR order what-if on the
   official path is wired — outside demo mode the runtime constructs `OfficialIBKRBroker` and
