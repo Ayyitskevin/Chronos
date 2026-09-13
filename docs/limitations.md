@@ -721,8 +721,9 @@ the store beneath it:
   ADR-0016 §"Known limitations and residuals" item 0. The honest lesson recorded here: these
   contracts are young, and their first adversarial pass found a hole per lens.
 - **Prompt injection is an open problem.** An `EvidenceBundle` is immutable, carries a
-  `bundle_version` the mandate pins, is content-digested and compared at admission against
-  the digest the supervisor issued, and is refused at issue on a `redaction_violations` hit;
+  `bundle_version` and is content-digested; admission compares the bundle id and digest the
+  supervisor issued (the mandate pins provider, model, prompt, tool-schema, decision-schema
+  and policy versions — not the bundle's), and issue refuses on a `redaction_violations` hit;
   external text (news, filings) rides in it as `TextualEvidence` whose `untrusted` flag
   cannot be set false, and the model's tools are a frozen read-only registry. The explicit
   injection tests exist in `tests/safety/test_model_tool_surface.py` — among them
