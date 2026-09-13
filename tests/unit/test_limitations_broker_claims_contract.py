@@ -85,9 +85,22 @@ def test_ibapi_is_absent_from_every_lock_and_loaded_lazily() -> None:
 
 
 def test_normalizing_a_limit_price_moves_only_non_canonical_spellings() -> None:
-    assert format(Decimal("3.2"), "f") == format(Decimal("3.2").normalize(), "f")
-    assert format(Decimal("3.20"), "f") != format(Decimal("3.20").normalize(), "f")
-    assert format(Decimal("100"), "f") == format(Decimal("100").normalize(), "f")
+    """Canonical spellings are fixed points; trailing zeros move — integral or not.
+
+    Daybreak's HOLD on 82d4a36: "integral prices are unchanged" was false, because an
+    integral VALUE can still carry a non-canonical spelling — ``Decimal("100.00")``
+    formats as ``100.00`` and normalizes to ``100``. The boundary is the spelling, never
+    the value, and the bullet must say so.
+    """
+
+    unchanged = ("3.2", "100", "0.5")
+    changed = ("3.20", "100.00", "12.50")
+    for spelling in unchanged:
+        value = Decimal(spelling)
+        assert format(value, "f") == format(value.normalize(), "f"), spelling
+    for spelling in changed:
+        value = Decimal(spelling)
+        assert format(value, "f") != format(value.normalize(), "f"), spelling
 
 
 def test_the_limit_price_bullet_cites_the_canonicalization_the_source_has() -> None:
@@ -98,3 +111,7 @@ def test_the_limit_price_bullet_cites_the_canonicalization_the_source_has() -> N
     assert "whose persisted price spelling is non-canonical" in bullet
     assert "would alter every existing hash" not in bullet
     assert "`canonical_quantity`" in bullet and '`format(limit_price, "f")`' in bullet
+    # The boundary is the spelling, not the value: the bullet names the integral
+    # non-canonical case and never claims integral prices are unchanged as a class.
+    assert '`Decimal("100.00")`' in bullet
+    assert "integral prices are unchanged" not in bullet
