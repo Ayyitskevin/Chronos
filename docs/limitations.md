@@ -173,20 +173,25 @@ runbooks.
   with the trading backend (a shared pacing budget) is not wired; the data process
   self-paces conservatively under its own client id.
 - **The holdout embargo is a default-masked accessor, not a structural guardian.** A
-  caller that reads `bars/<SYMBOL>.csv` directly bypasses it. The once-only,
-  owner-typed, logged unlock and registry-brokered reads are Phase C2's job.
+  caller that reads `bars/<SYMBOL>.csv` directly bypasses it. The registry guardian's
+  mediated read exists (`src/chronos/registry/holdout_guardian.py`): an owner-typed,
+  single-use unlock grant, consumed inside the ledger's locked critical section, with the
+  burn recorded before any bar is unmasked. Its bounds: it mediates only the reads that go
+  through it — the direct-file bypass above is untouched — and it guards only the windows
+  the store declares.
 - **The legacy `research/data/raw/` corpus is unchanged.** C1 stands up a separate
   go-forward store (`research/data/history/`) and does not migrate or reconcile the
   heterogeneous 5-ETF CSVs.
 
 ## Options forward capture (C0, `chronos.histdata options`)
 
-- **No expired-options history exists at any spend.** IBKR provides no historical data
-  for expired options, so capture is **forward-only** — the surface accrues at calendar
-  speed and will span few volatility regimes for years. Frozen-criteria Wheel
-  validation stays gated on either a paid vendor (owner decision N2) or an accepted
-  multi-year horizon (restated in C5). The store ships empty; the first snapshot is an
-  owner-run step.
+- **Expired-options history is absent from this zero-budget store.** IBKR cannot backfill
+  expired contracts, so this capture is **forward-only** — the surface accrues at calendar
+  speed and will span few volatility regimes for years. Licensed vendor history remains an
+  owner option (the repository's own plan, `docs/VISION_COMPLETION_PLAN.md`, says option
+  validation is calendar-bound without it); frozen-criteria Wheel validation stays gated on
+  either that owner decision (N2) or an accepted multi-year horizon (restated in C5). The
+  store ships empty; the first snapshot is an owner-run step.
 - **$0-tier data is delayed / EOD-snapshot quality, and labeled as such.** Every row
   carries its `DataQuality` and each snapshot records a staleness histogram +
   worst-case; delayed/frozen data is never presented as live. Real-time OPRA is a paid
