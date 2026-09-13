@@ -21,7 +21,21 @@ from __future__ import annotations
 
 import ast
 import re
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+
+import pytest
+
+from chronos.histdata.holdout import HoldoutWindow, write_holdouts
+from chronos.histdata.store import write_bars
+from chronos.marketdata.bars import Bar, BarInterval, BarSeries
+from chronos.registry import (
+    REQUIRED_HOLDOUT_UNLOCK_PHRASE,
+    HoldoutGuardianError,
+    RegistryLedger,
+    mediated_holdout_read,
+    request_unlock,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 LIMITATIONS = ROOT / "docs" / "limitations.md"
@@ -67,6 +81,8 @@ def test_1_the_holdout_bullet_names_the_present_mediated_read_and_keeps_the_bypa
         "locked critical section",
         "burn recorded before any bar is unmasked",
         "direct-file bypass above is untouched",
+        # the SECOND bound, as a whole clause (Daybreak, DOC-8 HOLD P2: it was prose-only)
+        "and it guards only the windows the store declares.",
     )
     for phrase in accepted:
         assert phrase in bullet, phrase
@@ -184,3 +200,68 @@ def test_3c_the_plan_names_licensed_expired_options_history_as_the_alternative()
         "Without licensed expired-options history, option validation becomes calendar-bound and "
         "can take multiple years."
     ) in plan
+
+
+# ---------------------------------------- 3d. the guardian guards only declared windows
+
+
+def _bar(day: date, close: float) -> Bar:
+    return Bar(
+        symbol="SPY",
+        source="ibkr",
+        exchange="SMART",
+        interval=BarInterval.DAY_1,
+        session_date=day,
+        timestamp_utc=datetime(day.year, day.month, day.day, 21, 0, tzinfo=UTC),
+        open=close,
+        high=close,
+        low=close,
+        close=close,
+        volume=1000.0,
+    )
+
+
+def test_3d_the_mediated_read_refuses_a_window_the_store_no_longer_declares(
+    tmp_path: Path,
+) -> None:
+    """The bullet's second bound, executed: a grant is issued while the store declares the
+    window; the store is then re-declared without it; the mediated read refuses with the
+    exact reason rather than reading through some other window."""
+
+    now = datetime(2026, 7, 20, 21, 0, tzinfo=UTC)
+    declared = HoldoutWindow(
+        "holdout_2024_jun", date(2024, 6, 1), date(2024, 6, 30), symbols=("SPY",)
+    )
+    write_holdouts(tmp_path, (declared,))
+    write_bars(
+        tmp_path,
+        BarSeries(
+            symbol="SPY",
+            interval=BarInterval.DAY_1,
+            bars=(
+                _bar(date(2024, 5, 15), 10),
+                _bar(date(2024, 6, 14), 11),
+                _bar(date(2024, 7, 15), 12),
+            ),
+        ),
+        captured_at="2026-07-20T21:00:00+00:00",
+    )
+    ledger = RegistryLedger(tmp_path / "registry.jsonl")
+    grant = request_unlock(
+        ledger,
+        tmp_path,
+        declared.name,
+        typed_phrase=REQUIRED_HOLDOUT_UNLOCK_PHRASE,
+        reason="contract pin",
+        now=now,
+        accrued_sessions=40,
+        ttl_minutes=15,
+        sessions_per_unlock=20,
+        max_outstanding_unlocks=2,
+    )
+
+    other = HoldoutWindow("holdout_2024_aug", date(2024, 8, 1), date(2024, 8, 31), symbols=("SPY",))
+    write_holdouts(tmp_path, (other,))  # the store now declares a different window only
+
+    with pytest.raises(HoldoutGuardianError, match="is no longer declared"):
+        mediated_holdout_read(ledger, tmp_path, "SPY", grant=grant, now=now + timedelta(minutes=1))
