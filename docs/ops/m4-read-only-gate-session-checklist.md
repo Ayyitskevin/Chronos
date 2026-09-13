@@ -48,13 +48,18 @@ fresh `.env` that does not set them is already correct.
 | `BROKER_MODE` | `ibkr` for a gateway session (`demo` only for the offline rehearsal) | `demo` |
 
 `ALLOW_LIVE_TRADING=true` by itself — with the other campaign settings at their defaults — is
-refused: settings validation raises and the process does not start. With the full live
-conjunction (`BROKER_MODE=ibkr`, `BROKER_ADAPTER=official_ibkr`, `IB_ENVIRONMENT=live`, a live
-port, `ALLOW_ORDER_TRANSMIT=true`, a live `U…` account on `IB_ACCOUNT_ALLOWLIST`) the process
-starts **live-capable** (`validate_safety_and_ranges` in `src/chronos/config/settings.py`;
-pinned by `tests/unit/test_settings.py`) — which is exactly why every flag in the table stays
-at its default for this gate. (`docs/IBKR_RUNBOOK.md` §4 states the refusal without this
-qualifier; that runbook is not edited by this checklist.) A present, valid
+refused at settings validation (`Settings()` raises). With the full live conjunction
+(`BROKER_MODE=ibkr`, `BROKER_ADAPTER=official_ibkr`, `IB_ENVIRONMENT=live`,
+`ALLOW_ORDER_TRANSMIT=true`, a live `U…` account on `IB_ACCOUNT_ALLOWLIST`, arming and typed
+confirmation required) settings validation accepts the configuration and
+`live_transmission_possible` is true (`validate_safety_and_ranges` in
+`src/chronos/config/settings.py`; pinned by `tests/unit/test_settings.py`). That is a statement
+about the configuration and says nothing about whether a process starts: `build_runtime` can
+still fail afterwards (database initialization, adapter construction — where
+`verify_environment_port` in `src/chronos/broker/official_ibkr.py` refuses an environment/port
+mismatch — broker connection, account summary and scope). It is exactly why every flag in the
+table stays at its default for this gate. (`docs/IBKR_RUNBOOK.md` §4 is corrected the same way
+on its own branch, DOC-4; that runbook is not edited by this checklist.) A present, valid
 `AUTONOMY_MANDATE_FILE` auto-activates autonomy on every backend boot (ADR-0017), so it stays
 unset for the whole campaign. The IBKR-side "Read-Only API" option (§3.1) is defense in depth
 on top of these flags, not a substitute for them.
