@@ -353,6 +353,10 @@ def assemble_delivery(
     """
 
     _require_disjoint(store, out)
+    # Pre-read order: placement (`_require_disjoint`, above), then the target's shape, then
+    # the owner's text. Each refusal names the earliest thing the operator would fix, and
+    # none of the three opens a store file — the store is read only once all agree.
+    _require_directory_or_absent(out)
     # `--delivery-id` is argparse-required, which `""` satisfies, and `--supersedes` takes any
     # string: a shell slip (`"$ID"` with ID unset) therefore assembled, printed ASSEMBLED with
     # exit 0, and failed `data verify` one step later as "must be a non-empty string" — the
@@ -634,6 +638,25 @@ def _require_disjoint(store: Path, out: Path) -> None:
             f"the delivery target resolves inside the store ({out_real} within {store_real}); "
             "assembling would write into the bytes being assembled. Choose an --out beside "
             "the store, not under it",
+        )
+
+
+def _require_directory_or_absent(out: Path) -> None:
+    """``--out`` names a directory that does not exist yet, or one that does — never a file.
+
+    `--out delivery.json` used to read and validate the whole store and then die in pass 2
+    with NotADirectoryError from ``out.iterdir()`` — a traceback and exit 1 in place of the
+    REFUSED line every other bad input gets; a dangling symlink died one line later, in
+    ``mkdir``, with FileExistsError. Both are the target's SHAPE, knowable before the first
+    store file is opened, so the shape is checked here beside the disjointness check. Only
+    the shape: whether an existing directory is EMPTY stays with pass 2, where it was.
+    """
+
+    if (out.exists() or out.is_symlink()) and not out.is_dir():
+        raise _refuse(
+            out,
+            "the delivery target exists and is not a directory (a file, or a link that does "
+            "not lead to one); --out must name a new or empty directory",
         )
 
 
