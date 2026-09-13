@@ -113,14 +113,15 @@ def cmd_data_synth_store(args: argparse.Namespace) -> int:
         print(f"REFUSED {args.out}: {error}")
         return 2
     except StoreError as error:
-        # The store refuses to overwrite rows it already holds, and its remedy line names
-        # `allow_correction` — a flag this command does not have and must not grow: a
-        # synthetic fixture is regenerated in place only with the seed and range that wrote
-        # it. Quote the store's reason, then say what the operator can actually do.
+        # Backstop only: generate_store refuses a differing store by byte comparison before
+        # write_bars can conflict, so this is reached only for a store refusal the
+        # comparison did not anticipate. The store's own text advertises `allow_correction`,
+        # a capability this command does not have and must not surface, so only the error's
+        # CLASS is quoted — never its message.
         print(
-            f"REFUSED {args.out}: existing store disagrees with seed {args.seed} ({error}); "
-            "a store is regenerated in place only with the seed and range that wrote it — "
-            "choose a fresh --out"
+            f"REFUSED {args.out}: the history store refused to write "
+            f"({error.__class__.__name__}); the existing store is not reusable for seed "
+            f"{args.seed} — choose a fresh --out"
         )
         return 2
     total = sum(written.values())

@@ -35,6 +35,8 @@ than the material threshold, so they change the prices without manufacturing fin
 from __future__ import annotations
 
 import hashlib
+import shutil
+import tempfile
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time
 from pathlib import Path
@@ -247,6 +249,14 @@ def generate_store(
         raise ValueError(f"no sessions between {start} and {end}")
     captured_at = datetime.combine(end, _DAILY_CLOSE_UTC, tzinfo=UTC).isoformat()
 
+    if out.is_dir() and any(out.iterdir()):
+        return _reuse_only_if_identical(
+            out, seed=seed, start=start, end=end, sessions=sessions, captured_at=captured_at
+        )
+    return _write_store(out, seed=seed, sessions=sessions, captured_at=captured_at)
+
+
+def _write_store(out: Path, *, seed: int, sessions: list[date], captured_at: str) -> dict[str, int]:
     written: dict[str, int] = {}
     for symbol in CAMPAIGN_SYMBOLS:
         series = bars_for(symbol, sessions, seed)
@@ -257,6 +267,57 @@ def generate_store(
         written[symbol] = result.rows_written
     write_holdouts(out, holdout_windows(sessions))
     return written
+
+
+def _tree_digests(root: Path) -> dict[str, str]:
+    return {
+        path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+def _reuse_only_if_identical(
+    out: Path, *, seed: int, start: date, end: date, sessions: list[date], captured_at: str
+) -> dict[str, int]:
+    """An existing, non-empty ``out`` is reused only when it is byte-identical to this run.
+
+    The store carries no generator identity — its schema is the history store's and must
+    stay so — so the only honest test of "is this the store seed N over this range would
+    write" is to write it somewhere disposable and compare bytes. ``write_bars`` alone
+    cannot decide it: with a range that does not overlap the existing rows it has nothing
+    to conflict with, and a different seed was ACCEPTED and quietly extended the store into
+    a two-seed hybrid (Daybreak, F-5 HOLD P1-a); a same-seed shorter range would rewrite the
+    manifest and holdouts around bars they no longer describe. Identical set and bytes →
+    the same no-op as before, reporting the same counts. Anything else → refused before a
+    single byte of ``out`` is written. The candidate is a dot-prefixed sibling of ``out``
+    and is removed whichever way this returns.
+    """
+
+    candidate = Path(tempfile.mkdtemp(prefix=f".{out.name}-candidate-", dir=out.parent))
+    try:
+        written = _write_store(candidate, seed=seed, sessions=sessions, captured_at=captured_at)
+        expected, actual = _tree_digests(candidate), _tree_digests(out)
+    finally:
+        shutil.rmtree(candidate, ignore_errors=True)
+    if expected == actual:
+        return written
+    missing = sorted(set(expected) - set(actual))
+    extra = sorted(set(actual) - set(expected))
+    differing = sorted(
+        name for name in expected.keys() & actual.keys() if expected[name] != actual[name]
+    )
+    parts = [
+        f"missing {', '.join(missing)}" if missing else "",
+        f"extra {', '.join(extra)}" if extra else "",
+        f"differing {', '.join(differing)}" if differing else "",
+    ]
+    detail = "; ".join(part for part in parts if part)
+    raise ValueError(
+        f"{out} already holds a store that disagrees with seed {seed} over {start}..{end} "
+        f"({detail}); an existing store is reused only when it is byte-identical to what "
+        "this seed and range produce — choose a fresh --out"
+    )
 
 
 __all__ = [

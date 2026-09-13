@@ -210,7 +210,7 @@ def test_an_empty_range_is_refused(tmp_path: Path) -> None:
 # ------------------------------------------------------------------ operator refusals
 
 
-def _cli(out: Path, seed: int) -> list[str]:
+def _cli(out: Path, seed: int, start: str = "2024-01-02", end: str = "2024-03-28") -> list[str]:
     return [
         "data",
         "synth-store",
@@ -219,10 +219,18 @@ def _cli(out: Path, seed: int) -> list[str]:
         "--seed",
         str(seed),
         "--start",
-        "2024-01-02",
+        start,
         "--end",
-        "2024-03-28",
+        end,
     ]
+
+
+def _sha_map(root: Path) -> dict[str, str]:
+    return {
+        path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
 
 
 def test_an_out_that_is_a_file_is_refused_before_anything_is_written(tmp_path: Path) -> None:
@@ -297,3 +305,80 @@ def test_a_rerun_with_the_same_seed_is_a_byte_identical_no_op(
     assert main(_cli(out, _SEED)) == 0
     assert _store_digest(out) == before
     assert capsys.readouterr().out.count("SYNTH_STORE ") == 2
+
+
+def test_a_different_seed_over_a_disjoint_range_is_refused_and_the_store_is_untouched(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A store carries no generator identity, so reuse is decided by bytes, not by luck.
+
+    Daybreak (F-5 HOLD, P1-a): with a range that does not overlap the existing rows,
+    `write_bars` has nothing to conflict with, so a different seed was ACCEPTED and the
+    store silently became a two-seed hybrid. The rule is now fail-closed: an existing,
+    non-empty store is reused only when it is byte-identical to what this seed and range
+    produce; anything else is refused before a single byte of `out` is written.
+    """
+
+    out = tmp_path / "store"
+    assert main(_cli(out, _SEED)) == 0
+    capsys.readouterr()
+    before = _sha_map(out)
+
+    code = main(_cli(out, _SEED + 1, start="2024-04-01", end="2024-06-28"))
+    output = capsys.readouterr()
+    assert code == 2, output.out
+    assert output.out.startswith("REFUSED "), output.out
+    assert "byte-identical" in output.out and "fresh --out" in output.out, output.out
+    assert _sha_map(out) == before, "a refused regeneration must leave the store's bytes alone"
+    assert "allow_correction" not in output.out + output.err
+
+
+def test_the_same_seed_over_a_shorter_range_is_refused_and_the_store_is_untouched(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A shorter range is a different store: MANIFEST.json and HOLDOUTS.json would be
+    rewritten to describe fewer sessions while the bars kept the longer history."""
+
+    out = tmp_path / "store"
+    assert main(_cli(out, _SEED)) == 0
+    capsys.readouterr()
+    before = _sha_map(out)
+
+    code = main(_cli(out, _SEED, end="2024-02-29"))
+    output = capsys.readouterr()
+    assert code == 2, output.out
+    assert output.out.startswith("REFUSED "), output.out
+    assert "byte-identical" in output.out and "fresh --out" in output.out, output.out
+    assert _sha_map(out) == before, "a refused regeneration must leave the store's bytes alone"
+    assert "allow_correction" not in output.out + output.err
+
+
+def test_the_store_error_backstop_never_names_the_correction_capability(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P1-b: the store's own message advertises `allow_correction`; the operator never sees it.
+
+    The byte comparison refuses a differing store before `write_bars` can conflict, so the
+    StoreError mapping is a backstop that is reached only if the store refuses for a reason
+    the comparison did not anticipate. It is forced here by making the writer raise the
+    store's real conflict text, and the CLI line must carry an operator-safe reason without
+    the internal capability name.
+    """
+
+    from chronos.histdata.store import StoreConflictError
+    from chronos.research import synth_store
+
+    def _refuse_write(*args: object, **kwargs: object) -> object:
+        raise StoreConflictError(
+            "QQQ 2024-01-02: re-fetch differs from the stored row; pass allow_correction "
+            "to supersede it deliberately"
+        )
+
+    monkeypatch.setattr(synth_store, "write_bars", _refuse_write)
+    out = tmp_path / "fresh"
+    code = main(_cli(out, _SEED))
+    output = capsys.readouterr()
+    assert code == 2, output.out
+    assert output.out.startswith("REFUSED "), output.out
+    assert "fresh --out" in output.out, output.out
+    assert "allow_correction" not in output.out + output.err, output.out
