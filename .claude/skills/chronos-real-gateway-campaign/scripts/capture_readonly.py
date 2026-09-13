@@ -12,6 +12,13 @@ refuses to start unless ALLOW_ORDER_TRANSMIT and ALLOW_LIVE_TRADING are false an
 AUTONOMY_MANDATE_FILE is unset. Steps that fail are recorded as errors and the
 capture continues; absence of evidence is itself evidence.
 
+Sanitization before anything is written: every account id becomes
+``ACCT-<account_fingerprint[:16]>`` (textual, as before), and every broker
+identifier value — ``execution_id``, ``broker_order_id``, ``permanent_id`` —
+becomes a session-scoped pseudonym ``EXEC-``/``ORD-``/``PERM-<sha256[:16]>``
+(:func:`pseudonymize_identifiers`), replaced as a whole JSON value so a
+timestamp or quantity that happens to contain the same digits is untouched.
+
 Usage (from the repo root, .env configured per the campaign skill):
 
     .venv/bin/python .claude/skills/chronos-real-gateway-campaign/scripts/\
@@ -315,6 +322,104 @@ async def run_capture(settings: Any, args: argparse.Namespace) -> dict[str, Any]
     return capture
 
 
+#: Broker identifier keys in the capture and the pseudonym prefix each takes.
+#: order_ref is NOT here: it is Chronos's own intent id, not a broker identifier.
+IDENTIFIER_KEYS: dict[str, str] = {
+    "execution_id": "EXEC",
+    "broker_order_id": "ORD",
+    "permanent_id": "PERM",
+}
+
+
+def session_salt(capture: dict[str, Any]) -> str:
+    """The session's own label + capture time: public, reproducible, NOT a secret.
+
+    Tokens are therefore stable within one session (the same order id maps to the
+    same token everywhere in the capture) and differ across sessions (no
+    cross-session linkage of a broker id). A public salt does not resist brute
+    force of a low-entropy id; a secret salt is an owner decision.
+    """
+
+    meta = capture.get("meta", {})
+    return f"{meta.get('label', '')}:{meta.get('captured_at_utc', '')}"
+
+
+def identifier_pseudonym(kind: str, value: str | int, salt: str) -> str:
+    """Stable, irreversible token for one broker identifier — the account-id shape.
+
+    ``account_fingerprint`` hashes ``chronos-account:<id>``; this hashes
+    ``chronos-<kind>:<salt>:<value>`` and keeps the same 16-hex tail under a
+    kind prefix, so a fixture reader can tell an order token from an exec token
+    without either being reversible.
+    """
+
+    digest = sha256(f"chronos-{kind.lower()}:{salt}:{value}".encode()).hexdigest()
+    return f"{kind}-{digest[:16]}"
+
+
+def pseudonymize_identifiers(payload: Any, salt: str) -> Any:
+    """Replace the VALUE of every identifier key in a JSON-able tree, whole value only.
+
+    Structural, not textual: ``broker_order_id: 7001`` becomes ``"ORD-…"`` while a
+    ``"quantity": 17001`` or a timestamp ending in ``7001`` is untouched, because
+    the match is on the key, never on the digits. Booleans and ``None`` are left
+    alone (``permanent_id`` may be ``None``).
+    """
+
+    if isinstance(payload, dict):
+        result: dict[str, Any] = {}
+        for key, value in payload.items():
+            if (
+                key in IDENTIFIER_KEYS
+                and value is not None
+                and isinstance(value, (str, int))
+                and not isinstance(value, bool)
+            ):
+                result[key] = identifier_pseudonym(IDENTIFIER_KEYS[key], value, salt)
+            else:
+                result[key] = pseudonymize_identifiers(value, salt)
+        return result
+    if isinstance(payload, list):
+        return [pseudonymize_identifiers(item, salt) for item in payload]
+    return payload
+
+
+def sanitize_capture(capture: dict[str, Any], account_ids: set[str]) -> str:
+    """capture.json bytes: identifiers pseudonymized structurally, then account ids textually."""
+
+    salted = pseudonymize_identifiers(capture, session_salt(capture))
+    return sanitize(canonical_json(salted), account_ids)
+
+
+def write_session(
+    out_dir: Path, capture: dict[str, Any], account_ids: set[str], label: str
+) -> dict[str, str]:
+    """Write capture.json, derived_liquid_hours.json and manifest.json; return the sha256 map.
+
+    The exact production write path (``main`` calls this), so a test that wants
+    the bytes the campaign would commit gets them from the same function.
+    """
+
+    derived = derive_liquid_hours(capture)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    files = {
+        "capture.json": sanitize_capture(capture, account_ids),
+        "derived_liquid_hours.json": sanitize(canonical_json(derived), account_ids),
+    }
+    manifest: dict[str, Any] = {
+        "campaign": "chronos-real-gateway-campaign",
+        "created_utc": capture["meta"]["captured_at_utc"],
+        "label": label,
+        "gateway_evidence": capture["meta"]["gateway_evidence"],
+        "files": {},
+    }
+    for name, text in files.items():
+        (out_dir / name).write_text(text, encoding="utf-8")
+        manifest["files"][name] = sha256(text.encode("utf-8")).hexdigest()
+    (out_dir / "manifest.json").write_text(canonical_json(manifest), encoding="utf-8")
+    return dict(manifest["files"])
+
+
 def sanitize(text: str, account_ids: set[str]) -> str:
     from chronos.utils.identifiers import account_fingerprint
 
@@ -367,25 +472,8 @@ def main() -> int:
         print(f"REFUSED: cannot construct the configured broker adapter: {error}")
         print("(nothing was written; see chronos-real-gateway-campaign Phase 0.1)")
         return 2
-    derived = derive_liquid_hours(capture)
-
     out_dir = Path(args.out)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    files = {
-        "capture.json": sanitize(canonical_json(capture), args.account_ids),
-        "derived_liquid_hours.json": sanitize(canonical_json(derived), args.account_ids),
-    }
-    manifest = {
-        "campaign": "chronos-real-gateway-campaign",
-        "created_utc": capture["meta"]["captured_at_utc"],
-        "label": args.label,
-        "gateway_evidence": capture["meta"]["gateway_evidence"],
-        "files": {},
-    }
-    for name, text in files.items():
-        (out_dir / name).write_text(text, encoding="utf-8")
-        manifest["files"][name] = sha256(text.encode("utf-8")).hexdigest()
-    (out_dir / "manifest.json").write_text(canonical_json(manifest), encoding="utf-8")
+    write_session(out_dir, capture, args.account_ids, args.label)
 
     errors = [
         name
