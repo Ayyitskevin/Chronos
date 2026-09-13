@@ -179,11 +179,25 @@ def test_invalidation_linearizes_after_an_atomic_send_boundary() -> None:
     assert snapshot.generation == generation + 1
 
 
-def test_process_sessions_do_not_share_generation_identity() -> None:
+def test_generation_is_per_latch_and_session_id_is_the_cross_process_identity() -> None:
+    """The generation integer is NOT a cross-process identity; ``session_id`` is.
+
+    Every latch starts at generation 0 and advances on its own, so two processes' proofs
+    can carry the same integer at the same moment. A consumer that wants to know whether
+    the proof it holds came from *this* process's latch must carry the snapshot's
+    ``session_id`` — which is what ``chronos.orders.evidence`` and
+    ``reconciliation_recovery`` compare before and after a submission. Until 2026-09-12
+    this test was named ``..._do_not_share_generation_identity`` and asserted only that
+    the generations were equal: the opposite of what its name claimed.
+    """
+
     first = ReconciliationReadiness(session_id="process-a")
     second = ReconciliationReadiness(session_id="process-b")
 
-    assert first.snapshot().generation == second.snapshot().generation
+    assert first.snapshot().session_id != second.snapshot().session_id
+    assert first.snapshot().session_id == "process-a"
+    assert second.snapshot().session_id == "process-b"
+    assert first.snapshot().generation == second.snapshot().generation == 0
 
 
 # ---------------------------------------------------- maximum evidence age (ADR-0020)
