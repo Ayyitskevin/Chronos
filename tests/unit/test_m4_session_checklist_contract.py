@@ -209,3 +209,28 @@ def test_the_live_flag_sentence_carries_its_qualifier() -> None:
     assert "`ALLOW_LIVE_TRADING=true` by itself" in text
     assert "full live conjunction" in text
     assert "does not enable anything" not in text
+
+
+# The source proves a CONFIGURATION property (validation accepts; live_transmission_possible is
+# True), never that a process starts or fails to start: build_runtime can still fail after
+# settings load (database, adapter construction, broker connection, account scope).
+_PROCESS_CLAIMS = (
+    "the process starts",
+    "process never starts",
+    "starts live-capable",
+    "the process does not start",
+    "refuses to start",
+)
+
+
+def test_the_live_flag_passage_claims_a_configuration_property_not_a_process_outcome() -> None:
+    text = _collapsed(_checklist())
+    start = text.index("`ALLOW_LIVE_TRADING=true` by itself")
+    passage = text[start : text.index("A present, valid `AUTONOMY_MANDATE_FILE`", start)]
+    for claim in _PROCESS_CLAIMS:
+        assert claim not in passage, claim
+    assert "`live_transmission_possible` is true" in passage
+    assert "says nothing about whether a process starts" in passage
+    # The port is the adapter's check, not a settings conjunct.
+    assert "a live port" not in passage
+    assert "`verify_environment_port`" in passage
