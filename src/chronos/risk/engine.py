@@ -59,7 +59,16 @@ class RiskRejectionCode(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class AccountView:
-    """Broker-derived account evidence supplied by the execution engine."""
+    """Account evidence supplied by the caller — not, as a type, broker-derived.
+
+    Which source depends on the constructor: the service cycle and the shadow scan pass
+    configured equity as both ``account_equity_usd`` and ``cash_usd``; the backtest passes
+    simulated ledger cash; broker-observed cash for a paper account is an owner-gated
+    follow-on that no constructor supplies today. The engine checks that the evidence is
+    usable (every float finite, cash non-negative — otherwise ``ACCOUNT_STATE_MISSING``) but
+    cannot tell the sources apart: see the "Margin, shorts, options, market orders" row of
+    ``docs/RISK_POLICY.md``.
+    """
 
     account_equity_usd: float
     cash_usd: float

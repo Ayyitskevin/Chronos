@@ -77,8 +77,16 @@ runbooks.
 ## Order pipeline and reconciliation
 
 - Reconciliation runs on the portfolio page render and inside explicit symbol workflows.
-  Scheduled/periodic reconciliation on a timer is not implemented; startup, reconnect, and
-  order/fill-event reconciliation are.
+  Submission readiness is re-established by exactly three callers: startup (a writer backend
+  not under a recovery hold), the explicit operator route (`POST /orders/reconcile`, writer
+  only), and a writer-only periodic task on the ADR-0020 cadence
+  (`src/chronos/api/reconciliation_loop.py`, started from the lifespan; it sleeps its interval
+  first and skips the broker while readiness is still warm). Connection loss, a
+  connectivity-uncertain error code, and an account-scope change only invalidate readiness —
+  a reconnect does not reconcile; readiness returns on the next startup, operator, or
+  periodic pass. Order, fill, open-order, and order-status callbacks do not trigger
+  reconciliation: they feed caches and request results only, so order/fill-event-driven
+  reconciliation is absent.
 - The local reader conservatively marks persisted cycles, strategy state, drafts, fills, and
   basis symbols unresolved, so only locally-empty flat symbols can publish `RECONCILED`;
   positions and owned working orders stay `MANUAL_REVIEW` until complete allocation provenance
