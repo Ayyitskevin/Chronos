@@ -47,11 +47,17 @@ fresh `.env` that does not set them is already correct.
 | `AUTONOMY_MANDATE_FILE` | unset | unset |
 | `BROKER_MODE` | `ibkr` for a gateway session (`demo` only for the offline rehearsal) | `demo` |
 
-`ALLOW_LIVE_TRADING=true` does not enable anything: settings validation raises and the process
-refuses to start (`docs/IBKR_RUNBOOK.md` §4). A present, valid `AUTONOMY_MANDATE_FILE`
-auto-activates autonomy on every backend boot (ADR-0017), so it stays unset for the whole
-campaign. The IBKR-side "Read-Only API" option (§3.1) is defense in depth on top of these
-flags, not a substitute for them.
+`ALLOW_LIVE_TRADING=true` by itself — with the other campaign settings at their defaults — is
+refused: settings validation raises and the process does not start. With the full live
+conjunction (`BROKER_MODE=ibkr`, `BROKER_ADAPTER=official_ibkr`, `IB_ENVIRONMENT=live`, a live
+port, `ALLOW_ORDER_TRANSMIT=true`, a live `U…` account on `IB_ACCOUNT_ALLOWLIST`) the process
+starts **live-capable** (`validate_safety_and_ranges` in `src/chronos/config/settings.py`;
+pinned by `tests/unit/test_settings.py`) — which is exactly why every flag in the table stays
+at its default for this gate. (`docs/IBKR_RUNBOOK.md` §4 states the refusal without this
+qualifier; that runbook is not edited by this checklist.) A present, valid
+`AUTONOMY_MANDATE_FILE` auto-activates autonomy on every backend boot (ADR-0017), so it stays
+unset for the whole campaign. The IBKR-side "Read-Only API" option (§3.1) is defense in depth
+on top of these flags, not a substitute for them.
 
 ## 3. Once, before session 1 (owner prerequisites + offline preflight)
 
@@ -180,12 +186,21 @@ The harness writes one `capture.json` (every observation keyed by step name),
 
 1. Leak check: `active_subscription_count_before_disconnect == 0`, `disconnect: ok`,
    `final_connection_status.connected == false`.
-2. Mutation check, Chronos side: `.venv/bin/python scripts/paper_soak_report.py` reads the
-   order database read-only and places no orders. Expected: `order intents: 0` and zero
-   counts throughout if the backend order plane never ran. Caution: the script calls
-   `database.initialize()`, which creates a fresh database file at a nonexistent URL — run
-   it against your real `DATABASE_URL` (default `sqlite:///data/chronos.db`), and note that
-   "no DB existed before the first run" is itself the strongest no-mutation evidence.
+2. Mutation check, Chronos side — a genuinely read-only inspection of the order database
+   (default `DATABASE_URL` = `sqlite:///data/chronos.db`). Snapshot first, then read the copy:
+   ```bash
+   S=~/chronos-gateway-evidence/$(date +%F)-session-<N>
+   [ -e data/chronos.db ] && sqlite3 -readonly data/chronos.db ".backup '$S/chronos.db.snapshot'" \
+     || echo "no order database exists — record that; it is the strongest no-mutation evidence"
+   sqlite3 -readonly "$S/chronos.db.snapshot" "SELECT count(*) FROM order_intents;"
+   ```
+   Expected: `0` every session if the backend order plane never ran, or a count unchanged
+   session over session. `-readonly` refuses a missing file instead of creating one, and
+   refuses any write; the snapshot's sha256 goes in the evidence doc.
+   Do NOT use `scripts/paper_soak_report.py` for this against the real database: it calls
+   `database.initialize()`, which initializes a schema on an empty target — it creates the
+   SQLite file, every table and a `schema_version` row (`src/chronos/persistence/database.py`)
+   — so its exit 0 proves nothing about mutation.
 3. Mutation check, gateway side (owner): the TWS/Gateway order log shows zero orders from the
    Chronos client id. Record "checked, none".
 4. Account-drift check (session ≥ 2): `[GAP]` no `session_drift_report` tool exists — diff
@@ -276,7 +291,7 @@ first-contact ledger entries (§4.4), leak/mutation/drift/callback/pacing check 
 | §7 EXIT criterion | Measurement | Pass looks like |
 |---|---|---|
 | ≥ 5 sessions incl. a gateway restart | count session directories; the `-post-restart` pair and its narrative exist | ≥ 5 dirs + the pair + evidence docs |
-| no mutation call | (a) `replay_check.py`'s mutation scan (no `submit_order` / `preview_order` / `modify_order` / `cancel_order` step name in any capture); (b) `scripts/paper_soak_report.py` zeros or unchanged, every session; (c) the owner's gateway order-log check | all three recorded, all clean |
+| no mutation call | (a) `replay_check.py`'s mutation scan (no `submit_order` / `preview_order` / `modify_order` / `cancel_order` step name in any capture); (b) the `-readonly` `order_intents` count on the session snapshot (§4.3 step 2) zero or unchanged, every session; (c) the owner's gateway order-log check | all three recorded, all clean |
 | no leaked subscription | `active_subscription_count_before_disconnect` in every capture | `0` everywhere (or explained and re-run) |
 | no account drift | session-over-session diffs (§4.3 step 4) | every difference explained; none unexplained |
 | no unexplained callback | callback classification (§4.3 step 5) | every observed code classified or explained |
@@ -300,7 +315,7 @@ cancellation, fills and the ack path keep zero gateway evidence by this campaign
 `docs/VISION_COMPLETION_PLAN.md` §7 (the gate, quoted in §1) and §11 (owner gates) ·
 `docs/IBKR_RUNBOOK.md` §1–§8 · `docs/ibkr_setup.md` · `docs/IBKR_INTEGRATION.md` ·
 `docs/INCIDENT_RESPONSE.md` "Evidence capture" (copy, don't move; timestamp everything) ·
-`scripts/smoke_test_ibkr.py` · `scripts/paper_soak_report.py` ·
+`scripts/smoke_test_ibkr.py` · `scripts/paper_soak_report.py` (cited only for what it does NOT prove) ·
 `.claude/skills/chronos-real-gateway-campaign/scripts/capture_readonly.py` and
 `replay_check.py` (the harness and the offline check) · `src/chronos/config/settings.py` ·
 `src/chronos/broker/base.py` · `src/chronos/broker/callbacks.py` ·
