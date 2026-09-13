@@ -305,3 +305,83 @@ def test_upper_case_stems_are_the_symbols_the_store_holds(tmp_path: Path) -> Non
 
     store = full_store(tmp_path / "store")
     assert available_symbols(store) == ("DIA", "GLD", "IWM", "QQQ", "SPY", "TLT")
+
+
+# ------------------------------------------------- filename convention: the extension
+
+
+@pytest.mark.parametrize("near_miss", ["DIA.CSV", "Dia.Csv", "dia.CSV"])
+def test_1_a_near_miss_extension_is_refused_naming_the_canonical_file(
+    tmp_path: Path, near_miss: str
+) -> None:
+    """Contract 1. `bars/DIA.CSV` used to fall outside the `*.csv` glob and vanish: the store
+    reported "GATES RUN over 5 symbol(s) … 0 finding(s)", exit 0, with DIA silently absent.
+    A file that is `<STEM>.csv` case-insensitively but not exactly `<STEM>.csv` with an
+    upper-case stem is now refused by the same grouping F-3 added, before any gate."""
+
+    store = one_symbol_store(tmp_path)
+    (store / "bars" / "DIA.csv").rename(store / "bars" / near_miss)
+
+    with pytest.raises(CheckRefusal) as caught:
+        available_symbols(store)
+    assert caught.value.path == store / "bars" / near_miss
+    assert "bars/DIA.csv" in caught.value.reason
+
+
+def test_1_cli_refuses_a_near_miss_extension_with_exit_2_before_any_gate(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Contract 1, through the CLI: one REFUSED line, exit 2, no CHECKED line — with a
+    conforming SPY.csv beside the near miss, so "before any gate" is observable."""
+
+    store = one_symbol_store(tmp_path)
+    (store / "bars" / "DIA.csv").rename(store / "bars" / "DIA.CSV")
+    shutil.copyfile(tmp_path / "source" / "bars" / "SPY.csv", store / "bars" / "SPY.csv")
+
+    code = main(["data", "check", "--store", str(store)])
+    output = capsys.readouterr().out
+    assert code == 2, output
+    assert output.startswith("REFUSED "), output
+    assert "CHECKED" not in output, output
+    assert "DIA.CSV" in output and "bars/DIA.csv" in output, output
+
+
+def test_2_a_near_miss_beside_the_canonical_file_is_refused_as_ambiguous(tmp_path: Path) -> None:
+    """Contract 2. `DIA.csv` and `DIA.CSV` both claim DIA; the ambiguity refusal names both."""
+
+    store = one_symbol_store(tmp_path)
+    shutil.copyfile(store / "bars" / "DIA.csv", store / "bars" / "DIA.CSV")
+
+    with pytest.raises(CheckRefusal) as caught:
+        available_symbols(store)
+    assert "ambiguous" in caught.value.reason
+    assert "DIA.csv" in caught.value.reason and "DIA.CSV" in caught.value.reason
+
+
+def test_3_a_conforming_store_is_checked_exactly_as_before(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Contract 3. Six CHECKED lines, exit 0, and the report text is unchanged by the extension
+    rule — the positive control that the widened scan changed nothing for a conforming store."""
+
+    store = full_store(tmp_path / "store")
+    assert available_symbols(store) == ("DIA", "GLD", "IWM", "QQQ", "SPY", "TLT")
+    code = main(["data", "check", "--store", str(store)])
+    output = capsys.readouterr().out
+    assert code == 0, output
+    assert output.count("\nCHECKED ") + output.startswith("CHECKED ") == 6, output
+    assert "GATES RUN over 6 symbol(s)" in output, output
+
+
+def test_4_non_csv_files_in_bars_are_still_ignored(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Contract 4. The refusal is NOT widened to files that are not `.csv` under any casing."""
+
+    store = one_symbol_store(tmp_path)
+    (store / "bars" / "notes.txt").write_text("operator notes\n")
+    (store / "bars" / "README").write_text("not bars\n")
+
+    assert available_symbols(store) == ("DIA",)
+    assert main(["data", "check", "--store", str(store)]) == 0
+    assert "GATES RUN over 1 symbol(s)" in capsys.readouterr().out

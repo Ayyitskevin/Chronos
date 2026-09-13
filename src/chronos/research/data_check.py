@@ -111,14 +111,24 @@ def available_symbols(store: Path) -> tuple[str, ...]:
     ``DIA``, reopened ``DIA.csv``, and handed the operator a FileNotFoundError traceback.
     Two files that fold to one symbol are refused as ambiguous rather than resolved: which
     of them is canonical is not a choice this command makes.
+
+    The extension follows the same rule. ``bars/DIA.CSV`` used to fall outside a ``*.csv``
+    glob and simply vanish — the store reported five symbols and no findings, exit 0, with
+    DIA silently absent from the check. Every file whose name is ``.csv`` case-insensitively
+    is therefore scanned and grouped by its upper-cased stem, and a member that is not
+    exactly ``<STEM>.csv`` is the near miss: refused naming the canonical file, or, with the
+    canonical file also present, refused as ambiguous. Files that are not ``.csv`` under any
+    casing (an operator's notes) are still ignored — the refusal is not widened to them.
     """
 
     bars = store / "bars"
     if not bars.is_dir():
         raise _refuse(bars, "the store has no bars/ directory")
     by_symbol: dict[str, list[Path]] = {}
-    for path in sorted(bars.glob("*.csv")):
-        by_symbol.setdefault(path.stem.upper(), []).append(path)
+    for path in sorted(bars.iterdir()):
+        if not path.is_file() or not path.name.lower().endswith(".csv"):
+            continue
+        by_symbol.setdefault(path.name[: -len(".csv")].upper(), []).append(path)
     for symbol, paths in sorted(by_symbol.items()):
         canonical = bars / f"{symbol}.csv"
         if len(paths) > 1:
@@ -133,9 +143,10 @@ def available_symbols(store: Path) -> tuple[str, ...]:
         if path != canonical:
             raise _refuse(
                 path,
-                f"bars filename {path.name!r} is not the upper-case symbol stem the store "
-                f"layout requires (bars/{symbol}.csv, histdata.store.bars_path); rename it "
-                "rather than have the gates guess which symbol it is",
+                f"bars filename {path.name!r} is not the upper-case symbol stem plus "
+                f"lower-case .csv the store layout requires (bars/{symbol}.csv, "
+                "histdata.store.bars_path); rename it rather than have the gates guess "
+                "which symbol it is",
             )
     return tuple(sorted(by_symbol))
 
