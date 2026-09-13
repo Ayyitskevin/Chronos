@@ -81,8 +81,8 @@ def test_2_the_r36_bullet_says_the_lifespan_constructs_and_binds_the_runtime() -
     accepted = (
         "the backend lifespan (`src/chronos/api/main.py`) calls `build_autonomy_runtime`",
         "binds the result to the app",
-        "no service unit supervises",
-        "no operational proof",
+        "nothing in the repository installs, enables, or starts it",
+        "no supervised run or operational proof",
     )
     for phrase in accepted:
         assert phrase in bullet, phrase
@@ -163,3 +163,65 @@ def test_3d_account_scope_and_durable_activation_gate_assembly_in_the_wiring_sou
     assert "loaded.mandate.account_fingerprint != fingerprint" in wiring
     assert "if not ensure_activation(" in wiring
     assert "BackendGatherers(" in wiring, "the lifespan's runtime carries the backend's gatherers"
+
+
+# ----------------------------------- 5. the introduction makes the same (qualified) claim
+
+
+INTRO_ACCEPTED = (
+    "activates autonomy at boot unless a recovery hold is in force or, for a submitting mode, "
+    "the proposer posture is static"
+)
+
+
+def _intro() -> str:
+    text = LIMITATIONS.read_text(encoding="utf-8")
+    return " ".join(text[: text.index("\n## ")].split())
+
+
+def test_5_the_introduction_carries_the_qualified_claim_and_the_bare_form_appears_nowhere() -> None:
+    """Daybreak's P1: the intro said a valid mandate "auto-activates and trades inside that
+    mandate" — the unconditional form the corrected bullet refutes — and called the document
+    the single source of truth. The intro now states the same predicate in one clause, and
+    the bare `auto-activates` claim appears nowhere in the whole document (the anchored
+    allowlist covers the accepted sentence; the scan covers every other line)."""
+
+    intro = _intro()
+    assert INTRO_ACCEPTED in intro, intro
+    assert "account-matching" in intro, intro
+    assert "without one, autonomy is inert" in intro, intro
+    whole = LIMITATIONS.read_text(encoding="utf-8")
+    assert "auto-activates" not in whole, "the bare unconditional form must not survive anywhere"
+
+
+# ---------------------------------- 6. the service-supervision residual is supportable
+
+
+SERVICE_TEMPLATE = ROOT / "docs" / "ops" / "chronos-backend.service"
+OPS_README = ROOT / "docs" / "ops" / "README.md"
+
+
+def test_6a_a_backend_service_template_ships_and_nothing_in_the_repo_installs_it() -> None:
+    """Daybreak's P2: "no service unit supervises" was an unmeasured environment negative.
+    What the repository proves: a template ships with the backend as ExecStart and
+    Restart=on-failure, and its README says nothing installs, enables, or starts it."""
+
+    unit = SERVICE_TEMPLATE.read_text(encoding="utf-8")
+    exec_lines = [line for line in unit.splitlines() if line.startswith("ExecStart=")]
+    assert len(exec_lines) == 1 and exec_lines[0].endswith("scripts/run_backend.py"), exec_lines
+    assert "Restart=on-failure" in unit.splitlines(), "the template restarts on failure, not always"
+    assert "installs, enables, or starts" in OPS_README.read_text(encoding="utf-8")
+
+
+def test_6b_the_r36_residual_says_a_template_ships_and_no_supervised_run_is_demonstrated() -> None:
+    bullet = _bullet(R36_BULLET)
+    accepted = (
+        "a service unit template ships",
+        "`docs/ops/chronos-backend.service`",
+        "nothing in the repository installs, enables, or starts it",
+        "no supervised run or operational proof",
+    )
+    for phrase in accepted:
+        assert phrase in bullet, phrase
+    assert "no service unit supervises" not in bullet, "the environment negative is gone"
+    assert re.search(r"\.py:\d", bullet) is None, "no line numbers in prose"

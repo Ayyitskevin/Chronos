@@ -3,9 +3,11 @@
 The honest, consolidated list of what Chronos does NOT do, cannot yet prove, or defers to an
 owner action. Chronos is pre-release, local-first software built for autonomous trading
 (ADR-0016 / D-16, maximal under ADR-0017 / D-17); **whether it trades autonomously is an
-owner configuration fact** — a backend with a valid `AUTONOMY_MANDATE_FILE` auto-activates
-and trades inside that mandate; without one, autonomy is inert. See the autonomy section
-below for exactly what has and has not been delivered. It is not an investment adviser or a
+owner configuration fact** — a backend with a valid, account-matching `AUTONOMY_MANDATE_FILE`
+activates autonomy at boot unless a recovery hold is in force or, for a submitting mode, the
+proposer posture is static, and then trades inside that mandate; without one, autonomy is
+inert. See the autonomy section below for the full activation predicate and for exactly what
+has and has not been delivered. It is not an investment adviser or a
 promise of profitable trading. Equities, futures, options, and crypto can produce rapid,
 substantial losses, and an autonomous system can produce them without waiting for you. This
 document is the single source of truth for limitations referenced by the README and the
@@ -636,9 +638,10 @@ provenance claim from *agreement* to *authorship*.
   floor, never triggers. The entrypoint exists: the backend lifespan
   (`src/chronos/api/main.py`) calls `build_autonomy_runtime`, which assembles the runtime
   with the backend's own fact gatherers, and binds the result to the app. What remains of
-  R-36 is operational, not structural: no service unit supervises that process as a
-  long-running daemon, and there is no operational proof of the runtime judging over a real
-  session.
+  R-36 is operational, not structural: a service unit template ships
+  (`docs/ops/chronos-backend.service`, the backend as `ExecStart` with `Restart=on-failure`),
+  but nothing in the repository installs, enables, or starts it, and no supervised run or
+  operational proof of the runtime judging over a real session has been demonstrated.
 - **No process supervisor for the model worker.** Running the external worker is operational.
 - **R-32's residual:** a local file does not follow you off the machine. Genuinely unattended
   operation *away from the host* still needs a networked channel and its own ADR.
