@@ -12,6 +12,7 @@ non-transmitting capability and that the CLI imports no broker adapter.
 from __future__ import annotations
 
 import hashlib
+import os
 import stat
 from datetime import date, timedelta
 from pathlib import Path
@@ -235,6 +236,48 @@ def test_status_on_a_directory_halt_file_stays_typed(
     assert main([*_halt_path_args(tmp_path, target), "status"]) == 0
     output = capsys.readouterr().out
     assert "TRADING HALTED" in output and "STATE_CORRUPTION" in output, output
+
+
+def test_a_fifo_halt_path_is_replaced_by_the_halt_file_exactly_as_at_base(tmp_path: Path) -> None:
+    """The preflight refuses ONLY what tracebacked before; a FIFO never did (Daybreak, F-7 P1-a).
+
+    At 3ab88ec `os.replace` swapped the FIFO's directory entry for the new halt file and
+    the halt was written. Refusing it would skip a halt write the old code performed —
+    a protection-semantics change, outside tonight's grant — so the predicate is narrowed
+    to an existing directory target and a parent that exists but is not a directory.
+    """
+
+    target = tmp_path / "fifo"
+    os.mkfifo(target)
+    assert main([*_halt_path_args(tmp_path, target), "halt", "--reason", "x"]) == 0
+    assert target.is_file(), "the FIFO entry is replaced by the regular halt file, as at base"
+    assert HaltStore(target).read().halted is True
+    assert not (tmp_path / "fifo.tmp").exists()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permission bits")
+def test_an_unwritable_parent_is_reported_typed_and_writes_nothing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """P1-b: PermissionError from the temp-file open used to escape cmd_halt as a traceback.
+
+    The OS's refusal is not a store rule, so the store still raises it unchanged
+    (fail-closed exactly as before); the CLI reports it as one typed line, exit 2. No halt
+    file and no `.tmp` exist afterwards, as before.
+    """
+
+    parent = tmp_path / "locked"
+    parent.mkdir()
+    target = parent / "halt.json"
+    parent.chmod(0o555)
+    try:
+        code = main([*_halt_path_args(tmp_path, target), "halt", "--reason", "x"])
+        output = capsys.readouterr().out
+        assert code == 2, output
+        assert output.startswith(f"REFUSED halt: --halt-file {target}: "), output
+        assert sorted(item.name for item in parent.iterdir()) == [], "nothing written"
+    finally:
+        parent.chmod(0o755)
 
 
 def test_risk_show_command(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
