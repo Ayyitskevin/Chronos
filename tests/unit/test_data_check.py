@@ -451,6 +451,30 @@ def test_the_cli_refuses_a_manifest_listed_symbol_with_no_bars_and_checks_nothin
     assert "bars/DIA.csv" in output
 
 
+@pytest.mark.parametrize("what", ["bars", "MANIFEST.json", "corporate_actions"])
+def test_a_symlinked_store_component_is_refused_even_when_its_target_is_the_real_thing(
+    tmp_path: Path, what: str
+) -> None:
+    """The same invariant for every path the check reads: nothing under the store is a symlink.
+
+    Daybreak's C-2X r2 probe: ``bars/`` itself as a symlink to a complete copy outside the
+    store redirected the whole evidence tree and a SPY-only check ran. One helper now guards
+    the bars directory, each bars file, MANIFEST.json and the corporate-actions tree.
+    """
+
+    store = full_store(tmp_path / "store")
+    outside = tmp_path / "outside"
+    target = store / what
+    shutil.move(str(target), str(outside))
+    target.symlink_to(outside)
+
+    with pytest.raises(CheckRefusal) as caught:
+        check_store(store, ("SPY",))
+    assert caught.value.path == target
+    assert "symlink" in caught.value.reason
+    assert str(outside) in caught.value.reason
+
+
 def test_a_symlink_at_the_canonical_bars_name_is_refused_even_when_its_target_is_a_regular_file(
     tmp_path: Path,
 ) -> None:

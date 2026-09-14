@@ -101,6 +101,24 @@ def _refuse(path: Path, reason: str) -> CheckRefusal:
     return CheckRefusal(path, reason)
 
 
+def _own_bytes(path: Path, what: str) -> Path:
+    """Refuse a symlink at ``path`` — the store's ``what`` must be the store's own bytes.
+
+    One invariant for every path the check reads under the store (the bars directory, each
+    bars file, MANIFEST.json, the corporate-actions directory and files): none is reached
+    through a symlink. Following one would let the gates read bytes the store does not hold
+    while its own record says it does (C-2X reviews: a file, then the ``bars/`` directory).
+    """
+
+    if path.is_symlink():
+        raise _refuse(
+            path,
+            f"{what} is a symlink to {os.readlink(path)!r}; a store's {what} is inside the "
+            "store as its own bytes — copy it in rather than have the gates read outside",
+        )
+    return path
+
+
 def available_symbols(store: Path) -> tuple[str, ...]:
     """Every symbol the store has bars for, whatever subset that is.
 
@@ -122,22 +140,14 @@ def available_symbols(store: Path) -> tuple[str, ...]:
     casing (an operator's notes) are still ignored — the refusal is not widened to them.
     """
 
-    bars = store / "bars"
+    bars = _own_bytes(store / "bars", "bars/ directory")
     if not bars.is_dir():
         raise _refuse(bars, "the store has no bars/ directory")
     by_symbol: dict[str, list[Path]] = {}
     for path in sorted(bars.iterdir()):
         if not path.name.lower().endswith(".csv"):
             continue
-        if path.is_symlink():
-            # A store's bars are its own bytes. `is_file()` would follow the link and count
-            # bytes outside the store as backing (C-2X r1 review); refuse it by name instead.
-            raise _refuse(
-                path,
-                f"bars entry {path.name!r} is a symlink to {os.readlink(path)!r}; a store's bars "
-                "are regular files inside it — copy the bytes in rather than have the gates "
-                "read outside the store",
-            )
+        _own_bytes(path, f"bars entry {path.name!r}")
         if not path.is_file():
             continue
         by_symbol.setdefault(path.name[: -len(".csv")].upper(), []).append(path)
@@ -185,7 +195,7 @@ def _manifest_entries(store: Path) -> dict[str, Any] | None:
     cross-check did not run, instead of reading its silence as a pass.
     """
 
-    path = store / "MANIFEST.json"
+    path = _own_bytes(store / "MANIFEST.json", "MANIFEST.json")
     if not path.exists():
         return None
     try:
@@ -271,6 +281,9 @@ def check_store(store: Path, symbols: tuple[str, ...] | None = None) -> CheckRes
 
         actions_path = store / "corporate_actions" / f"{symbol}.json"
         actions = None
+        if actions_path.parent.exists():
+            _own_bytes(actions_path.parent, "corporate_actions/ directory")
+        _own_bytes(actions_path, f"corporate action file {actions_path.name!r}")
         if actions_path.exists():
             try:
                 actions = parse_actions(actions_path.read_bytes(), actions_path)
