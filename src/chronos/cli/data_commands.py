@@ -97,6 +97,7 @@ def cmd_data_synth_store(args: argparse.Namespace) -> int:
 
     # Import inside the command so the repeatedly-run read-only verify path does not carry
     # a generator it never calls.
+    from chronos.histdata.store import StoreError
     from chronos.research.synth_store import DEFAULT_END, DEFAULT_START, generate_store
 
     # Defaults are resolved here, not as argparse defaults: importing synth_store at module
@@ -110,6 +111,18 @@ def cmd_data_synth_store(args: argparse.Namespace) -> int:
         written = generate_store(args.out, seed=args.seed, start=start, end=end)
     except ValueError as error:
         print(f"REFUSED {args.out}: {error}")
+        return 2
+    except StoreError as error:
+        # Backstop only: generate_store refuses a differing store by byte comparison before
+        # write_bars can conflict, so this is reached only for a store refusal the
+        # comparison did not anticipate. The store's own text advertises `allow_correction`,
+        # a capability this command does not have and must not surface, so only the error's
+        # CLASS is quoted — never its message.
+        print(
+            f"REFUSED {args.out}: the history store refused to write "
+            f"({error.__class__.__name__}); the existing store is not reusable for seed "
+            f"{args.seed} — choose a fresh --out"
+        )
         return 2
     total = sum(written.values())
     detail = ", ".join(f"{symbol} {rows}" for symbol, rows in sorted(written.items()))

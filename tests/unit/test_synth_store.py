@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from chronos.cli.main import main
 from chronos.histdata.holdout import load_holdouts
 from chronos.histdata.store import read_actions, read_bars
 from chronos.marketdata.quality import validate_series
@@ -204,3 +205,180 @@ def test_the_holdout_declaration_is_loadable_and_covers_the_campaign_symbols(sto
 def test_an_empty_range_is_refused(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         generate_store(tmp_path / "backwards", seed=_SEED, start=_END, end=_START)
+
+
+# ------------------------------------------------------------------ operator refusals
+
+
+def _cli(out: Path, seed: int, start: str = "2024-01-02", end: str = "2024-03-28") -> list[str]:
+    return [
+        "data",
+        "synth-store",
+        "--out",
+        str(out),
+        "--seed",
+        str(seed),
+        "--start",
+        start,
+        "--end",
+        end,
+    ]
+
+
+def _sha_map(root: Path) -> dict[str, str]:
+    return {
+        path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+def test_an_out_that_is_a_file_is_refused_before_anything_is_written(tmp_path: Path) -> None:
+    """`--out afile.txt` is a refusal in the generator's own type, not a NotADirectoryError.
+
+    Nothing about the range is wrong, so neither range refusal fired; the generator went
+    straight to `write_bars`, whose mkdir of `afile.txt/bars` raised out of the CLI as a
+    traceback, exit 1. The target's shape is knowable before a single bar is generated, and
+    ValueError is the type this module already refuses with, so the CLI needs no new mapping.
+    """
+
+    target = tmp_path / "afile.txt"
+    target.write_bytes(b"not a store\n")
+    with pytest.raises(ValueError, match="not a directory"):
+        generate_store(target, seed=_SEED, start=date(2024, 1, 2), end=date(2024, 3, 28))
+    assert target.read_bytes() == b"not a store\n", "the refusal must not touch the target"
+
+
+def test_the_cli_refuses_an_out_that_is_a_file_with_exit_2(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    target = tmp_path / "afile.txt"
+    target.write_bytes(b"not a store\n")
+    code = main(_cli(target, _SEED))
+
+    output = capsys.readouterr().out
+    assert code == 2, output
+    assert output.startswith("REFUSED "), output
+    assert "not a directory" in output, output
+    assert target.read_bytes() == b"not a store\n"
+
+
+def test_a_rerun_with_a_different_seed_is_refused_and_the_store_is_untouched(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A store is regenerated in place only with the seed and range that wrote it.
+
+    `write_bars` raises StoreConflictError on the first differing row (QQQ, the first
+    campaign symbol, so nothing has been written yet) and the CLI mapped only ValueError:
+    a traceback, exit 1, whose remedy line names `allow_correction` — a flag this command
+    does not have and must not grow. The refusal quotes the store's reason and says what
+    the operator can actually do: choose a fresh --out.
+    """
+
+    out = tmp_path / "store"
+    assert main(_cli(out, _SEED)) == 0
+    capsys.readouterr()
+    before = _store_digest(out)
+
+    code = main(_cli(out, _SEED + 1))
+    output = capsys.readouterr().out
+    assert code == 2, output
+    assert output.startswith("REFUSED "), output
+    assert f"disagrees with seed {_SEED + 1}" in output, output
+    assert "fresh --out" in output, output
+    assert _store_digest(out) == before, "a refused regeneration must leave the store's bytes alone"
+
+
+def test_a_rerun_with_the_same_seed_is_a_byte_identical_no_op(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Positive control, green before the fix: the in-place form of the determinism claim.
+
+    `test_the_store_is_byte_stable_across_runs` pins two FRESH directories; this pins the
+    re-run INTO the existing store, which `write_bars` treats as a pure idempotent no-op
+    rather than a rewrite (its manifest's `captured_at` would otherwise churn).
+    """
+
+    out = tmp_path / "store"
+    assert main(_cli(out, _SEED)) == 0
+    before = _store_digest(out)
+    assert main(_cli(out, _SEED)) == 0
+    assert _store_digest(out) == before
+    assert capsys.readouterr().out.count("SYNTH_STORE ") == 2
+
+
+def test_a_different_seed_over_a_disjoint_range_is_refused_and_the_store_is_untouched(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A store carries no generator identity, so reuse is decided by bytes, not by luck.
+
+    Daybreak (F-5 HOLD, P1-a): with a range that does not overlap the existing rows,
+    `write_bars` has nothing to conflict with, so a different seed was ACCEPTED and the
+    store silently became a two-seed hybrid. The rule is now fail-closed: an existing,
+    non-empty store is reused only when it is byte-identical to what this seed and range
+    produce; anything else is refused before a single byte of `out` is written.
+    """
+
+    out = tmp_path / "store"
+    assert main(_cli(out, _SEED)) == 0
+    capsys.readouterr()
+    before = _sha_map(out)
+
+    code = main(_cli(out, _SEED + 1, start="2024-04-01", end="2024-06-28"))
+    output = capsys.readouterr()
+    assert code == 2, output.out
+    assert output.out.startswith("REFUSED "), output.out
+    assert "byte-identical" in output.out and "fresh --out" in output.out, output.out
+    assert _sha_map(out) == before, "a refused regeneration must leave the store's bytes alone"
+    assert "allow_correction" not in output.out + output.err
+
+
+def test_the_same_seed_over_a_shorter_range_is_refused_and_the_store_is_untouched(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A shorter range is a different store: MANIFEST.json and HOLDOUTS.json would be
+    rewritten to describe fewer sessions while the bars kept the longer history."""
+
+    out = tmp_path / "store"
+    assert main(_cli(out, _SEED)) == 0
+    capsys.readouterr()
+    before = _sha_map(out)
+
+    code = main(_cli(out, _SEED, end="2024-02-29"))
+    output = capsys.readouterr()
+    assert code == 2, output.out
+    assert output.out.startswith("REFUSED "), output.out
+    assert "byte-identical" in output.out and "fresh --out" in output.out, output.out
+    assert _sha_map(out) == before, "a refused regeneration must leave the store's bytes alone"
+    assert "allow_correction" not in output.out + output.err
+
+
+def test_the_store_error_backstop_never_names_the_correction_capability(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P1-b: the store's own message advertises `allow_correction`; the operator never sees it.
+
+    The byte comparison refuses a differing store before `write_bars` can conflict, so the
+    StoreError mapping is a backstop that is reached only if the store refuses for a reason
+    the comparison did not anticipate. It is forced here by making the writer raise the
+    store's real conflict text, and the CLI line must carry an operator-safe reason without
+    the internal capability name.
+    """
+
+    from chronos.histdata.store import StoreConflictError
+    from chronos.research import synth_store
+
+    def _refuse_write(*args: object, **kwargs: object) -> object:
+        raise StoreConflictError(
+            "QQQ 2024-01-02: re-fetch differs from the stored row; pass allow_correction "
+            "to supersede it deliberately"
+        )
+
+    monkeypatch.setattr(synth_store, "write_bars", _refuse_write)
+    out = tmp_path / "fresh"
+    code = main(_cli(out, _SEED))
+    output = capsys.readouterr()
+    assert code == 2, output.out
+    assert output.out.startswith("REFUSED "), output.out
+    assert "fresh --out" in output.out, output.out
+    assert "allow_correction" not in output.out + output.err, output.out
