@@ -3,9 +3,13 @@
 The honest, consolidated list of what Chronos does NOT do, cannot yet prove, or defers to an
 owner action. Chronos is pre-release, local-first software built for autonomous trading
 (ADR-0016 / D-16, maximal under ADR-0017 / D-17); **whether it trades autonomously is an
-owner configuration fact** — a backend with a valid `AUTONOMY_MANDATE_FILE` auto-activates
-and trades inside that mandate; without one, autonomy is inert. See the autonomy section
-below for exactly what has and has not been delivered. It is not an investment adviser or a
+owner configuration fact** — a backend assembles the autonomy runtime at boot only when every
+conjunct holds: a valid, account-matching `AUTONOMY_MANDATE_FILE`, no recovery hold, a durable
+activation that has not been revoked, and, for a submitting mode, an authenticated proposer and
+evidence posture; an assembled runtime judges proposals inside that mandate and, in a
+submitting mode, may submit an order through the existing execution plane — or refuse, or, in
+SHADOW, place none; without a mandate file, autonomy is inert. See the autonomy section below
+for the full activation predicate and for exactly what has and has not been delivered. It is not an investment adviser or a
 promise of profitable trading. Equities, futures, options, and crypto can produce rapid,
 substantial losses, and an autonomous system can produce them without waiting for you. This
 document is the single source of truth for limitations referenced by the README and the
@@ -169,20 +173,25 @@ runbooks.
   with the trading backend (a shared pacing budget) is not wired; the data process
   self-paces conservatively under its own client id.
 - **The holdout embargo is a default-masked accessor, not a structural guardian.** A
-  caller that reads `bars/<SYMBOL>.csv` directly bypasses it. The once-only,
-  owner-typed, logged unlock and registry-brokered reads are Phase C2's job.
+  caller that reads `bars/<SYMBOL>.csv` directly bypasses it. The registry guardian's
+  mediated read exists (`src/chronos/registry/holdout_guardian.py`): an owner-typed,
+  single-use unlock grant, consumed inside the ledger's locked critical section, with the
+  burn recorded before any bar is unmasked. Its bounds: it mediates only the reads that go
+  through it — the direct-file bypass above is untouched — and it guards only the windows
+  the store declares.
 - **The legacy `research/data/raw/` corpus is unchanged.** C1 stands up a separate
   go-forward store (`research/data/history/`) and does not migrate or reconcile the
   heterogeneous 5-ETF CSVs.
 
 ## Options forward capture (C0, `chronos.histdata options`)
 
-- **No expired-options history exists at any spend.** IBKR provides no historical data
-  for expired options, so capture is **forward-only** — the surface accrues at calendar
-  speed and will span few volatility regimes for years. Frozen-criteria Wheel
-  validation stays gated on either a paid vendor (owner decision N2) or an accepted
-  multi-year horizon (restated in C5). The store ships empty; the first snapshot is an
-  owner-run step.
+- **Expired-options history is absent from this zero-budget store.** IBKR cannot backfill
+  expired contracts, so this capture is **forward-only** — the surface accrues at calendar
+  speed and will span few volatility regimes for years. Licensed vendor history remains an
+  owner option (the repository's own plan, `docs/VISION_COMPLETION_PLAN.md`, says option
+  validation is calendar-bound without it); frozen-criteria Wheel validation stays gated on
+  either that owner decision (N2) or an accepted multi-year horizon (restated in C5). The
+  store ships empty; the first snapshot is an owner-run step.
 - **$0-tier data is delayed / EOD-snapshot quality, and labeled as such.** Every row
   carries its `DataQuality` and each snapshot records a staleness histogram +
   worst-case; delayed/frozen data is never presented as live. Real-time OPRA is a paid
@@ -430,10 +439,16 @@ runbooks.
 - **The autonomy stack is built and wired (M1–M7.5).** Contracts, gateway, durable state,
   compiler, queue, counters, alert delivery, the tick runtime, and — since ADR-0017 — the
   app-plane wiring (`chronos.api.autonomy_wiring`) that assembles them in the backend
-  lifespan. A backend booted with a valid `AUTONOMY_MANDATE_FILE` auto-activates it and
-  judges proposals arriving over the ingress; with no mandate file configured, autonomy is
-  inert (no runtime is constructed). The consumer-isolation test now names the wiring
-  module as the single permitted app-plane consumer of the contracts.
+  lifespan. Activation at boot is a conjunction, not a switch. The lifespan
+  (`src/chronos/api/main.py`) does not construct the runtime at all under a recovery hold
+  (ADR-0054); with no mandate file configured, autonomy is inert (no runtime is
+  constructed); a configured mandate must load as a trusted file and be scoped to this
+  account, or the backend alerts and stays inert; a mandate in a submitting mode
+  additionally requires a proposer registry and evidence binding, or assembly refuses
+  (ADR-0051); and the activation is recorded durably before a runtime exists
+  (`src/chronos/api/autonomy_wiring.py`). A valid `AUTONOMY_MANDATE_FILE` is therefore
+  necessary, not sufficient. The consumer-isolation test names the wiring module as the
+  single permitted app-plane consumer of the contracts.
 - **ADR-0017 changed the envelope, not the gates.** Owner-directed supersessions: the
   persistent auto-activating mandate (revocation still survives restart; invalid or
   wrong-account files boot inert with a CRITICAL alert), the live ceiling at 365 days,
@@ -552,12 +567,25 @@ provenance claim from *agreement* to *authorship*.
   `chronos.bridge` translates a TradingView alert into a candidate proposal and posts it to
   the same loopback ingress. It is a *client* of that endpoint, not a second door into it,
   and it holds no Chronos capability — it imports no order, broker, supervisor, or
-  persistence module, and not `chronos.autonomy` either. The honest consequence is that
-  **the static ingress provenance now covers two genuinely different kinds of author and
-  cannot distinguish them**: a TradingView-sourced decision's `provenance` is byte-identical
-  to a model worker's. The bridge compensates only as far as an evidence citation can — kind
-  `tradingview_alert`, digested over the exact alert text — so the audit chain records which
-  alert produced which decision. The gap below is therefore wider than it was, not narrower.
+  persistence module, and not `chronos.autonomy` either. Who authored a decision is answered
+  by the proposer registry (ADR-0023, `src/chronos/supervisor/proposers.py`): a registration
+  binds a credential hash to a proposer-specific identity — `proposer_id`, provider, model
+  and the version fields (model, prompt, tool schema, decision schema, policy) — and the
+  route persists the verified `proposer_id`, credential epoch and registry-entry digest on
+  the queue row. At drain, `build_identity_resolver` (`src/chronos/api/autonomy_wiring.py`)
+  reconstructs the stamped identity from exactly that registration and refuses — it never
+  falls back to the static identity — when the binding is unbound, unknown, replaced,
+  revoked, disabled or expired. Distinct registrations are therefore distinct authors: a
+  bridge and a worker minted as separate proposers are told apart in `provenance` by
+  `proposer_id`. What the registry authenticates is the credential, not the process
+  presenting it — one credential configured in two processes is one author, and nothing in
+  the registry can tell those two apart; the mitigation is the operator requirement to mint
+  a distinct proposer per process and never reuse a credential (`docs/model_worker.md`,
+  `docs/tradingview_bridge.md`). The residual is the optional static SHADOW posture: with
+  no registry configured, a TradingView-sourced decision's `provenance` is byte-identical to
+  a model worker's, and the bridge compensates only as far as an evidence citation can —
+  kind `tradingview_alert`, digested over the exact alert text — so the audit chain still
+  records which alert produced which decision.
 
 ### What M5 added, and what it deliberately did not
 
@@ -571,10 +599,13 @@ provenance claim from *agreement* to *authorship*.
 - **Non-live by default, structurally.** The handoff callable is optional. Omitting it runs
   the full walk and places no order — SHADOW — so a caller who has not thought about the last
   step gets the safe behaviour rather than a surprise.
-- **The session counters M3 built are finally fed.** A completed cycle advances orders and
-  turnover. Counting happens at *handoff*, not at fill, because an activity limit bounds what
-  the system **attempts** — an order that was sent and rejected still consumed an attempt, and
-  counting at fill would let a system being rejected by the venue retry without limit.
+- **The session counters M3 built are finally fed.** A cycle reserves one order attempt and
+  the sized turnover *before* the order-plane handoff, and the handoff's typed disposition
+  settles it afterwards: a refusal that proves nothing reached the wire releases the
+  reservation; a raise, an unconfirmed send or a venue rejection keeps it. The reservation is
+  made before the handoff, not at fill, because an activity limit bounds what the system
+  **attempts** — an order that was sent and rejected still consumed an attempt, and counting
+  at fill would let a system being rejected by the venue retry without limit.
 - **The proposal ingress is a process boundary (R-35).** Chronos makes no outbound model call,
   so there is no provider SDK, no API key, and no egress path in the broker-holding process.
   Every payload is treated as hostile: bounded size before parsing, strict single-object JSON,
@@ -598,24 +629,39 @@ provenance claim from *agreement* to *authorship*.
   optional JSONL file sink (0600, fsync'd, `O_NOFOLLOW` per R-21) that composes with whatever
   the operator already runs.
 - **The ingress transport** (`POST /autonomy/proposals`), which answers M5's "who is calling"
-  question by **reusing what exists** rather than inventing a weaker scheme: loopback-only
-  binding, the same local API token every mutating endpoint requires, and the single-writer
-  lease. Nothing here is weaker than the surface it sits beside.
+  question with a dependency of its own rather than the shared token: loopback-only binding,
+  `require_proposer` (`src/chronos/api/auth.py`) declared on the route ahead of the
+  single-writer lease (`src/chronos/api/routes/autonomy.py`). With a proposer registry
+  configured (ADR-0023) the route verifies a registered proposer credential in
+  `X-Chronos-Proposer-Token`, refuses the shared `X-Chronos-Token` with a distinct 401 that
+  says what changed, and records the matched registration on the queue row. The exact
+  fallback is the pre-registry posture: with no registry, `require_proposer` calls
+  `require_token` and returns no proposer, so the route is gated by the same local API token
+  as every other mutating endpoint and by nothing more. Nothing here is weaker than the
+  surface it sits beside; with a registry it demands more.
 
 **Known gaps after M6:**
 
-- ~~**The proposal route does not run the cycle (R-36)**~~ — **the runtime exists since M7.**
-  The route enqueues into a bounded durable queue; `AutonomyRuntime` judges on a time-driven
-  tick where events are hints that coalesce to a floor, never triggers. What remains of R-36:
-  the runtime is a class, not a daemon — no shipped entrypoint constructs it with a real
-  `FactGatherer` and handoff, so wiring it into the backend lifespan or a service unit is the
-  operational step left.
+- ~~**The proposal route does not run the cycle (R-36)**~~ — **the runtime exists since M7
+  and the backend constructs it.** The route enqueues into a bounded durable queue;
+  `AutonomyRuntime` judges on a time-driven tick where events are hints that coalesce to a
+  floor, never triggers. The entrypoint exists: the backend lifespan
+  (`src/chronos/api/main.py`) calls `build_autonomy_runtime`, which assembles the runtime
+  with the backend's own fact gatherers, and binds the result to the app. What remains of
+  R-36 is operational, not structural: a service unit template ships
+  (`docs/ops/chronos-backend.service`, the backend as `ExecStart` with `Restart=on-failure`),
+  but nothing in the repository installs, enables, or starts it, and no supervised run or
+  operational proof of the runtime judging over a real session has been demonstrated.
 - **No process supervisor for the model worker.** Running the external worker is operational.
 - **R-32's residual:** a local file does not follow you off the machine. Genuinely unattended
   operation *away from the host* still needs a networked channel and its own ADR.
 - **R-34's residual:** market *calendar day*, not session calendar — no holidays or half-days.
-- **Who is calling, beyond the token.** The transport authenticates that a caller has local
-  access and the token; it does not distinguish one local worker from another.
+- **Who is calling, beyond the token.** Only on the static posture: with no
+  `AUTONOMY_PROPOSERS_FILE` the route accepts the shared local token and every proposal is
+  stamped `INGRESS_IDENTITY`, so one local worker is not told apart from another. Closing it
+  is an owner act — an owner-authored proposer registry (ADR-0023) gives each caller its own
+  credential and identity — and a submitting (PAPER/LIVE) mandate refuses to assemble on the
+  static posture at all (ADR-0051), so the residual is SHADOW-grade.
 
 ### What M3 added, and what it deliberately did not
 
@@ -663,10 +709,17 @@ the store beneath it:
   have.
 - **The EvidenceBundle store is still M4.** Bundles are bound by id and digest; individual
   citations are still not resolved against a store.
-- **Nothing counts *for* the counters yet.** `record_activity` and `record_equity` are the
-  supervisor's API, but no production caller invokes them, because the order plane is not
-  yet routed through the supervisor — compilation is M4. The limits are enforced in the
-  sense that a recorded breach binds; they are not yet *fed* by live trading.
+- **The activity counters are fed by the cycle; the equity counter is not.** `run_cycle`
+  (`src/chronos/supervisor/loop.py`) calls `record_activity` to reserve one order attempt
+  and the sized turnover before the order-plane handoff — durably, committed there when the
+  wiring supplies a pre-handoff commit (ADR-0052) — so a process lost mid-handoff cannot
+  hand an allowance back to a mandate that already spent it. After the handoff its typed
+  disposition decides: a refusal that proves nothing reached the wire releases the
+  reservation (`release_activity_reservation`); a raise, an unconfirmed send or a venue
+  rejection keeps it, because ambiguity is paid out of the mandate's budget rather than
+  handed back. The residual is `record_equity`: it remains the supervisor's API with no
+  production caller, so the equity-drawdown limit binds on a recorded breach but is not fed
+  by live observation.
 - **The M1 contracts shipped with real defects, found by adversarial review and fixed in M2a.**
   The worst was an authority-escalation vector: `model_copy(update=...)` bypassed every mandate
   validator, so a one-day SHADOW mandate could be copied into a ten-year `LIVE_AUTONOMOUS` one.
@@ -675,11 +728,18 @@ the store beneath it:
   `from chronos import <subpackage>`. All are fixed and regression-tested; the full list is
   ADR-0016 §"Known limitations and residuals" item 0. The honest lesson recorded here: these
   contracts are young, and their first adversarial pass found a hole per lens.
-- **Prompt injection is an open problem.** EvidenceBundles will be redacted, versioned, and
-  hash-pinned and tools allowlisted, but evidence derived from external text (news, filings)
-  is an untrusted input to a non-deterministic component. The deterministic kernel is the
-  control that holds when injection succeeds; explicit injection tests are owed by M4 and are
-  a frozen promotion criterion.
+- **Prompt injection is an open problem.** An `EvidenceBundle` is immutable, carries a
+  `bundle_version` and is content-digested; admission compares the bundle id and digest the
+  supervisor issued (the mandate pins provider, model, prompt, tool-schema, decision-schema
+  and policy versions — not the bundle's), and issue refuses on a `redaction_violations` hit;
+  external text (news, filings) rides in it as `TextualEvidence` whose `untrusted` flag
+  cannot be set false, and the model's tools are a frozen read-only registry. The explicit
+  injection tests exist in `tests/safety/test_model_tool_surface.py` — among them
+  `test_injected_narrative_changes_no_compiled_order_parameter` and
+  `test_no_deterministic_module_reads_a_bundle_text_body`. What none of that changes is
+  the residual: evidence derived from external text is an untrusted input to a
+  non-deterministic component, and injection is bounded, not prevented. The deterministic
+  kernel is the control that holds when injection succeeds.
 - **Kernel defects the autonomy programme inherits.** The M0 audit found four that unattended
   operation makes strictly more dangerous, tracked as RISK_REGISTER R-24…R-27. Status after
   M2:
