@@ -300,3 +300,32 @@ def test_4c_the_release_is_guarded_by_not_counts_activity_attempt() -> None:
     node_ids = _collected_node_ids(HANDOFF_SUITE)
     for name in HANDOFF_TESTS:
         assert f"{HANDOFF_SUITE}::{name}" in node_ids, (name, sorted(node_ids))
+
+
+# ------------------------------------ 4. the M5 bullet tells the SAME counting story (DOC-9)
+
+M5_ANCHOR = "- **The session counters M3 built are finally fed.**"
+
+
+def test_4_the_m5_bullet_states_the_same_reserve_before_handoff_rule() -> None:
+    """COMPOSE-1 review P1: the composed document told two stories — the M5 bullet said
+    "Counting happens at *handoff*" and that a completed cycle advances the counters, while
+    the counters bullet (and `run_cycle`) reserve BEFORE the handoff and settle by the typed
+    disposition afterwards. One story now, and the old forms appear nowhere."""
+
+    bullet = _bullet(M5_ANCHOR)
+    accepted = (
+        "reserves one order attempt and the sized turnover *before* the order-plane handoff",
+        "typed disposition settles it afterwards",
+        "a refusal that proves nothing reached the wire releases the reservation",
+        "a raise, an unconfirmed send or a venue rejection keeps it",
+        "bounds what the system **attempts**",
+        "still consumed an attempt",
+        "retry without limit",
+    )
+    for phrase in accepted:
+        assert phrase in bullet, phrase
+    assert re.search(r"\.py:\d", bullet) is None, "no line numbers in prose"
+    whole = _whole_document()
+    assert "Counting happens at *handoff*" not in whole, "the at-handoff story must not survive"
+    assert re.search(r"completed cycle advances", whole) is None, "the bare advance form is gone"
