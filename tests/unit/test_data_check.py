@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 from datetime import date
 from pathlib import Path
@@ -406,3 +407,172 @@ def test_4_non_csv_files_in_bars_are_still_ignored(
     assert available_symbols(store) == ("DIA",)
     assert main(["data", "check", "--store", str(store)]) == 0
     assert "GATES RUN over 1 symbol(s)" in capsys.readouterr().out
+
+
+# ------------------------------------------------ manifest lists a symbol the bytes lack
+
+
+def test_a_manifest_listed_symbol_with_no_bars_file_is_refused_before_any_gate(
+    tmp_path: Path,
+) -> None:
+    """The store's own record disagrees with its bytes — the mirror of the witness refusal.
+
+    A listed symbol whose bars file is PRESENT but disagrees is refused today; a listed
+    symbol whose bars file is ABSENT was silently skipped: five symbols checked, exit 0,
+    and DIA gone. Store-level: it is refused whichever symbol was requested.
+    """
+
+    store = full_store(tmp_path / "store")
+    (store / "bars" / "DIA.csv").unlink()
+
+    with pytest.raises(CheckRefusal) as caught:
+        check_store(store)
+    assert caught.value.path == store / "MANIFEST.json"
+    assert "DIA" in caught.value.reason
+    assert "bars/DIA.csv" in caught.value.reason
+    assert "disagrees with its bytes" in caught.value.reason
+
+    with pytest.raises(CheckRefusal) as caught_subset:  # not just the missing one
+        check_store(store, ("SPY",))
+    assert "bars/DIA.csv" in caught_subset.value.reason
+
+
+def test_the_cli_refuses_a_manifest_listed_symbol_with_no_bars_and_checks_nothing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    store = full_store(tmp_path / "store")
+    (store / "bars" / "DIA.csv").unlink()
+
+    code = main(["data", "check", "--store", str(store)])
+    output = capsys.readouterr().out
+    assert code == 2
+    assert output.startswith("REFUSED "), output
+    assert "CHECKED" not in output, output  # the refusal precedes every per-symbol gate
+    assert "bars/DIA.csv" in output
+
+
+@pytest.mark.parametrize("what", ["bars", "MANIFEST.json", "corporate_actions"])
+def test_a_symlinked_store_component_is_refused_even_when_its_target_is_the_real_thing(
+    tmp_path: Path, what: str
+) -> None:
+    """The same invariant for every path the check reads: nothing under the store is a symlink.
+
+    Daybreak's C-2X r2 probe: ``bars/`` itself as a symlink to a complete copy outside the
+    store redirected the whole evidence tree and a SPY-only check ran. One helper now guards
+    the bars directory, each bars file, MANIFEST.json and the corporate-actions tree.
+    """
+
+    store = full_store(tmp_path / "store")
+    outside = tmp_path / "outside"
+    target = store / what
+    shutil.move(str(target), str(outside))
+    target.symlink_to(outside)
+
+    with pytest.raises(CheckRefusal) as caught:
+        check_store(store, ("SPY",))
+    assert caught.value.path == target
+    assert "symlink" in caught.value.reason
+    assert str(outside) in caught.value.reason
+
+
+def test_a_symlink_at_the_canonical_bars_name_is_refused_even_when_its_target_is_a_regular_file(
+    tmp_path: Path,
+) -> None:
+    """A store's bars are its own bytes: a symlink at bars/<SYMBOL>.csv is refused, not followed.
+
+    Daybreak's C-2X r1 probe: with ``bars/DIA.csv`` a symlink to an exact copy OUTSIDE the
+    store, ``is_file()`` followed it, DIA counted as backed, and a SPY-only check ran over
+    bytes the store does not hold. F-8's assumption that "a symlinked bars file is scanned
+    as before" is withdrawn here, deliberately: the refusal names the link and its target.
+    """
+
+    store = full_store(tmp_path / "store")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    shutil.copyfile(store / "bars" / "DIA.csv", outside / "DIA.csv")
+    (store / "bars" / "DIA.csv").unlink()
+    (store / "bars" / "DIA.csv").symlink_to(outside / "DIA.csv")
+
+    with pytest.raises(CheckRefusal) as caught:
+        check_store(store, ("SPY",))
+    assert caught.value.path == store / "bars" / "DIA.csv"
+    assert "symlink" in caught.value.reason
+    assert str(outside / "DIA.csv") in caught.value.reason
+
+
+@pytest.mark.parametrize("entry", ["directory", "fifo"])
+def test_a_manifest_listed_symbol_whose_canonical_entry_is_not_a_regular_file_is_unbacked(
+    tmp_path: Path, entry: str
+) -> None:
+    """Backing is a regular file the store validated, not any filesystem entry at the name.
+
+    Daybreak's C-2X probe: with ``bars/DIA.csv`` replaced by a directory, ``Path.exists()``
+    was true, the store-level refusal did not fire, and a SPY-only check completed. The
+    refusal now keys on the set ``available_symbols`` validated (regular files only), so a
+    directory or a FIFO at the canonical name is UNBACKED — refused against MANIFEST.json,
+    before any gate, whichever subset was requested.
+    """
+
+    store = full_store(tmp_path / "store")
+    canonical = store / "bars" / "DIA.csv"
+    canonical.unlink()
+    if entry == "directory":
+        canonical.mkdir()
+    else:
+        os.mkfifo(canonical)
+
+    with pytest.raises(CheckRefusal) as caught:
+        check_store(store, ("SPY",))
+    assert caught.value.path == store / "MANIFEST.json"
+    assert "DIA" in caught.value.reason
+    assert "bars/DIA.csv" in caught.value.reason
+
+
+@pytest.mark.parametrize("shape", ["absolute", "traversal", "lower-case", "nul"])
+def test_a_manifest_key_that_is_not_a_symbol_stem_is_refused_even_when_its_path_exists(
+    tmp_path: Path, shape: str
+) -> None:
+    """A manifest key is untrusted text; only an upper-case filename stem can name a bars file.
+
+    Daybreak's C-2 probe: an absolute key makes ``store / "bars" / f"{key}.csv"`` resolve
+    OUTSIDE the store (pathlib discards the prefix), so a matching external file would have
+    counted as the in-store bars the key claims. The key is refused before any path is built
+    from it — with the file present where the key would resolve, so the pin cannot pass by
+    the file's absence — and a NUL is refused rather than surfacing as pathlib's ValueError.
+    """
+
+    store = full_store(tmp_path / "store")
+    outside = tmp_path / "OUTSIDE"
+    outside.mkdir()
+    shutil.copyfile(store / "bars" / "DIA.csv", outside / "DIA.csv")
+    key = {
+        "absolute": str(outside / "DIA"),
+        "traversal": "../../OUTSIDE/DIA",
+        "lower-case": "dia",
+        "nul": "DIA\x00",
+    }[shape]
+    if shape == "traversal":  # the join really would land on the copy
+        assert (store / "bars" / f"{key}.csv").resolve() == (outside / "DIA.csv").resolve()
+    manifest = json.loads((store / "MANIFEST.json").read_text())
+    manifest["symbols"][key] = manifest["symbols"]["DIA"]
+    (store / "MANIFEST.json").write_text(json.dumps(manifest))
+
+    with pytest.raises(CheckRefusal) as caught:
+        check_store(store, ("SPY",))
+    assert caught.value.path == store / "MANIFEST.json"
+    assert repr(key) in caught.value.reason
+    assert "upper-case symbol stem" in caught.value.reason
+
+
+def test_a_symbol_the_manifest_does_not_list_is_still_checked_without_witnesses(
+    tmp_path: Path,
+) -> None:
+    """The other direction is not a refusal: bytes the manifest never claimed are disclosed."""
+
+    store = full_store(tmp_path / "store")
+    shutil.copyfile(store / "bars" / "DIA.csv", store / "bars" / "AAPL.csv")
+
+    result = check_store(store, ("AAPL",))
+    (item,) = result.symbols
+    assert item.symbol == "AAPL"
+    assert item.manifest_checked is False

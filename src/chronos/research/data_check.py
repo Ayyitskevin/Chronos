@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -100,6 +101,24 @@ def _refuse(path: Path, reason: str) -> CheckRefusal:
     return CheckRefusal(path, reason)
 
 
+def _own_bytes(path: Path, what: str) -> Path:
+    """Refuse a symlink at ``path`` — the store's ``what`` must be the store's own bytes.
+
+    One invariant for every path the check reads under the store (the bars directory, each
+    bars file, MANIFEST.json, the corporate-actions directory and files): none is reached
+    through a symlink. Following one would let the gates read bytes the store does not hold
+    while its own record says it does (C-2X reviews: a file, then the ``bars/`` directory).
+    """
+
+    if path.is_symlink():
+        raise _refuse(
+            path,
+            f"{what} is a symlink to {os.readlink(path)!r}; a store's {what} is inside the "
+            "store as its own bytes — copy it in rather than have the gates read outside",
+        )
+    return path
+
+
 def available_symbols(store: Path) -> tuple[str, ...]:
     """Every symbol the store has bars for, whatever subset that is.
 
@@ -121,12 +140,15 @@ def available_symbols(store: Path) -> tuple[str, ...]:
     casing (an operator's notes) are still ignored — the refusal is not widened to them.
     """
 
-    bars = store / "bars"
+    bars = _own_bytes(store / "bars", "bars/ directory")
     if not bars.is_dir():
         raise _refuse(bars, "the store has no bars/ directory")
     by_symbol: dict[str, list[Path]] = {}
     for path in sorted(bars.iterdir()):
-        if not path.is_file() or not path.name.lower().endswith(".csv"):
+        if not path.name.lower().endswith(".csv"):
+            continue
+        _own_bytes(path, f"bars entry {path.name!r}")
+        if not path.is_file():
             continue
         by_symbol.setdefault(path.name[: -len(".csv")].upper(), []).append(path)
     for symbol, paths in sorted(by_symbol.items()):
@@ -151,6 +173,20 @@ def available_symbols(store: Path) -> tuple[str, ...]:
     return tuple(sorted(by_symbol))
 
 
+def _is_symbol_stem(symbol: object) -> bool:
+    """True when ``symbol`` is the one thing a manifest key may be: an upper-case filename stem.
+
+    The same rule ``available_symbols`` applies to the bars filenames, read from the other
+    side: ``f"{symbol}.csv"`` must be a single POSIX path component (no ``/``, no NUL) whose
+    stem is its own upper-case. Anything else cannot name ``bars/<SYMBOL>.csv`` and must
+    not be joined onto the store path at all.
+    """
+
+    if not isinstance(symbol, str) or not symbol or symbol != symbol.upper():
+        return False
+    return "/" not in symbol and "\x00" not in symbol
+
+
 def _manifest_entries(store: Path) -> dict[str, Any] | None:
     """The manifest's per-symbol witnesses, or None when the store has no manifest.
 
@@ -159,7 +195,7 @@ def _manifest_entries(store: Path) -> dict[str, Any] | None:
     cross-check did not run, instead of reading its silence as a pass.
     """
 
-    path = store / "MANIFEST.json"
+    path = _own_bytes(store / "MANIFEST.json", "MANIFEST.json")
     if not path.exists():
         return None
     try:
@@ -195,6 +231,34 @@ def check_store(store: Path, symbols: tuple[str, ...] | None = None) -> CheckRes
         )
 
     entries = _manifest_entries(store)
+    if entries is not None:
+        # A manifest key is untrusted text. Only an upper-case filename stem can name
+        # bars/<SYMBOL>.csv; an absolute or traversal-shaped key would make the join below
+        # resolve OUTSIDE the store (pathlib drops the prefix), so no path is built from a
+        # key until every key has passed the same rule the bars filenames must.
+        malformed = sorted(repr(symbol) for symbol in entries if not _is_symbol_stem(symbol))
+        if malformed:
+            raise _refuse(
+                store / "MANIFEST.json",
+                f"MANIFEST 'symbols' key(s) {', '.join(malformed)} are not an upper-case "
+                "symbol stem (bars/<SYMBOL>.csv, the histdata.store layout); a key that "
+                "cannot name a bars file is refused rather than resolved as a path",
+            )
+        # The mirror of the witness cross-check below: a symbol the manifest records whose
+        # bars file is ABSENT was silently skipped (five symbols checked, exit 0, DIA gone).
+        # It is the store's own record disagreeing with its bytes, so it is refused at the
+        # store level, before any gate, whichever subset was requested.
+        # "Backed" means a regular file the store validated (`available_symbols`: regular files
+        # with the canonical name) — not any entry at the name: a directory or a FIFO at
+        # bars/DIA.csv satisfied Path.exists() and let a SPY-only check run (C-2X review).
+        unbacked = sorted(str(symbol) for symbol in entries if symbol not in present)
+        if unbacked:
+            named = ", ".join(f"{symbol} (bars/{symbol}.csv)" for symbol in unbacked)
+            raise _refuse(
+                store / "MANIFEST.json",
+                f"MANIFEST records bars for {named} but the store has no such file; "
+                "the store's own record disagrees with its bytes",
+            )
     calendar = SessionCalendar()
     checked: list[SymbolCheck] = []
     for symbol in chosen:
@@ -217,6 +281,9 @@ def check_store(store: Path, symbols: tuple[str, ...] | None = None) -> CheckRes
 
         actions_path = store / "corporate_actions" / f"{symbol}.json"
         actions = None
+        if actions_path.parent.exists():
+            _own_bytes(actions_path.parent, "corporate_actions/ directory")
+        _own_bytes(actions_path, f"corporate action file {actions_path.name!r}")
         if actions_path.exists():
             try:
                 actions = parse_actions(actions_path.read_bytes(), actions_path)
