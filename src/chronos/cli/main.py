@@ -82,12 +82,24 @@ def cmd_halt(args: argparse.Namespace) -> int:
 def cmd_rearm(args: argparse.Namespace) -> int:
     store = HaltStore(args.halt_file)
     previous = store.read()
+    try:
+        store.rearm(args.note)
+    except ValueError:
+        # The store owns the rule (a non-empty operator note, for the audit trail) and
+        # refused before writing anything. This only reports that refusal typed, and
+        # before any other output: `--note "$NOTE"` with NOTE unset used to print
+        # "clearing halt (...)" and then let the ValueError escape main() as a traceback,
+        # exit 1 — a line that read as if the clear began, followed by a crash.
+        print(
+            "REFUSED rearm: an operator note is required for the audit trail (--note); "
+            "halt state unchanged"
+        )
+        return 2
     if previous.halted:
         print(
             "clearing halt "
             f"({previous.reason.value if previous.reason else 'unknown'}: {previous.detail})"
         )
-    store.rearm(args.note)
     _banner(TradingMode.RESEARCH, store)
     print("rearmed. Order generation still requires mode capability and reconciliation.")
     return 0
