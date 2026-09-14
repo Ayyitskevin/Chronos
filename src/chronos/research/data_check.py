@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -126,7 +127,18 @@ def available_symbols(store: Path) -> tuple[str, ...]:
         raise _refuse(bars, "the store has no bars/ directory")
     by_symbol: dict[str, list[Path]] = {}
     for path in sorted(bars.iterdir()):
-        if not path.is_file() or not path.name.lower().endswith(".csv"):
+        if not path.name.lower().endswith(".csv"):
+            continue
+        if path.is_symlink():
+            # A store's bars are its own bytes. `is_file()` would follow the link and count
+            # bytes outside the store as backing (C-2X r1 review); refuse it by name instead.
+            raise _refuse(
+                path,
+                f"bars entry {path.name!r} is a symlink to {os.readlink(path)!r}; a store's bars "
+                "are regular files inside it — copy the bytes in rather than have the gates "
+                "read outside the store",
+            )
+        if not path.is_file():
             continue
         by_symbol.setdefault(path.name[: -len(".csv")].upper(), []).append(path)
     for symbol, paths in sorted(by_symbol.items()):

@@ -451,6 +451,31 @@ def test_the_cli_refuses_a_manifest_listed_symbol_with_no_bars_and_checks_nothin
     assert "bars/DIA.csv" in output
 
 
+def test_a_symlink_at_the_canonical_bars_name_is_refused_even_when_its_target_is_a_regular_file(
+    tmp_path: Path,
+) -> None:
+    """A store's bars are its own bytes: a symlink at bars/<SYMBOL>.csv is refused, not followed.
+
+    Daybreak's C-2X r1 probe: with ``bars/DIA.csv`` a symlink to an exact copy OUTSIDE the
+    store, ``is_file()`` followed it, DIA counted as backed, and a SPY-only check ran over
+    bytes the store does not hold. F-8's assumption that "a symlinked bars file is scanned
+    as before" is withdrawn here, deliberately: the refusal names the link and its target.
+    """
+
+    store = full_store(tmp_path / "store")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    shutil.copyfile(store / "bars" / "DIA.csv", outside / "DIA.csv")
+    (store / "bars" / "DIA.csv").unlink()
+    (store / "bars" / "DIA.csv").symlink_to(outside / "DIA.csv")
+
+    with pytest.raises(CheckRefusal) as caught:
+        check_store(store, ("SPY",))
+    assert caught.value.path == store / "bars" / "DIA.csv"
+    assert "symlink" in caught.value.reason
+    assert str(outside / "DIA.csv") in caught.value.reason
+
+
 @pytest.mark.parametrize("entry", ["directory", "fifo"])
 def test_a_manifest_listed_symbol_whose_canonical_entry_is_not_a_regular_file_is_unbacked(
     tmp_path: Path, entry: str
