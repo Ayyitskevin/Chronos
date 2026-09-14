@@ -637,6 +637,85 @@ def test_an_out_reaching_the_store_through_a_symlink_is_refused(tmp_path: Path) 
     assert _tree(store) == before
 
 
+@pytest.mark.parametrize("shape", ["file", "symlink_to_file", "dangling_symlink"])
+def test_an_out_that_is_not_a_directory_is_refused_before_anything_is_read(
+    tmp_path: Path, shape: str
+) -> None:
+    """`--out delivery.json`, or a link that leads to no directory, is a refusal, not a traceback.
+
+    The previous version read and validated every store file, reached pass 2, and called
+    `out.iterdir()` on the file — NotADirectoryError, exit 1, no REFUSED line. The target's
+    shape is now checked in the pre-read block beside the disjointness check, so the refusal
+    names the path and neither the store nor the target is touched.
+    """
+
+    store = write_store(tmp_path / "store")
+    target = tmp_path / "delivery"
+    if shape == "file":
+        target.write_bytes(b"not a directory\n")
+    elif shape == "symlink_to_file":
+        (tmp_path / "plain.txt").write_bytes(b"not a directory\n")
+        target.symlink_to(tmp_path / "plain.txt")
+    else:
+        target.symlink_to(tmp_path / "does-not-exist")
+    before_store = _tree(store)
+    before_target = target.read_bytes() if shape != "dangling_symlink" else None
+
+    with pytest.raises(AssembleRefusal) as caught:
+        _assemble(tmp_path, store=store, out=target)
+    assert caught.value.path == target
+    assert "not a directory" in caught.value.reason
+    assert "new or empty directory" in caught.value.reason
+    assert _tree(store) == before_store, "a refused assembly still changed the store"
+    if before_target is not None:
+        assert target.read_bytes() == before_target, "the refusal must not touch the target"
+    assert not (tmp_path / "does-not-exist").exists(), "a dangling link must not be materialised"
+
+
+def test_an_absent_out_is_created_and_an_empty_out_is_used(tmp_path: Path) -> None:
+    """Positive controls for the shape check: the two shapes that assemble today still do."""
+
+    store = write_store(tmp_path / "store")
+    absent = tmp_path / "absent" / "delivery"
+    assert not absent.parent.exists()
+    result = _assemble(tmp_path, store=store, out=absent)
+    assert (result.delivery / "INTAKE.json").is_file()
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    result = _assemble(tmp_path, store=store, out=empty)
+    assert (empty / "INTAKE.json").is_file()
+
+
+def test_a_non_empty_out_is_refused_by_the_existing_emptiness_check(tmp_path: Path) -> None:
+    """Positive control: a non-empty DIRECTORY keeps today's pass-2 refusal, untouched."""
+
+    store = write_store(tmp_path / "store")
+    out = tmp_path / "delivery"
+    out.mkdir()
+    (out / "leftover.txt").write_text("from an earlier run\n")
+
+    with pytest.raises(AssembleRefusal) as caught:
+        _assemble(tmp_path, store=store, out=out)
+    assert "delivery target is not empty" in caught.value.reason
+    assert sorted(item.name for item in out.iterdir()) == ["leftover.txt"], "nothing was written"
+
+
+def test_the_cli_refuses_an_out_that_is_a_file_with_exit_2(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    store = write_store(tmp_path / "store")
+    target = tmp_path / "delivery.json"
+    target.write_text("{}\n")
+    code = main(_cli_argv(store, target, _sampled_attestation(tmp_path)))
+
+    output = capsys.readouterr().out
+    assert code == 2, output
+    assert output.startswith("REFUSED "), output
+    assert "not a directory" in output, output
+    assert target.read_text() == "{}\n"
+
+
 def test_sources_changed_between_the_parse_and_the_copy_cannot_reach_the_delivery(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
