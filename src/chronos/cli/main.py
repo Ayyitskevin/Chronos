@@ -73,7 +73,18 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 def cmd_halt(args: argparse.Namespace) -> int:
     store = HaltStore(args.halt_file)
-    state = store.halt(HaltReason.OPERATOR_REQUEST, args.reason)
+    try:
+        state = store.halt(HaltReason.OPERATOR_REQUEST, args.reason)
+    except ValueError as error:
+        # The store refused before touching disk (its path rule); report it typed rather
+        # than let a traceback stand in for the kill switch's answer.
+        print(f"REFUSED halt: {error}")
+        return 2
+    except OSError as error:
+        # The OS refused the write (an unwritable parent, for one). The store raises it
+        # unchanged — fail-closed exactly as before — and this only reports it typed.
+        print(f"REFUSED halt: --halt-file {args.halt_file}: {error}")
+        return 2
     _banner(TradingMode.RESEARCH, store)
     print(f"halted: {state.detail}")
     return 0
@@ -84,16 +95,22 @@ def cmd_rearm(args: argparse.Namespace) -> int:
     previous = store.read()
     try:
         store.rearm(args.note)
-    except ValueError:
-        # The store owns the rule (a non-empty operator note, for the audit trail) and
-        # refused before writing anything. This only reports that refusal typed, and
-        # before any other output: `--note "$NOTE"` with NOTE unset used to print
-        # "clearing halt (...)" and then let the ValueError escape main() as a traceback,
-        # exit 1 — a line that read as if the clear began, followed by a crash.
-        print(
-            "REFUSED rearm: an operator note is required for the audit trail (--note); "
-            "halt state unchanged"
-        )
+    except ValueError as error:
+        # The store's own rules refused before writing anything — the note rule (a
+        # non-empty operator note, for the audit trail) or the path rule — and this only
+        # reports the refusal typed, before any other output: `--note "$NOTE"` with NOTE
+        # unset used to print "clearing halt (...)" and then let the ValueError escape
+        # main() as a traceback. The note rule keeps its operator wording; every other
+        # store reason is printed in the store's own words.
+        reason = str(error)
+        if reason == "rearm requires a non-empty operator note":
+            reason = (
+                "an operator note is required for the audit trail (--note); halt state unchanged"
+            )
+        print(f"REFUSED rearm: {reason}")
+        return 2
+    except OSError as error:
+        print(f"REFUSED rearm: --halt-file {args.halt_file}: {error}")
         return 2
     if previous.halted:
         print(
@@ -187,7 +204,8 @@ def cmd_bootstrap_audit_anchor(args: argparse.Namespace) -> int:
 
 
 def cmd_shadow_scan(args: argparse.Namespace) -> int:
-    store = HaltStore(args.halt_file)
+    store_path = args.halt_file
+    store = HaltStore(store_path)
     _banner(TradingMode.SHADOW, store)
     from chronos.auditlog.log import AuditLog, AuditLogCorruptionError
     from chronos.control.halt import HaltReason
@@ -205,7 +223,12 @@ def cmd_shadow_scan(args: argparse.Namespace) -> int:
     try:
         audit_log = AuditLog(args.audit_file)
     except AuditLogCorruptionError as error:
-        store.halt(HaltReason.AUDIT_LOG_FAILURE, str(error))
+        try:
+            store.halt(HaltReason.AUDIT_LOG_FAILURE, str(error))
+        except (ValueError, OSError) as path_error:
+            print(f"REFUSED shadow-scan: --halt-file {store_path}: {path_error}")
+            print(f"AUDIT LOG CORRUPT and the halt could not be written: {error}")
+            return 2
         print(f"AUDIT LOG CORRUPT — halted, refusing to run: {error}")
         return 1
     reports = shadow_scan(

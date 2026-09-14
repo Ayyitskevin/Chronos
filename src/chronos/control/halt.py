@@ -143,7 +143,36 @@ class HaltStore:
         self._write(state)
         return state
 
+    def _require_writable_file_path(self) -> None:
+        """Refuse, BEFORE the temp file is opened, exactly what used to traceback — nothing more.
+
+        A directory at the path used to reach ``os.replace`` and die with IsADirectoryError
+        after ``<path>.tmp`` had already been written beside it; a parent that is a file died
+        in ``mkdir`` with FileExistsError. Both left the operator a traceback and no halt —
+        fail-closed by accident. This is the one place the rule lives (the CLI only prints
+        it), and it raises the same ValueError the blank-note rule does. The predicate is
+        deliberately NARROW (Daybreak, F-7 P1-a): a symlink, a FIFO, a socket or a device
+        node at the path were all REPLACED by ``os.replace`` before and still are — refusing
+        them would skip a halt write the old code performed. A MISSING parent is still
+        created below: refusing it would change what the kill switch does on a fresh
+        deployment, where ``data/`` does not exist yet. An OS refusal (an unwritable parent)
+        is not a rule of this store and is raised unchanged.
+        """
+
+        path = self._path
+        if path.is_dir() and not path.is_symlink():
+            raise ValueError(
+                f"halt file path {path} is not a writable file path (it is a directory)"
+            )
+        parent = path.parent
+        if parent.exists() and not parent.is_dir():
+            raise ValueError(
+                f"halt file path {path} is not a writable file path (parent {parent} is not "
+                "a directory)"
+            )
+
     def _write(self, state: HaltState) -> None:
+        self._require_writable_file_path()
         payload = {
             "schema": _SCHEMA_VERSION,
             "halted": state.halted,

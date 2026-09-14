@@ -12,6 +12,7 @@ non-transmitting capability and that the CLI imports no broker adapter.
 from __future__ import annotations
 
 import hashlib
+import os
 import stat
 from datetime import date, timedelta
 from pathlib import Path
@@ -160,6 +161,123 @@ def test_rearm_success_output_keeps_its_order(
     assert "manual test" in lines[clearing], lines
     assert clearing < banner < rearmed, lines
     assert HaltStore(halt_file).read().halted is False
+
+
+def _halt_path_args(tmp_path: Path, halt_path: Path) -> list[str]:
+    return ["--halt-file", str(halt_path), "--audit-file", str(tmp_path / "audit.jsonl")]
+
+
+@pytest.mark.parametrize("command", [["halt", "--reason", "x"], ["rearm", "--note", "x"]])
+def test_a_directory_halt_file_is_refused_before_any_temp_file(
+    tmp_path: Path, command: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--halt-file <directory>` is one REFUSED line, not IsADirectoryError plus a stray `.tmp`.
+
+    HaltStore._write wrote `<path>.tmp` beside the directory and then died in os.replace;
+    the operator got a traceback (exit 1), no halt, and a temp file to clean up. The store
+    now refuses a path that is not a writable file path BEFORE it opens the temp file, and
+    the CLI prints the store's reason. No decision changes: the halt that could not be
+    written still is not written — it is refused explicitly and cleanly.
+    """
+
+    target = tmp_path / "adir"
+    target.mkdir()
+    listing_before = sorted(item.name for item in tmp_path.iterdir())
+
+    code = main([*_halt_path_args(tmp_path, target), *command])
+    output = capsys.readouterr().out
+    assert code == 2, output
+    assert output.startswith(f"REFUSED {command[0]}:"), output
+    assert "is not a writable file path" in output, output
+    assert str(target) in output, output
+    assert not (tmp_path / "adir.tmp").exists(), "the refusal must precede the temp file"
+    assert target.is_dir()
+    assert sorted(item.name for item in tmp_path.iterdir()) == listing_before, (
+        "nothing else written"
+    )
+
+
+def test_a_halt_file_whose_parent_is_a_file_is_refused(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--halt-file <file>/h.json` died in mkdir with FileExistsError; now the same REFUSED line."""
+
+    parent = tmp_path / "afile"
+    parent.write_bytes(b"x")
+    target = parent / "h.json"
+
+    code = main([*_halt_path_args(tmp_path, target), "halt", "--reason", "x"])
+    output = capsys.readouterr().out
+    assert code == 2, output
+    assert output.startswith("REFUSED halt:"), output
+    assert "is not a writable file path" in output, output
+    assert parent.read_bytes() == b"x"
+    assert not (tmp_path / "afile.tmp").exists() and not target.exists()
+
+
+def test_a_missing_parent_is_still_created_by_halt(tmp_path: Path) -> None:
+    """Positive control, green before the change: the first halt of a fresh deployment
+    creates its parent directory (`data/` does not exist on a fresh checkout). Refusing a
+    missing parent would change what the kill switch DOES, so it is deliberately unchanged."""
+
+    target = tmp_path / "missing" / "h.json"
+    assert main([*_halt_path_args(tmp_path, target), "halt", "--reason", "x"]) == 0
+    assert HaltStore(target).read().halted is True
+
+
+def test_status_on_a_directory_halt_file_stays_typed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Positive control, green before the change: the read path already fails closed as
+    STATE_CORRUPTION and `status` reports it in the banner without a traceback."""
+
+    target = tmp_path / "adir"
+    target.mkdir()
+    assert main([*_halt_path_args(tmp_path, target), "status"]) == 0
+    output = capsys.readouterr().out
+    assert "TRADING HALTED" in output and "STATE_CORRUPTION" in output, output
+
+
+def test_a_fifo_halt_path_is_replaced_by_the_halt_file_exactly_as_at_base(tmp_path: Path) -> None:
+    """The preflight refuses ONLY what tracebacked before; a FIFO never did (Daybreak, F-7 P1-a).
+
+    At 3ab88ec `os.replace` swapped the FIFO's directory entry for the new halt file and
+    the halt was written. Refusing it would skip a halt write the old code performed —
+    a protection-semantics change, outside tonight's grant — so the predicate is narrowed
+    to an existing directory target and a parent that exists but is not a directory.
+    """
+
+    target = tmp_path / "fifo"
+    os.mkfifo(target)
+    assert main([*_halt_path_args(tmp_path, target), "halt", "--reason", "x"]) == 0
+    assert target.is_file(), "the FIFO entry is replaced by the regular halt file, as at base"
+    assert HaltStore(target).read().halted is True
+    assert not (tmp_path / "fifo.tmp").exists()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permission bits")
+def test_an_unwritable_parent_is_reported_typed_and_writes_nothing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """P1-b: PermissionError from the temp-file open used to escape cmd_halt as a traceback.
+
+    The OS's refusal is not a store rule, so the store still raises it unchanged
+    (fail-closed exactly as before); the CLI reports it as one typed line, exit 2. No halt
+    file and no `.tmp` exist afterwards, as before.
+    """
+
+    parent = tmp_path / "locked"
+    parent.mkdir()
+    target = parent / "halt.json"
+    parent.chmod(0o555)
+    try:
+        code = main([*_halt_path_args(tmp_path, target), "halt", "--reason", "x"])
+        output = capsys.readouterr().out
+        assert code == 2, output
+        assert output.startswith(f"REFUSED halt: --halt-file {target}: "), output
+        assert sorted(item.name for item in parent.iterdir()) == [], "nothing written"
+    finally:
+        parent.chmod(0o755)
 
 
 def test_risk_show_command(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
