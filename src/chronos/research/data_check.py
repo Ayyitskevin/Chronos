@@ -31,9 +31,10 @@ what it buys is finding out on Monday rather than after the sixth capture.
 ## Two kinds of outcome
 
 A **finding** is what the gates say about bars that could be read. A **refusal** is the
-store not being a readable subject at all — a missing bars file, an unparseable CSV, an
-adjusted-close column (§2's delivery is unadjusted as traded), or a `MANIFEST.json` whose
-own witnesses disagree with the bytes. Refusals name the file, exactly as `data assemble`
+store not being a readable subject at all — a missing bars file, a bars filename that is
+not the upper-case symbol stem the layout requires, an unparseable CSV, an adjusted-close
+column (§2's delivery is unadjusted as traded), or a `MANIFEST.json` whose own witnesses
+disagree with the bytes. Refusals name the file, exactly as `data assemble`
 does, and reuse its checks (`data_assemble.cross_check_manifest`, `parse_actions`).
 
 An absent action file is neither: it is reported as absent, and split reconciliation then
@@ -100,12 +101,43 @@ def _refuse(path: Path, reason: str) -> CheckRefusal:
 
 
 def available_symbols(store: Path) -> tuple[str, ...]:
-    """Every symbol the store has bars for, whatever subset that is."""
+    """Every symbol the store has bars for, whatever subset that is.
+
+    The store's bars filenames are upper-case symbol stems: ``bars/<SYMBOL>.csv`` is the
+    layout ``histdata.store.bars_path`` writes and the verifier reads (``CAMPAIGN_SYMBOLS``
+    are upper-case), and ``check_store`` reopens each file by exactly that name. A stem that
+    is not its own upper-case is therefore refused HERE, before any gate runs, naming the
+    file and the name it would have to carry — the previous version folded ``dia`` to
+    ``DIA``, reopened ``DIA.csv``, and handed the operator a FileNotFoundError traceback.
+    Two files that fold to one symbol are refused as ambiguous rather than resolved: which
+    of them is canonical is not a choice this command makes.
+    """
 
     bars = store / "bars"
     if not bars.is_dir():
         raise _refuse(bars, "the store has no bars/ directory")
-    return tuple(sorted(path.stem.upper() for path in bars.glob("*.csv")))
+    by_symbol: dict[str, list[Path]] = {}
+    for path in sorted(bars.glob("*.csv")):
+        by_symbol.setdefault(path.stem.upper(), []).append(path)
+    for symbol, paths in sorted(by_symbol.items()):
+        canonical = bars / f"{symbol}.csv"
+        if len(paths) > 1:
+            names = ", ".join(path.name for path in paths)
+            raise _refuse(
+                bars,
+                f"{symbol}: ambiguous bars files ({names}); the store's bars filenames are "
+                f"upper-case symbol stems (bars/{symbol}.csv, the histdata.store layout) and "
+                "two files cannot both be it — remove one rather than have the gates guess",
+            )
+        (path,) = paths
+        if path != canonical:
+            raise _refuse(
+                path,
+                f"bars filename {path.name!r} is not the upper-case symbol stem the store "
+                f"layout requires (bars/{symbol}.csv, histdata.store.bars_path); rename it "
+                "rather than have the gates guess which symbol it is",
+            )
+    return tuple(sorted(by_symbol))
 
 
 def _manifest_entries(store: Path) -> dict[str, Any] | None:

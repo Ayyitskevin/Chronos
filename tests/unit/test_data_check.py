@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 from chronos.cli.main import main
-from chronos.research.data_check import CheckRefusal, check_store
+from chronos.research.data_check import CheckRefusal, available_symbols, check_store
 from chronos.research.synth_store import generate_store
 
 START = date(2024, 1, 2)
@@ -240,3 +240,68 @@ def test_nothing_is_written_anywhere(tmp_path: Path) -> None:
     check_store(store, ("DIA",))
 
     assert _tree(tmp_path) == before, "data check wrote something"
+
+
+# ------------------------------------------------------------- filename convention
+
+
+def test_a_lower_case_bars_filename_is_refused_naming_the_file_and_the_canonical_name(
+    tmp_path: Path,
+) -> None:
+    """`bars/dia.csv` is not a subject the gates can judge, and the refusal says why.
+
+    The store layout is `bars/<SYMBOL>.csv` (`histdata.store.bars_path`; the campaign symbols
+    are upper-case), and this module already reads a stem as the upper-cased symbol. Before
+    this test the two halves disagreed: `available_symbols` folded `dia` to `DIA` and
+    `check_store` reopened `DIA.csv`, which does not exist — a FileNotFoundError traceback
+    for an operator who saved one file in lower case. There is deliberately no
+    case-insensitive resolution: which file is canonical is not a choice this command makes.
+    """
+
+    store = one_symbol_store(tmp_path)
+    (store / "bars" / "DIA.csv").rename(store / "bars" / "dia.csv")
+
+    with pytest.raises(CheckRefusal) as caught:
+        check_store(store)
+    assert caught.value.path == store / "bars" / "dia.csv"
+    assert "bars/DIA.csv" in caught.value.reason
+    assert "upper-case" in caught.value.reason
+
+
+def test_a_store_holding_both_cases_of_one_symbol_is_refused_as_ambiguous(
+    tmp_path: Path,
+) -> None:
+    """`DIA.csv` next to `dia.csv`: two files claim one symbol, and neither is chosen."""
+
+    store = one_symbol_store(tmp_path)
+    shutil.copyfile(store / "bars" / "DIA.csv", store / "bars" / "dia.csv")
+
+    with pytest.raises(CheckRefusal) as caught:
+        check_store(store)
+    assert "ambiguous" in caught.value.reason
+    assert "DIA.csv" in caught.value.reason
+    assert "dia.csv" in caught.value.reason
+
+
+def test_the_filename_refusal_fires_before_any_gate_and_the_cli_reports_it(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A conforming SPY.csv sits beside the offending file, and no gate runs for it either."""
+
+    store = one_symbol_store(tmp_path)
+    (store / "bars" / "DIA.csv").rename(store / "bars" / "dia.csv")
+    shutil.copyfile(tmp_path / "source" / "bars" / "SPY.csv", store / "bars" / "SPY.csv")
+
+    code = main(["data", "check", "--store", str(store)])
+    output = capsys.readouterr().out
+    assert code == 2
+    assert output.startswith("REFUSED "), output
+    assert "CHECKED" not in output, output  # the refusal precedes every per-symbol gate
+    assert "dia.csv" in output and "bars/DIA.csv" in output
+
+
+def test_upper_case_stems_are_the_symbols_the_store_holds(tmp_path: Path) -> None:
+    """Positive control: a convention-conforming store is read exactly as before."""
+
+    store = full_store(tmp_path / "store")
+    assert available_symbols(store) == ("DIA", "GLD", "IWM", "QQQ", "SPY", "TLT")
