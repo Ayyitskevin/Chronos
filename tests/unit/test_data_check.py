@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 from datetime import date
 from pathlib import Path
@@ -448,6 +449,34 @@ def test_the_cli_refuses_a_manifest_listed_symbol_with_no_bars_and_checks_nothin
     assert output.startswith("REFUSED "), output
     assert "CHECKED" not in output, output  # the refusal precedes every per-symbol gate
     assert "bars/DIA.csv" in output
+
+
+@pytest.mark.parametrize("entry", ["directory", "fifo"])
+def test_a_manifest_listed_symbol_whose_canonical_entry_is_not_a_regular_file_is_unbacked(
+    tmp_path: Path, entry: str
+) -> None:
+    """Backing is a regular file the store validated, not any filesystem entry at the name.
+
+    Daybreak's C-2X probe: with ``bars/DIA.csv`` replaced by a directory, ``Path.exists()``
+    was true, the store-level refusal did not fire, and a SPY-only check completed. The
+    refusal now keys on the set ``available_symbols`` validated (regular files only), so a
+    directory or a FIFO at the canonical name is UNBACKED — refused against MANIFEST.json,
+    before any gate, whichever subset was requested.
+    """
+
+    store = full_store(tmp_path / "store")
+    canonical = store / "bars" / "DIA.csv"
+    canonical.unlink()
+    if entry == "directory":
+        canonical.mkdir()
+    else:
+        os.mkfifo(canonical)
+
+    with pytest.raises(CheckRefusal) as caught:
+        check_store(store, ("SPY",))
+    assert caught.value.path == store / "MANIFEST.json"
+    assert "DIA" in caught.value.reason
+    assert "bars/DIA.csv" in caught.value.reason
 
 
 @pytest.mark.parametrize("shape", ["absolute", "traversal", "lower-case", "nul"])

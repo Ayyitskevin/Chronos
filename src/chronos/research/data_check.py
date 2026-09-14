@@ -226,9 +226,10 @@ def check_store(store: Path, symbols: tuple[str, ...] | None = None) -> CheckRes
         # bars file is ABSENT was silently skipped (five symbols checked, exit 0, DIA gone).
         # It is the store's own record disagreeing with its bytes, so it is refused at the
         # store level, before any gate, whichever subset was requested.
-        unbacked = sorted(
-            str(symbol) for symbol in entries if not (store / "bars" / f"{symbol}.csv").exists()
-        )
+        # "Backed" means a regular file the store validated (`available_symbols`: regular files
+        # with the canonical name) — not any entry at the name: a directory or a FIFO at
+        # bars/DIA.csv satisfied Path.exists() and let a SPY-only check run (C-2X review).
+        unbacked = sorted(str(symbol) for symbol in entries if symbol not in present)
         if unbacked:
             named = ", ".join(f"{symbol} (bars/{symbol}.csv)" for symbol in unbacked)
             raise _refuse(
