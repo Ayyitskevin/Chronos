@@ -105,6 +105,21 @@ class FakeLifecycleEvent:
             handler()
 
 
+class FakePayloadEvent:
+    """An ib_async order/fill lifecycle event: handlers receive the emitted payload."""
+
+    def __init__(self) -> None:
+        self.handlers: list[Callable[..., object]] = []
+
+    def connect(self, handler: Callable[..., object]) -> object:
+        self.handlers.append(handler)
+        return handler
+
+    def emit(self, *payload: object) -> None:
+        for handler in tuple(self.handlers):
+            handler(*payload)
+
+
 def ib_stock() -> Stock:
     return Stock(
         symbol="AAPL",
@@ -168,6 +183,13 @@ class FakeIB:
         self.errorEvent = FakeErrorEvent()
         self.connectedEvent = FakeLifecycleEvent()
         self.disconnectedEvent = FakeLifecycleEvent()
+        # ib_async's order/fill lifecycle events. The adapter subscribes to none of
+        # them — connection and error events only — and a pin below proves that
+        # emitting them reaches readiness not at all.
+        self.orderStatusEvent = FakePayloadEvent()
+        self.openOrderEvent = FakePayloadEvent()
+        self.execDetailsEvent = FakePayloadEvent()
+        self.commissionReportEvent = FakePayloadEvent()
         self.connected = False
         self.accounts = [ACCOUNT_ID]
         self.connect_kwargs: dict[str, object] = {}
@@ -476,7 +498,7 @@ def make_broker(
     )
 
 
-def test_lifecycle_events_invalidate_reconciliation_readiness() -> None:
+def test_connection_events_invalidate_reconciliation_readiness() -> None:
     client = FakeIB()
     reasons: list[str] = []
     make_broker(client, on_connection_uncertain=reasons.append)
@@ -488,6 +510,37 @@ def test_lifecycle_events_invalidate_reconciliation_readiness() -> None:
         "ib_async connection established; reconciliation required",
         "ib_async connection lost; reconciliation required",
     ]
+
+
+def test_order_and_fill_events_do_not_invalidate_reconciliation_readiness() -> None:
+    """Pins an absence the source shows: no order/fill lifecycle event reaches readiness.
+
+    ``IBKRBroker.__init__`` subscribes to ``errorEvent``, ``connectedEvent`` and
+    ``disconnectedEvent`` and nothing else (``src/chronos/broker/ibkr.py``); the official
+    adapter's order-side callbacks — ``on_open_order``, ``on_order_status``,
+    ``on_exec_details`` in ``src/chronos/broker/callbacks.py`` — feed caches and request
+    results and never call the connection invalidator. The connection event first proves
+    the observer is live (a negative assertion needs its positive control); the four
+    ib_async order/fill events then append nothing. The operator-facing statement of this
+    limitation in ``docs/limitations.md`` is corrected separately (DOC-1); this pin does
+    not depend on that text. Wiring callback-driven reconciliation is owner-reviewed work
+    (D-1 audit §1) and must flip this pin deliberately.
+    """
+
+    client = FakeIB()
+    reasons: list[str] = []
+    make_broker(client, on_connection_uncertain=reasons.append)
+    client.connectedEvent.emit()
+    live = ["ib_async connection established; reconciliation required"]
+    assert reasons == live
+
+    trade, fill, report = object(), object(), object()
+    client.orderStatusEvent.emit(trade)
+    client.openOrderEvent.emit(trade)
+    client.execDetailsEvent.emit(trade, fill)
+    client.commissionReportEvent.emit(trade, fill, report)
+
+    assert reasons == live
 
 
 @pytest.mark.parametrize("code", [1100, 1101, 1102, 1300, 2110])
