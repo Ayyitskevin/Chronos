@@ -645,7 +645,7 @@ def test_r1_3b_the_final_name_is_acquired_without_overwrite(tmp_path: Path) -> N
     wall = datetime(2026, 9, 15, 5, 0, tzinfo=UTC)
     out = tmp_path / "out"
     out.mkdir()
-    occupied = out / f"{db.stem}-{wall.strftime('%Y%m%dT%H%M%SZ')}.db"
+    occupied = out / f"{db.stem}-{wall.strftime('%Y%m%dT%H%M%SZ')}"  # the envelope's name
     occupied.write_bytes(b"someone else's backup")
     before = _sha256(occupied)
     with pytest.raises(DrillRefused, match="already exists"):
@@ -689,10 +689,10 @@ def test_r1_3d_the_audit_pair_is_read_once_as_one_snapshot_after_the_backup_comp
 
     def recording_pair(path: Path) -> tuple[str | None, bytes | None]:
         # at this instant the backup must already be COMPLETE (every source row in the
-        # unpublished temp) and not yet published — a refusal here publishes nothing
+        # unpublished temp ENVELOPE) and not yet published — a refusal here publishes nothing
         temps = sorted((tmp_path / "out").glob(".*.tmp"))
-        published = sorted((tmp_path / "out").glob("*.db"))
-        rows = _row_count(temps[0], "application_events") if temps else -1
+        published = sorted(p for p in (tmp_path / "out").iterdir() if not p.name.startswith("."))
+        rows = _row_count(temps[0] / "chronos.db", "application_events") if temps else -1
         calls.append((str(path), rows, len(published)))
         return real_pair(path)
 
@@ -727,47 +727,57 @@ def _store_with_audit(tmp_path: Path) -> Path:
     return db
 
 
-def _final_names(db: Path, wall: datetime) -> dict[str, str]:
-    stamp = wall.strftime("%Y%m%dT%H%M%SZ")
-    stem = f"{db.stem}-{stamp}"
-    return {
-        "db": f"{stem}.db",
-        "log": f"{stem}.platform_audit.jsonl",
-        "anchor": f"{stem}.platform_audit.head.json",
-    }
+def _envelope_name(db: Path, wall: datetime) -> str:
+    return f"{db.stem}-{wall.strftime('%Y%m%dT%H%M%SZ')}"
 
 
-@pytest.mark.parametrize("planted", ["db", "log", "anchor"])
-def test_r2_1_a_collision_at_any_of_the_three_final_names_publishes_nothing(
+ENVELOPE_FILES = ["chronos.db", "manifest.json", "platform_audit.head.json", "platform_audit.jsonl"]
+
+
+@pytest.mark.parametrize("planted", ["file", "directory"])
+def test_r2_1_a_collision_at_the_one_final_name_publishes_nothing(
     tmp_path: Path, planted: str
 ) -> None:
-    """Daybreak's exact sequence, one case per name: only ONE final name is pre-planted; the
-    refusal must leave that entry byte-identical and the destination otherwise empty —
-    no database, no audit copy, no temp — whichever of the three collided."""
+    """r3: the triple is ONE envelope with ONE name (r2's three-name class no longer
+    exists). A pre-planted entry at that name — a file or a non-empty directory — makes
+    RENAME_NOREPLACE refuse: the entry is byte-for-byte untouched and the destination
+    holds exactly it — no envelope, no temp."""
 
     db = _store_with_audit(tmp_path)
     wall = datetime(2026, 9, 15, 6, 0, tzinfo=UTC)
     out = tmp_path / "out"
     out.mkdir()
-    occupied = out / _final_names(db, wall)[planted]
-    occupied.write_bytes(b"pre-existing, must not move")
-    before = _sha256(occupied)
+    occupied = out / _envelope_name(db, wall)
+    if planted == "file":
+        occupied.write_bytes(b"pre-existing, must not move")
+        before = _sha256(occupied)
+    else:
+        occupied.mkdir()
+        (occupied / "keep").write_bytes(b"pre-existing, must not move")
+        before = _sha256(occupied / "keep")
     with pytest.raises(DrillRefused, match="already exists"):
         backup(db, out, clock=Clock(wall=lambda: wall, monotonic=lambda: 0.0))
-    assert _sha256(occupied) == before
+    assert _sha256(occupied if planted == "file" else occupied / "keep") == before
     assert sorted(p.name for p in out.iterdir()) == [occupied.name], (
         "the destination must hold exactly the planted entry: "
         + ", ".join(sorted(p.name for p in out.iterdir()))
     )
+    if planted == "directory":
+        assert sorted(p.name for p in occupied.iterdir()) == ["keep"]
 
 
-def test_r2_1d_a_complete_publication_is_the_whole_triple(tmp_path: Path) -> None:
+def test_r2_1d_a_complete_publication_is_one_envelope_holding_the_whole_triple(
+    tmp_path: Path,
+) -> None:
     db = _store_with_audit(tmp_path)
     wall = datetime(2026, 9, 15, 6, 0, tzinfo=UTC)
     manifest = backup(db, tmp_path / "out", clock=Clock(wall=lambda: wall, monotonic=lambda: 0.0))
-    names = _final_names(db, wall)
-    assert sorted(p.name for p in (tmp_path / "out").iterdir()) == sorted(names.values())
-    assert Path(manifest.backup_path).name == names["db"]
+    envelope = tmp_path / "out" / _envelope_name(db, wall)
+    assert sorted(p.name for p in (tmp_path / "out").iterdir()) == [envelope.name]
+    assert sorted(p.name for p in envelope.iterdir()) == ENVELOPE_FILES
+    assert Path(manifest.backup_path) == envelope / "chronos.db"
+    inside = json.loads((envelope / "manifest.json").read_text())
+    assert inside["sha256"] == manifest.sha256 and inside["backup_path"] == manifest.backup_path
 
 
 def test_r2_2a_backup_refuses_a_symlinked_ancestor_before_creating_anything_beyond_it(
@@ -812,6 +822,174 @@ def test_r2_3_the_runbook_states_the_triple_as_one_publication_and_names_the_wal
     assert "nothing is published" in prose
     assert "component" in prose
     assert "all three" in prose or "triple" in prose
+
+
+# ----------------------------------------------------------- (r3) Daybreak's HOLD-DELTA at 36786b9
+
+
+def _swap_ancestor(directory: Path) -> Path:
+    """Daybreak's sequence: rename the real directory away and put a fresh empty directory
+    at the lexical path — a concurrent pathname actor. Returns where the real one went."""
+
+    moved = directory.with_name(directory.name + "-moved")
+    directory.rename(moved)
+    directory.mkdir()
+    return moved
+
+
+def test_r3_1a_an_ancestor_swap_right_after_publication_is_a_typed_refusal_that_tells_the_truth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = _store_with_audit(tmp_path)
+    out = tmp_path / "backups"
+    real = drill._renameat2
+    moved: list[Path] = []
+
+    def swapping_renameat2(*args: object) -> None:
+        real(*args)  # the envelope is published for real ...
+        moved.append(_swap_ancestor(out))  # ... then the ancestor is swapped underneath
+
+    monkeypatch.setattr(drill, "_renameat2", swapping_renameat2)
+    with pytest.raises(DrillRefused) as refused:
+        backup(db, out)
+    message = str(refused.value)
+    assert message.startswith("published: the envelope "), message
+    assert "exists in the directory the walk admitted" in message
+    assert f"but the path {out} no longer names that directory" in message
+    assert "an ancestor was swapped after publication" in message
+    assert "nothing is published" not in message
+    # the triple really is in the descriptor-bound (renamed) directory; the lexical path is empty
+    envelopes = [p for p in moved[0].iterdir() if not p.name.startswith(".")]
+    assert len(envelopes) == 1 and sorted(q.name for q in envelopes[0].iterdir()) == ENVELOPE_FILES
+    assert sorted(out.iterdir()) == []
+
+
+def test_r3_1b_an_ancestor_swap_after_the_restore_copy_is_never_verified(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = _store_with_audit(tmp_path)
+    manifest = backup(db, tmp_path / "out")
+    target = tmp_path / "restore" / "into"
+    real_fsync = os.fsync
+    swapped: list[Path] = []
+
+    def swapping_fsync(fd: int) -> None:
+        real_fsync(fd)
+        st = os.fstat(fd)
+        is_target = (
+            os.path.stat.S_ISDIR(st.st_mode)
+            and target.exists()
+            and (st.st_dev, st.st_ino) == (os.stat(target).st_dev, os.stat(target).st_ino)
+        )
+        if is_target and not swapped:
+            # the copy is done (this is the target's post-copy fsync); swap the ancestor and
+            # plant an IDENTICAL database at the redirected path (Daybreak's sequence)
+            swapped.append(_swap_ancestor(target))
+            (target / Path(manifest.backup_path).name).write_bytes(
+                Path(manifest.backup_path).read_bytes()
+            )
+
+    monkeypatch.setattr(drill.os, "fsync", swapping_fsync)
+    report = restore(manifest, target)
+    assert swapped, "the swap must have happened after the copy"
+    assert report.verified is False
+    assert any("restore target swapped" in f for f in report.failures), report.failures
+    # the copy this drill made is in the renamed directory, not at the reported path
+    assert (swapped[0] / Path(manifest.backup_path).name).is_file()
+
+
+def _fork_backup(db: Path, out: Path, crash: str) -> tuple[int, Path | None]:
+    """Run backup() in a forked child that os._exit()s at ``crash`` ('before-rename' or
+    'after-rename'); returns (child status, the envelope's final dir or None)."""
+
+    pid = os.fork()
+    if pid == 0:  # pragma: no cover — the child
+        try:
+            real = drill._renameat2
+
+            def crashing_renameat2(*args: object) -> None:
+                if crash == "before-rename":
+                    os._exit(0)
+                real(*args)
+                os._exit(0)
+
+            drill._renameat2 = crashing_renameat2  # type: ignore[assignment]
+            backup(db, out)
+        finally:
+            os._exit(3)
+    _pid, status = os.waitpid(pid, 0)
+    published = [p for p in out.iterdir() if not p.name.startswith(".")]
+    return status, (published[0] if published else None)
+
+
+def test_r3_2a_a_crash_before_the_rename_leaves_only_a_dot_temp_that_restore_refuses_by_name(
+    tmp_path: Path,
+) -> None:
+    db = _store_with_audit(tmp_path)
+    out = tmp_path / "out"
+    out.mkdir()
+    status, envelope = _fork_backup(db, out, "before-rename")
+    assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0
+    assert envelope is None, "nothing may be published"
+    remnants = sorted(out.iterdir())
+    assert (
+        len(remnants) == 1
+        and remnants[0].name.startswith(".")
+        and remnants[0].name.endswith(".tmp")
+    )
+    assert remnants[0].is_dir() and "chronos.db" in {p.name for p in remnants[0].iterdir()}
+    # a manifest that points INTO the remnant is refused by name, whatever the remnant holds
+    manifest = BackupManifest.from_dict(json.loads((remnants[0] / "manifest.json").read_text()))
+    tampered = BackupManifest.from_dict(
+        {**manifest.to_dict(), "backup_path": str(remnants[0] / "chronos.db")}
+    )
+    with pytest.raises(DrillRefused, match="unpublished temp envelope"):
+        restore(tampered, tmp_path / "restored")
+    with pytest.raises(DrillRefused, match="unpublished temp envelope"):
+        rpo_seconds(tampered)
+    # and the manifest as written (pointing at the never-published final name) is refused too
+    with pytest.raises(DrillRefused, match="does not exist"):
+        restore(manifest, tmp_path / "restored2")
+
+
+def test_r3_2b_a_crash_right_after_the_rename_leaves_the_whole_envelope(tmp_path: Path) -> None:
+    db = _store_with_audit(tmp_path)
+    out = tmp_path / "out"
+    out.mkdir()
+    status, envelope = _fork_backup(db, out, "after-rename")
+    assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0
+    assert envelope is not None and sorted(p.name for p in envelope.iterdir()) == ENVELOPE_FILES
+    assert sorted(p.name for p in out.iterdir()) == [envelope.name], "no temp remains"
+    manifest = BackupManifest.from_dict(json.loads((envelope / "manifest.json").read_text()))
+    report = restore(manifest, tmp_path / "restored")
+    assert report.verified, report.failures
+
+
+def test_r3_3_a_non_eexist_acquisition_failure_is_a_typed_refusal_and_cleans_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = _store_with_audit(tmp_path)
+    out = tmp_path / "out"
+
+    def failing_renameat2(*args: object) -> None:
+        raise OSError(5, "injected link failure")
+
+    monkeypatch.setattr(drill, "_renameat2", failing_renameat2)
+    with pytest.raises(DrillRefused) as refused:
+        backup(db, out)
+    message = str(refused.value)
+    assert "injected link failure" in message and "errno 5" in message
+    assert f"{db.stem}-" in message, "the failing final name is named"
+    assert sorted(out.iterdir()) == [], "published=[] and no temp survives"
+
+
+def test_r3_4_the_runbook_states_the_envelope_and_the_crash_truth() -> None:
+    prose = " ".join(
+        (ROOT / "docs" / "ops" / "RESTORE-DRILL.md").read_text(encoding="utf-8").split()
+    )
+    assert "envelope" in prose and "renameat2" in prose
+    assert ("crash" in prose and "dot-temp" in prose) or "dot-prefixed" in prose
+    assert "descriptor" in prose
 
 
 def test_6c_the_module_is_read_only_operations_and_names_its_seams() -> None:

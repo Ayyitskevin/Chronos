@@ -32,7 +32,7 @@ python -m chronos.operations.restore_drill \
   `refused:` line (the source was not a regular file, the target was not empty, …). Nothing
   was written to the source in either case.
 
-The manifest is written beside the backup as `<backup>.manifest.json`.
+The manifest is inside the envelope as `<stem>-<stamp>/manifest.json`.
 
 ## What the two numbers are — and are not
 
@@ -66,19 +66,34 @@ locking — never `immutable=1`, which would ignore a WAL that appears after any
 is never written; on a WAL-mode store a read-only reader may create empty `-wal`/`-shm`
 sidecars beside it (sqlite's own bookkeeping, a directory write, not a database write).
 
-**Publication is all-or-nothing, name-bound and durable.** The backup is a triple — the
-database, the audit log copy and its head anchor copy (the last two only when a pair sits
-beside the source). The harness writes the database into the exclusively created temp
-file's own descriptor (`/proc/self/fd/<n>`, identity re-checked), stores the copy in
-rollback-journal mode (one self-contained file), fsyncs it, then reads the audit log and its
-head anchor **once, as a pair, after the backup completed** and stages both copies as temp
-entries from that read. Only when all three temps are complete and fsynced are the final
-names acquired, each with `link` — an existing file at ANY of the three names is a refusal:
-every final entry this attempt had already linked is removed again (only if the name still
-designates the inode this attempt linked), every temp is removed, and **nothing is
-published** — the pre-existing entry keeps its bytes, nothing is ever renamed over it. The
-directory is fsynced once after the triple is visible. An anchor without its log (or the
-reverse) is likewise a refusal with nothing published.
+**Publication is ONE envelope, renamed into place atomically.** A backup is the whole triple
+in one directory `<stem>-<stamp>/`: the database (`chronos.db`, stored in rollback-journal mode as one
+self-contained file), the audit log copy and its head anchor copy (only when a pair sits
+beside the source), and `manifest.json`. The harness stages all of it in a **dot-prefixed
+temp directory** under `--out` — the database written into the exclusively created temp
+file's own descriptor (`/proc/self/fd/<n>`, identity re-checked), the audit pair read
+**once, as a pair, after the backup completed**, every file fsynced, then the directory —
+and publishes it with a single `renameat2(RENAME_NOREPLACE)` to the final name, then fsyncs
+`--out`. What that buys, exactly: **a crash before the rename leaves only the dot-temp
+directory**, which `restore` refuses by name whatever it contains (the CLI never treats a
+dot-prefixed envelope as a backup); **a crash after the rename leaves the whole envelope**.
+There is no state in which part of a backup is public. An existing entry at the final name
+— a file or a directory — is a refusal (`already exists`), the temp is removed and **nothing
+is published**; any other rename error is a typed refusal naming the envelope and the
+errno, with the same cleanup. An anchor without its log (or the reverse) is likewise a
+refusal with nothing published.
+
+**The directory capability is held through every read.** The manifest's sha256, schema head
+and row counts are read through the descriptor the walk admitted (the database opened
+descriptor-relative, sqlite over `/proc/self/fd/<n>`), never through a re-resolved path; and
+before the manifest is returned the envelope's name must still designate the inode that
+was written AND the lexical `--out` path must still name the admitted directory — otherwise
+the harness refuses with a message that says the truth: `published: the envelope … exists
+in the directory the walk admitted … but the path … no longer names that directory`. The
+restore holds its target descriptor through the copy **and** the verification the same way
+(the repository's own acceptance check opens the copy by path, so it is bracketed by
+identity checks); a swapped restore target is a `restore target swapped` failure, never
+`VERIFIED`.
 
 **Directories are reached component by component.** The backup directory and the restore
 target are opened by an `O_DIRECTORY|O_NOFOLLOW` walk from `/` — every path component,
@@ -94,7 +109,8 @@ not name. Every later create, link, unlink and fsync is relative to the retained
 2. **Take the backup with sqlite's online backup API, never `cp`.** A file copy of a
    WAL-mode database misses committed rows still in `-wal`; the backup API reads through
    the WAL and produces a consistent single file:
-   `sqlite3 data/chronos.db ".backup '/var/backups/chronos/chronos-<stamp>.db'"`
+   `mkdir -m 700 /var/backups/chronos/.chronos-<stamp>.tmp && sqlite3 data/chronos.db ".backup '/var/backups/chronos/.chronos-<stamp>.tmp/chronos.db'"`
+   (stage into a dot-prefixed temp directory; the envelope is renamed into place in step 3b)
    (the harness does the same through Python's `Connection.backup`, into a temp name that is
    renamed into place).
 3. **Record the manifest.** Write down the completion time of step 2 as
@@ -108,6 +124,10 @@ not name. Every later create, link, unlink and fsync is relative to the retained
    other later), and record the anchor's `last_hash`. Note `"encryption": "none"` (see
    owner asks). The harness's copy is in rollback-journal mode; a `.backup` made by the
    `sqlite3` shell keeps the source's WAL flag — both are complete, single files.
+3b. **Publish the envelope with one rename.** With `manifest.json` written into the temp
+   directory, `mv -T /var/backups/chronos/.chronos-<stamp>.tmp /var/backups/chronos/chronos-<stamp>`
+   (refuse if the final name exists — never rename over it), then `sync` the parent. From
+   this point the backup is the directory `chronos-<stamp>/` and nothing else.
 4. **Restore into a fresh directory.** `mkdir -m 700 <fresh>` (it must not exist or be
    empty), then copy the backup — and the audit pair if present — into it.
 5. **Verify.** `sha256sum` of the copy equals the manifest; the schema head query on the
@@ -144,4 +164,4 @@ not name. Every later create, link, unlink and fsync is relative to the retained
 | `row_counts:` | a table's count differs from the manifest (names the tables) | the copy lost or gained rows after the backup — stop, investigate |
 | `audit_chain:` | the audit log beside the copy is BROKEN or missing while the manifest records a head | the tamper-evidence did not survive the copy; the restore is not trustworthy |
 | `rpo: refused —` | evidence in the retained snapshot is dated after the snapshot completed | a writer's or this host's clock is wrong; the backup itself may still be VERIFIED |
-| `refused:` | a typed refusal — nothing is published | fix the named condition (source type, non-empty target, an existing entry at any of the three backup names, a half audit pair, a symlinked path component) and re-run |
+| `refused:` | a typed refusal — nothing is published (a `published:` refusal is the one exception: the envelope exists in the admitted directory but the path was swapped underneath) | fix the named condition (source type, non-empty target, an existing entry at the envelope's name, a half audit pair, a symlinked path component, a rename error) and re-run |

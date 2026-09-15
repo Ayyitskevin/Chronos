@@ -29,13 +29,22 @@ What the drill does and does not do:
   semantics — never ``immutable=1``, never inferred from a sidecar precheck, so a
   WAL that appears after any check is still honoured — never a file copy of a
   live database. The source is never opened for writing.
-- The destination is the O_EXCL|O_NOFOLLOW temp DESCRIPTOR itself (sqlite opens
-  ``/proc/self/fd/<n>``, identity re-checked by fstat/stat), stored in
-  rollback-journal mode so the backup is one self-contained file; the final
-  name is acquired with ``link`` (EEXIST → typed refusal, never a rename over an
-  existing file) and the directory is fsynced. The audit log and its head
-  anchor are read ONCE as a pair after the backup completed (``read_audit_pair``)
-  and both copies are written from that read; a half pair is a refusal.
+- The backup is ONE ENVELOPE: a dot-prefixed temp DIRECTORY under ``--out``
+  holding the database (written into the O_EXCL temp descriptor via
+  ``/proc/self/fd/<n>``, stored in rollback-journal mode), the audit log and
+  its head anchor (read ONCE as a pair after the backup completed), and
+  ``manifest.json`` — every file fsynced, then the directory — published with
+  ONE ``renameat2(RENAME_NOREPLACE)`` to ``<stem>-<stamp>/`` and an fsync of
+  ``--out``. A crash before the rename leaves only the dot-temp directory,
+  which ``restore()`` refuses by name; a crash after it leaves the whole
+  envelope. EEXIST is a typed refusal; any other acquisition error is a typed
+  refusal naming the envelope and the errno; either way the temp is removed.
+- The directory capability admitted by the no-follow walk is HELD through
+  every read: manifest facts (sha256, schema head, row counts) and restore
+  verdicts are computed from descendants opened descriptor-relative, and the
+  reported paths are bound to it — before returning, the envelope's inode by
+  name and the lexical ``--out`` path must still be the directory the walk
+  admitted, else a typed refusal that says truthfully what was published.
 - The restore goes into a fresh directory the caller names; an existing
   non-empty target is refused. Nothing here ever writes to the live path.
 - The schema head is the alembic revision when the store carries an
@@ -64,6 +73,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import ctypes
 import errno
 import hashlib
 import json
@@ -86,7 +96,7 @@ from chronos.auditlog.log import (
     AuditLogCorruptionError,
     ChainState,
     read_audit_pair,
-    verify_chain,
+    verify_pair_text,
 )
 from chronos.persistence.database import Database
 
@@ -95,6 +105,9 @@ AUDIT_LOG_NAME = "platform_audit.jsonl"
 AUDIT_ANCHOR_NAME = "platform_audit.head.json"
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
 _CHUNK = 1 << 20
+MANIFEST_NAME = "manifest.json"
+_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+_RENAME_NOREPLACE = 1
 
 
 class DrillRefused(RuntimeError):
@@ -207,6 +220,28 @@ def _open_regular(path: Path, subject: str) -> int:
         if error.errno == errno.ENOENT:
             raise DrillRefused(f"{subject} {path} does not exist") from None
         raise DrillRefused(f"{subject} {path} could not be opened: {error.strerror}") from None
+    return _require_regular(fd, subject, str(path))
+
+
+def _open_regular_at(dfd: int, name: str, subject: str) -> int:
+    """Open ``name`` against the directory fd, read-only, no-follow, non-blocking; regular only."""
+
+    try:
+        fd = os.open(name, os.O_RDONLY | _NOFOLLOW, dir_fd=dfd)
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            raise DrillRefused(
+                f"{subject} {name} is a symlink; a regular file is required"
+            ) from None
+        if error.errno == errno.ENOENT:
+            raise DrillRefused(
+                f"{subject} {name} does not exist in the admitted directory"
+            ) from None
+        raise DrillRefused(f"{subject} {name} could not be opened: {error.strerror}") from None
+    return _require_regular(fd, subject, name)
+
+
+def _require_regular(fd: int, subject: str, name: str) -> int:
     mode = os.fstat(fd).st_mode
     if not stat.S_ISREG(mode):
         os.close(fd)
@@ -217,23 +252,27 @@ def _open_regular(path: Path, subject: str) -> int:
             if stat.S_ISDIR(mode)
             else "not a regular file"
         )
-        raise DrillRefused(f"{subject} {path} is {kind}; a regular file is required")
+        raise DrillRefused(f"{subject} {name} is {kind}; a regular file is required")
     return fd
+
+
+def _sha256_fd(fd: int) -> str:
+    digest = hashlib.sha256()
+    os.lseek(fd, 0, os.SEEK_SET)
+    while True:
+        chunk = os.read(fd, _CHUNK)
+        if not chunk:
+            break
+        digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _sha256_of(path: Path, subject: str) -> str:
     fd = _open_regular(path, subject)
-    digest = hashlib.sha256()
     try:
-        with os.fdopen(fd, "rb") as handle:
-            for chunk in iter(lambda: handle.read(_CHUNK), b""):
-                digest.update(chunk)
+        return _sha256_fd(fd)
     finally:
-        pass
-    return digest.hexdigest()
-
-
-_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+        os.close(fd)
 
 
 def _component_problem(dfd: int, component: str, error: OSError) -> str:
@@ -293,8 +332,8 @@ def _walk_directory(named: Path, what: str, *, create: bool) -> tuple[int, Path]
 
 
 def _open_directory(directory: Path, what: str, *, create: bool) -> int:
-    """A directory fd reached by the no-follow walk; every create, link, unlink and fsync
-    below is relative to it."""
+    """A directory fd reached by the no-follow walk; every create, rename, unlink, fsync
+    and READ below is relative to it."""
 
     descriptor, _absolute = _walk_directory(directory, what, create=create)
     return descriptor
@@ -316,48 +355,39 @@ def _create_exclusive_at(
         ) from None
 
 
-def _identity(dfd: int, name: str) -> tuple[int, int]:
-    st = os.stat(name, dir_fd=dfd, follow_symlinks=False)
+def _dir_identity(fd: int) -> tuple[int, int]:
+    st = os.fstat(fd)
     return st.st_dev, st.st_ino
 
 
-def _publish_all(dfd: int, pairs: list[tuple[str, str]]) -> None:
-    """Acquire EVERY final name with ``link`` (EEXIST → refusal) — all or nothing.
-
-    ``pairs`` is ``[(temp_name, final_name), ...]``; every temp is complete and fsynced
-    before this is called. If any final name cannot be acquired, every final entry THIS
-    attempt linked is removed (only if the name still designates the inode this attempt
-    linked) and every temp is removed, then the typed refusal is raised: nothing new stays
-    visible. On success the temps are dropped and the directory is fsynced once."""
-
-    acquired: list[tuple[str, tuple[int, int]]] = []
+def _lexical_identity(path: Path) -> tuple[int, int] | None:
     try:
-        for temp_name, final_name in pairs:
-            try:
-                os.link(temp_name, final_name, src_dir_fd=dfd, dst_dir_fd=dfd)
-            except FileExistsError:
-                raise DrillRefused(
-                    f"{final_name} already exists in the destination; the drill never overwrites"
-                ) from None
-            acquired.append((final_name, _identity(dfd, temp_name)))
-    except BaseException:
-        for final_name, inode in acquired:
-            with contextlib.suppress(OSError):
-                if _identity(dfd, final_name) == inode:
-                    os.unlink(final_name, dir_fd=dfd)
-        for temp_name, _final_name in pairs:
-            with contextlib.suppress(OSError):
-                os.unlink(temp_name, dir_fd=dfd)
-        raise
-    for temp_name, _final_name in pairs:
-        os.unlink(temp_name, dir_fd=dfd)
-    os.fsync(dfd)
+        st = os.stat(path)
+    except OSError:
+        return None
+    return st.st_dev, st.st_ino
 
 
-def _stage_bytes_at(dfd: int, temp_name: str, payload: bytes) -> None:
-    """A complete, fsynced temp entry holding ``payload`` (unpublished until _publish_all)."""
+def _renameat2(src_dir_fd: int, src: str, dst_dir_fd: int, dst: str, flags: int) -> None:
+    """renameat2(2) through libc (Linux). Raises OSError with the syscall's errno.
+    The watchdog's helper (W-1), copied in-file rather than imported across branches."""
 
-    fd = _create_exclusive_at(dfd, temp_name)
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        call = libc.renameat2
+    except (OSError, AttributeError) as error:
+        raise OSError(errno.ENOSYS, "renameat2 is not available in this libc") from error
+    call.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)
+    call.restype = ctypes.c_int
+    if call(src_dir_fd, os.fsencode(src), dst_dir_fd, os.fsencode(dst), flags) != 0:
+        code = ctypes.get_errno()
+        raise OSError(code, os.strerror(code))
+
+
+def _stage_bytes_at(dfd: int, name: str, payload: bytes) -> None:
+    """A complete, fsynced regular file ``name`` under the directory fd."""
+
+    fd = _create_exclusive_at(dfd, name)
     try:
         with os.fdopen(fd, "wb") as writer:
             writer.write(payload)
@@ -365,19 +395,21 @@ def _stage_bytes_at(dfd: int, temp_name: str, payload: bytes) -> None:
             os.fsync(writer.fileno())
     except BaseException:
         with contextlib.suppress(OSError):
-            os.unlink(temp_name, dir_fd=dfd)
+            os.unlink(name, dir_fd=dfd)
         raise
 
 
-def _copy_regular_at(source: Path, dfd: int, name: str, subject: str) -> None:
-    """Copy a regular file (opened no-follow, fstat'd) into the directory fd under
-    ``name`` — O_EXCL, fsynced; the caller fsyncs the directory."""
+def _copy_fd_to(src_fd: int, dfd: int, name: str) -> None:
+    """Copy an open regular file into the directory fd under ``name`` — O_EXCL, fsynced."""
 
-    src_fd = _open_regular(source, subject)
     dst_fd = _create_exclusive_at(dfd, name)
     try:
-        with os.fdopen(src_fd, "rb") as reader, os.fdopen(dst_fd, "wb") as writer:
-            for chunk in iter(lambda: reader.read(_CHUNK), b""):
+        os.lseek(src_fd, 0, os.SEEK_SET)
+        with os.fdopen(dst_fd, "wb") as writer:
+            while True:
+                chunk = os.read(src_fd, _CHUNK)
+                if not chunk:
+                    break
                 writer.write(chunk)
             writer.flush()
             os.fsync(writer.fileno())
@@ -385,6 +417,21 @@ def _copy_regular_at(source: Path, dfd: int, name: str, subject: str) -> None:
         with contextlib.suppress(OSError):
             os.unlink(name, dir_fd=dfd)
         raise
+
+
+def _remove_temp_envelope(out_fd: int, temp_name: str) -> None:
+    """Best-effort removal of an unpublished temp envelope (its files, then the directory)."""
+
+    with contextlib.suppress(OSError):
+        env_fd = os.open(temp_name, _DIR_FLAGS, dir_fd=out_fd)
+        try:
+            for entry in os.listdir(env_fd):
+                with contextlib.suppress(OSError):
+                    os.unlink(entry, dir_fd=env_fd)
+        finally:
+            os.close(env_fd)
+    with contextlib.suppress(OSError):
+        os.rmdir(temp_name, dir_fd=out_fd)
 
 
 def _fresh_directory(target: Path, what: str) -> int:
@@ -418,8 +465,11 @@ def _fresh_directory(target: Path, what: str) -> int:
         os.close(parent_fd)
 
 
+# ----------------------------------------------------------------- store inspection
+
+
 def _readonly(path: Path) -> sqlite3.Connection:
-    """A read-only connection under SQLite's normal locking and WAL semantics.
+    """A read-only connection on the SOURCE under SQLite's normal locking and WAL semantics.
 
     Never ``immutable=1``: that flag makes SQLite ignore a WAL, and "no ``-wal`` right
     now" is not a fact about the next instant (Daybreak's R-1 probe committed a row
@@ -430,6 +480,13 @@ def _readonly(path: Path) -> sqlite3.Connection:
     """
 
     return sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+
+
+def _readonly_fd(fd: int) -> sqlite3.Connection:
+    """A read-only connection on an already-open descriptor (a retained copy): sqlite
+    opens ``/proc/self/fd/<n>``, so no pathname is re-resolved."""
+
+    return sqlite3.connect(f"file:/proc/self/fd/{fd}?mode=ro", uri=True)
 
 
 def _user_tables(connection: sqlite3.Connection) -> list[str]:
@@ -458,32 +515,48 @@ def _max_statement(table_name: str, column_name: str) -> str:
     return str(statement.compile(dialect=sqlite_dialect.dialect()))
 
 
-def row_counts(path: Path) -> dict[str, int]:
-    """Every user table's row count, read-only."""
+def _row_counts_on(connection: sqlite3.Connection) -> dict[str, int]:
+    return {
+        name: int(connection.execute(_count_statement(name)).fetchone()[0])
+        for name in _user_tables(connection)
+    }
 
-    with _readonly(path) as connection:
-        return {
-            name: int(connection.execute(_count_statement(name)).fetchone()[0])
-            for name in _user_tables(connection)
-        }
+
+def _schema_head_on(connection: sqlite3.Connection) -> str:
+    tables = set(_user_tables(connection))
+    if "alembic_version" in tables:
+        revision = connection.execute("SELECT version_num FROM alembic_version").fetchone()
+        if revision is not None:
+            return f"alembic:{revision[0]}"
+    if "schema_version" in tables:
+        version = connection.execute(
+            "SELECT version FROM schema_version ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        if version is not None:
+            return f"schema_version:{version[0]}"
+    return "unversioned"
+
+
+def row_counts(path: Path) -> dict[str, int]:
+    """Every user table's row count, read-only (the file opened no-follow, read by fd)."""
+
+    fd = _open_regular(path, "store")
+    try:
+        with _readonly_fd(fd) as connection:
+            return _row_counts_on(connection)
+    finally:
+        os.close(fd)
 
 
 def schema_head(path: Path) -> str:
     """The alembic revision when the store carries one, else ``schema_version:<n>``."""
 
-    with _readonly(path) as connection:
-        tables = set(_user_tables(connection))
-        if "alembic_version" in tables:
-            revision = connection.execute("SELECT version_num FROM alembic_version").fetchone()
-            if revision is not None:
-                return f"alembic:{revision[0]}"
-        if "schema_version" in tables:
-            version = connection.execute(
-                "SELECT version FROM schema_version ORDER BY id DESC LIMIT 1"
-            ).fetchone()
-            if version is not None:
-                return f"schema_version:{version[0]}"
-    return "unversioned"
+    fd = _open_regular(path, "store")
+    try:
+        with _readonly_fd(fd) as connection:
+            return _schema_head_on(connection)
+    finally:
+        os.close(fd)
 
 
 def _parse_utc(value: object) -> datetime | None:
@@ -500,15 +573,16 @@ def _parse_utc(value: object) -> datetime | None:
     return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
 
 
-def newest_evidence(
-    path: Path, audit_log: Path | None
+def newest_evidence_on(
+    connection: sqlite3.Connection, audit_text: str | None
 ) -> tuple[datetime | None, dict[str, object]]:
-    """The newest committed evidence timestamp in the source and which basis produced it."""
+    """The newest committed evidence timestamp in an open store (plus the audit log's
+    text, already read through a descriptor) and which basis produced it."""
 
     newest: datetime | None = None
     candidates = 0
     basis: dict[str, object] = {"source": None, "newest_evidence_at": None, "candidates": 0}
-    with _readonly(path) as connection:
+    if True:
         for table_name in _user_tables(connection):
             columns = [
                 str(row[1])
@@ -523,13 +597,8 @@ def newest_evidence(
                 candidates += 1
                 if newest is None or stamp > newest:
                     newest, basis["source"] = stamp, f"table:{table_name}.{column_name}"
-    if audit_log is not None and audit_log.is_file():
-        try:
-            text, _anchor = read_audit_pair(audit_log)
-        except Exception as error:  # a refused audit read is a basis, not a crash
-            basis["audit_log_error"] = str(error)
-            text = None
-        last = (text or "").rstrip("\n").rsplit("\n", 1)[-1] if text else ""
+    if audit_text:
+        last = audit_text.rstrip("\n").rsplit("\n", 1)[-1]
         if last:
             try:
                 stamp = _parse_utc(json.loads(last).get("at_utc"))
@@ -572,17 +641,33 @@ def _audit_head(anchor_path: Path) -> str | None:
 # ----------------------------------------------------------------- backup
 
 
+def _envelope_names(db_path: Path, stamp: str) -> tuple[str, str, str]:
+    """(final envelope dir name, temp envelope dir name, database file name)."""
+
+    final = f"{db_path.stem}-{stamp}"
+    return final, f".{final}.{secrets.token_hex(6)}.tmp", f"{db_path.stem}.db"
+
+
+def _read_text_at(dfd: int, name: str, subject: str) -> str:
+    fd = _open_regular_at(dfd, name, subject)
+    try:
+        with os.fdopen(fd, "rb") as handle:
+            return handle.read().decode("utf-8")
+    finally:
+        pass
+
+
 def backup(db_path: Path, out_dir: Path, *, clock: Clock | None = None) -> BackupManifest:
-    """A consistent online backup of ``db_path`` into ``out_dir`` plus its manifest.
+    """A consistent online backup of ``db_path`` as ONE envelope under ``out_dir``.
 
     The source is opened read-only (``mode=ro``, normal SQLite locking) and never
-    written. The backup is written into the O_EXCL temp DESCRIPTOR (sqlite opens
-    ``/proc/self/fd/<n>``), fsynced, and published with ``link`` — EEXIST is a
-    refusal, nothing is ever renamed over an existing file — then the directory is
-    fsynced. ``snapshot_completed_at`` is the instant the backup API returned. The
-    audit log and its head anchor beside the source are read once as a pair AFTER
-    that instant and both copies are written from that read, so the retained chain
-    is one stated snapshot; a half pair is a refusal.
+    written. The envelope is staged as a dot-temp directory (database through the
+    O_EXCL temp descriptor, audit pair from one ``read_audit_pair`` after the backup
+    completed, ``manifest.json``), every file and the directory fsynced, then
+    published with ONE ``renameat2(RENAME_NOREPLACE)`` — EEXIST or any other error
+    is a typed refusal and the temp is removed — then ``out_dir`` is fsynced. The
+    directory capability admitted by the walk is held through every manifest read
+    and bound to the returned paths before returning.
     """
 
     clock = clock or system_clock()
@@ -590,153 +675,237 @@ def backup(db_path: Path, out_dir: Path, *, clock: Clock | None = None) -> Backu
     out_dir = Path(out_dir)
     fd = _open_regular(db_path, "source database")
     os.close(fd)
-    dfd = _open_directory(out_dir, "backup directory", create=True)
+    out_fd, out_abs = _walk_directory(out_dir, "backup directory", create=True)
     try:
         taken_at = clock.wall()
         stamp = taken_at.strftime("%Y%m%dT%H%M%SZ")
-        final_name = f"{db_path.stem}-{stamp}.db"
-        # no existence precheck: link() at publication is the one authority on EEXIST
-        tmp_name = f".{final_name}.{secrets.token_hex(6)}.tmp"
-        tmp_fd = _create_exclusive_at(dfd, tmp_name, flags=os.O_RDWR)
-        audit_log = db_path.parent / AUDIT_LOG_NAME
-        staged: list[tuple[str, str]] = [(tmp_name, final_name)]
-        audit_head: str | None = None
-        audit_copy: Path | None = None
+        final_name, temp_name, db_name = _envelope_names(db_path, stamp)
+        os.mkdir(temp_name, 0o700, dir_fd=out_fd)
+        env_fd = os.open(temp_name, _DIR_FLAGS, dir_fd=out_fd)
         try:
-            identity = os.fstat(tmp_fd)
-            # sqlite writes THIS descriptor's inode (/proc/self/fd/<n>), never a
-            # re-resolved pathname; journal OFF so no sibling journal is needed there
-            destination = sqlite3.connect(f"/proc/self/fd/{tmp_fd}")
+            manifest = _stage_envelope(
+                env_fd, db_path, db_name, out_abs / final_name, taken_at, clock
+            )
+            _stage_bytes_at(
+                env_fd,
+                MANIFEST_NAME,
+                (json.dumps(manifest.to_dict(), indent=2, sort_keys=True) + "\n").encode("utf-8"),
+            )
+            os.fsync(env_fd)
             try:
-                destination.execute("PRAGMA journal_mode=OFF")
-                with _readonly(db_path) as source:
-                    source.backup(destination)
-                snapshot_completed_at = clock.wall()
-                # one self-contained file: readers of the retained copy leave no sidecars
-                destination.execute("PRAGMA journal_mode=DELETE")
-            finally:
-                destination.close()
-            after = os.stat(tmp_name, dir_fd=dfd)
-            if (after.st_dev, after.st_ino) != (identity.st_dev, identity.st_ino):
-                raise DrillRefused(f"the temp entry {tmp_name} changed identity during the backup")
-            os.fsync(tmp_fd)
-            os.close(tmp_fd)
-            tmp_fd = -1
-            # the audit pair, read ONCE as a pair AFTER the backup completed (anchor before
-            # log, no-follow, one capability read each — the audit log's own reader); a
-            # refused or half pair unlinks every staged temp: nothing is published
-            try:
-                log_text, anchor_bytes = read_audit_pair(audit_log)
-            except AuditLogCorruptionError as error:
+                _renameat2(out_fd, temp_name, out_fd, final_name, _RENAME_NOREPLACE)
+            except FileExistsError:
                 raise DrillRefused(
-                    f"audit pair beside the source could not be read as one snapshot: {error}"
+                    f"{final_name} already exists in the destination; the drill never overwrites"
                 ) from None
-            if (log_text is None) != (anchor_bytes is None):
+            except OSError as error:
                 raise DrillRefused(
-                    "audit pair beside the source is incomplete (a log without its anchor or "
-                    "an anchor without its log); refusing to retain half a chain"
+                    f"publication of {final_name} failed: [errno {error.errno}] {error.strerror}; "
+                    "the temp envelope was removed, nothing is published"
+                ) from None
+            os.fsync(out_fd)
+            # bind the reported paths to the capability that received the writes
+            by_name = os.stat(final_name, dir_fd=out_fd)
+            if (by_name.st_dev, by_name.st_ino) != _dir_identity(env_fd):
+                raise DrillRefused(
+                    f"published: the envelope {final_name} was renamed into the admitted "
+                    f"directory, but the name now designates a different inode — a concurrent "
+                    f"actor replaced it after publication; the backup this drill wrote is not "
+                    f"at {out_abs / final_name}"
                 )
-            if log_text is not None and anchor_bytes is not None:
-                audit_head = _decode_audit_head(
-                    anchor_bytes, audit_log.with_name(AUDIT_ANCHOR_NAME)
+            admitted = _dir_identity(out_fd)
+            if _lexical_identity(out_abs) != admitted:
+                raise DrillRefused(
+                    f"published: the envelope {final_name} exists in the directory the walk "
+                    f"admitted (device:inode {admitted[0]}:{admitted[1]}), "
+                    f"but the path {out_abs} no longer names that directory — an ancestor was "
+                    f"swapped after publication; the triple is published there, not at the path, "
+                    "and this manifest is not returned"
                 )
-                stem = final_name[: -len(".db")]
-                log_final = f"{stem}.{AUDIT_LOG_NAME}"
-                anchor_final = f"{stem}.{AUDIT_ANCHOR_NAME}"
-                log_tmp = f".{log_final}.{secrets.token_hex(6)}.tmp"
-                anchor_tmp = f".{anchor_final}.{secrets.token_hex(6)}.tmp"
-                _stage_bytes_at(dfd, log_tmp, log_text.encode("utf-8"))
-                staged.append((log_tmp, log_final))
-                _stage_bytes_at(dfd, anchor_tmp, anchor_bytes)
-                staged.append((anchor_tmp, anchor_final))
-                audit_copy = out_dir / log_final
         except BaseException:
-            if tmp_fd != -1:
-                os.close(tmp_fd)
-            for temp_name, _final in staged:
-                with contextlib.suppress(OSError):
-                    os.unlink(temp_name, dir_fd=dfd)
+            os.close(env_fd)
+            _remove_temp_envelope(out_fd, temp_name)  # a no-op once the envelope is published
             raise
-        # every temp is complete and fsynced: acquire ALL final names, or none
-        _publish_all(dfd, staged)
-        backup_path = out_dir / final_name
+        os.close(env_fd)
     finally:
-        os.close(dfd)
+        os.close(out_fd)
+    return manifest
 
+
+def _stage_envelope(
+    env_fd: int, db_path: Path, db_name: str, final_dir: Path, taken_at: datetime, clock: Clock
+) -> BackupManifest:
+    """Fill the temp envelope: the database, the audit pair (one read, after the backup
+    completed), and the manifest facts read back through the descriptors."""
+
+    tmp_fd = _create_exclusive_at(env_fd, db_name, flags=os.O_RDWR)
+    try:
+        identity = os.fstat(tmp_fd)
+        # sqlite writes THIS descriptor's inode (/proc/self/fd/<n>), never a re-resolved
+        # pathname; journal OFF so no sibling journal is needed there
+        destination = sqlite3.connect(f"/proc/self/fd/{tmp_fd}")
+        try:
+            destination.execute("PRAGMA journal_mode=OFF")
+            with _readonly(db_path) as source:
+                source.backup(destination)
+            snapshot_completed_at = clock.wall()
+            # one self-contained file: readers of the retained copy leave no sidecars
+            destination.execute("PRAGMA journal_mode=DELETE")
+        finally:
+            destination.close()
+        after = os.stat(db_name, dir_fd=env_fd)
+        if (after.st_dev, after.st_ino) != (identity.st_dev, identity.st_ino):
+            raise DrillRefused(f"the temp entry {db_name} changed identity during the backup")
+        os.fsync(tmp_fd)
+        # the audit pair, read ONCE as a pair AFTER the backup completed (anchor before
+        # log, no-follow, one capability read each — the audit log's own reader)
+        audit_log = db_path.parent / AUDIT_LOG_NAME
+        try:
+            log_text, anchor_bytes = read_audit_pair(audit_log)
+        except AuditLogCorruptionError as error:
+            raise DrillRefused(
+                f"audit pair beside the source could not be read as one snapshot: {error}"
+            ) from None
+        if (log_text is None) != (anchor_bytes is None):
+            raise DrillRefused(
+                "audit pair beside the source is incomplete (a log without its anchor or "
+                "an anchor without its log); refusing to retain half a chain"
+            )
+        audit_head: str | None = None
+        audit_log_path: str | None = None
+        if log_text is not None and anchor_bytes is not None:
+            audit_head = _decode_audit_head(anchor_bytes, audit_log.with_name(AUDIT_ANCHOR_NAME))
+            _stage_bytes_at(env_fd, AUDIT_LOG_NAME, log_text.encode("utf-8"))
+            _stage_bytes_at(env_fd, AUDIT_ANCHOR_NAME, anchor_bytes)
+            audit_log_path = str(final_dir / AUDIT_LOG_NAME)
+        # manifest facts, read back through the descriptor that was written
+        with _readonly_fd(tmp_fd) as retained:
+            head = _schema_head_on(retained)
+            counts = _row_counts_on(retained)
+        sha256 = _sha256_fd(tmp_fd)
+    finally:
+        os.close(tmp_fd)
     return BackupManifest(
         taken_at=taken_at.isoformat(),
         snapshot_completed_at=snapshot_completed_at.isoformat(),
         source_path=str(db_path),
-        backup_path=str(backup_path),
-        sha256=_sha256_of(backup_path, "backup"),
-        schema_head=schema_head(backup_path),
-        row_counts=row_counts(backup_path),
+        backup_path=str(final_dir / db_name),
+        sha256=sha256,
+        schema_head=head,
+        row_counts=counts,
         audit_head=audit_head,
-        audit_log_path=None if audit_copy is None else str(audit_copy),
+        audit_log_path=audit_log_path,
     )
+
+
+def _open_envelope(manifest: BackupManifest) -> tuple[int, Path]:
+    """The published envelope directory, reached by the no-follow walk; a dot-temp
+    (unpublished) envelope is refused BY NAME, whatever it contains."""
+
+    env_dir = Path(manifest.backup_path).parent
+    if env_dir.name.startswith("."):
+        raise DrillRefused(
+            f"{env_dir} is an unpublished temp envelope (a crash before its rename); "
+            "the drill never restores from one"
+        )
+    return _walk_directory(env_dir, "backup envelope", create=False)
 
 
 # ----------------------------------------------------------------- restore + verify
 
 
-def verify_restored(
-    manifest: BackupManifest, restored: Path, restored_audit_log: Path | None
+def _verify_in(
+    manifest: BackupManifest, target_fd: int, target_abs: Path, has_audit: bool
 ) -> tuple[list[str], dict[str, bool | str]]:
-    """The four verifiers against a restored copy; returns (failures, facts)."""
+    """The four verifiers, every read through the target directory descriptor; the
+    repository's own acceptance (a pathname open) is bound by identity checks before and
+    after it."""
 
     failures: list[str] = []
     facts: dict[str, bool | str] = {}
-
-    actual = _sha256_of(restored, "restored copy")
-    facts["sha256_ok"] = actual == manifest.sha256
-    if not facts["sha256_ok"]:
-        failures.append(f"sha256: restored copy {actual[:12]}… != manifest {manifest.sha256[:12]}…")
-
-    head = schema_head(restored)
-    accepted = True
+    db_name = Path(manifest.backup_path).name
+    fd = _open_regular_at(target_fd, db_name, "restored copy")
     try:
-        database = Database(f"sqlite:///{restored}")
-        try:
-            # verifies version + zero drift on a versioned store; applies no upgrade
-            database.initialize()
-        finally:
-            database.dispose()
-    except RuntimeError as error:
+        actual = _sha256_fd(fd)
+        facts["sha256_ok"] = actual == manifest.sha256
+        if not facts["sha256_ok"]:
+            failures.append(
+                f"sha256: restored copy {actual[:12]}… != manifest {manifest.sha256[:12]}…"
+            )
+        with _readonly_fd(fd) as restored:
+            head = _schema_head_on(restored)
+            counts = _row_counts_on(restored)
+        copy_identity = (os.fstat(fd).st_dev, os.fstat(fd).st_ino)
+    finally:
+        os.close(fd)
+
+    accepted = True
+    lexical = target_abs / db_name
+    if _lexical_identity(lexical) != copy_identity or _lexical_identity(
+        target_abs
+    ) != _dir_identity(target_fd):
         accepted = False
-        failures.append(f"schema_acceptance: {error}")
+        failures.append(
+            f"restore target swapped: {target_abs} no longer names the directory the walk "
+            "admitted, so the repository's acceptance check cannot be bound to the copy"
+        )
+    else:
+        try:
+            database = Database(f"sqlite:///{lexical}")
+            try:
+                # verifies version + zero drift on a versioned store; applies no upgrade
+                database.initialize()
+            finally:
+                database.dispose()
+        except RuntimeError as error:
+            accepted = False
+            failures.append(f"schema_acceptance: {error}")
+        if _lexical_identity(lexical) != copy_identity:
+            accepted = False
+            failures.append(
+                f"restore target swapped: {lexical} changed identity during the acceptance check"
+            )
     facts["schema_head_ok"] = head == manifest.schema_head and accepted
     if head != manifest.schema_head:
         failures.append(f"schema_head: restored {head} != manifest {manifest.schema_head}")
 
-    counts = row_counts(restored)
     facts["row_counts_ok"] = counts == manifest.row_counts
     if not facts["row_counts_ok"]:
         differing = sorted(
-            table
-            for table in set(counts) | set(manifest.row_counts)
-            if counts.get(table) != manifest.row_counts.get(table)
+            t
+            for t in set(counts) | set(manifest.row_counts)
+            if counts.get(t) != manifest.row_counts.get(t)
         )
         failures.append(f"row_counts: differ in {', '.join(differing)}")
 
     if manifest.audit_head is None:
         facts["audit_chain"] = "NOT_APPLICABLE"
-    elif restored_audit_log is None:
+    elif not has_audit:
         facts["audit_chain"] = "ABSENT"
         failures.append(
             "audit_chain: the manifest records an audit head but no audit log was restored"
         )
     else:
-        verdict = verify_chain(restored_audit_log)
-        facts["audit_chain"] = verdict.state.value
-        if verdict.state is not ChainState.VALID:
-            failures.append(f"audit_chain: {verdict.state.value} — {verdict.detail}")
+        try:
+            log_text = _read_text_at(target_fd, AUDIT_LOG_NAME, "restored audit log")
+            anchor_fd = _open_regular_at(target_fd, AUDIT_ANCHOR_NAME, "restored audit anchor")
+            try:
+                with os.fdopen(anchor_fd, "rb") as handle:
+                    anchor_bytes = handle.read()
+            finally:
+                pass
+        except DrillRefused as error:
+            facts["audit_chain"] = "ABSENT"
+            failures.append(f"audit_chain: {error}")
         else:
-            head_now = _audit_head(
-                restored_audit_log.with_name(
-                    restored_audit_log.name.replace(AUDIT_LOG_NAME, AUDIT_ANCHOR_NAME)
-                )
-            )
-            if head_now != manifest.audit_head:
+            verdict = verify_pair_text(log_text, anchor_bytes)
+            facts["audit_chain"] = verdict.state.value
+            if verdict.state is not ChainState.VALID:
+                failures.append(f"audit_chain: {verdict.state.value} — {verdict.detail}")
+            elif (
+                _decode_audit_head(anchor_bytes, target_abs / AUDIT_ANCHOR_NAME)
+                != manifest.audit_head
+            ):
                 failures.append(
                     "audit_chain: the restored anchor's last hash differs from the manifest's "
                     "audit_head"
@@ -744,36 +913,63 @@ def verify_restored(
     return failures, facts
 
 
+def verify_restored(
+    manifest: BackupManifest, restored: Path, restored_audit_log: Path | None
+) -> tuple[list[str], dict[str, bool | str]]:
+    """The four verifiers against a restored copy named by path (the directory is reached
+    by the no-follow walk and every read goes through it)."""
+
+    restored = Path(restored)
+    target_fd, target_abs = _walk_directory(restored.parent, "restore target", create=False)
+    try:
+        return _verify_in(manifest, target_fd, target_abs, restored_audit_log is not None)
+    finally:
+        os.close(target_fd)
+
+
 def restore(
     manifest: BackupManifest, target_dir: Path, *, clock: Clock | None = None
 ) -> RestoreReport:
-    """Copy the backup into a fresh directory and verify it; rto_s from start to verified."""
+    """Copy the envelope's files into a fresh directory and verify them there — the target
+    descriptor is held through the copy AND the verification; rto_s from start to verified."""
 
     clock = clock or system_clock()
     target_dir = Path(target_dir)
+    target_abs = target_dir if target_dir.is_absolute() else Path.cwd() / target_dir
     started = clock.monotonic()
-    target_fd = _fresh_directory(target_dir, "restore target")
-    backup_path = Path(manifest.backup_path)
-    restored_audit: Path | None = None
+    env_fd, _env_abs = _open_envelope(manifest)
     try:
-        _copy_regular_at(backup_path, target_fd, backup_path.name, "backup")
-        restored = target_dir / backup_path.name
-        if manifest.audit_log_path is not None:
-            audit_src = Path(manifest.audit_log_path)
-            anchor_src = audit_src.with_name(
-                audit_src.name.replace(AUDIT_LOG_NAME, AUDIT_ANCHOR_NAME)
-            )
-            _copy_regular_at(audit_src, target_fd, AUDIT_LOG_NAME, "audit log")
-            _copy_regular_at(anchor_src, target_fd, AUDIT_ANCHOR_NAME, "audit anchor")
-            restored_audit = target_dir / AUDIT_LOG_NAME
-        os.fsync(target_fd)
+        target_fd = _fresh_directory(target_dir, "restore target")
+        try:
+            db_name = Path(manifest.backup_path).name
+            src = _open_regular_at(env_fd, db_name, "backup")
+            try:
+                _copy_fd_to(src, target_fd, db_name)
+            finally:
+                os.close(src)
+            has_audit = manifest.audit_log_path is not None
+            if has_audit:
+                for name in (AUDIT_LOG_NAME, AUDIT_ANCHOR_NAME):
+                    src = _open_regular_at(env_fd, name, "retained audit file")
+                    try:
+                        _copy_fd_to(src, target_fd, name)
+                    finally:
+                        os.close(src)
+            os.fsync(target_fd)
+            failures, facts = _verify_in(manifest, target_fd, target_abs, has_audit)
+            if _lexical_identity(target_abs) != _dir_identity(target_fd):
+                failures.append(
+                    f"restore target swapped: {target_abs} no longer names the directory the "
+                    "walk admitted; the copy this drill made is not at the reported path"
+                )
+        finally:
+            os.close(target_fd)
     finally:
-        os.close(target_fd)
-    failures, facts = verify_restored(manifest, restored, restored_audit)
+        os.close(env_fd)
     verified_at = clock.monotonic()
     return RestoreReport(
-        target_dir=str(target_dir),
-        restored_path=str(restored),
+        target_dir=str(target_abs),
+        restored_path=str(target_abs / Path(manifest.backup_path).name),
         sha256_ok=bool(facts["sha256_ok"]),
         schema_head_ok=bool(facts["schema_head_ok"]),
         row_counts_ok=bool(facts["row_counts_ok"]),
@@ -788,13 +984,26 @@ def restore(
 
 def rpo_seconds(manifest: BackupManifest) -> tuple[float | None, dict[str, object]]:
     """``snapshot_completed_at`` minus the newest committed evidence IN THE RETAINED
-    SNAPSHOT (the backup file and the retained audit copy) — never the live source.
-    None + reason when the snapshot carries no timestamped evidence; evidence dated
-    after the snapshot completed is a typed refusal, never a negative number."""
+    ENVELOPE (the backup file and the retained audit copy, read through the envelope's
+    descriptor) — never the live source. None + reason when the snapshot carries no
+    timestamped evidence; evidence dated after the snapshot completed is a typed
+    refusal, never a negative number."""
 
-    retained = Path(manifest.backup_path)
-    audit_copy = None if manifest.audit_log_path is None else Path(manifest.audit_log_path)
-    newest, basis = newest_evidence(retained, audit_copy)
+    env_fd, _env_abs = _open_envelope(manifest)
+    try:
+        db_fd = _open_regular_at(env_fd, Path(manifest.backup_path).name, "retained backup")
+        try:
+            audit_text = (
+                _read_text_at(env_fd, AUDIT_LOG_NAME, "retained audit log")
+                if manifest.audit_log_path is not None
+                else None
+            )
+            with _readonly_fd(db_fd) as retained:
+                newest, basis = newest_evidence_on(retained, audit_text)
+        finally:
+            os.close(db_fd)
+    finally:
+        os.close(env_fd)
     basis["evidence_read_from"] = "retained snapshot"
     snapshot = datetime.fromisoformat(manifest.snapshot_completed_at)
     basis["snapshot_completed_at"] = snapshot.isoformat()
@@ -867,15 +1076,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(refused, indent=2 if args.pretty else None, sort_keys=True))
         return 2
     payload = report.to_dict()
-    manifest_path = Path(report.manifest.backup_path).with_suffix(".manifest.json")
-    dfd = _open_directory(manifest_path.parent, "backup directory", create=False)
-    try:
-        body = json.dumps(report.manifest.to_dict(), indent=2, sort_keys=True) + "\n"
-        _stage_bytes_at(dfd, manifest_path.name, body.encode("utf-8"))
-        os.fsync(dfd)
-    finally:
-        os.close(dfd)
-    payload["manifest_path"] = str(manifest_path)
+    payload["manifest_path"] = str(Path(report.manifest.backup_path).with_name(MANIFEST_NAME))
     print(json.dumps(payload, indent=2 if args.pretty else None, sort_keys=True))
     return 0 if report.verdict == "VERIFIED" else 2
 
