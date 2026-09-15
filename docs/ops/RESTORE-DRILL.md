@@ -9,7 +9,9 @@ The harness: `src/chronos/operations/restore_drill.py` · tests:
 `tests/unit/test_ops_restore_drill.py`. The whole-data-directory snapshot
 (`python -m chronos.recovery`, [`../BACKUP_AND_RECOVERY.md`](../BACKUP_AND_RECOVERY.md))
 is the sibling procedure for a full recovery; this drill is the database-only check with
-per-table verification and a backup-time RPO.
+per-table verification and a backup-time RPO. It builds on the isolated drill in
+`tests/integration/test_backup_restore_drill.py` (the online backup API over the real
+WAL-backed stores, which proves integrity and the fail-closed posture, not RPO/RTO).
 
 ## The one command
 

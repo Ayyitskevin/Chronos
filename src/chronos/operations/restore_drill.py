@@ -39,6 +39,11 @@ What the drill does and does not do:
   directory and observes snapshot age and restore elapsed; this module is the
   database-only drill with per-table verification and a backup-time RPO. It
   imports no order, execution, autonomy or supervisor module (pinned).
+- ``tests/integration/test_backup_restore_drill.py`` is the isolated drill over
+  the real WAL-backed stores (artifact integrity, fail-closed recovery posture;
+  it says it does not prove RPO/RTO). This harness builds on its posture — the
+  online backup API over a store whose committed rows still sit in ``-wal`` —
+  and adds the manifest, the two measured numbers and the operator runbook.
 
 Every source and backup file is opened ``O_NOFOLLOW|O_NONBLOCK`` and ``fstat``'d
 regular before use: a symlink, FIFO or directory at a path is a typed refusal.

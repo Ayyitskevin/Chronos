@@ -4,6 +4,13 @@ Every store here is created by the repository's own initializer (``Database.init
 under ``tmp_path`` — never ``data/chronos.db``. Numbered to the R-1 contract: (1) the backup
 and its manifest, (2) restore + the four verifiers, (3) rpo_s, (4) the CLI and the import
 pin, (6) the pinned-clock measurements and the "never opens the source for writing" pin.
+
+Built ON ``tests/integration/test_backup_restore_drill.py`` (the isolated backup/restore
+drill over the real WAL-backed stores, which proves artifact integrity and the fail-closed
+recovery posture and says it does not prove RPO/RTO): its WAL posture — committed rows
+still in ``-wal`` that a main-file copy misses — is reproduced here through its own
+helpers (``_checkpoint_wal``, ``_row_count``), and this harness adds the manifest, the
+measured numbers and the runbook on top of that posture rather than beside it.
 """
 
 from __future__ import annotations
@@ -20,6 +27,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from tests.integration.test_backup_restore_drill import _checkpoint_wal, _row_count
 
 from chronos.auditlog.log import AuditLog
 from chronos.operations import restore_drill as drill
@@ -150,9 +158,67 @@ def test_1e_a_source_that_is_not_a_regular_file_is_refused_typed(tmp_path: Path,
         os.mkfifo(bad)
     else:
         bad.mkdir()
-    with pytest.raises(DrillRefused, match=kind if kind != "directory" else "directory"):
-        backup(bad, tmp_path / "out")
+    if kind == "fifo":
+        # in a subprocess under a timeout: a reader that does not fstat first BLOCKS on a
+        # fifo forever, and that must read as a failure, never as a hung suite
+        probe = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import sys; from pathlib import Path\n"
+                "from chronos.operations.restore_drill import DrillRefused, backup\n"
+                "try:\n"
+                f"    backup(Path({str(bad)!r}), Path({str(tmp_path / 'out')!r}))\n"
+                "except DrillRefused as e:\n"
+                "    print('REFUSED', e); sys.exit(0)\n"
+                "print('ACCEPTED'); sys.exit(1)",
+            ],
+            cwd=ROOT,
+            env={**os.environ, **SAFE_ENV},
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        assert probe.returncode == 0 and "fifo" in probe.stdout, probe.stdout + probe.stderr
+    else:
+        with pytest.raises(DrillRefused, match=kind):
+            backup(bad, tmp_path / "out")
     assert not (tmp_path / "out").exists() or not any((tmp_path / "out").iterdir())
+
+
+def test_1f_the_backup_api_captures_committed_wal_rows_that_a_file_copy_misses(
+    tmp_path: Path,
+) -> None:
+    """The integration drill's posture (tests/integration/test_backup_restore_drill.py):
+    a holder connection keeps the WAL from being checkpointed, so committed rows live only
+    in ``-wal``; a main-file copy misses them, the online backup API does not."""
+
+    db = _demo_store(tmp_path, events=0)
+    _checkpoint_wal(db)
+    holder = sqlite3.connect(db)  # keeps the WAL alive: no checkpoint-on-close
+    try:
+        with sqlite3.connect(db) as writer:
+            for index in range(7):
+                writer.execute(
+                    "INSERT INTO application_events (event_type, severity, message, event_data,"
+                    " occurred_at) VALUES (?, ?, ?, ?, ?)",
+                    ("wal", "INFO", f"wal row {index}", "{}", "2026-09-15 03:00:00.000000"),
+                )
+        assert db.with_name(db.name + "-wal").stat().st_size > 0, (
+            "the rows must still be in the WAL"
+        )
+        unsafe = tmp_path / "unsafe-main-file-only.db"
+        unsafe.write_bytes(db.read_bytes())  # what `cp` would give an operator
+        assert _row_count(unsafe, "application_events") == 0
+        manifest = backup(db, tmp_path / "out")
+    finally:
+        holder.close()
+    assert manifest.row_counts["application_events"] == 7
+    assert _row_count(Path(manifest.backup_path), "application_events") == 7
+    report = restore(manifest, tmp_path / "restored")
+    assert report.verified, report.failures
+    assert _row_count(Path(report.restored_path), "application_events") == 7
 
 
 # ----------------------------------------------------------- (2) restore + verify
@@ -431,6 +497,31 @@ def test_6b_manifest_round_trips_through_json(tmp_path: Path) -> None:
     assert again == manifest
     report = restore(again, tmp_path / "restored")
     assert report.verified, report.failures
+
+
+def test_6d_the_source_is_only_ever_connected_read_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every sqlite connection the drill opens on the SOURCE path is a ``mode=ro`` URI —
+    the mechanism behind "never opens the source for writing" (a read-write connection
+    that happens not to write leaves the bytes identical, so the sha256 pin alone cannot
+    see it)."""
+
+    db = _demo_store(tmp_path)
+    seen: list[tuple[str, bool]] = []
+    real_connect = sqlite3.connect
+
+    def recording_connect(database: object, *args: object, **kwargs: object) -> sqlite3.Connection:
+        seen.append((str(database), bool(kwargs.get("uri", False))))
+        return real_connect(database, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(drill.sqlite3, "connect", recording_connect)
+    report = run_drill(db, tmp_path / "out", tmp_path / "restored")
+    assert report.verdict == "VERIFIED"
+    on_source = [(target, uri) for target, uri in seen if str(db) in target]
+    assert on_source, "the drill must have connected to the source"
+    for target, uri in on_source:
+        assert uri and target.startswith("file:") and "mode=ro" in target, target
 
 
 def test_6c_the_module_is_read_only_operations_and_names_its_seams() -> None:
