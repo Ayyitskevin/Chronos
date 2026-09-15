@@ -104,6 +104,7 @@ def _watchdog(
     *,
     interval: float = 10.0,
     deadline: float = 90.0,
+    boot_id: str = "boot-A",
 ) -> Watchdog:
     return Watchdog(
         probe=_probe(clock, backend),  # type: ignore[arg-type]
@@ -114,6 +115,7 @@ def _watchdog(
         timer=clock.monotonic,
         sleep=clock.advance,
         pid=4242,
+        boot_id=boot_id,
     )
 
 
@@ -247,13 +249,16 @@ def test_1e_heartbeat_is_replaced_atomically_and_a_planted_symlink_is_refused(
     dog.tick()
     first = json.loads(heartbeat.read_text(encoding="utf-8"))
     assert set(first) == {
+        "boot_id",
         "last_healthy_at",
+        "last_healthy_monotonic",
         "last_observed_at",
         "monotonic",
         "pid",
         "version",
         "verdict",
     }
+    assert first["boot_id"] == "boot-A" and first["last_healthy_monotonic"] == 5_000.0
     assert first["pid"] == 4242 and first["monotonic"] == 5_000.0
     assert first["last_healthy_at"] == NOW.isoformat() == first["last_observed_at"]
     assert first["verdict"]["state"] == "HEALTHY"
@@ -605,6 +610,214 @@ def test_r1_2f_deadman_walks_to_the_heartbeat_without_following_a_symlinked_ance
     )
     assert verdict.state is DeadmanState.DEAD
     assert "symlink" in verdict.reason
+
+
+# ---------------------------------------------- r2 (Daybreak HOLD-DELTA at 2f81447)
+
+
+def test_r2_1a_same_boot_restart_keeps_the_monotonic_deadline_when_the_wall_is_held(
+    tmp_path: Path,
+) -> None:
+    """P1 continuity, Daybreak's exact sequence (logs/daybreak-probe-W-1-r1.py): HEALTHY at
+    monotonic 1000 → +80 s monotonic with the wall held → restart into an UNHEALTHY peer →
+    +10 s → TRIPPED at 90 s. At 2f81447 the restart said "10.000 s without a HEALTHY"."""
+
+    clock = _Clock(monotonic=1000.0)
+    backend = {"live": True, "ready": True}
+    first = _watchdog(tmp_path, clock, backend)
+    assert first.tick().state is WatchdogState.HEALTHY
+    first.close()
+    backend["ready"] = False
+    clock.mono += 80.0  # same boot; the wall clock stepped back to the recorded value
+    restarted = _watchdog(tmp_path, clock, backend)
+    clock.mono += 10.0
+    verdict = restarted.tick()
+    assert verdict.state is WatchdogState.TRIPPED, verdict.reason
+    assert "90.000 s" in verdict.reason
+    assert verdict.since == NOW
+
+
+def test_r2_1b_a_different_boot_starts_tripped_until_a_healthy_observation(
+    tmp_path: Path,
+) -> None:
+    clock = _Clock(monotonic=1000.0)
+    backend = {"live": True, "ready": True}
+    first = _watchdog(tmp_path, clock, backend, boot_id="boot-A")
+    first.tick()
+    first.close()
+    backend["ready"] = False
+    clock = _Clock(wall=NOW + timedelta(seconds=5), monotonic=20.0)  # rebooted: a young timer
+    restarted = _watchdog(tmp_path, clock, backend, boot_id="boot-B")
+    verdict = restarted.tick()
+    assert verdict.state is WatchdogState.TRIPPED
+    assert "boot" in verdict.reason and "unproven" in verdict.reason
+    heartbeat = json.loads((tmp_path / "ops" / HEARTBEAT).read_text(encoding="utf-8"))
+    assert heartbeat["verdict"]["state"] == "TRIPPED" and heartbeat["boot_id"] == "boot-B"
+    backend["ready"] = True
+    clock.advance(10.0)
+    assert restarted.tick().state is WatchdogState.HEALTHY
+
+
+def test_r2_1c_a_prior_monotonic_ahead_of_this_timer_is_not_comparable_and_starts_tripped(
+    tmp_path: Path,
+) -> None:
+    clock = _Clock(monotonic=1000.0)
+    backend = {"live": True, "ready": True}
+    first = _watchdog(tmp_path, clock, backend)
+    first.tick()
+    first.close()
+    backend["ready"] = False
+    clock.mono = 500.0  # the same boot id claimed, but the timer went backwards: unproven
+    restarted = _watchdog(tmp_path, clock, backend)
+    verdict = restarted.tick()
+    assert verdict.state is WatchdogState.TRIPPED and "unproven" in verdict.reason
+
+
+def test_r2_1d_the_deadline_is_never_shortened_by_either_clock(tmp_path: Path) -> None:
+    """The restored interval is max(monotonic, wall, the prior file's own silence)."""
+
+    clock = _Clock(monotonic=1000.0)
+    backend = {"live": True, "ready": True}
+    first = _watchdog(tmp_path, clock, backend)
+    first.tick()
+    first.close()
+    backend["ready"] = False
+    clock.mono += 20.0
+    clock.wall += timedelta(seconds=85)  # the wall says 85 s, the timer says 20 s
+    restarted = _watchdog(tmp_path, clock, backend)
+    clock.advance(5.0)
+    verdict = restarted.tick()  # wall-derived 90 s wins: neither clock may shorten the outage
+    assert verdict.state is WatchdogState.TRIPPED, verdict.reason
+
+
+def test_r2_1e_an_unreadable_boot_identity_is_a_typed_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(watchdog_module, "_BOOT_ID_PATH", tmp_path / "no-such-boot_id")
+    clock = _Clock()
+    with pytest.raises(WatchdogEvidenceError, match="boot identity"):
+        Watchdog(
+            probe=_probe(clock, {"live": True, "ready": True}),  # type: ignore[arg-type]
+            interval_s=10.0,
+            deadline_s=90.0,
+            evidence_dir=tmp_path / "ops",
+            clock=clock.now,
+            timer=clock.monotonic,
+        )
+    assert not (tmp_path / "ops" / HEARTBEAT).exists()
+
+
+def _plant_before_exchange(
+    monkeypatch: pytest.MonkeyPatch, ops: Path, plant: Callable[[], None]
+) -> dict[str, int]:
+    """Daybreak's swap_before_replace hook, on the exchange: plant an entry at heartbeat.json
+    immediately before the real atomic call runs, once."""
+
+    real = watchdog_module._renameat2
+    calls = {"n": 0}
+
+    def hooked(src_dir_fd: int, src: str, dst_dir_fd: int, dst: str, flags: int) -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            plant()
+        real(src_dir_fd, src, dst_dir_fd, dst, flags)
+
+    monkeypatch.setattr(watchdog_module, "_renameat2", hooked)
+    return calls
+
+
+def test_r2_2a_a_symlink_planted_in_the_check_replace_window_survives_and_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P1 envelope: at 2f81447 the planted link was silently displaced (result=accepted)."""
+
+    clock = _Clock()
+    dog = _watchdog(tmp_path, clock, {"live": True, "ready": True})
+    dog.tick()
+    ops = tmp_path / "ops"
+    previous = (ops / HEARTBEAT).read_bytes()
+    sentinel = tmp_path / "sentinel.json"
+    sentinel.write_text("SENTINEL", encoding="utf-8")
+
+    def plant() -> None:
+        (ops / HEARTBEAT).unlink()
+        (ops / HEARTBEAT).symlink_to(sentinel)
+
+    _plant_before_exchange(monkeypatch, ops, plant)
+    clock.advance(10.0)
+    with pytest.raises(WatchdogEvidenceError, match="replaced during publication"):
+        dog.tick()
+    monkeypatch.undo()
+    assert (ops / HEARTBEAT).is_symlink(), "the planted entry survives at the name"
+    assert sentinel.read_text(encoding="utf-8") == "SENTINEL"
+    assert {p.name for p in ops.iterdir()} == {EVIDENCE_LOG, HEARTBEAT}, "no temp, nothing new"
+    assert previous  # the previous heartbeat is gone from the name (the planter removed it);
+    # what a reader now sees at heartbeat.json is the planted link — the operator's evidence
+
+
+def test_r2_2b_a_hardlink_to_a_foreign_file_planted_in_the_window_survives_and_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = _Clock()
+    dog = _watchdog(tmp_path, clock, {"live": True, "ready": True})
+    dog.tick()
+    ops = tmp_path / "ops"
+    foreign = tmp_path / "foreign.json"
+    foreign.write_text("FOREIGN", encoding="utf-8")
+    foreign.chmod(0o600)
+
+    def plant() -> None:
+        (ops / HEARTBEAT).unlink()
+        os.link(foreign, ops / HEARTBEAT)
+
+    _plant_before_exchange(monkeypatch, ops, plant)
+    clock.advance(10.0)
+    with pytest.raises(WatchdogEvidenceError, match="replaced during publication"):
+        dog.tick()
+    monkeypatch.undo()
+    assert (ops / HEARTBEAT).read_text(encoding="utf-8") == "FOREIGN"
+    assert foreign.lstat().st_nlink == 2, "the planted hardlink was neither unlinked nor rewritten"
+    assert {p.name for p in ops.iterdir()} == {EVIDENCE_LOG, HEARTBEAT}
+
+
+def test_r2_2c_an_entry_that_appears_at_an_absent_name_is_refused_not_replaced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = _Clock()
+    ops = tmp_path / "ops"
+    dog = _watchdog(tmp_path, clock, {"live": True, "ready": True})  # no heartbeat yet
+    sentinel = tmp_path / "sentinel.json"
+    sentinel.write_text("SENTINEL", encoding="utf-8")
+    _plant_before_exchange(monkeypatch, ops, lambda: (ops / HEARTBEAT).symlink_to(sentinel))
+    with pytest.raises(WatchdogEvidenceError, match="appeared during publication"):
+        dog.tick()
+    monkeypatch.undo()
+    assert (ops / HEARTBEAT).is_symlink()
+    assert {p.name for p in ops.iterdir()} == {EVIDENCE_LOG, HEARTBEAT}
+
+
+def test_r2_2d_the_normal_publication_still_replaces_atomically_and_leaves_no_temp(
+    tmp_path: Path,
+) -> None:
+    clock = _Clock()
+    dog = _watchdog(tmp_path, clock, {"live": True, "ready": True})
+    ops = tmp_path / "ops"
+    for _ in range(3):
+        dog.tick()
+        clock.advance(10.0)
+        assert {p.name for p in ops.iterdir()} == {EVIDENCE_LOG, HEARTBEAT}
+        st = (ops / HEARTBEAT).lstat()
+        assert stat.S_ISREG(st.st_mode) and st.st_nlink == 1 and stat.S_IMODE(st.st_mode) == 0o600
+
+
+def test_r2_3_the_runbook_states_the_boot_rule_and_the_refused_entry() -> None:
+    import re
+
+    runbook = (ROOT / "docs" / "ops" / "WATCHDOG.md").read_text(encoding="utf-8")
+    collapsed = re.sub(r"\s+", " ", runbook)
+    assert "starts TRIPPED" in collapsed
+    assert "same boot" in collapsed and "keeps the original deadline" in collapsed
+    assert "left in place" in collapsed
 
 
 # ------------------------------------------------------------------ 2. the dead-man check
