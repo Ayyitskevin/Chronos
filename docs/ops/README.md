@@ -15,6 +15,8 @@ per-session checklist for the VCP §7 real-gateway read-only gate, when present)
 template rules below apply to the `.service` files only; a checklist is indexed in this
 paragraph by filename, and `tests/unit/test_ibkr_runbook_live_flag_contract.py` fails if a
 markdown file appears in this directory without being named here.
+`WATCHDOG.md` is the runbook for the evidence-only watchdog and dead-man layers
+(`python -m chronos.operations.watchdog` / `deadman`); they observe and record, never act.
 
 ## Rules these templates keep, and a test that enforces them
 
