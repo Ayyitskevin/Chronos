@@ -67,7 +67,8 @@ is never written; on a WAL-mode store a read-only reader may create empty `-wal`
 sidecars beside it (sqlite's own bookkeeping, a directory write, not a database write).
 
 **Publication is ONE envelope, renamed into place atomically.** A backup is the whole triple
-in one directory `<stem>-<stamp>/`: the database (`chronos.db`, stored in rollback-journal mode as one
+in one directory `chronos-<stamp>/` (a fixed prefix — the source's basename never leaks into
+the name): the database (`chronos.db`, stored in rollback-journal mode as one
 self-contained file), the audit log copy and its head anchor copy (only when a pair sits
 beside the source), and `manifest.json`. The harness stages all of it in a **dot-prefixed
 temp directory** under `--out` — the database written into the exclusively created temp
@@ -86,8 +87,10 @@ refusal with nothing published.
 **The directory capability is held through every read.** The manifest's sha256, schema head
 and row counts are read through the descriptor the walk admitted (the database opened
 descriptor-relative, sqlite over `/proc/self/fd/<n>`), never through a re-resolved path; and
-before the manifest is returned the envelope's name must still designate the inode that
-was written AND the lexical `--out` path must still name the admitted directory — otherwise
+before the manifest is returned the envelope's name must still BE the directory that
+was written (by `lstat` — a symlink to the same inode is refused) AND every component of
+the reported `--out` path must be a real directory reached without following a link —
+otherwise
 the harness refuses with a message that says the truth: `published: the envelope … exists
 in the directory the walk admitted … but the path … no longer names that directory`. The
 restore holds its target descriptor through the copy **and** the verification the same way
@@ -109,8 +112,12 @@ not name. Every later create, link, unlink and fsync is relative to the retained
 2. **Take the backup with sqlite's online backup API, never `cp`.** A file copy of a
    WAL-mode database misses committed rows still in `-wal`; the backup API reads through
    the WAL and produces a consistent single file:
-   `mkdir -m 700 /var/backups/chronos/.chronos-<stamp>.tmp && sqlite3 data/chronos.db ".backup '/var/backups/chronos/.chronos-<stamp>.tmp/chronos.db'"`
-   (stage into a dot-prefixed temp directory; the envelope is renamed into place in step 3b)
+   `mkdir -m 700 /var/backups/chronos/.chronos-<stamp>.<16 hex>.tmp && sqlite3 data/chronos.db ".backup '/var/backups/chronos/.chronos-<stamp>.<16 hex>.tmp/chronos.db'"`
+   (stage into a temp directory named by the exact grammar `.chronos-<stamp>.<16 hex>.tmp`
+   — 16 lowercase hex digits, e.g. from `openssl rand -hex 8`; the envelope is renamed into
+   place in step 3b). The name rule: a published envelope is always `chronos-<stamp>` — a
+   fixed prefix, never the source's basename — and a crash temp is recognised ONLY by that
+   exact grammar, never by a leading dot alone.
    (the harness does the same through Python's `Connection.backup`, into a temp name that is
    renamed into place).
 3. **Record the manifest.** Write down the completion time of step 2 as
@@ -124,10 +131,15 @@ not name. Every later create, link, unlink and fsync is relative to the retained
    other later), and record the anchor's `last_hash`. Note `"encryption": "none"` (see
    owner asks). The harness's copy is in rollback-journal mode; a `.backup` made by the
    `sqlite3` shell keeps the source's WAL flag — both are complete, single files.
-3b. **Publish the envelope with one rename.** With `manifest.json` written into the temp
-   directory, `mv -T /var/backups/chronos/.chronos-<stamp>.tmp /var/backups/chronos/chronos-<stamp>`
-   (refuse if the final name exists — never rename over it), then `sync` the parent. From
-   this point the backup is the directory `chronos-<stamp>/` and nothing else.
+3b. **Publish the envelope with the harness's exclusive rename.** With `manifest.json`
+   written into the temp directory:
+   `python -m chronos.operations.restore_drill publish-envelope /var/backups/chronos/.chronos-<stamp>.<16 hex>.tmp /var/backups/chronos/chronos-<stamp>`
+   — ONE `renameat2(RENAME_NOREPLACE)`; an existing file **or** directory at the final name
+   is a refusal (exit 2, nothing moves, the temp stays for you to inspect), then the parent
+   is fsynced. A plain `mv -T` is **not atomic** against a concurrent name: it renames over
+   an existing empty directory and reports success, so it is never the by-hand step — use
+   the command above, or run the harness for a real drill. From this point the backup is
+   the directory `chronos-<stamp>/` and nothing else.
 4. **Restore into a fresh directory.** `mkdir -m 700 <fresh>` (it must not exist or be
    empty), then copy the backup — and the audit pair if present — into it.
 5. **Verify.** `sha256sum` of the copy equals the manifest; the schema head query on the

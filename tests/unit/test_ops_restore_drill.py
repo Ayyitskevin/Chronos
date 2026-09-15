@@ -992,6 +992,175 @@ def test_r3_4_the_runbook_states_the_envelope_and_the_crash_truth() -> None:
     assert "descriptor" in prose
 
 
+# ----------------------------------------------------------- (r4) Daybreak's HOLD-DELTA at 92a2628
+
+
+def test_r4_1a_a_symlink_placed_at_the_final_name_after_the_rename_is_the_published_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Daybreak's sequence: the real RENAME_NOREPLACE, then the envelope is renamed aside and
+    a SYMLINK to it is put at the final name. A following stat sees the same inode; a
+    no-follow check sees a symlink where a directory must be — the honest refusal."""
+
+    db = _store_with_audit(tmp_path)
+    out = tmp_path / "out"
+    real = drill._renameat2
+
+    def link_at_final(src_fd: int, src: str, dst_fd: int, dst: str, flags: int) -> None:
+        real(src_fd, src, dst_fd, dst, flags)
+        os.rename(dst, dst + ".moved", src_dir_fd=dst_fd, dst_dir_fd=dst_fd)
+        os.symlink(dst + ".moved", dst, dir_fd=dst_fd)
+
+    monkeypatch.setattr(drill, "_renameat2", link_at_final)
+    with pytest.raises(DrillRefused) as refused:
+        backup(db, out)
+    assert str(refused.value).startswith("published: ")
+    assert "symlink" in str(refused.value)
+    entries = sorted(p.name for p in out.iterdir())
+    assert len(entries) == 2 and any(
+        e.endswith(".moved") for e in entries
+    )  # the envelope + the link
+
+
+def test_r4_1b_an_ancestor_replaced_by_a_symlink_back_to_the_admitted_dir_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = _store_with_audit(tmp_path)
+    out = tmp_path / "out"
+    real = drill._renameat2
+
+    def link_ancestor(*args: object) -> None:
+        real(*args)  # type: ignore[arg-type]
+        out.rename(out.with_name("out-moved"))
+        out.symlink_to(out.with_name("out-moved"))  # same inode through a link
+
+    monkeypatch.setattr(drill, "_renameat2", link_ancestor)
+    with pytest.raises(DrillRefused) as refused:
+        backup(db, out)
+    assert str(refused.value).startswith("published: ")
+    assert "no longer names that directory" in str(refused.value) or "symlink" in str(refused.value)
+
+
+def test_r4_2a_a_dot_prefixed_source_basename_yields_a_normal_envelope_and_a_verified_drill(
+    tmp_path: Path,
+) -> None:
+    data = tmp_path / "data"
+    data.mkdir()
+    db = data / ".chronos.db"
+    database = Database(f"sqlite:///{db}")
+    try:
+        database.initialize()
+    finally:
+        database.dispose()
+    report = run_drill(db, tmp_path / "out", tmp_path / "restored")
+    assert report.verdict == "VERIFIED", report.failures
+    envelope = Path(report.manifest.backup_path).parent
+    assert envelope.name.startswith("chronos-") and not envelope.name.startswith(".")
+    assert Path(report.manifest.backup_path).name == "chronos.db"
+    rpo, _basis = rpo_seconds(report.manifest)
+    assert rpo is not None and rpo >= 0
+
+
+def test_r4_2b_only_the_exact_temp_grammar_is_refused_as_a_crash_temp(tmp_path: Path) -> None:
+    db = _demo_store(tmp_path)
+    manifest = backup(db, tmp_path / "out")
+    envelope = Path(manifest.backup_path).parent
+    stamp = envelope.name.removeprefix("chronos-")
+    # a genuine crash temp (the exact private grammar) is refused by name
+    temp = tmp_path / "out" / f".chronos-{stamp}.{'ab' * 8}.tmp"
+    temp.mkdir()
+    (temp / "chronos.db").write_bytes(Path(manifest.backup_path).read_bytes())
+    tampered = BackupManifest.from_dict(
+        {**manifest.to_dict(), "backup_path": str(temp / "chronos.db")}
+    )
+    with pytest.raises(DrillRefused, match="unpublished temp envelope"):
+        restore(tampered, tmp_path / "restored")
+    # a dot-prefixed directory that does NOT match the grammar is not a temp: it is judged on
+    # its contents, never refused by a leading dot alone
+    other = tmp_path / "out" / f".chronos-{stamp}"
+    other.mkdir()
+    (other / "chronos.db").write_bytes(Path(manifest.backup_path).read_bytes())
+    plain = BackupManifest.from_dict(
+        {**manifest.to_dict(), "backup_path": str(other / "chronos.db")}
+    )
+    report = restore(plain, tmp_path / "restored2")
+    assert report.sha256_ok, report.failures
+    assert drill.TEMP_ENVELOPE_RE.fullmatch(temp.name) and not drill.TEMP_ENVELOPE_RE.fullmatch(
+        other.name
+    )
+
+
+def _publish_cli(temp: Path, final: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "chronos.operations.restore_drill",
+            "publish-envelope",
+            str(temp),
+            str(final),
+        ],
+        cwd=ROOT,
+        env={**os.environ, **SAFE_ENV},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+@pytest.mark.parametrize("occupant", ["file", "empty-directory"])
+def test_r4_3_publish_envelope_never_renames_over_an_existing_name(
+    tmp_path: Path, occupant: str
+) -> None:
+    out = tmp_path / "out"
+    out.mkdir()
+    temp = out / ".chronos-20260915T070000Z.0123456789abcdef.tmp"
+    temp.mkdir()
+    (temp / "chronos.db").write_bytes(b"staged")
+    final = out / "chronos-20260915T070000Z"
+    if occupant == "file":
+        final.write_bytes(b"occupied")
+        before = _sha256(final)
+    else:
+        final.mkdir()
+        before = "empty-dir"
+    completed = _publish_cli(temp, final)
+    assert completed.returncode == 2, completed.stdout + completed.stderr
+    assert "already exists" in completed.stdout
+    assert (
+        _sha256(final)
+        if occupant == "file"
+        else ("empty-dir" if final.is_dir() and not any(final.iterdir()) else "changed")
+    ) == before
+    assert temp.is_dir() and (temp / "chronos.db").read_bytes() == b"staged", (
+        "the temp is left for the operator, untouched"
+    )
+
+
+def test_r4_3c_publish_envelope_succeeds_once_and_is_exclusive(tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    out.mkdir()
+    temp = out / ".chronos-20260915T070000Z.0123456789abcdef.tmp"
+    temp.mkdir()
+    (temp / "chronos.db").write_bytes(b"staged")
+    final = out / "chronos-20260915T070000Z"
+    completed = _publish_cli(temp, final)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert sorted(p.name for p in out.iterdir()) == [final.name]
+    assert (final / "chronos.db").read_bytes() == b"staged"
+
+
+def test_r4_4_the_runbook_publishes_by_hand_through_the_exclusive_command() -> None:
+    text = (ROOT / "docs" / "ops" / "RESTORE-DRILL.md").read_text(encoding="utf-8")
+    prose = " ".join(text.split())
+    # the old by-hand command (a plain rename over the final name) is gone; `mv -T` may only
+    # appear in the sentence that says it is NOT atomic
+    assert "`mv -T /var/backups" not in prose
+    assert "`mv -T` is **not atomic**" in prose
+    assert "python -m chronos.operations.restore_drill publish-envelope" in prose
+    assert "chronos-<stamp>" in prose and ".chronos-<stamp>.<16 hex>.tmp" in prose
+
+
 def test_6c_the_module_is_read_only_operations_and_names_its_seams() -> None:
     text = MODULE.read_text(encoding="utf-8")
     assert 'ENCRYPTION: str = "none"' in text

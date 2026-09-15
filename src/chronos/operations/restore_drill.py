@@ -78,6 +78,7 @@ import errno
 import hashlib
 import json
 import os
+import re
 import secrets
 import sqlite3
 import stat
@@ -106,6 +107,12 @@ AUDIT_ANCHOR_NAME = "platform_audit.head.json"
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
 _CHUNK = 1 << 20
 MANIFEST_NAME = "manifest.json"
+DB_NAME = "chronos.db"
+#: The envelope name grammar. Final: ``chronos-<stamp>`` (a fixed prefix — the source's
+#: basename never leaks into it, so a dot-prefixed source cannot produce a dot-prefixed
+#: envelope). Temp: exactly ``.chronos-<stamp>.<16 hex>.tmp`` — the ONE grammar by which a
+#: crash temp is recognised; a leading dot alone means nothing.
+TEMP_ENVELOPE_RE = re.compile(r"^\.chronos-\d{8}T\d{6}Z\.[0-9a-f]{16}\.tmp$")
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
 _RENAME_NOREPLACE = 1
 
@@ -360,12 +367,55 @@ def _dir_identity(fd: int) -> tuple[int, int]:
     return st.st_dev, st.st_ino
 
 
-def _lexical_identity(path: Path) -> tuple[int, int] | None:
+def _nofollow_identity(path: Path) -> tuple[int, int] | None:
+    """The (dev, ino) the absolute ``path`` designates when EVERY component is a real
+    directory reached without following a link: from ``/``, each component is lstat'd
+    (must be a directory, never a symlink), opened O_DIRECTORY|O_NOFOLLOW, and the opened
+    descriptor's identity must equal that lstat. None when any component is missing, a
+    symlink, or not a directory — the path is then not trustworthy as a name."""
+
+    absolute = path if path.is_absolute() else Path.cwd() / path
     try:
-        st = os.stat(path)
+        descriptor = os.open(os.sep, _DIR_FLAGS)
     except OSError:
         return None
-    return st.st_dev, st.st_ino
+    try:
+        for component in absolute.parts[1:]:
+            try:
+                by_name = os.stat(component, dir_fd=descriptor, follow_symlinks=False)
+                if not stat.S_ISDIR(by_name.st_mode):
+                    return None
+                child = os.open(component, _DIR_FLAGS, dir_fd=descriptor)
+            except OSError:
+                return None
+            opened = os.fstat(child)
+            if (opened.st_dev, opened.st_ino) != (by_name.st_dev, by_name.st_ino):
+                os.close(child)
+                return None
+            os.close(descriptor)
+            descriptor = child
+        return _dir_identity(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _entry_is_real_directory(dfd: int, name: str, identity: tuple[int, int]) -> bool:
+    """``name`` under the directory fd is, by lstat, a directory with exactly ``identity``
+    (never a symlink to one)."""
+
+    try:
+        by_name = os.stat(name, dir_fd=dfd, follow_symlinks=False)
+    except OSError:
+        return False
+    return stat.S_ISDIR(by_name.st_mode) and (by_name.st_dev, by_name.st_ino) == identity
+
+
+def _entry_is_real_file(dfd: int, name: str, identity: tuple[int, int]) -> bool:
+    try:
+        by_name = os.stat(name, dir_fd=dfd, follow_symlinks=False)
+    except OSError:
+        return False
+    return stat.S_ISREG(by_name.st_mode) and (by_name.st_dev, by_name.st_ino) == identity
 
 
 def _renameat2(src_dir_fd: int, src: str, dst_dir_fd: int, dst: str, flags: int) -> None:
@@ -641,11 +691,14 @@ def _audit_head(anchor_path: Path) -> str | None:
 # ----------------------------------------------------------------- backup
 
 
-def _envelope_names(db_path: Path, stamp: str) -> tuple[str, str, str]:
-    """(final envelope dir name, temp envelope dir name, database file name)."""
+def _envelope_names(stamp: str) -> tuple[str, str, str]:
+    """(final envelope dir name, temp envelope dir name, database file name) — the fixed
+    grammar above; the source's basename never appears in any of them."""
 
-    final = f"{db_path.stem}-{stamp}"
-    return final, f".{final}.{secrets.token_hex(6)}.tmp", f"{db_path.stem}.db"
+    final = f"chronos-{stamp}"
+    temp = f".{final}.{secrets.token_hex(8)}.tmp"
+    assert TEMP_ENVELOPE_RE.fullmatch(temp), temp
+    return final, temp, DB_NAME
 
 
 def _read_text_at(dfd: int, name: str, subject: str) -> str:
@@ -679,7 +732,7 @@ def backup(db_path: Path, out_dir: Path, *, clock: Clock | None = None) -> Backu
     try:
         taken_at = clock.wall()
         stamp = taken_at.strftime("%Y%m%dT%H%M%SZ")
-        final_name, temp_name, db_name = _envelope_names(db_path, stamp)
+        final_name, temp_name, db_name = _envelope_names(stamp)
         os.mkdir(temp_name, 0o700, dir_fd=out_fd)
         env_fd = os.open(temp_name, _DIR_FLAGS, dir_fd=out_fd)
         try:
@@ -704,23 +757,32 @@ def backup(db_path: Path, out_dir: Path, *, clock: Clock | None = None) -> Backu
                     "the temp envelope was removed, nothing is published"
                 ) from None
             os.fsync(out_fd)
-            # bind the reported paths to the capability that received the writes
-            by_name = os.stat(final_name, dir_fd=out_fd)
-            if (by_name.st_dev, by_name.st_ino) != _dir_identity(env_fd):
-                raise DrillRefused(
-                    f"published: the envelope {final_name} was renamed into the admitted "
-                    f"directory, but the name now designates a different inode — a concurrent "
-                    f"actor replaced it after publication; the backup this drill wrote is not "
-                    f"at {out_abs / final_name}"
-                )
+            # bind the reported paths to the capability that received the writes — every
+            # check no-follow: the final name must BE the envelope directory by lstat (a
+            # symlink to the same inode is refused), and every component of the reported
+            # absolute path must be a real directory reached without following a link
             admitted = _dir_identity(out_fd)
-            if _lexical_identity(out_abs) != admitted:
+            envelope = _dir_identity(env_fd)
+            if not _entry_is_real_directory(out_fd, final_name, envelope):
+                raise DrillRefused(
+                    f"published: the envelope was renamed into the directory the walk admitted "
+                    f"(device:inode {admitted[0]}:{admitted[1]}), but the name {final_name} there "
+                    f"no longer IS that directory by lstat — it is a symlink or a replaced entry; "
+                    f"the backup this drill wrote exists, the reported path {out_abs / final_name} "
+                    "is not trustworthy, and this manifest is not returned"
+                )
+            if (
+                _nofollow_identity(out_abs) != admitted
+                or _nofollow_identity(out_abs / final_name) != envelope
+            ):
                 raise DrillRefused(
                     f"published: the envelope {final_name} exists in the directory the walk "
                     f"admitted (device:inode {admitted[0]}:{admitted[1]}), "
-                    f"but the path {out_abs} no longer names that directory — an ancestor was "
-                    f"swapped after publication; the triple is published there, not at the path, "
-                    "and this manifest is not returned"
+                    f"but the path {out_abs} no longer names that directory without following "
+                    f"a symlink — an ancestor was swapped after publication (renamed away, or "
+                    f"replaced by a link); "
+                    "the triple is published there, not at the path, and this manifest is not "
+                    "returned"
                 )
         except BaseException:
             os.close(env_fd)
@@ -803,7 +865,7 @@ def _open_envelope(manifest: BackupManifest) -> tuple[int, Path]:
     (unpublished) envelope is refused BY NAME, whatever it contains."""
 
     env_dir = Path(manifest.backup_path).parent
-    if env_dir.name.startswith("."):
+    if TEMP_ENVELOPE_RE.fullmatch(env_dir.name):
         raise DrillRefused(
             f"{env_dir} is an unpublished temp envelope (a crash before its rename); "
             "the drill never restores from one"
@@ -841,7 +903,7 @@ def _verify_in(
 
     accepted = True
     lexical = target_abs / db_name
-    if _lexical_identity(lexical) != copy_identity or _lexical_identity(
+    if not _entry_is_real_file(target_fd, db_name, copy_identity) or _nofollow_identity(
         target_abs
     ) != _dir_identity(target_fd):
         accepted = False
@@ -860,7 +922,7 @@ def _verify_in(
         except RuntimeError as error:
             accepted = False
             failures.append(f"schema_acceptance: {error}")
-        if _lexical_identity(lexical) != copy_identity:
+        if not _entry_is_real_file(target_fd, db_name, copy_identity):
             accepted = False
             failures.append(
                 f"restore target swapped: {lexical} changed identity during the acceptance check"
@@ -957,7 +1019,7 @@ def restore(
                         os.close(src)
             os.fsync(target_fd)
             failures, facts = _verify_in(manifest, target_fd, target_abs, has_audit)
-            if _lexical_identity(target_abs) != _dir_identity(target_fd):
+            if _nofollow_identity(target_abs) != _dir_identity(target_fd):
                 failures.append(
                     f"restore target swapped: {target_abs} no longer names the directory the "
                     "walk admitted; the copy this drill made is not at the reported path"
@@ -1047,7 +1109,63 @@ def run_drill(
     )
 
 
+def publish_envelope(temp: Path, final: Path) -> None:
+    """The by-hand publication step, made mechanically exclusive: ``temp`` and ``final`` must
+    name entries of the same directory (reached by the no-follow walk); ``temp`` must be a
+    directory; the rename is ONE renameat2(RENAME_NOREPLACE) — an existing file OR directory
+    at ``final`` is a typed refusal and nothing moves — then the directory is fsynced."""
+
+    temp = temp if temp.is_absolute() else Path.cwd() / temp
+    final = final if final.is_absolute() else Path.cwd() / final
+    if temp.parent != final.parent:
+        raise DrillRefused(
+            "publish-envelope: <temp> and <final> must be entries of the same directory"
+        )
+    dfd, _absolute = _walk_directory(temp.parent, "envelope directory", create=False)
+    try:
+        try:
+            by_name = os.stat(temp.name, dir_fd=dfd, follow_symlinks=False)
+        except OSError as error:
+            raise DrillRefused(f"publish-envelope: {temp} {error.strerror}") from None
+        if not stat.S_ISDIR(by_name.st_mode):
+            raise DrillRefused(f"publish-envelope: {temp} is not a directory")
+        try:
+            _renameat2(dfd, temp.name, dfd, final.name, _RENAME_NOREPLACE)
+        except FileExistsError:
+            raise DrillRefused(
+                f"{final.name} already exists in the destination; the drill never overwrites"
+            ) from None
+        except OSError as error:
+            raise DrillRefused(
+                f"publication of {final.name} failed: [errno {error.errno}] {error.strerror}"
+            ) from None
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
+
+
+def _cli_publish(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="python -m chronos.operations.restore_drill publish-envelope",
+        description="Rename a staged temp envelope to its final name with ONE exclusive rename.",
+    )
+    parser.add_argument("temp", type=Path)
+    parser.add_argument("final", type=Path)
+    args = parser.parse_args(argv)
+    try:
+        publish_envelope(args.temp, args.final)
+    except DrillRefused as error:
+        print(json.dumps({"verdict": "FAILED", "failures": [f"refused: {error}"]}, sort_keys=True))
+        return 2
+    print(json.dumps({"verdict": "PUBLISHED", "envelope": str(args.final)}, sort_keys=True))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
+    if argv is None:
+        argv = sys.argv[1:]
+    if argv[:1] == ["publish-envelope"]:
+        return _cli_publish(argv[1:])
     parser = argparse.ArgumentParser(
         prog="python -m chronos.operations.restore_drill",
         description=(
