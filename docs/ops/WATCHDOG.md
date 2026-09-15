@@ -10,7 +10,7 @@ evidence, not a decision.
 |---|---|---|---|---|
 | 1 | `python -m chronos.operations.watchdog` | the backend's `/health/live` and `/health/ready`, through the one-shot external probe | no HEALTHY observation for `--deadline` seconds (monotonic) | any host that can reach the backend |
 | 2 | `python -m chronos.operations.deadman` | layer 1's own `heartbeat.json` | the heartbeat is absent, unreadable, malformed, not a regular file, or older than `--max-age` by both clocks | the same host (today) |
-| 3 | off-host sidecar | a copy of the heartbeat pulled to another host | as layer 2 | another host — **design only, not built** |
+| 3 | off-host, receive-only sidecar | records the HOST PUSHES to it (it never pulls) | its own clock sees no HEALTHY observation for an outer deadline | a separately administered host — **design only, not built** (`DESIGN-alert-sidecar.md`) |
 
 ## What each layer proves, and does not
 
@@ -101,10 +101,41 @@ evidence capture as they are.
 **A watchdog on the same host dies with the host.** Layer 2 on that host dies with it too,
 and a host that loses power produces no DEAD verdict — it produces silence. Layer 2's value
 is catching a watchdog that died while the host lived (OOM-killed, a stuck loop, a
-mis-typed unit). Catching the host itself needs the third layer: an off-host sidecar that
-pulls `heartbeat.json` to another machine (read-only copy, e.g. `scp`/`rsync` on a timer)
-and runs `chronos.operations.deadman` against the copy with a `--max-age` that allows for
-the copy interval — and, because `CLOCK_MONOTONIC` does not travel between hosts, expects
-`UNKNOWN` from the monotonic comparison unless the sidecar's checker is taught to trust the
-wall clock alone across hosts. That teaching is a decision, not a patch; it is **design
-only** tonight, and nothing here builds it.
+mis-typed unit). Catching the host itself needs the third layer, and that layer is
+**design only** tonight: [`DESIGN-alert-sidecar.md`](DESIGN-alert-sidecar.md) defines it
+and nothing here builds it.
+
+The one property the design fixes, restated here so this runbook can never drift from it:
+the sidecar is **receive-only** and the host **pushes**. The host sends typed, signed records
+(`watchdog.observation`, `watchdog.verdict`, `deadman.verdict`, the audit head) over HTTPS
+to the sidecar with a write-only, per-host bearer token that can append records and do
+nothing else; the sidecar holds the host's Ed25519 PUBLIC key and verifies every record.
+The receiver **holds no Chronos-host credential** and cannot initiate a connection to the
+host: there is no login, no file copy, no timer on the sidecar that reaches into the host,
+and no endpoint on the sidecar that the host would obey. The sidecar **never pulls**. Its
+dead-man decision uses its own clock — the `received_at` of the last observation whose
+payload says HEALTHY — never a host-claimed timestamp and never the host's monotonic
+value, which does not travel between hosts. Where the sidecar lives, who administers it,
+and what its outbound alert channel is are Kevin's decisions (design §"Open owner asks").
+
+## Restart, evidence entries, and the one thing a reader must tolerate
+
+**A restart cannot turn an outage HEALTHY.** On start the watchdog reads the existing
+`heartbeat.json`: a recorded `TRIPPED`, or a `last_healthy_at` already `--deadline` behind
+the prior `last_observed_at`, starts the new process `TRIPPED` until a real HEALTHY
+observation; a recent prior HEALTHY is carried over as the deadline's anchor, so the
+interval keeps counting across the restart. A watchdog that has never seen HEALTHY at all
+publishes `TRIPPED` on a non-HEALTHY tick — it has nothing to certify.
+
+**Evidence entries are capabilities.** The evidence directory is reached component by
+component without following links (a symlinked ancestor is refused and nothing is created
+past it), its descriptor is kept, and every open, create, replace and fsync is relative to
+it. An existing `watchdog.jsonl` or `heartbeat.json` must be a regular file owned by the
+watchdog's user with exactly one link and mode 0600; a hardlink, a symlink, a FIFO, a
+looser mode or a foreign owner is refused with a typed reason and nothing is written.
+Every write is complete or refused — a short write is never published — and after each
+publication the name is checked against the inode that was written.
+
+**The one thing a reader must tolerate:** if the disk stops accepting bytes mid-append,
+`watchdog.jsonl` can end in a torn last line (the tick then exits 3 and no heartbeat is
+published). Treat a final line that does not parse as "the writer died here", not as data.

@@ -158,22 +158,30 @@ def test_1a_no_trip_before_the_deadline_and_a_trip_exactly_at_it(tmp_path: Path)
     assert tripped.evidence_path == str(tmp_path / "ops" / EVIDENCE_LOG)
 
 
-def test_1a2_never_healthy_counts_from_the_first_tick(tmp_path: Path) -> None:
+def test_1a2_never_healthy_is_tripped_from_the_first_tick(tmp_path: Path) -> None:
+    """r1 P1 (fail closed): a watchdog that has never seen HEALTHY has nothing to certify —
+    it publishes TRIPPED on a non-HEALTHY tick, not a HEALTHY-until-the-deadline grace."""
+
     clock = _Clock()
-    dog = _watchdog(tmp_path, clock, {"live": False, "ready": False}, deadline=30.0)
-    assert dog.tick().state is WatchdogState.HEALTHY  # silent for 0 s so far
-    clock.advance(30.0)
+    backend = {"live": False, "ready": False}
+    dog = _watchdog(tmp_path, clock, backend, deadline=30.0)
     verdict = dog.tick()
     assert verdict.state is WatchdogState.TRIPPED
     assert verdict.since is None
-    assert "never" in verdict.reason
+    assert "ever" in verdict.reason
+    heartbeat = json.loads((tmp_path / "ops" / HEARTBEAT).read_text(encoding="utf-8"))
+    assert heartbeat["verdict"]["state"] == "TRIPPED" and heartbeat["last_healthy_at"] is None
+    backend["live"] = backend["ready"] = True
+    clock.advance(10.0)
+    assert dog.tick().state is WatchdogState.HEALTHY
 
 
 def test_1b_a_healthy_observation_resets_the_deadline(tmp_path: Path) -> None:
     clock = _Clock()
-    backend = {"live": True, "ready": False}
+    backend = {"live": True, "ready": True}
     dog = _watchdog(tmp_path, clock, backend)
-    assert dog.tick().state is WatchdogState.HEALTHY  # never HEALTHY yet: counted from this tick
+    assert dog.tick().state is WatchdogState.HEALTHY
+    backend["ready"] = False
     clock.advance(90.0)
     assert dog.tick().state is WatchdogState.TRIPPED
     backend["ready"] = True
@@ -332,6 +340,273 @@ def test_1g_configuration_is_validated_typed() -> None:
             )
 
 
+# ------------------------------------------------------------------ r1 (Daybreak HOLD at 50ad133)
+
+
+def _tripped_dir(tmp_path: Path, clock: _Clock, backend: dict[str, bool]) -> Watchdog:
+    """A watchdog run to TRIPPED on tmp_path/ops (one HEALTHY tick, then 90 s of silence)."""
+
+    backend["live"] = backend["ready"] = True
+    dog = _watchdog(tmp_path, clock, backend)
+    assert dog.tick().state is WatchdogState.HEALTHY
+    backend["ready"] = False
+    clock.advance(90.0)
+    assert dog.tick().state is WatchdogState.TRIPPED
+    dog.close()
+    return dog
+
+
+def test_r1_1a_a_restart_over_a_tripped_evidence_dir_stays_tripped_until_healthy(
+    tmp_path: Path,
+) -> None:
+    """P1 restart: the reviewer's probe — at 50ad133 the second instance published HEALTHY."""
+
+    clock = _Clock()
+    backend: dict[str, bool] = {}
+    _tripped_dir(tmp_path, clock, backend)
+    clock.advance(10.0)
+    restarted = _watchdog(tmp_path, clock, backend)  # same dir, peer still UNHEALTHY
+    verdict = restarted.tick()
+    assert verdict.state is WatchdogState.TRIPPED, verdict.reason
+    assert "before this process started" in verdict.reason
+    assert verdict.since == NOW  # the prior HEALTHY, carried over from the heartbeat
+    heartbeat = json.loads((tmp_path / "ops" / HEARTBEAT).read_text(encoding="utf-8"))
+    assert heartbeat["verdict"]["state"] == "TRIPPED"
+    assert heartbeat["last_healthy_at"] == NOW.isoformat()
+    backend["ready"] = True
+    clock.advance(10.0)
+    assert restarted.tick().state is WatchdogState.HEALTHY
+
+
+def test_r1_1b_a_restart_with_a_recent_prior_healthy_restores_the_interval(tmp_path: Path) -> None:
+    clock = _Clock()
+    backend = {"live": True, "ready": True}
+    first = _watchdog(tmp_path, clock, backend)
+    first.tick()
+    first.close()
+    backend["ready"] = False
+    clock.advance(60.0)  # the old process died; 60 s of the 90 s deadline already elapsed
+    restarted = _watchdog(tmp_path, clock, backend)
+    assert restarted.tick().state is WatchdogState.HEALTHY  # 60 s since HEALTHY, under 90
+    clock.advance(29.0)
+    assert restarted.tick().state is WatchdogState.HEALTHY
+    clock.advance(1.0)  # 90 s since the prior HEALTHY, counted across the restart
+    assert restarted.tick().state is WatchdogState.TRIPPED
+
+
+def test_r1_1c_a_prior_heartbeat_whose_healthy_is_already_stale_starts_tripped(
+    tmp_path: Path,
+) -> None:
+    clock = _Clock()
+    ops = tmp_path / "ops"
+    ops.mkdir()
+    stale = {
+        "last_healthy_at": (NOW - timedelta(seconds=500)).isoformat(),
+        "last_observed_at": (NOW - timedelta(seconds=5)).isoformat(),
+        "monotonic": 4_995.0,
+        "pid": 1,
+        "version": "0.1.0",
+        "verdict": {"state": "HEALTHY", "reason": "lying", "since": None, "evidence_path": "x"},
+    }
+    path = ops / HEARTBEAT
+    path.write_text(json.dumps(stale), encoding="utf-8")
+    path.chmod(0o600)
+    dog = _watchdog(tmp_path, clock, {"live": True, "ready": False})
+    verdict = dog.tick()
+    assert verdict.state is WatchdogState.TRIPPED
+    assert verdict.since == NOW - timedelta(seconds=500)
+
+
+def test_r1_2a_a_hardlinked_evidence_log_is_refused_and_the_other_name_untouched(
+    tmp_path: Path,
+) -> None:
+    """P1 capability: at 50ad133 S_ISREG passed and the tick appended into the sentinel."""
+
+    clock = _Clock()
+    ops = tmp_path / "ops"
+    ops.mkdir()
+    sentinel = tmp_path / "sentinel.jsonl"
+    sentinel.write_text("SENTINEL\n", encoding="utf-8")
+    sentinel.chmod(0o600)
+    os.link(sentinel, ops / EVIDENCE_LOG)
+    dog = _watchdog(tmp_path, clock, {"live": True, "ready": True})
+    with pytest.raises(WatchdogEvidenceError, match="2 links"):
+        dog.tick()
+    assert sentinel.read_text(encoding="utf-8") == "SENTINEL\n"
+    assert not (ops / HEARTBEAT).exists(), "nothing is published after a refused append"
+
+
+def test_r1_2b_a_symlinked_ancestor_is_refused_and_nothing_is_created_outside(
+    tmp_path: Path,
+) -> None:
+    clock = _Clock()
+    real = tmp_path / "real"
+    real.mkdir()
+    (tmp_path / "link").symlink_to(real)
+    with pytest.raises(WatchdogEvidenceError, match="symlink"):
+        Watchdog(
+            probe=_probe(clock, {"live": True, "ready": True}),  # type: ignore[arg-type]
+            interval_s=10.0,
+            deadline_s=90.0,
+            evidence_dir=tmp_path / "link" / "ops",
+            clock=clock.now,
+            timer=clock.monotonic,
+        )
+    assert list(real.iterdir()) == [], "the walk stopped at the link; nothing was created"
+    assert not (tmp_path / "link" / "ops").exists()
+
+
+def test_r1_2c_a_name_swap_between_the_check_and_the_write_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = _Clock()
+    dog = _watchdog(tmp_path, clock, {"live": True, "ready": True})
+    ops = tmp_path / "ops"
+    dog.tick()  # creates the log and the heartbeat
+    decoy = tmp_path / "decoy.jsonl"
+    decoy.write_text("DECOY\n", encoding="utf-8")
+    decoy.chmod(0o600)
+    real_write = os.write
+
+    def swapping_write(fd: int, data: bytes, *args: object) -> int:
+        if os.fstat(fd).st_size > 0 and not decoy.exists():  # only the log append, once
+            return real_write(fd, data)
+        if decoy.exists():
+            os.replace(decoy, ops / EVIDENCE_LOG)  # the name now designates another inode
+        return real_write(fd, data)
+
+    monkeypatch.setattr(os, "write", swapping_write)
+    clock.advance(10.0)
+    with pytest.raises(WatchdogEvidenceError, match="replaced"):
+        dog.tick()
+    monkeypatch.undo()
+    assert (ops / EVIDENCE_LOG).read_text(encoding="utf-8") == "DECOY\n", (
+        "the decoy was not written"
+    )
+
+
+def test_r1_2d_loose_or_foreign_evidence_entries_are_refused_typed(tmp_path: Path) -> None:
+    clock = _Clock()
+    ops = tmp_path / "ops"
+    ops.mkdir()
+    (ops / EVIDENCE_LOG).write_text("", encoding="utf-8")
+    (ops / EVIDENCE_LOG).chmod(0o644)
+    dog = _watchdog(tmp_path, clock, {"live": True, "ready": True})
+    with pytest.raises(WatchdogEvidenceError, match="mode"):
+        dog.tick()
+    (ops / EVIDENCE_LOG).chmod(0o600)
+    (ops / HEARTBEAT).write_text("{}", encoding="utf-8")
+    (ops / HEARTBEAT).chmod(0o600)
+    with pytest.raises(WatchdogEvidenceError, match="malformed"):
+        _watchdog(tmp_path, clock, {"live": True, "ready": True})
+    os.link(ops / HEARTBEAT, tmp_path / "other-name.json")
+    with pytest.raises(WatchdogEvidenceError, match="2 links"):
+        _watchdog(tmp_path, clock, {"live": True, "ready": True})
+
+
+def test_r1_2e_the_evidence_files_are_created_private_and_the_dir_fd_is_retained(
+    tmp_path: Path,
+) -> None:
+    clock = _Clock()
+    dog = _watchdog(tmp_path, clock, {"live": True, "ready": True})
+    dog.tick()
+    ops = tmp_path / "ops"
+    for name in (EVIDENCE_LOG, HEARTBEAT):
+        st = (ops / name).lstat()
+        assert stat.S_ISREG(st.st_mode) and stat.S_IMODE(st.st_mode) == 0o600 and st.st_nlink == 1
+    assert dog.directory_fd >= 0
+    dog.close()
+    with pytest.raises(WatchdogEvidenceError, match="closed"):
+        dog.tick()
+
+
+def _starved_write(monkeypatch: pytest.MonkeyPatch, *, skip_calls: int = 0) -> None:
+    """os.write that persists HALF of one call, then accepts nothing (a disk that stops)."""
+
+    real_write = os.write
+    state = {"calls": 0, "starved": False}
+
+    def starving(fd: int, data: bytes, *args: object) -> int:
+        state["calls"] += 1
+        if state["calls"] <= skip_calls:
+            return real_write(fd, data)
+        if state["starved"]:
+            return 0
+        state["starved"] = True
+        half = max(1, len(data) // 2)
+        return real_write(fd, bytes(data[:half]))
+
+    monkeypatch.setattr(os, "write", starving)
+
+
+def test_r1_3a_a_short_log_write_raises_typed_and_publishes_no_heartbeat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P2: at 50ad133 the return value of os.write was ignored and a half-written heartbeat
+    was published as success."""
+
+    clock = _Clock()
+    dog = _watchdog(tmp_path, clock, {"live": True, "ready": True})
+    dog.tick()
+    ops = tmp_path / "ops"
+    before = (ops / HEARTBEAT).read_bytes()
+    _starved_write(monkeypatch)  # the first os.write of the tick is the log append
+    clock.advance(10.0)
+    with pytest.raises(WatchdogEvidenceError, match="short write"):
+        dog.tick()
+    monkeypatch.undo()
+    assert (ops / HEARTBEAT).read_bytes() == before, "the previous heartbeat stays"
+    assert [p.name for p in ops.iterdir()] == sorted([EVIDENCE_LOG, HEARTBEAT]) or set(
+        p.name for p in ops.iterdir()
+    ) == {EVIDENCE_LOG, HEARTBEAT}
+
+
+def test_r1_3b_a_short_heartbeat_write_keeps_the_previous_heartbeat_byte_identical(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = _Clock()
+    dog = _watchdog(tmp_path, clock, {"live": True, "ready": True})
+    dog.tick()
+    ops = tmp_path / "ops"
+    before = (ops / HEARTBEAT).read_bytes()
+    lines_before = len(_lines(ops / EVIDENCE_LOG))
+    _starved_write(monkeypatch, skip_calls=1)  # the log append succeeds; the heartbeat temp starves
+    clock.advance(10.0)
+    with pytest.raises(WatchdogEvidenceError, match="short write"):
+        dog.tick()
+    monkeypatch.undo()
+    assert (ops / HEARTBEAT).read_bytes() == before
+    assert json.loads(before)["verdict"]["state"] == "HEALTHY"
+    assert len(_lines(ops / EVIDENCE_LOG)) == lines_before + 1, "the observation was recorded"
+    assert {p.name for p in ops.iterdir()} == {EVIDENCE_LOG, HEARTBEAT}, "no temp survives"
+
+
+def test_r1_4_the_runbook_third_layer_is_host_push_receive_only_and_never_pulls() -> None:
+    runbook = (ROOT / "docs" / "ops" / "WATCHDOG.md").read_text(encoding="utf-8")
+    lowered = runbook.lower()
+    for tool in ("scp", "rsync", "ssh "):
+        assert tool not in lowered, f"the runbook must not instruct a {tool.strip()} pull"
+    assert "never pulls" in runbook
+    assert "receive-only" in lowered
+    assert "no chronos-host credential" in lowered or "holds no credential" in lowered
+    assert "DESIGN-alert-sidecar.md" in runbook
+
+
+def test_r1_2f_deadman_walks_to_the_heartbeat_without_following_a_symlinked_ancestor(
+    tmp_path: Path,
+) -> None:
+    clock = _Clock()
+    real = tmp_path / "real"
+    real.mkdir()
+    _heartbeat(real / HEARTBEAT, clock, age_s=1.0)
+    (tmp_path / "link").symlink_to(real)
+    verdict = check_deadman(
+        tmp_path / "link" / HEARTBEAT, 180.0, clock=clock.now, timer=clock.monotonic
+    )
+    assert verdict.state is DeadmanState.DEAD
+    assert "symlink" in verdict.reason
+
+
 # ------------------------------------------------------------------ 2. the dead-man check
 
 
@@ -485,9 +760,14 @@ def test_3a_watchdog_once_records_one_observation_and_exits_by_what_it_saw(
     assert len(_lines(ops / EVIDENCE_LOG)) == 1
     assert json.loads((ops / HEARTBEAT).read_text(encoding="utf-8"))["pid"] == os.getpid()
     backend["ready"] = False
+    # the prior heartbeat (seconds old, HEALTHY) is restored: not HEALTHY now, under the deadline
     assert watchdog_main(argv, transport=httpx.MockTransport(handler)) == 1
     lines = _lines(ops / EVIDENCE_LOG)
     assert len(lines) == 2 and lines[-1]["state"] == "UNHEALTHY"
+    fresh = [*argv[:-2], str(tmp_path / "fresh-ops"), "--once"]
+    assert watchdog_main(fresh, transport=httpx.MockTransport(handler)) == 2, (
+        "no prior HEALTHY: TRIPPED"
+    )
 
 
 def test_3b_watchdog_cli_refuses_bad_configuration_typed(

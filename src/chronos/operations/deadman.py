@@ -13,10 +13,12 @@ value precedes this process's timer (another boot, or another host — CLOCK_MON
 comparable only within one boot of one host), or the heartbeat is from the future beyond a
 small tolerance. UNKNOWN is not ALIVE; it exits 3 so an operator looks.
 
-The heartbeat is opened by descriptor with ``O_NOFOLLOW|O_NONBLOCK`` and must be a regular
-file (``fstat``): a planted symlink is refused (never followed, even to a fresh file), a
-planted FIFO is refused instead of blocking the check, a directory is refused. Reads are
-bounded to 64 KiB.
+The heartbeat's directory is reached by an ``O_NOFOLLOW`` component walk (a symlinked
+ancestor is a typed DEAD, never followed — round 1) and the entry is opened relative to
+that directory with ``O_NOFOLLOW|O_NONBLOCK`` and must be a regular file (``fstat``): a
+planted symlink is refused (never followed, even to a fresh file), a planted FIFO is
+refused instead of blocking the check, a directory is refused. Reads are bounded to 64
+KiB. The check creates nothing on the way.
 """
 
 from __future__ import annotations
@@ -78,18 +80,66 @@ def _describe(error: OSError) -> str:
         errno.ELOOP: "is a symlink (refused, never followed)",
         errno.EISDIR: "is a directory",
         errno.ENXIO: "is a fifo (refused, never blocked on)",
+        errno.ENOTDIR: "is not a directory",
     }.get(error.errno or 0, error.strerror or type(error).__name__)
+
+
+def _component_problem(descriptor: int, component: str, error: OSError) -> str:
+    """Name the refused component honestly: a link is reported as a link, not as ENOTDIR."""
+
+    try:
+        found = os.stat(component, dir_fd=descriptor, follow_symlinks=False)
+    except OSError:
+        return _describe(error)
+    if stat.S_ISLNK(found.st_mode):
+        return "is a symlink (refused, never followed)"
+    return _describe(error)
+
+
+_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | _CLOEXEC | _NOFOLLOW
+
+
+def _open_parent(path: Path) -> tuple[int | None, str | None]:
+    """Walk to the heartbeat's directory component by component, O_NOFOLLOW at every step.
+
+    A reader creates nothing: a missing or symlinked component is a typed DEAD reason.
+    """
+
+    absolute = path if path.is_absolute() else Path.cwd() / path
+    descriptor = os.open(os.sep, _DIR_FLAGS)
+    try:
+        for component in absolute.parent.parts[1:]:
+            try:
+                child = os.open(component, _DIR_FLAGS, dir_fd=descriptor)
+            except FileNotFoundError:
+                os.close(descriptor)
+                return None, "heartbeat absent (its directory does not exist)"
+            except OSError as error:
+                problem = _component_problem(descriptor, component, error)
+                os.close(descriptor)
+                return None, f"heartbeat unreachable: component {component!r} {problem}"
+            os.close(descriptor)
+            descriptor = child
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor, None
 
 
 def _read_heartbeat(path: Path) -> tuple[bytes | None, str | None]:
     """The heartbeat's bytes, or the typed reason they could not be read."""
 
+    parent_fd, unreachable = _open_parent(path)
+    if parent_fd is None:
+        return None, unreachable
     try:
-        fd = os.open(path, _ENTRY_FLAGS)
+        fd = os.open(path.name, _ENTRY_FLAGS, dir_fd=parent_fd)
     except FileNotFoundError:
         return None, "heartbeat absent"
     except OSError as error:
         return None, f"heartbeat unreadable: {_describe(error)}"
+    finally:
+        os.close(parent_fd)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             return None, (
