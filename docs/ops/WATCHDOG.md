@@ -160,9 +160,9 @@ publication the name is checked against the inode that was written.
 Once the new file has been swapped onto the name, the entry it displaced has exactly three
 fates: it is the heartbeat validated before the write and is dropped (the normal tick); it
 is something else and is swapped back and left in place (refused, nothing published); or it
-has vanished — then the watchdog cannot prove what it displaced, so it withdraws its own
-fresh record (and only its own: the withdrawal is identity-bound, a foreign entry at the name
-is left in place) and exits 3. A refused tick therefore never leaves a current-looking
+has vanished — then the watchdog cannot prove what it displaced, so its own fresh
+record is withdrawn (and only its own: the withdrawal is identity-bound, a foreign entry at the
+name is left in place) and it exits 3. A refused tick therefore never leaves a current-looking
 heartbeat behind: the dead-man reads an absent file as `DEAD`, not a fresh one as `ALIVE`.
 
 **The crash boundary that remains.** A writer that dies AFTER a clean publication is
