@@ -23,8 +23,15 @@ is read: a recorded TRIPPED, or a ``last_healthy_at`` already ``deadline_s`` beh
 prior ``last_observed_at``, starts this instance TRIPPED until a real HEALTHY observation;
 a recent prior HEALTHY is carried over as the deadline's anchor (the interval since it is
 restored once, by the wall clock, at construction — never shorter than the prior evidence
-itself shows). A restart can therefore never turn an outage HEALTHY. The compare is
-``>=``: the deadline itself trips, one tick before does not.
+itself shows). A restart can therefore never turn an outage HEALTHY. Continuity (round 2):
+the heartbeat records the kernel's boot_id and the monotonic value of the last HEALTHY
+observation; a restart under the same boot whose prior monotonic values do not lie
+ahead of this timer anchors the deadline on THAT value (the longest of the monotonic,
+wall and prior-file accounts wins — no clock may shorten an outage); a different boot,
+a missing boot_id or non-comparable values leave continuity unproven and the instance
+starts TRIPPED until a real HEALTHY observation. The deadline is never rebuilt from
+wall time alone. The compare is ``>=``: the deadline itself trips, one tick before does
+not.
 
 Evidence files are capability entries (round 1), written the way the audit log writes its
 anchor — the pattern is copied, the module is not imported. The evidence directory is
@@ -33,9 +40,13 @@ ancestor is refused; missing components are created 0700), and its descriptor is
 every open, create, replace and fsync is descriptor-relative. An existing entry must be a
 regular file owned by this process's effective user with exactly one link and mode 0600 —
 a hardlink, a symlink, a FIFO, a looser mode or a foreign owner is refused, typed, and
-nothing is written. Every write loops until all bytes are accepted or raises; after a
-publication the name is re-checked against the inode that was written (a swap between the
-check and the write is refused). When evidence cannot be written the tick raises
+nothing is written. Every write loops until all bytes are accepted or raises. Publication
+(round 2) is an atomic envelope: an absent name is filled with ``renameat2(RENAME_NOREPLACE)``
+(an entry that appeared in the window is refused, left in place); a present name is swapped
+with ``RENAME_EXCHANGE`` and the DISPLACED entry is judged before it is dropped — only the
+inode validated before the write is unlinked; anything else is swapped back and refused.
+The watchdog never deletes an entry it did not validate. After a publication the name is
+re-checked against the inode that was written. When evidence cannot be written the tick raises
 ``WatchdogEvidenceError`` and the process exits 3: a watchdog that cannot record is not a
 watchdog, and its stale heartbeat is exactly what the dead-man layer trips on.
 """
@@ -44,11 +55,13 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import ctypes
 import errno
 import functools
 import json
 import math
 import os
+import re
 import stat
 import sys
 import time
@@ -85,6 +98,14 @@ _TEMP_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _CLOEXEC | _NOFOLLOW | _NON
 # A prior heartbeat read at construction: no-follow, non-blocking, regular files only.
 _ENTRY_FLAGS = os.O_RDONLY | _CLOEXEC | _NOFOLLOW | _NONBLOCK
 _MAX_HEARTBEAT_BYTES = 64 * 1024
+#: The kernel's boot identity: a heartbeat's monotonic value is comparable with this
+#: process's timer only when both were taken under the same boot (r2, continuity).
+_BOOT_ID_PATH = Path("/proc/sys/kernel/random/boot_id")
+_BOOT_ID_FORM = re.compile(r"[0-9A-Za-z-]{1,64}")
+#: renameat2(2) flags: publish only where nothing is (NOREPLACE), or exchange two names
+#: atomically (EXCHANGE) so the displaced entry can be judged before it is dropped.
+_RENAME_NOREPLACE = 1
+_RENAME_EXCHANGE = 2
 
 
 class _Model(BaseModel):
@@ -150,6 +171,35 @@ def _positive_finite(name: str, value: float) -> float:
 
 def _identity(metadata: os.stat_result) -> tuple[int, int]:
     return (metadata.st_dev, metadata.st_ino)
+
+
+def _read_boot_id() -> str:
+    """The running kernel's boot_id, read once; unreadable or malformed is a typed refusal."""
+
+    try:
+        raw = _BOOT_ID_PATH.read_text(encoding="ascii").strip()
+    except (OSError, UnicodeDecodeError) as error:
+        raise WatchdogEvidenceError(
+            _BOOT_ID_PATH, f"boot identity unreadable: {type(error).__name__}: {error}"
+        ) from error
+    if not _BOOT_ID_FORM.fullmatch(raw):
+        raise WatchdogEvidenceError(_BOOT_ID_PATH, "boot identity malformed")
+    return raw
+
+
+def _renameat2(src_dir_fd: int, src: str, dst_dir_fd: int, dst: str, flags: int) -> None:
+    """renameat2(2) through libc (Linux). Raises OSError with the syscall's errno."""
+
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        call = libc.renameat2
+    except (OSError, AttributeError) as error:
+        raise OSError(errno.ENOSYS, "renameat2 is not available in this libc") from error
+    call.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)
+    call.restype = ctypes.c_int
+    if call(src_dir_fd, os.fsencode(src), dst_dir_fd, os.fsencode(dst), flags) != 0:
+        code = ctypes.get_errno()
+        raise OSError(code, os.strerror(code))
 
 
 def _require_owned_regular(metadata: os.stat_result, subject: Path) -> None:
@@ -225,6 +275,42 @@ def _open_evidence_directory(named: Path) -> tuple[int, Path]:
     return descriptor, absolute
 
 
+class _PriorHeartbeat:
+    """What the prior heartbeat proves, as read at construction."""
+
+    __slots__ = (
+        "boot_id",
+        "last_healthy_at",
+        "last_healthy_monotonic",
+        "last_observed_at",
+        "monotonic",
+        "tripped",
+    )
+
+    def __init__(
+        self,
+        *,
+        last_healthy_at: datetime | None,
+        last_observed_at: datetime,
+        tripped: bool,
+        boot_id: str | None,
+        monotonic: float | None,
+        last_healthy_monotonic: float | None,
+    ) -> None:
+        self.last_healthy_at = last_healthy_at
+        self.last_observed_at = last_observed_at
+        self.tripped = tripped
+        self.boot_id = boot_id
+        self.monotonic = monotonic
+        self.last_healthy_monotonic = last_healthy_monotonic
+
+
+def _finite_or_none(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value):
+        return None
+    return float(value)
+
+
 class Watchdog:
     """One watch: a probe, an interval, an outer deadline, an evidence directory.
 
@@ -243,9 +329,11 @@ class Watchdog:
         timer: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
         pid: int | None = None,
+        boot_id: str | None = None,
     ) -> None:
         self._interval_s = _positive_finite("interval_s", interval_s)
         self._deadline_s = _positive_finite("deadline_s", deadline_s)
+        self._boot_id = _read_boot_id() if boot_id is None else boot_id
         self._probe = probe
         self._clock = clock
         self._timer = timer
@@ -257,6 +345,7 @@ class Watchdog:
         self._last_healthy_monotonic: float | None = None
         self._last_healthy_at: datetime | None = None
         self._prior_tripped = False
+        self._continuity_unproven: str | None = None
         self._temp_counter = 0
         self.last_observation: ExternalProbeState | None = None
         try:
@@ -313,6 +402,7 @@ class Watchdog:
             self._last_healthy_monotonic = observed_monotonic
             self._last_healthy_at = report.assessed_at
             self._prior_tripped = False
+            self._continuity_unproven = None
         verdict = self._judge(observed_monotonic)
         self._append_observation(
             report, elapsed_ms=elapsed_ms, monotonic=observed_monotonic, verdict=verdict
@@ -354,6 +444,11 @@ class Watchdog:
                 reason = (
                     "tripped before this process started (prior heartbeat) and no HEALTHY "
                     f"observation since ({deadline})"
+                )
+            elif self._continuity_unproven is not None:
+                reason = (
+                    f"continuity across restart unproven ({self._continuity_unproven}); the "
+                    f"prior HEALTHY cannot anchor this deadline ({deadline})"
                 )
             else:
                 reason = f"no HEALTHY observation has ever been recorded ({deadline})"
@@ -409,25 +504,43 @@ class Watchdog:
             ) from error
         finally:
             os.close(descriptor)
-        last_healthy_at, last_observed_at, tripped = self._parse_prior(raw)
-        if tripped:
+        prior = self._parse_prior(raw)
+        if prior.tripped:
             self._prior_tripped = True
-            self._last_healthy_at = last_healthy_at
+            self._last_healthy_at = prior.last_healthy_at
             return
-        if last_healthy_at is None:
+        if prior.last_healthy_at is None:
             return  # a prior watchdog that never saw HEALTHY: still nothing to certify
-        prior_silence_s = (last_observed_at - last_healthy_at).total_seconds()
+        prior_silence_s = (prior.last_observed_at - prior.last_healthy_at).total_seconds()
         if prior_silence_s >= self._deadline_s:
             self._prior_tripped = True
-            self._last_healthy_at = last_healthy_at
+            self._last_healthy_at = prior.last_healthy_at
             return
-        # Carry the prior HEALTHY over as the anchor. The interval since it is restored by
-        # the wall clock once, here, and never shorter than the prior evidence itself shows.
-        since_healthy_s = max(prior_silence_s, (self._clock() - last_healthy_at).total_seconds())
-        self._last_healthy_at = last_healthy_at
-        self._last_healthy_monotonic = self._timer() - since_healthy_s
+        # Continuity (r2): the prior monotonic values are comparable with this timer only
+        # under the same boot and only if they do not lie ahead of it. Without that proof
+        # the deadline cannot be reconstructed — not from the wall clock alone — and the
+        # instance starts TRIPPED until a real HEALTHY observation.
+        now_monotonic = self._timer()
+        same_boot = prior.boot_id is not None and prior.boot_id == self._boot_id
+        comparable = (
+            prior.last_healthy_monotonic is not None
+            and prior.monotonic is not None
+            and prior.last_healthy_monotonic <= prior.monotonic <= now_monotonic
+        )
+        self._last_healthy_at = prior.last_healthy_at
+        if not (same_boot and comparable):
+            self._continuity_unproven = (
+                "boot changed" if not same_boot else "prior monotonic evidence not comparable"
+            )
+            return
+        assert prior.last_healthy_monotonic is not None  # narrowed by `comparable`
+        monotonic_silence_s = now_monotonic - prior.last_healthy_monotonic
+        wall_silence_s = (self._clock() - prior.last_healthy_at).total_seconds()
+        # Neither clock may shorten an outage: the longest account wins.
+        since_healthy_s = max(monotonic_silence_s, wall_silence_s, prior_silence_s)
+        self._last_healthy_monotonic = now_monotonic - since_healthy_s
 
-    def _parse_prior(self, raw: bytes) -> tuple[datetime | None, datetime, bool]:
+    def _parse_prior(self, raw: bytes) -> _PriorHeartbeat:
         def malformed(detail: str) -> WatchdogEvidenceError:
             return WatchdogEvidenceError(
                 self._heartbeat_path, f"prior heartbeat is malformed: {detail}"
@@ -459,7 +572,17 @@ class Watchdog:
         for value in (last_observed_at, last_healthy_at):
             if value is not None and value.utcoffset() is None:
                 raise malformed("a timestamp carries no timezone")
-        return last_healthy_at, last_observed_at, verdict["state"] == WatchdogState.TRIPPED.value
+        boot_id = document.get("boot_id")
+        if not (boot_id is None or (isinstance(boot_id, str) and _BOOT_ID_FORM.fullmatch(boot_id))):
+            raise malformed("boot_id is not a boot identity")
+        return _PriorHeartbeat(
+            last_healthy_at=last_healthy_at,
+            last_observed_at=last_observed_at,
+            tripped=verdict["state"] == WatchdogState.TRIPPED.value,
+            boot_id=boot_id,
+            monotonic=_finite_or_none(document.get("monotonic")),
+            last_healthy_monotonic=_finite_or_none(document.get("last_healthy_monotonic")),
+        )
 
     # ------------------------------------------------------------------ the evidence files
 
@@ -548,9 +671,11 @@ class Watchdog:
         if found is not None:
             _require_owned_regular(found, self._heartbeat_path)
         document = {
+            "boot_id": self._boot_id,
             "last_healthy_at": (
                 None if self._last_healthy_at is None else self._last_healthy_at.isoformat()
             ),
+            "last_healthy_monotonic": self._last_healthy_monotonic,
             "last_observed_at": observed_at.isoformat(),
             "monotonic": monotonic,
             "pid": self._pid,
@@ -573,12 +698,13 @@ class Watchdog:
                 written = _identity(os.fstat(descriptor))
             finally:
                 os.close(descriptor)
-            os.replace(temp_name, HEARTBEAT, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+            self._publish(temp_name, validated=None if found is None else _identity(found))
             os.fsync(dir_fd)
             named = os.stat(HEARTBEAT, dir_fd=dir_fd, follow_symlinks=False)
-        except WatchdogEvidenceError:
-            with contextlib.suppress(OSError):
-                os.unlink(temp_name, dir_fd=dir_fd)
+        except WatchdogEvidenceError as refusal:
+            if "swap back failed" not in refusal.reason:  # then the temp name holds OUR bytes
+                with contextlib.suppress(OSError):
+                    os.unlink(temp_name, dir_fd=dir_fd)
             raise
         except OSError as error:
             with contextlib.suppress(OSError):
@@ -590,6 +716,64 @@ class Watchdog:
                 "was replaced during publication; the name no longer designates the inode "
                 "that was written",
             )
+
+    def _publish(self, temp_name: str, *, validated: tuple[int, int] | None) -> None:
+        """Move the temp to the heartbeat name without ever displacing an entry that was
+        not validated (r2, Daybreak P1).
+
+        Absent name: RENAME_NOREPLACE — an entry that appeared in the window makes the
+        rename fail EEXIST and is refused, left in place. Present name: RENAME_EXCHANGE
+        swaps the two names atomically, then the DISPLACED entry, now at the temp name, is
+        judged no-follow: the identity validated before the write → it is unlinked (the
+        old heartbeat); anything else → swapped back, the temp unlinked, typed refusal —
+        the planted entry survives at the name and nothing is published.
+        """
+
+        dir_fd = self._require_open()
+        if validated is None:
+            try:
+                _renameat2(dir_fd, temp_name, dir_fd, HEARTBEAT, _RENAME_NOREPLACE)
+            except FileExistsError as error:
+                raise WatchdogEvidenceError(
+                    self._heartbeat_path,
+                    "an entry appeared during publication where none was validated; refused "
+                    "and left in place",
+                ) from error
+            except OSError as error:
+                raise WatchdogEvidenceError(
+                    self._heartbeat_path, f"atomic publication unavailable: {_describe(error)}"
+                ) from error
+            return
+        try:
+            _renameat2(dir_fd, temp_name, dir_fd, HEARTBEAT, _RENAME_EXCHANGE)
+        except OSError as error:
+            raise WatchdogEvidenceError(
+                self._heartbeat_path, f"atomic exchange unavailable: {_describe(error)}"
+            ) from error
+        try:
+            displaced = os.stat(temp_name, dir_fd=dir_fd, follow_symlinks=False)
+        except OSError as error:
+            raise WatchdogEvidenceError(
+                self._heartbeat_path,
+                f"displaced entry vanished mid-publication: {_describe(error)}",
+            ) from error
+        if _identity(displaced) == validated:
+            os.unlink(temp_name, dir_fd=dir_fd)  # the old, validated heartbeat: dropped
+            return
+        try:
+            _renameat2(dir_fd, temp_name, dir_fd, HEARTBEAT, _RENAME_EXCHANGE)  # swap back
+        except OSError as error:
+            raise WatchdogEvidenceError(
+                self._heartbeat_path,
+                "replaced during publication AND the swap back failed: the new heartbeat "
+                f"sits at the name and the foreign entry at {temp_name} ({_describe(error)}); "
+                "nothing was deleted — operator attention",
+            ) from error
+        raise WatchdogEvidenceError(
+            self._heartbeat_path,
+            "replaced during publication: the entry at the name was not the one validated; "
+            "it was left in place and nothing was published",
+        )
 
 
 # ---------------------------------------------------------------------- the CLI

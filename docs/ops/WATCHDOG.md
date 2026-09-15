@@ -123,9 +123,29 @@ and what its outbound alert channel is are Kevin's decisions (design §"Open own
 **A restart cannot turn an outage HEALTHY.** On start the watchdog reads the existing
 `heartbeat.json`: a recorded `TRIPPED`, or a `last_healthy_at` already `--deadline` behind
 the prior `last_observed_at`, starts the new process `TRIPPED` until a real HEALTHY
-observation; a recent prior HEALTHY is carried over as the deadline's anchor, so the
-interval keeps counting across the restart. A watchdog that has never seen HEALTHY at all
-publishes `TRIPPED` on a non-HEALTHY tick — it has nothing to certify.
+observation. A watchdog that has never seen HEALTHY at all publishes `TRIPPED` on a
+non-HEALTHY tick — it has nothing to certify.
+
+**A restart on the same boot keeps the original deadline.** The heartbeat records the
+kernel's `boot_id` and the monotonic time of the last HEALTHY observation. When the new
+process runs under the same boot and those monotonic values do not lie ahead of its own
+timer, the deadline is anchored on that recorded monotonic value — the outage keeps
+counting exactly where it was, and a wall clock that stepped backwards in between cannot
+shorten it (the longest of the monotonic, wall and prior-file accounts wins). The deadline
+is never rebuilt from wall time alone.
+
+**A different boot starts TRIPPED.** When the `boot_id` differs, is missing, or the prior
+monotonic values cannot be compared with this timer, continuity is unproven: the new
+process starts `TRIPPED` and stays so until a real HEALTHY observation. A reboot therefore
+never hands the backend a fresh grace period.
+
+**A foreign entry at the heartbeat name is refused and left in place.** Publication is an
+atomic envelope: an absent name is filled only if it is still absent; a present name is
+swapped atomically with the new file and the displaced entry is judged before it is
+dropped — only the heartbeat validated before the write is ever deleted. A symlink,
+hardlink, FIFO or loose file that appears at the name in between is swapped back, left in
+place, reported with a typed error, and nothing is published; the operator sees the planted
+entry as evidence of tampering.
 
 **Evidence entries are capabilities.** The evidence directory is reached component by
 component without following links (a symlinked ancestor is refused and nothing is created
