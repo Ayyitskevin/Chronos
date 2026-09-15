@@ -45,8 +45,11 @@ nothing is written. Every write loops until all bytes are accepted or raises. Pu
 (an entry that appeared in the window is refused, left in place); a present name is swapped
 with ``RENAME_EXCHANGE`` and the DISPLACED entry is judged before it is dropped — only the
 inode validated before the write is unlinked; anything else is swapped back and refused.
-The watchdog never deletes an entry it did not validate. After a publication the name is
-re-checked against the inode that was written. When evidence cannot be written the tick raises
+The watchdog never deletes an entry it did not validate. Every branch after the exchange is
+settled before a raise (round 3): a displaced entry that vanishes makes the watchdog
+withdraw its own fresh record — identity-bound, so a foreign entry at the name is left in
+place — leaving no heartbeat rather than one the dead-man would read as proof of life.
+After a publication the name is re-checked against the inode that was written. When evidence cannot be written the tick raises
 ``WatchdogEvidenceError`` and the process exits 3: a watchdog that cannot record is not a
 watchdog, and its stale heartbeat is exactly what the dead-man layer trips on.
 """
@@ -131,12 +134,18 @@ class WatchdogConfigurationError(ValueError):
 
 
 class WatchdogEvidenceError(RuntimeError):
-    """The evidence directory refused a write; the observation was NOT recorded there."""
+    """The evidence directory refused a write; the observation was NOT recorded there.
 
-    def __init__(self, path: Path, reason: str) -> None:
+    ``temp_holds_foreign`` is set when the refusal left an entry that is NOT ours at the
+    temp name (a failed swap back, or a withdrawal that could not restore a foreign entry):
+    the caller must then not unlink the temp name — nothing foreign is ever deleted.
+    """
+
+    def __init__(self, path: Path, reason: str, *, temp_holds_foreign: bool = False) -> None:
         super().__init__(f"{path}: {reason}")
         self.path = path
         self.reason = reason
+        self.temp_holds_foreign = temp_holds_foreign
 
 
 def _describe(error: OSError) -> str:
@@ -698,11 +707,13 @@ class Watchdog:
                 written = _identity(os.fstat(descriptor))
             finally:
                 os.close(descriptor)
-            self._publish(temp_name, validated=None if found is None else _identity(found))
+            self._publish(
+                temp_name, validated=None if found is None else _identity(found), written=written
+            )
             os.fsync(dir_fd)
             named = os.stat(HEARTBEAT, dir_fd=dir_fd, follow_symlinks=False)
         except WatchdogEvidenceError as refusal:
-            if "swap back failed" not in refusal.reason:  # then the temp name holds OUR bytes
+            if not refusal.temp_holds_foreign:  # then the temp name holds OUR bytes, or nothing
                 with contextlib.suppress(OSError):
                     os.unlink(temp_name, dir_fd=dir_fd)
             raise
@@ -717,16 +728,22 @@ class Watchdog:
                 "that was written",
             )
 
-    def _publish(self, temp_name: str, *, validated: tuple[int, int] | None) -> None:
+    def _publish(
+        self, temp_name: str, *, validated: tuple[int, int] | None, written: tuple[int, int]
+    ) -> None:
         """Move the temp to the heartbeat name without ever displacing an entry that was
-        not validated (r2, Daybreak P1).
+        not validated (r2, Daybreak P1), and settle every branch after the exchange (r3).
 
         Absent name: RENAME_NOREPLACE — an entry that appeared in the window makes the
         rename fail EEXIST and is refused, left in place. Present name: RENAME_EXCHANGE
-        swaps the two names atomically, then the DISPLACED entry, now at the temp name, is
-        judged no-follow: the identity validated before the write → it is unlinked (the
-        old heartbeat); anything else → swapped back, the temp unlinked, typed refusal —
-        the planted entry survives at the name and nothing is published.
+        swaps the two names atomically, then the DISPLACED entry, now at the temp name, has
+        exactly three outcomes, each settled before any raise: (i) the identity validated
+        before the write → it is unlinked (the old heartbeat), success; (ii) anything else
+        → swapped back, the temp unlinked, typed refusal — the planted entry survives at
+        the name and nothing is published; (iii) VANISHED → our fresh record must not stay
+        readable as proof of life, so it is withdrawn (``_withdraw``: identity-bound, no
+        check/unlink window) leaving NO heartbeat — the dead-man's absent state, DEAD — and
+        the typed refusal is raised.
         """
 
         dir_fd = self._require_open()
@@ -752,10 +769,17 @@ class Watchdog:
             ) from error
         try:
             displaced = os.stat(temp_name, dir_fd=dir_fd, follow_symlinks=False)
+        except FileNotFoundError as error:
+            self._withdraw(temp_name, written)
+            raise WatchdogEvidenceError(
+                self._heartbeat_path,
+                "displaced entry vanished mid-publication; our record was withdrawn and "
+                "nothing is published (the dead-man now reads an absent heartbeat)",
+            ) from error
         except OSError as error:
             raise WatchdogEvidenceError(
                 self._heartbeat_path,
-                f"displaced entry vanished mid-publication: {_describe(error)}",
+                f"displaced entry unreadable mid-publication: {_describe(error)}",
             ) from error
         if _identity(displaced) == validated:
             os.unlink(temp_name, dir_fd=dir_fd)  # the old, validated heartbeat: dropped
@@ -768,11 +792,62 @@ class Watchdog:
                 "replaced during publication AND the swap back failed: the new heartbeat "
                 f"sits at the name and the foreign entry at {temp_name} ({_describe(error)}); "
                 "nothing was deleted — operator attention",
+                temp_holds_foreign=True,
             ) from error
         raise WatchdogEvidenceError(
             self._heartbeat_path,
             "replaced during publication: the entry at the name was not the one validated; "
             "it was left in place and nothing was published",
+        )
+
+    def _withdraw(self, temp_name: str, written: tuple[int, int]) -> None:
+        """Take our fresh record off the heartbeat name, and only ours (r3).
+
+        There is no unlink-by-inode, so the withdrawal is a NOREPLACE rename of whatever
+        the name holds to the temp name (free after the displaced entry vanished), a
+        no-follow stat of THAT, and then: our inode → unlinked; anything else → moved back
+        with NOREPLACE and named in the refusal. Nothing foreign is ever deleted, and no
+        check precedes an unlink on a pathname.
+        """
+
+        dir_fd = self._require_open()
+        try:
+            _renameat2(dir_fd, HEARTBEAT, dir_fd, temp_name, _RENAME_NOREPLACE)
+        except FileNotFoundError:
+            return  # the name is already empty: nothing readable as proof of life remains
+        except FileExistsError as error:
+            raise WatchdogEvidenceError(
+                self._heartbeat_path,
+                f"withdrawal refused: an entry reappeared at {temp_name}; our record stays at "
+                "the name and nothing was deleted — operator attention",
+                temp_holds_foreign=True,
+            ) from error
+        except OSError as error:
+            raise WatchdogEvidenceError(
+                self._heartbeat_path, f"withdrawal failed: {_describe(error)}"
+            ) from error
+        try:
+            moved = os.stat(temp_name, dir_fd=dir_fd, follow_symlinks=False)
+        except OSError as error:
+            raise WatchdogEvidenceError(
+                self._heartbeat_path, f"withdrawal: the moved entry vanished ({_describe(error)})"
+            ) from error
+        if _identity(moved) == written:
+            os.unlink(temp_name, dir_fd=dir_fd)  # ours, and only ours
+            return
+        try:
+            _renameat2(dir_fd, temp_name, dir_fd, HEARTBEAT, _RENAME_NOREPLACE)
+        except OSError as error:
+            raise WatchdogEvidenceError(
+                self._heartbeat_path,
+                f"withdrawal: a foreign entry at the name was moved to {temp_name} and could "
+                f"not be moved back ({_describe(error)}); nothing was deleted — operator attention",
+                temp_holds_foreign=True,
+            ) from error
+        raise WatchdogEvidenceError(
+            self._heartbeat_path,
+            "withdrawal: the entry at the name was not the record this process wrote; it was "
+            "left in place and nothing was deleted",
         )
 
 
