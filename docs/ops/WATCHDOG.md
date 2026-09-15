@@ -167,7 +167,7 @@ before. Three rounds settled post-exchange failure branches one at a time; the l
 class: whichever branch made a tick raise, the loop exits, the lock frees, and the second
 layer sees it. The best-effort withdrawal of a vanished-displaced publication stays (our own
 record is withdrawn where it can be, identity-bound), but no per-branch settlement is claimed
-any more. **One writer per evidence directory:** a second watchdog on the same directory is
+any more. The lock proves the loop's life only when the entry satisfies the **capability contract on both sides**: the writer will not take a foreign entry, and the dead-man will not read contention on a hardlinked, foreign-owned, loose-mode, non-regular or swapped entry as liveness — it reports `DEAD` naming the failed predicate. **One writer per evidence directory:** a second watchdog on the same directory is
 refused with a typed error, so two loops can never publish over each other.
 
 **The boundary that remains.** A writer that is *alive but wedged* still holds its lock, so it

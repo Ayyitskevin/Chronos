@@ -8,8 +8,11 @@ operator, whose response is the runbook's (``docs/ops/WATCHDOG.md``).
 The verdict rule. DEAD when the heartbeat is absent, unreadable, malformed, not a regular
 file, when NO writer holds the liveness lock ``watchdog.lock`` (round 4 — the kernel releases
 it on any exit, so this input comes before any age and makes a fresh-looking heartbeat from
-an exited writer DEAD regardless), or older than ``max_age_s`` by BOTH the wall clock and the
-monotonic timer. ALIVE when
+an exited writer DEAD regardless), when the lock entry fails the capability contract the
+writer applies to it (round 5 — regular, owned by this effective uid, exactly one link, mode
+0600, and the name still designates the opened inode; contention on any other entry is not
+liveness and is reported naming the failed predicate), or older than ``max_age_s`` by BOTH
+the wall clock and the monotonic timer. ALIVE when
 both say it is within ``max_age_s``. UNKNOWN only when the clock evidence cannot be
 reasoned about: the two clocks disagree (one of them moved), the heartbeat's monotonic
 value precedes this process's timer (another boot, or another host — CLOCK_MONOTONIC is
@@ -134,13 +137,36 @@ def _open_parent(path: Path) -> tuple[int | None, str | None]:
     return descriptor, None
 
 
+def _lock_entry_problem(opened: os.stat_result, named: os.stat_result) -> str | None:
+    """The reader-side capability contract for the lock entry (round 5) — the same predicate
+    the writer's ``_require_owned_regular`` applies, mirrored here so the reader imports
+    nothing from the writer. Contention on an entry that fails it is NOT liveness: a
+    hardlinked, foreign-owned, loose-mode, non-regular or swapped entry can be locked by
+    anyone, so it proves nothing about the watchdog this reader knows.
+    """
+
+    if not stat.S_ISREG(opened.st_mode):
+        return "liveness lock is not a regular file"
+    if opened.st_uid != os.geteuid():
+        return f"liveness lock is owned by uid {opened.st_uid}, not this process's effective user"
+    if opened.st_nlink != 1:
+        return f"liveness lock has {opened.st_nlink} links; a capability entry has exactly one"
+    mode = stat.S_IMODE(opened.st_mode)
+    if mode != 0o600:
+        return f"liveness lock has mode {oct(mode)}, not 0o600"
+    if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino):
+        return "liveness lock name no longer designates the inode that was opened"
+    return None
+
+
 def _writer_holds_lock(parent_fd: int) -> tuple[bool, str | None]:
     """(True, None) when a live writer holds the liveness lock; (False, reason) otherwise.
 
-    The probe is LOCK_SH|LOCK_NB on the lock entry opened no-follow, non-blocking: EWOULDBLOCK
-    means a writer holds LOCK_EX right now; success means nobody does (released at once);
-    an absent or non-regular entry means no writer either. The kernel, not a timestamp,
-    answers — a writer that exited on any path has already let go.
+    The entry is opened no-follow, non-blocking, and must satisfy the capability contract
+    (``_lock_entry_problem``) BEFORE contention is read as liveness. Then the probe is
+    LOCK_SH|LOCK_NB: EWOULDBLOCK means a writer holds LOCK_EX right now; success means
+    nobody does (released at once); an absent entry means no writer either. The kernel,
+    not a timestamp, answers — a writer that exited on any path has already let go.
     """
 
     try:
@@ -150,8 +176,14 @@ def _writer_holds_lock(parent_fd: int) -> tuple[bool, str | None]:
     except OSError as error:
         return False, f"no writer holds the liveness lock (lock entry {_describe(error)})"
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            return False, "no writer holds the liveness lock (lock entry is not a regular file)"
+        try:
+            opened = os.fstat(fd)
+            named = os.stat(LIVENESS_LOCK, dir_fd=parent_fd, follow_symlinks=False)
+        except OSError as error:
+            return False, f"liveness lock unreadable: {_describe(error)}"
+        problem = _lock_entry_problem(opened, named)
+        if problem is not None:
+            return False, f"{problem}; contention on it is not liveness"
         try:
             fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
         except BlockingIOError:
