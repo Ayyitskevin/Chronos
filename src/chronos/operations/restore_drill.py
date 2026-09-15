@@ -1111,9 +1111,14 @@ def run_drill(
 
 def publish_envelope(temp: Path, final: Path) -> None:
     """The by-hand publication step, made mechanically exclusive: ``temp`` and ``final`` must
-    name entries of the same directory (reached by the no-follow walk); ``temp`` must be a
-    directory; the rename is ONE renameat2(RENAME_NOREPLACE) — an existing file OR directory
-    at ``final`` is a typed refusal and nothing moves — then the directory is fsynced."""
+    name entries of the same directory (reached by the no-follow walk); ``temp`` is opened
+    ``O_DIRECTORY|O_NOFOLLOW`` and its identity retained — the directory this call CHECKED;
+    the rename is ONE renameat2(RENAME_NOREPLACE) by that same name — an existing file OR
+    directory at ``final`` is a typed refusal and nothing moves — then the directory is
+    fsynced and the final name is re-proved: by lstat it must be a directory with the
+    retained identity AND the no-follow walk of the reported final path must reach it;
+    otherwise a ``published:`` refusal, never a success line (r5: a link planted at the
+    freed temp name between the check and the rename was renamed in the envelope's place)."""
 
     temp = temp if temp.is_absolute() else Path.cwd() / temp
     final = final if final.is_absolute() else Path.cwd() / final
@@ -1124,11 +1129,15 @@ def publish_envelope(temp: Path, final: Path) -> None:
     dfd, _absolute = _walk_directory(temp.parent, "envelope directory", create=False)
     try:
         try:
-            by_name = os.stat(temp.name, dir_fd=dfd, follow_symlinks=False)
+            temp_fd = os.open(temp.name, _DIR_FLAGS, dir_fd=dfd)
+        except NotADirectoryError:
+            raise DrillRefused(f"publish-envelope: {temp} is not a directory") from None
         except OSError as error:
             raise DrillRefused(f"publish-envelope: {temp} {error.strerror}") from None
-        if not stat.S_ISDIR(by_name.st_mode):
-            raise DrillRefused(f"publish-envelope: {temp} is not a directory")
+        try:
+            checked = _dir_identity(temp_fd)
+        finally:
+            os.close(temp_fd)
         try:
             _renameat2(dfd, temp.name, dfd, final.name, _RENAME_NOREPLACE)
         except FileExistsError:
@@ -1140,6 +1149,16 @@ def publish_envelope(temp: Path, final: Path) -> None:
                 f"publication of {final.name} failed: [errno {error.errno}] {error.strerror}"
             ) from None
         os.fsync(dfd)
+        if not _entry_is_real_directory(dfd, final.name, checked) or (
+            _nofollow_identity(final) != checked
+        ):
+            raise DrillRefused(
+                f"published: an entry was published at {final} but it is not the checked "
+                f"envelope (device:inode {checked[0]}:{checked[1]} by O_NOFOLLOW open before "
+                "the rename) — the temp name was replaced between the check and the rename, "
+                "or an ancestor was swapped after it; the entry at the final name is NOT a "
+                "backup: inspect it and the displaced directory by hand"
+            )
     finally:
         os.close(dfd)
 

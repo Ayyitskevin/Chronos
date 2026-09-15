@@ -1161,6 +1161,99 @@ def test_r4_4_the_runbook_publishes_by_hand_through_the_exclusive_command() -> N
     assert "chronos-<stamp>" in prose and ".chronos-<stamp>.<16 hex>.tmp" in prose
 
 
+# ----------------------------------------------------------- (r5) Daybreak's HOLD-DELTA at 172bec1
+
+
+def test_r5_1_publish_envelope_refuses_when_the_final_name_is_not_the_envelope_it_checked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Daybreak's sequence: the temp is validated; before the one rename, the validated temp
+    is renamed aside and a symlink to a sentinel is planted at the freed temp name; the real
+    RENAME_NOREPLACE then moves the LINK to the final name. The helper must notice that the
+    final name is not the directory it checked: the `published:` refusal, non-zero, no
+    PUBLISHED line; the sentinel untouched; the real envelope intact under its displaced name."""
+
+    out = tmp_path / "out"
+    out.mkdir()
+    temp = out / ".chronos-20260915T080000Z.0123456789abcdef.tmp"
+    temp.mkdir()
+    (temp / "chronos.db").write_bytes(b"staged")
+    final = out / "chronos-20260915T080000Z"
+    sentinel = tmp_path / "sentinel"
+    sentinel.write_bytes(b"SENTINEL")
+    before = _sha256(sentinel)
+    real = drill._renameat2
+
+    def swap_then_rename(src_fd: int, src: str, dst_fd: int, dst: str, flags: int) -> None:
+        os.rename(src, src + ".displaced", src_dir_fd=src_fd, dst_dir_fd=src_fd)
+        os.symlink(str(sentinel), src, dir_fd=src_fd)
+        real(src_fd, src, dst_fd, dst, flags)
+
+    monkeypatch.setattr(drill, "_renameat2", swap_then_rename)
+    with pytest.raises(DrillRefused) as refused:
+        drill.publish_envelope(temp, final)
+    message = str(refused.value)
+    assert message.startswith("published: ")
+    assert f"an entry was published at {final} but it is not the checked envelope" in message
+    assert _sha256(sentinel) == before
+    displaced = out / (temp.name + ".displaced")
+    assert displaced.is_dir() and (displaced / "chronos.db").read_bytes() == b"staged"
+    # and through the CLI path: non-zero, the refusal in the JSON, no PUBLISHED line
+    monkeypatch.undo()
+    temp2 = out / ".chronos-20260915T080100Z.0123456789abcdef.tmp"
+    temp2.mkdir()
+    (temp2 / "chronos.db").write_bytes(b"staged-2")
+    final2 = out / "chronos-20260915T080100Z"
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import os, sys\n"
+            "from pathlib import Path\n"
+            "from chronos.operations import restore_drill as drill\n"
+            "real = drill._renameat2\n"
+            f"sentinel = {str(sentinel)!r}\n"
+            "def swap_then_rename(src_fd, src, dst_fd, dst, flags):\n"
+            "    os.rename(src, src + '.displaced', src_dir_fd=src_fd, dst_dir_fd=src_fd)\n"
+            "    os.symlink(sentinel, src, dir_fd=src_fd)\n"
+            "    real(src_fd, src, dst_fd, dst, flags)\n"
+            "drill._renameat2 = swap_then_rename\n"
+            f"sys.exit(drill.main(['publish-envelope', {str(temp2)!r}, {str(final2)!r}]))",
+        ],
+        cwd=ROOT,
+        env={**os.environ, **SAFE_ENV},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert probe.returncode == 2, probe.stdout + probe.stderr
+    assert "PUBLISHED" not in probe.stdout
+    assert "published: " in probe.stdout and "not the checked envelope" in probe.stdout
+    assert _sha256(sentinel) == before
+    # positive control: an untouched temp publishes — PUBLISHED, exit 0, the final name IS it
+    temp3 = out / ".chronos-20260915T080200Z.0123456789abcdef.tmp"
+    temp3.mkdir()
+    (temp3 / "chronos.db").write_bytes(b"staged-3")
+    final3 = out / "chronos-20260915T080200Z"
+    completed = _publish_cli(temp3, final3)
+    assert completed.returncode == 0 and "PUBLISHED" in completed.stdout, (
+        completed.stdout + completed.stderr
+    )
+    assert (
+        final3.is_dir()
+        and not final3.is_symlink()
+        and (final3 / "chronos.db").read_bytes() == b"staged-3"
+    )
+
+
+def test_r5_2_the_runbook_says_what_a_published_line_means() -> None:
+    prose = " ".join(
+        (ROOT / "docs" / "ops" / "RESTORE-DRILL.md").read_text(encoding="utf-8").split()
+    )
+    assert "publishes the checked envelope or refuses" in prose
+    assert "a PUBLISHED line means the final name IS that directory" in prose
+
+
 def test_6c_the_module_is_read_only_operations_and_names_its_seams() -> None:
     text = MODULE.read_text(encoding="utf-8")
     assert 'ENCRYPTION: str = "none"' in text

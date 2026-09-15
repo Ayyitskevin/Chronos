@@ -134,12 +134,19 @@ not name. Every later create, link, unlink and fsync is relative to the retained
 3b. **Publish the envelope with the harness's exclusive rename.** With `manifest.json`
    written into the temp directory:
    `python -m chronos.operations.restore_drill publish-envelope /var/backups/chronos/.chronos-<stamp>.<16 hex>.tmp /var/backups/chronos/chronos-<stamp>`
-   — ONE `renameat2(RENAME_NOREPLACE)`; an existing file **or** directory at the final name
-   is a refusal (exit 2, nothing moves, the temp stays for you to inspect), then the parent
-   is fsynced. A plain `mv -T` is **not atomic** against a concurrent name: it renames over
-   an existing empty directory and reports success, so it is never the by-hand step — use
-   the command above, or run the harness for a real drill. From this point the backup is
-   the directory `chronos-<stamp>/` and nothing else.
+   — the command publishes the checked envelope or refuses; a PUBLISHED line means the
+   final name IS that directory. It opens the temp `O_DIRECTORY|O_NOFOLLOW` and keeps that
+   identity, renames by the same name with ONE `renameat2(RENAME_NOREPLACE)` — an existing
+   file **or** directory at the final name is a refusal (exit 2, nothing moves, the temp
+   stays for you to inspect) — fsyncs the parent, then re-proves the final name: by
+   `lstat` it must be a directory with the retained identity and the no-follow walk of the
+   final path must reach it; anything else (a link planted at the freed temp name between
+   the check and the rename, a swapped ancestor) is a `published:` refusal, exit 2, and no
+   PUBLISHED line — the entry at the final name is then NOT a backup. A plain `mv -T` is
+   **not atomic** against a concurrent name: it renames over an existing empty directory
+   and reports success, so it is never the by-hand step — use the command above, or run the
+   harness for a real drill. From this point the backup is the directory `chronos-<stamp>/`
+   and nothing else.
 4. **Restore into a fresh directory.** `mkdir -m 700 <fresh>` (it must not exist or be
    empty), then copy the backup — and the audit pair if present — into it.
 5. **Verify.** `sha256sum` of the copy equals the manifest; the schema head query on the
