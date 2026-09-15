@@ -49,7 +49,8 @@ The watchdog never deletes an entry it did not validate. Every branch after the 
 settled before a raise (round 3): a displaced entry that vanishes makes the watchdog
 withdraw its own fresh record — identity-bound, so a foreign entry at the name is left in
 place — leaving no heartbeat rather than one the dead-man would read as proof of life.
-After a publication the name is re-checked against the inode that was written. When evidence cannot be written the tick raises
+After a publication the name is re-checked against the inode that was written. When
+evidence cannot be written the tick raises
 ``WatchdogEvidenceError`` and the process exits 3: a watchdog that cannot record is not a
 watchdog, and its stale heartbeat is exactly what the dead-man layer trips on.
 """
