@@ -156,6 +156,21 @@ looser mode or a foreign owner is refused with a typed reason and nothing is wri
 Every write is complete or refused — a short write is never published — and after each
 publication the name is checked against the inode that was written.
 
+**Every branch after the atomic exchange is settled before the watchdog reports failure.**
+Once the new file has been swapped onto the name, the entry it displaced has exactly three
+fates: it is the heartbeat validated before the write and is dropped (the normal tick); it
+is something else and is swapped back and left in place (refused, nothing published); or it
+has vanished — then the watchdog cannot prove what it displaced, so it withdraws its own
+fresh record (and only its own: the withdrawal is identity-bound, a foreign entry at the name
+is left in place) and exits 3. A refused tick therefore never leaves a current-looking
+heartbeat behind: the dead-man reads an absent file as `DEAD`, not a fresh one as `ALIVE`.
+
+**The crash boundary that remains.** A writer that dies AFTER a clean publication is
+indistinguishable from a live one until `--max-age` elapses: its last heartbeat is genuine,
+current, and correct, and nothing on disk can say the process is gone. The dead-man's max age
+is therefore the outage-detection bound, and the operator picks it knowing that — short enough
+to notice, long enough that a slow tick is not a death.
+
 **The one thing a reader must tolerate:** if the disk stops accepting bytes mid-append,
 `watchdog.jsonl` can end in a torn last line (the tick then exits 3 and no heartbeat is
 published). Treat a final line that does not parse as "the writer died here", not as data.

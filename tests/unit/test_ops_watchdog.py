@@ -26,6 +26,7 @@ import pytest
 from chronos.operations import deadman as deadman_module
 from chronos.operations import watchdog as watchdog_module
 from chronos.operations.deadman import (
+    EXIT_CODES,
     DeadmanConfigurationError,
     DeadmanState,
     check_deadman,
@@ -818,6 +819,107 @@ def test_r2_3_the_runbook_states_the_boot_rule_and_the_refused_entry() -> None:
     assert "starts TRIPPED" in collapsed
     assert "same boot" in collapsed and "keeps the original deadline" in collapsed
     assert "left in place" in collapsed
+
+
+# ---------------------------------------------- r3 (Daybreak HOLD-DELTA at 84ea338)
+
+
+def _after_exchange(
+    monkeypatch: pytest.MonkeyPatch, act: Callable[[int, str, int, str], None]
+) -> None:
+    """Daybreak's r2 hook: run ``act`` immediately after the real RENAME_EXCHANGE returns, once."""
+
+    real = watchdog_module._renameat2
+    fired = {"done": False}
+
+    def hooked(src_dir_fd: int, src: str, dst_dir_fd: int, dst: str, flags: int) -> None:
+        real(src_dir_fd, src, dst_dir_fd, dst, flags)
+        if flags == watchdog_module._RENAME_EXCHANGE and not fired["done"]:
+            fired["done"] = True
+            act(src_dir_fd, src, dst_dir_fd, dst)
+
+    monkeypatch.setattr(watchdog_module, "_renameat2", hooked)
+
+
+def test_r3_1a_a_displaced_entry_that_vanishes_after_the_exchange_withdraws_our_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P1 (Daybreak's exact scenario): at 84ea338 the tick raised but the fresh record stayed
+    at heartbeat.json and check_deadman said ALIVE. Now the record is withdrawn: absent → DEAD."""
+
+    clock = _Clock()
+    dog = _watchdog(tmp_path, clock, {"live": True, "ready": True})
+    dog.tick()
+    ops = tmp_path / "ops"
+
+    def vanish(src_dir_fd: int, src: str, dst_dir_fd: int, dst: str) -> None:
+        os.unlink(src, dir_fd=src_dir_fd)  # the displaced old heartbeat vanishes at the temp name
+
+    _after_exchange(monkeypatch, vanish)
+    clock.advance(10.0)
+    with pytest.raises(WatchdogEvidenceError, match="vanished mid-publication"):
+        dog.tick()
+    monkeypatch.undo()
+    assert not (ops / HEARTBEAT).exists(), "the fresh record must not remain readable"
+    assert {p.name for p in ops.iterdir()} == {EVIDENCE_LOG}, "no temp survives"
+    verdict = check_deadman(ops / HEARTBEAT, 180.0, clock=clock.now, timer=clock.monotonic)
+    assert verdict.state is DeadmanState.DEAD and "absent" in verdict.reason
+    assert EXIT_CODES[verdict.state] == 2
+
+
+def test_r3_1b_a_foreign_entry_at_the_name_after_the_vanish_is_left_in_place(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The withdrawal is identity-bound: only the inode this process wrote is ever removed."""
+
+    clock = _Clock()
+    dog = _watchdog(tmp_path, clock, {"live": True, "ready": True})
+    dog.tick()
+    ops = tmp_path / "ops"
+    sentinel = tmp_path / "sentinel.json"
+    sentinel.write_text("SENTINEL", encoding="utf-8")
+
+    def vanish_and_plant(src_dir_fd: int, src: str, dst_dir_fd: int, dst: str) -> None:
+        os.unlink(src, dir_fd=src_dir_fd)  # the displaced entry vanishes ...
+        os.unlink(dst, dir_fd=dst_dir_fd)  # ... and a planter swaps our record for a symlink
+        os.symlink(str(sentinel), dst, dir_fd=dst_dir_fd)
+
+    _after_exchange(monkeypatch, vanish_and_plant)
+    clock.advance(10.0)
+    with pytest.raises(WatchdogEvidenceError, match="left in place"):
+        dog.tick()
+    monkeypatch.undo()
+    assert (ops / HEARTBEAT).is_symlink(), "the foreign entry survives at the name"
+    assert sentinel.read_text(encoding="utf-8") == "SENTINEL"
+    assert {p.name for p in ops.iterdir()} == {EVIDENCE_LOG, HEARTBEAT}
+    verdict = check_deadman(ops / HEARTBEAT, 180.0, clock=clock.now, timer=clock.monotonic)
+    assert verdict.state is DeadmanState.DEAD and "symlink" in verdict.reason
+
+
+def test_r3_1c_the_normal_and_foreign_branches_are_unchanged_by_the_settlement(
+    tmp_path: Path,
+) -> None:
+    clock = _Clock()
+    dog = _watchdog(tmp_path, clock, {"live": True, "ready": True})
+    ops = tmp_path / "ops"
+    for _ in range(3):
+        dog.tick()
+        clock.advance(10.0)
+    heartbeat = json.loads((ops / HEARTBEAT).read_text(encoding="utf-8"))
+    assert heartbeat["verdict"]["state"] == "HEALTHY"
+    assert {p.name for p in ops.iterdir()} == {EVIDENCE_LOG, HEARTBEAT}
+    verdict = check_deadman(ops / HEARTBEAT, 180.0, clock=clock.now, timer=clock.monotonic)
+    assert verdict.state is DeadmanState.ALIVE
+
+
+def test_r3_3_the_runbook_names_the_settled_outcomes_and_the_crash_boundary() -> None:
+    import re
+
+    runbook = (ROOT / "docs" / "ops" / "WATCHDOG.md").read_text(encoding="utf-8")
+    collapsed = re.sub(r"\s+", " ", runbook)
+    assert "indistinguishable" in collapsed
+    assert "outage-detection bound" in collapsed
+    assert "withdrawn" in collapsed
 
 
 # ------------------------------------------------------------------ 2. the dead-man check
