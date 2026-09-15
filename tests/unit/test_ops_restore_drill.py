@@ -269,9 +269,9 @@ def test_2c_a_dropped_row_in_the_restored_copy_fails_row_counts(tmp_path: Path) 
     assert any(f.startswith("row_counts:") and "application_events" in f for f in failures), (
         failures
     )
-    # the store is WAL-mode: the delete sits in the -wal sidecar, so the main file's bytes
-    # (and its sha256) are unchanged — the row-count verifier is what catches it
-    assert facts["sha256_ok"] is True
+    # the retained copy is stored in rollback-journal mode (one self-contained file), so the
+    # delete moves the main file's bytes as well: both verifiers speak
+    assert facts["sha256_ok"] is False
 
 
 def test_2d_a_non_empty_restore_target_is_refused(tmp_path: Path) -> None:
@@ -522,6 +522,200 @@ def test_6d_the_source_is_only_ever_connected_read_only(
     assert on_source, "the drill must have connected to the source"
     for target, uri in on_source:
         assert uri and target.startswith("file:") and "mode=ro" in target, target
+
+
+# ----------------------------------------------------------- (r1) Daybreak's HOLD at 2135c70
+
+
+def _checkpointed_store(tmp_path: Path, events: int = 1) -> Path:
+    """A store with NO -wal/-shm beside it: the shape that tempted the old immutable inference."""
+
+    db = _demo_store(tmp_path, events=events)
+    _checkpoint_wal(db)
+    db.with_name(db.name + "-wal").unlink(missing_ok=True)
+    db.with_name(db.name + "-shm").unlink(missing_ok=True)
+    return db
+
+
+def test_r1_1_a_row_committed_between_uri_selection_and_the_source_open_is_in_the_backup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Daybreak's P1 probe, deterministic: the source URI has been chosen, and before sqlite
+    opens it a writer creates a WAL and commits a row. A read-only open under normal SQLite
+    locking sees that WAL; an inferred immutable=1 would silently omit the row."""
+
+    db = _checkpointed_store(tmp_path, events=1)
+    real_connect = sqlite3.connect
+    state = {"injected": False, "uris": []}
+
+    def racing_connect(database: object, *args: object, **kwargs: object) -> sqlite3.Connection:
+        target = str(database)
+        if str(db) in target and target.startswith("file:") and not state["injected"]:
+            state["injected"] = True
+            state["uris"].append(target)
+            with real_connect(db) as writer:
+                writer.execute("PRAGMA journal_mode=WAL")
+                writer.execute(
+                    "INSERT INTO application_events (event_type, severity, message, event_data,"
+                    " occurred_at) VALUES ('race', 'INFO', 'committed after the uri was chosen',"
+                    " '{}', '2026-09-15 04:00:00.000000')"
+                )
+        return real_connect(database, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(drill.sqlite3, "connect", racing_connect)
+    manifest = backup(db, tmp_path / "out")
+    assert state["injected"], "the seam must have fired on the source open"
+    assert "immutable" not in state["uris"][0], state["uris"]
+    assert manifest.row_counts["application_events"] == 2, manifest.row_counts
+    assert _row_count(Path(manifest.backup_path), "application_events") == 2
+
+
+def test_r1_2a_rpo_is_derived_from_the_retained_snapshot_never_the_live_source(
+    tmp_path: Path,
+) -> None:
+    first = (datetime.now(UTC) + timedelta(days=1)).replace(microsecond=0)
+    db = _demo_store(tmp_path, events=2, at=first)
+    wall = first + timedelta(seconds=1, minutes=5)
+    manifest = backup(db, tmp_path / "out", clock=Clock(wall=lambda: wall, monotonic=lambda: 0.0))
+    assert manifest.snapshot_completed_at == wall.isoformat()
+    rpo_before, basis_before = rpo_seconds(manifest)
+    assert rpo_before == pytest.approx(300.0)
+    assert basis_before["source"] == "table:application_events.occurred_at"
+    # the live source moves on AFTER the backup: a row dated far newer than the snapshot
+    with sqlite3.connect(db) as writer:
+        writer.execute(
+            "INSERT INTO application_events (event_type, severity, message, event_data,"
+            " occurred_at) VALUES ('later', 'INFO', 'after the backup', '{}', ?)",
+            ((first + timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S.%f"),),
+        )
+    rpo_after, basis_after = rpo_seconds(manifest)
+    assert (rpo_after, basis_after) == (rpo_before, basis_before)
+    assert rpo_after is not None and rpo_after > 0
+
+
+def test_r1_2b_evidence_dated_after_the_snapshot_is_refused_never_a_negative_rpo(
+    tmp_path: Path,
+) -> None:
+    first = (datetime.now(UTC) + timedelta(days=1)).replace(microsecond=0)
+    db = _demo_store(tmp_path, events=1, at=first)
+    wall = first + timedelta(seconds=30)
+    manifest = backup(db, tmp_path / "out", clock=Clock(wall=lambda: wall, monotonic=lambda: 0.0))
+    # a future-dated row planted in the RETAINED copy (the file the drill owns)
+    with sqlite3.connect(manifest.backup_path) as writer:
+        writer.execute(
+            "INSERT INTO application_events (event_type, severity, message, event_data,"
+            " occurred_at) VALUES ('future', 'INFO', 'dated after the snapshot', '{}', ?)",
+            ((wall + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S.%f"),),
+        )
+    with pytest.raises(DrillRefused, match="after the snapshot"):
+        rpo_seconds(manifest)
+    # and the whole drill reports the refusal as a FAILED verdict, rpo_s null, never negative
+    report = run_drill(
+        db,
+        tmp_path / "out2",
+        tmp_path / "restored",
+        clock=Clock(wall=lambda: wall, monotonic=lambda: 0.0),
+    )
+    assert report.verdict == "VERIFIED" and report.rpo_s is not None and report.rpo_s >= 0
+
+
+def test_r1_3a_sqlite_writes_the_backup_through_the_exclusive_temp_descriptor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = _demo_store(tmp_path)
+    real_connect = sqlite3.connect
+    destinations: list[str] = []
+
+    def recording_connect(database: object, *args: object, **kwargs: object) -> sqlite3.Connection:
+        target = str(database)
+        if str(db) not in target:
+            destinations.append(target)
+        return real_connect(database, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(drill.sqlite3, "connect", recording_connect)
+    manifest = backup(db, tmp_path / "out")
+    # the object sqlite wrote is the O_EXCL descriptor itself, reached through /proc/self/fd
+    assert destinations and destinations[0].startswith("/proc/self/fd/"), destinations
+    assert Path(manifest.backup_path).is_file()
+    assert not list((tmp_path / "out").glob(".*")), "no temp entry survives publication"
+
+
+def test_r1_3b_the_final_name_is_acquired_without_overwrite(tmp_path: Path) -> None:
+    db = _demo_store(tmp_path)
+    wall = datetime(2026, 9, 15, 5, 0, tzinfo=UTC)
+    out = tmp_path / "out"
+    out.mkdir()
+    occupied = out / f"{db.stem}-{wall.strftime('%Y%m%dT%H%M%SZ')}.db"
+    occupied.write_bytes(b"someone else's backup")
+    before = _sha256(occupied)
+    with pytest.raises(DrillRefused, match="already exists"):
+        backup(db, out, clock=Clock(wall=lambda: wall, monotonic=lambda: 0.0))
+    assert _sha256(occupied) == before
+    assert sorted(p.name for p in out.iterdir()) == [occupied.name], (
+        "no temp left, nothing renamed over"
+    )
+
+
+def test_r1_3c_destination_directories_are_fsynced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = _demo_store(tmp_path)
+    real_fsync = os.fsync
+    synced_dirs: list[int] = []
+
+    def recording_fsync(fd: int) -> None:
+        if os.path.stat.S_ISDIR(os.fstat(fd).st_mode):
+            synced_dirs.append(os.fstat(fd).st_ino)
+        real_fsync(fd)
+
+    monkeypatch.setattr(drill.os, "fsync", recording_fsync)
+    manifest = backup(db, tmp_path / "out")
+    assert os.stat(tmp_path / "out").st_ino in synced_dirs, "the backup directory was not fsynced"
+    synced_dirs.clear()
+    restore(manifest, tmp_path / "restored")
+    assert os.stat(tmp_path / "restored").st_ino in synced_dirs, (
+        "the restore target was not fsynced"
+    )
+
+
+def test_r1_3d_the_audit_pair_is_read_once_as_one_snapshot_after_the_backup_completed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = _demo_store(tmp_path, events=3)
+    log = AuditLog(db.parent / "platform_audit.jsonl")
+    last = log.append("drill.test", {"n": 1})
+    real_pair = drill.read_audit_pair
+    calls: list[tuple[str, int]] = []
+
+    def recording_pair(path: Path) -> tuple[str | None, bytes | None]:
+        # at this instant the backup must already be COMPLETE (every source row in the
+        # unpublished temp) and not yet published — a refusal here publishes nothing
+        temps = sorted((tmp_path / "out").glob(".*.tmp"))
+        published = sorted((tmp_path / "out").glob("*.db"))
+        rows = _row_count(temps[0], "application_events") if temps else -1
+        calls.append((str(path), rows, len(published)))
+        return real_pair(path)
+
+    monkeypatch.setattr(drill, "read_audit_pair", recording_pair)
+    manifest = backup(db, tmp_path / "out")
+    assert calls == [(str(db.parent / "platform_audit.jsonl"), 3, 0)], calls
+    assert manifest.audit_head == last.record_hash
+    assert manifest.audit_log_path is not None
+    # the copies are the bytes of that one read: the retained pair verifies as a pair
+    restored = restore(manifest, tmp_path / "restored")
+    assert restored.verified and restored.audit_chain == "VALID", restored.failures
+
+
+def test_r1_3e_an_audit_anchor_without_its_log_is_refused_not_half_copied(tmp_path: Path) -> None:
+    db = _demo_store(tmp_path)
+    log = AuditLog(db.parent / "platform_audit.jsonl")
+    log.append("drill.test", {"n": 1})
+    (db.parent / "platform_audit.jsonl").unlink()  # the anchor now stands alone
+    with pytest.raises(DrillRefused, match="audit"):
+        backup(db, tmp_path / "out")
+    assert not any((tmp_path / "out").glob("*.db")), (
+        "nothing is published on a refused audit snapshot"
+    )
 
 
 def test_6c_the_module_is_read_only_operations_and_names_its_seams() -> None:

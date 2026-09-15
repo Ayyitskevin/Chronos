@@ -9,11 +9,13 @@ reports two MEASURED numbers as JSON::
 
 What the numbers are, exactly:
 
-- ``rpo_s`` — the age of the newest committed evidence in the SOURCE at backup
-  time: ``taken_at`` minus the max of (the audit log's last entry ``at_utc``, the
-  newest row timestamp among tables that carry one). The report names which
-  basis won (``rpo_basis``). A store with no timestamped evidence reports
-  ``rpo_s: null`` with a reason — never ``0``.
+- ``rpo_s`` — ``snapshot_completed_at`` (the instant the backup API returned,
+  recorded once) minus the newest committed evidence timestamp read FROM THE
+  RETAINED BACKUP and the retained copy of the audit log — never from the live
+  source, which keeps moving after the backup. The report names which basis won
+  (``rpo_basis``). A store with no timestamped evidence reports ``rpo_s: null``
+  with a reason — never ``0``; evidence dated after the snapshot completed is a
+  typed refusal — never a negative number.
 - ``rto_s`` — wall-clock, monotonic, from the start of the restore to the moment
   the restored copy was verified (copy → sha256 → schema head → row counts →
   audit chain). It is the time this host takes to restore and verify THIS store;
@@ -22,9 +24,18 @@ What the numbers are, exactly:
 
 What the drill does and does not do:
 
-- The backup uses sqlite3's online backup API (``Connection.backup``) on a
-  read-only connection, into an O_EXCL temp file that is ``os.replace``d — never
-  a file copy of a live database. The source is never opened for writing.
+- The backup uses sqlite3's online backup API (``Connection.backup``) from a
+  read-only (``mode=ro``) connection under SQLite's normal locking and WAL
+  semantics — never ``immutable=1``, never inferred from a sidecar precheck, so a
+  WAL that appears after any check is still honoured — never a file copy of a
+  live database. The source is never opened for writing.
+- The destination is the O_EXCL|O_NOFOLLOW temp DESCRIPTOR itself (sqlite opens
+  ``/proc/self/fd/<n>``, identity re-checked by fstat/stat), stored in
+  rollback-journal mode so the backup is one self-contained file; the final
+  name is acquired with ``link`` (EEXIST → typed refusal, never a rename over an
+  existing file) and the directory is fsynced. The audit log and its head
+  anchor are read ONCE as a pair after the backup completed (``read_audit_pair``)
+  and both copies are written from that read; a half pair is a refusal.
 - The restore goes into a fresh directory the caller names; an existing
   non-empty target is refused. Nothing here ever writes to the live path.
 - The schema head is the alembic revision when the store carries an
@@ -52,6 +63,7 @@ regular before use: a symlink, FIFO or directory at a path is a typed refusal.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import errno
 import hashlib
 import json
@@ -70,7 +82,12 @@ from typing import Any
 from sqlalchemy import Select, column, func, select, table
 from sqlalchemy.dialects import sqlite as sqlite_dialect
 
-from chronos.auditlog.log import ChainState, read_audit_pair, verify_chain
+from chronos.auditlog.log import (
+    AuditLogCorruptionError,
+    ChainState,
+    read_audit_pair,
+    verify_chain,
+)
 from chronos.persistence.database import Database
 
 ENCRYPTION: str = "none"
@@ -99,6 +116,7 @@ def system_clock() -> Clock:
 @dataclass(frozen=True, slots=True)
 class BackupManifest:
     taken_at: str
+    snapshot_completed_at: str
     source_path: str
     backup_path: str
     sha256: str
@@ -115,6 +133,7 @@ class BackupManifest:
     def from_dict(cls, data: dict[str, object]) -> BackupManifest:
         return cls(
             taken_at=str(data["taken_at"]),
+            snapshot_completed_at=str(data["snapshot_completed_at"]),
             source_path=str(data["source_path"]),
             backup_path=str(data["backup_path"]),
             sha256=str(data["sha256"]),
@@ -214,35 +233,87 @@ def _sha256_of(path: Path, subject: str) -> str:
     return digest.hexdigest()
 
 
-def _create_exclusive(directory: Path, name: str, mode: int = 0o600) -> tuple[int, Path]:
-    """An O_EXCL|O_NOFOLLOW regular file under ``directory``; a random suffix on collision."""
+def _open_directory(directory: Path, what: str, *, create: bool) -> int:
+    """A directory fd (O_DIRECTORY|O_NOFOLLOW, 0700 when created); every create, link,
+    unlink and fsync below is relative to it, so a path swapped underneath cannot
+    redirect a write."""
 
-    for _ in range(16):
-        candidate = directory / name
-        try:
-            fd = os.open(
-                candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), mode
-            )
-        except FileExistsError:
-            name = f"{name}.{secrets.token_hex(4)}"
-            continue
-        return fd, candidate
-    raise DrillRefused(f"could not create a fresh file named {name} under {directory}")
-
-
-def _copy_regular(source: Path, destination_dir: Path, name: str, subject: str) -> Path:
-    src_fd = _open_regular(source, subject)
-    dst_fd, out = _create_exclusive(destination_dir, name)
+    if directory.is_symlink():
+        raise DrillRefused(f"{what} {directory} is a symlink; name a real directory")
+    if create:
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     try:
-        with os.fdopen(src_fd, "rb") as reader, os.fdopen(dst_fd, "wb") as writer:
-            for chunk in iter(lambda: reader.read(_CHUNK), b""):
-                writer.write(chunk)
+        return os.open(directory, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as error:
+        raise DrillRefused(
+            f"{what} {directory} could not be opened as a directory: {error.strerror}"
+        ) from None
+
+
+def _create_exclusive_at(
+    dfd: int, name: str, mode: int = 0o600, *, flags: int = os.O_WRONLY
+) -> int:
+    """An O_EXCL|O_NOFOLLOW regular file created by NAME against the directory fd; EEXIST
+    is a typed refusal (never a rename or link over an existing entry)."""
+
+    try:
+        return os.open(
+            name, flags | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), mode, dir_fd=dfd
+        )
+    except FileExistsError:
+        raise DrillRefused(
+            f"{name} already exists in the destination; the drill never overwrites"
+        ) from None
+
+
+def _publish(dfd: int, tmp_name: str, final_name: str) -> None:
+    """Acquire the final name with ``link`` (EEXIST → refusal), drop the temp name, fsync
+    the directory. The published entry is the very inode the temp descriptor wrote."""
+
+    try:
+        os.link(tmp_name, final_name, src_dir_fd=dfd, dst_dir_fd=dfd)
+    except FileExistsError:
+        os.unlink(tmp_name, dir_fd=dfd)
+        raise DrillRefused(
+            f"{final_name} already exists in the destination; the drill never overwrites"
+        ) from None
+    os.unlink(tmp_name, dir_fd=dfd)
+    os.fsync(dfd)
+
+
+def _write_bytes_at(dfd: int, name: str, payload: bytes) -> None:
+    fd = _create_exclusive_at(dfd, name)
+    try:
+        with os.fdopen(fd, "wb") as writer:
+            writer.write(payload)
             writer.flush()
             os.fsync(writer.fileno())
     except BaseException:
-        out.unlink(missing_ok=True)
+        os.unlink(name, dir_fd=dfd)
         raise
-    return out
+
+
+def _copy_regular(source: Path, destination_dir: Path, name: str, subject: str) -> Path:
+    """Copy a regular file (opened no-follow, fstat'd) into ``destination_dir`` under
+    ``name`` — O_EXCL against the directory fd, fsynced, then the directory fsynced."""
+
+    src_fd = _open_regular(source, subject)
+    dfd = _open_directory(destination_dir, "destination", create=False)
+    try:
+        dst_fd = _create_exclusive_at(dfd, name)
+        try:
+            with os.fdopen(src_fd, "rb") as reader, os.fdopen(dst_fd, "wb") as writer:
+                for chunk in iter(lambda: reader.read(_CHUNK), b""):
+                    writer.write(chunk)
+                writer.flush()
+                os.fsync(writer.fileno())
+        except BaseException:
+            os.unlink(name, dir_fd=dfd)
+            raise
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
+    return destination_dir / name
 
 
 def _fresh_directory(target: Path, what: str) -> None:
@@ -264,22 +335,18 @@ def _fresh_directory(target: Path, what: str) -> None:
 # ----------------------------------------------------------------- store inspection
 
 
-def _readonly(path: Path, *, immutable: bool | None = None) -> sqlite3.Connection:
-    """A read-only connection.
+def _readonly(path: Path) -> sqlite3.Connection:
+    """A read-only connection under SQLite's normal locking and WAL semantics.
 
-    ``immutable=True`` is for a file nothing can be writing and that has no ``-wal``
-    sidecar (a fresh backup, a fresh restored copy): sqlite then creates no
-    ``-wal``/``-shm`` beside it. ``None`` decides that from the sidecar's presence — a
-    copy that HAS a WAL is read through it, so committed-but-uncheckpointed rows count.
-    The SOURCE is always opened non-immutable: a live writer's WAL must be seen, and a
-    read-only connection may create empty sidecars beside it (a directory write, never
-    a database write).
+    Never ``immutable=1``: that flag makes SQLite ignore a WAL, and "no ``-wal`` right
+    now" is not a fact about the next instant (Daybreak's R-1 probe committed a row
+    between such a check and the open). A read-only reader on a WAL-mode file may
+    create empty ``-wal``/``-shm`` beside it — a directory write, never a database
+    write; the retained copies are stored in rollback-journal mode so readers leave
+    nothing beside them.
     """
 
-    if immutable is None:
-        immutable = not path.with_name(path.name + "-wal").exists()
-    suffix = "&immutable=1" if immutable else ""
-    return sqlite3.connect(f"file:{path}?mode=ro{suffix}", uri=True)
+    return sqlite3.connect(f"file:{path}?mode=ro", uri=True)
 
 
 def _user_tables(connection: sqlite3.Connection) -> list[str]:
@@ -308,20 +375,20 @@ def _max_statement(table_name: str, column_name: str) -> str:
     return str(statement.compile(dialect=sqlite_dialect.dialect()))
 
 
-def row_counts(path: Path, *, immutable: bool | None = None) -> dict[str, int]:
-    """Every user table's row count, read-only (through a ``-wal`` sidecar when one exists)."""
+def row_counts(path: Path) -> dict[str, int]:
+    """Every user table's row count, read-only."""
 
-    with _readonly(path, immutable=immutable) as connection:
+    with _readonly(path) as connection:
         return {
             name: int(connection.execute(_count_statement(name)).fetchone()[0])
             for name in _user_tables(connection)
         }
 
 
-def schema_head(path: Path, *, immutable: bool | None = None) -> str:
+def schema_head(path: Path) -> str:
     """The alembic revision when the store carries one, else ``schema_version:<n>``."""
 
-    with _readonly(path, immutable=immutable) as connection:
+    with _readonly(path) as connection:
         tables = set(_user_tables(connection))
         if "alembic_version" in tables:
             revision = connection.execute("SELECT version_num FROM alembic_version").fetchone()
@@ -358,7 +425,7 @@ def newest_evidence(
     newest: datetime | None = None
     candidates = 0
     basis: dict[str, object] = {"source": None, "newest_evidence_at": None, "candidates": 0}
-    with _readonly(path, immutable=False) as connection:
+    with _readonly(path) as connection:
         for table_name in _user_tables(connection):
             columns = [
                 str(row[1])
@@ -395,14 +462,9 @@ def newest_evidence(
     return newest, basis
 
 
-def _audit_head(anchor_path: Path) -> str | None:
-    """The head anchor's ``last_hash`` (64 hex) or None when there is no anchor."""
+def _decode_audit_head(raw: bytes, anchor_path: Path) -> str:
+    """The head anchor's ``last_hash`` (64 hex) from the anchor's bytes."""
 
-    if not anchor_path.is_file():
-        return None
-    fd = _open_regular(anchor_path, "audit anchor")
-    with os.fdopen(fd, "rb") as handle:
-        raw = handle.read()
     try:
         decoded = json.loads(raw.decode("utf-8"))
         last_hash = str(decoded["last_hash"])
@@ -413,17 +475,31 @@ def _audit_head(anchor_path: Path) -> str | None:
     return last_hash
 
 
+def _audit_head(anchor_path: Path) -> str | None:
+    """The head anchor's ``last_hash`` (64 hex) or None when there is no anchor."""
+
+    if not anchor_path.is_file():
+        return None
+    fd = _open_regular(anchor_path, "audit anchor")
+    with os.fdopen(fd, "rb") as handle:
+        raw = handle.read()
+    return _decode_audit_head(raw, anchor_path)
+
+
 # ----------------------------------------------------------------- backup
 
 
 def backup(db_path: Path, out_dir: Path, *, clock: Clock | None = None) -> BackupManifest:
     """A consistent online backup of ``db_path`` into ``out_dir`` plus its manifest.
 
-    The source is opened read-only (``mode=ro``) and never written. The backup is
-    written through an O_EXCL temp name and ``os.replace``d into place; the audit
-    log and its head anchor beside the source (``platform_audit.jsonl`` /
-    ``platform_audit.head.json``) travel with the backup when present, so the
-    restored store's chain can be verified.
+    The source is opened read-only (``mode=ro``, normal SQLite locking) and never
+    written. The backup is written into the O_EXCL temp DESCRIPTOR (sqlite opens
+    ``/proc/self/fd/<n>``), fsynced, and published with ``link`` — EEXIST is a
+    refusal, nothing is ever renamed over an existing file — then the directory is
+    fsynced. ``snapshot_completed_at`` is the instant the backup API returned. The
+    audit log and its head anchor beside the source are read once as a pair AFTER
+    that instant and both copies are written from that read, so the retained chain
+    is one stated snapshot; a half pair is a refusal.
     """
 
     clock = clock or system_clock()
@@ -431,40 +507,75 @@ def backup(db_path: Path, out_dir: Path, *, clock: Clock | None = None) -> Backu
     out_dir = Path(out_dir)
     fd = _open_regular(db_path, "source database")
     os.close(fd)
-    if out_dir.is_symlink():
-        raise DrillRefused(f"backup directory {out_dir} is a symlink; name a real directory")
-    out_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-
-    taken_at = clock.wall()
-    stamp = taken_at.strftime("%Y%m%dT%H%M%SZ")
-    final_name = f"{db_path.stem}-{stamp}.db"
-    tmp_fd, tmp_path = _create_exclusive(out_dir, f".{final_name}.{secrets.token_hex(6)}.tmp")
-    os.close(tmp_fd)
+    dfd = _open_directory(out_dir, "backup directory", create=True)
     try:
-        with _readonly(db_path) as source, sqlite3.connect(tmp_path) as destination:
-            source.backup(destination)
-        with open(tmp_path, "rb") as handle:
-            os.fsync(handle.fileno())
-    except BaseException:
-        tmp_path.unlink(missing_ok=True)
-        raise
-    backup_path = out_dir / final_name
-    if backup_path.exists():
-        backup_path = out_dir / f"{db_path.stem}-{stamp}-{secrets.token_hex(3)}.db"
-    os.replace(tmp_path, backup_path)
+        taken_at = clock.wall()
+        stamp = taken_at.strftime("%Y%m%dT%H%M%SZ")
+        final_name = f"{db_path.stem}-{stamp}.db"
+        if os.path.lexists(os.path.join(out_dir, final_name)):
+            raise DrillRefused(
+                f"{final_name} already exists in the destination; the drill never overwrites"
+            )
+        tmp_name = f".{final_name}.{secrets.token_hex(6)}.tmp"
+        tmp_fd = _create_exclusive_at(dfd, tmp_name, flags=os.O_RDWR)
+        audit_log = db_path.parent / AUDIT_LOG_NAME
+        try:
+            identity = os.fstat(tmp_fd)
+            # sqlite writes THIS descriptor's inode (/proc/self/fd/<n>), never a
+            # re-resolved pathname; journal OFF so no sibling journal is needed there
+            destination = sqlite3.connect(f"/proc/self/fd/{tmp_fd}")
+            try:
+                destination.execute("PRAGMA journal_mode=OFF")
+                with _readonly(db_path) as source:
+                    source.backup(destination)
+                snapshot_completed_at = clock.wall()
+                # one self-contained file: readers of the retained copy leave no sidecars
+                destination.execute("PRAGMA journal_mode=DELETE")
+            finally:
+                destination.close()
+            after = os.stat(tmp_name, dir_fd=dfd)
+            if (after.st_dev, after.st_ino) != (identity.st_dev, identity.st_ino):
+                raise DrillRefused(f"the temp entry {tmp_name} changed identity during the backup")
+            os.fsync(tmp_fd)
+            # the audit pair, read ONCE as a pair AFTER the backup completed (anchor before
+            # log, no-follow, one capability read each — the audit log's own reader); a
+            # refused or half pair unlinks the unpublished backup: nothing is published
+            try:
+                log_text, anchor_bytes = read_audit_pair(audit_log)
+            except AuditLogCorruptionError as error:
+                raise DrillRefused(
+                    f"audit pair beside the source could not be read as one snapshot: {error}"
+                ) from None
+            if (log_text is None) != (anchor_bytes is None):
+                raise DrillRefused(
+                    "audit pair beside the source is incomplete (a log without its anchor or "
+                    "an anchor without its log); refusing to retain half a chain"
+                )
+        except BaseException:
+            os.close(tmp_fd)
+            with contextlib.suppress(OSError):
+                os.unlink(tmp_name, dir_fd=dfd)
+            raise
+        os.close(tmp_fd)
+        _publish(dfd, tmp_name, final_name)
+        backup_path = out_dir / final_name
 
-    audit_log = db_path.parent / AUDIT_LOG_NAME
-    anchor = db_path.parent / AUDIT_ANCHOR_NAME
-    audit_head = _audit_head(anchor)
-    audit_copy: Path | None = None
-    if audit_head is not None and audit_log.is_file():
-        audit_copy = _copy_regular(
-            audit_log, out_dir, f"{backup_path.stem}.{AUDIT_LOG_NAME}", "audit log"
-        )
-        _copy_regular(anchor, out_dir, f"{backup_path.stem}.{AUDIT_ANCHOR_NAME}", "audit anchor")
+        # both audit copies are written from that single read
+        audit_head: str | None = None
+        audit_copy: Path | None = None
+        if log_text is not None and anchor_bytes is not None:
+            audit_head = _decode_audit_head(anchor_bytes, audit_log.with_name(AUDIT_ANCHOR_NAME))
+            stem = backup_path.stem
+            _write_bytes_at(dfd, f"{stem}.{AUDIT_LOG_NAME}", log_text.encode("utf-8"))
+            _write_bytes_at(dfd, f"{stem}.{AUDIT_ANCHOR_NAME}", anchor_bytes)
+            os.fsync(dfd)
+            audit_copy = out_dir / f"{stem}.{AUDIT_LOG_NAME}"
+    finally:
+        os.close(dfd)
 
     return BackupManifest(
         taken_at=taken_at.isoformat(),
+        snapshot_completed_at=snapshot_completed_at.isoformat(),
         source_path=str(db_path),
         backup_path=str(backup_path),
         sha256=_sha256_of(backup_path, "backup"),
@@ -577,22 +688,31 @@ def restore(
 # ----------------------------------------------------------------- the drill
 
 
-def rpo_seconds(
-    manifest: BackupManifest, *, source_audit_log: Path | None = None
-) -> tuple[float | None, dict[str, object]]:
-    """``taken_at`` minus the newest committed evidence in the SOURCE; None + reason if none."""
+def rpo_seconds(manifest: BackupManifest) -> tuple[float | None, dict[str, object]]:
+    """``snapshot_completed_at`` minus the newest committed evidence IN THE RETAINED
+    SNAPSHOT (the backup file and the retained audit copy) — never the live source.
+    None + reason when the snapshot carries no timestamped evidence; evidence dated
+    after the snapshot completed is a typed refusal, never a negative number."""
 
-    source = Path(manifest.source_path)
-    audit_log = source_audit_log if source_audit_log is not None else source.parent / AUDIT_LOG_NAME
-    newest, basis = newest_evidence(source, audit_log)
-    taken_at = datetime.fromisoformat(manifest.taken_at)
+    retained = Path(manifest.backup_path)
+    audit_copy = None if manifest.audit_log_path is None else Path(manifest.audit_log_path)
+    newest, basis = newest_evidence(retained, audit_copy)
+    basis["evidence_read_from"] = "retained snapshot"
+    snapshot = datetime.fromisoformat(manifest.snapshot_completed_at)
+    basis["snapshot_completed_at"] = snapshot.isoformat()
     if newest is None:
         basis["reason"] = (
-            "no timestamped evidence in the source "
+            "no timestamped evidence in the retained snapshot "
             "(no *_at column carries a value and no audit entry)"
         )
         return None, basis
-    return (taken_at - newest).total_seconds(), basis
+    if newest > snapshot:
+        raise DrillRefused(
+            f"evidence in the retained snapshot ({basis['source']}, {newest.isoformat()}) is "
+            f"dated after the snapshot completed ({snapshot.isoformat()}); refusing to report a "
+            "negative rpo_s — check the clocks of the writers and of this host"
+        )
+    return (snapshot - newest).total_seconds(), basis
 
 
 def run_drill(
@@ -600,9 +720,15 @@ def run_drill(
 ) -> DrillReport:
     clock = clock or system_clock()
     manifest = backup(db_path, out_dir, clock=clock)
-    rpo, basis = rpo_seconds(manifest)
+    failures: list[str] = []
+    rpo: float | None
+    try:
+        rpo, basis = rpo_seconds(manifest)
+    except DrillRefused as error:
+        rpo, basis = None, {"source": None, "refused": str(error)}
+        failures.append(f"rpo: refused — {error}")
     report = restore(manifest, restore_into, clock=clock)
-    failures = list(report.failures)
+    failures.extend(report.failures)
     return DrillReport(
         manifest=manifest,
         restore=report,
@@ -644,11 +770,14 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     payload = report.to_dict()
     manifest_path = Path(report.manifest.backup_path).with_suffix(".manifest.json")
-    fd, manifest_out = _create_exclusive(manifest_path.parent, manifest_path.name)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        json.dump(report.manifest.to_dict(), handle, indent=2, sort_keys=True)
-        handle.write("\n")
-    payload["manifest_path"] = str(manifest_out)
+    dfd = _open_directory(manifest_path.parent, "backup directory", create=False)
+    try:
+        body = json.dumps(report.manifest.to_dict(), indent=2, sort_keys=True) + "\n"
+        _write_bytes_at(dfd, manifest_path.name, body.encode("utf-8"))
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
+    payload["manifest_path"] = str(manifest_path)
     print(json.dumps(payload, indent=2 if args.pretty else None, sort_keys=True))
     return 0 if report.verdict == "VERIFIED" else 2
 
