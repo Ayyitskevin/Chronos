@@ -512,10 +512,7 @@ def backup(db_path: Path, out_dir: Path, *, clock: Clock | None = None) -> Backu
         taken_at = clock.wall()
         stamp = taken_at.strftime("%Y%m%dT%H%M%SZ")
         final_name = f"{db_path.stem}-{stamp}.db"
-        if os.path.lexists(os.path.join(out_dir, final_name)):
-            raise DrillRefused(
-                f"{final_name} already exists in the destination; the drill never overwrites"
-            )
+        # no existence precheck: link() at publication is the one authority on EEXIST
         tmp_name = f".{final_name}.{secrets.token_hex(6)}.tmp"
         tmp_fd = _create_exclusive_at(dfd, tmp_name, flags=os.O_RDWR)
         audit_log = db_path.parent / AUDIT_LOG_NAME
