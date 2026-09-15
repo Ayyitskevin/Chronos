@@ -156,20 +156,25 @@ looser mode or a foreign owner is refused with a typed reason and nothing is wri
 Every write is complete or refused — a short write is never published — and after each
 publication the name is checked against the inode that was written.
 
-**Every branch after the atomic exchange is settled before the watchdog reports failure.**
-Once the new file has been swapped onto the name, the entry it displaced has exactly three
-fates: it is the heartbeat validated before the write and is dropped (the normal tick); it
-is something else and is swapped back and left in place (refused, nothing published); or it
-has vanished — then the watchdog cannot prove what it displaced, so its own fresh
-record is withdrawn (and only its own: the withdrawal is identity-bound, a foreign entry at the
-name is left in place) and it exits 3. A refused tick therefore never leaves a current-looking
-heartbeat behind: the dead-man reads an absent file as `DEAD`, not a fresh one as `ALIVE`.
+**The writer's liveness is a kernel-released lock, and the dead-man reads it first.** The
+watchdog holds `watchdog.lock` in the evidence directory (`LOCK_EX`, taken before its first
+tick, a capability entry like the others) for the life of its loop, and the kernel releases
+it on ANY exit — a clean stop, a raised tick, a crash, a kill. The dead-man has two inputs,
+in this order: the **liveness lock** (probed with a non-blocking shared lock; if nobody holds
+it, or the entry is absent, the verdict is `DEAD` — "no writer holds the liveness lock" —
+**regardless** of how fresh `heartbeat.json` looks), then the heartbeat's **age** exactly as
+before. Three rounds settled post-exchange failure branches one at a time; the lock closes the
+class: whichever branch made a tick raise, the loop exits, the lock frees, and the second
+layer sees it. The best-effort withdrawal of a vanished-displaced publication stays (our own
+record is withdrawn where it can be, identity-bound), but no per-branch settlement is claimed
+any more. **One writer per evidence directory:** a second watchdog on the same directory is
+refused with a typed error, so two loops can never publish over each other.
 
-**The crash boundary that remains.** A writer that dies AFTER a clean publication is
-indistinguishable from a live one until `--max-age` elapses: its last heartbeat is genuine,
-current, and correct, and nothing on disk can say the process is gone. The dead-man's max age
-is therefore the outage-detection bound, and the operator picks it knowing that — short enough
-to notice, long enough that a slow tick is not a death.
+**The boundary that remains.** A writer that is *alive but wedged* still holds its lock, so it
+is indistinguishable from a healthy one until `--max-age` elapses: the dead-man's max age is
+the outage-detection bound for that case, and the operator picks it knowing that — short
+enough to notice, long enough that a slow tick is not a death. A writer that *exits* after a
+clean publication is `DEAD` at the very next dead-man check.
 
 **The one thing a reader must tolerate:** if the disk stops accepting bytes mid-append,
 `watchdog.jsonl` can end in a torn last line (the tick then exits 3 and no heartbeat is
