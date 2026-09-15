@@ -14,7 +14,10 @@ test holds to the plan and the source (e.g. `m4-read-only-gate-session-checklist
 per-session checklist for the VCP §7 real-gateway read-only gate, when present). The
 template rules below apply to the `.service` files only; a checklist is indexed in this
 paragraph by filename, and `tests/unit/test_ibkr_runbook_live_flag_contract.py` fails if a
-markdown file appears in this directory without being named here.
+markdown file appears in this directory without being named here. Design notes live here too
+when they bound an operational component before it exists: `DESIGN-alert-sidecar.md` (the
+off-host alert sidecar, receive-only protocol sketch — design only; placement and backup-key
+custody are owner decisions, not made there).
 
 ## Rules these templates keep, and a test that enforces them
 
