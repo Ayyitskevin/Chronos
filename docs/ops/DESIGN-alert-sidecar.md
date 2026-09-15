@@ -41,10 +41,11 @@ object); the **sidecar envelope** adds `schema_version: 1`, `host_id`, `head_sha
 - The sidecar answers `202 {received: n, first_seq, last_seq}` after fsync; any other answer is a *transport gap* the host records locally and retries
   with backoff — never a reason to change host behaviour.
 - Canonical bytes: `canonical = json.dumps(envelope_without_record_id_and_signature, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")`
-  — the same rule the audit anchor already uses (sorted keys, one representation). `record_id = sha256(canonical)` and
-  `signature = Ed25519(host_private_key, canonical)`; both are then added as fields. The RECEIVER recomputes both from the envelope it parsed
-  (dropping the two fields) and refuses a record whose `record_id` or signature does not match; identity is therefore independent of the
-  sender's JSON spelling and of retries.
+  — the same rule the audit anchor already uses (sorted keys, one representation). `record_id = sha256(canonical)`, encoded as 64 lowercase
+  hex characters; `signature = Ed25519.sign(host_private_key, canonical)`, encoded as unpadded base64url of the 64 raw signature bytes; both are
+  then added as string fields. The RECEIVER parses the envelope, drops the two fields, re-canonicalizes, RECOMPUTES `record_id` (a digest anyone
+  can compute) and VERIFIES `signature` against the host's PUBLIC key (a signature only the host can produce; the receiver never recomputes it);
+  a record failing either check is refused. Identity is therefore independent of the sender's JSON spelling and of retries.
 - Idempotency: the sidecar deduplicates by `record_id`; a retried record is stored once; a record with the same `(host_id, kind, producer_seq)`
   but a different `record_id` is stored AND flagged as a producer conflict (never silently replaced).
 - Integrity: the per-host Ed25519 key's PUBLIC half is held by the sidecar; the private half lives in the host's untracked per-machine `.env` (R2)

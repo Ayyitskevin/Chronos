@@ -73,3 +73,7 @@ def test_time_authority_and_record_identity_are_defined() -> None:
     assert "record_id = sha256(canonical)" in text
     assert 'sort_keys=True, separators=(",", ":")' in text
     assert "ONLY time authority" in text and "sidecar-side dead-man" in text
+    # a public-key receiver verifies a signature; it recomputes only the digest (D-1 r1 review)
+    assert "VERIFIES `signature` against the host's PUBLIC key" in text
+    assert "the receiver never recomputes it" in text
+    assert "64 lowercase" in text and "base64url" in text
