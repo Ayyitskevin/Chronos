@@ -1127,6 +1127,86 @@ def test_r4_2_the_runbook_states_the_lock_rule() -> None:
     assert "every post-exchange failure is settled" not in collapsed.lower()
 
 
+# ---------------------------------------------- r5 (Daybreak HOLD-DELTA at 7f97f26)
+
+
+def _foreign_hardlinked_lock(tmp_path: Path, clock: _Clock) -> tuple[Path, Path]:
+    """Daybreak's r4 sequence (logs/daybreak-probe-W-1-r4.py): a fresh heartbeat from a watchdog
+    that then closed, and watchdog.lock replaced by a hardlink to a foreign regular file."""
+
+    dog = _watchdog(tmp_path, clock, {"live": True, "ready": True})
+    dog.tick()
+    dog.close()
+    ops = tmp_path / "ops"
+    foreign = tmp_path / "foreign.lock"
+    foreign.write_text("", encoding="utf-8")
+    foreign.chmod(0o600)
+    (ops / LIVENESS_LOCK).unlink()
+    os.link(foreign, ops / LIVENESS_LOCK)
+    return ops, foreign
+
+
+def test_r5_1a_a_foreign_locked_hardlink_at_the_lock_name_cannot_forge_alive(
+    tmp_path: Path,
+) -> None:
+    """At 7f97f26 this read ALIVE ('heartbeat 0.0 s wall / 0.0 s monotonic old')."""
+
+    clock = _Clock()
+    ops, foreign = _foreign_hardlinked_lock(tmp_path, clock)
+    holder = os.open(foreign, os.O_RDWR)
+    fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)  # another description locks the inode
+    try:
+        verdict = check_deadman(ops / HEARTBEAT, 180.0, clock=clock.now, timer=clock.monotonic)
+    finally:
+        fcntl.flock(holder, fcntl.LOCK_UN)
+        os.close(holder)
+    assert verdict.state is DeadmanState.DEAD
+    assert "liveness lock has 2 links" in verdict.reason
+    assert EXIT_CODES[verdict.state] == 2
+
+
+def test_r5_1b_the_same_hardlink_unlocked_is_refused_for_the_same_reason(tmp_path: Path) -> None:
+    clock = _Clock()
+    ops, _foreign = _foreign_hardlinked_lock(tmp_path, clock)
+    verdict = check_deadman(ops / HEARTBEAT, 180.0, clock=clock.now, timer=clock.monotonic)
+    assert verdict.state is DeadmanState.DEAD
+    assert "liveness lock has 2 links" in verdict.reason, "the predicate, not the free lock"
+
+
+def test_r5_1c_a_genuine_lock_held_by_an_open_watchdog_still_reads_alive(tmp_path: Path) -> None:
+    clock = _Clock()
+    dog = _watchdog(tmp_path, clock, {"live": True, "ready": True})
+    dog.tick()
+    verdict = check_deadman(
+        tmp_path / "ops" / HEARTBEAT, 180.0, clock=clock.now, timer=clock.monotonic
+    )
+    assert verdict.state is DeadmanState.ALIVE, verdict.reason
+    dog.close()
+
+
+def test_r5_1d_a_loose_mode_lock_entry_is_refused_even_while_held(tmp_path: Path) -> None:
+    clock = _Clock()
+    held = _hold_lock(tmp_path)
+    _heartbeat(tmp_path / HEARTBEAT, clock, age_s=1.0)
+    (tmp_path / LIVENESS_LOCK).chmod(0o644)
+    verdict = check_deadman(tmp_path / HEARTBEAT, 180.0, clock=clock.now, timer=clock.monotonic)
+    assert verdict.state is DeadmanState.DEAD and "liveness lock has mode 0o644" in verdict.reason
+    (tmp_path / LIVENESS_LOCK).chmod(0o600)
+    assert (
+        check_deadman(tmp_path / HEARTBEAT, 180.0, clock=clock.now, timer=clock.monotonic).state
+        is DeadmanState.ALIVE
+    )
+    os.close(held)
+
+
+def test_r5_2_the_runbook_states_the_precondition_on_both_sides() -> None:
+    import re
+
+    runbook = (ROOT / "docs" / "ops" / "WATCHDOG.md").read_text(encoding="utf-8")
+    collapsed = re.sub(r"\s+", " ", runbook)
+    assert "capability contract on both sides" in collapsed.lower()
+
+
 # ------------------------------------------------------------------ 2. the dead-man check
 
 
