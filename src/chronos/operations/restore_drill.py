@@ -65,6 +65,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import Select, column, func, select, table
 from sqlalchemy.dialects import sqlite as sqlite_dialect
@@ -303,9 +304,7 @@ def _count_statement(table_name: str) -> str:
 
 
 def _max_statement(table_name: str, column_name: str) -> str:
-    statement: Select[tuple[object]] = select(func.max(column(column_name))).select_from(
-        table(table_name)
-    )
+    statement: Select[Any] = select(func.max(column(column_name))).select_from(table(table_name))
     return str(statement.compile(dialect=sqlite_dialect.dialect()))
 
 
