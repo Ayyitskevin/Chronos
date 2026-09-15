@@ -66,6 +66,9 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from sqlalchemy import Select, column, func, select, table
+from sqlalchemy.dialects import sqlite as sqlite_dialect
+
 from chronos.auditlog.log import ChainState, read_audit_pair, verify_chain
 from chronos.persistence.database import Database
 
@@ -290,13 +293,29 @@ def _quote(identifier: str) -> str:
     return '"' + identifier.replace('"', '""') + '"'
 
 
+def _count_statement(table_name: str) -> str:
+    """``SELECT count(*) FROM <table>`` with SQLAlchemy's identifier quoting — the table
+    names come from ``sqlite_master``, never from a caller, and no SQL text is assembled
+    by hand."""
+
+    statement = select(func.count()).select_from(table(table_name))
+    return str(statement.compile(dialect=sqlite_dialect.dialect()))
+
+
+def _max_statement(table_name: str, column_name: str) -> str:
+    statement: Select[tuple[object]] = select(func.max(column(column_name))).select_from(
+        table(table_name)
+    )
+    return str(statement.compile(dialect=sqlite_dialect.dialect()))
+
+
 def row_counts(path: Path, *, immutable: bool | None = None) -> dict[str, int]:
     """Every user table's row count, read-only (through a ``-wal`` sidecar when one exists)."""
 
     with _readonly(path, immutable=immutable) as connection:
         return {
-            table: int(connection.execute(f"SELECT COUNT(*) FROM {_quote(table)}").fetchone()[0])
-            for table in _user_tables(connection)
+            name: int(connection.execute(_count_statement(name)).fetchone()[0])
+            for name in _user_tables(connection)
         }
 
 
@@ -341,22 +360,20 @@ def newest_evidence(
     candidates = 0
     basis: dict[str, object] = {"source": None, "newest_evidence_at": None, "candidates": 0}
     with _readonly(path, immutable=False) as connection:
-        for table in _user_tables(connection):
+        for table_name in _user_tables(connection):
             columns = [
                 str(row[1])
-                for row in connection.execute(f"PRAGMA table_info({_quote(table)})").fetchall()
+                for row in connection.execute(f"PRAGMA table_info({_quote(table_name)})").fetchall()
                 if str(row[1]).endswith("_at")
             ]
-            for column in columns:
-                value = connection.execute(
-                    f"SELECT MAX({_quote(column)}) FROM {_quote(table)}"
-                ).fetchone()[0]
+            for column_name in columns:
+                value = connection.execute(_max_statement(table_name, column_name)).fetchone()[0]
                 stamp = _parse_utc(value)
                 if stamp is None:
                     continue
                 candidates += 1
                 if newest is None or stamp > newest:
-                    newest, basis["source"] = stamp, f"table:{table}.{column}"
+                    newest, basis["source"] = stamp, f"table:{table_name}.{column_name}"
     if audit_log is not None and audit_log.is_file():
         try:
             text, _anchor = read_audit_pair(audit_log)
