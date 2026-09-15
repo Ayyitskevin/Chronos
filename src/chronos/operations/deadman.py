@@ -6,7 +6,10 @@ writes nothing, contacts nothing, and cannot act: a DEAD verdict is evidence for
 operator, whose response is the runbook's (``docs/ops/WATCHDOG.md``).
 
 The verdict rule. DEAD when the heartbeat is absent, unreadable, malformed, not a regular
-file, or older than ``max_age_s`` by BOTH the wall clock and the monotonic timer. ALIVE when
+file, when NO writer holds the liveness lock ``watchdog.lock`` (round 4 — the kernel releases
+it on any exit, so this input comes before any age and makes a fresh-looking heartbeat from
+an exited writer DEAD regardless), or older than ``max_age_s`` by BOTH the wall clock and the
+monotonic timer. ALIVE when
 both say it is within ``max_age_s``. UNKNOWN only when the clock evidence cannot be
 reasoned about: the two clocks disagree (one of them moved), the heartbeat's monotonic
 value precedes this process's timer (another boot, or another host — CLOCK_MONOTONIC is
@@ -25,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import errno
+import fcntl
 import json
 import math
 import os
@@ -45,6 +49,10 @@ _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 _ENTRY_FLAGS = os.O_RDONLY | _CLOEXEC | _NOFOLLOW | _NONBLOCK
 _MAX_HEARTBEAT_BYTES = 64 * 1024
+#: The watchdog's liveness lock (round 4): held LOCK_EX by a running writer for the life of
+#: its loop, released by the kernel on any exit. Probed with LOCK_SH|LOCK_NB: acquirable, or
+#: absent → no writer → DEAD regardless of the heartbeat's age. Same name as the writer's.
+LIVENESS_LOCK = "watchdog.lock"
 #: A heartbeat may be a little ahead of this process's wall clock (two hosts, two NTP
 #: states); beyond this it is not evidence this check can reason about.
 FUTURE_TOLERANCE_S = 5.0
@@ -126,34 +134,69 @@ def _open_parent(path: Path) -> tuple[int | None, str | None]:
     return descriptor, None
 
 
-def _read_heartbeat(path: Path) -> tuple[bytes | None, str | None]:
-    """The heartbeat's bytes, or the typed reason they could not be read."""
+def _writer_holds_lock(parent_fd: int) -> tuple[bool, str | None]:
+    """(True, None) when a live writer holds the liveness lock; (False, reason) otherwise.
+
+    The probe is LOCK_SH|LOCK_NB on the lock entry opened no-follow, non-blocking: EWOULDBLOCK
+    means a writer holds LOCK_EX right now; success means nobody does (released at once);
+    an absent or non-regular entry means no writer either. The kernel, not a timestamp,
+    answers — a writer that exited on any path has already let go.
+    """
+
+    try:
+        fd = os.open(LIVENESS_LOCK, _ENTRY_FLAGS, dir_fd=parent_fd)
+    except FileNotFoundError:
+        return False, "no writer holds the liveness lock (the lock entry is absent)"
+    except OSError as error:
+        return False, f"no writer holds the liveness lock (lock entry {_describe(error)})"
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return False, "no writer holds the liveness lock (lock entry is not a regular file)"
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True, None
+        except OSError as error:
+            return False, f"liveness lock unreadable: {_describe(error)}"
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False, "no writer holds the liveness lock"
+    finally:
+        os.close(fd)
+
+
+def _read_heartbeat(path: Path) -> tuple[bytes | None, str | None, bool, str | None]:
+    """The heartbeat's bytes (or the typed reason), and whether a writer holds the lock."""
 
     parent_fd, unreachable = _open_parent(path)
     if parent_fd is None:
-        return None, unreachable
+        return None, unreachable, False, unreachable
     try:
-        fd = os.open(path.name, _ENTRY_FLAGS, dir_fd=parent_fd)
-    except FileNotFoundError:
-        return None, "heartbeat absent"
-    except OSError as error:
-        return None, f"heartbeat unreadable: {_describe(error)}"
+        alive, dead_reason = _writer_holds_lock(parent_fd)
+        try:
+            fd = os.open(path.name, _ENTRY_FLAGS, dir_fd=parent_fd)
+        except FileNotFoundError:
+            return None, "heartbeat absent", alive, dead_reason
+        except OSError as error:
+            return None, f"heartbeat unreadable: {_describe(error)}", alive, dead_reason
     finally:
         os.close(parent_fd)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
-            return None, (
+            return (
+                None,
                 "heartbeat is not a regular file (a fifo, directory or device is refused, "
-                "never read)"
+                "never read)",
+                alive,
+                dead_reason,
             )
         raw = os.read(fd, _MAX_HEARTBEAT_BYTES + 1)
     except OSError as error:
-        return None, f"heartbeat unreadable: {_describe(error)}"
+        return None, f"heartbeat unreadable: {_describe(error)}", alive, dead_reason
     finally:
         os.close(fd)
     if len(raw) > _MAX_HEARTBEAT_BYTES:
-        return None, "heartbeat malformed: larger than 64 KiB"
-    return raw, None
+        return None, "heartbeat malformed: larger than 64 KiB", alive, dead_reason
+    return raw, None, alive, dead_reason
 
 
 def _parse_heartbeat(raw: bytes) -> tuple[datetime | None, float | None, str | None]:
@@ -206,12 +249,16 @@ def check_deadman(
     def verdict(state: DeadmanState, reason: str, age: float | None = None) -> DeadmanVerdict:
         return DeadmanVerdict(state=state, reason=reason, heartbeat_age_s=age, assessed_at=now)
 
-    raw, failure = _read_heartbeat(Path(heartbeat_path))
+    raw, failure, writer_alive, no_writer = _read_heartbeat(Path(heartbeat_path))
     if raw is None:
         return verdict(DeadmanState.DEAD, failure or "heartbeat unreadable")
     observed_at, monotonic, malformed = _parse_heartbeat(raw)
     if observed_at is None or monotonic is None:
         return verdict(DeadmanState.DEAD, malformed or "heartbeat malformed")
+    # Round 4 — the lock is the first input, the age the second: a writer that exited on ANY
+    # path has let the kernel release its lock, so a fresh-looking heartbeat proves nothing.
+    if not writer_alive:
+        return verdict(DeadmanState.DEAD, no_writer or "no writer holds the liveness lock")
 
     wall_age = round((now - observed_at).total_seconds(), 3)
     monotonic_age = round(now_monotonic - monotonic, 3)

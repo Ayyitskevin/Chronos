@@ -45,11 +45,16 @@ nothing is written. Every write loops until all bytes are accepted or raises. Pu
 (an entry that appeared in the window is refused, left in place); a present name is swapped
 with ``RENAME_EXCHANGE`` and the DISPLACED entry is judged before it is dropped — only the
 inode validated before the write is unlinked; anything else is swapped back and refused.
-The watchdog never deletes an entry it did not validate. Every branch after the exchange is
-settled before a raise (round 3): a displaced entry that vanishes makes the watchdog
-withdraw its own fresh record — identity-bound, so a foreign entry at the name is left in
-place — leaving no heartbeat rather than one the dead-man would read as proof of life.
-After a publication the name is re-checked against the inode that was written. When
+The watchdog never deletes an entry it did not validate. A displaced entry that vanishes
+makes the watchdog withdraw its own fresh record where it can (round 3; identity-bound, a
+foreign entry at the name is left in place) — but that withdrawal is best effort, not the
+guarantee. The guarantee (round 4) is the liveness lock: ``watchdog.lock`` is held LOCK_EX
+by the running watchdog from before its first tick until it closes, and the kernel releases
+it on ANY exit. The dead-man probes that lock before it reads any age: no writer holds it →
+DEAD, regardless of how fresh the last heartbeat looks. So whichever branch raised, the
+loop exiting is what the second layer sees; no per-branch settlement is claimed. One writer
+per evidence directory: a second watchdog is refused. After a publication the name is
+re-checked against the inode that was written. When
 evidence cannot be written the tick raises
 ``WatchdogEvidenceError`` and the process exits 3: a watchdog that cannot record is not a
 watchdog, and its stale heartbeat is exactly what the dead-man layer trips on.
@@ -61,6 +66,7 @@ import argparse
 import contextlib
 import ctypes
 import errno
+import fcntl
 import functools
 import json
 import math
@@ -87,6 +93,9 @@ from chronos.utils.time import utc_now
 
 EVIDENCE_LOG = "watchdog.jsonl"
 HEARTBEAT = "heartbeat.json"
+#: The liveness lock (round 4): held LOCK_EX by the running watchdog for the life of its loop
+#: and released by the kernel on ANY exit; the dead-man probes it before it reads any age.
+LIVENESS_LOCK = "watchdog.lock"
 
 _CLOEXEC = getattr(os, "O_CLOEXEC", 0)
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
@@ -101,6 +110,9 @@ _LOG_FLAGS = os.O_WRONLY | os.O_APPEND | _CLOEXEC | _NOFOLLOW | _NONBLOCK
 _TEMP_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _CLOEXEC | _NOFOLLOW | _NONBLOCK
 # A prior heartbeat read at construction: no-follow, non-blocking, regular files only.
 _ENTRY_FLAGS = os.O_RDONLY | _CLOEXEC | _NOFOLLOW | _NONBLOCK
+# The liveness lock entry: a capability entry like the others; O_RDWR so flock LOCK_EX is
+# ours to take, never through a link, never blocking on a planted FIFO.
+_LOCK_FLAGS = os.O_RDWR | _CLOEXEC | _NOFOLLOW | _NONBLOCK
 _MAX_HEARTBEAT_BYTES = 64 * 1024
 #: The kernel's boot identity: a heartbeat's monotonic value is comparable with this
 #: process's timer only when both were taken under the same boot (r2, continuity).
@@ -350,8 +362,10 @@ class Watchdog:
         self._sleep = sleep
         self._pid = os.getpid() if pid is None else pid
         self._dir_fd, self._evidence_dir = _open_evidence_directory(Path(evidence_dir))
+        self._lock_fd = -1
         self._log_path = self._evidence_dir / EVIDENCE_LOG
         self._heartbeat_path = self._evidence_dir / HEARTBEAT
+        self._lock_path = self._evidence_dir / LIVENESS_LOCK
         self._last_healthy_monotonic: float | None = None
         self._last_healthy_at: datetime | None = None
         self._prior_tripped = False
@@ -359,6 +373,7 @@ class Watchdog:
         self._temp_counter = 0
         self.last_observation: ExternalProbeState | None = None
         try:
+            self._acquire_liveness_lock()
             self._restore_prior_state()
         except BaseException:
             self.close()
@@ -375,11 +390,42 @@ class Watchdog:
         return self._dir_fd
 
     def close(self) -> None:
-        """Release the retained directory descriptor; the instance is finished."""
+        """Release the liveness lock and the retained directory descriptor; finished."""
 
+        if self._lock_fd >= 0:
+            with contextlib.suppress(OSError):
+                fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
+            os.close(self._lock_fd)
+            self._lock_fd = -1
         if self._dir_fd >= 0:
             os.close(self._dir_fd)
             self._dir_fd = -1
+
+    def _acquire_liveness_lock(self) -> None:
+        """Take LOCK_EX|LOCK_NB on the lock entry before the first tick (round 4).
+
+        Held for the life of the loop; the kernel releases it on any exit, so a raised tick
+        that ends the loop is visible to the dead-man without any per-branch settlement.
+        One writer per evidence directory: a second watchdog is refused, typed.
+        """
+
+        descriptor = self._create_or_open(LIVENESS_LOCK, _LOCK_FLAGS, self._lock_path)
+        try:
+            _require_owned_regular(os.fstat(descriptor), self._lock_path)
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as error:
+                raise WatchdogEvidenceError(
+                    self._lock_path, "another watchdog holds the evidence dir (liveness lock)"
+                ) from error
+            except OSError as error:
+                raise WatchdogEvidenceError(
+                    self._lock_path, f"liveness lock unavailable: {_describe(error)}"
+                ) from error
+        except BaseException:
+            os.close(descriptor)
+            raise
+        self._lock_fd = descriptor
 
     def __enter__(self) -> Watchdog:
         return self

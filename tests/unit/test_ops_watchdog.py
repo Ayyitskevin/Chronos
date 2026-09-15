@@ -10,6 +10,8 @@ restarts anything: 1f pins the import graph in both directions.
 from __future__ import annotations
 
 import ast
+import errno
+import fcntl
 import json
 import os
 import stat
@@ -36,6 +38,7 @@ from chronos.operations.external_probe import probe_external_health
 from chronos.operations.watchdog import (
     EVIDENCE_LOG,
     HEARTBEAT,
+    LIVENESS_LOCK,
     Watchdog,
     WatchdogConfigurationError,
     WatchdogEvidenceError,
@@ -122,6 +125,16 @@ def _watchdog(
 
 def _lines(path: Path) -> list[dict[str, object]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def _hold_lock(directory: Path) -> int:
+    """Hold the liveness lock the way a live watchdog does; the test keeps the fd open."""
+
+    directory.mkdir(parents=True, exist_ok=True)
+    fd = os.open(directory / LIVENESS_LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    os.fchmod(fd, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    return fd
 
 
 def _heartbeat(path: Path, clock: _Clock, *, age_s: float = 0.0) -> None:
@@ -263,9 +276,9 @@ def test_1e_heartbeat_is_replaced_atomically_and_a_planted_symlink_is_refused(
     assert first["pid"] == 4242 and first["monotonic"] == 5_000.0
     assert first["last_healthy_at"] == NOW.isoformat() == first["last_observed_at"]
     assert first["verdict"]["state"] == "HEALTHY"
-    assert [p.name for p in ops.iterdir() if p.name not in {HEARTBEAT, EVIDENCE_LOG}] == [], (
-        "no temp file may survive a tick"
-    )
+    assert [
+        p.name for p in ops.iterdir() if p.name not in {HEARTBEAT, EVIDENCE_LOG, LIVENESS_LOCK}
+    ] == [], "no temp file may survive a tick"
     clock.advance(10.0)
     backend["ready"] = False
     dog.tick()
@@ -283,7 +296,9 @@ def test_1e_heartbeat_is_replaced_atomically_and_a_planted_symlink_is_refused(
         dog.tick()
     assert heartbeat.is_symlink()
     assert sentinel.read_text(encoding="utf-8") == "SENTINEL"
-    assert [p.name for p in ops.iterdir() if p.name not in {HEARTBEAT, EVIDENCE_LOG}] == []
+    assert [
+        p.name for p in ops.iterdir() if p.name not in {HEARTBEAT, EVIDENCE_LOG, LIVENESS_LOCK}
+    ] == []
 
 
 def test_1e2_a_planted_symlink_at_the_evidence_log_is_refused_not_followed(tmp_path: Path) -> None:
@@ -500,6 +515,7 @@ def test_r1_2d_loose_or_foreign_evidence_entries_are_refused_typed(tmp_path: Pat
     dog = _watchdog(tmp_path, clock, {"live": True, "ready": True})
     with pytest.raises(WatchdogEvidenceError, match="mode"):
         dog.tick()
+    dog.close()  # r4: the liveness lock is released; the next constructions may take the dir
     (ops / EVIDENCE_LOG).chmod(0o600)
     (ops / HEARTBEAT).write_text("{}", encoding="utf-8")
     (ops / HEARTBEAT).chmod(0o600)
@@ -562,9 +578,7 @@ def test_r1_3a_a_short_log_write_raises_typed_and_publishes_no_heartbeat(
         dog.tick()
     monkeypatch.undo()
     assert (ops / HEARTBEAT).read_bytes() == before, "the previous heartbeat stays"
-    assert [p.name for p in ops.iterdir()] == sorted([EVIDENCE_LOG, HEARTBEAT]) or set(
-        p.name for p in ops.iterdir()
-    ) == {EVIDENCE_LOG, HEARTBEAT}
+    assert {p.name for p in ops.iterdir()} == {EVIDENCE_LOG, HEARTBEAT, LIVENESS_LOCK}
 
 
 def test_r1_3b_a_short_heartbeat_write_keeps_the_previous_heartbeat_byte_identical(
@@ -584,7 +598,7 @@ def test_r1_3b_a_short_heartbeat_write_keeps_the_previous_heartbeat_byte_identic
     assert (ops / HEARTBEAT).read_bytes() == before
     assert json.loads(before)["verdict"]["state"] == "HEALTHY"
     assert len(_lines(ops / EVIDENCE_LOG)) == lines_before + 1, "the observation was recorded"
-    assert {p.name for p in ops.iterdir()} == {EVIDENCE_LOG, HEARTBEAT}, "no temp survives"
+    assert {p.name for p in ops.iterdir()} == {EVIDENCE_LOG, HEARTBEAT, LIVENESS_LOCK}, "no temp"
 
 
 def test_r1_4_the_runbook_third_layer_is_host_push_receive_only_and_never_pulls() -> None:
@@ -751,7 +765,7 @@ def test_r2_2a_a_symlink_planted_in_the_check_replace_window_survives_and_is_ref
     monkeypatch.undo()
     assert (ops / HEARTBEAT).is_symlink(), "the planted entry survives at the name"
     assert sentinel.read_text(encoding="utf-8") == "SENTINEL"
-    assert {p.name for p in ops.iterdir()} == {EVIDENCE_LOG, HEARTBEAT}, "no temp, nothing new"
+    assert {p.name for p in ops.iterdir()} == {EVIDENCE_LOG, HEARTBEAT, LIVENESS_LOCK}, "no temp"
     assert previous  # the previous heartbeat is gone from the name (the planter removed it);
     # what a reader now sees at heartbeat.json is the planted link — the operator's evidence
 
@@ -778,7 +792,7 @@ def test_r2_2b_a_hardlink_to_a_foreign_file_planted_in_the_window_survives_and_i
     monkeypatch.undo()
     assert (ops / HEARTBEAT).read_text(encoding="utf-8") == "FOREIGN"
     assert foreign.lstat().st_nlink == 2, "the planted hardlink was neither unlinked nor rewritten"
-    assert {p.name for p in ops.iterdir()} == {EVIDENCE_LOG, HEARTBEAT}
+    assert {p.name for p in ops.iterdir()} == {EVIDENCE_LOG, HEARTBEAT, LIVENESS_LOCK}
 
 
 def test_r2_2c_an_entry_that_appears_at_an_absent_name_is_refused_not_replaced(
@@ -794,7 +808,7 @@ def test_r2_2c_an_entry_that_appears_at_an_absent_name_is_refused_not_replaced(
         dog.tick()
     monkeypatch.undo()
     assert (ops / HEARTBEAT).is_symlink()
-    assert {p.name for p in ops.iterdir()} == {EVIDENCE_LOG, HEARTBEAT}
+    assert {p.name for p in ops.iterdir()} == {EVIDENCE_LOG, HEARTBEAT, LIVENESS_LOCK}
 
 
 def test_r2_2d_the_normal_publication_still_replaces_atomically_and_leaves_no_temp(
@@ -806,7 +820,7 @@ def test_r2_2d_the_normal_publication_still_replaces_atomically_and_leaves_no_te
     for _ in range(3):
         dog.tick()
         clock.advance(10.0)
-        assert {p.name for p in ops.iterdir()} == {EVIDENCE_LOG, HEARTBEAT}
+        assert {p.name for p in ops.iterdir()} == {EVIDENCE_LOG, HEARTBEAT, LIVENESS_LOCK}
         st = (ops / HEARTBEAT).lstat()
         assert stat.S_ISREG(st.st_mode) and st.st_nlink == 1 and stat.S_IMODE(st.st_mode) == 0o600
 
@@ -861,7 +875,7 @@ def test_r3_1a_a_displaced_entry_that_vanishes_after_the_exchange_withdraws_our_
         dog.tick()
     monkeypatch.undo()
     assert not (ops / HEARTBEAT).exists(), "the fresh record must not remain readable"
-    assert {p.name for p in ops.iterdir()} == {EVIDENCE_LOG}, "no temp survives"
+    assert {p.name for p in ops.iterdir()} == {EVIDENCE_LOG, LIVENESS_LOCK}, "no temp survives"
     verdict = check_deadman(ops / HEARTBEAT, 180.0, clock=clock.now, timer=clock.monotonic)
     assert verdict.state is DeadmanState.DEAD and "absent" in verdict.reason
     assert EXIT_CODES[verdict.state] == 2
@@ -891,7 +905,7 @@ def test_r3_1b_a_foreign_entry_at_the_name_after_the_vanish_is_left_in_place(
     monkeypatch.undo()
     assert (ops / HEARTBEAT).is_symlink(), "the foreign entry survives at the name"
     assert sentinel.read_text(encoding="utf-8") == "SENTINEL"
-    assert {p.name for p in ops.iterdir()} == {EVIDENCE_LOG, HEARTBEAT}
+    assert {p.name for p in ops.iterdir()} == {EVIDENCE_LOG, HEARTBEAT, LIVENESS_LOCK}
     verdict = check_deadman(ops / HEARTBEAT, 180.0, clock=clock.now, timer=clock.monotonic)
     assert verdict.state is DeadmanState.DEAD and "symlink" in verdict.reason
 
@@ -907,7 +921,7 @@ def test_r3_1c_the_normal_and_foreign_branches_are_unchanged_by_the_settlement(
         clock.advance(10.0)
     heartbeat = json.loads((ops / HEARTBEAT).read_text(encoding="utf-8"))
     assert heartbeat["verdict"]["state"] == "HEALTHY"
-    assert {p.name for p in ops.iterdir()} == {EVIDENCE_LOG, HEARTBEAT}
+    assert {p.name for p in ops.iterdir()} == {EVIDENCE_LOG, HEARTBEAT, LIVENESS_LOCK}
     verdict = check_deadman(ops / HEARTBEAT, 180.0, clock=clock.now, timer=clock.monotonic)
     assert verdict.state is DeadmanState.ALIVE
 
@@ -922,21 +936,215 @@ def test_r3_3_the_runbook_names_the_settled_outcomes_and_the_crash_boundary() ->
     assert "withdrawn" in collapsed
 
 
+# ---------------------------------------------- r4 (Daybreak HOLD-DELTA at 116214c): the class
+
+
+_Hook = Callable[[int, str, int, str], None]
+
+
+def _after_exchange_then(
+    monkeypatch: pytest.MonkeyPatch, on_exchange: _Hook, on_next: _Hook
+) -> None:
+    """Daybreak's r3 hooks: act right after the real RENAME_EXCHANGE, then act BEFORE the next
+    renameat2 call (the withdrawal's NOREPLACE move)."""
+
+    real = watchdog_module._renameat2
+    state = {"exchanged": False}
+
+    def hooked(src_dir_fd: int, src: str, dst_dir_fd: int, dst: str, flags: int) -> None:
+        if flags == watchdog_module._RENAME_EXCHANGE and not state["exchanged"]:
+            real(src_dir_fd, src, dst_dir_fd, dst, flags)
+            state["exchanged"] = True
+            on_exchange(src_dir_fd, src, dst_dir_fd, dst)
+            return
+        if state["exchanged"]:
+            on_next(src_dir_fd, src, dst_dir_fd, dst)
+        real(src_dir_fd, src, dst_dir_fd, dst, flags)
+
+    monkeypatch.setattr(watchdog_module, "_renameat2", hooked)
+
+
+def test_r4_1a_withdrawal_name_reoccupied_the_exited_writer_is_dead_by_the_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Daybreak's sequence (a), logs/daybreak-probe-W-1-r3.py: the displaced entry vanishes,
+    then
+    a symlink is planted at the freed temp name just before the withdrawal's NOREPLACE move. At
+    116214c the tick raised 'withdrawal refused', the fresh record stayed, and the dead-man read
+    ALIVE. The lock closes the class: once the loop exits, no writer holds it → DEAD."""
+
+    clock = _Clock()
+    dog = _watchdog(tmp_path, clock, {"live": True, "ready": True})
+    dog.tick()
+    ops = tmp_path / "ops"
+    sentinel = tmp_path / "sentinel.json"
+    sentinel.write_text("SENTINEL", encoding="utf-8")
+
+    def vanish(src_dir_fd: int, src: str, dst_dir_fd: int, dst: str) -> None:
+        os.unlink(src, dir_fd=src_dir_fd)
+
+    def occupy(src_dir_fd: int, src: str, dst_dir_fd: int, dst: str) -> None:
+        os.symlink(str(sentinel), dst, dir_fd=dst_dir_fd)  # the freed temp name is taken again
+
+    _after_exchange_then(monkeypatch, vanish, occupy)
+    clock.advance(10.0)
+    with pytest.raises(WatchdogEvidenceError, match="withdrawal refused"):
+        dog.tick()
+    monkeypatch.undo()
+    planted = [p for p in ops.iterdir() if p.is_symlink()]
+    assert len(planted) == 1 and sentinel.read_text(encoding="utf-8") == "SENTINEL"
+    before = check_deadman(ops / HEARTBEAT, 180.0, clock=clock.now, timer=clock.monotonic)
+    assert before.state is DeadmanState.ALIVE, "the fresh record alone would pass: the lock decides"
+    dog.close()  # what run()'s finally does when the tick raises: the loop exits, the lock frees
+    after = check_deadman(ops / HEARTBEAT, 180.0, clock=clock.now, timer=clock.monotonic)
+    assert after.state is DeadmanState.DEAD and "no writer holds the liveness lock" in after.reason
+    assert EXIT_CODES[after.state] == 2
+
+
+def test_r4_1b_eio_on_the_displaced_stat_the_exited_writer_is_dead_by_the_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Daybreak's sequence (b): EIO injected on the displaced-entry stat."""
+
+    clock = _Clock()
+    dog = _watchdog(tmp_path, clock, {"live": True, "ready": True})
+    dog.tick()
+    ops = tmp_path / "ops"
+    real_stat = os.stat
+    armed = {"name": None}
+
+    def mark(src_dir_fd: int, src: str, dst_dir_fd: int, dst: str) -> None:
+        armed["name"] = src
+
+    def failing_stat(path: object, *args: object, **kwargs: object) -> os.stat_result:
+        if armed["name"] is not None and path == armed["name"]:
+            armed["name"] = None
+            raise OSError(errno.EIO, "injected displaced stat failure")
+        return real_stat(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    _after_exchange_then(monkeypatch, mark, lambda *a: None)
+    monkeypatch.setattr(watchdog_module.os, "stat", failing_stat)
+    clock.advance(10.0)
+    with pytest.raises(WatchdogEvidenceError, match="unreadable mid-publication"):
+        dog.tick()
+    monkeypatch.undo()
+    dog.close()
+    verdict = check_deadman(ops / HEARTBEAT, 180.0, clock=clock.now, timer=clock.monotonic)
+    assert (
+        verdict.state is DeadmanState.DEAD and "no writer holds the liveness lock" in verdict.reason
+    )
+
+
+def test_r4_1c_the_lock_is_the_first_input_and_the_age_the_second(tmp_path: Path) -> None:
+    clock = _Clock()
+    path = tmp_path / HEARTBEAT
+    _heartbeat(path, clock, age_s=5.0)
+    no_writer = check_deadman(path, 180.0, clock=clock.now, timer=clock.monotonic)
+    assert (
+        no_writer.state is DeadmanState.DEAD
+        and "no writer holds the liveness lock" in no_writer.reason
+    )
+    held = _hold_lock(tmp_path)
+    assert (
+        check_deadman(path, 180.0, clock=clock.now, timer=clock.monotonic).state
+        is DeadmanState.ALIVE
+    )
+    _heartbeat(path, clock, age_s=500.0)
+    by_age = check_deadman(path, 180.0, clock=clock.now, timer=clock.monotonic)
+    assert by_age.state is DeadmanState.DEAD and "500.0 s wall" in by_age.reason
+    os.close(held)  # the writer is gone: DEAD by the lock even though nothing else changed
+    _heartbeat(path, clock, age_s=5.0)
+    gone = check_deadman(path, 180.0, clock=clock.now, timer=clock.monotonic)
+    assert gone.state is DeadmanState.DEAD and "no writer holds the liveness lock" in gone.reason
+
+
+def test_r4_1d_one_writer_per_evidence_dir(tmp_path: Path) -> None:
+    clock = _Clock()
+    first = _watchdog(tmp_path, clock, {"live": True, "ready": True})
+    with pytest.raises(WatchdogEvidenceError, match="another watchdog holds the evidence dir"):
+        _watchdog(tmp_path, clock, {"live": True, "ready": True})
+    first.close()
+    second = _watchdog(
+        tmp_path, clock, {"live": True, "ready": True}
+    )  # released: a restart may take it
+    assert second.tick().state is WatchdogState.HEALTHY
+    second.close()
+
+
+def test_r4_1e_the_lock_entry_is_a_capability_entry(tmp_path: Path) -> None:
+    clock = _Clock()
+    ops = tmp_path / "ops"
+    ops.mkdir()
+    sentinel = tmp_path / "sentinel.lock"
+    sentinel.write_text("", encoding="utf-8")
+    (ops / LIVENESS_LOCK).symlink_to(sentinel)
+    with pytest.raises(WatchdogEvidenceError, match="symlink"):
+        _watchdog(tmp_path, clock, {"live": True, "ready": True})
+    (ops / LIVENESS_LOCK).unlink()
+    dog = _watchdog(tmp_path, clock, {"live": True, "ready": True})
+    st = (ops / LIVENESS_LOCK).lstat()
+    assert stat.S_ISREG(st.st_mode) and stat.S_IMODE(st.st_mode) == 0o600 and st.st_nlink == 1
+    dog.close()
+
+
+def test_r4_1f_the_kernel_releases_the_lock_when_the_writer_process_dies(tmp_path: Path) -> None:
+    """A real second process holds the lock (no HTTP: it builds a Watchdog on a MockTransport probe
+    in-process and sleeps); the dead-man sees ALIVE while it lives and DEAD once it is killed."""
+
+    ops = tmp_path / "ops"
+    script = f"""
+import httpx, time
+from chronos.operations.external_probe import probe_external_health
+from chronos.operations.watchdog import Watchdog
+transport = httpx.MockTransport(lambda request: httpx.Response(200))
+probe = lambda: probe_external_health("http://backend.test", transport=transport)
+dog = Watchdog(probe=probe, interval_s=10.0, deadline_s=90.0, evidence_dir={str(ops)!r})
+dog.tick()
+print("ready", flush=True)
+time.sleep(60)
+"""
+    child = subprocess.Popen(
+        [sys.executable, "-c", script], stdout=subprocess.PIPE, text=True, env=SAFE_ENV
+    )
+    try:
+        assert child.stdout is not None and child.stdout.readline().strip() == "ready"
+        alive = check_deadman(ops / HEARTBEAT, 180.0)  # the real clocks: the child used them too
+        assert alive.state is DeadmanState.ALIVE, alive.reason
+    finally:
+        child.kill()
+        child.wait(timeout=10)
+    dead = check_deadman(ops / HEARTBEAT, 180.0)
+    assert dead.state is DeadmanState.DEAD and "no writer holds the liveness lock" in dead.reason
+
+
+def test_r4_2_the_runbook_states_the_lock_rule() -> None:
+    import re
+
+    runbook = (ROOT / "docs" / "ops" / "WATCHDOG.md").read_text(encoding="utf-8")
+    collapsed = re.sub(r"\s+", " ", runbook)
+    assert "liveness lock" in collapsed and "regardless" in collapsed
+    assert "one writer" in collapsed.lower()
+    assert "every post-exchange failure is settled" not in collapsed.lower()
+
+
 # ------------------------------------------------------------------ 2. the dead-man check
 
 
 def test_2a_a_fresh_heartbeat_is_alive(tmp_path: Path) -> None:
     clock = _Clock()
     path = tmp_path / HEARTBEAT
+    held = _hold_lock(tmp_path)
     _heartbeat(path, clock, age_s=30.0)
     verdict = check_deadman(path, 180.0, clock=clock.now, timer=clock.monotonic)
     assert verdict.state is DeadmanState.ALIVE
     assert verdict.heartbeat_age_s == 30.0
+    os.close(held)
 
 
 def test_2b_a_heartbeat_stale_by_both_clocks_is_dead(tmp_path: Path) -> None:
     clock = _Clock()
     path = tmp_path / HEARTBEAT
+    _hold_lock(tmp_path)
     _heartbeat(path, clock, age_s=181.0)
     verdict = check_deadman(path, 180.0, clock=clock.now, timer=clock.monotonic)
     assert verdict.state is DeadmanState.DEAD
@@ -947,6 +1155,7 @@ def test_2b_a_heartbeat_stale_by_both_clocks_is_dead(tmp_path: Path) -> None:
 def test_2b2_exactly_max_age_is_still_alive(tmp_path: Path) -> None:
     clock = _Clock()
     path = tmp_path / HEARTBEAT
+    _hold_lock(tmp_path)
     _heartbeat(path, clock, age_s=180.0)
     assert check_deadman(path, 180.0, clock=clock.now, timer=clock.monotonic).state is (
         DeadmanState.ALIVE
@@ -1014,6 +1223,7 @@ def test_2f_disagreeing_clocks_and_a_monotonic_from_another_boot_are_unknown(
 ) -> None:
     clock = _Clock()
     path = tmp_path / HEARTBEAT
+    _hold_lock(tmp_path)
     _heartbeat(path, clock, age_s=30.0)
     clock.wall += timedelta(seconds=400)  # the wall clock stepped forward; the timer did not
     verdict = check_deadman(path, 180.0, clock=clock.now, timer=clock.monotonic)
@@ -1036,6 +1246,7 @@ def test_2f_disagreeing_clocks_and_a_monotonic_from_another_boot_are_unknown(
 def test_2g_configuration_is_validated_and_nothing_is_retained(tmp_path: Path) -> None:
     clock = _Clock()
     path = tmp_path / HEARTBEAT
+    _hold_lock(tmp_path)
     _heartbeat(path, clock)
     for bad in (0.0, -5.0, float("nan"), True):
         with pytest.raises(DeadmanConfigurationError, match="positive finite"):
@@ -1114,6 +1325,7 @@ def test_3c_deadman_cli_exit_codes_and_json(
 ) -> None:
     clock = _Clock(wall=datetime.now(tz=UTC), monotonic=time.monotonic())
     path = tmp_path / HEARTBEAT
+    _hold_lock(tmp_path)
     _heartbeat(path, clock, age_s=1.0)
     assert deadman_main(["--heartbeat", str(path), "--max-age", "180"]) == 0
     assert json.loads(capsys.readouterr().out)["state"] == "ALIVE"
