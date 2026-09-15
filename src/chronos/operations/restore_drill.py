@@ -233,21 +233,71 @@ def _sha256_of(path: Path, subject: str) -> str:
     return digest.hexdigest()
 
 
-def _open_directory(directory: Path, what: str, *, create: bool) -> int:
-    """A directory fd (O_DIRECTORY|O_NOFOLLOW, 0700 when created); every create, link,
-    unlink and fsync below is relative to it, so a path swapped underneath cannot
-    redirect a write."""
+_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
 
-    if directory.is_symlink():
-        raise DrillRefused(f"{what} {directory} is a symlink; name a real directory")
-    if create:
-        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+
+def _component_problem(dfd: int, component: str, error: OSError) -> str:
+    """Name the object at the component: a symlink (ELOOP, or ENOTDIR because O_DIRECTORY
+    is judged before O_NOFOLLOW on Linux) is said to be one; the drill never follows it."""
+
+    with contextlib.suppress(OSError):
+        if stat.S_ISLNK(os.stat(component, dir_fd=dfd, follow_symlinks=False).st_mode):
+            return (
+                "is a symlink (refused: the drill never follows a link on its way to a directory)"
+            )
+    if error.errno == errno.ELOOP:
+        return "is a symlink (refused: the drill never follows a link on its way to a directory)"
+    if error.errno == errno.ENOTDIR:
+        return "is not a directory"
+    return error.strerror or str(error)
+
+
+def _walk_directory(named: Path, what: str, *, create: bool) -> tuple[int, Path]:
+    """Reach ``named`` component by component, O_DIRECTORY|O_NOFOLLOW at every step, from
+    the root. Missing components are created descriptor-relative (0700) when ``create``;
+    a symlinked ancestor or a non-directory component is a typed refusal BEFORE anything
+    is created past it. Returns the retained fd and the absolute path (for messages only —
+    every later operation is descriptor-relative). The pattern is the watchdog's
+    ``_open_evidence_directory`` (W-1), copied rather than imported across branches."""
+
+    absolute = named if named.is_absolute() else Path.cwd() / named
+    descriptor = os.open(os.sep, _DIR_FLAGS)
     try:
-        return os.open(directory, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0))
-    except OSError as error:
-        raise DrillRefused(
-            f"{what} {directory} could not be opened as a directory: {error.strerror}"
-        ) from None
+        for component in absolute.parts[1:]:
+            try:
+                child = os.open(component, _DIR_FLAGS, dir_fd=descriptor)
+            except FileNotFoundError:
+                if not create:
+                    raise DrillRefused(
+                        f"{what} {absolute}: component {component!r} does not exist"
+                    ) from None
+                try:
+                    os.mkdir(component, 0o700, dir_fd=descriptor)
+                    child = os.open(component, _DIR_FLAGS, dir_fd=descriptor)
+                except OSError as error:
+                    raise DrillRefused(
+                        f"{what} {absolute}: component {component!r} "
+                        f"{_component_problem(descriptor, component, error)}"
+                    ) from None
+            except OSError as error:
+                raise DrillRefused(
+                    f"{what} {absolute}: component {component!r} "
+                    f"{_component_problem(descriptor, component, error)}"
+                ) from None
+            os.close(descriptor)
+            descriptor = child
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor, absolute
+
+
+def _open_directory(directory: Path, what: str, *, create: bool) -> int:
+    """A directory fd reached by the no-follow walk; every create, link, unlink and fsync
+    below is relative to it."""
+
+    descriptor, _absolute = _walk_directory(directory, what, create=create)
+    return descriptor
 
 
 def _create_exclusive_at(
@@ -266,73 +316,106 @@ def _create_exclusive_at(
         ) from None
 
 
-def _publish(dfd: int, tmp_name: str, final_name: str) -> None:
-    """Acquire the final name with ``link`` (EEXIST → refusal), drop the temp name, fsync
-    the directory. The published entry is the very inode the temp descriptor wrote."""
+def _identity(dfd: int, name: str) -> tuple[int, int]:
+    st = os.stat(name, dir_fd=dfd, follow_symlinks=False)
+    return st.st_dev, st.st_ino
 
+
+def _publish_all(dfd: int, pairs: list[tuple[str, str]]) -> None:
+    """Acquire EVERY final name with ``link`` (EEXIST → refusal) — all or nothing.
+
+    ``pairs`` is ``[(temp_name, final_name), ...]``; every temp is complete and fsynced
+    before this is called. If any final name cannot be acquired, every final entry THIS
+    attempt linked is removed (only if the name still designates the inode this attempt
+    linked) and every temp is removed, then the typed refusal is raised: nothing new stays
+    visible. On success the temps are dropped and the directory is fsynced once."""
+
+    acquired: list[tuple[str, tuple[int, int]]] = []
     try:
-        os.link(tmp_name, final_name, src_dir_fd=dfd, dst_dir_fd=dfd)
-    except FileExistsError:
-        os.unlink(tmp_name, dir_fd=dfd)
-        raise DrillRefused(
-            f"{final_name} already exists in the destination; the drill never overwrites"
-        ) from None
-    os.unlink(tmp_name, dir_fd=dfd)
+        for temp_name, final_name in pairs:
+            try:
+                os.link(temp_name, final_name, src_dir_fd=dfd, dst_dir_fd=dfd)
+            except FileExistsError:
+                raise DrillRefused(
+                    f"{final_name} already exists in the destination; the drill never overwrites"
+                ) from None
+            acquired.append((final_name, _identity(dfd, temp_name)))
+    except BaseException:
+        for final_name, inode in acquired:
+            with contextlib.suppress(OSError):
+                if _identity(dfd, final_name) == inode:
+                    os.unlink(final_name, dir_fd=dfd)
+        for temp_name, _final_name in pairs:
+            with contextlib.suppress(OSError):
+                os.unlink(temp_name, dir_fd=dfd)
+        raise
+    for temp_name, _final_name in pairs:
+        os.unlink(temp_name, dir_fd=dfd)
     os.fsync(dfd)
 
 
-def _write_bytes_at(dfd: int, name: str, payload: bytes) -> None:
-    fd = _create_exclusive_at(dfd, name)
+def _stage_bytes_at(dfd: int, temp_name: str, payload: bytes) -> None:
+    """A complete, fsynced temp entry holding ``payload`` (unpublished until _publish_all)."""
+
+    fd = _create_exclusive_at(dfd, temp_name)
     try:
         with os.fdopen(fd, "wb") as writer:
             writer.write(payload)
             writer.flush()
             os.fsync(writer.fileno())
     except BaseException:
-        os.unlink(name, dir_fd=dfd)
+        with contextlib.suppress(OSError):
+            os.unlink(temp_name, dir_fd=dfd)
         raise
 
 
-def _copy_regular(source: Path, destination_dir: Path, name: str, subject: str) -> Path:
-    """Copy a regular file (opened no-follow, fstat'd) into ``destination_dir`` under
-    ``name`` — O_EXCL against the directory fd, fsynced, then the directory fsynced."""
+def _copy_regular_at(source: Path, dfd: int, name: str, subject: str) -> None:
+    """Copy a regular file (opened no-follow, fstat'd) into the directory fd under
+    ``name`` — O_EXCL, fsynced; the caller fsyncs the directory."""
 
     src_fd = _open_regular(source, subject)
-    dfd = _open_directory(destination_dir, "destination", create=False)
+    dst_fd = _create_exclusive_at(dfd, name)
     try:
-        dst_fd = _create_exclusive_at(dfd, name)
-        try:
-            with os.fdopen(src_fd, "rb") as reader, os.fdopen(dst_fd, "wb") as writer:
-                for chunk in iter(lambda: reader.read(_CHUNK), b""):
-                    writer.write(chunk)
-                writer.flush()
-                os.fsync(writer.fileno())
-        except BaseException:
+        with os.fdopen(src_fd, "rb") as reader, os.fdopen(dst_fd, "wb") as writer:
+            for chunk in iter(lambda: reader.read(_CHUNK), b""):
+                writer.write(chunk)
+            writer.flush()
+            os.fsync(writer.fileno())
+    except BaseException:
+        with contextlib.suppress(OSError):
             os.unlink(name, dir_fd=dfd)
-            raise
-        os.fsync(dfd)
-    finally:
-        os.close(dfd)
-    return destination_dir / name
+        raise
 
 
-def _fresh_directory(target: Path, what: str) -> None:
-    """The target must be absent or an empty directory (never a symlink); created 0700."""
+def _fresh_directory(target: Path, what: str) -> int:
+    """The target must be absent or an empty directory, reached by the no-follow walk (a
+    symlinked ancestor or leaf is refused); created 0700 when absent. Returns its fd."""
 
-    if target.is_symlink():
-        raise DrillRefused(f"{what} {target} is a symlink; name a real directory")
-    if target.exists():
-        if not target.is_dir():
-            raise DrillRefused(f"{what} {target} exists and is not a directory")
-        if any(target.iterdir()):
+    absolute = target if target.is_absolute() else Path.cwd() / target
+    parent_fd, _parent = _walk_directory(absolute.parent, what, create=True)
+    try:
+        leaf = absolute.name
+        try:
+            fd = os.open(leaf, _DIR_FLAGS, dir_fd=parent_fd)
+        except FileNotFoundError:
+            os.mkdir(leaf, 0o700, dir_fd=parent_fd)
+            fd = os.open(leaf, _DIR_FLAGS, dir_fd=parent_fd)
+        except OSError as error:
             raise DrillRefused(
-                f"{what} {target} is not empty; the drill never restores over existing files"
-            )
-        return
-    target.mkdir(mode=0o700, parents=True)
-
-
-# ----------------------------------------------------------------- store inspection
+                f"{what} {absolute}: component {leaf!r} "
+                f"{_component_problem(parent_fd, leaf, error)}"
+            ) from None
+        try:
+            if os.listdir(fd):
+                raise DrillRefused(
+                    f"{what} {absolute} is not empty; the drill never restores over existing files"
+                )
+        except BaseException:
+            os.close(fd)
+            raise
+        return fd
+    finally:
+        os.close(parent_fd)
 
 
 def _readonly(path: Path) -> sqlite3.Connection:
@@ -516,6 +599,9 @@ def backup(db_path: Path, out_dir: Path, *, clock: Clock | None = None) -> Backu
         tmp_name = f".{final_name}.{secrets.token_hex(6)}.tmp"
         tmp_fd = _create_exclusive_at(dfd, tmp_name, flags=os.O_RDWR)
         audit_log = db_path.parent / AUDIT_LOG_NAME
+        staged: list[tuple[str, str]] = [(tmp_name, final_name)]
+        audit_head: str | None = None
+        audit_copy: Path | None = None
         try:
             identity = os.fstat(tmp_fd)
             # sqlite writes THIS descriptor's inode (/proc/self/fd/<n>), never a
@@ -534,9 +620,11 @@ def backup(db_path: Path, out_dir: Path, *, clock: Clock | None = None) -> Backu
             if (after.st_dev, after.st_ino) != (identity.st_dev, identity.st_ino):
                 raise DrillRefused(f"the temp entry {tmp_name} changed identity during the backup")
             os.fsync(tmp_fd)
+            os.close(tmp_fd)
+            tmp_fd = -1
             # the audit pair, read ONCE as a pair AFTER the backup completed (anchor before
             # log, no-follow, one capability read each — the audit log's own reader); a
-            # refused or half pair unlinks the unpublished backup: nothing is published
+            # refused or half pair unlinks every staged temp: nothing is published
             try:
                 log_text, anchor_bytes = read_audit_pair(audit_log)
             except AuditLogCorruptionError as error:
@@ -548,25 +636,30 @@ def backup(db_path: Path, out_dir: Path, *, clock: Clock | None = None) -> Backu
                     "audit pair beside the source is incomplete (a log without its anchor or "
                     "an anchor without its log); refusing to retain half a chain"
                 )
+            if log_text is not None and anchor_bytes is not None:
+                audit_head = _decode_audit_head(
+                    anchor_bytes, audit_log.with_name(AUDIT_ANCHOR_NAME)
+                )
+                stem = final_name[: -len(".db")]
+                log_final = f"{stem}.{AUDIT_LOG_NAME}"
+                anchor_final = f"{stem}.{AUDIT_ANCHOR_NAME}"
+                log_tmp = f".{log_final}.{secrets.token_hex(6)}.tmp"
+                anchor_tmp = f".{anchor_final}.{secrets.token_hex(6)}.tmp"
+                _stage_bytes_at(dfd, log_tmp, log_text.encode("utf-8"))
+                staged.append((log_tmp, log_final))
+                _stage_bytes_at(dfd, anchor_tmp, anchor_bytes)
+                staged.append((anchor_tmp, anchor_final))
+                audit_copy = out_dir / log_final
         except BaseException:
-            os.close(tmp_fd)
-            with contextlib.suppress(OSError):
-                os.unlink(tmp_name, dir_fd=dfd)
+            if tmp_fd != -1:
+                os.close(tmp_fd)
+            for temp_name, _final in staged:
+                with contextlib.suppress(OSError):
+                    os.unlink(temp_name, dir_fd=dfd)
             raise
-        os.close(tmp_fd)
-        _publish(dfd, tmp_name, final_name)
+        # every temp is complete and fsynced: acquire ALL final names, or none
+        _publish_all(dfd, staged)
         backup_path = out_dir / final_name
-
-        # both audit copies are written from that single read
-        audit_head: str | None = None
-        audit_copy: Path | None = None
-        if log_text is not None and anchor_bytes is not None:
-            audit_head = _decode_audit_head(anchor_bytes, audit_log.with_name(AUDIT_ANCHOR_NAME))
-            stem = backup_path.stem
-            _write_bytes_at(dfd, f"{stem}.{AUDIT_LOG_NAME}", log_text.encode("utf-8"))
-            _write_bytes_at(dfd, f"{stem}.{AUDIT_ANCHOR_NAME}", anchor_bytes)
-            os.fsync(dfd)
-            audit_copy = out_dir / f"{stem}.{AUDIT_LOG_NAME}"
     finally:
         os.close(dfd)
 
@@ -659,15 +752,23 @@ def restore(
     clock = clock or system_clock()
     target_dir = Path(target_dir)
     started = clock.monotonic()
-    _fresh_directory(target_dir, "restore target")
+    target_fd = _fresh_directory(target_dir, "restore target")
     backup_path = Path(manifest.backup_path)
-    restored = _copy_regular(backup_path, target_dir, backup_path.name, "backup")
     restored_audit: Path | None = None
-    if manifest.audit_log_path is not None:
-        audit_src = Path(manifest.audit_log_path)
-        anchor_src = audit_src.with_name(audit_src.name.replace(AUDIT_LOG_NAME, AUDIT_ANCHOR_NAME))
-        restored_audit = _copy_regular(audit_src, target_dir, AUDIT_LOG_NAME, "audit log")
-        _copy_regular(anchor_src, target_dir, AUDIT_ANCHOR_NAME, "audit anchor")
+    try:
+        _copy_regular_at(backup_path, target_fd, backup_path.name, "backup")
+        restored = target_dir / backup_path.name
+        if manifest.audit_log_path is not None:
+            audit_src = Path(manifest.audit_log_path)
+            anchor_src = audit_src.with_name(
+                audit_src.name.replace(AUDIT_LOG_NAME, AUDIT_ANCHOR_NAME)
+            )
+            _copy_regular_at(audit_src, target_fd, AUDIT_LOG_NAME, "audit log")
+            _copy_regular_at(anchor_src, target_fd, AUDIT_ANCHOR_NAME, "audit anchor")
+            restored_audit = target_dir / AUDIT_LOG_NAME
+        os.fsync(target_fd)
+    finally:
+        os.close(target_fd)
     failures, facts = verify_restored(manifest, restored, restored_audit)
     verified_at = clock.monotonic()
     return RestoreReport(
@@ -770,7 +871,7 @@ def main(argv: list[str] | None = None) -> int:
     dfd = _open_directory(manifest_path.parent, "backup directory", create=False)
     try:
         body = json.dumps(report.manifest.to_dict(), indent=2, sort_keys=True) + "\n"
-        _write_bytes_at(dfd, manifest_path.name, body.encode("utf-8"))
+        _stage_bytes_at(dfd, manifest_path.name, body.encode("utf-8"))
         os.fsync(dfd)
     finally:
         os.close(dfd)

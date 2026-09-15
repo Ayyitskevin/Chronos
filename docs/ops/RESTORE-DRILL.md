@@ -66,13 +66,26 @@ locking — never `immutable=1`, which would ignore a WAL that appears after any
 is never written; on a WAL-mode store a read-only reader may create empty `-wal`/`-shm`
 sidecars beside it (sqlite's own bookkeeping, a directory write, not a database write).
 
-**Publication is name-bound and durable.** The harness writes the backup into the
-exclusively created temp file's own descriptor (`/proc/self/fd/<n>`, identity re-checked),
-stores the copy in rollback-journal mode (one self-contained file), fsyncs it, acquires the
-final name with `link` — an existing file of that name is a refusal, nothing is ever
-renamed over it — and fsyncs the directory. The audit log and its head anchor are read
-**once, as a pair, after the backup completed** and both copies are written from that read;
-an anchor without its log (or the reverse) is a refusal and nothing is published.
+**Publication is all-or-nothing, name-bound and durable.** The backup is a triple — the
+database, the audit log copy and its head anchor copy (the last two only when a pair sits
+beside the source). The harness writes the database into the exclusively created temp
+file's own descriptor (`/proc/self/fd/<n>`, identity re-checked), stores the copy in
+rollback-journal mode (one self-contained file), fsyncs it, then reads the audit log and its
+head anchor **once, as a pair, after the backup completed** and stages both copies as temp
+entries from that read. Only when all three temps are complete and fsynced are the final
+names acquired, each with `link` — an existing file at ANY of the three names is a refusal:
+every final entry this attempt had already linked is removed again (only if the name still
+designates the inode this attempt linked), every temp is removed, and **nothing is
+published** — the pre-existing entry keeps its bytes, nothing is ever renamed over it. The
+directory is fsynced once after the triple is visible. An anchor without its log (or the
+reverse) is likewise a refusal with nothing published.
+
+**Directories are reached component by component.** The backup directory and the restore
+target are opened by an `O_DIRECTORY|O_NOFOLLOW` walk from `/` — every path component,
+not just the last one — with missing components created descriptor-relative (mode 0700).
+A symlinked ancestor (`alias -> elsewhere`) is refused by name before anything is created
+past it, so an alias cannot redirect backup or restore bytes into a tree the operator did
+not name. Every later create, link, unlink and fsync is relative to the retained descriptor.
 
 ## By hand — the same steps the harness runs
 
@@ -131,4 +144,4 @@ an anchor without its log (or the reverse) is a refusal and nothing is published
 | `row_counts:` | a table's count differs from the manifest (names the tables) | the copy lost or gained rows after the backup — stop, investigate |
 | `audit_chain:` | the audit log beside the copy is BROKEN or missing while the manifest records a head | the tamper-evidence did not survive the copy; the restore is not trustworthy |
 | `rpo: refused —` | evidence in the retained snapshot is dated after the snapshot completed | a writer's or this host's clock is wrong; the backup itself may still be VERIFIED |
-| `refused:` | a typed refusal before anything was published | fix the named condition (source type, non-empty target, an existing backup of the same name, a half audit pair) and re-run |
+| `refused:` | a typed refusal — nothing is published | fix the named condition (source type, non-empty target, an existing entry at any of the three backup names, a half audit pair, a symlinked path component) and re-run |

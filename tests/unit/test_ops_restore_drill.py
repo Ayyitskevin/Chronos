@@ -718,6 +718,102 @@ def test_r1_3e_an_audit_anchor_without_its_log_is_refused_not_half_copied(tmp_pa
     )
 
 
+# ----------------------------------------------------------- (r2) Daybreak's HOLD-DELTA at a8e6c6d
+
+
+def _store_with_audit(tmp_path: Path) -> Path:
+    db = _demo_store(tmp_path, events=2)
+    AuditLog(db.parent / "platform_audit.jsonl").append("drill.test", {"n": 1})
+    return db
+
+
+def _final_names(db: Path, wall: datetime) -> dict[str, str]:
+    stamp = wall.strftime("%Y%m%dT%H%M%SZ")
+    stem = f"{db.stem}-{stamp}"
+    return {
+        "db": f"{stem}.db",
+        "log": f"{stem}.platform_audit.jsonl",
+        "anchor": f"{stem}.platform_audit.head.json",
+    }
+
+
+@pytest.mark.parametrize("planted", ["db", "log", "anchor"])
+def test_r2_1_a_collision_at_any_of_the_three_final_names_publishes_nothing(
+    tmp_path: Path, planted: str
+) -> None:
+    """Daybreak's exact sequence, one case per name: only ONE final name is pre-planted; the
+    refusal must leave that entry byte-identical and the destination otherwise empty —
+    no database, no audit copy, no temp — whichever of the three collided."""
+
+    db = _store_with_audit(tmp_path)
+    wall = datetime(2026, 9, 15, 6, 0, tzinfo=UTC)
+    out = tmp_path / "out"
+    out.mkdir()
+    occupied = out / _final_names(db, wall)[planted]
+    occupied.write_bytes(b"pre-existing, must not move")
+    before = _sha256(occupied)
+    with pytest.raises(DrillRefused, match="already exists"):
+        backup(db, out, clock=Clock(wall=lambda: wall, monotonic=lambda: 0.0))
+    assert _sha256(occupied) == before
+    assert sorted(p.name for p in out.iterdir()) == [occupied.name], (
+        "the destination must hold exactly the planted entry: "
+        + ", ".join(sorted(p.name for p in out.iterdir()))
+    )
+
+
+def test_r2_1d_a_complete_publication_is_the_whole_triple(tmp_path: Path) -> None:
+    db = _store_with_audit(tmp_path)
+    wall = datetime(2026, 9, 15, 6, 0, tzinfo=UTC)
+    manifest = backup(db, tmp_path / "out", clock=Clock(wall=lambda: wall, monotonic=lambda: 0.0))
+    names = _final_names(db, wall)
+    assert sorted(p.name for p in (tmp_path / "out").iterdir()) == sorted(names.values())
+    assert Path(manifest.backup_path).name == names["db"]
+
+
+def test_r2_2a_backup_refuses_a_symlinked_ancestor_before_creating_anything_beyond_it(
+    tmp_path: Path,
+) -> None:
+    db = _demo_store(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(outside)
+    with pytest.raises(DrillRefused, match="alias"):
+        backup(db, alias / "backups")
+    assert sorted(outside.iterdir()) == [], "nothing may be created under the link's target"
+    assert alias.is_symlink() and sorted(alias.iterdir()) == []
+
+
+def test_r2_2b_restore_refuses_a_symlinked_ancestor_before_creating_anything_beyond_it(
+    tmp_path: Path,
+) -> None:
+    db = _demo_store(tmp_path)
+    manifest = backup(db, tmp_path / "out")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(outside)
+    with pytest.raises(DrillRefused, match="alias"):
+        restore(manifest, alias / "restore")
+    assert sorted(outside.iterdir()) == []
+
+
+def test_r2_2c_missing_components_are_created_descriptor_relative_and_the_walk_is_in_file() -> None:
+    text = MODULE.read_text(encoding="utf-8")
+    assert "mkdir(parents=True" not in text and "parents=True" not in text
+    assert "os.open(os.sep," in text, "the walk must start at the root component"
+    assert "dir_fd=" in text
+
+
+def test_r2_3_the_runbook_states_the_triple_as_one_publication_and_names_the_walk() -> None:
+    prose = " ".join(
+        (ROOT / "docs" / "ops" / "RESTORE-DRILL.md").read_text(encoding="utf-8").split()
+    )
+    assert "nothing is published" in prose
+    assert "component" in prose
+    assert "all three" in prose or "triple" in prose
+
+
 def test_6c_the_module_is_read_only_operations_and_names_its_seams() -> None:
     text = MODULE.read_text(encoding="utf-8")
     assert 'ENCRYPTION: str = "none"' in text
