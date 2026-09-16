@@ -142,10 +142,13 @@ never hands the backend a fresh grace period.
 **A foreign entry at the heartbeat name is refused and left in place.** Publication is an
 atomic envelope: an absent name is filled only if it is still absent; a present name is
 swapped atomically with the new file and the displaced entry is judged before it is
-dropped — only the heartbeat validated before the write is ever deleted. A symlink,
-hardlink, FIFO or loose file that appears at the name in between is swapped back, left in
-place, reported with a typed error, and nothing is published; the operator sees the planted
-entry as evidence of tampering.
+dropped — only the heartbeat validated before the write is ever deleted. The validated
+heartbeat is held open across the swap, so its inode cannot be freed and its number cannot
+be handed to an entry planted in the window (a filesystem may otherwise reuse a just-freed
+inode number immediately); the displaced entry must be a regular file with that pinned
+identity to be dropped. A symlink, hardlink, FIFO or loose file that appears at the name in
+between is swapped back, left in place, reported with a typed error, and nothing is
+published; the operator sees the planted entry as evidence of tampering.
 
 **Evidence entries are capabilities.** The evidence directory is reached component by
 component without following links (a symlinked ancestor is refused and nothing is created

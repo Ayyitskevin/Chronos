@@ -724,8 +724,23 @@ class Watchdog:
             found = None
         except OSError as error:
             raise WatchdogEvidenceError(self._heartbeat_path, _describe(error)) from error
+        held: int | None = None  # the validated inode, pinned open across the exchange (r6)
         if found is not None:
             _require_owned_regular(found, self._heartbeat_path)
+            # Hold the validated entry open: an inode that is referenced cannot be freed, so
+            # its number cannot be reused by an entry planted in the check/replace window.
+            # CI (ext4, 2026-09-15) reused the unlinked heartbeat's inode number for a
+            # planted symlink and (dev, ino) equality alone read it as the old heartbeat.
+            try:
+                held = os.open(HEARTBEAT, _ENTRY_FLAGS, dir_fd=dir_fd)
+            except OSError as error:
+                raise WatchdogEvidenceError(self._heartbeat_path, _describe(error)) from error
+            if _identity(os.fstat(held)) != _identity(found):
+                os.close(held)
+                raise WatchdogEvidenceError(
+                    self._heartbeat_path,
+                    "changed between the check and the open; refused and left in place",
+                )
         document = {
             "boot_id": self._boot_id,
             "last_healthy_at": (
@@ -745,6 +760,8 @@ class Watchdog:
         try:
             descriptor = os.open(temp_name, _TEMP_FLAGS, 0o600, dir_fd=dir_fd)
         except OSError as error:
+            if held is not None:
+                os.close(held)
             raise WatchdogEvidenceError(temp_path, _describe(error)) from error
         try:
             try:
@@ -752,11 +769,14 @@ class Watchdog:
                 _write_all(descriptor, data, temp_path)
                 os.fsync(descriptor)
                 written = _identity(os.fstat(descriptor))
+                # both descriptors stay open through the exchange: the written inode and the
+                # validated inode are pinned, so every identity comparison below is exact
+                self._publish(temp_name, held=held, written=written)
             finally:
                 os.close(descriptor)
-            self._publish(
-                temp_name, validated=None if found is None else _identity(found), written=written
-            )
+                if held is not None:
+                    os.close(held)
+                    held = None
             os.fsync(dir_fd)
             named = os.stat(HEARTBEAT, dir_fd=dir_fd, follow_symlinks=False)
         except WatchdogEvidenceError as refusal:
@@ -775,26 +795,26 @@ class Watchdog:
                 "that was written",
             )
 
-    def _publish(
-        self, temp_name: str, *, validated: tuple[int, int] | None, written: tuple[int, int]
-    ) -> None:
+    def _publish(self, temp_name: str, *, held: int | None, written: tuple[int, int]) -> None:
         """Move the temp to the heartbeat name without ever displacing an entry that was
         not validated (r2, Daybreak P1), and settle every branch after the exchange (r3).
 
         Absent name: RENAME_NOREPLACE — an entry that appeared in the window makes the
         rename fail EEXIST and is refused, left in place. Present name: RENAME_EXCHANGE
         swaps the two names atomically, then the DISPLACED entry, now at the temp name, has
-        exactly three outcomes, each settled before any raise: (i) the identity validated
-        before the write → it is unlinked (the old heartbeat), success; (ii) anything else
-        → swapped back, the temp unlinked, typed refusal — the planted entry survives at
-        the name and nothing is published; (iii) VANISHED → our fresh record must not stay
+        exactly three outcomes, each settled before any raise: (i) a regular file whose
+        identity equals the validated entry — which is HELD OPEN (``held``), so its inode
+        number cannot have been reused — → it is unlinked (the old heartbeat), success;
+        (ii) anything else → swapped back, the temp unlinked, typed refusal — the planted
+        entry survives at the name and nothing is published; (iii) VANISHED → our fresh
+        record must not stay
         readable as proof of life, so it is withdrawn (``_withdraw``: identity-bound, no
         check/unlink window) leaving NO heartbeat — the dead-man's absent state, DEAD — and
         the typed refusal is raised.
         """
 
         dir_fd = self._require_open()
-        if validated is None:
+        if held is None:
             try:
                 _renameat2(dir_fd, temp_name, dir_fd, HEARTBEAT, _RENAME_NOREPLACE)
             except FileExistsError as error:
@@ -828,7 +848,7 @@ class Watchdog:
                 self._heartbeat_path,
                 f"displaced entry unreadable mid-publication: {_describe(error)}",
             ) from error
-        if _identity(displaced) == validated:
+        if stat.S_ISREG(displaced.st_mode) and _identity(displaced) == _identity(os.fstat(held)):
             os.unlink(temp_name, dir_fd=dir_fd)  # the old, validated heartbeat: dropped
             return
         try:

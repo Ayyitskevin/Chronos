@@ -795,6 +795,88 @@ def test_r2_2b_a_hardlink_to_a_foreign_file_planted_in_the_window_survives_and_i
     assert {p.name for p in ops.iterdir()} == {EVIDENCE_LOG, HEARTBEAT, LIVENESS_LOCK}
 
 
+def test_r2_2d_a_fresh_regular_file_planted_in_the_window_is_refused_despite_inode_number_reuse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """r6 (CI, ext4, 2026-09-15): r2_2a FAILED on GitHub because the runner's filesystem
+    handed the planted symlink the inode number the unlinked heartbeat had just freed, and a
+    (dev, ino) comparison read it as the validated entry. The fix pins the validated inode
+    open across the exchange, so a fresh entry can never receive its number; the strongest
+    form of the class is a planted REGULAR file, which no type check could tell apart."""
+
+    clock = _Clock()
+    dog = _watchdog(tmp_path, clock, {"live": True, "ready": True})
+    dog.tick()
+    ops = tmp_path / "ops"
+    before = (ops / HEARTBEAT).stat()
+
+    def plant() -> None:
+        (ops / HEARTBEAT).unlink()  # frees the name; the inode stays allocated while HELD
+        planted = ops / HEARTBEAT
+        planted.write_text("PLANTED", encoding="utf-8")
+        planted.chmod(0o600)
+
+    _plant_before_exchange(monkeypatch, ops, plant)
+    clock.advance(10.0)
+    with pytest.raises(WatchdogEvidenceError, match="replaced during publication"):
+        dog.tick()
+    monkeypatch.undo()
+    after = (ops / HEARTBEAT).stat()
+    assert (ops / HEARTBEAT).read_text(encoding="utf-8") == "PLANTED", "left in place, not dropped"
+    assert (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino), (
+        "the planted file could not have received the validated inode's number: it was held open"
+    )
+    assert {p.name for p in ops.iterdir()} == {EVIDENCE_LOG, HEARTBEAT, LIVENESS_LOCK}, "no temp"
+
+
+def test_r2_2e_the_validated_heartbeat_is_held_open_at_the_instant_of_the_exchange(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The mechanism behind r2_2d, pinned directly: when the real RENAME_EXCHANGE runs, some
+    descriptor of THIS process still refers to the inode that was validated (Linux /proc)."""
+
+    clock = _Clock()
+    dog = _watchdog(tmp_path, clock, {"live": True, "ready": True})
+    dog.tick()
+    ops = tmp_path / "ops"
+    validated = (ops / HEARTBEAT).stat()
+    seen: dict[str, bool] = {"held": False}
+    real = watchdog_module._renameat2
+
+    def hooked(src_dir_fd: int, src: str, dst_dir_fd: int, dst: str, flags: int) -> None:
+        if flags == watchdog_module._RENAME_EXCHANGE and not seen["held"]:
+            for entry in os.listdir("/proc/self/fd"):
+                try:
+                    meta = os.fstat(int(entry))
+                except OSError:
+                    continue
+                if (meta.st_dev, meta.st_ino) == (validated.st_dev, validated.st_ino):
+                    seen["held"] = True
+                    break
+        real(src_dir_fd, src, dst_dir_fd, dst, flags)
+
+    monkeypatch.setattr(watchdog_module, "_renameat2", hooked)
+    clock.advance(10.0)
+    dog.tick()
+    monkeypatch.undo()
+    assert seen["held"], "the validated inode was not held open across the exchange"
+    # and the hold is released afterwards: nothing in this process still refers to it
+    still = [
+        e
+        for e in os.listdir("/proc/self/fd")
+        if _fstat_identity(int(e)) == (validated.st_dev, validated.st_ino)
+    ]
+    assert still == [], f"descriptor leak: {still}"
+
+
+def _fstat_identity(fd: int) -> tuple[int, int] | None:
+    try:
+        meta = os.fstat(fd)
+    except OSError:
+        return None
+    return (meta.st_dev, meta.st_ino)
+
+
 def test_r2_2c_an_entry_that_appears_at_an_absent_name_is_refused_not_replaced(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
