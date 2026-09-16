@@ -72,6 +72,7 @@ import json
 import math
 import os
 import re
+import secrets
 import stat
 import sys
 import time
@@ -735,7 +736,14 @@ class Watchdog:
                 held = os.open(HEARTBEAT, _ENTRY_FLAGS, dir_fd=dir_fd)
             except OSError as error:
                 raise WatchdogEvidenceError(self._heartbeat_path, _describe(error)) from error
-            if _identity(os.fstat(held)) != _identity(found):
+            try:
+                reopened = _identity(os.fstat(held))
+            except OSError as error:
+                os.close(held)
+                raise WatchdogEvidenceError(
+                    self._heartbeat_path, f"could not re-prove the opened entry: {_describe(error)}"
+                ) from error
+            if reopened != _identity(found):
                 os.close(held)
                 raise WatchdogEvidenceError(
                     self._heartbeat_path,
@@ -765,13 +773,27 @@ class Watchdog:
             raise WatchdogEvidenceError(temp_path, _describe(error)) from error
         try:
             try:
-                os.fchmod(descriptor, 0o600)
-                _write_all(descriptor, data, temp_path)
-                os.fsync(descriptor)
-                written = _identity(os.fstat(descriptor))
-                # both descriptors stay open through the exchange: the written inode and the
-                # validated inode are pinned, so every identity comparison below is exact
-                self._publish(temp_name, held=held, written=written)
+                # both descriptors stay open through the write, the exchange AND the cleanup:
+                # the written inode and the validated inode are pinned, so every identity
+                # comparison is exact and our temp is only ever dropped through _drop_own
+                try:
+                    os.fchmod(descriptor, 0o600)
+                    _write_all(descriptor, data, temp_path)
+                    os.fsync(descriptor)
+                    written = _identity(os.fstat(descriptor))
+                    self._publish(temp_name, held=held, written_fd=descriptor)
+                except WatchdogEvidenceError as refusal:
+                    if not refusal.temp_holds_foreign:  # the temp name holds OUR bytes, or nothing
+                        leftover = self._drop_own(temp_name, descriptor)
+                        if leftover is not None:
+                            refusal.args = (f"{refusal.args[0]}; {leftover}",)
+                    raise
+                except OSError as error:
+                    leftover = self._drop_own(temp_name, descriptor)
+                    raise WatchdogEvidenceError(
+                        self._heartbeat_path,
+                        _describe(error) if leftover is None else f"{_describe(error)}; {leftover}",
+                    ) from error
             finally:
                 os.close(descriptor)
                 if held is not None:
@@ -779,14 +801,9 @@ class Watchdog:
                     held = None
             os.fsync(dir_fd)
             named = os.stat(HEARTBEAT, dir_fd=dir_fd, follow_symlinks=False)
-        except WatchdogEvidenceError as refusal:
-            if not refusal.temp_holds_foreign:  # then the temp name holds OUR bytes, or nothing
-                with contextlib.suppress(OSError):
-                    os.unlink(temp_name, dir_fd=dir_fd)
+        except WatchdogEvidenceError:
             raise
         except OSError as error:
-            with contextlib.suppress(OSError):
-                os.unlink(temp_name, dir_fd=dir_fd)
             raise WatchdogEvidenceError(self._heartbeat_path, _describe(error)) from error
         if _identity(named) != written:
             raise WatchdogEvidenceError(
@@ -795,7 +812,7 @@ class Watchdog:
                 "that was written",
             )
 
-    def _publish(self, temp_name: str, *, held: int | None, written: tuple[int, int]) -> None:
+    def _publish(self, temp_name: str, *, held: int | None, written_fd: int) -> None:
         """Move the temp to the heartbeat name without ever displacing an entry that was
         not validated (r2, Daybreak P1), and settle every branch after the exchange (r3).
 
@@ -837,7 +854,7 @@ class Watchdog:
         try:
             displaced = os.stat(temp_name, dir_fd=dir_fd, follow_symlinks=False)
         except FileNotFoundError as error:
-            self._withdraw(temp_name, written)
+            self._withdraw(temp_name, written_fd)
             raise WatchdogEvidenceError(
                 self._heartbeat_path,
                 "displaced entry vanished mid-publication; our record was withdrawn and "
@@ -849,7 +866,13 @@ class Watchdog:
                 f"displaced entry unreadable mid-publication: {_describe(error)}",
             ) from error
         if stat.S_ISREG(displaced.st_mode) and _identity(displaced) == _identity(os.fstat(held)):
-            os.unlink(temp_name, dir_fd=dir_fd)  # the old, validated heartbeat: dropped
+            leftover = self._drop_own(temp_name, held)  # the old, validated heartbeat: dropped
+            if leftover is not None:
+                raise WatchdogEvidenceError(
+                    self._heartbeat_path,
+                    f"published, but the displaced heartbeat was swapped before it could be "
+                    f"dropped: {leftover}",
+                )
             return
         try:
             _renameat2(dir_fd, temp_name, dir_fd, HEARTBEAT, _RENAME_EXCHANGE)  # swap back
@@ -867,14 +890,58 @@ class Watchdog:
             "it was left in place and nothing was published",
         )
 
-    def _withdraw(self, temp_name: str, written: tuple[int, int]) -> None:
-        """Take our fresh record off the heartbeat name, and only ours (r3).
+    def _drop_own(self, name: str, pinned: int) -> str | None:
+        """Delete the entry at ``name`` only if it is the inode ``pinned`` refers to (r6).
+
+        Linux has no unlink-by-descriptor, so a bare ``unlink(name)`` after a check is a
+        window in which a foreign entry swapped onto the name is deleted (Daybreak r6 P1).
+        Instead the name is captured atomically with ``RENAME_NOREPLACE`` into a fresh,
+        unguessable private name, THAT entry is judged against ``fstat(pinned)`` — exact,
+        because the pinned inode cannot have been freed or reused — and only a match is
+        unlinked. A mismatch is moved back to ``name`` with NOREPLACE (or left at the
+        private name if ``name`` was reoccupied) and described, never deleted. Returns
+        None when our entry was dropped, otherwise a sentence for the refusal. The residual
+        window is a planter guessing a 16-hex private name between two syscalls.
+        """
+
+        dir_fd = self._require_open()
+        quarantine = f"{name}.{secrets.token_hex(8)}.drop"
+        try:
+            _renameat2(dir_fd, name, dir_fd, quarantine, _RENAME_NOREPLACE)
+        except FileNotFoundError:
+            return None  # nothing at the name: nothing to drop
+        except OSError as error:
+            return f"the entry at {name} could not be captured for dropping ({_describe(error)})"
+        try:
+            captured = os.stat(quarantine, dir_fd=dir_fd, follow_symlinks=False)
+            ours = stat.S_ISREG(captured.st_mode) and _identity(captured) == _identity(
+                os.fstat(pinned)
+            )
+        except OSError as error:
+            return f"the captured entry at {quarantine} could not be judged ({_describe(error)})"
+        if ours:
+            try:
+                os.unlink(quarantine, dir_fd=dir_fd)
+            except OSError as error:
+                return f"our entry at {quarantine} could not be unlinked ({_describe(error)})"
+            return None
+        try:
+            _renameat2(dir_fd, quarantine, dir_fd, name, _RENAME_NOREPLACE)
+        except OSError:
+            return (
+                f"a foreign entry was found at {name}; it was left in place at {quarantine} "
+                "and nothing was deleted — operator attention"
+            )
+        return f"a foreign entry was found at {name}; it was left in place and nothing was deleted"
+
+    def _withdraw(self, temp_name: str, written_fd: int) -> None:
+        """Take our fresh record off the heartbeat name, and only ours (r3, r6).
 
         There is no unlink-by-inode, so the withdrawal is a NOREPLACE rename of whatever
         the name holds to the temp name (free after the displaced entry vanished), a
-        no-follow stat of THAT, and then: our inode → unlinked; anything else → moved back
-        with NOREPLACE and named in the refusal. Nothing foreign is ever deleted, and no
-        check precedes an unlink on a pathname.
+        no-follow stat of THAT against the PINNED written descriptor, and then: our inode →
+        dropped through ``_drop_own`` (a second private capture, never a bare unlink on a
+        name); anything else → moved back with NOREPLACE and named in the refusal.
         """
 
         dir_fd = self._require_open()
@@ -899,8 +966,15 @@ class Watchdog:
             raise WatchdogEvidenceError(
                 self._heartbeat_path, f"withdrawal: the moved entry vanished ({_describe(error)})"
             ) from error
-        if _identity(moved) == written:
-            os.unlink(temp_name, dir_fd=dir_fd)  # ours, and only ours
+        if stat.S_ISREG(moved.st_mode) and _identity(moved) == _identity(os.fstat(written_fd)):
+            leftover = self._drop_own(temp_name, written_fd)  # ours, and only ours
+            if leftover is not None:
+                raise WatchdogEvidenceError(
+                    self._heartbeat_path,
+                    f"withdrawal: our record left the name but a foreign entry took the temp "
+                    f"name before it could be dropped: {leftover}",
+                    temp_holds_foreign=True,
+                )
             return
         try:
             _renameat2(dir_fd, temp_name, dir_fd, HEARTBEAT, _RENAME_NOREPLACE)

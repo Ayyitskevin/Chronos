@@ -148,7 +148,12 @@ be handed to an entry planted in the window (a filesystem may otherwise reuse a 
 inode number immediately); the displaced entry must be a regular file with that pinned
 identity to be dropped. A symlink, hardlink, FIFO or loose file that appears at the name in
 between is swapped back, left in place, reported with a typed error, and nothing is
-published; the operator sees the planted entry as evidence of tampering.
+published; the operator sees the planted entry as evidence of tampering. Nothing is ever
+deleted by name alone: every drop — the displaced heartbeat, our own temp on a refusal, our
+withdrawn record — first captures the name atomically into a fresh private one and judges
+that entry against the pinned descriptor; a foreign entry found there is moved back and
+reported, never deleted. Linux has no unlink-by-descriptor, so the remaining window is a
+planter guessing the private 16-hex name between two syscalls.
 
 **Evidence entries are capabilities.** The evidence directory is reached component by
 component without following links (a symlinked ancestor is refused and nothing is created

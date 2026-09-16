@@ -877,6 +877,198 @@ def _fstat_identity(fd: int) -> tuple[int, int] | None:
     return (meta.st_dev, meta.st_ino)
 
 
+def _hook_renameat2(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    after_exchange: Callable[[int, str, int, str], None] | None = None,
+    before_drop: Callable[[int, str, int, str], None] | None = None,
+) -> dict[str, int]:
+    """r6 hooks on the one syscall seam: ``after_exchange`` runs once right after the real
+    RENAME_EXCHANGE returns; ``before_drop`` runs once right BEFORE the private capture that
+    ``_drop_own`` makes (a NOREPLACE move whose destination ends in ``.drop``)."""
+
+    real = watchdog_module._renameat2
+    fired = {"exchange": 0, "drop": 0}
+
+    def hooked(src_dir_fd: int, src: str, dst_dir_fd: int, dst: str, flags: int) -> None:
+        if (
+            before_drop is not None
+            and flags == watchdog_module._RENAME_NOREPLACE
+            and dst.endswith(".drop")
+            and fired["drop"] == 0
+        ):
+            fired["drop"] += 1
+            before_drop(src_dir_fd, src, dst_dir_fd, dst)
+        real(src_dir_fd, src, dst_dir_fd, dst, flags)
+        if (
+            after_exchange is not None
+            and flags == watchdog_module._RENAME_EXCHANGE
+            and fired["exchange"] == 0
+        ):
+            fired["exchange"] += 1
+            after_exchange(src_dir_fd, src, dst_dir_fd, dst)
+
+    monkeypatch.setattr(watchdog_module, "_renameat2", hooked)
+    return fired
+
+
+def _swap_in_symlink(dir_fd: int, name: str, aside: str, sentinel: Path) -> None:
+    """Daybreak's r6 planter: move whatever is at ``name`` aside and plant a symlink there."""
+
+    os.rename(name, aside, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    os.symlink(sentinel, name, dir_fd=dir_fd)
+
+
+def test_r6_1a_withdrawal_never_deletes_a_foreign_entry_swapped_onto_the_temp_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Daybreak r6 P1 (withdrawal window): at 41c5728 our record was statted at the temp name
+    and then unlinked BY NAME; a symlink swapped in between was deleted. Now the drop captures
+    the name into a private one first and judges THAT against the pinned descriptor."""
+
+    clock = _Clock()
+    dog = _watchdog(tmp_path, clock, {"live": True, "ready": True})
+    dog.tick()
+    ops = tmp_path / "ops"
+    sentinel = tmp_path / "sentinel.json"
+    sentinel.write_text("SENTINEL", encoding="utf-8")
+    aside = "aside.json"
+
+    def vanish(src_dir_fd: int, src: str, dst_dir_fd: int, dst: str) -> None:
+        os.unlink(src, dir_fd=src_dir_fd)  # the displaced old heartbeat vanishes (r3 scenario)
+
+    def plant(src_dir_fd: int, src: str, dst_dir_fd: int, dst: str) -> None:
+        _swap_in_symlink(src_dir_fd, src, aside, sentinel)  # src = the temp name, our record on it
+
+    fired = _hook_renameat2(monkeypatch, after_exchange=vanish, before_drop=plant)
+    clock.advance(10.0)
+    with pytest.raises(WatchdogEvidenceError, match="foreign entry took the temp name"):
+        dog.tick()
+    monkeypatch.undo()
+    assert fired == {"exchange": 1, "drop": 1}
+    temps = [p for p in ops.iterdir() if p.name.endswith(".tmp")]
+    assert len(temps) == 1 and temps[0].is_symlink(), "the planted link survives at the temp name"
+    assert sentinel.read_text(encoding="utf-8") == "SENTINEL"
+    assert json.loads((ops / aside).read_text(encoding="utf-8"))["pid"] == 4242, (
+        "our own record was moved aside by the planter, and never deleted"
+    )
+    assert not (ops / HEARTBEAT).exists(), "our record left the name (withdrawn)"
+    assert not [p for p in ops.iterdir() if p.name.endswith(".drop")], "no quarantine left"
+
+
+def test_r6_1b_the_outer_cleanup_after_a_swap_back_never_deletes_a_foreign_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Daybreak r6 P1 (swap-back window): after a foreign heartbeat is swapped back, the outer
+    cleanup unlinked the temp name blindly. Now it goes through the same pinned capture."""
+
+    clock = _Clock()
+    dog = _watchdog(tmp_path, clock, {"live": True, "ready": True})
+    dog.tick()
+    ops = tmp_path / "ops"
+    foreign = tmp_path / "foreign.json"
+    foreign.write_text("FOREIGN", encoding="utf-8")
+    sentinel = tmp_path / "sentinel.json"
+    sentinel.write_text("SENTINEL", encoding="utf-8")
+    aside = "aside.json"
+
+    def plant_heartbeat() -> None:  # r2_2a's plant: a foreign entry at the name before the exchange
+        (ops / HEARTBEAT).unlink()
+        (ops / HEARTBEAT).symlink_to(foreign)
+
+    _plant_before_exchange(monkeypatch, ops, plant_heartbeat)
+    inner = watchdog_module._renameat2  # the r2 hook, so the r6 hook wraps it
+
+    def plant_temp(src_dir_fd: int, src: str, dst_dir_fd: int, dst: str) -> None:
+        _swap_in_symlink(src_dir_fd, src, aside, sentinel)  # our swapped-back temp, replaced
+
+    fired = _hook_renameat2(monkeypatch, before_drop=plant_temp)
+    assert watchdog_module._renameat2 is not inner
+    clock.advance(10.0)
+    with pytest.raises(WatchdogEvidenceError) as caught:
+        dog.tick()
+    monkeypatch.undo()
+    assert "replaced during publication" in str(caught.value)
+    assert "foreign entry was found" in str(caught.value), "the cleanup reported, not deleted"
+    assert fired["drop"] == 1
+    assert (ops / HEARTBEAT).is_symlink(), "the first planted entry survives at the name"
+    temps = [p for p in ops.iterdir() if p.name.endswith(".tmp")]
+    assert len(temps) == 1 and temps[0].is_symlink(), "the second planted link survives too"
+    assert json.loads((ops / aside).read_text(encoding="utf-8"))["pid"] == 4242
+    assert sentinel.read_text(encoding="utf-8") == "SENTINEL"
+    assert foreign.read_text(encoding="utf-8") == "FOREIGN"
+
+
+def test_r6_1c_dropping_the_displaced_heartbeat_never_deletes_a_foreign_entry_either(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The success path has the same window (the old heartbeat sits at the temp name between
+    judgement and unlink): a swap there is refused, reported, and left in place."""
+
+    clock = _Clock()
+    dog = _watchdog(tmp_path, clock, {"live": True, "ready": True})
+    dog.tick()
+    ops = tmp_path / "ops"
+    sentinel = tmp_path / "sentinel.json"
+    sentinel.write_text("SENTINEL", encoding="utf-8")
+    aside = "aside.json"
+
+    def plant(src_dir_fd: int, src: str, dst_dir_fd: int, dst: str) -> None:
+        _swap_in_symlink(src_dir_fd, src, aside, sentinel)  # the displaced OLD heartbeat, replaced
+
+    _hook_renameat2(monkeypatch, before_drop=plant)
+    clock.advance(10.0)
+    with pytest.raises(WatchdogEvidenceError, match="swapped before it could be dropped"):
+        dog.tick()
+    monkeypatch.undo()
+    fresh = json.loads((ops / HEARTBEAT).read_text(encoding="utf-8"))
+    assert fresh["monotonic"] == 5010.0, "publication itself stood"
+    temps = [p for p in ops.iterdir() if p.name.endswith(".tmp")]
+    assert len(temps) == 1 and temps[0].is_symlink(), "the planted link survives"
+    assert json.loads((ops / aside).read_text(encoding="utf-8"))["monotonic"] == 5000.0, (
+        "the displaced old heartbeat was moved aside by the planter, never deleted by us"
+    )
+    assert sentinel.read_text(encoding="utf-8") == "SENTINEL"
+
+
+def test_r6_2_a_failed_re_proof_of_the_opened_heartbeat_is_typed_and_leaks_no_descriptor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Daybreak r6 P2: an fstat failure right after opening the validated heartbeat escaped
+    as a raw OSError and left the descriptor open."""
+
+    clock = _Clock()
+    dog = _watchdog(tmp_path, clock, {"live": True, "ready": True})
+    dog.tick()
+    ops = tmp_path / "ops"
+    target = (ops / HEARTBEAT).stat()
+    before = (ops / HEARTBEAT).read_bytes()
+    real_fstat = os.fstat
+    fired = {"n": 0}
+
+    def failing_fstat(fd: int) -> os.stat_result:
+        meta = real_fstat(fd)
+        if (meta.st_dev, meta.st_ino) == (target.st_dev, target.st_ino) and fired["n"] == 0:
+            fired["n"] += 1
+            raise OSError(errno.EIO, "injected fstat failure")
+        return meta
+
+    monkeypatch.setattr(os, "fstat", failing_fstat)
+    clock.advance(10.0)
+    with pytest.raises(WatchdogEvidenceError, match="could not re-prove the opened entry"):
+        dog.tick()
+    monkeypatch.undo()
+    assert fired["n"] == 1
+    leaked = [
+        e
+        for e in os.listdir("/proc/self/fd")
+        if _fstat_identity(int(e)) == (target.st_dev, target.st_ino)
+    ]
+    assert leaked == [], f"descriptor leak: {leaked}"
+    assert (ops / HEARTBEAT).read_bytes() == before, "the previous heartbeat stands"
+    assert {p.name for p in ops.iterdir()} == {EVIDENCE_LOG, HEARTBEAT, LIVENESS_LOCK}, "no temp"
+
+
 def test_r2_2c_an_entry_that_appears_at_an_absent_name_is_refused_not_replaced(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
