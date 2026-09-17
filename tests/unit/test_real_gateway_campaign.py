@@ -95,7 +95,7 @@ SAFE_ENV = {
 PEPPER = sha256(b"chronos-real-gateway-campaign: test pepper A").digest()
 PEPPER_HEX = PEPPER.hex()
 OTHER_PEPPER = sha256(b"chronos-real-gateway-campaign: test pepper B").digest()
-SALT = "session-1:2026-09-13T19:30:00+00:00"
+SALT = ("session-1", "2026-09-13T19:30:00+00:00")  # the public (label, captured_at_utc) pair
 
 
 def _identifier_payload(label: str = "session-1") -> dict:
@@ -261,8 +261,18 @@ def test_5_demo_capture_round_trips_with_no_raw_identifier_in_the_bytes(tmp_path
 # pepper, CHRONOS_CAPTURE_PEPPER. Tests are numbered to the G-1r1 contract.
 
 
-def _message(value: int) -> bytes:
-    return f"chronos-ord:{SALT}:{value}".encode()
+def _message(value: int | str, kind: str = "ord", salt: tuple[str, str] = SALT) -> bytes:
+    """The HMAC message: a canonical JSON array of the four fields (r2, injective)."""
+
+    label, captured_at = salt
+    fields = [f"chronos-{kind}", label, captured_at, str(value)]
+    return json.dumps(fields, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+def _old_message(value: int) -> bytes:
+    """The r1 colon-joined message Daybreak's r1 probe enumerated (kept as the (a) control)."""
+
+    return f"chronos-ord:{SALT[0]}:{SALT[1]}:{value}".encode()
 
 
 def test_r1_1_tokens_resist_bounded_enumeration_without_the_pepper() -> None:
@@ -277,7 +287,7 @@ def test_r1_1_tokens_resist_bounded_enumeration_without_the_pepper() -> None:
     tail = token.removeprefix("ORD-")
     candidates = range(1, 10_001)
     # (a) Daybreak's probe — the OLD public-salt sha256 construction — recovers nothing
-    assert [v for v in candidates if sha256(_message(v)).hexdigest()[:16] == tail] == []
+    assert [v for v in candidates if sha256(_old_message(v)).hexdigest()[:16] == tail] == []
     # (b) HMAC under an empty key, and under a different pepper — nothing
     for key in (b"", OTHER_PEPPER):
         hits = [
@@ -411,7 +421,7 @@ def test_r1_4_manifest_records_the_scheme_and_a_pepper_fingerprint(tmp_path: Pat
         )
     manifest_a, capture_a, manifest_text_a = sessions["a"]
     manifest_b, capture_b, _ = sessions["b"]
-    expected = {"scheme": "hmac-sha256-v1", "pepper_fingerprint": sha256(PEPPER).hexdigest()[:16]}
+    expected = {"scheme": "hmac-sha256-v2", "pepper_fingerprint": sha256(PEPPER).hexdigest()[:16]}
     assert manifest_a["identifier_pseudonyms"] == expected
     fingerprint = manifest_a["identifier_pseudonyms"]["pepper_fingerprint"]
     assert re.fullmatch(r"[0-9a-f]{16}", fingerprint)
@@ -419,7 +429,7 @@ def test_r1_4_manifest_records_the_scheme_and_a_pepper_fingerprint(tmp_path: Pat
     assert fingerprint not in PEPPER_HEX and PEPPER_HEX not in manifest_text_a
     # a rotated pepper → a different fingerprint and different identifier tokens ...
     assert manifest_b["identifier_pseudonyms"]["pepper_fingerprint"] != fingerprint
-    assert manifest_b["identifier_pseudonyms"]["scheme"] == "hmac-sha256-v1"
+    assert manifest_b["identifier_pseudonyms"]["scheme"] == "hmac-sha256-v2"
     order_a = capture_a["steps"]["executions"][0]["broker_order_id"]
     order_b = capture_b["steps"]["executions"][0]["broker_order_id"]
     assert order_a.startswith("ORD-") and order_b.startswith("ORD-") and order_a != order_b
@@ -500,3 +510,109 @@ def test_r1_6_no_new_gap_literal_and_the_retired_mechanism_token_is_absent() -> 
         check=False,
     )
     assert absent.returncode == 1 and absent.stdout == ""
+
+
+# ------------------------------------------------------------------------ G-1 r2
+# Daybreak's HOLD at 68b76ff (P1): the colon-joined HMAC message was not injective — two
+# distinct (label, captured_at, value) triples with byte-identical joins shared a token. The
+# message is now a canonical JSON array of the four fields. Tests are numbered to the G-1r2
+# contract.
+
+T1 = "2026-09-17T00:00:00+00:00"
+T2 = "2026-09-17T00:00:01+00:00"
+
+
+def _execution_capture(label: str, captured_at: str, execution_id: str) -> dict:
+    return {
+        "meta": {"label": label, "captured_at_utc": captured_at, "gateway_evidence": False},
+        "steps": {"executions": [{"execution_id": execution_id}]},
+    }
+
+
+def _execution_token(m: ModuleType, capture: dict, pepper: bytes = PEPPER) -> str:
+    sanitized = json.loads(m.sanitize_capture(capture, set(), pepper))
+    return sanitized["steps"]["executions"][0]["execution_id"]
+
+
+def test_r2_1a_daybreaks_colon_collision_yields_distinct_tokens() -> None:
+    """logs/daybreak-probe-G1r1-delimiter-collision.py, verbatim: distinct sessions and distinct
+    execution ids whose r1 colon-joins were byte-identical."""
+
+    m = _load_capture_module()
+    pepper = bytes.fromhex("42" * 32)  # the probe's pepper: 32 bytes, not a secret
+    capture_a = _execution_capture("alpha", T1, f"bridge:{T2}:9001")
+    capture_b = _execution_capture(f"alpha:{T1}:bridge", T2, "9001")
+    # the r1 message would have been byte-identical for both (the finding)
+    joined_a = f"chronos-exec:alpha:{T1}:bridge:{T2}:9001"
+    joined_b = f"chronos-exec:alpha:{T1}:bridge:{T2}:9001"
+    assert joined_a == joined_b
+    token_a = _execution_token(m, capture_a, pepper)
+    token_b = _execution_token(m, capture_b, pepper)
+    assert token_a != token_b, (token_a, token_b)
+    # and directly: session_salt() is the pair, identifier_pseudonym keys the JSON array
+    assert m.session_salt(capture_a) == ("alpha", T1)
+    assert token_a == m.identifier_pseudonym("EXEC", f"bridge:{T2}:9001", ("alpha", T1), pepper)
+    assert (
+        token_a
+        == "EXEC-"
+        + hmac.new(
+            pepper, _message(f"bridge:{T2}:9001", "exec", ("alpha", T1)), "sha256"
+        ).hexdigest()[:16]
+    )
+    assert (
+        token_b
+        == "EXEC-"
+        + hmac.new(
+            pepper, _message("9001", "exec", (f"alpha:{T1}:bridge", T2)), "sha256"
+        ).hexdigest()[:16]
+    )
+    # a joined-string salt (the r1 shape, what the probe's direct call passes) is refused, not
+    # silently unpacked into two characters
+    with pytest.raises(TypeError, match="never a joined string"):
+        m.identifier_pseudonym("EXEC", value_a := f"bridge:{T2}:9001", f"alpha:{T1}", pepper)
+    assert value_a == f"bridge:{T2}:9001"
+    # the two JSON messages differ where the colon-joins did not
+    assert _message(f"bridge:{T2}:9001", "exec", ("alpha", T1)) != _message(
+        "9001", "exec", (f"alpha:{T1}:bridge", T2)
+    )
+
+
+def test_r2_1b_a_hostile_label_stays_distinct_across_sessions_and_stable_within() -> None:
+    m = _load_capture_module()
+    hostile = 'alpha","x",[1],\n]'  # a quote, brackets, a comma and a newline
+    assert all(ch in hostile for ch in ('"', "[", "]", ",", "\n"))
+    capture = _execution_capture(hostile, T1, "9001")
+    once = _execution_token(m, capture)
+    again = _execution_token(m, _execution_capture(hostile, T1, "9001"))
+    assert once == again  # stable within the session
+    # distinct from a plain label, from the same label at another instant, and from a label
+    # whose bytes try to spell the hostile one's JSON encoding
+    plain = _execution_token(m, _execution_capture("alpha", T1, "9001"))
+    later = _execution_token(m, _execution_capture(hostile, T2, "9001"))
+    spelled = _execution_token(m, _execution_capture(json.dumps(hostile)[1:-1], T1, "9001"))
+    assert len({once, plain, later, spelled}) == 4
+    # the encoding is the one prescribed: json.dumps escapes the quote and the newline
+    encoded = _message("9001", "exec", (hostile, T1))
+    assert encoded == ('["chronos-exec","alpha\\",\\"x\\",[1],\\n]","' + T1 + '","9001"]').encode(
+        "utf-8"
+    )
+    assert once == "EXEC-" + hmac.new(PEPPER, encoded, "sha256").hexdigest()[:16]
+    # the same hostile string in the VALUE slot is a different token from the label slot
+    swapped = _execution_token(m, _execution_capture("9001", T1, hostile))
+    assert swapped != once
+
+
+def test_r2_2_scheme_is_v2_and_the_docs_describe_the_json_array_message(tmp_path: Path) -> None:
+    m = _load_capture_module()
+    assert m.PSEUDONYM_SCHEME == "hmac-sha256-v2"
+    session = tmp_path / "session"
+    m.write_session(session, _identifier_payload(), set(), "g1r2-scheme", PEPPER)
+    manifest = json.loads((session / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["identifier_pseudonyms"]["scheme"] == "hmac-sha256-v2"
+    skill = " ".join(SKILL.read_text(encoding="utf-8").split())
+    script = " ".join(CAPTURE.read_text(encoding="utf-8").split())
+    for text in (skill, script):
+        assert '["chronos-<kind>", label, captured_at_utc, str(value)]' in text
+        assert "hmac-sha256-v2" in text
+        assert "chronos-<kind>:<salt>:<value>" not in text  # the r1 colon form is gone
+    assert "injective" in script and "unambiguous" in script

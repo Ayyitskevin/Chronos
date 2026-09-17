@@ -340,18 +340,23 @@ grep -RniE "DU[0-9]|DF[0-9]|U[0-9]{6}" ~/chronos-gateway-evidence/  && echo LEAK
 
 If `executions`/`open_orders` are non-empty (pre-existing manual history), broker order
 ids/exec ids/permIds are present: the harness replaces each one, whole-value, with
-`EXEC-`/`ORD-`/`PERM-<16 hex>` = `HMAC-SHA256(pepper, "chronos-<kind>:<label>:<captured_at_utc>:<value>")[:16]`
-under the per-install secret pepper `CHRONOS_CAPTURE_PEPPER` (Muse ruling 2026-09-16,
-delegated by Kevin, closing the G-1 review's P1: a public salt over small integer ids was
-enumerable — candidates 1–10,000 recovered an order id). The session salt
-(`<label>:<captured_at_utc>`) stays public: it is what keeps tokens stable within a
+`EXEC-`/`ORD-`/`PERM-<16 hex>` = `HMAC-SHA256(pepper, message)[:16]` where the message is
+the canonical JSON array `["chronos-<kind>", label, captured_at_utc, str(value)]`
+(`separators=(",", ":")`, `ensure_ascii=False`, UTF-8 — injective over the four fields:
+JSON escaping keeps every field boundary unambiguous, so a label containing a colon, a
+quote or a bracket can never alias another session; the earlier colon-joined message
+could, G-1r1 review P1) under the per-install secret pepper `CHRONOS_CAPTURE_PEPPER` (Muse
+ruling 2026-09-16, delegated by Kevin, closing the G-1 review's P1: a public salt over
+small integer ids was enumerable — candidates 1–10,000 recovered an order id). The
+session's label and capture time stay public: they are what keeps tokens stable within a
 session and unlinkable across sessions; the pepper is what stops a reader of a committed
 fixture from enumerating small integers back to a broker id. Where the pepper lives: the
 untracked per-machine `.env` (mode 0600; generate with
 `python3 -c 'import secrets; print(secrets.token_hex(32))'`) — never in the tree, never in
 any output byte; a capture without one is refused and nothing is written. `manifest.json`
-records `identifier_pseudonyms.scheme` (`hmac-sha256-v1`) and a 16-hex
-`pepper_fingerprint` so a reader can tell which pepper minted a fixture's tokens:
+records `identifier_pseudonyms.scheme` (`hmac-sha256-v2`; a `v1` fixture keyed the old
+colon-joined message) and a 16-hex `pepper_fingerprint` so a reader can tell which pepper
+minted a fixture's tokens:
 rotation = a new pepper → new tokens; old fixtures stay valid, merely unlinkable to new
 ones; losing the pepper loses nothing but linkability (no fixture becomes readable or
 unreadable). Verify by hand before the directory leaves the machine — a raw broker id is a
