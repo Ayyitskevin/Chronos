@@ -4,14 +4,18 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hmac
 import importlib.util
 import json
 import os
 import re
 import subprocess
 import sys
+from hashlib import sha256
 from pathlib import Path
 from types import ModuleType
+
+import pytest
 
 from chronos.config.settings import Settings
 from chronos.utils.identifiers import account_fingerprint
@@ -84,13 +88,25 @@ SAFE_ENV = {
     "ALLOW_LIVE_TRADING": "false",
     "PYTHONDONTWRITEBYTECODE": "1",
 }
+# G-1 r1: test-only peppers — 32 bytes each, so their hex is the 64-digit grammar the harness
+# accepts. Derived from fixed labels rather than written as hex literals: a 64-hex constant in
+# the tree is exactly what the release security gate's secret scan (tracked files AND git
+# history) refuses, and no test needs randomness. Never a real pepper.
+PEPPER = sha256(b"chronos-real-gateway-campaign: test pepper A").digest()
+PEPPER_HEX = PEPPER.hex()
+OTHER_PEPPER = sha256(b"chronos-real-gateway-campaign: test pepper B").digest()
+SALT = "session-1:2026-09-13T19:30:00+00:00"
 
 
 def _identifier_payload(label: str = "session-1") -> dict:
     """A capture-shaped tree with one execution and one open order (demo-adapter values)."""
 
     return {
-        "meta": {"captured_at_utc": "2026-09-13T19:30:00+00:00", "label": label},
+        "meta": {
+            "captured_at_utc": "2026-09-13T19:30:00+00:00",
+            "label": label,
+            "gateway_evidence": False,
+        },
         "steps": {
             "executions": [
                 {
@@ -124,13 +140,13 @@ def _demo_capture(capture_module: ModuleType, label: str) -> dict:
 
 def test_1_identifier_values_become_stable_session_scoped_pseudonyms() -> None:
     m = _load_capture_module()
-    text_a = m.sanitize_capture(_identifier_payload("session-1"), set())
-    text_a_again = m.sanitize_capture(_identifier_payload("session-1"), set())
-    text_b = m.sanitize_capture(_identifier_payload("session-2"), set())
+    text_a = m.sanitize_capture(_identifier_payload("session-1"), set(), PEPPER)
+    text_a_again = m.sanitize_capture(_identifier_payload("session-1"), set(), PEPPER)
+    text_b = m.sanitize_capture(_identifier_payload("session-2"), set(), PEPPER)
     tree_a = json.loads(text_a)
     execution = tree_a["steps"]["executions"][0]
     order = tree_a["steps"]["open_orders"][0]
-    # the account-id shape: <KIND>-<16 hex>, a sha256 prefix over a namespaced string
+    # the account-id shape: <KIND>-<16 hex>, an HMAC-SHA256 prefix over a namespaced string
     for token, kind in (
         (execution["execution_id"], "EXEC"),
         (execution["broker_order_id"], "ORD"),
@@ -138,7 +154,7 @@ def test_1_identifier_values_become_stable_session_scoped_pseudonyms() -> None:
     ):
         assert re.fullmatch(rf"{kind}-[0-9a-f]{{16}}", token), token
     salt = m.session_salt(_identifier_payload("session-1"))
-    assert execution["broker_order_id"] == m.identifier_pseudonym("ORD", 7001, salt)
+    assert execution["broker_order_id"] == m.identifier_pseudonym("ORD", 7001, salt, PEPPER)
     # same id → same token within a session (the order and its execution agree)
     assert order["broker_order_id"] == execution["broker_order_id"]
     assert text_a == text_a_again
@@ -155,7 +171,7 @@ def test_1_identifier_values_become_stable_session_scoped_pseudonyms() -> None:
 
 def test_2_numeric_identifiers_are_replaced_as_whole_values_never_as_digit_substrings() -> None:
     m = _load_capture_module()
-    tree = json.loads(m.sanitize_capture(_identifier_payload(), set()))
+    tree = json.loads(m.sanitize_capture(_identifier_payload(), set(), PEPPER))
     execution = tree["steps"]["executions"][0]
     # the digits 7001 also occur inside a quantity, a timestamp and a balance — all untouched
     assert execution["quantity"] == "17001"
@@ -174,7 +190,7 @@ def test_3_account_id_sanitization_is_byte_identical_before_and_after() -> None:
         f'{{"account_id": "{expected_token}"}}'
     )
     # the ACCT- token the identifier pass produces is the one the textual pass alone produces
-    with_identifiers = m.sanitize_capture(payload, account_ids)
+    with_identifiers = m.sanitize_capture(payload, account_ids, PEPPER)
     textual_only = m.sanitize(m.canonical_json(payload), account_ids)
     assert with_identifiers.count(expected_token) == textual_only.count(expected_token) == 1
     assert "DU1234567" not in with_identifiers
@@ -186,7 +202,7 @@ def test_4_replay_check_byte_integrity_and_mutation_scan_hold_on_a_sanitized_cap
     m = _load_capture_module()
     capture = _demo_capture(m, "g1-replay")
     session = tmp_path / "session"
-    m.write_session(session, capture, set(), "g1-replay")
+    m.write_session(session, capture, set(), "g1-replay", PEPPER)
     run = [sys.executable, str(REPLAY_CHECK), "--allow-demo", str(session)]
     passed = subprocess.run(
         run,
@@ -225,7 +241,7 @@ def test_5_demo_capture_round_trips_with_no_raw_identifier_in_the_bytes(tmp_path
     raw_perm_id = raw_executions[0]["permanent_id"]
     assert isinstance(raw_exec_id, str) and isinstance(raw_order_id, int) and raw_perm_id
     session = tmp_path / "session"
-    m.write_session(session, capture, set(), "g1-roundtrip")
+    m.write_session(session, capture, set(), "g1-roundtrip", PEPPER)
     text = (session / "capture.json").read_text(encoding="utf-8")
     tree = json.loads(text)  # parses
     assert raw_exec_id not in text
@@ -237,3 +253,250 @@ def test_5_demo_capture_round_trips_with_no_raw_identifier_in_the_bytes(tmp_path
     assert execution["broker_order_id"].startswith("ORD-")
     assert execution["permanent_id"].startswith("PERM-")
     assert order["broker_order_id"] == execution["broker_order_id"]
+
+
+# ------------------------------------------------------------------------ G-1 r1
+# Daybreak's HOLD at 6d21d00 (P1): a public salt over bounded numeric broker ids is
+# enumerable. Muse's ruling (2026-09-16): keyed HMAC-SHA256 under a per-install secret
+# pepper, CHRONOS_CAPTURE_PEPPER. Tests are numbered to the G-1r1 contract.
+
+
+def _message(value: int) -> bytes:
+    return f"chronos-ord:{SALT}:{value}".encode()
+
+
+def test_r1_1_tokens_resist_bounded_enumeration_without_the_pepper() -> None:
+    m = _load_capture_module()
+    # the token the harness mints for order id 7001 under the public session salt
+    assert m.session_salt(_identifier_payload("session-1")) == SALT
+    tree = json.loads(m.sanitize_capture(_identifier_payload("session-1"), set(), PEPPER))
+    token = tree["steps"]["executions"][0]["broker_order_id"]
+    assert token == m.identifier_pseudonym("ORD", 7001, SALT, PEPPER)
+    # the construction, literally: kind prefix + HMAC-SHA256(pepper, message)[:16]
+    assert token == "ORD-" + hmac.new(PEPPER, _message(7001), "sha256").hexdigest()[:16]
+    tail = token.removeprefix("ORD-")
+    candidates = range(1, 10_001)
+    # (a) Daybreak's probe — the OLD public-salt sha256 construction — recovers nothing
+    assert [v for v in candidates if sha256(_message(v)).hexdigest()[:16] == tail] == []
+    # (b) HMAC under an empty key, and under a different pepper — nothing
+    for key in (b"", OTHER_PEPPER):
+        hits = [
+            v for v in candidates if hmac.new(key, _message(v), "sha256").hexdigest()[:16] == tail
+        ]
+        assert hits == [], key
+    # (c) positive control: with the pepper the enumeration finds exactly 7001
+    hits = [
+        v for v in candidates if hmac.new(PEPPER, _message(v), "sha256").hexdigest()[:16] == tail
+    ]
+    assert hits == [7001]
+
+
+def test_r1_2_no_pepper_is_a_typed_refusal_and_nothing_is_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    m = _load_capture_module()
+    guidance = ("CHRONOS_CAPTURE_PEPPER", "secrets.token_hex(32)", ".env", "0600")
+    monkeypatch.delenv("CHRONOS_CAPTURE_PEPPER", raising=False)
+    with pytest.raises(m.CaptureRefused) as absent:
+        m.load_pepper(env_file=None)
+    for needle in guidance:
+        assert needle in str(absent.value), needle
+    # a 10-character pepper: refused as too short (5 bytes; 32 are required)
+    monkeypatch.setenv("CHRONOS_CAPTURE_PEPPER", "0123456789")
+    with pytest.raises(m.CaptureRefused, match="too short") as short:
+        m.load_pepper(env_file=None)
+    for needle in guidance:
+        assert needle in str(short.value), needle
+    # not hex → refused too; no derivation, no default
+    monkeypatch.setenv("CHRONOS_CAPTURE_PEPPER", "z" * 64)
+    with pytest.raises(m.CaptureRefused, match="hex"):
+        m.load_pepper(env_file=None)
+    # the pepper lives in the untracked per-machine env file: the file source is read
+    monkeypatch.delenv("CHRONOS_CAPTURE_PEPPER", raising=False)
+    env_file = tmp_path / ".env"
+    env_file.write_text(f"CHRONOS_CAPTURE_PEPPER={PEPPER_HEX}\n", encoding="utf-8")
+    assert m.load_pepper(env_file=env_file) == PEPPER
+    # the environment wins over the file (the repo's settings precedence)
+    monkeypatch.setenv("CHRONOS_CAPTURE_PEPPER", OTHER_PEPPER.hex())
+    assert m.load_pepper(env_file=env_file) == OTHER_PEPPER
+    # the write path refuses BEFORE creating the session directory
+    session = tmp_path / "session"
+    for bad in (b"", b"short", PEPPER[:31]):
+        with pytest.raises(m.CaptureRefused):
+            m.sanitize_capture(_identifier_payload(), set(), bad)
+        with pytest.raises(m.CaptureRefused):
+            m.write_session(session, _identifier_payload(), set(), "g1r1-nopepper", bad)
+        assert not session.exists()
+    # and the CLI: no pepper anywhere → REFUSED, exit 2, no session directory, no broker step
+    monkeypatch.delenv("CHRONOS_CAPTURE_PEPPER", raising=False)
+    env = {key: value for key, value in os.environ.items() if key != "CHRONOS_CAPTURE_PEPPER"}
+    bare = tmp_path / "bare"  # a cwd with no .env: the only source is the (absent) variable
+    bare.mkdir()
+    out = bare / "cli-session"
+    refused = subprocess.run(
+        [
+            sys.executable,
+            str(CAPTURE),
+            "--out",
+            str(out),
+            "--label",
+            "g1r1-nopepper",
+            "--allow-demo",
+            "--skip-options",
+            "--skip-bars",
+        ],
+        cwd=bare,
+        env={**env, **SAFE_ENV},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert refused.returncode == 2, refused.stdout + refused.stderr
+    assert refused.stdout.startswith("REFUSED: CHRONOS_CAPTURE_PEPPER"), refused.stdout
+    assert "secrets.token_hex(32)" in refused.stdout
+    assert "capture written" not in refused.stdout
+    assert not out.exists()
+
+
+def test_r1_3_the_pepper_appears_in_no_output_byte_and_no_log_line(tmp_path: Path) -> None:
+    session = tmp_path / "session"
+    written = subprocess.run(
+        [
+            sys.executable,
+            str(CAPTURE),
+            "--out",
+            str(session),
+            "--label",
+            "g1r1-pepper",
+            "--allow-demo",
+            "--skip-options",
+            "--skip-bars",
+        ],
+        cwd=tmp_path,
+        env={**os.environ, **SAFE_ENV, "CHRONOS_CAPTURE_PEPPER": PEPPER_HEX},
+        capture_output=True,
+        check=False,
+    )
+    assert written.returncode == 0, written.stdout + written.stderr
+    files = {path.name: path.read_bytes() for path in session.iterdir()}
+    assert {"capture.json", "derived_liquid_hours.json", "manifest.json"} <= set(files)
+    # positive control: the capture really carries pseudonymized identifiers, and THIS pepper
+    # minted them (the manifest's fingerprint) — used, yet present nowhere as bytes
+    assert b'"broker_order_id": "ORD-' in files["capture.json"]
+    manifest = json.loads(files["manifest.json"])
+    assert (
+        manifest["identifier_pseudonyms"]["pepper_fingerprint"] == sha256(PEPPER).hexdigest()[:16]
+    )
+    needles = (PEPPER_HEX.encode(), PEPPER_HEX.upper().encode(), PEPPER)
+    for name, data in files.items():
+        for needle in needles:
+            assert needle not in data, name
+    for stream in (written.stdout, written.stderr):
+        for needle in needles:
+            assert needle not in stream
+
+
+def test_r1_4_manifest_records_the_scheme_and_a_pepper_fingerprint(tmp_path: Path) -> None:
+    m = _load_capture_module()
+    account_ids = {"DU1234567"}
+    acct = f"ACCT-{account_fingerprint('DU1234567')[:16]}"
+    sessions = {}
+    for name, pepper in (("a", PEPPER), ("b", OTHER_PEPPER)):
+        directory = tmp_path / name
+        m.write_session(directory, _identifier_payload(), account_ids, "g1r1-manifest", pepper)
+        sessions[name] = (
+            json.loads((directory / "manifest.json").read_text(encoding="utf-8")),
+            json.loads((directory / "capture.json").read_text(encoding="utf-8")),
+            (directory / "manifest.json").read_text(encoding="utf-8"),
+        )
+    manifest_a, capture_a, manifest_text_a = sessions["a"]
+    manifest_b, capture_b, _ = sessions["b"]
+    expected = {"scheme": "hmac-sha256-v1", "pepper_fingerprint": sha256(PEPPER).hexdigest()[:16]}
+    assert manifest_a["identifier_pseudonyms"] == expected
+    fingerprint = manifest_a["identifier_pseudonyms"]["pepper_fingerprint"]
+    assert re.fullmatch(r"[0-9a-f]{16}", fingerprint)
+    # the fingerprint is not the pepper (nor any slice of it)
+    assert fingerprint not in PEPPER_HEX and PEPPER_HEX not in manifest_text_a
+    # a rotated pepper → a different fingerprint and different identifier tokens ...
+    assert manifest_b["identifier_pseudonyms"]["pepper_fingerprint"] != fingerprint
+    assert manifest_b["identifier_pseudonyms"]["scheme"] == "hmac-sha256-v1"
+    order_a = capture_a["steps"]["executions"][0]["broker_order_id"]
+    order_b = capture_b["steps"]["executions"][0]["broker_order_id"]
+    assert order_a.startswith("ORD-") and order_b.startswith("ORD-") and order_a != order_b
+    # ... while the account tokens do not move with the pepper
+    assert capture_a["steps"]["account_summary"]["account_id"] == acct
+    assert capture_b["steps"]["account_summary"]["account_id"] == acct
+    # the file sha256 map is unchanged in shape (replay_check reads only that)
+    assert set(manifest_a["files"]) == {"capture.json", "derived_liquid_hours.json"}
+
+
+def test_r1_5_docs_state_the_keyed_scheme_and_where_the_pepper_lives() -> None:
+    skill = " ".join(SKILL.read_text(encoding="utf-8").split())
+    script = " ".join(CAPTURE.read_text(encoding="utf-8").split())
+    for text in (skill, script):
+        assert "CHRONOS_CAPTURE_PEPPER" in text
+        assert "HMAC-SHA256" in text
+        # the retired claims: the salt is no longer the whole story, and the secret is decided
+        assert "a secret salt is an owner decision" not in text
+        assert "does not resist brute force" not in text
+    assert "old fixtures stay valid" in skill and "unlinkable" in skill
+    assert "losing the pepper loses nothing but linkability" in skill
+    assert "0600" in skill and "secrets.token_hex(32)" in skill
+    # session_salt's docstring says what the salt is for now: cross-session unlinkability
+    m = _load_capture_module()
+    salt_doc = " ".join((m.session_salt.__doc__ or "").split())
+    assert "public" in salt_doc and "pepper" in salt_doc
+    # no salt sentence anywhere else in docs/ or .claude/ says the old thing
+    matches = subprocess.run(
+        ["git", "grep", "-n", "-i", "salt", "--", "docs", ".claude"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout
+    assert "owner decision" not in matches.lower()
+
+
+def test_r1_6_no_new_gap_literal_and_the_retired_mechanism_token_is_absent() -> None:
+    marker = "[" + "GAP" + "]"  # never spelled whole here: this file must not add one
+    gaps = subprocess.run(
+        ["git", "grep", "-n", "-F", marker, "--", "tests"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout.splitlines()
+    # nothing new: every marker line under tests/ is either #232's own checker or the one
+    # pre-existing header comment of this file (6d21d00)
+    holders = {line.split(":", 1)[0] for line in gaps}
+    assert holders <= {
+        "tests/unit/test_m4_session_checklist_contract.py",
+        "tests/unit/test_real_gateway_campaign.py",
+    }, holders
+    own = [line for line in gaps if line.startswith("tests/unit/test_real_gateway_campaign.py:")]
+    assert len(own) == 1 and "that no order-id sanitizer exists" in own[0], own
+    # #232's mechanism token (never spelled whole here) stays absent from the tree #232 searches,
+    # the checklist line that declares the gap and #232's own checker excepted, as there
+    token = "sanitize_" + "order_ids"
+    absent = subprocess.run(
+        [
+            "git",
+            "grep",
+            "-n",
+            "-F",
+            token,
+            "--",
+            "src",
+            "scripts",
+            "tests",
+            "docs",
+            ".claude/skills",
+            ":!docs/ops/m4-read-only-gate-session-checklist.md",
+            ":!tests/unit/test_m4_session_checklist_contract.py",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert absent.returncode == 1 and absent.stdout == ""
