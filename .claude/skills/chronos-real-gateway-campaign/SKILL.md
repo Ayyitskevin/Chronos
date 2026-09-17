@@ -51,7 +51,9 @@ that owns authentication and the API socket; Chronos only connects to its local 
 **Paper account** = an IBKR simulated-money account (id `DU…`/`DF…`). **Session** = one
 connect → capture → disconnect cycle against a running gateway. **Fixture** = a captured,
 sanitized session directory that offline checks can replay. **Sanitized** = raw account
-ids (and any order ids) replaced with stable pseudonyms before anything enters the repo.
+ids replaced with `ACCT-` fingerprints and every broker identifier (execution, order and
+permanent ids) replaced with a keyed pseudonym — HMAC-SHA256 under the per-install secret
+`CHRONOS_CAPTURE_PEPPER` — before anything enters the repo.
 
 **Decoupled owner question:** the account-capital decision (~USD 110 today vs the ~USD
 3,000 historical premise — VISION_COMPLETION_PLAN.md:68-70, RISK_REGISTER.md R-10) is a
@@ -174,10 +176,16 @@ ALLOW_ORDER_TRANSMIT=false
 ALLOW_LIVE_TRADING=false
 SYMBOL_ALLOWLIST=AAPL,MSFT,SPY
 # AUTONOMY_MANDATE_FILE stays unset/commented
+# the per-install secret that keys every identifier pseudonym (G-1 r1, Muse ruling 2026-09-16):
+# generate with python3 -c 'import secrets; print(secrets.token_hex(32))' — 64 hex digits
+CHRONOS_CAPTURE_PEPPER=<64 hex>
 ```
 
 `IB_ACCOUNT_ID` is required: `OfficialIBKRBroker.__init__` raises `BrokerSafetyError`
-without it (official_ibkr.py:723-727). Never commit `.env`. Then audit:
+without it (official_ibkr.py:723-727). `CHRONOS_CAPTURE_PEPPER` is required too: the
+harness refuses to capture without it (`REFUSED: CHRONOS_CAPTURE_PEPPER …`, exit 2, nothing
+written, no broker connection). Never commit `.env` — `chmod 600 .env`; the pepper lives
+there and nowhere else (never in the tree, never in any output byte). Then audit:
 
 ```bash
 .venv/bin/python -c "
@@ -331,9 +339,30 @@ grep -RniE "DU[0-9]|DF[0-9]|U[0-9]{6}" ~/chronos-gateway-evidence/  && echo LEAK
 ```
 
 If `executions`/`open_orders` are non-empty (pre-existing manual history), broker order
-ids/exec ids/permIds are present: either replace them with stable placeholders (keep the
-mapping OFF-repo) or keep those files off-repo and record counts only. Nothing
-unsanitized enters git — ever.
+ids/exec ids/permIds are present: the harness replaces each one, whole-value, with
+`EXEC-`/`ORD-`/`PERM-<16 hex>` = `HMAC-SHA256(pepper, "chronos-<kind>:<label>:<captured_at_utc>:<value>")[:16]`
+under the per-install secret pepper `CHRONOS_CAPTURE_PEPPER` (Muse ruling 2026-09-16,
+delegated by Kevin, closing the G-1 review's P1: a public salt over small integer ids was
+enumerable — candidates 1–10,000 recovered an order id). The session salt
+(`<label>:<captured_at_utc>`) stays public: it is what keeps tokens stable within a
+session and unlinkable across sessions; the pepper is what stops a reader of a committed
+fixture from enumerating small integers back to a broker id. Where the pepper lives: the
+untracked per-machine `.env` (mode 0600; generate with
+`python3 -c 'import secrets; print(secrets.token_hex(32))'`) — never in the tree, never in
+any output byte; a capture without one is refused and nothing is written. `manifest.json`
+records `identifier_pseudonyms.scheme` (`hmac-sha256-v1`) and a 16-hex
+`pepper_fingerprint` so a reader can tell which pepper minted a fixture's tokens:
+rotation = a new pepper → new tokens; old fixtures stay valid, merely unlinkable to new
+ones; losing the pepper loses nothing but linkability (no fixture becomes readable or
+unreadable). Verify by hand before the directory leaves the machine — a raw broker id is a
+plain integer under `broker_order_id`/`permanent_id`, a raw execution id is a dotted string
+under `execution_id`:
+
+```bash
+grep -RnE '"(broker_order_id|permanent_id)": [0-9]|"execution_id": "[^E]' ~/chronos-gateway-evidence/ && echo LEAK || echo clean
+```
+
+Nothing unsanitized enters git — ever.
 
 **2.5 Session evidence doc.** One markdown doc per session (goes to
 `docs/evidence/real_gateway/<date>-session-<N>.md` in the gate-passage PR — a new
