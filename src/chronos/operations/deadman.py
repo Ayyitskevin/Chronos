@@ -1,0 +1,362 @@
+"""Dead-man check over the watchdog's heartbeat (M3 ops plane, second layer).
+
+``check_deadman`` reads ``heartbeat.json`` — the file ``chronos.operations.watchdog``
+replaces on every tick — and says whether that watchdog is still alive. It keeps no state,
+writes nothing, contacts nothing, and cannot act: a DEAD verdict is evidence for the
+operator, whose response is the runbook's (``docs/ops/WATCHDOG.md``).
+
+The verdict rule. DEAD when the heartbeat is absent, unreadable, malformed, not a regular
+file, when NO writer holds the liveness lock ``watchdog.lock`` (round 4 — the kernel releases
+it on any exit, so this input comes before any age and makes a fresh-looking heartbeat from
+an exited writer DEAD regardless), when the lock entry fails the capability contract the
+writer applies to it (round 5 — regular, owned by this effective uid, exactly one link, mode
+0600, and the name still designates the opened inode; contention on any other entry is not
+liveness and is reported naming the failed predicate), or older than ``max_age_s`` by BOTH
+the wall clock and the monotonic timer. ALIVE when
+both say it is within ``max_age_s``. UNKNOWN only when the clock evidence cannot be
+reasoned about: the two clocks disagree (one of them moved), the heartbeat's monotonic
+value precedes this process's timer (another boot, or another host — CLOCK_MONOTONIC is
+comparable only within one boot of one host), or the heartbeat is from the future beyond a
+small tolerance. UNKNOWN is not ALIVE; it exits 3 so an operator looks.
+
+The heartbeat's directory is reached by an ``O_NOFOLLOW`` component walk (a symlinked
+ancestor is a typed DEAD, never followed — round 1) and the entry is opened relative to
+that directory with ``O_NOFOLLOW|O_NONBLOCK`` and must be a regular file (``fstat``): a
+planted symlink is refused (never followed, even to a fresh file), a planted FIFO is
+refused instead of blocking the check, a directory is refused. Reads are bounded to 64
+KiB. The check creates nothing on the way.
+"""
+
+from __future__ import annotations
+
+import argparse
+import errno
+import fcntl
+import json
+import math
+import os
+import stat
+import sys
+import time
+from collections.abc import Callable
+from datetime import datetime
+from enum import StrEnum
+from pathlib import Path
+
+from pydantic import AwareDatetime, BaseModel, ConfigDict
+
+from chronos.utils.time import utc_now
+
+_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+_ENTRY_FLAGS = os.O_RDONLY | _CLOEXEC | _NOFOLLOW | _NONBLOCK
+_MAX_HEARTBEAT_BYTES = 64 * 1024
+#: The watchdog's liveness lock (round 4): held LOCK_EX by a running writer for the life of
+#: its loop, released by the kernel on any exit. Probed with LOCK_SH|LOCK_NB: acquirable, or
+#: absent → no writer → DEAD regardless of the heartbeat's age. Same name as the writer's.
+LIVENESS_LOCK = "watchdog.lock"
+#: A heartbeat may be a little ahead of this process's wall clock (two hosts, two NTP
+#: states); beyond this it is not evidence this check can reason about.
+FUTURE_TOLERANCE_S = 5.0
+
+
+class _Model(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class DeadmanState(StrEnum):
+    ALIVE = "ALIVE"
+    DEAD = "DEAD"
+    UNKNOWN = "UNKNOWN"
+
+
+EXIT_CODES = {DeadmanState.ALIVE: 0, DeadmanState.DEAD: 2, DeadmanState.UNKNOWN: 3}
+
+
+class DeadmanVerdict(_Model):
+    state: DeadmanState
+    reason: str
+    #: Wall-clock age of the heartbeat in seconds; None when no age could be read.
+    heartbeat_age_s: float | None
+    assessed_at: AwareDatetime
+
+
+class DeadmanConfigurationError(ValueError):
+    """A parameter that cannot describe a check."""
+
+
+def _describe(error: OSError) -> str:
+    return {
+        errno.ELOOP: "is a symlink (refused, never followed)",
+        errno.EISDIR: "is a directory",
+        errno.ENXIO: "is a fifo (refused, never blocked on)",
+        errno.ENOTDIR: "is not a directory",
+    }.get(error.errno or 0, error.strerror or type(error).__name__)
+
+
+def _component_problem(descriptor: int, component: str, error: OSError) -> str:
+    """Name the refused component honestly: a link is reported as a link, not as ENOTDIR."""
+
+    try:
+        found = os.stat(component, dir_fd=descriptor, follow_symlinks=False)
+    except OSError:
+        return _describe(error)
+    if stat.S_ISLNK(found.st_mode):
+        return "is a symlink (refused, never followed)"
+    return _describe(error)
+
+
+_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | _CLOEXEC | _NOFOLLOW
+
+
+def _open_parent(path: Path) -> tuple[int | None, str | None]:
+    """Walk to the heartbeat's directory component by component, O_NOFOLLOW at every step.
+
+    A reader creates nothing: a missing or symlinked component is a typed DEAD reason.
+    """
+
+    absolute = path if path.is_absolute() else Path.cwd() / path
+    descriptor = os.open(os.sep, _DIR_FLAGS)
+    try:
+        for component in absolute.parent.parts[1:]:
+            try:
+                child = os.open(component, _DIR_FLAGS, dir_fd=descriptor)
+            except FileNotFoundError:
+                os.close(descriptor)
+                return None, "heartbeat absent (its directory does not exist)"
+            except OSError as error:
+                problem = _component_problem(descriptor, component, error)
+                os.close(descriptor)
+                return None, f"heartbeat unreachable: component {component!r} {problem}"
+            os.close(descriptor)
+            descriptor = child
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor, None
+
+
+def _lock_entry_problem(opened: os.stat_result, named: os.stat_result) -> str | None:
+    """The reader-side capability contract for the lock entry (round 5) — the same predicate
+    the writer's ``_require_owned_regular`` applies, mirrored here so the reader imports
+    nothing from the writer. Contention on an entry that fails it is NOT liveness: a
+    hardlinked, foreign-owned, loose-mode, non-regular or swapped entry can be locked by
+    anyone, so it proves nothing about the watchdog this reader knows.
+    """
+
+    if not stat.S_ISREG(opened.st_mode):
+        return "liveness lock is not a regular file"
+    if opened.st_uid != os.geteuid():
+        return f"liveness lock is owned by uid {opened.st_uid}, not this process's effective user"
+    if opened.st_nlink != 1:
+        return f"liveness lock has {opened.st_nlink} links; a capability entry has exactly one"
+    mode = stat.S_IMODE(opened.st_mode)
+    if mode != 0o600:
+        return f"liveness lock has mode {oct(mode)}, not 0o600"
+    if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino):
+        return "liveness lock name no longer designates the inode that was opened"
+    return None
+
+
+def _writer_holds_lock(parent_fd: int) -> tuple[bool, str | None]:
+    """(True, None) when a live writer holds the liveness lock; (False, reason) otherwise.
+
+    The entry is opened no-follow, non-blocking, and must satisfy the capability contract
+    (``_lock_entry_problem``) BEFORE contention is read as liveness. Then the probe is
+    LOCK_SH|LOCK_NB: EWOULDBLOCK means a writer holds LOCK_EX right now; success means
+    nobody does (released at once); an absent entry means no writer either. The kernel,
+    not a timestamp, answers — a writer that exited on any path has already let go.
+    """
+
+    try:
+        fd = os.open(LIVENESS_LOCK, _ENTRY_FLAGS, dir_fd=parent_fd)
+    except FileNotFoundError:
+        return False, "no writer holds the liveness lock (the lock entry is absent)"
+    except OSError as error:
+        return False, f"no writer holds the liveness lock (lock entry {_describe(error)})"
+    try:
+        try:
+            opened = os.fstat(fd)
+            named = os.stat(LIVENESS_LOCK, dir_fd=parent_fd, follow_symlinks=False)
+        except OSError as error:
+            return False, f"liveness lock unreadable: {_describe(error)}"
+        problem = _lock_entry_problem(opened, named)
+        if problem is not None:
+            return False, f"{problem}; contention on it is not liveness"
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True, None
+        except OSError as error:
+            return False, f"liveness lock unreadable: {_describe(error)}"
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False, "no writer holds the liveness lock"
+    finally:
+        os.close(fd)
+
+
+def _read_heartbeat(path: Path) -> tuple[bytes | None, str | None, bool, str | None]:
+    """The heartbeat's bytes (or the typed reason), and whether a writer holds the lock."""
+
+    parent_fd, unreachable = _open_parent(path)
+    if parent_fd is None:
+        return None, unreachable, False, unreachable
+    try:
+        alive, dead_reason = _writer_holds_lock(parent_fd)
+        try:
+            fd = os.open(path.name, _ENTRY_FLAGS, dir_fd=parent_fd)
+        except FileNotFoundError:
+            return None, "heartbeat absent", alive, dead_reason
+        except OSError as error:
+            return None, f"heartbeat unreadable: {_describe(error)}", alive, dead_reason
+    finally:
+        os.close(parent_fd)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return (
+                None,
+                "heartbeat is not a regular file (a fifo, directory or device is refused, "
+                "never read)",
+                alive,
+                dead_reason,
+            )
+        raw = os.read(fd, _MAX_HEARTBEAT_BYTES + 1)
+    except OSError as error:
+        return None, f"heartbeat unreadable: {_describe(error)}", alive, dead_reason
+    finally:
+        os.close(fd)
+    if len(raw) > _MAX_HEARTBEAT_BYTES:
+        return None, "heartbeat malformed: larger than 64 KiB", alive, dead_reason
+    return raw, None, alive, dead_reason
+
+
+def _parse_heartbeat(raw: bytes) -> tuple[datetime | None, float | None, str | None]:
+    """(last_observed_at, monotonic) from the heartbeat, or the typed malformation."""
+
+    try:
+        document = json.loads(raw)
+    except ValueError:
+        return None, None, "heartbeat malformed: not JSON"
+    if not isinstance(document, dict):
+        return None, None, "heartbeat malformed: not an object"
+    observed = document.get("last_observed_at")
+    if not isinstance(observed, str):
+        return None, None, "heartbeat malformed: last_observed_at missing or not a string"
+    try:
+        observed_at = datetime.fromisoformat(observed)
+    except ValueError:
+        return None, None, "heartbeat malformed: last_observed_at is not an ISO-8601 timestamp"
+    if observed_at.tzinfo is None or observed_at.utcoffset() is None:
+        return None, None, "heartbeat malformed: last_observed_at carries no timezone"
+    monotonic = document.get("monotonic")
+    if (
+        isinstance(monotonic, bool)
+        or not isinstance(monotonic, int | float)
+        or not math.isfinite(monotonic)
+    ):
+        return None, None, "heartbeat malformed: monotonic missing or not a finite number"
+    return observed_at, float(monotonic), None
+
+
+def check_deadman(
+    heartbeat_path: Path | str,
+    max_age_s: float,
+    *,
+    clock: Callable[[], datetime] = utc_now,
+    timer: Callable[[], float] = time.monotonic,
+) -> DeadmanVerdict:
+    """Judge the watchdog's heartbeat once. Reads one file; retains and writes nothing."""
+
+    if (
+        isinstance(max_age_s, bool)
+        or not isinstance(max_age_s, int | float)
+        or not math.isfinite(max_age_s)
+        or max_age_s <= 0
+    ):
+        raise DeadmanConfigurationError("max_age_s must be a positive finite number")
+    now = clock()
+    now_monotonic = timer()
+
+    def verdict(state: DeadmanState, reason: str, age: float | None = None) -> DeadmanVerdict:
+        return DeadmanVerdict(state=state, reason=reason, heartbeat_age_s=age, assessed_at=now)
+
+    raw, failure, writer_alive, no_writer = _read_heartbeat(Path(heartbeat_path))
+    if raw is None:
+        return verdict(DeadmanState.DEAD, failure or "heartbeat unreadable")
+    observed_at, monotonic, malformed = _parse_heartbeat(raw)
+    if observed_at is None or monotonic is None:
+        return verdict(DeadmanState.DEAD, malformed or "heartbeat malformed")
+    # Round 4 — the lock is the first input, the age the second: a writer that exited on ANY
+    # path has let the kernel release its lock, so a fresh-looking heartbeat proves nothing.
+    if not writer_alive:
+        return verdict(DeadmanState.DEAD, no_writer or "no writer holds the liveness lock")
+
+    wall_age = round((now - observed_at).total_seconds(), 3)
+    monotonic_age = round(now_monotonic - monotonic, 3)
+    limit = f"max {max_age_s:.1f} s"
+    if wall_age < -FUTURE_TOLERANCE_S:
+        return verdict(
+            DeadmanState.UNKNOWN,
+            f"heartbeat is {-wall_age:.1f} s in the future: "
+            "the wall clock cannot be reasoned about",
+            wall_age,
+        )
+    if monotonic_age < 0:
+        return verdict(
+            DeadmanState.UNKNOWN,
+            f"heartbeat monotonic {monotonic:.3f} is ahead of this process's timer "
+            f"{now_monotonic:.3f}: written under another boot or on another host",
+            wall_age,
+        )
+    wall_stale = wall_age > max_age_s
+    monotonic_stale = monotonic_age > max_age_s
+    if wall_stale and monotonic_stale:
+        return verdict(
+            DeadmanState.DEAD,
+            f"no heartbeat for {wall_age:.1f} s wall / {monotonic_age:.1f} s monotonic ({limit})",
+            wall_age,
+        )
+    if not wall_stale and not monotonic_stale:
+        return verdict(
+            DeadmanState.ALIVE,
+            f"heartbeat {wall_age:.1f} s wall / {monotonic_age:.1f} s monotonic old ({limit})",
+            wall_age,
+        )
+    return verdict(
+        DeadmanState.UNKNOWN,
+        f"wall and monotonic evidence disagree ({wall_age:.1f} s wall, {monotonic_age:.1f} s "
+        f"monotonic, {limit}): a clock moved",
+        wall_age,
+    )
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="chronos-deadman",
+        description=(
+            "Dead-man check over the watchdog's heartbeat.json: ALIVE (0), DEAD (2) or "
+            "UNKNOWN (3). Reads one file, writes nothing, acts on nothing."
+        ),
+    )
+    parser.add_argument("--heartbeat", type=Path, required=True, help="path to heartbeat.json")
+    parser.add_argument(
+        "--max-age", type=float, default=180.0, help="seconds before a heartbeat is stale"
+    )
+    parser.add_argument("--pretty", action="store_true")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
+    try:
+        result = check_deadman(args.heartbeat, args.max_age)
+    except DeadmanConfigurationError as error:
+        print(f"deadman configuration error: {error}", file=sys.stderr)
+        return 64
+    print(result.model_dump_json(indent=2 if args.pretty else None))
+    return EXIT_CODES[result.state]
+
+
+if __name__ == "__main__":
+    sys.exit(main())

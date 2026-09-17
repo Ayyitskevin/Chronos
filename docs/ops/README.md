@@ -18,6 +18,8 @@ markdown file appears in this directory without being named here. Design notes l
 when they bound an operational component before it exists: `DESIGN-alert-sidecar.md` (the
 off-host alert sidecar, receive-only protocol sketch — design only; placement and backup-key
 custody are owner decisions, not made there).
+`WATCHDOG.md` is the runbook for the evidence-only watchdog and dead-man layers
+(`python -m chronos.operations.watchdog` / `deadman`); they observe and record, never act.
 
 ## Rules these templates keep, and a test that enforces them
 
