@@ -12,6 +12,27 @@ refuses to start unless ALLOW_ORDER_TRANSMIT and ALLOW_LIVE_TRADING are false an
 AUTONOMY_MANDATE_FILE is unset. Steps that fail are recorded as errors and the
 capture continues; absence of evidence is itself evidence.
 
+Sanitization before anything is written: every account id becomes
+``ACCT-<account_fingerprint[:16]>`` (textual, as before), and every broker
+identifier value — ``execution_id``, ``broker_order_id``, ``permanent_id`` —
+becomes a session-scoped KEYED pseudonym ``EXEC-``/``ORD-``/``PERM-<hmac[:16]>``
+(:func:`pseudonymize_identifiers`), replaced as a whole JSON value so a
+timestamp or quantity that happens to contain the same digits is untouched.
+
+The key (Muse ruling 2026-09-16, delegated by Kevin; closes the G-1 review's P1):
+``HMAC-SHA256(pepper, message)[:16]`` where the message is the canonical JSON array
+``["chronos-<kind>", label, captured_at_utc, str(value)]`` (scheme ``hmac-sha256-v2``;
+the r1 colon-joined form was not injective — G-1r1 review P1) and the pepper is a
+per-install secret read ONCE from ``CHRONOS_CAPTURE_PEPPER`` — the untracked
+per-machine env file (the repo-root ``.env``, mode 0600), never in the tree, never
+in any output byte. The session's label and capture time are public: they keep
+tokens unlinkable ACROSS sessions; the pepper is what stops a reader of a committed
+fixture from enumerating small integers back to a broker id. A capture without a
+pepper is REFUSED (:class:`CaptureRefused`) and nothing is written. ``manifest.json``
+records the scheme and a 16-hex fingerprint of the pepper: rotation = a new pepper →
+new tokens; old fixtures stay valid, merely unlinkable to new ones; losing the pepper
+loses nothing but linkability.
+
 Usage (from the repo root, .env configured per the campaign skill):
 
     .venv/bin/python .claude/skills/chronos-real-gateway-campaign/scripts/\
@@ -27,7 +48,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import dataclasses
+import hmac
 import json
+import re
 import sys
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -36,7 +59,95 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
+from pydantic import SecretStr
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
 STEP_TIMEOUT_S = 30.0
+
+#: The per-install secret that keys every identifier pseudonym (G-1 r1).
+PEPPER_ENV = "CHRONOS_CAPTURE_PEPPER"
+#: 32 random bytes = 64 hex digits (``secrets.token_hex(32)``); the harness accepts hex only.
+PEPPER_MIN_BYTES = 32
+#: Recorded in manifest.json beside the pepper fingerprint so a rotation is auditable.
+#: v1 keyed a colon-joined message (not injective, G-1r1 review P1); v2 keys the canonical
+#: JSON array of the four fields. A fixture reader can tell v1 tokens from v2 by this string.
+PSEUDONYM_SCHEME = "hmac-sha256-v2"
+PEPPER_GUIDANCE = (
+    "generate one with: python3 -c 'import secrets; print(secrets.token_hex(32))' and put "
+    f"{PEPPER_ENV}=<that value> in the untracked per-machine env file (the repo-root .env, "
+    "mode 0600 — never committed, never in any output byte); there is no default and no "
+    "derivation from the session label, time or host"
+)
+
+
+class CaptureRefused(RuntimeError):
+    """A typed refusal: the capture cannot proceed and nothing has been written."""
+
+
+class _PepperSource(BaseSettings):
+    """The pepper read the way the repo reads every setting (``Settings``' own convention:
+    the process environment first, then the untracked repo-root ``.env``). A source of its
+    own rather than a ``Settings`` field so the campaign script owns its secret's grammar
+    and refusal text; ``SecretStr`` keeps the bytes out of any repr."""
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=False,
+        frozen=True,
+    )
+
+    chronos_capture_pepper: SecretStr = SecretStr("")
+
+
+def pepper_from_text(text: str) -> bytes:
+    """Decode a pepper's textual form or refuse: 64+ hex digits → at least 32 bytes."""
+
+    cleaned = text.strip()
+    if not cleaned:
+        raise CaptureRefused(
+            f"{PEPPER_ENV} is not set: identifier pseudonyms are keyed (HMAC-SHA256) and a "
+            f"capture without the key is refused; {PEPPER_GUIDANCE}"
+        )
+    if not re.fullmatch(r"[0-9a-fA-F]+", cleaned) or len(cleaned) % 2:
+        raise CaptureRefused(
+            f"{PEPPER_ENV} must be hex ({2 * PEPPER_MIN_BYTES}+ hex digits, an even count); "
+            f"{PEPPER_GUIDANCE}"
+        )
+    pepper = bytes.fromhex(cleaned)
+    if len(pepper) < PEPPER_MIN_BYTES:
+        raise CaptureRefused(
+            f"{PEPPER_ENV} is too short: {len(pepper)} bytes, at least {PEPPER_MIN_BYTES} "
+            f"({2 * PEPPER_MIN_BYTES} hex digits) are required; {PEPPER_GUIDANCE}"
+        )
+    return pepper
+
+
+def load_pepper(*, env_file: str | Path | None = ".env") -> bytes:
+    """Read ``CHRONOS_CAPTURE_PEPPER`` ONCE — the environment, then ``env_file`` — and validate."""
+
+    # ``_env_file`` is pydantic-settings' documented per-instance override of ``env_file``;
+    # its mypy plugin does not know the init keyword.
+    source = _PepperSource(_env_file=env_file)  # type: ignore[call-arg]
+    return pepper_from_text(source.chronos_capture_pepper.get_secret_value())
+
+
+def _require_pepper(pepper: bytes) -> bytes:
+    """The write path's own guard: a short or empty key is refused before anything is written."""
+
+    if not isinstance(pepper, bytes | bytearray) or len(pepper) < PEPPER_MIN_BYTES:
+        raise CaptureRefused(
+            f"a pepper of at least {PEPPER_MIN_BYTES} bytes is required to pseudonymize "
+            f"identifiers; nothing was written; {PEPPER_GUIDANCE}"
+        )
+    return bytes(pepper)
+
+
+def pepper_fingerprint(pepper: bytes) -> str:
+    """16 hex of sha256(pepper): tells which pepper minted a fixture's tokens, reveals nothing."""
+
+    return sha256(pepper).hexdigest()[:16]
 
 
 def to_jsonable(value: Any) -> Any:
@@ -315,6 +426,144 @@ async def run_capture(settings: Any, args: argparse.Namespace) -> dict[str, Any]
     return capture
 
 
+#: Broker identifier keys in the capture and the pseudonym prefix each takes.
+#: order_ref is NOT here: it is Chronos's own intent id, not a broker identifier.
+IDENTIFIER_KEYS: dict[str, str] = {
+    "execution_id": "EXEC",
+    "broker_order_id": "ORD",
+    "permanent_id": "PERM",
+}
+
+
+SessionSalt = tuple[str, str]
+
+
+def session_salt(capture: dict[str, Any]) -> SessionSalt:
+    """The session's own ``(label, captured_at_utc)``: public, reproducible, NOT a secret —
+    and not meant to be one.
+
+    The pair is the per-session part of the HMAC message, never the key, and it is
+    carried as two fields (r2) — never joined with a delimiter, because an operator-
+    controlled label may contain any byte and a join is not injective. Tokens are stable
+    within one session (the same order id maps to the same token everywhere in the
+    capture) and differ across sessions (no cross-session linkage of a broker id).
+    Resistance to enumerating a low-entropy id comes from the pepper — the HMAC key,
+    :func:`load_pepper` — never from this salt.
+    """
+
+    meta = capture.get("meta", {})
+    return str(meta.get("label", "")), str(meta.get("captured_at_utc", ""))
+
+
+def pseudonym_message(kind: str, value: str | int, salt: SessionSalt) -> bytes:
+    """The HMAC message: the canonical JSON array
+    ``["chronos-<kind>", label, captured_at_utc, str(value)]`` (``separators=(",", ":")``,
+    ``ensure_ascii=False``, UTF-8).
+
+    Injective over the four fields: JSON string escaping makes every field boundary
+    unambiguous — a quote, a bracket, a comma, a colon or a newline inside a label is
+    escaped or enclosed, so no two distinct (kind, label, captured_at, value) tuples can
+    encode to the same bytes (the r1 colon-join could: G-1r1 review P1). Muse's ruling
+    named the FIELDS — kind, session label, value — and this is that same construction
+    with an unambiguous encoding, not a new one. ``str(value)`` means an identifier
+    spelled as ``7001`` and as ``"7001"`` is the same identifier (same token).
+    """
+
+    if isinstance(salt, str):  # the r1 joined string: refuse loudly rather than unpack two chars
+        raise TypeError(
+            "the session salt is the (label, captured_at_utc) pair, never a joined string"
+        )
+    label, captured_at = salt
+    fields = [f"chronos-{kind.lower()}", label, captured_at, str(value)]
+    return json.dumps(fields, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+def identifier_pseudonym(kind: str, value: str | int, salt: SessionSalt, pepper: bytes) -> str:
+    """Stable, keyed token for one broker identifier — the account-id shape.
+
+    ``account_fingerprint`` hashes ``chronos-account:<id>``; this is
+    ``HMAC-SHA256(pepper, pseudonym_message(kind, value, salt))`` and keeps the same
+    16-hex tail under a kind prefix, so a fixture reader can tell an order token from an
+    exec token. Without the pepper (the key) a bounded enumeration of candidate values
+    finds nothing; with it the token is reproducible — that is what makes it a pseudonym
+    and not a mere obfuscation.
+    """
+
+    digest = hmac.new(pepper, pseudonym_message(kind, value, salt), "sha256").hexdigest()
+    return f"{kind}-{digest[:16]}"
+
+
+def pseudonymize_identifiers(payload: Any, salt: SessionSalt, pepper: bytes) -> Any:
+    """Replace the VALUE of every identifier key in a JSON-able tree, whole value only.
+
+    Structural, not textual: ``broker_order_id: 7001`` becomes ``"ORD-…"`` while a
+    ``"quantity": 17001`` or a timestamp ending in ``7001`` is untouched, because
+    the match is on the key, never on the digits. Booleans and ``None`` are left
+    alone (``permanent_id`` may be ``None``).
+    """
+
+    if isinstance(payload, dict):
+        result: dict[str, Any] = {}
+        for key, value in payload.items():
+            if (
+                key in IDENTIFIER_KEYS
+                and value is not None
+                and isinstance(value, (str, int))
+                and not isinstance(value, bool)
+            ):
+                result[key] = identifier_pseudonym(IDENTIFIER_KEYS[key], value, salt, pepper)
+            else:
+                result[key] = pseudonymize_identifiers(value, salt, pepper)
+        return result
+    if isinstance(payload, list):
+        return [pseudonymize_identifiers(item, salt, pepper) for item in payload]
+    return payload
+
+
+def sanitize_capture(capture: dict[str, Any], account_ids: set[str], pepper: bytes) -> str:
+    """capture.json bytes: identifiers pseudonymized structurally (keyed), then account ids
+    textually. Refuses without a usable pepper."""
+
+    key = _require_pepper(pepper)
+    keyed = pseudonymize_identifiers(capture, session_salt(capture), key)
+    return sanitize(canonical_json(keyed), account_ids)
+
+
+def write_session(
+    out_dir: Path, capture: dict[str, Any], account_ids: set[str], label: str, pepper: bytes
+) -> dict[str, str]:
+    """Write capture.json, derived_liquid_hours.json and manifest.json; return the sha256 map.
+
+    The exact production write path (``main`` calls this), so a test that wants
+    the bytes the campaign would commit gets them from the same function. The pepper
+    is checked before the directory exists: no pepper, no directory.
+    """
+
+    key = _require_pepper(pepper)
+    derived = derive_liquid_hours(capture)
+    files = {
+        "capture.json": sanitize_capture(capture, account_ids, key),
+        "derived_liquid_hours.json": sanitize(canonical_json(derived), account_ids),
+    }
+    out_dir.mkdir(parents=True, exist_ok=True)
+    manifest: dict[str, Any] = {
+        "campaign": "chronos-real-gateway-campaign",
+        "created_utc": capture["meta"]["captured_at_utc"],
+        "label": label,
+        "gateway_evidence": capture["meta"]["gateway_evidence"],
+        "identifier_pseudonyms": {
+            "scheme": PSEUDONYM_SCHEME,
+            "pepper_fingerprint": pepper_fingerprint(key),
+        },
+        "files": {},
+    }
+    for name, text in files.items():
+        (out_dir / name).write_text(text, encoding="utf-8")
+        manifest["files"][name] = sha256(text.encode("utf-8")).hexdigest()
+    (out_dir / "manifest.json").write_text(canonical_json(manifest), encoding="utf-8")
+    return dict(manifest["files"])
+
+
 def sanitize(text: str, account_ids: set[str]) -> str:
     from chronos.utils.identifiers import account_fingerprint
 
@@ -356,6 +605,13 @@ def main() -> int:
 
     args.account_ids = {settings.ib_account_id} if settings.ib_account_id.strip() else set()
 
+    try:
+        pepper = load_pepper()
+    except CaptureRefused as error:
+        print(f"REFUSED: {error}")
+        print("(nothing was written; no broker connection was made)")
+        return 2
+
     from chronos.broker.base import BrokerError
 
     try:
@@ -367,25 +623,8 @@ def main() -> int:
         print(f"REFUSED: cannot construct the configured broker adapter: {error}")
         print("(nothing was written; see chronos-real-gateway-campaign Phase 0.1)")
         return 2
-    derived = derive_liquid_hours(capture)
-
     out_dir = Path(args.out)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    files = {
-        "capture.json": sanitize(canonical_json(capture), args.account_ids),
-        "derived_liquid_hours.json": sanitize(canonical_json(derived), args.account_ids),
-    }
-    manifest = {
-        "campaign": "chronos-real-gateway-campaign",
-        "created_utc": capture["meta"]["captured_at_utc"],
-        "label": args.label,
-        "gateway_evidence": capture["meta"]["gateway_evidence"],
-        "files": {},
-    }
-    for name, text in files.items():
-        (out_dir / name).write_text(text, encoding="utf-8")
-        manifest["files"][name] = sha256(text.encode("utf-8")).hexdigest()
-    (out_dir / "manifest.json").write_text(canonical_json(manifest), encoding="utf-8")
+    write_session(out_dir, capture, args.account_ids, args.label, pepper)
 
     errors = [
         name
