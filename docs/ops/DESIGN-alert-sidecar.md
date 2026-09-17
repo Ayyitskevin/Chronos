@@ -22,13 +22,13 @@ Failure model, stated exactly:
   with backoff. That is telemetry only — it never changes trading or authority behaviour. The sidecar cannot record its own outage
   contemporaneously; a gap in its timeline is inferred afterwards from `producer_seq` discontinuities and receipt times, never asserted.
 
-## What is carried (record kinds; `present` = the producer exists at this head, `planned` = W-1 / R-1)
+## What is carried (record kinds; `present` = the producer exists at this head, `planned` = R-1)
 | kind | local producer | status | why it is worth carrying |
 |---|---|---|---|
 | `audit.head` | the audit log's head anchor `<stem>.head.json` — its bytes are exactly `{"count": 7, "last_hash": "<64 hex>"}` (a JSON object with those two keys and nothing else) (`src/chronos/auditlog/log.py`, `_anchor_bytes`); it carries NO timestamp | present | the off-host audit-head receipt named in D1 PR-4: a later chain rewrite on the host cannot rewrite the copy |
-| `watchdog.observation` | `chronos.operations.watchdog` — one JSON line per tick | planned (W-1) | an off-host copy shows a gap when the host stops observing itself |
-| `watchdog.verdict` | `chronos.operations.watchdog` — `TRIPPED`/`HEALTHY` transitions | planned (W-1) | the trip an operator must see even if the host is gone |
-| `deadman.verdict` | `chronos.operations.deadman` | planned (W-1) | the layer that catches a dead watchdog |
+| `watchdog.observation` | `chronos.operations.watchdog` — one JSON line per tick | present | an off-host copy shows a gap when the host stops observing itself |
+| `watchdog.verdict` | `chronos.operations.watchdog` — `TRIPPED`/`HEALTHY` transitions | present | the trip an operator must see even if the host is gone |
+| `deadman.verdict` | `chronos.operations.deadman` | present | the layer that catches a dead watchdog |
 | `backup.manifest` | `chronos.operations.restore_drill` (`BackupManifest`) | planned (R-1) | proves a backup existed with a given digest at a given time |
 | `drill.report` | `chronos.operations.restore_drill` (`DrillReport` with measured `rpo_s` / `rto_s`) | planned (R-1) | the measured numbers, kept where a host loss cannot erase them |
 Two layers of bytes, kept distinct: the **producer payload** is whatever the local file holds (for `audit.head`, exactly the two-key anchor
