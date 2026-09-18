@@ -138,7 +138,7 @@ not name. Every later create, link, unlink and fsync is relative to the retained
    file, and reads and writes through the envelope's directory descriptor). Record in the
    manifest: `"sha256"` = the digest of the CLEARTEXT `chronos.db` from step 3 (what a restore
    verifies), `"ciphertext_sha256"` = `sha256sum <temp>/chronos.db.age`, and
-   `"encryption": {"scheme": "age-x25519-v1", "recipients": [<the two public keys, sorted>], "tool": "age v1.3.2"}`.
+   `"encryption": {"scheme": "age-x25519-v1", "recipients": [<the two public keys, sorted>], "tool": "age v1.3.2"}` (the `tool` string is `age` plus whatever `age --version` prints — `v1.3.2` for the release binary, `1.1.1` for the Ubuntu package).
    A temp that still holds `chronos.db` is not ready to publish.
 3b. **Publish the envelope with the harness's exclusive rename.** With `manifest.json`
    written into the temp directory:
