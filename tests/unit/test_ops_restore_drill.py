@@ -1462,8 +1462,9 @@ def test_enc_1f_the_keys_are_named_by_the_environment_and_default_under_data_key
     assert keys.host_public_key == age_keys.host_public_key
     assert keys.recipients == tuple(sorted([age_keys.host_public_key, KEVIN_PUBLIC_KEY]))
     # the release binary prints "v1.3.2", the Ubuntu package prints "1.1.1" (CI, 2026-09-17):
-    # the pin is "age plus a version", not one packager's spelling
-    assert re.fullmatch(r"age v?\d+\.\d+(\.\d+)?\S*", keys.tool), keys.tool
+    # the pin is "age plus a version" (an optional -prerelease suffix, nothing else), not one
+    # packager's spelling
+    assert re.fullmatch(r"age v?\d+\.\d+(\.\d+)?(-[0-9A-Za-z.]+)?", keys.tool), keys.tool
     assert keys.encryption_block() == {
         "scheme": "age-x25519-v1",
         "recipients": sorted([age_keys.host_public_key, KEVIN_PUBLIC_KEY]),
