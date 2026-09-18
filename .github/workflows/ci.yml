@@ -42,6 +42,11 @@ jobs:
           python -m pip install --require-hashes -r requirements-dev.lock
           python -m pip install -e . --no-deps --no-build-isolation --check-build-dependencies
 
+      - name: Install age (backup encryption at rest)
+        # docs/ops/RESTORE-DRILL.md, 'Encryption at rest': the restore-drill tests encrypt
+        # every envelope with the age CLI and skip without it; level C must exercise it.
+        run: sudo apt-get install -y age
+
       - name: Lint
         run: ruff check .
 

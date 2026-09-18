@@ -68,9 +68,10 @@ sidecars beside it (sqlite's own bookkeeping, a directory write, not a database 
 
 **Publication is ONE envelope, renamed into place atomically.** A backup is the whole triple
 in one directory `chronos-<stamp>/` (a fixed prefix — the source's basename never leaks into
-the name): the database (`chronos.db`, stored in rollback-journal mode as one
-self-contained file), the audit log copy and its head anchor copy (only when a pair sits
-beside the source), and `manifest.json`. The harness stages all of it in a **dot-prefixed
+the name): the database — staged in rollback-journal mode as one self-contained file and
+published ONLY as the ciphertext `chronos.db.age` (see *Encryption at rest*; the cleartext
+staged copy is removed before the rename) — the audit log copy and its head anchor copy
+(only when a pair sits beside the source), and `manifest.json`. The harness stages all of it in a **dot-prefixed
 temp directory** under `--out` — the database written into the exclusively created temp
 file's own descriptor (`/proc/self/fd/<n>`, identity re-checked), the audit pair read
 **once, as a pair, after the backup completed**, every file fsynced, then the directory —
@@ -128,9 +129,17 @@ not name. Every later create, link, unlink and fsync is relative to the retained
    the **backup file**, not the live database; and, when `data/platform_audit.head.json`
    exists beside the database, copy `platform_audit.jsonl` and `platform_audit.head.json`
    beside the backup **together, after step 2** (one snapshot — never one file now and the
-   other later), and record the anchor's `last_hash`. Note `"encryption": "none"` (see
-   owner asks). The harness's copy is in rollback-journal mode; a `.backup` made by the
-   `sqlite3` shell keeps the source's WAL flag — both are complete, single files.
+   other later), and record the anchor's `last_hash`. The harness's copy is in
+   rollback-journal mode; a `.backup` made by the `sqlite3` shell keeps the source's WAL
+   flag — both are complete, single files.
+3a. **Encrypt the staged database to the two recipients, then remove the cleartext.**
+   `age -R data/keys/backup-recipients.txt -o <temp>/chronos.db.age <temp>/chronos.db && rm <temp>/chronos.db`
+   (the harness passes each VALIDATED recipient as `-r <key>` rather than re-reading the
+   file, and reads and writes through the envelope's directory descriptor). Record in the
+   manifest: `"sha256"` = the digest of the CLEARTEXT `chronos.db` from step 3 (what a restore
+   verifies), `"ciphertext_sha256"` = `sha256sum <temp>/chronos.db.age`, and
+   `"encryption": {"scheme": "age-x25519-v1", "recipients": [<the two public keys, sorted>], "tool": "age v1.3.2"}` (the `tool` string is `age` plus whatever `age --version` prints — `v1.3.2` for the release binary, `1.1.1` for the Ubuntu package).
+   A temp that still holds `chronos.db` is not ready to publish.
 3b. **Publish the envelope with the harness's exclusive rename.** With `manifest.json`
    written into the temp directory:
    `python -m chronos.operations.restore_drill publish-envelope /var/backups/chronos/.chronos-<stamp>.<16 hex>.tmp /var/backups/chronos/chronos-<stamp>`
@@ -148,8 +157,12 @@ not name. Every later create, link, unlink and fsync is relative to the retained
    harness for a real drill. From this point the backup is the directory `chronos-<stamp>/`
    and nothing else.
 4. **Restore into a fresh directory.** `mkdir -m 700 <fresh>` (it must not exist or be
-   empty), then copy the backup — and the audit pair if present — into it.
-5. **Verify.** `sha256sum` of the copy equals the manifest; the schema head query on the
+   empty), then decrypt the backup into it through the host identity —
+   `age -d -i data/keys/backup-host.age -o <fresh>/chronos.db <envelope>/chronos.db.age`
+   — and copy the audit pair beside it if present. A non-zero exit (a corrupted `.age`,
+   an identity that is not a recipient) is a stop: the harness records it as
+   `decrypt: refused — …`, `verified: false`, and leaves nothing partial in the target.
+5. **Verify.** `sha256sum` of the decrypted copy equals the manifest's `sha256`; the schema head query on the
    copy equals the manifest's and the repository accepts the copy
    (`python -c 'from chronos.persistence.database import Database; d = Database("sqlite:///<copy>"); d.initialize(); d.dispose()'`
    — on an already-versioned store this checks version and drift and applies **no**
@@ -163,12 +176,54 @@ not name. Every later create, link, unlink and fsync is relative to the retained
    than `snapshot_completed_at`, do not write a negative number: record the refusal and
    check the clocks. `rto_s` from a stopwatch around steps 4–5.
 
+## Encryption at rest — two recipients (Muse ruling 2026-09-16, delegated by Kevin)
+
+Every backup's database is encrypted with [age](https://github.com/FiloSottile/age)
+(X25519) to exactly **two recipients**, and is never published in the clear:
+
+- **The host operational key** — the identity this host restores with. The operator
+  generates it once per host, untracked, readable by the operator alone:
+  `mkdir -m 700 data/keys && age-keygen -o data/keys/backup-host.age && chmod 600 data/keys/backup-host.age`
+  — then its public key, `age-keygen -y data/keys/backup-host.age`, is line one of
+  `data/keys/backup-recipients.txt`. The harness refuses to back up or restore if the
+  identity is missing, not a regular file, not mode 0600, or not owned by the process uid
+  (the paths come from `CHRONOS_BACKUP_AGE_IDENTITY` and `CHRONOS_BACKUP_AGE_RECIPIENTS`;
+  the defaults are the two above). **Rotation on host rebuild** = a new identity + a new
+  line one; older backups stay readable by Kevin's key, and only by it — that is the point
+  of the second recipient.
+- **Kevin's recovery key** — line two of the recipients file is his PUBLIC key,
+  `age1ddwtdaexpp2k0dp22fj3rtqfw9y5trr3we77rsmwq9s0y70ase3sgu07kf`; the private half lives
+  in his password manager and is **never on a fleet host**. No fleet code, test or runbook
+  step generates, stores, prints or logs it. A backup without a readable host identity is
+  recoverable ONLY through Kevin's key. The recovery recipient is **pinned in code**
+  (`KEVIN_RECOVERY_RECIPIENT` in `src/chronos/operations/restore_drill.py`, the value Muse
+  recorded 2026-09-16): the recipients file names it, it never chooses it. Rotating
+  Kevin's key is a **reviewed code change** plus a new recipients line — never a file edit
+  alone — so nobody with write access to `data/keys/` can make a different key the second
+  decrypting party.
+
+The recipients file must hold exactly these two lines (each a valid `age1…` key, distinct)
+and the validator refuses **any set other than {host, Kevin}** as a typed refusal before any
+database is opened. What the refusal says, exactly: a wrong line count (one line, three
+lines, an empty file) names the count, which required key(s) are missing — by role and the
+first 12 characters of the expected key — and the line number(s) that are neither required
+key; a two-line file with a wrong key (the host plus any other key, Kevin's key without the
+host's) names the offending line number, the key on it and the missing required key; a line
+that is not a valid `age1…` key names its line number; the same key twice names the
+duplication. The manifest's `encryption` block records the
+scheme, both recipients (sorted) and the tool version, so a reader can tell which keys a
+given envelope was minted for; `sha256` is the CLEARTEXT digest (what step 5 verifies) and
+`ciphertext_sha256` the `.age` file's. The by-hand decrypt is step 4's `age -d -i …` line.
+
+Install `age` from the distro package (`sudo apt-get install -y age` — the CI runner does
+exactly this) or the official release; the harness refuses without it with the sentence
+*age is not installed: install the distro `age` package or the official release
+(https://github.com/FiloSottile/age/releases) so that `age` and `age-keygen` are on PATH —
+docs/ops/RESTORE-DRILL.md, section 'Encryption at rest'*, and the test file skips with the
+same sentence on a host without it.
+
 ## Owner asks (Kevin) — the seams, not implemented here
 
-- **Backup encryption and key custody.** The backup is written in the clear; the
-  manifest's `encryption` field is the seam and reads `"none"` tonight. Encrypting at
-  rest means a key that is NOT on this host's disk beside the backup, and a custody rule
-  for it — both are owner decisions before any off-host copy exists.
 - **Off-host copy placement.** Nothing here copies a backup anywhere; a backup on the same
   disk as the database is a convenience, not a recovery. Where the copy goes, how it is
   encrypted in transit and at rest, and who can read it are the owner's.

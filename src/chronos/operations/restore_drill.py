@@ -53,8 +53,20 @@ What the drill does and does not do:
   restored copy compares that value AND runs the repository's own acceptance
   (``Database.initialize()`` on an already-versioned store verifies the version
   and zero drift and applies no upgrade).
-- Encryption is the owner's ask; the manifest's ``encryption`` field is the seam
-  and reads ``"none"`` tonight. Off-host placement is likewise not done here.
+- The database is encrypted at rest with ``age`` (route A: the age CLI — Muse
+  ruling 2026-09-16, delegated by Kevin) to exactly TWO recipients — the host's
+  operational public key and Kevin's recovery public key — inside the temp
+  envelope, and the cleartext staged copy is removed BEFORE publication: a
+  published envelope holds ``chronos.db.age``, never ``chronos.db``. No code
+  decides custody: the host identity is the file ``CHRONOS_BACKUP_AGE_IDENTITY``
+  names (default ``data/keys/backup-host.age``; regular, 0600, owned by this uid,
+  untracked) and the recipients are the two lines of
+  ``CHRONOS_BACKUP_AGE_RECIPIENTS`` (default ``data/keys/backup-recipients.txt``),
+  one of which must be the host identity's own public key. The manifest's
+  ``encryption`` field records the scheme, both recipients and the tool; its
+  ``sha256`` is of the CLEARTEXT database and ``ciphertext_sha256`` of the ``.age``
+  file. A restore decrypts through the host identity into the isolated target
+  and verifies as before. Off-host placement is not done here.
 - ``chronos.recovery`` (``python -m chronos.recovery``) captures the WHOLE data
   directory and observes snapshot age and restore elapsed; this module is the
   database-only drill with per-table verification and a backup-time RPO. It
@@ -80,12 +92,15 @@ import json
 import os
 import re
 import secrets
+import shutil
 import sqlite3
 import stat
+import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -101,7 +116,30 @@ from chronos.auditlog.log import (
 )
 from chronos.persistence.database import Database
 
-ENCRYPTION: str = "none"
+#: Encryption at rest (R-2): the age CLI, X25519 recipients. ``"none"`` is what a manifest
+#: from before R-2 says; the drill no longer produces or restores such an envelope.
+AGE_SCHEME = "age-x25519-v1"
+ENCRYPTED_DB_SUFFIX = ".age"
+IDENTITY_ENV = "CHRONOS_BACKUP_AGE_IDENTITY"
+RECIPIENTS_ENV = "CHRONOS_BACKUP_AGE_RECIPIENTS"
+DEFAULT_KEY_DIR = Path("data") / "keys"
+DEFAULT_IDENTITY = DEFAULT_KEY_DIR / "backup-host.age"
+DEFAULT_RECIPIENTS = DEFAULT_KEY_DIR / "backup-recipients.txt"
+RECIPIENT_COUNT = 2
+#: The decided recovery recipient — Kevin's PUBLIC key as Muse recorded it on 2026-09-16.
+#: Pinned in code on purpose (R-2 r1): the recipients file may name it, never choose it —
+#: a file that lists the host key plus ANY other key is refused, so an operator (or an
+#: attacker with write access to data/keys/) cannot swap the second decrypting party.
+#: Rotating this key is a reviewed code change plus a new recipients line, never a file
+#: edit alone. Its private half never exists on a fleet host.
+KEVIN_RECOVERY_RECIPIENT = "age1ddwtdaexpp2k0dp22fj3rtqfw9y5trr3we77rsmwq9s0y70ase3sgu07kf"
+AGE_INSTALL_SENTENCE = (
+    "age is not installed: install the distro `age` package or the official release "
+    "(https://github.com/FiloSottile/age/releases) so that `age` and `age-keygen` are on PATH "
+    "— docs/ops/RESTORE-DRILL.md, section 'Encryption at rest'"
+)
+#: An age X25519 public key: bech32 ``age1`` + 58 data characters.
+_AGE_PUBLIC_KEY_RE = re.compile(r"age1[02-9ac-hj-np-z]{58}")
 AUDIT_LOG_NAME = "platform_audit.jsonl"
 AUDIT_ANCHOR_NAME = "platform_audit.head.json"
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
@@ -144,10 +182,18 @@ class BackupManifest:
     row_counts: dict[str, int]
     audit_head: str | None
     audit_log_path: str | None
-    encryption: str = ENCRYPTION
+    encryption: dict[str, object] = field(default_factory=lambda: {"scheme": "none"})
+    ciphertext_sha256: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
+
+    @property
+    def cleartext_name(self) -> str:
+        """The restored database's file name: the envelope's ``chronos.db.age`` → ``chronos.db``."""
+
+        name = Path(self.backup_path).name
+        return name.removesuffix(ENCRYPTED_DB_SUFFIX)
 
     @classmethod
     def from_dict(cls, data: dict[str, object]) -> BackupManifest:
@@ -163,8 +209,21 @@ class BackupManifest:
             audit_log_path=None
             if data.get("audit_log_path") is None
             else str(data["audit_log_path"]),
-            encryption=str(data.get("encryption", ENCRYPTION)),
+            encryption=_encryption_block(data.get("encryption")),
+            ciphertext_sha256=None
+            if data.get("ciphertext_sha256") is None
+            else str(data["ciphertext_sha256"]),
         )
+
+
+def _encryption_block(raw: object) -> dict[str, object]:
+    """A pre-R-2 manifest wrote the string ``"none"``; R-2 writes the block."""
+
+    if raw is None:
+        return {"scheme": "none"}
+    if isinstance(raw, dict):
+        return {str(key): value for key, value in raw.items()}
+    return {"scheme": str(raw)}
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,6 +268,197 @@ class DrillReport:
             "verdict": self.verdict,
             "failures": list(self.failures),
         }
+
+
+# ----------------------------------------------------------------- keys (age, two recipients)
+
+
+@dataclass(frozen=True, slots=True)
+class AgeKeys:
+    """What a backup or restore needs from the operator's key material, validated ONCE
+    before any database is opened — the binaries, the identity file, the two recipients.
+
+    No code decides custody: the identity file and the recipients file are named by the
+    environment (defaults under ``data/keys/``), generated and placed by the operator per
+    the runbook. Kevin's recovery private key never exists on a fleet host; only his
+    PUBLIC key is a recipient line."""
+
+    age: str
+    age_keygen: str
+    identity_path: Path
+    recipients_path: Path
+    host_public_key: str
+    recipients: tuple[str, ...]
+    tool: str
+
+    def encryption_block(self) -> dict[str, object]:
+        return {"scheme": AGE_SCHEME, "recipients": list(self.recipients), "tool": self.tool}
+
+
+def _run_age(argv: list[str], *, what: str, pass_fds: tuple[int, ...] = ()) -> bytes:
+    """Run one age binary with an argv list (no shell), stdin closed; a non-zero exit is a
+    typed refusal carrying age's stderr; returns stdout."""
+
+    try:
+        completed = subprocess.run(  # argv list, no shell; the binary was resolved by which()
+            argv,
+            capture_output=True,
+            check=False,
+            stdin=subprocess.DEVNULL,
+            pass_fds=pass_fds,
+        )
+    except OSError as error:
+        raise DrillRefused(f"{what}: could not run {argv[0]}: {error.strerror}") from None
+    if completed.returncode != 0:
+        detail = completed.stderr.decode("utf-8", "replace").strip()
+        raise DrillRefused(f"{what}: age exited {completed.returncode}: {detail}")
+    return completed.stdout
+
+
+def _open_identity(identity_path: Path) -> int:
+    """The host identity, opened no-follow and proven a regular file, mode exactly 0600,
+    owned by this process's uid; the descriptor is what age reads (``/proc/self/fd/<n>``)."""
+
+    fd = _open_regular(identity_path, "backup host identity")
+    try:
+        st = os.fstat(fd)
+        mode = stat.S_IMODE(st.st_mode)
+        if mode != 0o600:
+            raise DrillRefused(
+                f"backup host identity {identity_path} has mode {mode:04o}; it must be exactly "
+                f"0600 (chmod 600 {identity_path}) — a readable identity decrypts every backup"
+            )
+        if st.st_uid != os.getuid():
+            raise DrillRefused(
+                f"backup host identity {identity_path} is owned by uid {st.st_uid}, not this "
+                f"process's uid {os.getuid()}; the operator's identity must be the operator's file"
+            )
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def load_age_keys(
+    identity: Path | None = None, recipients: Path | None = None, *, environ: Any = None
+) -> AgeKeys:
+    """Resolve the binaries and validate the operator's key files — every refusal here
+    happens BEFORE any source database is opened or any envelope directory is created.
+
+    Order: ``age``/``age-keygen`` on PATH (else the runbook's install sentence); the identity
+    file (:func:`_open_identity`) and its public key by ``age-keygen -y`` over the open
+    descriptor; the recipients file: exactly ``RECIPIENT_COUNT`` non-blank lines, each an
+    ``age1…`` X25519 public key that ``age`` itself accepts as a recipient, and the SET of
+    them must EQUAL ``{the host identity's public key, KEVIN_RECOVERY_RECIPIENT}`` — a line
+    that is neither is refused by number (R-2 r1: the file names the recipients, it never
+    chooses them), and a missing required key is named.
+    """
+
+    env = os.environ if environ is None else environ
+    age = shutil.which("age")
+    age_keygen = shutil.which("age-keygen")
+    if age is None or age_keygen is None:
+        raise DrillRefused(AGE_INSTALL_SENTENCE)
+    version = _run_age([age, "--version"], what="age --version").decode("utf-8", "replace")
+    tool = f"age {version.strip()}"
+    identity_path = Path(identity or env.get(IDENTITY_ENV) or DEFAULT_IDENTITY)
+    recipients_path = Path(recipients or env.get(RECIPIENTS_ENV) or DEFAULT_RECIPIENTS)
+    identity_fd = _open_identity(identity_path)
+    try:
+        derived = _run_age(
+            [age_keygen, "-y", f"/proc/self/fd/{identity_fd}"],
+            what=f"deriving the public key of {identity_path}",
+            pass_fds=(identity_fd,),
+        )
+    finally:
+        os.close(identity_fd)
+    host_public_key = derived.decode("utf-8", "replace").strip()
+    if not _AGE_PUBLIC_KEY_RE.fullmatch(host_public_key):
+        raise DrillRefused(
+            f"age-keygen -y over {identity_path} did not yield an age1 public key; the identity "
+            "file is not an age X25519 identity"
+        )
+    recipients_fd = _open_regular(recipients_path, "backup recipients file")
+    try:
+        with os.fdopen(recipients_fd, "rb") as handle:
+            raw = handle.read().decode("utf-8", "replace")
+    except OSError as error:
+        raise DrillRefused(f"backup recipients file {recipients_path}: {error.strerror}") from None
+    lines = [(number, line.strip()) for number, line in enumerate(raw.splitlines(), 1)]
+    lines = [(number, text) for number, text in lines if text]
+    required = {host_public_key, KEVIN_RECOVERY_RECIPIENT}
+    if len(lines) != RECIPIENT_COUNT:
+        # r2: the count alone is not a diagnosis — say which required key is absent (by role
+        # and the first 12 characters) and which line(s), if any, are neither required key
+        present = {text for _number, text in lines}
+        missing: list[str] = []
+        if host_public_key not in present:
+            missing.append(f"the host identity's public key ({host_public_key[:12]}…)")
+        if KEVIN_RECOVERY_RECIPIENT not in present:
+            missing.append(f"the owner's recovery recipient ({KEVIN_RECOVERY_RECIPIENT[:12]}…)")
+        neither = [str(number) for number, text in lines if text not in required]
+        raise DrillRefused(
+            f"backup recipients file {recipients_path} has {len(lines)} recipient line(s); "
+            f"exactly {RECIPIENT_COUNT} are required (the host's operational public key and the "
+            "owner's recovery public key — docs/ops/RESTORE-DRILL.md, 'Encryption at rest'); "
+            f"missing required key(s): {', '.join(missing) or 'none'}; "
+            f"line(s) that are neither required key: {', '.join(neither) or 'none'}"
+        )
+    for number, text in lines:
+        if not _AGE_PUBLIC_KEY_RE.fullmatch(text):
+            raise DrillRefused(
+                f"backup recipients file {recipients_path} line {number} is not an age X25519 "
+                f"public key (age1…): {text!r}"
+            )
+        # age's own parser (checksum included): encrypt nothing to this recipient alone
+        _run_age(
+            [age, "-r", text, "-o", "/dev/null"],
+            what=f"backup recipients file {recipients_path} line {number} ({text}) rejected by age",
+        )
+    keys = tuple(text for _number, text in lines)
+    if len(set(keys)) != RECIPIENT_COUNT:
+        raise DrillRefused(
+            f"backup recipients file {recipients_path} lists the same public key twice; the two "
+            "recipients must be distinct keys"
+        )
+    for number, text in lines:
+        if text not in required:
+            missing = sorted(required - set(keys))
+            raise DrillRefused(
+                f"backup recipients file {recipients_path} line {number} ({text}) is neither the "
+                f"host identity's public key nor the decided recovery recipient "
+                f"{KEVIN_RECOVERY_RECIPIENT} (pinned in code; rotating it is a reviewed code "
+                f"change); the recipient set must be exactly those two — missing: "
+                f"{', '.join(missing)}"
+            )
+    if host_public_key not in keys:  # unreachable once both lines are required keys; kept explicit
+        raise DrillRefused(
+            f"backup recipients file {recipients_path} does not contain the host identity's own "
+            f"public key {host_public_key}; a backup this host could not restore is refused"
+        )
+    if KEVIN_RECOVERY_RECIPIENT not in keys:
+        raise DrillRefused(
+            f"backup recipients file {recipients_path} does not contain the decided recovery "
+            f"recipient {KEVIN_RECOVERY_RECIPIENT}; a backup the owner could not recover is refused"
+        )
+    return AgeKeys(
+        age=age,
+        age_keygen=age_keygen,
+        identity_path=identity_path,
+        recipients_path=recipients_path,
+        host_public_key=host_public_key,
+        recipients=tuple(sorted(keys)),
+        tool=tool,
+    )
+
+
+def _require_age_manifest(manifest: BackupManifest) -> None:
+    scheme = manifest.encryption.get("scheme")
+    if scheme != AGE_SCHEME:
+        raise DrillRefused(
+            f"manifest records encryption {scheme!r}; this drill restores {AGE_SCHEME} envelopes "
+            "only (R-2) — a pre-R-2 cleartext envelope is not a backup this runbook covers"
+        )
 
 
 # ----------------------------------------------------------------- file discipline
@@ -710,7 +960,9 @@ def _read_text_at(dfd: int, name: str, subject: str) -> str:
         pass
 
 
-def backup(db_path: Path, out_dir: Path, *, clock: Clock | None = None) -> BackupManifest:
+def backup(
+    db_path: Path, out_dir: Path, *, clock: Clock | None = None, keys: AgeKeys | None = None
+) -> BackupManifest:
     """A consistent online backup of ``db_path`` as ONE envelope under ``out_dir``.
 
     The source is opened read-only (``mode=ro``, normal SQLite locking) and never
@@ -724,6 +976,7 @@ def backup(db_path: Path, out_dir: Path, *, clock: Clock | None = None) -> Backu
     """
 
     clock = clock or system_clock()
+    keys = keys or load_age_keys()  # every key refusal precedes the source open
     db_path = Path(db_path)
     out_dir = Path(out_dir)
     fd = _open_regular(db_path, "source database")
@@ -739,6 +992,7 @@ def backup(db_path: Path, out_dir: Path, *, clock: Clock | None = None) -> Backu
             manifest = _stage_envelope(
                 env_fd, db_path, db_name, out_abs / final_name, taken_at, clock
             )
+            manifest = _encrypt_staged(env_fd, db_name, manifest, keys)
             _stage_bytes_at(
                 env_fd,
                 MANIFEST_NAME,
@@ -860,6 +1114,36 @@ def _stage_envelope(
     )
 
 
+def _encrypt_staged(
+    env_fd: int, db_name: str, manifest: BackupManifest, keys: AgeKeys
+) -> BackupManifest:
+    """Encrypt the staged cleartext database inside the temp envelope to the two validated
+    recipients (``age -r <key> -r <key>``: the keys this run checked, not a re-read file),
+    fsync the ciphertext, then remove the cleartext — BEFORE the envelope is published. The
+    child reads and writes through the envelope descriptor (``/proc/self/fd/<n>/…``)."""
+
+    encrypted_name = db_name + ENCRYPTED_DB_SUFFIX
+    argv = [keys.age]
+    for recipient in keys.recipients:
+        argv += ["-r", recipient]
+    argv += ["-o", f"/proc/self/fd/{env_fd}/{encrypted_name}", f"/proc/self/fd/{env_fd}/{db_name}"]
+    _run_age(argv, what=f"encryption of {db_name}", pass_fds=(env_fd,))
+    cipher_fd = _open_regular_at(env_fd, encrypted_name, "encrypted backup")
+    try:
+        os.fsync(cipher_fd)
+        ciphertext_sha256 = _sha256_fd(cipher_fd)
+    finally:
+        os.close(cipher_fd)
+    os.unlink(db_name, dir_fd=env_fd)  # the cleartext never reaches the published name
+    os.fsync(env_fd)
+    return replace(
+        manifest,
+        backup_path=str(Path(manifest.backup_path).with_name(encrypted_name)),
+        encryption=keys.encryption_block(),
+        ciphertext_sha256=ciphertext_sha256,
+    )
+
+
 def _open_envelope(manifest: BackupManifest) -> tuple[int, Path]:
     """The published envelope directory, reached by the no-follow walk; a dot-temp
     (unpublished) envelope is refused BY NAME, whatever it contains."""
@@ -885,7 +1169,7 @@ def _verify_in(
 
     failures: list[str] = []
     facts: dict[str, bool | str] = {}
-    db_name = Path(manifest.backup_path).name
+    db_name = manifest.cleartext_name
     fd = _open_regular_at(target_fd, db_name, "restored copy")
     try:
         actual = _sha256_fd(fd)
@@ -989,13 +1273,54 @@ def verify_restored(
         os.close(target_fd)
 
 
+def _decrypt_into(
+    env_fd: int, encrypted_name: str, target_fd: int, db_name: str, keys: AgeKeys
+) -> None:
+    """``age -d -i <identity> -o <target>/chronos.db <envelope>/chronos.db.age`` through the
+    two directory descriptors and the identity's descriptor (re-proved 0600, this uid). A
+    non-zero exit is a typed refusal and any partial output at the target is removed first."""
+
+    identity_fd = _open_identity(keys.identity_path)
+    try:
+        argv = [
+            keys.age,
+            "-d",
+            "-i",
+            f"/proc/self/fd/{identity_fd}",
+            "-o",
+            f"/proc/self/fd/{target_fd}/{db_name}",
+            f"/proc/self/fd/{env_fd}/{encrypted_name}",
+        ]
+        try:
+            _run_age(
+                argv,
+                what=f"decryption of {encrypted_name}",
+                pass_fds=(identity_fd, target_fd, env_fd),
+            )
+        except DrillRefused:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(db_name, dir_fd=target_fd)  # nothing partial stays in the target
+            os.fsync(target_fd)
+            raise
+    finally:
+        os.close(identity_fd)
+
+
 def restore(
-    manifest: BackupManifest, target_dir: Path, *, clock: Clock | None = None
+    manifest: BackupManifest,
+    target_dir: Path,
+    *,
+    clock: Clock | None = None,
+    keys: AgeKeys | None = None,
 ) -> RestoreReport:
-    """Copy the envelope's files into a fresh directory and verify them there — the target
-    descriptor is held through the copy AND the verification; rto_s from start to verified."""
+    """Decrypt the envelope's database through the host identity into a fresh directory,
+    copy the audit pair beside it, and verify them there — the target descriptor is held
+    through the decrypt, the copy AND the verification; rto_s from start to verified. A
+    decrypt failure is a typed refusal recorded in the report (``decrypt: refused — …``)."""
 
     clock = clock or system_clock()
+    keys = keys or load_age_keys()
+    _require_age_manifest(manifest)
     target_dir = Path(target_dir)
     target_abs = target_dir if target_dir.is_absolute() else Path.cwd() / target_dir
     started = clock.monotonic()
@@ -1003,12 +1328,21 @@ def restore(
     try:
         target_fd = _fresh_directory(target_dir, "restore target")
         try:
-            db_name = Path(manifest.backup_path).name
-            src = _open_regular_at(env_fd, db_name, "backup")
+            db_name = manifest.cleartext_name
+            encrypted_name = Path(manifest.backup_path).name
             try:
-                _copy_fd_to(src, target_fd, db_name)
-            finally:
-                os.close(src)
+                _decrypt_into(env_fd, encrypted_name, target_fd, db_name, keys)
+            except DrillRefused as error:
+                return RestoreReport(
+                    target_dir=str(target_abs),
+                    restored_path=str(target_abs / db_name),
+                    sha256_ok=False,
+                    schema_head_ok=False,
+                    row_counts_ok=False,
+                    audit_chain="NOT_APPLICABLE" if manifest.audit_head is None else "ABSENT",
+                    failures=(f"decrypt: refused — {error}",),
+                    rto_s=clock.monotonic() - started,
+                )
             has_audit = manifest.audit_log_path is not None
             if has_audit:
                 for name in (AUDIT_LOG_NAME, AUDIT_ANCHOR_NAME):
@@ -1031,7 +1365,7 @@ def restore(
     verified_at = clock.monotonic()
     return RestoreReport(
         target_dir=str(target_abs),
-        restored_path=str(target_abs / Path(manifest.backup_path).name),
+        restored_path=str(target_abs / manifest.cleartext_name),
         sha256_ok=bool(facts["sha256_ok"]),
         schema_head_ok=bool(facts["schema_head_ok"]),
         row_counts_ok=bool(facts["row_counts_ok"]),
@@ -1044,29 +1378,56 @@ def restore(
 # ----------------------------------------------------------------- the drill
 
 
-def rpo_seconds(manifest: BackupManifest) -> tuple[float | None, dict[str, object]]:
+def rpo_seconds(
+    manifest: BackupManifest, *, keys: AgeKeys | None = None
+) -> tuple[float | None, dict[str, object]]:
     """``snapshot_completed_at`` minus the newest committed evidence IN THE RETAINED
-    ENVELOPE (the backup file and the retained audit copy, read through the envelope's
-    descriptor) — never the live source. None + reason when the snapshot carries no
-    timestamped evidence; evidence dated after the snapshot completed is a typed
-    refusal, never a negative number."""
+    ENVELOPE — never the live source. The retained database is ciphertext, so it is
+    decrypted through the host identity into a private 0700 scratch directory (a
+    descriptor-bound ``/proc/self/fd`` write, removed before returning), its sha256 must be
+    the manifest's, and the evidence is read through that descriptor; the audit evidence is
+    read from the retained audit copy through the envelope's descriptor, as before. None +
+    reason when the snapshot carries no timestamped evidence; evidence dated after the
+    snapshot completed is a typed refusal, never a negative number."""
 
+    keys = keys or load_age_keys()
+    _require_age_manifest(manifest)
     env_fd, _env_abs = _open_envelope(manifest)
     try:
-        db_fd = _open_regular_at(env_fd, Path(manifest.backup_path).name, "retained backup")
+        audit_text = (
+            _read_text_at(env_fd, AUDIT_LOG_NAME, "retained audit log")
+            if manifest.audit_log_path is not None
+            else None
+        )
+        db_name = manifest.cleartext_name
+        scratch = Path(tempfile.mkdtemp(prefix=".chronos-rpo-"))  # mode 0700
         try:
-            audit_text = (
-                _read_text_at(env_fd, AUDIT_LOG_NAME, "retained audit log")
-                if manifest.audit_log_path is not None
-                else None
-            )
-            with _readonly_fd(db_fd) as retained:
-                newest, basis = newest_evidence_on(retained, audit_text)
+            scratch_fd = os.open(scratch, _DIR_FLAGS)
+            try:
+                _decrypt_into(env_fd, Path(manifest.backup_path).name, scratch_fd, db_name, keys)
+                db_fd = _open_regular_at(scratch_fd, db_name, "decrypted retained backup")
+                try:
+                    digest = _sha256_fd(db_fd)
+                    if digest != manifest.sha256:
+                        raise DrillRefused(
+                            f"the decrypted retained backup ({digest[:12]}…) is not the manifest's "
+                            f"cleartext (sha256 {manifest.sha256[:12]}…); rpo_s is measured from "
+                            "the retained bytes only"
+                        )
+                    with _readonly_fd(db_fd) as retained:
+                        newest, basis = newest_evidence_on(retained, audit_text)
+                finally:
+                    os.close(db_fd)
+            finally:
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(db_name, dir_fd=scratch_fd)
+                os.close(scratch_fd)
         finally:
-            os.close(db_fd)
+            with contextlib.suppress(OSError):
+                os.rmdir(scratch)
     finally:
         os.close(env_fd)
-    basis["evidence_read_from"] = "retained snapshot"
+    basis["evidence_read_from"] = "retained snapshot (decrypted, sha256 == manifest)"
     snapshot = datetime.fromisoformat(manifest.snapshot_completed_at)
     basis["snapshot_completed_at"] = snapshot.isoformat()
     if newest is None:
@@ -1085,18 +1446,24 @@ def rpo_seconds(manifest: BackupManifest) -> tuple[float | None, dict[str, objec
 
 
 def run_drill(
-    db_path: Path, out_dir: Path, restore_into: Path, *, clock: Clock | None = None
+    db_path: Path,
+    out_dir: Path,
+    restore_into: Path,
+    *,
+    clock: Clock | None = None,
+    keys: AgeKeys | None = None,
 ) -> DrillReport:
     clock = clock or system_clock()
-    manifest = backup(db_path, out_dir, clock=clock)
+    keys = keys or load_age_keys()
+    manifest = backup(db_path, out_dir, clock=clock, keys=keys)
     failures: list[str] = []
     rpo: float | None
     try:
-        rpo, basis = rpo_seconds(manifest)
+        rpo, basis = rpo_seconds(manifest, keys=keys)
     except DrillRefused as error:
         rpo, basis = None, {"source": None, "refused": str(error)}
         failures.append(f"rpo: refused — {error}")
-    report = restore(manifest, restore_into, clock=clock)
+    report = restore(manifest, restore_into, clock=clock, keys=keys)
     failures.extend(report.failures)
     return DrillReport(
         manifest=manifest,
