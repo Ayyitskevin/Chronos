@@ -126,6 +126,13 @@ DEFAULT_KEY_DIR = Path("data") / "keys"
 DEFAULT_IDENTITY = DEFAULT_KEY_DIR / "backup-host.age"
 DEFAULT_RECIPIENTS = DEFAULT_KEY_DIR / "backup-recipients.txt"
 RECIPIENT_COUNT = 2
+#: The decided recovery recipient — Kevin's PUBLIC key as Muse recorded it on 2026-09-16.
+#: Pinned in code on purpose (R-2 r1): the recipients file may name it, never choose it —
+#: a file that lists the host key plus ANY other key is refused, so an operator (or an
+#: attacker with write access to data/keys/) cannot swap the second decrypting party.
+#: Rotating this key is a reviewed code change plus a new recipients line, never a file
+#: edit alone. Its private half never exists on a fleet host.
+KEVIN_RECOVERY_RECIPIENT = "age1ddwtdaexpp2k0dp22fj3rtqfw9y5trr3we77rsmwq9s0y70ase3sgu07kf"
 AGE_INSTALL_SENTENCE = (
     "age is not installed: install the distro `age` package or the official release "
     "(https://github.com/FiloSottile/age/releases) so that `age` and `age-keygen` are on PATH "
@@ -341,8 +348,10 @@ def load_age_keys(
     Order: ``age``/``age-keygen`` on PATH (else the runbook's install sentence); the identity
     file (:func:`_open_identity`) and its public key by ``age-keygen -y`` over the open
     descriptor; the recipients file: exactly ``RECIPIENT_COUNT`` non-blank lines, each an
-    ``age1…`` X25519 public key that ``age`` itself accepts as a recipient, all distinct,
-    and one of them the host identity's public key.
+    ``age1…`` X25519 public key that ``age`` itself accepts as a recipient, and the SET of
+    them must EQUAL ``{the host identity's public key, KEVIN_RECOVERY_RECIPIENT}`` — a line
+    that is neither is refused by number (R-2 r1: the file names the recipients, it never
+    chooses them), and a missing required key is named.
     """
 
     env = os.environ if environ is None else environ
@@ -400,10 +409,26 @@ def load_age_keys(
             f"backup recipients file {recipients_path} lists the same public key twice; the two "
             "recipients must be distinct keys"
         )
-    if host_public_key not in keys:
+    required = {host_public_key, KEVIN_RECOVERY_RECIPIENT}
+    for number, text in lines:
+        if text not in required:
+            missing = sorted(required - set(keys))
+            raise DrillRefused(
+                f"backup recipients file {recipients_path} line {number} ({text}) is neither the "
+                f"host identity's public key nor the decided recovery recipient "
+                f"{KEVIN_RECOVERY_RECIPIENT} (pinned in code; rotating it is a reviewed code "
+                f"change); the recipient set must be exactly those two — missing: "
+                f"{', '.join(missing)}"
+            )
+    if host_public_key not in keys:  # unreachable once both lines are required keys; kept explicit
         raise DrillRefused(
             f"backup recipients file {recipients_path} does not contain the host identity's own "
             f"public key {host_public_key}; a backup this host could not restore is refused"
+        )
+    if KEVIN_RECOVERY_RECIPIENT not in keys:
+        raise DrillRefused(
+            f"backup recipients file {recipients_path} does not contain the decided recovery "
+            f"recipient {KEVIN_RECOVERY_RECIPIENT}; a backup the owner could not recover is refused"
         )
     return AgeKeys(
         age=age,

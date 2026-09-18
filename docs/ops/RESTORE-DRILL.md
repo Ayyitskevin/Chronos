@@ -195,11 +195,18 @@ Every backup's database is encrypted with [age](https://github.com/FiloSottile/a
   `age1ddwtdaexpp2k0dp22fj3rtqfw9y5trr3we77rsmwq9s0y70ase3sgu07kf`; the private half lives
   in his password manager and is **never on a fleet host**. No fleet code, test or runbook
   step generates, stores, prints or logs it. A backup without a readable host identity is
-  recoverable ONLY through Kevin's key.
+  recoverable ONLY through Kevin's key. The recovery recipient is **pinned in code**
+  (`KEVIN_RECOVERY_RECIPIENT` in `src/chronos/operations/restore_drill.py`, the value Muse
+  recorded 2026-09-16): the recipients file names it, it never chooses it. Rotating
+  Kevin's key is a **reviewed code change** plus a new recipients line — never a file edit
+  alone — so nobody with write access to `data/keys/` can make a different key the second
+  decrypting party.
 
-The recipients file must hold exactly these two lines (each a valid `age1…` key, distinct,
-one of them the host identity's own public key); anything else is a typed refusal naming
-the line, before any database is opened. The manifest's `encryption` block records the
+The recipients file must hold exactly these two lines (each a valid `age1…` key, distinct)
+and the validator refuses **any set other than {host, Kevin}** — a file that lists the host
+key plus any other key, Kevin's key without the host's, one line, or three — as a typed
+refusal naming the offending line number and the missing required key, before any database
+is opened. The manifest's `encryption` block records the
 scheme, both recipients (sorted) and the tool version, so a reader can tell which keys a
 given envelope was minted for; `sha256` is the CLEARTEXT digest (what step 5 verifies) and
 `ciphertext_sha256` the `.age` file's. The by-hand decrypt is step 4's `age -d -i …` line.

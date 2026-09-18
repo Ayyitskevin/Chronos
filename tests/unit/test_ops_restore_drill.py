@@ -20,6 +20,7 @@ import hashlib
 import itertools
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -1440,8 +1441,11 @@ def test_enc_1e_recipients_that_omit_the_hosts_own_public_key_are_refused(
 ) -> None:
     other = _keygen(tmp_path / "keys" / "other.age")
     age_keys.recipients.write_text(f"{other}\n{KEVIN_PUBLIC_KEY}\n", encoding="utf-8")
+    # (r1) the stranger's line is named, and the host key is the missing required one
     _refused_before_the_source_is_opened(
-        tmp_path, monkeypatch, "does not contain the host identity's own public key"
+        tmp_path,
+        monkeypatch,
+        rf"line 1 \({other}\) is neither .* missing: {age_keys.host_public_key}",
     )
     # the same key twice is not two recipients either
     age_keys.recipients.write_text(
@@ -1724,3 +1728,118 @@ def test_enc_6_no_private_key_material_is_committed_anywhere() -> None:
     assert found.returncode == 1 and found.stdout == "", found.stdout
     # and every identity these tests use is generated at test time, under tmp_path
     assert "age-keygen" in (ROOT / "tests" / "unit" / "test_ops_restore_drill.py").read_text()
+
+
+# ------------------------------------------------------------ (R-2 r1) the pinned recipient
+# Daybreak's HOLD at 78a6522 (P1): the validator accepted host + ANY valid key, so Kevin
+# could be silently replaced by an attacker's recipient. The decided recovery recipient is
+# now a module constant and the recipient set must EQUAL {host key, that constant}.
+
+
+def _attacker_probe(tmp_path: Path) -> tuple[Path, str]:
+    """Daybreak's probe's second identity: a valid key that is not Kevin's."""
+
+    attacker = tmp_path / "keys" / "attacker.age"
+    return attacker, _keygen(attacker)
+
+
+def test_r1_1a_daybreaks_host_plus_attacker_file_is_refused_and_nothing_is_published(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, age_keys: KeyMaterial
+) -> None:
+    """logs/daybreak-probe-R2-recipient-substitution.py, verbatim: a recipients file of
+    {host key, attacker key} — both valid age1 keys, distinct, the host present."""
+
+    attacker_identity, attacker_public = _attacker_probe(tmp_path)
+    age_keys.recipients.write_text(
+        f"{age_keys.host_public_key}\n{attacker_public}\n", encoding="utf-8"
+    )
+    # the validator names the line and the missing required key
+    with pytest.raises(DrillRefused) as refused:
+        drill.load_age_keys()
+    message = str(refused.value)
+    assert "line 2" in message and attacker_public in message
+    assert "decided recovery recipient" in message and drill.KEVIN_RECOVERY_RECIPIENT in message
+    # ... before the source database is opened, and nothing exists under out_dir
+    _refused_before_the_source_is_opened(tmp_path, monkeypatch, r"line 2 \(.*\) is neither")
+    out = tmp_path / "out"
+    assert not out.exists() or list(out.iterdir()) == []
+    # the attacker identity has nothing to decrypt: no envelope was ever created
+    assert not list(tmp_path.glob("out/**/*.age"))
+    assert AGE is not None
+    nothing = subprocess.run(
+        [AGE, "-d", "-i", str(attacker_identity), str(out / "chronos-x" / "chronos.db.age")],
+        capture_output=True,
+        check=False,
+    )
+    assert nothing.returncode != 0
+
+
+def test_r1_1b_kevin_without_the_host_key_is_refused_naming_the_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, age_keys: KeyMaterial
+) -> None:
+    _attacker_identity, attacker_public = _attacker_probe(tmp_path)
+    # Kevin + a stranger: the host's own key is the one missing
+    age_keys.recipients.write_text(f"{KEVIN_PUBLIC_KEY}\n{attacker_public}\n", encoding="utf-8")
+    with pytest.raises(DrillRefused) as refused:
+        drill.load_age_keys()
+    message = str(refused.value)
+    assert "line 2" in message and "host identity's public key" in message
+    assert age_keys.host_public_key in message
+    _refused_before_the_source_is_opened(tmp_path, monkeypatch, "host identity's public key")
+    # Kevin alone is one line: the count refusal, still before the source open
+    age_keys.recipients.write_text(f"{KEVIN_PUBLIC_KEY}\n", encoding="utf-8")
+    _refused_before_the_source_is_opened(
+        tmp_path, monkeypatch, r"has 1 recipient line\(s\); exactly 2 are required"
+    )
+
+
+def test_r1_1c_host_plus_kevin_is_the_one_accepted_set_and_the_drill_verifies(
+    tmp_path: Path, age_keys: KeyMaterial
+) -> None:
+    # line order does not matter; the set does
+    age_keys.recipients.write_text(
+        f"{KEVIN_PUBLIC_KEY}\n{age_keys.host_public_key}\n", encoding="utf-8"
+    )
+    keys = drill.load_age_keys()
+    assert set(keys.recipients) == {age_keys.host_public_key, drill.KEVIN_RECOVERY_RECIPIENT}
+    db = _store_with_audit(tmp_path)
+    report = run_drill(db, tmp_path / "out", tmp_path / "restored")
+    assert report.verdict == "VERIFIED", report.failures
+    assert report.manifest.encryption["recipients"] == sorted(
+        [age_keys.host_public_key, drill.KEVIN_RECOVERY_RECIPIENT]
+    )
+
+
+def test_r1_1d_three_lines_including_both_required_keys_is_the_count_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, age_keys: KeyMaterial
+) -> None:
+    _attacker_identity, attacker_public = _attacker_probe(tmp_path)
+    age_keys.recipients.write_text(
+        f"{age_keys.host_public_key}\n{KEVIN_PUBLIC_KEY}\n{attacker_public}\n",
+        encoding="utf-8",
+    )
+    _refused_before_the_source_is_opened(
+        tmp_path, monkeypatch, r"has 3 recipient line\(s\); exactly 2 are required"
+    )
+
+
+def test_r1_1e_the_pinned_constant_is_the_runbooks_quoted_key_byte_for_byte() -> None:
+    assert drill.KEVIN_RECOVERY_RECIPIENT == KEVIN_PUBLIC_KEY  # one explicit pin, not derived
+    quoted = re.findall(r"`(age1[02-9ac-hj-np-z]{58})`", RUNBOOK.read_text(encoding="utf-8"))
+    assert quoted, "the runbook must quote the recovery key"
+    assert set(quoted) == {drill.KEVIN_RECOVERY_RECIPIENT}
+    # the constant is a literal in the module — not read from a file, the environment or input
+    source = MODULE.read_text(encoding="utf-8")
+    assert f'KEVIN_RECOVERY_RECIPIENT = "{KEVIN_PUBLIC_KEY}"' in source
+    assert "KEVIN_RECOVERY_RECIPIENT" not in " ".join(
+        line for line in source.splitlines() if "environ" in line or "getenv" in line
+    )
+
+
+def test_r1_2_the_runbook_says_the_recipient_is_pinned_in_code_and_how_it_rotates() -> None:
+    prose = " ".join(RUNBOOK.read_text(encoding="utf-8").split())
+    assert "pinned in code" in prose
+    assert KEVIN_PUBLIC_KEY in prose
+    assert "reviewed code change" in prose
+    assert "never a file edit alone" in prose
+    assert "any set other than {host, Kevin}" in prose
