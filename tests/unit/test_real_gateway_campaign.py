@@ -616,3 +616,79 @@ def test_r2_2_scheme_is_v2_and_the_docs_describe_the_json_array_message(tmp_path
         assert "hmac-sha256-v2" in text
         assert "chronos-<kind>:<salt>:<value>" not in text  # the r1 colon form is gone
     assert "injective" in script and "unambiguous" in script
+
+
+# ------------------------------------------------------------------------ T-2
+# The G-1 tail: .env.example documents the pepper; --label is validated before broker contact
+# (Daybreak G-1 r2 P2: a surrogate-escaped argv byte raised UnicodeEncodeError at encode time).
+
+ENV_EXAMPLE = ROOT / ".env.example"
+
+
+def test_t2_2_env_example_documents_the_pepper_without_an_example_value() -> None:
+    text = ENV_EXAMPLE.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    assert "#CHRONOS_CAPTURE_PEPPER=" in lines  # commented, next to the other CHRONOS_ secrets
+    block = "\n".join(lines[max(0, lines.index("#CHRONOS_CAPTURE_PEPPER=") - 12) :])
+    assert "python3 -c 'import secrets; print(secrets.token_hex(32))'" in block
+    for phrase in ("HMAC", "0600", "Never commit it", "old fixtures stay valid"):
+        assert phrase in block, phrase
+    # no literal value follows the variable, anywhere in the file
+    assert re.search(r"CHRONOS_CAPTURE_PEPPER=\s*[0-9a-fA-F]{64}", text) is None
+    assert re.search(r"CHRONOS_CAPTURE_PEPPER=\S", text) is None
+
+
+def _capture_cli(tmp_path: Path, label: str, out: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            sys.executable,
+            str(CAPTURE),
+            "--out",
+            str(out),
+            "--label",
+            label,
+            "--allow-demo",
+            "--skip-options",
+            "--skip-bars",
+        ],
+        cwd=tmp_path,
+        env={**os.environ, **SAFE_ENV, "CHRONOS_CAPTURE_PEPPER": PEPPER_HEX},
+        capture_output=True,
+        text=True,
+        errors="surrogateescape",
+        check=False,
+    )
+
+
+def test_t2_3_a_label_that_is_not_utf8_encodable_is_refused_before_any_broker_contact(
+    tmp_path: Path,
+) -> None:
+    m = _load_capture_module()
+    surrogate = os.fsdecode(b"label-\xff")  # Daybreak's probe value: a non-UTF-8 argv byte
+    with pytest.raises(m.CaptureRefused, match="UTF-8"):
+        m.validate_label(surrogate)
+    # the CLI: typed refusal, exit 2, no session directory, no capture step ran
+    out = tmp_path / "session"
+    refused = _capture_cli(tmp_path, surrogate, out)
+    assert refused.returncode == 2, refused.stdout + refused.stderr
+    assert refused.stdout.startswith("REFUSED: --label"), refused.stdout
+    assert "UTF-8" in refused.stdout and "UnicodeEncodeError" not in refused.stderr
+    assert "capture written" not in refused.stdout and not out.exists()
+    # control characters and length are refused by name, too
+    for bad, rule in (
+        ("a\tb", "control"),
+        ("a\nb", "control"),
+        ("a\rb", "control"),
+        ("x" * 65, "64"),
+    ):
+        with pytest.raises(m.CaptureRefused, match=rule):
+            m.validate_label(bad)
+    # positive control: a normal label passes the CLI and mints the same tokens as before
+    ok = _capture_cli(tmp_path, "session-1", tmp_path / "ok")
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+    assert m.validate_label("session-1") == "session-1"
+    assert m.validate_label("x" * 64) == "x" * 64
+    tree = json.loads(m.sanitize_capture(_identifier_payload("session-1"), set(), PEPPER))
+    assert tree["steps"]["executions"][0]["broker_order_id"] == m.identifier_pseudonym(
+        "ORD", 7001, ("session-1", "2026-09-13T19:30:00+00:00"), PEPPER
+    )

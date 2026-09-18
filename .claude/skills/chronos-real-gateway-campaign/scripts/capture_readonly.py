@@ -84,6 +84,35 @@ class CaptureRefused(RuntimeError):
     """A typed refusal: the capture cannot proceed and nothing has been written."""
 
 
+LABEL_MAX_CHARS = 64
+
+
+def validate_label(label: str) -> str:
+    """``--label`` is part of every pseudonym's HMAC message and of the manifest: Unicode
+    text only — UTF-8-encodable (a surrogate escape from a non-UTF-8 argv byte is refused,
+    not crashed on at encode time — G-1 r2 review P2), no control characters, at most
+    ``LABEL_MAX_CHARS`` characters. Refuses BEFORE any broker contact."""
+
+    try:
+        label.encode("utf-8")
+    except UnicodeEncodeError as error:
+        raise CaptureRefused(
+            f"--label must be UTF-8-encodable text; {label!r} carries a surrogate escape "
+            f"({error.reason}) — a non-UTF-8 byte in the argument; nothing was written"
+        ) from None
+    if any(ord(char) < 0x20 or char == "\x7f" for char in label):
+        raise CaptureRefused(
+            f"--label must not contain control characters (tab, LF, CR, …): {label!r}; "
+            "nothing was written"
+        )
+    if len(label) > LABEL_MAX_CHARS:
+        raise CaptureRefused(
+            f"--label must be at most {LABEL_MAX_CHARS} characters ({len(label)} given); "
+            "nothing was written"
+        )
+    return label
+
+
 class _PepperSource(BaseSettings):
     """The pepper read the way the repo reads every setting (``Settings``' own convention:
     the process environment first, then the untracked repo-root ``.env``). A source of its
@@ -444,7 +473,9 @@ def session_salt(capture: dict[str, Any]) -> SessionSalt:
 
     The pair is the per-session part of the HMAC message, never the key, and it is
     carried as two fields (r2) — never joined with a delimiter, because an operator-
-    controlled label may contain any byte and a join is not injective. Tokens are stable
+    controlled label may contain any Unicode text the CLI admits (:func:`validate_label`:
+    UTF-8-encodable, no control characters, at most 64 characters) and a join is not
+    injective. Tokens are stable
     within one session (the same order id maps to the same token everywhere in the
     capture) and differ across sessions (no cross-session linkage of a broker id).
     Resistance to enumerating a low-entropy id comes from the pepper — the HMAC key,
@@ -588,6 +619,11 @@ def main() -> int:
         help="permit BROKER_MODE=demo rehearsal (output is NOT gateway evidence)",
     )
     args = parser.parse_args()
+    try:
+        args.label = validate_label(args.label)
+    except CaptureRefused as error:
+        print(f"REFUSED: {error}")
+        return 2
 
     from chronos.config.settings import Settings
     from chronos.domain.enums import BrokerMode

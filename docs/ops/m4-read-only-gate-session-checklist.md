@@ -272,11 +272,12 @@ first-contact ledger entries (§4.4), leak/mutation/drift/callback/pacing check 
   place of the raw id (`src/chronos/persistence/database.py`). Raw account ids never enter git.
 - Verify by hand before the directory leaves the machine:
   `grep -RniE "DU[0-9]|DF[0-9]|U[0-9]{6}" ~/chronos-gateway-evidence/ && echo LEAK || echo clean`.
-- `[GAP]` no `sanitize_order_ids` tool exists: if `executions` or `open_orders` are
-  non-empty (pre-existing manual history), broker order ids, exec ids and permIds are present
-  in the capture. Either replace them with stable placeholders by hand (mapping kept
-  OFF-repo) or keep those files off-repo and record counts only. Nothing unsanitized enters
-  git — ever.
+- The harness pseudonymizes every broker identifier value — `execution_id`,
+  `broker_order_id`, `permanent_id` — whole-value, as `EXEC-`/`ORD-`/`PERM-<16 hex>` keyed by
+  HMAC-SHA256 under the per-install secret `CHRONOS_CAPTURE_PEPPER` (#243); the manifest
+  records the scheme and a 16-hex `pepper_fingerprint`; the by-hand grep above is unchanged.
+  A capture without a pepper is refused before anything is written (the campaign skill,
+  §1.2 and §2.4, says where the pepper lives). Nothing unsanitized enters git — ever.
 - Names: the harness records no owner name; do not add one to the evidence doc beyond
   initials.
 
