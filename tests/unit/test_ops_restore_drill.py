@@ -26,6 +26,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -136,7 +137,7 @@ def _demo_store(tmp_path: Path, *, events: int = 3, at: datetime | None = None) 
     finally:
         database.dispose()
     stamp = at or datetime(2026, 9, 15, 1, 0, tzinfo=UTC)
-    with sqlite3.connect(db) as connection:
+    with closing(sqlite3.connect(db)) as connection, connection:
         for index in range(events):
             connection.execute(
                 "INSERT INTO application_events (event_type, severity, correlation_id, symbol,"
@@ -185,7 +186,7 @@ def test_1b_row_counts_equal_a_direct_count_and_cover_every_table(
     db = _demo_store(tmp_path, events=5)
     manifest = backup(db, tmp_path / "out")
     clear = _decrypt(manifest, age_keys.identity, tmp_path / "clear")
-    with sqlite3.connect(f"file:{clear}?mode=ro", uri=True) as connection:
+    with closing(sqlite3.connect(f"file:{clear}?mode=ro", uri=True)) as connection, connection:
         tables = [
             row[0]
             for row in connection.execute(
@@ -221,7 +222,7 @@ def test_1d_backup_uses_the_online_backup_api_and_the_source_is_never_written(
     assert _sha256(db) == before, "the source must be byte-identical after the backup"
     # a consistent backup: the copy passes sqlite's own integrity check and equals the source's rows
     clear = _decrypt(manifest, age_keys.identity, tmp_path / "clear")
-    with sqlite3.connect(f"file:{clear}?mode=ro", uri=True) as connection:
+    with closing(sqlite3.connect(f"file:{clear}?mode=ro", uri=True)) as connection, connection:
         assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     assert not list((tmp_path / "out").glob(".*.tmp")), "no temp file survives the os.replace"
 
@@ -276,7 +277,11 @@ def test_1f_the_backup_api_captures_committed_wal_rows_that_a_file_copy_misses(
     _checkpoint_wal(db)
     holder = sqlite3.connect(db)  # keeps the WAL alive: no checkpoint-on-close
     try:
-        with sqlite3.connect(db) as writer:
+        # the holder must have opened the WAL index (one read) — a connection that never
+        # touched the store does not count when the writer closes and checkpoints (T-3: the
+        # writer is now closed explicitly instead of lingering until garbage collection)
+        holder.execute("SELECT count(*) FROM application_events").fetchone()
+        with closing(sqlite3.connect(db)) as writer, writer:
             for index in range(7):
                 writer.execute(
                     "INSERT INTO application_events (event_type, severity, message, event_data,"
@@ -337,7 +342,7 @@ def test_2c_a_dropped_row_in_the_restored_copy_fails_row_counts(tmp_path: Path) 
     report = restore(manifest, tmp_path / "restored")
     assert report.verified, report.failures
     restored = Path(report.restored_path)
-    with sqlite3.connect(restored) as connection:
+    with closing(sqlite3.connect(restored)) as connection, connection:
         connection.execute(
             "DELETE FROM application_events WHERE id = (SELECT MIN(id) FROM application_events)"
         )
@@ -367,7 +372,7 @@ def test_2e_the_schema_head_check_refuses_a_restored_store_whose_head_moved(tmp_
     manifest = backup(db, tmp_path / "out")
     report = restore(manifest, tmp_path / "restored")
     restored = Path(report.restored_path)
-    with sqlite3.connect(restored) as connection:
+    with closing(sqlite3.connect(restored)) as connection, connection:
         connection.execute("UPDATE schema_version SET version = version + 1")
     failures, facts = verify_restored(manifest, restored, None)
     assert facts["schema_head_ok"] is False
@@ -436,7 +441,7 @@ def test_3c_a_store_with_no_timestamped_evidence_reports_null_with_a_reason_neve
     tmp_path: Path,
 ) -> None:
     bare = tmp_path / "bare.db"
-    with sqlite3.connect(bare) as connection:
+    with closing(sqlite3.connect(bare)) as connection, connection:
         connection.execute("CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT)")
         connection.execute("INSERT INTO notes (body) VALUES ('no clock here')")
     manifest = backup(bare, tmp_path / "out")
@@ -661,7 +666,7 @@ def test_r1_2a_rpo_is_derived_from_the_retained_snapshot_never_the_live_source(
     assert rpo_before == pytest.approx(300.0)
     assert basis_before["source"] == "table:application_events.occurred_at"
     # the live source moves on AFTER the backup: a row dated far newer than the snapshot
-    with sqlite3.connect(db) as writer:
+    with closing(sqlite3.connect(db)) as writer, writer:
         writer.execute(
             "INSERT INTO application_events (event_type, severity, message, event_data,"
             " occurred_at) VALUES ('later', 'INFO', 'after the backup', '{}', ?)",
@@ -681,7 +686,7 @@ def test_r1_2b_evidence_dated_after_the_snapshot_is_refused_never_a_negative_rpo
     # the retained bytes are authenticated ciphertext (a planted row is a decrypt refusal —
     # enc_3d), so the writer's clock is the one that runs ahead: an event an hour AFTER the
     # snapshot instant sits in the store the backup retains
-    with sqlite3.connect(db) as writer:
+    with closing(sqlite3.connect(db)) as writer, writer:
         writer.execute(
             "INSERT INTO application_events (event_type, severity, message, event_data,"
             " occurred_at) VALUES ('future', 'INFO', 'dated after the snapshot', '{}', ?)",
@@ -1962,3 +1967,119 @@ def test_r2_2_the_runbook_states_the_refusal_diagnostics_exactly() -> None:
     ) in prose
     # the earlier over-promise is gone
     assert "naming the offending line number and the missing required key, before" not in prose
+
+
+# --------------------------------------------- (T-3) the copy's inode is pinned by a descriptor
+# R-1 residual (the class CI caught on W-1): copy_identity was a (dev, ino) tuple captured from
+# fstat(fd) and the descriptor was CLOSED before the acceptance check compared the name against
+# it — a freed inode number can be reused. Now the descriptor stays open through the acceptance
+# and both comparisons read fstat of that held descriptor.
+
+
+def _descriptors_to(identity: tuple[int, int]) -> list[int]:
+    """Every descriptor of this process that refers to the inode ``identity`` right now."""
+
+    found: list[int] = []
+    for name in os.listdir("/proc/self/fd"):
+        try:
+            st = os.stat(int(name))
+        except OSError:
+            continue  # the listing's own descriptor, or one closed meanwhile
+        if (st.st_dev, st.st_ino) == identity:
+            found.append(int(name))
+    return found
+
+
+def test_t3_1a_a_descriptor_to_the_copied_inode_is_held_through_the_acceptance_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = _demo_store(tmp_path)
+    manifest = backup(db, tmp_path / "out")
+    target = tmp_path / "restored"
+    seen: list[int] = []
+    real_check = drill._entry_is_real_file
+
+    def observing_check(dfd: int, name: str, identity: tuple[int, int]) -> bool:
+        # the comparison's own instant: before the repository opens (first call) and after
+        # it has disposed its connections (second call) — only restore's held descriptor can
+        # refer to the copied inode here
+        seen.append(len(_descriptors_to(identity)))
+        return real_check(dfd, name, identity)
+
+    monkeypatch.setattr(drill, "_entry_is_real_file", observing_check)
+    report = restore(manifest, target)
+    assert report.verified, report.failures
+    assert seen == [1, 1], seen  # exactly one descriptor, at both comparisons
+    # and none after restore() returns: the held descriptor is closed in a finally
+    copy = os.stat(target / "chronos.db")
+    assert _descriptors_to((copy.st_dev, copy.st_ino)) == []
+
+
+def test_t3_1b_a_fresh_file_planted_at_the_name_during_the_acceptance_check_is_never_verified(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = _demo_store(tmp_path)
+    manifest = backup(db, tmp_path / "out")
+    target = tmp_path / "restored"
+    copy = target / "chronos.db"
+    real_initialize = drill.Database.initialize
+    planted: list[tuple[int, int]] = []
+
+    def planting_initialize(self: object) -> None:
+        real_initialize(self)  # type: ignore[arg-type]
+        # after the repository accepted the copy: move it aside, plant a fresh regular file
+        copy.rename(copy.with_name("chronos.db.aside"))
+        copy.write_bytes(copy.with_name("chronos.db.aside").read_bytes())
+        st = os.stat(copy)
+        planted.append((st.st_dev, st.st_ino))
+
+    monkeypatch.setattr(drill.Database, "initialize", planting_initialize)
+    report = restore(manifest, target)
+    assert planted, "the plant must have happened"
+    assert report.verified is False
+    assert any("changed identity during the acceptance check" in f for f in report.failures), (
+        report.failures
+    )
+
+
+def test_t3_1c_an_unlink_and_recreate_cannot_reuse_the_pinned_inode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The W-1 class exactly: in the window after the repository disposed its connections and
+    before the post-acceptance comparison, unlink the copy and create a new file at the name.
+    With the descriptor held the old inode stays allocated, so the new file can never carry
+    its number — the comparison is deterministic; without it, the filesystem may hand the
+    freed number straight back and the comparison passes a stranger."""
+
+    db = _demo_store(tmp_path)
+    manifest = backup(db, tmp_path / "out")
+    target = tmp_path / "restored"
+    copy = target / "chronos.db"
+    real_check = drill._entry_is_real_file
+    observed: list[tuple[tuple[int, int], tuple[int, int], int]] = []
+
+    def swapping_check(dfd: int, name: str, identity: tuple[int, int]) -> bool:
+        calls = getattr(swapping_check, "calls", 0) + 1
+        swapping_check.calls = calls  # type: ignore[attr-defined]
+        if calls % 2 == 0:  # the post-acceptance comparison of this restore()
+            held = _descriptors_to(identity)
+            data = copy.read_bytes()
+            copy.unlink()
+            copy.write_bytes(data)
+            after = os.stat(copy)
+            observed.append((identity, (after.st_dev, after.st_ino), len(held)))
+        return real_check(dfd, name, identity)
+
+    monkeypatch.setattr(drill, "_entry_is_real_file", swapping_check)
+    for _ in range(20):  # the class is a race on inode reuse; the pin must never flake
+        if target.exists():
+            for path in target.iterdir():
+                path.unlink()
+            target.rmdir()
+        report = restore(manifest, target)
+        assert report.verified is False, report.failures
+        assert any("changed identity during the acceptance check" in f for f in report.failures)
+    assert len(observed) == 20
+    for identity, recreated, held in observed:
+        assert held == 1, "the copied inode must be referenced by exactly one descriptor"
+        assert identity != recreated, "a referenced inode was renumbered"

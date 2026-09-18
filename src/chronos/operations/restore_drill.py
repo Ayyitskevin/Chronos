@@ -768,7 +768,7 @@ def _fresh_directory(target: Path, what: str) -> int:
 # ----------------------------------------------------------------- store inspection
 
 
-def _readonly(path: Path) -> sqlite3.Connection:
+def _readonly(path: Path) -> contextlib.closing[sqlite3.Connection]:
     """A read-only connection on the SOURCE under SQLite's normal locking and WAL semantics.
 
     Never ``immutable=1``: that flag makes SQLite ignore a WAL, and "no ``-wal`` right
@@ -779,14 +779,18 @@ def _readonly(path: Path) -> sqlite3.Connection:
     nothing beside them.
     """
 
-    return sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    # closing(): a ``with`` on a sqlite3 Connection is a transaction scope, not a closer —
+    # without it the connection (and its descriptor on the store) lingers until the garbage
+    # collector runs (T-3)
+    return contextlib.closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True))
 
 
-def _readonly_fd(fd: int) -> sqlite3.Connection:
+def _readonly_fd(fd: int) -> contextlib.closing[sqlite3.Connection]:
     """A read-only connection on an already-open descriptor (a retained copy): sqlite
-    opens ``/proc/self/fd/<n>``, so no pathname is re-resolved."""
+    opens ``/proc/self/fd/<n>``, so no pathname is re-resolved. Closed on exit (see
+    :func:`_readonly`)."""
 
-    return sqlite3.connect(f"file:/proc/self/fd/{fd}?mode=ro", uri=True)
+    return contextlib.closing(sqlite3.connect(f"file:/proc/self/fd/{fd}?mode=ro", uri=True))
 
 
 def _user_tables(connection: sqlite3.Connection) -> list[str]:
@@ -1181,36 +1185,45 @@ def _verify_in(
         with _readonly_fd(fd) as restored:
             head = _schema_head_on(restored)
             counts = _row_counts_on(restored)
-        copy_identity = (os.fstat(fd).st_dev, os.fstat(fd).st_ino)
-    finally:
-        os.close(fd)
 
-    accepted = True
-    lexical = target_abs / db_name
-    if not _entry_is_real_file(target_fd, db_name, copy_identity) or _nofollow_identity(
-        target_abs
-    ) != _dir_identity(target_fd):
-        accepted = False
-        failures.append(
-            f"restore target swapped: {target_abs} no longer names the directory the walk "
-            "admitted, so the repository's acceptance check cannot be bound to the copy"
-        )
-    else:
-        try:
-            database = Database(f"sqlite:///{lexical}")
-            try:
-                # verifies version + zero drift on a versioned store; applies no upgrade
-                database.initialize()
-            finally:
-                database.dispose()
-        except RuntimeError as error:
-            accepted = False
-            failures.append(f"schema_acceptance: {error}")
-        if not _entry_is_real_file(target_fd, db_name, copy_identity):
+        # The copy's identity is read from THIS descriptor at every comparison, and the
+        # descriptor stays open through the repository's acceptance check: a referenced
+        # inode cannot be freed, so its number cannot be handed to a stranger planted at
+        # the name meanwhile (T-3 — the (dev, ino)-after-close class CI caught on W-1).
+        def copy_identity() -> tuple[int, int]:
+            st = os.fstat(fd)
+            return st.st_dev, st.st_ino
+
+        accepted = True
+        lexical = target_abs / db_name
+        if not _entry_is_real_file(target_fd, db_name, copy_identity()) or _nofollow_identity(
+            target_abs
+        ) != _dir_identity(target_fd):
             accepted = False
             failures.append(
-                f"restore target swapped: {lexical} changed identity during the acceptance check"
+                f"restore target swapped: {target_abs} no longer names the directory the walk "
+                "admitted, so the repository's acceptance check cannot be bound to the copy"
             )
+        else:
+            try:
+                database = Database(f"sqlite:///{lexical}")
+                try:
+                    # verifies version + zero drift on a versioned store; applies no upgrade
+                    database.initialize()
+                finally:
+                    database.dispose()
+            except RuntimeError as error:
+                accepted = False
+                failures.append(f"schema_acceptance: {error}")
+            if not _entry_is_real_file(target_fd, db_name, copy_identity()):
+                accepted = False
+                failures.append(
+                    f"restore target swapped: {lexical} changed identity during the acceptance "
+                    "check"
+                )
+    finally:
+        os.close(fd)  # after the last comparison: no descriptor to the copy outlives restore()
+
     facts["schema_head_ok"] = head == manifest.schema_head and accepted
     if head != manifest.schema_head:
         failures.append(f"schema_head: restored {head} != manifest {manifest.schema_head}")
