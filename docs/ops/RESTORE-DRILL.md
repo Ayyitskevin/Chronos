@@ -203,10 +203,14 @@ Every backup's database is encrypted with [age](https://github.com/FiloSottile/a
   decrypting party.
 
 The recipients file must hold exactly these two lines (each a valid `age1…` key, distinct)
-and the validator refuses **any set other than {host, Kevin}** — a file that lists the host
-key plus any other key, Kevin's key without the host's, one line, or three — as a typed
-refusal naming the offending line number and the missing required key, before any database
-is opened. The manifest's `encryption` block records the
+and the validator refuses **any set other than {host, Kevin}** as a typed refusal before any
+database is opened. What the refusal says, exactly: a wrong line count (one line, three
+lines, an empty file) names the count, which required key(s) are missing — by role and the
+first 12 characters of the expected key — and the line number(s) that are neither required
+key; a two-line file with a wrong key (the host plus any other key, Kevin's key without the
+host's) names the offending line number, the key on it and the missing required key; a line
+that is not a valid `age1…` key names its line number; the same key twice names the
+duplication. The manifest's `encryption` block records the
 scheme, both recipients (sorted) and the tool version, so a reader can tell which keys a
 given envelope was minted for; `sha256` is the CLEARTEXT digest (what step 5 verifies) and
 `ciphertext_sha256` the `.age` file's. The by-hand decrypt is step 4's `age -d -i …` line.

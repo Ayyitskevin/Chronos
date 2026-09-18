@@ -1843,3 +1843,119 @@ def test_r1_2_the_runbook_says_the_recipient_is_pinned_in_code_and_how_it_rotate
     assert "reviewed code change" in prose
     assert "never a file edit alone" in prose
     assert "any set other than {host, Kevin}" in prose
+
+
+# ------------------------------------------------------------ (R-2 r2) count-refusal diagnostics
+# Daybreak's HOLD-DELTA at e6eb4a3 (P2): one-line and three-line files were refused with the
+# count only, while the runbook promised the missing required key and the offending line.
+
+
+def _count_refusal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lines: list[str]) -> str:
+    """The refusal text for a recipients file of ``lines`` — raised before the source open."""
+
+    keys = tmp_path / "keys"
+    (keys / "backup-recipients.txt").write_text("".join(f"{line}\n" for line in lines), "utf-8")
+    db = tmp_path / "data" / "chronos.db"
+    if not db.exists():
+        db = _demo_store(tmp_path)
+    real_open_regular = drill._open_regular
+
+    def source_never_opened(path: Path, subject: str) -> int:
+        if subject == "source database":
+            raise AssertionError("the source database was opened before the key refusal")
+        return real_open_regular(path, subject)
+
+    monkeypatch.setattr(drill, "_open_regular", source_never_opened)
+    with pytest.raises(DrillRefused) as refused:
+        backup(db, tmp_path / "out")
+    assert _nothing_under(tmp_path / "out")
+    return str(refused.value)
+
+
+def _diagnostics(message: str) -> str:
+    """The part of the refusal after the path: the exact reason phrase, path-independent."""
+
+    marker = "recipient line(s); exactly 2 are required"
+    assert marker in message, message
+    return message[message.index(marker) :]
+
+
+def test_r2_1a_a_host_only_file_names_the_missing_recovery_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, age_keys: KeyMaterial
+) -> None:
+    message = _count_refusal(tmp_path, monkeypatch, [age_keys.host_public_key])
+    assert message.startswith(f"backup recipients file {age_keys.recipients} has 1 ")
+    assert _diagnostics(message) == (
+        "recipient line(s); exactly 2 are required (the host's operational public key and the "
+        "owner's recovery public key — docs/ops/RESTORE-DRILL.md, 'Encryption at rest'); "
+        f"missing required key(s): the owner's recovery recipient ({KEVIN_PUBLIC_KEY[:12]}…); "
+        "line(s) that are neither required key: none"
+    )
+
+
+def test_r2_1b_a_kevin_only_file_names_the_missing_host_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, age_keys: KeyMaterial
+) -> None:
+    message = _count_refusal(tmp_path, monkeypatch, [KEVIN_PUBLIC_KEY])
+    assert _diagnostics(message) == (
+        "recipient line(s); exactly 2 are required (the host's operational public key and the "
+        "owner's recovery public key — docs/ops/RESTORE-DRILL.md, 'Encryption at rest'); "
+        f"missing required key(s): the host identity's public key "
+        f"({age_keys.host_public_key[:12]}…); line(s) that are neither required key: none"
+    )
+    # an empty file: both required keys missing, no line to blame
+    message = _count_refusal(tmp_path, monkeypatch, [])
+    assert message.startswith(f"backup recipients file {age_keys.recipients} has 0 ")
+    assert _diagnostics(message).endswith(
+        f"missing required key(s): the host identity's public key "
+        f"({age_keys.host_public_key[:12]}…), the owner's recovery recipient "
+        f"({KEVIN_PUBLIC_KEY[:12]}…); line(s) that are neither required key: none"
+    )
+
+
+def test_r2_1c_a_three_line_file_names_the_extra_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, age_keys: KeyMaterial
+) -> None:
+    _attacker_identity, attacker_public = _attacker_probe(tmp_path)
+    message = _count_refusal(
+        tmp_path, monkeypatch, [age_keys.host_public_key, KEVIN_PUBLIC_KEY, attacker_public]
+    )
+    assert message.startswith(f"backup recipients file {age_keys.recipients} has 3 ")
+    assert _diagnostics(message) == (
+        "recipient line(s); exactly 2 are required (the host's operational public key and the "
+        "owner's recovery public key — docs/ops/RESTORE-DRILL.md, 'Encryption at rest'); "
+        "missing required key(s): none; line(s) that are neither required key: 3"
+    )
+    # the extra line AFTER a blank line: numbered as the file's line 4, the blank counted
+    message = _count_refusal(
+        tmp_path,
+        monkeypatch,
+        [age_keys.host_public_key, "", KEVIN_PUBLIC_KEY, attacker_public],
+    )
+    assert _diagnostics(message).endswith("line(s) that are neither required key: 4")
+    # two extra lines: both numbered
+    message = _count_refusal(
+        tmp_path,
+        monkeypatch,
+        [attacker_public, age_keys.host_public_key, "not-a-key", KEVIN_PUBLIC_KEY],
+    )
+    assert _diagnostics(message).endswith("line(s) that are neither required key: 1, 3")
+    # the two-line substitution refusal is unchanged (r1): the offending line and the missing key
+    message = _count_refusal(tmp_path, monkeypatch, [age_keys.host_public_key, attacker_public])
+    assert "has 2 recipient line" not in message
+    assert f"line 2 ({attacker_public}) is neither" in message
+    assert message.endswith(f"missing: {KEVIN_PUBLIC_KEY}")
+
+
+def test_r2_2_the_runbook_states_the_refusal_diagnostics_exactly() -> None:
+    prose = " ".join(RUNBOOK.read_text(encoding="utf-8").split())
+    assert (
+        "a wrong line count (one line, three lines, an empty file) names the count, which "
+        "required key(s) are missing — by role and the first 12 characters of the expected key "
+        "— and the line number(s) that are neither required key; a two-line file with a wrong "
+        "key (the host plus any other key, Kevin's key without the host's) names the offending "
+        "line number, the key on it and the missing required key; a line that is not a valid "
+        "`age1…` key names its line number; the same key twice names the duplication"
+    ) in prose
+    # the earlier over-promise is gone
+    assert "naming the offending line number and the missing required key, before" not in prose

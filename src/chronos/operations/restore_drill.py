@@ -386,11 +386,23 @@ def load_age_keys(
         raise DrillRefused(f"backup recipients file {recipients_path}: {error.strerror}") from None
     lines = [(number, line.strip()) for number, line in enumerate(raw.splitlines(), 1)]
     lines = [(number, text) for number, text in lines if text]
+    required = {host_public_key, KEVIN_RECOVERY_RECIPIENT}
     if len(lines) != RECIPIENT_COUNT:
+        # r2: the count alone is not a diagnosis — say which required key is absent (by role
+        # and the first 12 characters) and which line(s), if any, are neither required key
+        present = {text for _number, text in lines}
+        missing: list[str] = []
+        if host_public_key not in present:
+            missing.append(f"the host identity's public key ({host_public_key[:12]}…)")
+        if KEVIN_RECOVERY_RECIPIENT not in present:
+            missing.append(f"the owner's recovery recipient ({KEVIN_RECOVERY_RECIPIENT[:12]}…)")
+        neither = [str(number) for number, text in lines if text not in required]
         raise DrillRefused(
             f"backup recipients file {recipients_path} has {len(lines)} recipient line(s); "
-            f"exactly {RECIPIENT_COUNT} are required — the host's operational public key and the "
-            "owner's recovery public key (docs/ops/RESTORE-DRILL.md, 'Encryption at rest')"
+            f"exactly {RECIPIENT_COUNT} are required (the host's operational public key and the "
+            "owner's recovery public key — docs/ops/RESTORE-DRILL.md, 'Encryption at rest'); "
+            f"missing required key(s): {', '.join(missing) or 'none'}; "
+            f"line(s) that are neither required key: {', '.join(neither) or 'none'}"
         )
     for number, text in lines:
         if not _AGE_PUBLIC_KEY_RE.fullmatch(text):
@@ -409,7 +421,6 @@ def load_age_keys(
             f"backup recipients file {recipients_path} lists the same public key twice; the two "
             "recipients must be distinct keys"
         )
-    required = {host_public_key, KEVIN_RECOVERY_RECIPIENT}
     for number, text in lines:
         if text not in required:
             missing = sorted(required - set(keys))
