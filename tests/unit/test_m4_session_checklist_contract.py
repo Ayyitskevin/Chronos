@@ -234,3 +234,37 @@ def test_the_live_flag_passage_claims_a_configuration_property_not_a_process_out
     # The port is the adapter's check, not a settings conjunct.
     assert "a live port" not in passage
     assert "`verify_environment_port`" in passage
+
+
+# --------------------------------- (g) the identifier sanitizer is present, not a [GAP] (T-2)
+
+CAPTURE = (
+    ROOT
+    / ".claude"
+    / "skills"
+    / "chronos-real-gateway-campaign"
+    / "scripts"
+    / "capture_readonly.py"
+)
+
+
+def test_the_identifier_sanitizer_line_names_a_present_mechanism() -> None:
+    """#243 landed the keyed pseudonymizer; the checklist says so in the present tense and
+    the mechanism it names exists in the tree — the inverse of the [GAP] pin above."""
+
+    prose = _collapsed(CHECKLIST.read_text(encoding="utf-8"))
+    sentence = (
+        "The harness pseudonymizes every broker identifier value — `execution_id`, "
+        "`broker_order_id`, `permanent_id` — whole-value, as `EXEC-`/`ORD-`/`PERM-<16 hex>` "
+        "keyed by HMAC-SHA256 under the per-install secret `CHRONOS_CAPTURE_PEPPER` (#243); "
+        "the manifest records the scheme and a 16-hex `pepper_fingerprint`; the by-hand grep "
+        "above is unchanged."
+    )
+    assert sentence in prose
+    # the retired gap token is no longer a [GAP] and no longer in the checklist at all
+    retired = "sanitize_" + "order_ids"
+    assert retired not in _gap_tokens() and retired not in prose
+    # the named mechanism is present in the tree, under the names the sentence uses
+    source = CAPTURE.read_text(encoding="utf-8")
+    for name in ("def pseudonymize_identifiers", "CHRONOS_CAPTURE_PEPPER", "pepper_fingerprint"):
+        assert name in source, name
