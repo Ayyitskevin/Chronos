@@ -95,6 +95,7 @@ def _seed_complete_active_order_evidence(database: Database) -> None:
                 execution_id="EXEC-1",
                 correlation_id="CORR-1",
                 broker_order_id=11,
+                client_id=17,
                 wheel_cycle_id="CYCLE-1",
                 symbol="AAPL",
                 contract_id=101,
@@ -221,6 +222,7 @@ def test_every_ownership_bearing_table_contributes_its_canonical_symbol() -> Non
                     FillRow(
                         execution_id="EXEC-NVDA",
                         broker_order_id=22,
+                        client_id=17,
                         symbol="NVDA",
                         contract_id=202,
                         security_type=SecurityType.STOCK.value,

@@ -312,6 +312,9 @@ def test_repository_exact_replay_is_idempotent_and_conflicting_replay_is_rejecte
             FillRow(
                 execution_id=execution.execution_id,
                 broker_order_id=execution.broker_order_id,
+                permanent_id=execution.permanent_id,
+                client_id=execution.client_id,
+                order_ref=execution.order_ref,
                 wheel_cycle_id=CYCLE_ID,
                 symbol="AAPL",
                 contract_id=execution.contract.con_id,
