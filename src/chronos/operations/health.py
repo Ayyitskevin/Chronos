@@ -14,6 +14,7 @@ from enum import StrEnum
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
 from chronos.operations.clock import ClockFailureCode, ClockProvider, ClockState
+from chronos.operations.slo import SloState
 
 
 class _HealthModel(BaseModel):
@@ -158,6 +159,19 @@ class ClockFact(_HealthModel):
         return self
 
 
+class SloFact(_HealthModel):
+    """The last SLO evaluation, as read from the cache the offline evaluator publishes.
+
+    An observation and nothing else (ADR-0040): no verdict reads it. ``state`` None with a
+    ``problem`` means no evaluation could be read — absent, unreadable, malformed, or no
+    cache configured at all (the default).
+    """
+
+    evaluated_at: AwareDatetime | None = None
+    state: SloState | None = None
+    problem: str | None = "no evaluation cache is configured"
+
+
 class OperationalFacts(_HealthModel):
     backend_initialized: bool = False
     writer_role: WriterRole = WriterRole.UNKNOWN
@@ -178,6 +192,7 @@ class OperationalFacts(_HealthModel):
     mandate_active: bool | None = None
     promotion_present: bool | None = None
     clock: ClockFact = Field(default_factory=ClockFact)
+    slo: SloFact = Field(default_factory=SloFact)
 
 
 class LivenessVerdict(_HealthModel):
@@ -236,6 +251,24 @@ class ClockObservationReport(_HealthModel):
     generation: int = Field(ge=0)
 
 
+class SloObservationReport(_HealthModel):
+    evaluated_at: AwareDatetime | None
+    state: SloState
+    age_seconds: float | None
+    problem: str | None
+
+
+def _slo_absent() -> SloObservationReport:
+    """A recorded health document from before SLO-1 carries no ``slo``: still a valid v2 body."""
+
+    return SloObservationReport(
+        evaluated_at=None,
+        state=SloState.UNKNOWN,
+        age_seconds=None,
+        problem="absent from this health document",
+    )
+
+
 class OperationalObservations(_HealthModel):
     writer_role: WriterRole
     store_readable: bool | None
@@ -246,6 +279,9 @@ class OperationalObservations(_HealthModel):
     reconciliation: ReconciliationObservationReport
     clock: ClockState
     clock_evidence: ClockObservationReport
+    #: Optional on READ so health documents recorded before SLO-1 still parse (the campaign
+    #: status tool reads them); the projection always writes it.
+    slo: SloObservationReport = Field(default_factory=_slo_absent)
 
 
 class OperationalHealth(_HealthModel):
@@ -275,6 +311,14 @@ def _observation(
     if age > max_age_seconds:
         return ObservationState.STALE, rounded_age
     return ObservationState.CURRENT, rounded_age
+
+
+def _age_seconds(observed_at: datetime | None, *, now: datetime) -> float | None:
+    """Seconds since ``observed_at``; None when absent or from the future (unknown, not fresh)."""
+
+    if observed_at is None or observed_at > now:
+        return None
+    return round((now - observed_at).total_seconds(), 3)
 
 
 def _capability(
@@ -473,6 +517,14 @@ def evaluate_operational_health(
                 maximum_allowed_error_seconds=facts.clock.maximum_allowed_error_seconds,
                 failure_code=facts.clock.failure_code,
                 generation=facts.clock.generation,
+            ),
+            # An observation only (ADR-0040, SLO-1): no branch above reads facts.slo, and
+            # tests/unit/test_ops_slo.py pins that by AST and by behaviour.
+            slo=SloObservationReport(
+                evaluated_at=facts.slo.evaluated_at,
+                state=facts.slo.state or SloState.UNKNOWN,
+                age_seconds=_age_seconds(facts.slo.evaluated_at, now=now),
+                problem=facts.slo.problem,
             ),
         ),
     )
