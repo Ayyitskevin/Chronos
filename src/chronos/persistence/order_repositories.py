@@ -418,8 +418,13 @@ class OrderTrackerRepository:
 
         ``permanent_id`` / ``client_id`` are the broker order identity the event
         reported (BP-2): stored as columns on THIS row only — an earlier row that
-        lacked them is never edited; the latest non-None value is the intent's
-        identity (:meth:`chronos.orders.tracker.OrderTracker.permanent_id`).
+        lacked them is never edited. The intent's identity is read by
+        :meth:`chronos.orders.tracker.OrderTracker.permanent_id` /
+        :meth:`~chronos.orders.tracker.OrderTracker.client_id`: one non-None value
+        across the rows is the identity; two distinct non-None values for one
+        field are a typed ``OrderIdentityConflict`` at the accessor (R-e) — never
+        the most recent row, never the first. Callers must not re-implement a
+        most-recent-wins read over these columns.
 
         With ``enforce_from_status=True`` this is a true CAS (ADR-0009 §4): the
         intent's CURRENT status must equal ``from_status`` inside this same

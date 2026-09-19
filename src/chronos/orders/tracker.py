@@ -25,18 +25,24 @@ from chronos.persistence.order_repositories import (
 
 
 class OrderIdentityConflict(ValueError):
-    """Two distinct non-null broker permIds were persisted for one intent (BP-2 r1, R-e).
+    """Two distinct non-null values of one broker identity field were persisted for one
+    intent (BP-2 r1, R-e; r2 extends it to the client id).
 
     Reconciliation treats the intent as UNRESOLVED with this reason — never the
     latest value, never the first; the contradiction is evidence, not a choice.
     """
 
-    def __init__(self, intent_id: str, permanent_ids: tuple[int, ...]) -> None:
+    def __init__(
+        self, intent_id: str, values: tuple[int, ...], *, field: str = "permanent_id"
+    ) -> None:
         self.intent_id = intent_id
-        self.permanent_ids = permanent_ids
-        listed = " and ".join(str(value) for value in permanent_ids)
+        self.field = field
+        self.values = values
+        self.permanent_ids = values if field == "permanent_id" else ()
+        listed = " and ".join(str(value) for value in values)
+        noun = "permanent ids" if field == "permanent_id" else "client ids"
         super().__init__(
-            f"identity conflict: intent {intent_id!r} persisted permanent ids {listed} disagree"
+            f"identity conflict: intent {intent_id!r} persisted {noun} {listed} disagree"
         )
 
 
@@ -169,20 +175,24 @@ class OrderTracker:
         Appends ONE identity-refinement row (``from_status == to_status``, source
         ``IDENTITY``, carrying the permId and the client id the callback reported)
         through the same CAS write as every other event; it never edits an earlier
-        row and moves no existing event. A callback whose permId is absent, or
-        equal to what is already persisted, records nothing. A contradicting permId
-        IS recorded — it is evidence — and the accessor then fails closed
-        (:class:`OrderIdentityConflict`) instead of the contradiction being dropped.
+        row and moves no existing event. Either field newly arriving (None ->
+        non-None) is new identity; a callback repeating the persisted values
+        records nothing. A contradicting value IS recorded — it is evidence — and
+        the accessor for that field then fails closed (:class:`OrderIdentityConflict`)
+        instead of the contradiction being dropped.
         """
 
-        # The identity that matters is the permId — the value reconciliation matches
-        # on when the venue drops the orderRef. A callback that only repeats or only
-        # adds a client id is not new identity: the expected client id is
-        # configuration (settings.ib_client_id), never persisted state, so such an
-        # observation stays the benign no-op it always was (proven, not applied).
+        # R-d (clarified in r2): EITHER field going None -> non-None is new identity;
+        # a callback repeating the persisted values is idempotent. A non-null value
+        # that DIFFERS is recorded too — evidence for the accessors to fail closed on.
         events = self._tracker.events(update.intent_id, current_account_id=current_account_id)
-        persisted_permanent_id = _latest(events, "permanent_id")
-        if update.permanent_id is None or update.permanent_id == persisted_permanent_id:
+        new_permanent_id = update.permanent_id is not None and update.permanent_id != _latest(
+            events, "permanent_id"
+        )
+        new_client_id = update.client_id is not None and update.client_id != _latest(
+            events, "client_id"
+        )
+        if not (new_permanent_id or new_client_id):
             return False
         return self._tracker.record_transition(
             intent_id=update.intent_id,
@@ -282,12 +292,27 @@ class OrderTracker:
         DISTINCT non-None values fail closed with :class:`OrderIdentityConflict`
         (R-e) — never the latest, never the first.
         """
+        return self._single_identity(intent_id, "permanent_id", current_account_id)
+
+    def client_id(self, intent_id: str, *, current_account_id: str) -> int | None:
+        """The broker client id persisted for this intent, if any (BP-2 r2).
+
+        Same policy as :meth:`permanent_id`: one non-None value is the identity;
+        two distinct values fail closed with :class:`OrderIdentityConflict`.
+        """
+        return self._single_identity(intent_id, "client_id", current_account_id)
+
+    def _single_identity(self, intent_id: str, field: str, current_account_id: str) -> int | None:
         events = self._tracker.events(intent_id, current_account_id=current_account_id)
         distinct = tuple(
-            dict.fromkeys(event.permanent_id for event in events if event.permanent_id is not None)
+            dict.fromkeys(
+                int(value)
+                for value in (getattr(event, field) for event in events)
+                if value is not None
+            )
         )
         if len(distinct) > 1:
-            raise OrderIdentityConflict(intent_id, distinct)
+            raise OrderIdentityConflict(intent_id, distinct, field=field)
         return distinct[0] if distinct else None
 
     def effective_limit_price(

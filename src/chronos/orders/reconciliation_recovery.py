@@ -453,6 +453,8 @@ class OrderRestartReconciler:
                     intent.intent_id,
                     current_account_id=current_account_id,
                 )
+                # a divergent client id is the same contradiction (R-e, r2): fail closed
+                self._tracker.client_id(intent.intent_id, current_account_id=current_account_id)
             except OrderIdentityConflict as conflict:
                 # R-e: contradictory persisted permIds fail closed — never the
                 # latest, never the first; the operator sees the typed reason.

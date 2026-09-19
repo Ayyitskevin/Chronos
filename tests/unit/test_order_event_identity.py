@@ -544,12 +544,11 @@ def test_r1_2_a_same_status_callback_that_newly_supplies_identity_records_a_refi
     assert len(_event_rows(database, "i-r2")) == 2
 
 
-def test_r1_2c_a_same_status_callback_adding_only_a_client_id_is_still_a_benign_no_op(
+def test_r1_2c_a_same_status_callback_adding_only_a_client_id_is_refinement_evidence_too(
     database: Database,
 ) -> None:
-    # the identity reconciliation matches on is the permId; the expected client id is
-    # configuration (settings.ib_client_id), never persisted state — so a client-id-only
-    # observation stays the proven no-op the restart report already distinguishes
+    # R-d clarified (r2): EITHER permanent_id OR client_id going None -> non-None is new
+    # identity; (None, None) -> (None, 17) records one row
     intents = OrderIntentRepository(database.sessions)
     repo = OrderTrackerRepository(database.sessions)
     tracker = OrderTracker(intents, repo)
@@ -560,14 +559,13 @@ def test_r1_2c_a_same_status_callback_adding_only_a_client_id_is_still_a_benign_
         _submitted_update("i-r2c", permanent_id=None, client_id=None),
         current_account_id=PAPER_ACCOUNT,
     )
-    assert (
-        tracker.ingest(
-            _submitted_update("i-r2c", permanent_id=None, client_id=_CLIENT_ID),
-            current_account_id=PAPER_ACCOUNT,
-        )
-        is False
+    assert tracker.ingest(
+        _submitted_update("i-r2c", permanent_id=None, client_id=_CLIENT_ID),
+        current_account_id=PAPER_ACCOUNT,
     )
-    assert _event_rows(database, "i-r2c") == [(1, None, None)]
+    assert _event_rows(database, "i-r2c") == [(1, None, None), (2, None, _CLIENT_ID)]
+    assert tracker.client_id("i-r2c", current_account_id=PAPER_ACCOUNT) == _CLIENT_ID
+    assert tracker.permanent_id("i-r2c", current_account_id=PAPER_ACCOUNT) is None
 
 
 def test_r1_2d_a_same_status_callback_repeating_the_acked_permid_records_nothing(
@@ -761,3 +759,109 @@ def test_r1_4b_a_mismatching_nonblank_order_ref_stays_unresolved_through_the_rec
     assert report.proven == ()
     assert [item.intent_id for item in report.unresolved] == ["i-r4b"]
     assert report.unresolved[0].reason.startswith("identity conflict:")
+
+
+# =============================================================================================
+# BP-2 r2 — Daybreak's HOLD-DELTA at 631a485: client identity is refinement evidence too
+# (R-d clarified); the repository docstring states the R-e policy, never latest-wins.
+# =============================================================================================
+
+
+def _identity_rows(database: Database, intent_id: str) -> list[tuple[int | None, int | None]]:
+    return [(perm, client) for _sequence, perm, client in _event_rows(database, intent_id)]
+
+
+def test_r2_1_a_same_status_callback_that_first_supplies_the_client_id_records_one_row(
+    database: Database,
+) -> None:
+    intents = OrderIntentRepository(database.sessions)
+    repo = OrderTrackerRepository(database.sessions)
+    tracker = OrderTracker(intents, repo)
+    intents.create(
+        _intent("i-r21", status=OrderLifecycle.SUBMISSION_UNKNOWN), current_account_id=PAPER_ACCOUNT
+    )
+    # persisted (4242, None) — Daybreak's probe shape (logs/daybreak-probe-bp2r1.out:14)
+    assert tracker.ingest(
+        _submitted_update("i-r21", permanent_id=_PERM_ID, client_id=None),
+        current_account_id=PAPER_ACCOUNT,
+    )
+    assert _identity_rows(database, "i-r21") == [(_PERM_ID, None)]
+
+    applied = tracker.ingest(
+        _submitted_update("i-r21", permanent_id=_PERM_ID, client_id=_CLIENT_ID),
+        current_account_id=PAPER_ACCOUNT,
+    )
+    assert applied is True
+    assert _identity_rows(database, "i-r21") == [(_PERM_ID, None), (_PERM_ID, _CLIENT_ID)]
+    events = repo.events("i-r21", current_account_id=PAPER_ACCOUNT)
+    assert events[1].from_status is events[1].to_status is OrderLifecycle.SUBMITTED
+    assert events[1].source == "IDENTITY"
+    assert tracker.client_id("i-r21", current_account_id=PAPER_ACCOUNT) == _CLIENT_ID
+    assert tracker.permanent_id("i-r21", current_account_id=PAPER_ACCOUNT) == _PERM_ID
+
+    # a duplicate (4242, 17) after (4242, 17): idempotent, no row
+    assert (
+        tracker.ingest(
+            _submitted_update("i-r21", permanent_id=_PERM_ID, client_id=_CLIENT_ID),
+            current_account_id=PAPER_ACCOUNT,
+        )
+        is False
+    )
+    assert len(_identity_rows(database, "i-r21")) == 2
+
+
+def test_r2_1b_a_divergent_client_id_is_recorded_as_evidence_and_the_client_accessor_raises(
+    database: Database,
+) -> None:
+    intents = OrderIntentRepository(database.sessions)
+    repo = OrderTrackerRepository(database.sessions)
+    tracker = OrderTracker(intents, repo)
+    intents.create(
+        _intent("i-r21b", status=OrderLifecycle.SUBMISSION_UNKNOWN),
+        current_account_id=PAPER_ACCOUNT,
+    )
+    assert tracker.ingest(
+        _submitted_update("i-r21b", permanent_id=_PERM_ID, client_id=_CLIENT_ID),
+        current_account_id=PAPER_ACCOUNT,
+    )
+    # (4242, 17) -> (4242, 18): the contradiction is evidence (a row), and the CLIENT accessor
+    # is the one that raises — the permId accessor still resolves the single 4242
+    assert tracker.ingest(
+        _submitted_update("i-r21b", permanent_id=_PERM_ID, client_id=_CLIENT_ID + 1),
+        current_account_id=PAPER_ACCOUNT,
+    )
+    assert _identity_rows(database, "i-r21b") == [
+        (_PERM_ID, _CLIENT_ID),
+        (_PERM_ID, _CLIENT_ID + 1),
+    ]
+    assert tracker.permanent_id("i-r21b", current_account_id=PAPER_ACCOUNT) == _PERM_ID
+    with pytest.raises(OrderIdentityConflict, match=r"client ids 17 and 18") as caught:
+        tracker.client_id("i-r21b", current_account_id=PAPER_ACCOUNT)
+    assert (caught.value.field, caught.value.values) == ("client_id", (_CLIENT_ID, _CLIENT_ID + 1))
+    assert caught.value.permanent_ids == ()
+
+    # reconciliation fails closed on it too: UNRESOLVED with the typed reason
+    broker = FakeBroker(open_orders=(_working_order(order_ref=None, permanent_id=_PERM_ID),))
+    connection = BrokerConnectionManager(broker, readiness=ReconciliationReadiness())
+    connection.start()
+    try:
+        report = OrderRestartReconciler(
+            connection=connection,
+            intents=intents,
+            tracker=tracker,
+            reconciliation_readiness=ReconciliationReadiness(),
+            expected_broker_client_id=_CLIENT_ID,
+        ).reconcile_report(current_account_id=PAPER_ACCOUNT, now=FIXED_NOW)
+    finally:
+        connection.close()
+    assert report.proven == ()
+    assert [item.intent_id for item in report.unresolved] == ["i-r21b"]
+    assert report.unresolved[0].reason.startswith("identity conflict:")
+    assert "17" in report.unresolved[0].reason and "18" in report.unresolved[0].reason
+
+
+def test_r2_2_the_repository_docstring_states_the_typed_conflict_policy_not_latest_wins() -> None:
+    doc = OrderTrackerRepository.record_transition.__doc__ or ""
+    assert "OrderIdentityConflict" in doc
+    assert "never" in doc  # the policy sentence: never latest-wins, never first-wins
+    assert "latest" not in doc.lower()
