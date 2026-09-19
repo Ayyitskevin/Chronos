@@ -570,6 +570,32 @@ def test_r1_2c_a_same_status_callback_adding_only_a_client_id_is_still_a_benign_
     assert _event_rows(database, "i-r2c") == [(1, None, None)]
 
 
+def test_r1_2d_a_same_status_callback_repeating_the_acked_permid_records_nothing(
+    database: Database,
+) -> None:
+    # the ACK (a lifecycle transition, its own event_key) already persisted 4242; a later
+    # SUBMITTED->SUBMITTED orderStatus repeating 4242 is not new identity — no refinement row.
+    # (event_key idempotency cannot cover this: the two keys differ.)
+    intents = OrderIntentRepository(database.sessions)
+    repo = OrderTrackerRepository(database.sessions)
+    tracker = OrderTracker(intents, repo)
+    intents.create(
+        _intent("i-r2d", status=OrderLifecycle.SUBMISSION_UNKNOWN), current_account_id=PAPER_ACCOUNT
+    )
+    assert tracker.ingest(
+        _submitted_update("i-r2d", permanent_id=_PERM_ID, client_id=_CLIENT_ID),
+        current_account_id=PAPER_ACCOUNT,
+    )
+    assert (
+        tracker.ingest(
+            _submitted_update("i-r2d", permanent_id=_PERM_ID, client_id=_CLIENT_ID),
+            current_account_id=PAPER_ACCOUNT,
+        )
+        is False
+    )
+    assert _event_rows(database, "i-r2d") == [(1, _PERM_ID, _CLIENT_ID)]
+
+
 def test_r1_2b_an_out_of_order_callback_after_a_terminal_state_still_records_nothing(
     database: Database,
 ) -> None:
