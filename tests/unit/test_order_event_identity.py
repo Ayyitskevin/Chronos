@@ -34,7 +34,12 @@ from chronos.orders.reconciliation_recovery import (
     _unresolved_evidence_reason,
     resolve_from_broker_evidence,
 )
-from chronos.orders.tracker import OrderIdentityConflict, OrderStatusUpdate, OrderTracker
+from chronos.orders.tracker import (
+    IngestOutcome,
+    OrderIdentityConflict,
+    OrderStatusUpdate,
+    OrderTracker,
+)
 from chronos.persistence.database import SCHEMA_VERSION, Database
 from chronos.persistence.order_repositories import (
     OrderIntentRecord,
@@ -194,7 +199,7 @@ def test_2_an_order_status_observation_with_permid_and_clientid_lands_in_the_col
         ),
         current_account_id=PAPER_ACCOUNT,
     )
-    assert applied is True
+    assert applied.lifecycle_changed is True
     assert _event_rows(database, "i-2") == [(1, _PERM_ID, _CLIENT_ID)]
     latest = repo.events("i-2", current_account_id=PAPER_ACCOUNT)[-1]
     assert (latest.permanent_id, latest.client_id) == (_PERM_ID, _CLIENT_ID)
@@ -213,7 +218,7 @@ def test_2_an_order_status_observation_with_permid_and_clientid_lands_in_the_col
             occurred_at=FIXED_NOW,
         ),
         current_account_id=PAPER_ACCOUNT,
-    )
+    ).recorded
     assert _event_rows(database, "i-2b") == [(1, None, None)]
 
 
@@ -506,7 +511,7 @@ def test_r1_2_a_same_status_callback_that_newly_supplies_identity_records_a_refi
     assert tracker.ingest(
         _submitted_update("i-r2", permanent_id=None, client_id=None),
         current_account_id=PAPER_ACCOUNT,
-    )
+    ).recorded
     assert _event_rows(database, "i-r2") == [(1, None, None)]
 
     # SUBMITTED -> SUBMITTED, first supplying permId / clientId: a refinement row through ingest
@@ -514,7 +519,7 @@ def test_r1_2_a_same_status_callback_that_newly_supplies_identity_records_a_refi
         _submitted_update("i-r2", permanent_id=_PERM_ID, client_id=_CLIENT_ID),
         current_account_id=PAPER_ACCOUNT,
     )
-    assert applied is True
+    assert applied.identity_refined is True
     assert _event_rows(database, "i-r2") == [(1, None, None), (2, _PERM_ID, _CLIENT_ID)]
     events = repo.events("i-r2", current_account_id=PAPER_ACCOUNT)
     assert events[1].from_status is OrderLifecycle.SUBMITTED
@@ -530,7 +535,7 @@ def test_r1_2_a_same_status_callback_that_newly_supplies_identity_records_a_refi
         tracker.ingest(
             _submitted_update("i-r2", permanent_id=_PERM_ID, client_id=_CLIENT_ID),
             current_account_id=PAPER_ACCOUNT,
-        )
+        ).recorded
         is False
     )
     # a same-status callback with NO identity at all: no row
@@ -538,7 +543,7 @@ def test_r1_2_a_same_status_callback_that_newly_supplies_identity_records_a_refi
         tracker.ingest(
             _submitted_update("i-r2", permanent_id=None, client_id=None),
             current_account_id=PAPER_ACCOUNT,
-        )
+        ).recorded
         is False
     )
     assert len(_event_rows(database, "i-r2")) == 2
@@ -558,11 +563,11 @@ def test_r1_2c_a_same_status_callback_adding_only_a_client_id_is_refinement_evid
     assert tracker.ingest(
         _submitted_update("i-r2c", permanent_id=None, client_id=None),
         current_account_id=PAPER_ACCOUNT,
-    )
+    ).recorded
     assert tracker.ingest(
         _submitted_update("i-r2c", permanent_id=None, client_id=_CLIENT_ID),
         current_account_id=PAPER_ACCOUNT,
-    )
+    ).recorded
     assert _event_rows(database, "i-r2c") == [(1, None, None), (2, None, _CLIENT_ID)]
     assert tracker.client_id("i-r2c", current_account_id=PAPER_ACCOUNT) == _CLIENT_ID
     assert tracker.permanent_id("i-r2c", current_account_id=PAPER_ACCOUNT) is None
@@ -583,12 +588,12 @@ def test_r1_2d_a_same_status_callback_repeating_the_acked_permid_records_nothing
     assert tracker.ingest(
         _submitted_update("i-r2d", permanent_id=_PERM_ID, client_id=_CLIENT_ID),
         current_account_id=PAPER_ACCOUNT,
-    )
+    ).recorded
     assert (
         tracker.ingest(
             _submitted_update("i-r2d", permanent_id=_PERM_ID, client_id=_CLIENT_ID),
             current_account_id=PAPER_ACCOUNT,
-        )
+        ).recorded
         is False
     )
     assert _event_rows(database, "i-r2d") == [(1, _PERM_ID, _CLIENT_ID)]
@@ -607,7 +612,7 @@ def test_r1_2b_an_out_of_order_callback_after_a_terminal_state_still_records_not
         tracker.ingest(
             _submitted_update("i-r2b", permanent_id=_PERM_ID, client_id=_CLIENT_ID),
             current_account_id=PAPER_ACCOUNT,
-        )
+        ).recorded
         is False
     )
     assert _event_rows(database, "i-r2b") == []
@@ -628,12 +633,12 @@ def test_r1_3_divergent_permanent_ids_raise_a_typed_conflict_and_leave_the_inten
     assert tracker.ingest(
         _submitted_update("i-r3", permanent_id=_PERM_ID, client_id=_CLIENT_ID),
         current_account_id=PAPER_ACCOUNT,
-    )
+    ).recorded
     # the same intent / broker order now reports permId 4243 (Daybreak's probe, line 12)
     assert tracker.ingest(
         _submitted_update("i-r3", permanent_id=_PERM_ID + 1, client_id=_CLIENT_ID),
         current_account_id=PAPER_ACCOUNT,
-    )
+    ).recorded
     assert [row[1] for row in _event_rows(database, "i-r3")] == [_PERM_ID, _PERM_ID + 1]
 
     with pytest.raises(OrderIdentityConflict, match=r"4242.*4243|4243.*4242") as caught:
@@ -740,7 +745,7 @@ def test_r1_4b_a_mismatching_nonblank_order_ref_stays_unresolved_through_the_rec
     assert tracker.ingest(
         _submitted_update("i-r4b", permanent_id=_PERM_ID, client_id=_CLIENT_ID),
         current_account_id=PAPER_ACCOUNT,
-    )
+    ).recorded
     # push it back to SUBMISSION_UNKNOWN-like state is not possible; use a fresh intent that is
     # SUBMITTED and observe the reconciler's verdict on the contradictory snapshot
     broker = FakeBroker(open_orders=(_working_order(order_ref="CHR-OTHER", permanent_id=_PERM_ID),))
@@ -784,14 +789,14 @@ def test_r2_1_a_same_status_callback_that_first_supplies_the_client_id_records_o
     assert tracker.ingest(
         _submitted_update("i-r21", permanent_id=_PERM_ID, client_id=None),
         current_account_id=PAPER_ACCOUNT,
-    )
+    ).recorded
     assert _identity_rows(database, "i-r21") == [(_PERM_ID, None)]
 
     applied = tracker.ingest(
         _submitted_update("i-r21", permanent_id=_PERM_ID, client_id=_CLIENT_ID),
         current_account_id=PAPER_ACCOUNT,
     )
-    assert applied is True
+    assert applied.identity_refined is True
     assert _identity_rows(database, "i-r21") == [(_PERM_ID, None), (_PERM_ID, _CLIENT_ID)]
     events = repo.events("i-r21", current_account_id=PAPER_ACCOUNT)
     assert events[1].from_status is events[1].to_status is OrderLifecycle.SUBMITTED
@@ -804,7 +809,7 @@ def test_r2_1_a_same_status_callback_that_first_supplies_the_client_id_records_o
         tracker.ingest(
             _submitted_update("i-r21", permanent_id=_PERM_ID, client_id=_CLIENT_ID),
             current_account_id=PAPER_ACCOUNT,
-        )
+        ).recorded
         is False
     )
     assert len(_identity_rows(database, "i-r21")) == 2
@@ -823,13 +828,13 @@ def test_r2_1b_a_divergent_client_id_is_recorded_as_evidence_and_the_client_acce
     assert tracker.ingest(
         _submitted_update("i-r21b", permanent_id=_PERM_ID, client_id=_CLIENT_ID),
         current_account_id=PAPER_ACCOUNT,
-    )
+    ).recorded
     # (4242, 17) -> (4242, 18): the contradiction is evidence (a row), and the CLIENT accessor
     # is the one that raises — the permId accessor still resolves the single 4242
     assert tracker.ingest(
         _submitted_update("i-r21b", permanent_id=_PERM_ID, client_id=_CLIENT_ID + 1),
         current_account_id=PAPER_ACCOUNT,
-    )
+    ).recorded
     assert _identity_rows(database, "i-r21b") == [
         (_PERM_ID, _CLIENT_ID),
         (_PERM_ID, _CLIENT_ID + 1),
@@ -865,3 +870,121 @@ def test_r2_2_the_repository_docstring_states_the_typed_conflict_policy_not_late
     assert "OrderIdentityConflict" in doc
     assert "never" in doc  # the policy sentence: never latest-wins, never first-wins
     assert "latest" not in doc.lower()
+
+
+# =============================================================================================
+# BP-2 r4 — Daybreak's HOLD-DELTA at 018028a (R-g): ingest returns a structured outcome; the
+# restart report counts ONLY lifecycle changes; a refinement-only observation is reported
+# through the existing reason string — no report-shape change.
+# =============================================================================================
+
+
+class _NoPermIdAckBroker(FakeBroker):
+    """The venue's placeOrder acknowledgement reports clientId 17 but no permId yet — the
+    live production shape (OrderSubmission.permanent_id is optional; official_ibkr.py
+    initialises it to None until an acknowledgement supplies it)."""
+
+    async def submit_order(self, request: OrderRequest, **kwargs: object) -> OrderSubmission:
+        submission = await super().submit_order(request, **kwargs)
+        return submission.model_copy(update={"permanent_id": None, "client_id": _CLIENT_ID})
+
+
+def test_r4_1_ingest_returns_a_structured_outcome_that_cannot_be_mistaken_for_the_old_bool(
+    database: Database,
+) -> None:
+    intents = OrderIntentRepository(database.sessions)
+    repo = OrderTrackerRepository(database.sessions)
+    tracker = OrderTracker(intents, repo)
+    intents.create(
+        _intent("i-r41", status=OrderLifecycle.SUBMISSION_UNKNOWN), current_account_id=PAPER_ACCOUNT
+    )
+    lifecycle = tracker.ingest(
+        _submitted_update("i-r41", permanent_id=None, client_id=_CLIENT_ID),
+        current_account_id=PAPER_ACCOUNT,
+    )
+    assert isinstance(lifecycle, IngestOutcome)
+    assert (lifecycle.lifecycle_changed, lifecycle.identity_refined) == (True, False)
+    refinement = tracker.ingest(
+        _submitted_update("i-r41", permanent_id=_PERM_ID, client_id=_CLIENT_ID),
+        current_account_id=PAPER_ACCOUNT,
+    )
+    assert (refinement.lifecycle_changed, refinement.identity_refined) == (False, True)
+    duplicate = tracker.ingest(
+        _submitted_update("i-r41", permanent_id=_PERM_ID, client_id=_CLIENT_ID),
+        current_account_id=PAPER_ACCOUNT,
+    )
+    assert (duplicate.lifecycle_changed, duplicate.identity_refined) == (False, False)
+    assert (lifecycle.recorded, refinement.recorded, duplicate.recorded) == (True, True, False)
+    with pytest.raises(TypeError, match="lifecycle_changed"):
+        bool(duplicate)  # the old `if ingest(...)` / `assert ingest(...)` fails loudly
+
+
+def test_r4_2_a_restart_identity_refinement_is_evidence_not_an_applied_lifecycle_transition() -> (
+    None
+):
+    # Daybreak's production-shaped probe (logs/daybreak-probe-bp2r3.out:17): a post-R-c ACK row
+    # (None, 17), then the broker reports (4242, 17) with the SAME lifecycle.
+    h = _Harness(_NoPermIdAckBroker(), paper_settings())
+    try:
+        intent = _short_put_intent()
+        _drive_to_confirmed(h, intent, FIXED_NOW)
+        assert h.service.submit(intent, writer_lease_held=True, now=FIXED_NOW).submitted  # type: ignore[arg-type]
+        assert _harness_events(h, "intent-1")[-1] == (2, None, _CLIENT_ID)  # the ACK row
+        h.broker._open_orders = (
+            _working_order(order_ref=intent.correlation_id, permanent_id=_PERM_ID).model_copy(  # type: ignore[attr-defined]
+                update={"client_id": h.settings.ib_client_id, "limit_price": intent.limit_price}  # type: ignore[attr-defined]
+            ),
+        )
+
+        report = h.service.reconcile_on_restart_report(now=FIXED_NOW)
+
+        rows = _harness_events(h, "intent-1")
+        assert rows[-1] == (3, _PERM_ID, _CLIENT_ID)  # ONE identity row appended
+        assert [item.intent_id for item in report.proven] == ["intent-1"]
+        assert (
+            report.proven[0].local_status
+            is report.proven[0].broker_status
+            is OrderLifecycle.SUBMITTED
+        )
+        assert report.proven[0].transition_applied is False
+        assert report.proven[0].reason == "identity evidence refined; lifecycle unchanged"
+        assert report.applied_updates == ()
+        assert report.unresolved == ()
+        # the operator-visible integer (service.reconcile_on_restart -> api applied_count)
+        assert h.service.reconcile_on_restart(now=FIXED_NOW) == 0
+        assert _harness_events(h, "intent-1") == rows  # the second pass is idempotent
+        assert h.tracker.permanent_id("intent-1", current_account_id=PAPER_ACCOUNT) == _PERM_ID
+    finally:
+        h.close()
+
+
+def test_r4_3_a_genuine_lifecycle_recovery_still_counts_as_an_applied_transition() -> None:
+    h = _Harness(_NoPermIdAckBroker(), paper_settings())
+    try:
+        intent = _short_put_intent()
+        _drive_to_confirmed(h, intent, FIXED_NOW)
+        assert h.service.submit(intent, writer_lease_held=True, now=FIXED_NOW).submitted  # type: ignore[arg-type]
+        h.broker._open_orders = (
+            _working_order(order_ref=intent.correlation_id, permanent_id=_PERM_ID).model_copy(  # type: ignore[attr-defined]
+                update={
+                    "client_id": h.settings.ib_client_id,
+                    "limit_price": intent.limit_price,  # type: ignore[attr-defined]
+                    "filled_quantity": Decimal("1"),
+                    "remaining_quantity": Decimal("0"),
+                    "lifecycle": OrderLifecycle.FILLED,
+                }
+            ),
+        )
+        report = h.service.reconcile_on_restart_report(now=FIXED_NOW)
+        assert report.proven[0].transition_applied is True
+        assert report.proven[0].reason == "matching broker order or execution observed"
+        assert len(report.applied_updates) == 1
+        assert report.applied_updates[0].lifecycle is OrderLifecycle.FILLED
+        stored = h.service.get("intent-1")
+        assert stored is not None and stored.status is OrderLifecycle.FILLED
+        assert _harness_events(h, "intent-1")[-1][1:] == (_PERM_ID, _CLIENT_ID)  # on the row
+        # a plain proven no-op (nothing recorded) keeps the original reason
+        report_again = h.service.reconcile_on_restart_report(now=FIXED_NOW)
+        assert report_again.proven == () or report_again.applied_updates == ()
+    finally:
+        h.close()

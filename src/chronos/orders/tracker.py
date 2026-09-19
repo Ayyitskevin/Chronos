@@ -11,6 +11,7 @@ fills only ever move forward.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 
@@ -44,6 +45,34 @@ class OrderIdentityConflict(ValueError):
         super().__init__(
             f"identity conflict: intent {intent_id!r} persisted {noun} {listed} disagree"
         )
+
+
+@dataclass(frozen=True, slots=True)
+class IngestOutcome:
+    """What :meth:`OrderTracker.ingest` did with one observation (BP-2 r4, R-g).
+
+    ``lifecycle_changed``: the intent's status advanced (a transition row was
+    written). ``identity_refined``: a same-status observation supplied broker
+    identity the rows lacked (an IDENTITY row was written) — evidence, never a
+    lifecycle transition. Both False: a duplicate / stale / benign no-op. This is
+    deliberately NOT a bool: the old single flag conflated the two meanings and
+    the restart report published a refinement as an applied transition.
+    """
+
+    lifecycle_changed: bool
+    identity_refined: bool
+
+    @property
+    def recorded(self) -> bool:
+        return self.lifecycle_changed or self.identity_refined
+
+    def __bool__(self) -> bool:
+        raise TypeError(
+            "IngestOutcome is not a bool: read .lifecycle_changed / .identity_refined / .recorded"
+        )
+
+
+_NOTHING_RECORDED = IngestOutcome(lifecycle_changed=False, identity_refined=False)
 
 
 class OrderStatusUpdate(ChronosModel):
@@ -114,8 +143,13 @@ class OrderTracker:
         self._intents = intents
         self._tracker = tracker_repo
 
-    def ingest(self, update: OrderStatusUpdate, *, current_account_id: str) -> bool:
-        """Apply one broker observation. Returns False on a no-op/duplicate/stale event."""
+    def ingest(self, update: OrderStatusUpdate, *, current_account_id: str) -> IngestOutcome:
+        """Apply one broker observation.
+
+        Returns an :class:`IngestOutcome`: ``lifecycle_changed`` for a genuine
+        transition, ``identity_refined`` for a same-status observation that first
+        supplied broker identity (R-d), neither for a no-op/duplicate/stale event.
+        """
 
         intent = self._intents.get(update.intent_id, current_account_id=current_account_id)
         if intent is None:
@@ -130,7 +164,7 @@ class OrderTracker:
         if update.lifecycle in {OrderLifecycle.PARTIALLY_FILLED, OrderLifecycle.FILLED}:
             prior_filled = self._latest_filled(update.intent_id, current_account_id)
             if update.filled_quantity < prior_filled:
-                return False
+                return _NOTHING_RECORDED
 
         machine = OrderLifecycleMachine(intent.status)
         # apply() raises OrderLifecycleError on a contradiction (surfaced to the
@@ -138,14 +172,15 @@ class OrderTracker:
         # same-status callback newly supplies the broker identity (R-d).
         if not machine.apply(update.lifecycle):
             if update.lifecycle is not intent.status:
-                return False  # an out-of-order message after a terminal state: absorb it
-            return self._record_identity_refinement(update, intent.status, current_account_id)
+                return _NOTHING_RECORDED  # an out-of-order message after a terminal state
+            refined = self._record_identity_refinement(update, intent.status, current_account_id)
+            return IngestOutcome(lifecycle_changed=False, identity_refined=refined)
 
         event_key = (
             f"{update.intent_id}:{update.broker_order_id}:"
             f"{update.lifecycle.value}:{update.filled_quantity}"
         )
-        return self._tracker.record_transition(
+        advanced = self._tracker.record_transition(
             intent_id=update.intent_id,
             event_key=event_key,
             source=update.source,
@@ -166,6 +201,7 @@ class OrderTracker:
             occurred_at=update.occurred_at,
             enforce_from_status=True,
         )
+        return IngestOutcome(lifecycle_changed=advanced, identity_refined=False)
 
     def _record_identity_refinement(
         self, update: OrderStatusUpdate, status: OrderLifecycle, current_account_id: str

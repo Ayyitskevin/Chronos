@@ -596,10 +596,14 @@ def test_partial_then_full_fill_is_monotonic(harness: _Harness) -> None:
         remaining_quantity=Decimal("1"),
         occurred_at=FIXED_NOW,
     )
-    assert harness.tracker.ingest(partial, current_account_id=PAPER_ACCOUNT) is True
+    assert (
+        harness.tracker.ingest(partial, current_account_id=PAPER_ACCOUNT).lifecycle_changed is True
+    )
     # A stale duplicate reporting a LOWER cumulative fill is ignored.
     stale = partial.model_copy(update={"filled_quantity": Decimal("0")})
-    assert harness.tracker.ingest(stale, current_account_id=PAPER_ACCOUNT) is False
+    assert (
+        harness.tracker.ingest(stale, current_account_id=PAPER_ACCOUNT).lifecycle_changed is False
+    )
     fill = OrderStatusUpdate(
         intent_id="intent-1",
         broker_order_id=9001,
@@ -608,7 +612,7 @@ def test_partial_then_full_fill_is_monotonic(harness: _Harness) -> None:
         remaining_quantity=Decimal("0"),
         occurred_at=FIXED_NOW,
     )
-    assert harness.tracker.ingest(fill, current_account_id=PAPER_ACCOUNT) is True
+    assert harness.tracker.ingest(fill, current_account_id=PAPER_ACCOUNT).lifecycle_changed is True
     stored = harness.service.get("intent-1")
     assert stored is not None and stored.status is OrderLifecycle.FILLED
 
@@ -625,8 +629,8 @@ def test_duplicate_callback_is_idempotent(harness: _Harness) -> None:
         remaining_quantity=Decimal("0"),
         occurred_at=FIXED_NOW,
     )
-    assert harness.tracker.ingest(fill, current_account_id=PAPER_ACCOUNT) is True
-    assert harness.tracker.ingest(fill, current_account_id=PAPER_ACCOUNT) is False
+    assert harness.tracker.ingest(fill, current_account_id=PAPER_ACCOUNT).lifecycle_changed is True
+    assert harness.tracker.ingest(fill, current_account_id=PAPER_ACCOUNT).lifecycle_changed is False
 
 
 def test_cancel_moves_through_cancel_pending(harness: _Harness) -> None:
@@ -1203,7 +1207,7 @@ def test_late_submit_ack_cannot_downgrade_reconciled_fill() -> None:
                     occurred_at=FIXED_NOW,
                 ),
                 current_account_id=PAPER_ACCOUNT,
-            )
+            ).lifecycle_changed
 
         broker.after_send = publish_fill
         outcome = h.service.submit(intent, writer_lease_held=True, now=FIXED_NOW)  # type: ignore[arg-type]

@@ -504,16 +504,23 @@ class OrderRestartReconciler:
                     )
                 )
                 continue
-            transition_applied = self._tracker.ingest(update, current_account_id=current_account_id)
-            if transition_applied:
+            outcome = self._tracker.ingest(update, current_account_id=current_account_id)
+            # R-g: only a LIFECYCLE change is an applied transition (the integer the
+            # operator sees as applied_count); an identity refinement is evidence and
+            # is named through the existing reason string — the report keeps its shape.
+            if outcome.lifecycle_changed:
                 applied.append(update)
             proven.append(
                 RestartOrderObservation(
                     intent_id=intent.intent_id,
                     local_status=intent.status,
                     broker_status=update.lifecycle,
-                    transition_applied=transition_applied,
-                    reason="matching broker order or execution observed",
+                    transition_applied=outcome.lifecycle_changed,
+                    reason=(
+                        "identity evidence refined; lifecycle unchanged"
+                        if outcome.identity_refined and not outcome.lifecycle_changed
+                        else "matching broker order or execution observed"
+                    ),
                 )
             )
 
