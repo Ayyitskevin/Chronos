@@ -529,3 +529,36 @@ def test_r2_5_the_reverse_scan_resolves_every_import_spelling() -> None:
         assert _imports_the_repository(_imports(relative, source)), source
     # and an unrelated import is not a hit
     assert not _imports_the_repository(_imports(sample, "from chronos.persistence import schema\n"))
+
+
+# ------------------------------------------------------------------ (BP-1b) the typed refusal
+
+
+def test_bp1b_4a_an_unknown_correlation_id_is_a_typed_refusal_before_any_insert(
+    database: Database,
+) -> None:
+    """Muse item 2 for BP-1b: a non-draft ``correlation_id`` is refused by the repository itself,
+    typed, with zero rows and no ``IntegrityError`` anywhere in the exception's chain."""
+
+    from sqlalchemy.exc import IntegrityError
+
+    from chronos.persistence.execution_repository import UnknownCorrelation
+
+    repository = ExecutionRepository(database.sessions)
+    with pytest.raises(UnknownCorrelation) as info:
+        repository.record(_execution(), correlation_id="not-a-draft")
+    error: BaseException | None = info.value
+    chain: list[type[BaseException]] = []
+    while error is not None:
+        chain.append(type(error))
+        error = error.__cause__ or error.__context__
+    assert IntegrityError not in chain, chain
+    assert (info.value.execution_id, info.value.correlation_id) == (
+        "0000e0d5.64f1a2b3.01.01",
+        "not-a-draft",
+    )
+    assert isinstance(info.value, ValueError) and "not-a-draft" in str(info.value)
+    assert _rows(database) == ([], [])
+    # the session rolled back cleanly: the same execution records normally afterwards
+    assert repository.record(_execution(), correlation_id=None) is True
+    assert len(_rows(database)[0]) == 1

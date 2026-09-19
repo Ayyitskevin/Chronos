@@ -55,6 +55,7 @@ from chronos.orders.session_drawdown import SessionDrawdownBreaker
 from chronos.orders.submission import OrderSubmissionBoundary
 from chronos.orders.tracker import OrderTracker
 from chronos.persistence.database import Database
+from chronos.persistence.execution_repository import ExecutionRepository
 from chronos.persistence.order_repositories import (
     OrderConfirmationRepository,
     OrderIntentRepository,
@@ -265,6 +266,9 @@ def build_runtime(*, register_atexit: bool = True) -> AppRuntime:
             # ADR-0010: a held crypto position must not surface as a permanent
             # MANUAL_REVIEW 'outside the configured allowlist' symbol.
             tuple(dict.fromkeys(settings.symbol_allowlist + settings.crypto_allowlist)),
+            # BP-1b: executions the pass observes persist once into fills + commissions;
+            # evidence only — no verdict, admission or risk path reads them back.
+            execution_repository=ExecutionRepository(database.sessions),
         )
         short_put_candidates = ShortPutCandidateService(
             connection=connection,
