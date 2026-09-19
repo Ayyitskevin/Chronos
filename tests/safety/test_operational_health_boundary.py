@@ -21,6 +21,7 @@ PROJECTION_MODULES = (
     "chronos.operations.health",
     "chronos.operations.clock",
     "chronos.operations.external_probe",
+    "chronos.operations.slo",
 )
 
 
@@ -57,6 +58,13 @@ def test_operational_health_cannot_become_an_authority_dependency() -> None:
 
 def test_external_probe_is_inside_the_authority_import_boundary() -> None:
     assert "chronos.operations.external_probe" in PROJECTION_MODULES
+
+
+def test_slo_evaluator_is_inside_the_authority_import_boundary() -> None:
+    """SLO-1: the offline evaluator is a projection module like the probe — an observation
+    the authority packages are structurally barred from importing."""
+
+    assert "chronos.operations.slo" in PROJECTION_MODULES
 
 
 def test_authority_boundary_detects_from_package_imports(tmp_path: Path) -> None:

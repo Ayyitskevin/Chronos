@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 
 from fastapi import Request
 
@@ -13,13 +14,26 @@ from chronos.operations.health import (
     ClockFact,
     OperationalFacts,
     OperationalHealth,
+    SloFact,
     WriterRole,
     evaluate_operational_health,
 )
+from chronos.operations.slo import read_evaluation_cache
 from chronos.supervisor import durable
 from chronos.supervisor.runtime import AutonomyRuntime
 from chronos.utils.identifiers import account_fingerprint
 from chronos.utils.time import utc_now
+
+
+def slo_fact(path: Path) -> SloFact:
+    """The last SLO evaluation as a fact, from the cache the offline evaluator publishes.
+
+    One bounded, no-follow read; never raises — a problem is typed into the fact. The backend
+    reads this file and nothing else about SLOs: it never runs the evaluator (SLO-1).
+    """
+
+    reading = read_evaluation_cache(path)
+    return SloFact(evaluated_at=reading.evaluated_at, state=reading.state, problem=reading.problem)
 
 
 def collect_operational_health(
@@ -81,6 +95,8 @@ def collect_operational_health(
 
     max_evidence_age = settings.reconciliation_max_evidence_age_seconds
     clock = state.clock_health.snapshot()
+    slo_path = settings.ops_slo_evaluation_file
+    slo = SloFact() if slo_path is None else slo_fact(slo_path)
     facts = OperationalFacts(
         backend_initialized=True,
         writer_role=WriterRole.WRITER if state.writer else WriterRole.READ_ONLY,
@@ -117,5 +133,6 @@ def collect_operational_health(
             failure_code=clock.failure_code,
             generation=clock.generation,
         ),
+        slo=slo,
     )
     return evaluate_operational_health(facts, now=moment)
