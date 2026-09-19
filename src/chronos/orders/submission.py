@@ -802,6 +802,8 @@ class OrderSubmissionBoundary:
             to_status=submission.lifecycle,
             current_account_id=account_id,
             broker_order_id=submission.broker_order_id,
+            permanent_id=submission.permanent_id,
+            client_id=submission.client_id,
             evidence={
                 "permanent_id": submission.permanent_id,
                 "client_id": submission.client_id,

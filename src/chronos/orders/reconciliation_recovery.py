@@ -24,7 +24,7 @@ from chronos.broker.connection import BrokerConnectionManager
 from chronos.domain.enums import ConnectionState, OrderLifecycle
 from chronos.domain.models import BrokerExecution, BrokerOrder
 from chronos.orders.reconciliation_readiness import ReconciliationReadiness
-from chronos.orders.tracker import OrderStatusUpdate, OrderTracker
+from chronos.orders.tracker import OrderIdentityConflict, OrderStatusUpdate, OrderTracker
 from chronos.persistence.order_repositories import (
     OrderIntentRecord,
     OrderIntentRepository,
@@ -154,17 +154,64 @@ def _executions_match_intent(
     )
 
 
+def _permid_contradicts(reported: int | None, persisted: int | None) -> bool:
+    return reported is not None and persisted is not None and reported != persisted
+
+
 def _is_owned(
     observation: BrokerOrder | BrokerExecution,
     *,
     order_ref: str,
     persisted_permanent_id: int | None,
 ) -> bool:
-    """The identity set: the owned CHR- reference, or the persisted broker permId (BP-2)."""
+    """The identity set (BP-2, narrowed in r1 by R-f).
 
-    return observation.order_ref == order_ref or (
-        persisted_permanent_id is not None and observation.permanent_id == persisted_permanent_id
-    )
+    A NONBLANK observation reference must equal the owned CHR- reference, and its
+    reported permId (when any) must agree with the persisted one. The persisted
+    permId is the identity ONLY when the observation carries no reference at all
+    (absent/blank) — a venue that reports the order back without its ``orderRef``.
+    A nonblank, mismatching reference is never ours, whatever permId it carries.
+    """
+
+    if observation.order_ref:
+        if observation.order_ref != order_ref:
+            return False
+        return not _permid_contradicts(observation.permanent_id, persisted_permanent_id)
+    return persisted_permanent_id is not None and observation.permanent_id == persisted_permanent_id
+
+
+def _identity_conflict_reason(
+    *,
+    order_ref: str,
+    persisted_permanent_id: int | None,
+    open_orders: tuple[BrokerOrder, ...],
+    executions: tuple[BrokerExecution, ...],
+) -> str | None:
+    """The typed reason for a snapshot that contradicts the persisted identity (R-f)."""
+
+    if persisted_permanent_id is None:
+        return None
+    for kind, observations in (("order", open_orders), ("execution", executions)):
+        for observation in observations:
+            if (
+                observation.order_ref
+                and observation.order_ref != order_ref
+                and observation.permanent_id == persisted_permanent_id
+            ):
+                return (
+                    f"identity conflict: broker {kind} {observation.broker_order_id} carrying "
+                    f"persisted permId {persisted_permanent_id} reports order reference "
+                    f"{observation.order_ref!r}"
+                )
+            if observation.order_ref == order_ref and _permid_contradicts(
+                observation.permanent_id, persisted_permanent_id
+            ):
+                return (
+                    f"identity conflict: owned order reference reports permId "
+                    f"{observation.permanent_id} on broker {kind} "
+                    f"{observation.broker_order_id}, persisted {persisted_permanent_id}"
+                )
+    return None
 
 
 def resolve_from_broker_evidence(
@@ -181,14 +228,17 @@ def resolve_from_broker_evidence(
 ) -> OrderStatusUpdate | None:
     """Derive the true lifecycle for one intent from broker evidence.
 
-    Matching begins with the intent's owned ``order_ref`` (CHR-) — or, when the
-    persisted events carry the broker's ``permId``, that ``permanent_id`` (BP-2:
-    a venue that reports the order back without its ``orderRef`` is still
-    matched) — and requires coherent account and economic identity before
-    Chronos acts. Chronos NEVER re-submits. Returns ``None`` (leave unresolved)
-    when the order is absent: a timed-out submit very often DID reach the venue,
-    so mere absence is not positive evidence of rejection and must not drive a
-    live order to a wrong terminal state.
+    Matching begins with the intent's owned ``order_ref`` (CHR-); the persisted
+    ``permanent_id`` from the events is used as the identity only when the
+    observation's reference is absent/blank (BP-2 r1, R-f: a venue that reports
+    the order back without its ``orderRef``). A nonblank, mismatching reference
+    with our permId, or our reference with a contradicting permId, is a typed
+    identity conflict and leaves the intent unresolved. Matching then requires
+    coherent account and economic identity before Chronos acts. Chronos NEVER
+    re-submits. Returns ``None`` (leave unresolved) when the order is absent: a
+    timed-out submit very often DID reach the venue, so mere absence is not
+    positive evidence of rejection and must not drive a live order to a wrong
+    terminal state.
     """
 
     order_ref = intent.order_ref
@@ -298,6 +348,14 @@ def _unresolved_evidence_reason(
     order_ref = intent.order_ref
     if not order_ref:
         return "local intent has no owned broker order reference"
+    conflict = _identity_conflict_reason(
+        order_ref=order_ref,
+        persisted_permanent_id=persisted_permanent_id,
+        open_orders=open_orders,
+        executions=executions,
+    )
+    if conflict is not None:
+        return conflict
     matching_orders = tuple(
         order
         for order in open_orders
@@ -390,10 +448,24 @@ class OrderRestartReconciler:
                 intent.intent_id,
                 current_account_id=current_account_id,
             )
-            persisted_permanent_id = self._tracker.permanent_id(
-                intent.intent_id,
-                current_account_id=current_account_id,
-            )
+            try:
+                persisted_permanent_id = self._tracker.permanent_id(
+                    intent.intent_id,
+                    current_account_id=current_account_id,
+                )
+            except OrderIdentityConflict as conflict:
+                # R-e: contradictory persisted permIds fail closed — never the
+                # latest, never the first; the operator sees the typed reason.
+                unresolved.append(
+                    RestartOrderObservation(
+                        intent_id=intent.intent_id,
+                        local_status=intent.status,
+                        broker_status=None,
+                        transition_applied=False,
+                        reason=str(conflict),
+                    )
+                )
+                continue
             expected_limit_price = self._tracker.effective_limit_price(
                 intent.intent_id,
                 original_limit_price=intent.limit_price,

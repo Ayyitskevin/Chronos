@@ -18,9 +18,26 @@ from chronos.domain.enums import OrderLifecycle
 from chronos.domain.models import ChronosModel
 from chronos.orders.state_machine import OrderLifecycleMachine
 from chronos.persistence.order_repositories import (
+    OrderEventRecord,
     OrderIntentRepository,
     OrderTrackerRepository,
 )
+
+
+class OrderIdentityConflict(ValueError):
+    """Two distinct non-null broker permIds were persisted for one intent (BP-2 r1, R-e).
+
+    Reconciliation treats the intent as UNRESOLVED with this reason — never the
+    latest value, never the first; the contradiction is evidence, not a choice.
+    """
+
+    def __init__(self, intent_id: str, permanent_ids: tuple[int, ...]) -> None:
+        self.intent_id = intent_id
+        self.permanent_ids = permanent_ids
+        listed = " and ".join(str(value) for value in permanent_ids)
+        super().__init__(
+            f"identity conflict: intent {intent_id!r} persisted permanent ids {listed} disagree"
+        )
 
 
 class OrderStatusUpdate(ChronosModel):
@@ -72,6 +89,14 @@ def broker_status_to_lifecycle(
     return OrderLifecycle.SUBMISSION_UNKNOWN
 
 
+def _latest(events: tuple[OrderEventRecord, ...], field: str) -> int | None:
+    for event in reversed(events):
+        value = getattr(event, field)
+        if value is not None:
+            return int(value)
+    return None
+
+
 class OrderTracker:
     """Drive lifecycle persistence from normalized broker observations."""
 
@@ -103,9 +128,12 @@ class OrderTracker:
 
         machine = OrderLifecycleMachine(intent.status)
         # apply() raises OrderLifecycleError on a contradiction (surfaced to the
-        # caller); returns False for a benign no-op we can skip.
+        # caller); returns False for a benign no-op we can skip — unless a
+        # same-status callback newly supplies the broker identity (R-d).
         if not machine.apply(update.lifecycle):
-            return False
+            if update.lifecycle is not intent.status:
+                return False  # an out-of-order message after a terminal state: absorb it
+            return self._record_identity_refinement(update, intent.status, current_account_id)
 
         event_key = (
             f"{update.intent_id}:{update.broker_order_id}:"
@@ -127,6 +155,55 @@ class OrderTracker:
             remaining_quantity=update.remaining_quantity,
             evidence={
                 "permanent_id": update.permanent_id,
+                "occurred_at": update.occurred_at.isoformat(),
+            },
+            occurred_at=update.occurred_at,
+            enforce_from_status=True,
+        )
+
+    def _record_identity_refinement(
+        self, update: OrderStatusUpdate, status: OrderLifecycle, current_account_id: str
+    ) -> bool:
+        """A same-status callback that first supplies permId/clientId (BP-2 r1, R-d).
+
+        Appends ONE identity-refinement row (``from_status == to_status``, source
+        ``IDENTITY``, carrying the permId and the client id the callback reported)
+        through the same CAS write as every other event; it never edits an earlier
+        row and moves no existing event. A callback whose permId is absent, or
+        equal to what is already persisted, records nothing. A contradicting permId
+        IS recorded — it is evidence — and the accessor then fails closed
+        (:class:`OrderIdentityConflict`) instead of the contradiction being dropped.
+        """
+
+        # The identity that matters is the permId — the value reconciliation matches
+        # on when the venue drops the orderRef. A callback that only repeats or only
+        # adds a client id is not new identity: the expected client id is
+        # configuration (settings.ib_client_id), never persisted state, so such an
+        # observation stays the benign no-op it always was (proven, not applied).
+        events = self._tracker.events(update.intent_id, current_account_id=current_account_id)
+        persisted_permanent_id = _latest(events, "permanent_id")
+        if update.permanent_id is None or update.permanent_id == persisted_permanent_id:
+            return False
+        return self._tracker.record_transition(
+            intent_id=update.intent_id,
+            event_key=(
+                f"{update.intent_id}:{update.broker_order_id}:identity:"
+                f"{update.permanent_id}:{update.client_id}"
+            ),
+            source="IDENTITY",
+            from_status=status,
+            to_status=status,
+            current_account_id=current_account_id,
+            broker_order_id=update.broker_order_id,
+            permanent_id=update.permanent_id,
+            client_id=update.client_id,
+            filled_quantity=update.filled_quantity,
+            remaining_quantity=update.remaining_quantity,
+            evidence={
+                "permanent_id": update.permanent_id,
+                "client_id": update.client_id,
+                "refinement": "identity",
+                "observed_via": update.source,
                 "occurred_at": update.occurred_at.isoformat(),
             },
             occurred_at=update.occurred_at,
@@ -198,16 +275,20 @@ class OrderTracker:
         return None
 
     def permanent_id(self, intent_id: str, *, current_account_id: str) -> int | None:
-        """The most recent broker permId recorded for this intent, if any (BP-2).
+        """The broker permId persisted for this intent, if any (BP-2).
 
         A later event may carry the permId an earlier one lacked; the rows are
-        append-only, so the latest non-None column is the intent's identity.
+        append-only, so the single non-None value is the intent's identity. Two
+        DISTINCT non-None values fail closed with :class:`OrderIdentityConflict`
+        (R-e) — never the latest, never the first.
         """
         events = self._tracker.events(intent_id, current_account_id=current_account_id)
-        for event in reversed(events):
-            if event.permanent_id is not None:
-                return event.permanent_id
-        return None
+        distinct = tuple(
+            dict.fromkeys(event.permanent_id for event in events if event.permanent_id is not None)
+        )
+        if len(distinct) > 1:
+            raise OrderIdentityConflict(intent_id, distinct)
+        return distinct[0] if distinct else None
 
     def effective_limit_price(
         self,
