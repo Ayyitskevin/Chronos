@@ -684,6 +684,30 @@ def _write_document(tmp_path: Path, document: SloDocument) -> Path:
     return path
 
 
+def test_4f_a_health_document_recorded_before_slo_1_still_parses() -> None:
+    """The campaign status tool validates recorded health.json bodies with extra forbidden
+    (``src/chronos/cli/campaign_status.py``); a required new field would have refused every
+    document written before this change. On READ the field defaults to an honest absence."""
+
+    from chronos.api.routes.health import HealthResponse
+
+    app = FastAPI()
+    app.include_router(health_router)
+    with TestClient(app) as client:
+        body = client.get("/health").json()
+    assert body["observations"]["slo"]["problem"] == "no evaluation cache is configured"
+    del body["observations"]["slo"]
+    recorded = HealthResponse.model_validate_json(json.dumps(body), extra="forbid")
+    assert recorded.observations.slo.state is SloState.UNKNOWN
+    assert recorded.observations.slo.evaluated_at is None
+    assert recorded.observations.slo.problem == "absent from this health document"
+    with pytest.raises(ValueError, match="extra"):
+        HealthResponse.model_validate_json(
+            json.dumps({**body, "observations": {**body["observations"], "slo_x": 1}}),
+            extra="forbid",
+        )
+
+
 def test_4e_the_document_is_read_through_the_same_bounded_no_follow_reader(tmp_path: Path) -> None:
     target = tmp_path / "real.json"
     target.write_text(json.dumps({"deadman_max_age_s": 180.0}), encoding="utf-8")

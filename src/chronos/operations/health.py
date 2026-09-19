@@ -258,6 +258,17 @@ class SloObservationReport(_HealthModel):
     problem: str | None
 
 
+def _slo_absent() -> SloObservationReport:
+    """A recorded health document from before SLO-1 carries no ``slo``: still a valid v2 body."""
+
+    return SloObservationReport(
+        evaluated_at=None,
+        state=SloState.UNKNOWN,
+        age_seconds=None,
+        problem="absent from this health document",
+    )
+
+
 class OperationalObservations(_HealthModel):
     writer_role: WriterRole
     store_readable: bool | None
@@ -268,7 +279,9 @@ class OperationalObservations(_HealthModel):
     reconciliation: ReconciliationObservationReport
     clock: ClockState
     clock_evidence: ClockObservationReport
-    slo: SloObservationReport
+    #: Optional on READ so health documents recorded before SLO-1 still parse (the campaign
+    #: status tool reads them); the projection always writes it.
+    slo: SloObservationReport = Field(default_factory=_slo_absent)
 
 
 class OperationalHealth(_HealthModel):
