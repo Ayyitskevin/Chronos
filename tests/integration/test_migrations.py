@@ -818,7 +818,7 @@ def test_v11_database_gains_credential_bindings_without_relabelling_rows(
 def test_v13_database_gains_execution_identity_and_keeps_its_fill_rows(tmp_path: Path) -> None:
     """Migration 0013 (BP-1, schema v14) adds the execution identity to ``fills`` without
     touching a single prior column: a pre-0013 fill row reads back byte-equal on every old
-    column, the new columns are NULL / the ALTER's ``0`` default, and the drift checker
+    column, the new columns are all NULL (no default is ever synthesized), and the drift checker
     accepts the upgraded store.
     """
 
@@ -859,7 +859,7 @@ def test_v13_database_gains_execution_identity_and_keeps_its_fill_rows(tmp_path:
     inspector = sa.inspect(engine)
     columns = {column["name"]: column for column in inspector.get_columns("fills")}
     assert columns["permanent_id"]["nullable"] is True
-    assert columns["client_id"]["nullable"] is False
+    assert columns["client_id"]["nullable"] is True  # unknown stays unknown (BP-1 r2, R-a)
     assert columns["order_ref"]["nullable"] is True
     assert any(
         index["column_names"] == ["permanent_id"] for index in inspector.get_indexes("fills")
@@ -875,7 +875,7 @@ def test_v13_database_gains_execution_identity_and_keeps_its_fill_rows(tmp_path:
     engine.dispose()
 
     assert after == before  # every old column byte-equal
-    assert identity == (None, 0, None)
+    assert identity == (None, None, None)  # never a synthesized client 0
     assert version == SCHEMA_VERSION == 14
 
     database = Database(f"sqlite:///{db_path}")

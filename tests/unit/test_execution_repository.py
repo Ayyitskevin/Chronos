@@ -12,12 +12,15 @@ import hashlib
 import os
 import subprocess
 import sys
-from datetime import UTC, date, datetime
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
 import sqlalchemy as sa
+from sqlalchemy.orm import Session, sessionmaker
 
 from chronos.domain.enums import OptionRight, OrderSide
 from chronos.domain.models import BrokerExecution, OptionContract, UnderlyingContract
@@ -198,7 +201,7 @@ def test_2_fills_carries_the_identity_columns_and_the_drift_checker_accepts_them
     inspector = sa.inspect(database.engine)
     columns = {c["name"]: c for c in inspector.get_columns("fills")}
     assert columns["permanent_id"]["nullable"] is True
-    assert columns["client_id"]["nullable"] is False
+    assert columns["client_id"]["nullable"] is True  # r2 (ruling R-a): unknown stays unknown
     assert columns["order_ref"]["nullable"] is True
     assert any(
         index["column_names"] == ["permanent_id"] for index in inspector.get_indexes("fills")
@@ -289,15 +292,32 @@ def test_5_the_engine_fill_path_holds_a_broker_event_not_an_execution_so_nothing
 # ------------------------------------------------------------------ (6) the authority line
 
 
-def _imports(path: Path) -> list[str]:
-    tree = ast.parse(path.read_text(encoding="utf-8"))
+def _imports(path: Path, source: str | None = None) -> list[str]:
+    """Every module name a file can reach by import — the shape of
+    tests/safety/test_operational_health_boundary.py::_imports_operational_projection, plus
+    the relative form: ``import a.b``, ``from a import b [as x]`` (→ ``a`` AND ``a.b``), and
+    ``from . import b`` / ``from .b import c`` resolved against the file's own package."""
+
+    tree = ast.parse(source if source is not None else path.read_text(encoding="utf-8"))
+    package = ".".join(path.resolve().relative_to(ROOT / "src").with_suffix("").parts[:-1])
     names: list[str] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             names += [alias.name for alias in node.names]
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            names.append(node.module)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:  # relative: from . import x / from .m import y
+                base = ".".join(package.split(".")[: len(package.split(".")) - node.level + 1])
+                module = f"{base}.{node.module}" if node.module else base
+            else:
+                module = node.module or ""
+            names.append(module)
+            names += [f"{module}.{alias.name}" for alias in node.names]
     return names
+
+
+def _imports_the_repository(names: list[str]) -> bool:
+    target = "chronos.persistence.execution_repository"
+    return any(n == target or n.startswith(target + ".") for n in names)
 
 
 def test_6_the_repository_imports_no_authority_module_and_none_imports_it() -> None:
@@ -307,7 +327,7 @@ def test_6_the_repository_imports_no_authority_module_and_none_imports_it() -> N
     importers = []
     for prefix in ("orders", "autonomy", "supervisor", "control", "execution"):
         for path in (ROOT / "src" / "chronos" / prefix).rglob("*.py"):
-            if "execution_repository" in " ".join(_imports(path)):
+            if _imports_the_repository(_imports(path)):
                 importers.append(path.relative_to(ROOT).as_posix())
     assert importers == [], importers
     # and at runtime: importing the module pulls none of the forbidden packages into sys.modules
@@ -325,3 +345,187 @@ def test_6_the_repository_imports_no_authority_module_and_none_imports_it() -> N
         check=True,
     )
     assert probe.stdout.strip() == "[]", probe.stdout
+
+
+# ------------------------------------------------------------- (r2) Daybreak's HOLD at b2b370a
+
+
+def test_r2_1_a_legacy_row_reads_client_id_none_and_a_new_row_carries_the_executions_client_id(
+    database: Database,
+) -> None:
+    """Ruling R-a: unknown stays unknown — the column is nullable, the ALTER has no default
+    (the migration suite pins the v13 upgrade to (None, None, None)); every row the
+    repository writes still carries the execution's own client id."""
+
+    inspector = sa.inspect(database.engine)
+    assert {c["name"]: c for c in inspector.get_columns("fills")}["client_id"]["nullable"] is True
+    migration = ROOT / "src/chronos/persistence/migrations/versions/0013_execution_identity.py"
+    assert "server_default" not in migration.read_text(encoding="utf-8")
+    # a legacy row (written before 0013) reads back None, never a synthesized client 0
+    with database.sessions.begin() as session:
+        session.execute(
+            sa.text(
+                "INSERT INTO fills (execution_id, broker_order_id, symbol, contract_id, "
+                "security_type, side, quantity, price, multiplier, currency, "
+                "account_fingerprint, occurred_at) VALUES ('EXEC-LEGACY', 1, 'AAPL', 100, 'OPT', "
+                "'SELL', 1, 2, 100, 'USD', :fp, '2026-01-15 15:30:00.000000')"
+            ),
+            {"fp": account_fingerprint(ACCOUNT_ID)},
+        )
+    ExecutionRepository(database.sessions).record(_execution(), correlation_id=None)
+    fills, _ = _rows(database)
+    by_id = {f[0]: f for f in fills}
+    assert by_id["EXEC-LEGACY"][3] is None
+    assert by_id["0000e0d5.64f1a2b3.01.01"][3] == 17
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["execution_id", "order_ref", "symbol", "currency", "commission_currency"],
+)
+def test_r2_2_every_persisted_broker_string_passes_the_raw_account_id_guard(
+    database: Database, field: str
+) -> None:
+    """Daybreak's probe: contract.currency='DU1234567' was stored. Each broker-controlled
+    string field is now refused by name before any write."""
+
+    raw = ACCOUNT_ID  # a raw broker account id smuggled into the field
+    if field == "currency":
+        contract = _option().model_copy(update={"currency": raw})
+        execution = _execution(contract=contract)
+    elif field == "commission_currency":
+        execution = _execution(commission="0.65", commission_currency=raw)
+    elif field == "symbol":
+        contract = _option().model_copy(update={"symbol": raw})
+        execution = _execution(contract=contract)
+    else:
+        execution = _execution(**{field: raw})
+    repository = ExecutionRepository(database.sessions)
+    with pytest.raises(ValueError, match="raw broker account IDs"):
+        repository.record(execution, correlation_id=None)
+    assert _rows(database) == ([], [])
+
+
+def test_r2_2b_the_callers_linkage_strings_pass_the_guard_too(database: Database) -> None:
+    repository = ExecutionRepository(database.sessions)
+    for kwargs in (
+        {"correlation_id": f"corr-{ACCOUNT_ID}"},
+        {"correlation_id": None, "wheel_cycle_id": f"cyc-{ACCOUNT_ID}"},
+    ):
+        with pytest.raises(ValueError, match="raw broker account IDs"):
+            repository.record(_execution(), **kwargs)
+    assert _rows(database) == ([], [])
+
+
+def test_r2_3_the_conflict_identity_is_the_broker_facts_incl_timestamp_never_the_callers_linkage(
+    database: Database,
+) -> None:
+    """Ruling R-b. The same execution_id one second apart is a conflict naming `timestamp`;
+    the same execution observed again under another correlation/cycle is a replay (False),
+    the first linkage kept — reconciliation observes the same execution many times."""
+
+    repository = ExecutionRepository(database.sessions)
+    assert repository.record(_execution(), correlation_id=None) is True
+    before = _rows(database)
+    later = _execution().model_copy(update={"timestamp": NOW + timedelta(seconds=1)})
+    with pytest.raises(ExecutionConflict, match=r"a different timestamp"):
+        repository.record(later, correlation_id=None)
+    assert _rows(database) == before
+    # the caller's linkage is not identity: a second observation under another correlation
+    # returns False, writes nothing, keeps the first linkage (None here) — one row
+    assert (
+        repository.record(_execution(), correlation_id="CORR-OTHER", wheel_cycle_id=None) is False
+    )
+    fills, commissions = _rows(database)
+    assert len(fills) == 1 and fills[0][14] is None and (fills, commissions) == before
+    # the docstring states the identity set verbatim
+    doc = (ROOT / "src/chronos/persistence/execution_repository.py").read_text(encoding="utf-8")
+    assert (
+        "execution_id + permanent_id + client_id + order_ref + contract identity (symbol, "
+        "contract_id, security_type, currency) + side + quantity + price + multiplier + "
+        "timestamp + commission amount + commission currency"
+    ) in " ".join(doc.split())
+    assert "correlation_id, wheel_cycle_id" in " ".join(doc.split())
+
+
+def _barrier_sessions(
+    database: Database, execution_id: str
+) -> tuple[sessionmaker[Session], threading.Barrier]:
+    """Daybreak's probe: two sessions both observe 'no row' before either inserts."""
+
+    barrier = threading.Barrier(2)
+
+    class BarrierSession(Session):
+        def get(self, entity, ident, **kwargs):  # type: ignore[no-untyped-def,override]
+            value = super().get(entity, ident, **kwargs)
+            if entity is FillRow and ident == execution_id and value is None:
+                barrier.wait(timeout=5)
+            return value
+
+    return sessionmaker(
+        bind=database.engine, expire_on_commit=False, class_=BarrierSession
+    ), barrier
+
+
+def test_r2_4a_two_concurrent_identical_inserts_return_true_and_false_with_one_row(
+    database: Database,
+) -> None:
+    sessions, _barrier = _barrier_sessions(database, "concurrent-exec")
+    repository = ExecutionRepository(sessions)
+
+    def write() -> str:
+        try:
+            execution = _execution(execution_id="concurrent-exec")
+            return f"return:{repository.record(execution, correlation_id=None)}"
+        except Exception as error:  # the externally visible class is the evidence
+            return f"error:{type(error).__name__}"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = sorted(future.result() for future in [pool.submit(write) for _ in range(2)])
+    assert outcomes == ["return:False", "return:True"], outcomes
+    fills, commissions = _rows(database)
+    assert [f[0] for f in fills] == ["concurrent-exec"] and len(commissions) == 1
+
+
+def test_r2_4b_a_divergent_concurrent_loser_raises_the_typed_conflict(database: Database) -> None:
+    sessions, _barrier = _barrier_sessions(database, "concurrent-exec")
+    repository = ExecutionRepository(sessions)
+
+    def write(price: str) -> str:
+        try:
+            execution = _execution(execution_id="concurrent-exec", price=price)
+            return f"return:{repository.record(execution, correlation_id=None)}"
+        except ExecutionConflict as error:
+            return f"conflict:{'price' in str(error)}"
+        except Exception as error:
+            return f"error:{type(error).__name__}"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = sorted(
+            f.result() for f in [pool.submit(write, "2.00"), pool.submit(write, "2.05")]
+        )
+    assert outcomes == ["conflict:True", "return:True"], outcomes
+    fills, _ = _rows(database)
+    assert len(fills) == 1  # the winner's row, untouched by the loser
+
+
+def test_r2_5_the_reverse_scan_resolves_every_import_spelling() -> None:
+    sample = Path(
+        ROOT / "src/chronos/orders/_probe.py"
+    )  # never written: a path for package resolution
+    spellings = [
+        "import chronos.persistence.execution_repository\n",
+        "from chronos.persistence import execution_repository\n",
+        "from chronos.persistence import execution_repository as repo\n",
+        "from chronos.persistence.execution_repository import ExecutionRepository\n",
+    ]
+    for source in spellings:
+        assert _imports_the_repository(_imports(sample, source)), source
+    relative = Path(ROOT / "src/chronos/persistence/_probe.py")
+    for source in (
+        "from . import execution_repository\n",
+        "from .execution_repository import ExecutionRepository\n",
+    ):
+        assert _imports_the_repository(_imports(relative, source)), source
+    # and an unrelated import is not a hit
+    assert not _imports_the_repository(_imports(sample, "from chronos.persistence import schema\n"))

@@ -6,9 +6,10 @@ intent reference the broker echoed) — so a persisted execution can be matched 
 broker's ``execDetails`` and to the submitted order without a second lookup. Column-only,
 like 0011: idempotent on a database whose metadata already carries the columns.
 
-``client_id`` is NOT NULL with a server default of ``0`` for the ALTER (sqlite cannot add a
-NOT NULL column without one); nothing wrote ``fills`` before this revision, so no row
-receives that default. The repository always supplies the real value.
+All three columns are NULLABLE and carry no default: a row written before this revision
+reads back ``(permanent_id=None, client_id=None, order_ref=None)`` — unknown stays unknown,
+never a synthesized client ``0`` (0 is a legitimate IB client id). The repository supplies
+the real client id on every row it writes; a reader treats a missing id as None.
 
 Revision ID: 0013
 Revises: 0012
@@ -31,10 +32,7 @@ depends_on = None
 _TABLE = "fills"
 _COLUMNS = (
     ("permanent_id", sa.Column("permanent_id", sa.Integer(), nullable=True)),
-    (
-        "client_id",
-        sa.Column("client_id", sa.Integer(), nullable=False, server_default=sa.text("0")),
-    ),
+    ("client_id", sa.Column("client_id", sa.Integer(), nullable=True)),
     ("order_ref", sa.Column("order_ref", sa.String(length=120), nullable=True)),
 )
 _INDEX = "ix_fills_permanent_id"
