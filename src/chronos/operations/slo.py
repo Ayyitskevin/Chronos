@@ -32,8 +32,12 @@ Objectives (each optional; a document declaring none is refused):
 UNKNOWN is the honest answer, never a guess: the log is absent, malformed or spans less
 than the window; a measurement needs two lines and has one; the heartbeat is absent,
 malformed or from the future; an entry is a symlink, FIFO, directory or device (refused
-typed, never followed, never blocked on). The overall state is BREACHED if any objective
-is, else UNKNOWN if any is, else MET; exit 0 / 2 / 3, 64 for a bad document.
+typed, never followed, never blocked on). Malformed includes (round 1, fail closed): a
+``state`` outside the probe's closed vocabulary, a ``verdict`` outside the watchdog's, or a
+line whose ``monotonic`` or ``assessed_at`` does not strictly increase from the line before
+— the whole log is refused before any objective is computed and the reason names the line,
+so corrupted or adversarial evidence can never read MET. The overall state is BREACHED if
+any objective is, else UNKNOWN if any is, else MET; exit 0 / 2 / 3, 64 for a bad document.
 
 Reads mirror the dead-man's discipline (the pattern is copied, the module is not imported):
 the evidence directory is reached by an ``O_NOFOLLOW`` component walk; each entry is opened
@@ -103,6 +107,12 @@ OBJECTIVES: tuple[str, ...] = (
     "deadman_max_age_s",
     "clock_max_error_s",
 )
+#: The evidence's closed vocabularies, mirrored VERBATIM from the probe's ``ExternalProbeState``
+#: and the watchdog's ``WatchdogState``. Not imported: W-1's default-off scan forbids naming the
+#: watchdog module anywhere else in src, and this module must stay import-light on the /health
+#: path; ``tests/unit/test_ops_slo.py`` (r1_1a) pins set equality against both enums.
+PROBE_STATES = frozenset({"HEALTHY", "UNHEALTHY", "UNKNOWN"})
+WATCHDOG_VERDICTS = frozenset({"HEALTHY", "TRIPPED"})
 ObjectiveName = Literal[
     "probe_latency_p95_ms",
     "readiness_availability_pct",
@@ -370,7 +380,13 @@ class _Line(NamedTuple):
 
 
 def _parse_lines(raw: bytes) -> tuple[list[_Line], str | None]:
-    """Every line of the log, typed; a torn LAST line is where the writer died and is dropped."""
+    """Every line of the log, typed; a torn LAST line is where the writer died and is dropped.
+
+    Fail closed (round 1): a ``state`` or ``verdict`` outside its closed vocabulary, or a
+    ``monotonic`` / ``assessed_at`` that does not strictly increase from the previous line,
+    makes the LOG malformed — nothing is computed over it, and the reason names the line
+    (numbered from the first complete line of the bounded tail that was read).
+    """
 
     text = raw.decode("utf-8", errors="replace")
     pieces = text.split("\n")
@@ -400,6 +416,24 @@ def _parse_lines(raw: bytes) -> tuple[list[_Line], str | None]:
             or not isinstance(verdict, str)
         ):
             return [], f"log malformed: line {number} lacks a typed field"
+        if state not in PROBE_STATES:
+            return [], f"log malformed: line {number} state is not in the probe's closed vocabulary"
+        if verdict not in WATCHDOG_VERDICTS:
+            return [], (
+                f"log malformed: line {number} verdict is not in the watchdog's closed vocabulary"
+            )
+        if lines:
+            previous = lines[-1]
+            if monotonic <= previous.monotonic:
+                return [], (
+                    f"log malformed: line {number} monotonic {monotonic:g} does not increase "
+                    f"from line {number - 1} ({previous.monotonic:g})"
+                )
+            if assessed_at <= previous.assessed_at:
+                return [], (
+                    f"log malformed: line {number} assessed_at does not increase from line "
+                    f"{number - 1}"
+                )
         lines.append(_Line(assessed_at, monotonic, state, elapsed_ms, verdict))
     return lines, None
 
@@ -484,12 +518,13 @@ class _Evidence:
 def _cadence_s(lines: Iterable[_Line]) -> float | None:
     """The cadence the writer kept: the median spacing of consecutive monotonic values."""
 
+    # Every delta is positive by construction: ``_parse_lines`` refused any log whose
+    # ``monotonic`` does not strictly increase (round 1) — nothing is filtered here.
     values = [line.monotonic for line in lines]
     deltas = [later - earlier for earlier, later in pairwise(values)]
-    positive = [delta for delta in deltas if delta > 0]
-    if not positive:
+    if not deltas:
         return None
-    return round(statistics.median(positive), 3)
+    return round(statistics.median(deltas), 3)
 
 
 def _nearest_rank_p95(values: list[float]) -> float:

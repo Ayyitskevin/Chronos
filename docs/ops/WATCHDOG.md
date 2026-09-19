@@ -236,7 +236,13 @@ document that violates either is refused typed, exit 64, and publishes nothing.
 `UNKNOWN` is the honest answer, never a guess: the log is absent, malformed, or spans less than
 the window; a measurement needs two lines and has one; the heartbeat is absent, malformed or
 from the future; an entry at either name is a symlink, FIFO, directory or device — refused
-typed, never followed, never blocked on. Reads mirror the dead-man's (`O_NOFOLLOW` walk,
+typed, never followed, never blocked on. **Malformed evidence never reads MET:** every line's
+`state` and `verdict` are checked against the closed vocabularies (`HEALTHY | UNHEALTHY |
+UNKNOWN` for the probe state, `HEALTHY | TRIPPED` for the watchdog's verdict — a stray space or
+a lower-case token is malformed), and a line whose `monotonic` or `assessed_at`
+does not increase from the line before is malformed too; the whole log is refused before any objective
+is computed and the reason names the line. A wall clock that stepped backwards between two
+ticks therefore reads `UNKNOWN` — go and look at the log, which shows the step. Reads mirror the dead-man's (`O_NOFOLLOW` walk,
 `O_NONBLOCK` open, `fstat` regular-file check, bounded: the newest 4 MiB of the log; a torn
 last line is where the writer died). The overall state is BREACHED if any objective is, else
 UNKNOWN if any is, else MET.

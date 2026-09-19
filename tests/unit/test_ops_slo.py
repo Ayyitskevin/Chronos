@@ -30,6 +30,7 @@ from chronos.api.routes.health import router as health_router
 from chronos.config.settings import Settings
 from chronos.operations import health as health_module
 from chronos.operations import slo as slo_module
+from chronos.operations.external_probe import ExternalProbeState
 from chronos.operations.health import (
     OperationalFacts,
     OperationalObservations,
@@ -43,6 +44,8 @@ from chronos.operations.slo import (
     EXIT_BAD_DOCUMENT,
     EXIT_CODES,
     HEARTBEAT,
+    PROBE_STATES,
+    WATCHDOG_VERDICTS,
     SloCacheError,
     SloDocument,
     SloDocumentError,
@@ -55,6 +58,7 @@ from chronos.operations.slo import (
     write_evaluation_cache,
 )
 from chronos.operations.slo import main as slo_main
+from chronos.operations.watchdog import WatchdogState
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src" / "chronos"
@@ -435,6 +439,181 @@ def test_2h_a_torn_last_line_is_where_the_writer_died_and_a_malformed_body_is_un
     assert report.state is SloState.UNKNOWN and "malformed" in report.reason
 
 
+# ------------------------------------------- r1: malformed evidence is UNKNOWN, never MET
+
+
+def _probe_record(
+    seconds_ago: int, monotonic: float, state: str, verdict: str
+) -> dict[str, object]:
+    """Daybreak's probe record (logs/daybreak-probe-slo1.py), verbatim in shape."""
+
+    return {
+        "assessed_at": (NOW - timedelta(seconds=seconds_ago)).isoformat(),
+        "monotonic": monotonic,
+        "state": state,
+        "elapsed_ms": 1.0,
+        "verdict": verdict,
+    }
+
+
+def _deadline_report(tmp_path: Path, rows: list[dict[str, object]]) -> slo_module.ObjectiveReport:
+    ops = _evidence(tmp_path, rows, heartbeat_age_s=None)
+    return _report(evaluate(ops, _document(watchdog_deadline_s=30.0), NOW), "watchdog_deadline_s")
+
+
+def test_r1_1a_the_vocabularies_are_the_probe_and_watchdog_enums_verbatim() -> None:
+    """Mirrored, not imported: W-1's default-off scan (test_ops_watchdog 3d) forbids naming
+    ``operations.watchdog`` anywhere else in src, and 3c above forbids the import; this pin is
+    what keeps the mirror honest."""
+
+    assert {state.value for state in ExternalProbeState} == PROBE_STATES
+    assert {state.value for state in WatchdogState} == WATCHDOG_VERDICTS
+    assert {"HEALTHY", "UNHEALTHY", "UNKNOWN"} == PROBE_STATES
+    assert {"HEALTHY", "TRIPPED"} == WATCHDOG_VERDICTS
+
+
+def test_r1_1b_an_unknown_verdict_token_is_malformed_and_unknown_never_met(tmp_path: Path) -> None:
+    report = _deadline_report(
+        tmp_path,
+        [
+            _probe_record(20, 0.0, "HEALTHY", "HEALTHY"),
+            _probe_record(10, 10.0, "UNHEALTHY", "TRIPPED "),
+            _probe_record(0, 20.0, "HEALTHY", "HEALTHY"),
+        ],
+    )
+    assert report.state is SloState.UNKNOWN
+    assert "line 2" in report.reason and "verdict" in report.reason and "malformed" in report.reason
+    assert report.measured is None and report.samples == 0
+    # the whole log is refused: every log-based objective is UNKNOWN, none is computed
+    ops = _evidence(
+        tmp_path / "all",
+        [
+            _probe_record(20, 0.0, "HEALTHY", "HEALTHY"),
+            _probe_record(10, 10.0, "UNHEALTHY", "TRIPPED "),
+            _probe_record(0, 20.0, "HEALTHY", "HEALTHY"),
+        ],
+    )
+    evaluation = evaluate(
+        ops,
+        _document(
+            probe_latency_p95_ms=50.0,
+            readiness_availability_pct=1.0,
+            window_s=20.0,
+            watchdog_deadline_s=30.0,
+            clock_max_error_s=5.0,
+        ),
+        NOW,
+    )
+    log_based = {
+        r.objective: r for r in evaluation.objectives if r.objective != "deadman_max_age_s"
+    }
+    assert len(log_based) == 4
+    assert all(r.state is SloState.UNKNOWN and "line 2" in r.reason for r in log_based.values())
+
+
+def test_r1_1c_a_lower_cased_state_is_malformed_and_unknown(tmp_path: Path) -> None:
+    report = _deadline_report(
+        tmp_path,
+        [
+            _probe_record(20, 0.0, "HEALTHY", "HEALTHY"),
+            _probe_record(10, 10.0, "HEALTHY", "HEALTHY"),
+            _probe_record(0, 20.0, "healthy", "HEALTHY"),
+        ],
+    )
+    assert report.state is SloState.UNKNOWN
+    assert "line 3" in report.reason and "state" in report.reason
+    for token in ("", "HEALTHY ", "READY", "Healthy", "UNHEALTHY\n"):
+        report = _deadline_report(
+            tmp_path / f"t{abs(hash(token))}",
+            [
+                _probe_record(10, 0.0, "HEALTHY", "HEALTHY"),
+                _probe_record(0, 10.0, token, "HEALTHY"),
+            ],
+        )
+        assert report.state is SloState.UNKNOWN and "line 2" in report.reason, token
+
+
+def test_r1_1d_a_valid_tripped_verdict_still_reads_breached(tmp_path: Path) -> None:
+    report = _deadline_report(
+        tmp_path,
+        [
+            _probe_record(20, 0.0, "HEALTHY", "HEALTHY"),
+            _probe_record(10, 10.0, "UNHEALTHY", "TRIPPED"),
+            _probe_record(0, 20.0, "HEALTHY", "HEALTHY"),
+        ],
+    )
+    assert report.state is SloState.BREACHED and "TRIPPED" in report.reason
+    assert report.measured == 20.0 and report.samples == 3
+
+
+def test_r1_2a_a_decreasing_monotonic_sequence_is_malformed_and_unknown_naming_the_line(
+    tmp_path: Path,
+) -> None:
+    report = _deadline_report(
+        tmp_path,
+        [
+            _probe_record(30, 0.0, "HEALTHY", "HEALTHY"),
+            _probe_record(20, 10.0, "HEALTHY", "HEALTHY"),
+            _probe_record(10, 5.0, "HEALTHY", "HEALTHY"),
+            _probe_record(0, 15.0, "HEALTHY", "HEALTHY"),
+        ],
+    )
+    assert report.state is SloState.UNKNOWN
+    assert "line 3" in report.reason and "monotonic" in report.reason
+    assert report.measured is None
+
+
+def test_r1_2b_equal_monotonic_and_out_of_order_assessed_at_are_malformed(tmp_path: Path) -> None:
+    equal = _deadline_report(
+        tmp_path / "equal",
+        [
+            _probe_record(20, 0.0, "HEALTHY", "HEALTHY"),
+            _probe_record(10, 10.0, "HEALTHY", "HEALTHY"),
+            _probe_record(0, 10.0, "HEALTHY", "HEALTHY"),
+        ],
+    )
+    assert (
+        equal.state is SloState.UNKNOWN and "line 3" in equal.reason and "monotonic" in equal.reason
+    )
+    reordered = _deadline_report(
+        tmp_path / "wall",
+        [
+            _probe_record(20, 0.0, "HEALTHY", "HEALTHY"),
+            _probe_record(5, 10.0, "HEALTHY", "HEALTHY"),
+            _probe_record(10, 20.0, "HEALTHY", "HEALTHY"),  # wall clock went backwards 5 s
+        ],
+    )
+    assert reordered.state is SloState.UNKNOWN
+    assert "line 3" in reordered.reason and "assessed_at" in reordered.reason
+    same_instant = _deadline_report(
+        tmp_path / "same",
+        [
+            _probe_record(10, 0.0, "HEALTHY", "HEALTHY"),
+            _probe_record(10, 10.0, "HEALTHY", "HEALTHY"),
+        ],
+    )
+    assert same_instant.state is SloState.UNKNOWN and "assessed_at" in same_instant.reason
+
+
+def test_r1_2c_a_clean_log_reads_as_before_and_the_cadence_is_the_median_spacing(
+    tmp_path: Path,
+) -> None:
+    clean = _deadline_report(
+        tmp_path,
+        [_probe_record(30 - 10 * i, 10.0 * i, "HEALTHY", "HEALTHY") for i in range(4)],
+    )
+    # a clean 10 s cadence: the longest stretch between HEALTHY observations is one interval
+    assert clean.state is SloState.MET and clean.measured == 10.0 and clean.samples == 4
+    lines, problem = slo_module._parse_lines(
+        "".join(
+            json.dumps(_probe_record(30 - 10 * i, [0.0, 10.0, 25.0, 35.0][i], "HEALTHY", "HEALTHY"))
+            + "\n"
+            for i in range(4)
+        ).encode("utf-8")
+    )
+    assert problem is None and slo_module._cadence_s(lines) == 10.0
+
+
 # ------------------------------------------------------------------ 3. the CLI, default-off
 
 
@@ -750,5 +929,7 @@ def test_5a_the_runbook_states_what_an_slo_proves_the_format_and_the_exit_codes(
         "64",
         "ops_slo_evaluation_file",
         "changes no verdict",
+        "closed vocabularies",
+        "does not increase",
     ):
         assert needle in runbook, needle
