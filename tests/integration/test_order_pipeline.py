@@ -1031,6 +1031,7 @@ def test_restart_report_distinguishes_proven_noop_from_broker_absence(
         from_status=OrderLifecycle.USER_CONFIRMED,
         to_status=OrderLifecycle.SUBMITTED,
         current_account_id=PAPER_ACCOUNT,
+        client_id=17,  # the production ACK row carries the client id (BP-2 r1, R-c)
         occurred_at=FIXED_NOW,
     )
     harness.broker._open_orders = (
