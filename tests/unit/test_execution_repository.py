@@ -206,7 +206,9 @@ def test_2_fills_carries_the_identity_columns_and_the_drift_checker_accepts_them
     assert any(
         index["column_names"] == ["permanent_id"] for index in inspector.get_indexes("fills")
     )
-    assert SCHEMA_VERSION == 14
+    assert (
+        SCHEMA_VERSION >= 14
+    )  # 0013 raised it to 14; the chain head is pinned once, in test_database
     database.initialize()  # the fail-closed drift checker on an initialized store: no drift
     migration = ROOT / "src/chronos/persistence/migrations/versions/0013_execution_identity.py"
     text = migration.read_text(encoding="utf-8")
