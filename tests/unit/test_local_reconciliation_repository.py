@@ -255,7 +255,9 @@ def test_every_ownership_bearing_table_contributes_its_canonical_symbol() -> Non
     finally:
         database.dispose()
 
-    assert evidence.unresolved_symbols == frozenset({"AAPL", "AMD", "MSFT", "NVDA", "TSLA"})
+    # BP-1b r1 (Kevin's ruling (a), 2026-09-19): a fills row is a broker fact, not local strategy
+    # evidence — the lone NVDA fill no longer marks its symbol unresolved.
+    assert evidence.unresolved_symbols == frozenset({"AAPL", "AMD", "MSFT", "TSLA"})
     assert evidence.complete is True
 
 
@@ -564,3 +566,183 @@ def test_local_read_uses_one_read_only_transaction_and_persists_no_raw_account(
     assert scope.account_fingerprint == ACCOUNT_FINGERPRINT
     assert all(ACCOUNT_ID not in draft.account_id_masked for draft in drafts)
     assert event_count == 0
+
+
+# --------------------------------------- BP-1b r1: a fills row is a broker fact (ruling (a))
+
+
+def _fill_row(symbol: str = "NVDA") -> FillRow:
+    return FillRow(
+        execution_id=f"EXEC-{symbol}",
+        broker_order_id=22,
+        client_id=17,
+        symbol=symbol,
+        contract_id=202,
+        security_type=SecurityType.STOCK.value,
+        side=OrderSide.BUY.value,
+        quantity=Decimal("1"),
+        price=Decimal("100"),
+        multiplier=Decimal("1"),
+        currency="USD",
+        account_fingerprint=ACCOUNT_FINGERPRINT,
+        occurred_at=NOW,
+    )
+
+
+def _draft_row(
+    correlation_id: str,
+    symbol: str,
+    lifecycle: str = OrderLifecycle.DRAFT.value,
+    wheel_cycle_id: str | None = None,
+) -> OrderDraftRow:
+    return OrderDraftRow(
+        correlation_id=correlation_id,
+        wheel_cycle_id=wheel_cycle_id,
+        account_id_masked="****4567",
+        symbol=symbol,
+        contract_id=201,
+        intent=OrderIntent.OPEN_SHORT_PUT.value,
+        quantity=1,
+        limit_price=Decimal("1"),
+        lifecycle=lifecycle,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "first", "second", "expected"),
+    [
+        (
+            "wheel cycle",
+            lambda: WheelCycleRow(id="CYCLE-AAPL", symbol="AAPL", status="OPEN", opened_at=NOW),
+            None,
+            {"AAPL"},
+        ),
+        (
+            "strategy state",
+            lambda: StrategyStateRow(
+                symbol="MSFT",
+                wheel_stage=WheelStage.FLAT.value,
+                reconciliation_status=ReconciliationStatus.PENDING.value,
+                updated_at=NOW,
+            ),
+            None,
+            {"MSFT"},
+        ),
+        ("order draft", lambda: _draft_row("CORR-TSLA", "TSLA"), None, {"TSLA"}),
+        (
+            "submitted order (with its draft and cycle owner)",
+            lambda: WheelCycleRow(id="CYCLE-AMD", symbol="AMD", status="OPEN", opened_at=NOW),
+            lambda: [
+                _draft_row("CORR-AMD", "AMD", OrderLifecycle.SUBMITTED.value, "CYCLE-AMD"),
+                SubmittedOrderRow(
+                    correlation_id="CORR-AMD",
+                    broker_order_id=11,
+                    permanent_id=9001,
+                    client_id=17,
+                    order_ref="CHR-AMD-11",
+                    lifecycle=OrderLifecycle.SUBMITTED.value,
+                    submitted_at=NOW,
+                ),
+            ],
+            {"AMD"},
+        ),
+        (
+            "basis entry (with its cycle)",
+            lambda: WheelCycleRow(id="CYCLE-AMD", symbol="AMD", status="OPEN", opened_at=NOW),
+            lambda: BasisEntryRow(
+                id="BASIS-AMD",
+                wheel_cycle_id="CYCLE-AMD",
+                symbol="AMD",
+                entry_type=BasisEntryType.MANUAL_ADJUSTMENT.value,
+                amount=Decimal("1"),
+                account_fingerprint=ACCOUNT_FINGERPRINT,
+                currency="USD",
+                provisional=False,
+                reconciliation_status=ReconciliationStatus.MANUAL_REVIEW.value,
+                source_note="Operator-reviewed local adjustment",
+                occurred_at=NOW,
+                created_at=NOW,
+            ),
+            {"AMD"},
+        ),
+        ("fills row alone", lambda: _fill_row("NVDA"), None, set()),
+    ],
+    ids=["cycle", "strategy_state", "draft", "submitted", "basis", "fill"],
+)
+def test_bp1br1_1_every_local_table_still_marks_its_symbol_and_a_fills_row_alone_does_not(
+    label: str, first: object, second: object, expected: set[str]
+) -> None:
+    """Contract 1 (table by table): drafts, submitted orders, cycles and basis entries still put
+    their symbol into ``unresolved_symbols`` exactly as before; a fills row alone contributes
+    nothing — it is a broker fact (Kevin's ruling (a), 2026-09-19); its row-shape checks stay."""
+
+    database = _database()
+    try:
+        with database.sessions.begin() as session:
+            session.add(first())  # type: ignore[operator]
+            session.flush()
+            if second is not None:
+                rows = second()  # type: ignore[operator]
+                for row in rows if isinstance(rows, list) else [rows]:
+                    session.add(row)
+                    session.flush()
+        evidence = LocalReconciliationRepository(database.sessions).read(ACCOUNT_ID)
+    finally:
+        database.dispose()
+    assert evidence.unresolved_symbols == frozenset(expected), label
+    assert evidence.complete is True
+    if expected:
+        assert evidence.reasons == (
+            "Local strategy evidence exists but is conservatively unresolved by this reader.",
+        )
+    else:
+        assert evidence.reasons == ()
+
+
+def test_bp1br1_1b_a_malformed_fills_row_is_still_an_issue_without_becoming_evidence() -> None:
+    """The shape half of the old helper is kept: a non-canonical fill symbol is an issue (the
+    read is incomplete) but never an unresolved symbol."""
+
+    database = _database()
+    try:
+        with database.sessions.begin() as session:
+            session.add(_fill_row("nvda"))
+        evidence = LocalReconciliationRepository(database.sessions).read(ACCOUNT_ID)
+    finally:
+        database.dispose()
+    assert evidence.unresolved_symbols == frozenset()
+    assert evidence.complete is False
+    assert "Persisted fill evidence is incomplete or malformed." in evidence.reasons
+
+
+def test_bp1br1_2_the_seams_first_persisted_execution_no_longer_locks_the_next_pass() -> None:
+    """Contract 2 — the BP-1b finding reproduced then closed: after the writer records the demo
+    execution DEMO-EXEC-0001 (correlation None, a foreign order_ref), the local read is still
+    complete with nothing unresolved (red at 3cd25d7: unresolved={'TSLA'})."""
+
+    import asyncio
+
+    from chronos.broker.demo import DEMO_ACCOUNT_ID, DemoBroker
+    from chronos.persistence.execution_repository import ExecutionRepository
+
+    assert DEMO_ACCOUNT_ID == ACCOUNT_ID, "the demo scope is this file's scope"
+    database = _database()
+    try:
+        reader = LocalReconciliationRepository(database.sessions)
+        before = reader.read(ACCOUNT_ID)
+        assert (before.complete, before.unresolved_symbols, before.reasons) == (
+            True,
+            frozenset(),
+            (),
+        )
+        broker = DemoBroker()
+        asyncio.run(broker.connect())
+        execution = asyncio.run(broker.executions())[0]
+        assert execution.execution_id == "DEMO-EXEC-0001"
+        assert ExecutionRepository(database.sessions).record(execution, correlation_id=None) is True
+        after = reader.read(ACCOUNT_ID)
+        assert (after.complete, after.unresolved_symbols, after.reasons) == (True, frozenset(), ())
+    finally:
+        database.dispose()
