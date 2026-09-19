@@ -206,6 +206,12 @@ class FillRow(Base):
         index=True,
     )
     broker_order_id: Mapped[int] = mapped_column(Integer, index=True, nullable=False)
+    # Execution identity (BP-1, migration 0013): the broker's permanent id, the placing
+    # client id and Chronos's echoed order reference — the fill row is matched to the
+    # broker's own execDetails and to the submitted order by these, never by a second lookup.
+    permanent_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    client_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    order_ref: Mapped[str | None] = mapped_column(String(120))
     wheel_cycle_id: Mapped[str | None] = mapped_column(ForeignKey("wheel_cycles.id"))
     symbol: Mapped[str] = mapped_column(String(32), index=True, nullable=False)
     contract_id: Mapped[int] = mapped_column(Integer, nullable=False)

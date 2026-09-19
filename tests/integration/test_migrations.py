@@ -815,6 +815,76 @@ def test_v11_database_gains_credential_bindings_without_relabelling_rows(
         database.dispose()
 
 
+def test_v13_database_gains_execution_identity_and_keeps_its_fill_rows(tmp_path: Path) -> None:
+    """Migration 0013 (BP-1, schema v14) adds the execution identity to ``fills`` without
+    touching a single prior column: a pre-0013 fill row reads back byte-equal on every old
+    column, the new columns are NULL / the ALTER's ``0`` default, and the drift checker
+    accepts the upgraded store.
+    """
+
+    db_path = tmp_path / "chronos.db"
+    engine = sa.create_engine(f"sqlite:///{db_path}")
+    Base.metadata.create_all(engine)
+    old_columns = (
+        "execution_id, broker_order_id, symbol, contract_id, security_type, side, quantity, "
+        "price, multiplier, currency, account_fingerprint, occurred_at"
+    )
+    with engine.begin() as connection:
+        # a true v13 shape: the three identity columns (and their index) do not exist yet
+        connection.execute(sa.text("DROP INDEX ix_fills_permanent_id"))
+        for column in ("permanent_id", "client_id", "order_ref"):
+            connection.execute(sa.text(f"ALTER TABLE fills DROP COLUMN {column}"))
+        connection.execute(
+            sa.text(
+                f"INSERT INTO fills ({old_columns}) VALUES ('EXEC-OLD', 7001, 'AAPL', 2002, "
+                "'OPT', 'SELL', 1, 2.05, 100, 'USD', 'f' , '2026-01-15 15:30:00.000000')"
+            )
+        )
+        for version in range(2, 14):
+            connection.execute(
+                sa.text(
+                    "INSERT INTO schema_version (version, applied_at) "
+                    f"VALUES ({version}, '2026-01-01 00:00:00.000000')"
+                )
+            )
+    with engine.connect() as connection:
+        before = connection.execute(sa.text(f"SELECT {old_columns} FROM fills")).one()
+    engine.dispose()
+
+    config = _alembic_config(db_path)
+    command.stamp(config, "0012")
+    command.upgrade(config, "head")
+
+    engine = sa.create_engine(f"sqlite:///{db_path}")
+    inspector = sa.inspect(engine)
+    columns = {column["name"]: column for column in inspector.get_columns("fills")}
+    assert columns["permanent_id"]["nullable"] is True
+    assert columns["client_id"]["nullable"] is False
+    assert columns["order_ref"]["nullable"] is True
+    assert any(
+        index["column_names"] == ["permanent_id"] for index in inspector.get_indexes("fills")
+    )
+    with engine.connect() as connection:
+        after = connection.execute(sa.text(f"SELECT {old_columns} FROM fills")).one()
+        identity = connection.execute(
+            sa.text("SELECT permanent_id, client_id, order_ref FROM fills")
+        ).one()
+        version = connection.execute(
+            sa.text("SELECT version FROM schema_version ORDER BY id DESC LIMIT 1")
+        ).scalar()
+    engine.dispose()
+
+    assert after == before  # every old column byte-equal
+    assert identity == (None, 0, None)
+    assert version == SCHEMA_VERSION == 14
+
+    database = Database(f"sqlite:///{db_path}")
+    try:
+        database.initialize()  # the fail-closed drift checker accepts the upgraded store
+    finally:
+        database.dispose()
+
+
 def test_fresh_database_needs_no_alembic(tmp_path: Path) -> None:
     database = Database(f"sqlite:///{tmp_path / 'fresh.db'}")
     try:

@@ -194,7 +194,9 @@ def test_schema_initialization_creates_required_evidence_tables() -> None:
     # v11: managed_position_bindings (ADR-0035, migration 0010).
     # v12: proposal and evidence registration bindings (ADR-0048, migration 0011).
     # v13: installation identity + recovery acknowledgements (ADR-0054, migration 0012).
-    assert SCHEMA_VERSION == 13
+    # v14: fills carries the execution identity — permanent_id, client_id, order_ref
+    #      (BP-1, migration 0013).
+    assert SCHEMA_VERSION == 14
 
 
 def test_application_events_are_append_only_and_queryable() -> None:
@@ -489,9 +491,9 @@ def test_current_schema_missing_foreign_key_is_refused_without_mutation(tmp_path
             "fills",
             (
                 "INSERT INTO fills "
-                "(execution_id, broker_order_id, symbol, contract_id, security_type, side, "
-                "quantity, price, multiplier, currency, account_fingerprint, occurred_at) "
-                f"VALUES ('EXEC-1', 1, 'AAPL', 100, 'OPT', 'SELL', 1, 2, 100, 'USD', "
+                "(execution_id, broker_order_id, client_id, symbol, contract_id, security_type, "
+                "side, quantity, price, multiplier, currency, account_fingerprint, occurred_at) "
+                f"VALUES ('EXEC-1', 1, 17, 'AAPL', 100, 'OPT', 'SELL', 1, 2, 100, 'USD', "
                 f"'{account_fingerprint('DU1234567')}', '2026-01-15 15:30:00')",
             ),
         ),
