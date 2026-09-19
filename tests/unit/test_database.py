@@ -196,7 +196,8 @@ def test_schema_initialization_creates_required_evidence_tables() -> None:
     # v13: installation identity + recovery acknowledgements (ADR-0054, migration 0012).
     # v14: fills carries the execution identity — permanent_id, client_id, order_ref
     #      (BP-1, migration 0013).
-    assert SCHEMA_VERSION == 14
+    #      (BP-2, migration 0014): order_events gains permanent_id + client_id (schema v15).
+    assert SCHEMA_VERSION == 15
 
 
 def test_application_events_are_append_only_and_queryable() -> None:

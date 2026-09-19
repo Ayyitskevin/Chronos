@@ -29,6 +29,7 @@ class OrderStatusUpdate(ChronosModel):
     intent_id: str
     broker_order_id: int | None = None
     permanent_id: int | None = None
+    client_id: int | None = None
     lifecycle: OrderLifecycle
     filled_quantity: Decimal = Decimal("0")
     remaining_quantity: Decimal = Decimal("0")
@@ -118,6 +119,10 @@ class OrderTracker:
             to_status=update.lifecycle,
             current_account_id=current_account_id,
             broker_order_id=update.broker_order_id,
+            # the broker's order identity lands as columns (BP-2) — the evidence
+            # JSON keeps its copy for readers that predate the columns
+            permanent_id=update.permanent_id,
+            client_id=update.client_id,
             filled_quantity=update.filled_quantity,
             remaining_quantity=update.remaining_quantity,
             evidence={
@@ -190,6 +195,18 @@ class OrderTracker:
         for event in reversed(events):
             if event.broker_order_id is not None:
                 return event.broker_order_id
+        return None
+
+    def permanent_id(self, intent_id: str, *, current_account_id: str) -> int | None:
+        """The most recent broker permId recorded for this intent, if any (BP-2).
+
+        A later event may carry the permId an earlier one lacked; the rows are
+        append-only, so the latest non-None column is the intent's identity.
+        """
+        events = self._tracker.events(intent_id, current_account_id=current_account_id)
+        for event in reversed(events):
+            if event.permanent_id is not None:
+                return event.permanent_id
         return None
 
     def effective_limit_price(

@@ -452,6 +452,11 @@ class OrderEventRow(Base):
     from_status: Mapped[str | None] = mapped_column(String(32))
     to_status: Mapped[str] = mapped_column(String(32), nullable=False)
     broker_order_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    # Broker order identity as first-class columns (BP-2, migration 0014): the permId and the
+    # placing client id the orderStatus/openOrder evidence reported — nullable, never a
+    # synthesized 0; a row from before 0014 reads None. Evidence, not a decision input.
+    permanent_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    client_id: Mapped[int | None] = mapped_column(Integer)
     filled_quantity: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
     remaining_quantity: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
     evidence: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)

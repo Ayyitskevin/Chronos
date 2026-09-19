@@ -154,6 +154,19 @@ def _executions_match_intent(
     )
 
 
+def _is_owned(
+    observation: BrokerOrder | BrokerExecution,
+    *,
+    order_ref: str,
+    persisted_permanent_id: int | None,
+) -> bool:
+    """The identity set: the owned CHR- reference, or the persisted broker permId (BP-2)."""
+
+    return observation.order_ref == order_ref or (
+        persisted_permanent_id is not None and observation.permanent_id == persisted_permanent_id
+    )
+
+
 def resolve_from_broker_evidence(
     intent: OrderIntentRecord,
     *,
@@ -163,23 +176,34 @@ def resolve_from_broker_evidence(
     expected_broker_client_id: int,
     expected_limit_price: Decimal | None,
     persisted_broker_order_id: int | None,
+    persisted_permanent_id: int | None = None,
     now: datetime,
 ) -> OrderStatusUpdate | None:
     """Derive the true lifecycle for one intent from broker evidence.
 
-    Matching begins with the intent's owned ``order_ref`` (CHR-) and requires
-    coherent account and economic identity before Chronos acts. Chronos NEVER
-    re-submits. Returns ``None`` (leave unresolved) when the order is absent:
-    a timed-out submit very often DID reach the venue, so mere absence is not
-    positive evidence of rejection and must not drive a live order to a wrong
-    terminal state.
+    Matching begins with the intent's owned ``order_ref`` (CHR-) — or, when the
+    persisted events carry the broker's ``permId``, that ``permanent_id`` (BP-2:
+    a venue that reports the order back without its ``orderRef`` is still
+    matched) — and requires coherent account and economic identity before
+    Chronos acts. Chronos NEVER re-submits. Returns ``None`` (leave unresolved)
+    when the order is absent: a timed-out submit very often DID reach the venue,
+    so mere absence is not positive evidence of rejection and must not drive a
+    live order to a wrong terminal state.
     """
 
     order_ref = intent.order_ref
     if not order_ref:
         return None
-    working = [order for order in open_orders if order.order_ref == order_ref]
-    fills = [execution for execution in executions if execution.order_ref == order_ref]
+    working = [
+        order
+        for order in open_orders
+        if _is_owned(order, order_ref=order_ref, persisted_permanent_id=persisted_permanent_id)
+    ]
+    fills = [
+        execution
+        for execution in executions
+        if _is_owned(execution, order_ref=order_ref, persisted_permanent_id=persisted_permanent_id)
+    ]
 
     if len(working) > 1:
         return None
@@ -223,6 +247,7 @@ def resolve_from_broker_evidence(
             intent_id=intent.intent_id,
             broker_order_id=order.broker_order_id,
             permanent_id=order.permanent_id,
+            client_id=order.client_id,
             lifecycle=lifecycle,
             filled_quantity=order.filled_quantity,
             remaining_quantity=order.remaining_quantity,
@@ -245,6 +270,7 @@ def resolve_from_broker_evidence(
                 ),
                 None,
             ),
+            client_id=fills[0].client_id,  # _executions_match_intent proved one client id
             lifecycle=lifecycle,
             filled_quantity=filled,
             remaining_quantity=remaining,
@@ -267,15 +293,22 @@ def _unresolved_evidence_reason(
     expected_limit_price: Decimal | None,
     expected_broker_client_id: int,
     persisted_broker_order_id: int | None,
+    persisted_permanent_id: int | None = None,
 ) -> str:
     order_ref = intent.order_ref
     if not order_ref:
         return "local intent has no owned broker order reference"
-    matching_orders = tuple(order for order in open_orders if order.order_ref == order_ref)
+    matching_orders = tuple(
+        order
+        for order in open_orders
+        if _is_owned(order, order_ref=order_ref, persisted_permanent_id=persisted_permanent_id)
+    )
     if len(matching_orders) > 1:
         return "multiple broker orders share the owned order reference"
     matching_executions = tuple(
-        execution for execution in executions if execution.order_ref == order_ref
+        execution
+        for execution in executions
+        if _is_owned(execution, order_ref=order_ref, persisted_permanent_id=persisted_permanent_id)
     )
     evidence_order_ids = {order.broker_order_id for order in matching_orders} | {
         execution.broker_order_id for execution in matching_executions
@@ -357,6 +390,10 @@ class OrderRestartReconciler:
                 intent.intent_id,
                 current_account_id=current_account_id,
             )
+            persisted_permanent_id = self._tracker.permanent_id(
+                intent.intent_id,
+                current_account_id=current_account_id,
+            )
             expected_limit_price = self._tracker.effective_limit_price(
                 intent.intent_id,
                 original_limit_price=intent.limit_price,
@@ -370,6 +407,7 @@ class OrderRestartReconciler:
                 expected_broker_client_id=self._expected_broker_client_id,
                 expected_limit_price=expected_limit_price,
                 persisted_broker_order_id=persisted_broker_order_id,
+                persisted_permanent_id=persisted_permanent_id,
                 now=now,
             )
             if update is None:
@@ -387,6 +425,7 @@ class OrderRestartReconciler:
                             expected_broker_client_id=self._expected_broker_client_id,
                             expected_limit_price=expected_limit_price,
                             persisted_broker_order_id=persisted_broker_order_id,
+                            persisted_permanent_id=persisted_permanent_id,
                         ),
                     )
                 )
@@ -515,6 +554,10 @@ class OrderRestartReconciler:
                 current_account_id=current_account_id,
             ),
             persisted_broker_order_id=self._tracker.broker_order_id(
+                intent.intent_id,
+                current_account_id=current_account_id,
+            ),
+            persisted_permanent_id=self._tracker.permanent_id(
                 intent.intent_id,
                 current_account_id=current_account_id,
             ),
