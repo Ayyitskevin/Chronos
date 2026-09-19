@@ -374,14 +374,9 @@ def test_2g_a_fifo_symlink_or_directory_at_either_file_is_unknown_typed_within_a
     document = _document(probe_latency_p95_ms=50.0, window_s=60.0, deadman_max_age_s=180.0)
     ops = _evidence(tmp_path, None, heartbeat_age_s=None)
     os.mkfifo(ops / EVIDENCE_LOG)
-    started = time.monotonic()
-    evaluation = evaluate(ops, document, NOW)
-    assert time.monotonic() - started < 1.0
-    report = _report(evaluation, "probe_latency_p95_ms")
-    assert report.state is SloState.UNKNOWN
-    assert "fifo" in report.reason or "not a regular file" in report.reason
-    # the process-level pin (W-1 3c's shape): the CLI through the real interpreter, under an
-    # outer timeout, so a pathname open that BLOCKS on the fifo fails here in 5 s, never hangs
+    # the process-level pin FIRST (W-1 3c's shape): the CLI through the real interpreter under
+    # an outer timeout, so a pathname open that BLOCKS on the fifo fails here in 5 s and never
+    # hangs this process — an in-process call on the fifo must come after it, never before
     completed = subprocess.run(
         [
             sys.executable,
@@ -400,6 +395,12 @@ def test_2g_a_fifo_symlink_or_directory_at_either_file_is_unknown_typed_within_a
     )
     assert completed.returncode == 3, completed.stderr
     assert json.loads(completed.stdout)["state"] == "UNKNOWN"
+    started = time.monotonic()
+    evaluation = evaluate(ops, document, NOW)
+    assert time.monotonic() - started < 1.0
+    report = _report(evaluation, "probe_latency_p95_ms")
+    assert report.state is SloState.UNKNOWN
+    assert "fifo" in report.reason or "not a regular file" in report.reason
     fresh = tmp_path / "fresh-heartbeat.json"
     fresh.write_text(json.dumps({"last_observed_at": NOW.isoformat()}), encoding="utf-8")
     (ops / HEARTBEAT).symlink_to(fresh)
