@@ -12,6 +12,7 @@ against an app with no lifespan, no backend and no broker).
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import os
 import stat
@@ -938,8 +939,7 @@ def test_5a_the_runbook_states_what_an_slo_proves_the_format_and_the_exit_codes(
 def test_f1_1_the_runbook_states_the_unset_default_is_an_unknown_observation() -> None:
     """SLO-1-F1 (kimi2's #248 pre-merge read, P3 1 of 2): the prose matches the probed
     behaviour — with `ops_slo_evaluation_file` unset the projection still writes
-    `observations.slo`, in state UNKNOWN with problem "no evaluation cache is configured"
-    (probe: run-20260913-pm/logs/SLO-1-F1-probe.out)."""
+    `observations.slo`, in state UNKNOWN with problem "no evaluation cache is configured"."""
 
     runbook = " ".join((ROOT / "docs" / "ops" / "WATCHDOG.md").read_text(encoding="utf-8").split())
     assert (
@@ -952,12 +952,78 @@ def test_f1_1_the_runbook_states_the_unset_default_is_an_unknown_observation() -
 def test_f1_2_the_runbook_states_a_refused_document_leaves_the_previous_observation() -> None:
     """SLO-1-F1 (kimi2's #248 pre-merge read, P3 2 of 2): a document that newly fails
     validation publishes nothing, so the previous — possibly MET — observation stays in
-    `/health` until the next successful evaluation; age_seconds is the only staleness
-    signal."""
+    `/health` until the next successful evaluation."""
 
     runbook = " ".join((ROOT / "docs" / "ops" / "WATCHDOG.md").read_text(encoding="utf-8").split())
     assert (
         "A refused document therefore leaves the previous observation — possibly MET — in "
-        "`/health` until the next successful evaluation; `age_seconds` is the only "
-        "staleness signal."
+        "`/health` until the next successful evaluation; the observation's `evaluated_at` "
+        "(and its derived `age_seconds`) is the only staleness signal."
     ) in runbook
+
+
+def test_f1r1_1_the_runbook_states_one_rule_for_nothing_published() -> None:
+    """SLO-1-F1 r1 (fable's P2): the paragraph states ONE outcome for "nothing published" —
+    `/health` keeps the previous observation (possibly MET) for both a refused document and
+    an unpublishable cache; the exit code, not `/health`, says UNKNOWN. The pre-existing
+    sentence claiming the opposite is gone."""
+
+    runbook = " ".join((ROOT / "docs" / "ops" / "WATCHDOG.md").read_text(encoding="utf-8").split())
+    assert (
+        "When nothing can be published — a refused document (exit 64), or a cache the "
+        "evidence directory refuses (the CLI says so on stderr; a MET run exits 3) — "
+        "`/health` keeps the previous observation, possibly MET, until the next successful "
+        "evaluation; the exit code, not `/health`, is what says UNKNOWN."
+    ) in runbook
+    assert "unpublished is UNKNOWN to `/health`" not in runbook
+
+
+def test_f1r1_2a_a_refused_document_leaves_the_previous_met_cache(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """SLO-1-F1 r1 (fable's P3, behaviour): a document that newly fails validation must not
+    disturb a previously published evaluation — the refused run publishes nothing, so the
+    cache bytes and the `/health` fact stay MET."""
+
+    real = datetime.now(tz=UTC)  # the CLI reads the real clock: date the evidence to it
+    ops = _evidence(tmp_path, _synthetic_log(100, interval_s=10.0, end=real), now=real)
+    good = _write_document(tmp_path, _document(deadman_max_age_s=180))
+    assert slo_main(["--evidence-dir", str(ops), "--slo", str(good)]) == 0
+    cache = ops / EVALUATION_CACHE
+    seed_sha = hashlib.sha256(cache.read_bytes()).hexdigest()
+    assert collector_module.slo_fact(cache).state is SloState.MET
+
+    refused = tmp_path / "refused.json"
+    refused.write_text(json.dumps({"watchdog_deadline_s": 90, "deadman_max_age_s": 100}))
+    assert slo_main(["--evidence-dir", str(ops), "--slo", str(refused)]) == EXIT_BAD_DOCUMENT
+    assert "2 x watchdog_deadline_s" in capsys.readouterr().err
+    assert hashlib.sha256(cache.read_bytes()).hexdigest() == seed_sha
+    fact = collector_module.slo_fact(cache)
+    assert fact.state is SloState.MET and fact.problem is None
+
+
+def test_f1r1_2b_an_unpublishable_met_run_leaves_the_previous_met_cache(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """SLO-1-F1 r1 (fable's P2 + P3, behaviour): when the evidence directory refuses the
+    cache write, a MET run exits 3 and publishes nothing — the previous evaluation stays the
+    one `/health` shows; only the exit code says UNKNOWN."""
+
+    real = datetime.now(tz=UTC)
+    ops = _evidence(tmp_path, _synthetic_log(100, interval_s=10.0, end=real), now=real)
+    good = _write_document(tmp_path, _document(deadman_max_age_s=180))
+    assert slo_main(["--evidence-dir", str(ops), "--slo", str(good)]) == 0
+    cache = ops / EVALUATION_CACHE
+    seed_sha = hashlib.sha256(cache.read_bytes()).hexdigest()
+
+    ops.chmod(0o500)  # the directory refuses the temp create
+    try:
+        assert slo_main(["--evidence-dir", str(ops), "--slo", str(good)]) == EXIT_CODES[
+            SloState.UNKNOWN
+        ]
+        assert "slo cache not published" in capsys.readouterr().err
+    finally:
+        ops.chmod(0o700)
+    assert hashlib.sha256(cache.read_bytes()).hexdigest() == seed_sha
+    fact = collector_module.slo_fact(cache)
+    assert fact.state is SloState.MET and fact.problem is None
