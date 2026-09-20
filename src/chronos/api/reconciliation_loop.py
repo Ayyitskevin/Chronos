@@ -99,7 +99,7 @@ def reconcile_once(runtime: AppRuntime) -> tuple[bool, bool]:
     """
 
     try:
-        report = runtime.reconcile_submission_readiness()
+        report = runtime.reconcile_submission_readiness(trigger="periodic")
     except Exception:
         _logger.exception(
             "Periodic reconciliation failed; readiness is left to expire on its own age",

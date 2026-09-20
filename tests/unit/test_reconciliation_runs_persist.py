@@ -570,3 +570,154 @@ def test_4c_every_trigger_label_is_typed_and_only_these(database: Database) -> N
     ]
     assert sql == []
     assert ReconciliationRunRow.__tablename__ == "reconciliation_runs"
+
+
+# --- r1. the REAL callers name their trigger; the default stays honest; the CLI is registered ---
+
+
+def _triggers(database: Database) -> list[str]:
+    return [row[1] for row in _rows(database)]
+
+
+def test_r1_1a_the_startup_path_writes_a_startup_row(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Drive the REAL caller: the app lifespan (api/main.py) on a demo boot with a tmp database."""
+
+    from fastapi.testclient import TestClient
+
+    from chronos.api.main import create_app
+    from chronos.config.settings import get_settings
+
+    url = f"sqlite:///{tmp_path / 'chronos.db'}"
+    monkeypatch.setenv("BROKER_MODE", "demo")
+    monkeypatch.setenv("ALLOW_ORDER_TRANSMIT", "false")
+    monkeypatch.setenv("ALLOW_LIVE_TRADING", "false")
+    monkeypatch.setenv("DATABASE_URL", url)
+    monkeypatch.setenv("LOG_FILE", str(tmp_path / "chronos.log"))
+    monkeypatch.setenv("BACKEND_TOKEN_FILE", str(tmp_path / "backend_api_token"))
+    monkeypatch.setenv("LIVE_KILL_SWITCH_FILE", str(tmp_path / "kill.json"))
+    monkeypatch.setenv("SESSION_BASELINE_FILE", str(tmp_path / "baseline.json"))
+    get_settings.cache_clear()
+    try:
+        with TestClient(create_app()):
+            pass
+    finally:
+        get_settings.cache_clear()
+    fresh = Database(url)
+    try:
+        records = ReconciliationRepository(fresh.sessions).recent(limit=10)
+    finally:
+        fresh.dispose()
+    # exactly one startup row; the periodic task sleeps its first interval (>= 120 s) before
+    # its first cycle, so nothing else can have written inside the lifespan window
+    assert [record.trigger for record in records] == ["startup"], records
+    assert records[0].run_id.startswith("startup-")
+    assert DEMO_ACCOUNT_ID not in json.dumps(records[0].broker_snapshot)
+
+
+def test_r1_1b_the_operator_route_writes_an_operator_row(database: Database) -> None:
+    """Drive the REAL caller: routes/orders.py `reconcile_orders` with the runtime on its state."""
+
+    from chronos.api.routes.orders import reconcile_orders
+
+    runtime = _runtime(database)
+    response = reconcile_orders(cast(Any, SimpleNamespace(runtime=runtime)))
+    assert response.status == "RECONCILED"
+    assert _triggers(database) == ["operator"]
+
+
+def test_r1_1c_reconcile_once_writes_a_periodic_row(database: Database) -> None:
+    """Drive the REAL caller: reconciliation_loop.reconcile_once (the periodic task's one cycle)."""
+
+    from chronos.api.reconciliation_loop import reconcile_once
+
+    runtime = _runtime(database)
+    assert reconcile_once(runtime) == (True, False)
+    assert _triggers(database) == ["periodic"]
+
+
+def test_r1_1d_the_no_kwarg_default_is_still_unattributed_never_a_guess(database: Database) -> None:
+    import inspect
+
+    parameter = inspect.signature(AppRuntime.reconcile_submission_readiness).parameters["trigger"]
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameter.default == "unattributed"
+    runtime = _runtime(database)
+    runtime.reconcile_submission_readiness()  # a caller that says nothing
+    assert _triggers(database) == ["unattributed"]
+
+
+def test_r1_2_the_command_is_registered_on_the_real_cli_the_add_selection_command_way() -> None:
+    env = {
+        "BROKER_MODE": "demo",
+        "ALLOW_ORDER_TRANSMIT": "false",
+        "ALLOW_LIVE_TRADING": "false",
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
+    import os
+
+    full_env = {**os.environ, **env}
+    real = subprocess.run(
+        [sys.executable, "-m", "chronos.cli", "reconciliation-runs", "--help"],
+        cwd=_ROOT,
+        capture_output=True,
+        text=True,
+        env=full_env,
+    )
+    assert real.returncode == 0, real.stderr
+    assert "--last" in real.stdout
+    module_form = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "chronos.cli.reconciliation_commands",
+            "reconciliation-runs",
+            "--help",
+        ],
+        cwd=_ROOT,
+        capture_output=True,
+        text=True,
+        env=full_env,
+    )
+    assert module_form.returncode == 0, module_form.stderr
+    # the registration shape: one import beside `add_selection_command`, one call beside the
+    # other top-level `add_*_commands(sub)` calls — and nothing else in cli/main.py mentions it
+    source = (_ROOT / "src/chronos/cli/main.py").read_text(encoding="utf-8")
+    assert (
+        source.count(
+            "from chronos.cli.reconciliation_commands import add_reconciliation_runs_command\n"
+        )
+        == 1
+    )
+    assert source.count("add_reconciliation_runs_command(sub)\n") == 1
+    assert source.count("reconciliation_runs") == 2
+
+
+def test_r1_4_the_real_caller_set_is_startup_operator_periodic_and_nothing_is_invented() -> None:
+    """Every production caller under api/ names its trigger; the set is the three real callers."""
+
+    found: dict[str, str] = {}
+    for path in sorted((_ROOT / "src/chronos/api").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "reconcile_submission_readiness"
+            ):
+                continue
+            labels = [
+                kw.value.value
+                for kw in node.keywords
+                if kw.arg == "trigger" and isinstance(kw.value, ast.Constant)
+            ]
+            assert len(labels) == 1, f"{path}:{node.lineno} names no literal trigger"
+            found[f"{path.relative_to(_ROOT)}:{node.lineno}"] = labels[0]
+    assert sorted(found.values()) == ["operator", "periodic", "startup"], found
+    assert set(found) == {
+        "src/chronos/api/main.py:330",
+        "src/chronos/api/reconciliation_loop.py:102",
+        "src/chronos/api/routes/orders.py:216",
+    }, found
+    assert set(found.values()) <= set(TRIGGERS)

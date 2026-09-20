@@ -31,6 +31,7 @@ from chronos.cli.campaign_status import add_campaign_status_command
 from chronos.cli.data_commands import add_data_commands
 from chronos.cli.mandate_check import add_mandate_commands
 from chronos.cli.proposer_commands import add_proposer_commands
+from chronos.cli.reconciliation_commands import add_reconciliation_runs_command
 from chronos.cli.selection_commands import add_selection_command
 from chronos.control.halt import HaltReason, HaltStore
 from chronos.control.modes import TradingMode, resolve_mode_lock
@@ -567,6 +568,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_data_commands(sub)
     add_mandate_commands(sub)
     add_proposer_commands(sub)
+    add_reconciliation_runs_command(sub)
 
     return parser
 
