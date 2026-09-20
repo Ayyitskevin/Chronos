@@ -933,3 +933,35 @@ def test_5a_the_runbook_states_what_an_slo_proves_the_format_and_the_exit_codes(
         "does not increase",
     ):
         assert needle in runbook, needle
+
+
+def test_f1_1_the_runbook_states_the_unset_default_is_an_unknown_observation() -> None:
+    """SLO-1-F1 (kimi2's #248 pre-merge read, P3 1 of 2): the prose matches the probed
+    behaviour — with `ops_slo_evaluation_file` unset the projection still writes
+    `observations.slo`, in state UNKNOWN with problem "no evaluation cache is configured"
+    (probe: run-20260913-pm/logs/SLO-1-F1-probe.out)."""
+
+    runbook = " ".join(
+        (ROOT / "docs" / "ops" / "WATCHDOG.md").read_text(encoding="utf-8").split()
+    )
+    assert (
+        "The default is unset: `/health` still carries the observation, in state `UNKNOWN` "
+        'with `problem` "no evaluation cache is configured"'
+    ) in runbook
+    assert "The default is unset: no observation." not in runbook
+
+
+def test_f1_2_the_runbook_states_a_refused_document_leaves_the_previous_observation() -> None:
+    """SLO-1-F1 (kimi2's #248 pre-merge read, P3 2 of 2): a document that newly fails
+    validation publishes nothing, so the previous — possibly MET — observation stays in
+    `/health` until the next successful evaluation; age_seconds is the only staleness
+    signal."""
+
+    runbook = " ".join(
+        (ROOT / "docs" / "ops" / "WATCHDOG.md").read_text(encoding="utf-8").split()
+    )
+    assert (
+        "A refused document therefore leaves the previous observation — possibly MET — in "
+        "`/health` until the next successful evaluation; `age_seconds` is the only "
+        "staleness signal."
+    ) in runbook
