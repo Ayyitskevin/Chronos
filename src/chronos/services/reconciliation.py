@@ -194,7 +194,13 @@ class ReconciliationCoordinator:
         self._execution_repository = execution_repository
 
     def reconcile(self) -> ReconciliationResult:
-        """Read broker and local evidence without writing state or invoking an order method."""
+        """Read broker and local evidence without placing or changing any order.
+
+        The broker is only ever read. Local state is written in exactly one case: when an
+        ``ExecutionRepository`` was injected, the executions the accepted observation carried
+        are persisted as local evidence after a result is decided (never on a resolution
+        failure), and that write can neither change the result nor raise out of the pass.
+        """
 
         try:
             started_at = self._monotonic()
@@ -227,12 +233,12 @@ class ReconciliationCoordinator:
             )
             return self._complete(self._pending_without_snapshot(*broker_reasons))
 
-        try:
-            return self._resolve(observation, started_at=started_at)
-        finally:
-            # BP-1b: the accepted broker evidence is persisted AFTER the result is decided, so
-            # the writer can neither extend the evidence window nor change the report.
-            self._persist_executions(observation)
+        result = self._resolve(observation, started_at=started_at)
+        # BP-1b r2: the accepted broker evidence is persisted only once a result exists (a
+        # resolution failure propagates before this line), so the writer can neither extend
+        # the evidence window nor change the report.
+        self._persist_executions(observation)
+        return result
 
     def _resolve(
         self, observation: _BrokerObservation, *, started_at: float

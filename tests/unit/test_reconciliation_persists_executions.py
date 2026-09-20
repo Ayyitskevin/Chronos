@@ -20,7 +20,7 @@ import logging
 import os
 import subprocess
 import sys
-from collections.abc import Coroutine
+from collections.abc import Callable, Coroutine
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -285,7 +285,7 @@ def _coordinator(
     broker: object,
     *,
     repository: object | None = None,
-    monotonic: _Ticking | None = None,
+    monotonic: Callable[[], float] | None = None,
     symbols: tuple[str, ...] = ("AAPL",),
 ) -> ReconciliationCoordinator:
     extra: dict[str, Any] = {}
@@ -557,3 +557,72 @@ def test_6a_only_service_and_runtime_import_the_repository_and_no_authority_read
     )
     assert probe.stdout.strip() == "[]", probe.stdout
     assert IntegrityError is not None  # the name is imported so the 4a pin below can name it
+
+
+# ------------------------------------------------------------------ r2. Daybreak's HOLD at a0e83cc
+
+
+class _ExplodingAtResolve:
+    """Daybreak's probe clock: capture completes, then the first read inside ``_resolve`` raises.
+
+    A pass reads the clock for ``started_at``, for ``broker_elapsed_seconds`` after the capture,
+    and then for ``evidence_elapsed_seconds`` inside ``_resolve``: the third read.
+    """
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __call__(self) -> float:
+        self.calls += 1
+        if self.calls == 3:
+            raise RuntimeError("resolution clock failed")
+        return 1_000.0 + self.calls / 1_000
+
+
+def test_r2_1a_a_resolution_failure_escapes_and_persists_nothing(tmp_path: Path) -> None:
+    """P1: the writer runs only after a result exists; a raise in ``_resolve`` writes no rows."""
+    database = _database(tmp_path, ACCOUNT_ID)
+    try:
+        one = _execution("EX-1")
+        spy = _Spy(ExecutionRepository(database.sessions))
+        failing = _ScriptedBroker(((one,), (one,)))
+        clock = _ExplodingAtResolve()
+        with pytest.raises(RuntimeError) as raised:
+            _coordinator(failing, repository=spy, monotonic=clock).reconcile()
+        assert type(raised.value) is RuntimeError
+        assert str(raised.value) == "resolution clock failed"
+        assert failing.calls["executions"] == 2, "both snapshots were captured before the raise"
+        assert clock.calls == 3, "the raise was the first clock read inside _resolve"
+        assert spy.recorded == [], "the writer ran before any result was decided"
+        assert _rows(database) == ([], [])
+        # positive control: the same evidence with a healthy clock persists exactly once
+        healthy = _ScriptedBroker(((one,), (one,)))
+        _coordinator(healthy, repository=spy, monotonic=_Ticking()).reconcile()
+        assert spy.recorded == [("EX-1", None, True)]
+        assert [f[0] for f in _rows(database)[0]] == ["EX-1"]
+    finally:
+        database.dispose()
+
+
+RECONCILE_CONTRACT = (
+    "Read broker and local evidence without placing or changing any order.\n"
+    "\n"
+    "The broker is only ever read. Local state is written in exactly one case: when an\n"
+    "``ExecutionRepository`` was injected, the executions the accepted observation carried\n"
+    "are persisted as local evidence after a result is decided (never on a resolution\n"
+    "failure), and that write can neither change the result nor raise out of the pass."
+)
+
+
+def test_r2_2a_the_reconcile_contract_says_what_the_pass_writes_and_when() -> None:
+    """P2: the public method contract no longer claims a no-write pass."""
+    flat = " ".join(RECONCILE_CONTRACT.split())  # the pinned text wraps; the meaning does not
+    assert "without writing state" not in flat
+    for phrase in (
+        "without placing or changing any order",
+        "``ExecutionRepository`` was injected",
+        "after a result is decided",
+        "never on a resolution failure",
+    ):
+        assert phrase in flat, phrase
+    assert inspect.getdoc(ReconciliationCoordinator.reconcile) == RECONCILE_CONTRACT
