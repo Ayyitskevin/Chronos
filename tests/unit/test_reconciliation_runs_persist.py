@@ -721,3 +721,124 @@ def test_r1_4_the_real_caller_set_is_startup_operator_periodic_and_nothing_is_in
         "src/chronos/api/routes/orders.py:216",
     }, found
     assert set(found.values()) <= set(TRIGGERS)
+
+
+# --- r2. the operator CLI registers the command WITHOUT loading chronos.broker ---
+
+_R1_HEAD = "43134441f34ea9183e9244b5f9173c645c6e0a15"  # pragma: allowlist secret
+_REPOSITORY = "src/chronos/persistence/reconciliation_repository.py"
+
+
+def _without_the_r2_hunks(source: str) -> str:
+    """The module with the docstring, the result-type import and the TYPE_CHECKING block removed.
+
+    What remains must be identical before and after r2: the cut and the docstring sentence are
+    the ONLY changes in the module.
+    """
+
+    tree = ast.parse(source)
+    kept: list[ast.stmt] = []
+    for node in tree.body:
+        if (
+            isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        ):
+            continue  # the module docstring
+        if isinstance(node, ast.ImportFrom) and node.module == "chronos.services.reconciliation":
+            continue  # the runtime import (r1) — absent after r2
+        if (
+            isinstance(node, ast.If)
+            and isinstance(node.test, ast.Name)
+            and node.test.id == "TYPE_CHECKING"
+        ):
+            continue  # the type-only block (r2) — absent before r2
+        if isinstance(node, ast.ImportFrom) and node.module == "typing":
+            node.names = [alias for alias in node.names if alias.name != "TYPE_CHECKING"]
+        kept.append(node)
+    tree.body = kept
+    return ast.dump(tree)
+
+
+def test_r2_1_the_cut_is_the_type_checking_import_and_the_docstring_and_nothing_else() -> None:
+    before = subprocess.run(
+        ["git", "show", f"{_R1_HEAD}:{_REPOSITORY}"],
+        cwd=_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    after = (_ROOT / _REPOSITORY).read_text(encoding="utf-8")
+    tree = ast.parse(after)
+    runtime_imports = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.ImportFrom) and node.module == "chronos.services.reconciliation"
+    ]
+    assert runtime_imports == [], "the result type must not be imported at runtime"
+    blocks = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.If)
+        and isinstance(node.test, ast.Name)
+        and node.test.id == "TYPE_CHECKING"
+    ]
+    assert len(blocks) == 1
+    assert [
+        (node.module, [alias.name for alias in node.names])
+        for node in blocks[0].body
+        if isinstance(node, ast.ImportFrom)
+    ] == [("chronos.services.reconciliation", ["ReconciliationResult"])]
+    assert "from __future__ import annotations" in after  # the annotation stays a string
+    assert "build_parser" not in after and "import chronos.cli" not in after  # no lazy tricks
+    # nothing else in the module moved
+    assert _without_the_r2_hunks(before) == _without_the_r2_hunks(after)
+    # the docstring names the three real callers, the honest default and the unemitted vocabulary
+    docstring = ast.get_docstring(tree) or ""
+    for phrase in ("startup", "operator", "periodic", "unattributed", "reconnect", "order_fill"):
+        assert phrase in docstring, phrase
+    assert "no caller emits" in docstring
+
+
+def test_r2_2_importing_the_cli_never_loads_a_broker_module_and_the_probe_can_see_one() -> None:
+    """A fresh interpreter (the platform pin's own technique): the CLI entry points leave no
+    ``chronos.broker*`` in ``sys.modules``; the positive control proves the probe sees a broker
+    module when one IS loaded."""
+
+    import os
+
+    env = {
+        **os.environ,
+        "BROKER_MODE": "demo",
+        "ALLOW_ORDER_TRANSMIT": "false",
+        "ALLOW_LIVE_TRADING": "false",
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
+
+    def loaded_broker_modules(*modules: str) -> list[str]:
+        probe = (
+            "import sys\n"
+            + "".join(f"import {module}\n" for module in modules)
+            + "print('|'.join(sorted(m for m in sys.modules if m.startswith('chronos.broker'))))\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", probe],
+            cwd=_ROOT,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=120,
+            check=True,
+        )
+        return [m for m in result.stdout.strip().split("|") if m]
+
+    assert (
+        loaded_broker_modules(
+            "chronos.cli.main",
+            "chronos.cli.reconciliation_commands",
+            "chronos.persistence.reconciliation_repository",
+        )
+        == []
+    )
+    # positive control: the service module DOES pull the broker base, and the probe reports it
+    assert "chronos.broker.base" in loaded_broker_modules("chronos.services.reconciliation")

@@ -14,6 +14,11 @@ exception into the pass and never a change to the latch. Nothing in the order pl
 supervisor or control reads these rows; ``chronos.cli reconciliation-runs`` and a fresh session
 read them back.
 
+The ``trigger`` a row carries is the caller's own word. The real callers today are ``startup``
+(the api/main.py lifespan), ``operator`` (``POST /orders/reconcile``) and ``periodic``
+(``reconcile_once``); a caller that passes nothing is recorded as ``unattributed`` — the honest
+default, never a guessed label. ``reconnect`` and ``order_fill`` are vocabulary no caller emits yet.
+
 Evidence only: verified on synthetic / demo evidence; UNVERIFIED on live until the M4 read-only
 session (K4 unanswered).
 """
@@ -24,7 +29,7 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import AwareDatetime, Field
 from sqlalchemy import select
@@ -39,7 +44,9 @@ from chronos.persistence.repositories import (
     _require_scope,
 )
 from chronos.persistence.schema import ReconciliationRunRow
-from chronos.services.reconciliation import ReconciliationResult
+
+if TYPE_CHECKING:  # type only: the runtime import drags chronos.broker into the operator CLI
+    from chronos.services.reconciliation import ReconciliationResult
 
 _LOGGER = logging.getLogger(__name__)
 
