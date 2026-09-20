@@ -876,7 +876,78 @@ def test_v13_database_gains_execution_identity_and_keeps_its_fill_rows(tmp_path:
 
     assert after == before  # every old column byte-equal
     assert identity == (None, None, None)  # never a synthesized client 0
-    assert version == SCHEMA_VERSION == 14
+    assert version == SCHEMA_VERSION  # the chain's head, as every upgrade pin asserts it
+
+    database = Database(f"sqlite:///{db_path}")
+    try:
+        database.initialize()  # the fail-closed drift checker accepts the upgraded store
+    finally:
+        database.dispose()
+
+
+def test_v14_database_gains_order_event_identity_and_keeps_its_rows(tmp_path: Path) -> None:
+    """Migration 0014 (BP-2, schema v15) adds ``permanent_id`` / ``client_id`` to
+    ``order_events`` without touching a prior column: a pre-0014 event row reads back byte-equal
+    on every old column, the new columns are NULL (never a synthesized 0), and the drift checker
+    accepts the upgraded store.
+    """
+
+    db_path = tmp_path / "chronos.db"
+    engine = sa.create_engine(f"sqlite:///{db_path}")
+    Base.metadata.create_all(engine)
+    old_columns = (
+        "id, intent_id, event_key, sequence, source, from_status, to_status, broker_order_id, "
+        "filled_quantity, remaining_quantity, evidence, occurred_at, recorded_at"
+    )
+    with engine.begin() as connection:
+        # a true v14 shape: the two identity columns (and the index) do not exist yet
+        connection.execute(sa.text("DROP INDEX ix_order_events_permanent_id"))
+        for column in ("permanent_id", "client_id"):
+            connection.execute(sa.text(f"ALTER TABLE order_events DROP COLUMN {column}"))
+        connection.execute(
+            sa.text(
+                f"INSERT INTO order_events ({old_columns}) VALUES (1, 'intent-old', "
+                "'intent-old:9001:SUBMITTED', 1, 'SUBMIT', 'SUBMISSION_UNKNOWN', 'SUBMITTED', "
+                "9001, 0, 1, '{\"permanent_id\": 4242}', '2026-01-15 15:30:00.000000', "
+                "'2026-01-15 15:30:01.000000')"
+            )
+        )
+        for version in range(2, 15):
+            connection.execute(
+                sa.text(
+                    "INSERT INTO schema_version (version, applied_at) "
+                    f"VALUES ({version}, '2026-01-01 00:00:00.000000')"
+                )
+            )
+    with engine.connect() as connection:
+        before = connection.execute(sa.text(f"SELECT {old_columns} FROM order_events")).one()
+    engine.dispose()
+
+    config = _alembic_config(db_path)
+    command.stamp(config, "0013")
+    command.upgrade(config, "head")
+
+    engine = sa.create_engine(f"sqlite:///{db_path}")
+    inspector = sa.inspect(engine)
+    columns = {column["name"]: column for column in inspector.get_columns("order_events")}
+    assert columns["permanent_id"]["nullable"] is True
+    assert columns["client_id"]["nullable"] is True
+    assert any(
+        index["column_names"] == ["permanent_id"] for index in inspector.get_indexes("order_events")
+    )
+    with engine.connect() as connection:
+        after = connection.execute(sa.text(f"SELECT {old_columns} FROM order_events")).one()
+        identity = connection.execute(
+            sa.text("SELECT permanent_id, client_id FROM order_events")
+        ).one()
+        version = connection.execute(
+            sa.text("SELECT version FROM schema_version ORDER BY id DESC LIMIT 1")
+        ).scalar()
+    engine.dispose()
+
+    assert after == before  # every old column byte-equal; the evidence JSON keeps its copy
+    assert identity == (None, None)  # the columns are not back-filled from the JSON
+    assert version == SCHEMA_VERSION  # 15 at this revision; the head pin lives in test_database
 
     database = Database(f"sqlite:///{db_path}")
     try:
