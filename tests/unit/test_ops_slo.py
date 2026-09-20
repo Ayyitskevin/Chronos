@@ -941,9 +941,7 @@ def test_f1_1_the_runbook_states_the_unset_default_is_an_unknown_observation() -
     `observations.slo`, in state UNKNOWN with problem "no evaluation cache is configured"
     (probe: run-20260913-pm/logs/SLO-1-F1-probe.out)."""
 
-    runbook = " ".join(
-        (ROOT / "docs" / "ops" / "WATCHDOG.md").read_text(encoding="utf-8").split()
-    )
+    runbook = " ".join((ROOT / "docs" / "ops" / "WATCHDOG.md").read_text(encoding="utf-8").split())
     assert (
         "The default is unset: `/health` still carries the observation, in state `UNKNOWN` "
         'with `problem` "no evaluation cache is configured"'
@@ -957,9 +955,7 @@ def test_f1_2_the_runbook_states_a_refused_document_leaves_the_previous_observat
     `/health` until the next successful evaluation; age_seconds is the only staleness
     signal."""
 
-    runbook = " ".join(
-        (ROOT / "docs" / "ops" / "WATCHDOG.md").read_text(encoding="utf-8").split()
-    )
+    runbook = " ".join((ROOT / "docs" / "ops" / "WATCHDOG.md").read_text(encoding="utf-8").split())
     assert (
         "A refused document therefore leaves the previous observation — possibly MET — in "
         "`/health` until the next successful evaluation; `age_seconds` is the only "
