@@ -1018,9 +1018,10 @@ def test_f1r1_2b_an_unpublishable_met_run_leaves_the_previous_met_cache(
 
     ops.chmod(0o500)  # the directory refuses the temp create
     try:
-        assert slo_main(["--evidence-dir", str(ops), "--slo", str(good)]) == EXIT_CODES[
-            SloState.UNKNOWN
-        ]
+        assert (
+            slo_main(["--evidence-dir", str(ops), "--slo", str(good)])
+            == EXIT_CODES[SloState.UNKNOWN]
+        )
         assert "slo cache not published" in capsys.readouterr().err
     finally:
         ops.chmod(0o700)
