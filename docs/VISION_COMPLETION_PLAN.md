@@ -411,6 +411,52 @@ Deliver:
   offline `ensurepip` trust, independent/cross-platform rebuild evidence, and compromised-builder resistance remain
   open. This does not satisfy the Phase 2 exit.
 
+  **Partial delivery (updated 2026-09-20, through #247 / ADR-0059):** the operations-plane and
+  persistence work that landed since ADR-0045, each item bound to its merge commit and evidence
+  artifact at 001efb66, and every item verified on synthetic / demo evidence; UNVERIFIED on live
+  until the M4 read-only session. (a) LANDED — the off-host alert sidecar DESIGN only, a
+  receive-only protocol sketch (docs/ops/DESIGN-alert-sidecar.md; #240, merge 3e3427c); the
+  evidence-only watchdog and dead-man, run as `python -m chronos.operations.watchdog --interval 10
+  --deadline 90 --evidence-dir data/ops` (docs/ops/WATCHDOG.md:65) with `python -m
+  chronos.operations.deadman --heartbeat data/ops/heartbeat.json --max-age 180` (WATCHDOG.md:69),
+  the writer holding `watchdog.lock` `LOCK_EX` for the life of its loop — a kernel-released
+  liveness lock the dead-man reads first, a free or absent entry reading DEAD (WATCHDOG.md:167-172)
+  — and appending `<evidence-dir>/watchdog.jsonl` opened `O_APPEND|O_NOFOLLOW|O_NONBLOCK`
+  (WATCHDOG.md:32,56; tests/unit/test_ops_watchdog.py; #241, merge 39fd2a5); the RPO/RTO restore
+  drill harness that publishes one self-contained envelope with a single
+  `renameat2(RENAME_NOREPLACE)` and restores through the host identity (docs/ops/RESTORE-DRILL.md:78
+  and :148; src/chronos/operations/restore_drill.py; tests/unit/test_ops_restore_drill.py;
+  tests/integration/test_backup_restore_drill.py; #242, merge d8ed5f4), its first measured drill
+  quoted from the merged record as rpo 2.208 s / rto 0.026 s on the Flow host gate — the drill
+  report itself is kept where a host loss cannot erase it (docs/ops/DESIGN-alert-sidecar.md:33);
+  keyed identifier pseudonyms — session-scoped HMAC-SHA256 under the per-install secret
+  `CHRONOS_CAPTURE_PEPPER`, scheme `hmac-sha256-v2`, a 16-hex `pepper_fingerprint` in the manifest,
+  and a capture refused before anything is written when the pepper is absent
+  (.claude/skills/chronos-real-gateway-campaign/scripts/capture_readonly.py:18-31;
+  docs/ops/m4-read-only-gate-session-checklist.md:270-279; #243, merge 7ee0319, with its checklist
+  and pepper-documentation tail in #245, merge 148e936); backups encrypted at rest with age
+  (X25519) to exactly two recipients, the host identity generated once per host, untracked, readable
+  by the operator alone (docs/ops/RESTORE-DRILL.md:179-185; #244, merge 8d1ba6d); the restored
+  copy's descriptor held through the acceptance check, verdicts computed from descendants opened
+  descriptor-relative (src/chronos/operations/restore_drill.py:44; #246, merge 3785988); and broker
+  executions persisting as executions — an idempotent execution-keyed writer for fills and
+  commissions, migration 0013 adding nullable `permanent_id`/`client_id`/`order_ref` so a
+  pre-revision row reads back unknown-never-synthesized (src/chronos/persistence/execution_repository.py:148;
+  src/chronos/persistence/migrations/versions/0013_execution_identity.py;
+  tests/unit/test_execution_repository.py; #247, merge 001efb6). (b) AT THE GATE, NOT COUNTED:
+  SLO-1 #248 (typed default-off SLO document plus offline evaluator over watchdog evidence), BP-2
+  #249 (order identity columns on the event path), BP-1b #250 (the reconciliation seam that first
+  writes fills), and the stacked follow-ups #251/#252/#253 — open PRs as of this update, none of
+  them counted toward the exit. (c) REMAINS OPEN against the §7 bullets: cash, buying-power, and
+  positions persistence and exact allocation provenance (BP-3/AP-1; owner decisions K1/K2
+  outstanding); the off-host sidecar receiver itself (S-1 — only the design landed) and the
+  off-host witness; the external audit-chain anchor; P&L attribution, drawdown, exposure,
+  slippage, and tracking error by exact strategy; atomic reservations, position netting, and
+  conflict resolution; bounded reconciliation beyond the pre-existing modules (the #240–#247
+  cumulative diff touches one reconciliation-named path, and it is a unit test —
+  tests/unit/test_local_reconciliation_repository.py); and orchestrator deployment/configuration,
+  outer deadlines, always-on alerts, and operational proof. (d) This does not satisfy the Phase 2 exit.
+
 ### Real-gateway read-only gate
 
 The owner installs and pins the official IB API, supplies a paper account and market-data
