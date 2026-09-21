@@ -231,7 +231,10 @@ cadence rules**, the same shape as the reconciliation and clock-health settings:
 must be at least 3 × the cadence the writer actually kept (the median spacing of consecutive
 `monotonic` values in `watchdog.jsonl` — a missed tick is not an outage), and
 `deadman_max_age_s` at least 2 × `watchdog_deadline_s` (a missed tick is not a death). A
-document that violates either is refused typed, exit 64, and publishes nothing.
+document that violates either is refused typed, exit 64, and publishes nothing. A refused
+document therefore leaves the previous observation — possibly MET — in `/health` until the
+next successful evaluation; the observation's `evaluated_at` (and its derived `age_seconds`)
+is the only staleness signal.
 
 `UNKNOWN` is the honest answer, never a guess: the log is absent, malformed, or spans less than
 the window; a measurement needs two lines and has one; the heartbeat is absent, malformed or
@@ -252,8 +255,12 @@ UNKNOWN if any is, else MET.
 fsync; a symlink, FIFO or directory at the name is refused and left in place). When the
 setting `ops_slo_evaluation_file` names that file, `/health` carries
 `observations.slo: {evaluated_at, state, age_seconds, problem}` read from it — one bounded,
-no-follow read per request, never the evaluator. The default is unset: no observation. The
+no-follow read per request, never the evaluator. The default is unset: `/health` still
+carries the observation, in state `UNKNOWN` with `problem` "no evaluation cache is
+configured" — an absent evaluation is an honest UNKNOWN, not a missing field. The
 field is an observation and **changes no verdict**: neither liveness, readiness nor trading
-capability reads it (`tests/unit/test_ops_slo.py` pins that by AST and by behaviour). If the
-cache cannot be published the CLI says so on stderr and a MET run exits 3 — unpublished is
-UNKNOWN to `/health`.
+capability reads it (`tests/unit/test_ops_slo.py` pins that by AST and by behaviour). When
+nothing can be published — a refused document (exit 64), or a cache the evidence directory
+refuses (the CLI says so on stderr; a MET run exits 3) — `/health` keeps the previous
+observation, possibly MET, until the next successful evaluation; the exit code, not
+`/health`, is what says UNKNOWN.
