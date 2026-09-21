@@ -415,14 +415,121 @@ def test_3_no_authority_package_imports_the_repository_and_the_scan_detects_a_pl
     assert _imports_module(plant, module)
 
 
+_LIVE_ACCOUNT_READS = ("src/chronos/orders/evidence.py", "src/chronos/orders/submission.py")
+_BASE_REF_FALLBACKS = ("origin/main", "main")
+
+
+def _packet_base_ref() -> str:
+    """The ref the branch is measured against: env override, else origin/main, else main.
+
+    A frozen sha would fail the moment main is merged into the branch for a change BP-3 never
+    made (the r3 lesson); the merge-base with a live ref moves with those merges. A ref that
+    does not resolve is a loud failure naming what was tried — never a silent skip.
+    """
+
+    import os
+
+    tried: list[str] = []
+    for ref in (os.environ.get("CHRONOS_PACKET_BASE_REF"), *_BASE_REF_FALLBACKS):
+        if not ref:
+            continue
+        resolved = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
+            cwd=_ROOT,
+            capture_output=True,
+            text=True,
+        )
+        if resolved.returncode == 0:
+            return ref
+        tried.append(ref)
+    pytest.fail(
+        "no packet base ref resolves (tried "
+        + ", ".join(tried)
+        + "); set CHRONOS_PACKET_BASE_REF to the ref this branch is measured against"
+    )
+
+
 def test_3b_the_live_account_summary_reads_are_untouched_against_the_base() -> None:
-    base = "a9a89a307142ab505e371d2d3aa7cc6dc4c41d90"
-    for path in ("src/chronos/orders/evidence.py", "src/chronos/orders/submission.py"):
+    """BP-3 touches neither live AccountSummary read — measured against the branch's merge-base
+    with its base ref, so merges of main into the branch (other packets' edits to these files)
+    do not fail a pin about THIS branch's edits."""
+
+    ref = _packet_base_ref()
+    base = subprocess.run(
+        ["git", "merge-base", "HEAD", ref], cwd=_ROOT, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    assert base, ref
+    for path in _LIVE_ACCOUNT_READS:
         before = subprocess.run(
             ["git", "show", f"{base}:{path}"], cwd=_ROOT, capture_output=True, text=True, check=True
         ).stdout
         after = (_ROOT / path).read_text(encoding="utf-8")
-        assert ast.dump(ast.parse(before)) == ast.dump(ast.parse(after)), path
+        assert ast.dump(ast.parse(before)) == ast.dump(ast.parse(after)), (
+            f"{path} differs from the merge-base {base[:12]} with {ref}: this branch edited a "
+            "live AccountSummary read"
+        )
+
+
+def test_3c_the_base_comparison_uses_no_frozen_sha() -> None:
+    """The pin's base is a ref, never a 40-hex literal (in its body or via a module constant)."""
+
+    import inspect
+    import re
+
+    source = inspect.getsource(
+        test_3b_the_live_account_summary_reads_are_untouched_against_the_base
+    )
+    source += inspect.getsource(_packet_base_ref)
+    assert re.search(r"[0-9a-f]{40}", source) is None, "a frozen sha is used as the base again"
+    tree = ast.parse(inspect.getsource(sys.modules[__name__]))
+    frozen = {
+        target.id
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        for target in node.targets
+        if isinstance(target, ast.Name)
+        and isinstance(node.value, ast.Constant)
+        and isinstance(node.value.value, str)
+        and re.fullmatch(r"[0-9a-f]{40}", node.value.value)
+    }
+    used = {n.id for n in ast.walk(ast.parse(source)) if isinstance(n, ast.Name)}
+    assert not (frozen & used), frozen & used
+    assert "merge-base" in source and "CHRONOS_PACKET_BASE_REF" in source
+
+
+def test_3b2_a_missing_base_ref_is_a_loud_failure_never_a_skip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CHRONOS_PACKET_BASE_REF", "refs/heads/does-not-exist")
+    monkeypatch.setattr(sys.modules[__name__], "_BASE_REF_FALLBACKS", ("refs/heads/nor-this",))
+    with pytest.raises(pytest.fail.Exception, match="no packet base ref resolves") as raised:
+        _packet_base_ref()
+    assert "refs/heads/does-not-exist, refs/heads/nor-this" in str(raised.value)
+    assert "CHRONOS_PACKET_BASE_REF" in str(raised.value)
+    # and the override wins when it resolves
+    monkeypatch.setenv("CHRONOS_PACKET_BASE_REF", "HEAD")
+    assert _packet_base_ref() == "HEAD"
+
+
+def test_3d_the_r3_commit_touched_exactly_this_test_file() -> None:
+    """The BP-3 r3 delta is one file — pinned on the commit itself, not on an open range."""
+
+    found = subprocess.run(
+        ["git", "log", "-1", "--format=%H", "--grep=(BP-3 r3)"],
+        cwd=_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert found, "the BP-3 r3 commit is not in this branch's history yet"
+    touched = subprocess.run(
+        ["git", "show", "--name-only", "--format=", found],
+        cwd=_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()
+    assert touched == ["tests/unit/test_reconciliation_runs_persist.py"], touched
 
 
 # --- 4. the restart-recovery drill + the CLI ---------------------------------------------------
