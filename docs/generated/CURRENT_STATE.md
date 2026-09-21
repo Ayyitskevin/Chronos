@@ -216,7 +216,7 @@ Both are built inert and enabled only by the owner (plan §11); a value would be
 | --- | --- |
 | src/chronos/supervisor/compiler.py | `40b9b4a07dd90356f74552bb291296fbc069758b14cd471b122cea92dcd57538` |
 | src/chronos/autonomy/enums.py | `96bcff19f76065a34d75c9fba00b5682de59448c8a8f770a8628494eec15a3e9` |
-| src/chronos/config/settings.py | `9d1b6a817c5b3600549a054e4582a10f34aecd947834857c46d89800226add84` |
+| src/chronos/config/settings.py | `dfa0f5c7bb4d5c37dbbd8ad53f4f858fdc39e68248eaa572a6c24574033d1e7a` |
 | src/chronos/domain/enums.py | `6244760cac081c4ca0cbbec7cfc586efe6fd11471d7e06fbb29c8c4790414828` |
 | src/chronos/runtime.py | `e85ead28e76de6a0265985ea21227367aa5ebaa2418bd74d9bb3c380fe6ec738` |
 | src/chronos/api/autonomy_wiring.py | `6538f1670631efdd3ee9c08245f87fecda8a51d082914a97d64e5452c9958ae2` |

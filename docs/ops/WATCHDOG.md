@@ -187,3 +187,73 @@ clean publication is `DEAD` at the very next dead-man check.
 **The one thing a reader must tolerate:** if the disk stops accepting bytes mid-append,
 `watchdog.jsonl` can end in a torn last line (the tick then exits 3 and no heartbeat is
 published). Treat a final line that does not parse as "the writer died here", not as data.
+
+## Objectives: what an SLO proves, and does not
+
+`python -m chronos.operations.slo` is an **offline evaluator** over the two files above. An
+operator declares objectives once, in a typed document, and the evaluator says per objective
+whether the **recorded evidence** met it over the declared window. That is the whole claim:
+**an SLO here proves compliance of what the watchdog wrote down, and nothing else.** The host
+that died **records nothing** — its silence is the dead-man's boundary, not the evaluator's —
+and a met objective is not a healthy trader, a sane broker session, or anything about the
+order plane. The evaluator starts nothing, alerts nobody, and **changes no verdict**: it is
+an observation (ADR-0040), the same tier as the watchdog and the dead-man, and the authority
+packages are structurally barred from importing it (`tests/safety/test_operational_health_boundary.py`).
+Nothing in this repository starts it; a timer or an operator does.
+
+```bash
+python -m chronos.operations.slo --evidence-dir data/ops --slo data/ops/slo.json [--pretty]
+# exit 0 all MET · 2 any BREACHED · 3 any UNKNOWN and none BREACHED · 64 bad document
+```
+
+`slo.json` — every objective optional, a document declaring none is refused, every number
+positive and finite. **The numbers below are placeholders** (OWNER-ASKS 9): Kevin's values
+replace them. Until then, and on any host with no evidence yet, the evaluator prints
+`UNKNOWN` and exits 3 — that is the correct finished state, not a failure.
+
+```json
+{"schema_version": 1,
+ "probe_latency_p95_ms": 250, "readiness_availability_pct": 99.5, "window_s": 3600,
+ "watchdog_deadline_s": 90, "deadman_max_age_s": 180, "clock_max_error_s": 5}
+```
+
+| Objective | Measured from | MET when |
+|---|---|---|
+| `probe_latency_p95_ms` | nearest-rank p95 of `elapsed_ms` over the lines within `window_s` | p95 ≤ budget |
+| `readiness_availability_pct` | share of lines within `window_s` whose probe `state` is `HEALTHY` (an `UNKNOWN` tick is not availability) | share ≥ objective |
+| `watchdog_deadline_s` | the longest monotonic stretch without a `HEALTHY` observation within the window, and whether any line carries a `TRIPPED` verdict | stretch < deadline and no `TRIPPED` |
+| `deadman_max_age_s` | the heartbeat's `last_observed_at` age | age ≤ max |
+| `clock_max_error_s` | the largest wall-versus-monotonic disagreement between consecutive lines within the window (a stepped clock shows here) | disagreement ≤ max |
+
+`window_s` is required with the two windowed objectives; the deadline and clock objectives use
+it when present and the whole log otherwise. **The document is validated against the shipped
+cadence rules**, the same shape as the reconciliation and clock-health settings: `watchdog_deadline_s`
+must be at least 3 × the cadence the writer actually kept (the median spacing of consecutive
+`monotonic` values in `watchdog.jsonl` — a missed tick is not an outage), and
+`deadman_max_age_s` at least 2 × `watchdog_deadline_s` (a missed tick is not a death). A
+document that violates either is refused typed, exit 64, and publishes nothing.
+
+`UNKNOWN` is the honest answer, never a guess: the log is absent, malformed, or spans less than
+the window; a measurement needs two lines and has one; the heartbeat is absent, malformed or
+from the future; an entry at either name is a symlink, FIFO, directory or device — refused
+typed, never followed, never blocked on. **Malformed evidence never reads MET:** every line's
+`state` and `verdict` are checked against the closed vocabularies (`HEALTHY | UNHEALTHY |
+UNKNOWN` for the probe state, `HEALTHY | TRIPPED` for the watchdog's verdict — a stray space or
+a lower-case token is malformed), and a line whose `monotonic` or `assessed_at`
+does not increase from the line before is malformed too; the whole log is refused before any objective
+is computed and the reason names the line. A wall clock that stepped backwards between two
+ticks therefore reads `UNKNOWN` — go and look at the log, which shows the step. Reads mirror the dead-man's (`O_NOFOLLOW` walk,
+`O_NONBLOCK` open, `fstat` regular-file check, bounded: the newest 4 MiB of the log; a torn
+last line is where the writer died). The overall state is BREACHED if any objective is, else
+UNKNOWN if any is, else MET.
+
+**The one observation `/health` shows.** Each run publishes its evaluation as
+`<evidence-dir>/slo-evaluation.json` (unique `O_EXCL` 0600 temp, fsync, rename, directory
+fsync; a symlink, FIFO or directory at the name is refused and left in place). When the
+setting `ops_slo_evaluation_file` names that file, `/health` carries
+`observations.slo: {evaluated_at, state, age_seconds, problem}` read from it — one bounded,
+no-follow read per request, never the evaluator. The default is unset: no observation. The
+field is an observation and **changes no verdict**: neither liveness, readiness nor trading
+capability reads it (`tests/unit/test_ops_slo.py` pins that by AST and by behaviour). If the
+cache cannot be published the CLI says so on stderr and a MET run exits 3 — unpublished is
+UNKNOWN to `/health`.
