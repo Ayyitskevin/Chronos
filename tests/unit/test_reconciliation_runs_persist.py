@@ -997,6 +997,7 @@ def test_ap1r1_2_the_chain_is_linear_and_the_version_pins_follow_its_head() -> N
     assert len(parents) == len(set(parents)), "the migration chain branched"
     (head,) = script.get_heads()
     assert revisions["0015"].down_revision == "0014"  # #249's 0014 (schema v15) is on main
+    assert revisions["0016"].down_revision == "0015"  # AP-1b's acknowledgements on AP-1
     gate = (_ROOT / "scripts/verify_release_artifact.py").read_text(encoding="utf-8")
     assert f'_MIGRATION_HEAD: Final[str] = "{head}"' in gate
     head_module = importlib.import_module(
@@ -1171,3 +1172,41 @@ def test_ap1r1_4_none_of_the_ratified_files_is_a_current_state_input() -> None:
     builder = (_ROOT / "scripts/build_current_state.py").read_text(encoding="utf-8")
     for path in _RATIFIED:
         assert path not in builder, path
+
+
+# --- AP-1b r1. the fossil pins are gone: no literal head number, version or sha as a base ---
+
+
+def test_ap1br1_1_no_fossil_remains_in_either_pin_file() -> None:
+    """No bare version literal, no sha used as a base and no literal head number remains in the
+    two files this round owns. Structure facts (``"0016".down_revision == "0015"``) and the
+    expected-diff strings inside ``test_ap1r1_1`` (what the r1 commit CHANGED) are history, not
+    bases, and stay."""
+
+    import re
+
+    fossils = (
+        r"\b(SCHEMA_)?[Vv]ersion\s*==\s*1[0-9]\b",  # a bare schema/version literal
+        r"^\s*\w+ = \"[0-9a-f]{40}\"",  # a sha bound as a base
+        r"\"[0-9a-f]{40}\":",  # git show <sha>:path
+        r"get_heads\(\)\) == \[\"00",  # a literal chain head
+        r"_MIGRATION_HEAD: Final\[str\] = \\?\"00[0-9]{2}\\?\"' in gate",  # a literal head pin
+        r"head == \"00[0-9]{2}\"",  # a literal chain head (the AP-1 r2 slip)
+    )
+    for path in (
+        "tests/unit/test_position_provenance.py",
+        "tests/unit/test_reconciliation_runs_persist.py",
+    ):
+        for line in (_ROOT / path).read_text(encoding="utf-8").splitlines():
+            if "fossils = (" in line or line.strip().startswith('r"'):
+                continue  # this pin's own patterns
+            for pattern in fossils:
+                assert re.search(pattern, line) is None, (path, pattern, line)
+
+
+def test_ap1br1_2_the_r1_commit_touched_exactly_the_two_pin_files() -> None:
+    touched = sorted(_files_of(_commit_by_marker("(AP-1b r1)")))
+    assert touched == [
+        "tests/unit/test_position_provenance.py",
+        "tests/unit/test_reconciliation_runs_persist.py",
+    ], touched
