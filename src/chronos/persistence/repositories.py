@@ -413,14 +413,13 @@ class LocalReconciliationRepository:
                     _append_issue(issues, _LOCAL_ORDER_ISSUE)
 
             for fill in fills:
-                _collect_local_symbol(
-                    fill.symbol,
-                    unresolved_symbols=unresolved_symbols,
-                    issues=issues,
-                    issue=_LOCAL_FILL_ISSUE,
-                )
+                # BP-1b r1 (Kevin's ruling (a), 2026-09-19): a fills row is a broker-observed
+                # fact, not local strategy evidence — its symbol is never collected as
+                # unresolved. Local strategy evidence is drafts, submitted orders, cycles and
+                # basis entries. The row-shape checks stay (the symbol's shape included).
                 if (
-                    not _is_nonblank_string(fill.execution_id)
+                    not _is_canonical_code(fill.symbol)
+                    or not _is_nonblank_string(fill.execution_id)
                     or not _is_enum_value(SecurityType, fill.security_type)
                     or not _is_enum_value(OrderSide, fill.side)
                     or not _is_canonical_code(fill.currency)

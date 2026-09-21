@@ -37,6 +37,11 @@ from chronos.domain.models import (
     LocalReconciliationEvidence,
     OptionContract,
 )
+from chronos.persistence.execution_repository import (
+    ExecutionConflict,
+    ExecutionRepository,
+    UnknownCorrelation,
+)
 from chronos.strategy.wheel_state import WheelStateInput, derive_wheel_state
 from chronos.utils.logging import mask_account_id
 
@@ -171,6 +176,7 @@ class ReconciliationCoordinator:
         *,
         max_observation_seconds: float = 30.0,
         monotonic: Callable[[], float] = system_monotonic,
+        execution_repository: ExecutionRepository | None = None,
     ) -> None:
         symbols = frozenset(symbol.strip().upper() for symbol in allowlisted_symbols)
         if not symbols or any(not symbol for symbol in symbols):
@@ -184,9 +190,17 @@ class ReconciliationCoordinator:
         self._max_observation_window = timedelta(seconds=max_observation_seconds)
         self._max_observation_seconds = max_observation_seconds
         self._monotonic = monotonic
+        # BP-1b: evidence only. None (every existing constructor) means no write path exists.
+        self._execution_repository = execution_repository
 
     def reconcile(self) -> ReconciliationResult:
-        """Read broker and local evidence without writing state or invoking an order method."""
+        """Read broker and local evidence without placing or changing any order.
+
+        The broker is only ever read. Local state is written in exactly one case: when an
+        ``ExecutionRepository`` was injected, the executions the accepted observation carried
+        are persisted as local evidence after a result is decided (never on a resolution
+        failure), and that write can neither change the result nor raise out of the pass.
+        """
 
         try:
             started_at = self._monotonic()
@@ -219,6 +233,16 @@ class ReconciliationCoordinator:
             )
             return self._complete(self._pending_without_snapshot(*broker_reasons))
 
+        result = self._resolve(observation, started_at=started_at)
+        # BP-1b r2: the accepted broker evidence is persisted only once a result exists (a
+        # resolution failure propagates before this line), so the writer can neither extend
+        # the evidence window nor change the report.
+        self._persist_executions(observation)
+        return result
+
+    def _resolve(
+        self, observation: _BrokerObservation, *, started_at: float
+    ) -> ReconciliationResult:
         local_evidence: LocalReconciliationEvidence | None = None
         local_read_failed = False
         account_id = observation.account_second.account_id
@@ -253,6 +277,66 @@ class ReconciliationCoordinator:
                 local_read_failed=local_read_failed,
             )
         )
+
+    def _persist_executions(self, observation: _BrokerObservation) -> None:
+        """Record every execution the accepted observation carried, once per ``execution_id``.
+
+        The union of both snapshots (the first snapshot's object wins) so the double read
+        yields one ``record()`` per execution per pass; the writer is idempotent by
+        ``execution_id`` across passes. Evidence only: nothing here reads a row back, and a
+        refusal is one typed line — the pass never raises because of the writer.
+        """
+
+        repository = self._execution_repository
+        if repository is None:
+            return
+        union: dict[str, BrokerExecution] = {}
+        for execution in (*observation.executions_first, *observation.executions_second):
+            union.setdefault(execution.execution_id, execution)
+        for execution in union.values():
+            self._record_execution(repository, execution)
+
+    @staticmethod
+    def _record_execution(repository: ExecutionRepository, execution: BrokerExecution) -> None:
+        identity = {
+            "execution_id": execution.execution_id,
+            "account": mask_account_id(execution.account_id),
+        }
+        try:
+            correlation_id = repository.linked_correlation_id(execution.order_ref)
+            recorded = repository.record(execution, correlation_id=correlation_id)
+        except (ExecutionConflict, UnknownCorrelation, ValueError, RuntimeError) as refusal:
+            # the writer's typed refusals: divergent replay, unknown draft, raw id, scope
+            with suppress(Exception):
+                _LOGGER.warning(
+                    "Execution persistence refused; the reconciliation result is unchanged",
+                    extra={
+                        "event": "reconciliation_execution_persist_refused",
+                        "refusal": type(refusal).__name__,
+                        **identity,
+                    },
+                )
+            return
+        except Exception as error:  # the pass never raises because of the writer
+            with suppress(Exception):
+                _LOGGER.warning(
+                    "Execution persistence failed unexpectedly; the result is unchanged",
+                    extra={
+                        "event": "reconciliation_execution_persist_failed",
+                        "refusal": type(error).__name__,
+                        **identity,
+                    },
+                )
+            return
+        with suppress(Exception):
+            _LOGGER.info(
+                "Execution persisted" if recorded else "Execution already persisted",
+                extra={
+                    "event": "reconciliation_execution_recorded",
+                    "recorded": recorded,
+                    **identity,
+                },
+            )
 
     @staticmethod
     def _complete(result: ReconciliationResult) -> ReconciliationResult:

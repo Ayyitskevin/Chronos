@@ -49,11 +49,29 @@ from chronos.persistence.repositories import (
     _reject_raw_account_event_data,
     _require_matching_account_scope,
 )
-from chronos.persistence.schema import CommissionRow, FillRow
+from chronos.persistence.schema import CommissionRow, FillRow, OrderDraftRow, SubmittedOrderRow
 
 
 class ExecutionConflict(ValueError):
     """The same ``execution_id`` arrived with different facts; nothing was written."""
+
+
+class UnknownCorrelation(ValueError):
+    """A caller named a ``correlation_id`` that is not an order draft; nothing was written.
+
+    Raised BEFORE any insert (BP-1b, Muse item 2): ``fills.correlation_id`` is a foreign key to
+    ``order_drafts.correlation_id``, and the database's refusal would otherwise surface as a raw
+    ``IntegrityError`` from inside the write. The caller's linkage is checked as a fact of its
+    own so the writer's refusals stay typed.
+    """
+
+    def __init__(self, execution_id: str, correlation_id: str) -> None:
+        super().__init__(
+            f"execution {execution_id} names correlation_id {correlation_id!r}, which is not "
+            "an order draft; nothing was written"
+        )
+        self.execution_id = execution_id
+        self.correlation_id = correlation_id
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,6 +169,23 @@ class ExecutionRepository:
     def __init__(self, sessions: sessionmaker[Session]) -> None:
         self._sessions = sessions
 
+    def linked_correlation_id(self, order_ref: str | None) -> str | None:
+        """The draft an execution's ``order_ref`` maps to, or None (the foreign/unmatched case).
+
+        The only path at this head is ``submitted_orders.order_ref`` (unique) → its
+        ``correlation_id`` (the foreign key to ``order_drafts``). A read of a linkage string,
+        never a decision input: the caller stores it beside the execution and nothing else.
+        """
+
+        if order_ref is None or not order_ref.strip():
+            return None
+        with self._sessions() as session:
+            return session.scalar(
+                select(SubmittedOrderRow.correlation_id).where(
+                    SubmittedOrderRow.order_ref == order_ref
+                )
+            )
+
     def record(
         self,
         execution: BrokerExecution,
@@ -187,6 +222,10 @@ class ExecutionRepository:
             if existing is not None:
                 _require_same_facts(session, existing, facts)
                 return False
+            # BP-1b: the caller's linkage is checked before any insert, so an unknown draft is
+            # a typed refusal of this repository and never the database's IntegrityError.
+            if correlation_id is not None and session.get(OrderDraftRow, correlation_id) is None:
+                raise UnknownCorrelation(execution.execution_id, correlation_id)
             fill = FillRow(
                 execution_id=execution.execution_id,
                 correlation_id=correlation_id,
@@ -236,4 +275,4 @@ class ExecutionRepository:
         return True
 
 
-__all__ = ["ExecutionConflict", "ExecutionRepository"]
+__all__ = ["ExecutionConflict", "ExecutionRepository", "UnknownCorrelation"]
