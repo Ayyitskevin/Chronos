@@ -511,27 +511,6 @@ def test_3b2_a_missing_base_ref_is_a_loud_failure_never_a_skip(
     assert _packet_base_ref() == "HEAD"
 
 
-def test_3d_the_r3_commit_touched_exactly_this_test_file() -> None:
-    """The BP-3 r3 delta is one file — pinned on the commit itself, not on an open range."""
-
-    found = subprocess.run(
-        ["git", "log", "-1", "--format=%H", "--grep=(BP-3 r3)"],
-        cwd=_ROOT,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
-    assert found, "the BP-3 r3 commit is not in this branch's history yet"
-    touched = subprocess.run(
-        ["git", "show", "--name-only", "--format=", found],
-        cwd=_ROOT,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.split()
-    assert touched == ["tests/unit/test_reconciliation_runs_persist.py"], touched
-
-
 # --- 4. the restart-recovery drill + the CLI ---------------------------------------------------
 
 
@@ -863,7 +842,9 @@ def test_r2_1_the_cut_is_the_type_checking_import_and_the_docstring_and_nothing_
     # (refs/packets/BP-3/2), not as equality to a dead head: outside the run recorder (whose AP-1
     # hook is pinned by test_ap1r1_3) every top-level statement is AST-equal once the r2 hunks
     # (docstring, the result-type imports, the TYPE_CHECKING block) are set aside
-    kept_before, _ = _recorder_delta(_git("show", f"{_BP3_HEAD}:{_REPOSITORY}"))
+    kept_before, _ = _recorder_delta(
+        _git("show", f"{_commit_by_marker('(BP-3 r2)')}:{_REPOSITORY}")
+    )
     kept_after, _ = _recorder_delta(after)
     assert kept_after == kept_before
     # the docstring names the three real callers, the honest default and the unemitted vocabulary
@@ -919,8 +900,26 @@ def test_r2_2_importing_the_cli_never_loads_a_broker_module_and_the_probe_can_se
 
 # --- AP-1 r1. the schema bump + the provenance hook in the run recorder ---
 
-_AP1_HEAD = "0413f1c93b3ca7e458aa04264d6dc0aea4b60811"  # pragma: allowlist secret
-_BP3_HEAD = "6150839b5e67db7e17733ac24de3bcd675cd8a9b"  # pragma: allowlist secret
+
+def _commit_by_marker(marker: str) -> str:
+    """The newest ancestor commit whose message carries ``marker`` — a durable, sha-free base.
+
+    Packet commits end their subject with their id (``… (BP-3 r2)``); the marker survives
+    stacking and merge commits, unlike a frozen sha (which is a dead head after the next
+    round) or an open ``..HEAD`` range (which widens with every later commit).
+    """
+
+    for line in _git("log", "--format=%H%x00%s").splitlines():
+        sha, _, subject = line.partition("\x00")
+        if subject.rstrip().endswith(marker):  # the SUBJECT ends with it; bodies may quote it
+            return sha
+    raise AssertionError(f"no ancestor commit's subject ends with the marker {marker!r}")
+
+
+def _files_of(commit: str) -> list[str]:
+    return _git("show", "--name-only", "--format=", commit).split()
+
+
 _RATIFIED = (
     "scripts/verify_release_artifact.py",
     "src/chronos/persistence/database.py",
@@ -938,26 +937,35 @@ def _git(*argv: str) -> str:
 
 
 def test_ap1r1_1_the_ratification_patch_is_applied_as_is_and_nothing_else_moves() -> None:
-    names = tuple(sorted(_git("diff", "--name-only", f"{_AP1_HEAD}..HEAD").split()))
+    # the r1 delta = the two r1 commits, found by their markers — never an open range
+    ratification = _commit_by_marker("(AP-1 r1)")
+    repair = _commit_by_marker("(AP-1 r1 gate repair)")
+    names = tuple(sorted(set(_files_of(ratification)) | set(_files_of(repair))))
     assert names == _RATIFIED, names
+    span = f"{ratification}~1..{repair}"
     numstat = {
         line.split("\t")[2]: (int(line.split("\t")[0]), int(line.split("\t")[1]))
-        for line in _git("diff", "--numstat", f"{_AP1_HEAD}..HEAD").splitlines()
+        for line in _git("diff", "--numstat", span).splitlines()
     }
-    # the five non-test hunks of logs/AP-1-ratification.patch, line for line
+    # the five non-test hunks of logs/AP-1-ratification.patch, line for line, plus the one
+    # SCHEMA_VERSION pin the patch missed (test_execution_repository.py:209, ratified 20:50 EDT)
+    # the r2 restack onto main 4eadb37 (#249's 0014 = schema v15 already on main): the r1
+    # commits re-point the chain — 0015 revises 0014, SCHEMA_VERSION 15 → 16, the head pin
+    # "0014" → "0015", the declared set is _V16_TABLES; the v13 `== 14` literal and the fills
+    # identity literal were already replaced on main, so those hunks no longer exist
     assert numstat["src/chronos/persistence/database.py"] == (1, 1)
     assert numstat["scripts/verify_release_artifact.py"] == (1, 1)
-    assert numstat["tests/unit/test_database.py"] == (1, 1)
-    assert numstat["tests/integration/test_migrations.py"] == (6, 1)
+    assert numstat["tests/unit/test_database.py"] == (2, 1)
+    assert numstat["tests/integration/test_migrations.py"] == (5, 0)
     assert numstat["src/chronos/persistence/reconciliation_repository.py"] == (7, 1)
-    diff = _git("diff", f"{_AP1_HEAD}..HEAD", "--", *_RATIFIED[:5])
+    diff = _git("diff", span, "--", *_RATIFIED[:5])
     for expected in (
-        "-SCHEMA_VERSION = 14\n+SCHEMA_VERSION = 15\n",
-        '-_MIGRATION_HEAD: Final[str] = "0013"\n+_MIGRATION_HEAD: Final[str] = "0015"\n',
-        '+    "_V15_TABLES": ("0015_position_provenance", "_V15_TABLES"),\n',
+        "-SCHEMA_VERSION = 15\n+SCHEMA_VERSION = 16\n",
+        '-_MIGRATION_HEAD: Final[str] = "0014"\n+_MIGRATION_HEAD: Final[str] = "0015"\n',
+        '+    "_V16_TABLES": ("0015_position_provenance", "_V16_TABLES"),\n',
         '+    "position_provenance",\n',
-        "-    assert version == SCHEMA_VERSION == 14\n+    assert version == SCHEMA_VERSION",
-        "-    assert SCHEMA_VERSION == 14\n+    assert SCHEMA_VERSION == 15",
+        "-    assert SCHEMA_VERSION == 15\n+    # v16:",
+        "+    assert SCHEMA_VERSION == 16\n",
         "+from chronos.portfolio.provenance import record_position_provenance\n",
         "+        self._sessions = sessions\n",
         "+            record_position_provenance(self._sessions, snapshot.run_id)\n",
@@ -965,7 +973,15 @@ def test_ap1r1_1_the_ratification_patch_is_applied_as_is_and_nothing_else_moves(
         assert expected in diff, expected
 
 
-def test_ap1r1_2_the_chain_head_is_0015_revising_0013_here_and_the_pins_say_15() -> None:
+def test_ap1r1_2_the_chain_is_linear_and_the_version_pins_follow_its_head() -> None:
+    """One alembic head, no branches; the release-gate pin and SCHEMA_VERSION follow that head.
+
+    The head number and the version it writes are read from the chain, never a literal, so a
+    later stacked migration (AP-1b's 0016) moves them without touching this pin.
+    """
+
+    import importlib
+
     from alembic.config import Config
     from alembic.script import ScriptDirectory
 
@@ -976,13 +992,17 @@ def test_ap1r1_2_the_chain_head_is_0015_revising_0013_here_and_the_pins_say_15()
         "script_location", str(_ROOT / "src" / "chronos" / "persistence" / "migrations")
     )
     script = ScriptDirectory.from_config(config)
-    assert list(script.get_heads()) == ["0015"]
-    head = script.get_revision("0015")
-    assert head is not None and head.down_revision == "0013"  # BP-2's 0014 is not in this stack
-    assert "0014" not in {revision.revision for revision in script.walk_revisions()}
-    assert SCHEMA_VERSION == 15
+    revisions = {revision.revision: revision for revision in script.walk_revisions()}
+    parents = [r.down_revision for r in revisions.values() if r.down_revision is not None]
+    assert len(parents) == len(set(parents)), "the migration chain branched"
+    (head,) = script.get_heads()
+    assert revisions["0015"].down_revision == "0014"  # #249's 0014 (schema v15) is on main
     gate = (_ROOT / "scripts/verify_release_artifact.py").read_text(encoding="utf-8")
-    assert '_MIGRATION_HEAD: Final[str] = "0015"' in gate
+    assert f'_MIGRATION_HEAD: Final[str] = "{head}"' in gate
+    head_module = importlib.import_module(
+        f"chronos.persistence.migrations.versions.{Path(revisions[head].path).stem}"
+    )
+    assert SCHEMA_VERSION == head_module._SCHEMA_VERSION
 
 
 def _recorder_delta(source: str) -> tuple[list[str], dict[str, Any]]:
@@ -997,6 +1017,7 @@ def _recorder_delta(source: str) -> tuple[list[str], dict[str, Any]]:
         if isinstance(node, ast.ImportFrom) and node.module in (
             "chronos.services.reconciliation",  # r1's runtime import (absent after r2)
             "chronos.portfolio.provenance",  # AP-1's hook import (absent before AP-1)
+            "chronos.persistence.acknowledgement_repository",  # AP-1b's read (absent before)
         ):
             continue
         if (
@@ -1017,20 +1038,24 @@ def _recorder_delta(source: str) -> tuple[list[str], dict[str, Any]]:
 
 
 def test_ap1r1_3_the_hook_is_the_only_recorder_change_and_runs_only_after_a_written_row() -> None:
-    before = _git("show", f"{_BP3_HEAD}:{_REPOSITORY}")
+    before = _git("show", f"{_commit_by_marker('(BP-3 r2)')}:{_REPOSITORY}")
     after = (_ROOT / _REPOSITORY).read_text(encoding="utf-8")
     kept_before, rec_before = _recorder_delta(before)
     kept_after, rec_after = _recorder_delta(after)
     assert kept_after == kept_before  # every other top-level statement is AST-equal to 6150839
-    assert set(rec_after) == set(rec_before) == {"__init__", "record"}
-    # __init__: exactly one added statement, `self._sessions = sessions`, first
+    assert set(rec_before) == {"__init__", "record"}
+    assert set(rec_before) <= set(rec_after)  # later rounds may add helpers (AP-1b did)
+    # __init__: `self._sessions = sessions` was added first; the old body is kept in order
+    # (later rounds may add their own seams after it — AP-1b added `self._acknowledgements`)
     init_before = [ast.dump(s) for s in rec_before["__init__"].body]
     init_after = [ast.dump(s) for s in rec_after["__init__"].body]
-    assert init_after[1:] == init_before
     assert init_after[0] == ast.dump(ast.parse("self._sessions = sessions").body[0])
+    assert [s for s in init_after if s in init_before] == init_before
     # record(): the try's success line binds `written`; the failure branch is AST-identical;
-    # the hook and the return come AFTER the try, never inside it
-    body_before, body_after = rec_before["record"].body, rec_after["record"].body
+    # the hook and the return come AFTER the try, never inside it (statements before the try —
+    # AP-1b's acknowledgement read — are outside this pin's invariant and are pinned by AP-1b)
+    body_before = rec_before["record"].body
+    body_after = [s for s in rec_after["record"].body if not isinstance(s, ast.Assign)]
     assert len(body_before) == 1 and isinstance(body_before[0], ast.Try)
     assert [type(s).__name__ for s in body_after] == ["Try", "If", "Return"]
     try_before, try_after = body_before[0], body_after[0]
