@@ -623,6 +623,18 @@ class OrderRestartReconciler:
         )
         if len(matching_orders) > 1:
             raise ValueError("broker evidence is ambiguous: duplicate owned order references")
+        # Contradictory persisted identity fails closed with THIS method's own refusal type
+        # (BP-2-F1, the restart loop's catch at reconcile_report made typed): both accessors
+        # are read here, nothing is written, the intent stays SUBMISSION_UNKNOWN, and the
+        # operator sees the reason through the same ValueError → 409 path as every other refusal.
+        try:
+            persisted_permanent_id = self._tracker.permanent_id(
+                intent.intent_id,
+                current_account_id=current_account_id,
+            )
+            self._tracker.client_id(intent.intent_id, current_account_id=current_account_id)
+        except OrderIdentityConflict as conflict:
+            raise ValueError(f"persisted order identity is contradictory: {conflict}") from conflict
         update = resolve_from_broker_evidence(
             intent,
             open_orders=open_orders,
@@ -638,10 +650,7 @@ class OrderRestartReconciler:
                 intent.intent_id,
                 current_account_id=current_account_id,
             ),
-            persisted_permanent_id=self._tracker.permanent_id(
-                intent.intent_id,
-                current_account_id=current_account_id,
-            ),
+            persisted_permanent_id=persisted_permanent_id,
             now=now,
         )
         if update is not None:

@@ -988,3 +988,127 @@ def test_r4_3_a_genuine_lifecycle_recovery_still_counts_as_an_applied_transition
         assert report_again.proven == () or report_again.applied_updates == ()
     finally:
         h.close()
+
+
+# =============================================================================================
+# BP-2-F1 — kimi2's #249 pre-merge read, P3 #1: the operator-resolution guard fails closed with
+# a TYPED refusal on contradictory persisted identity. `operator_resolve` catches
+# OrderIdentityConflict from BOTH accessors and raises the method's own ValueError; nothing is
+# written; the intent stays SUBMISSION_UNKNOWN. Pinned through the reconciler and the service.
+# =============================================================================================
+
+
+def _unknown_intent_with_identity_rows(
+    h: _Harness, intent_id: str, rows: list[tuple[int, int]]
+) -> None:
+    """A SUBMISSION_UNKNOWN intent (entered today, FIXED_NOW — the evidence-window guard passes)
+    whose persisted rows carry the given (permanent_id, client_id) pairs."""
+    intent = _short_put_intent(intent_id=intent_id)
+    _drive_to_confirmed(h, intent, FIXED_NOW)
+    assert h.tracker_repo.record_transition(
+        intent_id=intent_id,
+        event_key=f"{intent_id}:presubmit:SUBMISSION_UNKNOWN",
+        source="SUBMIT",
+        from_status=OrderLifecycle.USER_CONFIRMED,
+        to_status=OrderLifecycle.SUBMISSION_UNKNOWN,
+        current_account_id=PAPER_ACCOUNT,
+        occurred_at=FIXED_NOW,
+    )
+    for n, (perm, client) in enumerate(rows, start=1):
+        assert h.tracker_repo.record_transition(
+            intent_id=intent_id,
+            event_key=f"{intent_id}:identity:{n}",
+            source="ORDER_STATUS",
+            from_status=OrderLifecycle.SUBMISSION_UNKNOWN,
+            to_status=OrderLifecycle.SUBMISSION_UNKNOWN,
+            current_account_id=PAPER_ACCOUNT,
+            broker_order_id=9001,
+            permanent_id=perm,
+            client_id=client,
+            occurred_at=FIXED_NOW,
+        )
+
+
+def _assert_typed_refusal(caught: pytest.ExceptionInfo, *ids: str) -> None:
+    assert type(caught.value) is ValueError  # the method's own refusal type, never the accessor's
+    assert "contradictory" in str(caught.value)
+    for value in ids:
+        assert value in str(caught.value)
+    # the typed cause is inspectable, but nothing in the chain is RAISED as OrderIdentityConflict
+    exc = caught.value
+    seen = []
+    while exc is not None:
+        seen.append(type(exc))
+        exc = exc.__cause__ or exc.__context__
+    assert seen[0] is ValueError
+    assert OrderIdentityConflict not in seen[:1]
+
+
+def test_f1_1_operator_resolve_refuses_typed_on_contradictory_permanent_ids() -> None:
+    h = _Harness(FakeBroker(), paper_settings())
+    try:
+        _unknown_intent_with_identity_rows(
+            h, "intent-1", [(_PERM_ID, _CLIENT_ID), (_PERM_ID + 1, _CLIENT_ID)]
+        )
+        before = _harness_events(h, "intent-1")
+        with pytest.raises(ValueError) as caught:
+            h.service._reconciler.operator_resolve(
+                "intent-1", operator_note="probe", current_account_id=PAPER_ACCOUNT, now=FIXED_NOW
+            )
+        _assert_typed_refusal(caught, "4242", "4243")
+        assert _harness_events(h, "intent-1") == before  # zero rows written
+        stored = h.service.get("intent-1")
+        assert stored is not None and stored.status is OrderLifecycle.SUBMISSION_UNKNOWN
+    finally:
+        h.close()
+
+
+def test_f1_2_the_service_wrapper_surfaces_the_same_typed_refusal() -> None:
+    # OrderManagementService.resolve_submission_unknown (service.py:305-317) → the route maps
+    # ValueError to 409 with detail=str(error) (api/routes/orders.py:361-365); pinned here at
+    # the service level — there is no existing route test for /orders/{id}/resolve.
+    h = _Harness(FakeBroker(), paper_settings())
+    try:
+        _unknown_intent_with_identity_rows(
+            h, "intent-1", [(_PERM_ID, _CLIENT_ID), (_PERM_ID + 1, _CLIENT_ID)]
+        )
+        before = _harness_events(h, "intent-1")
+        with pytest.raises(ValueError) as caught:
+            h.service.resolve_submission_unknown("intent-1", operator_note="probe", now=FIXED_NOW)
+        _assert_typed_refusal(caught, "4242", "4243")
+        assert str(caught.value).startswith("persisted order identity is contradictory: ")
+        assert _harness_events(h, "intent-1") == before
+        stored = h.service.get("intent-1")
+        assert stored is not None and stored.status is OrderLifecycle.SUBMISSION_UNKNOWN
+    finally:
+        h.close()
+
+
+def test_f1_3_a_divergent_client_id_refuses_the_same_way_on_the_operator_path() -> None:
+    h = _Harness(FakeBroker(), paper_settings())
+    try:
+        _unknown_intent_with_identity_rows(
+            h, "intent-1", [(_PERM_ID, _CLIENT_ID), (_PERM_ID, _CLIENT_ID + 1)]
+        )
+        before = _harness_events(h, "intent-1")
+        with pytest.raises(ValueError) as caught:
+            h.service.resolve_submission_unknown("intent-1", operator_note="probe", now=FIXED_NOW)
+        _assert_typed_refusal(caught, "17", "18")
+        assert _harness_events(h, "intent-1") == before
+        stored = h.service.get("intent-1")
+        assert stored is not None and stored.status is OrderLifecycle.SUBMISSION_UNKNOWN
+    finally:
+        h.close()
+
+
+def test_f1_3b_the_restart_loop_catch_is_unchanged() -> None:
+    # symmetry: the restart path's typed catch (reconciliation_recovery.py:452-470) — its own pins
+    # (test_r1_3, test_r2_1b) stay green; this pin reads the source so a refactor that drops one
+    # side of the symmetry is caught by name
+    src = (_ROOT / "src/chronos/orders/reconciliation_recovery.py").read_text(encoding="utf-8")
+    i = src.index("def reconcile_report")
+    j = src.index("def operator_resolve")
+    restart, operator = src[i:j], src[j:]
+    assert restart.count("except OrderIdentityConflict") == 1
+    assert operator.count("except OrderIdentityConflict") == 1
+    assert "self._tracker.client_id(" in restart and "self._tracker.client_id(" in operator
