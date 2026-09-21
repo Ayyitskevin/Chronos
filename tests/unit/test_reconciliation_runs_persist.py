@@ -832,49 +832,10 @@ def test_r1_4_the_real_caller_set_is_startup_operator_periodic_and_nothing_is_in
 
 # --- r2. the operator CLI registers the command WITHOUT loading chronos.broker ---
 
-_R1_HEAD = "43134441f34ea9183e9244b5f9173c645c6e0a15"  # pragma: allowlist secret
 _REPOSITORY = "src/chronos/persistence/reconciliation_repository.py"
 
 
-def _without_the_r2_hunks(source: str) -> str:
-    """The module with the docstring, the result-type import and the TYPE_CHECKING block removed.
-
-    What remains must be identical before and after r2: the cut and the docstring sentence are
-    the ONLY changes in the module.
-    """
-
-    tree = ast.parse(source)
-    kept: list[ast.stmt] = []
-    for node in tree.body:
-        if (
-            isinstance(node, ast.Expr)
-            and isinstance(node.value, ast.Constant)
-            and isinstance(node.value.value, str)
-        ):
-            continue  # the module docstring
-        if isinstance(node, ast.ImportFrom) and node.module == "chronos.services.reconciliation":
-            continue  # the runtime import (r1) — absent after r2
-        if (
-            isinstance(node, ast.If)
-            and isinstance(node.test, ast.Name)
-            and node.test.id == "TYPE_CHECKING"
-        ):
-            continue  # the type-only block (r2) — absent before r2
-        if isinstance(node, ast.ImportFrom) and node.module == "typing":
-            node.names = [alias for alias in node.names if alias.name != "TYPE_CHECKING"]
-        kept.append(node)
-    tree.body = kept
-    return ast.dump(tree)
-
-
 def test_r2_1_the_cut_is_the_type_checking_import_and_the_docstring_and_nothing_else() -> None:
-    before = subprocess.run(
-        ["git", "show", f"{_R1_HEAD}:{_REPOSITORY}"],
-        cwd=_ROOT,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout
     after = (_ROOT / _REPOSITORY).read_text(encoding="utf-8")
     tree = ast.parse(after)
     runtime_imports = [
@@ -898,8 +859,13 @@ def test_r2_1_the_cut_is_the_type_checking_import_and_the_docstring_and_nothing_
     ] == [("chronos.services.reconciliation", ["ReconciliationResult"])]
     assert "from __future__ import annotations" in after  # the annotation stays a string
     assert "build_parser" not in after and "import chronos.cli" not in after  # no lazy tricks
-    # nothing else in the module moved
-    assert _without_the_r2_hunks(before) == _without_the_r2_hunks(after)
+    # nothing else in the module moved — stated as a DELTA against the retained BP-3 PASS head
+    # (refs/packets/BP-3/2), not as equality to a dead head: outside the run recorder (whose AP-1
+    # hook is pinned by test_ap1r1_3) every top-level statement is AST-equal once the r2 hunks
+    # (docstring, the result-type imports, the TYPE_CHECKING block) are set aside
+    kept_before, _ = _recorder_delta(_git("show", f"{_BP3_HEAD}:{_REPOSITORY}"))
+    kept_after, _ = _recorder_delta(after)
+    assert kept_after == kept_before
     # the docstring names the three real callers, the honest default and the unemitted vocabulary
     docstring = ast.get_docstring(tree) or ""
     for phrase in ("startup", "operator", "periodic", "unattributed", "reconnect", "order_fill"):
@@ -949,3 +915,234 @@ def test_r2_2_importing_the_cli_never_loads_a_broker_module_and_the_probe_can_se
     )
     # positive control: the service module DOES pull the broker base, and the probe reports it
     assert "chronos.broker.base" in loaded_broker_modules("chronos.services.reconciliation")
+
+
+# --- AP-1 r1. the schema bump + the provenance hook in the run recorder ---
+
+_AP1_HEAD = "0413f1c93b3ca7e458aa04264d6dc0aea4b60811"  # pragma: allowlist secret
+_BP3_HEAD = "6150839b5e67db7e17733ac24de3bcd675cd8a9b"  # pragma: allowlist secret
+_RATIFIED = (
+    "scripts/verify_release_artifact.py",
+    "src/chronos/persistence/database.py",
+    "src/chronos/persistence/reconciliation_repository.py",
+    "tests/integration/test_migrations.py",
+    "tests/unit/test_database.py",
+    "tests/unit/test_reconciliation_runs_persist.py",
+)
+
+
+def _git(*argv: str) -> str:
+    return subprocess.run(
+        ["git", *argv], cwd=_ROOT, capture_output=True, text=True, check=True
+    ).stdout
+
+
+def test_ap1r1_1_the_ratification_patch_is_applied_as_is_and_nothing_else_moves() -> None:
+    names = tuple(sorted(_git("diff", "--name-only", f"{_AP1_HEAD}..HEAD").split()))
+    assert names == _RATIFIED, names
+    numstat = {
+        line.split("\t")[2]: (int(line.split("\t")[0]), int(line.split("\t")[1]))
+        for line in _git("diff", "--numstat", f"{_AP1_HEAD}..HEAD").splitlines()
+    }
+    # the five non-test hunks of logs/AP-1-ratification.patch, line for line
+    assert numstat["src/chronos/persistence/database.py"] == (1, 1)
+    assert numstat["scripts/verify_release_artifact.py"] == (1, 1)
+    assert numstat["tests/unit/test_database.py"] == (1, 1)
+    assert numstat["tests/integration/test_migrations.py"] == (6, 1)
+    assert numstat["src/chronos/persistence/reconciliation_repository.py"] == (7, 1)
+    diff = _git("diff", f"{_AP1_HEAD}..HEAD", "--", *_RATIFIED[:5])
+    for expected in (
+        "-SCHEMA_VERSION = 14\n+SCHEMA_VERSION = 15\n",
+        '-_MIGRATION_HEAD: Final[str] = "0013"\n+_MIGRATION_HEAD: Final[str] = "0015"\n',
+        '+    "_V15_TABLES": ("0015_position_provenance", "_V15_TABLES"),\n',
+        '+    "position_provenance",\n',
+        "-    assert version == SCHEMA_VERSION == 14\n+    assert version == SCHEMA_VERSION",
+        "-    assert SCHEMA_VERSION == 14\n+    assert SCHEMA_VERSION == 15",
+        "+from chronos.portfolio.provenance import record_position_provenance\n",
+        "+        self._sessions = sessions\n",
+        "+            record_position_provenance(self._sessions, snapshot.run_id)\n",
+    ):
+        assert expected in diff, expected
+
+
+def test_ap1r1_2_the_chain_head_is_0015_revising_0013_here_and_the_pins_say_15() -> None:
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    from chronos.persistence.database import SCHEMA_VERSION
+
+    config = Config(str(_ROOT / "alembic.ini"))
+    config.set_main_option(
+        "script_location", str(_ROOT / "src" / "chronos" / "persistence" / "migrations")
+    )
+    script = ScriptDirectory.from_config(config)
+    assert list(script.get_heads()) == ["0015"]
+    head = script.get_revision("0015")
+    assert head is not None and head.down_revision == "0013"  # BP-2's 0014 is not in this stack
+    assert "0014" not in {revision.revision for revision in script.walk_revisions()}
+    assert SCHEMA_VERSION == 15
+    gate = (_ROOT / "scripts/verify_release_artifact.py").read_text(encoding="utf-8")
+    assert '_MIGRATION_HEAD: Final[str] = "0015"' in gate
+
+
+def _recorder_delta(source: str) -> tuple[list[str], dict[str, Any]]:
+    """Top-level dumps (minus the r2/AP-1 hunks) and the recorder's method bodies, separately."""
+
+    tree = ast.parse(source)
+    kept: list[str] = []
+    recorder: dict[str, Any] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant):
+            continue  # the module docstring
+        if isinstance(node, ast.ImportFrom) and node.module in (
+            "chronos.services.reconciliation",  # r1's runtime import (absent after r2)
+            "chronos.portfolio.provenance",  # AP-1's hook import (absent before AP-1)
+        ):
+            continue
+        if (
+            isinstance(node, ast.If)
+            and isinstance(node.test, ast.Name)
+            and node.test.id == "TYPE_CHECKING"
+        ):
+            continue
+        if isinstance(node, ast.ImportFrom) and node.module == "typing":
+            node.names = [alias for alias in node.names if alias.name != "TYPE_CHECKING"]
+        if isinstance(node, ast.ClassDef) and node.name == "ReconciliationRunRecorder":
+            for method in node.body:
+                if isinstance(method, ast.FunctionDef):
+                    recorder[method.name] = method
+            continue
+        kept.append(ast.dump(node))
+    return kept, recorder
+
+
+def test_ap1r1_3_the_hook_is_the_only_recorder_change_and_runs_only_after_a_written_row() -> None:
+    before = _git("show", f"{_BP3_HEAD}:{_REPOSITORY}")
+    after = (_ROOT / _REPOSITORY).read_text(encoding="utf-8")
+    kept_before, rec_before = _recorder_delta(before)
+    kept_after, rec_after = _recorder_delta(after)
+    assert kept_after == kept_before  # every other top-level statement is AST-equal to 6150839
+    assert set(rec_after) == set(rec_before) == {"__init__", "record"}
+    # __init__: exactly one added statement, `self._sessions = sessions`, first
+    init_before = [ast.dump(s) for s in rec_before["__init__"].body]
+    init_after = [ast.dump(s) for s in rec_after["__init__"].body]
+    assert init_after[1:] == init_before
+    assert init_after[0] == ast.dump(ast.parse("self._sessions = sessions").body[0])
+    # record(): the try's success line binds `written`; the failure branch is AST-identical;
+    # the hook and the return come AFTER the try, never inside it
+    body_before, body_after = rec_before["record"].body, rec_after["record"].body
+    assert len(body_before) == 1 and isinstance(body_before[0], ast.Try)
+    assert [type(s).__name__ for s in body_after] == ["Try", "If", "Return"]
+    try_before, try_after = body_before[0], body_after[0]
+    assert [ast.dump(h) for h in try_after.handlers] == [ast.dump(h) for h in try_before.handlers]
+    assert ast.dump(try_before.body[0]) == ast.dump(
+        ast.parse("return self._runs.record_run(snapshot)").body[0]
+    )
+    assert ast.dump(try_after.body[0]) == ast.dump(
+        ast.parse("written = self._runs.record_run(snapshot)").body[0]
+    )
+    hook = body_after[1]
+    assert isinstance(hook, ast.If) and ast.dump(hook.test) == ast.dump(
+        ast.Name(id="written", ctx=ast.Load())
+    )
+    assert [ast.dump(s) for s in hook.body] == [
+        ast.dump(ast.parse("record_position_provenance(self._sessions, snapshot.run_id)").body[0])
+    ]
+    assert hook.orelse == []
+    assert ast.dump(body_after[2]) == ast.dump(ast.parse("return written").body[0])
+    # the import is top-level (no lazy import inside the recorder)
+    assert "from chronos.portfolio.provenance import record_position_provenance\n" in after
+    assert "    from chronos.portfolio.provenance" not in after
+
+
+def test_ap1r1_3b_a_demo_boot_writes_a_provenance_row_for_every_position_through_the_hook(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from fastapi.testclient import TestClient
+
+    from chronos.api.main import create_app
+    from chronos.config.settings import get_settings
+    from chronos.portfolio.provenance import PositionProvenanceRepository, position_key
+
+    url = f"sqlite:///{tmp_path / 'chronos.db'}"
+    monkeypatch.setenv("BROKER_MODE", "demo")
+    monkeypatch.setenv("ALLOW_ORDER_TRANSMIT", "false")
+    monkeypatch.setenv("ALLOW_LIVE_TRADING", "false")
+    monkeypatch.setenv("DATABASE_URL", url)
+    monkeypatch.setenv("LOG_FILE", str(tmp_path / "chronos.log"))
+    monkeypatch.setenv("BACKEND_TOKEN_FILE", str(tmp_path / "backend_api_token"))
+    monkeypatch.setenv("LIVE_KILL_SWITCH_FILE", str(tmp_path / "kill.json"))
+    monkeypatch.setenv("SESSION_BASELINE_FILE", str(tmp_path / "baseline.json"))
+    get_settings.cache_clear()
+    try:
+        with TestClient(create_app()):
+            pass
+    finally:
+        get_settings.cache_clear()
+    fresh = Database(url)
+    try:
+        (run,) = ReconciliationRepository(fresh.sessions).recent(limit=10)
+        rows = PositionProvenanceRepository(fresh.sessions).rows_for_run(run.run_id)
+    finally:
+        fresh.dispose()
+    positions = run.broker_snapshot["positions"]
+    assert run.trigger == "startup" and len(positions) > 0
+    expected_keys = sorted(
+        position_key(
+            con_id=entry["contract"]["con_id"],
+            security_type=entry["contract"]["security_type"],
+            quantity=Decimal(str(entry["quantity"])),
+        )
+        for entry in positions
+    )
+    assert sorted(row.position_key for row in rows) == expected_keys
+    assert {row.origin_class for row in rows} == {"FOREIGN"}  # the demo book has no bindings
+    assert all(row.observed_run_id == run.run_id == row.first_seen_run_id for row in rows)
+    assert DEMO_ACCOUNT_ID not in json.dumps([row.account_fingerprint for row in rows])
+
+
+def test_ap1r1_3c_a_failing_provenance_write_never_escapes_the_recorder(
+    database: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from chronos.portfolio import provenance as provenance_module
+
+    def explode(self: Any, run_id: str) -> int:
+        raise RuntimeError("provenance store unavailable")
+
+    monkeypatch.setattr(provenance_module.PositionProvenanceRepository, "record_run", explode)
+    recorder = ReconciliationRunRecorder(database.sessions)
+    assert recorder.record(_snapshot("startup-00000001-run", trigger="startup")) is True
+    assert _rows(database) == [("startup-00000001-run", "startup", "RECONCILED")]
+    events = ApplicationEventRepository(database.sessions).recent(limit=5)
+    assert [event.event_type for event in events] == ["position_provenance_persist_failed"]
+    assert "RuntimeError: provenance store unavailable" in events[0].message
+
+
+def test_ap1r1_3d_a_failed_run_write_never_calls_the_provenance_hook(
+    database: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import chronos.persistence.reconciliation_repository as recorder_module
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        recorder_module, "record_position_provenance", lambda sessions, run_id: calls.append(run_id)
+    )
+    recorder = ReconciliationRunRecorder(database.sessions)
+    monkeypatch.setattr(
+        recorder._runs,
+        "record_run",
+        lambda snapshot: (_ for _ in ()).throw(RuntimeError("db down")),
+    )
+    assert recorder.record(_snapshot("startup-00000001-run", trigger="startup")) is None
+    assert calls == []  # the failure branch alone ran
+    assert _rows(database) == []
+    # and a successful write calls it exactly once with the run id
+    monkeypatch.setattr(recorder._runs, "record_run", lambda snapshot: True)
+    assert recorder.record(_snapshot("startup-00000002-run", trigger="startup")) is True
+    assert calls == ["startup-00000002-run"]
+
+
+def test_ap1r1_4_none_of_the_ratified_files_is_a_current_state_input() -> None:
+    builder = (_ROOT / "scripts/build_current_state.py").read_text(encoding="utf-8")
+    for path in _RATIFIED:
+        assert path not in builder, path

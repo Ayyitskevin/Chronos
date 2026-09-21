@@ -44,6 +44,7 @@ from chronos.persistence.repositories import (
     _require_scope,
 )
 from chronos.persistence.schema import ReconciliationRunRow
+from chronos.portfolio.provenance import record_position_provenance
 
 if TYPE_CHECKING:  # type only: the runtime import drags chronos.broker into the operator CLI
     from chronos.services.reconciliation import ReconciliationResult
@@ -325,12 +326,13 @@ class ReconciliationRunRecorder:
     EVENT_TYPE = "reconciliation_run_persist_failed"
 
     def __init__(self, sessions: sessionmaker[Session]) -> None:
+        self._sessions = sessions
         self._runs = ReconciliationRepository(sessions)
         self._events = ApplicationEventRepository(sessions)
 
     def record(self, snapshot: ReconciliationSnapshot) -> bool | None:
         try:
-            return self._runs.record_run(snapshot)
+            written = self._runs.record_run(snapshot)
         except Exception as exc:  # evidence only; the pass already decided
             _LOGGER.warning(
                 "reconciliation run was not persisted; readiness is unaffected",
@@ -346,3 +348,7 @@ class ReconciliationRunRecorder:
             except Exception:  # the event is best effort too
                 _LOGGER.warning("application event for the failed run write was not persisted")
             return None
+        if written:
+            # AP-1: provenance rows follow the persisted run — never raises, never reads the broker
+            record_position_provenance(self._sessions, snapshot.run_id)
+        return written
