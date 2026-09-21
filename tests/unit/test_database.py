@@ -198,7 +198,8 @@ def test_schema_initialization_creates_required_evidence_tables() -> None:
     #      (BP-1, migration 0013).
     #      (BP-2, migration 0014): order_events gains permanent_id + client_id (schema v15).
     # v16: position_provenance — allocation provenance per observed position (AP-1, migration 0015).
-    assert SCHEMA_VERSION == 16
+    # v17: position_acknowledgements — the MANUAL provenance producer (AP-1b, migration 0016).
+    assert SCHEMA_VERSION == 17
 
 
 def test_application_events_are_append_only_and_queryable() -> None:

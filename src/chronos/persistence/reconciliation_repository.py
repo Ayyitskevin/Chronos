@@ -38,6 +38,10 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from chronos.domain.enums import ReconciliationStatus
 from chronos.domain.models import ChronosModel
+from chronos.persistence.acknowledgement_repository import (
+    AcknowledgementRepository,
+    acknowledgement_decisions,
+)
 from chronos.persistence.repositories import (
     ApplicationEventRepository,
     _reject_raw_account_event_data,
@@ -324,13 +328,20 @@ class ReconciliationRunRecorder:
     """
 
     EVENT_TYPE = "reconciliation_run_persist_failed"
+    ACKNOWLEDGEMENTS_UNAVAILABLE = "acknowledgements_unavailable"
 
     def __init__(self, sessions: sessionmaker[Session]) -> None:
         self._sessions = sessions
         self._runs = ReconciliationRepository(sessions)
         self._events = ApplicationEventRepository(sessions)
+        self._acknowledgements = AcknowledgementRepository(sessions)
 
     def record(self, snapshot: ReconciliationSnapshot) -> bool | None:
+        # AP-1b: the CURRENT operator acknowledgements ride into the run's decisions so AP-1's
+        # classifier can record MANUAL. Read here — after the latch published (record() is only
+        # ever called after complete(...)) — and never raise: a read failure is one typed
+        # application event and the run row still carries `acknowledgements_unavailable: true`.
+        snapshot = self._with_acknowledgements(snapshot)
         try:
             written = self._runs.record_run(snapshot)
         except Exception as exc:  # evidence only; the pass already decided
@@ -352,3 +363,30 @@ class ReconciliationRunRecorder:
             # AP-1: provenance rows follow the persisted run — never raises, never reads the broker
             record_position_provenance(self._sessions, snapshot.run_id)
         return written
+
+    def _with_acknowledgements(self, snapshot: ReconciliationSnapshot) -> ReconciliationSnapshot:
+        try:
+            extra = acknowledgement_decisions(self._acknowledgements.current())
+        except Exception as exc:  # evidence only; the pass already decided
+            _LOGGER.warning(
+                "operator acknowledgements could not be read; the run is recorded without them",
+                extra={"event": self.ACKNOWLEDGEMENTS_UNAVAILABLE, "run_id": snapshot.run_id},
+            )
+            try:
+                self._events.append(
+                    event_type=self.ACKNOWLEDGEMENTS_UNAVAILABLE,
+                    message=f"{exc.__class__.__name__}: {exc}"[:500],
+                    severity="WARNING",
+                    event_data={"run_id": snapshot.run_id, "trigger": snapshot.trigger},
+                )
+            except Exception:  # the event is best effort too
+                _LOGGER.warning("application event for the acknowledgement read was not persisted")
+            extra = [
+                {
+                    "kind": self.ACKNOWLEDGEMENTS_UNAVAILABLE,
+                    "acknowledgements_unavailable": True,
+                }
+            ]
+        if not extra:
+            return snapshot
+        return snapshot.model_copy(update={"decisions": tuple(snapshot.decisions) + tuple(extra)})
