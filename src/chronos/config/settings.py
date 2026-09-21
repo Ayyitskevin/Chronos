@@ -202,6 +202,14 @@ class Settings(BaseSettings):
         float, Field(gt=0, le=30, allow_inf_nan=False)
     ] = 2.0
 
+    # SLO evaluation cache (SLO-1, observation only). The offline SLO evaluator
+    # (docs/ops/WATCHDOG.md, "Objectives") publishes its last evaluation beside
+    # the watchdog's evidence; when this names that file, ``/health`` shows
+    # ``observations.slo`` {evaluated_at, state}. None — the default — means no
+    # observation. Nothing in the backend starts the evaluator, and no verdict
+    # (liveness, readiness, capability) reads the field (ADR-0040).
+    ops_slo_evaluation_file: Path | None = None
+
     # Autonomy runtime (ADR-0017, owner-directed persistent authority). The
     # mandate file is the owner's standing grant: authored once, validated on
     # every boot, auto-activated when present. An empty path means no autonomy

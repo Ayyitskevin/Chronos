@@ -20,16 +20,26 @@ from pathlib import Path
 
 import pytest
 import sqlalchemy as sa
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy.orm import Session, sessionmaker
 
 from chronos.domain.enums import OptionRight, OrderSide
 from chronos.domain.models import BrokerExecution, OptionContract, UnderlyingContract
-from chronos.persistence.database import SCHEMA_VERSION, Database
+from chronos.persistence.database import Database
 from chronos.persistence.execution_repository import ExecutionConflict, ExecutionRepository
 from chronos.persistence.schema import CommissionRow, FillRow
 from chronos.utils.identifiers import account_fingerprint
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def _alembic_config() -> Config:
+    config = Config(str(ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(ROOT / "src/chronos/persistence/migrations"))
+    return config
+
+
 MODULE = ROOT / "src" / "chronos" / "persistence" / "execution_repository.py"
 ACCOUNT_ID = "DU1234567"
 NOW = datetime(2026, 9, 19, 13, 0, tzinfo=UTC)
@@ -206,7 +216,11 @@ def test_2_fills_carries_the_identity_columns_and_the_drift_checker_accepts_them
     assert any(
         index["column_names"] == ["permanent_id"] for index in inspector.get_indexes("fills")
     )
-    assert SCHEMA_VERSION == 14
+    # 0013's OWN artifact, exactly: the alembic chain holds revision 0013 revising 0012 (the
+    # chain HEAD is pinned once, in test_database); its upgrade stamps version 14 (below)
+    script = ScriptDirectory.from_config(_alembic_config())
+    revision = script.get_revision("0013")
+    assert revision is not None and revision.down_revision == "0012"
     database.initialize()  # the fail-closed drift checker on an initialized store: no drift
     migration = ROOT / "src/chronos/persistence/migrations/versions/0013_execution_identity.py"
     text = migration.read_text(encoding="utf-8")

@@ -24,7 +24,7 @@ from chronos.broker.connection import BrokerConnectionManager
 from chronos.domain.enums import ConnectionState, OrderLifecycle
 from chronos.domain.models import BrokerExecution, BrokerOrder
 from chronos.orders.reconciliation_readiness import ReconciliationReadiness
-from chronos.orders.tracker import OrderStatusUpdate, OrderTracker
+from chronos.orders.tracker import OrderIdentityConflict, OrderStatusUpdate, OrderTracker
 from chronos.persistence.order_repositories import (
     OrderIntentRecord,
     OrderIntentRepository,
@@ -154,6 +154,66 @@ def _executions_match_intent(
     )
 
 
+def _permid_contradicts(reported: int | None, persisted: int | None) -> bool:
+    return reported is not None and persisted is not None and reported != persisted
+
+
+def _is_owned(
+    observation: BrokerOrder | BrokerExecution,
+    *,
+    order_ref: str,
+    persisted_permanent_id: int | None,
+) -> bool:
+    """The identity set (BP-2, narrowed in r1 by R-f).
+
+    A NONBLANK observation reference must equal the owned CHR- reference, and its
+    reported permId (when any) must agree with the persisted one. The persisted
+    permId is the identity ONLY when the observation carries no reference at all
+    (absent/blank) — a venue that reports the order back without its ``orderRef``.
+    A nonblank, mismatching reference is never ours, whatever permId it carries.
+    """
+
+    if observation.order_ref:
+        if observation.order_ref != order_ref:
+            return False
+        return not _permid_contradicts(observation.permanent_id, persisted_permanent_id)
+    return persisted_permanent_id is not None and observation.permanent_id == persisted_permanent_id
+
+
+def _identity_conflict_reason(
+    *,
+    order_ref: str,
+    persisted_permanent_id: int | None,
+    open_orders: tuple[BrokerOrder, ...],
+    executions: tuple[BrokerExecution, ...],
+) -> str | None:
+    """The typed reason for a snapshot that contradicts the persisted identity (R-f)."""
+
+    if persisted_permanent_id is None:
+        return None
+    for kind, observations in (("order", open_orders), ("execution", executions)):
+        for observation in observations:
+            if (
+                observation.order_ref
+                and observation.order_ref != order_ref
+                and observation.permanent_id == persisted_permanent_id
+            ):
+                return (
+                    f"identity conflict: broker {kind} {observation.broker_order_id} carrying "
+                    f"persisted permId {persisted_permanent_id} reports order reference "
+                    f"{observation.order_ref!r}"
+                )
+            if observation.order_ref == order_ref and _permid_contradicts(
+                observation.permanent_id, persisted_permanent_id
+            ):
+                return (
+                    f"identity conflict: owned order reference reports permId "
+                    f"{observation.permanent_id} on broker {kind} "
+                    f"{observation.broker_order_id}, persisted {persisted_permanent_id}"
+                )
+    return None
+
+
 def resolve_from_broker_evidence(
     intent: OrderIntentRecord,
     *,
@@ -163,14 +223,20 @@ def resolve_from_broker_evidence(
     expected_broker_client_id: int,
     expected_limit_price: Decimal | None,
     persisted_broker_order_id: int | None,
+    persisted_permanent_id: int | None = None,
     now: datetime,
 ) -> OrderStatusUpdate | None:
     """Derive the true lifecycle for one intent from broker evidence.
 
-    Matching begins with the intent's owned ``order_ref`` (CHR-) and requires
+    Matching begins with the intent's owned ``order_ref`` (CHR-); the persisted
+    ``permanent_id`` from the events is used as the identity only when the
+    observation's reference is absent/blank (BP-2 r1, R-f: a venue that reports
+    the order back without its ``orderRef``). A nonblank, mismatching reference
+    with our permId, or our reference with a contradicting permId, is a typed
+    identity conflict and leaves the intent unresolved. Matching then requires
     coherent account and economic identity before Chronos acts. Chronos NEVER
-    re-submits. Returns ``None`` (leave unresolved) when the order is absent:
-    a timed-out submit very often DID reach the venue, so mere absence is not
+    re-submits. Returns ``None`` (leave unresolved) when the order is absent: a
+    timed-out submit very often DID reach the venue, so mere absence is not
     positive evidence of rejection and must not drive a live order to a wrong
     terminal state.
     """
@@ -178,8 +244,16 @@ def resolve_from_broker_evidence(
     order_ref = intent.order_ref
     if not order_ref:
         return None
-    working = [order for order in open_orders if order.order_ref == order_ref]
-    fills = [execution for execution in executions if execution.order_ref == order_ref]
+    working = [
+        order
+        for order in open_orders
+        if _is_owned(order, order_ref=order_ref, persisted_permanent_id=persisted_permanent_id)
+    ]
+    fills = [
+        execution
+        for execution in executions
+        if _is_owned(execution, order_ref=order_ref, persisted_permanent_id=persisted_permanent_id)
+    ]
 
     if len(working) > 1:
         return None
@@ -223,6 +297,7 @@ def resolve_from_broker_evidence(
             intent_id=intent.intent_id,
             broker_order_id=order.broker_order_id,
             permanent_id=order.permanent_id,
+            client_id=order.client_id,
             lifecycle=lifecycle,
             filled_quantity=order.filled_quantity,
             remaining_quantity=order.remaining_quantity,
@@ -245,6 +320,7 @@ def resolve_from_broker_evidence(
                 ),
                 None,
             ),
+            client_id=fills[0].client_id,  # _executions_match_intent proved one client id
             lifecycle=lifecycle,
             filled_quantity=filled,
             remaining_quantity=remaining,
@@ -267,15 +343,30 @@ def _unresolved_evidence_reason(
     expected_limit_price: Decimal | None,
     expected_broker_client_id: int,
     persisted_broker_order_id: int | None,
+    persisted_permanent_id: int | None = None,
 ) -> str:
     order_ref = intent.order_ref
     if not order_ref:
         return "local intent has no owned broker order reference"
-    matching_orders = tuple(order for order in open_orders if order.order_ref == order_ref)
+    conflict = _identity_conflict_reason(
+        order_ref=order_ref,
+        persisted_permanent_id=persisted_permanent_id,
+        open_orders=open_orders,
+        executions=executions,
+    )
+    if conflict is not None:
+        return conflict
+    matching_orders = tuple(
+        order
+        for order in open_orders
+        if _is_owned(order, order_ref=order_ref, persisted_permanent_id=persisted_permanent_id)
+    )
     if len(matching_orders) > 1:
         return "multiple broker orders share the owned order reference"
     matching_executions = tuple(
-        execution for execution in executions if execution.order_ref == order_ref
+        execution
+        for execution in executions
+        if _is_owned(execution, order_ref=order_ref, persisted_permanent_id=persisted_permanent_id)
     )
     evidence_order_ids = {order.broker_order_id for order in matching_orders} | {
         execution.broker_order_id for execution in matching_executions
@@ -357,6 +448,26 @@ class OrderRestartReconciler:
                 intent.intent_id,
                 current_account_id=current_account_id,
             )
+            try:
+                persisted_permanent_id = self._tracker.permanent_id(
+                    intent.intent_id,
+                    current_account_id=current_account_id,
+                )
+                # a divergent client id is the same contradiction (R-e, r2): fail closed
+                self._tracker.client_id(intent.intent_id, current_account_id=current_account_id)
+            except OrderIdentityConflict as conflict:
+                # R-e: contradictory persisted permIds fail closed — never the
+                # latest, never the first; the operator sees the typed reason.
+                unresolved.append(
+                    RestartOrderObservation(
+                        intent_id=intent.intent_id,
+                        local_status=intent.status,
+                        broker_status=None,
+                        transition_applied=False,
+                        reason=str(conflict),
+                    )
+                )
+                continue
             expected_limit_price = self._tracker.effective_limit_price(
                 intent.intent_id,
                 original_limit_price=intent.limit_price,
@@ -370,6 +481,7 @@ class OrderRestartReconciler:
                 expected_broker_client_id=self._expected_broker_client_id,
                 expected_limit_price=expected_limit_price,
                 persisted_broker_order_id=persisted_broker_order_id,
+                persisted_permanent_id=persisted_permanent_id,
                 now=now,
             )
             if update is None:
@@ -387,20 +499,28 @@ class OrderRestartReconciler:
                             expected_broker_client_id=self._expected_broker_client_id,
                             expected_limit_price=expected_limit_price,
                             persisted_broker_order_id=persisted_broker_order_id,
+                            persisted_permanent_id=persisted_permanent_id,
                         ),
                     )
                 )
                 continue
-            transition_applied = self._tracker.ingest(update, current_account_id=current_account_id)
-            if transition_applied:
+            outcome = self._tracker.ingest(update, current_account_id=current_account_id)
+            # R-g: only a LIFECYCLE change is an applied transition (the integer the
+            # operator sees as applied_count); an identity refinement is evidence and
+            # is named through the existing reason string — the report keeps its shape.
+            if outcome.lifecycle_changed:
                 applied.append(update)
             proven.append(
                 RestartOrderObservation(
                     intent_id=intent.intent_id,
                     local_status=intent.status,
                     broker_status=update.lifecycle,
-                    transition_applied=transition_applied,
-                    reason="matching broker order or execution observed",
+                    transition_applied=outcome.lifecycle_changed,
+                    reason=(
+                        "identity evidence refined; lifecycle unchanged"
+                        if outcome.identity_refined and not outcome.lifecycle_changed
+                        else "matching broker order or execution observed"
+                    ),
                 )
             )
 
@@ -503,6 +623,18 @@ class OrderRestartReconciler:
         )
         if len(matching_orders) > 1:
             raise ValueError("broker evidence is ambiguous: duplicate owned order references")
+        # Contradictory persisted identity fails closed with THIS method's own refusal type
+        # (BP-2-F1, the restart loop's catch at reconcile_report made typed): both accessors
+        # are read here, nothing is written, the intent stays SUBMISSION_UNKNOWN, and the
+        # operator sees the reason through the same ValueError → 409 path as every other refusal.
+        try:
+            persisted_permanent_id = self._tracker.permanent_id(
+                intent.intent_id,
+                current_account_id=current_account_id,
+            )
+            self._tracker.client_id(intent.intent_id, current_account_id=current_account_id)
+        except OrderIdentityConflict as conflict:
+            raise ValueError(f"persisted order identity is contradictory: {conflict}") from conflict
         update = resolve_from_broker_evidence(
             intent,
             open_orders=open_orders,
@@ -518,6 +650,7 @@ class OrderRestartReconciler:
                 intent.intent_id,
                 current_account_id=current_account_id,
             ),
+            persisted_permanent_id=persisted_permanent_id,
             now=now,
         )
         if update is not None:

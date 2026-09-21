@@ -19,7 +19,7 @@
     },
     {
       "path": "src/chronos/config/settings.py",
-      "sha256": "9d1b6a817c5b3600549a054e4582a10f34aecd947834857c46d89800226add84"
+      "sha256": "dfa0f5c7bb4d5c37dbbd8ad53f4f858fdc39e68248eaa572a6c24574033d1e7a"
     },
     {
       "path": "src/chronos/domain/enums.py",

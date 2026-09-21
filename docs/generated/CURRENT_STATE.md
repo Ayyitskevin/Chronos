@@ -205,7 +205,7 @@ Both are built inert and enabled only by the owner (plan §11); a value would be
 | --- | --- |
 | DECISIONS.md | `a29eaaea431b955fafd8eca8f8c5254a1989dffaf3388ac3a6c2c881ff7a5ab7` |
 | RISK_REGISTER.md | `52bfe7604b157992f770c17fa2579d5229876b5f3235832ca48858f5633fa383` |
-| docs/VISION_COMPLETION_PLAN.md | `f7cff45f7389c480d11720fe6251d5b04fd9a908de0488812c71a1442ad5d5c2` |
+| docs/VISION_COMPLETION_PLAN.md | `63fecfa948c3d74b577476c59db3010ddb63c1d50d21bad3e0de8e1a35b7a501` |
 | src/chronos/auditlog/__init__.py | `5ec898d0ab735be6f0a7773bbeb9d8aacf4c3ea3b5eceff2d446a914d5a1647b` |
 | src/chronos/bridge/config.py | `25f2f9a369d625440eb21d0d55f10386aa47d33dfb1843731788295b03cec636` |
 | worker/config.py | `6b3763ec4280a65160442eb2fb63d523ae069ae70754842635681f855573dffe` |
@@ -216,7 +216,7 @@ Both are built inert and enabled only by the owner (plan §11); a value would be
 | --- | --- |
 | src/chronos/supervisor/compiler.py | `40b9b4a07dd90356f74552bb291296fbc069758b14cd471b122cea92dcd57538` |
 | src/chronos/autonomy/enums.py | `96bcff19f76065a34d75c9fba00b5682de59448c8a8f770a8628494eec15a3e9` |
-| src/chronos/config/settings.py | `9d1b6a817c5b3600549a054e4582a10f34aecd947834857c46d89800226add84` |
+| src/chronos/config/settings.py | `dfa0f5c7bb4d5c37dbbd8ad53f4f858fdc39e68248eaa572a6c24574033d1e7a` |
 | src/chronos/domain/enums.py | `6244760cac081c4ca0cbbec7cfc586efe6fd11471d7e06fbb29c8c4790414828` |
 | src/chronos/runtime.py | `39f2f0fa83262eac8eca899b8ac1555cc7d775f140efb7688ef35f3c04b7fb76` |
 | src/chronos/api/autonomy_wiring.py | `6538f1670631efdd3ee9c08245f87fecda8a51d082914a97d64e5452c9958ae2` |

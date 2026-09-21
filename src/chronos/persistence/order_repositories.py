@@ -95,6 +95,9 @@ class OrderEventRecord:
     remaining_quantity: Decimal | None
     evidence: dict[str, Any]
     occurred_at: datetime
+    # broker order identity the event reported (BP-2): None when the callback carried none
+    permanent_id: int | None = None
+    client_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -400,6 +403,8 @@ class OrderTrackerRepository:
         to_status: OrderLifecycle,
         current_account_id: str,
         broker_order_id: int | None = None,
+        permanent_id: int | None = None,
+        client_id: int | None = None,
         filled_quantity: Decimal | None = None,
         remaining_quantity: Decimal | None = None,
         evidence: dict[str, Any] | None = None,
@@ -410,6 +415,16 @@ class OrderTrackerRepository:
 
         Returns ``False`` when ``event_key`` was already recorded (a duplicate
         or late broker callback), mutating nothing.
+
+        ``permanent_id`` / ``client_id`` are the broker order identity the event
+        reported (BP-2): stored as columns on THIS row only — an earlier row that
+        lacked them is never edited. The intent's identity is read by
+        :meth:`chronos.orders.tracker.OrderTracker.permanent_id` /
+        :meth:`~chronos.orders.tracker.OrderTracker.client_id`: one non-None value
+        across the rows is the identity; two distinct non-None values for one
+        field are a typed ``OrderIdentityConflict`` at the accessor (R-e) — never
+        the most recent row, never the first. Callers must not re-implement a
+        most-recent-wins read over these columns.
 
         With ``enforce_from_status=True`` this is a true CAS (ADR-0009 §4): the
         intent's CURRENT status must equal ``from_status`` inside this same
@@ -437,6 +452,8 @@ class OrderTrackerRepository:
                 from_status=from_status.value if from_status is not None else None,
                 to_status=to_status.value,
                 broker_order_id=broker_order_id,
+                permanent_id=permanent_id,
+                client_id=client_id,
                 filled_quantity=filled_quantity,
                 remaining_quantity=remaining_quantity,
                 evidence=evidence or {},
@@ -485,6 +502,8 @@ def _event_row_to_record(row: OrderEventRow) -> OrderEventRecord:
         remaining_quantity=row.remaining_quantity,
         evidence=dict(row.evidence),
         occurred_at=row.occurred_at,
+        permanent_id=row.permanent_id,
+        client_id=row.client_id,
     )
 
 
