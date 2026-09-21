@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pytest
 import sqlalchemy as sa
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 from tests.integration.test_order_pipeline import _drive_to_confirmed, _Harness, _short_put_intent
 from tests.support.order_fakes import (
     FIXED_NOW,
@@ -50,6 +52,14 @@ from chronos.persistence.repositories import account_fingerprint
 
 _ROOT = Path(__file__).resolve().parents[2]
 _MIGRATION = _ROOT / "src/chronos/persistence/migrations/versions/0014_order_event_identity.py"
+
+
+def _alembic_config() -> Config:
+    config = Config(str(_ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(_ROOT / "src/chronos/persistence/migrations"))
+    return config
+
+
 _CLIENT_ID = 17
 _PERM_ID = 4242
 _LIMIT = Decimal("1.20")
@@ -142,15 +152,25 @@ def test_1_migration_0014_adds_nullable_identity_columns_and_the_schema_mirrors_
         and index["column_names"] == ["permanent_id"]
         for index in inspector.get_indexes("order_events")
     )
-    assert SCHEMA_VERSION == 15
+    # BP-2's invariant, stated durably: 0014 writes schema v15 on top of 0013 (its OWN declared
+    # numbers, asserted about the migration below); the running SCHEMA_VERSION is at least that —
+    # a later migration raises it, never lowers it; the release gate pins the chain's single HEAD
+    # (whatever later migrations moved it to) and 0014 sits at or below that head. No head or
+    # version literal a later migration breaks (the AP-1 r2 lesson).
+    assert SCHEMA_VERSION >= 15
 
     migration = _MIGRATION.read_text(encoding="utf-8")
     assert 'revision = "0014"' in migration
     assert 'down_revision = "0013"' in migration
     assert "version=15" in migration
     assert "server_default" not in migration  # unknown stays unknown, never a synthesized 0
+    script = ScriptDirectory.from_config(_alembic_config())
+    revisions = {revision.revision: revision for revision in script.walk_revisions()}
+    assert revisions["0014"].down_revision == "0013"
+    (head,) = script.get_heads()
     release_gate = (_ROOT / "scripts/verify_release_artifact.py").read_text(encoding="utf-8")
-    assert re.search(r'^_MIGRATION_HEAD: Final\[str\] = "0014"$', release_gate, re.MULTILINE)
+    assert re.search(rf'^_MIGRATION_HEAD: Final\[str\] = "{head}"$', release_gate, re.MULTILINE)
+    assert "0014" in {revision.revision for revision in script.iterate_revisions(head, "base")}
 
     # a row written without any identity reads back None on both columns
     intents = OrderIntentRepository(database.sessions)
@@ -173,6 +193,25 @@ def test_1_migration_0014_adds_nullable_identity_columns_and_the_schema_mirrors_
 
 
 # --- 2. the callback→event path writes the columns --------------------------------------------
+
+
+def test_1b_no_global_schema_version_or_chain_head_literal_pins_this_file() -> None:
+    """The only numbers pinned here are 0014's OWN (its revision, parent and the version it
+    writes); the running SCHEMA_VERSION is bounded (``>=``), never equated, and the release-gate
+    head is read from the alembic chain — so a later migration cannot break this test."""
+
+    source = Path(__file__).read_text(encoding="utf-8")
+    offenders = [
+        line
+        for line in source.splitlines()
+        if (
+            re.search(r"SCHEMA_VERSION\s*==\s*\d+", line)
+            or re.search(r'_MIGRATION_HEAD.*"00\d\d"', line)
+        )
+        and "test_1b" not in line
+        and not line.lstrip().startswith(("if (re.search", "or re.search"))
+    ]
+    assert offenders == [], offenders
 
 
 def test_2_an_order_status_observation_with_permid_and_clientid_lands_in_the_columns(
