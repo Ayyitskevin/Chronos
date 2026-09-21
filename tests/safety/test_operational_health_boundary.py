@@ -22,6 +22,8 @@ PROJECTION_MODULES = (
     "chronos.operations.clock",
     "chronos.operations.external_probe",
     "chronos.operations.slo",
+    "chronos.operations.watchdog",
+    "chronos.operations.deadman",
 )
 
 
@@ -65,6 +67,33 @@ def test_slo_evaluator_is_inside_the_authority_import_boundary() -> None:
     the authority packages are structurally barred from importing."""
 
     assert "chronos.operations.slo" in PROJECTION_MODULES
+
+
+def test_watchdog_is_inside_the_authority_import_boundary() -> None:
+    """W-1 (#241) follow-up W-1-F1: the watchdog CLI is a projection module — an observer the
+    authority packages are structurally barred from importing."""
+
+    assert "chronos.operations.watchdog" in PROJECTION_MODULES
+
+
+def test_deadman_is_inside_the_authority_import_boundary() -> None:
+    """W-1 (#241) follow-up W-1-F1: the dead-man CLI is a projection module like the watchdog —
+    never an authority dependency."""
+
+    assert "chronos.operations.deadman" in PROJECTION_MODULES
+
+
+def test_authority_boundary_detects_watchdog_and_deadman_imports(tmp_path: Path) -> None:
+    """Positive control for W-1-F1: both import spellings of the two new projection modules are
+    detected, so a future authority import of either is structurally caught."""
+
+    from_package = tmp_path / "authority_deadman.py"
+    from_package.write_text("from chronos.operations import deadman\n", encoding="utf-8")
+    plain_import = tmp_path / "authority_watchdog.py"
+    plain_import.write_text("import chronos.operations.watchdog\n", encoding="utf-8")
+
+    assert _imports_operational_projection(from_package)
+    assert _imports_operational_projection(plain_import)
 
 
 def test_authority_boundary_detects_from_package_imports(tmp_path: Path) -> None:
