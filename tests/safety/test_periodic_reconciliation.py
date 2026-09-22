@@ -60,7 +60,7 @@ class _Runtime:
         self._error = error
         self.calls = 0
 
-    def reconcile_submission_readiness(self) -> _Report:
+    def reconcile_submission_readiness(self, *, trigger: str = "unattributed") -> _Report:
         self.calls += 1
         if self._error is not None:
             raise self._error
@@ -156,7 +156,7 @@ class _ScriptedRuntime(_Runtime):
         super().__init__()
         self._outcomes = list(outcomes)
 
-    def reconcile_submission_readiness(self) -> _Report:
+    def reconcile_submission_readiness(self, *, trigger: str = "unattributed") -> _Report:
         self.calls += 1
         outcome = self._outcomes.pop(0)
         if isinstance(outcome, Exception):

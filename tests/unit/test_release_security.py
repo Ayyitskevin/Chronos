@@ -90,8 +90,10 @@ def test_reviewed_baseline_contains_only_explicit_false_positive_fingerprints() 
     # new fingerprint, and the superseded one stays reachable in git history, so
     # it joins the reviewed set rather than being dropped. 11 at ADR-0053, 12 at
     # ADR-0056, 13 at SLO-1 (the ops_slo_evaluation_file setting), 14 at BP-1b
-    # (the runtime wiring of ExecutionRepository, re-rotated onto SLO-1 at merge).
-    assert len(historical_candidates) == 14
+    # (the runtime wiring of ExecutionRepository, re-rotated onto SLO-1 at merge),
+    # 15 at BP-3 (the runtime wiring of ReconciliationRunRecorder, rebased onto main),
+    # 16 at BP-3 r3 (the frozen packet-base sha left the tree; its history entry is reviewed).
+    assert len(historical_candidates) == 16
     assert {item["type"] for item in candidates} == {
         "Hex High Entropy String",
         "Secret Keyword",

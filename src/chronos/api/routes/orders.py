@@ -213,7 +213,7 @@ def reconcile_orders(
     """Rebuild submission readiness from fresh broker and local evidence."""
 
     try:
-        report = state.runtime.reconcile_submission_readiness()
+        report = state.runtime.reconcile_submission_readiness(trigger="operator")
     except Exception as error:
         _logger.error(
             "Operator submission reconciliation failed; submission remains locked",

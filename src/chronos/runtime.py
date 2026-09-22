@@ -62,6 +62,11 @@ from chronos.persistence.order_repositories import (
     OrderTrackerRepository,
     RiskDecisionRepository,
 )
+from chronos.persistence.reconciliation_repository import (
+    ReconciliationRunRecorder,
+    ReconciliationSnapshot,
+    ReconciliationTrigger,
+)
 from chronos.persistence.repositories import LocalReconciliationRepository
 from chronos.services.reconciliation import (
     ReconciliationCoordinator,
@@ -104,20 +109,37 @@ class AppRuntime:
     live_arming: LiveArmingService
     live_kill_switch: LiveKillSwitch
     session_drawdown: SessionDrawdownBreaker
+    # BP-3: one reconciliation_runs row per decided pass, written AFTER the readiness latch
+    # published; evidence only (K1 (a) append-only, K2 (a) masked id + fingerprint). Optional
+    # so a runtime built without a database seam records nothing.
+    reconciliation_runs: ReconciliationRunRecorder | None = None
 
     def reconcile_submission_readiness(
-        self, *, now: datetime | None = None
+        self,
+        *,
+        now: datetime | None = None,
+        trigger: ReconciliationTrigger = "unattributed",
     ) -> SubmissionReconciliationReport:
-        """Publish readiness only from one complete, unchanged evidence generation."""
+        """Publish readiness only from one complete, unchanged evidence generation.
+
+        ``trigger`` names what started this pass for the persisted run row (BP-3); a caller
+        that does not say is recorded as ``unattributed`` — never a guessed label.
+        """
 
         moment = now or utc_now()
         with self.reconciliation_readiness.reconciliation_session(
             "reconciliation observation in progress"
         ) as generation:
-            return self._reconcile_submission_readiness_generation(moment, generation)
+            return self._reconcile_submission_readiness_generation(
+                moment, generation, trigger=trigger
+            )
 
     def _reconcile_submission_readiness_generation(
-        self, moment: datetime, generation: int
+        self,
+        moment: datetime,
+        generation: int,
+        *,
+        trigger: ReconciliationTrigger = "unattributed",
     ) -> SubmissionReconciliationReport:
         try:
             restart = self.order_management.reconcile_on_restart_report(now=moment)
@@ -166,11 +188,26 @@ class AppRuntime:
             reason=reason,
             reconciled_at=moment if status is ReconciliationStatus.RECONCILED else None,
         )
-        return SubmissionReconciliationReport(
+        report = SubmissionReconciliationReport(
             restart=restart,
             portfolio=portfolio,
             readiness=self.reconciliation_readiness.snapshot(),
         )
+        # BP-3: the run row is written only now — after the decided result and after the
+        # latch published (the latch never waits on the database); the recorder never raises.
+        # getattr: the readiness tests build AppRuntime.__new__ (slots) without the seam.
+        recorder = getattr(self, "reconciliation_runs", None)
+        if recorder is not None:
+            recorder.record(
+                _reconciliation_run_snapshot(
+                    trigger=trigger,
+                    report=report,
+                    generation=generation,
+                    started_at=moment,
+                    account_fingerprint=account_fingerprint(self.order_management.account_id),
+                )
+            )
+        return report
 
     def close(self) -> None:
         try:
@@ -178,6 +215,44 @@ class AppRuntime:
         finally:
             self.market_data.clear_cache()
             self.database.dispose()
+
+
+def _reconciliation_run_snapshot(
+    *,
+    trigger: ReconciliationTrigger,
+    report: SubmissionReconciliationReport,
+    generation: int,
+    started_at: datetime,
+    account_fingerprint: str,
+) -> ReconciliationSnapshot:
+    """The row's content from the decided report — masked, typed, run-keyed."""
+
+    completed_at = utc_now()
+    if completed_at < started_at:
+        completed_at = started_at
+    restart_decisions = tuple(
+        {
+            "kind": "restart_observation",
+            "intent_id": item.intent_id,
+            "local_status": item.local_status.value,
+            "broker_status": item.broker_status.value if item.broker_status else None,
+            "transition_applied": item.transition_applied,
+            "reason": item.reason,
+        }
+        for item in (*report.restart.proven, *report.restart.unresolved)
+    )
+    return ReconciliationSnapshot.from_result(
+        run_id=f"{trigger}-{generation:08d}-{started_at.strftime('%Y%m%dT%H%M%S%fZ')}",
+        trigger=trigger,
+        portfolio=report.portfolio,
+        readiness_status=report.readiness.status,
+        readiness_reason=report.readiness.reason,
+        generation=generation,
+        started_at=started_at,
+        completed_at=completed_at,
+        account_fingerprint=account_fingerprint,
+        restart_decisions=restart_decisions,
+    )
 
 
 def _validate_scope_observations(
@@ -270,6 +345,9 @@ def build_runtime(*, register_atexit: bool = True) -> AppRuntime:
             # evidence only — no verdict, admission or risk path reads them back.
             execution_repository=ExecutionRepository(database.sessions),
         )
+        # BP-3: one reconciliation_runs row per decided pass — evidence only, written after
+        # the readiness latch published; failures become application events, never raises.
+        reconciliation_runs = ReconciliationRunRecorder(database.sessions)
         short_put_candidates = ShortPutCandidateService(
             connection=connection,
             market_data=market_data,
@@ -360,6 +438,7 @@ def build_runtime(*, register_atexit: bool = True) -> AppRuntime:
         live_arming=live_arming,
         live_kill_switch=live_kill_switch,
         session_drawdown=session_drawdown,
+        reconciliation_runs=reconciliation_runs,
     )
     if register_atexit:
         atexit.register(runtime.close)

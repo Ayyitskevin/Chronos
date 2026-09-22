@@ -327,7 +327,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                 )
             else:
                 try:
-                    report = runtime.reconcile_submission_readiness()
+                    report = runtime.reconcile_submission_readiness(trigger="startup")
                     readiness = report.readiness
                     log = _logger.info if readiness.ready else _logger.warning
                     log(
