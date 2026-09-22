@@ -20,6 +20,12 @@ import sys
 from typing import Any
 
 from chronos.config.settings import get_settings
+from chronos.persistence.acknowledgement_repository import (
+    AcknowledgementRepository,
+    InvalidAcknowledgement,
+    UnknownAcknowledgement,
+    operator_fingerprint,
+)
 from chronos.persistence.database import Database
 from chronos.persistence.reconciliation_repository import ReconciliationRepository
 from chronos.portfolio.provenance import PositionProvenanceRepository, UnknownReconciliationRun
@@ -89,6 +95,86 @@ def add_position_provenance_command(sub: Any) -> None:
     provenance.set_defaults(func=cmd_position_provenance)
 
 
+def cmd_position_acknowledge(args: argparse.Namespace) -> int:
+    """Append ONE acknowledgement row (or ONE superseding row with --withdraw); never the broker."""
+
+    note = str(args.note)
+    database = Database(get_settings().database_url)
+    line: dict[str, Any]
+    try:
+        repository = AcknowledgementRepository(database.sessions)
+        fingerprint = operator_fingerprint()
+        if args.withdraw is not None:
+            acknowledgement_id = repository.withdraw(
+                acknowledgement_id=int(args.withdraw), note=note, operator_fingerprint=fingerprint
+            )
+            line = {"acknowledgement_id": acknowledgement_id, "withdraws": int(args.withdraw)}
+        else:
+            if args.key is None:
+                print("position-acknowledge: --key is required unless --withdraw", file=sys.stderr)
+                return 64
+            acknowledgement_id = repository.acknowledge(
+                position_key=str(args.key), note=note, operator_fingerprint=fingerprint
+            )
+            line = {"acknowledgement_id": acknowledgement_id, "position_key": str(args.key)}
+    except InvalidAcknowledgement as error:
+        print(f"position-acknowledge: {error}", file=sys.stderr)
+        return 64
+    except UnknownAcknowledgement as error:
+        print(
+            f"position-acknowledge: no current acknowledgement {int(str(error))}", file=sys.stderr
+        )
+        return 2
+    finally:
+        database.dispose()
+    print(json.dumps(line, sort_keys=True, separators=(",", ":")))
+    return 0
+
+
+def cmd_position_acknowledgements(args: argparse.Namespace) -> int:
+    limit = int(args.last)
+    if limit < 1:
+        print("position-acknowledgements: --last must be >= 1", file=sys.stderr)
+        return 64
+    database = Database(get_settings().database_url)
+    try:
+        records = AcknowledgementRepository(database.sessions).recent(limit=limit)
+    finally:
+        database.dispose()
+    for record in records:
+        line: dict[str, Any] = {
+            "id": record.id,
+            "position_key": record.position_key,
+            "note": record.note,
+            "acknowledged_at": record.acknowledged_at.isoformat(),
+            "operator_fingerprint": record.operator_fingerprint,
+            "superseded_by": record.superseded_by,
+        }
+        print(json.dumps(line, sort_keys=True, separators=(",", ":")))
+    return 0
+
+
+def add_position_acknowledgement_commands(sub: Any) -> None:
+    acknowledge = sub.add_parser(
+        "position-acknowledge",
+        help="record ONE operator acknowledgement of a position key (append-only, record-only)",
+    )
+    acknowledge.add_argument(
+        "--key", default=None, help="<con_id>:<security_type>:<LONG|SHORT|FLAT>"
+    )
+    acknowledge.add_argument("--note", required=True, help="why (1-500 chars, one line)")
+    acknowledge.add_argument(
+        "--withdraw", type=int, default=None, help="supersede this acknowledgement id instead"
+    )
+    acknowledge.set_defaults(func=cmd_position_acknowledge)
+    listing = sub.add_parser(
+        "position-acknowledgements",
+        help="list acknowledgement rows, oldest first within the window (read-only)",
+    )
+    listing.add_argument("--last", type=int, default=20, help="how many of the newest rows to list")
+    listing.set_defaults(func=cmd_position_acknowledgements)
+
+
 def add_reconciliation_runs_command(sub: Any) -> None:
     runs = sub.add_parser(
         "reconciliation-runs",
@@ -99,6 +185,7 @@ def add_reconciliation_runs_command(sub: Any) -> None:
     # AP-1: the provenance reader rides the same registration hook (cli/main.py:571) so the
     # real CLI carries it without a second edit outside AP-1's owned set.
     add_position_provenance_command(sub)
+    add_position_acknowledgement_commands(sub)  # AP-1b: the MANUAL producer + its listing
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -118,8 +205,11 @@ if __name__ == "__main__":
 
 
 __all__ = [
+    "add_position_acknowledgement_commands",
     "add_position_provenance_command",
     "add_reconciliation_runs_command",
+    "cmd_position_acknowledge",
+    "cmd_position_acknowledgements",
     "cmd_position_provenance",
     "cmd_reconciliation_runs",
     "main",

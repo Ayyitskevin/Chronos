@@ -273,7 +273,10 @@ def test_1_migration_0015_creates_position_provenance_and_the_drift_checker_acce
 
     script = ScriptDirectory.from_config(config)
     (head,) = script.get_heads()
-    assert head == "0015" and script.get_revision("0015").down_revision == "0014"
+    assert script.get_revision("0015").down_revision == "0014"  # 0015's own parent
+    assert "0015" in {
+        r.revision for r in script.iterate_revisions(head, "base")
+    }  # at/below the head
     upgraded = Database(f"sqlite:///{db_path}")
     try:
         upgraded.initialize()

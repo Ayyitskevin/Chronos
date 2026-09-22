@@ -332,6 +332,28 @@ class PositionProvenanceRow(Base):
     recorded_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
 
 
+class PositionAcknowledgementRow(Base):
+    """An operator's acknowledgement of a position (AP-1b, schema v16) — the MANUAL producer.
+
+    Append-only (K1(a)): a withdrawal is a NEW row whose ``superseded_by`` points at the old one;
+    no row is ever updated or deleted (the repository registers ORM listeners that refuse both).
+    ``operator_fingerprint`` is a 16-hex digest of the OS user + host — never a name (K2(a)).
+    Record-only (K3(a)): the row changes what the ledger SAYS about a position (AP-1 classifies
+    it MANUAL at the next persisted run), never what anything DOES with it.
+    """
+
+    __tablename__ = "position_acknowledgements"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    position_key: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    note: Mapped[str] = mapped_column(String(500), nullable=False)
+    acknowledged_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    operator_fingerprint: Mapped[str] = mapped_column(String(16), nullable=False)
+    superseded_by: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("position_acknowledgements.id"), index=True
+    )
+
+
 class ApplicationEventRow(Base):
     __tablename__ = "application_events"
 

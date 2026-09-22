@@ -43,6 +43,7 @@ _DECLARED_TABLE_SETS = {
     "_V10_TABLES": ("0009_proposer_revocation", "_V10_TABLES"),
     "_V11_TABLES": ("0010_managed_position_bindings", "_V11_TABLES"),
     "_V16_TABLES": ("0015_position_provenance", "_V16_TABLES"),
+    "_V17_TABLES": ("0016_position_acknowledgements", "_V17_TABLES"),
 }
 
 #: Migrations that build their tables inline and so have no list to import. Each needs a
@@ -103,6 +104,7 @@ _V9_TABLES = _declared_tables(*_DECLARED_TABLE_SETS["_V9_TABLES"])
 _V10_TABLES = _declared_tables(*_DECLARED_TABLE_SETS["_V10_TABLES"])
 _V11_TABLES = _declared_tables(*_DECLARED_TABLE_SETS["_V11_TABLES"])
 _V16_TABLES = _declared_tables(*_DECLARED_TABLE_SETS["_V16_TABLES"])
+_V17_TABLES = _declared_tables(*_DECLARED_TABLE_SETS["_V17_TABLES"])
 
 _V2_BASELINE_TABLES = {
     "application_events",
@@ -157,6 +159,7 @@ _ALL_MIGRATED_TABLES = (
     | _V11_TABLES
     | _V12_TABLES
     | _V16_TABLES
+    | _V17_TABLES
 )
 
 #: Every table the migration chain creates after the v2 baseline, written out once.
@@ -198,6 +201,7 @@ _EXPECTED_MIGRATED_TABLES = {
     "order_confirmations",
     "order_events",
     "order_intents",
+    "position_acknowledgements",
     "position_provenance",
     "recovery_acknowledgements",
     "risk_check_results",
@@ -976,6 +980,7 @@ def test_fresh_database_needs_no_alembic(tmp_path: Path) -> None:
             | _V11_TABLES
             | _V12_TABLES
             | _V16_TABLES
+            | _V17_TABLES
         )
     finally:
         database.dispose()
