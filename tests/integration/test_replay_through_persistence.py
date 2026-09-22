@@ -66,18 +66,21 @@ from chronos.services.reconciliation import ReconciliationCoordinator
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = ROOT / ".claude/skills/chronos-real-gateway-campaign/scripts"
-#: A committed demo rehearsal, when one exists. It does not yet: the tracked-file secret scan
-#: flags two hex strings in any capture manifest (a file sha256 and the pepper fingerprint), and
-#: the reviewed baseline that would admit them is in flight elsewhere — so, until that entry lands,
-#: the rehearsal is MINTED at test time by the capture tool itself (same code, same pepper phrase).
+#: The committed demo rehearsal (EV-1-F1): a DEMO REHEARSAL, NOT gateway evidence — minted
+#: in-process from the demo broker by ``capture_readonly.py --allow-demo --skip-bars`` under
+#: ALLOW_ORDER_TRANSMIT=false with the published test pepper below. Its manifest's three hex
+#: strings (two file sha256s, the pepper fingerprint) are reviewed entries in .secrets.baseline.
+#: It is the default session; a missing fixture FAILS (never a silent re-mint, never a pass).
 COMMITTED_SESSION = ROOT / "tests/fixtures/ibkr_demo/rehearsal"
+DEMO_REHEARSAL_NOTE = "demo rehearsal — NOT gateway evidence"
 DEMO_LABEL = "ev1-demo-rehearsal"
 SESSION_ENV = "CHRONOS_REPLAY_SESSION_DIR"
 DATABASE_ENV = "CHRONOS_REPLAY_DATABASE_URL"
 PEPPER_ENV = "CHRONOS_CAPTURE_PEPPER"
-#: The committed demo fixture was minted with a pepper DERIVED from this public phrase. It is
-#: a rehearsal key for a rehearsal fixture (gateway_evidence=false); it can never unlock a real
-#: session because the manifest's pepper fingerprint would not match.
+#: The committed demo fixture was minted with a pepper DERIVED from this public phrase — a
+#: PUBLISHED, TEST-ONLY key, never a real CHRONOS_CAPTURE_PEPPER. It is a rehearsal key for a
+#: rehearsal fixture (gateway_evidence=false); it can never unlock a real session because the
+#: manifest's pepper fingerprint would not match.
 DEMO_FIXTURE_PEPPER_PHRASE = b"chronos-ev1-demo-rehearsal-fixture-pepper"
 #: The demo broker's canned partial fill (src/chronos/broker/demo.py, SAFETY_CASES profile).
 DEMO_CLIENT_ID = 17
@@ -161,9 +164,12 @@ def session_dir() -> Path:
         if not path.is_dir():
             pytest.fail(f"session directory {path} ({SESSION_ENV}) does not exist")
         return path
-    if COMMITTED_SESSION.is_dir():
-        return COMMITTED_SESSION
-    return mint_demo_rehearsal()
+    if not COMMITTED_SESSION.is_dir():
+        pytest.fail(
+            f"the committed demo rehearsal {COMMITTED_SESSION} is missing: the replay contract "
+            "refuses to run vacuously (set CHRONOS_REPLAY_SESSION_DIR for a real session)"
+        )
+    return COMMITTED_SESSION
 
 
 def load_session(directory: Path) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -477,7 +483,7 @@ def test_2c_a_session_with_zero_executions_is_refused(tmp_path: Path) -> None:
 
 
 def test_3_the_demo_rehearsal_fixture_replays_and_carries_no_raw_identifier() -> None:
-    fixture = COMMITTED_SESSION if COMMITTED_SESSION.is_dir() else mint_demo_rehearsal()
+    fixture = session_dir() if not os.environ.get(SESSION_ENV) else COMMITTED_SESSION
     replay = _replay_module()
     assert replay.check_session(fixture, allow_demo=True) == []
     assert replay.check_session(fixture, allow_demo=False), (
@@ -504,3 +510,51 @@ def test_3_the_demo_rehearsal_fixture_replays_and_carries_no_raw_identifier() ->
         assert str(item["broker_order_id"]).startswith("ORD-")
         assert item["permanent_id"] is None or str(item["permanent_id"]).startswith("PERM-")
     assert len(_step(capture, "executions")) >= 1
+
+
+# ------------------------------------------------------------------ EV-1-F1: the committed fixture
+
+
+def test_3b_the_committed_fixture_is_a_demo_rehearsal_not_gateway_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Label pinned in the manifest note, the test name above and the replay tool's refusal."""
+
+    monkeypatch.delenv(SESSION_ENV, raising=False)
+    assert session_dir() == COMMITTED_SESSION  # the default session IS the committed fixture
+    manifest = json.loads((COMMITTED_SESSION / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["gateway_evidence"] is False
+    assert manifest["label"] == DEMO_LABEL
+    assert manifest["note"].startswith(DEMO_REHEARSAL_NOTE), manifest.get("note")
+    assert "ALLOW_ORDER_TRANSMIT=false" in manifest["note"]
+    assert "published test pepper" in manifest["note"]
+    assert sorted(p.name for p in COMMITTED_SESSION.iterdir()) == [
+        "capture.json",
+        "derived_liquid_hours.json",
+        "manifest.json",
+    ]
+
+
+def test_3c_a_missing_committed_fixture_is_refused_never_minted_or_passed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv(SESSION_ENV, raising=False)
+    monkeypatch.setattr(sys.modules[__name__], "COMMITTED_SESSION", tmp_path / "absent")
+    with pytest.raises(pytest.fail.Exception, match="refuses to run vacuously"):
+        session_dir()
+    assert "dir" not in _MINTED or _MINTED["dir"] != tmp_path / "absent"
+
+
+def test_3d_the_committed_bytes_are_the_capture_tools_own_shape() -> None:
+    """Positive control: a fresh mint through the tool's production write path has the same
+    steps, the same fact counts and the same pepper fingerprint as the committed fixture — only
+    the capture time (and the time-salted tokens) differ."""
+
+    fresh = mint_demo_rehearsal()
+    committed_manifest, committed = load_session(COMMITTED_SESSION)
+    fresh_manifest, minted = load_session(fresh)
+    assert sorted(committed["steps"]) == sorted(minted["steps"])
+    for step in ("executions", "open_orders"):
+        assert len(_step(committed, step)) == len(_step(minted, step)), step
+    assert committed_manifest["identifier_pseudonyms"] == fresh_manifest["identifier_pseudonyms"]
+    assert set(committed_manifest) - set(fresh_manifest) == {"note"}  # the one hand-added key

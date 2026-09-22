@@ -1,0 +1,486 @@
+{
+  "meta": {
+    "allow_live_trading": false,
+    "allow_order_transmit": false,
+    "broker_adapter": "official_ibkr",
+    "broker_mode": "demo",
+    "captured_at_utc": "2026-09-22T22:18:29.878488+00:00",
+    "gateway_evidence": false,
+    "ib_environment": "paper",
+    "label": "ev1-demo-rehearsal"
+  },
+  "steps": {
+    "account_summary": {
+      "account_id": "ACCT-b7fac9de5823c894",
+      "as_of": "2026-07-15T15:30:00Z",
+      "buying_power": "240000.00",
+      "currency": "USD",
+      "net_liquidation": "250000.00",
+      "total_cash": "125000.00"
+    },
+    "active_subscription_count_before_disconnect": 0,
+    "completed_orders": {
+      "not_captured": "the Broker protocol exposes open_orders and executions only; reqCompletedOrders is not implemented (record as a known gap)"
+    },
+    "connect": {
+      "ok": true
+    },
+    "connection_status": {
+      "account_id": "ACCT-b7fac9de5823c894",
+      "connected": true,
+      "data_quality": "DEMO",
+      "environment": "DEMO",
+      "last_successful_sync": "2026-07-15T15:30:00Z",
+      "managed_accounts": [],
+      "message": "Deterministic local fixtures",
+      "state": "CONNECTED"
+    },
+    "disconnect": {
+      "ok": true
+    },
+    "executions": [
+      {
+        "account_id": "ACCT-b7fac9de5823c894",
+        "broker_order_id": "ORD-493af3fa1074aa94",
+        "client_id": 17,
+        "commission": "0.65",
+        "commission_currency": "USD",
+        "contract": {
+          "con_id": 2601,
+          "currency": "USD",
+          "deliverable_shares": "100",
+          "deliverable_verified": true,
+          "exchange": "SMART",
+          "expiration": "2026-08-05",
+          "liquid_hours": "20260715:0000-2359",
+          "local_symbol": "TSLA 260805P00230000",
+          "min_tick": "0.01",
+          "multiplier": "100",
+          "right": "P",
+          "security_type": "OPT",
+          "strike": "230",
+          "symbol": "TSLA",
+          "time_zone_id": "UTC",
+          "trading_class": "TSLA",
+          "underlying_con_id": 1007
+        },
+        "execution_id": "EXEC-baf1912942ed768b",
+        "order_ref": "CHR-DEMO-PARTIAL",
+        "permanent_id": "PERM-497b203cfce97562",
+        "price": "4.75",
+        "quantity": "1",
+        "side": "SELL",
+        "timestamp": "2026-07-15T15:27:00Z"
+      }
+    ],
+    "final_connection_status": {
+      "account_id": null,
+      "connected": false,
+      "data_quality": "UNKNOWN",
+      "environment": "DEMO",
+      "last_successful_sync": "2026-07-15T15:30:00Z",
+      "managed_accounts": [],
+      "message": "Demo broker disconnected",
+      "state": "DISCONNECTED"
+    },
+    "open_orders": [
+      {
+        "account_id": "ACCT-b7fac9de5823c894",
+        "broker_order_id": "ORD-493af3fa1074aa94",
+        "client_id": 17,
+        "contract": {
+          "con_id": 2601,
+          "currency": "USD",
+          "deliverable_shares": "100",
+          "deliverable_verified": true,
+          "exchange": "SMART",
+          "expiration": "2026-08-05",
+          "liquid_hours": "20260715:0000-2359",
+          "local_symbol": "TSLA 260805P00230000",
+          "min_tick": "0.01",
+          "multiplier": "100",
+          "right": "P",
+          "security_type": "OPT",
+          "strike": "230",
+          "symbol": "TSLA",
+          "time_zone_id": "UTC",
+          "trading_class": "TSLA",
+          "underlying_con_id": 1007
+        },
+        "filled_quantity": "1",
+        "lifecycle": "PARTIALLY_FILLED",
+        "limit_price": "4.75",
+        "order_ref": "CHR-DEMO-PARTIAL",
+        "outside_rth": false,
+        "permanent_id": "PERM-497b203cfce97562",
+        "quantity": "2",
+        "remaining_quantity": "1",
+        "side": "SELL",
+        "transmit": false
+      }
+    ],
+    "positions": [
+      {
+        "account_id": "ACCT-b7fac9de5823c894",
+        "average_cost": "390.00",
+        "contract": {
+          "con_id": 1002,
+          "currency": "USD",
+          "exchange": "SMART",
+          "liquid_hours": "",
+          "primary_exchange": "NASDAQ",
+          "security_type": "STK",
+          "symbol": "MSFT",
+          "time_zone_id": ""
+        },
+        "market_price": "421.80",
+        "quantity": "200",
+        "unrealized_pnl": "6360.00"
+      },
+      {
+        "account_id": "ACCT-b7fac9de5823c894",
+        "average_cost": "2.45",
+        "contract": {
+          "con_id": 2201,
+          "currency": "USD",
+          "deliverable_shares": "100",
+          "deliverable_verified": true,
+          "exchange": "SMART",
+          "expiration": "2026-08-05",
+          "liquid_hours": "20260715:0000-2359",
+          "local_symbol": "SPY 260805P00540000",
+          "min_tick": "0.01",
+          "multiplier": "100",
+          "right": "P",
+          "security_type": "OPT",
+          "strike": "540",
+          "symbol": "SPY",
+          "time_zone_id": "UTC",
+          "trading_class": "SPY",
+          "underlying_con_id": 1003
+        },
+        "market_price": "3.98",
+        "quantity": "-1",
+        "unrealized_pnl": null
+      },
+      {
+        "account_id": "ACCT-b7fac9de5823c894",
+        "average_cost": "145.00",
+        "contract": {
+          "con_id": 1004,
+          "currency": "USD",
+          "exchange": "SMART",
+          "liquid_hours": "",
+          "primary_exchange": "NASDAQ",
+          "security_type": "STK",
+          "symbol": "AMD",
+          "time_zone_id": ""
+        },
+        "market_price": "168.16",
+        "quantity": "100",
+        "unrealized_pnl": "2316.00"
+      },
+      {
+        "account_id": "ACCT-b7fac9de5823c894",
+        "average_cost": "1.95",
+        "contract": {
+          "con_id": 2301,
+          "currency": "USD",
+          "deliverable_shares": "100",
+          "deliverable_verified": true,
+          "exchange": "SMART",
+          "expiration": "2026-07-29",
+          "liquid_hours": "20260715:0000-2359",
+          "local_symbol": "AMD 260729C00175000",
+          "min_tick": "0.01",
+          "multiplier": "100",
+          "right": "C",
+          "security_type": "OPT",
+          "strike": "175",
+          "symbol": "AMD",
+          "time_zone_id": "UTC",
+          "trading_class": "AMD",
+          "underlying_con_id": 1004
+        },
+        "market_price": "2.45",
+        "quantity": "-1",
+        "unrealized_pnl": null
+      },
+      {
+        "account_id": "ACCT-b7fac9de5823c894",
+        "average_cost": "4.75",
+        "contract": {
+          "con_id": 2601,
+          "currency": "USD",
+          "deliverable_shares": "100",
+          "deliverable_verified": true,
+          "exchange": "SMART",
+          "expiration": "2026-08-05",
+          "liquid_hours": "20260715:0000-2359",
+          "local_symbol": "TSLA 260805P00230000",
+          "min_tick": "0.01",
+          "multiplier": "100",
+          "right": "P",
+          "security_type": "OPT",
+          "strike": "230",
+          "symbol": "TSLA",
+          "time_zone_id": "UTC",
+          "trading_class": "TSLA",
+          "underlying_con_id": 1007
+        },
+        "market_price": "4.92",
+        "quantity": "-1",
+        "unrealized_pnl": null
+      }
+    ],
+    "server_time": "2026-07-15T15:30:00+00:00",
+    "server_time_offset": {
+      "local_utc_after_response": "2026-09-22T22:18:29.879171+00:00",
+      "local_utc_before_request": "2026-09-22T22:18:29.878610+00:00",
+      "note": "record the observed offset; no expected value exists for a first contact"
+    },
+    "symbol:AAPL:option_chain_parameters": {
+      "complete": true,
+      "completion_marker": "demo-option-chain-fixture-complete",
+      "completion_observed_at": "2026-07-15T15:30:00+00:00",
+      "completion_source": "demo-fixture-v1",
+      "fetched_at": "2026-07-15T15:30:00+00:00",
+      "fresh": true,
+      "from_cache": false,
+      "observed_at": "2026-07-15T15:30:00+00:00",
+      "parameters": [
+        {
+          "exchange": "SMART",
+          "expirations": [
+            "2026-07-29",
+            "2026-08-05",
+            "2026-08-19"
+          ],
+          "multiplier": "100",
+          "strikes": [
+            "175",
+            "180",
+            "185"
+          ],
+          "trading_class": "AAPL",
+          "underlying_con_id": 1001
+        }
+      ],
+      "truncated": false
+    },
+    "symbol:AAPL:option_market_rules": [
+      {
+        "con_id": 2002,
+        "exchange": "SMART",
+        "market_rule_id": 26,
+        "price_increments": [
+          {
+            "increment": "0.01",
+            "low_edge": "0"
+          },
+          {
+            "increment": "0.05",
+            "low_edge": "3"
+          }
+        ],
+        "source": "demo-fixture-v1"
+      }
+    ],
+    "symbol:AAPL:option_specs": [
+      {
+        "currency": "USD",
+        "exchange": "SMART",
+        "expiration": "2026-08-05",
+        "multiplier": "100",
+        "right": "P",
+        "strike": "180",
+        "symbol": "AAPL",
+        "trading_class": "AAPL",
+        "underlying_con_id": 1001
+      },
+      {
+        "currency": "USD",
+        "exchange": "SMART",
+        "expiration": "2026-08-05",
+        "multiplier": "100",
+        "right": "P",
+        "strike": "185",
+        "symbol": "AAPL",
+        "trading_class": "AAPL",
+        "underlying_con_id": 1001
+      }
+    ],
+    "symbol:AAPL:qualify_option:2026-08-05:180:P": {
+      "error": "BrokerDataError: Demo contract is not qualified: AAPL 2026-08-05 180 P"
+    },
+    "symbol:AAPL:qualify_option:2026-08-05:185:P": [
+      {
+        "con_id": 2002,
+        "currency": "USD",
+        "deliverable_shares": "100",
+        "deliverable_verified": true,
+        "exchange": "SMART",
+        "expiration": "2026-08-05",
+        "liquid_hours": "20260715:0000-2359",
+        "local_symbol": "AAPL 260805P00185000",
+        "min_tick": "0.01",
+        "multiplier": "100",
+        "right": "P",
+        "security_type": "OPT",
+        "strike": "185",
+        "symbol": "AAPL",
+        "time_zone_id": "UTC",
+        "trading_class": "AAPL",
+        "underlying_con_id": 1001
+      }
+    ],
+    "symbol:AAPL:qualify_option_contracts": {
+      "error": "BrokerDataError: Demo contract is not qualified: AAPL 2026-08-05 180 P"
+    },
+    "symbol:AAPL:qualify_underlying": {
+      "con_id": 1001,
+      "currency": "USD",
+      "exchange": "SMART",
+      "liquid_hours": "",
+      "primary_exchange": "NASDAQ",
+      "security_type": "STK",
+      "symbol": "AAPL",
+      "time_zone_id": ""
+    },
+    "symbol:AAPL:underlying_quote": {
+      "cache_age_seconds": 0.0,
+      "fetched_at": "2026-07-15T15:30:00+00:00",
+      "fresh": true,
+      "from_cache": false,
+      "observed_at": "2026-07-15T15:30:00+00:00",
+      "quote": {
+        "ask": "190.30",
+        "bid": "190.20",
+        "close": "190.25",
+        "contract": {
+          "con_id": 1001,
+          "currency": "USD",
+          "exchange": "SMART",
+          "liquid_hours": "",
+          "primary_exchange": "NASDAQ",
+          "security_type": "STK",
+          "symbol": "AAPL",
+          "time_zone_id": ""
+        },
+        "data_quality": "DEMO",
+        "greeks": null,
+        "last": "190.25",
+        "open_interest": null,
+        "timestamp": "2026-07-15T15:30:00Z",
+        "volume": 1000000
+      },
+      "source_age_seconds": 0.0,
+      "transmission_eligible": false
+    },
+    "symbol:MSFT:option_chain_parameters": {
+      "complete": true,
+      "completion_marker": "demo-option-chain-fixture-complete",
+      "completion_observed_at": "2026-07-15T15:30:00+00:00",
+      "completion_source": "demo-fixture-v1",
+      "fetched_at": "2026-07-15T15:30:00+00:00",
+      "fresh": true,
+      "from_cache": false,
+      "observed_at": "2026-07-15T15:30:00+00:00",
+      "parameters": [
+        {
+          "exchange": "SMART",
+          "expirations": [
+            "2026-07-29",
+            "2026-08-05",
+            "2026-08-19"
+          ],
+          "multiplier": "100",
+          "strikes": [
+            "430",
+            "440",
+            "450"
+          ],
+          "trading_class": "MSFT",
+          "underlying_con_id": 1002
+        }
+      ],
+      "truncated": false
+    },
+    "symbol:MSFT:option_market_rules": {
+      "not_captured": "no option contract qualified for a market-rule read"
+    },
+    "symbol:MSFT:option_specs": [
+      {
+        "currency": "USD",
+        "exchange": "SMART",
+        "expiration": "2026-08-05",
+        "multiplier": "100",
+        "right": "P",
+        "strike": "430",
+        "symbol": "MSFT",
+        "trading_class": "MSFT",
+        "underlying_con_id": 1002
+      },
+      {
+        "currency": "USD",
+        "exchange": "SMART",
+        "expiration": "2026-08-05",
+        "multiplier": "100",
+        "right": "P",
+        "strike": "440",
+        "symbol": "MSFT",
+        "trading_class": "MSFT",
+        "underlying_con_id": 1002
+      }
+    ],
+    "symbol:MSFT:qualify_option:2026-08-05:430:P": {
+      "error": "BrokerDataError: Demo contract is not qualified: MSFT 2026-08-05 430 P"
+    },
+    "symbol:MSFT:qualify_option:2026-08-05:440:P": {
+      "error": "BrokerDataError: Demo contract is not qualified: MSFT 2026-08-05 440 P"
+    },
+    "symbol:MSFT:qualify_option_contracts": {
+      "error": "BrokerDataError: Demo contract is not qualified: MSFT 2026-08-05 430 P"
+    },
+    "symbol:MSFT:qualify_underlying": {
+      "con_id": 1002,
+      "currency": "USD",
+      "exchange": "SMART",
+      "liquid_hours": "",
+      "primary_exchange": "NASDAQ",
+      "security_type": "STK",
+      "symbol": "MSFT",
+      "time_zone_id": ""
+    },
+    "symbol:MSFT:underlying_quote": {
+      "cache_age_seconds": 0.0,
+      "fetched_at": "2026-07-15T15:30:00+00:00",
+      "fresh": true,
+      "from_cache": false,
+      "observed_at": "2026-07-15T15:30:00+00:00",
+      "quote": {
+        "ask": "421.90",
+        "bid": "421.70",
+        "close": "421.80",
+        "contract": {
+          "con_id": 1002,
+          "currency": "USD",
+          "exchange": "SMART",
+          "liquid_hours": "",
+          "primary_exchange": "NASDAQ",
+          "security_type": "STK",
+          "symbol": "MSFT",
+          "time_zone_id": ""
+        },
+        "data_quality": "DEMO",
+        "greeks": null,
+        "last": "421.80",
+        "open_interest": null,
+        "timestamp": "2026-07-15T15:30:00Z",
+        "volume": 1000000
+      },
+      "source_age_seconds": 0.0,
+      "transmission_eligible": false
+    }
+  }
+}

@@ -245,6 +245,7 @@ account fingerprint (never the raw id), config-audit output (§3.3 step 2), smok
 (session 1), capture directory + the `manifest.json` sha256s, every step error classified,
 first-contact ledger entries (§4.4), leak/mutation/drift/callback/pacing check results
 (§4.3), safety-state inventory (§3.3 step 3), your initials.
+When a session directory is committed (§6), it takes the same per-session baseline step the demo rehearsal took (EV-1-F1: `tests/fixtures/ibkr_demo/rehearsal/`, a demo rehearsal — NOT gateway evidence): its `manifest.json` file sha256s and `pepper_fingerprint` enter `.secrets.baseline` as reviewed results by hand, with a reason each — never by letting `detect-secrets` rewrite the baseline.
 
 ## 5. The restart session (one of sessions 2 … N, done deliberately)
 
