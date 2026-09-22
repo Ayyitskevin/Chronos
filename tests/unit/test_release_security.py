@@ -64,6 +64,52 @@ def _write_test_baseline(
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
+#: EV-1-F1: the demo rehearsal fixture's manifest carries three Hex High Entropy Strings (the two
+#: file sha256 digests and the published test pepper's fingerprint). They are reviewed by hand; this
+#: pin holds that review as an invariant, not data. The expected identities are DERIVED from the
+#: committed fixture bytes (detect-secrets' hashed_secret is the sha1 of the flagged value), so the
+#: pin needs no digest literal of its own — a literal here would itself be a scan finding.
+_REHEARSAL_MANIFEST = "tests/fixtures/ibkr_demo/rehearsal/manifest.json"
+
+
+def _rehearsal_flagged_values() -> dict[int, str]:
+    manifest = json.loads((_REPO_ROOT / _REHEARSAL_MANIFEST).read_text(encoding="utf-8"))
+    lines = (_REPO_ROOT / _REHEARSAL_MANIFEST).read_text(encoding="utf-8").splitlines()
+    values = [
+        manifest["files"]["capture.json"],
+        manifest["files"]["derived_liquid_hours.json"],
+        manifest["identifier_pseudonyms"]["pepper_fingerprint"],
+    ]
+    flagged: dict[int, str] = {}
+    for value in values:
+        (line_number,) = [n for n, text in enumerate(lines, start=1) if f'"{value}"' in text]
+        flagged[line_number] = value
+    return flagged
+
+
+def test_demo_rehearsal_manifest_has_exactly_its_three_reviewed_results_each_with_a_reason() -> (
+    None
+):
+    payload = json.loads((_REPO_ROOT / ".secrets.baseline").read_text(encoding="utf-8"))
+    entries = payload["results"][_REHEARSAL_MANIFEST]
+    expected = {
+        (
+            "Hex High Entropy String",
+            hashlib.sha1(value.encode("utf-8")).hexdigest(),
+            line_number,
+        )
+        for line_number, value in _rehearsal_flagged_values().items()
+    }
+
+    identities = [(item["type"], item["hashed_secret"], item["line_number"]) for item in entries]
+    assert len(identities) == len(expected) == 3, identities
+    assert set(identities) == expected
+    for item in entries:
+        assert item.get("is_secret") is False, item
+        reason = item.get("reason")
+        assert isinstance(reason, str) and reason.strip(), f"unreviewed entry (no reason): {item}"
+
+
 def test_security_gate_pip_identity_matches_the_bootstrap_lock() -> None:
     assert EXPECTED_TOOL_VERSIONS["pip"] == locked_pip_version(
         _REPO_ROOT / "requirements-bootstrap.lock"
