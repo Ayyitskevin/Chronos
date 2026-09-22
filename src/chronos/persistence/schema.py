@@ -296,6 +296,42 @@ class ReconciliationRunRow(Base):
     completed_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
 
 
+class PositionProvenanceRow(Base):
+    """Origin class of one observed position at one reconciliation run (AP-1, schema v15).
+
+    Append-only evidence (K1(a)): a class change writes a new row, never an edit; rows carry
+    the account FINGERPRINT only (K2(a)); nothing reads this table to decide anything (K3(a)).
+    ``position_key`` is ``<con_id>:<security_type>:<side>``; ``evidence_ref`` names the binding
+    (MANAGED), the wheel cycle (WHEEL), the acknowledging run (MANUAL) or the first-seen run +
+    snapshot digest (FOREIGN).
+    """
+
+    __tablename__ = "position_provenance"
+    __table_args__ = (
+        UniqueConstraint(
+            "observed_run_id",
+            "position_key",
+            "origin_class",
+            "evidence_ref",
+            name="uq_position_provenance_run_key_class_evidence",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account_fingerprint: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    position_key: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    origin_class: Mapped[str] = mapped_column(String(16), nullable=False)
+    evidence_ref: Mapped[str] = mapped_column(String(160), nullable=False)
+    first_seen_run_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("reconciliation_runs.id"), nullable=False
+    )
+    observed_run_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("reconciliation_runs.id"), index=True, nullable=False
+    )
+    quantity: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
+    recorded_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
 class ApplicationEventRow(Base):
     __tablename__ = "application_events"
 
