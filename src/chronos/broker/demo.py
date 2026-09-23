@@ -15,6 +15,7 @@ from chronos.broker.base import (
     BrokerSendGuard,
     OptionChainResponse,
 )
+from chronos.broker.callbacks import UnsolicitedObservationClassifier
 from chronos.domain.enums import (
     ConnectionState,
     DataQuality,
@@ -70,6 +71,7 @@ class DemoBroker:
         *,
         clock: Callable[[], datetime] = demo_now,
         profile: DemoProfile = DemoProfile.SAFETY_CASES,
+        on_connection_uncertain: Callable[[str], object] | None = None,
     ) -> None:
         self._clock = clock
         self._profile = DemoProfile(profile)
@@ -85,6 +87,10 @@ class DemoBroker:
         self._orders: tuple[BrokerOrder, ...] = ()
         self._executions: tuple[BrokerExecution, ...] = ()
         self._logger = logging.getLogger("chronos.broker.demo")
+        # RC-1: the demo broker places no orders, so every streamed observation is unsolicited.
+        self._unsolicited = UnsolicitedObservationClassifier(
+            invalidate=on_connection_uncertain, client_id=None, logger=self._logger
+        )
 
     @property
     def profile(self) -> DemoProfile:
@@ -184,6 +190,16 @@ class DemoBroker:
     async def positions(self) -> tuple[BrokerPosition, ...]:
         self._require_connection()
         return self._positions
+
+    def simulate_unsolicited_execution(self, execution: BrokerExecution) -> None:
+        """RC-1 test seam: a fill this system did not place arrives on the demo stream.
+
+        The execution joins the demo book (a later reconciliation pass sees it) and the
+        observation goes to the one classifier, which invalidates readiness. Demo only.
+        """
+
+        self._executions = (*self._executions, execution)
+        self._unsolicited.observe_execution(client_id=None, order_id=execution.broker_order_id)
 
     async def executions(self, since: datetime | None = None) -> tuple[BrokerExecution, ...]:
         self._require_connection()

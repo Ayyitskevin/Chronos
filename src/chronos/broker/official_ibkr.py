@@ -599,7 +599,7 @@ def _make_app(bridge: CallbackBridge) -> Any:
             whyHeld: str,
             mktCapPrice: float,
         ) -> None:
-            del parentId, lastFillPrice, clientId, whyHeld, mktCapPrice
+            del parentId, lastFillPrice, whyHeld, mktCapPrice
             bridge.on_order_status(
                 int(orderId),
                 str(status),
@@ -607,6 +607,7 @@ def _make_app(bridge: CallbackBridge) -> Any:
                 float(remaining),
                 float(avgFillPrice),
                 int(permId),
+                client_id=int(clientId),  # RC-1: own-vs-unsolicited needs the client id
             )
 
         def tickPrice(self, reqId: int, tickType: int, price: float, attrib: Any) -> None:
@@ -930,6 +931,7 @@ class OfficialIBKRBroker:
             self.registry,
             on_connection_uncertain=on_connection_uncertain,
             on_managed_account_scope_change=on_managed_account_scope_change,
+            client_id=settings.ib_client_id,
         )
         self.order_ids = OrderIdAllocator()
         self._app: Any = None

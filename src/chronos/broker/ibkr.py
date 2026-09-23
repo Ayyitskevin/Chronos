@@ -44,6 +44,7 @@ from chronos.broker.base import (
     BrokerSendGuard,
     OptionChainResponse,
 )
+from chronos.broker.callbacks import UnsolicitedObservationClassifier
 from chronos.broker.market_data import (
     MarketDataCancellationError,
     MarketDataPacingError,
@@ -372,6 +373,20 @@ class IBKRBroker:
         disconnected_event = getattr(self._client, "disconnectedEvent", None)
         if disconnected_event is not None:
             disconnected_event.connect(self._on_disconnected)
+        # RC-1 (K8 = (a)): this adapter never places an order (read-only, see submit_order), so
+        # every live fill or status change ib_async streams is unsolicited and invalidates
+        # readiness. ib_async emits execDetailsEvent only for LIVE fills of a trade it already
+        # knows, and orderStatusEvent only on a change; a fill with no ib_async trade object
+        # (an assignment, a never-synced manual order) emits nothing here — a K4 question.
+        self._unsolicited = UnsolicitedObservationClassifier(
+            invalidate=on_connection_uncertain, client_id=None, logger=self._logger
+        )
+        exec_details_event = getattr(self._client, "execDetailsEvent", None)
+        if exec_details_event is not None:
+            exec_details_event.connect(self._on_exec_details)
+        order_status_event = getattr(self._client, "orderStatusEvent", None)
+        if order_status_event is not None:
+            order_status_event.connect(self._on_order_status)
 
     async def connect(self) -> None:
         """Connect read-only and explicitly synchronize all-account open orders."""
@@ -1881,6 +1896,14 @@ class IBKRBroker:
     def _on_disconnected(self, *_args: object) -> None:
         del _args
         self._invalidate_connection("ib_async connection lost; reconciliation required")
+
+    def _on_exec_details(self, *_args: object) -> None:
+        del _args
+        self._unsolicited.observe_execution(client_id=None, order_id=None)
+
+    def _on_order_status(self, *_args: object) -> None:
+        del _args
+        self._unsolicited.observe_order_status(client_id=None, order_id=None)
 
     def _invalidate_connection(self, reason: str) -> None:
         callback = self._on_connection_uncertain

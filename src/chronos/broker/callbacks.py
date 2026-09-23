@@ -94,6 +94,13 @@ def _classified_market_data_error(req_id: int, code: int, message: str) -> Broke
     return error
 
 
+def _optional_int(value: Any) -> int | None:
+    try:
+        return None if value is None else int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def clean_price(value: float | None) -> Decimal | None:
     """Convert a TWS price to Decimal, mapping sentinels/invalid to None."""
 
@@ -177,6 +184,87 @@ class _MarketRuleFlight:
     truncated: bool = False
 
 
+#: RC-1 (owner answer K8 = (a), tightening only): the typed reasons a streamed observation
+#: gives readiness when it demotes it.
+UNSOLICITED_EXECUTION_REASON = "unsolicited broker execution observed; reconciliation required"
+UNSOLICITED_ORDER_STATUS_REASON = (
+    "unsolicited broker order status observed; reconciliation required"
+)
+
+
+class UnsolicitedObservationClassifier:
+    """RC-1: the ONE classifier for streamed executions and order statuses, every adapter.
+
+    An observation is **own-and-correlated** only when it names this adapter's client id AND an
+    order id this process submitted (:meth:`note_own_order`, recorded before the send); it is
+    ignored here. Anything else — another client's order, a manual TWS order, an assignment, a
+    missing id, an adapter that places no orders (``client_id=None``) — is unsolicited or
+    uncorrelated, and calls ``invalidate`` with a typed reason: readiness goes ``PENDING`` and
+    its generation advances, exactly as on connection loss.
+
+    That call is the ONLY thing this class does to the latch. It never runs a reconciliation
+    pass and never re-arms readiness (K8 (b)/(c) would need an ADR). An ``invalidate`` that
+    raises is logged and swallowed, so the reader thread keeps its own result (the
+    ``connection.py`` observer pattern). Own order ids are kept across reconnects; after a
+    process restart an earlier order reads as uncorrelated, which only tightens.
+
+    What IBKR actually streams to which client id is UNVERIFIED on live (K4): demo/synthetic only.
+    """
+
+    def __init__(
+        self,
+        *,
+        invalidate: Callable[[str], object] | None,
+        client_id: int | None,
+        logger: logging.Logger,
+    ) -> None:
+        self._invalidate = invalidate
+        self._client_id = client_id
+        self._logger = logger
+        self._lock = threading.Lock()
+        self._own_order_ids: set[int] = set()
+
+    def note_own_order(self, order_id: int) -> None:
+        with self._lock:
+            self._own_order_ids.add(int(order_id))
+
+    def observe_execution(self, *, client_id: int | None, order_id: int | None) -> bool:
+        """Return True when the observation invalidated readiness."""
+
+        return self._observe(client_id, order_id, UNSOLICITED_EXECUTION_REASON, "execution")
+
+    def observe_order_status(self, *, client_id: int | None, order_id: int | None) -> bool:
+        """Return True when the observation invalidated readiness."""
+
+        return self._observe(client_id, order_id, UNSOLICITED_ORDER_STATUS_REASON, "order_status")
+
+    def _is_own(self, client_id: int | None, order_id: int | None) -> bool:
+        if self._client_id is None or client_id is None or order_id is None:
+            return False
+        with self._lock:
+            return client_id == self._client_id and order_id in self._own_order_ids
+
+    def _observe(self, client_id: int | None, order_id: int | None, reason: str, kind: str) -> bool:
+        if self._is_own(client_id, order_id):
+            return False
+        self._logger.warning(
+            "Unsolicited broker %s observed; submission readiness is invalidated",
+            kind,
+            extra={"event": "unsolicited_broker_observation", "observation": kind},
+        )
+        if self._invalidate is None:
+            return False
+        try:
+            self._invalidate(reason)
+        except Exception:
+            self._logger.exception(
+                "Unsolicited-observation readiness invalidation failed",
+                extra={"event": "unsolicited_observation_invalidation_failed"},
+            )
+            return False
+        return True
+
+
 class CallbackBridge:
     """Connection-level state and callback routing for the official adapter."""
 
@@ -188,11 +276,16 @@ class CallbackBridge:
         on_managed_account_scope_change: (
             Callable[[str], AbstractContextManager[None]] | None
         ) = None,
+        client_id: int | None = None,
     ) -> None:
         self.registry = registry
         self._on_connection_uncertain = on_connection_uncertain
         self._on_managed_account_scope_change = on_managed_account_scope_change
         self._logger = logging.getLogger("chronos.broker.callbacks")
+        # RC-1: streamed executions / order statuses this process did not place → invalidate.
+        self.unsolicited = UnsolicitedObservationClassifier(
+            invalidate=on_connection_uncertain, client_id=client_id, logger=self._logger
+        )
         self._lock = threading.Lock()
         self.connected_event = threading.Event()
         self.next_valid_id: int | None = None
@@ -395,6 +488,7 @@ class CallbackBridge:
     def start_order_ack(self, order_id: int) -> _SingleFlight:
         """Await the first openOrder/orderStatus callback for one order id."""
 
+        self.unsolicited.note_own_order(order_id)  # before the send: own fills stay own
         with self._lock:
             flight = _SingleFlight()
             self._order_acks[order_id] = flight
@@ -412,6 +506,7 @@ class CallbackBridge:
         remaining: float,
         avg_fill_price: float,
         perm_id: int,
+        client_id: int | None = None,
     ) -> None:
         with self._lock:
             ack = self._order_acks.get(order_id)
@@ -419,6 +514,7 @@ class CallbackBridge:
         if ack is not None and not ack.done.is_set():
             ack.items.append(("orderStatus", order_id, status, filled, remaining, perm_id))
             ack.done.set()
+        self.unsolicited.observe_order_status(client_id=client_id, order_id=order_id)
 
     def _fail_all_single_flights(self, reason: str) -> None:
         with self._lock:
@@ -472,6 +568,14 @@ class CallbackBridge:
         self.registry.finish(req_id)
 
     def on_exec_details(self, req_id: int, contract: Any, execution: Any) -> None:
+        if req_id < 0:
+            # RC-1: an unrequested (live) execution — IBKR sends it with request id -1. A
+            # response to this adapter's own reqExecutions keeps the registry path below.
+            self.unsolicited.observe_execution(
+                client_id=_optional_int(getattr(execution, "clientId", None)),
+                order_id=_optional_int(getattr(execution, "orderId", None)),
+            )
+            return
         self.registry.add(req_id, (contract, execution))
 
     def on_exec_details_end(self, req_id: int) -> None:
