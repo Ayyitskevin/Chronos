@@ -1,0 +1,15 @@
+{
+  "campaign": "chronos-real-gateway-campaign",
+  "created_utc": "2026-09-22T22:18:29.878488+00:00",
+  "files": {
+    "capture.json": "018b542cd62415c9cb50257c39322569dbc5479fd080b88e7243f903cea0f44d",
+    "derived_liquid_hours.json": "eda1ceba0af75d7d6c567bd3e5d86dfdb88ac338ad76fd21fc5111d648fb7e0a"
+  },
+  "gateway_evidence": false,
+  "identifier_pseudonyms": {
+    "pepper_fingerprint": "8ad6a7b5e7a89711",
+    "scheme": "hmac-sha256-v2"
+  },
+  "label": "ev1-demo-rehearsal",
+  "note": "demo rehearsal \u2014 NOT gateway evidence (gateway_evidence=false; minted in-process from the demo broker by capture_readonly.py --allow-demo under ALLOW_ORDER_TRANSMIT=false with the published test pepper)"
+}
