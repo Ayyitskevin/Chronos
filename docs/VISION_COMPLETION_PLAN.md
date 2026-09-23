@@ -457,6 +457,50 @@ Deliver:
   tests/unit/test_local_reconciliation_repository.py); and orchestrator deployment/configuration,
   outer deadlines, always-on alerts, and operational proof. (d) This does not satisfy the Phase 2 exit.
 
+  **Partial delivery (updated 2026-09-22, through #259 / main 43d9a26):** the pull requests that
+  merged after #247, each item bound to its merge commit and one evidence artifact at 43d9a26, and
+  every item verified on synthetic / demo evidence; UNVERIFIED on live until the K4 read-only
+  session. (a) LANDED — against §7 bullet 1 (broker identities, executions, fills, commissions,
+  positions, cash, buying power): order identity completing on the event path, `permanent_id` and
+  `client_id` columns on `order_events` with typed identity conflicts
+  (src/chronos/persistence/migrations/versions/0014_order_event_identity.py; #249, merge aa7ef47),
+  and `operator_resolve` failing closed with a typed refusal on contradictory persisted identity
+  (tests/unit/test_order_event_identity.py; #251, merge 05bf772); broker executions persisting as
+  fills and commissions from the reconciliation seam, the fills row being the broker fact
+  (tests/unit/test_reconciliation_persists_executions.py; #250, merge 4eadb37); and account state
+  per run — one append-only `reconciliation_runs` row per decided run whose snapshot carries the
+  MASKED account summary and the account fingerprint, never the raw account id
+  (src/chronos/persistence/reconciliation_repository.py:1-8; #255, merge 2704cd7). Against bullet
+  2 (allocation provenance): every observed position recorded as MANAGED / WHEEL / MANUAL /
+  FOREIGN, record-only — nothing in the order plane or autonomy decides on it
+  (src/chronos/portfolio/provenance.py:6-16; #257, merge 2b36ad9), the MANUAL producer being an
+  append-only operator acknowledgement that carries an operator fingerprint, never a name
+  (src/chronos/persistence/acknowledgement_repository.py:1-16; #258, merge e608a09); both per the
+  owner rulings K1(a) append-only, K2(a) fingerprint only, K3(a) record-only. Against bullet 3
+  (reconciliation): the evidence side only — the replay-through-persistence contract, under which
+  captured session bytes must equal the persisted rows
+  (tests/integration/test_replay_through_persistence.py; #256, merge 811a3df), running by default
+  on the committed demo rehearsal session — demo only, NOT gateway evidence
+  (tests/fixtures/ibkr_demo/rehearsal/manifest.json; #259, merge 43d9a26). Against the
+  operations bullets: a typed default-off SLO document with an offline evaluator over the
+  watchdog's evidence and one `/health` observation that is never a verdict input
+  (src/chronos/operations/slo.py:1-10; #248, merge 64efa7e), its runbook reading an unset default
+  as an honest UNKNOWN and a refused evaluation as leaving the previous observation
+  (docs/ops/WATCHDOG.md:258-260; #252, merge 893b72b); the watchdog and dead-man CLIs inside the
+  authority import boundary (tests/safety/test_operational_health_boundary.py; #253, merge
+  658c474); and this plan's own record through #247 with its prose pin
+  (tests/unit/test_vision_completion_plan_prose.py; #254, merge 723df41). (b) AT THE GATE, NOT
+  COUNTED: nothing at the gate (no Chronos PR open at this update).
+  (c) REMAINS OPEN, with owners: live verification of every item above (K4, the
+  owner-led read-only session); the off-host sidecar receiver and sender (S-1a/S-1c, built
+  fail-closed in the flow lane, NOT merged and not counted; held on K6, the host, and K7, the
+  Ed25519 dependency) and the off-host witness; the external audit-chain anchor; P&L attribution,
+  drawdown, exposure, slippage, and tracking error by exact strategy; atomic reservations,
+  position netting, and conflict resolution; reconnect- and order/fill-triggered reconciliation —
+  a disconnect only invalidates readiness (src/chronos/broker/connection.py:177) and no such
+  caller exists today, stated here, not built; and orchestrator deployment/configuration,
+  always-on alerts, and operational proof. (d) This does not satisfy the Phase 2 exit.
+
 ### Real-gateway read-only gate
 
 The owner installs and pins the official IB API, supplies a paper account and market-data
