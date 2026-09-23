@@ -457,8 +457,8 @@ Deliver:
   tests/unit/test_local_reconciliation_repository.py); and orchestrator deployment/configuration,
   outer deadlines, always-on alerts, and operational proof. (d) This does not satisfy the Phase 2 exit.
 
-  **Partial delivery (updated 2026-09-22, through #258 / main e608a09):** the pull requests that
-  merged after #247, each item bound to its merge commit and one evidence artifact at e608a09, and
+  **Partial delivery (updated 2026-09-22, through #259 / main 43d9a26):** the pull requests that
+  merged after #247, each item bound to its merge commit and one evidence artifact at 43d9a26, and
   every item verified on synthetic / demo evidence; UNVERIFIED on live until the M4 read-only
   session. (a) LANDED — against §7 bullet 1 (broker identities, executions, fills, commissions,
   positions, cash, buying power): order identity completing on the event path, `permanent_id` and
@@ -479,7 +479,9 @@ Deliver:
   owner rulings K1(a) append-only, K2(a) fingerprint only, K3(a) record-only. Against bullet 3
   (reconciliation): the evidence side only — the replay-through-persistence contract, under which
   captured session bytes must equal the persisted rows
-  (tests/integration/test_replay_through_persistence.py; #256, merge 811a3df). Against the
+  (tests/integration/test_replay_through_persistence.py; #256, merge 811a3df), running by default
+  on the committed demo rehearsal session — demo only, NOT gateway evidence
+  (tests/fixtures/ibkr_demo/rehearsal/manifest.json; #259, merge 43d9a26). Against the
   operations bullets: a typed default-off SLO document with an offline evaluator over the
   watchdog's evidence and one `/health` observation that is never a verdict input
   (src/chronos/operations/slo.py:1-10; #248, merge 64efa7e), its runbook reading an unset default
@@ -488,9 +490,8 @@ Deliver:
   authority import boundary (tests/safety/test_operational_health_boundary.py; #253, merge
   658c474); and this plan's own record through #247 with its prose pin
   (tests/unit/test_vision_completion_plan_prose.py; #254, merge 723df41). (b) AT THE GATE, NOT
-  COUNTED: none. #259 EV-1-F1 (the committed demo rehearsal fixture — demo only, NOT gateway
-  evidence) merged at 43d9a26 after this record's cut; it is not counted here and is left to the
-  next update. (c) REMAINS OPEN, with owners: live verification of every item above (K4, the
+  COUNTED: nothing at the gate (no Chronos PR open at this update).
+  (c) REMAINS OPEN, with owners: live verification of every item above (K4, the
   owner-led read-only session); the off-host sidecar receiver and sender (S-1a/S-1c, built
   fail-closed in the flow lane, NOT merged and not counted; held on K6, the host, and K7, the
   Ed25519 dependency) and the off-host witness; the external audit-chain anchor; P&L attribution,
