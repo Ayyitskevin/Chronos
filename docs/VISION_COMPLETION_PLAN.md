@@ -459,7 +459,7 @@ Deliver:
 
   **Partial delivery (updated 2026-09-22, through #259 / main 43d9a26):** the pull requests that
   merged after #247, each item bound to its merge commit and one evidence artifact at 43d9a26, and
-  every item verified on synthetic / demo evidence; UNVERIFIED on live until the M4 read-only
+  every item verified on synthetic / demo evidence; UNVERIFIED on live until the K4 read-only
   session. (a) LANDED — against §7 bullet 1 (broker identities, executions, fills, commissions,
   positions, cash, buying power): order identity completing on the event path, `permanent_id` and
   `client_id` columns on `order_events` with typed identity conflicts
