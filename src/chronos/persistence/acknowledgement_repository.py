@@ -29,6 +29,7 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import event, select
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from chronos.persistence.repositories import _reject_raw_account_event_data, _require_scope
@@ -64,6 +65,36 @@ def _refuse_update(mapper: Any, connection: Any, target: PositionAcknowledgement
 def _refuse_delete(mapper: Any, connection: Any, target: PositionAcknowledgementRow) -> None:
     raise AcknowledgementImmutable(
         f"position acknowledgement {target.id} is append-only; write a superseding row instead"
+    )
+
+
+@event.listens_for(Engine, "before_execute")
+def _refuse_bulk_dml(
+    connection: Any,
+    clauseelement: Any,
+    multiparams: Any,
+    params: Any,
+    execution_options: Any,
+) -> None:
+    """AP-2: the append-only rule at the ENGINE, not only the ORM unit of work.
+
+    The mapper listeners above see rows the ORM flushes; a Core statement (``session.execute``
+    of an ORM-enabled statement, or ``connection.execute`` on the table) skips them. Every
+    engine therefore refuses a data-manipulation construct that is not an insert when its
+    target is this table. Inserts (``acknowledge``, ``withdraw``) pass. A raw SQL string or a
+    DB-API cursor is not a construct and is not seen here; closing that needs a database
+    trigger, which is a migration and out of this module's reach.
+    """
+
+    del connection, multiparams, params, execution_options
+    if not getattr(clauseelement, "is_dml", False) or getattr(clauseelement, "is_insert", False):
+        return
+    target = getattr(clauseelement, "table", None)
+    if getattr(target, "name", None) != PositionAcknowledgementRow.__tablename__:
+        return
+    raise AcknowledgementImmutable(
+        "position acknowledgements are append-only: a Core statement that edits or removes rows "
+        "is refused; write a superseding row instead"
     )
 
 

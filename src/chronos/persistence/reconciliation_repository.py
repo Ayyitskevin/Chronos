@@ -19,6 +19,16 @@ The ``trigger`` a row carries is the caller's own word. The real callers today a
 (``reconcile_once``); a caller that passes nothing is recorded as ``unattributed`` — the honest
 default, never a guessed label. ``reconnect`` and ``order_fill`` are vocabulary no caller emits yet.
 
+Replay semantics (AP-2). A replay compares the run's OWN facts — trigger, status, the broker
+snapshot and the run's own decisions — and not the entries the recorder folds in (operator
+acknowledgements, or the ``acknowledgements_unavailable`` marker): acknowledgements are as of the
+FIRST write, because the row is evidence of what the recorder saw when the run was decided and is
+never overwritten. An identical run replayed after ``position-acknowledge`` is therefore a replay,
+not a conflict; the NEXT run id reads the current acknowledgements. A replay also re-runs the
+provenance hook, which classifies the STORED row and is idempotent per (run, key, class,
+evidence), so a replay repairs missing provenance after a failed first write and otherwise adds
+nothing.
+
 Evidence only: verified on synthetic / demo evidence; UNVERIFIED on live until the M4 read-only
 session (K4 unanswered).
 """
@@ -39,6 +49,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from chronos.domain.enums import ReconciliationStatus
 from chronos.domain.models import ChronosModel
 from chronos.persistence.acknowledgement_repository import (
+    ACKNOWLEDGEMENT_KIND,
     AcknowledgementRepository,
     acknowledgement_decisions,
 )
@@ -54,6 +65,10 @@ if TYPE_CHECKING:  # type only: the runtime import drags chronos.broker into the
     from chronos.services.reconciliation import ReconciliationResult
 
 _LOGGER = logging.getLogger(__name__)
+
+#: The decision kinds the RECORDER folds into a run (never the run's own facts). A replay
+#: comparison removes them from both sides; the stored row keeps the ones of its first write.
+_RECORDER_DECISION_KINDS = frozenset({ACKNOWLEDGEMENT_KIND, "acknowledgements_unavailable"})
 
 ReconciliationTrigger = Literal[
     "startup", "reconnect", "order_fill", "periodic", "operator", "unattributed"
@@ -310,13 +325,23 @@ def _require_same_bytes(
         stored.trigger == snapshot.trigger
         and stored.status == snapshot.status.value
         and json_ready(stored.broker_snapshot) == broker_snapshot
-        and json_ready(stored.decisions) == decisions
+        and _own_decisions(json_ready(stored.decisions)) == _own_decisions(decisions)
     )
     if not same:
         raise ReconciliationRunConflict(
             f"reconciliation run {snapshot.run_id} was already recorded with different bytes; "
             "the row is never overwritten"
         )
+
+
+def _own_decisions(decisions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The run's own decisions: everything but the recorder-folded kinds, order kept."""
+
+    return [
+        decision
+        for decision in decisions
+        if not (isinstance(decision, dict) and decision.get("kind") in _RECORDER_DECISION_KINDS)
+    ]
 
 
 class ReconciliationRunRecorder:
@@ -359,9 +384,10 @@ class ReconciliationRunRecorder:
             except Exception:  # the event is best effort too
                 _LOGGER.warning("application event for the failed run write was not persisted")
             return None
-        if written:
-            # AP-1: provenance rows follow the persisted run — never raises, never reads the broker
-            record_position_provenance(self._sessions, snapshot.run_id)
+        # AP-1: provenance rows follow the persisted run — never raises, never reads the broker.
+        # AP-2: also on a replay (``written`` False): the hook classifies the STORED row and is
+        # idempotent, so a provenance write that failed the first time is repaired here.
+        record_position_provenance(self._sessions, snapshot.run_id)
         return written
 
     def _with_acknowledgements(self, snapshot: ReconciliationSnapshot) -> ReconciliationSnapshot:
