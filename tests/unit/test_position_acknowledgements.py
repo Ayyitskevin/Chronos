@@ -640,3 +640,166 @@ def test_4_the_cli_writes_one_row_per_invocation_and_lists_them_masked(
         env=env,
     )
     assert module_form.returncode == 0 and module_form.stdout == listing.stdout
+
+
+# --- AP-2: replay and bulk-DML hardening (the P2s carried on #257/#258) ---------------------------
+#: The recorder-added decision kinds; a replay compares the run's OWN facts without them.
+_RECORDER_KINDS = {ACKNOWLEDGEMENT_KIND, "acknowledgements_unavailable"}
+_RECORDER_MODULE = "src/chronos/persistence/reconciliation_repository.py"
+
+
+def _events(database: Database) -> list[str]:
+    return [e.event_type for e in ApplicationEventRepository(database.sessions).recent(limit=20)]
+
+
+def test_ap2_c1_no_changed_module_reaches_authority_and_the_recorder_calls_only_its_seams() -> None:
+    for module in (_MODULE, _RECORDER_MODULE):
+        imported = _imports(_ROOT / module)
+        assert not {
+            name
+            for name in imported
+            if name.startswith(
+                (
+                    "chronos.orders",
+                    "chronos.risk",
+                    "chronos.autonomy",
+                    "chronos.supervisor",
+                    "chronos.control",
+                    "chronos.broker",
+                )
+            )
+        }, (module, imported)
+    tree = ast.parse((_ROOT / _RECORDER_MODULE).read_text(encoding="utf-8"))
+    record = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ClassDef) and node.name == "ReconciliationRunRecorder"
+    )
+    method = next(n for n in record.body if isinstance(n, ast.FunctionDef) and n.name == "record")
+    called = {ast.unparse(node.func) for node in ast.walk(method) if isinstance(node, ast.Call)}
+    assert called <= {
+        "self._with_acknowledgements",
+        "self._runs.record_run",
+        "record_position_provenance",
+        "_LOGGER.warning",
+        "self._events.append",
+        "exc.__class__.__name__",
+    }, called
+
+
+def test_ap2_c2_core_bulk_edit_of_an_acknowledgement_is_refused_and_the_row_is_unchanged(
+    database: Database,
+) -> None:
+    repo = AcknowledgementRepository(database.sessions)
+    row_id = repo.acknowledge(position_key=SYM0_KEY, note="n", operator_fingerprint=OPERATOR)
+    before = _ack_rows(database)
+    with pytest.raises(AcknowledgementImmutable), database.sessions.begin() as session:
+        session.execute(sa.update(PositionAcknowledgementRow).values(note="edited"))
+    with pytest.raises(AcknowledgementImmutable), database.sessions.begin() as session:
+        session.execute(
+            sa.update(PositionAcknowledgementRow)
+            .where(PositionAcknowledgementRow.id == row_id)
+            .values(superseded_by=row_id)
+        )
+    assert _ack_rows(database) == before == [(1, SYM0_KEY, "n", OPERATOR, None)]
+
+
+def test_ap2_c2_core_bulk_removal_is_refused_on_the_session_and_the_bare_connection(
+    database: Database,
+) -> None:
+    repo = AcknowledgementRepository(database.sessions)
+    repo.acknowledge(position_key=SYM0_KEY, note="n", operator_fingerprint=OPERATOR)
+    table = Base.metadata.tables["position_acknowledgements"]
+    with pytest.raises(AcknowledgementImmutable), database.sessions.begin() as session:
+        session.execute(sa.delete(PositionAcknowledgementRow))
+    with pytest.raises(AcknowledgementImmutable), database.engine.begin() as connection:
+        connection.execute(sa.delete(table))
+    with pytest.raises(AcknowledgementImmutable), database.engine.begin() as connection:
+        connection.execute(sa.update(table).values(note="edited"))
+    assert _ack_rows(database) == [(1, SYM0_KEY, "n", OPERATOR, None)]
+
+
+def test_ap2_c2_the_append_path_still_works_under_the_guard(database: Database) -> None:
+    repo = AcknowledgementRepository(database.sessions)
+    first = repo.acknowledge(position_key=SYM0_KEY, note="n", operator_fingerprint=OPERATOR)
+    withdrawal = repo.withdraw(acknowledgement_id=first, note="gone", operator_fingerprint=OPERATOR)
+    rows = _ack_rows(database)
+    assert [r[0] for r in rows] == [first, withdrawal]
+    assert rows[1][4] == first and repo.current() == ()
+    # other tables are untouched by the guard: a Core edit elsewhere still runs
+    with database.sessions.begin() as session:
+        session.execute(sa.update(ReconciliationRunRow).values(status="PENDING"))
+
+
+def test_ap2_c3a_a_replay_repairs_a_failed_first_provenance_write_exactly_once(
+    database: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = PositionProvenanceRepository.record_run
+
+    def explode(self: Any, run_id: str) -> int:
+        raise RuntimeError("provenance store unavailable")
+
+    monkeypatch.setattr(PositionProvenanceRepository, "record_run", explode)
+    recorder = ReconciliationRunRecorder(database.sessions)
+    assert recorder.record(_snapshot("periodic-00000001-run")) is True
+    assert _provenance(database) == []
+    assert _events(database) == ["position_provenance_persist_failed"]
+
+    monkeypatch.setattr(PositionProvenanceRepository, "record_run", original)
+    assert recorder.record(_snapshot("periodic-00000001-run")) is False  # a replay
+    repaired = _provenance(database)
+    assert [(r[0], r[1], r[2]) for r in repaired] == [
+        ("periodic-00000001-run", SYM0_KEY, "FOREIGN")
+    ]
+    assert recorder.record(_snapshot("periodic-00000001-run")) is False
+    assert _provenance(database) == repaired  # a third replay adds nothing
+    assert _events(database) == ["position_provenance_persist_failed"]
+
+
+def test_ap2_c3b_a_replay_after_an_acknowledgement_is_idempotent_and_keeps_its_first_write(
+    database: Database,
+) -> None:
+    recorder = ReconciliationRunRecorder(database.sessions)
+    repo = AcknowledgementRepository(database.sessions)
+    assert recorder.record(_snapshot("periodic-00000001-run", started=_NOW)) is True
+    first_decisions = _decisions(database, "periodic-00000001-run")
+    repo.acknowledge(position_key=SYM0_KEY, note="desk hedge", operator_fingerprint=OPERATOR)
+
+    assert recorder.record(_snapshot("periodic-00000001-run", started=_NOW)) is False
+    assert "reconciliation_run_persist_failed" not in _events(database)
+    assert _decisions(database, "periodic-00000001-run") == first_decisions
+    assert ACKNOWLEDGEMENT_KIND not in json.dumps(first_decisions)
+    assert [(r[0], r[2]) for r in _provenance(database)] == [("periodic-00000001-run", "FOREIGN")]
+
+    assert (
+        recorder.record(
+            _snapshot("periodic-00000002-run", generation=2, started=_NOW + timedelta(minutes=2))
+        )
+        is True
+    )
+    assert [(r[0], r[2]) for r in _provenance(database)] == [
+        ("periodic-00000001-run", "FOREIGN"),
+        ("periodic-00000002-run", "MANUAL"),  # the NEXT run id sees the acknowledgement
+    ]
+
+
+def test_ap2_c3c_a_different_own_fact_is_still_a_conflict_even_with_equal_acknowledgements(
+    database: Database,
+) -> None:
+    recorder = ReconciliationRunRecorder(database.sessions)
+    assert recorder.record(_snapshot("periodic-00000001-run", started=_NOW)) is True
+    before = _decisions(database, "periodic-00000001-run")
+    divergent = _snapshot("periodic-00000001-run", started=_NOW).model_copy(
+        update={"decisions": (*_snapshot("x").decisions, {"kind": "extra_fact", "value": 1})}
+    )
+    assert recorder.record(divergent) is None
+    assert _events(database) == ["reconciliation_run_persist_failed"]
+    assert _decisions(database, "periodic-00000001-run") == before
+
+
+def test_ap2_c3d_the_recorder_docstring_states_the_replay_semantics() -> None:
+    tree = ast.parse((_ROOT / _RECORDER_MODULE).read_text(encoding="utf-8"))
+    doc = " ".join((ast.get_docstring(tree) or "").split())
+    assert "A replay compares the run's OWN facts" in doc
+    assert "acknowledgements are as of the FIRST write" in doc
+    assert "a replay repairs missing provenance" in doc

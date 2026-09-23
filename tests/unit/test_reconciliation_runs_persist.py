@@ -1029,6 +1029,15 @@ def _recorder_delta(source: str) -> tuple[list[str], dict[str, Any]]:
             continue
         if isinstance(node, ast.ImportFrom) and node.module == "typing":
             node.names = [alias for alias in node.names if alias.name != "TYPE_CHECKING"]
+        if isinstance(node, ast.Assign) and [ast.dump(t) for t in node.targets] == [
+            ast.dump(ast.Name(id="_RECORDER_DECISION_KINDS", ctx=ast.Store()))
+        ]:
+            continue  # AP-2's recorder-kind set (pinned by test_ap2_1)
+        if isinstance(node, ast.FunctionDef) and node.name in (
+            "_own_decisions",  # AP-2's own-facts filter (absent before)
+            "_require_same_bytes",  # AP-2 changed ONE comparison (pinned by test_ap2_1)
+        ):
+            continue
         if isinstance(node, ast.ClassDef) and node.name == "ReconciliationRunRecorder":
             for method in node.body:
                 if isinstance(method, ast.FunctionDef):
@@ -1038,7 +1047,7 @@ def _recorder_delta(source: str) -> tuple[list[str], dict[str, Any]]:
     return kept, recorder
 
 
-def test_ap1r1_3_the_hook_is_the_only_recorder_change_and_runs_only_after_a_written_row() -> None:
+def test_ap1r1_3_the_hook_is_the_only_recorder_change_and_runs_after_every_recorded_run() -> None:
     before = _git("show", f"{_commit_by_marker('(BP-3 r2)')}:{_REPOSITORY}")
     after = (_ROOT / _REPOSITORY).read_text(encoding="utf-8")
     kept_before, rec_before = _recorder_delta(before)
@@ -1054,11 +1063,13 @@ def test_ap1r1_3_the_hook_is_the_only_recorder_change_and_runs_only_after_a_writ
     assert [s for s in init_after if s in init_before] == init_before
     # record(): the try's success line binds `written`; the failure branch is AST-identical;
     # the hook and the return come AFTER the try, never inside it (statements before the try —
-    # AP-1b's acknowledgement read — are outside this pin's invariant and are pinned by AP-1b)
+    # AP-1b's acknowledgement read — are outside this pin's invariant and are pinned by AP-1b).
+    # AP-2 dropped AP-1's `if written:` guard: the hook runs after EVERY non-conflicting record
+    # (a replay included), so a failed first provenance write is repaired by the next replay.
     body_before = rec_before["record"].body
     body_after = [s for s in rec_after["record"].body if not isinstance(s, ast.Assign)]
     assert len(body_before) == 1 and isinstance(body_before[0], ast.Try)
-    assert [type(s).__name__ for s in body_after] == ["Try", "If", "Return"]
+    assert [type(s).__name__ for s in body_after] == ["Try", "Expr", "Return"]
     try_before, try_after = body_before[0], body_after[0]
     assert [ast.dump(h) for h in try_after.handlers] == [ast.dump(h) for h in try_before.handlers]
     assert ast.dump(try_before.body[0]) == ast.dump(
@@ -1068,17 +1079,45 @@ def test_ap1r1_3_the_hook_is_the_only_recorder_change_and_runs_only_after_a_writ
         ast.parse("written = self._runs.record_run(snapshot)").body[0]
     )
     hook = body_after[1]
-    assert isinstance(hook, ast.If) and ast.dump(hook.test) == ast.dump(
-        ast.Name(id="written", ctx=ast.Load())
+    assert ast.dump(hook) == ast.dump(
+        ast.parse("record_position_provenance(self._sessions, snapshot.run_id)").body[0]
     )
-    assert [ast.dump(s) for s in hook.body] == [
-        ast.dump(ast.parse("record_position_provenance(self._sessions, snapshot.run_id)").body[0])
-    ]
-    assert hook.orelse == []
     assert ast.dump(body_after[2]) == ast.dump(ast.parse("return written").body[0])
     # the import is top-level (no lazy import inside the recorder)
     assert "from chronos.portfolio.provenance import record_position_provenance\n" in after
     assert "    from chronos.portfolio.provenance" not in after
+
+
+def test_ap2_1_the_replay_comparison_moved_one_expression_and_filters_the_recorder_kinds() -> None:
+    """AP-2's only edits outside the recorder, as a DELTA against the BP-3 r2 head."""
+
+    def function(source: str, name: str) -> ast.FunctionDef:
+        return next(
+            node
+            for node in ast.parse(source).body
+            if isinstance(node, ast.FunctionDef) and node.name == name
+        )
+
+    before = _git("show", f"{_commit_by_marker('(BP-3 r2)')}:{_REPOSITORY}")
+    after = (_ROOT / _REPOSITORY).read_text(encoding="utf-8")
+    old = ast.dump(ast.parse("json_ready(stored.decisions) == decisions", mode="eval").body)
+    new = ast.dump(
+        ast.parse(
+            "_own_decisions(json_ready(stored.decisions)) == _own_decisions(decisions)", mode="eval"
+        ).body
+    )
+    before_dump = ast.dump(function(before, "_require_same_bytes"))
+    assert before_dump.count(old) == 1
+    assert ast.dump(function(after, "_require_same_bytes")) == before_dump.replace(old, new)
+    kinds = next(
+        node
+        for node in ast.parse(after).body
+        if isinstance(node, ast.Assign)
+        and ast.unparse(node.targets[0]) == "_RECORDER_DECISION_KINDS"
+    )
+    assert ast.unparse(kinds.value) == (
+        "frozenset({ACKNOWLEDGEMENT_KIND, 'acknowledgements_unavailable'})"
+    )
 
 
 def test_ap1r1_3b_a_demo_boot_writes_a_provenance_row_for_every_position_through_the_hook(
