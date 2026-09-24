@@ -600,6 +600,11 @@ def _make_app(bridge: CallbackBridge) -> Any:
             mktCapPrice: float,
         ) -> None:
             del parentId, lastFillPrice, whyHeld, mktCapPrice
+            # RC-1: classify the RAW identifiers first — before any int() — so a malformed id
+            # can neither alias an own order nor raise before readiness is invalidated.
+            bridge.observe_order_status_identity(clientId, orderId)
+            if type(orderId) is not int:
+                return  # a malformed order id matches no flight; it was classified above
             bridge.on_order_status(
                 int(orderId),
                 str(status),
@@ -607,7 +612,6 @@ def _make_app(bridge: CallbackBridge) -> Any:
                 float(remaining),
                 float(avgFillPrice),
                 int(permId),
-                client_id=int(clientId),  # RC-1: own-vs-unsolicited needs the client id
             )
 
         def tickPrice(self, reqId: int, tickType: int, price: float, attrib: Any) -> None:

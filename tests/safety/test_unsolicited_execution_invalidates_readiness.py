@@ -136,7 +136,7 @@ def test_1_official_bridge_ignores_own_and_correlated_and_demotes_everything_els
 
     # own-and-correlated: this client id AND an order id this process submitted
     bridge.on_exec_details(-1, None, _execution(_OWN_CLIENT, _OWN_ORDER))
-    bridge.on_order_status(_OWN_ORDER, "Filled", 1.0, 0.0, 1.5, 555, client_id=_OWN_CLIENT)
+    bridge.observe_order_status_identity(_OWN_CLIENT, _OWN_ORDER)
     assert readiness.snapshot().ready and readiness.snapshot().generation == generation
 
     # a response to the adapter's own reqExecutions (request id >= 0) never invalidates
@@ -149,8 +149,8 @@ def test_1_official_bridge_ignores_own_and_correlated_and_demotes_everything_els
         ("execution", lambda: bridge.on_exec_details(-1, None, _execution(0, 0))),
         ("execution", lambda: bridge.on_exec_details(-1, None, _execution(None, None))),
         ("execution", lambda: bridge.on_exec_details(-1, None, _execution(_OWN_CLIENT, 999))),
-        ("status", lambda: bridge.on_order_status(0, "Filled", 1.0, 0.0, 1.5, 9, client_id=0)),
-        ("status", lambda: bridge.on_order_status(_OWN_ORDER, "Filled", 1.0, 0.0, 1.5, 9)),
+        ("status", lambda: bridge.observe_order_status_identity(0, 0)),
+        ("status", lambda: bridge.observe_order_status_identity(None, _OWN_ORDER)),
     ]
     for kind, observe in cases:
         before = _warm(readiness)
@@ -502,3 +502,140 @@ def test_4_the_latch_settings_pacing_and_the_composite_predicate_are_untouched_b
     before = _git("show", f"{commit}^:src/chronos/runtime.py")
     after = _git("show", f"{commit}:src/chronos/runtime.py")
     assert _predicate(after) == _predicate(before)
+
+
+# --- r2 (Daybreak HOLD at 72ee6ec): malformed identifiers are uncorrelated, never own ----------
+
+
+class _HostileExecution:
+    """A callback object whose identifier getter itself fails."""
+
+    orderId = _OWN_ORDER
+
+    @property
+    def clientId(self) -> int:
+        raise RuntimeError("decoder produced an unreadable clientId")
+
+
+#: Every one of these is NOT an exact own-and-correlated observation: it must invalidate.
+_MALFORMED_IDS: tuple[tuple[object, object], ...] = (
+    (7.9, 101.9),  # Daybreak's probe: truncation would alias the own pair (7, 101)
+    (7.0, 101.0),  # an exact float of the own pair (7.0 == 7 in Python) is still not an int
+    (float("inf"), _OWN_ORDER),  # int(inf) raises OverflowError
+    (_OWN_CLIENT, float("inf")),
+    (float("-inf"), float("nan")),
+    (True, _OWN_ORDER),  # bool is an int subclass; never an identifier
+    ("7", "101"),  # a string is not coerced
+    (Decimal("7"), Decimal("101")),
+    (None, _OWN_ORDER),
+    (_OWN_CLIENT, None),
+)
+
+
+@pytest.mark.parametrize(("client_id", "order_id"), _MALFORMED_IDS)
+def test_2r2_a_malformed_live_execution_is_uncorrelated_and_invalidates(
+    client_id: object, order_id: object
+) -> None:
+    readiness = ReconciliationReadiness()
+    bridge = _bridge(readiness)
+    generation = _warm(readiness)
+
+    bridge.on_exec_details(-1, None, SimpleNamespace(clientId=client_id, orderId=order_id))
+
+    snapshot = readiness.snapshot()
+    assert snapshot.status is ReconciliationStatus.PENDING
+    assert snapshot.generation == generation + 1
+    assert snapshot.reason == UNSOLICITED_EXECUTION_REASON
+
+
+def test_2r2_an_unreadable_identifier_stays_inside_the_callback_and_invalidates() -> None:
+    readiness = ReconciliationReadiness()
+    bridge = _bridge(readiness)
+    generation = _warm(readiness)
+
+    bridge.on_exec_details(-1, None, _HostileExecution())  # must not raise
+
+    assert readiness.snapshot().status is ReconciliationStatus.PENDING
+    assert readiness.snapshot().generation == generation + 1
+
+
+@pytest.mark.parametrize(("client_id", "order_id"), _MALFORMED_IDS)
+def test_2r2_a_malformed_order_status_identity_is_uncorrelated_and_invalidates(
+    client_id: object, order_id: object
+) -> None:
+    readiness = ReconciliationReadiness()
+    bridge = _bridge(readiness)
+    generation = _warm(readiness)
+
+    bridge.observe_order_status_identity(client_id, order_id)
+
+    snapshot = readiness.snapshot()
+    assert snapshot.status is ReconciliationStatus.PENDING
+    assert snapshot.generation == generation + 1
+    assert snapshot.reason == UNSOLICITED_ORDER_STATUS_REASON
+
+
+@pytest.mark.parametrize(
+    ("client_id", "order_id"),
+    [(7.9, 101.9), (7.0, 101.0), (float("inf"), _OWN_ORDER), (_OWN_CLIENT, float("nan"))],
+)
+def test_2r2_the_official_wrapper_classifies_raw_ids_first_and_never_raises(
+    monkeypatch: pytest.MonkeyPatch, client_id: object, order_id: object
+) -> None:
+    class _EWrapper:
+        pass
+
+    class _EClient:
+        def __init__(self, wrapper: object) -> None:
+            del wrapper
+
+    monkeypatch.setattr(official_module, "_load_ibapi", lambda: (_EClient, _EWrapper, None, None))
+    readiness = ReconciliationReadiness()
+    bridge = _bridge(readiness)
+    app = official_module._make_app(bridge)
+
+    generation = _warm(readiness)
+    app.orderStatus(order_id, "Filled", 1, 0, 1.5, 555, 0, 1.5, client_id, "", 0.0)
+    assert readiness.snapshot().status is ReconciliationStatus.PENDING
+    assert readiness.snapshot().generation == generation + 1
+    assert readiness.snapshot().reason == UNSOLICITED_ORDER_STATUS_REASON
+
+    generation = _warm(readiness)
+    app.execDetails(-1, None, SimpleNamespace(clientId=client_id, orderId=order_id))
+    assert readiness.snapshot().status is ReconciliationStatus.PENDING
+    assert readiness.snapshot().generation == generation + 1
+
+
+def test_1r2_the_exact_own_pair_still_reads_own_and_malformed_never_restores_readiness() -> None:
+    readiness = ReconciliationReadiness()
+    bridge = _bridge(readiness)
+    generation = _warm(readiness)
+
+    # positive control: the exact integer own pair is still own-and-correlated on both paths
+    bridge.on_exec_details(-1, None, SimpleNamespace(clientId=_OWN_CLIENT, orderId=_OWN_ORDER))
+    bridge.observe_order_status_identity(_OWN_CLIENT, _OWN_ORDER)
+    assert readiness.snapshot().ready and readiness.snapshot().generation == generation
+
+    # from PENDING, malformed observations only ever advance the generation; never RECONCILED
+    readiness.invalidate("cold start")
+    for client_id, order_id in _MALFORMED_IDS:
+        before = readiness.snapshot().generation
+        bridge.on_exec_details(-1, None, SimpleNamespace(clientId=client_id, orderId=order_id))
+        bridge.observe_order_status_identity(client_id, order_id)
+        after = readiness.snapshot()
+        assert after.status is ReconciliationStatus.PENDING
+        assert after.generation == before + 2
+
+
+def test_2r2_the_classifier_itself_never_reads_a_non_int_as_own() -> None:
+    """Defense in depth: a future caller that forgets to parse cannot alias an own pair."""
+
+    reasons: list[str] = []
+    classifier = UnsolicitedObservationClassifier(
+        invalidate=reasons.append, client_id=_OWN_CLIENT, logger=logging.getLogger("rc1.r2")
+    )
+    classifier.note_own_order(_OWN_ORDER)
+    assert classifier.observe_execution(client_id=_OWN_CLIENT, order_id=_OWN_ORDER) is False
+    for client_id, order_id in ((7.0, 101.0), (True, _OWN_ORDER), (_OWN_CLIENT, Decimal("101"))):
+        assert classifier.observe_execution(client_id=client_id, order_id=order_id) is True  # type: ignore[arg-type]
+    assert reasons == [UNSOLICITED_EXECUTION_REASON] * 3

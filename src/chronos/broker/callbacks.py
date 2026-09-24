@@ -94,11 +94,15 @@ def _classified_market_data_error(req_id: int, code: int, message: str) -> Broke
     return error
 
 
-def _optional_int(value: Any) -> int | None:
-    try:
-        return None if value is None else int(value)
-    except (TypeError, ValueError):
-        return None
+def _exact_int(value: Any) -> int | None:
+    """An identifier exactly as the broker sent it, or ``None`` (= uncorrelated).
+
+    RC-1 r2 (Daybreak HOLD at 72ee6ec): never coerce. ``int(7.9)`` is 7 and would alias an own
+    pair; ``int(inf)`` raises out of the callback; ``7.0 == 7`` and ``True == 1`` in Python.
+    Only a real ``int`` (never a ``bool``) is an identifier; anything else fails closed.
+    """
+
+    return value if type(value) is int else None
 
 
 def clean_price(value: float | None) -> Decimal | None:
@@ -244,8 +248,9 @@ class UnsolicitedObservationClassifier:
         with self._lock:
             return client_id == self._client_id and order_id in self._own_order_ids
 
-    def _observe(self, client_id: int | None, order_id: int | None, reason: str, kind: str) -> bool:
-        if self._is_own(client_id, order_id):
+    def _observe(self, client_id: object, order_id: object, reason: str, kind: str) -> bool:
+        # defense in depth: whatever a caller passes, only exact ints can ever read as own
+        if self._is_own(_exact_int(client_id), _exact_int(order_id)):
             return False
         self._logger.warning(
             "Unsolicited broker %s observed; submission readiness is invalidated",
@@ -506,7 +511,6 @@ class CallbackBridge:
         remaining: float,
         avg_fill_price: float,
         perm_id: int,
-        client_id: int | None = None,
     ) -> None:
         with self._lock:
             ack = self._order_acks.get(order_id)
@@ -514,7 +518,17 @@ class CallbackBridge:
         if ack is not None and not ack.done.is_set():
             ack.items.append(("orderStatus", order_id, status, filled, remaining, perm_id))
             ack.done.set()
-        self.unsolicited.observe_order_status(client_id=client_id, order_id=order_id)
+
+    def observe_order_status_identity(self, client_id: object, order_id: object) -> None:
+        """RC-1: classify an orderStatus by its RAW identifiers, before any coercion.
+
+        Called by the EWrapper first, so a malformed id cannot alias an own order or raise
+        before classification; never raises.
+        """
+
+        self.unsolicited.observe_order_status(
+            client_id=_exact_int(client_id), order_id=_exact_int(order_id)
+        )
 
     def _fail_all_single_flights(self, reason: str) -> None:
         with self._lock:
@@ -571,10 +585,12 @@ class CallbackBridge:
         if req_id < 0:
             # RC-1: an unrequested (live) execution — IBKR sends it with request id -1. A
             # response to this adapter's own reqExecutions keeps the registry path below.
-            self.unsolicited.observe_execution(
-                client_id=_optional_int(getattr(execution, "clientId", None)),
-                order_id=_optional_int(getattr(execution, "orderId", None)),
-            )
+            try:
+                client_id = _exact_int(getattr(execution, "clientId", None))
+                order_id = _exact_int(getattr(execution, "orderId", None))
+            except Exception:  # an unreadable identifier is uncorrelated, and stays in here
+                client_id = order_id = None
+            self.unsolicited.observe_execution(client_id=client_id, order_id=order_id)
             return
         self.registry.add(req_id, (contract, execution))
 
