@@ -94,15 +94,28 @@ def _classified_market_data_error(req_id: int, code: int, message: str) -> Broke
     return error
 
 
-def _exact_int(value: Any) -> int | None:
-    """An identifier exactly as the broker sent it, or ``None`` (= uncorrelated).
+#: The TWS API carries ``orderId`` and ``clientId`` as 32-bit signed integers.
+_BROKER_ID_MAX = 2**31 - 1
+#: ``clientId`` 0 is TWS's master client (``settings.ib_client_id`` is ``ge=0``).
+_MIN_CLIENT_ID = 0
+#: ``nextValidId`` issues positive order ids; a manual TWS order arrives as 0 or negative.
+_MIN_ORDER_ID = 1
 
+
+def _broker_id(value: Any, *, minimum: int) -> int | None:
+    """A broker identifier exactly as sent AND inside the broker-valid domain, else ``None``.
+
+    The ONE validator of RC-1, used when recording own orders and when classifying observations.
     RC-1 r2 (Daybreak HOLD at 72ee6ec): never coerce. ``int(7.9)`` is 7 and would alias an own
     pair; ``int(inf)`` raises out of the callback; ``7.0 == 7`` and ``True == 1`` in Python.
-    Only a real ``int`` (never a ``bool``) is an identifier; anything else fails closed.
+    RC-1 r3 (Daybreak HOLD at ce71d4b): an exact int outside ``[minimum, 2**31 - 1]`` (negative,
+    zero for an order id, or wider than the TWS API's 32-bit field) is not an identifier either.
+    ``None`` means uncorrelated; it never reads as own.
     """
 
-    return value if type(value) is int else None
+    if type(value) is not int:
+        return None
+    return value if minimum <= value <= _BROKER_ID_MAX else None
 
 
 def clean_price(value: float | None) -> Decimal | None:
@@ -223,14 +236,24 @@ class UnsolicitedObservationClassifier:
         logger: logging.Logger,
     ) -> None:
         self._invalidate = invalidate
-        self._client_id = client_id
+        # RC-1 r3: the adapter's own client id passes the same validator as every observation;
+        # out of domain → this classifier has no own identity and everything is unsolicited
+        self._client_id = _broker_id(client_id, minimum=_MIN_CLIENT_ID)
         self._logger = logger
         self._lock = threading.Lock()
         self._own_order_ids: set[int] = set()
 
     def note_own_order(self, order_id: int) -> None:
+        valid = _broker_id(order_id, minimum=_MIN_ORDER_ID)
+        if valid is None:
+            # never recorded: its fills and statuses will read unsolicited (tightening only)
+            self._logger.warning(
+                "Own order id outside the broker-valid domain was not recorded",
+                extra={"event": "unsolicited_classifier_own_order_refused"},
+            )
+            return
         with self._lock:
-            self._own_order_ids.add(int(order_id))
+            self._own_order_ids.add(valid)
 
     def observe_execution(self, *, client_id: int | None, order_id: int | None) -> bool:
         """Return True when the observation invalidated readiness."""
@@ -250,7 +273,10 @@ class UnsolicitedObservationClassifier:
 
     def _observe(self, client_id: object, order_id: object, reason: str, kind: str) -> bool:
         # defense in depth: whatever a caller passes, only exact ints can ever read as own
-        if self._is_own(_exact_int(client_id), _exact_int(order_id)):
+        if self._is_own(
+            _broker_id(client_id, minimum=_MIN_CLIENT_ID),
+            _broker_id(order_id, minimum=_MIN_ORDER_ID),
+        ):
             return False
         self._logger.warning(
             "Unsolicited broker %s observed; submission readiness is invalidated",
@@ -527,7 +553,8 @@ class CallbackBridge:
         """
 
         self.unsolicited.observe_order_status(
-            client_id=_exact_int(client_id), order_id=_exact_int(order_id)
+            client_id=_broker_id(client_id, minimum=_MIN_CLIENT_ID),
+            order_id=_broker_id(order_id, minimum=_MIN_ORDER_ID),
         )
 
     def _fail_all_single_flights(self, reason: str) -> None:
@@ -586,8 +613,8 @@ class CallbackBridge:
             # RC-1: an unrequested (live) execution — IBKR sends it with request id -1. A
             # response to this adapter's own reqExecutions keeps the registry path below.
             try:
-                client_id = _exact_int(getattr(execution, "clientId", None))
-                order_id = _exact_int(getattr(execution, "orderId", None))
+                client_id = _broker_id(getattr(execution, "clientId", None), minimum=_MIN_CLIENT_ID)
+                order_id = _broker_id(getattr(execution, "orderId", None), minimum=_MIN_ORDER_ID)
             except Exception:  # an unreadable identifier is uncorrelated, and stays in here
                 client_id = order_id = None
             self.unsolicited.observe_execution(client_id=client_id, order_id=order_id)

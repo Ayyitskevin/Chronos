@@ -639,3 +639,136 @@ def test_2r2_the_classifier_itself_never_reads_a_non_int_as_own() -> None:
     for client_id, order_id in ((7.0, 101.0), (True, _OWN_ORDER), (_OWN_CLIENT, Decimal("101"))):
         assert classifier.observe_execution(client_id=client_id, order_id=order_id) is True  # type: ignore[arg-type]
     assert reasons == [UNSOLICITED_EXECUTION_REASON] * 3
+
+
+# --- r3 (Daybreak HOLD at ce71d4b): ids outside the broker-valid domain are uncorrelated --------
+#: The TWS API carries orderId and clientId as 32-bit signed ints. clientId in [0, 2**31-1]
+#: (0 is the master client); orderId in [1, 2**31-1] (nextValidId issues positive ids; manual
+#: TWS orders arrive as 0 or negative). Outside that, or not an exact int: never own.
+_ID_MAX = 2**31 - 1
+_OUT_OF_DOMAIN: tuple[tuple[int, int], ...] = (
+    (-1, -1),  # Daybreak's probe
+    (10**1000, 10**1000),  # Daybreak's probe
+    (_OWN_CLIENT, _ID_MAX + 1),
+    (_ID_MAX + 1, _OWN_ORDER),
+    (_OWN_CLIENT, 0),  # order id 0: a manual TWS order's execution
+    (-1, _OWN_ORDER),
+    (_OWN_CLIENT, -5),
+)
+_OUT_OF_DOMAIN_IDS = (
+    "neg-neg",
+    "huge-huge",
+    "order-2**31",
+    "client-2**31",
+    "order-0",
+    "client-neg",
+    "order-neg",
+)
+
+
+@pytest.mark.parametrize(("client_id", "order_id"), _OUT_OF_DOMAIN, ids=_OUT_OF_DOMAIN_IDS)
+def test_1r3_an_out_of_domain_pair_can_neither_register_nor_read_as_own(
+    client_id: int, order_id: int
+) -> None:
+    reasons: list[str] = []
+    classifier = UnsolicitedObservationClassifier(
+        invalidate=reasons.append, client_id=client_id, logger=logging.getLogger("rc1.r3")
+    )
+    classifier.note_own_order(order_id)  # Daybreak's probe registered these as own
+    assert classifier.observe_execution(client_id=client_id, order_id=order_id) is True
+    assert classifier.observe_order_status(client_id=client_id, order_id=order_id) is True
+    assert reasons == [UNSOLICITED_EXECUTION_REASON, UNSOLICITED_ORDER_STATUS_REASON]
+
+
+@pytest.mark.parametrize(("client_id", "order_id"), _OUT_OF_DOMAIN, ids=_OUT_OF_DOMAIN_IDS)
+def test_1r3_the_bridge_invalidates_an_out_of_domain_pair_on_both_paths(
+    client_id: int, order_id: int
+) -> None:
+    readiness = ReconciliationReadiness()
+    bridge = CallbackBridge(
+        RequestRegistry(), on_connection_uncertain=readiness.invalidate, client_id=client_id
+    )
+    bridge.start_order_ack(order_id)
+    bridge.clear_order_ack(order_id)
+
+    generation = _warm(readiness)
+    bridge.on_exec_details(-1, None, SimpleNamespace(clientId=client_id, orderId=order_id))
+    assert readiness.snapshot().status is ReconciliationStatus.PENDING
+    assert readiness.snapshot().generation == generation + 1
+
+    generation = _warm(readiness)
+    bridge.observe_order_status_identity(client_id, order_id)
+    assert readiness.snapshot().status is ReconciliationStatus.PENDING
+    assert readiness.snapshot().generation == generation + 1
+
+
+@pytest.mark.parametrize(
+    ("client_id", "order_id"), [(0, 1), (_ID_MAX, _ID_MAX), (_OWN_CLIENT, _OWN_ORDER)]
+)
+def test_1r3_the_domain_boundaries_still_read_own_when_recorded(
+    client_id: int, order_id: int
+) -> None:
+    reasons: list[str] = []
+    classifier = UnsolicitedObservationClassifier(
+        invalidate=reasons.append, client_id=client_id, logger=logging.getLogger("rc1.r3")
+    )
+    classifier.note_own_order(order_id)
+    assert classifier.observe_execution(client_id=client_id, order_id=order_id) is False
+    assert classifier.observe_order_status(client_id=client_id, order_id=order_id) is False
+    assert reasons == []
+    # one past a boundary on either field is not own
+    assert classifier.observe_execution(client_id=client_id, order_id=order_id + 1) is True
+
+
+def _function_calls(node: ast.AST) -> list[tuple[int, str]]:
+    return sorted(
+        (call.lineno, ast.unparse(call.func))
+        for call in ast.walk(node)
+        if isinstance(call, ast.Call)
+    )
+
+
+def test_1r3_one_validator_on_both_sides_and_no_int_coercion_on_the_id_surface() -> None:
+    tree = ast.parse((_ROOT / "src/chronos/broker/callbacks.py").read_text(encoding="utf-8"))
+    surface: dict[str, ast.AST] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == "UnsolicitedObservationClassifier":
+            surface[node.name] = node
+        if isinstance(node, ast.FunctionDef) and node.name in (
+            "_broker_id",
+            "start_order_ack",
+            "on_exec_details",
+            "observe_order_status_identity",
+        ):
+            surface[node.name] = node
+    assert set(surface) == {
+        "UnsolicitedObservationClassifier",
+        "_broker_id",
+        "start_order_ack",
+        "on_exec_details",
+        "observe_order_status_identity",
+    }
+    for name, node in surface.items():
+        assert "int" not in {func for _, func in _function_calls(node)}, name  # no int() coercion
+    classifier = surface["UnsolicitedObservationClassifier"]
+    methods = {n.name: n for n in classifier.body if isinstance(n, ast.FunctionDef)}
+    for method in ("__init__", "note_own_order", "_observe"):
+        assert "_broker_id" in {f for _, f in _function_calls(methods[method])}, method
+    for name in ("on_exec_details", "observe_order_status_identity"):
+        assert "_broker_id" in {f for _, f in _function_calls(surface[name])}, name
+    assert "_exact_int" not in (_ROOT / "src/chronos/broker/callbacks.py").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_1r3_the_official_wrapper_classifies_raw_ids_before_any_int() -> None:
+    tree = ast.parse((_ROOT / "src/chronos/broker/official_ibkr.py").read_text(encoding="utf-8"))
+    status = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "orderStatus"
+    )
+    calls = _function_calls(status)
+    classify = [line for line, func in calls if func == "bridge.observe_order_status_identity"]
+    coercions = [line for line, func in calls if func == "int"]
+    assert len(classify) == 1 and coercions and classify[0] < min(coercions), calls
