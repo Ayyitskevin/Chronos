@@ -183,9 +183,10 @@ class FakeIB:
         self.errorEvent = FakeErrorEvent()
         self.connectedEvent = FakeLifecycleEvent()
         self.disconnectedEvent = FakeLifecycleEvent()
-        # ib_async's order/fill lifecycle events. The adapter subscribes to none of
-        # them — connection and error events only — and a pin below proves that
-        # emitting them reaches readiness not at all.
+        # ib_async's order/fill lifecycle events. Since RC-1 (K8 = (a)) the read-only
+        # adapter subscribes to execDetailsEvent and orderStatusEvent — every live fill or
+        # status change is unsolicited there and invalidates readiness — and to neither
+        # openOrderEvent nor commissionReportEvent; a pin below proves both halves.
         self.orderStatusEvent = FakePayloadEvent()
         self.openOrderEvent = FakePayloadEvent()
         self.execDetailsEvent = FakePayloadEvent()
@@ -512,19 +513,15 @@ def test_connection_events_invalidate_reconciliation_readiness() -> None:
     ]
 
 
-def test_order_and_fill_events_do_not_invalidate_reconciliation_readiness() -> None:
-    """Pins an absence the source shows: no order/fill lifecycle event reaches readiness.
+def test_fill_and_status_events_invalidate_readiness_and_open_order_and_commission_do_not() -> None:
+    """RC-1 flips the old absence pin deliberately (owner answer K8 = (a), tightening only).
 
-    ``IBKRBroker.__init__`` subscribes to ``errorEvent``, ``connectedEvent`` and
-    ``disconnectedEvent`` and nothing else (``src/chronos/broker/ibkr.py``); the official
-    adapter's order-side callbacks — ``on_open_order``, ``on_order_status``,
-    ``on_exec_details`` in ``src/chronos/broker/callbacks.py`` — feed caches and request
-    results and never call the connection invalidator. The connection event first proves
-    the observer is live (a negative assertion needs its positive control); the four
-    ib_async order/fill events then append nothing. The operator-facing statement of this
-    limitation in ``docs/limitations.md`` is corrected separately (DOC-1); this pin does
-    not depend on that text. Wiring callback-driven reconciliation is owner-reviewed work
-    (D-1 audit §1) and must flip this pin deliberately.
+    ``IBKRBroker.__init__`` now also subscribes ``execDetailsEvent`` and ``orderStatusEvent``:
+    this adapter places no orders, so every live fill or status change it observes is
+    unsolicited and invalidates readiness with the typed RC-1 reason — invalidation only; no
+    reconciliation pass runs and nothing re-arms. ``openOrderEvent`` and
+    ``commissionReportEvent`` stay unsubscribed. The connection event first proves the
+    observer is live (a negative assertion needs its positive control).
     """
 
     client = FakeIB()
@@ -535,12 +532,17 @@ def test_order_and_fill_events_do_not_invalidate_reconciliation_readiness() -> N
     assert reasons == live
 
     trade, fill, report = object(), object(), object()
-    client.orderStatusEvent.emit(trade)
     client.openOrderEvent.emit(trade)
-    client.execDetailsEvent.emit(trade, fill)
     client.commissionReportEvent.emit(trade, fill, report)
-
     assert reasons == live
+
+    client.orderStatusEvent.emit(trade)
+    client.execDetailsEvent.emit(trade, fill)
+    assert reasons == [
+        *live,
+        "unsolicited broker order status observed; reconciliation required",
+        "unsolicited broker execution observed; reconciliation required",
+    ]
 
 
 @pytest.mark.parametrize("code", [1100, 1101, 1102, 1300, 2110])

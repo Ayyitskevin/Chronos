@@ -39,15 +39,15 @@
     },
     {
       "path": "src/chronos/broker/demo.py",
-      "sha256": "0b957a97f993dbc5beb51d167c0cdbb62b80f99d3b008d11083305450c5f1d1c"
+      "sha256": "461830a97ebd0fbcaa611c8fe0fc6c792c2a6cbbc86c413636994ad2ab9568df"
     },
     {
       "path": "src/chronos/broker/official_ibkr.py",
-      "sha256": "01a9de8212db02d1affcd285847fb398dd56a981344811bc7ea9fdec1598fa5e"
+      "sha256": "027106933913ac14645d0cd42f07d91cac14c4afc80f3826d9320d3f1c561c59"
     },
     {
       "path": "src/chronos/broker/ibkr.py",
-      "sha256": "5e5fc128b57ec79cdab1fe9340bf79abf3390c978849ad893d8d0d7feac2c62a"
+      "sha256": "db77599924803d3c4a5faf59fb4238f901e509307b5d4895a43b39bcd28e50ae"
     }
   ],
   "repository_defaults": {
