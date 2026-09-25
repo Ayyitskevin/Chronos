@@ -30,7 +30,8 @@ check "1 every gates/NN-*.sh for 40-70 exists and is executable" "[ -x $G/40-evi
 mkdir "$T/bin" "$T/ctl"; C=$T/ctl
 ctl() { if [ "$#" -eq 2 ]; then printf '%s' "$2" > "$C/$1"; else rm -f "$C/$1"; fi; }
 RVENV=$(readlink -f "$ROOT/.venv"); UVROOT=$(dirname "$(dirname "$(sed -n 's/^home = //p' "$RVENV/pyvenv.cfg")")")
-export GATES_SANDBOX_RO="$T/bin:$T/ctl:$RVENV:$UVROOT"
+export GATES_SANDBOX_RO="$T/bin:$T/ctl:$RVENV"
+case "$UVROOT" in /|/usr|/usr/*) ;; *) GATES_SANDBOX_RO="$GATES_SANDBOX_RO:$UVROOT" ;; esac  # a /usr-based venv's toolchain is already bound (K3 P2-1)
 printf 'synthetic-probe-secret\n' > "$T/planted"
 python3 -c 'import socket,time; s=socket.socket(); s.bind(("127.0.0.1",0)); s.listen(); open("'"$T"'/port","w").write(str(s.getsockname()[1])); time.sleep(1800)' & LPID=$!
 for _ in $(seq 50); do [ -s "$T/port" ] && break; sleep 0.1; done
@@ -337,6 +338,8 @@ mk60 "d['filters_used'].append({'path': 'file://./evil.py::f'})"; g60
 check "r4:1 P6 60 FAIL: a baseline whose filters_used differs from the trusted base's → FAIL" "failed secrets-baseline \".secrets.baseline's filters_used differs from the trusted base's\""
 mk60 "d['plugins_used'] = []"; printf 'x = 1\naws_key = "%s"\n' "$FAKE" > "$R60/leak.py"; commit "$R60"; g60
 check "r4:1 P6 60 FAIL: Daybreak's empty-plugins probe (a baseline with no plugins + a planted AWS-shaped secret) → FAIL, never a clean scan" "failed secrets-baseline \".secrets.baseline's plugins_used differs from the trusted base's\""
+mk60; printf 'x = 1\naws_key = "%s"\n' "$FAKE" > "$R60/.secretsXbaseline"; commit "$R60"; g60
+check "g3:2 P2-2 60 FAIL: the baseline exclusion is LITERAL — a tracked .secretsXbaseline holding a synthetic secret is scanned, never skipped as the baseline" "failed secrets-baseline '1 new finding\\(s\\) vs .secrets.baseline: .secretsXbaseline:2 AWS Access Key'"
 mk60; ln -s clean.py "$R60/link.py"; commit "$R60"; g60
 check "r2:2 P1-b 60 FAIL: a tracked symlink among the scanner inputs → FAIL before the scan" "failed secrets-baseline 'link.py is a symlink or non-regular file'"
 mk60; mv "$R60/.secrets.baseline" "$T/outside.baseline"; ln -s "$T/outside.baseline" "$R60/.secrets.baseline"; commit "$R60"; g60
@@ -425,6 +428,9 @@ check "1 70 PASS on this repo (the real doc-contract tests, real pytest)" "passe
 # --- contract 4: the harness never edits existing tests or source ------------------------------
 check "4 this repo's tracked tree is unchanged by the harness (git status empty)" "[ -z \"\$(git -C $ROOT status --porcelain --untracked-files=no)\" ]"
 
+check "g3:1 P2-1 the harness never ro-binds the host root or a /usr prefix via GATES_SANDBOX_RO (a /usr-based venv's toolchain is bound by the gate itself)" "! printf '%s' \"\$GATES_SANDBOX_RO\" | tr ':' '\\n' | grep -qxE '/|/usr(/.*)?'"
+check "g3:1 P2-3 gate 30: every tool-failure exit carries its own FAIL line (no bare '|| exit 1')" "[ -s $G/30-base-fresh.sh ] && ! grep -nE '\\|\\| exit 1\$' $G/30-base-fresh.sh"
+check "g3:1 P2-4 the README states the ~60-line exception for gates 40 and 70 next to the contract" "grep -qF 'gates 40 and 70 exceed it' $G/README.md"
 check "r2:3 no .github change on this branch (working tree vs origin/main)" "git -C $ROOT diff --quiet origin/main -- .github"
 kill "$LPID" 2>/dev/null
 echo "test_gates_40_70: $pass ok, $fail failed"

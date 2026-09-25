@@ -5,7 +5,9 @@ root as the working directory and `PR_NUMBER` and `PR_HEAD_SHA` set. Exit 0 iff 
 Adding a gate = adding its file and one row below; there is no central registry, and a new gate takes
 effect once it is merged to the trusted base.
 
-Gate script contract: `NN-short-name.sh`, numbered in run order, self-contained, under ~60 lines.
+Gate script contract: `NN-short-name.sh`, numbered in run order, self-contained, under ~60 lines —
+gates 40 and 70 exceed it: gate 40's trusted network steps, sandboxed targets and receipt, and gate 70's
+trusted AST judge, are each one narrative that splitting would obscure; new gates still target ~60.
 On success it prints exactly one `PASS: <gate> — <reason>` line on stdout; on failure one
 `FAIL: <gate> — <reason + what to do>` line on stderr and exit 1. A tool failure inside a gate
 (`make`, `git fetch`, `gh`) is its own FAIL line, never a silent exit. Gates report state; they

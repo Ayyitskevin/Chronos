@@ -13,7 +13,10 @@ if ! top="$(git rev-parse --show-toplevel 2>/dev/null)"; then
   echo "FAIL: base-fresh — not inside a git work tree; run the gate from the repo root" >&2
   exit 1
 fi
-cd "$top" || exit 1
+if ! cd "$top"; then
+  echo "FAIL: base-fresh — could not enter $top; check the checkout, then re-run" >&2
+  exit 1
+fi
 if ! git fetch origin main --quiet 2>/dev/null; then
   echo "FAIL: base-fresh — could not fetch origin main; check the remote/network, then re-run" >&2
   exit 1

@@ -53,7 +53,7 @@ open(sys.argv[3], "w").write(json.dumps(scan, indent=2) + "\n")
 PY
 )" || fail "$(tail -n 1 <<< "$why")"
 cp "$work/scan.baseline" "$work/io/.secrets.baseline" || fail "could not place the scan baseline in the output dir"
-mapfile -d '' files < <(git ls-files -z | grep -zvx '.secrets.baseline')
+mapfile -d '' files < <(git ls-files -z | grep -zvxF '.secrets.baseline')  # a literal whole-name match
 [ "${#files[@]}" -gt 0 ] || fail "no tracked files; refusing an empty secret scan"
 SANDBOX_RO="$tools" sandbox_run "$work" "$tools/bin/python" -m detect_secrets.pre_commit_hook --baseline "$work/io/.secrets.baseline" \
   --json -- "${files[@]}" > "$work/hook.out" 2>/dev/null
