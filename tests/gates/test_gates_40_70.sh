@@ -50,9 +50,14 @@ def leaks(lane=None, extra=()):
     return found
 PROBE
 # --- 40 evidence-at-head (a stub make inside the sandbox; a throwaway repo) ---------------------
-cat > "$T/bin/make" <<STUB
+# GATES-1r5: gate 40 runs REAL GNU Make pinned to the trusted makefile; the trusted fixture Makefile's
+# recipes call this stub (stubmake), so a candidate makefile that GNU Make picked instead would never reach it.
+cat > "$T/bin/stubmake" <<STUB
 #!/usr/bin/python3
-import os, subprocess, sys; sys.path.insert(0, "$T/bin"); import probe_lib
+import os, re, subprocess, sys; sys.path.insert(0, "$T/bin"); import probe_lib
+mflags = os.environ.get("MAKEFLAGS", "") + " " + os.environ.get("MFLAGS", "")
+if re.search(r"(^|\s|-)-?(I|include-dir|eval)", mflags): print("LEAK makeflags " + mflags); sys.exit(7)
+for k in ("MAKELEVEL", "MAKEFLAGS", "MFLAGS", "MAKE_TERMOUT", "MAKE_TERMERR", "MAKEOVERRIDES"): os.environ.pop(k, None)
 C = "$C"; ctl = lambda k, d=None: open(os.path.join(C, k)).read() if os.path.exists(os.path.join(C, k)) else d
 target = sys.argv[1:]
 extra = ("PIP_NO_INDEX", "PIP_FIND_LINKS") if target == ["release-gate"] else ()
@@ -84,7 +89,7 @@ print("mypy: Success: no issues found in 12 source files")
 if target == ["test"]: print(ctl("summary", "12 passed, 1 skipped, 3 warnings in 4.56s"))
 sys.exit(int(ctl("rc", "0")) if target == [ctl("rctarget", "test")] else 0)
 STUB
-chmod +x "$T/bin/make"
+chmod +x "$T/bin/stubmake"
 # the trusted tools venv, stubbed (GATES_TOOLS_VENV): `pip download` and `pip_audit` on the HOST, driven by $C
 mkdir -p "$T/tools/bin" "$T/xdg"; cat > "$T/tools/bin/python" <<STUB
 #!/usr/bin/python3
@@ -119,7 +124,7 @@ def verify_git_history_secrets(root, baseline):
     if found or os.path.exists("$C/histfail"): raise SecurityGateError("LEAK " + " ".join(found))
 FAKE
 printf '.venv/\n.gates/\ndata/\n' > "$R40/.gitignore"   # as in the repo: .gates/, the venv and data/ are ignored
-printf '# TRUSTED-MAKEFILE (the trusted base)\n' > "$R40/Makefile"
+printf '# TRUSTED-MAKEFILE (the trusted base)\nlint format-check type type-worker test release-gate:\n\t@%s $@\n' "$T/bin/stubmake" > "$R40/Makefile"
 printf '# TRUSTED release script\n' > "$R40/scripts/verify_release_artifact.py"; printf '# TRUSTED pip bootstrap\n' > "$R40/scripts/verify_pip_bootstrap.py"
 commit "$R40"; git -C "$R40" branch -q trusted-main; git -C "$R40" update-ref refs/remotes/origin/main trusted-main
 # the CANDIDATE on top: Daybreak's no-op Makefile and a gutted security script (its history scan checks nothing)
@@ -150,7 +155,7 @@ check "1 40 PASS line names the sha and the counts" "grep -qF \"$H (12 passed, 0
 check "r2:1 P1-1 40 that PASS means the stub ran as exactly 'make gates' and saw no leak: exactly the env allowlist, no runner HOME/credential dirs, no planted host file, no network, not the lane's cwd; every write to the snapshot or its git was refused, the lane's files were not visible; dist/ writable" "passed evidence-at-head && [ \"\$(cat $R40/a)\" = a ] && [ \"\$(git -C $R40 rev-list --count HEAD)\" = 2 ]"
 DUMMY_CREDENTIAL=synthetic-probe-secret GH_TOKEN=synthetic-gh-token g40
 check "r2:1 P1-1 40 Daybreak's DUMMY_CREDENTIAL probe: with credential variables in the runner's env, make gates still sees none → PASS" "passed evidence-at-head"
-(cd "$R40" && DUMMY_CREDENTIAL=x "$T/bin/make" test > "$T/host.out" 2>&1)
+(cd "$R40" && DUMMY_CREDENTIAL=x "$T/bin/stubmake" test > "$T/host.out" 2>&1)
 check "r2:1 P1-1 positive control: the same stub run OUTSIDE the sandbox reports every leak (env creds file net cwd write-naive write-hostile write-commit lane-visible; the candidate's no-op Makefile; no data/ or dist/ there; the host's own age)" "grep -qx 'LEAK env env creds file net cwd write-naive write-hostile write-commit lane-visible untrusted-makefile no-data binary-parity no-dist' $T/host.out"
 git -C "$R40" reset -q --hard "$H"; git -C "$R40" clean -qfd -e .gates
 ctl rc 2; ctl summary '3 failed, 9 passed in 1.00s'; g40; ctl rc; ctl summary
@@ -183,11 +188,23 @@ check "r3:1 40 FAIL: the trusted pip-audit reports a vulnerability → FAIL nami
 ctl audit none; ctl audit_rc 1; g40; ctl audit; ctl audit_rc
 check "r3:1 40 FAIL: the trusted pip-audit leaves no report (e.g. its advisory service is unreachable) → FAIL" "failed evidence-at-head 'the trusted pip-audit exited 1 without a readable report'"
 ctl rctarget type; ctl rc 1; g40; ctl rc; ctl rctarget
-check "r3:2 40 FAIL: one failing target is reported by name, and the others still ran (recorded)" "failed evidence-at-head 'make gates exited 1 at $H \\(target type\\)' && [ \"\$(field \"len(r['targets'])\")\" = 7 ]"
+check "r3:2 40 FAIL: one failing target is reported by name, and the others still ran (recorded)" "failed evidence-at-head 'make gates exited 2 at $H \\(target type\\)' && [ \"\$(field \"len(r['targets'])\")\" = 7 ]"
 ctl histfail 1; g40; ctl histfail
 check "r4:2 P3 40 FAIL: with the candidate's GUTTED security script in the tree, the TRUSTED base's script still runs, so a failing history scan still FAILs (Daybreak's probe)" "failed evidence-at-head '.*target security-offline'"
 echo x > "$R40/untracked.txt"; g40; rm -f "$R40/untracked.txt"
 check "r3:2 40 FAIL: an untracked file (make security-gate's precheck, done by the trusted gate) → FAIL" "failed evidence-at-head 'untracked files in the tree'"
+# r5: GNU Make is pinned to the trusted makefile — candidate makefile names, MAKEFILES and MAKEFLAGS cannot override it.
+# A candidate target that GNU Make ran instead would forge "999 passed"; the trusted stub reports 12.
+forge='lint format-check type type-worker release-gate:\n\t@true\ntest:\n\t@echo "999 passed in 0.01s"\n'
+for name in GNUmakefile makefile; do
+  printf "$forge" > "$R40/$name"; commit "$R40"; g40 "$(git -C "$R40" rev-parse HEAD)"; git -C "$R40" reset -q --hard "$H"
+  check "r5:1 P3 40 a candidate $name with no-op targets (forging 999 passed) never runs: gate 40 still ran the TRUSTED targets (receipt 12 passed, every target 0)" "passed evidence-at-head && [ \"\$(field \"r['pytest']['passed'], sorted(set(r['targets'].values()))\")\" = '12 [0]' ]"
+done
+printf "$forge" > "$R40/evil.mk"; commit "$R40"; HE=$(git -C "$R40" rev-parse HEAD)
+(cd "$R40" && MAKEFILES=evil.mk g40 "$HE"); check "r5:1 P3 40 MAKEFILES=evil.mk in the runner's env (a tracked evil.mk) never reaches the sandboxed make: the trusted targets ran" "passed evidence-at-head && [ \"\$(field \"r['pytest']['passed']\")\" = 12 ]"
+(cd "$R40" && MAKEFLAGS='--eval=test: ; @echo "999 passed in 0.01s"' g40 "$HE"); check "r5:1 P3 40 MAKEFLAGS='--eval=…' in the runner's env never reaches the sandboxed make (the stub also refuses -I/--include-dir/--eval in MAKEFLAGS)" "passed evidence-at-head && [ \"\$(field \"r['pytest']['passed']\")\" = 12 ]"
+git -C "$R40" reset -q --hard "$H"
+check "r5:1 P3 main's Makefile has no recursive \$(MAKE) (a recursion would rediscover a candidate makefile; gate 40 refuses one)" "! git -C $ROOT show origin/main:Makefile | grep -q '\$(MAKE)\\|\${MAKE}'"
 mkdir -p "$R40/.venv/bin"; echo 'home = /usr/bin' > "$R40/.venv/pyvenv.cfg"; g40
 check "r2:2 P1-a 40 the lane .venv is bound read-only into the sandbox (the stub checks it cannot write it) and the lane's .venv stays writable on the host" "passed evidence-at-head && [ -w $R40/.venv/bin ]"
 rm -rf "$R40/.venv"

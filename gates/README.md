@@ -72,7 +72,9 @@ The gates are executable acceptance authority: whoever runs them holds repositor
   and `scripts/verify_pip_bootstrap.py` from it and binds them read-only over the snapshot's copies,
   inside the sandbox only (the Makefile for every target, the scripts for the release/security steps;
   never for the `test` run, so the candidate's tests test the candidate's scripts). A candidate's no-op
-  Makefile or gutted security script never runs. The receipt names the trusted base commit.
+  Makefile or gutted security script never runs, and every call is `make -R -f <trusted Makefile>` (a
+  candidate `GNUmakefile`/`makefile` is never searched for; MAKEFILES/MAKEFLAGS never reach the sandbox).
+  The receipt names the trusted base commit.
 - **Sandbox parity with the host (no network, no home):** `data/` is writable scratch for gate 40's
   targets (backed by the output dir, never the lane's); the snapshot carries the lane's `origin/main`
   ref (a local fetch); the lane venv's editable `.pth` is overlaid, in the sandbox only, with one naming

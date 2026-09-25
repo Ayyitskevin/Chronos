@@ -90,8 +90,15 @@ target() {  # $1 name, rest = the sandboxed command; records the exit, keeps the
   printf '%s %s\n' "$name" "$rc" >> "$work/targets"
   if [ "$rc" -ne 0 ] && [ "$code" -eq 0 ]; then code=$rc; first=$name; fi
 }
-for t in lint format-check type type-worker test; do SANDBOX_OVERLAY="$MK" target "$t" sandbox_run "$work" "$mk" "$t"; done
-SANDBOX_OVERLAY="$REL" SANDBOX_RO="$cache" SANDBOX_ENV="PIP_NO_INDEX=1 PIP_FIND_LINKS=$cache" target release-gate sandbox_run "$work" "$mk" release-gate
+# GNU Make is pinned to the TRUSTED makefile: `-f <trusted>` (so no candidate GNUmakefile/makefile/Makefile is
+# ever searched for) and `-R` (no builtin rules or variables); no -I; MAKEFILES/MAKEFLAGS never reach the
+# sandbox (--clearenv). Main's targets do not recurse ($(MAKE) would rediscover the candidate's file).
+grep -q '$(MAKE)\|${MAKE}' "$work/trusted/Makefile" && fail "the trusted Makefile recurses via \$(MAKE), which would rediscover a candidate makefile; pin the recursion to -f first"
+for t in lint format-check type type-worker test; do
+  SANDBOX_RO="$work/trusted" SANDBOX_OVERLAY="$MK" target "$t" sandbox_run "$work" "$mk" -R -f "$work/trusted/Makefile" "$t"
+done
+SANDBOX_OVERLAY="$REL" SANDBOX_RO="$cache $work/trusted" SANDBOX_ENV="PIP_NO_INDEX=1 PIP_FIND_LINKS=$cache" target release-gate \
+  sandbox_run "$work" "$mk" -R -f "$work/trusted/Makefile" release-gate
 cp "$snap/.secrets.baseline" "$work/io/.secrets.baseline" 2>/dev/null
 SANDBOX_OVERLAY="$SEC" target security-offline sandbox_run "$work" "$py" - <<'PY'
 # the security gate's own scans minus pip-audit (run by the trusted step above), from the TRUSTED base's script
