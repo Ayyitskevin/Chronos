@@ -25,3 +25,6 @@ logs/*.log
 logs/*.log.*
 .streamlit/secrets.toml
 .DS_Store
+
+# gates/40-evidence-at-head.sh receipt + make log (never committed)
+.gates/
