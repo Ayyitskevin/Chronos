@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
 # 40-evidence-at-head.sh — test evidence must record the sha it ran on, and it must equal PR_HEAD_SHA.
-# Runs the existing `make gates` (adopted, not rewritten) inside the trusted bwrap sandbox
-# (gates/lib/sandbox.sh): an immutable exact-head snapshot, no network, no runner home, and only the
-# gitignored outputs dist/ + the tool caches writable (backed by the 0700 scratch dir), after asserting
-# `chronos` imports from the snapshot. The sandbox denies the network, and `make gates` needs it for
-# pip-audit and the release gate's pip installs — so today this gate FAILs closed, naming that, until
-# the owner rules (GATES-1r2 read-back point 5); it never falls back to an unsandboxed run. Afterwards the
-# trusted gate proves every tracked byte of the snapshot still equals PR_HEAD_SHA's blobs (the lane's
-# object store) and the lane is untouched, then writes .gates/40-evidence-at-head.json (0700 dir, 0600
-# file, never through a link) = {sha, exit, pytest counts, tree_verified}. PASS iff that receipt shows
-# sha == PR_HEAD_SHA == HEAD, exit 0, exactly one pytest summary with passed > 0, failed == errors == 0.
-# The raw make log lives only in the scratch dir; it is never kept.
+# Runs the work of the existing `make gates` (adopted, not rewritten), split so no candidate code gets the
+# network (reports/GATE40-SPLIT-PROPOSAL.md, the conductor's D2 call):
+#   A. TRUSTED, network allowed, candidate bytes only as DATA — validate the requirements-*.lock files
+#      (pinned lines + sha256 hashes + comments only), pre-fetch them as hash-pinned wheels (binary only) with
+#      the trusted tools venv's pip, and run the trusted pip-audit on requirements-runtime.lock;
+#   B. in the bwrap sandbox (gates/lib/sandbox.sh: no network, immutable exact-head snapshot, chronos
+#      identity asserted) — `make lint format-check type type-worker test` each, `make release-gate` with
+#      PIP_NO_INDEX + the read-only wheel cache, and the security gate's scans minus pip-audit.
+# Afterwards the trusted gate compares every tracked snapshot file with PR_HEAD_SHA's blobs (the lane's
+# object store) and checks the lane is untouched, then writes .gates/40-evidence-at-head.json (0700 dir, 0600
+# file, never through a link) = {sha, exit, per-target exits, pytest counts, lock + cache digests, audit}.
+# PASS iff sha == PR_HEAD_SHA == HEAD, every target exits 0, the audit is clean, and exactly one pytest summary
+# shows passed > 0 with failed == errors == 0. Raw logs live only in the scratch dir.
 set -uo pipefail
 g=evidence-at-head
 fail() { echo "FAIL: $g — $1" >&2; exit 1; }
@@ -22,23 +24,88 @@ head="$(git rev-parse HEAD)" || fail "could not read HEAD"
 [ -z "$(git status --porcelain --untracked-files=no)" ] || fail "tracked files are modified, so HEAD does not name the tested bytes; commit or stash, then re-run"
 { [ -L .gates ] || { [ -e .gates ] && [ ! -d .gates ]; }; } && fail ".gates is a symlink or not a directory; remove it, then re-run"
 mkdir -p .gates && chmod 0700 .gates && [ "$(cd .gates && pwd -P)" = "$(pwd -P)/.gates" ] || fail "could not create a contained 0700 .gates/"
-. "$(dirname "$0")/lib/sandbox.sh" || fail "could not load the trusted sandbox launcher"
+[ -z "$(git ls-files --others --exclude-standard -- ':!.gates')" ] || fail "untracked files in the tree (make security-gate refuses them: its scan enumerates git ls-files); add or remove them, then re-run"
+. "$(dirname "$0")/lib/sandbox.sh" && . "$(dirname "$0")/lib/tools-venv.sh" || fail "could not load the trusted gate libraries"
 mk="$(command -v make)" || fail "make is not on PATH"
 py="${CHRONOS_PY:-.venv/bin/python}"
+tools="$(tools_venv 2>&1)" || fail "$(tail -n 1 <<< "$tools")"
 work="$(mktemp -d)" || fail "could not create a scratch dir"; trap 'rm -rf "$work"' EXIT
 snap="$work/snap"
 sandbox_snapshot "$work" || fail "could not build the exact-head snapshot at $PR_HEAD_SHA"
 export SANDBOX_WRITABLE="dist .ruff_cache .mypy_cache .pytest_cache"
 sandbox_run "$work" true 2>/dev/null; [ "$?" -ne 125 ] || fail "the bwrap sandbox is unavailable; candidate code never runs unsandboxed — install/enable bwrap"
 sandbox_identity "$work" "$py" || fail "chronos does not import from the exact-head snapshot (an editable install or PYTHONPATH points elsewhere); refusing to judge"
-sandbox_run "$work" "$mk" gates > "$work/make.log" 2>&1
-code=$?
-if [ "$code" -ne 0 ] && grep -qE 'Temporary failure in name resolution|Network is unreachable|NameResolutionError|NewConnectionError' "$work/make.log"; then
-  fail "make gates needs outbound network (pip-audit's vulnerability service, the release gate's pip installs) and the sandbox denies it; FAILing closed until the owner rules on gate 40's network (GATES-1r2)"
+# A. TRUSTED steps (network allowed; candidate bytes only as DATA): validate the locks, pre-fetch the wheel
+#    cache, audit the runtime lock — every tool from the trusted tools venv, never candidate code.
+LOCKS="bootstrap build runtime sbom"
+why="$(python3 - "$snap" $LOCKS <<'PY' 2>&1
+import re, sys
+snap, names = sys.argv[1], sys.argv[2:]
+ok = re.compile(r"(?:[A-Za-z0-9][A-Za-z0-9._-]*==[A-Za-z0-9._+!-]+|\s+--hash=sha256:[0-9a-f]{64})(?: \\)?|\s*(?:#.*)?")
+for name in names:
+    for n, line in enumerate(open(f"{snap}/requirements-{name}.lock", encoding="utf-8"), 1):
+        if not ok.fullmatch(line.rstrip("\n")):
+            sys.exit(f"requirements-{name}.lock:{n} is not a pinned requirement, a sha256 hash or a comment (options, URLs and paths are refused)")
+PY
+)" || fail "$(tail -n 1 <<< "$why"); the trusted steps read the locks only as pinned data"
+cache="${XDG_CACHE_HOME:-$HOME/.cache}/chronos-gates/wheels"; mkdir -p "$cache" && chmod 0700 "$cache" || fail "could not create the wheel cache"
+for l in $LOCKS; do
+  "$tools/bin/python" -m pip download -q --disable-pip-version-check --no-deps --only-binary=:all: --require-hashes \
+    -r "$snap/requirements-$l.lock" -d "$cache" > "$work/download-$l.log" 2>&1 \
+    || fail "could not pre-fetch requirements-$l.lock as hash-pinned wheels (an sdist-only or yanked pin fails closed); see pip download"
+done
+"$tools/bin/python" -m pip_audit --require-hashes --disable-pip --progress-spinner off -r "$snap/requirements-runtime.lock" -f json -o "$work/audit.json" > "$work/audit.log" 2>&1
+acode=$?
+audit="$(python3 - "$work/audit.json" "$acode" <<'PY' 2>&1
+import json, re, sys
+try:
+    deps = json.load(open(sys.argv[1]))["dependencies"]
+except (OSError, ValueError, KeyError, TypeError):
+    sys.exit(f"the trusted pip-audit exited {sys.argv[2]} without a readable report (its advisory service needs the network)")
+vulns = [f"{d.get('name')}=={d.get('version')} {v.get('id')}" for d in deps for v in d.get("vulns", [])]
+if vulns:
+    sys.exit(f"{len(vulns)} known vulnerabilit(ies) in requirements-runtime.lock: " + "; ".join(re.sub(r"[^ -~]", "", x)[:80] for x in vulns[:5]))
+if int(sys.argv[2]) != 0:
+    sys.exit(f"the trusted pip-audit exited {sys.argv[2]}")
+print(len(deps))
+PY
+)" || fail "$(tail -n 1 <<< "$audit")"
+# B. In the bwrap sandbox, network denied: every other `make gates` target, each recorded separately.
+code=0; first=""
+target() {  # $1 name, rest = the sandboxed command; records the exit, keeps the first failure
+  local name="$1"; shift
+  "$@" > "$work/$name.log" 2>&1; local rc=$?
+  printf '%s %s\n' "$name" "$rc" >> "$work/targets"
+  if [ "$rc" -ne 0 ] && [ "$code" -eq 0 ]; then code=$rc; first=$name; fi
+}
+for t in lint format-check type type-worker test; do target "$t" sandbox_run "$work" "$mk" "$t"; done
+SANDBOX_RO="$cache" SANDBOX_ENV="PIP_NO_INDEX=1 PIP_FIND_LINKS=$cache" target release-gate sandbox_run "$work" "$mk" release-gate
+cp "$snap/.secrets.baseline" "$work/io/.secrets.baseline" 2>/dev/null
+target security-offline sandbox_run "$work" "$py" - <<'PY'
+# the security gate's own scans minus pip-audit (run by the trusted step above), from the candidate script
+import importlib.util, os, subprocess, sys
+from importlib import metadata
+from pathlib import Path
+root, copy = Path.cwd(), Path(os.environ["GATE_IO"]) / ".secrets.baseline"
+spec = importlib.util.spec_from_file_location("release_security", root / "scripts/verify_release_security.py")
+gate = sys.modules[spec.name] = importlib.util.module_from_spec(spec); spec.loader.exec_module(gate)
+gate._require_exact_tool_versions(metadata.version)
+tracked = tuple(p for p in gate._tracked_files(root) if p != ".secrets.baseline")
+for command in gate.build_scan_commands(python=Path(sys.executable), baseline=copy, tracked_files=tracked):
+    if command.name != "runtime dependency audit":
+        subprocess.run(command.argv, cwd=root, check=True)
+gate.verify_git_history_secrets(root, copy)
+PY
+if [ "$code" -ne 0 ] && cat "$work"/*.log | grep -qE 'Temporary failure in name resolution|Network is unreachable|NameResolutionError|NewConnectionError'; then
+  fail "the $first target needs outbound network, which the sandbox denies (the split moved pip-audit and the wheel downloads to trusted steps); FAILing closed"
 fi
-out="$(python3 - "$top" "$snap" "$PR_HEAD_SHA" "$code" "$work/make.log" <<'PY' 2>&1
+cachedigest="$(cd "$cache" && find . -maxdepth 1 -type f -name '*.whl' -printf '%f\n' | LC_ALL=C sort | xargs -r sha256sum | sha256sum | cut -c1-64)"
+lockdigests="$(for l in $LOCKS; do printf '%s=%s ' "$l" "$(sha256sum < "$snap/requirements-$l.lock" | cut -c1-64)"; done)"
+out="$(python3 - "$top" "$snap" "$PR_HEAD_SHA" "$code" "$work/test.log" "$work/targets" "$lockdigests" "$cachedigest" "$audit" <<'PY' 2>&1
 import json, os, re, stat, subprocess, sys
 top, snap, sha, code, log = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4]), sys.argv[5]
+targets = dict(line.split() for line in open(sys.argv[6]))
+locks = dict(kv.split("=", 1) for kv in sys.argv[7].split())
 def git(*a, cwd=top):
     return subprocess.run(["git", *a], cwd=cwd, capture_output=True, check=True).stdout
 snap_head = git("rev-parse", "HEAD", cwd=snap).decode().strip()
@@ -62,7 +129,9 @@ if len(summaries) == 1:
     for part in summaries[0].split(", "):
         c, w = part.split(" ", 1); n[{"error": "errors"}.get(w, w)] = int(c)
     pytest = {k: n.get(k, 0) for k in ("passed", "failed", "skipped", "errors")}
-receipt = {"sha": snap_head, "exit": code, "pytest": pytest, "summaries": len(summaries), "tree_verified": bad is None and not lane_dirty}
+receipt = {"sha": snap_head, "exit": code, "pytest": pytest, "summaries": len(summaries), "tree_verified": bad is None and not lane_dirty,
+           "targets": {k: int(v) for k, v in targets.items()}, "locks": locks, "cache_sha256": sys.argv[8],
+           "audit": {"tool": "pip-audit (trusted tools venv)", "dependencies": int(sys.argv[9]), "vulns": 0}}
 path = os.path.join(top, ".gates", "40-evidence-at-head.json")
 if os.path.lexists(path):
     if not stat.S_ISREG(os.lstat(path).st_mode): sys.exit(f"{path} is a link or non-regular file; remove it")
@@ -76,7 +145,7 @@ PY
 read -r rsha rexit nsum counts < <(python3 -c 'import json,os,sys; r=json.load(os.fdopen(os.open(sys.argv[1], os.O_RDONLY|os.O_NOFOLLOW))); p=r["pytest"]
 print(r["sha"], r["exit"], r["summaries"], "none" if p is None else "%d/%d/%d/%d" % (p["passed"], p["failed"], p["skipped"], p["errors"]))' .gates/40-evidence-at-head.json) \
   || fail "could not read back the receipt .gates/40-evidence-at-head.json"
-[ "$rexit" = 0 ] || fail "make gates exited $rexit at $rsha; re-run 'make gates' by hand at that head, fix, then re-run"
+[ "$rexit" = 0 ] || fail "make gates exited $rexit at $rsha (target $first); re-run 'make $first' by hand at that head, fix, then re-run"
 [ "$rsha" = "$PR_HEAD_SHA" ] && [ "$rsha" = "$head" ] || fail "receipt sha $rsha is not PR_HEAD_SHA $PR_HEAD_SHA (HEAD moved during make gates); re-run at a fixed head"
 [ "$nsum" = 1 ] || fail "make gates exited 0 but printed $nsum pytest summaries (no pytest summary is ambiguous too); the evidence must carry exactly one set of test counts"
 IFS=/ read -r np nf ns ne <<< "$counts"

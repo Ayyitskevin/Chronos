@@ -37,10 +37,10 @@ for _ in $(seq 50); do [ -s "$T/port" ] && break; sleep 0.1; done
 cat > "$T/bin/probe_lib.py" <<PROBE
 import os, socket
 ALLOW = {"ALLOW_LIVE_TRADING", "ALLOW_ORDER_TRANSMIT", "BROKER_MODE", "GATE_IO", "HOME", "LANG", "PATH", "PYTHONDONTWRITEBYTECODE", "PYTHONPATH"}
-def leaks(lane=None):
+def leaks(lane=None, extra=()):
     found = []
-    if set(os.environ) - {"PWD", "SHLVL", "_", "OLDPWD"} != ALLOW or os.environ.get("BROKER_MODE") != "demo": found.append("env")
-    if not os.environ.get("PYTHONPATH", "").endswith("/snap/src") or os.environ.get("HOME") == "$HOME": found.append("env")
+    if set(os.environ) - {"PWD", "SHLVL", "_", "OLDPWD"} != ALLOW | set(extra) or os.environ.get("BROKER_MODE") != "demo": found.append("env")
+    if not os.environ.get("PYTHONPATH", "").split(":")[0].endswith("/snap/src") or os.environ.get("HOME") == "$HOME": found.append("env")
     if any(os.path.exists(p) for p in ("$HOME/.ssh", "$HOME/.config/gh")): found.append("creds")
     try: open("$T/planted").read(); found.append("file")
     except OSError: pass
@@ -54,8 +54,12 @@ cat > "$T/bin/make" <<STUB
 #!/usr/bin/python3
 import os, subprocess, sys; sys.path.insert(0, "$T/bin"); import probe_lib
 C = "$C"; ctl = lambda k, d=None: open(os.path.join(C, k)).read() if os.path.exists(os.path.join(C, k)) else d
-found = probe_lib.leaks(lane="$T/r40")
-if sys.argv[1:] != ["gates"]: found.append("argv")
+target = sys.argv[1:]
+extra = ("PIP_NO_INDEX", "PIP_FIND_LINKS") if target == ["release-gate"] else ()
+found = probe_lib.leaks(lane="$T/r40", extra=extra)
+if len(target) != 1 or target[0] not in ("lint", "format-check", "type", "type-worker", "test", "release-gate"): found.append("argv")
+if extra and (os.environ.get("PIP_NO_INDEX") != "1" or not os.path.isdir(os.environ.get("PIP_FIND_LINKS", "")) or os.access(os.environ["PIP_FIND_LINKS"], os.W_OK)):
+    found.append("no-offline-cache")                                                          # release-gate: index off, cache read-only
 for kind, attempt in (("naive", lambda: open("a", "a").write("changed")),                      # the snapshot is read-only
                       ("hostile", lambda: (os.chmod("a", 0o644), open("a", "a").write("changed"))),
                       ("commit", lambda: subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "moved"], check=True, capture_output=True))):
@@ -65,25 +69,59 @@ if os.path.exists("$T/r40/a"): found.append("lane-visible")                     
 try: open("dist/probe", "w").write("ok")                                                     # the declared outputs ARE writable
 except OSError: found.append("no-dist")
 if os.path.exists(".venv/pyvenv.cfg") and os.access(".venv", os.W_OK): found.append("venv-writable")
-if ctl("netfail"): print("urllib3.exceptions.NameResolutionError: Temporary failure in name resolution"); sys.exit(2)
+if found: print("LEAK " + " ".join(found)); sys.exit(7)                                        # a leak fails the target
+if target == [ctl("rctarget", "test")] and ctl("netfail"): print("urllib3.exceptions.NameResolutionError: Temporary failure in name resolution"); sys.exit(2)
 print("mypy: Success: no issues found in 12 source files")
-if found: print("LEAK " + " ".join(found)); sys.exit(0)                                        # no summary: the gate FAILs
-print(ctl("summary", "12 passed, 1 skipped, 3 warnings in 4.56s"))
-sys.exit(int(ctl("rc", "0")))
+if target == ["test"]: print(ctl("summary", "12 passed, 1 skipped, 3 warnings in 4.56s"))
+sys.exit(int(ctl("rc", "0")) if target == [ctl("rctarget", "test")] else 0)
 STUB
 chmod +x "$T/bin/make"
-G40="$G/40-evidence-at-head.sh"; R40="$T/r40"; newrepo "$R40"; echo a > "$R40/a"; mkdir -p "$R40/src/chronos"; : > "$R40/src/chronos/__init__.py"; commit "$R40"
+# the trusted tools venv, stubbed (GATES_TOOLS_VENV): `pip download` and `pip_audit` on the HOST, driven by $C
+mkdir -p "$T/tools/bin" "$T/xdg"; cat > "$T/tools/bin/python" <<STUB
+#!/usr/bin/python3
+import json, os, sys
+C = "$C"; ctl = lambda k, d=None: open(os.path.join(C, k)).read() if os.path.exists(os.path.join(C, k)) else d
+a = sys.argv[1:]
+if a[:3] == ["-m", "pip", "download"]:
+    open("$T/dl.log", "a").write(a[a.index("-r") + 1] + "\\n")
+    open(os.path.join(a[a.index("-d") + 1], "stub-1.0-py3-none-any.whl"), "w").write("x")
+    sys.exit(int(ctl("dl_rc", "0")))
+if a[:2] == ["-m", "pip_audit"]:
+    if ctl("audit") != "none":
+        open(a[a.index("-o") + 1], "w").write(ctl("audit", json.dumps({"dependencies": [{"name": "x", "version": "1", "vulns": []}]})))
+    sys.exit(int(ctl("audit_rc", "0")))
+sys.exit(99)
+STUB
+chmod +x "$T/tools/bin/python"
+G40="$G/40-evidence-at-head.sh"; R40="$T/r40"; newrepo "$R40"; echo a > "$R40/a"; mkdir -p "$R40/src/chronos" "$R40/scripts"; : > "$R40/src/chronos/__init__.py"
+for l in bootstrap build runtime sbom; do printf '# locked by uv\nexample==1.0 \\\n    --hash=sha256:%064d\n' 0 > "$R40/requirements-$l.lock"; done
+cat > "$R40/scripts/verify_release_security.py" <<FAKE
+# a stand-in release security script: its pip-audit command is \`false\` (it must never run in the sandbox)
+import os, sys; sys.path.insert(0, "$T/bin"); import probe_lib
+class SecurityGateError(RuntimeError): pass
+class _Cmd:
+    def __init__(self, name, argv): self.name, self.argv = name, argv
+def _require_exact_tool_versions(getter): pass
+def _tracked_files(root): return ("a",)
+def build_scan_commands(*, python, baseline, tracked_files):
+    return (_Cmd("runtime dependency audit", ("false",)), _Cmd("Python static analysis", ("true",)), _Cmd("tracked-file secret scan", ("true",)))
+def verify_git_history_secrets(root, baseline):
+    found = probe_lib.leaks(lane="$T/r40")
+    if found or os.path.exists("$C/histfail"): raise SecurityGateError("LEAK " + " ".join(found))
+FAKE
+printf '.venv/\n.gates/\n' > "$R40/.gitignore"   # as in the repo: the gate's own .gates/ and the venv are ignored
+commit "$R40"
 H=$(git -C "$R40" rev-parse HEAD); RCPT="$R40/.gates/40-evidence-at-head.json"
 field() { python3 -c "import json,sys; r=json.load(open(sys.argv[1])); print($1)" "$RCPT"; }
-g40() { (cd "$R40" && PATH="$T/bin:$PATH" CHRONOS_PY=/usr/bin/python3 PR_HEAD_SHA="${1:-$H}" run bash "$G40"); }
+g40() { (cd "$R40" && PATH="$T/bin:$PATH" CHRONOS_PY=/usr/bin/python3 GATES_TOOLS_VENV="$T/tools" XDG_CACHE_HOME="$T/xdg" PR_HEAD_SHA="${1:-$H}" run bash "$G40"); }
 g40
 check "1 40 PASS: make gates exit 0 at PR_HEAD_SHA == HEAD → one PASS line, exit 0" "passed evidence-at-head"
 check "1 40 receipt on disk records {sha, exit, pytest counts} of that run" "[ \"\$(field \"r['sha'], r['exit'], r['pytest']['passed'], r['pytest']['failed'], r['pytest']['skipped']\")\" = \"$H 0 12 0 1\" ]"
 check "1 40 PASS line names the sha and the counts" "grep -qF \"$H (12 passed, 0 failed, 1 skipped)\" $T/out"
 check "r2:1 P1-1 40 that PASS means the stub ran as exactly 'make gates' and saw no leak: exactly the env allowlist, no runner HOME/credential dirs, no planted host file, no network, not the lane's cwd; every write to the snapshot or its git was refused, the lane's files were not visible; dist/ writable" "passed evidence-at-head && [ \"\$(cat $R40/a)\" = a ] && [ \"\$(git -C $R40 rev-list --count HEAD)\" = 1 ]"
-(cd "$R40" && PATH="$T/bin:$PATH" CHRONOS_PY=/usr/bin/python3 DUMMY_CREDENTIAL=synthetic-probe-secret GH_TOKEN=synthetic-gh-token PR_HEAD_SHA=$H run bash "$G40")
+(cd "$R40" && PATH="$T/bin:$PATH" CHRONOS_PY=/usr/bin/python3 GATES_TOOLS_VENV="$T/tools" XDG_CACHE_HOME="$T/xdg" DUMMY_CREDENTIAL=synthetic-probe-secret GH_TOKEN=synthetic-gh-token PR_HEAD_SHA=$H run bash "$G40")
 check "r2:1 P1-1 40 Daybreak's DUMMY_CREDENTIAL probe: with credential variables in the runner's env, make gates still sees none → PASS" "passed evidence-at-head"
-(cd "$R40" && DUMMY_CREDENTIAL=x "$T/bin/make" gates > "$T/host.out" 2>&1)
+(cd "$R40" && DUMMY_CREDENTIAL=x "$T/bin/make" test > "$T/host.out" 2>&1)
 check "r2:1 P1-1 positive control: the same stub run OUTSIDE the sandbox reports every leak (env creds file net cwd write-naive write-hostile write-commit lane-visible; and dist/ is absent there)" "grep -qx 'LEAK env env creds file net cwd write-naive write-hostile write-commit lane-visible no-dist' $T/host.out"
 git -C "$R40" reset -q --hard "$H"; git -C "$R40" clean -qfd -e .gates
 ctl rc 2; ctl summary '3 failed, 9 passed in 1.00s'; g40; ctl rc; ctl summary
@@ -92,7 +130,7 @@ check "1 40 the failing run still leaves its receipt (exit 2, 3 failed)" "[ \"\$
 ctl summary ''; g40; ctl summary
 check "1 40 FAIL: a green make with no pytest summary records no counts → FAIL, never a PASS" "failed evidence-at-head '.*no pytest summary' && [ \"\$(field \"r['pytest']\")\" = None ]"
 ctl netfail 1; g40; ctl netfail
-check "r2:1 P1-1 40 FAIL: make gates needing the network the sandbox denies → a named FAIL (never a fallback to an unsandboxed run)" "failed evidence-at-head 'make gates needs outbound network'"
+check "r2:1 P1-1 40 FAIL: a sandboxed target needing the network the sandbox denies → a named FAIL (never a fallback to an unsandboxed run)" "failed evidence-at-head 'the test target needs outbound network'"
 for bad_sum in '3 failed, 9 passed in 1.00s' '5 skipped in 0.10s' '1 error, 5 passed in 0.10s' '0 passed in 0.10s'; do
   ctl summary "$bad_sum"; g40; ctl summary
   check "r2:1 P1-a 40 FAIL: exit 0 with a contradictory summary ('$bad_sum') is never a PASS" "failed evidence-at-head 'the pytest summary is contradictory'"
@@ -100,6 +138,27 @@ done
 ctl summary '5 passed in 0.1s
 7 passed in 0.2s'; g40; ctl summary
 check "r2:1 P1-a 40 FAIL: two pytest summaries are ambiguous → FAIL" "failed evidence-at-head 'make gates exited 0 but printed 2 pytest summaries'"
+# r3: the split — trusted steps over the locks as DATA, every target recorded, the receipt binds it all
+: > "$T/dl.log"; g40
+check "r3:1 40 PASS: every target (lint format-check type type-worker test release-gate security-offline) ran sandboxed and exited 0; the stub release-gate saw PIP_NO_INDEX and a READ-ONLY wheel cache; the fake security script's pip-audit command (\`false\`) was never run in the sandbox" "passed evidence-at-head && [ \"\$(field \"' '.join(f'{k}={v}' for k, v in sorted(r['targets'].items()))\")\" = 'format-check=0 lint=0 release-gate=0 security-offline=0 test=0 type=0 type-worker=0' ]"
+check "r3:1 40 the receipt binds the four lock digests, the wheel-cache digest and the trusted audit" "[ \"\$(field \"sorted(r['locks']) == ['bootstrap', 'build', 'runtime', 'sbom'] and all(len(v) == 64 for v in r['locks'].values()) and len(r['cache_sha256']) == 64 and r['audit']['dependencies'] == 1\")\" = True ]"
+check "r3:1 40 the trusted wheel pre-fetch ran on the HOST over the SNAPSHOT's four locks (never the lane's files, never in the sandbox)" "[ \"\$(sed -E 's#^.*/snap/##' $T/dl.log | sort | tr '\\n' ' ')\" = 'requirements-bootstrap.lock requirements-build.lock requirements-runtime.lock requirements-sbom.lock ' ]"
+for inj in '--index-url https://example.invalid/simple' 'https://example.invalid/pkg.whl' '-r other.txt' '-e .'; do
+  printf '%s\n' "$inj" >> "$R40/requirements-build.lock"; commit "$R40"; g40 "$(git -C "$R40" rev-parse HEAD)"; git -C "$R40" reset -q --hard "$H"
+  check "r3:1 40 FAIL: an option/URL/path line in a lock ('$inj') is refused before any trusted network step reads it" "failed evidence-at-head 'requirements-build.lock:4 is not a pinned requirement'"
+done
+ctl dl_rc 1; g40; ctl dl_rc
+check "r3:1 40 FAIL: a lock that cannot be pre-fetched as hash-pinned wheels → FAIL, never an online install" "failed evidence-at-head 'could not pre-fetch requirements-bootstrap.lock'"
+ctl audit '{"dependencies": [{"name": "urllib3", "version": "1.0", "vulns": [{"id": "GHSA-xxxx"}]}]}'; ctl audit_rc 1; g40; ctl audit; ctl audit_rc
+check "r3:1 40 FAIL: the trusted pip-audit reports a vulnerability → FAIL naming it" "failed evidence-at-head '1 known vulnerabilit\\(ies\\) in requirements-runtime.lock: urllib3==1.0 GHSA-xxxx'"
+ctl audit none; ctl audit_rc 1; g40; ctl audit; ctl audit_rc
+check "r3:1 40 FAIL: the trusted pip-audit leaves no report (e.g. its advisory service is unreachable) → FAIL" "failed evidence-at-head 'the trusted pip-audit exited 1 without a readable report'"
+ctl rctarget type; ctl rc 1; g40; ctl rc; ctl rctarget
+check "r3:2 40 FAIL: one failing target is reported by name, and the others still ran (recorded)" "failed evidence-at-head 'make gates exited 1 at $H \\(target type\\)' && [ \"\$(field \"len(r['targets'])\")\" = 7 ]"
+ctl histfail 1; g40; ctl histfail
+check "r3:2 40 FAIL: the security gate's offline scans (history scan) failing → FAIL naming security-offline" "failed evidence-at-head '.*target security-offline'"
+echo x > "$R40/untracked.txt"; g40; rm -f "$R40/untracked.txt"
+check "r3:2 40 FAIL: an untracked file (make security-gate's precheck, done by the trusted gate) → FAIL" "failed evidence-at-head 'untracked files in the tree'"
 mkdir -p "$R40/.venv/bin"; echo 'home = /usr/bin' > "$R40/.venv/pyvenv.cfg"; g40
 check "r2:2 P1-a 40 the lane .venv is bound read-only into the sandbox (the stub checks it cannot write it) and the lane's .venv stays writable on the host" "passed evidence-at-head && [ -w $R40/.venv/bin ]"
 rm -rf "$R40/.venv"
@@ -206,7 +265,7 @@ PY
   commit "$R60"
 }
 bsum() { sha256sum < "$1/.secrets.baseline"; }
-g60() { (cd "$R60" && CHRONOS_PY=$PY run bash "$G60"); }
+g60() { (cd "$R60" && run bash "$G60"); }
 mk60; s0=$(bsum "$R60"); g60
 check "1 60 PASS: no finding beyond the baseline → one PASS line, exit 0" "passed secrets-baseline"
 check "2 60 PASS run leaves .secrets.baseline byte-identical" "[ \"\$(bsum $R60)\" = \"$s0\" ]"
@@ -222,18 +281,14 @@ check "1 60 PASS: a finding already reviewed in the baseline is not new" "passed
 mk60 "d['results'] = {'leak.py': [${ENTRY/LINE/5}]}"; printf 'x = 1\naws_key = "%s"\n' "$FAKE" > "$R60/leak.py"; commit "$R60"; s2=$(bsum "$R60"); g60
 check "1 60 FAIL: a reviewed finding whose line moved → FAIL 'baseline stale', never a rewrite" "failed secrets-baseline '.secrets.baseline is stale'"
 check "2 60 the stale case leaves .secrets.baseline byte-identical (the hook only ever saw a temp copy)" "[ \"\$(bsum $R60)\" = \"$s2\" ]"
-cat > "$T/bin/probe60" <<STUB
-#!/usr/bin/python3
-import json, os, sys; sys.path.insert(0, "$T/bin"); import probe_lib
-sys.stdin.read(); found = probe_lib.leaks(lane="$T/r60")
-rec = {"error": "LEAK " + " ".join(found)} if found else {"returncode": 0, "stdout": "{}", "tracked": 1}
-open(os.path.join(os.environ.get("GATE_IO", "/nonexistent"), "result.json"), "w").write(json.dumps(rec))
-STUB
-chmod +x "$T/bin/probe60"
-(cd "$R60" && DUMMY_CREDENTIAL=synthetic-probe-secret GH_TOKEN=synthetic-gh-token CHRONOS_PY="$T/bin/probe60" run bash "$G60")
-check "r2:1 P1-1 60 the sandboxed scan (it imports candidate code) sees no credential variable, runner HOME, planted file or network, and its recorded result is judged OUTSIDE → PASS" "passed secrets-baseline"
-(cd "$R60" && CHRONOS_PY="$T/nopython" run bash "$G60")
-check "1 60 FAIL: no python at CHRONOS_PY → one FAIL line" "failed secrets-baseline 'no python at'"
+# Daybreak's forgery probe: a candidate release script that would write a PASS result — it is never run now
+mk60; printf 'import json, os\nopen(os.path.join(os.environ.get("GATE_IO", "."), "result.json"), "w").write(json.dumps({"returncode": 0, "stdout": "{}", "tracked": 1}))\n' > "$R60/scripts/verify_release_security.py"
+printf 'x = 1\naws_key = "%s"\n' "$FAKE" > "$R60/leak.py"; commit "$R60"; g60
+check "r3:1 P5 60 FAIL: Daybreak's forged-result probe — the candidate release script is never executed, so a planted tracked secret still FAILs" "failed secrets-baseline '1 new finding\\(s\\) vs .secrets.baseline: leak.py:2 AWS Access Key'"
+mk60 "d['plugins_used'].append({'name': 'EvilDetector', 'path': 'file://./evil.py'})"; g60
+check "r3:1 P5 60 FAIL: a baseline naming a non-built-in plugin (a path to candidate code) is refused before the trusted scanner runs" "failed secrets-baseline '.secrets.baseline names a non-built-in plugin or filter'"
+mk60 "d['filters_used'].append({'path': 'file://./evil.py::f'})"; g60
+check "r3:1 P5 60 FAIL: a baseline naming a non-detect_secrets filter is refused" "failed secrets-baseline '.secrets.baseline names a non-built-in plugin or filter'"
 mk60; ln -s clean.py "$R60/link.py"; commit "$R60"; g60
 check "r2:2 P1-b 60 FAIL: a tracked symlink among the scanner inputs → FAIL before the scan" "failed secrets-baseline 'link.py is a symlink or non-regular file'"
 mk60; mv "$R60/.secrets.baseline" "$T/outside.baseline"; ln -s "$T/outside.baseline" "$R60/.secrets.baseline"; commit "$R60"; g60
@@ -246,27 +301,36 @@ check "2 60 gate source never prints the hook's captured output (no echo/print o
 # --- 70 docs-claims-pinned (a stub python in a throwaway repo; one real run on this repo) -------
 G70="$G/70-docs-claims-pinned.sh"; R70="$T/r70"
 NAMED="tests/unit/test_adr_point_in_time_claims.py tests/unit/test_docs_map_skill_contract.py tests/unit/test_vision_completion_plan_prose.py"
-mk70() { newrepo "$R70"; mkdir -p "$R70/tests/unit" "$R70/src/chronos"; : > "$R70/src/chronos/__init__.py"; for f in tests/unit/test_limitations_a_contract.py tests/unit/test_limitations_b_contract.py $NAMED; do echo '' > "$R70/$f"; done; commit "$R70"; }
+mk70() { newrepo "$R70"; mkdir -p "$R70/tests/unit" "$R70/src/chronos"; : > "$R70/src/chronos/__init__.py"; for f in tests/unit/test_limitations_a_contract.py tests/unit/test_limitations_b_contract.py $NAMED; do printf 'def test_a():\n    pass\n\n\ndef test_b():\n    pass\n' > "$R70/$f"; done; commit "$R70"; }
 cat > "$T/bin/fakepy" <<STUB
 #!/usr/bin/python3
 # fake pytest inside the sandbox: runs -c (the identity assert) for real; otherwise checks its own argv
-# against \$C/argv and its containment, prints \$C/pysum, and writes a junit report per \$C/junit.
-import os, re, sys; sys.path.insert(0, "$T/bin"); import probe_lib
-if len(sys.argv) > 1 and sys.argv[1] == "-c":
+# against \$C/argv, its containment and the autoload-off env, prints \$C/pysum, and writes node reports to
+# \$GATE_IO/nodes.jsonl the way the trusted gates_nodes reporter does, per \$C/nodes (default: all pass).
+import json, os, re, sys; sys.path.insert(0, "$T/bin"); import probe_lib
+if len(sys.argv) > 1 and sys.argv[1] == "-c" and not sys.argv[2].startswith("/"):
     os.execv("/usr/bin/python3", ["python3", *sys.argv[1:]])
 C = "$C"; ctl = lambda k, d=None: open(os.path.join(C, k)).read() if os.path.exists(os.path.join(C, k)) else d
-found = probe_lib.leaks(lane="$T/r70")
-argv = re.sub(r"--junitxml=\S*/io/junit\.xml", "--junitxml=J", " ".join(sys.argv[1:]))
+found = probe_lib.leaks(lane="$T/r70", extra=("PYTEST_DISABLE_PLUGIN_AUTOLOAD",))
+if os.environ.get("PYTEST_DISABLE_PLUGIN_AUTOLOAD") != "1" or not os.environ.get("PYTHONPATH", "").endswith("/gates/lib"): found.append("autoload")
+argv = re.sub(r"-c \S*/trusted/pytest\.ini --rootdir \S*/snap ", "-c TRUSTED --rootdir SNAP ", " ".join(sys.argv[1:]))
 if ctl("argv") is not None and argv != ctl("argv"): found.append("argv")
 if found: print("LEAK " + " ".join(found)); sys.exit(8)
 print(ctl("pysum", "5 passed in 0.10s"))
-files = [a for a in sys.argv[1:] if a.endswith(".py")]; mode = ctl("junit", "pass")
-junit = next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--junitxml=")), None)
-if junit and mode != "none":
-    body = "".join(f'<testcase classname="{f[:-3].replace("/", ".")}" name="t">' + ("<skipped/>" if mode == "skipped" else "") + "</testcase>"
-                   for f in (files[:1] if mode == "onefile" else files))
-    n = len(files[:1] if mode == "onefile" else files)
-    open(junit, "w").write(f'<testsuites><testsuite tests="{n}" failures="0" errors="0" skipped="{n if mode == "skipped" else 0}">{body}</testsuite></testsuites>')
+files = [a for a in sys.argv[1:] if a.endswith(".py")]; mode = ctl("nodes", "pass")
+rows = {"pass": [(f"{f}::{t}", "passed") for f in files for t in ("test_a", "test_b")],
+        "skipped": [(f"{f}::{t}", "skipped") for f in files for t in ("test_a", "test_b")],
+        "onefile": [(f"{files[0]}::{t}", "passed") for t in ("test_a", "test_b")],
+        "missingfn": [(f"{f}::test_a", "passed") for f in files],
+        "foreign": [(f"{f}::{t}", "passed") for f in files for t in ("test_a", "test_b")] + [("tests/other/test_x.py::test_x", "passed")],
+        "none": []}.get(mode, [])
+if mode == "junitonly":  # Daybreak's forged zero-test JUnit: a report the gate no longer reads
+    open(os.path.join(os.environ["GATE_IO"], "junit.xml"), "w").write('<testsuites><testsuite tests="0" failures="0" errors="0" skipped="0"/></testsuites>')
+elif mode != "none":
+    with open(os.path.join(os.environ["GATE_IO"], "nodes.jsonl"), "w") as out:
+        for nodeid, outcome in rows:
+            for when in ("setup", "call", "teardown"):
+                out.write(json.dumps({"nodeid": nodeid, "when": when, "outcome": outcome if when == "call" else "passed"}) + "\\n")
 sys.exit(int(ctl("pyrc", "0")))
 STUB
 chmod +x "$T/bin/fakepy"
@@ -275,8 +339,8 @@ mk70; g70
 check "1 70 PASS: the named doc-contract set passes → one PASS line, exit 0" "passed docs-claims-pinned"
 DUMMY_CREDENTIAL=synthetic-probe-secret GH_TOKEN=synthetic-gh-token g70
 check "r2:1 P1-1 70 with credential variables in the runner's env, the sandboxed tests see no credential variable, runner HOME, planted file or network → PASS" "passed docs-claims-pinned"
-ctl argv "-m pytest -q -p no:cacheprovider --junitxml=J tests/unit/test_limitations_a_contract.py tests/unit/test_limitations_b_contract.py $NAMED"; g70; ctl argv
-check "1 70 adopts the existing tests: the sandboxed pytest ran over exactly the glob + the three named files, nothing skipped or deselected (the stub refuses any other argv)" "passed docs-claims-pinned"
+ctl argv "-m pytest -q -p no:cacheprovider -c TRUSTED --rootdir SNAP --noconftest -p gates_nodes tests/unit/test_limitations_a_contract.py tests/unit/test_limitations_b_contract.py $NAMED"; g70; ctl argv
+check "1 70 adopts the existing tests: the sandboxed pytest ran over exactly the glob + the three named files, with plugin autoload OFF, a trusted empty ini, --noconftest and the trusted reporter (the stub refuses any other argv/env)" "passed docs-claims-pinned"
 ctl pyrc 1; ctl pysum '1 failed, 4 passed in 0.10s'; g70
 check "1 70 FAIL: a failing doc-contract test → one FAIL line with the pytest summary, exit 1" "failed docs-claims-pinned 'pytest exited 1 \\(1 failed, 4 passed'"
 ctl pyrc 5; ctl pysum 'no tests ran in 0.01s'; g70; ctl pyrc; ctl pysum
@@ -285,13 +349,19 @@ ctl pysum '5 skipped in 0.10s'; g70; ctl pysum
 check "r2:1 P1-c 70 FAIL: Daybreak's all-skipped summary with exit 0 → FAIL" "failed docs-claims-pinned \"pytest reported '5 skipped in 0.10s'\""
 ctl pysum '4 passed, 1 deselected in 0.10s'; g70; ctl pysum
 check "r2:1 P1-c 70 FAIL: a deselected test in the summary → FAIL" "failed docs-claims-pinned \"pytest reported '4 passed, 1 deselected\""
-ctl junit skipped; g70; ctl junit
-check "r2:1 P1-c 70 FAIL: a clean summary but a junit report showing skipped tests → FAIL (the trusted gate reads the report)" "failed docs-claims-pinned 'the junit report shows'"
-ctl junit none; g70; ctl junit
-check "r2:1 P1-c 70 FAIL: no junit report written → FAIL" "failed docs-claims-pinned 'no usable junit report was written'"
-ctl junit onefile; g70; ctl junit
-check "r2:1 P1-c 70 FAIL: a selected file with no executed test (the others pass) → FAIL naming it" "failed docs-claims-pinned 'no test executed from tests/unit/test_limitations_b_contract.py'"
-check "r2:2 P1-c 70 the junit report lands in the gate's output dir, outside the tree (nothing new in the repo)" "[ -z \"\$(git -C $R70 status --porcelain --untracked-files=all)\" ]"
+ctl nodes skipped; g70; ctl nodes
+check "r3:1 P6 70 FAIL: a clean summary but node reports showing skipped outcomes → FAIL naming the node" "failed docs-claims-pinned 'tests/unit/test_limitations_a_contract.py::test_a reported skipped'"
+ctl nodes none; g70; ctl nodes
+check "r3:1 P6 70 FAIL: no node report written → FAIL" "failed docs-claims-pinned 'no usable node report was written by the trusted reporter'"
+ctl nodes junitonly; g70; ctl nodes
+check "r3:1 P6 70 FAIL: Daybreak's zero-test forged JUnit (exit 0, a clean summary) → FAIL, the gate no longer reads JUnit" "failed docs-claims-pinned 'no usable node report was written'"
+ctl nodes onefile; g70; ctl nodes
+check "r3:1 P6 70 FAIL: a selected file with no passing test (the others pass) → FAIL naming it" "failed docs-claims-pinned 'no passing test for tests/unit/test_limitations_b_contract.py::test_a'"
+ctl nodes missingfn; g70; ctl nodes
+check "r3:1 P6 70 FAIL: a report missing one test function the trusted AST expects (test_b) → FAIL naming it" "failed docs-claims-pinned 'no passing test for tests/unit/test_limitations_a_contract.py::test_b'"
+ctl nodes foreign; g70; ctl nodes
+check "r3:1 P6 70 FAIL: a report naming a test outside the selected files → FAIL" "failed docs-claims-pinned 'a report names tests/other/test_x.py::test_x'"
+check "r2:2 P1-c 70 the node report lands in the gate's output dir, outside the tree (nothing new in the repo)" "[ -z \"\$(git -C $R70 status --porcelain --untracked-files=all)\" ]"
 mk70; ln -s /etc/hostname "$R70/tests/unit/test_limitations_c_contract.py"; git -C "$R70" add tests; commit "$R70"; g70
 check "r2:2 P1-b 70 FAIL: a named contract file that is a tracked symlink → FAIL, pytest never runs" "failed docs-claims-pinned 'tests/unit/test_limitations_c_contract.py is not a tracked regular file inside tests/unit'"
 mk70; echo '' > "$R70/tests/unit/test_limitations_z_contract.py"; g70

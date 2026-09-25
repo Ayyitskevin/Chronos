@@ -9,7 +9,10 @@
 #   sandbox_identity <out> <python> fail unless `chronos.__file__` resolves under <snap>/src, in the sandbox
 # A missing bwrap or a sandbox that cannot start is an error for the caller to FAIL on — never a fallback.
 # GATES_SANDBOX_RO (runner-set, colon-separated absolute paths) adds read-only binds for a toolchain
-# outside /usr; the lane leaves it unset.
+# outside /usr; the lane leaves it unset. The GATE itself may set, per call: SANDBOX_RO (space-separated
+# trusted paths bound read-only, e.g. the tools venv, the wheel cache; a bound venv's toolchain is bound
+# too), SANDBOX_PYPATH (one trusted dir appended to PYTHONPATH) and SANDBOX_ENV (NAME=VALUE pairs, only
+# PIP_NO_INDEX, PIP_FIND_LINKS and PYTEST_DISABLE_PLUGIN_AUTOLOAD are accepted — anything else is an error, never passed).
 sandbox_snapshot() {
   local top sha; top="$(git rev-parse --show-toplevel)" && sha="$(git -C "$top" rev-parse HEAD)" || return 1
   git clone -q --no-checkout "$top" "$1/snap" 2>/dev/null && git -C "$1/snap" checkout -q --detach "$sha" 2>/dev/null || return 1
@@ -25,18 +28,28 @@ sandbox_run() {
     if [ -L "/$d" ]; then a+=(--symlink "$(readlink "/$d")" "/$d"); elif [ -d "/$d" ]; then a+=(--ro-bind "/$d" "/$d"); fi
   done
   a+=(--ro-bind "$snap" "$snap")
+  _sbx_toolchain() {  # bind a venv's base-interpreter tree when it lives outside /usr
+    local h; h="$(sed -n 's/^home = //p' "$1/pyvenv.cfg" 2>/dev/null)"
+    case "$h" in /usr/*|'') ;; *) a+=(--ro-bind "$(dirname "$(dirname "$h")")" "$(dirname "$(dirname "$h")")") ;; esac
+  }
   if [ -d "$top/.venv" ]; then
     venv="$(readlink -f "$top/.venv")"; mkdir -p "$snap/.venv" 2>/dev/null
     a+=(--ro-bind "$venv" "$venv" --ro-bind "$venv" "$snap/.venv")  # its scripts' shebangs name the real path
-    home="$(sed -n 's/^home = //p' "$venv/pyvenv.cfg" 2>/dev/null)"
-    case "$home" in /usr/*|'') ;; *) a+=(--ro-bind "$(dirname "$(dirname "$home")")" "$(dirname "$(dirname "$home")")") ;; esac
+    _sbx_toolchain "$venv"
   fi
+  for p in ${SANDBOX_RO:-}; do a+=(--ro-bind "$p" "$p"); [ -f "$p/pyvenv.cfg" ] && _sbx_toolchain "$p"; done
+  local pypath="$snap/src" kv; [ -n "${SANDBOX_PYPATH:-}" ] && pypath="$pypath:$SANDBOX_PYPATH"
+  local -a env=()
+  for kv in ${SANDBOX_ENV:-}; do
+    case "${kv%%=*}" in PIP_NO_INDEX|PIP_FIND_LINKS|PYTEST_DISABLE_PLUGIN_AUTOLOAD) env+=(--setenv "${kv%%=*}" "${kv#*=}") ;;
+      *) echo "SANDBOX_ENV may not set ${kv%%=*}" >&2; return 125 ;; esac
+  done
   local IFS=:; for p in ${GATES_SANDBOX_RO:-}; do [ -n "$p" ] && a+=(--ro-bind "$p" "$p"); done; unset IFS
   for d in ${SANDBOX_WRITABLE:-}; do mkdir -p "$out/w/$d" "$snap/$d" 2>/dev/null; a+=(--bind "$out/w/$d" "$snap/$d"); done
   a+=(--bind "$out/io" "$out/io" --chdir "$snap"
     --setenv PATH /usr/local/bin:/usr/bin:/bin --setenv HOME /tmp --setenv LANG C.UTF-8 --setenv BROKER_MODE demo
     --setenv ALLOW_ORDER_TRANSMIT false --setenv ALLOW_LIVE_TRADING false --setenv PYTHONDONTWRITEBYTECODE 1
-    --setenv PYTHONPATH "$snap/src" --setenv GATE_IO "$out/io")
+    --setenv PYTHONPATH "$pypath" --setenv GATE_IO "$out/io" "${env[@]}")
   bwrap "${a[@]}" true 2>/dev/null || { echo "the bwrap sandbox could not start" >&2; return 125; }
   bwrap "${a[@]}" "$@"
 }
