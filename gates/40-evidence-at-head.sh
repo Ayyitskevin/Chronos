@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # 40-evidence-at-head.sh — test evidence must record the sha it ran on, and it must equal PR_HEAD_SHA.
-# Runs the existing `make gates` (adopted, not rewritten) — but inside a read-only exact-head snapshot
-# (a local clone at PR_HEAD_SHA in a 0700 scratch dir; only the gitignored outputs dist/ and the tool
-# caches are writable), under `env -i` with a fixed allowlist and a throwaway HOME. Afterwards the
+# Runs the existing `make gates` (adopted, not rewritten) inside the trusted bwrap sandbox
+# (gates/lib/sandbox.sh): an immutable exact-head snapshot, no network, no runner home, and only the
+# gitignored outputs dist/ + the tool caches writable (backed by the 0700 scratch dir), after asserting
+# `chronos` imports from the snapshot. The sandbox denies the network, and `make gates` needs it for
+# pip-audit and the release gate's pip installs — so today this gate FAILs closed, naming that, until
+# the owner rules (GATES-1r2 read-back point 5); it never falls back to an unsandboxed run. Afterwards the
 # trusted gate proves every tracked byte of the snapshot still equals PR_HEAD_SHA's blobs (the lane's
 # object store) and the lane is untouched, then writes .gates/40-evidence-at-head.json (0700 dir, 0600
 # file, never through a link) = {sha, exit, pytest counts, tree_verified}. PASS iff that receipt shows
@@ -19,20 +22,20 @@ head="$(git rev-parse HEAD)" || fail "could not read HEAD"
 [ -z "$(git status --porcelain --untracked-files=no)" ] || fail "tracked files are modified, so HEAD does not name the tested bytes; commit or stash, then re-run"
 { [ -L .gates ] || { [ -e .gates ] && [ ! -d .gates ]; }; } && fail ".gates is a symlink or not a directory; remove it, then re-run"
 mkdir -p .gates && chmod 0700 .gates && [ "$(cd .gates && pwd -P)" = "$(pwd -P)/.gates" ] || fail "could not create a contained 0700 .gates/"
+. "$(dirname "$0")/lib/sandbox.sh" || fail "could not load the trusted sandbox launcher"
 mk="$(command -v make)" || fail "make is not on PATH"
-work="$(mktemp -d)" || fail "could not create a scratch dir"; trap 'chmod -R u+w "$work" 2>/dev/null; rm -rf "$work"' EXIT
-snap="$work/snap"; mkdir "$work/home" || fail "could not create a temp HOME"
-git clone -q --no-checkout "$top" "$snap" 2>/dev/null && git -C "$snap" checkout -q --detach "$PR_HEAD_SHA" 2>/dev/null \
-  || fail "could not build the exact-head snapshot at $PR_HEAD_SHA"
-if [ -d .venv ] && [ ! -L .venv ]; then  # the lane's venv, seen from the snapshot (the editable install is overridden by PYTHONPATH)
-  mkdir "$snap/.venv" && cp .venv/pyvenv.cfg "$snap/.venv/" || fail "could not shim .venv into the snapshot"
-  for d in bin lib lib64 include; do [ -e ".venv/$d" ] && ln -s "$top/.venv/$d" "$snap/.venv/$d"; done
-fi
-mkdir -p "$snap/dist" "$snap/.ruff_cache" "$snap/.mypy_cache" "$snap/.pytest_cache" || fail "could not create the snapshot's output dirs"
-find "$snap" \( -path "$snap/.git" -o -path "$snap/.venv" -o -path "$snap/dist" -o -path "$snap/.*_cache" \) -prune -o ! -type l -exec chmod a-w {} + 2>/dev/null
-(cd "$snap" && env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$work/home" LANG=C.UTF-8 BROKER_MODE=demo ALLOW_ORDER_TRANSMIT=false \
-  ALLOW_LIVE_TRADING=false PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$snap/src" "$mk" gates) > "$work/make.log" 2>&1
+py="${CHRONOS_PY:-.venv/bin/python}"
+work="$(mktemp -d)" || fail "could not create a scratch dir"; trap 'rm -rf "$work"' EXIT
+snap="$work/snap"
+sandbox_snapshot "$work" || fail "could not build the exact-head snapshot at $PR_HEAD_SHA"
+export SANDBOX_WRITABLE="dist .ruff_cache .mypy_cache .pytest_cache"
+sandbox_run "$work" true 2>/dev/null; [ "$?" -ne 125 ] || fail "the bwrap sandbox is unavailable; candidate code never runs unsandboxed — install/enable bwrap"
+sandbox_identity "$work" "$py" || fail "chronos does not import from the exact-head snapshot (an editable install or PYTHONPATH points elsewhere); refusing to judge"
+sandbox_run "$work" "$mk" gates > "$work/make.log" 2>&1
 code=$?
+if [ "$code" -ne 0 ] && grep -qE 'Temporary failure in name resolution|Network is unreachable|NameResolutionError|NewConnectionError' "$work/make.log"; then
+  fail "make gates needs outbound network (pip-audit's vulnerability service, the release gate's pip installs) and the sandbox denies it; FAILing closed until the owner rules on gate 40's network (GATES-1r2)"
+fi
 out="$(python3 - "$top" "$snap" "$PR_HEAD_SHA" "$code" "$work/make.log" <<'PY' 2>&1
 import json, os, re, stat, subprocess, sys
 top, snap, sha, code, log = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4]), sys.argv[5]

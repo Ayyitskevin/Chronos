@@ -2,9 +2,9 @@
 # 70-docs-claims-pinned.sh — the doc-pinning contract tests pass (docs say only what the source proves).
 # Runs the EXISTING tests by named selection (none rewritten, skipped or deselected):
 # tests/unit/test_limitations_*_contract.py plus the three named files below (listed in gates/README.md).
-# Each must be a TRACKED regular file inside tests/unit. The tests are candidate code: they run under
-# `env -i` with a fixed allowlist and a throwaway HOME, writing only a junit report into a 0700 scratch
-# dir. The trusted gate reads that report: PASS needs tests > 0, failures == errors == skipped == 0,
+# Each must be a TRACKED regular file inside tests/unit. The tests are candidate code: they run in the
+# trusted bwrap sandbox (gates/lib/sandbox.sh) over an exact-head snapshot, after asserting `chronos`
+# imports from it, writing only a junit report into the 0700 output dir. The trusted gate reads that report: PASS needs tests > 0, failures == errors == skipped == 0,
 # every selected file executed, and no deselected/skipped/xfail in the summary. CHRONOS_PY overrides the python.
 set -uo pipefail
 g=docs-claims-pinned
@@ -25,15 +25,19 @@ for f in "$@"; do
   git ls-files -s -- "$f" | grep -qE '^100(644|755) ' && [ ! -L "$f" ] && [ "$(cd "$(dirname "$f")" && pwd -P)" = "$unit" ] \
     || fail "$f is not a tracked regular file inside tests/unit; refusing to run it"
 done
-work="$(mktemp -d)" || fail "could not create a scratch dir"; trap 'rm -rf "$work"' EXIT; mkdir "$work/home"
-out="$(env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$work/home" LANG=C.UTF-8 BROKER_MODE=demo ALLOW_ORDER_TRANSMIT=false ALLOW_LIVE_TRADING=false \
-  PYTHONDONTWRITEBYTECODE=1 "$py" -m pytest -q -p no:cacheprovider --junitxml="$work/junit.xml" "$@" 2>&1)"
+. "$(dirname "$0")/lib/sandbox.sh" || fail "could not load the trusted sandbox launcher"
+[ -z "$(git status --porcelain --untracked-files=no)" ] || fail "tracked files are modified, so HEAD's snapshot is not the tree you see; commit or stash, then re-run"
+work="$(mktemp -d)" || fail "could not create a scratch dir"; trap 'rm -rf "$work"' EXIT
+sandbox_snapshot "$work" || fail "could not build the exact-head snapshot"
+sandbox_run "$work" true 2>/dev/null; [ "$?" -ne 125 ] || fail "the bwrap sandbox is unavailable; candidate code never runs unsandboxed — install/enable bwrap"
+sandbox_identity "$work" "$py" || fail "chronos does not import from the exact-head snapshot (an editable install or PYTHONPATH points elsewhere); refusing to judge"
+out="$(sandbox_run "$work" "$py" -m pytest -q -p no:cacheprovider --junitxml="$work/io/junit.xml" "$@" 2>&1)"
 code=$?
 summary="$(grep -E ' in [0-9.]+s' <<< "$out" | tail -n 1 | sed -E 's/^=+ //; s/ =+$//' | tr -cd '[:print:]' | cut -c1-120)"
 [ "$code" -ne 5 ] || fail "pytest collected no tests from the $# named files; the doc claims are unpinned"
 [ "$code" -eq 0 ] || fail "pytest exited $code ($summary); run '$py -m pytest -q $*' and fix the doc or the claim"
 ! grep -qE '[0-9]+ (deselected|skipped|xfailed|xpassed)' <<< "$summary" || fail "pytest reported '$summary'; every doc-contract test must run and pass (none skipped or deselected)"
-verdict="$(python3 - "$work/junit.xml" "$@" <<'PY' 2>&1
+verdict="$(python3 - "$work/io/junit.xml" "$@" <<'PY' 2>&1
 import os, sys, xml.etree.ElementTree as ET
 path, files = sys.argv[1], sys.argv[2:]
 if not os.path.isfile(path) or os.path.islink(path) or os.path.getsize(path) > 16 * 1024 * 1024:
