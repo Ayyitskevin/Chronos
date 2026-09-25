@@ -13,6 +13,20 @@ cd "$top" || fail "could not enter $top"
 py="${CHRONOS_PY:-.venv/bin/python}"
 [ -x "$py" ] || fail "no python at $py; create the venv (make's PY) or set CHRONOS_PY"
 [ -f .secrets.baseline ] || fail ".secrets.baseline is missing"
+inputs() { python3 - <<'PY'
+import os, stat, subprocess
+out = subprocess.run(["git", "ls-files", "-s", "-z"], capture_output=True, check=True).stdout
+modes = {r.split(b"\t", 1)[1].decode(): r.split(b" ", 1)[0].decode() for r in out.split(b"\0") if r}
+for need in (".secrets.baseline", "scripts/verify_release_security.py"):  # the scan's own inputs: tracked, regular, inside
+    if modes.get(need) not in ("100644", "100755") or os.path.commonpath([os.path.realpath("."), os.path.realpath(need)]) != os.path.realpath("."):
+        print(f"{need} is not a tracked regular file inside the tree"); raise SystemExit
+for path, mode in modes.items():  # every scanner input: no link or special file is ever followed
+    if mode not in ("100644", "100755") or (os.path.lexists(path) and not stat.S_ISREG(os.lstat(path).st_mode)):
+        print(f"{path} is a symlink or non-regular file"); raise SystemExit
+PY
+}
+bad="$(inputs 2>&1)" || fail "could not inspect the tracked tree ($(tail -n 1 <<< "$bad"))"
+[ -z "$bad" ] || fail "$bad; refusing to scan through it — replace it with a regular tracked file"
 home="$(mktemp -d)" || fail "could not create a temp HOME"; trap 'rm -rf "$home"' EXIT
 scan() { env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$home" LANG=C.UTF-8 BROKER_MODE=demo ALLOW_ORDER_TRANSMIT=false ALLOW_LIVE_TRADING=false PYTHONDONTWRITEBYTECODE=1 "$py" - <<'PY'
 import importlib.util, json, shutil, subprocess, sys, tempfile

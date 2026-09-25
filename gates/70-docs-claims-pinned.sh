@@ -2,9 +2,10 @@
 # 70-docs-claims-pinned.sh — the doc-pinning contract tests pass (docs say only what the source proves).
 # Runs the EXISTING tests by named selection (none rewritten, skipped or deselected):
 # tests/unit/test_limitations_*_contract.py plus the three named files below (listed in gates/README.md).
-# A missing named file, an empty glob, or pytest collecting nothing is a FAIL, never green.
-# The tests are candidate code: they run under `env -i` with a fixed allowlist and a throwaway HOME.
-# CHRONOS_PY overrides the venv python (the Makefile's PY).
+# Each must be a TRACKED regular file inside tests/unit. The tests are candidate code: they run under
+# `env -i` with a fixed allowlist and a throwaway HOME, writing only a junit report into a 0700 scratch
+# dir. The trusted gate reads that report: PASS needs tests > 0, failures == errors == skipped == 0,
+# every selected file executed, and no deselected/skipped/xfail in the summary. CHRONOS_PY overrides the python.
 set -uo pipefail
 g=docs-claims-pinned
 fail() { echo "FAIL: $g — $1" >&2; exit 1; }
@@ -19,10 +20,33 @@ for f in tests/unit/test_adr_point_in_time_claims.py tests/unit/test_docs_map_sk
   [ -f "$f" ] || fail "$f is missing; restore it or update the named set here and in gates/README.md"
   set -- "$@" "$f"
 done
-home="$(mktemp -d)" || fail "could not create a temp HOME"; trap 'rm -rf "$home"' EXIT
-out="$(env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$home" LANG=C.UTF-8 BROKER_MODE=demo ALLOW_ORDER_TRANSMIT=false ALLOW_LIVE_TRADING=false PYTHONDONTWRITEBYTECODE=1 "$py" -m pytest -q "$@" 2>&1)"
+unit="$(cd tests/unit && pwd -P)" || fail "tests/unit is not a directory"
+for f in "$@"; do
+  git ls-files -s -- "$f" | grep -qE '^100(644|755) ' && [ ! -L "$f" ] && [ "$(cd "$(dirname "$f")" && pwd -P)" = "$unit" ] \
+    || fail "$f is not a tracked regular file inside tests/unit; refusing to run it"
+done
+work="$(mktemp -d)" || fail "could not create a scratch dir"; trap 'rm -rf "$work"' EXIT; mkdir "$work/home"
+out="$(env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$work/home" LANG=C.UTF-8 BROKER_MODE=demo ALLOW_ORDER_TRANSMIT=false ALLOW_LIVE_TRADING=false \
+  PYTHONDONTWRITEBYTECODE=1 "$py" -m pytest -q -p no:cacheprovider --junitxml="$work/junit.xml" "$@" 2>&1)"
 code=$?
-summary="$(grep -E ' in [0-9.]+s' <<< "$out" | tail -n 1 | sed -E 's/^=+ //; s/ =+$//')"
+summary="$(grep -E ' in [0-9.]+s' <<< "$out" | tail -n 1 | sed -E 's/^=+ //; s/ =+$//' | tr -cd '[:print:]' | cut -c1-120)"
 [ "$code" -ne 5 ] || fail "pytest collected no tests from the $# named files; the doc claims are unpinned"
 [ "$code" -eq 0 ] || fail "pytest exited $code ($summary); run '$py -m pytest -q $*' and fix the doc or the claim"
-echo "PASS: $g — $# doc-contract files: $summary"
+! grep -qE '[0-9]+ (deselected|skipped|xfailed|xpassed)' <<< "$summary" || fail "pytest reported '$summary'; every doc-contract test must run and pass (none skipped or deselected)"
+verdict="$(python3 - "$work/junit.xml" "$@" <<'PY' 2>&1
+import os, sys, xml.etree.ElementTree as ET
+path, files = sys.argv[1], sys.argv[2:]
+if not os.path.isfile(path) or os.path.islink(path) or os.path.getsize(path) > 16 * 1024 * 1024:
+    sys.exit("no usable junit report was written")
+suites = [ET.parse(path).getroot()]; suites = suites[0].iter("testsuite") if suites[0].tag == "testsuites" else suites
+tot = {k: sum(int(s.get(k, 0)) for s in suites) for k in ("tests", "failures", "errors", "skipped")} if (suites := list(suites)) else {}
+if not tot or tot["tests"] <= 0 or tot["failures"] or tot["errors"] or tot["skipped"]:
+    sys.exit(f"the junit report shows {tot or 'no testsuite'}; every selected test must run and pass")
+ran = {c.get("classname", "") for s in suites for c in s.iter("testcase") if not any(k.tag in ("skipped", "failure", "error") for k in c)}
+missing = [f for f in files if not any(n == f[:-3].replace("/", ".") or n.startswith(f[:-3].replace("/", ".") + ".") for n in ran)]
+if missing:
+    sys.exit(f"no test executed from {missing[0]}" + (f" (+{len(missing) - 1} more)" if len(missing) > 1 else ""))
+print(tot["tests"])
+PY
+)" || fail "$(tail -n 1 <<< "$verdict"); fix the doc-contract tests, then re-run"
+echo "PASS: $g — $# doc-contract files: $verdict tests executed and passed (junit); $summary"
