@@ -66,13 +66,30 @@ The gates are executable acceptance authority: whoever runs them holds repositor
   `make lint format-check type type-worker test` each, `make release-gate` with `PIP_NO_INDEX=1` and the
   wheel cache bound READ-ONLY, and the security gate's scans minus pip-audit. The receipt binds
   PR_HEAD_SHA, each lock's sha256, the cache digest, the audit, and every target's exit.
+- **Target definitions come from the trusted base** (`GATES_TRUSTED_REF`, default `origin/main`, of
+  `GATES_TRUSTED_REPO`, default the trusted gates dir's repository — runner knobs the lane leaves unset):
+  gate 40 reads `Makefile`, `scripts/verify_release_security.py`, `scripts/verify_release_artifact.py`
+  and `scripts/verify_pip_bootstrap.py` from it and binds them read-only over the snapshot's copies,
+  inside the sandbox only (the Makefile for every target, the scripts for the release/security steps;
+  never for the `test` run, so the candidate's tests test the candidate's scripts). A candidate's no-op
+  Makefile or gutted security script never runs. The receipt names the trusted base commit.
+- **Sandbox parity with the host (no network, no home):** `data/` is writable scratch for gate 40's
+  targets (backed by the output dir, never the lane's); the snapshot carries the lane's `origin/main`
+  ref (a local fetch); the lane venv's editable `.pth` is overlaid, in the sandbox only, with one naming
+  `<snapshot>/src`, so `python -I` imports the snapshot (and the identity assert checks `-I` too); a
+  `GATES_SANDBOX_RO` entry that is a FILE is bound at its real path with its directory on PATH. The lane
+  runner declares exactly the binaries the suite needs: `~/.local/bin/age`, `~/.local/bin/age-keygen`,
+  `~/.nvm/versions/node/v24.16.0/bin/node` — only those files are visible under `/home`. Without them the
+  age/node tests skip (gate 40 still judges by its rules; the receipt's counts show the skips).
 - **The trusted tools venv** (`gates/lib/tools-venv.sh`): built by the trusted driver from
   `origin/main:requirements-dev.lock` of the repository the TRUSTED gates dir belongs to — never the
   candidate's lock, never the lane venv — into `${XDG_CACHE_HOME:-~/.cache}/chronos-gates/tools-<lock
   digest>` (0700), binary-only and hash-pinned; it provides pip, pip-audit and detect-secrets.
 - **Gate 60 runs no candidate code:** the trusted detect-secrets scans the snapshot as data (in the
-  sandbox), after the candidate `.secrets.baseline` is checked to name only detect-secrets' built-in
-  plugins and filters; the scanner's stdout goes straight to the trusted judge.
+  sandbox) with the trusted base's scanner configuration (`plugins_used`, `filters_used` from its
+  `.secrets.baseline`); the candidate baseline contributes only its reviewed `results`, and its own
+  configuration must equal the trusted one (an emptied or altered plugin set FAILs). The scanner's
+  stdout goes straight to the trusted judge.
 - **Gate 70 strips candidate pytest authority:** `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`, a trusted empty ini
   (`-c`), `--noconftest`, `-p no:cacheprovider`, and the trusted reporter `gates/lib/gates_nodes.py`; the
   judge requires every test function a trusted AST parse expects to have a passing report. Two tests are

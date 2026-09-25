@@ -66,6 +66,15 @@ for kind, attempt in (("naive", lambda: open("a", "a").write("changed")),       
     try: attempt(); found.append("write-" + kind)
     except (OSError, subprocess.CalledProcessError): pass
 if os.path.exists("$T/r40/a"): found.append("lane-visible")                                   # the lane's files are not visible at all
+if "TRUSTED-MAKEFILE" not in open("Makefile").read(): found.append("untrusted-makefile")        # main's Makefile, never the candidate's
+if target == ["release-gate"] and any("TRUSTED" not in open(f).read() for f in ("scripts/verify_release_artifact.py", "scripts/verify_pip_bootstrap.py")):
+    found.append("untrusted-release-scripts")
+if target == ["test"]:
+    try: open("data/probe.db", "w").write("ok")                                              # data/: writable scratch
+    except OSError: found.append("no-data")
+    import shutil
+    if shutil.which("age") != "$T/tooldir/age" or os.path.exists("$T/tooldir/sibling.txt"): found.append("binary-parity")
+    if subprocess.run(["git", "rev-parse", "-q", "--verify", "refs/remotes/origin/main"], capture_output=True).returncode: found.append("no-origin-main")
 try: open("dist/probe", "w").write("ok")                                                     # the declared outputs ARE writable
 except OSError: found.append("no-dist")
 if os.path.exists(".venv/pyvenv.cfg") and os.access(".venv", os.W_OK): found.append("venv-writable")
@@ -109,20 +118,40 @@ def verify_git_history_secrets(root, baseline):
     found = probe_lib.leaks(lane="$T/r40")
     if found or os.path.exists("$C/histfail"): raise SecurityGateError("LEAK " + " ".join(found))
 FAKE
-printf '.venv/\n.gates/\n' > "$R40/.gitignore"   # as in the repo: the gate's own .gates/ and the venv are ignored
+printf '.venv/\n.gates/\ndata/\n' > "$R40/.gitignore"   # as in the repo: .gates/, the venv and data/ are ignored
+printf '# TRUSTED-MAKEFILE (the trusted base)\n' > "$R40/Makefile"
+printf '# TRUSTED release script\n' > "$R40/scripts/verify_release_artifact.py"; printf '# TRUSTED pip bootstrap\n' > "$R40/scripts/verify_pip_bootstrap.py"
+commit "$R40"; git -C "$R40" branch -q trusted-main; git -C "$R40" update-ref refs/remotes/origin/main trusted-main
+# the CANDIDATE on top: Daybreak's no-op Makefile and a gutted security script (its history scan checks nothing)
+printf 'lint format-check type type-worker test release-gate:\n\t@echo "12 passed in 0.1s"\n' > "$R40/Makefile"
+printf '# CANDIDATE\n' > "$R40/scripts/verify_release_artifact.py"; printf '# CANDIDATE\n' > "$R40/scripts/verify_pip_bootstrap.py"
+cat > "$R40/scripts/verify_release_security.py" <<'GUT'
+class SecurityGateError(RuntimeError): pass
+class _Cmd:
+    def __init__(self, name, argv): self.name, self.argv = name, argv
+def _require_exact_tool_versions(getter): pass
+def _tracked_files(root): return ()
+def build_scan_commands(*, python, baseline, tracked_files): return ()
+def verify_git_history_secrets(root, baseline): pass
+GUT
 commit "$R40"
+mkdir -p "$T/tooldir"; printf '#!/bin/sh\necho age\n' > "$T/tooldir/age"; chmod +x "$T/tooldir/age"; echo secret > "$T/tooldir/sibling.txt"
 H=$(git -C "$R40" rev-parse HEAD); RCPT="$R40/.gates/40-evidence-at-head.json"
 field() { python3 -c "import json,sys; r=json.load(open(sys.argv[1])); print($1)" "$RCPT"; }
-g40() { (cd "$R40" && PATH="$T/bin:$PATH" CHRONOS_PY=/usr/bin/python3 GATES_TOOLS_VENV="$T/tools" XDG_CACHE_HOME="$T/xdg" PR_HEAD_SHA="${1:-$H}" run bash "$G40"); }
+g40() { (cd "$R40" && PATH="$T/bin:$PATH" CHRONOS_PY=/usr/bin/python3 GATES_TOOLS_VENV="$T/tools" XDG_CACHE_HOME="$T/xdg" \
+  GATES_TRUSTED_REPO="$R40" GATES_TRUSTED_REF=trusted-main GATES_SANDBOX_RO="$GATES_SANDBOX_RO:$T/tooldir/age" PR_HEAD_SHA="${1:-$H}" run bash "$G40"); }
 g40
 check "1 40 PASS: make gates exit 0 at PR_HEAD_SHA == HEAD → one PASS line, exit 0" "passed evidence-at-head"
+check "r4:2 P3 40 the PASS ran the TRUSTED base's Makefile (the candidate's no-op Makefile never ran: the stub refuses any Makefile without the trusted marker) and the trusted release scripts" "passed evidence-at-head && grep -q echo $R40/Makefile"
+check "r4:1 PB 40 that PASS also means: data/ was writable scratch inside, the lane's data/ untouched; the declared binary (age) was on PATH while its sibling file stayed invisible; origin/main resolved in the snapshot" "passed evidence-at-head && [ ! -e $R40/data ]"
+check "r4:2 P3 40 the receipt names the trusted base it took the definitions from" "[ \"\$(field \"r['trusted_base']\")\" = \"\$(git -C $R40 rev-parse trusted-main)\" ]"
 check "1 40 receipt on disk records {sha, exit, pytest counts} of that run" "[ \"\$(field \"r['sha'], r['exit'], r['pytest']['passed'], r['pytest']['failed'], r['pytest']['skipped']\")\" = \"$H 0 12 0 1\" ]"
 check "1 40 PASS line names the sha and the counts" "grep -qF \"$H (12 passed, 0 failed, 1 skipped)\" $T/out"
-check "r2:1 P1-1 40 that PASS means the stub ran as exactly 'make gates' and saw no leak: exactly the env allowlist, no runner HOME/credential dirs, no planted host file, no network, not the lane's cwd; every write to the snapshot or its git was refused, the lane's files were not visible; dist/ writable" "passed evidence-at-head && [ \"\$(cat $R40/a)\" = a ] && [ \"\$(git -C $R40 rev-list --count HEAD)\" = 1 ]"
-(cd "$R40" && PATH="$T/bin:$PATH" CHRONOS_PY=/usr/bin/python3 GATES_TOOLS_VENV="$T/tools" XDG_CACHE_HOME="$T/xdg" DUMMY_CREDENTIAL=synthetic-probe-secret GH_TOKEN=synthetic-gh-token PR_HEAD_SHA=$H run bash "$G40")
+check "r2:1 P1-1 40 that PASS means the stub ran as exactly 'make gates' and saw no leak: exactly the env allowlist, no runner HOME/credential dirs, no planted host file, no network, not the lane's cwd; every write to the snapshot or its git was refused, the lane's files were not visible; dist/ writable" "passed evidence-at-head && [ \"\$(cat $R40/a)\" = a ] && [ \"\$(git -C $R40 rev-list --count HEAD)\" = 2 ]"
+DUMMY_CREDENTIAL=synthetic-probe-secret GH_TOKEN=synthetic-gh-token g40
 check "r2:1 P1-1 40 Daybreak's DUMMY_CREDENTIAL probe: with credential variables in the runner's env, make gates still sees none → PASS" "passed evidence-at-head"
 (cd "$R40" && DUMMY_CREDENTIAL=x "$T/bin/make" test > "$T/host.out" 2>&1)
-check "r2:1 P1-1 positive control: the same stub run OUTSIDE the sandbox reports every leak (env creds file net cwd write-naive write-hostile write-commit lane-visible; and dist/ is absent there)" "grep -qx 'LEAK env env creds file net cwd write-naive write-hostile write-commit lane-visible no-dist' $T/host.out"
+check "r2:1 P1-1 positive control: the same stub run OUTSIDE the sandbox reports every leak (env creds file net cwd write-naive write-hostile write-commit lane-visible; the candidate's no-op Makefile; no data/ or dist/ there; the host's own age)" "grep -qx 'LEAK env env creds file net cwd write-naive write-hostile write-commit lane-visible untrusted-makefile no-data binary-parity no-dist' $T/host.out"
 git -C "$R40" reset -q --hard "$H"; git -C "$R40" clean -qfd -e .gates
 ctl rc 2; ctl summary '3 failed, 9 passed in 1.00s'; g40; ctl rc; ctl summary
 check "1 40 FAIL: make gates exit 2 → one FAIL line naming the exit, exit 1" "failed evidence-at-head 'make gates exited 2 at $H'"
@@ -156,7 +185,7 @@ check "r3:1 40 FAIL: the trusted pip-audit leaves no report (e.g. its advisory s
 ctl rctarget type; ctl rc 1; g40; ctl rc; ctl rctarget
 check "r3:2 40 FAIL: one failing target is reported by name, and the others still ran (recorded)" "failed evidence-at-head 'make gates exited 1 at $H \\(target type\\)' && [ \"\$(field \"len(r['targets'])\")\" = 7 ]"
 ctl histfail 1; g40; ctl histfail
-check "r3:2 40 FAIL: the security gate's offline scans (history scan) failing → FAIL naming security-offline" "failed evidence-at-head '.*target security-offline'"
+check "r4:2 P3 40 FAIL: with the candidate's GUTTED security script in the tree, the TRUSTED base's script still runs, so a failing history scan still FAILs (Daybreak's probe)" "failed evidence-at-head '.*target security-offline'"
 echo x > "$R40/untracked.txt"; g40; rm -f "$R40/untracked.txt"
 check "r3:2 40 FAIL: an untracked file (make security-gate's precheck, done by the trusted gate) → FAIL" "failed evidence-at-head 'untracked files in the tree'"
 mkdir -p "$R40/.venv/bin"; echo 'home = /usr/bin' > "$R40/.venv/pyvenv.cfg"; g40
@@ -286,9 +315,11 @@ mk60; printf 'import json, os\nopen(os.path.join(os.environ.get("GATE_IO", "."),
 printf 'x = 1\naws_key = "%s"\n' "$FAKE" > "$R60/leak.py"; commit "$R60"; g60
 check "r3:1 P5 60 FAIL: Daybreak's forged-result probe — the candidate release script is never executed, so a planted tracked secret still FAILs" "failed secrets-baseline '1 new finding\\(s\\) vs .secrets.baseline: leak.py:2 AWS Access Key'"
 mk60 "d['plugins_used'].append({'name': 'EvilDetector', 'path': 'file://./evil.py'})"; g60
-check "r3:1 P5 60 FAIL: a baseline naming a non-built-in plugin (a path to candidate code) is refused before the trusted scanner runs" "failed secrets-baseline '.secrets.baseline names a non-built-in plugin or filter'"
+check "r4:1 P6 60 FAIL: a baseline whose plugins_used differs from the trusted base's (an added path plugin) → FAIL before the scanner runs" "failed secrets-baseline \".secrets.baseline's plugins_used differs from the trusted base's\""
 mk60 "d['filters_used'].append({'path': 'file://./evil.py::f'})"; g60
-check "r3:1 P5 60 FAIL: a baseline naming a non-detect_secrets filter is refused" "failed secrets-baseline '.secrets.baseline names a non-built-in plugin or filter'"
+check "r4:1 P6 60 FAIL: a baseline whose filters_used differs from the trusted base's → FAIL" "failed secrets-baseline \".secrets.baseline's filters_used differs from the trusted base's\""
+mk60 "d['plugins_used'] = []"; printf 'x = 1\naws_key = "%s"\n' "$FAKE" > "$R60/leak.py"; commit "$R60"; g60
+check "r4:1 P6 60 FAIL: Daybreak's empty-plugins probe (a baseline with no plugins + a planted AWS-shaped secret) → FAIL, never a clean scan" "failed secrets-baseline \".secrets.baseline's plugins_used differs from the trusted base's\""
 mk60; ln -s clean.py "$R60/link.py"; commit "$R60"; g60
 check "r2:2 P1-b 60 FAIL: a tracked symlink among the scanner inputs → FAIL before the scan" "failed secrets-baseline 'link.py is a symlink or non-regular file'"
 mk60; mv "$R60/.secrets.baseline" "$T/outside.baseline"; ln -s "$T/outside.baseline" "$R60/.secrets.baseline"; commit "$R60"; g60

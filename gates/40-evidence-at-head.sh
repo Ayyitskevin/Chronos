@@ -7,7 +7,9 @@
 #      the trusted tools venv's pip, and run the trusted pip-audit on requirements-runtime.lock;
 #   B. in the bwrap sandbox (gates/lib/sandbox.sh: no network, immutable exact-head snapshot, chronos
 #      identity asserted) — `make lint format-check type type-worker test` each, `make release-gate` with
-#      PIP_NO_INDEX + the read-only wheel cache, and the security gate's scans minus pip-audit.
+#      PIP_NO_INDEX + the read-only wheel cache, and the security gate's scans minus pip-audit. The target
+#      DEFINITIONS (Makefile, the release/security scripts) are the TRUSTED base's, overlaid read-only on the
+#      candidate snapshot inside the sandbox; the candidate's copies never run. `data/` is writable scratch.
 # Afterwards the trusted gate compares every tracked snapshot file with PR_HEAD_SHA's blobs (the lane's
 # object store) and checks the lane is untouched, then writes .gates/40-evidence-at-head.json (0700 dir, 0600
 # file, never through a link) = {sha, exit, per-target exits, pytest counts, lock + cache digests, audit}.
@@ -32,7 +34,17 @@ tools="$(tools_venv 2>&1)" || fail "$(tail -n 1 <<< "$tools")"
 work="$(mktemp -d)" || fail "could not create a scratch dir"; trap 'rm -rf "$work"' EXIT
 snap="$work/snap"
 sandbox_snapshot "$work" || fail "could not build the exact-head snapshot at $PR_HEAD_SHA"
-export SANDBOX_WRITABLE="dist .ruff_cache .mypy_cache .pytest_cache"
+export SANDBOX_WRITABLE="dist .ruff_cache .mypy_cache .pytest_cache data"  # data/: untracked runtime state the tests write
+# The target DEFINITIONS come from the trusted base, never the candidate: its Makefile and the three scripts
+# the release/security targets run, overlaid read-only on the snapshot inside the sandbox only.
+mkdir "$work/trusted" || fail "could not create the trusted dir"
+for f in Makefile scripts/verify_release_security.py scripts/verify_release_artifact.py scripts/verify_pip_bootstrap.py; do
+  trusted_show "$f" > "$work/trusted/${f##*/}" && [ -s "$work/trusted/${f##*/}" ] || fail "cannot read $f from the trusted base (${GATES_TRUSTED_REF:-origin/main})"
+done
+trusted_sha="$(git -C "$(trusted_repo)" rev-parse "${GATES_TRUSTED_REF:-origin/main}" 2>/dev/null)" || fail "cannot resolve the trusted base ref"
+MK="$work/trusted/Makefile=Makefile"
+REL="$MK $work/trusted/verify_release_artifact.py=scripts/verify_release_artifact.py $work/trusted/verify_pip_bootstrap.py=scripts/verify_pip_bootstrap.py"
+SEC="$work/trusted/verify_release_security.py=scripts/verify_release_security.py"
 sandbox_run "$work" true 2>/dev/null; [ "$?" -ne 125 ] || fail "the bwrap sandbox is unavailable; candidate code never runs unsandboxed — install/enable bwrap"
 sandbox_identity "$work" "$py" || fail "chronos does not import from the exact-head snapshot (an editable install or PYTHONPATH points elsewhere); refusing to judge"
 # A. TRUSTED steps (network allowed; candidate bytes only as DATA): validate the locks, pre-fetch the wheel
@@ -78,11 +90,11 @@ target() {  # $1 name, rest = the sandboxed command; records the exit, keeps the
   printf '%s %s\n' "$name" "$rc" >> "$work/targets"
   if [ "$rc" -ne 0 ] && [ "$code" -eq 0 ]; then code=$rc; first=$name; fi
 }
-for t in lint format-check type type-worker test; do target "$t" sandbox_run "$work" "$mk" "$t"; done
-SANDBOX_RO="$cache" SANDBOX_ENV="PIP_NO_INDEX=1 PIP_FIND_LINKS=$cache" target release-gate sandbox_run "$work" "$mk" release-gate
+for t in lint format-check type type-worker test; do SANDBOX_OVERLAY="$MK" target "$t" sandbox_run "$work" "$mk" "$t"; done
+SANDBOX_OVERLAY="$REL" SANDBOX_RO="$cache" SANDBOX_ENV="PIP_NO_INDEX=1 PIP_FIND_LINKS=$cache" target release-gate sandbox_run "$work" "$mk" release-gate
 cp "$snap/.secrets.baseline" "$work/io/.secrets.baseline" 2>/dev/null
-target security-offline sandbox_run "$work" "$py" - <<'PY'
-# the security gate's own scans minus pip-audit (run by the trusted step above), from the candidate script
+SANDBOX_OVERLAY="$SEC" target security-offline sandbox_run "$work" "$py" - <<'PY'
+# the security gate's own scans minus pip-audit (run by the trusted step above), from the TRUSTED base's script
 import importlib.util, os, subprocess, sys
 from importlib import metadata
 from pathlib import Path
@@ -101,7 +113,7 @@ if [ "$code" -ne 0 ] && cat "$work"/*.log | grep -qE 'Temporary failure in name 
 fi
 cachedigest="$(cd "$cache" && find . -maxdepth 1 -type f -name '*.whl' -printf '%f\n' | LC_ALL=C sort | xargs -r sha256sum | sha256sum | cut -c1-64)"
 lockdigests="$(for l in $LOCKS; do printf '%s=%s ' "$l" "$(sha256sum < "$snap/requirements-$l.lock" | cut -c1-64)"; done)"
-out="$(python3 - "$top" "$snap" "$PR_HEAD_SHA" "$code" "$work/test.log" "$work/targets" "$lockdigests" "$cachedigest" "$audit" <<'PY' 2>&1
+out="$(python3 - "$top" "$snap" "$PR_HEAD_SHA" "$code" "$work/test.log" "$work/targets" "$lockdigests" "$cachedigest" "$audit" "$trusted_sha" <<'PY' 2>&1
 import json, os, re, stat, subprocess, sys
 top, snap, sha, code, log = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4]), sys.argv[5]
 targets = dict(line.split() for line in open(sys.argv[6]))
@@ -131,7 +143,8 @@ if len(summaries) == 1:
     pytest = {k: n.get(k, 0) for k in ("passed", "failed", "skipped", "errors")}
 receipt = {"sha": snap_head, "exit": code, "pytest": pytest, "summaries": len(summaries), "tree_verified": bad is None and not lane_dirty,
            "targets": {k: int(v) for k, v in targets.items()}, "locks": locks, "cache_sha256": sys.argv[8],
-           "audit": {"tool": "pip-audit (trusted tools venv)", "dependencies": int(sys.argv[9]), "vulns": 0}}
+           "audit": {"tool": "pip-audit (trusted tools venv)", "dependencies": int(sys.argv[9]), "vulns": 0},
+           "trusted_base": sys.argv[10]}
 path = os.path.join(top, ".gates", "40-evidence-at-head.json")
 if os.path.lexists(path):
     if not stat.S_ISREG(os.lstat(path).st_mode): sys.exit(f"{path} is a link or non-regular file; remove it")

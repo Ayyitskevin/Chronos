@@ -4,8 +4,8 @@
 # origin/main's requirements-dev.lock) scans the exact-head snapshot as DATA, with the same hook command
 # the release security gate uses (`detect_secrets.pre_commit_hook --baseline <copy> --json -- <tracked>`),
 # inside the bwrap sandbox (no network) against a temp COPY of the baseline, so .secrets.baseline is never
-# written. The candidate baseline is validated first (built-in plugins and detect_secrets.* filters only),
-# so it cannot make the scanner load code. The scanner's stdout is piped to the trusted judge — no result
+# written. The scanner CONFIGURATION (plugins, filters) is the trusted base's .secrets.baseline; the
+# candidate baseline contributes only its reviewed results, and its configuration must equal main's. The scanner's stdout is piped to the trusted judge — no result
 # file — and findings are reported as file:line type only.
 set -uo pipefail
 g=secrets-baseline
@@ -32,22 +32,27 @@ tools="$(tools_venv 2>&1)" || fail "$(tail -n 1 <<< "$tools")"
 work="$(mktemp -d)" || fail "could not create a scratch dir"; trap 'rm -rf "$work"' EXIT
 sandbox_snapshot "$work" || fail "could not build the exact-head snapshot"
 sandbox_run "$work" true 2>/dev/null; [ "$?" -ne 125 ] || fail "the bwrap sandbox is unavailable; nothing runs unsandboxed — install/enable bwrap"
-why="$("$tools/bin/python" - .secrets.baseline <<'PY' 2>&1
+trusted_show .secrets.baseline > "$work/trusted.baseline" && [ -s "$work/trusted.baseline" ] || fail "cannot read .secrets.baseline from the trusted base (${GATES_TRUSTED_REF:-origin/main})"
+# The scanner CONFIGURATION (version, plugins, filters) is the trusted base's; the candidate baseline
+# contributes only its reviewed `results` as data, and its own configuration must equal the trusted one.
+why="$(python3 - .secrets.baseline "$work/trusted.baseline" "$work/scan.baseline" <<'PY' 2>&1
 import json, sys
-from detect_secrets.core.plugins.util import get_mapping_from_secret_type_to_class
-builtin = {cls.__name__ for cls in get_mapping_from_secret_type_to_class().values()}
 try:
-    doc = json.load(open(sys.argv[1], encoding="utf-8"))
-    plugins, filters = doc["plugins_used"], doc["filters_used"]
-    bad = [p.get("name") for p in plugins if set(p) - {"name", "limit", "keyword_exclude"} or p.get("name") not in builtin]
-    bad += [f.get("path") for f in filters if not str(f.get("path", "")).startswith("detect_secrets.filters.")]
-except (OSError, ValueError, KeyError, TypeError, AttributeError):
+    cand, trusted = (json.load(open(p, encoding="utf-8")) for p in sys.argv[1:3])
+    results = cand["results"]
+    if not isinstance(results, dict):
+        raise TypeError
+except (OSError, ValueError, KeyError, TypeError):
     sys.exit(".secrets.baseline is not a readable detect-secrets baseline")
-if bad:
-    sys.exit(f".secrets.baseline names a non-built-in plugin or filter ({str(bad[0])[:80]}); only detect-secrets' own may run")
+for key in ("plugins_used", "filters_used"):
+    if cand.get(key) != trusted.get(key):
+        sys.exit(f".secrets.baseline's {key} differs from the trusted base's; the scanner configuration is main's (change it there first) and only reviewed results are data")
+scan = {k: trusted[k] for k in ("version", "plugins_used", "filters_used") if k in trusted}
+scan["results"] = results
+open(sys.argv[3], "w").write(json.dumps(scan, indent=2) + "\n")
 PY
 )" || fail "$(tail -n 1 <<< "$why")"
-cp .secrets.baseline "$work/io/.secrets.baseline" || fail "could not copy the baseline into the scan's output dir"
+cp "$work/scan.baseline" "$work/io/.secrets.baseline" || fail "could not place the scan baseline in the output dir"
 mapfile -d '' files < <(git ls-files -z | grep -zvx '.secrets.baseline')
 [ "${#files[@]}" -gt 0 ] || fail "no tracked files; refusing an empty secret scan"
 SANDBOX_RO="$tools" sandbox_run "$work" "$tools/bin/python" -m detect_secrets.pre_commit_hook --baseline "$work/io/.secrets.baseline" \
@@ -56,7 +61,7 @@ code=$?
 judge() { python3 - "$work" "$code" "${#files[@]}" <<'PY'
 import json, re, sys
 work, code, tracked = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
-before = open(".secrets.baseline", "rb").read()  # the LANE's reviewed baseline
+before = open(f"{work}/scan.baseline", "rb").read()  # built by the trusted gate: main's config + reviewed results
 stale = open(f"{work}/io/.secrets.baseline", "rb").read() != before  # written only by the trusted scanner
 if code == 0 and not stale:
     print(f"{tracked} tracked files, no finding beyond .secrets.baseline (trusted detect-secrets)"); sys.exit(0)
