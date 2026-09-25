@@ -179,9 +179,10 @@ def test_plan_findings_carry_a_mechanical_status_with_unknown_as_the_fallback() 
     # Read from the plan as committed today: struck + "addressed" marker = ADDRESSED; with an
     # unstruck "Still open from this finding" = ADDRESSED_WITH_RESIDUAL; unstruck = OPEN.
     assert status[6] == "ADDRESSED"
+    assert status[2] == "ADDRESSED"
     assert status[3] == "ADDRESSED_WITH_RESIDUAL"
     assert status[5] == "ADDRESSED_WITH_RESIDUAL"
-    for number in (1, 2, 4, 7, 8):
+    for number in (1, 4, 7, 8):
         assert status[number] == "OPEN", (number, status[number])
     assert "UNKNOWN is never closed" in findings
     assert "CLOSED" not in {state for state in status.values()}
