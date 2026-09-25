@@ -3,7 +3,8 @@
 # Reuses the release security gate's own scan path (scripts/verify_release_security.py: its tool-version
 # check, tracked-file list and "tracked-file secret scan" command) against a temp COPY of the baseline,
 # so detect-secrets never writes .secrets.baseline. The hook's output is never echoed: findings are
-# reported as file:line type only. CHRONOS_PY overrides the venv python (the Makefile's PY).
+# reported as file:line type only. The scan imports candidate code, so it runs under `env -i` with a
+# fixed allowlist and a throwaway HOME. CHRONOS_PY overrides the venv python (the Makefile's PY).
 set -uo pipefail
 g=secrets-baseline
 fail() { echo "FAIL: $g — $1" >&2; exit 1; }
@@ -12,7 +13,8 @@ cd "$top" || fail "could not enter $top"
 py="${CHRONOS_PY:-.venv/bin/python}"
 [ -x "$py" ] || fail "no python at $py; create the venv (make's PY) or set CHRONOS_PY"
 [ -f .secrets.baseline ] || fail ".secrets.baseline is missing"
-scan() { "$py" - <<'PY'
+home="$(mktemp -d)" || fail "could not create a temp HOME"; trap 'rm -rf "$home"' EXIT
+scan() { env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$home" LANG=C.UTF-8 BROKER_MODE=demo ALLOW_ORDER_TRANSMIT=false ALLOW_LIVE_TRADING=false PYTHONDONTWRITEBYTECODE=1 "$py" - <<'PY'
 import importlib.util, json, shutil, subprocess, sys, tempfile
 from importlib import metadata
 from pathlib import Path

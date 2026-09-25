@@ -22,15 +22,19 @@ PY=$ROOT/.venv/bin/python
 check "1 every gates/NN-*.sh for 40-70 exists and is executable" "[ -x $G/40-evidence-at-head.sh ] && [ -x $G/50-fixture-integrity.sh ] && [ -x $G/60-secrets-baseline.sh ] && [ -x $G/70-docs-claims-pinned.sh ]"
 
 # --- 40 evidence-at-head (a stub make; a throwaway repo) --------------------------------------
-mkdir "$T/bin"; cat > "$T/bin/make" <<'STUB'
+# Gates 40/60/70 run candidate code under `env -i`, so a stub sees none of this harness's variables:
+# stubs are controlled by files under $T/ctl (baked-in paths) and dump their environment for the probes.
+mkdir "$T/bin" "$T/ctl"; C=$T/ctl; MAKE_LOG="$T/make.log"
+ctl() { if [ "$#" -eq 2 ]; then printf '%s' "$2" > "$C/$1"; else rm -f "$C/$1"; fi; }
+cat > "$T/bin/make" <<STUB
 #!/usr/bin/env bash
-printf '%s\n' "$*" >> "$MAKE_LOG"
+printf '%s\n' "\$*" >> $MAKE_LOG; env > $T/make.env
 echo "mypy: Success: no issues found in 12 source files"
-[ -n "${STUB_SUMMARY-x}" ] && echo "${STUB_SUMMARY-12 passed, 1 skipped, 3 warnings in 4.56s}"
-[ -n "${STUB_MOVE_HEAD:-}" ] && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m moved
-exit "${STUB_RC:-0}"
+if [ -f $C/summary ]; then cat $C/summary; echo; else echo "12 passed, 1 skipped, 3 warnings in 4.56s"; fi
+[ -f $C/move_head ] && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m moved
+exit \$(cat $C/rc 2>/dev/null || echo 0)
 STUB
-chmod +x "$T/bin/make"; export MAKE_LOG="$T/make.log"
+chmod +x "$T/bin/make"
 G40="$G/40-evidence-at-head.sh"; R40="$T/r40"; newrepo "$R40"; echo a > "$R40/a"; commit "$R40"
 H=$(git -C "$R40" rev-parse HEAD); RCPT="$R40/.gates/40-evidence-at-head.json"
 field() { python3 -c "import json,sys; r=json.load(open(sys.argv[1])); print($1)" "$RCPT"; }
@@ -39,12 +43,17 @@ check "1 40 PASS: make gates exit 0 at PR_HEAD_SHA == HEAD → one PASS line, ex
 check "1 40 adopts the existing target: make was called exactly once, as 'make gates'" "[ \"\$(cat $MAKE_LOG)\" = gates ]"
 check "1 40 receipt on disk records {sha, exit, pytest counts} of that run" "[ \"\$(field \"r['sha'], r['exit'], r['pytest']['passed'], r['pytest']['failed'], r['pytest']['skipped']\")\" = \"$H 0 12 0 1\" ]"
 check "1 40 PASS line names the sha and the counts" "grep -qF \"$H (12 passed, 0 failed, 1 skipped)\" $T/out"
-: > "$MAKE_LOG"; (cd "$R40" && PATH="$T/bin:$PATH" STUB_RC=2 STUB_SUMMARY='3 failed, 9 passed in 1.00s' PR_HEAD_SHA=$H run bash "$G40")
+(cd "$R40" && PATH="$T/bin:$PATH" DUMMY_CREDENTIAL=synthetic-probe-secret GH_TOKEN=synthetic-gh-token PR_HEAD_SHA=$H run bash "$G40")
+ALLOW='ALLOW_LIVE_TRADING ALLOW_ORDER_TRANSMIT BROKER_MODE HOME LANG PATH PYTHONDONTWRITEBYTECODE '
+envset() { cut -d= -f1 "$1" | grep -vxE 'PWD|SHLVL|_|OLDPWD' | sort | tr '\n' ' '; }
+noleak() { [ -s "$1" ] && ! grep -qE '^(DUMMY_CREDENTIAL|GH_TOKEN)=' "$1" && [ "$(envset "$1")" = "$ALLOW" ] && grep -qx BROKER_MODE=demo "$1" && ! grep -qx "HOME=$HOME" "$1"; }
+check "r1:2 P1-2 40 Daybreak's DUMMY_CREDENTIAL probe: make gates runs under env -i — no DUMMY_CREDENTIAL/GH_TOKEN, exactly the allowlist, demo forced, a throwaway HOME (positive control: PASS + env dumped)" "passed evidence-at-head && noleak $T/make.env"
+: > "$MAKE_LOG"; ctl rc 2; ctl summary '3 failed, 9 passed in 1.00s'; (cd "$R40" && PATH="$T/bin:$PATH" PR_HEAD_SHA=$H run bash "$G40"); ctl rc; ctl summary
 check "1 40 FAIL: make gates exit 2 → one FAIL line naming the exit, exit 1" "failed evidence-at-head 'make gates exited 2 at $H'"
 check "1 40 the failing run still leaves its receipt (exit 2, 3 failed)" "[ \"\$(field \"r['exit'], r['pytest']['failed']\")\" = '2 3' ]"
-(cd "$R40" && PATH="$T/bin:$PATH" STUB_SUMMARY= PR_HEAD_SHA=$H run bash "$G40")
+ctl summary ''; (cd "$R40" && PATH="$T/bin:$PATH" PR_HEAD_SHA=$H run bash "$G40"); ctl summary
 check "1 40 FAIL: a green make with no pytest summary records no counts → FAIL, never a PASS" "failed evidence-at-head '.*no pytest summary' && [ \"\$(field \"r['pytest']\")\" = None ]"
-(cd "$R40" && PATH="$T/bin:$PATH" STUB_MOVE_HEAD=1 PR_HEAD_SHA=$H run bash "$G40")
+ctl move_head 1; (cd "$R40" && PATH="$T/bin:$PATH" PR_HEAD_SHA=$H run bash "$G40"); ctl move_head
 check "1 40 FAIL: the receipt's sha (HEAD after make) is not PR_HEAD_SHA → FAIL, judged from the receipt on disk" "failed evidence-at-head 'receipt sha' && [ \"\$(field \"r['sha']\")\" != $H ]"
 git -C "$R40" reset -q --hard "$H"
 : > "$MAKE_LOG"; OTHER=$(printf '%040d' 0 | tr 0 a)
@@ -137,6 +146,9 @@ check "1 60 PASS: a finding already reviewed in the baseline is not new" "passed
 mk60 "d['results'] = {'leak.py': [${ENTRY/LINE/5}]}"; printf 'x = 1\naws_key = "%s"\n' "$FAKE" > "$R60/leak.py"; commit "$R60"; s2=$(bsum "$R60"); g60
 check "1 60 FAIL: a reviewed finding whose line moved → FAIL 'baseline stale', never a rewrite" "failed secrets-baseline '.secrets.baseline is stale'"
 check "2 60 the stale case leaves .secrets.baseline byte-identical (the hook only ever saw a temp copy)" "[ \"\$(bsum $R60)\" = \"$s2\" ]"
+printf '#!/bin/sh\ncat > /dev/null; env > %s; echo "stub scan"\n' "$T/py60.env" > "$T/bin/envpy60"; chmod +x "$T/bin/envpy60"
+(cd "$R60" && DUMMY_CREDENTIAL=synthetic-probe-secret GH_TOKEN=synthetic-gh-token CHRONOS_PY="$T/bin/envpy60" run bash "$G60")
+check "r1:2 P1-2 60 DUMMY_CREDENTIAL probe: the scan (it imports candidate code) runs under env -i — no credential variables, exactly the allowlist" "passed secrets-baseline && noleak $T/py60.env"
 (cd "$R60" && CHRONOS_PY="$T/nopython" run bash "$G60")
 check "1 60 FAIL: no python at CHRONOS_PY → one FAIL line" "failed secrets-baseline 'no python at'"
 r0=$(bsum "$ROOT"); (cd "$ROOT" && run bash "$G60")
@@ -148,18 +160,22 @@ check "2 60 gate source never prints the hook's captured output (no echo/print o
 G70="$G/70-docs-claims-pinned.sh"; R70="$T/r70"
 NAMED="tests/unit/test_adr_point_in_time_claims.py tests/unit/test_docs_map_skill_contract.py tests/unit/test_vision_completion_plan_prose.py"
 mk70() { newrepo "$R70"; mkdir -p "$R70/tests/unit"; for f in tests/unit/test_limitations_a_contract.py tests/unit/test_limitations_b_contract.py $NAMED; do echo '' > "$R70/$f"; done; commit "$R70"; }
-cat > "$T/bin/fakepy" <<'STUB'
+PY_LOG="$T/py.log"; cat > "$T/bin/fakepy" <<STUB
 #!/usr/bin/env bash
-printf '%s\n' "$*" >> "$PY_LOG"; echo "${STUB_PYSUM:-5 passed in 0.10s}"; exit "${STUB_PYRC:-0}"
+printf '%s\n' "\$*" >> $PY_LOG; env > $T/py.env
+if [ -f $C/pysum ]; then cat $C/pysum; echo; else echo "5 passed in 0.10s"; fi
+exit \$(cat $C/pyrc 2>/dev/null || echo 0)
 STUB
-chmod +x "$T/bin/fakepy"; export PY_LOG="$T/py.log"
+chmod +x "$T/bin/fakepy"
 g70() { : > "$PY_LOG"; (cd "$R70" && CHRONOS_PY="$T/bin/fakepy" run bash "$G70"); }
 mk70; g70
 check "1 70 PASS: the named doc-contract set passes → one PASS line, exit 0" "passed docs-claims-pinned"
+DUMMY_CREDENTIAL=synthetic-probe-secret GH_TOKEN=synthetic-gh-token g70
+check "r1:2 P1-2 70 DUMMY_CREDENTIAL probe: the doc-contract tests run under env -i (no credential variables, exactly the allowlist)" "passed docs-claims-pinned && noleak $T/py.env"
 check "1 70 adopts the existing tests: pytest ran once over exactly the glob + the three named files, nothing skipped or deselected" "[ \"\$(cat $PY_LOG)\" = \"-m pytest -q tests/unit/test_limitations_a_contract.py tests/unit/test_limitations_b_contract.py $NAMED\" ]"
-STUB_PYRC=1 STUB_PYSUM='1 failed, 4 passed in 0.10s' g70
+ctl pyrc 1; ctl pysum '1 failed, 4 passed in 0.10s'; g70
 check "1 70 FAIL: a failing doc-contract test → one FAIL line with the pytest summary, exit 1" "failed docs-claims-pinned 'pytest exited 1 \\(1 failed, 4 passed'"
-STUB_PYRC=5 STUB_PYSUM='no tests ran in 0.01s' g70
+ctl pyrc 5; ctl pysum 'no tests ran in 0.01s'; g70; ctl pyrc; ctl pysum
 check "1 70 FAIL: pytest collected nothing (exit 5) → FAIL, never green" "failed docs-claims-pinned 'pytest collected no tests'"
 mk70; git -C "$R70" rm -q tests/unit/test_docs_map_skill_contract.py; commit "$R70"; g70
 check "1 70 FAIL: a named contract file missing → FAIL naming it, pytest never runs" "failed docs-claims-pinned 'tests/unit/test_docs_map_skill_contract.py is missing' && [ ! -s $PY_LOG ]"

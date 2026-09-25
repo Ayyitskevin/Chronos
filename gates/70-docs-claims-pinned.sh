@@ -3,6 +3,7 @@
 # Runs the EXISTING tests by named selection (none rewritten, skipped or deselected):
 # tests/unit/test_limitations_*_contract.py plus the three named files below (listed in gates/README.md).
 # A missing named file, an empty glob, or pytest collecting nothing is a FAIL, never green.
+# The tests are candidate code: they run under `env -i` with a fixed allowlist and a throwaway HOME.
 # CHRONOS_PY overrides the venv python (the Makefile's PY).
 set -uo pipefail
 g=docs-claims-pinned
@@ -18,7 +19,8 @@ for f in tests/unit/test_adr_point_in_time_claims.py tests/unit/test_docs_map_sk
   [ -f "$f" ] || fail "$f is missing; restore it or update the named set here and in gates/README.md"
   set -- "$@" "$f"
 done
-out="$("$py" -m pytest -q "$@" 2>&1)"
+home="$(mktemp -d)" || fail "could not create a temp HOME"; trap 'rm -rf "$home"' EXIT
+out="$(env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$home" LANG=C.UTF-8 BROKER_MODE=demo ALLOW_ORDER_TRANSMIT=false ALLOW_LIVE_TRADING=false PYTHONDONTWRITEBYTECODE=1 "$py" -m pytest -q "$@" 2>&1)"
 code=$?
 summary="$(grep -E ' in [0-9.]+s' <<< "$out" | tail -n 1 | sed -E 's/^=+ //; s/ =+$//')"
 [ "$code" -ne 5 ] || fail "pytest collected no tests from the $# named files; the doc claims are unpinned"

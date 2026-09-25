@@ -3,6 +3,7 @@
 # Runs the existing `make gates` (adopted, not rewritten) at a clean HEAD, writes the receipt
 # .gates/40-evidence-at-head.json = {sha, exit, pytest counts} (gitignored), then judges the receipt
 # as read back from disk: PASS iff receipt.sha == PR_HEAD_SHA == HEAD, exit == 0 and counts recorded.
+# `make gates` is candidate code: it runs under `env -i` with a fixed allowlist and a throwaway HOME.
 set -uo pipefail
 g=evidence-at-head
 fail() { echo "FAIL: $g — $1" >&2; exit 1; }
@@ -13,7 +14,9 @@ head="$(git rev-parse HEAD)" || fail "could not read HEAD"
 [ "$head" = "$PR_HEAD_SHA" ] || fail "checked-out HEAD $head is not PR_HEAD_SHA $PR_HEAD_SHA; check out the PR head and re-run"
 [ -z "$(git status --porcelain --untracked-files=no)" ] || fail "tracked files are modified, so HEAD does not name the tested bytes; commit or stash, then re-run"
 mkdir -p .gates || fail "could not create .gates/"
-make gates > .gates/make-gates.log 2>&1
+mk="$(command -v make)" || fail "make is not on PATH"
+home="$(mktemp -d)" || fail "could not create a temp HOME"; trap 'rm -rf "$home"' EXIT
+env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$home" LANG=C.UTF-8 BROKER_MODE=demo ALLOW_ORDER_TRANSMIT=false ALLOW_LIVE_TRADING=false PYTHONDONTWRITEBYTECODE=1 "$mk" gates > .gates/make-gates.log 2>&1
 code=$?
 after="$(git rev-parse HEAD)" || fail "could not read HEAD after make gates"
 python3 - "$after" "$code" .gates/make-gates.log > .gates/40-evidence-at-head.json <<'PY' || fail "could not write the receipt .gates/40-evidence-at-head.json"
