@@ -599,7 +599,12 @@ def _make_app(bridge: CallbackBridge) -> Any:
             whyHeld: str,
             mktCapPrice: float,
         ) -> None:
-            del parentId, lastFillPrice, clientId, whyHeld, mktCapPrice
+            del parentId, lastFillPrice, whyHeld, mktCapPrice
+            # RC-1: classify the RAW identifiers first — before any int() — so a malformed id
+            # can neither alias an own order nor raise before readiness is invalidated.
+            bridge.observe_order_status_identity(clientId, orderId)
+            if type(orderId) is not int:
+                return  # a malformed order id matches no flight; it was classified above
             bridge.on_order_status(
                 int(orderId),
                 str(status),
@@ -930,6 +935,7 @@ class OfficialIBKRBroker:
             self.registry,
             on_connection_uncertain=on_connection_uncertain,
             on_managed_account_scope_change=on_managed_account_scope_change,
+            client_id=settings.ib_client_id,
         )
         self.order_ids = OrderIdAllocator()
         self._app: Any = None

@@ -96,8 +96,11 @@ runbooks.
   connectivity-uncertain error code, and an account-scope change only invalidate readiness —
   a reconnect does not reconcile; after one, readiness stays locked until a later startup,
   operator, or periodic pass proves parity. Order, fill, open-order, and order-status
-  callbacks do not trigger reconciliation: they feed caches and request results only, so
-  order/fill-event-driven reconciliation is absent.
+  callbacks do not trigger reconciliation. Since RC-1 (owner answer K8 = (a)), a streamed
+  execution or order status that this process did not place, or cannot correlate, only
+  invalidates readiness — like connection loss, it never runs a pass or re-arms — so
+  order/fill-event-driven reconciliation is absent. What IBKR streams to which
+  client id is unverified until the M4 read-only session (K4).
 - The local reader conservatively marks persisted cycles, strategy state, drafts, fills, and
   basis symbols unresolved, so only locally-empty flat symbols can publish `RECONCILED`;
   positions and owned working orders stay `MANUAL_REVIEW` until complete allocation provenance
