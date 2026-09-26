@@ -176,7 +176,7 @@ Status is the register's own column with its parenthetical qualifier stripped; `
 | # | Finding | Status | Marker |
 | --- | --- | --- | --- |
 | 1 | Reconciliation readiness is consumed after one opening submission, while a complete supervised… | OPEN | Periodic half observed present 2026-09-03 (status note, not a closure) |
-| 2 | The incident runbook invokes the deterministic-platform halt while the live order plane has a s… | OPEN | — |
+| 2 | The incident runbook invokes the deterministic-platform halt while the live order plane has a s… | ADDRESSED | Addressed 2026-09-12 (#224; 71d2e1d, merge 9c26fc3) |
 | 3 | Restore guidance overstates safety: a missing live kill-switch file defaults disengaged. | ADDRESSED_WITH_RESIDUAL | Kill-engaged half addressed 2026-09-03 (D-63/ADR-0049, R-66) |
 | 4 | Standing-authority prose says the mandate replaces arming, while submission still requires a cu… | OPEN | — |
 | 5 | The supervisor treats any non-exception handoff return as `COMPLETE`, although `SubmissionOutco… | ADDRESSED_WITH_RESIDUAL | Addressed 2026-08-13 (A1; R-49) |
@@ -205,7 +205,7 @@ Both are built inert and enabled only by the owner (plan §11); a value would be
 | --- | --- |
 | DECISIONS.md | `a29eaaea431b955fafd8eca8f8c5254a1989dffaf3388ac3a6c2c881ff7a5ab7` |
 | RISK_REGISTER.md | `52bfe7604b157992f770c17fa2579d5229876b5f3235832ca48858f5633fa383` |
-| docs/VISION_COMPLETION_PLAN.md | `f05a8894f865ec15c5627ca0249bdf40664ef79dc69f9f23da46805013283614` |
+| docs/VISION_COMPLETION_PLAN.md | `b0466db84ef4631050fbaa16e8b1c1bb36fd75374f2c2b34956d5baae590fc81` |
 | src/chronos/auditlog/__init__.py | `5ec898d0ab735be6f0a7773bbeb9d8aacf4c3ea3b5eceff2d446a914d5a1647b` |
 | src/chronos/bridge/config.py | `25f2f9a369d625440eb21d0d55f10386aa47d33dfb1843731788295b03cec636` |
 | worker/config.py | `6b3763ec4280a65160442eb2fb63d523ae069ae70754842635681f855573dffe` |

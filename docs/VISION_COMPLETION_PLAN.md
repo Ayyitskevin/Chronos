@@ -247,9 +247,15 @@ the live commit and coordinate with any branch already addressing it before edit
    `tests/safety/test_periodic_reconciliation.py`; readiness is still consumed per
    submission. Whether the callback-consumer half is complete is not asserted here —
    re-verify against the live commit before closing this finding.
-2. The incident runbook invokes the deterministic-platform halt while the live order plane
+2. ~~The incident runbook invokes the deterministic-platform halt while the live order plane
    has a separate kill switch (`docs/INCIDENT_RESPONSE.md`,
-   `src/chronos/orders/kill_switch.py`).
+   `src/chronos/orders/kill_switch.py`).~~
+   **Addressed 2026-09-12 (#224; 71d2e1d, merge 9c26fc3):** the runbook opens with a
+   two-plane table naming each plane, its stop command, and its re-enable calls, and states
+   that every "stop" below means both (`docs/INCIDENT_RESPONSE.md:8-16`); every playbook's
+   first step stops both planes by name and the closing procedure re-enables each plane
+   separately, deterministic platform first (`docs/INCIDENT_RESPONSE.md:257-266`). The ten
+   pins in `tests/unit/test_incident_runbook_commands.py` hold every step to both planes.
 3. ~~Restore guidance overstates safety: a missing live kill-switch file defaults disengaged.
    Recovery must always boot kill-engaged, read-only, and unreconciled.~~
    **Kill-engaged half addressed 2026-09-03 (D-63/ADR-0049, R-66):** the state directory
