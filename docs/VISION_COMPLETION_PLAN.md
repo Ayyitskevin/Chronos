@@ -299,7 +299,9 @@ the live commit and coordinate with any branch already addressing it before edit
    fill, full fill, cancellation, late commission — which belong to the order
    plane's lifecycle tracker rather than the cycle's handoff; and R-49's
    residual (a), that an exception out of a non-wiring handoff callable is still
-   recorded as not-sent.
+   recorded as not-sent — kept as a reserved attempt since ADR-0052
+   (`supervisor/loop.py:1038-1045`, released only at `:1103`), journaled as a
+   refusal (`ORDER_PLANE_REFUSED`, `:1072`) and not alerted (`:1111`).
 6. ~~External-worker provenance is static and its credential is not proposal-only.~~
    **Addressed 2026-08-12 (ADR-0023 Option A, owner-directed; D-24/R-48):** with
    `AUTONOMY_PROPOSERS_FILE` configured, proposals require a per-proposer,
