@@ -45,6 +45,7 @@ import inspect
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -788,3 +789,180 @@ def test_the_handoff_module_imports_nothing_that_can_act() -> None:
         )
     ]
     assert forbidden == [], f"the supervisor's handoff vocabulary must own itself: {forbidden}"
+
+
+# --------------------------------------------------------------- R49A-1 pins
+#
+# R-49 residual (a) is latent only while two structural facts hold: the
+# production handoff callable raises only before the wire, and the wiring is
+# the only place a submit callable is supplied. These two pins watch the
+# bytes, not the prose: the sources are read from the candidate checkout by
+# path (never via an import, so an installed/stale module cannot be scanned
+# in the candidate's place), and each pin carries a positive control so a
+# rename or removal cannot pass it vacuously.
+
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_SRC_ROOT = _REPO_ROOT / "src" / "chronos"
+_WIRING = _SRC_ROOT / "api" / "autonomy_wiring.py"
+_TRANSPARENT = (ast.Expr, ast.Assign, ast.AnnAssign, ast.AugAssign, ast.Return)
+
+
+def _defs(tree: ast.AST, name: str) -> list[ast.FunctionDef]:
+    kinds = (ast.FunctionDef, ast.AsyncFunctionDef)
+    return [n for n in ast.walk(tree) if isinstance(n, kinds) and n.name == name]
+
+
+def _submit_calls(func: ast.FunctionDef) -> list[ast.Call]:
+    return [
+        n
+        for n in ast.walk(func)
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Attribute)
+        and n.func.attr == "submit"
+        and isinstance(n.func.value, ast.Name)
+        and n.func.value.id == "service"
+    ]
+
+
+def test_r49a1_submit_call_is_only_inside_the_try_that_returns_sent_ambiguous() -> None:
+    """R49A-1 pin 1: in order_plane_handoff._submit, service.submit runs only inside the
+    try whose sole handler (except Exception) returns HandoffResult.sent_ambiguous on
+    every path — so anything the submit call raises is reported possibly-sent."""
+
+    tree = ast.parse(_WIRING.read_text(encoding="utf-8"))
+    handoffs = _defs(tree, "order_plane_handoff")
+    assert len(handoffs) == 1, f"expected exactly one order_plane_handoff def in {_WIRING}"
+    submits = _defs(handoffs[0], "_submit")
+    assert len(submits) == 1, "expected exactly one nested _submit def"
+    func = submits[0]
+
+    calls = _submit_calls(func)
+    assert len(calls) == 1, (
+        f"expected exactly one service.submit(...) call in _submit, found {len(calls)} "
+        "— a renamed, removed, aliased or duplicated call is a red, not a pass"
+    )
+    call = calls[0]
+    # No OTHER attribute named .submit anywhere in _submit (an alias such as
+    # `send = service.submit` would leave a second Attribute), and no
+    # getattr(..., "submit") indirection.
+    for node in ast.walk(func):
+        if isinstance(node, ast.Attribute) and node.attr == "submit" and node is not call.func:
+            raise AssertionError("a second .submit attribute exists in _submit (alias?)")
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "getattr"
+            and any(isinstance(a, ast.Constant) and a.value == "submit" for a in node.args)
+        ):
+            raise AssertionError("getattr(..., 'submit') indirection in _submit")
+
+    trys = [n for n in ast.walk(func) if isinstance(n, ast.Try)]
+    assert len(trys) == 1, f"expected exactly one try in _submit, found {len(trys)}"
+    the_try = trys[0]
+
+    # The call must sit in try.body without crossing a lambda/nested def (a
+    # call inside one of those executes outside the try's protection), and
+    # never in the handlers, orelse or finalbody.
+    def _in_protected_body(nodes: list[ast.stmt]) -> bool:
+        for node in nodes:
+            if isinstance(node, (ast.Lambda, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue
+            hidden = (ast.Lambda, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+            if node is call or any(
+                child is call for child in ast.walk(node) if not isinstance(child, hidden)
+            ):
+                return True
+        return False
+
+    assert _in_protected_body(the_try.body), "service.submit is not directly inside the try body"
+    for region in (the_try.orelse, the_try.finalbody):
+        for node in region:
+            assert call not in list(ast.walk(node)), "service.submit in try else/finally"
+
+    assert len(the_try.handlers) == 1, (
+        f"expected exactly one handler (an earlier applicable handler could divert the raise), "
+        f"found {len(the_try.handlers)}"
+    )
+    handler = the_try.handlers[0]
+    assert isinstance(handler.type, ast.Name) and handler.type.id == "Exception", (
+        "the handler is not `except Exception`"
+    )
+    assert not any(isinstance(n, ast.Raise) for n in ast.walk(handler)), "the handler re-raises"
+    returns = [n for n in ast.walk(handler) if isinstance(n, ast.Return)]
+    assert returns, "the handler returns nothing (a fall-through would skip sent_ambiguous)"
+    for ret in returns:
+        value = ret.value
+        assert (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Attribute)
+            and value.func.attr == "sent_ambiguous"
+            and isinstance(value.func.value, ast.Name)
+            and value.func.value.id == "HandoffResult"
+        ), "a handler return is not HandoffResult.sent_ambiguous(...)"
+    # Every path through the handler returns: no statement that could branch
+    # around the return, and the handler's last statement is a return.
+    for node in ast.walk(handler):
+        branches = (ast.If, ast.For, ast.While, ast.Try, ast.With, ast.Match)
+        assert not isinstance(node, branches), (
+            "the handler can branch around its sent_ambiguous return"
+        )
+    assert isinstance(handler.body[-1], ast.Return), "the handler's last statement is not a return"
+
+
+def _submit_keyword_suppliers() -> list[tuple[Path, int, str]]:
+    suppliers: list[tuple[Path, int, str]] = []
+    for path in sorted(_SRC_ROOT.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                for keyword in node.keywords:
+                    if keyword.arg == "submit":
+                        suppliers.append((path, keyword.value.lineno, ast.dump(keyword.value)))
+                    elif keyword.arg is None:
+                        # `**{...}` splat: a dict literal naming "submit" is a
+                        # supplier the keyword scan must not miss.
+                        value = keyword.value
+                        if isinstance(value, ast.Dict) and any(
+                            isinstance(k, ast.Constant) and k.value == "submit" for k in value.keys
+                        ):
+                            suppliers.append((path, node.lineno, "**{submit: ...}"))
+            elif isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Attribute) and target.attr == "_submit":
+                        shape = f"assign {target.attr} = {ast.dump(node.value)}"
+                        suppliers.append((path, node.lineno, shape))
+    return suppliers
+
+
+def test_r49a1_order_plane_handoff_is_the_sole_submit_supplier_under_src() -> None:
+    """R49A-1 pin 2: the only submit callable supplied under src/chronos is the wiring's
+    order_plane_handoff; supervisor/runtime.py forwarding `self._submit` (bound from the
+    constructor argument) is propagation, not a second supplier. Anything else fails."""
+
+    suppliers = _submit_keyword_suppliers()
+    wiring_sites = [
+        (p, line)
+        for p, line, shape in suppliers
+        if p == _WIRING and shape.startswith("Call(func=Name(id='order_plane_handoff'")
+    ]
+    forward_sites = [
+        (p, line)
+        for p, line, shape in suppliers
+        if p == _SRC_ROOT / "supervisor" / "runtime.py"
+        and (
+            shape == "Attribute(value=Name(id='self', ctx=Load()), attr='_submit', ctx=Load())"
+            or shape == "assign _submit = Name(id='submit', ctx=Load())"
+        )
+    ]
+    allowed = {*wiring_sites, *forward_sites}
+    offenders = [(str(p), line, shape) for p, line, shape in suppliers if (p, line) not in allowed]
+    assert not offenders, (
+        f"a second submit supplier exists under src/chronos — declare it (owner gate): {offenders}"
+    )
+    # Positive controls: remove the wiring supplier or the forwarding and the
+    # pin goes red rather than passing vacuously.
+    assert len(wiring_sites) == 1, f"wiring supplier not found exactly once: {wiring_sites}"
+    assert len(forward_sites) == 2, (
+        f"expected runtime.py's _submit binding and its run_cycle forwarding, found {forward_sites}"
+    )
