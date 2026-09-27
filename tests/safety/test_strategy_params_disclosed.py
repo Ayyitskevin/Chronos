@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import ast
 import dataclasses
+import importlib
 import inspect
+import pkgutil
 from datetime import UTC, datetime
 from pathlib import Path
 from types import ModuleType
@@ -52,17 +54,43 @@ def _fields(cls: type) -> set[str]:
 def _strategy_reads() -> set[str]:
     """Attribute names read anywhere in src/chronos/strategies/*.py (the map module excluded)."""
 
-    import chronos.strategies.base as base
-    import chronos.strategies.baselines as baselines
-    import chronos.strategies.mean_reversion as mean_reversion
-    import chronos.strategies.regime_trend as regime_trend
-
-    modules: tuple[ModuleType, ...] = (base, baselines, mean_reversion, regime_trend)
+    modules: tuple[ModuleType, ...] = _strategy_modules()
     names: set[str] = set()
     for module in modules:
         tree = ast.parse(inspect.getsource(module))
         names.update(node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute))
     return names
+
+
+#: The package's vocabulary types: not parameter blocks.
+_NOT_PARAMS = frozenset({"PositionState", "StrategyContext", "StrategyProposal"})
+
+
+def _strategy_modules() -> tuple[ModuleType, ...]:
+    import chronos.strategies as package
+
+    return tuple(
+        importlib.import_module(f"chronos.strategies.{info.name}")
+        for info in pkgutil.iter_modules(package.__path__)
+        if info.name != "param_enforcement"
+    )
+
+
+def test_t1_every_parameter_block_in_the_package_is_in_the_table() -> None:
+    """A new params dataclass (or a new strategies module) cannot arrive unclassified."""
+
+    found = {
+        name
+        for module in _strategy_modules()
+        for name, obj in vars(module).items()
+        if dataclasses.is_dataclass(obj)
+        and isinstance(obj, type)
+        and obj.__module__ == module.__name__
+        and name not in _NOT_PARAMS
+    }
+    assert found <= set(PARAM_ENFORCEMENT), (
+        f"unclassified parameter blocks: {sorted(found - set(PARAM_ENFORCEMENT))}"
+    )
 
 
 def test_t1_every_param_field_is_classified_exactly_once() -> None:
@@ -84,14 +112,34 @@ def test_t1_every_param_field_is_classified_exactly_once() -> None:
                 assert not reader, f"{name}.{field}: INERT must not carry a reader"
 
 
+_OWNER: dict[str, str] = {
+    "MeanReversionParams": "chronos.strategies.mean_reversion",
+    "RegimeTrendParams": "chronos.strategies.regime_trend",
+    "BuyAndHoldStrategy": "chronos.strategies.baselines",
+    "SmaTrendBaseline": "chronos.strategies.baselines",
+    "DeterministicRandomEntries": "chronos.strategies.baselines",
+}
+
+
+def _module_reads(module_name: str) -> set[str]:
+    module = importlib.import_module(module_name)
+    tree = ast.parse(inspect.getsource(module))
+    return {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
+
+
 def test_t2_the_classification_matches_what_the_strategies_read() -> None:
-    """Guard the guard: ENFORCED means a strategies/*.py module reads it; INERT means none does."""
+    """Guard the guard: ENFORCED means the OWNING module reads it; INERT means no module does.
+
+    Per owner, not a union: both params classes carry atr_len, ema_filter_len and
+    exposure_fraction, so a union scan lets one strategy's read certify the other's.
+    """
 
     read = _strategy_reads()
     for name, classified in PARAM_ENFORCEMENT.items():
+        owner_reads = _module_reads(_OWNER[name])
         for field, (status, _reader) in classified.items():
             if status == ENFORCED:
-                assert field in read, (
+                assert field in owner_reads, (
                     f"{name}.{field} is classified ENFORCED but no strategies/*.py module reads "
                     "it — reclassify it in chronos.strategies.param_enforcement"
                 )
