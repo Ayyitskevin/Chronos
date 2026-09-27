@@ -92,8 +92,8 @@ fails the suite, and a misclassified one fails the guard-the-guard test
 | `loss: LossLimits` | 4 ceilings :283-286 | ENFORCED via durable counters → DegradedReason (blocks new exposure, leaves closing possible) |
 | `concentration` | `max_symbol_exposure_pct` ENFORCED; `max_sector_exposure_pct`, `max_family_exposure_pct`, `max_correlated_exposure_pct` **INERT** (test pin :676-678) | mixed |
 | `activity: ActivityLimits` | 4 per-session ceilings :301-304 | ENFORCED via durable counters |
-| `market_data` | `max_quote_age_seconds`, `permitted_data_qualities`, `max_relative_spread` ENFORCED; `min_option_volume`, `min_open_interest` **INERT** (:692-693) | mixed |
-| `sessions: SessionPolicy` | `permitted_sessions`, `allow_overnight_holding` **INERT** (:697-698) | INERT |
+| `market_data` | `max_quote_age_seconds`, `permitted_data_qualities`, `max_relative_spread` ENFORCED; `min_option_volume`, `min_open_interest` ENFORCED on the option-selection path (F7-A: `autonomy/enforcement.py` cites the readers) | ENFORCED |
+| `sessions: SessionPolicy` | `permitted_sessions` ENFORCED on the option-selection path (F7-A); `allow_overnight_holding` **INERT** | mixed |
 
 Submitting-mode validators (`SUBMITTING_AUTONOMY_MODES` = PAPER_AUTONOMOUS +
 CANARY_LIVE_AUTONOMOUS + LIVE_AUTONOMOUS, enums.py:189-191):
@@ -123,8 +123,12 @@ The set was wrong in both directions:*
 - `max_relative_spread` **is** inverted and was missing. Admission skips the
   spread comparison entirely when it is zero, so this `max_` field imposes no
   ceiling at its default, and nothing requires it to be set.
-- `min_option_volume` / `min_open_interest` are read by nothing at all — the
-  strike resolver's liquidity check uses the same-named *settings*, not these.
+- ~~`min_option_volume` / `min_open_interest` are read by nothing at all — the
+  strike resolver's liquidity check uses the same-named *settings*, not these.~~
+  *(Corrected by F7-A, 2026-09-27: the option-selection wiring takes
+  `max(settings, mandate)` for both (`api/autonomy_wiring.py`), the loop refuses
+  a selection receipt weaker than the mandate (`supervisor/loop.py`), and
+  `supervisor/option_selection.py` filters on them. They bind.)*
 
 When adding any mandate field, first decide whether zero is the safe or
 dangerous default, then classify it in `LIMIT_ENFORCEMENT`
