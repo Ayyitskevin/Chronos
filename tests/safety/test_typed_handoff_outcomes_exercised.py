@@ -864,16 +864,23 @@ def test_r49a1_submit_call_is_only_inside_the_try_that_returns_sent_ambiguous() 
     # The call must sit in try.body without crossing a lambda/nested def (a
     # call inside one of those executes outside the try's protection), and
     # never in the handlers, orelse or finalbody.
+    deferred = (
+        ast.Lambda,
+        ast.FunctionDef,
+        ast.AsyncFunctionDef,
+        ast.ClassDef,
+        ast.GeneratorExp,
+    )
+
+    def _contains_eager_call(node: ast.AST) -> bool:
+        if node is call:
+            return True
+        if isinstance(node, deferred):
+            return False
+        return any(_contains_eager_call(child) for child in ast.iter_child_nodes(node))
+
     def _in_protected_body(nodes: list[ast.stmt]) -> bool:
-        for node in nodes:
-            if isinstance(node, (ast.Lambda, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                continue
-            hidden = (ast.Lambda, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
-            if node is call or any(
-                child is call for child in ast.walk(node) if not isinstance(child, hidden)
-            ):
-                return True
-        return False
+        return any(_contains_eager_call(node) for node in nodes)
 
     assert _in_protected_body(the_try.body), "service.submit is not directly inside the try body"
     for region in (the_try.orelse, the_try.finalbody):
@@ -927,8 +934,19 @@ def _submit_keyword_suppliers() -> list[tuple[Path, int, str]]:
                             isinstance(k, ast.Constant) and k.value == "submit" for k in value.keys
                         ):
                             suppliers.append((path, node.lineno, "**{submit: ...}"))
-            elif isinstance(node, ast.Assign):
-                for target in node.targets:
+                if (
+                    isinstance(node.func, ast.Name)
+                    and node.func.id == "setattr"
+                    and len(node.args) >= 3
+                    and isinstance(node.args[1], ast.Constant)
+                    and node.args[1].value == "_submit"
+                ):
+                    suppliers.append(
+                        (path, node.lineno, f"setattr _submit = {ast.dump(node.args[2])}")
+                    )
+            elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                for target in targets:
                     if isinstance(target, ast.Attribute) and target.attr == "_submit":
                         shape = f"assign {target.attr} = {ast.dump(node.value)}"
                         suppliers.append((path, node.lineno, shape))
