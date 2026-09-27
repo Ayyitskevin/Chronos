@@ -680,16 +680,25 @@ def test_the_classification_matches_what_the_kernel_actually_reads() -> None:
 
     import chronos.supervisor.admission as admission_module
     import chronos.supervisor.durable as durable_module
+    import chronos.supervisor.loop as loop_module
+    import chronos.supervisor.option_selection as option_selection_module
     import chronos.supervisor.sizing as sizing_module
 
     # Every module that may enforce a mandate limit must be scanned. M3 added a
     # third one, and a classification test that missed it would have gone on
     # certifying LossLimits as inert while `durable.py` enforced it -- the exact
     # stale-claim failure this pin exists to catch.
+    #
+    # F7-A T2: the same miss happened again on the option-selection path. The
+    # loop refuses a selection receipt weaker than the mandate's liquidity floors
+    # and sessions, and option_selection filters on them, while this scan (and so
+    # the map) still called all three inert. Both modules are scanned now.
     kernel = (
         inspect.getsource(sizing_module)
         + inspect.getsource(admission_module)
         + inspect.getsource(durable_module)
+        + inspect.getsource(option_selection_module)
+        + inspect.getsource(loop_module)
     )
     for model_name, classified in _LIMIT_ENFORCEMENT.items():
         for field, status in classified.items():

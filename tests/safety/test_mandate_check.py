@@ -40,6 +40,7 @@ from chronos.autonomy import (
     SessionPolicy,
     StrategyForm,
     TradableAssetClass,
+    TradingSession,
     VersionPins,
 )
 from chronos.cli.main import main
@@ -343,6 +344,43 @@ def test_a_limit_written_into_an_inert_field_is_reported() -> None:
     assert all(item.severity is Severity.IMPORTANT for item in inert)
 
 
+def test_t1_an_option_liquidity_floor_or_session_is_not_reported_as_inert() -> None:
+    """F7-A T1: these three bind on the option-selection path, so none is "constrains nothing".
+
+    ``api/autonomy_wiring.py`` builds the selection policy from them and
+    ``supervisor/loop.py`` refuses a selection receipt weaker than the mandate.
+    Reporting them as inert would train the owner to ignore a floor that holds.
+    The positive control is the test above: sector exposure and overnight
+    holding are still reported.
+    """
+
+    mandate = _paper(
+        market_data=MarketDataRequirements(
+            max_quote_age_seconds=Decimal(5),
+            permitted_data_qualities=(DataQuality.LIVE,),
+            max_relative_spread=Decimal("0.02"),
+            min_option_volume=10,
+            min_open_interest=100,
+        ),
+        sessions=SessionPolicy(permitted_sessions=(TradingSession.REGULAR,)),
+    )
+    findings = review_mandate(
+        mandate,
+        now=_NOW,
+        expected_fingerprint=_FINGERPRINT,
+        fingerprint_source="test",
+        ingress_pins=dict(_INGRESS_PINS),
+    )
+    reported = {
+        item.message.split(" ", 1)[0] for item in findings if item.code == "inert-limit-set"
+    }
+    assert not reported & {
+        "market_data.min_option_volume",
+        "market_data.min_open_interest",
+        "sessions.permitted_sessions",
+    }, reported
+
+
 def test_an_enforced_limit_is_not_reported_as_inert() -> None:
     """Guard the guard: flagging a binding limit would train the owner to ignore this."""
 
@@ -581,10 +619,17 @@ def test_the_report_lists_every_inert_field_not_only_the_ones_set(
     printed = capsys.readouterr().out
     for field in (
         "concentration.max_sector_exposure_pct",
+        "concentration.max_family_exposure_pct",
+        "sessions.allow_overnight_holding",
+    ):
+        assert field in printed
+    # F7-A: the option-path limits bind, so the disclosure must not list them.
+    for field in (
+        "market_data.min_option_volume",
         "market_data.min_open_interest",
         "sessions.permitted_sessions",
     ):
-        assert field in printed
+        assert field not in printed
 
 
 # ----------------------------------------------------------- evidence posture
