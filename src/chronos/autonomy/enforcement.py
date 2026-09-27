@@ -20,8 +20,10 @@ can read, so three consumers stay in agreement instead of drifting:
 
 **This module enforces nothing.** It records, per limits model, whether some
 deterministic module reads each field today. ``ENFORCED`` means read by
-:mod:`chronos.supervisor.sizing`, :mod:`chronos.supervisor.admission`, or
-:mod:`chronos.supervisor.durable`. ``INERT`` means a value the owner writes
+:mod:`chronos.supervisor.sizing`, :mod:`chronos.supervisor.admission`,
+:mod:`chronos.supervisor.durable`, or, on the option-selection path,
+:mod:`chronos.supervisor.option_selection` and :mod:`chronos.supervisor.loop`.
+``INERT`` means a value the owner writes
 there changes no decision — the mandate will still validate, activate, and look
 complete.
 
@@ -104,15 +106,22 @@ LIMIT_ENFORCEMENT: Mapping[str, Mapping[str, str]] = MappingProxyType(
                 "max_quote_age_seconds": ENFORCED,
                 "permitted_data_qualities": ENFORCED,
                 "max_relative_spread": ENFORCED,
-                # Need option-chain evidence the supervisor does not gather yet.
-                "min_option_volume": INERT,
-                "min_open_interest": INERT,
+                # Option-selection floors (F7-A: once classified INERT while
+                # bound). api/autonomy_wiring.py:650-653 builds the selection
+                # policy from max(settings, mandate); supervisor/loop.py:1298 and
+                # :1300 refuse a receipt weaker than the mandate; and
+                # supervisor/option_selection.py:2064 / :2075 filter on them.
+                "min_option_volume": ENFORCED,
+                "min_open_interest": ENFORCED,
             }
         ),
         "SessionPolicy": MappingProxyType(
             {
-                # Need a session clock in the supervisor; the orders plane has its own.
-                "permitted_sessions": INERT,
+                # Option-selection path (F7-A): api/autonomy_wiring.py:658 passes
+                # it into the selection policy, supervisor/loop.py:1310 refuses a
+                # receipt outside it, supervisor/option_selection.py:1974 filters.
+                "permitted_sessions": ENFORCED,
+                # Nothing reads it: no session clock or flatten in the supervisor.
                 "allow_overnight_holding": INERT,
             }
         ),

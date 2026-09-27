@@ -504,11 +504,14 @@ It does **not** enforce, and these are open gaps rather than decisions:
 - ~~**`scope.exchanges` and `scope.contract_families`**~~ — **enforced since M4.**
   `chronos.supervisor.compiler` checks both against the qualified contract, which is what
   they always needed and what did not exist before.
-- **Sector, family, and correlated concentration**; and the option-liquidity floors
+- **Sector, family, and correlated concentration.** ~~And the option-liquidity floors
   (`min_option_volume`, `min_open_interest`), which need option-chain evidence the supervisor
-  does not gather.
-- **`SessionPolicy` in full** — permitted sessions and overnight holding need a session clock
-  in the supervisor; the orders plane has its own, which still applies downstream.
+  does not gather.~~ *(Corrected by F7-A, 2026-09-27: both floors bind on the option-selection
+  path. `supervisor/option_selection.py` filters on them, and `supervisor/loop.py` refuses a
+  selection receipt weaker than the mandate.)*
+- **`SessionPolicy.allow_overnight_holding`** — overnight holding needs a session clock in the
+  supervisor; the orders plane has its own, which still applies downstream. ~~`SessionPolicy`
+  in full~~: `permitted_sessions` binds on the option-selection path (F7-A, same modules).
 - **Individual evidence citations** — the bundle is bound by id and digest, and M4 added the
   bundle type itself (`chronos.autonomy.evidence`), but citations *inside* a bundle are still
   not resolved against a store of issued evidence.
