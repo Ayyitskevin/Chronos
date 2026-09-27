@@ -309,10 +309,17 @@ the live commit and coordinate with any branch already addressing it before edit
    at `src/chronos/domain/enums.py:102,106,107` (`:105`), mapped from broker
    status strings by `broker_status_to_lifecycle`
    (`src/chronos/orders/tracker.py:92`; typed returns at `:121`, `:116`,
-   `:110`, `:114`) — but they reach the tracker only through the restart
-   reconciler: the only `.ingest(` callers in `src/chronos` are
+   `:110`, `:114`) — but after the submission acknowledgement they reach the
+   durable lifecycle (`OrderTrackerRepository.record_transition`,
+   `src/chronos/persistence/order_repositories.py:396`) only through the restart
+   reconciler: the only `OrderTracker.ingest(` callers in `src/chronos` are
    `src/chronos/orders/reconciliation_recovery.py:507` and `:659`, and no
-   supervised live consumer produces them (finding 1; CB-1, owner-gated). A
+   supervised live consumer produces them (finding 1's callback-consumer half,
+   owner-gated). Two request-time writes are not post-submission status: the
+   submit acknowledgement may itself record `PARTIALLY_FILLED` or `FILLED`
+   (`src/chronos/orders/submission.py:797`, accepted at `:836-840`), and an
+   operator cancel records `CANCEL_PENDING` and, once the broker confirms,
+   `CANCELLED` (`src/chronos/orders/mutations.py:154-159`, `:166-172`). A
    late commission has no typed outcome: `OrderStatusUpdate`
    (`tracker.py:78-89`) carries no commission field, so the tracker cannot
    produce one, and when a commission arrives after its fill was stored
