@@ -1,6 +1,8 @@
 """Strategy protocol and proposal vocabulary.
 
-Invariants enforced here:
+Invariants enforced here (every economic-looking strategy/baseline parameter
+is classified with its reader in ``chronos.strategies.param_enforcement`` —
+data only; it enforces nothing itself):
 
 - A proposal is advice, not an order. It has no share quantity and no account
   or broker fields, so a strategy physically cannot express "submit X shares
