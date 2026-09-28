@@ -11,15 +11,25 @@ from __future__ import annotations
 
 import ast
 import inspect
+from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 
+import pytest
+
+from chronos.domain.enums import OrderIntent, ProductFamily, ReconciliationStatus, RiskCheckStatus
+from chronos.domain.models import AccountSummary
+from chronos.orders.intent import build_option_intent
+from chronos.orders.risk import OrderRiskEngine, RiskEvidence
 from chronos.persistence import reservation_enforcement
 from chronos.persistence.reservation_enforcement import (
     ENFORCED,
     INERT,
     RESERVATION_ENFORCEMENT,
 )
+from chronos.services.trading_hours import session_for
 from chronos.strategy import reservations
+from tests.support.order_fakes import PAPER_ACCOUNT, option_contract, paper_settings
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SRC = REPO_ROOT / "src" / "chronos"
@@ -107,6 +117,58 @@ def test_t2_the_in_memory_reservation_computation_is_enforced() -> None:
     assert "reserve_shares" in called, "orders/risk.py no longer calls reservations.reserve_shares"
     assert hasattr(reservations, "reserve_cash")
     assert hasattr(reservations, "reserve_shares")
+
+
+_NOW = datetime(2026, 7, 17, 15, 0, tzinfo=UTC)
+
+
+def _cash_secured_put_status(**evidence: Decimal) -> RiskCheckStatus:
+    intent = build_option_intent(
+        account_id=PAPER_ACCOUNT,
+        intent=OrderIntent.OPEN_SHORT_PUT,
+        contract=option_contract(),
+        quantity=1,
+        limit_price=Decimal("1.20"),
+        correlation_id="CHR-ORD-" + "R" * 32,
+    )
+    account = AccountSummary(
+        account_id=PAPER_ACCOUNT,
+        net_liquidation=Decimal("100000"),
+        total_cash=Decimal("80000"),
+        buying_power=Decimal("160000"),
+        as_of=_NOW,
+    )
+    decision = OrderRiskEngine(paper_settings()).evaluate(
+        intent,
+        RiskEvidence(
+            account=account,
+            reconciliation_status=ReconciliationStatus.RECONCILED,
+            reconciliation_generation=1,
+            reconciliation_session_id="f7r",
+            session=session_for(ProductFamily.OPTION, now=_NOW, broker_confirms_open=True),
+            **evidence,
+        ),
+        now=_NOW,
+    )
+    return next(c.status for c in decision.checks if c.name == "cash_secured_put")
+
+
+def test_t2b_the_reservation_result_changes_the_refusal() -> None:
+    """ENFORCED means the reserve_cash RESULT gates admission, not merely that it is called.
+
+    Cash covers the proposed put alone (positive control) but not once a reservation
+    bucket is added: each bucket on its own must turn the check to FAIL.
+    """
+
+    assert _cash_secured_put_status() is RiskCheckStatus.PASS
+
+
+@pytest.mark.parametrize(
+    "bucket",
+    ["existing_short_put_obligation", "pending_open_put_obligation", "pending_crypto_buy_notional"],
+)
+def test_t2b_each_reservation_bucket_alone_refuses(bucket: str) -> None:
+    assert _cash_secured_put_status(**{bucket: Decimal("79000")}) is RiskCheckStatus.FAIL
 
 
 def test_t3_the_map_module_is_imported_by_nothing_under_src() -> None:

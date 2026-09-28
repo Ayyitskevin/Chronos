@@ -89,8 +89,11 @@ RESERVATION_ENFORCEMENT: Mapping[str, Mapping[str, str]] = MappingProxyType(
         "position_netting": MappingProxyType(
             {
                 "classification": OUT_OF_SCOPE_OWNER_GATE,
-                "surface": "(no module)",
-                "evidence": "absent at the head; VCP section 7 O5",
+                "surface": "(no authoritative netting module)",
+                "evidence": "no netting on the admission/risk path at the head; a display-only, "
+                "read-only per-symbol net-position projection exists for the monitor "
+                "(src/chronos/monitoring/ledger_view.py:150) and is not an admission input; "
+                "VCP section 7 O5",
                 "note": "not classified: persisting reservations, netting and "
                 "cross-proposal conflict resolution are OWNER GATE, a separate packet",
             }
