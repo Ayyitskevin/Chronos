@@ -61,6 +61,26 @@ for bad_base in ERROR not-a-sha ''; do
 done
 ( cd "$T/repo" && STUB_BASE='abc123\nINJECTED' PR_NUMBER=7 run bash "$G30" )
 check "r1:1 P2-1 30 FAIL: newline-carrying gh output (K3 P2-1) is still exactly one FAIL line" "failed base-fresh 'could not read #7'"
+# GATE30-1 (D-32): the base can equal origin/main while the checked-out head lacks it (#270 at df4a960).
+# Each case sets HEAD, runs gate 30 with STUB_BASE=$NEW (the base check passes), then restores main.
+tc() { git -C "$T/repo" -c user.email=t@t -c user.name=t "$@"; }
+( cd "$T/repo" && git checkout -q --detach "$OLD" && STUB_BASE=$NEW PR_NUMBER=7 run bash "$G30" ); git -C "$T/repo" checkout -q main
+check "g30-1:C2 30 FAIL: base == origin/main but HEAD is the older $OLD → one FAIL line naming both shas, exit 1" "failed base-fresh 'head $OLD does not contain origin/main $NEW'"
+tc checkout -q -b g30-ahead "$NEW" && tc commit -q --allow-empty -m ahead; AHEAD=$(git -C "$T/repo" rev-parse HEAD)
+( cd "$T/repo" && STUB_BASE=$NEW PR_NUMBER=7 run bash "$G30" ); git -C "$T/repo" checkout -q main
+check "g30-1:C1 30 PASS: HEAD $AHEAD strictly contains origin/main → the unchanged PASS line (operand-order / equality-proxy control)" "passed base-fresh && grep -qxF \"PASS: base-fresh — PR base $NEW == origin/main\" $T/out"
+tc checkout -q -b g30-sibling "$OLD" && tc commit -q --allow-empty -m sibling; SIB=$(git -C "$T/repo" rev-parse HEAD)
+( cd "$T/repo" && STUB_BASE=$NEW PR_NUMBER=7 run bash "$G30" ); git -C "$T/repo" checkout -q main
+check "g30-1:C1 30 FAIL: a sibling of origin/main (diverged from $OLD) does not contain it" "failed base-fresh 'head $SIB does not contain origin/main $NEW'"
+git -C "$T/repo" replace --graft "$OLD" "$NEW"
+( cd "$T/repo" && git checkout -q --detach "$OLD" && STUB_BASE=$NEW PR_NUMBER=7 run bash "$G30" ); git -C "$T/repo" checkout -q main; git -C "$T/repo" replace -d "$OLD" >/dev/null
+check "g30-1:C1 30 FAIL: a planted refs/replace graft (OLD → parent NEW) does not make the stale head contain origin/main" "failed base-fresh 'head $OLD does not contain origin/main $NEW'"
+printf '%s %s\n' "$OLD" "$NEW" > "$T/repo/.git/info/grafts"
+( cd "$T/repo" && git checkout -q --detach "$OLD" && STUB_BASE=$NEW PR_NUMBER=7 run bash "$G30" ); git -C "$T/repo" checkout -q main; rm -f "$T/repo/.git/info/grafts"
+check "g30-1:C1 30 FAIL: a planted info/grafts line (OLD → parent NEW) does not make the stale head contain origin/main" "failed base-fresh 'head $OLD does not contain origin/main $NEW'"
+( cd "$T/repo" && STUB_BASE=$OLD PR_NUMBER=7 run bash "$G30" )
+check "g30-1:C3 30 FAIL: a behind base still gets the behind message first (the ancestry check runs only after it)" "failed base-fresh 'PR base $OLD is behind origin/main $NEW' && ! grep -q 'does not contain' $T/err"
+check "g30-1:C3 30 the restored repo is back on main at $NEW with a clean work tree" "[ \"\$(git -C $T/repo rev-parse HEAD)\" = $NEW ] && [ -z \"\$(git -C $T/repo status --porcelain)\" ]"
 git -C "$T/repo" remote set-url origin "$T/missing.git"
 ( cd "$T/repo" && STUB_BASE=$NEW PR_NUMBER=7 run bash "$G30" ); check "1 30 FAIL: origin main cannot be fetched → one FAIL line" "failed base-fresh 'could not fetch origin main'"
 check "r1:2 P1-1 30 queries the Chronos repository explicitly (graphql owner=Ayyitskevin name=Chronos, never the {owner}/{repo} inference)" "grep -q 'api graphql -F owner=Ayyitskevin -F name=Chronos' $STUB_LOG && ! grep -qF '{owner}' $STUB_LOG"
