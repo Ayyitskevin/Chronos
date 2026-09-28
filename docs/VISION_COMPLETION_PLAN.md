@@ -388,7 +388,13 @@ Deliver:
   `CapabilityState`, `:208-214` `CapabilityVerdict`/`TradingCapability`; no I/O, grants no
   authority); a default-off, one-shot external observer consumes the two exact probe
   endpoints with timeout-constrained, credential-free requests and machine exit status
-  (`src/chronos/operations/external_probe.py:45`).
+  (`src/chronos/operations/external_probe.py:45`). Rerunnable proof:
+  `tests/integration/test_operational_health_api.py` (e.g.
+  `test_schema_v2_separates_answering_readiness_and_capability`),
+  `tests/unit/test_operational_health.py`, `tests/unit/test_external_health_probe.py`,
+  `tests/safety/test_operational_health_boundary.py`. This addresses the separation only:
+  orchestrator deployment/configuration and operational proof of these probes stay open in
+  the Partial delivery record below, and nothing here satisfies the Phase 2 exit.
 - Off-host alert sidecar, encrypted backups, external audit-chain anchor, automatic clock
   health, watchdogs, dead-man monitoring, measured RPO/RTO, and isolated restore drills.
 - Reproducible package/release validation: clean venv install, all migrations, static
