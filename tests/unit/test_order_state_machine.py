@@ -128,7 +128,9 @@ def test_broker_status_cancel_ack_call_site_unchanged() -> None:
     from chronos.orders.tracker import broker_status_to_lifecycle
 
     assert (
-        broker_status_to_lifecycle("", filled_quantity=Decimal("0"), remaining_quantity=Decimal("0"))
+        broker_status_to_lifecycle(
+            "", filled_quantity=Decimal("0"), remaining_quantity=Decimal("0")
+        )
         is OrderLifecycle.SUBMISSION_UNKNOWN
     )
     assert (
