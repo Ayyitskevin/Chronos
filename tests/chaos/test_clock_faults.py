@@ -140,6 +140,8 @@ def test_an_expired_bundle_resolves_expired(tmp_path: Path) -> None:
                     now=at,
                 )
 
+        fresh = resolve(T0 + timedelta(seconds=59))
+        assert fresh.refusal is None and fresh.bundle is not None, fresh.detail
         refused = resolve(T0 + timedelta(seconds=61))
         assert refused.refusal is evidence_bundles.ResolutionRefusal.EXPIRED
     finally:
