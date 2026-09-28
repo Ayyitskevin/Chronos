@@ -205,7 +205,7 @@ Both are built inert and enabled only by the owner (plan §11); a value would be
 | --- | --- |
 | DECISIONS.md | `a29eaaea431b955fafd8eca8f8c5254a1989dffaf3388ac3a6c2c881ff7a5ab7` |
 | RISK_REGISTER.md | `7d9ede5f1b16dcbee09a0764f38601982f9d3288d696acd7e49f44e9aa383d65` |
-| docs/VISION_COMPLETION_PLAN.md | `a8a4710495cf770fb2dcac4616f7d1f56c2ae57979517196d02186f816360ddf` |
+| docs/VISION_COMPLETION_PLAN.md | `bc4f6a0fd1babe0a7f63d03e99eaeb4a1b1ac09a2d33e22d243b457d759a0e57` |
 | src/chronos/auditlog/__init__.py | `5ec898d0ab735be6f0a7773bbeb9d8aacf4c3ea3b5eceff2d446a914d5a1647b` |
 | src/chronos/bridge/config.py | `25f2f9a369d625440eb21d0d55f10386aa47d33dfb1843731788295b03cec636` |
 | worker/config.py | `6b3763ec4280a65160442eb2fb63d523ae069ae70754842635681f855573dffe` |
