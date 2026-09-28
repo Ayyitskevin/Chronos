@@ -75,6 +75,7 @@ survives the expiry of the thing issued.
 
 from __future__ import annotations
 
+import json
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -84,7 +85,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from chronos.persistence import hash_chain
-from chronos.persistence.schema import AutonomyEvidenceBundleRow
+from chronos.persistence.schema import AutonomyEvidenceBundleRow, HashChainRow
 from chronos.supervisor.evidence_kinds import BundleKind
 
 __all__ = [
@@ -130,6 +131,13 @@ MAX_LIVE_BUNDLES_PER_PROPOSER = 64
 #: is NOT pruned, so pruning never destroys the audit trail — only the lookup
 #: row whose authority has already lapsed.
 RETENTION_AFTER_EXPIRY = timedelta(days=7)
+
+#: Hash-chain event kind for the durable sticky EXPIRED verdict (D-26/FIX-26).
+#: Once a drain has refused a bundle as EXPIRED, that verdict is recorded on the
+#: account's evidence stream in the same transaction as the refusal, and every
+#: later resolution of the live row refuses EXPIRED regardless of what the wall
+#: clock does afterwards — refused authority is not revocable by clock motion.
+EXPIRED_EVENT_KIND = "evidence_bundle_expired"
 
 
 class ResolutionRefusal(StrEnum):
@@ -349,6 +357,59 @@ def load(
     )
 
 
+def _durable_expiry_verdict(session: Session, *, stream: str, bundle_id: str) -> str | None:
+    """The refusal detail if durable evidence already judged ``bundle_id`` EXPIRED.
+
+    Returns ``None`` when no sticky verdict exists. Everything else about the
+    read fails CLOSED, because the alternative in each case is treating corrupt
+    durable evidence as "not expired":
+
+    - a stream that fails ``hash_chain.verify`` (a targeted edit, a deletion, a
+      reordering) refuses rather than admitting on a ledger that can no longer
+      prove what it recorded;
+    - an expiry record that does not decode, is not a JSON object, or names no
+      string ``bundle_id`` refuses rather than being ignored;
+    - any record whose ``bundle_id`` matches exactly (duplicate records are the
+      same verdict, never an error) refuses with the sticky detail.
+
+    Only records of ``EXPIRED_EVENT_KIND`` on this account's own stream are
+    decoded, so one malformed unrelated record can neither match accidentally
+    nor crash the drain on an unbounded scan. Deleting the stream's TAIL record
+    stays undetectable — that is ``hash_chain``'s documented honest bound (no
+    external anchor), not a gap this read can close.
+    """
+
+    verification = hash_chain.verify(session, stream)
+    if not verification.ok:
+        return (
+            "the account's durable evidence stream failed verification "
+            f"({verification.detail}); refusing closed until the stream is repaired"
+        )
+    payloads = session.scalars(
+        select(HashChainRow.payload_json).where(
+            HashChainRow.stream == stream,
+            HashChainRow.kind == EXPIRED_EVENT_KIND,
+        )
+    )
+    for payload_json in payloads:
+        try:
+            decoded = json.loads(payload_json)
+        except json.JSONDecodeError:
+            return "a durable expiry record does not decode; refusing closed"
+        if not isinstance(decoded, dict):
+            return "a durable expiry record is not a JSON object; refusing closed"
+        recorded = decoded.get("bundle_id")
+        if not isinstance(recorded, str):
+            return "a durable expiry record names no string bundle id; refusing closed"
+        if recorded == bundle_id:
+            return (
+                "the cited evidence bundle was already refused EXPIRED at an earlier "
+                "drain and that verdict is durable; wall-clock motion does not revive "
+                "refused authority"
+            )
+    return None
+
+
 def resolve(
     session: Session,
     *,
@@ -418,7 +479,27 @@ def resolve(
                     "or registry entry; queued authority does not transfer across replacement"
                 ),
             )
+        sticky_detail = _durable_expiry_verdict(
+            session,
+            stream=hash_chain_stream(account_fingerprint),
+            bundle_id=row.bundle_id,
+        )
+        if sticky_detail is not None:
+            return Resolution(
+                refusal=ResolutionRefusal.EXPIRED,
+                detail=sticky_detail,
+            )
         if now >= row.expires_at:
+            hash_chain.append(
+                session,
+                stream=hash_chain_stream(account_fingerprint),
+                kind=EXPIRED_EVENT_KIND,
+                payload={
+                    "bundle_id": row.bundle_id,
+                    "expires_at": row.expires_at.isoformat(),
+                },
+                recorded_at=now,
+            )
             return Resolution(
                 refusal=ResolutionRefusal.EXPIRED,
                 detail=(
