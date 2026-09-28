@@ -163,3 +163,38 @@ def test_3b_args_after_the_command_arrive_verbatim_never_partially_applied(
         f"args {parsed.args} != suffix {tuple(suffix)}: tokens after the command "
         "must reach the command verbatim — folded or dropped tokens are a partial apply"
     )
+
+
+@settings(max_examples=200)
+@given(status=st.text(), filled=_POSITIVE_DECIMAL, remaining=_POSITIVE_DECIMAL)
+def test_4_d27_unknown_status_with_partial_shape_fails_closed(
+    status: str, filled: Decimal, remaining: Decimal
+) -> None:
+    # FIX-27 / D-27: the TG3A-removed shape. An unrecognized status WITH a
+    # partial-fill shape (filled>0 AND remaining>0) must still land
+    # SUBMISSION_UNKNOWN — the quantity heuristic is scoped to known working
+    # statuses, so a novel broker status is never granted working-order
+    # authority from quantities alone. Status-first short-circuit: quantities
+    # are never compared for an unrecognized status.
+    result = broker_status_to_lifecycle(
+        status, filled_quantity=filled, remaining_quantity=remaining
+    )
+    assert isinstance(result, OrderLifecycle)
+    if status.strip().lower() not in _KNOWN_STATUSES:
+        assert result is OrderLifecycle.SUBMISSION_UNKNOWN, (
+            f"unrecognized status {status!r} with filled={filled} remaining={remaining} "
+            f"mapped to {result}; quantities must not upgrade an unknown status"
+        )
+
+
+def test_5_d27_unknown_status_nonfinite_quantities_fail_closed() -> None:
+    # Threat-map row: "regardless of quantities" — a NaN comparison would raise
+    # InvalidOperation if the heuristic ever evaluated it; status-first
+    # short-circuiting must return SUBMISSION_UNKNOWN deterministically.
+    for qty in (Decimal("NaN"), Decimal("Infinity"), Decimal("-Infinity")):
+        result = broker_status_to_lifecycle(
+            "FutureWorkingState", filled_quantity=qty, remaining_quantity=qty
+        )
+        assert result is OrderLifecycle.SUBMISSION_UNKNOWN, (
+            f"unknown status with quantity {qty} mapped to {result}"
+        )

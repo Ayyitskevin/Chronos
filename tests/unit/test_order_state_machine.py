@@ -99,3 +99,21 @@ def test_broker_status_terminal_wins_over_partial_fill() -> None:
         )
         is OrderLifecycle.FILLED
     )
+
+
+def test_broker_status_working_partial_quantities_are_partial() -> None:
+    # FIX-27 C2/C4b named known-status pin: the quantity heuristic is scoped to
+    # exactly the three known working statuses — a partial-fill shape on any of
+    # them is PARTIALLY_FILLED. Mutation (b): drop pendingsubmit from the scoped
+    # set and this pin goes RED (that status falls through to SUBMITTED).
+    from decimal import Decimal
+
+    from chronos.orders.tracker import broker_status_to_lifecycle
+
+    for status in ("Submitted", "PreSubmitted", "PendingSubmit"):
+        assert (
+            broker_status_to_lifecycle(
+                status, filled_quantity=Decimal("5"), remaining_quantity=Decimal("5")
+            )
+            is OrderLifecycle.PARTIALLY_FILLED
+        ), f"{status} with a partial-fill shape must stay PARTIALLY_FILLED"
