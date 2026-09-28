@@ -88,6 +88,8 @@ mv "$T/repo/.git/objects/${LP:0:2}/${LP:2}" "$T/lp.obj"   # a local-only parent 
 ( cd "$T/repo" && STUB_BASE=$NEW PR_NUMBER=7 run bash "$G30" )
 mv "$T/lp.obj" "$T/repo/.git/objects/${LP:0:2}/${LP:2}"; git -C "$T/repo" checkout -q main
 check "g30-1:C1 30 FAIL: a merge-base error (exit >1, missing parent object) is its own one-line FAIL, never a PASS" "failed base-fresh \"could not check whether head $BROKEN contains origin/main $NEW \\(git merge-base exit [0-9]+\\)\""
+( cd "$T/repo" && git checkout -q --detach "$OLD" && git branch -q -f main "$OLD" && STUB_BASE=$NEW PR_NUMBER=7 run bash "$G30" ); git -C "$T/repo" branch -q -f main "$NEW"; git -C "$T/repo" checkout -q main
+check "g30-1:C1 30 FAIL: a lagging LOCAL main (== the stale head) is not the reference — origin/main after the fetch is" "failed base-fresh 'head $OLD does not contain origin/main $NEW'"
 check "g30-1:C3 30 the restored repo is back on main at $NEW with a clean work tree" "[ \"\$(git -C $T/repo rev-parse HEAD)\" = $NEW ] && [ -z \"\$(git -C $T/repo status --porcelain)\" ]"
 git -C "$T/repo" remote set-url origin "$T/missing.git"
 ( cd "$T/repo" && STUB_BASE=$NEW PR_NUMBER=7 run bash "$G30" ); check "1 30 FAIL: origin main cannot be fetched → one FAIL line" "failed base-fresh 'could not fetch origin main'"
