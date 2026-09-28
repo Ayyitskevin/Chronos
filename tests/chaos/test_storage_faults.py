@@ -30,16 +30,41 @@ from __future__ import annotations
 import errno
 import json
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
 from chronos.auditlog.log import AuditLog, AuditLogCorruptionError, ChainState, verify_chain
+from chronos.autonomy import (
+    AutonomyMandate,
+    AutonomyMode,
+    CapitalLimits,
+    ConcentrationLimits,
+    DecisionKind,
+    EvidenceCitation,
+    FamilyPromotion,
+    InstrumentScope,
+    MarketDataRequirements,
+    OrderForm,
+    PromotionLevel,
+    ProposedDecision,
+    StrategyForm,
+    TradableAssetClass,
+    VersionPins,
+)
+from chronos.domain.enums import DataQuality
+from chronos.domain.models import UnderlyingContract
 from chronos.persistence import hash_chain
 from chronos.persistence.database import Database
 from chronos.supervisor import durable as dur
-from chronos.supervisor.admission import AdmissionCheck, AdmissionOutcome
+from chronos.supervisor import queue
+from chronos.supervisor.admission import AdmissionCheck, AdmissionOutcome, MarketDataEvidence
+from chronos.supervisor.compiler import QuoteEvidence
+from chronos.supervisor.handoff import HandoffResult
+from chronos.supervisor.loop import CycleFacts, run_cycle
+from chronos.supervisor.sizing import AccountEvidence
 
 requires_nonroot = pytest.mark.skipif(
     os.geteuid() == 0, reason="root ignores directory write permission bits"
@@ -189,5 +214,187 @@ def test_3_a_failed_decision_write_journals_no_success(
             assert "d-faulted" not in refusals
             stream = dur.stream_for(dur.DECISION_STREAM, _FINGERPRINT)
             assert hash_chain.head(session, stream) is None, "no journaled success"
+    finally:
+        database.dispose()
+
+
+# --------------------------------------------------------------------------- #
+# Contract 3 at the supervised-cycle boundary (TG2r1, Daybreak's repair
+# criterion): the same fault driven through run_cycle, not the helper.
+# Harness mirrors tests/safety/test_typed_handoff_outcomes_exercised.py — a
+# plain session, because production's drain holds one for the same reason.
+# --------------------------------------------------------------------------- #
+
+_ACCOUNT = "DU1234567"
+
+
+def _cycle_identity() -> queue.HarnessIdentity:
+    return queue.HarnessIdentity(
+        provider="anthropic",
+        model_id="model-x",
+        model_version="1",
+        prompt_version="1",
+        tool_schema_version="1",
+        decision_schema_version="1",
+        policy_version="1",
+        evidence_bundle_id="eb-1",
+        evidence_bundle_digest="b" * 64,
+    )
+
+
+def _cycle_mandate() -> AutonomyMandate:
+    return AutonomyMandate(
+        mandate_id="m-1",
+        mandate_version=1,
+        account_fingerprint=_FINGERPRINT,
+        mode=AutonomyMode.PAPER_AUTONOMOUS,
+        promotions=(
+            FamilyPromotion(
+                asset_class=TradableAssetClass.EQUITY, level=PromotionLevel.PAPER_AUTONOMOUS
+            ),
+        ),
+        effective_from=_NOW - timedelta(hours=1),
+        expires_at=_NOW + timedelta(days=1),
+        versions=VersionPins(
+            provider="anthropic",
+            model_id="model-x",
+            model_version="1",
+            prompt_version="1",
+            tool_schema_version="1",
+            decision_schema_version="1",
+            policy_version="1",
+        ),
+        scope=InstrumentScope(
+            asset_classes=(TradableAssetClass.EQUITY,),
+            symbols=("SPY",),
+            strategies=(StrategyForm.LONG_EQUITY,),
+            order_forms=(OrderForm.LIMIT,),
+        ),
+        capital=CapitalLimits(
+            allocated_capital_usd=Decimal(50_000),
+            max_order_notional_usd=Decimal(10_000),
+            max_gross_exposure_usd=Decimal(500_000),
+            max_net_exposure_usd=Decimal(500_000),
+            max_position_notional_usd=Decimal(100_000),
+            max_shares_per_order=100,
+            min_cash_floor_usd=Decimal(1_000),
+            min_buying_power_usd=Decimal(500),
+        ),
+        concentration=ConcentrationLimits(max_symbol_exposure_pct=Decimal("0.50")),
+        market_data=MarketDataRequirements(
+            max_quote_age_seconds=Decimal(5),
+            permitted_data_qualities=(DataQuality.LIVE,),
+        ),
+        owner_authorization_ref="owner-1",
+        authored_at=_NOW,
+    )
+
+
+def _cycle_facts() -> CycleFacts:
+    return CycleFacts(
+        account_fingerprint=_FINGERPRINT,
+        account_id=_ACCOUNT,
+        now=_NOW,
+        process_generation=7,
+        evidence_bundle_id="eb-1",
+        evidence_bundle_digest="b" * 64,
+        market_data=MarketDataEvidence(quote_age_seconds=Decimal(1), quality=DataQuality.LIVE),
+        account=AccountEvidence(
+            net_liquidation_usd=Decimal(100_000),
+            total_cash_usd=Decimal(60_000),
+            buying_power_usd=Decimal(60_000),
+            symbol_exposure_usd=Decimal(0),
+            gross_exposure_usd=Decimal(0),
+            net_exposure_usd=Decimal(0),
+            position_notional_usd=Decimal(0),
+            maintenance_margin_usd=Decimal(0),
+            deployed_capital_usd=Decimal(0),
+        ),
+        quote=QuoteEvidence(bid=Decimal("399.98"), ask=Decimal("400.02")),
+        contract=UnderlyingContract(con_id=111, symbol="SPY"),
+        reference_price=Decimal(400),
+        multiplier=Decimal(1),
+    )
+
+
+def _cycle_proposal() -> ProposedDecision:
+    return ProposedDecision(
+        kind=DecisionKind.OPEN,
+        asset_class=TradableAssetClass.EQUITY,
+        symbol="SPY",
+        requested_strategy=StrategyForm.LONG_EQUITY,
+        requested_quantity=Decimal(10),
+        evidence=(EvidenceCitation(evidence_id="ev-1", kind="quote", as_of=_NOW, digest="c" * 64),),
+        invalidation_conditions=("closes below 400",),
+    )
+
+
+def test_3_cycle_level_a_failed_decision_write_aborts_the_cycle_before_any_handoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Daybreak repair criterion: under the hash_chain.append fault, a real
+    supervised cycle must fail closed across the cycle boundary — the OSError
+    propagates out of run_cycle, no submission/handoff is called, and after the
+    production-owned rollback (runtime.py:479-481) neither the attempt row nor
+    the decision-chain row exists. Mutation that turns this red: wrapping the
+    durable.record_outcome call at src/chronos/supervisor/loop.py:568-575 in
+    try/except OSError: pass — the cycle then walks on to the handoff."""
+    database = Database("sqlite+pysqlite:///:memory:")
+    database.initialize()
+    try:
+        session = database.sessions()
+        try:
+            mandate = _cycle_mandate()
+            dur.activate(
+                session,
+                account_fingerprint=_FINGERPRINT,
+                mandate=mandate,
+                owner_event_id="owner-event-1",
+                now=_NOW,
+                process_generation=7,
+            )
+            session.commit()
+
+            handoff_calls: list[object] = []
+
+            def spy_handoff(intent: object) -> HandoffResult:
+                handoff_calls.append(intent)
+                return HandoffResult.refused_not_sent(
+                    order_plane_code="READ_ONLY_LEASE", detail="spy handoff"
+                )
+
+            real_append = hash_chain.append
+            decision_stream = dur.stream_for(dur.DECISION_STREAM, _FINGERPRINT)
+
+            def fail_append(*args, **kwargs):
+                # The DECISION-journal write fails; every other chained write in
+                # the process behaves. A blanket fault would let the cycle die
+                # later at the attempt reserve even when record_outcome's failure
+                # is suppressed — and this pin would pass for the wrong reason.
+                if kwargs.get("stream") == decision_stream:
+                    raise OSError("private filesystem detail")
+                return real_append(*args, **kwargs)
+
+            monkeypatch.setattr(hash_chain, "append", fail_append)
+            with pytest.raises(OSError):
+                run_cycle(
+                    _cycle_proposal(),
+                    session=session,
+                    mandate=mandate,
+                    identity=_cycle_identity(),
+                    facts=_cycle_facts(),
+                    submit=spy_handoff,
+                    commit_before_handoff=session.commit,
+                )
+            assert handoff_calls == [], "no submission/handoff once the decision write has failed"
+            session.rollback()  # the production drain's rollback, not the test's tidiness
+            admitted, refusals = dur.load_attempts(session, account_fingerprint=_FINGERPRINT)
+            assert admitted == frozenset() and refusals == {}, (
+                "no attempt row may survive the failed write"
+            )
+            stream = dur.stream_for(dur.DECISION_STREAM, _FINGERPRINT)
+            assert hash_chain.head(session, stream) is None, "no journaled success"
+        finally:
+            session.close()
     finally:
         database.dispose()
