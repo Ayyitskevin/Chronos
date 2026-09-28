@@ -42,14 +42,11 @@ from chronos.autonomy import (
     AutonomyMode,
     CapitalLimits,
     ConcentrationLimits,
-    DecisionKind,
-    EvidenceCitation,
     FamilyPromotion,
     InstrumentScope,
     MarketDataRequirements,
     OrderForm,
     PromotionLevel,
-    ProposedDecision,
     StrategyForm,
     TradableAssetClass,
     VersionPins,
@@ -58,12 +55,13 @@ from chronos.domain.enums import DataQuality
 from chronos.domain.models import UnderlyingContract
 from chronos.persistence import hash_chain
 from chronos.persistence.database import Database
+from chronos.supervisor import alerts, proposals, queue
 from chronos.supervisor import durable as dur
-from chronos.supervisor import queue
 from chronos.supervisor.admission import AdmissionCheck, AdmissionOutcome, MarketDataEvidence
 from chronos.supervisor.compiler import QuoteEvidence
 from chronos.supervisor.handoff import HandoffResult
-from chronos.supervisor.loop import CycleFacts, run_cycle
+from chronos.supervisor.loop import CycleFacts
+from chronos.supervisor.runtime import AutonomyRuntime, RuntimeConfig, TickReport
 from chronos.supervisor.sizing import AccountEvidence
 
 requires_nonroot = pytest.mark.skipif(
@@ -208,6 +206,10 @@ def test_3_a_failed_decision_write_journals_no_success(
                     now=_NOW,
                     posture=_STATIC_POSTURE,
                 )
+            # The caller's own transaction duty in this runtime-free unit
+            # harness (record_outcome: "the caller's transaction") — NOT a
+            # stand-in for the drain's exception branch, which the drain-level
+            # pin below exercises for real.
             session.rollback()
             admitted, refusals = dur.load_attempts(session, account_fingerprint=_FINGERPRINT)
             assert "d-faulted" not in admitted, "no counter may claim what the journal cannot"
@@ -219,13 +221,24 @@ def test_3_a_failed_decision_write_journals_no_success(
 
 
 # --------------------------------------------------------------------------- #
-# Contract 3 at the supervised-cycle boundary (TG2r1, Daybreak's repair
-# criterion): the same fault driven through run_cycle, not the helper.
-# Harness mirrors tests/safety/test_typed_handoff_outcomes_exercised.py — a
-# plain session, because production's drain holds one for the same reason.
+# Contract 3 at the supervised-cycle boundary (TG2r2, Daybreak's round-2
+# repair criterion): the same fault driven through the REAL drain —
+# AutonomyRuntime._drain owns the exception branch (runtime.py:479-481) this
+# pin observes. Harness mirrors tests/safety/test_autonomy_runtime.py.
 # --------------------------------------------------------------------------- #
 
 _ACCOUNT = "DU1234567"
+
+
+class _NullSink:
+    name = "null"
+
+    def __init__(self) -> None:
+        self.seen: list[alerts.OwnerAlert] = []
+
+    def deliver(self, alert: alerts.OwnerAlert) -> bool:
+        self.seen.append(alert)
+        return True
 
 
 def _cycle_identity() -> queue.HarnessIdentity:
@@ -317,34 +330,44 @@ def _cycle_facts() -> CycleFacts:
     )
 
 
-def _cycle_proposal() -> ProposedDecision:
-    return ProposedDecision(
-        kind=DecisionKind.OPEN,
-        asset_class=TradableAssetClass.EQUITY,
-        symbol="SPY",
-        requested_strategy=StrategyForm.LONG_EQUITY,
-        requested_quantity=Decimal(10),
-        evidence=(EvidenceCitation(evidence_id="ev-1", kind="quote", as_of=_NOW, digest="c" * 64),),
-        invalidation_conditions=("closes below 400",),
+def _cycle_payload() -> str:
+    return json.dumps(
+        {
+            "kind": "OPEN",
+            "asset_class": "EQUITY",
+            "symbol": "SPY",
+            "requested_strategy": "LONG_EQUITY",
+            "requested_quantity": "10",
+            "evidence": [
+                {
+                    "evidence_id": "ev-1",
+                    "kind": "quote",
+                    "as_of": _NOW.isoformat(),
+                    "digest": "c" * 64,
+                }
+            ],
+            "invalidation_conditions": ["closes below 400"],
+        }
     )
 
 
-def test_3_cycle_level_a_failed_decision_write_aborts_the_cycle_before_any_handoff(
+def test_3_cycle_level_a_failed_decision_write_aborts_the_drain_before_any_handoff(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The Daybreak repair criterion: under the hash_chain.append fault, a real
-    supervised cycle must fail closed across the cycle boundary — the OSError
-    propagates out of run_cycle, no submission/handoff is called, and after the
-    production-owned rollback (runtime.py:479-481) neither the attempt row nor
-    the decision-chain row exists. Mutation that turns this red: wrapping the
-    durable.record_outcome call at src/chronos/supervisor/loop.py:568-575 in
-    try/except OSError: pass — the cycle then walks on to the handoff."""
+    """Daybreak's round-2 criterion: the decision-stream hash_chain.append
+    fault is driven through AutonomyRuntime._drain — the production exception
+    owner (runtime.py:479-481), whose rollback is what leaves neither the
+    attempt row nor the decision-chain row. Mutations that turn this red:
+    runtime.py:480 rollback→commit (the admitted attempt row PERSISTS without
+    its chain row, observed from a fresh session), and try/except OSError:
+    pass around durable.record_outcome at loop.py:568-575 (the cycle walks on
+    to the handoff)."""
     database = Database("sqlite+pysqlite:///:memory:")
     database.initialize()
     try:
-        session = database.sessions()
-        try:
-            mandate = _cycle_mandate()
+        sessions = database.sessions
+        mandate = _cycle_mandate()
+        with sessions.begin() as session:
             dur.activate(
                 session,
                 account_fingerprint=_FINGERPRINT,
@@ -353,48 +376,61 @@ def test_3_cycle_level_a_failed_decision_write_aborts_the_cycle_before_any_hando
                 now=_NOW,
                 process_generation=7,
             )
-            session.commit()
-
-            handoff_calls: list[object] = []
-
-            def spy_handoff(intent: object) -> HandoffResult:
-                handoff_calls.append(intent)
-                return HandoffResult.refused_not_sent(
-                    order_plane_code="READ_ONLY_LEASE", detail="spy handoff"
-                )
-
-            real_append = hash_chain.append
-            decision_stream = dur.stream_for(dur.DECISION_STREAM, _FINGERPRINT)
-
-            def fail_append(*args, **kwargs):
-                # The DECISION-journal write fails; every other chained write in
-                # the process behaves. A blanket fault would let the cycle die
-                # later at the attempt reserve even when record_outcome's failure
-                # is suppressed — and this pin would pass for the wrong reason.
-                if kwargs.get("stream") == decision_stream:
-                    raise OSError("private filesystem detail")
-                return real_append(*args, **kwargs)
-
-            monkeypatch.setattr(hash_chain, "append", fail_append)
-            with pytest.raises(OSError):
-                run_cycle(
-                    _cycle_proposal(),
-                    session=session,
-                    mandate=mandate,
-                    identity=_cycle_identity(),
-                    facts=_cycle_facts(),
-                    submit=spy_handoff,
-                    commit_before_handoff=session.commit,
-                )
-            assert handoff_calls == [], "no submission/handoff once the decision write has failed"
-            session.rollback()  # the production drain's rollback, not the test's tidiness
-            admitted, refusals = dur.load_attempts(session, account_fingerprint=_FINGERPRINT)
-            assert admitted == frozenset() and refusals == {}, (
-                "no attempt row may survive the failed write"
+        with sessions.begin() as session:
+            enqueued = proposals.enqueue(
+                session,
+                account_fingerprint=_FINGERPRINT,
+                payload=_cycle_payload(),
+                now=_NOW,
             )
-            stream = dur.stream_for(dur.DECISION_STREAM, _FINGERPRINT)
-            assert hash_chain.head(session, stream) is None, "no journaled success"
-        finally:
-            session.close()
+            assert enqueued.queued
+        with sessions.begin() as session:
+            batch = proposals.claim_batch(session, account_fingerprint=_FINGERPRINT, limit=10)
+        assert len(batch) == 1, "the drain receives a genuine QueuedProposal"
+
+        facts = _cycle_facts()
+        handoff_calls: list[object] = []
+
+        def spy_handoff(intent: object) -> HandoffResult:
+            handoff_calls.append(intent)
+            return HandoffResult.refused_not_sent(
+                order_plane_code="READ_ONLY_LEASE", detail="spy handoff"
+            )
+
+        runtime = AutonomyRuntime(
+            sessions=sessions,
+            config=RuntimeConfig(account_fingerprint=_FINGERPRINT),
+            identity=_cycle_identity(),
+            mandate_source=lambda: mandate,
+            gather_facts=lambda now: facts,
+            sinks=(_NullSink(),),
+            submit=spy_handoff,
+        )
+
+        real_append = hash_chain.append
+        decision_stream = dur.stream_for(dur.DECISION_STREAM, _FINGERPRINT)
+
+        def fail_append(*args, **kwargs):
+            # The DECISION-journal write fails; every other chained write in
+            # the process behaves (stream scoping KEPT — Daybreak ruled it
+            # sound and load-bearing): a blanket fault lets the cycle die
+            # later at the attempt reserve even when record_outcome's failure
+            # is suppressed, and this pin passes for the wrong reason.
+            if kwargs.get("stream") == decision_stream:
+                raise OSError("private filesystem detail")
+            return real_append(*args, **kwargs)
+
+        monkeypatch.setattr(hash_chain, "append", fail_append)
+        with pytest.raises(OSError):
+            runtime._drain(batch, mandate, facts, _NOW, TickReport(at=_NOW))
+        assert handoff_calls == [], "no submission/handoff once the decision write has failed"
+        # The drain's own exception branch owns the rollback; the inspection
+        # opens a NEW session from the sessionmaker, never the drain session.
+        with sessions() as fresh:
+            admitted, refusals = dur.load_attempts(fresh, account_fingerprint=_FINGERPRINT)
+            assert admitted == frozenset() and refusals == {}, (
+                "the drain's rollback left no attempt row behind"
+            )
+            assert hash_chain.head(fresh, decision_stream) is None, "no journaled success"
     finally:
         database.dispose()
