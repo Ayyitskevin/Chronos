@@ -80,6 +80,14 @@ printf '%s %s\n' "$OLD" "$NEW" > "$T/repo/.git/info/grafts"
 check "g30-1:C1 30 FAIL: a planted info/grafts line (OLD → parent NEW) does not make the stale head contain origin/main" "failed base-fresh 'head $OLD does not contain origin/main $NEW'"
 ( cd "$T/repo" && STUB_BASE=$OLD PR_NUMBER=7 run bash "$G30" )
 check "g30-1:C3 30 FAIL: a behind base still gets the behind message first (the ancestry check runs only after it)" "failed base-fresh 'PR base $OLD is behind origin/main $NEW' && ! grep -q 'does not contain' $T/err"
+( cd "$T/repo" && git checkout -q --detach "$OLD" && STUB_BASE=$OLD PR_NUMBER=7 run bash "$G30" ); git -C "$T/repo" checkout -q main
+check "g30-1:C3 30 FAIL: base behind AND head stale → still the behind message (the base check runs first; ancestry never pre-empts it)" "failed base-fresh 'PR base $OLD is behind origin/main $NEW' && ! grep -q 'does not contain' $T/err"
+tc checkout -q -b g30-broken "$NEW" && tc commit -q --allow-empty -m local-parent; LP=$(git -C "$T/repo" rev-parse HEAD)
+tc commit -q --allow-empty -m on-broken-history; BROKEN=$(git -C "$T/repo" rev-parse HEAD)
+mv "$T/repo/.git/objects/${LP:0:2}/${LP:2}" "$T/lp.obj"   # a local-only parent the fetch cannot restore
+( cd "$T/repo" && STUB_BASE=$NEW PR_NUMBER=7 run bash "$G30" )
+mv "$T/lp.obj" "$T/repo/.git/objects/${LP:0:2}/${LP:2}"; git -C "$T/repo" checkout -q main
+check "g30-1:C1 30 FAIL: a merge-base error (exit >1, missing parent object) is its own one-line FAIL, never a PASS" "failed base-fresh \"could not check whether head $BROKEN contains origin/main $NEW \\(git merge-base exit [0-9]+\\)\""
 check "g30-1:C3 30 the restored repo is back on main at $NEW with a clean work tree" "[ \"\$(git -C $T/repo rev-parse HEAD)\" = $NEW ] && [ -z \"\$(git -C $T/repo status --porcelain)\" ]"
 git -C "$T/repo" remote set-url origin "$T/missing.git"
 ( cd "$T/repo" && STUB_BASE=$NEW PR_NUMBER=7 run bash "$G30" ); check "1 30 FAIL: origin main cannot be fetched → one FAIL line" "failed base-fresh 'could not fetch origin main'"
