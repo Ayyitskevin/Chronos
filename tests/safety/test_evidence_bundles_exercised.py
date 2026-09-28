@@ -1935,3 +1935,25 @@ def test_citation_order_is_preserved_with_sticky_markers(sessions: sessionmaker[
     assert sticky_first.refusal is evidence_bundles.ResolutionRefusal.EXPIRED, (
         "a sticky first citation did not refuse at a rewound clock"
     )
+
+
+def test_a_broken_chain_refuses_a_live_bundle_closed(sessions: sessionmaker[Session]) -> None:
+    """Threat row 8: chain verification is load-bearing even with NO marker — a
+    targeted edit to the chain of a live, unexpired bundle fails CLOSED rather
+    than admitting on a ledger that can no longer prove what it recorded."""
+
+    from sqlalchemy import text
+
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    with sessions.begin() as session:
+        session.execute(
+            text(
+                "UPDATE hash_chain_records SET payload_json = payload_json || ' ' "
+                "WHERE id = (SELECT MIN(id) FROM hash_chain_records)"
+            )
+        )
+    resolution = _fix26_resolve(sessions, cited_ids=(issued.bundle_id,), now=_NOW)
+    assert resolution.refusal is evidence_bundles.ResolutionRefusal.EXPIRED, (
+        "a tampered evidence stream admitted a live bundle instead of refusing closed"
+    )
+    assert resolution.bundle is None
