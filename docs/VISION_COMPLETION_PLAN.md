@@ -366,10 +366,29 @@ Deliver:
   foreign positions, working orders, and commissions.
 - Startup, reconnect, order/fill-triggered, and bounded periodic reconciliation with a
   maximum evidence age.
+  **Landed (VCP-5, 2026-09-28):** startup (`src/chronos/api/main.py:330`,
+  `trigger="startup"`), bounded periodic on an RTH cadence
+  (`src/chronos/api/reconciliation_loop.py:102`, `trigger="periodic"`; task started from the
+  lifespan at `src/chronos/api/main.py:437`), and the ADR-0020 maximum evidence age enforced
+  inside the latch itself (`src/chronos/orders/reconciliation_readiness.py:89-116` — expiry
+  evaluated in `snapshot()`, so a dead refresher fails closed by arithmetic).
+  **Still open:** reconnect- and order/fill-triggered reconciliation — a disconnect only
+  invalidates readiness (`src/chronos/broker/connection.py:177`), the lifecycle tracker's only
+  `ingest` callers are restart recovery (`src/chronos/orders/reconciliation_recovery.py:507,659`),
+  and no supervised callback consumer exists.
 - P&L attribution, drawdown, exposure, commissions, slippage, and tracking error by exact
   strategy policy and family.
 - Atomic reservations, position netting, and conflict resolution across proposals.
-- Separate liveness, service readiness, and trading-capability health.
+- ~~Separate liveness, service readiness, and trading-capability health.~~
+  **Addressed 2026-09-28 (VCP-5):** dedicated no-store endpoints map liveness and
+  operator-service readiness to HTTP 200/503 without exposing trading capability
+  (`src/chronos/api/routes/health.py:46` `/health/live`, `:54` `/health/ready`); a pure,
+  display-only evaluator projects liveness, service readiness, and lane-specific
+  new-exposure trading capability as separate verdicts (`src/chronos/operations/health.py:34`
+  `CapabilityState`, `:208-214` `CapabilityVerdict`/`TradingCapability`; no I/O, grants no
+  authority); a default-off, one-shot external observer consumes the two exact probe
+  endpoints with timeout-constrained, credential-free requests and machine exit status
+  (`src/chronos/operations/external_probe.py:45`).
 - Off-host alert sidecar, encrypted backups, external audit-chain anchor, automatic clock
   health, watchdogs, dead-man monitoring, measured RPO/RTO, and isolated restore drills.
 - Reproducible package/release validation: clean venv install, all migrations, static
