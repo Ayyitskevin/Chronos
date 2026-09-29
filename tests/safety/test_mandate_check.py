@@ -143,6 +143,12 @@ def _codes(mandate: AutonomyMandate, **kwargs: object) -> dict[str, Severity]:
     return {finding.code: finding.severity for finding in findings}
 
 
+def _check(path: Path, *extra: str) -> list[str]:
+    """``mandate check`` argv for a fixture file."""
+
+    return ["mandate", "check", "--file", str(path), "--account-id", _ACCOUNT, *extra]
+
+
 # ----------------------------------------------------------------- read-only
 
 
@@ -200,6 +206,32 @@ def test_the_report_never_claims_to_authorize(
     assert main(["mandate", "check", "--file", str(mandate_file), "--account-id", _ACCOUNT]) == 0
     printed = capsys.readouterr().out
     assert "This is a description, not an authorization." in printed
+
+
+@pytest.mark.parametrize(
+    "wall_clock",
+    [_NOW - timedelta(days=2), _NOW, _NOW + timedelta(days=91)],
+    ids=["before-the-window", "inside-the-window", "after-the-window"],
+)
+def test_the_cli_result_does_not_depend_on_the_wall_clock(
+    wall_clock: datetime,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FIX-28: the fixture window is ``_NOW - 1d .. _NOW + 90d``; a CLI test must outlive it.
+
+    The real clock is moved to before, inside and after that window. The CLI
+    tests pin the review instant, so the same fixture gives the same answer at
+    every position (unpinned, the after-window run exits 1: the window expired
+    2026-09-29T14:00Z and every CLI test here went red with it).
+    """
+
+    monkeypatch.setattr("chronos.cli.mandate_check.utc_now", lambda: wall_clock)
+    path = tmp_path / "mandate.json"
+    path.write_text(_shadow().model_dump_json(), encoding="utf-8")
+    assert main(_check(path)) == 0
+    assert "] expired" not in capsys.readouterr().out  # the report line is "  [<severity>] expired"
 
 
 # ------------------------------------------------------------------ validation
