@@ -34,13 +34,15 @@ if [ "$base" != "$main" ]; then
 fi
 # D-32 (#270 at df4a960): GitHub keeps baseRefOid equal to the live base tip, so the check above
 # passes for any open PR after a merge. The checked-out head must also CONTAIN origin/main.
-# Replacement refs and grafts are ignored so the candidate's own object graph can't fake the
-# ancestry; any merge-base failure other than "not an ancestor" is its own named FAIL.
+# Replacement refs, grafts and commit-graph acceleration are all disabled for this decision (a
+# forged commit-graph in the lane or in a GIT_ALTERNATE_OBJECT_DIRECTORIES store can rewrite
+# parent edges), so the ancestry is read from the commit objects themselves; any merge-base
+# failure other than "not an ancestor" is its own named FAIL.
 if ! head="$(git rev-parse --verify --quiet 'HEAD^{commit}' 2>/dev/null)" || [[ ! "$head" =~ ^[0-9a-f]{40}$ ]]; then
   echo "FAIL: base-fresh — could not resolve the checked-out HEAD commit; check the checkout, then re-run" >&2
   exit 1
 fi
-GIT_GRAFT_FILE=/dev/null git --no-replace-objects merge-base --is-ancestor "$main" "$head" 2>/dev/null
+GIT_GRAFT_FILE=/dev/null git -c core.commitGraph=false --no-replace-objects merge-base --is-ancestor "$main" "$head" 2>/dev/null
 contains=$?
 if [ "$contains" -eq 0 ]; then
   echo "PASS: base-fresh — PR base $base == origin/main"
