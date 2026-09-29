@@ -159,8 +159,13 @@ class ResolutionRefusal(StrEnum):
     #: The record belongs to another credential epoch or registry entry.
     REGISTRATION_REPLACED = "EVIDENCE_BUNDLE_REGISTRATION_REPLACED"
     #: A record exists and has expired against the drain's clock. The verdict is
-    #: durable: it is recorded on the account's evidence stream and stays EXPIRED
-    #: across a later clock rewind and a restart (D-26).
+    #: durable: it is recorded on the account's evidence stream, and a later resolve
+    #: of that bundle by the SAME proposer and registration stays EXPIRED across a
+    #: clock rewind and a restart (D-26). A different proposer or registration keeps
+    #: FOREIGN / REGISTRATION_UNBOUND / REGISTRATION_REPLACED, and once the row is
+    #: pruned the bundle resolves UNISSUED. The same code is also returned when the
+    #: durable evidence cannot be trusted (a stream that fails verification, or an
+    #: undecodable or malformed expiry record); the detail text says which.
     EXPIRED = "EVIDENCE_BUNDLE_EXPIRED"
 
 
@@ -435,8 +440,11 @@ def resolve(
     drain refuses at the moment authority is exercised rather than the moment
     bytes arrived. The proposer's own ``as_of`` is data in the record, never the
     judge. An EXPIRED verdict is durable: the first one is recorded on the
-    account's evidence stream, and every later resolve of that bundle refuses
-    EXPIRED even if the clock has since rewound or the process restarted (D-26).
+    account's evidence stream, and a later resolve of that bundle by the SAME
+    proposer and registration refuses EXPIRED even if the clock has since rewound
+    or the process restarted (D-26). A different proposer or registration keeps
+    FOREIGN / REGISTRATION_UNBOUND / REGISTRATION_REPLACED (those checks come
+    first), and once the row is pruned the bundle resolves UNISSUED.
     """
 
     if not cited_ids:
