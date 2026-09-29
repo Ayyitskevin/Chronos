@@ -1862,6 +1862,30 @@ def test_duplicate_sticky_markers_still_refuse_expired(sessions: sessionmaker[Se
     )
 
 
+def test_a_prefix_neighbor_expiry_marker_does_not_match(
+    sessions: sessionmaker[Session],
+) -> None:
+    """A marker names one exact bundle id, never a prefix-related neighbor."""
+
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    with sessions.begin() as session:
+        hash_chain.append(
+            session,
+            stream=evidence_bundles.hash_chain_stream(_FINGERPRINT),
+            kind=_FIX26_KIND,
+            payload={
+                "bundle_id": issued.bundle_id + "-neighbor",
+                "expires_at": issued.expires_at.isoformat(),
+            },
+            recorded_at=_NOW,
+        )
+    resolved = _fix26_resolve(sessions, cited_ids=(issued.bundle_id,), now=_NOW)
+    assert resolved.refusal is None and resolved.bundle is not None, (
+        f"a prefix-neighbor marker poisoned the exact live bundle: {resolved.detail}"
+    )
+    assert resolved.bundle.bundle_id == issued.bundle_id
+
+
 def test_a_sticky_bundle_stays_foreign_to_another_proposer(sessions: sessionmaker[Session]) -> None:
     """Threat row 4 (guard): sticky expiry is consulted only AFTER the ownership and
     registration checks — a sticky bundle cited by another proposer is FOREIGN."""
