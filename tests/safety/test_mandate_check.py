@@ -144,9 +144,24 @@ def _codes(mandate: AutonomyMandate, **kwargs: object) -> dict[str, Severity]:
 
 
 def _check(path: Path, *extra: str) -> list[str]:
-    """``mandate check`` argv for a fixture file."""
+    """``mandate check`` argv for a fixture file, judged at the fixtures' own instant.
 
-    return ["mandate", "check", "--file", str(path), "--account-id", _ACCOUNT, *extra]
+    The CLI's ``--now`` pins the review instant to ``_NOW``, the instant every
+    fixture window is built around; without it the CLI reads the real clock and
+    these tests expire with the fixture (FIX-28: they did, at 2026-09-29T14:00Z).
+    """
+
+    return [
+        "mandate",
+        "check",
+        "--file",
+        str(path),
+        "--account-id",
+        _ACCOUNT,
+        "--now",
+        _NOW.isoformat(),
+        *extra,
+    ]
 
 
 # ----------------------------------------------------------------- read-only
@@ -166,7 +181,7 @@ def test_no_mandate_command_writes_anything(
     mandate_file = tmp_path / "mandate.json"
     mandate_file.write_text(_shadow().model_dump_json(), encoding="utf-8")
 
-    assert main(["mandate", "check", "--file", str(mandate_file), "--account-id", _ACCOUNT]) == 0
+    assert main(_check(mandate_file)) == 0
     assert main(["mandate", "template"]) == 0
     assert main(["mandate", "fingerprint", "--account-id", _ACCOUNT]) == 0
 
@@ -203,7 +218,7 @@ def test_the_report_never_claims_to_authorize(
 ) -> None:
     mandate_file = tmp_path / "mandate.json"
     mandate_file.write_text(_shadow().model_dump_json(), encoding="utf-8")
-    assert main(["mandate", "check", "--file", str(mandate_file), "--account-id", _ACCOUNT]) == 0
+    assert main(_check(mandate_file)) == 0
     printed = capsys.readouterr().out
     assert "This is a description, not an authorization." in printed
 
@@ -581,7 +596,7 @@ def test_strict_turns_important_findings_into_a_nonzero_exit(
     )
     path = tmp_path / "mandate.json"
     path.write_text(mandate.model_dump_json(), encoding="utf-8")
-    argv = ["mandate", "check", "--file", str(path), "--account-id", _ACCOUNT]
+    argv = _check(path)
     assert main(argv) == 0
     assert main([*argv, "--strict"]) == 1
     capsys.readouterr()
@@ -636,7 +651,7 @@ def test_the_cli_clears_the_cap_on_the_authenticated_posture(
     path = tmp_path / "mandate.json"
     path.write_text(_paper().model_dump_json(), encoding="utf-8")
 
-    assert main(["mandate", "check", "--file", str(path), "--account-id", _ACCOUNT]) == 0
+    assert main(_check(path)) == 0
     assert "SUBMITTING_MODE_ON_STATIC_POSTURE" not in capsys.readouterr().out
 
 
@@ -647,7 +662,7 @@ def test_the_report_lists_every_inert_field_not_only_the_ones_set(
 
     path = tmp_path / "mandate.json"
     path.write_text(_shadow().model_dump_json(), encoding="utf-8")
-    assert main(["mandate", "check", "--file", str(path), "--account-id", _ACCOUNT]) == 0
+    assert main(_check(path)) == 0
     printed = capsys.readouterr().out
     for field in (
         "concentration.max_sector_exposure_pct",
