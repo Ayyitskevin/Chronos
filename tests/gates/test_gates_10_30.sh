@@ -132,9 +132,13 @@ else bad "g30-1r1:C3 $DEAD (A1 precondition: raw=$pre_a forged=$pre_b, want 1 th
 # A2 — a clean lane (no graph file); ONLY GIT_ALTERNATE_OBJECT_DIRECTORIES points at a dir holding the forged graph
 git clone -q "$FO" "$FL2" 2>/dev/null; git -C "$FL2" fetch -q "$FL" refs/heads/pr; git -C "$FL2" switch -q --detach FETCH_HEAD
 mkdir -p "$FALT/info"; cp "$FL/.git/objects/info/commit-graph" "$FALT/info/commit-graph"
-pre_c=$(OLDCMD "$FL2" "$FM" "$FH2"); pre_d=$(GIT_ALTERNATE_OBJECT_DIRECTORIES="$FALT" OLDCMD "$FL2" "$FM" "$FH2")
+pre_c=$(OLDCMD "$FL2" "$FM" "$FH2")
+# ONE export feeds both the precondition and the gate run, so the gate can never be run without the forgery it is pinned against.
+( export GIT_ALTERNATE_OBJECT_DIRECTORIES="$FALT"
+  OLDCMD "$FL2" "$FM" "$FH2" > "$T/fg-pre-d"
+  cd "$FL2" && GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null STUB_BASE=$FM PR_NUMBER=7 run bash "$G30" )
+pre_d=$(cat "$T/fg-pre-d")
 if [ ! -e "$FL2/.git/objects/info/commit-graph" ] && [ "$pre_c" = 1 ] && [ "$pre_d" = 0 ]; then
-  ( cd "$FL2" && GIT_ALTERNATE_OBJECT_DIRECTORIES="$FALT" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null STUB_BASE=$FM PR_NUMBER=7 run bash "$G30" )
   check "g30-1r1:C4 30 FAIL: GIT_ALTERNATE_OBJECT_DIRECTORIES carrying a forged commit-graph does not make the stale head $FH2 contain origin/main" "failed base-fresh 'head $FH2 does not contain origin/main $FM'"
 else bad "g30-1r1:C4 $DEAD (A2 precondition: clean=$pre_c alternate=$pre_d, want 1 then 0; lane graph file absent=$([ ! -e "$FL2/.git/objects/info/commit-graph" ] && echo yes || echo no))"; fi
 git -C "$T/repo" remote set-url origin "$T/missing.git"
