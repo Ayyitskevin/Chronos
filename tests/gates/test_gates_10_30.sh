@@ -91,6 +91,52 @@ check "g30-1:C1 30 FAIL: a merge-base error (exit >1, missing parent object) is 
 ( cd "$T/repo" && git checkout -q --detach "$OLD" && git branch -q -f main "$OLD" && STUB_BASE=$NEW PR_NUMBER=7 run bash "$G30" ); git -C "$T/repo" branch -q -f main "$NEW"; git -C "$T/repo" checkout -q main
 check "g30-1:C1 30 FAIL: a lagging LOCAL main (== the stale head) is not the reference — origin/main after the fetch is" "failed base-fresh 'head $OLD does not contain origin/main $NEW'"
 check "g30-1:C3 30 the restored repo is back on main at $NEW with a clean work tree" "[ \"\$(git -C $T/repo rev-parse HEAD)\" = $NEW ] && [ -z \"\$(git -C $T/repo status --porcelain)\" ]"
+# GATE30-1r1 (Daybreak VERIFY-274-F1): a forged commit-graph must not answer gate 30's ancestry question. Own throwaway
+# origin + lanes under $T; the forger is embedded (modelled on logs/daybreak-probe-VERIFY-274-F1-forge.py): it rewrites one
+# commit's parent edge in a valid v1 SHA-1 graph and re-hashes the file. Topology: OLD → H → H2 (the PR), OLD → M (main).
+g30r1() { GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git -c user.email=t@t -c user.name=t "$@"; }
+g30r1_forge() { python3 - "$@" <<'FORGE'
+import hashlib, stat, struct, sys
+from pathlib import Path
+path, target, forged_parent = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+data = bytearray(path.read_bytes())
+assert data[:4] == b"CGPH" and data[4] == 1 and data[5] == 1, "unsupported commit-graph format"
+chunks = {bytes(data[8 + 12 * i:12 + 12 * i]): struct.unpack(">Q", data[12 + 12 * i:20 + 12 * i])[0] for i in range(data[6] + 1)}
+n = struct.unpack(">I", data[chunks[b"OIDF"] + 1020:chunks[b"OIDF"] + 1024])[0]
+oids = [bytes(data[chunks[b"OIDL"] + 20 * i:chunks[b"OIDL"] + 20 * i + 20]).hex() for i in range(n)]
+rec = lambda i: chunks[b"CDAT"] + 36 * i
+t, par = rec(oids.index(target)), rec(oids.index(forged_parent))
+data[t + 20:t + 24] = struct.pack(">I", oids.index(forged_parent))
+data[t + 24:t + 28] = struct.pack(">I", 0x70000000)
+data[t + 28:t + 32] = struct.pack(">I", ((struct.unpack(">I", data[par + 28:par + 32])[0] >> 2) + 5) << 2)
+data[t + 32:t + 36] = struct.pack(">I", struct.unpack(">I", data[par + 32:par + 36])[0] + 1000)
+data[-20:] = hashlib.sha1(bytes(data[:-20])).digest()
+path.chmod(stat.S_IRUSR | stat.S_IWUSR); path.write_bytes(data)
+FORGE
+}
+DEAD='forged commit-graph no longer changes the ancestry answer on this git; re-examine this pin'
+OLDCMD() { GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_GRAFT_FILE=/dev/null git -C "$1" --no-replace-objects merge-base --is-ancestor "$2" "$3" >/dev/null 2>&1; echo $?; }
+FO="$T/fg-origin.git"; FL="$T/fg-lane"; FL2="$T/fg-lane2"; FALT="$T/fg-alt"
+git init -q --bare -b main "$FO"; git clone -q "$FO" "$FL" 2>/dev/null
+( cd "$FL" && echo zero > f && g30r1 add f && g30r1 commit -qm c0 && g30r1 push -q origin HEAD:main ) ; FOLD=$(git -C "$FL" rev-parse HEAD)
+( cd "$FL" && g30r1 switch -q -c pr "$FOLD" && echo one > g && g30r1 add g && g30r1 commit -qm pr1 ); FH=$(git -C "$FL" rev-parse HEAD)
+( cd "$FL" && echo two >> g && g30r1 commit -qam pr2 && g30r1 push -q origin pr:pr ); FH2=$(git -C "$FL" rev-parse HEAD)
+( cd "$FL" && g30r1 switch -q main && echo m > f && g30r1 commit -qam main1 && g30r1 push -q origin main ); FM=$(git -C "$FL" rev-parse HEAD)
+git -C "$FL" switch -q --detach "$FH2"
+# A1 — a forged graph file in the lane itself
+pre_a=$(OLDCMD "$FL" "$FM" "$FH2"); g30r1 -C "$FL" commit-graph write --reachable; g30r1_forge "$FL/.git/objects/info/commit-graph" "$FH" "$FM"; pre_b=$(OLDCMD "$FL" "$FM" "$FH2")
+if [ "$pre_a" = 1 ] && [ "$pre_b" = 0 ]; then
+  ( cd "$FL" && GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null STUB_BASE=$FM PR_NUMBER=7 run bash "$G30" )
+  check "g30-1r1:C3 30 FAIL: a forged lane commit-graph (H's parent → main) does not make the stale head $FH2 contain origin/main" "failed base-fresh 'head $FH2 does not contain origin/main $FM'"
+else bad "g30-1r1:C3 $DEAD (A1 precondition: raw=$pre_a forged=$pre_b, want 1 then 0)"; fi
+# A2 — a clean lane (no graph file); ONLY GIT_ALTERNATE_OBJECT_DIRECTORIES points at a dir holding the forged graph
+git clone -q "$FO" "$FL2" 2>/dev/null; git -C "$FL2" fetch -q "$FL" refs/heads/pr; git -C "$FL2" switch -q --detach FETCH_HEAD
+mkdir -p "$FALT/info"; cp "$FL/.git/objects/info/commit-graph" "$FALT/info/commit-graph"
+pre_c=$(OLDCMD "$FL2" "$FM" "$FH2"); pre_d=$(GIT_ALTERNATE_OBJECT_DIRECTORIES="$FALT" OLDCMD "$FL2" "$FM" "$FH2")
+if [ ! -e "$FL2/.git/objects/info/commit-graph" ] && [ "$pre_c" = 1 ] && [ "$pre_d" = 0 ]; then
+  ( cd "$FL2" && GIT_ALTERNATE_OBJECT_DIRECTORIES="$FALT" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null STUB_BASE=$FM PR_NUMBER=7 run bash "$G30" )
+  check "g30-1r1:C4 30 FAIL: GIT_ALTERNATE_OBJECT_DIRECTORIES carrying a forged commit-graph does not make the stale head $FH2 contain origin/main" "failed base-fresh 'head $FH2 does not contain origin/main $FM'"
+else bad "g30-1r1:C4 $DEAD (A2 precondition: clean=$pre_c alternate=$pre_d, want 1 then 0; lane graph file absent=$([ ! -e "$FL2/.git/objects/info/commit-graph" ] && echo yes || echo no))"; fi
 git -C "$T/repo" remote set-url origin "$T/missing.git"
 ( cd "$T/repo" && STUB_BASE=$NEW PR_NUMBER=7 run bash "$G30" ); check "1 30 FAIL: origin main cannot be fetched → one FAIL line" "failed base-fresh 'could not fetch origin main'"
 check "r1:2 P1-1 30 queries the Chronos repository explicitly (graphql owner=Ayyitskevin name=Chronos, never the {owner}/{repo} inference)" "grep -q 'api graphql -F owner=Ayyitskevin -F name=Chronos' $STUB_LOG && ! grep -qF '{owner}' $STUB_LOG"
