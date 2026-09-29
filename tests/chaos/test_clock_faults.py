@@ -106,8 +106,9 @@ def test_an_expired_bundle_resolves_expired(tmp_path: Path) -> None:
     """Positive control: a bundle past its ``expires_at`` resolves EXPIRED.
 
     The rewind half of the original pin — an expiry verdict must never run
-    backwards — is the D-26 finding and lands red inside FIX-26; it is
-    deliberately not in this file.
+    backwards (D-26) — is pinned below by
+    ``test_an_expired_bundle_stays_refused_after_the_clock_rewinds`` and
+    ``test_an_expired_bundle_stays_refused_across_a_restart_and_rewind``.
     """
 
     database = Database(f"sqlite+pysqlite:///{tmp_path / 'tg1.db'}")
