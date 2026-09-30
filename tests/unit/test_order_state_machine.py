@@ -99,3 +99,70 @@ def test_broker_status_terminal_wins_over_partial_fill() -> None:
         )
         is OrderLifecycle.FILLED
     )
+
+
+def test_broker_status_working_partial_quantities_are_partial() -> None:
+    # FIX-27 C2/C4b named known-status pin: the quantity heuristic is scoped to
+    # exactly the three known working statuses — a partial-fill shape on any of
+    # them is PARTIALLY_FILLED. Mutation (b): drop pendingsubmit from the scoped
+    # set and this pin goes RED (that status falls through to SUBMITTED).
+    from decimal import Decimal
+
+    from chronos.orders.tracker import broker_status_to_lifecycle
+
+    for status in ("Submitted", "PreSubmitted", "PendingSubmit"):
+        assert (
+            broker_status_to_lifecycle(
+                status, filled_quantity=Decimal("5"), remaining_quantity=Decimal("5")
+            )
+            is OrderLifecycle.PARTIALLY_FILLED
+        ), f"{status} with a partial-fill shape must stay PARTIALLY_FILLED"
+    # ApiPending is real IBKR vocabulary outside the scoped set: widening the
+    # working set to it would re-open D-27 for that status.
+    assert (
+        broker_status_to_lifecycle(
+            "ApiPending", filled_quantity=Decimal("5"), remaining_quantity=Decimal("5")
+        )
+        is OrderLifecycle.SUBMISSION_UNKNOWN
+    )
+
+
+def test_broker_status_working_one_sided_quantities_stay_submitted() -> None:
+    # Only BOTH filled>0 AND remaining>0 is a partial fill: a fresh working order
+    # (nothing filled) or one with nothing remaining must not read as partial.
+    from decimal import Decimal
+
+    from chronos.orders.tracker import broker_status_to_lifecycle
+
+    for status in ("Submitted", "PreSubmitted", "PendingSubmit"):
+        for filled, remaining in (("0", "10"), ("10", "0"), ("0", "0")):
+            assert (
+                broker_status_to_lifecycle(
+                    status,
+                    filled_quantity=Decimal(filled),
+                    remaining_quantity=Decimal(remaining),
+                )
+                is OrderLifecycle.SUBMITTED
+            ), f"{status} filled={filled} remaining={remaining} must stay SUBMITTED"
+
+
+def test_broker_status_cancel_ack_call_site_unchanged() -> None:
+    # Third production call site (official_ibkr.py cancellation ack,
+    # :2414-2423): inline cancelled/pendingcancel handling, then the mapper
+    # with ZERO quantities. D-27 scoping must not change its results.
+    from decimal import Decimal
+
+    from chronos.orders.tracker import broker_status_to_lifecycle
+
+    assert (
+        broker_status_to_lifecycle(
+            "", filled_quantity=Decimal("0"), remaining_quantity=Decimal("0")
+        )
+        is OrderLifecycle.SUBMISSION_UNKNOWN
+    )
+    assert (
+        broker_status_to_lifecycle(
+            "WeirdCancel", filled_quantity=Decimal("0"), remaining_quantity=Decimal("0")
+        )
+        is OrderLifecycle.SUBMISSION_UNKNOWN
+    )

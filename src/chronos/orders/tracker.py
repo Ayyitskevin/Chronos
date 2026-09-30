@@ -97,8 +97,9 @@ def broker_status_to_lifecycle(
 ) -> OrderLifecycle:
     """Map an IBKR order-status string to a Chronos lifecycle.
 
-    Unknown statuses fail closed to SUBMISSION_UNKNOWN so an unrecognized broker
-    state is reconciled rather than assumed benign.
+    Unknown statuses fail closed to SUBMISSION_UNKNOWN — regardless of the
+    fill quantities reported alongside — so an unrecognized broker state is
+    reconciled rather than assumed benign.
     """
 
     normalized = status.strip().lower()
@@ -114,8 +115,14 @@ def broker_status_to_lifecycle(
         return OrderLifecycle.CANCEL_PENDING
     if normalized == "filled" and remaining_quantity <= 0:
         return OrderLifecycle.FILLED
+    # The partial-fill quantity heuristic is scoped to the known working
+    # statuses (D-27, Kevin ruling 2026-09-28): a novel/unrecognized status must
+    # not gain working-order authority from quantities alone. Membership is
+    # proven BEFORE any quantity comparison, so non-finite or hostile values
+    # never reach the `> 0` evaluations for an unknown status.
+    working = normalized in {"submitted", "presubmitted", "pendingsubmit"}
     partially_filled = normalized in {"filled", "partiallyfilled"} or (
-        filled_quantity > 0 and remaining_quantity > 0
+        working and filled_quantity > 0 and remaining_quantity > 0
     )
     if partially_filled:
         return OrderLifecycle.PARTIALLY_FILLED
