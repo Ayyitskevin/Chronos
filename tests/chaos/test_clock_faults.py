@@ -9,10 +9,11 @@ Three injected-clock pins, no real sleeping:
 2. A forward jump against reconciliation evidence-age (ADR-0020): the readiness
    latch is given both ``max_evidence_age`` and a clock, so jumping past the
    window must demote the proof to PENDING — stale, never silently fresh.
-3. Evidence-bundle expiry positive control: a bundle judged past its
-   ``expires_at`` resolves EXPIRED — the refusal the FIX-26 rewind pin
-   (the D-26 finding) builds on. The rewind assertion itself is not here;
-   it lands red inside FIX-26.
+3. Evidence-bundle expiry: a bundle judged past its ``expires_at`` resolves
+   EXPIRED (the two-sided positive control), and once refused EXPIRED the
+   verdict is DURABLE (D-26/FIX-26) — it survives the drain's clock rewinding
+   and a full engine restart, because refusing authority on expiry evidence is
+   not revocable by wall-clock motion.
 """
 
 from __future__ import annotations
@@ -105,8 +106,9 @@ def test_an_expired_bundle_resolves_expired(tmp_path: Path) -> None:
     """Positive control: a bundle past its ``expires_at`` resolves EXPIRED.
 
     The rewind half of the original pin — an expiry verdict must never run
-    backwards — is the D-26 finding and lands red inside FIX-26; it is
-    deliberately not in this file.
+    backwards (D-26) — is pinned below by
+    ``test_an_expired_bundle_stays_refused_after_the_clock_rewinds`` and
+    ``test_an_expired_bundle_stays_refused_across_a_restart_and_rewind``.
     """
 
     database = Database(f"sqlite+pysqlite:///{tmp_path / 'tg1.db'}")
@@ -146,3 +148,105 @@ def test_an_expired_bundle_resolves_expired(tmp_path: Path) -> None:
         assert refused.refusal is evidence_bundles.ResolutionRefusal.EXPIRED
     finally:
         database.dispose()
+
+
+def _issue_tg1_bundle(database: Database, fingerprint: str, epoch: str, registration: str):
+    with database.sessions.begin() as session:
+        return evidence_bundles.issue(
+            session,
+            account_fingerprint=fingerprint,
+            proposer_id="tg1-worker",
+            proposer_credential_epoch=epoch,
+            proposer_registry_entry_digest=registration,
+            kind=BundleKind.BACKEND_SERVED,
+            digest="1" * 64,
+            now=T0,
+            ttl_seconds=60.0,
+        )
+
+
+def _resolve_tg1(
+    database: Database,
+    issued,
+    fingerprint: str,
+    epoch: str,
+    registration: str,
+    at: datetime,
+) -> evidence_bundles.Resolution:
+    with database.sessions.begin() as session:
+        return evidence_bundles.resolve(
+            session,
+            account_fingerprint=fingerprint,
+            cited_ids=(issued.bundle_id,),
+            proposer_id="tg1-worker",
+            proposer_credential_epoch=epoch,
+            proposer_registry_entry_digest=registration,
+            now=at,
+        )
+
+
+def test_an_expired_bundle_stays_refused_after_the_clock_rewinds(tmp_path: Path) -> None:
+    """Expiry judged at T+delta must never run backwards to T.
+
+    A bundle refused EXPIRED against one drain clock stays refused when a later
+    drain observes a rewound clock: authority once refused on expiry evidence is
+    not revivable by wall-clock motion.
+    """
+
+    database = Database(f"sqlite+pysqlite:///{tmp_path / 'tg1.db'}")
+    database.initialize()
+    fingerprint = "f" * 64
+    epoch = "e" * 64
+    registration = "d" * 64
+    try:
+        issued = _issue_tg1_bundle(database, fingerprint, epoch, registration)
+
+        refused = _resolve_tg1(
+            database, issued, fingerprint, epoch, registration, T0 + timedelta(seconds=61)
+        )
+        assert refused.refusal is evidence_bundles.ResolutionRefusal.EXPIRED
+
+        rewound = _resolve_tg1(database, issued, fingerprint, epoch, registration, T0)
+        assert rewound.refusal is evidence_bundles.ResolutionRefusal.EXPIRED, (
+            "an expiry verdict ran backwards: the bundle admitted after the drain "
+            "clock rewound past its expiry"
+        )
+    finally:
+        database.dispose()
+
+
+def test_an_expired_bundle_stays_refused_across_a_restart_and_rewind(tmp_path: Path) -> None:
+    """The EXPIRED verdict is durable: it survives engine disposal (D-26/FIX-26).
+
+    Resolve EXPIRED at T0+61s, commit, dispose the engine (a restart), open a
+    fresh Database on the same file and resolve at a rewound T0 from a fresh
+    session: still EXPIRED. A process-only memory of the refusal would pass the
+    same-process rewind pin above and fail exactly here.
+    """
+
+    db_path = tmp_path / "tg1-restart.db"
+    fingerprint = "f" * 64
+    epoch = "e" * 64
+    registration = "d" * 64
+
+    database = Database(f"sqlite+pysqlite:///{db_path}")
+    database.initialize()
+    try:
+        issued = _issue_tg1_bundle(database, fingerprint, epoch, registration)
+        refused = _resolve_tg1(
+            database, issued, fingerprint, epoch, registration, T0 + timedelta(seconds=61)
+        )
+        assert refused.refusal is evidence_bundles.ResolutionRefusal.EXPIRED
+    finally:
+        database.dispose()
+
+    restarted = Database(f"sqlite+pysqlite:///{db_path}")
+    restarted.initialize()
+    try:
+        rewound = _resolve_tg1(restarted, issued, fingerprint, epoch, registration, T0)
+        assert rewound.refusal is evidence_bundles.ResolutionRefusal.EXPIRED, (
+            "an expiry verdict did not survive a restart: a fresh engine admitted "
+            "the bundle at a rewound clock"
+        )
+    finally:
+        restarted.dispose()

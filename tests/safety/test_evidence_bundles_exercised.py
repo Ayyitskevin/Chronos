@@ -1626,3 +1626,670 @@ def test_an_authenticated_row_under_evidence_binding_records_its_posture(
     assert durable.read_posture(payload) == durable.DecisionPosture(
         registry_configured=True, evidence_binding=True, credential_epoch_bound=True
     )
+
+
+# ================================================= FIX-26: durable sticky EXPIRED (D-26)
+#
+# Daybreak's sealed FIX-26 threat map (run-20260913-pm/FIX-26-threatmap-daybreak.md)
+# rows 5-6, each as a pin: durability across restart lives in
+# tests/chaos/test_clock_faults.py; the protocol pins below cover rollback
+# atomicity, precedence, keying, citation order, corruption fail-closed,
+# idempotence, and the prune interaction. The rewind/restart assertions are
+# RED before the fix; pins marked "guard" are green without it and exist to
+# prove the fix changes nothing outside expiry stickiness.
+
+_FIX26_KIND = "evidence_bundle_expired"
+
+
+def _fix26_binding(proposer_id: str = "claude-worker") -> tuple[str, str]:
+    binding = registration_binding(
+        ProposerRegistration.model_validate(_registration(proposer_id, WORKER_CREDENTIAL))
+    )
+    return binding.credential_epoch, binding.registry_entry_digest
+
+
+def _fix26_issue(
+    sessions: sessionmaker[Session],
+    *,
+    fingerprint: str = _FINGERPRINT,
+    proposer_id: str = "claude-worker",
+    ttl_seconds: float = 60.0,
+    now: datetime = _NOW,
+) -> evidence_bundles.IssuedBundle:
+    epoch, registration_digest = _fix26_binding(proposer_id)
+    with sessions.begin() as session:
+        return evidence_bundles.issue(
+            session,
+            account_fingerprint=fingerprint,
+            proposer_id=proposer_id,
+            proposer_credential_epoch=epoch,
+            proposer_registry_entry_digest=registration_digest,
+            kind=BundleKind.BACKEND_SERVED,
+            digest=_SERVED_DIGEST,
+            now=now,
+            ttl_seconds=ttl_seconds,
+        )
+
+
+def _fix26_resolve(
+    sessions: sessionmaker[Session],
+    *,
+    fingerprint: str = _FINGERPRINT,
+    cited_ids: tuple[str, ...],
+    proposer_id: str = "claude-worker",
+    now: datetime,
+) -> evidence_bundles.Resolution:
+    epoch, registration_digest = _fix26_binding(proposer_id)
+    with sessions.begin() as session:
+        return evidence_bundles.resolve(
+            session,
+            account_fingerprint=fingerprint,
+            cited_ids=cited_ids,
+            proposer_id=proposer_id,
+            proposer_credential_epoch=epoch,
+            proposer_registry_entry_digest=registration_digest,
+            now=now,
+        )
+
+
+def _fix26_markers(
+    sessions: sessionmaker[Session], fingerprint: str = _FINGERPRINT
+) -> list[HashChainRow]:
+    stream = evidence_bundles.hash_chain_stream(fingerprint)
+    with sessions.begin() as session:
+        return list(
+            session.scalars(
+                select(HashChainRow).where(
+                    HashChainRow.stream == stream,
+                    HashChainRow.kind == _FIX26_KIND,
+                )
+            )
+        )
+
+
+def test_a_sticky_expiry_writes_exactly_one_durable_marker(sessions: sessionmaker[Session]) -> None:
+    """Threat row 9: exactly one durable transition; repeat reads are write-free."""
+
+    issued = _fix26_issue(sessions)
+    expired_at = _NOW + timedelta(seconds=61)
+    for _ in range(3):
+        refused = _fix26_resolve(sessions, cited_ids=(issued.bundle_id,), now=expired_at)
+        assert refused.refusal is evidence_bundles.ResolutionRefusal.EXPIRED
+    markers = _fix26_markers(sessions)
+    assert len(markers) == 1, (
+        f"expected exactly one durable expiry marker, found {len(markers)}: "
+        "repeat resolutions must not append again"
+    )
+    stream = evidence_bundles.hash_chain_stream(_FINGERPRINT)
+
+    def stream_shape() -> tuple[int, int]:
+        # (head sequence, row count): the head is the LAST row's sequence, so an append
+        # anywhere moves it; the count is independent of how the sequence is numbered.
+        with sessions.begin() as session:
+            head = hash_chain.head(session, stream)
+            assert head is not None
+            rows = len(
+                list(session.scalars(select(HashChainRow).where(HashChainRow.stream == stream)))
+            )
+            return head.sequence, rows
+
+    shape_after_writes = stream_shape()
+    _fix26_resolve(sessions, cited_ids=(issued.bundle_id,), now=expired_at)
+    assert stream_shape() == shape_after_writes, "a repeat sticky read appended to the stream"
+
+
+def test_a_rolled_back_expiry_refusal_leaves_no_sticky_marker(
+    sessions: sessionmaker[Session],
+) -> None:
+    """Threat row 2 (guard): marker and refusal are one atomic write — a rolled-back
+    refusal leaves no durable fact, and a rewound clock then judges the bundle live."""
+
+    issued = _fix26_issue(sessions)
+    epoch, registration_digest = _fix26_binding()
+    session = sessions()
+    try:
+        refused = evidence_bundles.resolve(
+            session,
+            account_fingerprint=_FINGERPRINT,
+            cited_ids=(issued.bundle_id,),
+            proposer_id="claude-worker",
+            proposer_credential_epoch=epoch,
+            proposer_registry_entry_digest=registration_digest,
+            now=_NOW + timedelta(seconds=61),
+        )
+        assert refused.refusal is evidence_bundles.ResolutionRefusal.EXPIRED
+        session.rollback()
+    finally:
+        session.close()
+    assert _fix26_markers(sessions) == [], "a rolled-back refusal still wrote a marker"
+    rewound = _fix26_resolve(sessions, cited_ids=(issued.bundle_id,), now=_NOW)
+    assert rewound.refusal is None and rewound.bundle is not None, rewound.detail
+
+
+def test_a_sticky_marker_is_scoped_to_its_own_account_stream(
+    sessions: sessionmaker[Session],
+) -> None:
+    """Threat row 6: one account's expiry verdict can never poison another account."""
+
+    other_fingerprint = "b" * 64
+    poisoned = _fix26_issue(sessions, fingerprint=other_fingerprint)
+    refused = _fix26_resolve(
+        sessions,
+        fingerprint=other_fingerprint,
+        cited_ids=(poisoned.bundle_id,),
+        now=_NOW + timedelta(seconds=61),
+    )
+    assert refused.refusal is evidence_bundles.ResolutionRefusal.EXPIRED
+
+    clean = _fix26_issue(sessions, fingerprint=_FINGERPRINT)
+    rewound = _fix26_resolve(sessions, cited_ids=(clean.bundle_id,), now=_NOW)
+    assert rewound.refusal is None and rewound.bundle is not None, (
+        f"another account's sticky verdict leaked into this account: {rewound.detail}"
+    )
+    assert _fix26_markers(sessions) == [], "an expiry marker landed in the wrong account's stream"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"bundle_id": 12345},
+        {"bundle_id": None},
+        ["not", "an", "object"],
+        "a bare string",
+    ],
+    ids=["wrong-typed-id", "null-id", "json-list", "bare-string"],
+)
+def test_a_malformed_expiry_marker_refuses_closed(
+    sessions: sessionmaker[Session], payload: object
+) -> None:
+    """Threat row 8: a well-formed chain carrying a malformed expiry record fails
+    CLOSED — never ignored, never treated as 'not expired', never a crash."""
+
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    with sessions.begin() as session:
+        hash_chain.append(
+            session,
+            stream=evidence_bundles.hash_chain_stream(_FINGERPRINT),
+            kind=_FIX26_KIND,
+            payload=payload,
+            recorded_at=_NOW,
+        )
+    resolution = _fix26_resolve(sessions, cited_ids=(issued.bundle_id,), now=_NOW)
+    assert resolution.refusal is evidence_bundles.ResolutionRefusal.EXPIRED, (
+        f"malformed expiry evidence {payload!r} was ignored and the live bundle admitted"
+    )
+    assert resolution.bundle is None
+
+
+def test_a_broken_evidence_chain_refuses_closed(sessions: sessionmaker[Session]) -> None:
+    """Threat row 8: a targeted edit that breaks the chain fails CLOSED — a corrupt
+    durable record is never 'not expired'."""
+
+    from sqlalchemy import text
+
+    issued = _fix26_issue(sessions)
+    refused = _fix26_resolve(
+        sessions, cited_ids=(issued.bundle_id,), now=_NOW + timedelta(seconds=61)
+    )
+    assert refused.refusal is evidence_bundles.ResolutionRefusal.EXPIRED
+
+    with sessions.begin() as session:
+        session.execute(
+            text(
+                "UPDATE hash_chain_records SET payload_json = payload_json || ' ' "
+                "WHERE id = (SELECT MIN(id) FROM hash_chain_records)"
+            )
+        )
+    rewound = _fix26_resolve(sessions, cited_ids=(issued.bundle_id,), now=_NOW)
+    assert rewound.refusal is evidence_bundles.ResolutionRefusal.EXPIRED, (
+        "a tampered evidence stream was read as clean and the bundle admitted at a rewound clock"
+    )
+
+
+def test_duplicate_sticky_markers_still_refuse_expired(sessions: sessionmaker[Session]) -> None:
+    """Threat row 8: a duplicate/conflicting marker is the same verdict, not an error."""
+
+    issued = _fix26_issue(sessions)
+    expired_at = _NOW + timedelta(seconds=61)
+    refused = _fix26_resolve(sessions, cited_ids=(issued.bundle_id,), now=expired_at)
+    assert refused.refusal is evidence_bundles.ResolutionRefusal.EXPIRED
+    with sessions.begin() as session:
+        hash_chain.append(
+            session,
+            stream=evidence_bundles.hash_chain_stream(_FINGERPRINT),
+            kind=_FIX26_KIND,
+            payload={"bundle_id": issued.bundle_id, "expires_at": issued.expires_at.isoformat()},
+            recorded_at=expired_at,
+        )
+    rewound = _fix26_resolve(sessions, cited_ids=(issued.bundle_id,), now=_NOW)
+    assert rewound.refusal is evidence_bundles.ResolutionRefusal.EXPIRED, (
+        "duplicate sticky markers broke the sticky verdict"
+    )
+
+
+def test_a_prefix_neighbor_expiry_marker_does_not_match(
+    sessions: sessionmaker[Session],
+) -> None:
+    """A marker names one exact bundle id, never a prefix-related neighbor."""
+
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    with sessions.begin() as session:
+        hash_chain.append(
+            session,
+            stream=evidence_bundles.hash_chain_stream(_FINGERPRINT),
+            kind=_FIX26_KIND,
+            payload={
+                "bundle_id": issued.bundle_id + "-neighbor",
+                "expires_at": issued.expires_at.isoformat(),
+            },
+            recorded_at=_NOW,
+        )
+    resolved = _fix26_resolve(sessions, cited_ids=(issued.bundle_id,), now=_NOW)
+    assert resolved.refusal is None and resolved.bundle is not None, (
+        f"a prefix-neighbor marker poisoned the exact live bundle: {resolved.detail}"
+    )
+    assert resolved.bundle.bundle_id == issued.bundle_id
+
+
+def test_a_sticky_bundle_stays_foreign_to_another_proposer(sessions: sessionmaker[Session]) -> None:
+    """Threat row 4 (guard): sticky expiry is consulted only AFTER the ownership and
+    registration checks — a sticky bundle cited by another proposer is FOREIGN."""
+
+    issued = _fix26_issue(sessions)
+    refused = _fix26_resolve(
+        sessions, cited_ids=(issued.bundle_id,), now=_NOW + timedelta(seconds=61)
+    )
+    assert refused.refusal is evidence_bundles.ResolutionRefusal.EXPIRED
+
+    epoch, registration_digest = _fix26_binding("tradingview-bridge")
+    with sessions.begin() as session:
+        foreign = evidence_bundles.resolve(
+            session,
+            account_fingerprint=_FINGERPRINT,
+            cited_ids=(issued.bundle_id,),
+            proposer_id="tradingview-bridge",
+            proposer_credential_epoch=epoch,
+            proposer_registry_entry_digest=registration_digest,
+            now=_NOW,
+        )
+    assert foreign.refusal is evidence_bundles.ResolutionRefusal.FOREIGN, (
+        f"the sticky check pre-empted the ownership check: {foreign.refusal}"
+    )
+
+
+def test_a_pruned_sticky_bundle_resolves_unissued(sessions: sessionmaker[Session]) -> None:
+    """Threat row 5 (guard): prune_expired still prunes — after the row goes, the
+    surviving marker is NOT lookup authority: today's UNISSUED result is preserved."""
+
+    issued = _fix26_issue(sessions)
+    refused = _fix26_resolve(
+        sessions, cited_ids=(issued.bundle_id,), now=_NOW + timedelta(seconds=61)
+    )
+    assert refused.refusal is evidence_bundles.ResolutionRefusal.EXPIRED
+
+    pruned_at = (
+        _NOW + timedelta(seconds=61) + evidence_bundles.RETENTION_AFTER_EXPIRY + timedelta(days=1)
+    )
+    with sessions.begin() as session:
+        pruned = evidence_bundles.prune_expired(
+            session, account_fingerprint=_FINGERPRINT, now=pruned_at
+        )
+    assert pruned == 1
+    resolution = _fix26_resolve(sessions, cited_ids=(issued.bundle_id,), now=pruned_at)
+    assert resolution.refusal is evidence_bundles.ResolutionRefusal.UNISSUED, (
+        f"a surviving expiry marker resurrected a pruned bundle as {resolution.refusal} "
+        "instead of today's UNISSUED"
+    )
+
+
+def test_citation_order_is_preserved_with_sticky_markers(sessions: sessionmaker[Session]) -> None:
+    """Threat row 7: the first cited id naming a live row governs — an earlier live
+    citation admits even when a later citation is sticky-expired, and the reverse
+    order refuses on the sticky first citation."""
+
+    sticky = _fix26_issue(sessions, ttl_seconds=60.0)
+    live = _fix26_issue(sessions, ttl_seconds=300.0)
+    refused = _fix26_resolve(
+        sessions, cited_ids=(sticky.bundle_id,), now=_NOW + timedelta(seconds=61)
+    )
+    assert refused.refusal is evidence_bundles.ResolutionRefusal.EXPIRED
+
+    live_first = _fix26_resolve(sessions, cited_ids=(live.bundle_id, sticky.bundle_id), now=_NOW)
+    assert live_first.refusal is None and live_first.bundle is not None, (
+        f"a later sticky citation overrode an earlier live one: {live_first.detail}"
+    )
+    assert live_first.bundle.bundle_id == live.bundle_id
+
+    sticky_first = _fix26_resolve(sessions, cited_ids=(sticky.bundle_id, live.bundle_id), now=_NOW)
+    assert sticky_first.refusal is evidence_bundles.ResolutionRefusal.EXPIRED, (
+        "a sticky first citation did not refuse at a rewound clock"
+    )
+
+
+def test_a_broken_chain_refuses_a_live_bundle_closed(sessions: sessionmaker[Session]) -> None:
+    """Threat row 8: chain verification is load-bearing even with NO marker — a
+    targeted edit to the chain of a live, unexpired bundle fails CLOSED rather
+    than admitting on a ledger that can no longer prove what it recorded."""
+
+    from sqlalchemy import text
+
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    with sessions.begin() as session:
+        session.execute(
+            text(
+                "UPDATE hash_chain_records SET payload_json = payload_json || ' ' "
+                "WHERE id = (SELECT MIN(id) FROM hash_chain_records)"
+            )
+        )
+    resolution = _fix26_resolve(sessions, cited_ids=(issued.bundle_id,), now=_NOW)
+    assert resolution.refusal is evidence_bundles.ResolutionRefusal.EXPIRED, (
+        "a tampered evidence stream admitted a live bundle instead of refusing closed"
+    )
+    assert resolution.bundle is None
+
+
+# ------------------------------------------ FIX-26r1: reader F2 (PREMERGE-275-reader.md)
+#
+# Three branches of the sticky-EXPIRED protocol that were true in code but pinned by
+# nothing (each survived all 47 tests as the reader's mutant MA / MB / MC).
+
+
+def test_an_undecodable_expiry_marker_refuses_closed(sessions: sessionmaker[Session]) -> None:
+    """MA: a VALID chain carrying an expiry record whose payload does not decode as
+    JSON fails CLOSED. ``hash_chain.append`` always writes valid JSON, so the record
+    is inserted directly, with a correct chain hash, to reach the decode branch."""
+
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    stream = evidence_bundles.hash_chain_stream(_FINGERPRINT)
+    undecodable = "{not json"
+    with sessions.begin() as session:
+        previous = hash_chain.head(session, stream)
+        sequence = 0 if previous is None else previous.sequence + 1
+        previous_hash = hash_chain.GENESIS_HASH if previous is None else previous.record_hash
+        session.add(
+            HashChainRow(
+                stream=stream,
+                sequence=sequence,
+                kind=_FIX26_KIND,
+                payload_json=undecodable,
+                recorded_at=_NOW,
+                previous_hash=previous_hash,
+                record_hash=hash_chain.compute_hash(
+                    stream=stream,
+                    sequence=sequence,
+                    recorded_at=_NOW,
+                    payload_json=undecodable,
+                    previous_hash=previous_hash,
+                ),
+            )
+        )
+    with sessions.begin() as session:
+        # the refusal must come from the decode branch, not from a broken chain
+        assert hash_chain.verify(session, stream).ok
+    resolution = _fix26_resolve(sessions, cited_ids=(issued.bundle_id,), now=_NOW)
+    assert resolution.refusal is evidence_bundles.ResolutionRefusal.EXPIRED, (
+        "an undecodable expiry record was ignored and the live bundle admitted"
+    )
+    assert resolution.bundle is None
+
+
+def test_another_accounts_expiry_markers_are_ignored(sessions: sessionmaker[Session]) -> None:
+    """MB: the marker scan reads only this account's stream. Another account's
+    malformed marker, and its well-formed marker naming this very bundle id, neither
+    refuse nor alter this account's live bundle."""
+
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    other_stream = evidence_bundles.hash_chain_stream("c" * 64)
+    with sessions.begin() as session:
+        hash_chain.append(
+            session,
+            stream=other_stream,
+            kind=_FIX26_KIND,
+            payload={"bundle_id": 12345},
+            recorded_at=_NOW,
+        )
+        hash_chain.append(
+            session,
+            stream=other_stream,
+            kind=_FIX26_KIND,
+            payload={"bundle_id": issued.bundle_id, "expires_at": issued.expires_at.isoformat()},
+            recorded_at=_NOW,
+        )
+    resolution = _fix26_resolve(sessions, cited_ids=(issued.bundle_id,), now=_NOW)
+    assert resolution.refusal is None and resolution.bundle is not None, (
+        f"another account's expiry markers refused this account's live bundle: {resolution.detail}"
+    )
+    assert _fix26_markers(sessions) == [], "a marker landed on this account's stream"
+
+
+def _fix26_sticky(sessions: sessionmaker[Session]) -> evidence_bundles.IssuedBundle:
+    issued = _fix26_issue(sessions)
+    refused = _fix26_resolve(
+        sessions, cited_ids=(issued.bundle_id,), now=_NOW + timedelta(seconds=61)
+    )
+    assert refused.refusal is evidence_bundles.ResolutionRefusal.EXPIRED
+    assert len(_fix26_markers(sessions)) == 1
+    return issued
+
+
+def test_a_sticky_bundle_still_refuses_registration_unbound(
+    sessions: sessionmaker[Session],
+) -> None:
+    """MC: sticky expiry is consulted only AFTER the registration checks — a sticky
+    bundle cited without a registration binding is REGISTRATION_UNBOUND, not EXPIRED."""
+
+    issued = _fix26_sticky(sessions)
+    with sessions.begin() as session:
+        unbound = evidence_bundles.resolve(
+            session,
+            account_fingerprint=_FINGERPRINT,
+            cited_ids=(issued.bundle_id,),
+            proposer_id="claude-worker",
+            proposer_credential_epoch=None,
+            proposer_registry_entry_digest=None,
+            now=_NOW,
+        )
+    assert unbound.refusal is evidence_bundles.ResolutionRefusal.REGISTRATION_UNBOUND, (
+        f"the sticky check pre-empted the registration-binding check: {unbound.refusal}"
+    )
+
+
+def test_a_sticky_bundle_still_refuses_registration_replaced(
+    sessions: sessionmaker[Session],
+) -> None:
+    """MC: a sticky bundle cited under a different credential epoch / registry entry
+    is REGISTRATION_REPLACED, not EXPIRED."""
+
+    issued = _fix26_sticky(sessions)
+    other_epoch, other_digest = _fix26_binding("tradingview-bridge")
+    assert (other_epoch, other_digest) != _fix26_binding()
+    with sessions.begin() as session:
+        replaced = evidence_bundles.resolve(
+            session,
+            account_fingerprint=_FINGERPRINT,
+            cited_ids=(issued.bundle_id,),
+            proposer_id="claude-worker",
+            proposer_credential_epoch=other_epoch,
+            proposer_registry_entry_digest=other_digest,
+            now=_NOW,
+        )
+    assert replaced.refusal is evidence_bundles.ResolutionRefusal.REGISTRATION_REPLACED, (
+        f"the sticky check pre-empted the registration-replacement check: {replaced.refusal}"
+    )
+
+
+# FIX-26r3: reader delta-read F1-F3 (PREMERGE-275-delta-reader.md)
+#
+# Pins for the mutants the r1/r2 chain left alive: N1 reverse prefix, N7 empty-string id, N2
+# case-fold, N3 expiry boundary, N4/N5 marker payload and recorded_at, N6 distinct detail
+# sentences. Each is proven RED against its mutant in the FIX-26r3 handoff.
+
+
+@pytest.mark.parametrize(
+    "marker_id",
+    [
+        lambda bundle_id: "",
+        lambda bundle_id: bundle_id[:-1],
+        lambda bundle_id: bundle_id.upper(),
+    ],
+    ids=["empty-string", "strict-prefix", "other-case"],
+)
+def test_a_marker_naming_another_id_never_refuses_the_live_bundle(
+    sessions: sessionmaker[Session], marker_id: Any
+) -> None:
+    """N1/N7/N2: a marker matches the EXACT id. An empty id, a strict prefix of the live id
+    and the live id in another case are different ids, so the live bundle still resolves."""
+
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    named = marker_id(issued.bundle_id)
+    assert named != issued.bundle_id
+    with sessions.begin() as session:
+        hash_chain.append(
+            session,
+            stream=evidence_bundles.hash_chain_stream(_FINGERPRINT),
+            kind=_FIX26_KIND,
+            payload={"bundle_id": named, "expires_at": issued.expires_at.isoformat()},
+            recorded_at=_NOW,
+        )
+    with sessions.begin() as session:
+        assert hash_chain.verify(session, evidence_bundles.hash_chain_stream(_FINGERPRINT)).ok
+    resolved = _fix26_resolve(sessions, cited_ids=(issued.bundle_id,), now=_NOW)
+    assert resolved.refusal is None and resolved.bundle is not None, (
+        f"a marker naming {named!r} refused the live bundle {issued.bundle_id!r}: {resolved.detail}"
+    )
+    assert resolved.bundle.bundle_id == issued.bundle_id
+
+
+def test_the_expiry_boundary_is_inclusive(sessions: sessionmaker[Session]) -> None:
+    """N3: a bundle is expired AT expires_at (``now >= expires_at``) and live one microsecond
+    before it."""
+
+    issued = _fix26_issue(sessions, ttl_seconds=60.0)
+    just_before = _fix26_resolve(
+        sessions, cited_ids=(issued.bundle_id,), now=issued.expires_at - timedelta(microseconds=1)
+    )
+    assert just_before.refusal is None and just_before.bundle is not None, just_before.detail
+    assert _fix26_markers(sessions) == [], "a live resolve wrote an expiry marker"
+    at_expiry = _fix26_resolve(sessions, cited_ids=(issued.bundle_id,), now=issued.expires_at)
+    assert at_expiry.refusal is evidence_bundles.ResolutionRefusal.EXPIRED, (
+        "a bundle resolved live AT its expires_at: the boundary is exclusive"
+    )
+    assert len(_fix26_markers(sessions)) == 1
+
+
+def test_the_expiry_marker_records_the_bundle_the_deadline_and_the_drains_now(
+    sessions: sessionmaker[Session],
+) -> None:
+    """N4/N5: the ONE marker the drain writes carries exactly the bundle's id and the row's
+    expires_at, and is recorded at the drain's ``now`` (the audit trail's 'when refused')."""
+
+    issued = _fix26_issue(sessions)
+    drain_now = _NOW + timedelta(seconds=61)
+    refused = _fix26_resolve(sessions, cited_ids=(issued.bundle_id,), now=drain_now)
+    assert refused.refusal is evidence_bundles.ResolutionRefusal.EXPIRED
+    with sessions.begin() as session:
+        row = evidence_bundles.load(
+            session, account_fingerprint=_FINGERPRINT, bundle_id=issued.bundle_id
+        )
+        assert row is not None
+        row_expires_at = row.expires_at.isoformat()
+        assert row.issued_at.isoformat() != row_expires_at
+    (marker,) = _fix26_markers(sessions)
+    assert json.loads(marker.payload_json) == {
+        "bundle_id": issued.bundle_id,
+        "expires_at": row_expires_at,
+    }
+    recorded_at = marker.recorded_at
+    if recorded_at.tzinfo is None:
+        recorded_at = recorded_at.replace(tzinfo=UTC)
+    assert recorded_at == drain_now, "the marker was not recorded at the drain's now"
+    assert recorded_at != issued.expires_at
+
+
+def _fix26_raw_marker(sessions: sessionmaker[Session], payload_json: str) -> None:
+    """Append an expiry record whose payload TEXT is exactly ``payload_json`` with a correct
+    chain hash (``hash_chain.append`` can only write JSON it encoded itself)."""
+
+    stream = evidence_bundles.hash_chain_stream(_FINGERPRINT)
+    with sessions.begin() as session:
+        previous = hash_chain.head(session, stream)
+        assert previous is not None
+        sequence = previous.sequence + 1
+        session.add(
+            HashChainRow(
+                stream=stream,
+                sequence=sequence,
+                kind=_FIX26_KIND,
+                payload_json=payload_json,
+                recorded_at=_NOW,
+                previous_hash=previous.record_hash,
+                record_hash=hash_chain.compute_hash(
+                    stream=stream,
+                    sequence=sequence,
+                    recorded_at=_NOW,
+                    payload_json=payload_json,
+                    previous_hash=previous.record_hash,
+                ),
+            )
+        )
+
+
+_FIX26_DETAIL_PHRASES = {
+    "corrupt-stream": "failed verification",
+    "undecodable": "does not decode",
+    "non-object": "is not a JSON object",
+    "non-string-id": "names no string bundle id",
+    "sticky": "already refused EXPIRED at an earlier drain",
+    "first-refusal": "the drain's clock is past it",
+}
+
+
+@pytest.mark.parametrize(
+    "case", ["corrupt-stream", "undecodable", "non-object", "non-string-id", "sticky"]
+)
+def test_each_sticky_refusal_carries_its_own_distinguishing_detail(
+    sessions: sessionmaker[Session], case: str
+) -> None:
+    """N6: the refusal CODE is EXPIRED in every one of these, so the detail sentence is the
+    only thing telling an operator which happened. Each carries its own phrase and none of
+    the others' (the phrase is asserted, not the whole sentence)."""
+
+    from sqlalchemy import text
+
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    at = _NOW
+    if case == "corrupt-stream":
+        with sessions.begin() as session:
+            session.execute(
+                text(
+                    "UPDATE hash_chain_records SET payload_json = payload_json || ' ' "
+                    "WHERE id = (SELECT MIN(id) FROM hash_chain_records)"
+                )
+            )
+    elif case == "undecodable":
+        _fix26_raw_marker(sessions, "{not json")
+    elif case == "non-object":
+        _fix26_raw_marker(sessions, json.dumps(["not", "an", "object"]))
+    elif case == "non-string-id":
+        _fix26_raw_marker(sessions, json.dumps({"bundle_id": 12345}))
+    else:
+        _fix26_sticky_at(sessions, issued)
+    resolution = _fix26_resolve(sessions, cited_ids=(issued.bundle_id,), now=at)
+    assert resolution.refusal is evidence_bundles.ResolutionRefusal.EXPIRED, resolution.refusal
+    assert _FIX26_DETAIL_PHRASES[case] in resolution.detail, resolution.detail
+    for other, phrase in _FIX26_DETAIL_PHRASES.items():
+        if other != case:
+            assert phrase not in resolution.detail, (
+                f"the {case} refusal reads like the {other} one: {resolution.detail!r}"
+            )
+
+
+def _fix26_sticky_at(
+    sessions: sessionmaker[Session], issued: evidence_bundles.IssuedBundle
+) -> None:
+    refused = _fix26_resolve(
+        sessions, cited_ids=(issued.bundle_id,), now=issued.expires_at + timedelta(seconds=1)
+    )
+    assert refused.refusal is evidence_bundles.ResolutionRefusal.EXPIRED
+    assert _FIX26_DETAIL_PHRASES["first-refusal"] in refused.detail
+    assert _FIX26_DETAIL_PHRASES["sticky"] not in refused.detail
