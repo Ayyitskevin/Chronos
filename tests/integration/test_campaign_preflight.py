@@ -5,13 +5,28 @@ from __future__ import annotations
 import argparse
 import socket
 import sqlite3
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from chronos.cli.campaign_preflight import cmd_campaign_preflight
+
+
+def _far_expiry(now: datetime) -> datetime:
+    """A far-future expiry that exists for every ``now`` (``now.replace(year=2099)`` raises
+    ``ValueError`` on 29 February)."""
+
+    return now + timedelta(days=36500)
+
+
+def test_the_far_expiry_is_valid_and_later_on_29_february() -> None:
+    leap_day = datetime(2028, 2, 29, 12, 0, tzinfo=UTC)  # injected: no clock is moved
+    with pytest.raises(ValueError):
+        leap_day.replace(year=2099)  # the hazard the helper exists to avoid
+    far = _far_expiry(leap_day)
+    assert far > leap_day and far.tzinfo is not None and far.year > 2099
 
 
 def _args(root: Path, **overrides: object) -> argparse.Namespace:
@@ -60,7 +75,7 @@ def test_preflight_passes_with_explicit_inputs_and_no_dotenv(monkeypatch, tmp_pa
     mandate = SimpleNamespace(
         mode=AutonomyMode.SHADOW,
         effective_from=now,
-        expires_at=now.replace(year=2099),
+        expires_at=_far_expiry(now),
         scope=SimpleNamespace(symbols=("SPY",)),
     )
     monkeypatch.setattr(
@@ -139,7 +154,7 @@ def test_preflight_flags_0012_adoption_sentinel_for_writer_boot(tmp_path, capsys
             mandate=SimpleNamespace(
                 mode=AutonomyMode.SHADOW,
                 effective_from=now,
-                expires_at=now.replace(year=2099),
+                expires_at=_far_expiry(now),
                 scope=SimpleNamespace(symbols=("SPY",)),
             )
         ),
