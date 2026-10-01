@@ -633,16 +633,34 @@ def test_the_authenticated_posture_clears_the_cap_and_shadow_never_trips_it() ->
     assert "SUBMITTING_MODE_ON_STATIC_POSTURE" not in _codes(_shadow())
 
 
+@pytest.mark.parametrize(
+    "wall_clock",
+    [_NOW - timedelta(days=2), _NOW, _NOW + timedelta(days=91)],
+    ids=["before-the-window", "inside-the-window", "after-the-window"],
+)
 def test_the_cli_exit_code_carries_the_cap_on_the_static_posture(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], static_env: None
+    wall_clock: datetime,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    static_env: None,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """End to end through settings: the backend would boot inert, so the tool says so."""
+    """End to end through settings: the backend would boot inert, so the tool says so.
 
+    Judged at the fixtures' own instant (``_check`` passes ``--now``), with the real clock
+    moved to before, inside and after the fixture window. The exit 1 must come from the cap:
+    an unpinned call at the after-window position also exits 1, because the expired window
+    is itself a BLOCKING finding, so the report line ``] expired`` is the discriminator.
+    """
+
+    monkeypatch.setattr("chronos.cli.mandate_check.utc_now", lambda: wall_clock)
     path = tmp_path / "mandate.json"
     path.write_text(_paper().model_dump_json(), encoding="utf-8")
 
-    assert main(["mandate", "check", "--file", str(path), "--account-id", _ACCOUNT]) == 1
-    assert "SUBMITTING_MODE_ON_STATIC_POSTURE" in capsys.readouterr().out
+    assert main(_check(path)) == 1
+    printed = capsys.readouterr().out
+    assert "SUBMITTING_MODE_ON_STATIC_POSTURE" in printed
+    assert "] expired" not in printed  # the report line is "  [<severity>] expired"
 
 
 def test_the_cli_clears_the_cap_on_the_authenticated_posture(
