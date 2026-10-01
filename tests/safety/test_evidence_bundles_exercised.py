@@ -2726,8 +2726,10 @@ def test_a_pruned_bundle_with_a_kind_edited_marker_still_resolves_unissued(
 _K1R1_UNLABELLED_DECODE = "a durable evidence record does not decode"
 
 
-def _k1r1_insert(sessions: sessionmaker[Session], payload_json: object) -> None:
-    """A chain-correct ORDINARY row storing exactly ``payload_json`` (any type)."""
+def _k1r1_insert(
+    sessions: sessionmaker[Session], payload_json: object, *, kind: str = "evidence_bundle_issued"
+) -> None:
+    """A chain-correct row storing exactly ``payload_json`` (any type); ORDINARY unless ``kind``."""
 
     stream = _k1_stream()
     with sessions.begin() as session:
@@ -2738,7 +2740,7 @@ def _k1r1_insert(sessions: sessionmaker[Session], payload_json: object) -> None:
             HashChainRow(
                 stream=stream,
                 sequence=sequence,
-                kind="evidence_bundle_issued",
+                kind=kind,
                 payload_json=payload_json,  # type: ignore[arg-type]
                 recorded_at=_NOW,
                 previous_hash=previous.record_hash,
@@ -2786,3 +2788,38 @@ def test_a_2000_level_nested_array_is_refused_as_a_non_object(
     resolution = _fix26_resolve(sessions, cited_ids=(issued.bundle_id,), now=_NOW)
     _k1_refused_closed(resolution)
     assert _FIX26_DETAIL_PHRASES["non-object"] in resolution.detail, resolution.detail
+
+
+# ---------------------------------- FIX-26-K1r2: the two new branches made load-bearing
+
+
+def test_a_100000_deep_json_array_refuses_with_the_unlabelled_decode_detail(
+    sessions: sessionmaker[Session],
+) -> None:
+    """The ``RecursionError`` half of the widened catch: a chain-valid ordinary row nested
+    100,000 deep makes ``json.loads`` raise ``RecursionError`` (not ``ValueError``), which must
+    refuse closed with the unlabelled decode detail. The 2,000-level array above decodes and is
+    the negative control."""
+
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    _k1r1_insert(sessions, "[" * 100_000 + "]" * 100_000)
+    assert _k1_chain_ok(sessions)
+    resolution = _fix26_resolve(sessions, cited_ids=(issued.bundle_id,), now=_NOW)
+    _k1_refused_closed(resolution)
+    assert _K1R1_UNLABELLED_DECODE in resolution.detail, resolution.detail
+
+
+def test_a_valid_json_blob_labelled_as_an_expiry_refuses_with_the_labelled_decode_detail(
+    sessions: sessionmaker[Session],
+) -> None:
+    """The labelled branch of the non-text guard: a chain-valid BLOB of valid JSON stored under
+    the expiry kind refuses with the LABELLED decode detail — and not the unlabelled one, so a
+    guard that collapsed both branches into one phrase cannot pass."""
+
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    _k1r1_insert(sessions, b'{"bundle_id": "x", "expires_at": "y"}', kind=_FIX26_KIND)
+    assert _k1_chain_ok(sessions)
+    resolution = _fix26_resolve(sessions, cited_ids=(issued.bundle_id,), now=_NOW)
+    _k1_refused_closed(resolution)
+    assert "a durable expiry record does not decode" in resolution.detail, resolution.detail
+    assert _K1R1_UNLABELLED_DECODE not in resolution.detail, resolution.detail
