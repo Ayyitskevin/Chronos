@@ -138,6 +138,9 @@ RETENTION_AFTER_EXPIRY = timedelta(days=7)
 #: later resolution of the live row refuses EXPIRED regardless of what the wall
 #: clock does afterwards — refused authority is not revocable by clock motion.
 EXPIRED_EVENT_KIND = "evidence_bundle_expired"
+#: The exact key set of an expiry record payload (the writer in ``resolve``). Expiry
+#: records are recognised by this hashed shape, never by the unhashed ``kind`` (FIX-26-K1).
+_EXPIRY_PAYLOAD_KEYS = frozenset({"bundle_id", "expires_at"})
 
 
 class ResolutionRefusal(StrEnum):
@@ -369,21 +372,35 @@ def _durable_expiry_verdict(session: Session, *, stream: str, bundle_id: str) ->
 
     Returns ``None`` when no sticky verdict exists. Everything else about the
     read fails CLOSED, because the alternative in each case is treating corrupt
-    durable evidence as "not expired":
+    durable evidence as "not expired".
 
-    - a stream that fails ``hash_chain.verify`` (a targeted edit, a deletion, a
-      reordering) refuses rather than admitting on a ledger that can no longer
-      prove what it recorded;
-    - an expiry record that does not decode, is not a JSON object, or names no
-      string ``bundle_id`` refuses rather than being ignored;
-    - any record whose ``bundle_id`` matches exactly (duplicate records are the
-      same verdict, never an error) refuses with the sticky detail.
+    **An expiry record is recognised by its HASHED payload, never by ``kind``.**
+    ``hash_chain`` digests the payload text but not the ``kind`` column, so a
+    read that selected by ``kind`` let a one-field edit hide a durable verdict
+    while the chain still verified (FIX-26-K1). An expiry record is any row of
+    this account's own stream whose payload decodes to an object with EXACTLY
+    the keys ``bundle_id`` and ``expires_at``, both strings — the shape the
+    expiry writer in :func:`resolve` produces and the eight-key issuance record
+    can never take. ``expires_at`` is classification data only (the drain's
+    clock already judged it), and ``bundle_id`` matches by exact code points.
 
-    Only records of ``EXPIRED_EVENT_KIND`` on this account's own stream are
-    decoded, so one malformed unrelated record can neither match accidentally
-    nor crash the drain on an unbounded scan. Deleting the stream's TAIL record
-    stays undetectable — that is ``hash_chain``'s documented honest bound (no
-    external anchor), not a gap this read can close.
+    Refused closed, by the sealed doubt list:
+
+    - D0: a stream that fails ``hash_chain.verify`` (a targeted edit, a deletion,
+      a reordering);
+    - D1: ANY row whose payload does not decode or is not a JSON object;
+    - D2: a row labelled ``EXPIRED_EVENT_KIND`` that is not exactly the two-key,
+      two-string shape (an issuance relabelled as an expiry included);
+    - D3: an object with exactly the two keys whose values are not both
+      strings, whatever its ``kind`` — so relabelling cannot hide it;
+    - D4: the whole verified stream is read before answering, so a matching
+      record cannot hide a later doubt.
+
+    Duplicate matching records are the same verdict, never an error. Objects of
+    any other shape that are not labelled as expiries are ordinary evidence.
+    Deleting the stream's TAIL record stays undetectable — that is
+    ``hash_chain``'s documented honest bound (no external anchor), not a gap
+    this read can close.
     """
 
     verification = hash_chain.verify(session, stream)
@@ -392,28 +409,50 @@ def _durable_expiry_verdict(session: Session, *, stream: str, bundle_id: str) ->
             "the account's durable evidence stream failed verification "
             f"({verification.detail}); refusing closed until the stream is repaired"
         )
-    payloads = session.scalars(
-        select(HashChainRow.payload_json).where(
-            HashChainRow.stream == stream,
-            HashChainRow.kind == EXPIRED_EVENT_KIND,
-        )
+    rows = session.execute(
+        select(HashChainRow.kind, HashChainRow.payload_json)
+        .where(HashChainRow.stream == stream)
+        .order_by(HashChainRow.sequence.asc())
     )
-    for payload_json in payloads:
+    matched = False
+    for kind, payload_json in rows:
+        labelled = kind == EXPIRED_EVENT_KIND
+        if not isinstance(payload_json, str):
+            if labelled:
+                return "a durable expiry record does not decode; refusing closed"
+            return "a durable evidence record does not decode; refusing closed"
         try:
             decoded = json.loads(payload_json)
-        except json.JSONDecodeError:
-            return "a durable expiry record does not decode; refusing closed"
+        except (ValueError, RecursionError):
+            if labelled:
+                return "a durable expiry record does not decode; refusing closed"
+            return "a durable evidence record does not decode; refusing closed"
         if not isinstance(decoded, dict):
-            return "a durable expiry record is not a JSON object; refusing closed"
-        recorded = decoded.get("bundle_id")
-        if not isinstance(recorded, str):
-            return "a durable expiry record names no string bundle id; refusing closed"
-        if recorded == bundle_id:
+            if labelled:
+                return "a durable expiry record is not a JSON object; refusing closed"
+            return "a durable evidence record is not a JSON object; refusing closed"
+        if set(decoded) == _EXPIRY_PAYLOAD_KEYS:
+            recorded = decoded["bundle_id"]
+            if not isinstance(recorded, str):
+                return "a durable expiry record names no string bundle id; refusing closed"
+            if not isinstance(decoded["expires_at"], str):
+                return "a durable expiry record carries a non-string expires_at; refusing closed"
+            if recorded == bundle_id:
+                matched = True
+            continue
+        if labelled:
+            if not isinstance(decoded.get("bundle_id"), str):
+                return "a durable expiry record names no string bundle id; refusing closed"
             return (
-                "the cited evidence bundle was already refused EXPIRED at an earlier "
-                "drain and that verdict is durable; wall-clock motion does not revive "
-                "refused authority"
+                "a durable record labelled as an expiry is not the exact expiry shape "
+                "(bundle_id and expires_at only); refusing closed"
             )
+    if matched:
+        return (
+            "the cited evidence bundle was already refused EXPIRED at an earlier "
+            "drain and that verdict is durable; wall-clock motion does not revive "
+            "refused authority"
+        )
     return None
 
 
