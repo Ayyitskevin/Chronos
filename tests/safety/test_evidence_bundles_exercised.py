@@ -2293,3 +2293,423 @@ def _fix26_sticky_at(
     assert refused.refusal is evidence_bundles.ResolutionRefusal.EXPIRED
     assert _FIX26_DETAIL_PHRASES["first-refusal"] in refused.detail
     assert _FIX26_DETAIL_PHRASES["sticky"] not in refused.detail
+
+
+# ---------------------------------------------- FIX-26-K1: classification by hashed shape
+#
+# ``hash_chain.compute_hash`` digests stream, sequence, recorded_at, payload_json and
+# previous_hash — NOT ``kind``. A sticky read that SELECTS by ``kind`` therefore lets a
+# one-field edit hide a durable EXPIRED verdict while ``hash_chain.verify`` stays ok
+# (Daybreak's P1 on #275). These pins hold the sealed classification
+# (FIX-26-K1-preflight-daybreak.md): an expiry record is a row of the requested account's
+# exact stream whose JSON object has EXACTLY the keys {bundle_id, expires_at}, both
+# strings, whatever ``kind`` says; every doubt refuses closed (D0-D4).
+
+_K1_ISSUE_KEYS = {
+    "bundle_id",
+    "proposer_id",
+    "proposer_credential_epoch",
+    "proposer_registry_entry_digest",
+    "bundle_kind",
+    "digest",
+    "bundle_version",
+    "expires_at",
+}
+_K1_EXPIRY_KEYS = {"bundle_id", "expires_at"}
+_K1_SHAPE_PHRASE = "is not the exact expiry shape"
+_K1_EXPIRES_PHRASE = "carries a non-string expires_at"
+
+
+def _k1_stream(fingerprint: str = _FINGERPRINT) -> str:
+    return evidence_bundles.hash_chain_stream(fingerprint)
+
+
+def _k1_chain_ok(sessions: sessionmaker[Session], fingerprint: str = _FINGERPRINT) -> bool:
+    with sessions.begin() as session:
+        return hash_chain.verify(session, _k1_stream(fingerprint)).ok
+
+
+def _k1_append(
+    sessions: sessionmaker[Session],
+    payload: object,
+    *,
+    kind: str,
+    fingerprint: str = _FINGERPRINT,
+) -> None:
+    """A chain-correct record with any payload and any ``kind`` (``append`` hashes the JSON)."""
+
+    with sessions.begin() as session:
+        hash_chain.append(
+            session,
+            stream=_k1_stream(fingerprint),
+            kind=kind,
+            payload=payload,  # type: ignore[arg-type]
+            recorded_at=_NOW,
+        )
+
+
+def _k1_raw(sessions: sessionmaker[Session], payload_json: str, *, kind: str) -> None:
+    """A chain-correct record whose payload TEXT is exactly ``payload_json`` (maybe not JSON)."""
+
+    stream = _k1_stream()
+    with sessions.begin() as session:
+        previous = hash_chain.head(session, stream)
+        assert previous is not None
+        sequence = previous.sequence + 1
+        session.add(
+            HashChainRow(
+                stream=stream,
+                sequence=sequence,
+                kind=kind,
+                payload_json=payload_json,
+                recorded_at=_NOW,
+                previous_hash=previous.record_hash,
+                record_hash=hash_chain.compute_hash(
+                    stream=stream,
+                    sequence=sequence,
+                    recorded_at=_NOW,
+                    payload_json=payload_json,
+                    previous_hash=previous.record_hash,
+                ),
+            )
+        )
+
+
+def _k1_relabel(sessions: sessionmaker[Session], *, from_kind: str, to_kind: str) -> int:
+    """The one-field edit: rewrite ``kind`` of this account's rows labelled ``from_kind``."""
+
+    from sqlalchemy import text
+
+    with sessions.begin() as session:
+        result = session.execute(
+            text("UPDATE hash_chain_records SET kind = :to WHERE stream = :s AND kind = :frm"),
+            {"to": to_kind, "s": _k1_stream(), "frm": from_kind},
+        )
+        return int(result.rowcount)  # type: ignore[attr-defined]
+
+
+def _k1_expired(sessions: sessionmaker[Session]) -> evidence_bundles.IssuedBundle:
+    """A bundle refused EXPIRED once, so its genuine #275 two-key marker is on the stream."""
+
+    issued = _fix26_issue(sessions)
+    _fix26_sticky_at(sessions, issued)
+    assert len(_fix26_markers(sessions)) == 1
+    return issued
+
+
+def _k1_refused_closed(resolution: evidence_bundles.Resolution) -> None:
+    assert resolution.refusal is evidence_bundles.ResolutionRefusal.EXPIRED, (
+        f"doubtful durable evidence did not refuse closed: {resolution.refusal} {resolution.detail}"
+    )
+    assert resolution.bundle is None
+
+
+@pytest.mark.parametrize("new_kind", ["evidence_bundle_issued", "anything-else", ""])
+def test_a_kind_edit_on_an_expiry_record_does_not_revive_the_bundle(
+    sessions: sessionmaker[Session], new_kind: str
+) -> None:
+    """Daybreak's pin. The edit is invisible to ``hash_chain.verify`` (asserted), so only a
+    read that classifies by the HASHED payload can keep the verdict; a rewound clock must
+    still refuse EXPIRED with the sticky detail."""
+
+    issued = _k1_expired(sessions)
+    assert _k1_relabel(sessions, from_kind=_FIX26_KIND, to_kind=new_kind) == 1
+    assert _fix26_markers(sessions) == [], "the edit did not take"
+    assert _k1_chain_ok(sessions), "the kind edit broke the chain; this pin must prove it does not"
+    rewound = _fix26_resolve(sessions, cited_ids=(issued.bundle_id,), now=_NOW)
+    _k1_refused_closed(rewound)
+    assert _FIX26_DETAIL_PHRASES["sticky"] in rewound.detail, rewound.detail
+
+
+def test_a_kind_edit_does_not_revive_the_bundle_across_a_restart_and_rewind(
+    tmp_path: Path,
+) -> None:
+    """The same edit made before a restart: a fresh engine on the same file, rewound clock."""
+
+    db_path = tmp_path / "k1-restart.db"
+    first = Database(f"sqlite+pysqlite:///{db_path}")
+    first.initialize()
+    try:
+        issued = _k1_expired(first.sessions)
+        assert (
+            _k1_relabel(first.sessions, from_kind=_FIX26_KIND, to_kind="evidence_bundle_issued")
+            == 1
+        )
+    finally:
+        first.dispose()
+    second = Database(f"sqlite+pysqlite:///{db_path}")
+    second.initialize()
+    try:
+        assert _k1_chain_ok(second.sessions)
+        rewound = _fix26_resolve(second.sessions, cited_ids=(issued.bundle_id,), now=_NOW)
+        _k1_refused_closed(rewound)
+        assert _FIX26_DETAIL_PHRASES["sticky"] in rewound.detail, rewound.detail
+    finally:
+        second.dispose()
+
+
+def test_an_issuance_relabelled_as_an_expiry_refuses_closed(
+    sessions: sessionmaker[Session],
+) -> None:
+    """D2: an eight-key issuance whose kind is flipped TO the expiry kind is a labelled
+    expiry that is not the exact shape — refuse closed, never ignore it."""
+
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    assert _k1_relabel(sessions, from_kind="evidence_bundle_issued", to_kind=_FIX26_KIND) == 1
+    assert _k1_chain_ok(sessions)
+    resolution = _fix26_resolve(sessions, cited_ids=(issued.bundle_id,), now=_NOW)
+    _k1_refused_closed(resolution)
+    assert _K1_SHAPE_PHRASE in resolution.detail, resolution.detail
+
+
+def test_the_issuance_and_expiry_payload_shapes_are_disjoint(
+    sessions: sessionmaker[Session],
+) -> None:
+    """C2: derived from the two writers, not asserted from memory. The issuance payload has
+    exactly the eight keys and the expiry payload exactly the two, so an issued record can
+    never read as an expiry; and a stream of known pre-#275 issued rows plus a #275 marker
+    keeps its meaning (the live bundle admitted, the expired one sticky after a rewind)."""
+
+    live = _fix26_issue(sessions, ttl_seconds=3600.0)
+    expired = _k1_expired(sessions)
+    stream = _k1_stream()
+    with sessions.begin() as session:
+        rows = list(
+            session.execute(
+                select(HashChainRow.kind, HashChainRow.payload_json)
+                .where(HashChainRow.stream == stream)
+                .order_by(HashChainRow.sequence)
+            )
+        )
+    shapes = {kind: set(json.loads(payload)) for kind, payload in rows}
+    assert shapes["evidence_bundle_issued"] == _K1_ISSUE_KEYS, shapes
+    assert shapes[_FIX26_KIND] == _K1_EXPIRY_KEYS, shapes
+    assert _K1_ISSUE_KEYS != _K1_EXPIRY_KEYS
+    admitted = _fix26_resolve(sessions, cited_ids=(live.bundle_id,), now=_NOW)
+    assert admitted.refusal is None and admitted.bundle is not None, admitted.detail
+    rewound = _fix26_resolve(sessions, cited_ids=(expired.bundle_id,), now=_NOW)
+    _k1_refused_closed(rewound)
+    assert _FIX26_DETAIL_PHRASES["sticky"] in rewound.detail
+
+
+@pytest.mark.parametrize("kind", [_FIX26_KIND, "evidence_bundle_issued", "x"])
+def test_an_exact_shaped_marker_in_another_account_does_not_participate(
+    sessions: sessionmaker[Session], kind: str
+) -> None:
+    """Only the requested account's exact stream is read, whatever the label: another
+    account's exact marker naming THIS bundle, and its typed-invalid exact-key object,
+    neither refuse nor alter this account's live bundle."""
+
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    other = "c" * 64
+    _k1_append(
+        sessions,
+        {"bundle_id": issued.bundle_id, "expires_at": issued.expires_at.isoformat()},
+        kind=kind,
+        fingerprint=other,
+    )
+    _k1_append(sessions, {"bundle_id": 7, "expires_at": None}, kind=kind, fingerprint=other)
+    resolution = _fix26_resolve(sessions, cited_ids=(issued.bundle_id,), now=_NOW)
+    assert resolution.refusal is None and resolution.bundle is not None, resolution.detail
+
+
+@pytest.mark.parametrize("dup_kind", [_FIX26_KIND, "evidence_bundle_issued"])
+@pytest.mark.parametrize("dup_first", [True, False], ids=["dup-before", "dup-after"])
+def test_duplicate_exact_markers_in_either_order_are_one_verdict(
+    sessions: sessionmaker[Session], dup_kind: str, *, dup_first: bool
+) -> None:
+    """Duplicates before or after the genuine marker, labelled or not, are the same sticky
+    verdict; on a valid chain their chronological order is irrelevant."""
+
+    issued = _fix26_issue(sessions)
+    duplicate = {"bundle_id": issued.bundle_id, "expires_at": issued.expires_at.isoformat()}
+    if dup_first:
+        _k1_append(sessions, duplicate, kind=dup_kind)
+    first = _fix26_resolve(
+        sessions, cited_ids=(issued.bundle_id,), now=issued.expires_at + timedelta(seconds=1)
+    )
+    _k1_refused_closed(first)
+    if not dup_first:
+        _k1_append(sessions, duplicate, kind=dup_kind)
+    assert _k1_chain_ok(sessions)
+    rewound = _fix26_resolve(sessions, cited_ids=(issued.bundle_id,), now=_NOW)
+    _k1_refused_closed(rewound)
+    assert _FIX26_DETAIL_PHRASES["sticky"] in rewound.detail, rewound.detail
+
+
+@pytest.mark.parametrize("edit", ["delete-middle", "swap-sequences"])
+def test_a_deleted_or_reordered_evidence_row_refuses_closed(
+    sessions: sessionmaker[Session], edit: str
+) -> None:
+    """D0: sequence deletion or reordering breaks verification, which refuses closed."""
+
+    from sqlalchemy import text
+
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    _fix26_issue(sessions, ttl_seconds=300.0)
+    _fix26_issue(sessions, ttl_seconds=300.0)
+    stream = _k1_stream()
+    with sessions.begin() as session:
+        if edit == "delete-middle":
+            session.execute(
+                text("DELETE FROM hash_chain_records WHERE stream = :s AND sequence = 2"),
+                {"s": stream},
+            )
+        else:
+            for frm, to in ((1, 99), (2, 1), (99, 2)):
+                session.execute(
+                    text(
+                        "UPDATE hash_chain_records SET sequence = :to "
+                        "WHERE stream = :s AND sequence = :frm"
+                    ),
+                    {"to": to, "s": stream, "frm": frm},
+                )
+    assert not _k1_chain_ok(sessions)
+    resolution = _fix26_resolve(sessions, cited_ids=(issued.bundle_id,), now=_NOW)
+    _k1_refused_closed(resolution)
+    assert _FIX26_DETAIL_PHRASES["corrupt-stream"] in resolution.detail, resolution.detail
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "extra-key",
+        "missing-expires-at",
+        "missing-bundle-id",
+        "renamed-bundle-id",
+        "renamed-expires-at",
+    ],
+)
+def test_a_labelled_expiry_with_extra_missing_or_renamed_keys_refuses_closed(
+    sessions: sessionmaker[Session], shape: str
+) -> None:
+    """D2: a row labelled with the expiry kind must be EXACTLY the two-key shape."""
+
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    at = issued.expires_at.isoformat()
+    payload = {
+        "extra-key": {"bundle_id": issued.bundle_id, "expires_at": at, "note": "x"},
+        "missing-expires-at": {"bundle_id": issued.bundle_id},
+        "missing-bundle-id": {"expires_at": at},
+        "renamed-bundle-id": {"bundleId": issued.bundle_id, "expires_at": at},
+        "renamed-expires-at": {"bundle_id": issued.bundle_id, "expiresAt": at},
+    }[shape]
+    _k1_append(sessions, payload, kind=_FIX26_KIND)
+    resolution = _fix26_resolve(sessions, cited_ids=(issued.bundle_id,), now=_NOW)
+    _k1_refused_closed(resolution)
+    assert _FIX26_DETAIL_PHRASES["sticky"] not in resolution.detail, resolution.detail
+
+
+@pytest.mark.parametrize("kind", [_FIX26_KIND, "evidence_bundle_issued", "x"])
+@pytest.mark.parametrize(
+    "values",
+    ["int-id", "null-id", "int-expires-at", "null-expires-at", "list-expires-at"],
+)
+def test_exact_expiry_keys_with_a_non_string_value_refuse_closed_whatever_the_kind(
+    sessions: sessionmaker[Session], kind: str, values: str
+) -> None:
+    """D3: exactly the two keys but a non-string value refuses closed regardless of kind, so
+    flipping the label away cannot hide typed-invalid expiry-shaped evidence."""
+
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    at = issued.expires_at.isoformat()
+    payload: dict[str, object] = {
+        "int-id": {"bundle_id": 12345, "expires_at": at},
+        "null-id": {"bundle_id": None, "expires_at": at},
+        "int-expires-at": {"bundle_id": issued.bundle_id, "expires_at": 1},
+        "null-expires-at": {"bundle_id": issued.bundle_id, "expires_at": None},
+        "list-expires-at": {"bundle_id": issued.bundle_id, "expires_at": [at]},
+    }[values]
+    _k1_append(sessions, payload, kind=kind)
+    resolution = _fix26_resolve(sessions, cited_ids=(issued.bundle_id,), now=_NOW)
+    _k1_refused_closed(resolution)
+    expected = (
+        _FIX26_DETAIL_PHRASES["non-string-id"] if values.endswith("-id") else _K1_EXPIRES_PHRASE
+    )
+    assert expected in resolution.detail, resolution.detail
+
+
+@pytest.mark.parametrize(
+    ("recorded", "matches"),
+    [
+        ("bündle-ﬁ", True),  # the exact code points
+        ("bündle-fi", False),  # NFKC of the ligature
+        ("bündle-ﬁ", False),  # NFD of the umlaut
+        ("BÜNDLE-ﬁ", False),  # case-folded neighbour
+    ],
+    ids=["exact", "nfkc-neighbour", "nfd-neighbour", "case-neighbour"],
+)
+@pytest.mark.parametrize("kind", [_FIX26_KIND, "evidence_bundle_issued"])
+def test_a_non_ascii_bundle_id_is_compared_by_exact_code_points(
+    sessions: sessionmaker[Session], kind: str, recorded: str, *, matches: bool
+) -> None:
+    """Exact code-point equality, no normalization, no ASCII-only rule. Issuance only mints
+    ASCII ids, so this pins the sticky read at its own seam (``_durable_expiry_verdict``)."""
+
+    _fix26_issue(sessions)  # a genuine issuance row so the stream is not empty
+    _k1_append(
+        sessions, {"bundle_id": recorded, "expires_at": "2026-08-14T14:01:00+00:00"}, kind=kind
+    )
+    with sessions.begin() as session:
+        verdict = evidence_bundles._durable_expiry_verdict(
+            session, stream=_k1_stream(), bundle_id="bündle-ﬁ"
+        )
+    if matches:
+        assert verdict is not None and _FIX26_DETAIL_PHRASES["sticky"] in verdict, verdict
+    else:
+        assert verdict is None, f"{recorded!r} matched 'bündle-ﬁ': {verdict}"
+
+
+@pytest.mark.parametrize(
+    ("payload_json", "phrase"),
+    [
+        ("{not json", "undecodable"),
+        ('["not", "an", "object"]', "non-object"),
+        ('"a bare string"', "non-object"),
+        ("null", "non-object"),
+        ("3", "non-object"),
+    ],
+    ids=["invalid-json", "list", "string", "null", "number"],
+)
+def test_an_unlabelled_row_that_is_not_a_json_object_refuses_closed(
+    sessions: sessionmaker[Session], payload_json: str, phrase: str
+) -> None:
+    """D1: a decode failure or a decoded non-object on ANY row refuses closed — a relabelled
+    malformed marker can no longer hide behind an ordinary kind."""
+
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    _k1_raw(sessions, payload_json, kind="evidence_bundle_issued")
+    assert _k1_chain_ok(sessions)
+    resolution = _fix26_resolve(sessions, cited_ids=(issued.bundle_id,), now=_NOW)
+    _k1_refused_closed(resolution)
+    assert _FIX26_DETAIL_PHRASES[phrase] in resolution.detail, resolution.detail
+
+
+def test_a_matching_marker_does_not_hide_a_later_doubt(sessions: sessionmaker[Session]) -> None:
+    """D4: the whole verified stream is scanned before answering — a matching marker
+    followed by a later undecodable row refuses with the DOUBT, not the sticky detail."""
+
+    issued = _k1_expired(sessions)
+    _k1_raw(sessions, "{not json", kind="evidence_bundle_issued")
+    rewound = _fix26_resolve(sessions, cited_ids=(issued.bundle_id,), now=_NOW)
+    _k1_refused_closed(rewound)
+    assert _FIX26_DETAIL_PHRASES["undecodable"] in rewound.detail, rewound.detail
+    assert _FIX26_DETAIL_PHRASES["sticky"] not in rewound.detail, rewound.detail
+
+
+def test_a_pruned_bundle_with_a_kind_edited_marker_still_resolves_unissued(
+    sessions: sessionmaker[Session],
+) -> None:
+    """Prune keeps its meaning: after the row goes, a (relabelled) surviving marker is not
+    lookup authority — today's UNISSUED result is preserved."""
+
+    issued = _k1_expired(sessions)
+    assert _k1_relabel(sessions, from_kind=_FIX26_KIND, to_kind="evidence_bundle_issued") == 1
+    pruned_at = issued.expires_at + evidence_bundles.RETENTION_AFTER_EXPIRY + timedelta(days=1)
+    with sessions.begin() as session:
+        assert (
+            evidence_bundles.prune_expired(session, account_fingerprint=_FINGERPRINT, now=pruned_at)
+            == 1
+        )
+    resolution = _fix26_resolve(sessions, cited_ids=(issued.bundle_id,), now=pruned_at)
+    assert resolution.refusal is evidence_bundles.ResolutionRefusal.UNISSUED, resolution.refusal
