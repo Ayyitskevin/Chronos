@@ -2713,3 +2713,76 @@ def test_a_pruned_bundle_with_a_kind_edited_marker_still_resolves_unissued(
         )
     resolution = _fix26_resolve(sessions, cited_ids=(issued.bundle_id,), now=pruned_at)
     assert resolution.refusal is evidence_bundles.ResolutionRefusal.UNISSUED, resolution.refusal
+
+
+# ------------------------------------- FIX-26-K1r1: decode failures outside JSONDecodeError
+#
+# ``hash_chain.verify`` recomputes the digest over whatever SQLite returns, so a chain can be
+# valid while ``payload_json`` is not text at all (a BLOB) or is text ``json.loads`` rejects
+# with a plain ``ValueError`` (Python's integer-string conversion limit). Both are D1: they must
+# refuse closed through the typed reader, never escape as an exception that fails the tick
+# (Daybreak's P2 on FIX-26-K1).
+
+_K1R1_UNLABELLED_DECODE = "a durable evidence record does not decode"
+
+
+def _k1r1_insert(sessions: sessionmaker[Session], payload_json: object) -> None:
+    """A chain-correct ORDINARY row storing exactly ``payload_json`` (any type)."""
+
+    stream = _k1_stream()
+    with sessions.begin() as session:
+        previous = hash_chain.head(session, stream)
+        assert previous is not None
+        sequence = previous.sequence + 1
+        session.add(
+            HashChainRow(
+                stream=stream,
+                sequence=sequence,
+                kind="evidence_bundle_issued",
+                payload_json=payload_json,  # type: ignore[arg-type]
+                recorded_at=_NOW,
+                previous_hash=previous.record_hash,
+                record_hash=hash_chain.compute_hash(
+                    stream=stream,
+                    sequence=sequence,
+                    recorded_at=_NOW,
+                    payload_json=payload_json,  # type: ignore[arg-type]
+                    previous_hash=previous.record_hash,
+                ),
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    "payload_json",
+    [b"\xff", b'{"note": "ordinary"}', "9" * 5000],
+    ids=["blob", "json-object-blob", "5000-digit-integer"],
+)
+def test_chain_valid_payloads_that_raise_outside_jsondecodeerror_refuse_closed(
+    sessions: sessionmaker[Session], payload_json: object
+) -> None:
+    """D1 for every decode failure: an invalid-UTF-8 BLOB and a 5,000-digit integer, each a
+    chain-valid ordinary row, refuse EXPIRED with the unlabelled decode detail. The BLOB holding
+    VALID JSON bytes is the case only the non-text guard refuses: ``json.loads`` accepts bytes,
+    so without the guard it would decode as an ordinary object and admit the bundle."""
+
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    _k1r1_insert(sessions, payload_json)
+    assert _k1_chain_ok(sessions), "the fixture must be chain-valid for this pin to mean anything"
+    resolution = _fix26_resolve(sessions, cited_ids=(issued.bundle_id,), now=_NOW)
+    _k1_refused_closed(resolution)
+    assert _K1R1_UNLABELLED_DECODE in resolution.detail, resolution.detail
+
+
+def test_a_2000_level_nested_array_is_refused_as_a_non_object(
+    sessions: sessionmaker[Session],
+) -> None:
+    """Negative control for the pin above: deep nesting DECODES (no RecursionError at this
+    depth), so it is refused by the non-object rule, not by the decode rule."""
+
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    _k1r1_insert(sessions, "[" * 2000 + "]" * 2000)
+    assert _k1_chain_ok(sessions)
+    resolution = _fix26_resolve(sessions, cited_ids=(issued.bundle_id,), now=_NOW)
+    _k1_refused_closed(resolution)
+    assert _FIX26_DETAIL_PHRASES["non-object"] in resolution.detail, resolution.detail

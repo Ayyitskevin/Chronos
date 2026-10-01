@@ -417,9 +417,13 @@ def _durable_expiry_verdict(session: Session, *, stream: str, bundle_id: str) ->
     matched = False
     for kind, payload_json in rows:
         labelled = kind == EXPIRED_EVENT_KIND
+        if not isinstance(payload_json, str):
+            if labelled:
+                return "a durable expiry record does not decode; refusing closed"
+            return "a durable evidence record does not decode; refusing closed"
         try:
             decoded = json.loads(payload_json)
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):
             if labelled:
                 return "a durable expiry record does not decode; refusing closed"
             return "a durable evidence record does not decode; refusing closed"
