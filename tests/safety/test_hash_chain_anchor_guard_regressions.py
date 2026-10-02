@@ -208,33 +208,41 @@ def test_a_one_second_contender_acquires_from_a_holder_that_releases_at_point_si
             guard.release()
 
     worker = threading.Thread(target=holder, daemon=True)
+    release_worker: threading.Thread | None = None
     worker.start()
-    assert held.wait(JOIN_S)
-    started = time.monotonic()
-    control = AnchorGuard(lock_path, wait_s=0.2)
     try:
-        with pytest.raises(AnchorGuardTimeout, match="another thread"):
-            _bounded(control.acquire)
-    finally:
-        control.release()
-    assert time.monotonic() - started < 0.6, "the control contender waited past its bound"
+        assert held.wait(JOIN_S)
+        started = time.monotonic()
+        control = AnchorGuard(lock_path, wait_s=0.2)
+        try:
+            with pytest.raises(AnchorGuardTimeout, match="another thread"):
+                _bounded(control.acquire)
+        finally:
+            control.release()
+        assert time.monotonic() - started < 0.6, "the control contender waited past its bound"
 
-    def release_later() -> None:
-        time.sleep(0.6)
+        def release_later() -> None:
+            time.sleep(0.6)
+            release_at.set()
+
+        release_worker = threading.Thread(target=release_later, daemon=True)
+        release_worker.start()
+        started = time.monotonic()
+        contender = _bounded(lambda: AnchorGuard(lock_path, wait_s=1.0).acquire())
+        try:
+            elapsed = time.monotonic() - started
+            assert isinstance(contender, AnchorGuard) and contender.state == "HELD"
+            assert 0.3 <= elapsed < 1.0, f"acquired after {elapsed:.3f}s; expected about 0.6s"
+        finally:
+            assert isinstance(contender, AnchorGuard)
+            contender.release()
+    finally:
         release_at.set()
-
-    threading.Thread(target=release_later, daemon=True).start()
-    started = time.monotonic()
-    contender = _bounded(lambda: AnchorGuard(lock_path, wait_s=1.0).acquire())
-    try:
-        elapsed = time.monotonic() - started
-        assert isinstance(contender, AnchorGuard) and contender.state == "HELD"
-        assert 0.3 <= elapsed < 1.0, f"acquired after {elapsed:.3f}s; expected about 0.6s"
-    finally:
-        assert isinstance(contender, AnchorGuard)
-        contender.release()
-    worker.join(JOIN_S)
-    assert not worker.is_alive()
+        worker.join(JOIN_S)
+        if release_worker is not None:
+            release_worker.join(JOIN_S)
+        assert not worker.is_alive()
+        assert release_worker is None or not release_worker.is_alive()
 
     # --- the flock leg: the holder is a child process that releases after 0.6 s.
     proc = _spawn(CHILD_TIMED_HOLDER, str(lock_path), "1.0", "0.6")
