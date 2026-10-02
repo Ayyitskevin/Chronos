@@ -26,8 +26,8 @@ from pathlib import Path
 
 import pytest
 
-from chronos.persistence import database
-from chronos.persistence.database import (
+from chronos.persistence import anchor_guard as database
+from chronos.persistence.anchor_guard import (
     AnchorGuard,
     AnchorGuardCleanupFailed,
     AnchorGuardReentrant,
@@ -187,7 +187,7 @@ def _finish(proc: subprocess.Popen[str]) -> tuple[int, str]:
 CHILD_HOLDER = """
 import sys
 from pathlib import Path
-from chronos.persistence.database import AnchorGuard
+from chronos.persistence.anchor_guard import AnchorGuard
 guard = AnchorGuard(Path(sys.argv[1]), wait_s=float(sys.argv[2]))
 guard.acquire()
 print("HELD", flush=True)
@@ -199,7 +199,7 @@ print("RELEASED", flush=True)
 CHILD_CONTENDER = """
 import sys
 from pathlib import Path
-from chronos.persistence.database import AnchorGuard, AnchorGuardTimeout
+from chronos.persistence.anchor_guard import AnchorGuard, AnchorGuardTimeout
 guard = AnchorGuard(Path(sys.argv[1]), wait_s=float(sys.argv[2]))
 try:
     guard.acquire()
@@ -213,7 +213,7 @@ else:
 CHILD_JOURNAL_LOOP = """
 import os, sys, time
 from pathlib import Path
-from chronos.persistence.database import AnchorGuard
+from chronos.persistence.anchor_guard import AnchorGuard
 lock, journal, rounds = Path(sys.argv[1]), sys.argv[2], int(sys.argv[3])
 fd = os.open(journal, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
 for _ in range(rounds):
@@ -963,8 +963,8 @@ def test_a_stranded_held_key_refuses_the_same_thread_immediately(
 CHILD_STRAND_HELD_FLOCK = """
 import sys
 from pathlib import Path
-from chronos.persistence import database
-from chronos.persistence.database import AnchorGuard
+from chronos.persistence import anchor_guard as database
+from chronos.persistence.anchor_guard import AnchorGuard
 def hook(step, phase):
     if phase == "pre" and step in ("unlock", "close_lock_fd"):
         raise KeyboardInterrupt(step)
@@ -1083,8 +1083,8 @@ def test_async_interrupt_in_the_return_to_record_window_is_contained_to_availabi
 CHILD_FORK = """
 import os, sys
 from pathlib import Path
-from chronos.persistence import database
-from chronos.persistence.database import AnchorGuard, AnchorGuardTimeout
+from chronos.persistence import anchor_guard as database
+from chronos.persistence.anchor_guard import AnchorGuard, AnchorGuardTimeout
 guard = AnchorGuard(Path(sys.argv[1]), wait_s=1.0).acquire()
 lock_fd, dir_fd = guard._lock_fd, guard._dir_fd
 pid = os.fork()
@@ -1235,9 +1235,9 @@ def test_the_guard_is_unwired_and_does_no_anchor_io() -> None:
     users = sorted(
         str(path.relative_to(package))
         for path in package.rglob("*.py")
-        if "AnchorGuard" in path.read_text() and path.name != "database.py"
+        if "AnchorGuard" in path.read_text() and path.name != "anchor_guard.py"
     )
-    assert users == [], f"the guard is referenced outside persistence/database.py: {users}"
+    assert users == [], f"the guard is referenced outside persistence/anchor_guard.py: {users}"
     assert not (package / "persistence" / "hash_chain_anchor.py").exists()
     block = _guard_block()
     for marker in ("head.json", "hash_chain", "anchors", "authoriz", "database_url", "_sqlite"):

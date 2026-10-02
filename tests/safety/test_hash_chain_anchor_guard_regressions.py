@@ -25,8 +25,8 @@ from pathlib import Path
 
 import pytest
 
-from chronos.persistence import database
-from chronos.persistence.database import AnchorGuard, AnchorGuardRefused, AnchorGuardTimeout
+from chronos.persistence import anchor_guard as database
+from chronos.persistence.anchor_guard import AnchorGuard, AnchorGuardRefused, AnchorGuardTimeout
 
 SRC_ROOT = Path(database.__file__).resolve().parents[2]
 JOIN_S = 5.0
@@ -156,7 +156,7 @@ def restore_umask() -> Iterator[None]:
 CHILD_TIMED_HOLDER = """
 import sys, time
 from pathlib import Path
-from chronos.persistence.database import AnchorGuard
+from chronos.persistence.anchor_guard import AnchorGuard
 guard = AnchorGuard(Path(sys.argv[1]), wait_s=float(sys.argv[2]))
 guard.acquire()
 print("HELD", flush=True)
@@ -168,7 +168,7 @@ print("RELEASED", flush=True)
 CHILD_CONTENDER = """
 import os, sys
 from pathlib import Path
-from chronos.persistence.database import AnchorGuard, AnchorGuardTimeout
+from chronos.persistence.anchor_guard import AnchorGuard, AnchorGuardTimeout
 path = Path(sys.argv[1])
 guard = AnchorGuard(path, wait_s=float(sys.argv[2]))
 try:
