@@ -16,7 +16,6 @@ import errno
 import fcntl
 import inspect
 import os
-import select
 import signal
 import subprocess
 import sys
@@ -164,12 +163,18 @@ def _spawn(code: str, *args: str) -> subprocess.Popen[str]:
 
 def _read_line(proc: subprocess.Popen[str], timeout: float = CHILD_S) -> str:
     assert proc.stdout is not None
-    ready, _, _ = select.select([proc.stdout], [], [], timeout)
-    assert ready, "child did not report within the bound"
-    return proc.stdout.readline().strip()
+    stream = proc.stdout
+    line: list[str] = []
+    reader = threading.Thread(target=lambda: line.append(stream.readline()), daemon=True)
+    reader.start()
+    reader.join(timeout)
+    assert not reader.is_alive() and line, "child did not report within the bound"
+    return line[0].strip()
 
 
 def _finish(proc: subprocess.Popen[str]) -> tuple[int, str]:
+    if proc.stdin is not None and proc.stdin.closed:
+        proc.stdin = None
     try:
         _, err = proc.communicate(timeout=CHILD_S)
     except subprocess.TimeoutExpired:
