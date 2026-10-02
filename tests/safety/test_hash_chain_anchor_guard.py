@@ -1220,6 +1220,16 @@ def test_a_non_finite_or_negative_wait_is_refused_never_clamped(wait_s: float) -
         AnchorGuard("x.lock", wait_s=wait_s)
 
 
+@pytest.mark.parametrize(
+    "wait_s",
+    [threading.TIMEOUT_MAX * 2, 10**10000],
+    ids=["above_timeout_max", "int_10_pow_10000"],
+)
+def test_an_oversized_wait_is_a_typed_refusal_never_a_runtime_overflow(wait_s: int | float) -> None:
+    with pytest.raises(AnchorGuardRefused, match="wait_s"):
+        AnchorGuard("/tmp/unused.lock", wait_s=wait_s)
+
+
 def test_the_guard_is_unwired_and_does_no_anchor_io() -> None:
     package = SRC_ROOT / "chronos"
     users = sorted(

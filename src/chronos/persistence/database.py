@@ -588,15 +588,29 @@ class AnchorGuard:
     """
 
     def __init__(self, lock_path: str | os.PathLike[str], *, wait_s: float) -> None:
+        if isinstance(wait_s, bool) or not isinstance(wait_s, (int, float)):
+            raise AnchorGuardRefused(
+                "wait_s must be a finite, non-negative number of seconds within the "
+                "platform lock-timeout bound; "
+                "the guard has no default deadline and never clamps one"
+            )
+        try:
+            normalized_wait_s = float(wait_s)
+        except (OverflowError, ValueError):
+            raise AnchorGuardRefused(
+                "wait_s must be a finite, non-negative number of seconds within the "
+                "platform lock-timeout bound; the guard has no default deadline and "
+                "never clamps one"
+            ) from None
         if (
-            isinstance(wait_s, bool)
-            or not isinstance(wait_s, (int, float))
-            or not math.isfinite(wait_s)
-            or wait_s < 0
+            not math.isfinite(normalized_wait_s)
+            or normalized_wait_s < 0
+            or normalized_wait_s > threading.TIMEOUT_MAX
         ):
             raise AnchorGuardRefused(
-                f"wait_s must be a finite, non-negative number of seconds, got {wait_s!r}; "
-                "the guard has no default deadline and never clamps one"
+                "wait_s must be a finite, non-negative number of seconds within the "
+                "platform lock-timeout bound; the guard has no default deadline and "
+                "never clamps one"
             )
         raw = os.fspath(lock_path)
         directory, name = os.path.split(raw)
@@ -610,7 +624,7 @@ class AnchorGuard:
         self._lock_path = raw
         self._dir_path = directory or "."
         self._lock_name = name
-        self._wait_s = float(wait_s)
+        self._wait_s = normalized_wait_s
         self.state = "NEW"
         self.cleanup_record: AnchorCleanupRecord | None = None
         self._key: tuple[int, int, str] | None = None
