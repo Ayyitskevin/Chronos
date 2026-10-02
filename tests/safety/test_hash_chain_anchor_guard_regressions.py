@@ -201,16 +201,22 @@ def test_a_one_second_contender_acquires_from_a_holder_that_releases_at_point_si
 
     def holder() -> None:
         guard = AnchorGuard(lock_path, wait_s=1.0).acquire()
-        held.set()
-        release_at.wait(JOIN_S)
-        guard.release()
+        try:
+            held.set()
+            release_at.wait(JOIN_S)
+        finally:
+            guard.release()
 
     worker = threading.Thread(target=holder, daemon=True)
     worker.start()
     assert held.wait(JOIN_S)
     started = time.monotonic()
-    with pytest.raises(AnchorGuardTimeout, match="another thread"):
-        _bounded(lambda: AnchorGuard(lock_path, wait_s=0.2).acquire())
+    control = AnchorGuard(lock_path, wait_s=0.2)
+    try:
+        with pytest.raises(AnchorGuardTimeout, match="another thread"):
+            _bounded(control.acquire)
+    finally:
+        control.release()
     assert time.monotonic() - started < 0.6, "the control contender waited past its bound"
 
     def release_later() -> None:
@@ -220,10 +226,13 @@ def test_a_one_second_contender_acquires_from_a_holder_that_releases_at_point_si
     threading.Thread(target=release_later, daemon=True).start()
     started = time.monotonic()
     contender = _bounded(lambda: AnchorGuard(lock_path, wait_s=1.0).acquire())
-    elapsed = time.monotonic() - started
-    assert isinstance(contender, AnchorGuard) and contender.state == "HELD"
-    assert 0.3 <= elapsed < 1.0, f"acquired after {elapsed:.3f}s; expected about 0.6s"
-    contender.release()
+    try:
+        elapsed = time.monotonic() - started
+        assert isinstance(contender, AnchorGuard) and contender.state == "HELD"
+        assert 0.3 <= elapsed < 1.0, f"acquired after {elapsed:.3f}s; expected about 0.6s"
+    finally:
+        assert isinstance(contender, AnchorGuard)
+        contender.release()
     worker.join(JOIN_S)
     assert not worker.is_alive()
 
@@ -233,10 +242,13 @@ def test_a_one_second_contender_acquires_from_a_holder_that_releases_at_point_si
         assert _read_line(proc) == "HELD"
         started = time.monotonic()
         contender = _bounded(lambda: AnchorGuard(lock_path, wait_s=1.0).acquire())
-        elapsed = time.monotonic() - started
-        assert isinstance(contender, AnchorGuard) and contender.state == "HELD"
-        assert 0.3 <= elapsed < 1.0, f"acquired after {elapsed:.3f}s; expected about 0.6s"
-        contender.release()
+        try:
+            elapsed = time.monotonic() - started
+            assert isinstance(contender, AnchorGuard) and contender.state == "HELD"
+            assert 0.3 <= elapsed < 1.0, f"acquired after {elapsed:.3f}s; expected about 0.6s"
+        finally:
+            assert isinstance(contender, AnchorGuard)
+            contender.release()
         assert _read_line(proc) == "RELEASED"
     finally:
         code, err = _finish(proc)
@@ -247,8 +259,12 @@ def test_a_one_second_contender_acquires_from_a_holder_that_releases_at_point_si
     try:
         assert _read_line(proc) == "HELD"
         started = time.monotonic()
-        with pytest.raises(AnchorGuardTimeout, match="another process"):
-            _bounded(lambda: AnchorGuard(lock_path, wait_s=0.2).acquire())
+        control = AnchorGuard(lock_path, wait_s=0.2)
+        try:
+            with pytest.raises(AnchorGuardTimeout, match="another process"):
+                _bounded(control.acquire)
+        finally:
+            control.release()
         assert time.monotonic() - started < 0.6
         assert _read_line(proc) == "RELEASED"
     finally:
@@ -278,8 +294,12 @@ def test_a_symlink_to_an_existing_0600_lock_file_is_refused_before_any_flock(
     target_before = os.stat(target)
     calls = _spy_flock(monkeypatch)
     fds = _fd_count()
-    with pytest.raises(AnchorGuardRefused, match=r"lock file .* without following links"):
-        AnchorGuard(lock_path, wait_s=0.2).acquire()
+    guard = AnchorGuard(lock_path, wait_s=0.2)
+    try:
+        with pytest.raises(AnchorGuardRefused, match=r"lock file .* without following links"):
+            guard.acquire()
+    finally:
+        guard.release()
     assert calls == [], f"flock was called before the refusal: {calls}"
     assert _fd_count() == fds, "the refusal leaked a descriptor"
     assert stat.S_ISLNK(os.lstat(lock_path).st_mode), "the symlink was replaced"
@@ -308,8 +328,12 @@ def test_a_symlinked_lock_directory_is_refused_before_any_flock(
     linked_dir.symlink_to(real_dir)
     calls = _spy_flock(monkeypatch)
     fds = _fd_count()
-    with pytest.raises(AnchorGuardRefused, match=r"lock directory .* without following links"):
-        AnchorGuard(linked_dir / "x.lock", wait_s=0.2).acquire()
+    guard = AnchorGuard(linked_dir / "x.lock", wait_s=0.2)
+    try:
+        with pytest.raises(AnchorGuardRefused, match=r"lock directory .* without following links"):
+            guard.acquire()
+    finally:
+        guard.release()
     assert calls == [], f"flock was called before the refusal: {calls}"
     assert _fd_count() == fds, "the refusal leaked a descriptor"
     assert sorted(os.listdir(real_dir)) == [], "a lock file was created behind the link"
@@ -362,8 +386,12 @@ def test_a_lock_directory_owned_by_another_uid_is_refused_as_found_without_root(
     monkeypatch.setattr(os, "geteuid", lambda: foreign_uid)
     calls = _spy_flock(monkeypatch)
     fds = _fd_count()
-    with pytest.raises(AnchorGuardRefused) as info:
-        AnchorGuard(lock_path, wait_s=0.2).acquire()
+    guard = AnchorGuard(lock_path, wait_s=0.2)
+    try:
+        with pytest.raises(AnchorGuardRefused) as info:
+            guard.acquire()
+    finally:
+        guard.release()
     message = str(info.value)
     assert "lock directory" in message and "lock file" not in message, message
     assert f"owned by uid {real_uid}" in message and f"effective user {foreign_uid}" in message
@@ -410,8 +438,12 @@ def test_a_lock_file_owned_by_another_uid_is_refused_as_found_without_root(
     calls = _spy_flock(monkeypatch)
     fds = _fd_count()
     before = os.stat(lock_path)
-    with pytest.raises(AnchorGuardRefused) as info:
-        AnchorGuard(lock_path, wait_s=0.2).acquire()
+    guard = AnchorGuard(lock_path, wait_s=0.2)
+    try:
+        with pytest.raises(AnchorGuardRefused) as info:
+            guard.acquire()
+    finally:
+        guard.release()
     message = str(info.value)
     assert "lock file" in message and "lock directory" not in message, message
     assert f"owned by uid {real_uid}" in message and f"effective user {foreign_uid}" in message
