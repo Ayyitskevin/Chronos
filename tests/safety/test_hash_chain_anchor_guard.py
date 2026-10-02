@@ -1235,7 +1235,7 @@ def test_the_guard_is_unwired_and_does_no_anchor_io() -> None:
     users = sorted(
         str(path.relative_to(package))
         for path in package.rglob("*.py")
-        if "AnchorGuard" in path.read_text() and path.name != "anchor_guard.py"
+        if "anchor_guard" in path.read_text() and path.name != "anchor_guard.py"
     )
     assert users == [], f"the guard is referenced outside persistence/anchor_guard.py: {users}"
     assert not (package / "persistence" / "hash_chain_anchor.py").exists()
