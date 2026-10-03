@@ -25,10 +25,10 @@ from pathlib import Path
 
 import pytest
 
-from chronos.persistence import anchor_guard as database
+from chronos.persistence import anchor_guard as guard_module
 from chronos.persistence.anchor_guard import AnchorGuard, AnchorGuardRefused, AnchorGuardTimeout
 
-SRC_ROOT = Path(database.__file__).resolve().parents[2]
+SRC_ROOT = Path(guard_module.__file__).resolve().parents[2]
 JOIN_S = 5.0
 CHILD_S = 10.0
 LOCK_EX_NB = fcntl.LOCK_EX | fcntl.LOCK_NB
@@ -486,7 +486,7 @@ def test_order_pin_the_thread_lock_is_held_before_the_first_flock_call(
     guard = AnchorGuard(lock_path, wait_s=0.5)
 
     def probe() -> tuple[bool, bool]:
-        thread_lock = database._GUARD_THREAD_LOCKS.get(key)
+        thread_lock = guard_module._GUARD_THREAD_LOCKS.get(key)
         return (thread_lock is not None and thread_lock.locked(), guard._thread_lock_held)
 
     calls = _spy_flock(monkeypatch, probe)

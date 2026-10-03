@@ -26,7 +26,7 @@ from pathlib import Path
 
 import pytest
 
-from chronos.persistence import anchor_guard as database
+from chronos.persistence import anchor_guard as guard_module
 from chronos.persistence.anchor_guard import (
     AnchorGuard,
     AnchorGuardCleanupFailed,
@@ -40,7 +40,7 @@ pytestmark = pytest.mark.skipif(
     sys.platform != "linux", reason="the anchor guard is supported on Linux only (G6)"
 )
 
-SRC_ROOT = Path(database.__file__).resolve().parents[2]
+SRC_ROOT = Path(guard_module.__file__).resolve().parents[2]
 JOIN_S = 5.0
 CHILD_S = 10.0
 
@@ -75,10 +75,10 @@ def _force_unstrand(guard: AnchorGuard) -> None:
 @pytest.fixture(autouse=True)
 def _no_stranded_leftovers() -> Iterator[None]:
     yield
-    for guard in list(database._STRANDED.values()) + list(database._STRANDED_UNKEYED):
+    for guard in list(guard_module._STRANDED.values()) + list(guard_module._STRANDED_UNKEYED):
         _force_unstrand(guard)
-    database._STRANDED.clear()
-    database._STRANDED_UNKEYED.clear()
+    guard_module._STRANDED.clear()
+    guard_module._STRANDED_UNKEYED.clear()
 
 
 @pytest.fixture
@@ -130,7 +130,7 @@ def _install_hook(
             raise action
         action()
 
-    monkeypatch.setattr(database, "_ANCHOR_GUARD_STEP_HOOK", hook)
+    monkeypatch.setattr(guard_module, "_ANCHOR_GUARD_STEP_HOOK", hook)
     return seen
 
 
@@ -443,7 +443,7 @@ def test_a_failed_acquisition_leaves_a_later_acquisition_possible(
         AnchorGuard(lock_path, wait_s=0.2).acquire()
     monkeypatch.setattr(sys, "platform", "linux")
     assert _fd_count() == baseline
-    assert lock_path not in [g._lock_path for g in database._STRANDED.values()]
+    assert lock_path not in [g._lock_path for g in guard_module._STRANDED.values()]
     _bounded(lambda: AnchorGuard(lock_path, wait_s=0.2).acquire().release())
     assert _fd_count() == baseline
 
@@ -492,7 +492,7 @@ def test_partial_acquisition_unwinds_at_every_failure_point(
     assert guard.state == "RELEASED"
     assert guard.held_resources() == ()
     assert _fd_count() == baseline
-    assert not database._STRANDED
+    assert not guard_module._STRANDED
     monkeypatch.undo()
     if fault != "lock_path_is_a_directory":
         _bounded(lambda: AnchorGuard(lock_path, wait_s=0.5).acquire().release())
@@ -534,7 +534,7 @@ def test_an_interrupted_release_leaves_a_refused_state_never_a_clean_one(
     with pytest.raises(KeyboardInterrupt), AnchorGuard(lock_path, wait_s=1.0) as guard:
         pass
     assert guard.state == "RELEASE_INCOMPLETE"
-    monkeypatch.setattr(database, "_ANCHOR_GUARD_STEP_HOOK", None)
+    monkeypatch.setattr(guard_module, "_ANCHOR_GUARD_STEP_HOOK", None)
     with pytest.raises(AnchorGuardStranded, match="thread lock"):
         AnchorGuard(lock_path, wait_s=1.0).acquire()
 
@@ -678,7 +678,7 @@ def test_a_replaced_lock_file_or_directory_is_refused_by_identity(
 
 
 def _guard_block() -> str:
-    source = Path(database.__file__).read_text()
+    source = Path(guard_module.__file__).read_text()
     start = source.index("# >>> anchor guard (FU1-GUARD-1)")
     end = source.index("# <<< anchor guard (FU1-GUARD-1)")
     return source[start:end]
@@ -736,7 +736,7 @@ def test_release_is_idempotent_and_survives_failing_unlock_and_close(
     assert holder["g"].state == "RELEASED"
     assert _fd_count() == baseline
     # an interrupt at the held-key step leaves it stranded; there is no retry
-    monkeypatch.setattr(database, "_ANCHOR_GUARD_STEP_HOOK", None)
+    monkeypatch.setattr(guard_module, "_ANCHOR_GUARD_STEP_HOOK", None)
     _install_hook(monkeypatch, {("discard_held_key", "pre"): KeyboardInterrupt("held-key")})
     stranded = AnchorGuard(lock_path, wait_s=0.5).acquire()
     with pytest.raises(KeyboardInterrupt):
@@ -855,7 +855,7 @@ def test_an_async_interrupt_at_each_release_step_is_primary_and_state_is_what_is
     assert all(name in _attempted(seen) for name in later), "a later step was skipped"
     expected = PRE_EFFECT_HELD[step] if phase == "pre" else ()
     assert guard.held_resources() == expected
-    monkeypatch.setattr(database, "_ANCHOR_GUARD_STEP_HOOK", None)
+    monkeypatch.setattr(guard_module, "_ANCHOR_GUARD_STEP_HOOK", None)
     if expected:
         assert guard.state == "RELEASE_INCOMPLETE"
         started = time.monotonic()
@@ -904,7 +904,7 @@ def test_two_async_interruptions_in_one_release_make_the_second_primary(
     assert "discard_held_key" in _attempted(seen)
     assert "close_dir_fd" in _attempted(seen)
     assert guard.held_resources() == ("lock_fd", "thread lock")
-    monkeypatch.setattr(database, "_ANCHOR_GUARD_STEP_HOOK", None)
+    monkeypatch.setattr(guard_module, "_ANCHOR_GUARD_STEP_HOOK", None)
     with pytest.raises(AnchorGuardStranded):
         AnchorGuard(lock_path, wait_s=0.5).acquire()
 
@@ -935,7 +935,7 @@ def test_a_stranded_guard_refuses_same_process_reuse_immediately(
     guard = AnchorGuard(lock_path, wait_s=0.5).acquire()
     with pytest.raises(SystemExit):
         guard.release()
-    monkeypatch.setattr(database, "_ANCHOR_GUARD_STEP_HOOK", None)
+    monkeypatch.setattr(guard_module, "_ANCHOR_GUARD_STEP_HOOK", None)
     baseline = _fd_count()
     started = time.monotonic()
     with pytest.raises(AnchorGuardStranded, match="thread lock"):
@@ -953,7 +953,7 @@ def test_a_stranded_held_key_refuses_the_same_thread_immediately(
     guard = AnchorGuard(lock_path, wait_s=0.5).acquire()
     with pytest.raises(KeyboardInterrupt):
         guard.release()
-    monkeypatch.setattr(database, "_ANCHOR_GUARD_STEP_HOOK", None)
+    monkeypatch.setattr(guard_module, "_ANCHOR_GUARD_STEP_HOOK", None)
     started = time.monotonic()
     with pytest.raises(AnchorGuardStranded):
         AnchorGuard(lock_path, wait_s=2.0).acquire()
@@ -963,12 +963,12 @@ def test_a_stranded_held_key_refuses_the_same_thread_immediately(
 CHILD_STRAND_HELD_FLOCK = """
 import sys
 from pathlib import Path
-from chronos.persistence import anchor_guard as database
+from chronos.persistence import anchor_guard as guard_module
 from chronos.persistence.anchor_guard import AnchorGuard
 def hook(step, phase):
     if phase == "pre" and step in ("unlock", "close_lock_fd"):
         raise KeyboardInterrupt(step)
-database._ANCHOR_GUARD_STEP_HOOK = hook
+guard_module._ANCHOR_GUARD_STEP_HOOK = hook
 guard = AnchorGuard(Path(sys.argv[1]), wait_s=1.0).acquire()
 try:
     guard.release()
@@ -1007,7 +1007,7 @@ def test_a_stranded_descriptor_without_a_lock_is_a_leak_and_an_in_process_refusa
     guard = AnchorGuard(lock_path, wait_s=0.5).acquire()
     with pytest.raises(KeyboardInterrupt):
         guard.release()
-    monkeypatch.setattr(database, "_ANCHOR_GUARD_STEP_HOOK", None)
+    monkeypatch.setattr(guard_module, "_ANCHOR_GUARD_STEP_HOOK", None)
     assert _fd_count() == baseline + 1
     with pytest.raises(AnchorGuardStranded):
         AnchorGuard(lock_path, wait_s=0.5).acquire()
@@ -1083,7 +1083,7 @@ def test_async_interrupt_in_the_return_to_record_window_is_contained_to_availabi
 CHILD_FORK = """
 import os, sys
 from pathlib import Path
-from chronos.persistence import anchor_guard as database
+from chronos.persistence import anchor_guard as guard_module
 from chronos.persistence.anchor_guard import AnchorGuard, AnchorGuardTimeout
 guard = AnchorGuard(Path(sys.argv[1]), wait_s=1.0).acquire()
 lock_fd, dir_fd = guard._lock_fd, guard._dir_fd
@@ -1098,7 +1098,7 @@ if pid == 0:
             pass
     if guard.state != "INVALID_AFTER_FORK" or guard.held_resources():
         code = 12
-    if database._STRANDED or database._GUARD_THREAD_LOCKS:
+    if guard_module._STRANDED or guard_module._GUARD_THREAD_LOCKS:
         code = 13
     try:
         AnchorGuard(Path(sys.argv[1]), wait_s=0.2).acquire()
@@ -1230,12 +1230,54 @@ def test_an_oversized_wait_is_a_typed_refusal_never_a_runtime_overflow(wait_s: i
         AnchorGuard("/tmp/unused.lock", wait_s=wait_s)
 
 
+def _references_the_guard_module(source: str) -> bool:
+    """True when the source REALLY references persistence.anchor_guard.
+
+    Real references: any import form (absolute, ``from chronos.persistence import
+    anchor_guard``, relative ``from . import anchor_guard`` / ``from .anchor_guard import``),
+    an ``importlib.import_module`` / ``__import__`` call with a literal naming it, an
+    attribute access ``.anchor_guard``, a bare name ``anchor_guard``, or any non-docstring
+    string constant naming it (an indirect import by variable). Comments are not in the
+    syntax tree, and docstrings are excluded, so a mention in documentation passes.
+    """
+
+    tree = ast.parse(source)
+    docstrings = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            body = node.body
+            if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+                docstrings.add(id(body[0].value))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            if any("anchor_guard" in alias.name.split(".") for alias in node.names):
+                return True
+        elif isinstance(node, ast.ImportFrom):
+            module_parts = (node.module or "").split(".")
+            if "anchor_guard" in module_parts:
+                return True
+            if any(alias.name == "anchor_guard" for alias in node.names):
+                return True
+        elif (
+            (isinstance(node, ast.Attribute) and node.attr == "anchor_guard")
+            or (isinstance(node, ast.Name) and node.id == "anchor_guard")
+            or (
+                isinstance(node, ast.Constant)
+                and isinstance(node.value, str)
+                and "anchor_guard" in node.value
+                and id(node) not in docstrings
+            )
+        ):
+            return True
+    return False
+
+
 def test_the_guard_is_unwired_and_does_no_anchor_io() -> None:
     package = SRC_ROOT / "chronos"
     users = sorted(
         str(path.relative_to(package))
         for path in package.rglob("*.py")
-        if "anchor_guard" in path.read_text() and path.name != "anchor_guard.py"
+        if path.name != "anchor_guard.py" and _references_the_guard_module(path.read_text())
     )
     assert users == [], f"the guard is referenced outside persistence/anchor_guard.py: {users}"
     assert not (package / "persistence" / "hash_chain_anchor.py").exists()
