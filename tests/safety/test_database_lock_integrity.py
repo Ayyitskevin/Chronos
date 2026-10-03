@@ -78,6 +78,17 @@ def _db_rows(path: Path) -> list[str]:
     return _lock_rows(path, Path(f"{path}-shm"))
 
 
+def _existing_database(path: Path) -> None:
+    """An initialized database, as a deployment has: a fresh EMPTY file has no WAL state, so
+    no -wal/-shm and no locks until its first write (a lock pin on it would be vacuous)."""
+
+    setup = Database(_url(path))
+    try:
+        setup.initialize()
+    finally:
+        setup.dispose()
+
+
 def _close_window(tmp_path: Path) -> None:
     """A sacrificial file-backed Database: afterwards the window is CLOSED, whatever ran before."""
 
@@ -164,6 +175,7 @@ def test_the_proc_locks_oracle_sees_a_known_lock(tmp_path: Path) -> None:
 
 def test_construction_keeps_the_pooled_connections_wal_locks(tmp_path: Path) -> None:
     path = tmp_path / "a.db"
+    _existing_database(path)
     database = Database(_url(path))
     try:
         rows = _db_rows(path)
@@ -179,6 +191,7 @@ def test_a_second_in_process_database_keeps_the_first_engines_locks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     path = tmp_path / "a.db"
+    _existing_database(path)
     first = Database(_url(path))
     try:
         rows = _db_rows(path)
@@ -196,6 +209,7 @@ def test_dispose_and_reuse_of_the_same_engine_never_reopens_a_repair_window(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     path = tmp_path / "a.db"
+    _existing_database(path)
     first = Database(_url(path))
     try:
         first.dispose()
@@ -220,6 +234,7 @@ def test_an_alias_with_a_drifted_mode_is_refused_and_never_opened(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, spelling: str
 ) -> None:
     path = tmp_path / "live" / "a.db"
+    _existing_database(path)
     first = Database(_url(path))
     try:
         rows = _db_rows(path)
@@ -260,6 +275,7 @@ def test_no_repair_can_race_a_dbapi_open_after_the_window_closes(
     """
 
     path = tmp_path / "live" / "a.db"
+    _existing_database(path)
     engine_owner = Database(_url(path))
     engine_owner.dispose()  # fully disposed: no physical connection, no sidecar fd
     shm = Path(f"{path}-shm")
@@ -411,7 +427,10 @@ def test_a_second_process_closing_does_not_delete_the_wal_under_a_live_committer
             timeout=CHILD_S,
             check=False,
         )
-        assert a.returncode == 0, a.stderr
+        if a.returncode != 0:
+            b.send_signal(signal.SIGKILL)
+            _out, b_err = b.communicate(timeout=CHILD_S)
+            pytest.fail(f"A failed: {a.stderr}\nB stderr: {b_err}")
         deadline = time.monotonic() + CHILD_S
         while not (tmp_path / "b.done").exists():
             assert b.poll() is None, b.communicate()[1]
@@ -449,6 +468,7 @@ def test_a_fork_while_a_sibling_holds_the_window_lock_does_not_strand_the_child(
 
     _close_window(tmp_path)
     live = tmp_path / "live.db"
+    _existing_database(live)
     holder = Database(_url(live))
     admitted = tmp_path / "admitted.db"
     Database(_url(admitted)).dispose()
@@ -513,7 +533,8 @@ for s in ("-wal", "-shm", "-journal"):
 assert m._REPAIR_WINDOW_OPEN is True
 first = Database(url(p1))  # the window is OPEN: repaired
 def mode(p): return p.stat().st_mode & 0o777
-report["repaired"] = all(mode(Path(f"{p1}{s}")) == 0o600 for s in ("", "-journal"))
+existing = [Path(f"{p1}{s}") for s in ("", "-wal", "-shm", "-journal")]
+report["repaired"] = all(mode(q) == 0o600 for q in existing if q.exists())
 assert m._REPAIR_WINDOW_OPEN is False
 first.dispose()
 j = Path(f"{p1}-journal"); j.touch(); j.chmod(0o666)
