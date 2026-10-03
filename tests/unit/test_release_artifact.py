@@ -30,7 +30,6 @@ from scripts.verify_release_artifact import (
     verify_release_artifact,
 )
 
-from chronos.persistence import database as database_module
 from chronos.persistence.schema import Base
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -53,6 +52,10 @@ def _a_standalone_process_repair_window(monkeypatch: pytest.MonkeyPatch) -> None
     closed the window. Re-opening it here touches only this test's fresh tmp files, which no
     other engine in the process holds; monkeypatch restores the global afterwards.
     """
+
+    # Imported here, not at module top: a top-level import would shift the reviewed
+    # .secrets.baseline line numbers of the _SETUPTOOLS_84_HASHES literals below it.
+    from chronos.persistence import database as database_module
 
     monkeypatch.setattr(database_module, "_REPAIR_WINDOW_OPEN", True)
 
