@@ -386,6 +386,45 @@ def _check_sqlite_file_identity(path: Path) -> None:
         raise RuntimeError(f"Refusing non-regular SQLite path: {path}")
     if metadata.st_uid != os.geteuid():
         raise RuntimeError(f"Refusing SQLite path not owned by this user: {path}")
+    if metadata.st_nlink != 1:
+        # SQLite keys a database's -wal/-shm by PATHNAME, so a second name for the same file
+        # gets a second WAL namespace and acknowledged writes fork (DBLOCK-2 review, P1).
+        stray = _interrupted_create_stray(path, metadata)
+        if stray is not None:
+            raise RuntimeError(
+                f"Refusing SQLite path with {metadata.st_nlink} hard links: {path}; an "
+                f"interrupted Chronos create left the private temporary {stray} linked to "
+                "it. Check that file, remove exactly it, then restart"
+            )
+        raise RuntimeError(
+            f"Refusing SQLite path with {metadata.st_nlink} hard links: {path}; a database "
+            "file or sidecar must have exactly one name, because SQLite gives each name its "
+            "own WAL files"
+        )
+
+
+def _interrupted_create_stray(path: Path, metadata: os.stat_result) -> Path | None:
+    """The `.<name>.create-<hex>` temp of _create_private_sqlite_file sharing this inode.
+
+    Only NAMED in the refusal; never removed automatically (a name pattern is not proof the
+    stray is ours).
+    """
+
+    prefix = f".{path.name}.create-"
+    try:
+        entries = list(os.scandir(path.parent))
+    except OSError:
+        return None
+    for entry in entries:
+        if not entry.name.startswith(prefix):
+            continue
+        try:
+            found = entry.stat(follow_symlinks=False)
+        except OSError:
+            continue
+        if (found.st_dev, found.st_ino) == (metadata.st_dev, metadata.st_ino):
+            return path.parent / entry.name
+    return None
 
 
 def _check_sqlite_file_mode(path: Path) -> None:

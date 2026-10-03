@@ -47,6 +47,7 @@ pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="POSIX lock rows
 SRC_ROOT = Path(database_module.__file__).resolve().parents[2]
 CHILD_S = 60.0
 SIDE = ("-wal", "-shm", "-journal")
+_RESTART = "restart the process to repair"
 
 
 def _url(path: Path) -> str:
@@ -146,9 +147,11 @@ def _construct(path: Path) -> BaseException | None:
     return None
 
 
-def _assert_refused(outcome: BaseException | None) -> None:
+def _assert_refused(
+    outcome: BaseException | None, match: str = "restart the process to repair"
+) -> None:
     assert isinstance(outcome, RuntimeError), f"expected a refusal, got {outcome!r}"
-    assert "restart the process to repair" in str(outcome), str(outcome)
+    assert match in str(outcome), str(outcome)
 
 
 @pytest.fixture
@@ -255,7 +258,8 @@ def test_an_alias_with_a_drifted_mode_is_refused_and_never_opened(
         outcome = _construct(alias)
         assert _db_rows(path) == rows, "the alias constructor dropped the live connection's locks"
         assert spy.hits == [], spy.hits
-        _assert_refused(outcome)
+        # DBLOCK-2r1: a hard-linked file is refused by its link count before any mode check
+        _assert_refused(outcome, "hard link" if spelling == "hard_link" else _RESTART)
     finally:
         first.dispose()
 
@@ -337,7 +341,7 @@ def test_no_repair_can_race_a_dbapi_open_after_the_window_closes(
             assert not helper.is_alive()
             assert _db_rows(path) == rows, "the helper dropped the live connection's locks"
             assert spy.hits == [], spy.hits
-            _assert_refused(outcome["error"])
+            _assert_refused(outcome["error"], "hard link")  # DBLOCK-2r1: link count first
     finally:
         release.set()
         helper.join(10)
@@ -632,23 +636,169 @@ os._exit(0)
 """
 
 
-def test_a_crash_between_link_and_unlink_leaves_a_harmless_stray(tmp_path: Path) -> None:
+def test_a_crash_between_link_and_unlink_is_refused_naming_the_exact_stray(
+    tmp_path: Path,
+) -> None:
+    """DBLOCK-2r1 (Daybreak P1): the crash residue gives the database a SECOND name, which
+    would give SQLite two WAL namespaces for one file. It is refused fail-closed, naming the
+    exact private temp; nothing deletes it automatically (a name pattern is not proof the
+    stray is ours). After the operator removes that exact file, the database starts."""
+
     crashed = _run_child(_CREATE_CRASH, str(tmp_path))
     assert crashed.returncode == 7, (crashed.returncode, crashed.stderr)
     strays = [p for p in tmp_path.iterdir() if ".create-" in p.name]
     assert len(strays) == 1
     assert (tmp_path / "c.db").stat().st_nlink == 2
-    restarted = _run_child(
-        """
+    start = """
         import sys
         from chronos.persistence.database import Database
-        d = Database(f"sqlite+pysqlite:///{sys.argv[1]}/c.db"); d.initialize(); d.dispose()
-        print("ok")
-        """,
-        str(tmp_path),
-    )
+        try:
+            d = Database(f"sqlite+pysqlite:///{sys.argv[1]}/c.db"); d.initialize(); d.dispose()
+        except RuntimeError as error:
+            print("refused:", error)
+        else:
+            print("ok")
+        """
+    refused = _run_child(start, str(tmp_path))
+    assert refused.returncode == 0, refused.stderr
+    assert refused.stdout.startswith("refused:"), refused.stdout
+    assert str(strays[0]) in refused.stdout, refused.stdout  # the exact private temp
+    assert strays[0].exists(), "the stray was removed automatically"
+    strays[0].unlink()  # the operator's step
+    restarted = _run_child(start, str(tmp_path))
     assert restarted.returncode == 0, restarted.stderr
     assert restarted.stdout.strip() == "ok"
+
+
+# ------------------------------------------------------------------ DBLOCK-2r1: link counts
+
+_HARDLINK_WORKER = """
+import os, sys, time
+from pathlib import Path
+from sqlalchemy import text
+from chronos.persistence.database import Database
+path, root, rid = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
+try:
+    database = Database(f"sqlite+pysqlite:///{path}")
+except RuntimeError as error:
+    (root / f"{rid}.refused").write_text(str(error))
+    sys.exit(0)
+(root / f"{rid}.ready").touch()
+deadline = time.monotonic() + 30
+while not (root / "release").exists():
+    assert time.monotonic() < deadline, "never released"
+    time.sleep(0.005)
+with database.engine.begin() as connection:
+    connection.execute(text("INSERT INTO forked_wal(id) VALUES (:i)"), {"i": int(rid)})
+fd = os.open(root / f"{rid}.ack", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+os.write(fd, b"committed"); os.fsync(fd); os.close(fd)
+time.sleep(120)
+"""
+
+
+def test_a_stable_hard_link_to_the_database_is_refused_before_any_write(
+    tmp_path: Path,
+) -> None:
+    """Daybreak's DBLOCK-2 P1 probe as a pin: a stable owner-owned 0600 hard link, two path
+    spellings, two processes. SQLite keys its WAL files by pathname, so two spellings of one
+    inode get two WAL namespaces and acknowledged writes fork. Each construction must refuse
+    before an engine exists; no write may be acknowledged."""
+
+    canonical = tmp_path / "canonical.db"
+    alias = tmp_path / "alias.db"
+    setup = Database(_url(canonical))
+    try:
+        setup.initialize()
+        with setup.engine.begin() as connection:
+            connection.execute(text("CREATE TABLE forked_wal (id INTEGER PRIMARY KEY)"))
+    finally:
+        setup.dispose()
+    os.link(canonical, alias)
+    assert canonical.stat().st_mode & 0o777 == 0o600 == alias.stat().st_mode & 0o777
+    env = _child_env()
+    workers = [
+        subprocess.Popen(
+            [sys.executable, "-c", _HARDLINK_WORKER, str(path), str(tmp_path), rid],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for path, rid in ((canonical, "1"), (alias, "2"))
+    ]
+    try:
+        deadline = time.monotonic() + CHILD_S
+        for rid in ("1", "2"):
+            while not any((tmp_path / f"{rid}.{kind}").exists() for kind in ("ready", "refused")):
+                assert time.monotonic() < deadline, f"worker {rid} never decided"
+                time.sleep(0.01)
+        accepted = [rid for rid in ("1", "2") if (tmp_path / f"{rid}.ready").exists()]
+        if accepted:
+            (tmp_path / "release").touch()
+            for rid in accepted:
+                while not (tmp_path / f"{rid}.ack").exists():
+                    assert time.monotonic() < deadline, f"worker {rid} never acknowledged"
+                    time.sleep(0.01)
+    finally:
+        for worker in workers:
+            if worker.poll() is None:
+                worker.send_signal(signal.SIGKILL)
+            worker.wait(CHILD_S)
+    rows = {}
+    for name, path in (("canonical", canonical), ("alias", alias)):
+        result = _run_child(
+            """
+            import sqlite3, sys
+            c = sqlite3.connect(sys.argv[1])
+            print([r[0] for r in c.execute("SELECT id FROM forked_wal ORDER BY id")])
+            """,
+            str(path),
+        )
+        rows[name] = result.stdout.strip()
+    assert accepted == [], f"a hard-linked database was admitted; rows after the crash: {rows}"
+    for rid in ("1", "2"):
+        assert "hard link" in (tmp_path / f"{rid}.refused").read_text()
+    assert not any(tmp_path.glob("*.ack"))
+
+
+def test_a_hard_linked_sidecar_is_refused_in_the_open_and_the_closed_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """st_nlink != 1 on an existing sidecar refuses before any engine or open."""
+
+    open_dir = tmp_path / "open"
+    open_dir.mkdir()
+    _existing_database(open_dir / "o.db")
+    journal = Path(f"{open_dir / 'o.db'}-journal")
+    journal.touch(mode=0o600)
+    os.link(journal, open_dir / "second-name")
+    fresh = _run_child(
+        """
+        import sys
+        from chronos.persistence import database as m
+        from chronos.persistence.database import Database
+        assert m._REPAIR_WINDOW_OPEN is True
+        try:
+            Database(f"sqlite+pysqlite:///{sys.argv[1]}")
+        except RuntimeError as error:
+            print("refused:", error)
+        else:
+            print("constructed")
+        """,
+        str(open_dir / "o.db"),
+    )
+    assert fresh.returncode == 0, fresh.stderr
+    assert fresh.stdout.startswith("refused:") and "hard link" in fresh.stdout, fresh.stdout
+
+    _close_window(tmp_path)
+    closed = tmp_path / "closed" / "c.db"
+    _existing_database(closed)
+    sidecar = Path(f"{closed}-journal")
+    sidecar.touch(mode=0o600)
+    os.link(sidecar, closed.parent / "second-name")
+    spy = _OpenSpy(monkeypatch, closed, *(Path(f"{closed}{suffix}") for suffix in SIDE))
+    _assert_refused(_construct(closed), "hard link")
+    assert spy.hits == [], spy.hits
 
 
 # ------------------------------------------------------------------ T-7 / T-8: non-regression pins
