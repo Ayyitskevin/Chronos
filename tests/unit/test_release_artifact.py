@@ -30,6 +30,7 @@ from scripts.verify_release_artifact import (
     verify_release_artifact,
 )
 
+from chronos.persistence import database as database_module
 from chronos.persistence.schema import Base
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -39,6 +40,21 @@ _SETUPTOOLS_84_HASHES = frozenset(
         "f4695c21257f0d9b537ec2692c941d02ee143b7cc1276941349a546573b2ef73",
     }
 )
+
+
+@pytest.fixture(autouse=True)
+def _a_standalone_process_repair_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    """DBLOCK: model the production process this code runs in.
+
+    The release verifier (`scripts/verify_release_artifact.py`) runs as its own process,
+    where its Database construction is the process's FIRST file-backed one, so R-21's
+    one-way startup repair window is still OPEN and the Alembic-created (umask-mode) file
+    is repaired to 0600. Inside this shared pytest process an earlier test has already
+    closed the window. Re-opening it here touches only this test's fresh tmp files, which no
+    other engine in the process holds; monkeypatch restores the global afterwards.
+    """
+
+    monkeypatch.setattr(database_module, "_REPAIR_WINDOW_OPEN", True)
 
 
 def test_build_backend_input_and_lock_match_exact_published_requirement() -> None:

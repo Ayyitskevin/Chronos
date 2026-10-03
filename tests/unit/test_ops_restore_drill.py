@@ -36,6 +36,7 @@ from tests.integration.test_backup_restore_drill import _checkpoint_wal, _row_co
 
 from chronos.auditlog.log import AuditLog
 from chronos.operations import restore_drill as drill
+from chronos.operations import restore_drill as restore_drill_module
 from chronos.operations.restore_drill import (
     BackupManifest,
     Clock,
@@ -47,6 +48,7 @@ from chronos.operations.restore_drill import (
     schema_head,
     verify_restored,
 )
+from chronos.persistence import database as database_module
 from chronos.persistence.database import SCHEMA_VERSION, Database
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -57,6 +59,33 @@ SAFE_ENV = {
     "ALLOW_LIVE_TRADING": "false",
     "PYTHONDONTWRITEBYTECODE": "1",
 }
+
+
+@pytest.fixture(autouse=True)
+def _a_standalone_process_repair_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    """DBLOCK: model the production process this code runs in.
+
+    The restore drill (`python -m chronos.operations.restore_drill`) runs as its own
+    process, where its Database construction is the process's FIRST file-backed one, so
+    R-21's one-way startup repair window is still OPEN and the age-decrypted
+    (0666 & ~umask) file is repaired to 0600. Inside this shared pytest process an earlier
+    test has already closed the window. Re-opening it here touches only this test's fresh
+    tmp files, which no other engine in the process holds; monkeypatch restores the global
+    afterwards.
+    """
+
+    monkeypatch.setattr(database_module, "_REPAIR_WINDOW_OPEN", True)
+    # The drill's ONLY Database construction is its acceptance of the restored copy; in this
+    # shared test process the test's own source store (built through Database) closes the
+    # window first, so re-open it at exactly the drill's acceptance construction.
+    real_database = restore_drill_module.Database
+
+    class AcceptInAFreshProcess(real_database):  # type: ignore[misc, valid-type]
+        def __init__(self, url: str) -> None:
+            monkeypatch.setattr(database_module, "_REPAIR_WINDOW_OPEN", True)
+            super().__init__(url)
+
+    monkeypatch.setattr(restore_drill_module, "Database", AcceptInAFreshProcess)
 
 
 def _sha256(path: Path) -> str:
