@@ -221,13 +221,14 @@ def runtime(
     active: AutonomyMandate | None = None,
     submit: Any = None,
     config: RuntimeConfig | None = None,
+    gather: Any = facts,
 ) -> AutonomyRuntime:
     return AutonomyRuntime(
         sessions=sessions,
         config=config or RuntimeConfig(account_fingerprint=FINGERPRINT),
         identity=identity(),
         mandate_source=lambda: active,
-        gather_facts=facts,
+        gather_facts=gather,
         sinks=(NullSink(),),
         submit=submit,
     )
@@ -652,6 +653,9 @@ def test_a_clean_tick_raises_no_interrupted_claim_alert(sessions: sessionmaker[S
     report = runtime(sessions).run_tick(NOW)
     assert report.proposals_judged == 1
     runtime(sessions).run_tick(NOW + timedelta(minutes=1))
+    # DRAIN-2r1: the no-facts arm runs the same helper; a terminal row never alerts.
+    no_facts = runtime(sessions, gather=lambda _now: None)
+    assert no_facts.run_tick(NOW + timedelta(minutes=2)).proposals_judged == 0
     assert interrupted_alerts(sessions) == []
 
 
@@ -672,6 +676,12 @@ def test_the_interrupted_claim_alert_is_static_and_never_a_census(
     folded = interrupted_alerts(sessions)
     assert len(folded) == 1 and folded[0].occurrences == 3
     assert folded[0].detail == {} and folded[0].summary == INTERRUPTED_SUMMARY
+    # DRAIN-2r1: the no-facts arm folds into the same static alert, still no census.
+    no_facts = runtime(sessions, gather=lambda _now: None)
+    no_facts.run_tick(NOW + timedelta(minutes=1))
+    folded = interrupted_alerts(sessions)
+    assert len(folded) == 1 and folded[0].occurrences == 4
+    assert folded[0].detail == {} and folded[0].summary == INTERRUPTED_SUMMARY
     for alert in (raised[0], folded[0]):
         rendered = json.dumps([alert.summary, alert.detail])
         assert str(first) not in rendered and str(second) not in rendered
@@ -687,13 +697,22 @@ def test_the_interrupted_claim_alert_is_static_and_never_a_census(
 def test_list_interrupted_claims_is_read_only_and_the_sole_census(
     sessions: sessionmaker[Session], db_path: Path
 ) -> None:
+    first = enqueue(sessions)
+    second = enqueue(sessions)
+    processed = enqueue(sessions)
+    assert claim(sessions, limit=1) == [first]
+    assert claim(sessions, limit=1) == [second]
+    assert claim(sessions, limit=1) == [processed]
+    with sessions.begin() as session:
+        proposals.mark_processed(session, queue_id=processed, stage="INGRESS", refusal="X", now=NOW)
     pending = enqueue(sessions)
-    claimed = enqueue(sessions)
-    assert claim(sessions, limit=1) == [pending]
-    claim(sessions, limit=1)
+    # Reader P2-1: a PENDING and a PROCESSED row sit beside the two CLAIMED rows,
+    # so a census that dropped its status filter would list them.
     assert statuses(sessions) == {
-        pending: CLAIMED,
-        claimed: CLAIMED,
+        first: CLAIMED,
+        second: CLAIMED,
+        processed: proposals.STATUS_PROCESSED,
+        pending: proposals.STATUS_PENDING,
     }
     with sessions.begin() as session:
         raw = session.connection().connection.dbapi_connection
@@ -702,7 +721,9 @@ def test_list_interrupted_claims_is_read_only_and_the_sole_census(
         listed = proposals.list_interrupted_claims(session, account_fingerprint=FINGERPRINT)
         assert raw.total_changes == changes_before, "the read-only query wrote to the database"
         assert not session.new and not session.dirty and not session.deleted
-    assert [item.id for item in listed] == [pending, claimed]
+    assert [item.id for item in listed] == [first, second]
+    assert pending not in {item.id for item in listed}
+    assert processed not in {item.id for item in listed}
     assert all(item.claim_token.startswith("claim:") for item in listed)
     assert all(item.received_at == NOW for item in listed)
     fields = set(proposals.InterruptedClaim.__dataclass_fields__)
@@ -722,6 +743,28 @@ def test_list_interrupted_claims_is_read_only_and_the_sole_census(
         if isinstance(node, ast.Call)
     }
     assert not calls & {"update", "insert", "delete", "add", "execute", "values", "flush"}
+
+
+def test_an_interrupted_claim_alerts_even_when_facts_are_unavailable(
+    sessions: sessionmaker[Session],
+) -> None:
+    """Daybreak P2-DRAIN-2-1: a no-facts tick still alerts on an interrupted claim.
+
+    It alerts only: the row stays CLAIMED (no claim, reset, resolve or requeue).
+    """
+
+    queued = enqueue(sessions)
+    assert claim(sessions) == [queued]  # durable claim, then the process dies
+    assert interrupted_alerts(sessions) == [], "the claiming invocation raised the alert"
+    restarted = runtime(sessions, gather=lambda _now: None)
+    report = restarted.run_tick(NOW + timedelta(minutes=1))
+    assert report.proposals_judged == 0
+    assert statuses(sessions) == {queued: CLAIMED}
+    raised = interrupted_alerts(sessions)
+    assert len(raised) == 1
+    assert raised[0].kind == INTERRUPTED_KIND
+    assert raised[0].summary == INTERRUPTED_SUMMARY
+    assert raised[0].detail == {}
 
 
 # ------------------------------------------------------------------ capacity
