@@ -23,6 +23,7 @@ CLOSED whatever ran before; every REPAIR assertion runs in a fresh child process
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import json
 import os
@@ -126,15 +127,98 @@ def _child_env() -> dict[str, str]:
     return env
 
 
-def _run_child(code: str, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [sys.executable, "-c", textwrap.dedent(code), *args],
-        capture_output=True,
-        text=True,
-        env=_child_env(),
-        timeout=CHILD_S,
-        check=False,
+# TEARDOWN-1: every child this module starts is reaped on EVERY path. It runs in its own
+# process group (start_new_session) and the _children() context kills that group and waits
+# in a finally (success, assertion failure, timeout, KeyboardInterrupt). Each child also
+# carries a watchdog prelude, so a SIGKILLed pytest (no finally runs) cannot strand it: it
+# exits when its parent changes or a bounded total deadline passes. The marker comment
+# lets a leftover census find this module's children by command line.
+_CHILD_MARK = "# chronos-test-child:test_database_lock_integrity"
+_CHILD_DEADLINE_S = 300.0
+
+
+def _child_code(code: str) -> str:
+    return (
+        f"{_CHILD_MARK}\n"
+        "import os as _os, threading as _threading, time as _time\n"
+        # The spawner's pid, not getppid(): a parent that died before this line runs
+        # would make getppid() already the reaper's pid and blind the watchdog.
+        "_PARENT = int(_os.environ.get('CHRONOS_TEST_PARENT_PID', _os.getppid()))\n"
+        f"_DEADLINE = _time.monotonic() + {_CHILD_DEADLINE_S}\n"
+        "def _orphan_watchdog():\n"
+        "    while _os.getppid() == _PARENT and _time.monotonic() < _DEADLINE:\n"
+        "        _time.sleep(0.1)\n"
+        "    _os._exit(97)\n"
+        "_threading.Thread(target=_orphan_watchdog, daemon=True).start()\n" + textwrap.dedent(code)
     )
+
+
+class _Children:
+    """Children started in their own process groups; reap() kills and waits for them all."""
+
+    def __init__(self) -> None:
+        self._procs: list[subprocess.Popen[str]] = []
+
+    def popen(self, code: str, *args: str) -> subprocess.Popen[str]:
+        env = _child_env()
+        env["CHRONOS_TEST_PARENT_PID"] = str(os.getpid())
+        proc = subprocess.Popen(
+            [sys.executable, "-c", _child_code(code), *args],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        self._procs.append(proc)
+        return proc
+
+    def run(self, code: str, *args: str) -> subprocess.CompletedProcess[str]:
+        proc = self.popen(code, *args)
+        out, err = proc.communicate(timeout=CHILD_S)
+        return subprocess.CompletedProcess(proc.args, proc.returncode, out, err)
+
+    def reap(self) -> None:
+        for proc in self._procs:
+            # Kill only a child not yet reaped: until it is waited for, its pid (and so its
+            # process group id) cannot be recycled for an unrelated process.
+            if proc.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(proc.pid, signal.SIGKILL)
+            with contextlib.suppress(Exception):
+                proc.communicate(timeout=CHILD_S)
+
+
+@contextlib.contextmanager
+def _children() -> Iterator[_Children]:
+    children = _Children()
+    try:
+        yield children
+    finally:
+        children.reap()
+
+
+def _run_child(code: str, *args: str) -> subprocess.CompletedProcess[str]:
+    with _children() as children:
+        return children.run(code, *args)
+
+
+def _group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _pid_alive(pid: int) -> bool:
+    """Alive and not a zombie (an orphan's zombie is reaped by init, not by us)."""
+
+    try:
+        with open(f"/proc/{pid}/stat") as handle:
+            return handle.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except FileNotFoundError:
+        return False
 
 
 def _construct(path: Path) -> BaseException | None:
@@ -420,25 +504,11 @@ def test_a_second_process_closing_does_not_delete_the_wal_under_a_live_committer
             connection.execute(text("CREATE TABLE walloss (id INTEGER PRIMARY KEY)"))
     finally:
         setup.dispose()
-    env = _child_env()
-    b = subprocess.Popen(
-        [sys.executable, "-c", _WALLOSS_B, _url(path), str(tmp_path)],
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    try:
-        a = subprocess.run(
-            [sys.executable, "-c", _WALLOSS_A, _url(path), str(tmp_path), f"{path}-wal"],
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=CHILD_S,
-            check=False,
-        )
+    with _children() as children:
+        b = children.popen(_WALLOSS_B, _url(path), str(tmp_path))
+        a = children.run(_WALLOSS_A, _url(path), str(tmp_path), f"{path}-wal")
         if a.returncode != 0:
-            b.send_signal(signal.SIGKILL)
+            os.killpg(b.pid, signal.SIGKILL)
             _out, b_err = b.communicate(timeout=CHILD_S)
             pytest.fail(f"A failed: {a.stderr}\nB stderr: {b_err}")
         deadline = time.monotonic() + CHILD_S
@@ -446,9 +516,8 @@ def test_a_second_process_closing_does_not_delete_the_wal_under_a_live_committer
             assert b.poll() is None, b.communicate()[1]
             assert time.monotonic() < deadline, "B never finished its post-dispose commits"
             time.sleep(0.01)
-    finally:
-        b.send_signal(signal.SIGKILL)
-        b.wait(CHILD_S)
+        os.killpg(b.pid, signal.SIGKILL)  # B "dies" here (the crash under test)
+        b.communicate(timeout=CHILD_S)
     wal = json.loads((tmp_path / "a.json").read_text())
     acked = [int(line) for line in (tmp_path / "acks").read_text().split()]
     count = _run_child(
@@ -498,10 +567,13 @@ def test_a_fork_while_a_sibling_holds_the_window_lock_does_not_strand_the_child(
         target=lambda: Database(_url(tmp_path / "sib.db")).dispose(), name="sibling"
     )
     sibling.start()
+    pid = 0
+    child_reaped = False
     try:
         assert inside.wait(10), "the sibling never entered the window's critical section"
         pid = os.fork()
-        if pid == 0:  # the child: construct within a bounded time, then exit
+        if pid == 0:  # the child: its own process group, a bounded time, then exit
+            os.setpgid(0, 0)
             signal.alarm(10)
             try:
                 Database(_url(admitted)).dispose()
@@ -513,15 +585,21 @@ def test_a_fork_while_a_sibling_holds_the_window_lock_does_not_strand_the_child(
         while time.monotonic() < deadline:
             done, status = os.waitpid(pid, os.WNOHANG)
             if done:
+                child_reaped = True
                 break
             time.sleep(0.05)
         else:
-            os.kill(pid, signal.SIGKILL)
-            os.waitpid(pid, 0)
             pytest.fail("the forked child deadlocked on the inherited window lock")
         assert os.waitstatus_to_exitcode(status) == 0, os.waitstatus_to_exitcode(status)
         assert _db_rows(live) == rows
     finally:
+        if pid and not child_reaped:  # TEARDOWN-1: never leave the forked child behind
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(pid, signal.SIGKILL)
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+            with contextlib.suppress(ChildProcessError):
+                os.waitpid(pid, 0)
         release.set()
         sibling.join(10)
         holder.dispose()
@@ -715,18 +793,9 @@ def test_a_stable_hard_link_to_the_database_is_refused_before_any_write(
         setup.dispose()
     os.link(canonical, alias)
     assert canonical.stat().st_mode & 0o777 == 0o600 == alias.stat().st_mode & 0o777
-    env = _child_env()
-    workers = [
-        subprocess.Popen(
-            [sys.executable, "-c", _HARDLINK_WORKER, str(path), str(tmp_path), rid],
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        for path, rid in ((canonical, "1"), (alias, "2"))
-    ]
-    try:
+    with _children() as children:
+        for path, rid in ((canonical, "1"), (alias, "2")):
+            children.popen(_HARDLINK_WORKER, str(path), str(tmp_path), rid)
         deadline = time.monotonic() + CHILD_S
         for rid in ("1", "2"):
             while not any((tmp_path / f"{rid}.{kind}").exists() for kind in ("ready", "refused")):
@@ -739,11 +808,6 @@ def test_a_stable_hard_link_to_the_database_is_refused_before_any_write(
                 while not (tmp_path / f"{rid}.ack").exists():
                     assert time.monotonic() < deadline, f"worker {rid} never acknowledged"
                     time.sleep(0.01)
-    finally:
-        for worker in workers:
-            if worker.poll() is None:
-                worker.send_signal(signal.SIGKILL)
-            worker.wait(CHILD_S)
     rows = {}
     for name, path in (("canonical", canonical), ("alias", alias)):
         result = _run_child(
@@ -867,3 +931,55 @@ def test_a_refused_instance_is_dead_and_holds_no_lock(tmp_path: Path, window_clo
     with pytest.raises(RuntimeError, match="refused its database files"):
         database.engine.connect()
     assert database.readable() is False
+
+
+# ------------------------------------------------------------------ TEARDOWN-1: positive controls
+
+_HANG = "import time\ntime.sleep(600)\n"
+_INTERMEDIATE = """
+import os, subprocess, sys, time
+env = dict(os.environ, CHRONOS_TEST_PARENT_PID=str(os.getpid()))  # as any spawner does
+child = subprocess.Popen(
+    [sys.executable, "-c", sys.argv[1]], start_new_session=True, env=env,
+    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+)
+print(child.pid, flush=True)
+time.sleep(600)
+"""
+
+
+def test_teardown_control_a_failing_body_still_reaps_its_children() -> None:
+    """A failure inside the context (here a forced assertion) leaves no child alive."""
+
+    pgids: list[int] = []
+    try:
+        with pytest.raises(AssertionError, match="forced"), _children() as children:
+            for _ in range(3):
+                pgids.append(children.popen(_HANG).pid)
+            raise AssertionError("forced failure inside the reaping context")
+        assert [pgid for pgid in pgids if _group_alive(pgid)] == []
+    finally:
+        for pgid in pgids:  # never let a broken reaper leak the hung children
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(pgid, signal.SIGKILL)
+
+
+def test_teardown_control_an_orphaned_child_exits_on_its_own() -> None:
+    """A child whose parent is SIGKILLed (no finally runs there) exits via its watchdog."""
+
+    grandchild = 0
+    try:
+        with _children() as children:
+            parent = children.popen(_INTERMEDIATE, _child_code(_HANG))
+            assert parent.stdout is not None
+            grandchild = int(parent.stdout.readline())
+            os.killpg(parent.pid, signal.SIGKILL)
+            parent.wait(CHILD_S)
+        deadline = time.monotonic() + 10
+        while _pid_alive(grandchild):
+            assert time.monotonic() < deadline, "the orphaned child outlived its parent"
+            time.sleep(0.05)
+    finally:
+        if grandchild:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(grandchild, signal.SIGKILL)
