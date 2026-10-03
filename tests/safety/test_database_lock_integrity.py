@@ -977,6 +977,44 @@ time.sleep(600)
 """
 
 
+def _sqlite_file_with_mode(path: Path, mode: int) -> None:
+    import sqlite3
+
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute("CREATE TABLE marker(id INTEGER PRIMARY KEY)")
+        connection.commit()
+    finally:
+        connection.close()
+    path.chmod(mode)
+
+
+def test_c1_a_closed_window_refuses_a_file_without_owner_write_at_admission(
+    tmp_path: Path, window_closed: None
+) -> None:
+    """DBLOCK-2r3 C1 (Daybreak P2-1): 0400 is refused up front, not left for SQLite to fail late."""
+
+    candidate = tmp_path / "read-only.db"
+    _sqlite_file_with_mode(candidate, 0o400)
+    with pytest.raises(RuntimeError) as refused:
+        Database(_url(candidate))
+    assert "unsafe mode 0400" in str(refused.value)
+    assert database_module._RESTART_TO_REPAIR in str(refused.value)
+
+
+def test_c1_a_closed_window_refuses_a_file_without_owner_read_at_admission(
+    tmp_path: Path, window_closed: None
+) -> None:
+    """DBLOCK-2r3 C1 (Daybreak P2-1): 0200 is refused up front, not left for SQLite to fail late."""
+
+    candidate = tmp_path / "write-only.db"
+    _sqlite_file_with_mode(candidate, 0o200)
+    with pytest.raises(RuntimeError) as refused:
+        Database(_url(candidate))
+    assert "unsafe mode 0200" in str(refused.value)
+    assert database_module._RESTART_TO_REPAIR in str(refused.value)
+
+
 def test_teardown_control_a_failing_body_still_reaps_its_children() -> None:
     """A failure inside the context (here a forced assertion) leaves no child alive."""
 

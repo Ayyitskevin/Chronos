@@ -432,10 +432,10 @@ def _check_sqlite_file_mode(path: Path) -> None:
         metadata = os.lstat(path)
     except FileNotFoundError:
         return
-    if stat.S_IMODE(metadata.st_mode) & 0o077:
+    mode = stat.S_IMODE(metadata.st_mode)
+    if mode & 0o600 != 0o600 or mode & 0o077:
         raise RuntimeError(
-            f"Refusing SQLite path with mode {stat.S_IMODE(metadata.st_mode):04o} (group or "
-            f"other access): {path}; {_RESTART_TO_REPAIR}"
+            f"Refusing SQLite path with unsafe mode {mode:04o}: {path}; {_RESTART_TO_REPAIR}"
         )
 
 
