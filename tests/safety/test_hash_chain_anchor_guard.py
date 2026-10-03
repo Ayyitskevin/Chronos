@@ -1263,8 +1263,10 @@ def _references_the_guard_module(source: str) -> bool:
             or (isinstance(node, ast.Name) and node.id == "anchor_guard")
             or (
                 isinstance(node, ast.Constant)
-                and isinstance(node.value, str)
-                and "anchor_guard" in node.value
+                and (
+                    (isinstance(node.value, str) and "anchor_guard" in node.value)
+                    or (isinstance(node.value, bytes) and b"anchor_guard" in node.value)
+                )
                 and id(node) not in docstrings
             )
         ):
@@ -1274,10 +1276,11 @@ def _references_the_guard_module(source: str) -> bool:
 
 def test_the_guard_is_unwired_and_does_no_anchor_io() -> None:
     package = SRC_ROOT / "chronos"
+    guard_source = package / "persistence" / "anchor_guard.py"
     users = sorted(
         str(path.relative_to(package))
         for path in package.rglob("*.py")
-        if path.name != "anchor_guard.py" and _references_the_guard_module(path.read_text())
+        if path != guard_source and _references_the_guard_module(path.read_text())
     )
     assert users == [], f"the guard is referenced outside persistence/anchor_guard.py: {users}"
     assert not (package / "persistence" / "hash_chain_anchor.py").exists()
