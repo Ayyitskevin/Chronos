@@ -465,7 +465,17 @@ def test_phase_b_shadow_path(
             assert len(provisional) == 1
             assert report.failure == "tick raised _AfterAdmission"
             assert report.proposals_judged == 0 and report.outcomes == []
-            assert after["queue"] == queued["queue"]
+            # DRAIN-2 (Kevin's K-a): the claim committed before evaluation, so the failed
+            # tick leaves the row CLAIMED and blocked from re-evaluation; every other
+            # field is unchanged.
+            assert len(after["queue"]) == len(queued["queue"]) == 1
+            stranded, original = after["queue"][0], queued["queue"][0]
+            assert stranded["status"] == "CLAIMED"
+            assert stranded["cycle_stage"].startswith("claim:")
+            unchanged = {key for key in original if key not in ("status", "cycle_stage")}
+            assert {key: stranded[key] for key in unchanged} == {
+                key: original[key] for key in unchanged
+            }
             assert after["attempts"] == admissions == cycles == []
             failure_events = [
                 event
