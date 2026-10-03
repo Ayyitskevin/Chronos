@@ -1032,12 +1032,17 @@ def _sqlite_file_with_mode(path: Path, mode: int) -> None:
 
 
 def test_c1_a_closed_window_refuses_a_file_without_owner_write_at_admission(
-    tmp_path: Path, window_closed: None
+    tmp_path: Path, window_closed: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """DBLOCK-2r3 C1 (Daybreak P2-1): 0400 is refused up front, not left for SQLite to fail late."""
 
     candidate = tmp_path / "read-only.db"
     _sqlite_file_with_mode(candidate, 0o400)
+
+    def unexpected_create_engine(*args: object, **kwargs: object) -> None:
+        raise AssertionError("create_engine was reached before owner-mode refusal")
+
+    monkeypatch.setattr(database_module, "create_engine", unexpected_create_engine)
     with pytest.raises(RuntimeError) as refused:
         Database(_url(candidate))
     assert "unsafe mode 0400" in str(refused.value)
@@ -1045,12 +1050,17 @@ def test_c1_a_closed_window_refuses_a_file_without_owner_write_at_admission(
 
 
 def test_c1_a_closed_window_refuses_a_file_without_owner_read_at_admission(
-    tmp_path: Path, window_closed: None
+    tmp_path: Path, window_closed: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """DBLOCK-2r3 C1 (Daybreak P2-1): 0200 is refused up front, not left for SQLite to fail late."""
 
     candidate = tmp_path / "write-only.db"
     _sqlite_file_with_mode(candidate, 0o200)
+
+    def unexpected_create_engine(*args: object, **kwargs: object) -> None:
+        raise AssertionError("create_engine was reached before owner-mode refusal")
+
+    monkeypatch.setattr(database_module, "create_engine", unexpected_create_engine)
     with pytest.raises(RuntimeError) as refused:
         Database(_url(candidate))
     assert "unsafe mode 0200" in str(refused.value)
