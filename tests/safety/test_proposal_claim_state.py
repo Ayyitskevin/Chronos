@@ -13,11 +13,13 @@ every child process and join is bounded.
 from __future__ import annotations
 
 import ast
+import contextlib
 import json
 import os
 import signal
 import subprocess
 import sys
+import textwrap
 import threading
 import time
 from collections.abc import Iterator
@@ -299,15 +301,99 @@ def _child_env() -> dict[str, str]:
     return env
 
 
-def _run_child(code: str, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [sys.executable, "-c", code, *args],
-        capture_output=True,
-        text=True,
-        env=_child_env(),
-        timeout=CHILD_S,
-        check=False,
+# TEARDOWN-1: every child this module starts is reaped on EVERY path. It runs in its own
+# process group (start_new_session) and the _children() context kills that group and waits
+# in a finally (success, assertion failure, timeout, KeyboardInterrupt). Each child also
+# carries a watchdog prelude, so a SIGKILLed pytest (no finally runs) cannot strand it: it
+# exits when its parent changes or a bounded total deadline passes (the race workers used to
+# keep looping on a deleted temp database). The marker comment lets a leftover census find
+# this module's children by command line.
+_CHILD_MARK = "# chronos-test-child:test_proposal_claim_state"
+_CHILD_DEADLINE_S = 300.0
+
+
+def _child_code(code: str) -> str:
+    return (
+        f"{_CHILD_MARK}\n"
+        "import os as _os, threading as _threading, time as _time\n"
+        # The spawner's pid, not getppid(): a parent that died before this line runs
+        # would make getppid() already the reaper's pid and blind the watchdog.
+        "_PARENT = int(_os.environ.get('CHRONOS_TEST_PARENT_PID', _os.getppid()))\n"
+        f"_DEADLINE = _time.monotonic() + {_CHILD_DEADLINE_S}\n"
+        "def _orphan_watchdog():\n"
+        "    while _os.getppid() == _PARENT and _time.monotonic() < _DEADLINE:\n"
+        "        _time.sleep(0.1)\n"
+        "    _os._exit(97)\n"
+        "_threading.Thread(target=_orphan_watchdog, daemon=True).start()\n" + textwrap.dedent(code)
     )
+
+
+class _Children:
+    """Children started in their own process groups; reap() kills and waits for them all."""
+
+    def __init__(self) -> None:
+        self._procs: list[subprocess.Popen[str]] = []
+
+    def popen(self, code: str, *args: str) -> subprocess.Popen[str]:
+        env = _child_env()
+        env["CHRONOS_TEST_PARENT_PID"] = str(os.getpid())
+        proc = subprocess.Popen(
+            [sys.executable, "-c", _child_code(code), *args],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        self._procs.append(proc)
+        return proc
+
+    def run(self, code: str, *args: str) -> subprocess.CompletedProcess[str]:
+        proc = self.popen(code, *args)
+        out, err = proc.communicate(timeout=CHILD_S)
+        return subprocess.CompletedProcess(proc.args, proc.returncode, out, err)
+
+    def reap(self) -> None:
+        for proc in self._procs:
+            # Kill only a child not yet reaped: until it is waited for, its pid (and so its
+            # process group id) cannot be recycled for an unrelated process.
+            if proc.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(proc.pid, signal.SIGKILL)
+            with contextlib.suppress(Exception):
+                proc.communicate(timeout=CHILD_S)
+
+
+@contextlib.contextmanager
+def _children() -> Iterator[_Children]:
+    children = _Children()
+    try:
+        yield children
+    finally:
+        children.reap()
+
+
+def _run_child(code: str, *args: str) -> subprocess.CompletedProcess[str]:
+    with _children() as children:
+        return children.run(code, *args)
+
+
+def _group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _pid_alive(pid: int) -> bool:
+    """Alive and not a zombie (an orphan's zombie is reaped by init, not by us)."""
+
+    try:
+        with open(f"/proc/{pid}/stat") as handle:
+            return handle.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except FileNotFoundError:
+        return False
 
 
 # ------------------------------------------- the gap, the order, the crash matrix
@@ -534,24 +620,19 @@ def test_competing_workers_claim_every_row_exactly_once(db_path: Path, tmp_path:
         seed.dispose()
     go = tmp_path / "go"
     journal = tmp_path / "handoffs.log"
-    workers = [
-        subprocess.Popen(
-            [sys.executable, "-c", CHILD_RACE, str(db_path), str(go), str(journal), f"w{index}"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            env=_child_env(),
-        )
-        for index in range(3)
-    ]
-    time.sleep(1.0)  # let every worker reach the barrier
-    go.touch()
     summaries = []
-    for worker in workers:
-        out, err = worker.communicate(timeout=CHILD_S * 3)
-        assert worker.returncode == 0, err
-        name, claimed, started, finished = out.split()
-        summaries.append((name, int(claimed), float(started), float(finished)))
+    with _children() as children:
+        workers = [
+            children.popen(CHILD_RACE, str(db_path), str(go), str(journal), f"w{index}")
+            for index in range(3)
+        ]
+        time.sleep(1.0)  # let every worker reach the barrier
+        go.touch()
+        for worker in workers:
+            out, err = worker.communicate(timeout=CHILD_S * 3)
+            assert worker.returncode == 0, err
+            name, claimed, started, finished = out.split()
+            summaries.append((name, int(claimed), float(started), float(finished)))
     handoffs = [int(line.split()[1]) for line in journal.read_text().splitlines()]
     assert len(handoffs) == len(set(handoffs)) == 500, "a row was claimed (handed off) twice"
     # Real overlap: at least two workers' claim loops ran concurrently.
@@ -870,3 +951,55 @@ def test_claim_tokens_fit_the_stage_column_and_identify_the_process() -> None:
     assert token.startswith("claim:") and len(token) <= 32
     threading.Thread(target=lambda: None).start()  # tokens are per process, not per thread
     assert token == proposals.CLAIM_TOKEN
+
+
+# ------------------------------------------------------------------ TEARDOWN-1: positive controls
+
+_HANG = "import time\ntime.sleep(600)\n"
+_INTERMEDIATE = """
+import os, subprocess, sys, time
+env = dict(os.environ, CHRONOS_TEST_PARENT_PID=str(os.getpid()))  # as any spawner does
+child = subprocess.Popen(
+    [sys.executable, "-c", sys.argv[1]], start_new_session=True, env=env,
+    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+)
+print(child.pid, flush=True)
+time.sleep(600)
+"""
+
+
+def test_teardown_control_a_failing_body_still_reaps_its_children() -> None:
+    """A failure inside the context (here a forced assertion) leaves no child alive."""
+
+    pgids: list[int] = []
+    try:
+        with pytest.raises(AssertionError, match="forced"), _children() as children:
+            for _ in range(3):
+                pgids.append(children.popen(_HANG).pid)
+            raise AssertionError("forced failure inside the reaping context")
+        assert [pgid for pgid in pgids if _group_alive(pgid)] == []
+    finally:
+        for pgid in pgids:  # never let a broken reaper leak the hung children
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(pgid, signal.SIGKILL)
+
+
+def test_teardown_control_an_orphaned_child_exits_on_its_own() -> None:
+    """A child whose parent is SIGKILLed (no finally runs there) exits via its watchdog."""
+
+    grandchild = 0
+    try:
+        with _children() as children:
+            parent = children.popen(_INTERMEDIATE, _child_code(_HANG))
+            assert parent.stdout is not None
+            grandchild = int(parent.stdout.readline())
+            os.killpg(parent.pid, signal.SIGKILL)
+            parent.wait(CHILD_S)
+        deadline = time.monotonic() + 10
+        while _pid_alive(grandchild):
+            assert time.monotonic() < deadline, "the orphaned child outlived its parent"
+            time.sleep(0.05)
+    finally:
+        if grandchild:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(grandchild, signal.SIGKILL)
