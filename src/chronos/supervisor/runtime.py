@@ -348,6 +348,11 @@ class AutonomyRuntime:
                 # No facts is a refusal to run, not an error: a cycle without
                 # them would have to invent the numbers it judges against. The
                 # queue is left intact so the work happens once facts return.
+                proposals.alert_interrupted_claims(
+                    session,
+                    account_fingerprint=self._config.account_fingerprint,
+                    now=now,
+                )
                 alerts.raise_alert(
                     session,
                     account_fingerprint=self._config.account_fingerprint,

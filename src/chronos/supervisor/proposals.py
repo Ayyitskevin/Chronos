@@ -30,20 +30,44 @@ queue is where those two clocks meet.
 
 from __future__ import annotations
 
+import secrets
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from chronos.persistence.schema import AutonomyProposalQueueRow
+from chronos.supervisor import alerts
+from chronos.utils.time import utc_now
 
 #: How many unprocessed proposals may be held before enqueueing refuses. Sized
 #: so a burst survives a slow tick while a runaway worker cannot fill a disk.
 MAX_PENDING = 500
 
 STATUS_PENDING = "PENDING"
+#: Claimed by a drain and committed BEFORE it is evaluated (Kevin's K-a). A crash or
+#: raise after that commit leaves the row CLAIMED: it is never selected again, never
+#: moved back to PENDING, and never resolved automatically (option (c)). Interrupted
+#: claims are listed (:func:`list_interrupted_claims`) and alerted, nothing more.
+STATUS_CLAIMED = "CLAIMED"
 STATUS_PROCESSED = "PROCESSED"
+
+#: Written into ``cycle_stage`` while a row is CLAIMED, so a claim can be attributed to
+#: the process that made it. One value per process; ``mark_processed`` overwrites it.
+CLAIM_TOKEN = "claim:" + secrets.token_hex(8)
+
+INTERRUPTED_CLAIMS_ALERT_KIND = "proposals.interrupted_claims"
+#: Static on purpose: folding never refreshes an alert's detail, so a count, ids or
+#: tokens would go stale. The current census is :func:`list_interrupted_claims`.
+INTERRUPTED_CLAIMS_ALERT_SUMMARY = (
+    "one or more pre-existing proposal claims require inspection; "
+    "no automatic resolution is permitted"
+)
+
+
+class ClaimStateError(RuntimeError):
+    """A proposal's queue state was not the one the operation requires."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +85,20 @@ class QueuedProposal:
     #: NULL marks a legacy or pre-registry row and is never inferred later.
     proposer_credential_epoch: str | None = None
     proposer_registry_entry_digest: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class InterruptedClaim:
+    """One CLAIMED row, as found: never a judgement about whether its claimer is alive.
+
+    ``received_at`` is the queue receipt time, not the claim time: no claim time is
+    stored, so nothing here can say how long a row has been claimed or whether the
+    claim is stale. ``claim_token`` names the process that claimed it.
+    """
+
+    id: int
+    claim_token: str
+    received_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +120,20 @@ def pending_depth(session: Session, *, account_fingerprint: str) -> int:
         .where(
             AutonomyProposalQueueRow.account_fingerprint == account_fingerprint,
             AutonomyProposalQueueRow.status == STATUS_PENDING,
+        )
+    )
+    return int(total or 0)
+
+
+def outstanding_depth(session: Session, *, account_fingerprint: str) -> int:
+    """PENDING plus CLAIMED: everything not yet terminal. This is what the cap bounds."""
+
+    total = session.scalar(
+        select(func.count())
+        .select_from(AutonomyProposalQueueRow)
+        .where(
+            AutonomyProposalQueueRow.account_fingerprint == account_fingerprint,
+            AutonomyProposalQueueRow.status.in_((STATUS_PENDING, STATUS_CLAIMED)),
         )
     )
     return int(total or 0)
@@ -123,13 +175,14 @@ def enqueue(
                 )
 
     depth = pending_depth(session, account_fingerprint=account_fingerprint)
-    if depth >= MAX_PENDING:
+    outstanding = outstanding_depth(session, account_fingerprint=account_fingerprint)
+    if outstanding >= MAX_PENDING:
         return EnqueueOutcome(
             queued=False,
             refusal=(
-                f"the proposal queue holds {depth} unprocessed items, at its {MAX_PENDING} "
-                "cap; the runtime is not draining and new proposals are refused rather "
-                "than displacing earlier ones"
+                f"the proposal queue holds {outstanding} unprocessed items, at its "
+                f"{MAX_PENDING} cap; the runtime is not draining and new proposals are "
+                "refused rather than displacing earlier ones"
             ),
             pending_depth=depth,
         )
@@ -149,10 +202,45 @@ def enqueue(
     return EnqueueOutcome(queued=True, queue_id=row.id, pending_depth=depth + 1)
 
 
+def alert_interrupted_claims(session: Session, *, account_fingerprint: str, now: datetime) -> bool:
+    """Raise the static inspection alert iff this account already has a CLAIMED row."""
+    preexisting = session.scalar(
+        select(func.count())
+        .select_from(AutonomyProposalQueueRow)
+        .where(
+            AutonomyProposalQueueRow.account_fingerprint == account_fingerprint,
+            AutonomyProposalQueueRow.status == STATUS_CLAIMED,
+        )
+    )
+    if not preexisting:
+        return False
+    alerts.raise_alert(
+        session,
+        account_fingerprint=account_fingerprint,
+        severity=alerts.AlertSeverity.WARNING,
+        kind=INTERRUPTED_CLAIMS_ALERT_KIND,
+        summary=INTERRUPTED_CLAIMS_ALERT_SUMMARY,
+        detail={},
+        now=now,
+    )
+    return True
+
+
 def claim_batch(
     session: Session, *, account_fingerprint: str, limit: int
 ) -> tuple[QueuedProposal, ...]:
-    """The oldest pending proposals, in arrival order.
+    """Claim the oldest pending proposals, in arrival order, and return them.
+
+    Each claim is a compare-and-set: ``UPDATE ... SET status='CLAIMED' WHERE id=:id
+    AND status='PENDING'``, so exactly one claimant wins a row even when two drains
+    race. The caller's transaction commits the claims; the runtime commits it before
+    any proposal is evaluated, so a crash after that commit leaves the row CLAIMED
+    and it is never re-presented.
+
+    Claims that already existed before this call are interrupted (this process's
+    ticks are sequential, so its own claims are always finished by the next call;
+    another process's live claims may also be counted, conservatively). They raise
+    one static alert and are left exactly as they are.
 
     Bounded per tick so one flood cannot monopolise a cycle: the runtime should
     also deliver alerts and observe its own health each pass, and a tick that
@@ -160,7 +248,8 @@ def claim_batch(
     reports the queue is flooded.
     """
 
-    rows = session.scalars(
+    alert_interrupted_claims(session, account_fingerprint=account_fingerprint, now=utc_now())
+    candidates = session.scalars(
         select(AutonomyProposalQueueRow)
         .where(
             AutonomyProposalQueueRow.account_fingerprint == account_fingerprint,
@@ -169,15 +258,50 @@ def claim_batch(
         .order_by(AutonomyProposalQueueRow.id.asc())
         .limit(limit)
     ).all()
-    return tuple(
-        QueuedProposal(
-            id=row.id,
-            payload=row.payload,
-            received_at=row.received_at,
-            proposer_id=row.proposer_id,
-            proposer_credential_epoch=row.proposer_credential_epoch,
-            proposer_registry_entry_digest=row.proposer_registry_entry_digest,
+    claimed: list[QueuedProposal] = []
+    for row in candidates:
+        result = session.execute(
+            update(AutonomyProposalQueueRow)
+            .where(
+                AutonomyProposalQueueRow.id == row.id,
+                AutonomyProposalQueueRow.status == STATUS_PENDING,
+            )
+            .values(status=STATUS_CLAIMED, cycle_stage=CLAIM_TOKEN)
         )
+        if result.rowcount != 1:  # type: ignore[attr-defined]
+            continue  # another drain claimed it first
+        claimed.append(
+            QueuedProposal(
+                id=row.id,
+                payload=row.payload,
+                received_at=row.received_at,
+                proposer_id=row.proposer_id,
+                proposer_credential_epoch=row.proposer_credential_epoch,
+                proposer_registry_entry_digest=row.proposer_registry_entry_digest,
+            )
+        )
+    return tuple(claimed)
+
+
+def list_interrupted_claims(
+    session: Session, *, account_fingerprint: str
+) -> tuple[InterruptedClaim, ...]:
+    """Every CLAIMED row for the account, oldest first. Read-only; the current census.
+
+    Nothing in production calls this today: it is the list a later, separately
+    decided operator surface will show. It writes nothing and resolves nothing.
+    """
+
+    rows = session.scalars(
+        select(AutonomyProposalQueueRow)
+        .where(
+            AutonomyProposalQueueRow.account_fingerprint == account_fingerprint,
+            AutonomyProposalQueueRow.status == STATUS_CLAIMED,
+        )
+        .order_by(AutonomyProposalQueueRow.id.asc())
+    )
+    return tuple(
+        InterruptedClaim(id=row.id, claim_token=row.cycle_stage, received_at=row.received_at)
         for row in rows
     )
 
@@ -196,12 +320,25 @@ def mark_processed(
     refused" is a finished state. Leaving refusals pending would make the
     runtime re-judge them forever, which is both a loop and a way for one
     malformed payload to block every proposal behind it.
+
+    Only a CLAIMED row may be marked: the update is conditional on that status, and
+    any other state refuses loudly rather than overwriting a row it did not claim.
     """
 
-    row = session.get(AutonomyProposalQueueRow, queue_id)
-    if row is None:  # pragma: no cover - defensive
-        return
-    row.status = STATUS_PROCESSED
-    row.processed_at = now
-    row.cycle_stage = stage[:32]
-    row.refusal = refusal[:64]
+    result = session.execute(
+        update(AutonomyProposalQueueRow)
+        .where(
+            AutonomyProposalQueueRow.id == queue_id,
+            AutonomyProposalQueueRow.status == STATUS_CLAIMED,
+        )
+        .values(
+            status=STATUS_PROCESSED,
+            processed_at=now,
+            cycle_stage=stage[:32],
+            refusal=refusal[:64],
+        )
+    )
+    if result.rowcount != 1:  # type: ignore[attr-defined]
+        raise ClaimStateError(
+            f"proposal {queue_id} is not CLAIMED; refusing to mark a row this drain did not claim"
+        )
