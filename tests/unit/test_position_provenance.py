@@ -277,6 +277,11 @@ def test_1_migration_0015_creates_position_provenance_and_the_drift_checker_acce
     assert "0015" in {
         r.revision for r in script.iterate_revisions(head, "base")
     }  # at/below the head
+    # DBLOCK: this validates migration acceptance, not permission repair; the raw
+    # engine created the file under the umask, and after the process's first
+    # Database construction R-21 is check-only ("restart the process to repair").
+    db_path.chmod(0o600)
+    assert (db_path.stat().st_mode & 0o777) == 0o600
     upgraded = Database(f"sqlite:///{db_path}")
     try:
         upgraded.initialize()
