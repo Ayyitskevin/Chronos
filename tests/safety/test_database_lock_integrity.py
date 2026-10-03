@@ -281,8 +281,13 @@ def test_no_repair_can_race_a_dbapi_open_after_the_window_closes(
     shm = Path(f"{path}-shm")
     for suffix in SIDE:  # SQLite removed them at the last close
         Path(f"{path}{suffix}").unlink(missing_ok=True)
+    # Non-empty on purpose: SQLite's robust_open fchmods a ZERO-size file to the database's
+    # mode when it opens it, which would silently erase the drift this pin plants.
     fd = os.open(shm, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    os.close(fd)
+    try:
+        os.write(fd, b"\0" * 32768)
+    finally:
+        os.close(fd)
     alias_dir = tmp_path / "alias"
     alias_dir.mkdir()
     alias = alias_dir / "a.db"
@@ -323,6 +328,7 @@ def test_no_repair_can_race_a_dbapi_open_after_the_window_closes(
             rows = _db_rows(path)
             assert any(row.startswith("a.db-shm:") for row in rows), rows
             assert os.stat(shm).st_ino == replacement_inode
+            assert (os.stat(shm).st_mode & 0o777) == 0o644, "the planted drift is gone"
             if has_seam:
                 release.set()
             else:
