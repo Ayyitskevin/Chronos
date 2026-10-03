@@ -202,6 +202,30 @@ def enqueue(
     return EnqueueOutcome(queued=True, queue_id=row.id, pending_depth=depth + 1)
 
 
+def alert_interrupted_claims(session: Session, *, account_fingerprint: str, now: datetime) -> bool:
+    """Raise the static inspection alert iff this account already has a CLAIMED row."""
+    preexisting = session.scalar(
+        select(func.count())
+        .select_from(AutonomyProposalQueueRow)
+        .where(
+            AutonomyProposalQueueRow.account_fingerprint == account_fingerprint,
+            AutonomyProposalQueueRow.status == STATUS_CLAIMED,
+        )
+    )
+    if not preexisting:
+        return False
+    alerts.raise_alert(
+        session,
+        account_fingerprint=account_fingerprint,
+        severity=alerts.AlertSeverity.WARNING,
+        kind=INTERRUPTED_CLAIMS_ALERT_KIND,
+        summary=INTERRUPTED_CLAIMS_ALERT_SUMMARY,
+        detail={},
+        now=now,
+    )
+    return True
+
+
 def claim_batch(
     session: Session, *, account_fingerprint: str, limit: int
 ) -> tuple[QueuedProposal, ...]:
@@ -224,24 +248,7 @@ def claim_batch(
     reports the queue is flooded.
     """
 
-    preexisting = session.scalar(
-        select(func.count())
-        .select_from(AutonomyProposalQueueRow)
-        .where(
-            AutonomyProposalQueueRow.account_fingerprint == account_fingerprint,
-            AutonomyProposalQueueRow.status == STATUS_CLAIMED,
-        )
-    )
-    if preexisting:
-        alerts.raise_alert(
-            session,
-            account_fingerprint=account_fingerprint,
-            severity=alerts.AlertSeverity.WARNING,
-            kind=INTERRUPTED_CLAIMS_ALERT_KIND,
-            summary=INTERRUPTED_CLAIMS_ALERT_SUMMARY,
-            detail={},
-            now=utc_now(),
-        )
+    alert_interrupted_claims(session, account_fingerprint=account_fingerprint, now=utc_now())
     candidates = session.scalars(
         select(AutonomyProposalQueueRow)
         .where(
