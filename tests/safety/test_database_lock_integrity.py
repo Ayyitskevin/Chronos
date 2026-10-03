@@ -55,25 +55,54 @@ def _url(path: Path) -> str:
     return f"sqlite+pysqlite:///{path}"
 
 
-def _lock_rows(*paths: Path) -> list[str]:
-    """This pid's POSIX lock rows on the given files, as 'name:start-end' (by inode)."""
+def _lock_key(path: Path) -> str:
+    """The file's identity as /proc/locks prints it: MAJ:MIN:INODE (hex major/minor)."""
 
-    inodes: dict[int, str] = {}
+    st = os.stat(path)
+    return f"{os.major(st.st_dev):02x}:{os.minor(st.st_dev):02x}:{st.st_ino}"
+
+
+def _proc_locks_rows(keys: dict[str, str]) -> list[str]:
+    """One full snapshot of /proc/locks (read to EOF), filtered to this pid and the keys.
+
+    /proc/locks is a seq_file: one read() returns only one internal page (about 4 KiB), so a
+    single os.read silently TRUNCATES it once a few dozen locks exist on the host. Reading to
+    EOF takes several read() calls, between which other processes' lock churn can repeat or
+    skip rows (DBLOCK-2r2); _lock_rows therefore demands two agreeing snapshots.
+    """
+
+    with open("/proc/locks", "rb") as handle:
+        data = handle.read()
+    rows = []
+    for line in data.decode().splitlines():
+        fields = line.split()
+        if len(fields) < 8 or fields[1] != "POSIX" or fields[4] != str(os.getpid()):
+            continue
+        if fields[5] in keys:
+            rows.append(f"{keys[fields[5]]}:{fields[6]}-{fields[7]}")
+    return sorted(rows)
+
+
+def _lock_rows(*paths: Path) -> list[str]:
+    """This pid's POSIX lock rows on the given files, as 'name:start-end' (by device+inode).
+
+    A full read is several read() calls and can tear under other processes' lock churn, so
+    two consecutive snapshots of THIS pid's rows must agree before they are returned.
+    """
+
+    keys: dict[str, str] = {}
     for path in paths:
         try:
-            inodes[os.stat(path).st_ino] = path.name
+            keys[_lock_key(path)] = path.name
         except FileNotFoundError:
             continue
-    rows = []
-    with open("/proc/locks") as handle:
-        for line in handle:
-            fields = line.split()
-            if fields[1] != "POSIX" or int(fields[4]) != os.getpid():
-                continue
-            inode = int(fields[5].split(":")[2])
-            if inode in inodes:
-                rows.append(f"{inodes[inode]}:{fields[6]}-{fields[7]}")
-    return sorted(rows)
+    previous = _proc_locks_rows(keys)
+    for _ in range(50):
+        current = _proc_locks_rows(keys)
+        if current == previous:
+            return current
+        previous = current
+    raise AssertionError("/proc/locks never gave two agreeing snapshots of this pid's rows")
 
 
 def _db_rows(path: Path) -> list[str]:
