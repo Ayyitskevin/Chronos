@@ -26,9 +26,8 @@ from dataclasses import dataclass
 # performs no anchor-file I/O and derives no path: the caller INJECTS the lock path, and
 # the wait deadline is a required argument (the default/maximum, R11, is undecided).
 #
-# It lives in this module only because the approved production set is three files; the
-# cost (a larger module that mixes filesystem locking with engine configuration) is
-# disclosed in the FU1-GUARD-1 handoff. Linux only (advisory flock on a local filesystem).
+# The dedicated module is Kevin's 2026-10-02 placement decision (spec FU1g5.3).
+# Linux only (advisory flock on a local filesystem).
 
 #: Release steps, in the documented release order (the reverse of acquisition).
 _ANCHOR_RELEASE_STEPS = (
