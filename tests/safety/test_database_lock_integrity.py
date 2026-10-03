@@ -178,28 +178,59 @@ def _child_code(code: str) -> str:
         "    while _os.getppid() == _PARENT and _time.monotonic() < _DEADLINE:\n"
         "        _time.sleep(0.1)\n"
         "    _os._exit(97)\n"
+        # DBLOCK-2r3: a sentinel that keeps this process group non-empty (so its id is never
+        # recycled) until the spawner closes the pipe's write end, or dies. It is the pipe's
+        # ONLY reader (the leader closes its copy), forked before any thread or user code.
+        "_GROUP_FD = _os.environ.pop('CHRONOS_TEST_GROUP_FD', None)\n"
+        "if _GROUP_FD is not None:\n"
+        "    if _os.fork() == 0:\n"
+        "        try:\n"
+        "            _null = _os.open(_os.devnull, _os.O_RDWR)\n"
+        "            for _std in (0, 1, 2):\n"
+        "                _os.dup2(_null, _std)\n"
+        "            while _os.read(int(_GROUP_FD), 4096):\n"
+        "                pass\n"
+        "        finally:\n"
+        "            _os._exit(0)\n"
+        "    _os.close(int(_GROUP_FD))\n"
         "_threading.Thread(target=_orphan_watchdog, daemon=True).start()\n" + textwrap.dedent(code)
     )
 
 
 class _Children:
-    """Children started in their own process groups; reap() kills and waits for them all."""
+    """Children started in their own process groups; reap() kills and waits for them all.
+
+    Each group holds a sentinel (see _child_code) that is the only reader of a pipe whose write
+    end only this process holds. While a 1-byte write to that pipe succeeds, the sentinel is a
+    live member of the group, so the group exists and Linux cannot hand its id to anyone else:
+    killpg on the recorded id reaches only our group, even after its leader has been reaped.
+    """
 
     def __init__(self) -> None:
-        self._procs: list[subprocess.Popen[str]] = []
+        self._procs: list[tuple[subprocess.Popen[str], int]] = []
 
     def popen(self, code: str, *args: str) -> subprocess.Popen[str]:
         env = _child_env()
         env["CHRONOS_TEST_PARENT_PID"] = str(os.getpid())
-        proc = subprocess.Popen(
-            [sys.executable, "-c", _child_code(code), *args],
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            start_new_session=True,
-        )
-        self._procs.append(proc)
+        read_fd, write_fd = os.pipe()
+        env["CHRONOS_TEST_GROUP_FD"] = str(read_fd)
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, "-c", _child_code(code), *args],
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                start_new_session=True,
+                pass_fds=(read_fd,),
+            )
+        except BaseException:
+            os.close(write_fd)
+            raise
+        finally:
+            os.close(read_fd)
+        os.set_blocking(write_fd, False)
+        self._procs.append((proc, write_fd))
         return proc
 
     def run(self, code: str, *args: str) -> subprocess.CompletedProcess[str]:
@@ -208,14 +239,25 @@ class _Children:
         return subprocess.CompletedProcess(proc.args, proc.returncode, out, err)
 
     def reap(self) -> None:
-        for proc in self._procs:
-            # Kill only a child not yet reaped: until it is waited for, its pid (and so its
-            # process group id) cannot be recycled for an unrelated process.
-            if proc.returncode is None:
+        for proc, write_fd in self._procs:
+            try:
+                os.write(write_fd, b"\0")
+                pinned = True
+            except BrokenPipeError:  # no reader: the sentinel is gone, the id may be recycled
+                pinned = False
+            except BlockingIOError:  # a full pipe still has its reader
+                pinned = True
+            # An unreaped leader also pins its pid (and so the group id) until it is waited for.
+            if pinned or proc.returncode is None:
                 with contextlib.suppress(ProcessLookupError):
                     os.killpg(proc.pid, signal.SIGKILL)
             with contextlib.suppress(Exception):
                 proc.communicate(timeout=CHILD_S)
+            os.close(write_fd)
+            if pinned:  # the killed members are reaped by init; signal 0 only probes
+                deadline = time.monotonic() + CHILD_S
+                while _group_alive(proc.pid) and time.monotonic() < deadline:
+                    time.sleep(0.01)
 
 
 @contextlib.contextmanager
@@ -1050,3 +1092,74 @@ def test_teardown_control_an_orphaned_child_exits_on_its_own() -> None:
         if grandchild:
             with contextlib.suppress(ProcessLookupError):
                 os.killpg(grandchild, signal.SIGKILL)
+
+
+_LEADER_WITH_DESCENDANT = """
+import subprocess, sys
+child = subprocess.Popen(
+    [sys.executable, "-c", "import time; time.sleep(120)"],
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+)
+print(child.pid, flush=True)
+"""
+
+
+def test_c2_a_reaped_leader_does_not_exempt_its_same_group_descendant() -> None:
+    """DBLOCK-2r3 C2 (Daybreak TEARDOWN-1 P1): the leader exits 0 after starting a same-group
+    hung descendant and the caller reaps the leader; leaving the context leaves no survivor."""
+
+    descendant = 0
+    group = 0
+    try:
+        with _children() as children:
+            leader = children.popen(_LEADER_WITH_DESCENDANT)
+            group = leader.pid
+            out, err = leader.communicate(timeout=CHILD_S)
+            assert leader.returncode == 0, err
+            descendant = int(out.strip())
+            assert _pid_alive(descendant), "the descendant must reach the cleanup boundary"
+            assert os.getpgid(descendant) == group
+        assert not _pid_alive(descendant), "a reaped leader exempted its descendant"
+        assert not _group_alive(group)
+    finally:
+        if descendant and _pid_alive(descendant):  # never leak it from a broken reaper
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(descendant, signal.SIGKILL)
+
+
+def test_c2_a_group_outlives_its_reaped_leader_inside_the_context() -> None:
+    """The recorded pgid stays pinned to OUR group after its leader is reaped (the sentinel), so
+    the closing killpg cannot reach a recycled id."""
+
+    with _children() as children:
+        leader = children.popen("pass")
+        leader.communicate(timeout=CHILD_S)
+        assert leader.returncode == 0
+        assert _group_alive(leader.pid), "nothing pins the group once its leader is reaped"
+    assert not _group_alive(leader.pid)
+
+
+def test_c2_reap_never_signals_a_group_the_body_already_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No-unrelated-process invariant: once the body has killed and reaped a group (its sentinel
+    gone, so its id may be recycled), reap() sends that id no SIGKILL."""
+
+    with _children() as children:
+        leader = children.popen(_HANG)
+        os.killpg(leader.pid, signal.SIGKILL)
+        leader.communicate(timeout=CHILD_S)
+        deadline = time.monotonic() + CHILD_S
+        while _group_alive(leader.pid):
+            assert time.monotonic() < deadline, "the killed group never went away"
+            time.sleep(0.01)
+        sent: list[tuple[int, int]] = []
+        real_killpg = os.killpg
+
+        def recording_killpg(pgid: int, sig: int) -> None:
+            sent.append((pgid, sig))
+            real_killpg(pgid, sig)
+
+        monkeypatch.setattr(os, "killpg", recording_killpg)
+    assert (leader.pid, signal.SIGKILL) not in sent, sent
