@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import errno
 import os
+import secrets
 import stat
+import threading
+from collections.abc import Callable
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -26,6 +29,49 @@ _DATABASE_RECOVERY_GUIDANCE = (
     "configure a fresh DATABASE_URL instead. Chronos never modifies such a database itself."
 )
 _SQLITE_SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
+
+# >>> R-21 startup repair window (DBLOCK)
+# POSIX record locks belong to the (process, file) pair, and close() of ANY descriptor for a
+# file releases every lock the process holds on it. Re-opening a database or sidecar by path
+# while this process holds it through SQLite therefore silently drops that connection's WAL
+# locks, and another process can then delete the live WAL under it (P1-NEW-23: acknowledged
+# commits lost). So files may be opened to be repaired only during the FIRST file-backed
+# Database construction in a process: the window closes permanently, under the lock, before
+# that construction may create an engine, and is never reopened (not by dispose(), a failed
+# constructor or a fork). Afterwards every check is lstat-only and refuses what it would
+# have repaired: a restart repairs.
+_REPAIR_WINDOW_LOCK = threading.Lock()
+_REPAIR_WINDOW_OPEN = True
+_RESTART_TO_REPAIR = (
+    "restart the process to repair: the startup repair window closed during this process's "
+    "first file-backed Database construction, and re-opening a database file it may hold "
+    "through SQLite would drop that connection's locks"
+)
+#: Test-only seam: called as hook(step) at "decided" (the window state was read, the lock is
+#: held) and "linked" (a new database file was linked into place). A no-op while unset.
+_ADMISSION_STEP_HOOK: Callable[[str], None] | None = None
+
+
+def _admission_step(step: str) -> None:
+    hook = _ADMISSION_STEP_HOOK
+    if hook is not None:
+        hook(step)
+
+
+def _reset_repair_window_lock_in_child() -> None:
+    """A forked child gets a fresh lock; the window STATE is inherited unchanged.
+
+    A sibling thread holding the lock at fork() does not exist in the child and could never
+    release the inherited copy.
+    """
+
+    global _REPAIR_WINDOW_LOCK
+    _REPAIR_WINDOW_LOCK = threading.Lock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_repair_window_lock_in_child)
+# <<< R-21 startup repair window (DBLOCK)
 
 #: How long a connection waits for a competing writer before reporting
 #: "database is locked". The single-writer lease means sustained contention is
@@ -81,19 +127,22 @@ class Database:
         configured_url = make_url(url)
         is_sqlite = configured_url.get_backend_name() == "sqlite"
         self._sqlite_path = _sqlite_database_path(url)
-        self._prepare_sqlite_parent(self._sqlite_path)
-        self._prepare_private_sqlite_file()
-        # R-21, and the ordering is load-bearing: reject a symlinked database or
-        # sidecar BEFORE any connection is opened. This used to run only after
-        # the first connect, which happened to work while the journal mode was
-        # `delete`. Enabling WAL exposed the latent bug — switching journal modes
-        # makes SQLite unlink a stale `-wal`/`-journal` file, so by the time the
-        # check ran the symlink it was meant to reject had already been removed
-        # and the check passed on the real file SQLite had just created. Nothing
-        # was written through the link, but a guard that silently stops firing is
-        # a guard that is no longer there. Checking first also means SQLite never
-        # gets the chance to follow a link we would have refused.
-        self._restrict_sqlite_file_mode()
+        self._refused = False
+        # R-21 is a startup check. During the first Database construction for file-backed
+        # SQLite in this process, existing database and sidecar paths are checked and may
+        # have their mode tightened. Before that construction is allowed to create an
+        # engine, the process-wide repair window closes permanently under the module lock,
+        # whether or not engine creation or the first connection later succeeds. From then
+        # on every Database in the process only checks these files with lstat and refuses
+        # any problem; nothing is repaired until the process restarts. The checks reject a
+        # symbolic link, a non-regular file or a file owned by another user BEFORE any
+        # connection is opened, so SQLite is not handed a link already present at startup.
+        #
+        # It gives no protection against concurrent changes to these paths or their
+        # directories by any actor. SQLite opens by pathname, so such a change can redirect
+        # what it opens. Connections that other components open directly with sqlite3 are
+        # outside this check.
+        self._admit_sqlite_files()
         engine_kwargs: dict[str, object] = {}
         if is_sqlite:
             engine_kwargs["connect_args"] = {"check_same_thread": False}
@@ -101,6 +150,7 @@ class Database:
             engine_kwargs["poolclass"] = StaticPool
         self.engine: Engine = create_engine(url, **engine_kwargs)
         if is_sqlite:
+            event.listen(self.engine, "connect", self._refuse_if_refused)
             event.listen(
                 self.engine,
                 "connect",
@@ -108,9 +158,13 @@ class Database:
             )
         self.sessions = sessionmaker(bind=self.engine, expire_on_commit=False, class_=Session)
         if self._sqlite_path is not None:
-            with self.engine.connect():
-                pass
-            self._restrict_sqlite_file_mode()
+            try:
+                with self.engine.connect():
+                    pass
+                self._verify_sqlite_files()
+            except BaseException:
+                self._refuse()
+                raise
 
     def initialize(self) -> None:
         schema_inspector = inspect(self.engine)
@@ -126,7 +180,7 @@ class Database:
             Base.metadata.create_all(self.engine)
             with self.sessions.begin() as session:
                 session.add(SchemaVersionRow(version=SCHEMA_VERSION))
-            self._restrict_sqlite_file_mode()
+            self._verify_sqlite_files_or_refuse()
             return
 
         version_columns = {
@@ -159,7 +213,7 @@ class Database:
                 + ". "
                 + _DATABASE_RECOVERY_GUIDANCE
             )
-        self._restrict_sqlite_file_mode()
+        self._verify_sqlite_files_or_refuse()
 
     def bind_scope(
         self,
@@ -218,33 +272,132 @@ class Database:
         except (OSError, RuntimeError, SQLAlchemyError):
             return False
 
-    def _restrict_sqlite_file_mode(self) -> None:
-        if self._sqlite_path is None:
-            return
-        for path in (
+    def _sqlite_namespace(self) -> tuple[Path, ...]:
+        assert self._sqlite_path is not None
+        return (
             self._sqlite_path,
             *(Path(f"{self._sqlite_path}{suffix}") for suffix in _SQLITE_SIDECAR_SUFFIXES),
-        ):
-            _secure_sqlite_file(path)
+        )
 
-    def _prepare_private_sqlite_file(self) -> None:
+    def _admit_sqlite_files(self) -> None:
+        """Prepare, check and (only while the window is open) repair, then close the window."""
+
+        global _REPAIR_WINDOW_OPEN
         if self._sqlite_path is None:
             return
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW
-        try:
-            file_descriptor = os.open(self._sqlite_path, flags, 0o600)
-        except FileExistsError:
-            _secure_sqlite_file(self._sqlite_path)
+        with _REPAIR_WINDOW_LOCK:
+            try:
+                self._prepare_sqlite_parent(self._sqlite_path)
+                _create_private_sqlite_file(self._sqlite_path)
+                repair = _REPAIR_WINDOW_OPEN
+                _admission_step("decided")
+                namespace = self._sqlite_namespace()
+                # Identity first, across every path, so a link refusal is never masked by a
+                # mode refusal on another path.
+                for path in namespace:
+                    _check_sqlite_file_identity(path)
+                for path in namespace:
+                    if repair:
+                        _secure_sqlite_file(path)
+                    else:
+                        _check_sqlite_file_mode(path)
+            finally:
+                _REPAIR_WINDOW_OPEN = False
+
+    def _verify_sqlite_files(self) -> None:
+        """lstat-only re-check after a connection exists: never opens, never repairs."""
+
+        if self._sqlite_path is None:
             return
+        namespace = self._sqlite_namespace()
+        for path in namespace:
+            _check_sqlite_file_identity(path)
+        for path in namespace:
+            _check_sqlite_file_mode(path)
+
+    def _verify_sqlite_files_or_refuse(self) -> None:
         try:
-            os.fchmod(file_descriptor, 0o600)
-        finally:
-            os.close(file_descriptor)
+            self._verify_sqlite_files()
+        except BaseException:
+            self._refuse()
+            raise
+
+    def _refuse(self) -> None:
+        """Fail closed: no new connection, and the pooled ones are closed through SQLite."""
+
+        self._refused = True
+        self.engine.dispose()
+
+    def _refuse_if_refused(self, dbapi_connection: Any, _connection_record: Any) -> None:
+        if self._refused:
+            dbapi_connection.close()
+            raise RuntimeError(
+                "this Database refused its database files; construct a new one after the "
+                "problem is fixed"
+            )
 
     @staticmethod
     def _prepare_sqlite_parent(path: Path | None) -> None:
         if path is not None:
             path.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _create_private_sqlite_file(path: Path) -> None:
+    """Create a missing database 0600 without ever closing a published name.
+
+    A descriptor closed on the final name could belong to a file another thread's SQLite
+    connection has just opened; so the file is created under an unpublished random name,
+    closed, and only then linked into place (no-replace) and the temporary name removed.
+    """
+
+    try:
+        os.lstat(path)
+        return
+    except FileNotFoundError:
+        pass
+    parent_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        temporary = f".{path.name}.create-{secrets.token_hex(8)}"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW
+        descriptor = os.open(temporary, flags, 0o600, dir_fd=parent_fd)
+        try:
+            os.fchmod(descriptor, 0o600)
+        finally:
+            os.close(descriptor)
+        try:
+            os.link(temporary, path.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+            _admission_step("linked")
+        except FileExistsError:
+            pass  # created meanwhile; checked as an existing file
+        finally:
+            os.unlink(temporary, dir_fd=parent_fd)
+    finally:
+        os.close(parent_fd)
+
+
+def _check_sqlite_file_identity(path: Path) -> None:
+    try:
+        metadata = os.lstat(path)
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(metadata.st_mode):
+        raise RuntimeError(f"Refusing symbolic-link SQLite path: {path}")
+    if not stat.S_ISREG(metadata.st_mode):
+        raise RuntimeError(f"Refusing non-regular SQLite path: {path}")
+    if metadata.st_uid != os.geteuid():
+        raise RuntimeError(f"Refusing SQLite path not owned by this user: {path}")
+
+
+def _check_sqlite_file_mode(path: Path) -> None:
+    try:
+        metadata = os.lstat(path)
+    except FileNotFoundError:
+        return
+    if stat.S_IMODE(metadata.st_mode) & 0o077:
+        raise RuntimeError(
+            f"Refusing SQLite path with mode {stat.S_IMODE(metadata.st_mode):04o} (group or "
+            f"other access): {path}; {_RESTART_TO_REPAIR}"
+        )
 
 
 def _sqlite_database_path(url: str) -> Path | None:
