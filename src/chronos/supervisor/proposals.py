@@ -30,6 +30,7 @@ queue is where those two clocks meet.
 
 from __future__ import annotations
 
+import os
 import secrets
 from dataclasses import dataclass
 from datetime import datetime
@@ -53,9 +54,23 @@ STATUS_PENDING = "PENDING"
 STATUS_CLAIMED = "CLAIMED"
 STATUS_PROCESSED = "PROCESSED"
 
+
 #: Written into ``cycle_stage`` while a row is CLAIMED, so a claim can be attributed to
 #: the process that made it. One value per process; ``mark_processed`` overwrites it.
-CLAIM_TOKEN = "claim:" + secrets.token_hex(8)
+def _new_claim_token() -> str:
+    return "claim:" + secrets.token_hex(8)
+
+
+CLAIM_TOKEN = _new_claim_token()
+
+
+def _reset_claim_token_in_forked_child() -> None:
+    global CLAIM_TOKEN
+    CLAIM_TOKEN = _new_claim_token()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_claim_token_in_forked_child)
 
 INTERRUPTED_CLAIMS_ALERT_KIND = "proposals.interrupted_claims"
 #: Static on purpose: folding never refreshes an alert's detail, so a count, ids or

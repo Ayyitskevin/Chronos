@@ -996,6 +996,49 @@ def test_claim_tokens_fit_the_stage_column_and_identify_the_process() -> None:
     assert token == proposals.CLAIM_TOKEN
 
 
+def _is_claim_token(token: str) -> bool:
+    suffix = token.removeprefix("claim:")
+    return (
+        token.startswith("claim:")
+        and len(suffix) == 16
+        and all(c in "0123456789abcdef" for c in suffix)
+        and len(token) <= 32
+    )
+
+
+def test_a_forked_child_gets_its_own_claim_token() -> None:
+    """DRAIN-2r3 (Daybreak P2-REBASE-283-1): a fork after import must not share the parent's
+    diagnostic token, or a parent's and a child's claims are indistinguishable."""
+
+    parent_token = proposals.CLAIM_TOKEN
+    read_fd, write_fd = os.pipe()
+    pid = os.fork()
+    if pid == 0:  # the child: report its token, never return into pytest
+        try:
+            os.close(read_fd)
+            os.write(write_fd, proposals.CLAIM_TOKEN.encode())
+        finally:
+            os._exit(0)
+    child_reaped = False
+    try:
+        os.close(write_fd)
+        with os.fdopen(read_fd, "rb") as reader:
+            child_token = reader.read().decode()
+        _, status = os.waitpid(pid, 0)
+        child_reaped = True
+        assert os.waitstatus_to_exitcode(status) == 0
+    finally:
+        if not child_reaped:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+            with contextlib.suppress(ChildProcessError):
+                os.waitpid(pid, 0)
+    assert _is_claim_token(parent_token), parent_token
+    assert _is_claim_token(child_token), child_token
+    assert child_token != parent_token
+    assert parent_token == proposals.CLAIM_TOKEN  # the parent keeps its own
+
+
 # ------------------------------------------------------------------ TEARDOWN-1: positive controls
 
 _HANG = "import time\ntime.sleep(600)\n"
