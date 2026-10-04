@@ -801,3 +801,22 @@ the store beneath it:
   collars are a possible refinement.
 - **No futures capability of any kind exists yet** (no contract model, no adapter support);
   futures options are refused outright by the mandate validator in this release.
+
+### End-to-end demonstration: a stranded proposal claim across a crash (hardening milestone 2)
+
+`tests/e2e/test_m2_proposal_lifecycle.py` runs the real backend as a separate process,
+configured only through environment variables and files, in demo mode with a SHADOW
+mandate and order transmission off, and sends it synthetic HOLD proposals over loopback
+TCP. A test-only seam inside that child process SIGKILLs it after a proposal's claim has
+committed and before the drain marks it processed. The test then shows that the claim
+stays durably `CLAIMED`; that a backend restarted while the dead writer's lease is still
+live runs read-only; and that after the lease expires the new writer drains new work,
+raises the interrupted-claims alert once (one row, delivered once to the alert file), and
+never re-presents the stranded proposal. The proposal is not resumed or completed: an
+interrupted claim stays for the owner, and no operator listing of interrupted claims
+exists. **It does not show** duplicate or replay rejection at HTTP ingress (the ingress is a
+queue receipt; every well-formed POST is queued), the database or ledger lock-integrity
+fixes (their own barrier tests cover them), any trade, handoff, reservation or broker
+truth, guard enforcement (the guard is unwired), sustained operation, or production
+readiness. A restart within about 30 seconds of a crash (the writer lease's default
+lifetime) comes up read-only and drains nothing until that lease expires.
