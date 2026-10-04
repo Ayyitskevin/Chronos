@@ -1214,7 +1214,12 @@ def test_wait_s_is_required_with_no_default_and_no_deadline_constant() -> None:
     assert not constants & {5, 30}, "an R11 deadline constant appeared"
 
 
-@pytest.mark.parametrize("wait_s", [-0.1, float("nan"), float("inf")])
+@pytest.mark.parametrize(
+    "wait_s",
+    [-0.1, float("nan"), float("inf"), True, False],
+    # K-c: a bool is not a number of seconds; True must not become a 1.0 s deadline.
+    ids=["negative", "nan", "inf", "bool_true", "bool_false"],
+)
 def test_a_non_finite_or_negative_wait_is_refused_never_clamped(wait_s: float) -> None:
     with pytest.raises(AnchorGuardRefused, match="wait_s"):
         AnchorGuard("x.lock", wait_s=wait_s)
