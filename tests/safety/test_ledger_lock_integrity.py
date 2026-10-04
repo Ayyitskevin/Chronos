@@ -831,3 +831,38 @@ def test_c1_17_a_fork_while_a_sibling_holds_the_window_lock_does_not_strand_the_
         if sibling.ident is not None:
             sibling.join(10)
         holder.close()
+
+
+def test_c1_18_a_relative_path_is_bound_before_connection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cwd change at connect cannot redirect the path admitted by the constructor."""
+
+    admitted_root = tmp_path / "admitted"
+    switched_root = tmp_path / "switched"
+    admitted_root.mkdir()
+    switched_root.mkdir()
+    switched_path = switched_root / "ledger.db"
+    switched_path.touch(mode=0o600)
+    switched_path.chmod(0o600)
+    original_cwd = Path.cwd()
+    real_connect = sqlite3.connect
+
+    def switch_cwd_then_connect(database: Any, *args: Any, **kwargs: Any) -> sqlite3.Connection:
+        os.chdir(switched_root)
+        return real_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(ledger_module.sqlite3, "connect", switch_cwd_then_connect)
+    os.chdir(admitted_root)
+    ledger = None
+    try:
+        ledger = SqliteLedger(Path("ledger.db"))
+        connected_path = Path(
+            ledger._connection.execute("PRAGMA database_list").fetchone()[2]
+        ).resolve()
+        assert connected_path == (admitted_root / "ledger.db").resolve()
+        assert connected_path != switched_path.resolve()
+    finally:
+        if ledger is not None:
+            ledger.close()
+        os.chdir(original_cwd)

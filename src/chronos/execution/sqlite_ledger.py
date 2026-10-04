@@ -116,6 +116,7 @@ class SqliteLedger:
     """LedgerPort implementation over a local SQLite file."""
 
     def __init__(self, path: Path) -> None:
+        path = Path(os.path.abspath(path))
         _admit_ledger_files(path)
         # One post-connect boundary: whatever fails after the connection exists closes it
         # before the error propagates, so no failed constructor leaves a descriptor (and the
