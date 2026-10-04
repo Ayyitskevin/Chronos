@@ -1,5 +1,41 @@
 # CHANGELOG
 
+## [Unreleased] — anchor-guard module (unwired), drain claim state, database and ledger lock integrity (PRs #281-#285, 2026-10-03/04)
+
+Nothing here adds a command or a setting. Two changes alter behavior an operator can see: a proposal the
+drain claimed and then failed on is no longer retried (#283), and the application database and the
+platform ledger refuse some file states at startup instead of repairing them later (#284, #285).
+
+- **#281 (merged 2026-10-03, `e0a1c03`) — the per-stream anchor guard, in isolation.** Adds
+  `src/chronos/persistence/anchor_guard.py`, a lock-and-lifecycle guard for a per-stream anchor. No module
+  under `src/chronos` imports it: no per-stream anchor is published, read or compared. It does no anchor-file
+  I/O, derives no path (the caller supplies the lock path) and requires an explicit wait deadline; Linux
+  only (advisory `flock`). **#282 (merged 2026-10-04, `c2c0607`)** corrects a placement comment, renames a
+  test alias and makes the unwired pin an AST check; no behavior change. Bootstrap/recovery of an anchored
+  stream, FU2's bounded read and any enforcement are not built.
+- **#283 (merged 2026-10-04, `600e1fc`) — durable claim state for the proposal drain.** The drain now claims
+  a queued proposal (`PENDING` to `CLAIMED`, a compare-and-set) and commits the claim before evaluating it.
+  A crash or exception after that commit leaves the row `CLAIMED`: it is never selected again, never moved
+  back to `PENDING` and never resolved automatically. Before the change such a row stayed `PENDING` and was
+  presented again on every tick. Each claim records a per-process token in `cycle_stage` (a forked child gets
+  its own). When a tick starts and a `CLAIMED` row already exists, one static WARNING alert,
+  `proposals.interrupted_claims`, is raised; so is the same alert when the tick has no facts to run on.
+  `list_interrupted_claims` lists them; no command resolves them yet (RISK_REGISTER R-82).
+- **#284 (merged 2026-10-04, `ae94ca7`) — `Database` never re-opens a live database file.** Previously the
+  constructor re-opened the database and its sidecars by path after connecting, which dropped the
+  connection's SQLite locks and let another process delete the live write-ahead log; acknowledged commits
+  were lost if the writer later crashed. Now files are repaired (mode 0600) only during the process's first
+  construction, before it connects, and afterwards only `lstat`-checked. New startup refusals (each a
+  `RuntimeError` naming the path): symbolic link, non-regular file, foreign owner, a file or sidecar with more
+  than one name, and an unsafe mode ("restart the process to repair"). A missing database is created
+  owner-only through a private temporary name.
+- **#285 (merged 2026-10-04, `7fe3a94`) — the same for `SqliteLedger`** (`execution/sqlite_ledger.py`): the
+  same window, refusals (worded "ledger path") and creation shape; a failing constructor closes its
+  connection; a relative ledger path is resolved once, before admission. No module under `src/chronos`
+  constructs `SqliteLedger` (tests only), so this protects a future writer. See docs/limitations.md, "Local
+  SQLite file admission and refusals" and "Per-stream anchor guard (FU1): built, not wired; recovery held",
+  and RISK_REGISTER R-21 and R-80 to R-82.
+
 ## [Unreleased] — the platform audit log gains a head anchor; every existing log needs an owner bootstrap before first start (2026-09-12)
 
 **What breaks on upgrade.** `data/platform_audit.jsonl` now travels with a sibling head anchor,

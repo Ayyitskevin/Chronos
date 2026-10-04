@@ -143,6 +143,63 @@ runbooks.
 - Chronos never upgrades a v1 database in place, adopts account-specific rows from an unscoped
   database, or fabricates provenance for legacy rows. Preserve and back up any existing file and
   configure a fresh `DATABASE_URL` until an explicit operator-reviewed import exists.
+- No audit was performed for databases outside the fleet hosts (flow, mickey); a read-only
+  discovery on those hosts found only demo development databases.
+
+## Local SQLite file admission and refusals (`Database`, `SqliteLedger`)
+
+`persistence/database.py` (the application database) and `execution/sqlite_ledger.py` (the
+platform ledger) no longer re-open their own SQLite files by path after connecting. Closing any
+descriptor of a file that this process also holds through SQLite silently drops that connection's
+locks, which let another process delete the live write-ahead log; commits the writer had already
+acknowledged were then lost if it later crashed. Both modules now work as follows (PRs #284 and
+#285):
+
+- Only during the process's first file-backed construction (before it connects) may an existing
+  database file or its `-wal`, `-shm` or `-journal` sidecar have its mode tightened to 0600. That
+  repair window then closes permanently for the process: it is not reopened by `dispose()`, a
+  failed constructor or a fork. Each module has its own window.
+- From then on, and after every connection, the files are only checked with `lstat`. A check that
+  fails raises `RuntimeError` naming the path and, when it fails after the connection exists,
+  closes (ledger) or disposes (database) the connection. The refusals are: a symbolic link, a
+  non-regular file, a file owned by another user, a file or sidecar with more than one name
+  (`N hard links`; an interrupted creation that left a private `.<name>.create-<hex>` temporary
+  linked to it is named), and an unsafe mode (owner read and write missing, or any group or other
+  permission present), the last with "restart the process to repair". What an operator does for
+  each refusal is in [docs/OPERATIONS.md](OPERATIONS.md), "Database startup refusals" (written for
+  `Database`; the ledger's refusals have the same shapes, worded "ledger path").
+- A missing database or ledger file is created owner-only (0600) under an unpublished temporary
+  name and linked into place, so no descriptor on the published name is closed afterwards.
+
+Limits that remain, stated rather than discovered:
+
+- The window protects only locks held through the module that owns it. A connection that another
+  component opens directly with `sqlite3` on the same file, or a `Database` pointed at the ledger
+  path, is outside the ledger's window (and the reverse): the one-time repair would drop *its*
+  locks. Nothing in `src/chronos` holds such a connection open (`monitoring/ledger_view.py` opens the
+  ledger read-only for each call and closes it); wiring that does must show it does not.
+- The checks do not protect against another actor changing the paths or their directories
+  concurrently; SQLite opens by pathname.
+- No module under `src/chronos` constructs `SqliteLedger`; it is built only by tests, so the
+  ledger side is a guarantee for a future writer rather than a protection of a running one.
+
+## Per-stream anchor guard (FU1): built, not wired; recovery held
+
+`persistence/anchor_guard.py` (PR #281; no behavior change in #282) is a guard module in
+isolation. **No module under `src/chronos` imports it.** It performs no anchor-file I/O and
+derives no path (the caller supplies the lock path and a required wait deadline), and it is
+Linux-only (advisory `flock`). Consequently:
+
+- No per-stream hash-chain anchor is published, read or compared by any running code. The only
+  anchor in force is the platform audit log's own head anchor (`platform_audit.head.json`, R-79).
+- Nothing creates, verifies or replaces a per-stream anchor: there is no bootstrap or recovery
+  command, and no `maintenance` package exists under `src/chronos`. The bounded anchor read that
+  FU2 (the bounded evidence lookup) needs is not built.
+- No code implements a policy for what happens when the guard fails. The owner direction
+  recorded for the future integration (2026-10-03, outside this repository) is that a guard failure is fail-closed and loud: it
+  blocks broker submission in the same cycle and raises an immediate owner alert, with the
+  maintenance mechanism as the recovery path. That integration, the maintenance mechanism and
+  enforcement are all held.
 
 ## Historical-data plane (C1, `chronos.histdata`)
 

@@ -46,8 +46,14 @@ The repository contains two subsystems:
    .venv/bin/python -m chronos.cli research repro produce --help  # deterministic run manifests
    .venv/bin/python -m chronos.cli shadow-scan   # would-be intents; nothing can submit
    .venv/bin/python -m chronos.cli monitor       # read-only platform monitor
-   .venv/bin/python -m chronos.service           # supervised shadow service (one cycle)
+   .venv/bin/python -m chronos.service           # supervised shadow service (one cycle, once rearmed)
    ```
+
+   A fresh deployment starts halted (`NEVER_ARMED`): until an operator runs
+   `.venv/bin/python -m chronos.cli rearm --note '<reason>'`, `chronos.service` prints
+   `service halted; not running decision cycles. Resolve, rearm, restart.` and exits 1. After the
+   rearm, on a clean startup (reconciled, not halted), it runs one shadow cycle (proposals and
+   intents only; nothing is submitted) and exits; a startup that is still halted exits 1 again.
 
    Research-run produce/replay/compare: [docs/RESEARCH_REPRODUCIBILITY.md](docs/RESEARCH_REPRODUCIBILITY.md).
 
@@ -217,14 +223,21 @@ for the live gates, arming, kill switch, and per-family operational notes.
 
 ## Setup
 
-Python 3.12 or newer is required.
+Python 3.12 or newer is required; CI runs 3.12 (`.github/workflows/ci.yml`).
+
+**Reproducible install (the one CI and `make gates` use).** Follow the "Install" steps in
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md): a hash-locked pip bootstrap, build lock and dev lock,
+then an editable install without dependency resolution. Then:
 
 ```bash
-python3 -m venv .venv
-.venv/bin/python -m pip install -e '.[dev]'
 cp .env.example .env
 .venv/bin/python scripts/initialize_database.py
 ```
+
+**Quick local install (not reproducible).** `python3 -m venv .venv` followed by
+`.venv/bin/python -m pip install -e '.[dev]'` installs unpinned dependencies. Versions float, so a
+tool newer than the one in `requirements-dev.lock` (a newer `ruff`, for example) can fail a gate on
+an unchanged tree. Use it for a quick look, not to judge whether the gates pass.
 
 Do not commit `.env`; it is ignored.
 
@@ -277,7 +290,18 @@ trade, or an unexplained mismatch makes the state ambiguous.
 .venv/bin/python scripts/verify_release_artifact.py
 ```
 
-CI runs these six in order. Migration verification (fresh-DB init, historical-schema → head
+`make gates` runs, in order, `lint`, `format-check`, `type`, `type-worker`, `test`, `security-gate`
+and `release-gate`: the six commands above plus the release security gate (`make security-gate`;
+see the `Makefile`). CI (`.github/workflows/ci.yml`) runs the same checks as separate steps and
+additionally `pytest tests/safety -q --file-backed-sqlite` (the supervisor safety suites against a
+file-backed SQLite database); it installs `age` before the lint step (`sudo apt-get install -y age`).
+
+`make security-gate`, and therefore `make gates`, refuses to run while the working tree has
+untracked files that git does not ignore. Two commands from the quick start above, `shadow-scan`
+and `python -m chronos.service`, create `data/platform_audit.jsonl.lock`, which is not ignored:
+run the gates before them, or delete that file first.
+
+Migration verification (fresh-DB init, historical-schema → head
 upgrades, and a no-un-migrated-drift completeness check) runs inside the pytest step. The release
 gate builds the current source as a wheel, installs it with hash-locked dependencies in a clean
 venv outside the checkout using the hash-locked PEP 517 backend, verifies package origin and static
