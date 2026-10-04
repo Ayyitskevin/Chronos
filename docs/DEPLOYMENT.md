@@ -7,6 +7,10 @@ component for the trading path.
 
 - Python 3.12 (`requires-python = ">=3.12"` in `pyproject.toml`).
 - git.
+- `age` and `age-keygen` on `PATH` (the distro `age` package or the official release), for backup
+  encryption at rest: `python -m chronos.operations.restore_drill` refuses to run without them and
+  the restore-drill tests are skipped without them. CI installs the package
+  (`sudo apt-get install -y age`).
 - For any broker connectivity: TWS or IB Gateway installed and operated by you
   (docs/IBKR_RUNBOOK.md). Not needed for research/backtest.
 
