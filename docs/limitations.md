@@ -193,10 +193,7 @@ Linux-only (advisory `flock`). Consequently:
 - No per-stream hash-chain anchor is published, read or compared by any running code. The only
   anchor in force is the platform audit log's own head anchor (`platform_audit.head.json`, R-79).
 - Nothing creates, verifies or replaces a per-stream anchor: there is no bootstrap or recovery
-  command, and no `maintenance` package exists under `src/chronos`. FU2's bounded evidence read is
-  built (#290) WITHOUT that anchor: it compares against the drain process's own verified position
-  instead (see "Bounded evidence read (FU2)" below), so the per-stream anchor it would otherwise
-  compare against (R10-R12) remains not built.
+  command, and no `maintenance` package exists under `src/chronos`. FU2's bounded sticky-expiry verification is built and wired for the evidence-bundle stream (#290); it does not publish, read, or compare a per-stream anchor and does not supply the held bootstrap/recovery mechanism (see "Bounded evidence read (FU2)" below).
 - No code implements a policy for what happens when the guard fails. The owner direction
   recorded for the future integration (2026-10-03, outside this repository) is that a guard failure is fail-closed and loud: it
   blocks broker submission in the same cycle and raises an immediate owner alert, with the
@@ -210,6 +207,13 @@ verifies the whole evidence stream on every resolve. A verification pass, run by
 one chunk per tick inside one SQLite snapshot, publishes a verified head and the expired bundle ids
 it saw; each resolve then reads one bounded statement from that head and answers only after proving
 that every record THIS PROCESS has verified is still present with its digest.
+
+Implemented boundary (#290): evidence-bound proposals refuse from the first tick until a pass publishes;
+the pass verifies one bounded chunk per tick inside one file-backed SQLite snapshot and publishes only
+after a full proof of that snapshot; the verified state lives in process memory only; an in-memory
+database (`StaticPool`, one shared connection) refuses when more than one chunk is needed; consistent
+rewrites of never-observed history across a restart remain outside the guarantee; external anchoring
+and maintenance recovery remain held.
 
 - **After every process start, evidence-bound proposals refuse** (`EVIDENCE_BUNDLE_EXPIRED`, detail
   "has not been verified since this process started") until the first pass completes. At the default

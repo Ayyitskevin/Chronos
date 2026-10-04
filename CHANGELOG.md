@@ -14,8 +14,7 @@ evidence-stream verification pass completes after every process start (#290).
   I/O, derives no path (the caller supplies the lock path) and requires an explicit wait deadline; Linux
   only (advisory `flock`). **#282 (merged 2026-10-04, `c2c0607`)** corrects a placement comment, renames a
   test alias and makes the unwired pin an AST check; no behavior change. Bootstrap/recovery of an anchored
-  stream and any enforcement are not built; FU2's bounded evidence read is built WITHOUT an external anchor
-  (#290, below), so no per-stream anchor is published, read or compared.
+  stream and any enforcement are not built. FU2's bounded sticky-expiry verification is built and wired for the evidence-bundle stream (#290); it does not publish, read, or compare a per-stream anchor and does not supply the held bootstrap/recovery mechanism.
 - **#283 (merged 2026-10-04, `600e1fc`) — durable claim state for the proposal drain.** The drain now claims
   a queued proposal (`PENDING` to `CLAIMED`, a compare-and-set) and commits the claim before evaluating it.
   A crash or exception after that commit leaves the row `CLAIMED`: it is never selected again, never moved
