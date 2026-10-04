@@ -3652,8 +3652,11 @@ def _fu2_bulk_rows(sessions: sessionmaker[Session], count: int) -> None:
 
 
 def test_resolve_work_is_bounded_by_b_rows_at_thirty_thousand_rows(
-    sessions: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+    file_sessions: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # File-backed (declared, FU2-BUILD r1): certifying 30 000 rows takes 30 one-chunk ticks,
+    # which an in-memory engine refuses (see the single-connection pin).
+    sessions = file_sessions
     issued = _fix26_issue(sessions, ttl_seconds=300.0)
     _fu2_bulk_rows(sessions, 30_000)
     _fu2_certify(sessions)
@@ -3917,20 +3920,30 @@ def test_a_pass_publishes_state_only_when_it_completes_cleanly(
 
 
 @pytest.mark.in_memory_sqlite_is_the_subject
-def test_an_in_memory_database_completes_its_pass_within_one_tick(
+def test_an_in_memory_database_refuses_a_pass_that_needs_more_than_one_chunk(
     sessions: sessionmaker[Session],
 ) -> None:
-    """Declared FU2 build decision: an in-memory database (StaticPool) has ONE shared
-    connection, so a snapshot cannot be held across ticks without sharing the drain's
-    transaction. There the pass runs every chunk inside one tick; each chunk is still bounded.
-    File-backed databases keep the multi-tick one-snapshot pass (pinned above)."""
+    """Daybreak FU2-BUILD P2-1 (declared: REPLACES the earlier pin that required a whole pass in
+    one tick on StaticPool). Every topology runs exactly ONE chunk per tick. An in-memory engine
+    has one shared connection, so it cannot hold the pass's snapshot across ticks: a pass that
+    needs more than one chunk there admits at most one chunk, publishes nothing, closes its
+    snapshot and refuses closed with a stable detail. A stream that fits one chunk still
+    publishes (the positive control)."""
 
-    _fu2_configure(sessions, pass_rows=1)
+    _fu2_configure(sessions, pass_rows=10)
     _fix26_issue(sessions, ttl_seconds=300.0)
     _fu2_append(sessions, {"note": "two"})
-    _fu2_append(sessions, {"note": "three"})
+    assert _fu2_tick(sessions).published  # one chunk is enough: the positive control
+
+    evidence_bundles._reset_verified_streams()
+    _fu2_configure(sessions, pass_rows=1)
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)  # three rows, one per chunk
     outcome = _fu2_tick(sessions)
-    assert outcome.published and outcome.rows_verified == 3, outcome
+    assert outcome.rows_verified <= 1 and not outcome.published, outcome
+    assert outcome.aborted == evidence_bundles.SINGLE_CONNECTION_DETAIL, outcome
+    state = _fu2_state(sessions)
+    assert not state.pass_in_flight and state.published is None
+    _fu2_refused(_fu2_resolve_now(sessions, issued), evidence_bundles.SINGLE_CONNECTION_DETAIL)
 
 
 # --- the documented bounds (GREEN at both heads; a later anchor flips them deliberately) --
