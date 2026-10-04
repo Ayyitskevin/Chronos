@@ -434,6 +434,11 @@ LATCHED_DETAIL = (
     "process verified; every evidence-bound proposal refuses until the process is restarted "
     "and the stream is inspected"
 )
+SINGLE_CONNECTION_DETAIL = (
+    "this database has one shared connection (an in-memory engine), which cannot hold a "
+    "verification snapshot across ticks, and the evidence stream needs more than one pass "
+    "chunk; refusing closed"
+)
 _DEADLINE_DETAIL = (
     "the verification deadline is not representable (the monotonic start plus the bound does "
     "not exceed the start); refusing closed"
@@ -1070,11 +1075,13 @@ def _publish(
 
 
 def run_verification_tick(sessions: sessionmaker[Session], stream: str) -> PassOutcome:
-    """One tick of the pass: start one if needed, run one chunk. Never raises.
+    """One tick of the pass: start one if needed, run exactly ONE chunk. Never raises.
 
-    On an in-memory database (``StaticPool``: one shared connection) the pass cannot hold a
-    snapshot across ticks without sharing the drain's transaction, so there it runs every
-    chunk inside this one tick (declared build decision; each chunk stays bounded).
+    The tick's work is bounded by one chunk (P rows, Ct bytes) on every topology (Daybreak
+    FU2-BUILD P2-1). An in-memory database (``StaticPool``: one shared connection) cannot hold
+    the pass's snapshot across ticks without sharing the drain's transaction, so a pass that
+    needs more than one chunk there is aborted (snapshot closed, nothing published) and the
+    stream refuses closed with :data:`SINGLE_CONNECTION_DETAIL`.
     """
 
     engine = sessions.kw["bind"]
@@ -1088,12 +1095,11 @@ def run_verification_tick(sessions: sessionmaker[Session], stream: str) -> PassO
             if state.attempts >= limits.max_pass_attempts:
                 return PassOutcome()
             _start_pass(sessions, state)
-        one_tick = isinstance(engine.pool, StaticPool)
-        while True:
-            outcome = _run_pass_chunk(stream, state, limits)
-            verified += outcome.rows_verified
-            if not (one_tick and outcome.in_progress):
-                return replace(outcome, rows_verified=verified)
+        outcome = _run_pass_chunk(stream, state, limits)
+        verified = outcome.rows_verified
+        if outcome.in_progress and isinstance(engine.pool, StaticPool):
+            return _abort(state, SINGLE_CONNECTION_DETAIL, verified)
+        return outcome
     except _Latch as latched:
         _latch(state, latched.reason)
         return PassOutcome(rows_verified=verified, latched=True)

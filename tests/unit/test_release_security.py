@@ -139,8 +139,9 @@ def test_reviewed_baseline_contains_only_explicit_false_positive_fingerprints() 
     # (the runtime wiring of ExecutionRepository, re-rotated onto SLO-1 at merge),
     # 15 at BP-3 (the runtime wiring of ReconciliationRunRecorder, rebased onto main),
     # 16 at BP-3 r3 (the frozen packet-base sha left the tree; its history entry is reviewed).
-    # 21 at FU2 (the evidence verification limits added to settings.py and runtime.py).
-    assert len(historical_candidates) == 21
+    # 21 at FU2 (the evidence verification limits added to settings.py and runtime.py),
+    # 22 at FU2 r1 (the limits wired through api/autonomy_wiring.py).
+    assert len(historical_candidates) == 22
     assert {item["type"] for item in candidates} == {
         "Hex High Entropy String",
         "Secret Keyword",

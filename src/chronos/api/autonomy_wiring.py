@@ -78,7 +78,15 @@ from chronos.domain.models import Instrument, MarketQuote
 from chronos.orders.intent import WheelOrderIntent
 from chronos.orders.submission import SubmissionOutcome, SubmissionRefusalCode
 from chronos.runtime import AppRuntime
-from chronos.supervisor import alerts, delivery, durable, proposers, queue, revocation
+from chronos.supervisor import (
+    alerts,
+    delivery,
+    durable,
+    evidence_bundles,
+    proposers,
+    queue,
+    revocation,
+)
 from chronos.supervisor.admission import MarketDataEvidence
 from chronos.supervisor.compiler import QuoteEvidence
 from chronos.supervisor.handoff import SUBMIT_RAISED_CODE, HandoffResult
@@ -939,6 +947,7 @@ def build_autonomy_runtime(
             account_fingerprint=fingerprint,
             minimum_interval_seconds=settings.autonomy_min_interval_seconds,
             idle_interval_seconds=settings.autonomy_idle_interval_seconds,
+            evidence_limits=evidence_bundles.EvidenceVerificationLimits.from_settings(settings),
         ),
         identity=INGRESS_IDENTITY,
         mandate_source=lambda: mandate,

@@ -219,7 +219,7 @@ Both are built inert and enabled only by the owner (plan §11); a value would be
 | src/chronos/config/settings.py | `36ef9357248c81ba100288b2c930d0ec74c09986b2aca933f595b3962c040060` |
 | src/chronos/domain/enums.py | `6244760cac081c4ca0cbbec7cfc586efe6fd11471d7e06fbb29c8c4790414828` |
 | src/chronos/runtime.py | `ac2dc4dadb4b36ed10a765b56aeed291683fe5c5f04e1f0b86ef17a036fe5faa` |
-| src/chronos/api/autonomy_wiring.py | `6538f1670631efdd3ee9c08245f87fecda8a51d082914a97d64e5452c9958ae2` |
+| src/chronos/api/autonomy_wiring.py | `cf63ce481e3f103c403eab0d3c810babd1a445d2da6c917bd16e8737a7375517` |
 | src/chronos/supervisor/evidence_kinds.py | `374d6de281168796200d10b5ae64f83e4b336b0d18d91377fbefbd3d4a488e06` |
 | src/chronos/broker/demo.py | `461830a97ebd0fbcaa611c8fe0fc6c792c2a6cbbc86c413636994ad2ab9568df` |
 | src/chronos/broker/official_ibkr.py | `c5e916dd42457157cef3f2db9f80d45effd43f8f4f04ccff0b14c17d86d607bd` |
