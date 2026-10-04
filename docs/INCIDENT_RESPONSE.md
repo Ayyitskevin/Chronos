@@ -233,6 +233,13 @@ failure against the sibling `platform_audit.head.json`: `truncation/rollback`, `
 
 **Treat as a tamper-or-corruption incident. Do not trade until explained.**
 
+The same playbook applies to the account evidence stream in the application database (`DATABASE_URL`)
+when the owner-alert file carries a CRITICAL `evidence.stream_truncated` alert, or the journal shows
+evidence-bound proposals refusing with "failed verification" or "no longer holds, with its digest, a
+record this process verified" (FU2, #290; docs/OPERATIONS.md, "Evidence-stream verification refusals and
+alerts"). A restart clears the latched state and re-certifies whatever the stream then holds, so preserve
+the database and its sidecars read-only BEFORE any restart.
+
 1. **Stop both planes** (Immediate actions 1–3): `POST /live/kill` for the live order plane and
    `python -m chronos.cli halt --reason "SEV-n: <one line>"` for the deterministic platform;
    revoke or move aside any mandate.

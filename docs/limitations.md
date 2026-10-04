@@ -193,13 +193,47 @@ Linux-only (advisory `flock`). Consequently:
 - No per-stream hash-chain anchor is published, read or compared by any running code. The only
   anchor in force is the platform audit log's own head anchor (`platform_audit.head.json`, R-79).
 - Nothing creates, verifies or replaces a per-stream anchor: there is no bootstrap or recovery
-  command, and no `maintenance` package exists under `src/chronos`. The bounded anchor read that
-  FU2 (the bounded evidence lookup) needs is not built.
+  command, and no `maintenance` package exists under `src/chronos`. FU2's bounded evidence read is
+  built (#290) WITHOUT that anchor: it compares against the drain process's own verified position
+  instead (see "Bounded evidence read (FU2)" below), so the per-stream anchor it would otherwise
+  compare against (R10-R12) remains not built.
 - No code implements a policy for what happens when the guard fails. The owner direction
   recorded for the future integration (2026-10-03, outside this repository) is that a guard failure is fail-closed and loud: it
   blocks broker submission in the same cycle and raises an immediate owner alert, with the
   maintenance mechanism as the recovery path. That integration, the maintenance mechanism and
   enforcement are all held.
+
+## Bounded evidence read (FU2, #290): proven within a process, not across a restart
+
+In effect only when `AUTONOMY_EVIDENCE_BUNDLES` is set. `supervisor/evidence_bundles.py` no longer
+verifies the whole evidence stream on every resolve. A verification pass, run by the autonomy tick
+one chunk per tick inside one SQLite snapshot, publishes a verified head and the expired bundle ids
+it saw; each resolve then reads one bounded statement from that head and answers only after proving
+that every record THIS PROCESS has verified is still present with its digest.
+
+- **After every process start, evidence-bound proposals refuse** (`EVIDENCE_BUNDLE_EXPIRED`, detail
+  "has not been verified since this process started") until the first pass completes. At the default
+  1000 rows per tick a long stream takes several ticks.
+- **Other fail-closed refusals** (same code, distinct detail): the verified state is older than
+  `AUTONOMY_EVIDENCE_VERIFICATION_MAX_AGE_SECONDS` (default 900); the stream grew past the state by more
+  than `AUTONOMY_EVIDENCE_RESOLVE_ROWS` (default 1000; "verification in progress"); the monotonic clock
+  is unusable; corruption detectable from the stream itself ("failed verification"; clears on the
+  next clean pass); and **latched**: a record this process verified is missing, moved or rewritten.
+  A latch is cleared ONLY by a process restart and raises one CRITICAL owner alert
+  `evidence.stream_truncated`; an aborted pass raises a WARNING `evidence.pass_failed`, and after
+  `AUTONOMY_EVIDENCE_MAX_PASS_ATTEMPTS` (default 5) consecutive aborted passes the stream refuses until a
+  restart. The remaining bounds are `AUTONOMY_EVIDENCE_PASS_ROWS_PER_TICK` (1000),
+  `AUTONOMY_EVIDENCE_ROW_BYTES` (4096 bytes per record payload), `AUTONOMY_EVIDENCE_PASS_BYTES_PER_TICK`
+  (1048576) and `AUTONOMY_EVIDENCE_EXPIRED_IDS` (10000).
+- **What it does NOT guarantee (RISK_REGISTER R-83).** The integrity proof is process-lifetime: a
+  truncation or consistent rewrite of records this process has never verified, including EVERY
+  record across a restart (the first pass after a start certifies whatever the stream then holds),
+  is undetectable, exactly as before #290 (no external anchor; the anchor follow-ups R10-R12 are
+  deferred). An actor who can delete records and restart the drain is outside it. The 12 other
+  hash-chain writers are not covered. A record at or below the verified head that is edited after a
+  pass's snapshot is caught only by the next pass, not by the next resolve.
+- Operator meaning and actions for each refusal and alert: docs/OPERATIONS.md,
+  "Evidence-stream verification refusals and alerts".
 
 ## Historical-data plane (C1, `chronos.histdata`)
 
