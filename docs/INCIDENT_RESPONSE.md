@@ -114,7 +114,7 @@ Copy, don't move; timestamp everything:
 mkdir -p incidents/$(date +%F-%H%M)
 cp data/platform_audit.jsonl incidents/$(date +%F-%H%M)/
 cp data/platform_audit.head.json incidents/$(date +%F-%H%M)/   # the log's head anchor travels with it
-sqlite3 data/platform_ledger.db ".backup 'incidents/$(date +%F-%H%M)/platform_ledger.db'"
+sqlite3 -readonly data/platform_ledger.db ".backup 'incidents/$(date +%F-%H%M)/platform_ledger.db'"   # READ-ONLY: a read-write client beside a live writer can lose its commits (docs/BACKUP_AND_RECOVERY.md)
 cp data/platform_halt.json incidents/$(date +%F-%H%M)/ 2>/dev/null
 cp data/live_kill_switch.json data/state_generation.json incidents/$(date +%F-%H%M)/ 2>/dev/null
 python -m chronos.cli status > incidents/$(date +%F-%H%M)/status.txt 2>&1
