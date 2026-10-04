@@ -80,14 +80,34 @@ Both `data/platform_ledger.db` and `data/chronos.db` are SQLite. The platform le
 mode (`PRAGMA journal_mode=WAL`, `src/chronos/execution/sqlite_ledger.py`), which means part of
 the recent data lives in the `-wal` sidecar file until checkpointed.
 
-**Preferred — online, consistent, works even while a process is running:**
+**Preferred — stop every Chronos process that has the file open, then `.backup`:**
 
 ```bash
+# All Chronos processes stopped (backend, CLIs, dashboard):
 sqlite3 data/platform_ledger.db ".backup 'backups/platform_ledger-$(date +%F).db'"
 sqlite3 data/chronos.db          ".backup 'backups/chronos-$(date +%F).db'"
 ```
 
 `.backup` produces a consistent snapshot regardless of WAL state.
+
+**If you cannot stop the writer — online, READ-ONLY client only:**
+
+```bash
+sqlite3 -readonly data/platform_ledger.db ".backup 'backups/platform_ledger-$(date +%F).db'"
+sqlite3 -readonly data/chronos.db          ".backup 'backups/chronos-$(date +%F).db'"
+```
+
+**Never run `sqlite3 <db> ".backup …"` (or any other read-write SQLite client) against a database a
+running Chronos process has open.** A read-write client that closes beside a live writer can delete the
+live `-wal` file out from under it, and every commit the writer then acknowledges is lost if it
+later crashes or is killed, with no error (P1-NEW-23 for `data/chronos.db`, P1-NEW-24 for
+`data/platform_ledger.db`). Read-only connections do not do this: against a synthetic live writer
+(2026-10-03 probe) the read-write `.backup` lost 192 of 256 acknowledged commits and left no `-wal`;
+the `-readonly` form lost none (3 of 3 runs) and its copy passed `PRAGMA integrity_check`. This stays
+the rule after the `chronos.db` fix ships, because the ledger file is not covered by it.
+After each backup, verify that exact destination with a read-only client:
+`sqlite3 -readonly <exact-backup-path> "PRAGMA integrity_check"` must print `ok`.
+When both databases were backed up, verify both destination paths.
 
 **Acceptable — plain copy, but ONLY while every Chronos process is stopped:**
 

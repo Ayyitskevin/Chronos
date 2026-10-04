@@ -83,6 +83,40 @@ The command is an observation primitive, not a watchdog: it installs no service/
 no last-success state, detects no silence, restarts nothing, and sends no alert. ADR-0047 records
 that boundary.
 
+## Database startup refusals (applies once DBLOCK lands)
+
+> **Not in effect yet.** This section describes refusals added by the DBLOCK lock-drop fix
+> (branch `claude/dblock-lock-drop-fix`); it applies only once that fix is on `main` and deployed.
+> The fix stops `Database` from re-opening its own SQLite files after connecting (which silently
+> dropped the connection's locks and let another process delete the live WAL). The first
+> file-backed construction retains one startup mode-repair window; after it closes, later checks
+> are `lstat`-only and refuse instead of reopening files. A refusal is a `RuntimeError` and can
+> occur during construction or a later verification. Identity problems are refused before SQLite
+> opens the unsafe named object, but admission may create a previously missing main file before a
+> bad sidecar is found, and `initialize()` may write schema before its final verification refuses.
+> Do not infer that every file is byte- or metadata-unchanged. Every message names the path.
+> Never "fix" one by deleting `-wal`/`-shm` files.
+
+> Before any action below that changes a database or sidecar pathname or metadata (`replace`,
+> `move`, `chown`, `chmod`, `unlink`, or copy-then-`mv`), stop every Chronos process that may
+> access that database, record the deployed `DATABASE_URL`/service arguments, and preserve the
+> named object plus its sidecars as incident evidence. Live handling is inspection and read-only
+> capture only. If every configured pathname cannot be identified, do not mutate; escalate.
+
+| Refusal text starts with | Meaning | What the operator does |
+|---|---|---|
+| `Refusing symbolic-link SQLite path` | The database or a sidecar (`-wal`, `-shm`, `-journal`) is a symlink. Chronos never follows it. | Find out who created the link. Point `DATABASE_URL` at the real file, or replace the link with the real file while every Chronos process is stopped. Do not leave a symlink in the data directory. |
+| `Refusing non-regular SQLite path` | The path is a directory, FIFO, device or socket. | Check `DATABASE_URL`; move the object aside. Treat an unexpected object there as suspicious (incident process). |
+| `Refusing SQLite path not owned by this user` | The file belongs to another uid. | Run Chronos as the owning user, or, after confirming nobody tampered with it, change ownership as root. Chronos will not chown. |
+| `Refusing SQLite path with unsafe mode NNNN` + `restart the process to repair` | Mode drift: the file or a sidecar is missing owner read/write permission or has any group/other permission (for example, after a restore, backup or `chmod -R`). The startup repair window closes at the process's first database construction, so a later construction refuses instead of repairing. | With every Chronos process that may access this database stopped, start it again: the startup window restores 0600 for files you own. If the refusal persists at startup, `chmod 600` the named file by hand and look for what keeps changing it. |
+| `Refusing SQLite path with N hard links` | The database or a sidecar has more than one name (`cp -al`, `rsync --link-dest`, `ln`). SQLite keys `-wal`/`-shm` by pathname, so two names get two WAL files and acknowledged writes can fork between them. | **Stop; do not delete either name.** Copy both names and their sidecars to an incident directory, find the other names (`find <backup-root> -samefile <path>`), decide which one the backend actually wrote, and recreate it as a single-name file (`cp` to a new name, then `mv` into place) with every Chronos process stopped. If you cannot tell which name has the newest data, escalate: data may already have forked. Fix the backup tool so it copies instead of linking the live database. |
+| same, naming a private temporary `.<db>.create-<hex>` | A crash during first creation of the database may have left that temporary linked to it. | With every Chronos process stopped, preserve the configured path, the named temporary and all sidecars; record the deployed `DATABASE_URL`/service arguments; re-check that the two names have the same device and inode and that no deployed service names the temporary. Only then unlink the exact temporary named by the refusal and restart. If any check is uncertain, do not unlink; escalate. |
+| `restart the process to repair` (any refusal) | The repair window is closed in this process. | Restart the process. If the same refusal comes back at startup, use the row for its other text. |
+
+Hard-link backups of the live data directory are the usual cause of the `hard links` refusal: use
+the stop-then-`.backup` or read-only procedures in [`BACKUP_AND_RECOVERY.md`](BACKUP_AND_RECOVERY.md#sqlite-safe-backup)
+instead.
+
 ## Shadow scan (after market close)
 
 > **Not the autonomy SHADOW campaign.** This is the deterministic platform's one-shot

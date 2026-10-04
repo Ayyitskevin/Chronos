@@ -113,7 +113,11 @@ not name. Every later create, link, unlink and fsync is relative to the retained
 2. **Take the backup with sqlite's online backup API, never `cp`.** A file copy of a
    WAL-mode database misses committed rows still in `-wal`; the backup API reads through
    the WAL and produces a consistent single file:
-   `mkdir -m 700 /var/backups/chronos/.chronos-<stamp>.<16 hex>.tmp && sqlite3 data/chronos.db ".backup '/var/backups/chronos/.chronos-<stamp>.<16 hex>.tmp/chronos.db'"`
+   `mkdir -m 700 /var/backups/chronos/.chronos-<stamp>.<16 hex>.tmp && sqlite3 -readonly data/chronos.db ".backup '/var/backups/chronos/.chronos-<stamp>.<16 hex>.tmp/chronos.db'"`
+   (`-readonly` is required, not a nicety: a read-write `sqlite3` client closing beside a live backend can delete
+   the live `-wal`, and commits the backend acknowledged are then lost if it later crashes or is killed — see
+   [`../BACKUP_AND_RECOVERY.md`](../BACKUP_AND_RECOVERY.md#sqlite-safe-backup). With every Chronos process stopped the
+   read-write form is also safe.)
    (stage into a temp directory named by the exact grammar `.chronos-<stamp>.<16 hex>.tmp`
    — 16 lowercase hex digits, e.g. from `openssl rand -hex 8`; the envelope is renamed into
    place in step 3b). The name rule: a published envelope is always `chronos-<stamp>` — a
