@@ -1161,7 +1161,21 @@ def test_a_loose_or_linked_lock_location_is_refused_as_found(
     assert not (lock_dir / "target.lock").exists(), "a symlink was followed"
 
 
-@pytest.mark.skipif(os.geteuid() != 0, reason="no foreign-owned 0700 directory available")
+# M1-GAPS gap 6: this case needs a GENUINELY foreign-owned inode, which takes real root
+# (chown). An unprivileged user namespace does not help where AppArmor restricts them
+# (kernel.apparmor_restrict_unprivileged_userns=1: the "unprivileged_userns" profile
+# denies CAP_CHOWN). Without root the property is carried by
+# test_hash_chain_anchor_guard_regressions.py::
+# test_a_lock_directory_owned_by_another_uid_is_refused_as_found_without_root (a real fstat
+# of the real directory with geteuid patched), which fails if the owner check is removed.
+@pytest.mark.skipif(
+    os.geteuid() != 0,
+    reason=(
+        "needs root to chown a directory to another uid; without root the directory-owner "
+        "check is pinned by test_hash_chain_anchor_guard_regressions.py::"
+        "test_a_lock_directory_owned_by_another_uid_is_refused_as_found_without_root"
+    ),
+)
 def test_a_foreign_owned_exact_0700_directory_is_refused_as_found(tmp_path: Path) -> None:
     foreign = tmp_path / "foreign"
     foreign.mkdir(mode=0o700)
@@ -1214,7 +1228,12 @@ def test_wait_s_is_required_with_no_default_and_no_deadline_constant() -> None:
     assert not constants & {5, 30}, "an R11 deadline constant appeared"
 
 
-@pytest.mark.parametrize("wait_s", [-0.1, float("nan"), float("inf")])
+@pytest.mark.parametrize(
+    "wait_s",
+    [-0.1, float("nan"), float("inf"), True, False],
+    # K-c: a bool is not a number of seconds; True must not become a 1.0 s deadline.
+    ids=["negative", "nan", "inf", "bool_true", "bool_false"],
+)
 def test_a_non_finite_or_negative_wait_is_refused_never_clamped(wait_s: float) -> None:
     with pytest.raises(AnchorGuardRefused, match="wait_s"):
         AnchorGuard("x.lock", wait_s=wait_s)

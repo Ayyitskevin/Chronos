@@ -28,6 +28,7 @@ import fcntl
 import json
 import os
 import signal
+import stat
 import subprocess
 import sys
 import textwrap
@@ -768,6 +769,52 @@ def test_a_failed_first_construction_still_closes_the_window(tmp_path: Path) -> 
     assert result.stdout.strip() == "refused"
 
 
+_REFUSED_IN_ADMISSION = """
+import json, os, sys
+from pathlib import Path
+from chronos.persistence import database as m
+from chronos.persistence.database import Database
+d = Path(sys.argv[1])
+def url(p): return f"sqlite+pysqlite:///{p}"
+reached = []
+real = m.create_engine
+def spy(*a, **k):
+    reached.append(1)
+    return real(*a, **k)
+m.create_engine = spy
+(d / "target.db").touch()
+(d / "a.db").symlink_to(d / "target.db")
+first = ""
+try:
+    Database(url(d / "a.db")); first = "constructed"
+except RuntimeError as e:
+    first = str(e)
+report = {"first": first, "engine_reached": bool(reached), "window_open": m._REPAIR_WINDOW_OPEN}
+b = d / "b.db"; b.touch(); b.chmod(0o666)
+try:
+    Database(url(b)); report["second"] = "constructed"
+except RuntimeError as e:
+    report["second"] = "refused" if "restart the process to repair" in str(e) else str(e)
+print(json.dumps(report))
+"""
+
+
+def test_m1_a_first_construction_refused_inside_admission_still_closes_the_window(
+    tmp_path: Path,
+) -> None:
+    """M1-GAPS gap 4 (R-21; Daybreak P2-4): the window closes "whether or not engine creation
+    or the first connection later succeeds", including a failure INSIDE admission (here a
+    symlink at the database path), before create_engine is ever reached."""
+
+    result = _run_child(_REFUSED_IN_ADMISSION, str(tmp_path))
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout.strip())
+    assert "symbolic" in report["first"].lower(), report
+    assert report["engine_reached"] is False, report
+    assert report["window_open"] is False, report
+    assert report["second"] == "refused", report
+
+
 # ------------------------------------------------------------------ T-6: creation crash safety
 
 _CREATE_CRASH = """
@@ -1065,6 +1112,43 @@ def test_c1_a_closed_window_refuses_a_file_without_owner_read_at_admission(
         Database(_url(candidate))
     assert "unsafe mode 0200" in str(refused.value)
     assert database_module._RESTART_TO_REPAIR in str(refused.value)
+
+
+@pytest.mark.parametrize("mode", [0o640, 0o660, 0o604], ids=["0640", "0660", "0604"])
+def test_m1_a_closed_window_refuses_group_or_other_bits(
+    tmp_path: Path, window_closed: None, mode: int
+) -> None:
+    """M1-GAPS gap 2 (R-21): once the window is closed ANY group or other bit is refused, not
+    only the world bits the other fixtures (0666) happen to set."""
+
+    candidate = tmp_path / "group.db"
+    _sqlite_file_with_mode(candidate, mode)
+    with pytest.raises(RuntimeError) as refused:
+        Database(_url(candidate))
+    assert f"unsafe mode {mode:04o}" in str(refused.value)
+    assert database_module._RESTART_TO_REPAIR in str(refused.value)
+    assert stat.S_IMODE(candidate.stat().st_mode) == mode, "a closed window repaired a file"
+
+
+_OPEN_WINDOW_GROUP_BITS = """
+import os, sqlite3, stat, sys
+from pathlib import Path
+from chronos.persistence.database import Database
+p = Path(sys.argv[1]) / "g.db"
+c = sqlite3.connect(p)
+c.execute("CREATE TABLE t(x)"); c.commit(); c.close()
+p.chmod(0o640)
+Database(f"sqlite+pysqlite:///{p}").dispose()
+print(oct(stat.S_IMODE(os.stat(p).st_mode)))
+"""
+
+
+def test_m1_the_open_window_tightens_group_bits_to_owner_only(tmp_path: Path) -> None:
+    """M1-GAPS gap 2, the OPEN half: the first construction in a process repairs 0640 to 0600."""
+
+    result = _run_child(_OPEN_WINDOW_GROUP_BITS, str(tmp_path))
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "0o600"
 
 
 def test_teardown_control_a_failing_body_still_reaps_its_children() -> None:

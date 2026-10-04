@@ -390,6 +390,49 @@ def test_c1_06_a_closed_window_refuses_owner_read_only_and_write_only_files_at_a
     assert _mode(path) == mode, "the mode was changed by a refusing constructor"
 
 
+@pytest.mark.parametrize("mode", [0o640, 0o660, 0o604], ids=["0640", "0660", "0604"])
+def test_m1_a_closed_window_refuses_group_or_other_bits_on_the_ledger(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: int
+) -> None:
+    """M1-GAPS gap 3 (R-21, the ledger): once the window is closed ANY group or other bit is
+    refused before sqlite3.connect, not only the world bits other fixtures set."""
+
+    _close_window(tmp_path)
+    path = tmp_path / "ledger.db"
+    _ledger_file(path)
+    path.chmod(mode)
+    spy = _ConnectSpy(monkeypatch, path)
+    with pytest.raises(RuntimeError) as refused:
+        SqliteLedger(path)
+    assert f"unsafe mode {mode:04o}" in str(refused.value), str(refused.value)
+    assert _RESTART in str(refused.value)
+    assert spy.calls == 0, "sqlite3.connect was called before the refusal"
+    assert _mode(path) == mode, "a closed window repaired a file"
+
+
+_OPEN_WINDOW_GROUP_BITS = """
+import os, stat, sys
+from pathlib import Path
+from chronos.execution.sqlite_ledger import SqliteLedger
+p = Path(sys.argv[1]) / "g.db"
+SqliteLedger(p).close()  # the first construction: the window is open, then closes
+"""
+
+
+def test_m1_the_open_window_tightens_group_bits_on_the_ledger_to_owner_only(
+    tmp_path: Path,
+) -> None:
+    """M1-GAPS gap 3, the OPEN half: a pre-existing 0640 ledger is repaired to 0600 by the first
+    construction in a fresh process."""
+
+    path = tmp_path / "g.db"
+    _ledger_file(path)  # created (in THIS process, whose window is already closed) at 0600
+    path.chmod(0o640)
+    result = _run_child(_OPEN_WINDOW_GROUP_BITS, str(tmp_path))
+    assert result.returncode == 0, result.stderr
+    assert _mode(path) == 0o600
+
+
 def test_c1_06b_a_closed_window_accepts_an_owner_only_file(tmp_path: Path) -> None:
     _close_window(tmp_path)
     path = tmp_path / "ledger.db"
@@ -634,6 +677,50 @@ def test_c1_11b_a_failed_first_construction_still_closes_the_window(tmp_path: Pa
     result = _run_child(_FAILED_FIRST, str(tmp_path))
     assert result.returncode == 0, result.stderr
     assert result.stdout.split() == ["False", "refused"], result.stdout
+
+
+_REFUSED_IN_ADMISSION = """
+import json, sqlite3, sys
+from pathlib import Path
+from chronos.execution import sqlite_ledger as m
+from chronos.execution.sqlite_ledger import SqliteLedger
+d = Path(sys.argv[1])
+reached = []
+real = sqlite3.connect
+def spy(*a, **k):
+    reached.append(1)
+    return real(*a, **k)
+sqlite3.connect = spy
+(d / "target.db").touch()
+(d / "a.db").symlink_to(d / "target.db")
+first = ""
+try:
+    SqliteLedger(d / "a.db").close(); first = "constructed"
+except RuntimeError as e:
+    first = str(e)
+report = {"first": first, "connect_reached": bool(reached), "window_open": m._REPAIR_WINDOW_OPEN}
+b = d / "b.db"; b.touch(); b.chmod(0o666)
+try:
+    SqliteLedger(b).close(); report["second"] = "constructed"
+except RuntimeError as e:
+    report["second"] = "refused" if "restart the process to repair" in str(e) else str(e)
+print(json.dumps(report))
+"""
+
+
+def test_m1_a_first_ledger_refused_inside_admission_still_closes_the_window(
+    tmp_path: Path,
+) -> None:
+    """M1-GAPS gap 5: the window closes even when the FIRST construction is refused INSIDE
+    admission (a symlink at the ledger path, before any sqlite3.connect)."""
+
+    result = _run_child(_REFUSED_IN_ADMISSION, str(tmp_path))
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout.strip())
+    assert "symbolic" in report["first"].lower() or "symlink" in report["first"].lower(), report
+    assert report["connect_reached"] is False, report
+    assert report["window_open"] is False, report
+    assert report["second"] == "refused", report
 
 
 # ------------------------------------------------------------------ 12, 13: identity before SQLite
