@@ -83,11 +83,11 @@ The command is an observation primitive, not a watchdog: it installs no service/
 no last-success state, detects no silence, restarts nothing, and sends no alert. ADR-0047 records
 that boundary.
 
-## Database startup refusals (applies once DBLOCK lands)
+## Database startup refusals
 
-> **Not in effect yet.** This section describes refusals added by the DBLOCK lock-drop fix
-> (branch `claude/dblock-lock-drop-fix`); it applies only once that fix is on `main` and deployed.
-> The fix stops `Database` from re-opening its own SQLite files after connecting (which silently
+> **In effect on `main` since #284 (merged 2026-10-03).** This section describes refusals added by
+> the DBLOCK lock-drop fix to `Database`; a matching rule for the platform ledger (`SqliteLedger`)
+> landed in #285. The fix stops `Database` from re-opening its own SQLite files after connecting (which silently
 > dropped the connection's locks and let another process delete the live WAL). The first
 > file-backed construction retains one startup mode-repair window; after it closes, later checks
 > are `lstat`-only and refuse instead of reopening files. A refusal is a `RuntimeError` and can

@@ -104,7 +104,8 @@ later crashes or is killed, with no error (P1-NEW-23 for `data/chronos.db`, P1-N
 `data/platform_ledger.db`). Read-only connections do not do this: against a synthetic live writer
 (2026-10-03 probe) the read-write `.backup` lost 192 of 256 acknowledged commits and left no `-wal`;
 the `-readonly` form lost none (3 of 3 runs) and its copy passed `PRAGMA integrity_check`. This stays
-the rule after the `chronos.db` fix ships, because the ledger file is not covered by it.
+the rule even with the lock-drop fixes on `main` (#284 for `chronos.db`, #285 for the ledger): a
+read-only client cannot unlink the WAL, so the procedure stays safe beside any writer.
 After each backup, verify that exact destination with a read-only client:
 `sqlite3 -readonly <exact-backup-path> "PRAGMA integrity_check"` must print `ok`.
 When both databases were backed up, verify both destination paths.
