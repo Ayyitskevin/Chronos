@@ -943,6 +943,8 @@ def test_queue_view_reports_the_cycle_outcome_of_recent_arrivals(
         outcome = proposals.enqueue(
             session, account_fingerprint=_FINGERPRINT, payload="{}", now=_NOW
         )
+        # DRAIN-2: only a CLAIMED row may be marked processed (Kevin's K-a).
+        proposals.claim_batch(session, account_fingerprint=_FINGERPRINT, limit=1)
         proposals.mark_processed(
             session,
             queue_id=outcome.queue_id,
