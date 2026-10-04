@@ -583,6 +583,8 @@ class AutonomyRuntime:
         exhausted = self._consecutive_failures >= self._config.max_consecutive_failures
         if exhausted:
             self._stopped = True
+            if self._bind_evidence and self._engine is not None:
+                evidence_bundles.close_pass(self._engine, self._evidence_stream)
         try:
             with self._sessions.begin() as session:
                 alerts.raise_alert(
