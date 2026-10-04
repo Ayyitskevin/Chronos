@@ -3916,6 +3916,7 @@ def test_a_pass_publishes_state_only_when_it_completes_cleanly(
     assert _fu2_state(sessions).published.sequence == 2
 
 
+@pytest.mark.in_memory_sqlite_is_the_subject
 def test_an_in_memory_database_completes_its_pass_within_one_tick(
     sessions: sessionmaker[Session],
 ) -> None:
