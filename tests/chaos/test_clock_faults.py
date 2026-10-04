@@ -142,12 +142,25 @@ def test_an_expired_bundle_resolves_expired(tmp_path: Path) -> None:
                     now=at,
                 )
 
+        _certify_tg1(database, fingerprint)  # FU2: the first pass (R7)
         fresh = resolve(T0 + timedelta(seconds=59))
         assert fresh.refusal is None and fresh.bundle is not None, fresh.detail
         refused = resolve(T0 + timedelta(seconds=61))
         assert refused.refusal is evidence_bundles.ResolutionRefusal.EXPIRED
     finally:
         database.dispose()
+
+
+_STICKY = "already refused EXPIRED at an earlier drain"
+
+
+def _certify_tg1(database: Database, fingerprint: str) -> None:
+    """FU2 (Kevin K-20261004-008, test-only): complete the first verification pass, which an
+    evidence-bound resolve now requires (R7), before the existing assertions."""
+
+    evidence_bundles.certify_stream(
+        database.sessions, evidence_bundles.hash_chain_stream(fingerprint)
+    )
 
 
 def _issue_tg1_bundle(database: Database, fingerprint: str, epoch: str, registration: str):
@@ -200,6 +213,7 @@ def test_an_expired_bundle_stays_refused_after_the_clock_rewinds(tmp_path: Path)
     registration = "d" * 64
     try:
         issued = _issue_tg1_bundle(database, fingerprint, epoch, registration)
+        _certify_tg1(database, fingerprint)  # FU2: the first pass (R7)
 
         refused = _resolve_tg1(
             database, issued, fingerprint, epoch, registration, T0 + timedelta(seconds=61)
@@ -211,6 +225,9 @@ def test_an_expired_bundle_stays_refused_after_the_clock_rewinds(tmp_path: Path)
             "an expiry verdict ran backwards: the bundle admitted after the drain "
             "clock rewound past its expiry"
         )
+        assert _STICKY in rewound.detail, (
+            rewound.detail
+        )  # FU2: the durable verdict, not "not ready"
     finally:
         database.dispose()
 
@@ -233,6 +250,7 @@ def test_an_expired_bundle_stays_refused_across_a_restart_and_rewind(tmp_path: P
     database.initialize()
     try:
         issued = _issue_tg1_bundle(database, fingerprint, epoch, registration)
+        _certify_tg1(database, fingerprint)  # FU2: the first pass (R7)
         refused = _resolve_tg1(
             database, issued, fingerprint, epoch, registration, T0 + timedelta(seconds=61)
         )
@@ -243,10 +261,14 @@ def test_an_expired_bundle_stays_refused_across_a_restart_and_rewind(tmp_path: P
     restarted = Database(f"sqlite+pysqlite:///{db_path}")
     restarted.initialize()
     try:
+        _certify_tg1(restarted, fingerprint)  # FU2: a restart starts with no verified state
         rewound = _resolve_tg1(restarted, issued, fingerprint, epoch, registration, T0)
         assert rewound.refusal is evidence_bundles.ResolutionRefusal.EXPIRED, (
             "an expiry verdict did not survive a restart: a fresh engine admitted "
             "the bundle at a rewound clock"
         )
+        assert _STICKY in rewound.detail, (
+            rewound.detail
+        )  # FU2: the durable verdict, not "not ready"
     finally:
         restarted.dispose()

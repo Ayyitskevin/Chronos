@@ -20,6 +20,7 @@ import json
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -41,9 +42,10 @@ from chronos.autonomy import (
 )
 from chronos.domain.enums import DataQuality
 from chronos.domain.models import UnderlyingContract
+from chronos.persistence import hash_chain
 from chronos.persistence.database import Database
 from chronos.persistence.schema import HashChainRow
-from chronos.supervisor import alerts, durable, proposals, queue
+from chronos.supervisor import alerts, durable, evidence_bundles, proposals, queue
 from chronos.supervisor.admission import MarketDataEvidence
 from chronos.supervisor.compiler import QuoteEvidence
 from chronos.supervisor.handoff import HandoffResult
@@ -722,3 +724,200 @@ def test_a_tick_without_a_registry_journals_the_static_posture(
     assert durable.read_posture(payload) == durable.DecisionPosture(
         registry_configured=False, evidence_binding=False, credential_epoch_bound=False
     )
+
+
+# ================================================== FU2: the verification pass stage
+#
+# FU2r7 C1.3/C1.4: a stage of the tick (after alert delivery, evidence-bound only) runs one
+# chunk of the verification pass per tick; it never raises into the tick, raises ONE
+# CRITICAL alert per latch transition, a WARNING per aborted pass, and stop() closes an
+# in-flight pass snapshot.
+
+
+_FU2_STREAM = evidence_bundles.hash_chain_stream(_FINGERPRINT)
+_FU2_AT = datetime(2026, 8, 14, 14, 0, tzinfo=UTC)
+
+
+@pytest.fixture(autouse=True)
+def _fu2_fresh_verified_state() -> Iterator[None]:
+    reset = getattr(evidence_bundles, "_reset_verified_streams", None)
+    if reset is not None:
+        reset()
+    yield
+    if reset is not None:
+        reset()
+
+
+@pytest.fixture
+def file_sessions(tmp_path: Path) -> Iterator[sessionmaker[Session]]:
+    instance = Database(f"sqlite+pysqlite:///{tmp_path / 'fu2-runtime.db'}")
+    instance.initialize()
+    try:
+        yield instance.sessions
+    finally:
+        instance.dispose()
+
+
+def _fu2_rows(sessions: sessionmaker[Session], count: int, kind: str = "evidence_note") -> None:
+    with sessions.begin() as session:
+        for index in range(count):
+            hash_chain.append(
+                session,
+                stream=_FU2_STREAM,
+                kind=kind,
+                payload={"note": f"row-{index}"},
+                recorded_at=_FU2_AT,
+            )
+
+
+def _fu2_runtime(
+    sessions: sessionmaker[Session], *, sink: _NullSink | None = None, **limits: Any
+) -> AutonomyRuntime:
+    config = RuntimeConfig(
+        account_fingerprint=_FINGERPRINT,
+        evidence_limits=evidence_bundles.EvidenceVerificationLimits(**limits),
+    )
+    return AutonomyRuntime(
+        sessions=sessions,
+        config=config,
+        identity=_identity(),
+        mandate_source=lambda: None,
+        gather_facts=_facts,
+        sinks=(sink or _NullSink(),),
+        bind_evidence=True,
+    )
+
+
+def _fu2_state(sessions: sessionmaker[Session]) -> Any:
+    return evidence_bundles.stream_state(sessions.kw["bind"], _FU2_STREAM)
+
+
+def _fu2_alerts(sessions: sessionmaker[Session], kind: str) -> list[Any]:
+    from chronos.persistence.schema import AutonomyOwnerAlertRow
+
+    with sessions.begin() as session:
+        return [
+            (row.severity, row.occurrences)
+            for row in session.query(AutonomyOwnerAlertRow).filter(
+                AutonomyOwnerAlertRow.kind == kind
+            )
+        ]
+
+
+def test_the_off_path_pass_advances_in_chunks_within_its_tick_budget(
+    file_sessions: sessionmaker[Session],
+) -> None:
+    sessions = file_sessions
+    _fu2_rows(sessions, 5)
+    runtime = _fu2_runtime(sessions, pass_rows=2)
+    verified = []
+    for minute in range(3):
+        report = runtime.run_tick(_FU2_AT + timedelta(minutes=minute))
+        assert report.ok, report.failure
+        verified.append(report.evidence_pass_rows_verified)
+    assert verified == [2, 2, 1], verified
+    assert _fu2_state(sessions).published.sequence == 5
+
+
+def test_the_startup_rule_refuses_every_evidence_bound_proposal_until_the_first_pass_completes(
+    file_sessions: sessionmaker[Session],
+) -> None:
+    """R7: ceil(N/P) ticks of NOT READY refusals, then a clean answer."""
+
+    sessions = file_sessions
+    epoch, digest = "e" * 64, "d" * 64
+    with sessions.begin() as session:
+        issued = evidence_bundles.issue(
+            session,
+            account_fingerprint=_FINGERPRINT,
+            proposer_id="claude-worker",
+            proposer_credential_epoch=epoch,
+            proposer_registry_entry_digest=digest,
+            kind=evidence_bundles.BundleKind.BACKEND_SERVED,
+            digest="1" * 64,
+            now=_FU2_AT,
+            ttl_seconds=300.0,
+        )
+    _fu2_rows(sessions, 4)  # 5 rows; P = 2 -> 3 ticks
+    runtime = _fu2_runtime(sessions, pass_rows=2)
+
+    def resolve() -> Any:
+        with sessions.begin() as session:
+            return evidence_bundles.resolve(
+                session,
+                account_fingerprint=_FINGERPRINT,
+                cited_ids=(issued.bundle_id,),
+                proposer_id="claude-worker",
+                proposer_credential_epoch=epoch,
+                proposer_registry_entry_digest=digest,
+                now=_FU2_AT,
+            )
+
+    for minute in range(3):
+        refused = resolve()
+        assert refused.refusal is evidence_bundles.ResolutionRefusal.EXPIRED
+        assert evidence_bundles.NOT_READY_DETAIL in refused.detail, refused.detail
+        assert runtime.run_tick(_FU2_AT + timedelta(minutes=minute)).ok
+    answered = resolve()
+    assert answered.refusal is None and answered.bundle is not None, answered
+
+
+def test_the_latch_raises_exactly_one_owner_alert_from_the_tick(
+    sessions: sessionmaker[Session],
+) -> None:
+    from sqlalchemy import text
+
+    _fu2_rows(sessions, 3)
+    runtime = _fu2_runtime(sessions)
+    assert runtime.run_tick(_FU2_AT).ok  # publishes (3, H3)
+    with sessions.begin() as session:
+        session.execute(
+            text("DELETE FROM hash_chain_records WHERE stream = :s AND sequence = 3"),
+            {"s": _FU2_STREAM},
+        )
+    for minute in range(1, 4):
+        assert runtime.run_tick(_FU2_AT + timedelta(minutes=minute)).ok
+    assert _fu2_state(sessions).latched
+    assert _fu2_alerts(sessions, evidence_bundles.STREAM_TRUNCATED_ALERT_KIND) == [("CRITICAL", 1)]
+    assert not runtime.stopped, "a latch must not stop the runtime (R14)"
+
+
+def test_a_pass_abort_never_raises_into_the_tick_and_never_counts_as_a_tick_failure(
+    sessions: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fu2_rows(sessions, 2)
+
+    def broken_chunk(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("injected chunk failure")
+
+    monkeypatch.setattr(evidence_bundles, "_run_pass_chunk", broken_chunk)
+    runtime = _fu2_runtime(sessions)
+    report = runtime.run_tick(_FU2_AT)
+    assert report.ok, report.failure
+    assert runtime._consecutive_failures == 0
+    assert _fu2_alerts(sessions, evidence_bundles.PASS_FAILED_ALERT_KIND) == [("WARNING", 1)]
+    assert _fu2_state(sessions).published is None
+
+
+def test_runtime_stop_closes_an_in_flight_pass_snapshot(
+    file_sessions: sessionmaker[Session],
+) -> None:
+    sessions = file_sessions
+    _fu2_rows(sessions, 5)
+    runtime = _fu2_runtime(sessions, pass_rows=1)
+    assert runtime.run_tick(_FU2_AT).ok
+    engine = sessions.kw["bind"]
+    assert _fu2_state(sessions).pass_in_flight and engine.pool.checkedout() == 1
+    runtime.stop("test")
+    assert not _fu2_state(sessions).pass_in_flight
+    assert engine.pool.checkedout() == 0, "stop() left the pass snapshot open"
+    with engine.connect() as connection:
+        busy, _log, _done = connection.exec_driver_sql("PRAGMA wal_checkpoint(TRUNCATE)").one()
+    assert busy == 0, "a reader still held the WAL after stop()"
+
+
+def test_the_runtime_configures_the_engines_verification_limits(
+    sessions: sessionmaker[Session],
+) -> None:
+    _fu2_runtime(sessions, resolve_rows=7)
+    assert evidence_bundles.verification_limits(sessions.kw["bind"]).resolve_rows == 7
