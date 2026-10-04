@@ -161,6 +161,31 @@ _PRE_ADR_0055_UNSET_POSTURE_ROW = (
 # --------------------------------------------------------------- shared fixtures
 
 
+@pytest.fixture(autouse=True)
+def _fu2_fresh_verified_state() -> Iterator[None]:
+    """FU2: verified evidence state is process memory; every test starts with none."""
+
+    reset = getattr(evidence_bundles, "_reset_verified_streams", None)
+    if reset is not None:
+        reset()
+    yield
+    if reset is not None:
+        reset()
+
+
+def _fu2_stream(fingerprint: str = _FINGERPRINT) -> str:
+    return evidence_bundles.hash_chain_stream(fingerprint)
+
+
+def _fu2_certify(sessions: sessionmaker[Session], fingerprint: str = _FINGERPRINT) -> Any:
+    """Run one verification pass to completion (absent before FU2: then a no-op)."""
+
+    certify = getattr(evidence_bundles, "certify_stream", None)
+    if certify is None:
+        return None
+    return certify(sessions, _fu2_stream(fingerprint))
+
+
 @pytest.fixture
 def database() -> Iterator[Database]:
     instance = Database("sqlite+pysqlite:///:memory:")
@@ -439,6 +464,11 @@ def _enqueue(
 
 
 def _drain(runtime: AutonomyRuntime, now: datetime = _NOW) -> Any:
+    # FU2 (declared change, R7): evidence-bound resolves refuse until the first verification
+    # pass completes, and the tick runs its pass AFTER the drain. Complete that first pass
+    # before the drained tick, as a backend that has been up for one tick has.
+    if runtime._bind_evidence:
+        _fu2_certify(runtime._sessions)
     report = runtime.run_tick(now)
     assert report.ok, report.failure
     assert report.proposals_judged == 1, report.proposals_judged
@@ -1679,6 +1709,29 @@ def _fix26_resolve(
     proposer_id: str = "claude-worker",
     now: datetime,
 ) -> evidence_bundles.Resolution:
+    # FU2 (declared change): a full verification pass completes immediately before every
+    # resolve here, so each FIX-26/K1 pin exercises the bounded read against a freshly
+    # certified stream. The pins' own assertions are unchanged.
+    _fu2_certify(sessions, fingerprint)
+    return _fu2_resolve(
+        sessions,
+        fingerprint=fingerprint,
+        cited_ids=cited_ids,
+        proposer_id=proposer_id,
+        now=now,
+    )
+
+
+def _fu2_resolve(
+    sessions: sessionmaker[Session],
+    *,
+    fingerprint: str = _FINGERPRINT,
+    cited_ids: tuple[str, ...],
+    proposer_id: str = "claude-worker",
+    now: datetime,
+) -> evidence_bundles.Resolution:
+    """A resolve with NO pass first: what the drain sees between passes."""
+
     epoch, registration_digest = _fix26_binding(proposer_id)
     with sessions.begin() as session:
         return evidence_bundles.resolve(
@@ -2650,6 +2703,7 @@ def test_a_non_ascii_bundle_id_is_compared_by_exact_code_points(
     _k1_append(
         sessions, {"bundle_id": recorded, "expires_at": "2026-08-14T14:01:00+00:00"}, kind=kind
     )
+    _fu2_certify(sessions)  # FU2 (declared): the seam now reads from a verified state (R7)
     with sessions.begin() as session:
         verdict = evidence_bundles._durable_expiry_verdict(
             session, stream=_k1_stream(), bundle_id="bündle-ﬁ"
@@ -2768,6 +2822,12 @@ def test_chain_valid_payloads_that_raise_outside_jsondecodeerror_refuse_closed(
     VALID JSON bytes is the case only the non-text guard refuses: ``json.loads`` accepts bytes,
     so without the guard it would decode as an ordinary object and admit the bundle."""
 
+    if isinstance(payload_json, str):
+        # FU2 (declared): 5,000 digits exceed the default 4,096-byte Cr, which would refuse on
+        # the byte bound before the decoder ran (pinned separately by
+        # test_the_one_intended_divergence_from_k1_is_the_byte_bound). Raise Cr for this case
+        # so the pin still reaches the decode failure it exists to pin.
+        _fu2_configure(sessions, row_bytes=8192)
     issued = _fix26_issue(sessions, ttl_seconds=300.0)
     _k1r1_insert(sessions, payload_json)
     assert _k1_chain_ok(sessions), "the fixture must be chain-valid for this pin to mean anything"
@@ -2801,6 +2861,10 @@ def test_a_100000_deep_json_array_refuses_with_the_unlabelled_decode_detail(
     refuse closed with the unlabelled decode detail. The 2,000-level array above decodes and is
     the negative control."""
 
+    # FU2 (declared): 200,000 characters exceed the default 4,096-byte Cr; raise Cr for this
+    # pin so it still reaches the RecursionError it exists to pin (over Cr the byte bound
+    # refuses first: test_the_one_intended_divergence_from_k1_is_the_byte_bound).
+    _fu2_configure(sessions, row_bytes=300_000)
     issued = _fix26_issue(sessions, ttl_seconds=300.0)
     _k1r1_insert(sessions, "[" * 100_000 + "]" * 100_000)
     assert _k1_chain_ok(sessions)
@@ -2823,3 +2887,1322 @@ def test_a_valid_json_blob_labelled_as_an_expiry_refuses_with_the_labelled_decod
     _k1_refused_closed(resolution)
     assert "a durable expiry record does not decode" in resolution.detail, resolution.detail
     assert _K1R1_UNLABELLED_DECODE not in resolution.detail, resolution.detail
+
+
+# ================================================== FU2: the bounded, indexed sticky read
+#
+# FU2r7 (Daybreak PASS-DELTA, kimi CONFIRMED; Kevin A-prime and K-20261004-007/-008/-009).
+# The sticky stage no longer verifies the whole stream on every resolve. A verification
+# PASS (one SQLite snapshot, chunked across ticks) publishes a verified head (N, H) and the
+# expired ids it saw; each resolve then reads ONE bounded statement from that head, proves
+# every row this process has verified is still there with its hash (``observed``), and
+# answers. Not-ready, stale, over-budget, latched and doubtful states all refuse EXPIRED with
+# a DISTINCT detail, and these pins assert the detail (the reason), never only the code: a
+# blanket "not ready" refusal would otherwise satisfy every fixture that expects EXPIRED.
+
+_FU2_IN_PROGRESS = "verification in progress"
+
+
+def _fu2_detail(name: str) -> str:
+    """A FU2 refusal-detail constant. Before FU2 it does not exist: a placeholder no detail can
+    contain, so a pin fails on the BEHAVIOUR (the old reader answered) rather than on the name."""
+
+    return str(getattr(evidence_bundles, name, f"<{name}: no such refusal before FU2>"))
+
+
+def _fu2_engine(sessions: sessionmaker[Session]) -> Any:
+    return sessions.kw["bind"]
+
+
+def _fu2_state(sessions: sessionmaker[Session], fingerprint: str = _FINGERPRINT) -> Any:
+    return evidence_bundles.stream_state(_fu2_engine(sessions), _fu2_stream(fingerprint))
+
+
+def _fu2_configure(sessions: sessionmaker[Session], **limits: Any) -> None:
+    if not hasattr(evidence_bundles, "configure_verification"):
+        return  # before FU2 there are no verification limits; the scenario runs as K1 does
+    evidence_bundles.configure_verification(
+        _fu2_engine(sessions), evidence_bundles.EvidenceVerificationLimits(**limits)
+    )
+
+
+def _fu2_tick(sessions: sessionmaker[Session], fingerprint: str = _FINGERPRINT) -> Any:
+    return evidence_bundles.run_verification_tick(sessions, _fu2_stream(fingerprint))
+
+
+@pytest.fixture
+def file_sessions(tmp_path: Path) -> Iterator[sessionmaker[Session]]:
+    """A file-backed database: separate pooled connections, so a pass holds a real snapshot."""
+
+    instance = Database(f"sqlite+pysqlite:///{tmp_path / 'fu2.db'}")
+    instance.initialize()
+    try:
+        yield instance.sessions
+    finally:
+        instance.dispose()
+
+
+def _fu2_append(
+    sessions: sessionmaker[Session],
+    payload: dict[str, Any],
+    *,
+    kind: str = "evidence_note",
+    fingerprint: str = _FINGERPRINT,
+) -> None:
+    with sessions.begin() as session:
+        hash_chain.append(
+            session, stream=_fu2_stream(fingerprint), kind=kind, payload=payload, recorded_at=_NOW
+        )
+
+
+def _fu2_rows(sessions: sessionmaker[Session]) -> list[tuple[int, str]]:
+    with sessions.begin() as session:
+        return [
+            (row.sequence, row.record_hash)
+            for row in session.scalars(
+                select(HashChainRow)
+                .where(HashChainRow.stream == _fu2_stream())
+                .order_by(HashChainRow.sequence)
+            )
+        ]
+
+
+def _fu2_delete_from(sessions: sessionmaker[Session], sequence: int) -> None:
+    from sqlalchemy import text
+
+    with sessions.begin() as session:
+        session.execute(
+            text("DELETE FROM hash_chain_records WHERE stream = :s AND sequence >= :q"),
+            {"s": _fu2_stream(), "q": sequence},
+        )
+
+
+def _fu2_sql(sessions: sessionmaker[Session], statement: str, **params: Any) -> None:
+    from sqlalchemy import text
+
+    with sessions.begin() as session:
+        session.execute(text(statement), {"s": _fu2_stream(), **params})
+
+
+def _fu2_live(resolution: evidence_bundles.Resolution) -> None:
+    assert resolution.refusal is None and resolution.bundle is not None, (
+        f"expected a bound answer, got {resolution.refusal} {resolution.detail}"
+    )
+
+
+def _fu2_refused(resolution: evidence_bundles.Resolution, reason: str) -> None:
+    """Refused closed, AND for the stated reason (a phrase of the detail)."""
+
+    assert resolution.refusal is evidence_bundles.ResolutionRefusal.EXPIRED, (
+        f"expected an EXPIRED refusal for {reason!r}: {resolution.refusal} {resolution.detail}"
+    )
+    assert resolution.bundle is None
+    assert reason in resolution.detail, f"refused for another reason: {resolution.detail}"
+
+
+def _fu2_resolve_now(
+    sessions: sessionmaker[Session], issued: evidence_bundles.IssuedBundle
+) -> evidence_bundles.Resolution:
+    return _fu2_resolve(sessions, cited_ids=(issued.bundle_id,), now=_NOW)
+
+
+# --- an independent oracle: the K1 full read exactly as it stood at main c4a4c48 ---------
+# (copied verbatim from evidence_bundles._durable_expiry_verdict before FU2 replaced it, so
+# the equivalence pin compares the new bounded read against the reader it replaces, not
+# against itself)
+
+
+def _k1_reference_verdict(session: Session, *, stream: str, bundle_id: str) -> str | None:
+    verification = hash_chain.verify(session, stream)
+    if not verification.ok:
+        return (
+            "the account's durable evidence stream failed verification "
+            f"({verification.detail}); refusing closed until the stream is repaired"
+        )
+    rows = session.execute(
+        select(HashChainRow.kind, HashChainRow.payload_json)
+        .where(HashChainRow.stream == stream)
+        .order_by(HashChainRow.sequence.asc())
+    )
+    matched = False
+    for kind, payload_json in rows:
+        labelled = kind == evidence_bundles.EXPIRED_EVENT_KIND
+        if not isinstance(payload_json, str):
+            if labelled:
+                return "a durable expiry record does not decode; refusing closed"
+            return "a durable evidence record does not decode; refusing closed"
+        try:
+            decoded = json.loads(payload_json)
+        except (ValueError, RecursionError):
+            if labelled:
+                return "a durable expiry record does not decode; refusing closed"
+            return "a durable evidence record does not decode; refusing closed"
+        if not isinstance(decoded, dict):
+            if labelled:
+                return "a durable expiry record is not a JSON object; refusing closed"
+            return "a durable evidence record is not a JSON object; refusing closed"
+        if set(decoded) == {"bundle_id", "expires_at"}:
+            recorded = decoded["bundle_id"]
+            if not isinstance(recorded, str):
+                return "a durable expiry record names no string bundle id; refusing closed"
+            if not isinstance(decoded["expires_at"], str):
+                return "a durable expiry record carries a non-string expires_at; refusing closed"
+            if recorded == bundle_id:
+                matched = True
+            continue
+        if labelled:
+            if not isinstance(decoded.get("bundle_id"), str):
+                return "a durable expiry record names no string bundle id; refusing closed"
+            return (
+                "a durable record labelled as an expiry is not the exact expiry shape "
+                "(bundle_id and expires_at only); refusing closed"
+            )
+    if matched:
+        return (
+            "the cited evidence bundle was already refused EXPIRED at an earlier "
+            "drain and that verdict is durable; wall-clock motion does not revive "
+            "refused authority"
+        )
+    return None
+
+
+# --- startup and readiness ---------------------------------------------------------------
+
+
+def test_restart_without_a_verified_cache_refuses_without_walking_lifetime_history_on_resolve(
+    sessions: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R7: with no verified state (a fresh process), a resolve refuses NOT READY and never
+    falls back to walking the stream (no hash_chain.verify call)."""
+
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    calls: list[str] = []
+    real_verify = hash_chain.verify
+    monkeypatch.setattr(
+        hash_chain,
+        "verify",
+        lambda session, stream: calls.append(stream) or real_verify(session, stream),
+    )
+    resolution = _fu2_resolve_now(sessions, issued)
+    _fu2_refused(resolution, _fu2_detail("NOT_READY_DETAIL"))
+    assert calls == [], "a resolve with no verified state walked the stream"
+    assert _fu2_state(sessions).needs_pass is True
+
+
+def test_a_stale_full_pass_refuses_and_requests_off_path_verification(
+    sessions: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = [1000.0]
+    monkeypatch.setattr(evidence_bundles, "_monotonic", lambda: clock[0])
+    _fu2_configure(sessions, max_age_seconds=900.0)
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    _fu2_certify(sessions)
+    _fu2_live(_fu2_resolve_now(sessions, issued))
+    clock[0] = 1000.0 + 901.0
+    _fu2_refused(_fu2_resolve_now(sessions, issued), _fu2_detail("STALE_DETAIL"))
+    assert _fu2_state(sessions).needs_pass is True
+
+
+def test_the_verification_deadline_is_stale_at_exactly_t_max(
+    sessions: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = [500.0]
+    monkeypatch.setattr(evidence_bundles, "_monotonic", lambda: clock[0])
+    _fu2_configure(sessions, max_age_seconds=30.0)
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    _fu2_certify(sessions)
+    clock[0] = 529.999
+    _fu2_live(_fu2_resolve_now(sessions, issued))
+    clock[0] = 530.0
+    _fu2_refused(_fu2_resolve_now(sessions, issued), _fu2_detail("STALE_DETAIL"))
+
+
+def test_a_wall_clock_rewind_cannot_extend_the_full_verification_deadline(
+    sessions: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The deadline is monotonic: a drain clock (``now``) moved back never makes stale fresh."""
+
+    clock = [100.0]
+    monkeypatch.setattr(evidence_bundles, "_monotonic", lambda: clock[0])
+    _fu2_configure(sessions, max_age_seconds=10.0)
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    _fu2_certify(sessions)
+    clock[0] = 111.0
+    rewound = _fu2_resolve(sessions, cited_ids=(issued.bundle_id,), now=_NOW - timedelta(days=365))
+    _fu2_refused(rewound, _fu2_detail("STALE_DETAIL"))
+
+
+@pytest.mark.parametrize(
+    "reading", [float("nan"), float("inf"), float("-inf"), "backwards"], ids=str
+)
+def test_an_unavailable_non_finite_or_backward_monotonic_reading_refuses_closed(
+    sessions: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch, reading: Any
+) -> None:
+    clock = [1000.0]
+    monkeypatch.setattr(evidence_bundles, "_monotonic", lambda: clock[0])
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    _fu2_certify(sessions)
+    clock[0] = 999.0 if reading == "backwards" else reading
+    _fu2_refused(_fu2_resolve_now(sessions, issued), _fu2_detail("MONOTONIC_DETAIL"))
+    clock[0] = 1001.0  # the reading recovers; the doubt it raised does not (needs a pass)
+    _fu2_refused(_fu2_resolve_now(sessions, issued), _fu2_detail("MONOTONIC_DETAIL"))
+    _fu2_certify(sessions)
+    _fu2_live(_fu2_resolve_now(sessions, issued))
+
+
+# --- the observed identity and the latch -------------------------------------------------
+
+
+def _fu2_raw_columns(sessions: sessionmaker[Session], sequence: int) -> dict[str, Any]:
+    from sqlalchemy import text
+
+    with sessions.begin() as session:
+        row = session.execute(
+            text(
+                "SELECT stream, sequence, kind, payload_json, recorded_at, previous_hash, "
+                "record_hash FROM hash_chain_records WHERE stream = :s AND sequence = :q"
+            ),
+            {"s": _fu2_stream(), "q": sequence},
+        ).one()
+        return dict(row._mapping)
+
+
+def _fu2_restore_raw(sessions: sessionmaker[Session], columns: dict[str, Any]) -> None:
+    _fu2_sql(
+        sessions,
+        "INSERT INTO hash_chain_records (stream, sequence, kind, payload_json, recorded_at, "
+        "previous_hash, record_hash) VALUES (:s, :sequence, :kind, :payload_json, :recorded_at, "
+        ":previous_hash, :record_hash)",
+        **{k: v for k, v in columns.items() if k != "stream"},
+    )
+
+
+def test_delete_and_regrow_past_the_observed_point_latches_before_the_next_resolve(
+    sessions: sessionmaker[Session],
+) -> None:
+    """A1 (Daybreak FU2r4 P1-1): a row this process verified is replaced by a different valid
+    row (the chain still verifies); the next resolve latches instead of answering."""
+
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    _fu2_certify(sessions)
+    _fu2_append(sessions, {"note": "two"})
+    _fu2_live(_fu2_resolve_now(sessions, issued))  # observes row 2
+    _fu2_delete_from(sessions, 2)
+    _fu2_append(sessions, {"note": "a different two"})
+    _fu2_append(sessions, {"note": "three"})
+    assert _k1_chain_ok(sessions), "the regrown chain must verify: the attack is consistent"
+    _fu2_refused(_fu2_resolve_now(sessions, issued), _fu2_detail("LATCHED_DETAIL"))
+    assert _fu2_state(sessions).latched
+
+
+def test_a_tuple_observed_after_the_snapshot_started_is_never_forgotten_at_publication(
+    file_sessions: sessionmaker[Session],
+) -> None:
+    """A3 (Daybreak FU2r5 P1-1, V1's steps): the snapshot holds rows 1-3; live rows 2-3 are
+    replaced by 2', a live resolve observes (2, H2'), then the old rows come back. At
+    publication the snapshot's row 2 contradicts the observed tuple: latch, no publication."""
+
+    sessions = file_sessions
+    _fu2_configure(sessions, pass_rows=1)
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    _fu2_certify(sessions)  # published (1, H1), observed (1, H1)
+    _fu2_append(sessions, {"note": "two"})
+    _fu2_append(sessions, {"note": "three"})
+    old_two, old_three = _fu2_raw_columns(sessions, 2), _fu2_raw_columns(sessions, 3)
+    first = _fu2_tick(sessions)  # the pass opens its snapshot: rows 1-3
+    assert not first.published
+    _fu2_delete_from(sessions, 2)
+    _fu2_append(sessions, {"note": "two prime"})
+    _fu2_live(_fu2_resolve_now(sessions, issued))  # observes (2, H2')
+    _fu2_delete_from(sessions, 2)
+    _fu2_restore_raw(sessions, old_two)
+    _fu2_restore_raw(sessions, old_three)
+    outcome = None
+    for _ in range(6):
+        outcome = _fu2_tick(sessions)
+        if outcome.published or outcome.latched or outcome.aborted:
+            break
+    assert outcome is not None and outcome.latched and not outcome.published, outcome
+    state = _fu2_state(sessions)
+    assert state.latched and state.published is not None and state.published.sequence == 1
+    _fu2_refused(_fu2_resolve_now(sessions, issued), _fu2_detail("LATCHED_DETAIL"))
+
+
+def test_a_tuple_observed_beyond_the_snapshot_end_discards_the_pass_and_restarts(
+    file_sessions: sessionmaker[Session],
+) -> None:
+    """A4 under Kevin's R17 (Daybreak's stricter rule): a live resolve observes (5, H5) while
+    the pass's snapshot ends at 3. Publication DISCARDS the pass (no carry, no latch); the next
+    pass, from a snapshot that contains row 5, proves it and publishes. If rows 4-5 are gone by
+    then, that next pass latches (its start identity is missing)."""
+
+    sessions = file_sessions
+    _fu2_configure(sessions, pass_rows=1)
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    _fu2_certify(sessions)
+    _fu2_append(sessions, {"note": "two"})
+    _fu2_append(sessions, {"note": "three"})
+    assert not _fu2_tick(sessions).published  # snapshot rows 1-3
+    _fu2_append(sessions, {"note": "four"})
+    _fu2_append(sessions, {"note": "five"})
+    _fu2_live(_fu2_resolve_now(sessions, issued))  # observes (5, H5) live
+    five = _fu2_rows(sessions)[-1]
+    outcome = None
+    for _ in range(6):
+        outcome = _fu2_tick(sessions)
+        if outcome.published or outcome.latched or outcome.discarded or outcome.aborted:
+            break
+    assert outcome is not None and outcome.discarded and not outcome.latched, outcome
+    state = _fu2_state(sessions)
+    assert not state.latched and state.published.sequence == 1 and state.observed == five
+    for _ in range(12):  # the restarted pass, from a fresh snapshot, proves row 5
+        outcome = _fu2_tick(sessions)
+        if outcome.published or outcome.latched:
+            break
+    assert outcome.published and _fu2_state(sessions).published.sequence == 5
+    # (b): truncated before the next pass reaches the observed point -> that pass latches
+    _fu2_append(sessions, {"note": "six"})
+    _fu2_live(_fu2_resolve_now(sessions, issued))  # observes (6, H6)
+    _fu2_delete_from(sessions, 4)
+    for _ in range(12):
+        outcome = _fu2_tick(sessions)
+        if outcome.published or outcome.latched:
+            break
+    assert outcome.latched and not outcome.published
+
+
+def test_an_observation_made_before_the_snapshot_must_be_inside_it(
+    sessions: sessionmaker[Session],
+) -> None:
+    """A5 (5(i)): observed_at_start = (4, H4); the snapshot ends at 3 -> latch at publication."""
+
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    for note in ("two", "three", "four"):
+        _fu2_append(sessions, {"note": note})
+    _fu2_certify(sessions)  # observed (4, H4)
+    _fu2_delete_from(sessions, 4)
+    outcome = _fu2_certify(sessions)
+    assert outcome.latched and not outcome.published, outcome
+    _fu2_refused(_fu2_resolve_now(sessions, issued), _fu2_detail("LATCHED_DETAIL"))
+
+
+def test_a_pass_never_publishes_a_verified_end_below_the_observed_head(
+    sessions: sessionmaker[Session],
+) -> None:
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    _fu2_certify(sessions)
+    _fu2_append(sessions, {"note": "two"})
+    _fu2_append(sessions, {"note": "three"})
+    _fu2_live(_fu2_resolve_now(sessions, issued))  # observed (3, H3) via the live suffix
+    _fu2_delete_from(sessions, 3)
+    outcome = _fu2_certify(sessions)
+    assert outcome.latched and not outcome.published
+    assert _fu2_state(sessions).published.sequence == 1, "a pass lowered the verified head"
+
+
+def test_a_head_mismatch_refuses_and_latches(sessions: sessionmaker[Session]) -> None:
+    """The published head row rewritten consistently (payload and digest recomputed)."""
+
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    _fu2_append(sessions, {"note": "two"})
+    _fu2_certify(sessions)  # published (2, H2)
+    two = _fu2_raw_columns(sessions, 2)
+    forged = '{"note":"forged two"}'
+    forged_hash = hash_chain.compute_hash(
+        stream=_fu2_stream(),
+        sequence=2,
+        recorded_at=_NOW,
+        payload_json=forged,
+        previous_hash=two["previous_hash"],
+    )
+    _fu2_sql(
+        sessions,
+        "UPDATE hash_chain_records SET payload_json = :p, record_hash = :h "
+        "WHERE stream = :s AND sequence = 2",
+        p=forged,
+        h=forged_hash,
+    )
+    assert _k1_chain_ok(sessions)
+    _fu2_refused(_fu2_resolve_now(sessions, issued), _fu2_detail("LATCHED_DETAIL"))
+    assert _fu2_state(sessions).latched
+
+
+def test_a_tail_deleted_marker_this_process_has_seen_refuses_and_latches(
+    sessions: sessionmaker[Session],
+) -> None:
+    """K1's documented bound (tail deletion is undetectable) closes for rows THIS process saw:
+    the expiry marker is verified, then deleted; the next resolve latches instead of reviving
+    the bundle."""
+
+    issued = _fix26_issue(sessions, ttl_seconds=60.0)
+    _fix26_sticky_at(sessions, issued)  # marker is row 2
+    _fix26_resolve(sessions, cited_ids=(issued.bundle_id,), now=_NOW)  # observed (2, marker)
+    _fu2_delete_from(sessions, 2)
+    _fu2_refused(_fu2_resolve_now(sessions, issued), _fu2_detail("LATCHED_DETAIL"))
+    assert _fu2_state(sessions).latched
+
+
+def test_the_latch_survives_a_re_pass_a_wall_clock_move_and_a_head_regrowth(
+    sessions: sessionmaker[Session],
+) -> None:
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    _fu2_append(sessions, {"note": "two"})
+    _fu2_certify(sessions)
+    original_two = _fu2_raw_columns(sessions, 2)
+    _fu2_delete_from(sessions, 2)
+    _fu2_refused(_fu2_resolve_now(sessions, issued), _fu2_detail("LATCHED_DETAIL"))
+    # Restored EXACTLY: a pass that ran now would publish cleanly, so only the latch itself
+    # (cleared by nothing but a restart) can keep the stream refusing.
+    _fu2_restore_raw(sessions, original_two)
+    assert not _fu2_certify(sessions).published, "the latch was cleared in-process"
+    _fu2_refused(_fu2_resolve_now(sessions, issued), _fu2_detail("LATCHED_DETAIL"))
+    _fu2_delete_from(sessions, 2)  # and gone again: the regrowth below starts from row 1
+    for note in ("regrown two", "three", "four"):
+        _fu2_append(sessions, {"note": note})
+    outcome = _fu2_certify(sessions)
+    assert not outcome.published, "a latched stream ran a pass"
+    later = _fu2_resolve(sessions, cited_ids=(issued.bundle_id,), now=_NOW + timedelta(hours=9))
+    _fu2_refused(later, _fu2_detail("LATCHED_DETAIL"))
+    assert _fu2_state(sessions).latched
+
+
+# --- virtual genesis (FU2r5 P1-2, r7 P2-1) -----------------------------------------------
+
+
+def test_an_empty_first_pass_then_the_first_issuance_resolves_without_latching(
+    sessions: sessionmaker[Session],
+) -> None:
+    """G1: an empty stream publishes (0, GENESIS); the first issuance is verified from genesis
+    (no physical row 0 exists) and answers; observed becomes (1, H1)."""
+
+    outcome = _fu2_certify(sessions)
+    assert outcome.published
+    state = _fu2_state(sessions)
+    assert (state.published.sequence, state.published.record_hash) == (0, hash_chain.GENESIS_HASH)
+    assert state.observed is None
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    _fu2_live(_fu2_resolve_now(sessions, issued))
+    assert _fu2_state(sessions).observed == _fu2_rows(sessions)[0]
+    assert not _fu2_state(sessions).latched
+
+
+def test_deleting_the_first_row_after_it_was_observed_latches(
+    sessions: sessionmaker[Session],
+) -> None:
+    """G2: after G1, the first (and only) row is deleted; N == 0 has no head row, so the
+    observed row's absence is what latches."""
+
+    _fu2_certify(sessions)
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    _fu2_live(_fu2_resolve_now(sessions, issued))
+    _fu2_delete_from(sessions, 1)
+    _fu2_refused(_fu2_resolve_now(sessions, issued), _fu2_detail("LATCHED_DETAIL"))
+
+
+def test_virtual_genesis_uses_b_plus_one_as_the_overflow_sentinel(
+    sessions: sessionmaker[Session],
+) -> None:
+    """G3 (r7 P2-1): from published (0, GENESIS), exactly B physical rows are verified and
+    answered; B+1 rows refuse as in progress and schedule a pass. (Its mutant, an unconditional
+    LIMIT B+2, returns all B+1 rows without hitting the sentinel and answers.)"""
+
+    _fu2_configure(sessions, resolve_rows=3)
+    _fu2_certify(sessions)  # (0, GENESIS)
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    _fu2_append(sessions, {"note": "two"})
+    _fu2_append(sessions, {"note": "three"})
+    _fu2_live(_fu2_resolve_now(sessions, issued))  # exactly B = 3 rows from genesis
+    _fu2_append(sessions, {"note": "four"})  # B + 1 rows beyond the published head
+    _fu2_refused(_fu2_resolve_now(sessions, issued), _FU2_IN_PROGRESS)
+    assert _fu2_state(sessions).needs_pass is True
+
+
+# --- the one bounded statement (FU2r5 P1-3) ----------------------------------------------
+
+
+def _fu2_raw_insert(sessions: sessionmaker[Session], **columns: Any) -> None:
+    """Insert one row by raw SQL with literal SQL expressions (hostile shapes included)."""
+
+    from sqlalchemy import text
+
+    names = ", ".join(columns)
+    values = ", ".join(str(v) for v in columns.values())
+    with sessions.begin() as session:
+        session.execute(
+            text(f"INSERT INTO hash_chain_records (stream, {names}) VALUES (:s, {values})"),
+            {"s": _fu2_stream()},
+        )
+
+
+def _fu2_admitted_spy(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, int]]:
+    """Records, for every row handed to the bounded admission step, the length of each text
+    value that reached Python."""
+
+    seen: list[dict[str, int]] = []
+    real = evidence_bundles._admit_row
+
+    def spy(row: Any, **kwargs: Any) -> Any:
+        seen.append(
+            {
+                name: len(value)
+                for name, value in row._mapping.items()
+                if isinstance(value, (str, bytes))
+            }
+        )
+        return real(row, **kwargs)
+
+    monkeypatch.setattr(evidence_bundles, "_admit_row", spy)
+    return seen
+
+
+def test_a_relabelled_malformed_expiry_is_refused_d2_from_the_bounded_kind(
+    sessions: sessionmaker[Session],
+) -> None:
+    """K1-D2: the statement projects ``kind``; a row labelled as an expiry whose payload is not
+    the exact two-key shape refuses with K1's D2 detail (not "ordinary evidence")."""
+
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    _fu2_certify(sessions)
+    _fu2_append(
+        sessions,
+        {"bundle_id": issued.bundle_id, "expires_at": "x", "extra": 1},
+        kind=evidence_bundles.EXPIRED_EVENT_KIND,
+    )
+    _fu2_refused(_fu2_resolve_now(sessions, issued), _K1_SHAPE_PHRASE)
+
+
+@pytest.mark.parametrize(
+    ("columns", "field"),
+    [
+        (
+            {
+                "sequence": 2,
+                "kind": "'evidence_note'",
+                "payload_json": "'{\"n\":\"' || hex(zeroblob(524288)) || '\"}'",
+                "recorded_at": "'2026-08-14 14:00:00.000000'",
+                "previous_hash": "'" + "0" * 64 + "'",
+                "record_hash": "'" + "1" * 64 + "'",
+            },
+            "payload_json",
+        ),
+        (
+            {
+                "sequence": 2,
+                "kind": "'evidence_note'",
+                "payload_json": "'{}'",
+                "recorded_at": "'2026' || hex(zeroblob(25000))",
+                "previous_hash": "'" + "0" * 64 + "'",
+                "record_hash": "'" + "1" * 64 + "'",
+            },
+            "recorded_at",
+        ),
+        (
+            {
+                "sequence": 2,
+                "kind": "'evidence_note'",
+                "payload_json": "'{}'",
+                "recorded_at": "'2026-08-14 14:00:00.000000'",
+                "previous_hash": "'" + "0" * 64 + "'",
+                "record_hash": "'" + "1" * 70 + "'",
+            },
+            "record_hash",
+        ),
+        (
+            {
+                "sequence": 2,
+                "kind": "X'6b696e64'",
+                "payload_json": "'{}'",
+                "recorded_at": "'2026-08-14 14:00:00.000000'",
+                "previous_hash": "'" + "0" * 64 + "'",
+                "record_hash": "'" + "1" * 64 + "'",
+            },
+            "kind",
+        ),
+        (
+            {
+                "sequence": "X'02'",
+                "kind": "'evidence_note'",
+                "payload_json": "'{}'",
+                "recorded_at": "'2026-08-14 14:00:00.000000'",
+                "previous_hash": "'" + "0" * 64 + "'",
+                "record_hash": "'" + "1" * 64 + "'",
+            },
+            "sequence",
+        ),
+        (
+            {
+                "sequence": 2,
+                "kind": "'evidence_note'",
+                "payload_json": "'{}'",
+                "recorded_at": "'not a timestamp'",
+                "previous_hash": "'" + "0" * 64 + "'",
+                "record_hash": "'" + "1" * 64 + "'",
+            },
+            "recorded_at",
+        ),
+    ],
+    ids=[
+        "1MiB-payload",
+        "50000-char-timestamp",
+        "70-char-hash",
+        "blob-kind",
+        "blob-sequence",
+        "non-iso-timestamp",
+    ],
+)
+def test_the_sticky_statement_bounds_and_validates_all_six_fields_before_hashing(
+    sessions: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+    columns: dict[str, Any],
+    field: str,
+) -> None:
+    """K1-BOUNDS: hostile rows by raw SQL. Each refuses closed NAMING the field; no hostile row
+    is hashed; no text value longer than its bound + 1 reaches Python."""
+
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    _fu2_certify(sessions)
+    _fu2_raw_insert(sessions, **columns)
+    hashed: list[int] = []
+    real_hash = hash_chain.compute_hash
+    monkeypatch.setattr(
+        hash_chain,
+        "compute_hash",
+        lambda **kw: hashed.append(kw["sequence"]) or real_hash(**kw),
+    )
+    seen = _fu2_admitted_spy(monkeypatch)
+    resolution = _fu2_resolve_now(sessions, issued)
+    _fu2_refused(resolution, "failed verification")
+    assert field in resolution.detail, resolution.detail
+    assert hashed == [], f"a hostile row was hashed: {hashed}"
+    limit = evidence_bundles.EvidenceVerificationLimits().row_bytes
+    assert seen and all(length <= limit + 1 for row in seen for length in row.values()), seen
+
+
+def test_an_oversized_suffix_row_refuses_before_its_payload_is_materialized(
+    sessions: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fu2_configure(sessions, row_bytes=200, pass_bytes_per_tick=1000)
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    _fu2_certify(sessions)
+    _fu2_append(sessions, {"note": "x" * 300})  # chain-correct, over Cr
+    seen = _fu2_admitted_spy(monkeypatch)
+    resolution = _fu2_resolve_now(sessions, issued)
+    _fu2_refused(resolution, "payload_json")
+    assert "200-byte bound" in resolution.detail, resolution.detail
+    assert all(length <= 201 for row in seen for length in row.values()), seen
+
+
+def test_the_bounded_timestamp_is_rehashed_with_utc_attached(
+    sessions: sessionmaker[Session],
+) -> None:
+    """K1-TZ: the stored naive text re-hashes to the stored digest only with tzinfo=UTC; a
+    naive parse would refuse every legitimate suffix row."""
+
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    _fu2_certify(sessions)
+    _fu2_append(sessions, {"note": "two"})
+    stored = _fu2_raw_columns(sessions, 2)["recorded_at"]
+    assert "+" not in stored, stored  # UTCDateTime stores the naive form
+    _fu2_live(_fu2_resolve_now(sessions, issued))
+
+
+def test_suffix_work_over_the_bound_refuses_without_returning_not_expired(
+    sessions: sessionmaker[Session],
+) -> None:
+    _fu2_configure(sessions, resolve_rows=3)
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    _fu2_certify(sessions)  # (1, H1)
+    for note in ("two", "three", "four", "five"):
+        _fu2_append(sessions, {"note": note})
+    _fu2_refused(_fu2_resolve_now(sessions, issued), _FU2_IN_PROGRESS)
+    assert _fu2_state(sessions).needs_pass is True
+
+
+def _fu2_bulk_rows(sessions: sessionmaker[Session], count: int) -> None:
+    """``count`` chain-correct rows after the current head, in one transaction."""
+
+    with sessions.begin() as session:
+        head = hash_chain.head(session, _fu2_stream())
+        sequence = head.sequence if head is not None else 0
+        previous = head.record_hash if head is not None else hash_chain.GENESIS_HASH
+        rows = []
+        for _ in range(count):
+            sequence += 1
+            payload = f'{{"note":"bulk-{sequence}"}}'
+            digest = hash_chain.compute_hash(
+                stream=_fu2_stream(),
+                sequence=sequence,
+                recorded_at=_NOW,
+                payload_json=payload,
+                previous_hash=previous,
+            )
+            rows.append(
+                HashChainRow(
+                    stream=_fu2_stream(),
+                    sequence=sequence,
+                    kind="evidence_note",
+                    payload_json=payload,
+                    recorded_at=_NOW,
+                    previous_hash=previous,
+                    record_hash=digest,
+                )
+            )
+            previous = digest
+        session.add_all(rows)
+
+
+def test_resolve_work_is_bounded_by_b_rows_at_thirty_thousand_rows(
+    file_sessions: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # File-backed (declared, FU2-BUILD r1): certifying 30 000 rows takes 30 one-chunk ticks,
+    # which an in-memory engine refuses (see the single-connection pin).
+    sessions = file_sessions
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    _fu2_bulk_rows(sessions, 30_000)
+    _fu2_certify(sessions)
+    _fu2_append(sessions, {"note": "after"})
+    verifies: list[str] = []
+    real_verify = hash_chain.verify
+    monkeypatch.setattr(
+        hash_chain, "verify", lambda s, stream: verifies.append(stream) or real_verify(s, stream)
+    )
+    seen = _fu2_admitted_spy(monkeypatch)
+    _fu2_live(_fu2_resolve_now(sessions, issued))
+    assert verifies == [], "a resolve ran a full verify"
+    bound = evidence_bundles.EvidenceVerificationLimits().resolve_rows
+    assert 0 < len(seen) <= bound + 2, len(seen)
+    assert len(seen) == 2  # the published head row and the one suffix row
+
+
+def test_the_sticky_stage_reads_head_suffix_and_observed_row_in_one_statement(
+    sessions: sessionmaker[Session],
+) -> None:
+    """B3: exactly ONE statement touches the chain during a resolve (one SQLite snapshot)."""
+
+    from sqlalchemy import event
+
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    _fu2_certify(sessions)
+    _fu2_append(sessions, {"note": "two"})
+    statements: list[str] = []
+
+    def record(conn: Any, cursor: Any, statement: str, *args: Any) -> None:
+        if "hash_chain_records" in statement:
+            statements.append(statement)
+
+    engine = _fu2_engine(sessions)
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        _fu2_live(_fu2_resolve_now(sessions, issued))
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+    assert len(statements) == 1, statements
+
+
+# --- doubts --------------------------------------------------------------------------------
+
+
+def test_a_doubt_in_the_suffix_refuses_with_the_k1_detail(sessions: sessionmaker[Session]) -> None:
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    _fu2_certify(sessions)
+    _k1_raw(sessions, "{not json", kind=evidence_bundles.EXPIRED_EVENT_KIND)
+    resolution = _fu2_resolve_now(sessions, issued)
+    _fu2_refused(resolution, "a durable expiry record does not decode; refusing closed")
+    assert _fu2_state(sessions).published is None, "a doubt left the published state usable"
+
+
+def test_a_doubt_found_by_the_full_pass_keeps_the_stream_refusing_until_a_clean_pass(
+    sessions: sessionmaker[Session],
+) -> None:
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    _k1_raw(sessions, "[1, 2]", kind="evidence_note")
+    outcome = _fu2_certify(sessions)
+    assert outcome.aborted and not outcome.published
+    detail = "a durable evidence record is not a JSON object; refusing closed"
+    _fu2_refused(_fu2_resolve_now(sessions, issued), detail)
+    _fu2_refused(_fu2_resolve_now(sessions, issued), detail)  # still, without a clean pass
+    _fu2_delete_from(sessions, 2)  # the operator removes the bad (never-published) row
+    assert _fu2_certify(sessions).published
+    _fu2_live(_fu2_resolve_now(sessions, issued))
+
+
+def test_a_pass_whose_snapshot_includes_a_corrupt_prefix_publishes_nothing_and_no_resolve_answers_from_it(  # noqa: E501
+    sessions: sessionmaker[Session],
+) -> None:
+    """B2 (and C3 item 5's bound): a row <= N edited after publication is not seen by a resolve
+    (it re-verifies only the suffix) but the NEXT pass finds it, publishes nothing, and every
+    resolve then refuses closed."""
+
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    _fu2_append(sessions, {"note": "two"})
+    _fu2_append(sessions, {"note": "three"})
+    _fu2_certify(sessions)
+    _fu2_sql(
+        sessions,
+        'UPDATE hash_chain_records SET payload_json = \'{"note":"edited"}\' '
+        "WHERE stream = :s AND sequence = 1",
+    )
+    _fu2_live(_fu2_resolve_now(sessions, issued))  # the documented bound: not yet seen
+    outcome = _fu2_certify(sessions)
+    assert outcome.aborted and not outcome.published
+    _fu2_refused(_fu2_resolve_now(sessions, issued), "failed verification")
+
+
+# --- the pass --------------------------------------------------------------------------
+
+
+def test_the_pass_certifies_one_snapshot_so_a_between_chunk_prefix_mutation_cannot_enter_its_proof(
+    file_sessions: sessionmaker[Session],
+) -> None:
+    """B1: chunk 1 reads rows 1-2 of the snapshot; between ticks row 3 is replaced live by a
+    different valid row 3'. The pass publishes the SNAPSHOT's head (3, H3), never H3' (a fresh
+    session per chunk would read the live row and publish H3')."""
+
+    sessions = file_sessions
+    _fu2_configure(sessions, pass_rows=2)
+    _fix26_issue(sessions, ttl_seconds=300.0)
+    _fu2_append(sessions, {"note": "two"})
+    _fu2_append(sessions, {"note": "three"})
+    snapshot_head = _fu2_rows(sessions)[-1]
+    assert not _fu2_tick(sessions).published  # rows 1-2 admitted from the snapshot
+    _fu2_delete_from(sessions, 3)
+    _fu2_append(sessions, {"note": "a different three"})
+    assert _fu2_rows(sessions)[-1] != snapshot_head
+    outcome = _fu2_tick(sessions)
+    assert outcome.published, outcome
+    state = _fu2_state(sessions)
+    assert (state.published.sequence, state.published.record_hash) == snapshot_head
+
+
+def test_delete_and_regrow_past_the_observed_point_latches_before_pass_publication(
+    file_sessions: sessionmaker[Session],
+) -> None:
+    """A2: observed_at_start = (2, H2); the regrowth happens before the pass starts, so the
+    pass's snapshot holds 2'; the chunk spanning sequence 2 latches; nothing is published."""
+
+    sessions = file_sessions
+    _fu2_configure(sessions, pass_rows=1)
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    _fu2_append(sessions, {"note": "two"})
+    _fu2_certify(sessions)  # observed (2, H2)
+    _fu2_delete_from(sessions, 2)
+    _fu2_append(sessions, {"note": "a different two"})
+    _fu2_append(sessions, {"note": "three"})
+    outcome = None
+    for _ in range(6):
+        outcome = _fu2_tick(sessions)
+        if outcome.published or outcome.latched or outcome.aborted:
+            break
+    assert outcome is not None and outcome.latched and not outcome.published, outcome
+    _fu2_refused(_fu2_resolve_now(sessions, issued), _fu2_detail("LATCHED_DETAIL"))
+
+
+def test_the_pass_session_never_writes_and_ends_with_rollback(
+    file_sessions: sessionmaker[Session],
+) -> None:
+    from sqlalchemy import event
+
+    sessions = file_sessions
+    _fix26_issue(sessions, ttl_seconds=300.0)
+    _fu2_append(sessions, {"note": "two"})
+    _k1_raw(sessions, "[1]", kind="evidence_note")  # makes the second pass abort
+    writes: list[str] = []
+
+    def record(conn: Any, cursor: Any, statement: str, *args: Any) -> None:
+        if statement.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE", "REPLACE")):
+            writes.append(statement)
+
+    engine = _fu2_engine(sessions)
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        aborted = _fu2_certify(sessions)
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+    assert aborted.aborted
+    assert writes == [], writes
+    assert engine.pool.checkedout() == 0, "the aborted pass left its snapshot open"
+    _fu2_delete_from(sessions, 3)
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        published = _fu2_certify(sessions)
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+    assert published.published and writes == [], writes
+    assert engine.pool.checkedout() == 0, "the published pass left its snapshot open"
+
+
+def test_cumulative_bytes_over_the_tick_cap_defer_and_never_publish_partial_state(
+    file_sessions: sessionmaker[Session],
+) -> None:
+    sessions = file_sessions
+    _fu2_configure(sessions, row_bytes=300, pass_bytes_per_tick=700, pass_rows=100)
+    for index in range(5):
+        _fu2_append(sessions, {"note": f"{index}" * 200})  # about 213 bytes each
+    first = _fu2_tick(sessions)
+    assert not first.published and first.rows_verified == 3, first  # 3 x ~213 <= 700 < 4 x
+    assert _fu2_state(sessions).published is None
+    second = _fu2_tick(sessions)
+    assert second.published and second.rows_verified == 2, second
+    assert _fu2_state(sessions).published.sequence == 5
+
+
+def test_the_expired_id_cap_aborts_the_pass_and_publishes_nothing(
+    sessions: sessionmaker[Session],
+) -> None:
+    first = _fix26_issue(sessions, ttl_seconds=60.0)
+    second = _fix26_issue(sessions, ttl_seconds=60.0)
+    _fix26_sticky_at(sessions, first)
+    _fix26_sticky_at(sessions, second)
+    evidence_bundles._reset_verified_streams()
+    _fu2_configure(sessions, expired_ids=1)
+    outcome = _fu2_certify(sessions)
+    assert outcome.aborted and not outcome.published
+    _fu2_refused(_fu2_resolve_now(sessions, first), "1-id retained expired-id bound")
+
+
+def test_a_json_nesting_bomb_in_the_pass_is_a_doubt_not_a_crash(
+    sessions: sessionmaker[Session],
+) -> None:
+    _fu2_configure(sessions, row_bytes=200_000, pass_bytes_per_tick=400_000)
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    _k1_raw(sessions, "[" * 100_000, kind="evidence_note")
+    outcome = _fu2_certify(sessions)
+    assert outcome.aborted and not outcome.published
+    _fu2_refused(
+        _fu2_resolve_now(sessions, issued),
+        "a durable evidence record does not decode; refusing closed",
+    )
+
+
+def test_an_oversized_single_row_aborts_the_pass_without_materializing_it(
+    sessions: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cr is a BYTE bound: 60 two-byte characters (120 bytes) exceed a 100-byte Cr even though
+    the text is only 60 characters long."""
+
+    _fu2_configure(sessions, row_bytes=100, pass_bytes_per_tick=1000)
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    _k1_raw(sessions, '{"n":"' + "é" * 50 + '"}', kind="evidence_note")
+    seen = _fu2_admitted_spy(monkeypatch)
+    outcome = _fu2_certify(sessions)
+    assert outcome.aborted and not outcome.published
+    assert "100-byte bound" in outcome.aborted, outcome
+    assert all(length <= 101 for row in seen for length in row.values()), seen
+    _fu2_refused(_fu2_resolve_now(sessions, issued), "100-byte bound")
+
+
+@pytest.mark.parametrize("t_max", [float("inf"), float("nan"), 0.0, -1.0], ids=str)
+def test_a_non_finite_tmax_or_deadline_never_publishes_verified_state(
+    sessions: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch, t_max: float
+) -> None:
+    with pytest.raises(ValueError, match="max_age_seconds"):
+        evidence_bundles.EvidenceVerificationLimits(max_age_seconds=t_max)
+    # the absorbed sum: a huge monotonic reading with a tiny T_max gives D == m0
+    monkeypatch.setattr(evidence_bundles, "_monotonic", lambda: 1e20)
+    _fu2_configure(sessions, max_age_seconds=1.0)
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    outcome = _fu2_certify(sessions)
+    assert outcome.aborted and not outcome.published and "deadline" in outcome.aborted
+    _fu2_refused(_fu2_resolve_now(sessions, issued), "deadline")
+
+
+def test_a_pass_publishes_state_only_when_it_completes_cleanly(
+    file_sessions: sessionmaker[Session],
+) -> None:
+    sessions = file_sessions
+    _fu2_configure(sessions, pass_rows=1)
+    _fix26_issue(sessions, ttl_seconds=300.0)
+    _fu2_append(sessions, {"note": "two"})
+    assert not _fu2_tick(sessions).published
+    assert _fu2_state(sessions).published is None
+    assert _fu2_tick(sessions).published
+    assert _fu2_state(sessions).published.sequence == 2
+
+
+@pytest.mark.in_memory_sqlite_is_the_subject
+def test_an_in_memory_database_refuses_a_pass_that_needs_more_than_one_chunk(
+    sessions: sessionmaker[Session],
+) -> None:
+    """Daybreak FU2-BUILD P2-1 (declared: REPLACES the earlier pin that required a whole pass in
+    one tick on StaticPool). Every topology runs exactly ONE chunk per tick. An in-memory engine
+    has one shared connection, so it cannot hold the pass's snapshot across ticks: a pass that
+    needs more than one chunk there admits at most one chunk, publishes nothing, closes its
+    snapshot and refuses closed with a stable detail. A stream that fits one chunk still
+    publishes (the positive control)."""
+
+    _fu2_configure(sessions, pass_rows=10)
+    _fix26_issue(sessions, ttl_seconds=300.0)
+    _fu2_append(sessions, {"note": "two"})
+    assert _fu2_tick(sessions).published  # one chunk is enough: the positive control
+
+    evidence_bundles._reset_verified_streams()
+    _fu2_configure(sessions, pass_rows=1)
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)  # three rows, one per chunk
+    outcome = _fu2_tick(sessions)
+    assert outcome.rows_verified <= 1 and not outcome.published, outcome
+    assert outcome.aborted == evidence_bundles.SINGLE_CONNECTION_DETAIL, outcome
+    state = _fu2_state(sessions)
+    assert not state.pass_in_flight and state.published is None
+    _fu2_refused(_fu2_resolve_now(sessions, issued), evidence_bundles.SINGLE_CONNECTION_DETAIL)
+
+
+# --- the documented bounds (GREEN at both heads; a later anchor flips them deliberately) --
+
+
+def test_an_unseen_tail_deletion_within_a_process_is_not_detected_and_is_the_documented_bound(
+    sessions: sessionmaker[Session],
+) -> None:
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    _fu2_certify(sessions)
+    _fu2_append(sessions, {"note": "appended and deleted before anything read it"})
+    _fu2_delete_from(sessions, 2)
+    _fu2_live(_fu2_resolve_now(sessions, issued))
+
+
+def test_a_tail_deletion_across_a_restart_is_not_detected_and_is_the_documented_bound(
+    sessions: sessionmaker[Session],
+) -> None:
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    _fu2_append(sessions, {"note": "two"})
+    _fu2_certify(sessions)
+    _fu2_delete_from(sessions, 2)
+    reset = getattr(evidence_bundles, "_reset_verified_streams", None)
+    if reset is not None:
+        reset()  # the restart: process memory is gone
+    _fu2_certify(sessions)
+    _fu2_live(_fu2_resolve_now(sessions, issued))
+
+
+# --- the named settings (Kevin K-20261004-007/-009; builder-derived values flagged) --------
+
+
+def test_every_verification_limit_is_a_named_setting_with_the_same_default() -> None:
+    from chronos.config.settings import Settings
+
+    settings = Settings(_env_file=None)
+    limits = evidence_bundles.EvidenceVerificationLimits()
+    assert evidence_bundles.EvidenceVerificationLimits.from_settings(settings) == limits
+    assert (
+        settings.autonomy_evidence_verification_max_age_seconds,
+        settings.autonomy_evidence_resolve_rows,
+        settings.autonomy_evidence_pass_rows_per_tick,
+        settings.autonomy_evidence_row_bytes,
+        settings.autonomy_evidence_pass_bytes_per_tick,
+        settings.autonomy_evidence_expired_ids,
+        settings.autonomy_evidence_max_pass_attempts,
+    ) == (900.0, 1000, 1000, 4096, 1_048_576, 10_000, 5)
+    for name in (
+        "autonomy_evidence_verification_max_age_seconds",
+        "autonomy_evidence_resolve_rows",
+        "autonomy_evidence_row_bytes",
+        "autonomy_evidence_expired_ids",
+    ):
+        with pytest.raises(ValueError):
+            Settings(_env_file=None, **{name: 0})
+
+
+# --- the equivalence oracle: the bounded answer equals K1's full read --------------------
+
+_D0_PREFIX = "the account's durable evidence stream failed verification ("
+_D0_SUFFIX = "); refusing closed until the stream is repaired"
+
+
+def _oracle_live(sessions: sessionmaker[Session]) -> evidence_bundles.IssuedBundle:
+    return _fix26_issue(sessions, ttl_seconds=300.0)
+
+
+def _oracle_sticky(sessions: sessionmaker[Session]) -> evidence_bundles.IssuedBundle:
+    return _k1_expired(sessions)
+
+
+def _oracle_duplicate_markers(sessions: sessionmaker[Session]) -> evidence_bundles.IssuedBundle:
+    issued = _k1_expired(sessions)
+    _k1_append(
+        sessions,
+        {"bundle_id": issued.bundle_id, "expires_at": "x"},
+        kind=evidence_bundles.EXPIRED_EVENT_KIND,
+    )
+    return issued
+
+
+def _oracle_other_id_marker(sessions: sessionmaker[Session]) -> evidence_bundles.IssuedBundle:
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    _k1_append(
+        sessions,
+        {"bundle_id": issued.bundle_id + "x", "expires_at": "x"},
+        kind=evidence_bundles.EXPIRED_EVENT_KIND,
+    )
+    return issued
+
+
+def _oracle_kind_edited_marker(sessions: sessionmaker[Session]) -> evidence_bundles.IssuedBundle:
+    issued = _k1_expired(sessions)
+    _k1_relabel(sessions, from_kind=evidence_bundles.EXPIRED_EVENT_KIND, to_kind="anything-else")
+    return issued
+
+
+def _oracle_relabelled_issuance(
+    sessions: sessionmaker[Session],
+) -> evidence_bundles.IssuedBundle:
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    _k1_relabel(
+        sessions, from_kind="evidence_bundle_issued", to_kind=evidence_bundles.EXPIRED_EVENT_KIND
+    )
+    return issued
+
+
+def _oracle_extra_key(sessions: sessionmaker[Session]) -> evidence_bundles.IssuedBundle:
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    _k1_append(
+        sessions,
+        {"bundle_id": issued.bundle_id, "expires_at": "x", "extra": 1},
+        kind=evidence_bundles.EXPIRED_EVENT_KIND,
+    )
+    return issued
+
+
+def _oracle_non_string_id(sessions: sessionmaker[Session]) -> evidence_bundles.IssuedBundle:
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    _k1_append(sessions, {"bundle_id": 5, "expires_at": "x"}, kind="evidence_note")
+    return issued
+
+
+def _oracle_non_string_expiry(sessions: sessionmaker[Session]) -> evidence_bundles.IssuedBundle:
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    _k1_append(sessions, {"bundle_id": "evb_y", "expires_at": 7}, kind="evidence_note")
+    return issued
+
+
+def _oracle_unlabelled_array(sessions: sessionmaker[Session]) -> evidence_bundles.IssuedBundle:
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    _k1_raw(sessions, "[1, 2]", kind="evidence_note")
+    return issued
+
+
+def _oracle_labelled_undecodable(
+    sessions: sessionmaker[Session],
+) -> evidence_bundles.IssuedBundle:
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    _k1_raw(sessions, "{not json", kind=evidence_bundles.EXPIRED_EVENT_KIND)
+    return issued
+
+
+def _oracle_blob_payload(sessions: sessionmaker[Session]) -> evidence_bundles.IssuedBundle:
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    _k1r1_insert(sessions, b'{"note": "ordinary"}')
+    return issued
+
+
+def _oracle_labelled_blob(sessions: sessionmaker[Session]) -> evidence_bundles.IssuedBundle:
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    _k1r1_insert(sessions, b'{"bundle_id": "x", "expires_at": "y"}', kind=_FIX26_KIND)
+    return issued
+
+
+def _oracle_deep_array(sessions: sessionmaker[Session]) -> evidence_bundles.IssuedBundle:
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    _k1_raw(sessions, "[" * 1000 + "]" * 1000, kind="evidence_note")
+    return issued
+
+
+def _oracle_deleted_row(sessions: sessionmaker[Session]) -> evidence_bundles.IssuedBundle:
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    _fu2_append(sessions, {"note": "two"})
+    _fu2_append(sessions, {"note": "three"})
+    _fu2_sql(sessions, "DELETE FROM hash_chain_records WHERE stream = :s AND sequence = 2")
+    return issued
+
+
+def _oracle_edited_payload(sessions: sessionmaker[Session]) -> evidence_bundles.IssuedBundle:
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    _fu2_append(sessions, {"note": "two"})
+    _fu2_sql(
+        sessions,
+        'UPDATE hash_chain_records SET payload_json = \'{"note":"x"}\' '
+        "WHERE stream = :s AND sequence = 2",
+    )
+    return issued
+
+
+def _oracle_other_account_marker(
+    sessions: sessionmaker[Session],
+) -> evidence_bundles.IssuedBundle:
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    with sessions.begin() as session:
+        hash_chain.append(
+            session,
+            stream=evidence_bundles.hash_chain_stream("b" * 64),
+            kind=evidence_bundles.EXPIRED_EVENT_KIND,
+            payload={"bundle_id": issued.bundle_id, "expires_at": "x"},
+            recorded_at=_NOW,
+        )
+    return issued
+
+
+def _oracle_marker_then_later_doubt(
+    sessions: sessionmaker[Session],
+) -> evidence_bundles.IssuedBundle:
+    issued = _k1_expired(sessions)
+    _k1_raw(sessions, "[3]", kind="evidence_note")
+    return issued
+
+
+_ORACLE_FIXTURES = {
+    "live": _oracle_live,
+    "sticky": _oracle_sticky,
+    "duplicate-markers": _oracle_duplicate_markers,
+    "other-id-marker": _oracle_other_id_marker,
+    "kind-edited-marker": _oracle_kind_edited_marker,
+    "relabelled-issuance": _oracle_relabelled_issuance,
+    "labelled-extra-key": _oracle_extra_key,
+    "non-string-id": _oracle_non_string_id,
+    "non-string-expiry": _oracle_non_string_expiry,
+    "unlabelled-array": _oracle_unlabelled_array,
+    "labelled-undecodable": _oracle_labelled_undecodable,
+    "blob-payload": _oracle_blob_payload,
+    "labelled-blob": _oracle_labelled_blob,
+    "deep-array": _oracle_deep_array,
+    "deleted-row": _oracle_deleted_row,
+    "edited-payload": _oracle_edited_payload,
+    "other-account-marker": _oracle_other_account_marker,
+    "marker-then-later-doubt": _oracle_marker_then_later_doubt,
+}
+
+
+@pytest.mark.parametrize("fixture", sorted(_ORACLE_FIXTURES))
+def test_the_bounded_answer_equals_the_k1_full_read_on_every_k1_fixture(
+    sessions: sessionmaker[Session], fixture: str
+) -> None:
+    """The equivalence oracle, comparing the ANSWER and the REASON, never only the code."""
+
+    issued = _ORACLE_FIXTURES[fixture](sessions)
+    with sessions.begin() as session:
+        reference = _k1_reference_verdict(session, stream=_fu2_stream(), bundle_id=issued.bundle_id)
+    evidence_bundles._reset_verified_streams()
+    _fu2_certify(sessions)
+    resolution = _fu2_resolve_now(sessions, issued)
+    if reference is None:
+        _fu2_live(resolution)
+        return
+    assert resolution.refusal is evidence_bundles.ResolutionRefusal.EXPIRED, resolution
+    if reference.startswith(_D0_PREFIX):
+        assert resolution.detail.startswith(_D0_PREFIX), resolution.detail
+        assert resolution.detail.endswith(_D0_SUFFIX), resolution.detail
+    else:
+        assert resolution.detail == reference, (fixture, resolution.detail, reference)
+
+
+def test_the_one_intended_divergence_from_k1_is_the_byte_bound(
+    sessions: sessionmaker[Session],
+) -> None:
+    """Over Cr the bounded read refuses on the byte bound, where K1 decoded the whole value
+    (here a 5000-digit integer K1 refused as undecodable). Both refuse closed; only the
+    reason differs, and it is stated here rather than hidden in the oracle."""
+
+    issued = _fix26_issue(sessions, ttl_seconds=300.0)
+    _k1r1_insert(sessions, "9" * 5000)
+    with sessions.begin() as session:
+        reference = _k1_reference_verdict(session, stream=_fu2_stream(), bundle_id=issued.bundle_id)
+    assert reference == "a durable evidence record does not decode; refusing closed"
+    _fu2_certify(sessions)
+    _fu2_refused(_fu2_resolve_now(sessions, issued), "4096-byte bound")

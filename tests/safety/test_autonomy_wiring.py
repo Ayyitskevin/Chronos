@@ -158,8 +158,22 @@ def _settings(
     mandate_file: Path | None,
     proposers_file: Path | None = None,
     evidence_bundles: bool = False,
+    evidence_limits: dict[str, Any] | None = None,
 ) -> SimpleNamespace:
+    # FU2 (Kevin K-20261004-010): the seven named evidence-verification limits, at the real
+    # Settings defaults; the double carries them for the same reason it carries the posture.
+    limits = {
+        "autonomy_evidence_verification_max_age_seconds": 900.0,
+        "autonomy_evidence_resolve_rows": 1000,
+        "autonomy_evidence_pass_rows_per_tick": 1000,
+        "autonomy_evidence_row_bytes": 4096,
+        "autonomy_evidence_pass_bytes_per_tick": 1_048_576,
+        "autonomy_evidence_expired_ids": 10_000,
+        "autonomy_evidence_max_pass_attempts": 5,
+        **(evidence_limits or {}),
+    }
     return SimpleNamespace(
+        **limits,
         autonomy_mandate_file=mandate_file,
         autonomy_proposers_file=proposers_file,
         # ADR-0028's posture, defaulted off here exactly as the real Settings
@@ -221,6 +235,7 @@ def _runtime(
     order_management: Any = None,
     proposers_file: Path | None = None,
     evidence_bundles: bool = False,
+    evidence_limits: dict[str, Any] | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         settings=_settings(
@@ -228,6 +243,7 @@ def _runtime(
             mandate_file=mandate_file,
             proposers_file=proposers_file,
             evidence_bundles=evidence_bundles,
+            evidence_limits=evidence_limits,
         ),
         database=database,
         order_management=order_management or SimpleNamespace(account_id=account_id),
@@ -437,6 +453,44 @@ def test_a_matching_mandate_assembles_a_live_runtime(database: Database, tmp_pat
         )
     assert activation is not None
     assert activation.process_generation == 9
+
+
+def test_the_evidence_verification_limits_reach_the_production_runtime(
+    database: Database, tmp_path: Path
+) -> None:
+    """FU2 (Daybreak P1-1, Kevin K-20261004-010): an owner's NON-DEFAULT values for the named
+    evidence-verification settings are the values the assembled runtime enforces: on its
+    RuntimeConfig and on the engine the runtime configured. Equal defaults cannot show this."""
+
+    from chronos.supervisor import evidence_bundles as evidence
+
+    tuned = {
+        "autonomy_evidence_verification_max_age_seconds": 120.0,
+        "autonomy_evidence_resolve_rows": 7,
+        "autonomy_evidence_pass_rows_per_tick": 9,
+        "autonomy_evidence_row_bytes": 2048,
+        "autonomy_evidence_pass_bytes_per_tick": 65_536,
+        "autonomy_evidence_expired_ids": 33,
+        "autonomy_evidence_max_pass_attempts": 2,
+    }
+    path = _write_mandate(tmp_path, _mandate())
+    runtime = _runtime(
+        database, tmp_path, mandate_file=path, evidence_limits=tuned, **_authenticated(tmp_path)
+    )
+    autonomy = build_autonomy_runtime(runtime, process_generation=9, is_writer=lambda: True)
+    assert isinstance(autonomy, AutonomyRuntime)
+    expected = evidence.EvidenceVerificationLimits(
+        max_age_seconds=120.0,
+        resolve_rows=7,
+        pass_rows=9,
+        row_bytes=2048,
+        pass_bytes_per_tick=65_536,
+        expired_ids=33,
+        max_pass_attempts=2,
+    )
+    assert expected != evidence.EvidenceVerificationLimits()
+    assert autonomy._config.evidence_limits == expected
+    assert evidence.verification_limits(database.engine) == expected
 
 
 def test_a_revoked_persistent_mandate_stays_inert_after_restart(

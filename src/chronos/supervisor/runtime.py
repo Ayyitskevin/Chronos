@@ -149,6 +149,11 @@ class RuntimeConfig:
     alerts_per_tick: int = 50
     #: Consecutive failed ticks before the runtime stops itself.
     max_consecutive_failures: int = 5
+    #: FU2: the bounds of the evidence sticky read and its verification pass. Each is a
+    #: named setting (Kevin); ``EvidenceVerificationLimits.from_settings`` reads them.
+    evidence_limits: evidence_bundles.EvidenceVerificationLimits = field(
+        default_factory=evidence_bundles.EvidenceVerificationLimits
+    )
 
     def __post_init__(self) -> None:
         if self.minimum_interval_seconds <= 0:
@@ -196,6 +201,8 @@ class TickReport:
     #: Expired evidence-bundle rows reclaimed this tick (ADR-0028's retention
     #: rule). Always zero under the unset posture, which writes no bundles.
     evidence_bundles_pruned: int = 0
+    #: FU2: evidence-stream rows the verification pass verified this tick.
+    evidence_pass_rows_verified: int = 0
     queue_depth: int = 0
     failure: str = ""
     outcomes: list[CycleOutcome] = field(default_factory=list)
@@ -241,6 +248,10 @@ class AutonomyRuntime:
         # bundle this backend issued to that proposer and that has not expired
         # against the drain's clock. False is the pre-ADR-0028 posture verbatim.
         self._bind_evidence = bind_evidence
+        self._evidence_stream = evidence_bundles.hash_chain_stream(config.account_fingerprint)
+        self._engine = sessions.kw.get("bind")
+        if bind_evidence and self._engine is not None:
+            evidence_bundles.configure_verification(self._engine, config.evidence_limits)
         self._mandate_source = mandate_source
         self._gather_facts = gather_facts
         self._gather_instrument = gather_instrument
@@ -392,6 +403,58 @@ class AutonomyRuntime:
                     account_fingerprint=self._config.account_fingerprint,
                     now=now,
                 )
+
+        if self._bind_evidence:
+            self._verify_evidence(now, report)
+
+    def _verify_evidence(self, now: datetime, report: TickReport) -> None:
+        """FU2 (C1.3/C1.4): one chunk of the evidence-stream verification pass.
+
+        Runs after the drain and alert delivery, so the first tick's drain refuses evidence
+        until this pass has completed once (R7). It never raises into the tick: a corrupt
+        stream must not stop the runtime through ``max_consecutive_failures``. A latch raises
+        ONE CRITICAL owner alert on its transition and does not stop the runtime (R14); an
+        aborted pass raises a WARNING (R16).
+        """
+
+        outcome = evidence_bundles.run_verification_tick(self._sessions, self._evidence_stream)
+        report.evidence_pass_rows_verified = outcome.rows_verified
+        if self._engine is None:
+            return
+        state = evidence_bundles.stream_state(self._engine, self._evidence_stream)
+        raise_latch = state.latched is not None and not state.latch_alerted
+        if not raise_latch and outcome.aborted is None:
+            return
+        try:
+            with self._sessions.begin() as session:
+                if raise_latch:
+                    alerts.raise_alert(
+                        session,
+                        account_fingerprint=self._config.account_fingerprint,
+                        severity=alerts.AlertSeverity.CRITICAL,
+                        kind=evidence_bundles.STREAM_TRUNCATED_ALERT_KIND,
+                        summary=(
+                            "the evidence stream no longer holds a record this process "
+                            "verified; evidence-bound proposals refuse until a restart"
+                        ),
+                        now=now,
+                    )
+                if outcome.aborted is not None:
+                    alerts.raise_alert(
+                        session,
+                        account_fingerprint=self._config.account_fingerprint,
+                        severity=alerts.AlertSeverity.WARNING,
+                        kind=evidence_bundles.PASS_FAILED_ALERT_KIND,
+                        summary="an evidence-stream verification pass refused the stream",
+                        now=now,
+                    )
+            if raise_latch:
+                state.latch_alerted = True
+        except Exception:
+            _logger.exception(
+                "Could not record an evidence verification alert",
+                extra={"event": "evidence_alert_unrecordable"},
+            )
 
     def _drain(
         self,
@@ -562,6 +625,8 @@ class AutonomyRuntime:
         """
 
         self._stopped = True
+        if self._bind_evidence and self._engine is not None:
+            evidence_bundles.close_pass(self._engine, self._evidence_stream)
         _logger.warning(
             "Autonomy runtime stopped: %s",
             reason or "no reason given",

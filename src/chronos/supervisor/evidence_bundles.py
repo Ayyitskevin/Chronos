@@ -76,14 +76,27 @@ survives the expiry of the thing issued.
 from __future__ import annotations
 
 import json
+import math
 import secrets
-from dataclasses import dataclass
-from datetime import datetime, timedelta
+import time
+import weakref
+from collections.abc import Callable
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from typing import Any
 
-from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy import LargeBinary, Text, case, cast, func, literal, select, text
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import StaticPool
 
+from chronos.config.limits import (
+    MAX_DURABLE_HASH_TEXT_CHARS,
+    MAX_DURABLE_KIND_TEXT_CHARS,
+    MAX_DURABLE_SEQUENCE_TEXT_CHARS,
+    MAX_DURABLE_TIMESTAMP_TEXT_CHARS,
+)
 from chronos.persistence import hash_chain
 from chronos.persistence.schema import AutonomyEvidenceBundleRow, HashChainRow
 from chronos.supervisor.evidence_kinds import BundleKind
@@ -367,93 +380,759 @@ def load(
     )
 
 
-def _durable_expiry_verdict(session: Session, *, stream: str, bundle_id: str) -> str | None:
-    """The refusal detail if durable evidence already judged ``bundle_id`` EXPIRED.
+# ============================================================ FU2: the bounded sticky read
+#
+# FU2r7 (Daybreak PASS-DELTA, kimi CONFIRMED) under Kevin's A-prime ruling and
+# K-20261004-007/-009. Until FU2 the sticky stage verified the WHOLE stream and decoded every
+# record on every resolve. Now a verification PASS, run off the drain's path one chunk per
+# tick inside ONE SQLite snapshot, publishes a verified head ``(N, H)`` and the expired ids
+# it saw; each resolve reads ONE bounded statement from that head, proves that every row
+# THIS PROCESS has verified is still present with its digest (``observed``), and answers.
+#
+# Fail-closed states, each refusing EXPIRED with its own detail (R1: the code is reused, the
+# detail names the reason, and pins assert the detail):
+#
+# - not ready: no pass has completed since this process started (R7);
+# - stale: the published state is older than ``max_age_seconds`` (monotonic, R2);
+# - in progress: the stream outgrew the per-resolve bound ``resolve_rows`` (R3a);
+# - latched: a row this process verified is missing, moved or rewritten; cleared ONLY by a
+#   restart (C1.4; the owner-reviewed replacement is DEFERRED with the anchor lane, R12);
+# - doubt: corruption detectable from the stream itself (K1's D0-D4 and the bounds); cleared
+#   by the next clean pass.
+#
+# What it does NOT guarantee (C3, stated where the code is): a truncation or consistent
+# rewrite of rows this process has never verified, including every row across a restart, is
+# undetectable, exactly as K1's documented bound (no external anchor; R10-R12 deferred); an
+# actor who can delete rows AND restart the drain; the 12 other hash_chain writers; a row at
+# or below N edited after a pass's snapshot is caught only by the next pass (C3 item 5).
+#
+# Builder-derived values (Kevin K-20261004-009, flagged): max_age_seconds 900, row_bytes
+# 4096 (the largest legitimate canonical record measured at 1208 bytes), expired_ids 10 000;
+# max_pass_attempts 5 is also builder-derived (R16 named the policy, not a number).
 
-    Returns ``None`` when no sticky verdict exists. Everything else about the
-    read fails CLOSED, because the alternative in each case is treating corrupt
-    durable evidence as "not expired".
+#: The process's monotonic clock, through a seam a test can drive.
+_monotonic: Callable[[], float] = time.monotonic
 
-    **An expiry record is recognised by its HASHED payload, never by ``kind``.**
-    ``hash_chain`` digests the payload text but not the ``kind`` column, so a
-    read that selected by ``kind`` let a one-field edit hide a durable verdict
-    while the chain still verified (FIX-26-K1). An expiry record is any row of
-    this account's own stream whose payload decodes to an object with EXACTLY
-    the keys ``bundle_id`` and ``expires_at``, both strings — the shape the
-    expiry writer in :func:`resolve` produces and the eight-key issuance record
-    can never take. ``expires_at`` is classification data only (the drain's
-    clock already judged it), and ``bundle_id`` matches by exact code points.
+NOT_READY_DETAIL = (
+    "the account's durable evidence stream has not been verified since this process started; "
+    "evidence-bound proposals refuse until the first verification pass completes"
+)
+STALE_DETAIL = (
+    "the account's verified evidence state is older than its verification bound; refusing "
+    "until a fresh verification pass completes"
+)
+IN_PROGRESS_DETAIL = (
+    "the account's evidence stream has grown past the verified state by more than the "
+    "per-resolve bound; verification in progress, refusing until a pass catches up"
+)
+MONOTONIC_DETAIL = (
+    "the process's monotonic clock reading is unusable (non-finite, or behind the verified "
+    "state's start); refusing closed until a fresh verification pass"
+)
+LATCHED_DETAIL = (
+    "the account's durable evidence stream no longer holds, with its digest, a record this "
+    "process verified; every evidence-bound proposal refuses until the process is restarted "
+    "and the stream is inspected"
+)
+SINGLE_CONNECTION_DETAIL = (
+    "this database has one shared connection (an in-memory engine), which cannot hold a "
+    "verification snapshot across ticks, and the evidence stream needs more than one pass "
+    "chunk; refusing closed"
+)
+_DEADLINE_DETAIL = (
+    "the verification deadline is not representable (the monotonic start plus the bound does "
+    "not exceed the start); refusing closed"
+)
+_STICKY_DETAIL = (
+    "the cited evidence bundle was already refused EXPIRED at an earlier "
+    "drain and that verdict is durable; wall-clock motion does not revive "
+    "refused authority"
+)
+#: Owner-alert kinds the runtime raises for this stage (R14, R16).
+STREAM_TRUNCATED_ALERT_KIND = "evidence.stream_truncated"
+PASS_FAILED_ALERT_KIND = "evidence.pass_failed"
 
-    Refused closed, by the sealed doubt list:
 
-    - D0: a stream that fails ``hash_chain.verify`` (a targeted edit, a deletion,
-      a reordering);
-    - D1: ANY row whose payload does not decode or is not a JSON object;
-    - D2: a row labelled ``EXPIRED_EVENT_KIND`` that is not exactly the two-key,
-      two-string shape (an issuance relabelled as an expiry included);
-    - D3: an object with exactly the two keys whose values are not both
-      strings, whatever its ``kind`` — so relabelling cannot hide it;
-    - D4: the whole verified stream is read before answering, so a matching
-      record cannot hide a later doubt.
+def _d0(inner: str) -> str:
+    return (
+        f"the account's durable evidence stream failed verification ({inner}); "
+        "refusing closed until the stream is repaired"
+    )
 
-    Duplicate matching records are the same verdict, never an error. Objects of
-    any other shape that are not labelled as expiries are ordinary evidence.
-    Deleting the stream's TAIL record stays undetectable — that is
-    ``hash_chain``'s documented honest bound (no external anchor), not a gap
-    this read can close.
+
+@dataclass(frozen=True, slots=True)
+class EvidenceVerificationLimits:
+    """The bounds of the sticky read and its pass; each is a named setting (Kevin)."""
+
+    #: T_max (R2): seconds a published state stays fresh, from its pass's start.
+    max_age_seconds: float = 900.0
+    #: B (R3a): suffix rows one resolve may verify past the published head.
+    resolve_rows: int = 1000
+    #: P (R3b): rows one pass chunk may verify per tick.
+    pass_rows: int = 1000
+    #: Cr (R3b): bytes of one record's payload, enforced before it reaches Python.
+    row_bytes: int = 4096
+    #: Ct (R3b): payload bytes one pass chunk may admit per tick.
+    pass_bytes_per_tick: int = 1_048_576
+    #: K (R3b): expired bundle ids one published state may retain.
+    expired_ids: int = 10_000
+    #: R16: consecutive aborted passes before the stream refuses until a restart.
+    max_pass_attempts: int = 5
+
+    def __post_init__(self) -> None:
+        age = self.max_age_seconds
+        if (
+            isinstance(age, bool)
+            or not isinstance(age, (int, float))
+            or not math.isfinite(age)
+            or age <= 0
+        ):
+            raise ValueError("max_age_seconds must be a finite number of seconds above zero")
+        for name in (
+            "resolve_rows",
+            "pass_rows",
+            "row_bytes",
+            "pass_bytes_per_tick",
+            "expired_ids",
+            "max_pass_attempts",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
+        if self.row_bytes > self.pass_bytes_per_tick:
+            raise ValueError(
+                "row_bytes must not exceed pass_bytes_per_tick: one admitted row must fit a tick"
+            )
+
+    @classmethod
+    def from_settings(cls, settings: Any) -> EvidenceVerificationLimits:
+        """The limits a ``Settings`` object names (read by attribute, so the supervisor does
+        not import the configuration module)."""
+
+        return cls(
+            max_age_seconds=settings.autonomy_evidence_verification_max_age_seconds,
+            resolve_rows=settings.autonomy_evidence_resolve_rows,
+            pass_rows=settings.autonomy_evidence_pass_rows_per_tick,
+            row_bytes=settings.autonomy_evidence_row_bytes,
+            pass_bytes_per_tick=settings.autonomy_evidence_pass_bytes_per_tick,
+            expired_ids=settings.autonomy_evidence_expired_ids,
+            max_pass_attempts=settings.autonomy_evidence_max_pass_attempts,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class PublishedState:
+    """A full verification of ONE snapshot of the stream, from genesis to its head."""
+
+    sequence: int
+    record_hash: str
+    expired_ids: frozenset[str]
+    started_at_monotonic: float
+    deadline: float
+
+
+@dataclass(slots=True)
+class _PassAttempt:
+    session: Session
+    cursor: int
+    partial_hash: str
+    partial_expired: set[str]
+    observed_at_start: tuple[int, str] | None
+    start_proven: bool
+    started_at_monotonic: float
+
+
+@dataclass(slots=True)
+class StreamState:
+    """Process memory for one stream (R5(a): never persisted)."""
+
+    published: PublishedState | None = None
+    #: The highest (sequence, record_hash) THIS PROCESS has verified: an identity, never a
+    #: watermark; replaced only by a tuple whose range re-proved it, never lowered.
+    observed: tuple[int, str] | None = None
+    latched: str | None = None
+    doubt: str | None = None
+    needs_pass: bool = True
+    attempts: int = 0
+    latch_alerted: bool = False
+    in_flight: _PassAttempt | None = None
+
+    @property
+    def pass_in_flight(self) -> bool:
+        return self.in_flight is not None
+
+
+@dataclass(slots=True)
+class _EngineState:
+    limits: EvidenceVerificationLimits = field(default_factory=EvidenceVerificationLimits)
+    streams: dict[str, StreamState] = field(default_factory=dict)
+
+
+#: Keyed by engine (weakly), so the state of one database never meets another database in
+#: the same process (declared build decision: many tests share an account fingerprint).
+_ENGINES: weakref.WeakKeyDictionary[Engine, _EngineState] = weakref.WeakKeyDictionary()
+
+
+@dataclass(frozen=True, slots=True)
+class PassOutcome:
+    """What one verification tick (or a whole pass) did."""
+
+    rows_verified: int = 0
+    published: bool = False
+    in_progress: bool = False
+    discarded: bool = False
+    latched: bool = False
+    aborted: str | None = None
+
+
+class _Refused(Exception):
+    """A row (or the pass) cannot be trusted; ``detail`` is the closed refusal text."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(detail)
+        self.detail = detail
+
+
+class _Latch(Exception):
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _engine_state(engine: Engine) -> _EngineState:
+    state = _ENGINES.get(engine)
+    if state is None:
+        state = _EngineState()
+        _ENGINES[engine] = state
+    return state
+
+
+def configure_verification(engine: Engine, limits: EvidenceVerificationLimits) -> None:
+    """Set the bounds the drain on this engine uses (the runtime calls this at start)."""
+
+    _engine_state(engine).limits = limits
+
+
+def verification_limits(engine: Engine) -> EvidenceVerificationLimits:
+    return _engine_state(engine).limits
+
+
+def stream_state(engine: Engine, stream: str) -> StreamState:
+    streams = _engine_state(engine).streams
+    state = streams.get(stream)
+    if state is None:
+        state = StreamState()
+        streams[stream] = state
+    return state
+
+
+def _reset_verified_streams() -> None:
+    """Forget all verified state, as a process restart does (the test seam)."""
+
+    for engine_state in list(_ENGINES.values()):
+        for state in engine_state.streams.values():
+            _close(state)
+    _ENGINES.clear()
+
+
+def _close(state: StreamState) -> None:
+    attempt, state.in_flight = state.in_flight, None
+    if attempt is not None:
+        try:
+            attempt.session.rollback()
+        finally:
+            attempt.session.close()
+
+
+def close_pass(engine: Engine, stream: str) -> None:
+    """End an in-flight pass and its snapshot (``AutonomyRuntime.stop``)."""
+
+    state = _engine_state(engine).streams.get(stream)
+    if state is not None:
+        _close(state)
+
+
+# --- the six-field bounded projection (an in-file copy of loop.py's shape; a shared helper
+# would touch loop.py and views.py, outside FU2's files: technical debt for the sweep) ------
+
+
+def _bounded_text(
+    column: Any, *, maximum: int, storage: str, is_sqlite: bool
+) -> tuple[Any, Any, Any]:
+    text_value = cast(column, Text)
+    if not is_sqlite:
+        return literal(storage), func.length(text_value), func.substr(text_value, 1, maximum + 1)
+    storage_type = func.typeof(column)
+    expected = storage_type == storage
+    return (
+        storage_type,
+        case((expected, func.length(text_value)), else_=literal(None)),
+        case((expected, func.substr(text_value, 1, maximum + 1)), else_=literal(None)),
+    )
+
+
+def _bounded_statement(
+    session: Session,
+    stream: str,
+    *,
+    row_bytes: int,
+    limit: int,
+    sequence_from: int | None = None,
+    sequence_eq: int | None = None,
+) -> Any:
+    is_sqlite = session.get_bind().dialect.name == "sqlite"
+    fields = []
+    for label, column, maximum, storage in (
+        ("sequence", HashChainRow.sequence, MAX_DURABLE_SEQUENCE_TEXT_CHARS, "integer"),
+        ("kind", HashChainRow.kind, MAX_DURABLE_KIND_TEXT_CHARS, "text"),
+        ("payload_json", HashChainRow.payload_json, row_bytes, "text"),
+        ("recorded_at", HashChainRow.recorded_at, MAX_DURABLE_TIMESTAMP_TEXT_CHARS, "text"),
+        ("previous_hash", HashChainRow.previous_hash, MAX_DURABLE_HASH_TEXT_CHARS, "text"),
+        ("record_hash", HashChainRow.record_hash, MAX_DURABLE_HASH_TEXT_CHARS, "text"),
+    ):
+        storage_type, length, prefix = _bounded_text(
+            column, maximum=maximum, storage=storage, is_sqlite=is_sqlite
+        )
+        fields += [
+            storage_type.label(f"{label}_storage_type"),
+            length.label(f"{label}_length"),
+            prefix.label(label),
+        ]
+    payload_bytes: Any = func.length(cast(HashChainRow.payload_json, LargeBinary))
+    if is_sqlite:
+        payload_bytes = case(
+            (func.typeof(HashChainRow.payload_json) == "text", payload_bytes), else_=literal(None)
+        )
+    statement = select(*fields, payload_bytes.label("payload_bytes")).where(
+        HashChainRow.stream == stream
+    )
+    if sequence_eq is not None:
+        statement = statement.where(HashChainRow.sequence == sequence_eq)
+    elif sequence_from is not None:
+        statement = statement.where(HashChainRow.sequence >= sequence_from)
+    return statement.order_by(HashChainRow.sequence.asc()).limit(limit)
+
+
+@dataclass(frozen=True, slots=True)
+class _Row:
+    sequence: int
+    kind: str
+    payload_json: str
+    recorded_at: datetime
+    previous_hash: str
+    record_hash: str
+    payload_bytes: int
+
+
+_HEX = frozenset("0123456789abcdef")
+
+
+def _admit_row(row: Any, *, row_bytes: int) -> _Row:
+    """Validate the bounded projection of one record BEFORE it is hashed or classified."""
+
+    if row.sequence_storage_type != "integer" or row.sequence is None:
+        raise _Refused(_d0("a record's sequence has an invalid storage type"))
+    if row.sequence_length > MAX_DURABLE_SEQUENCE_TEXT_CHARS:
+        raise _Refused(_d0("a record's sequence exceeds its durable bound"))
+    text_sequence = row.sequence
+    if (
+        not text_sequence.isascii()
+        or not text_sequence.isdecimal()
+        or str(int(text_sequence)) != text_sequence
+        or int(text_sequence) < 1
+    ):
+        raise _Refused(_d0("a record's sequence is not a canonical positive integer"))
+    sequence = int(text_sequence)
+    if row.kind_storage_type != "text" or row.kind is None:
+        raise _Refused(_d0(f"record {sequence}: kind has an invalid storage type"))
+    if row.kind_length > MAX_DURABLE_KIND_TEXT_CHARS:
+        raise _Refused(_d0(f"record {sequence}: kind exceeds its durable bound"))
+    labelled = row.kind == EXPIRED_EVENT_KIND
+    if row.payload_json_storage_type != "text" or row.payload_json is None:
+        # K1's D1 text, kept verbatim: a payload that is not text does not decode
+        raise _Refused(
+            "a durable expiry record does not decode; refusing closed"
+            if labelled
+            else "a durable evidence record does not decode; refusing closed"
+        )
+    if row.payload_json_length > row_bytes or row.payload_bytes > row_bytes:
+        raise _Refused(
+            _d0(f"record {sequence}: payload_json exceeds the {row_bytes}-byte bound (R13)")
+        )
+    if row.recorded_at_storage_type != "text" or row.recorded_at is None:
+        raise _Refused(_d0(f"record {sequence}: recorded_at has an invalid storage type"))
+    if row.recorded_at_length > MAX_DURABLE_TIMESTAMP_TEXT_CHARS:
+        raise _Refused(_d0(f"record {sequence}: recorded_at exceeds its durable bound"))
+    try:
+        recorded_at = datetime.fromisoformat(row.recorded_at)
+    except (TypeError, ValueError):
+        raise _Refused(_d0(f"record {sequence}: recorded_at is not an ISO timestamp")) from None
+    # The stored text is the naive UTC form (UTCDateTime); the digest covers the aware value.
+    recorded_at = (
+        recorded_at.replace(tzinfo=UTC)
+        if recorded_at.tzinfo is None
+        else recorded_at.astimezone(UTC)
+    )
+    for name in ("previous_hash", "record_hash"):
+        if getattr(row, f"{name}_storage_type") != "text" or getattr(row, name) is None:
+            raise _Refused(_d0(f"record {sequence}: {name} has an invalid storage type"))
+        value = getattr(row, name)
+        if (
+            getattr(row, f"{name}_length") != MAX_DURABLE_HASH_TEXT_CHARS
+            or len(value) != MAX_DURABLE_HASH_TEXT_CHARS
+            or not set(value) <= _HEX
+        ):
+            raise _Refused(_d0(f"record {sequence}: {name} is not a 64-character digest"))
+    return _Row(
+        sequence=sequence,
+        kind=row.kind,
+        payload_json=row.payload_json,
+        recorded_at=recorded_at,
+        previous_hash=row.previous_hash,
+        record_hash=row.record_hash,
+        payload_bytes=int(row.payload_bytes),
+    )
+
+
+def _verify_link(stream: str, row: _Row, *, expected_sequence: int, expected_previous: str) -> None:
+    if row.sequence != expected_sequence:
+        raise _Refused(_d0(f"record {row.sequence} does not follow record {expected_sequence - 1}"))
+    if row.previous_hash != expected_previous:
+        raise _Refused(_d0(f"record {row.sequence} does not link to its predecessor"))
+    digest = hash_chain.compute_hash(
+        stream=stream,
+        sequence=row.sequence,
+        recorded_at=row.recorded_at,
+        payload_json=row.payload_json,
+        previous_hash=row.previous_hash,
+    )
+    if digest != row.record_hash:
+        raise _Refused(_d0(f"record {row.sequence} contents do not match its digest"))
+
+
+def _classify(row: _Row) -> str | None:
+    """K1's sealed classification (D1-D3), texts verbatim; returns an expired bundle id.
+
+    An expiry record is recognised by its HASHED payload, never by ``kind``: any row whose
+    payload decodes to an object with EXACTLY the keys ``bundle_id`` and ``expires_at``, both
+    strings. A row LABELLED as an expiry that is not exactly that shape is a doubt (D2); an
+    object with exactly those keys whose values are not both strings is a doubt whatever its
+    label (D3); a payload that does not decode or is not an object is a doubt (D1).
     """
 
-    verification = hash_chain.verify(session, stream)
-    if not verification.ok:
-        return (
-            "the account's durable evidence stream failed verification "
-            f"({verification.detail}); refusing closed until the stream is repaired"
-        )
-    rows = session.execute(
-        select(HashChainRow.kind, HashChainRow.payload_json)
-        .where(HashChainRow.stream == stream)
-        .order_by(HashChainRow.sequence.asc())
-    )
-    matched = False
-    for kind, payload_json in rows:
-        labelled = kind == EXPIRED_EVENT_KIND
-        if not isinstance(payload_json, str):
-            if labelled:
-                return "a durable expiry record does not decode; refusing closed"
-            return "a durable evidence record does not decode; refusing closed"
-        try:
-            decoded = json.loads(payload_json)
-        except (ValueError, RecursionError):
-            if labelled:
-                return "a durable expiry record does not decode; refusing closed"
-            return "a durable evidence record does not decode; refusing closed"
-        if not isinstance(decoded, dict):
-            if labelled:
-                return "a durable expiry record is not a JSON object; refusing closed"
-            return "a durable evidence record is not a JSON object; refusing closed"
-        if set(decoded) == _EXPIRY_PAYLOAD_KEYS:
-            recorded = decoded["bundle_id"]
-            if not isinstance(recorded, str):
-                return "a durable expiry record names no string bundle id; refusing closed"
-            if not isinstance(decoded["expires_at"], str):
-                return "a durable expiry record carries a non-string expires_at; refusing closed"
-            if recorded == bundle_id:
-                matched = True
-            continue
+    labelled = row.kind == EXPIRED_EVENT_KIND
+    try:
+        decoded = json.loads(row.payload_json)
+    except (ValueError, RecursionError, MemoryError):
         if labelled:
-            if not isinstance(decoded.get("bundle_id"), str):
-                return "a durable expiry record names no string bundle id; refusing closed"
-            return (
-                "a durable record labelled as an expiry is not the exact expiry shape "
-                "(bundle_id and expires_at only); refusing closed"
+            raise _Refused("a durable expiry record does not decode; refusing closed") from None
+        raise _Refused("a durable evidence record does not decode; refusing closed") from None
+    if not isinstance(decoded, dict):
+        if labelled:
+            raise _Refused("a durable expiry record is not a JSON object; refusing closed")
+        raise _Refused("a durable evidence record is not a JSON object; refusing closed")
+    if set(decoded) == _EXPIRY_PAYLOAD_KEYS:
+        recorded = decoded["bundle_id"]
+        if not isinstance(recorded, str):
+            raise _Refused("a durable expiry record names no string bundle id; refusing closed")
+        if not isinstance(decoded["expires_at"], str):
+            raise _Refused(
+                "a durable expiry record carries a non-string expires_at; refusing closed"
             )
-    if matched:
-        return (
-            "the cited evidence bundle was already refused EXPIRED at an earlier "
-            "drain and that verdict is durable; wall-clock motion does not revive "
-            "refused authority"
+        return recorded
+    if labelled:
+        if not isinstance(decoded.get("bundle_id"), str):
+            raise _Refused("a durable expiry record names no string bundle id; refusing closed")
+        raise _Refused(
+            "a durable record labelled as an expiry is not the exact expiry shape "
+            "(bundle_id and expires_at only); refusing closed"
         )
     return None
+
+
+def _doubt(state: StreamState, detail: str) -> str:
+    state.published = None
+    state.doubt = detail
+    state.needs_pass = True
+    return detail
+
+
+def _latch(state: StreamState, reason: str) -> str:
+    if state.latched is None:
+        state.latched = reason
+    _close(state)
+    return f"{LATCHED_DETAIL} ({state.latched})"
+
+
+def _durable_expiry_verdict(session: Session, *, stream: str, bundle_id: str) -> str | None:
+    """The sticky stage (C1.2): the refusal detail, or ``None`` when no durable verdict or
+    doubt stands against ``bundle_id``. One bounded statement; no writes."""
+
+    engine = session.get_bind()
+    engine_state = _engine_state(engine)  # type: ignore[arg-type]
+    limits = engine_state.limits
+    state = stream_state(engine, stream)  # type: ignore[arg-type]
+    if state.latched is not None:
+        return f"{LATCHED_DETAIL} ({state.latched})"
+    if state.doubt is not None:
+        return state.doubt
+    published = state.published
+    if published is None:
+        state.needs_pass = True
+        return NOT_READY_DETAIL
+    reading = _monotonic()
+    if not math.isfinite(reading) or reading < published.started_at_monotonic:
+        return _doubt(state, MONOTONIC_DETAIL)
+    if reading >= published.deadline:
+        state.needs_pass = True
+        return STALE_DETAIL
+
+    head_rows = 1 if published.sequence >= 1 else 0
+    row_limit = limits.resolve_rows + head_rows + 1  # r7 P2-1: the sentinel follows the state
+    rows = session.execute(
+        _bounded_statement(
+            session,
+            stream,
+            row_bytes=limits.row_bytes,
+            limit=row_limit,
+            sequence_from=max(published.sequence, 1),
+        )
+    ).all()
+    if len(rows) == row_limit:
+        state.needs_pass = True
+        return IN_PROGRESS_DETAIL
+    try:
+        admitted = [_admit_row(row, row_bytes=limits.row_bytes) for row in rows]
+        if head_rows:
+            head = admitted[0] if admitted else None
+            if (
+                head is None
+                or head.sequence != published.sequence
+                or head.record_hash != published.record_hash
+            ):
+                return _latch(state, "the verified head record is missing or rewritten")
+            suffix = admitted[1:]
+        else:
+            suffix = admitted  # virtual genesis: no physical head row exists
+        expected_sequence, expected_previous = published.sequence + 1, published.record_hash
+        suffix_expired: set[str] = set()
+        for row in suffix:
+            _verify_link(
+                stream,
+                row,
+                expected_sequence=expected_sequence,
+                expected_previous=expected_previous,
+            )
+            expired = _classify(row)
+            if expired is not None:
+                suffix_expired.add(expired)
+            expected_sequence, expected_previous = row.sequence + 1, row.record_hash
+    except _Refused as refused:
+        return _doubt(state, refused.detail)
+
+    end = (
+        (suffix[-1].sequence, suffix[-1].record_hash)
+        if suffix
+        else (
+            published.sequence,
+            published.record_hash,
+        )
+    )
+    observed = state.observed
+    if observed is not None and observed[0] > published.sequence:
+        if observed[0] > end[0]:
+            return _latch(state, "the stream is shorter than a record this process verified")
+        at = next(row for row in suffix if row.sequence == observed[0])
+        if at.record_hash != observed[1]:
+            return _latch(state, "a record this process verified was replaced")
+    if end[0] >= 1 and end[0] > (observed[0] if observed is not None else 0):
+        state.observed = end
+    if bundle_id in published.expired_ids or bundle_id in suffix_expired:
+        return _STICKY_DETAIL
+    return None
+
+
+# --- the off-path pass (C1.3): one snapshot, chunked, published only by proof ------------
+
+
+def _start_pass(sessions: sessionmaker[Session], state: StreamState) -> None:
+    started = _monotonic()
+    session = sessions()
+    try:
+        session.execute(text("BEGIN"))  # one SQLite snapshot for the whole pass (S2)
+    except BaseException:
+        session.close()
+        raise
+    state.in_flight = _PassAttempt(
+        session=session,
+        cursor=0,
+        partial_hash=hash_chain.GENESIS_HASH,
+        partial_expired=set(),
+        observed_at_start=state.observed,
+        start_proven=state.observed is None,
+        started_at_monotonic=started,
+    )
+
+
+def _run_pass_chunk(
+    stream: str, state: StreamState, limits: EvidenceVerificationLimits
+) -> PassOutcome:
+    attempt = state.in_flight
+    assert attempt is not None
+    rows = attempt.session.execute(
+        _bounded_statement(
+            attempt.session,
+            stream,
+            row_bytes=limits.row_bytes,
+            limit=limits.pass_rows + 1,
+            sequence_from=attempt.cursor + 1,
+        )
+    ).all()
+    reached_end = len(rows) <= limits.pass_rows
+    admitted_bytes = verified = 0
+    for raw in rows[: limits.pass_rows]:
+        row = _admit_row(raw, row_bytes=limits.row_bytes)
+        if verified and admitted_bytes + row.payload_bytes > limits.pass_bytes_per_tick:
+            reached_end = False  # this row leads the next chunk (Ct defers, never aborts)
+            break
+        _verify_link(
+            stream,
+            row,
+            expected_sequence=attempt.cursor + 1,
+            expected_previous=attempt.partial_hash,
+        )
+        expired = _classify(row)
+        if expired is not None:
+            attempt.partial_expired.add(expired)
+            if len(attempt.partial_expired) > limits.expired_ids:
+                raise _Refused(
+                    "the account's evidence stream retains more than the "
+                    f"{limits.expired_ids}-id retained expired-id bound; refusing closed until "
+                    "an owner raises the bound (R13)"
+                )
+        start = attempt.observed_at_start
+        if start is not None and row.sequence == start[0]:
+            if row.record_hash != start[1]:
+                raise _Latch("a record this process verified before the pass began was replaced")
+            attempt.start_proven = True
+        attempt.cursor, attempt.partial_hash = row.sequence, row.record_hash
+        admitted_bytes += row.payload_bytes
+        verified += 1
+    if not reached_end:
+        return PassOutcome(rows_verified=verified, in_progress=True)
+    return _publish(stream, state, limits, verified)
+
+
+def _publish(
+    stream: str, state: StreamState, limits: EvidenceVerificationLimits, verified: int
+) -> PassOutcome:
+    attempt = state.in_flight
+    assert attempt is not None
+    end = (attempt.cursor, attempt.partial_hash)
+    if attempt.observed_at_start is not None and not attempt.start_proven:
+        raise _Latch("the stream is shorter than a record this process verified")
+    live = state.observed
+    if live is not None and live != attempt.observed_at_start:
+        if live[0] <= end[0]:
+            rows = attempt.session.execute(
+                _bounded_statement(
+                    attempt.session,
+                    stream,
+                    row_bytes=limits.row_bytes,
+                    limit=1,
+                    sequence_eq=live[0],
+                )
+            ).all()
+            again = _admit_row(rows[0], row_bytes=limits.row_bytes) if rows else None
+            if again is None or again.record_hash != live[1]:
+                raise _Latch("a record this process verified contradicts the pass's snapshot")
+        else:
+            # R17 (Kevin, Daybreak's stricter rule): the snapshot cannot speak to a tuple
+            # verified beyond its end, so the pass is discarded and restarts from a snapshot
+            # that contains it. Fail-closed cost: a stream that grows during every pass never
+            # publishes a newer state.
+            _close(state)
+            state.needs_pass = True
+            return PassOutcome(rows_verified=verified, discarded=True)
+    started = attempt.started_at_monotonic
+    deadline = started + limits.max_age_seconds
+    if not (math.isfinite(started) and math.isfinite(deadline) and deadline > started):
+        raise _Refused(_DEADLINE_DETAIL)
+    state.published = PublishedState(
+        sequence=end[0],
+        record_hash=end[1],
+        expired_ids=frozenset(attempt.partial_expired),
+        started_at_monotonic=started,
+        deadline=deadline,
+    )
+    if end[0] >= 1 and end[0] > (live[0] if live is not None else 0):
+        state.observed = end
+    state.doubt = None
+    state.attempts = 0
+    state.needs_pass = True  # R4(d): continuous re-certification
+    _close(state)
+    return PassOutcome(rows_verified=verified, published=True)
+
+
+def run_verification_tick(sessions: sessionmaker[Session], stream: str) -> PassOutcome:
+    """One tick of the pass: start one if needed, run exactly ONE chunk. Never raises.
+
+    The tick's work is bounded by one chunk (P rows, Ct bytes) on every topology (Daybreak
+    FU2-BUILD P2-1). An in-memory database (``StaticPool``: one shared connection) cannot hold
+    the pass's snapshot across ticks without sharing the drain's transaction, so a pass that
+    needs more than one chunk there is aborted (snapshot closed, nothing published) and the
+    stream refuses closed with :data:`SINGLE_CONNECTION_DETAIL`.
+    """
+
+    engine = sessions.kw["bind"]
+    limits = _engine_state(engine).limits
+    state = stream_state(engine, stream)
+    if state.latched is not None:
+        return PassOutcome()
+    verified = 0
+    try:
+        if state.in_flight is None:
+            if state.attempts >= limits.max_pass_attempts:
+                return PassOutcome()
+            _start_pass(sessions, state)
+        outcome = _run_pass_chunk(stream, state, limits)
+        verified = outcome.rows_verified
+        if outcome.in_progress and isinstance(engine.pool, StaticPool):
+            return _abort(state, SINGLE_CONNECTION_DETAIL, verified)
+        return outcome
+    except _Latch as latched:
+        _latch(state, latched.reason)
+        return PassOutcome(rows_verified=verified, latched=True)
+    except _Refused as refused:
+        return _abort(state, refused.detail, verified)
+    except Exception as error:
+        return _abort(
+            state,
+            f"the verification pass failed ({type(error).__name__}); refusing closed until a "
+            "clean pass",
+            verified,
+        )
+
+
+def _abort(state: StreamState, detail: str, verified: int) -> PassOutcome:
+    try:
+        _close(state)
+    except Exception:  # pragma: no cover - the pass is gone either way
+        state.in_flight = None
+    _doubt(state, detail)
+    state.attempts += 1
+    return PassOutcome(rows_verified=verified, aborted=detail)
+
+
+def certify_stream(sessions: sessionmaker[Session], stream: str) -> PassOutcome:
+    """Run verification ticks until the pass ends (published, latched, aborted or discarded)."""
+
+    verified = 0
+    while True:
+        outcome = run_verification_tick(sessions, stream)
+        verified += outcome.rows_verified
+        if not outcome.in_progress:
+            return replace(outcome, rows_verified=verified)
 
 
 def resolve(

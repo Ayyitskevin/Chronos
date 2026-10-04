@@ -19,7 +19,7 @@
     },
     {
       "path": "src/chronos/config/settings.py",
-      "sha256": "dfa0f5c7bb4d5c37dbbd8ad53f4f858fdc39e68248eaa572a6c24574033d1e7a"
+      "sha256": "36ef9357248c81ba100288b2c930d0ec74c09986b2aca933f595b3962c040060"
     },
     {
       "path": "src/chronos/domain/enums.py",
@@ -31,7 +31,7 @@
     },
     {
       "path": "src/chronos/api/autonomy_wiring.py",
-      "sha256": "6538f1670631efdd3ee9c08245f87fecda8a51d082914a97d64e5452c9958ae2"
+      "sha256": "cf63ce481e3f103c403eab0d3c810babd1a445d2da6c917bd16e8737a7375517"
     },
     {
       "path": "src/chronos/supervisor/evidence_kinds.py",

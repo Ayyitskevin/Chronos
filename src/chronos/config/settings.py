@@ -250,6 +250,26 @@ class Settings(BaseSettings):
     # express a longer window. An unparsable or out-of-range value fails
     # validation and the process refuses to start.
     autonomy_evidence_ttl_seconds: Annotated[float, Field(gt=0, le=3600)] = 300.0
+    # FU2 (Kevin K-20261004-007/-009): the bounds of the evidence sticky read and its
+    # verification pass, as named settings so they can be tuned. Values marked
+    # builder-derived were not given by the design; Kevin accepted them as defaults.
+    # T_max: seconds a verified evidence state stays fresh (builder-derived).
+    autonomy_evidence_verification_max_age_seconds: Annotated[
+        float, Field(gt=0, allow_inf_nan=False)
+    ] = 900.0
+    # B: suffix rows one resolve may verify past the verified head.
+    autonomy_evidence_resolve_rows: Annotated[int, Field(gt=0)] = 1000
+    # P: rows one verification-pass chunk may verify per tick.
+    autonomy_evidence_pass_rows_per_tick: Annotated[int, Field(gt=0)] = 1000
+    # Cr: bytes of one evidence record's payload (builder-derived; the largest legitimate
+    # canonical record measures 1208 bytes).
+    autonomy_evidence_row_bytes: Annotated[int, Field(gt=0)] = 4096
+    # Ct: payload bytes one verification-pass chunk may admit per tick.
+    autonomy_evidence_pass_bytes_per_tick: Annotated[int, Field(gt=0)] = 1_048_576
+    # K: expired bundle ids one verified state may retain (builder-derived).
+    autonomy_evidence_expired_ids: Annotated[int, Field(gt=0)] = 10_000
+    # Consecutive aborted passes before the stream refuses until a restart (builder-derived).
+    autonomy_evidence_max_pass_attempts: Annotated[int, Field(gt=0)] = 5
     autonomy_alert_file: Path = Path("data/owner_alerts.jsonl")
     autonomy_idle_interval_seconds: Annotated[float, Field(gt=0)] = 60.0
     autonomy_min_interval_seconds: Annotated[float, Field(gt=0)] = 5.0

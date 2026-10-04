@@ -52,7 +52,7 @@ from chronos.config.settings import Settings
 from chronos.domain.enums import BrokerMode, DemoProfile
 from chronos.persistence import hash_chain
 from chronos.persistence.schema import AutonomyDecisionAttemptRow, HashChainRow
-from chronos.supervisor import durable
+from chronos.supervisor import durable, evidence_bundles
 from chronos.supervisor.proposers import ProposerRegistration
 from chronos.utils.identifiers import account_fingerprint
 
@@ -452,6 +452,12 @@ def test_phase_b_shadow_path(
         if case == "expired":
             tick_at = datetime.fromisoformat(issued["expires_at"]) + timedelta(seconds=1)
             assert tick_at < autonomy.mandate.expires_at
+        # FU2 (Kevin K-20261004-008, test-only): an evidence-bound resolve refuses until the
+        # first verification pass completes (R7), and the tick runs its pass after the drain.
+        # Complete that first pass, as a backend up for one tick has, before the drained tick.
+        evidence_bundles.certify_stream(
+            runtime.database.sessions, evidence_bundles.hash_chain_stream(_FINGERPRINT)
+        )
         report = autonomy.run_tick(tick_at)
         after = _committed_state(db_path)
         assert after["bundles"] == queued["bundles"]
