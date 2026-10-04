@@ -916,6 +916,49 @@ def test_runtime_stop_closes_an_in_flight_pass_snapshot(
     assert busy == 0, "a reader still held the WAL after stop()"
 
 
+def test_failure_exhaustion_closes_an_in_flight_pass_snapshot(
+    file_sessions: sessionmaker[Session],
+) -> None:
+    """Daybreak M3-FINAL P2-1: when consecutive tick failures stop the runtime, the stopped
+    runtime must not keep FU2's one-snapshot pass open (a pinned read snapshot stops the WAL
+    from checkpointing while the backend keeps writing). stop() already closed it; the
+    automatic stop in _record_failure did not."""
+
+    sessions = file_sessions
+    _fu2_rows(sessions, 5)
+    failing = [False]
+
+    def gather(now: datetime) -> Any:
+        if failing[0]:
+            raise RuntimeError("injected tick failure")
+        return _facts(now)
+
+    runtime = AutonomyRuntime(
+        sessions=sessions,
+        config=RuntimeConfig(
+            account_fingerprint=_FINGERPRINT,
+            max_consecutive_failures=1,
+            evidence_limits=evidence_bundles.EvidenceVerificationLimits(pass_rows=1),
+        ),
+        identity=_identity(),
+        mandate_source=lambda: None,
+        gather_facts=gather,
+        sinks=(_NullSink(),),
+        bind_evidence=True,
+    )
+    assert runtime.run_tick(_FU2_AT).ok  # starts a multi-chunk pass (5 rows, 1 per tick)
+    engine = sessions.kw["bind"]
+    assert _fu2_state(sessions).pass_in_flight and engine.pool.checkedout() == 1
+    failing[0] = True
+    report = runtime.run_tick(_FU2_AT + timedelta(minutes=1))
+    assert not report.ok and runtime.stopped, report.failure
+    assert not _fu2_state(sessions).pass_in_flight, "the stopped runtime kept its pass open"
+    assert engine.pool.checkedout() == 0, "the stopped runtime kept its snapshot connection"
+    with engine.connect() as connection:
+        busy, _log, _done = connection.exec_driver_sql("PRAGMA wal_checkpoint(TRUNCATE)").one()
+    assert busy == 0, "a reader still held the WAL after the runtime stopped itself"
+
+
 def test_the_runtime_configures_the_engines_verification_limits(
     sessions: sessionmaker[Session],
 ) -> None:
