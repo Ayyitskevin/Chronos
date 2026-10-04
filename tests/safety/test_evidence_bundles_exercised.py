@@ -2703,6 +2703,7 @@ def test_a_non_ascii_bundle_id_is_compared_by_exact_code_points(
     _k1_append(
         sessions, {"bundle_id": recorded, "expires_at": "2026-08-14T14:01:00+00:00"}, kind=kind
     )
+    _fu2_certify(sessions)  # FU2 (declared): the seam now reads from a verified state (R7)
     with sessions.begin() as session:
         verdict = evidence_bundles._durable_expiry_verdict(
             session, stream=_k1_stream(), bundle_id="bündle-ﬁ"
@@ -2821,6 +2822,12 @@ def test_chain_valid_payloads_that_raise_outside_jsondecodeerror_refuse_closed(
     VALID JSON bytes is the case only the non-text guard refuses: ``json.loads`` accepts bytes,
     so without the guard it would decode as an ordinary object and admit the bundle."""
 
+    if isinstance(payload_json, str):
+        # FU2 (declared): 5,000 digits exceed the default 4,096-byte Cr, which would refuse on
+        # the byte bound before the decoder ran (pinned separately by
+        # test_the_one_intended_divergence_from_k1_is_the_byte_bound). Raise Cr for this case
+        # so the pin still reaches the decode failure it exists to pin.
+        _fu2_configure(sessions, row_bytes=8192)
     issued = _fix26_issue(sessions, ttl_seconds=300.0)
     _k1r1_insert(sessions, payload_json)
     assert _k1_chain_ok(sessions), "the fixture must be chain-valid for this pin to mean anything"
@@ -2854,6 +2861,10 @@ def test_a_100000_deep_json_array_refuses_with_the_unlabelled_decode_detail(
     refuse closed with the unlabelled decode detail. The 2,000-level array above decodes and is
     the negative control."""
 
+    # FU2 (declared): 200,000 characters exceed the default 4,096-byte Cr; raise Cr for this
+    # pin so it still reaches the RecursionError it exists to pin (over Cr the byte bound
+    # refuses first: test_the_one_intended_divergence_from_k1_is_the_byte_bound).
+    _fu2_configure(sessions, row_bytes=300_000)
     issued = _fix26_issue(sessions, ttl_seconds=300.0)
     _k1r1_insert(sessions, "[" * 100_000 + "]" * 100_000)
     assert _k1_chain_ok(sessions)
@@ -3337,8 +3348,15 @@ def test_the_latch_survives_a_re_pass_a_wall_clock_move_and_a_head_regrowth(
     issued = _fix26_issue(sessions, ttl_seconds=300.0)
     _fu2_append(sessions, {"note": "two"})
     _fu2_certify(sessions)
+    original_two = _fu2_raw_columns(sessions, 2)
     _fu2_delete_from(sessions, 2)
     _fu2_refused(_fu2_resolve_now(sessions, issued), _fu2_detail("LATCHED_DETAIL"))
+    # Restored EXACTLY: a pass that ran now would publish cleanly, so only the latch itself
+    # (cleared by nothing but a restart) can keep the stream refusing.
+    _fu2_restore_raw(sessions, original_two)
+    assert not _fu2_certify(sessions).published, "the latch was cleared in-process"
+    _fu2_refused(_fu2_resolve_now(sessions, issued), _fu2_detail("LATCHED_DETAIL"))
+    _fu2_delete_from(sessions, 2)  # and gone again: the regrowth below starts from row 1
     for note in ("regrown two", "three", "four"):
         _fu2_append(sessions, {"note": note})
     outcome = _fu2_certify(sessions)
