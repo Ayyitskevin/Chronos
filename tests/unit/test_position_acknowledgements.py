@@ -185,6 +185,11 @@ def test_1_migration_0016_creates_the_table_the_bump_set_moved_and_the_drift_che
     assert "0016" in {r.revision for r in script.iterate_revisions(head, "base")}
     gate = (_ROOT / "scripts/verify_release_artifact.py").read_text(encoding="utf-8")
     assert f'_MIGRATION_HEAD: Final[str] = "{head}"' in gate
+    # DBLOCK: this validates migration acceptance, not permission repair; the raw
+    # engine created the file under the umask, and after the process's first
+    # Database construction R-21 is check-only ("restart the process to repair").
+    db_path.chmod(0o600)
+    assert (db_path.stat().st_mode & 0o777) == 0o600
     upgraded = Database(f"sqlite:///{db_path}")  # the fail-closed drift checker accepts it
     try:
         upgraded.initialize()

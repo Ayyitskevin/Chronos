@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import shutil
 import sqlite3
+import stat
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -66,6 +67,13 @@ def _online_backup(source: Path, destination: Path) -> None:
         closing(sqlite3.connect(destination)) as destination_connection,
     ):
         source_connection.backup(destination_connection)
+    # DBLOCK (Daybreak r3 P2-2): the SQLite backup API copies pages, not the source's mode,
+    # so the destination is created under the umask (0644 here). A Database opened on it in a
+    # process whose startup repair window has closed refuses a wide file ("restart the process
+    # to repair"), as a real restore does before the restarted backend opens it. The drill's
+    # backup step makes the copy owner-only, which is what a correct restore procedure does.
+    destination.chmod(0o600)
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o600
 
 
 def _checkpoint_wal(path: Path) -> None:

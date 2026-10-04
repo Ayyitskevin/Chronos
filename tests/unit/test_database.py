@@ -1,3 +1,8 @@
+import json
+import os
+import subprocess
+import sys
+import textwrap
 from datetime import UTC
 from pathlib import Path
 from stat import S_IMODE
@@ -7,6 +12,7 @@ import pytest
 from sqlalchemy import inspect, select, text
 from sqlalchemy.pool import StaticPool
 
+from chronos.persistence import database as database_module
 from chronos.persistence.database import SCHEMA_VERSION, Database
 from chronos.persistence.repositories import ApplicationEventRepository
 from chronos.persistence.schema import DatabaseScopeRow, SchemaVersionRow
@@ -561,16 +567,10 @@ def test_first_scope_binding_refuses_every_class_of_unscoped_account_data(
         database.dispose()
 
 
-@pytest.mark.parametrize("preexisting", [False, True])
 def test_sqlite_file_permissions_are_restricted_after_create_open_and_initialize(
     tmp_path: Path,
-    preexisting: bool,
 ) -> None:
     database_path = tmp_path / "chronos.db"
-    if preexisting:
-        database_path.touch(mode=0o666)
-        database_path.chmod(0o666)
-
     database = Database(f"sqlite+pysqlite:///{database_path}")
     try:
         assert S_IMODE(database_path.stat().st_mode) == 0o600
@@ -580,18 +580,97 @@ def test_sqlite_file_permissions_are_restricted_after_create_open_and_initialize
         database.dispose()
 
 
+# DBLOCK (Kevin, "repair only before first connect"): R-21 repairs a wrong mode only during
+# the FIRST file-backed Database construction in a process; afterwards every construction is
+# check-only and refuses ("restart the process to repair"), because re-opening a file the
+# process may hold through SQLite drops that connection's POSIX locks. The REPAIR cases
+# therefore run in a fresh child process; the in-process cases assert the refusal after a
+# sacrificial construction has closed the window (order-independent).
+
+_REPAIR_IN_A_FRESH_PROCESS = """
+import json, sys
+from pathlib import Path
+from chronos.persistence.database import Database
+path = Path(sys.argv[1])
+targets = [path] + [Path(f"{path}{s}") for s in sys.argv[2:]]
+for target in targets:
+    target.touch(mode=0o666)
+    target.chmod(0o666)
+database = Database(f"sqlite+pysqlite:///{path}")
+try:
+    database.initialize()
+    print(json.dumps({str(t.name): oct(t.stat().st_mode & 0o777) for t in targets if t.exists()}))
+finally:
+    database.dispose()
+"""
+
+
+def _repair_in_a_fresh_process(path: Path, *suffixes: str) -> dict[str, str]:
+    env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+    env["PYTHONPATH"] = str(Path(database_module.__file__).resolve().parents[2])
+    result = subprocess.run(
+        [sys.executable, "-c", textwrap.dedent(_REPAIR_IN_A_FRESH_PROCESS), str(path), *suffixes],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    report: dict[str, str] = json.loads(result.stdout.strip())
+    return report
+
+
+def _close_the_repair_window(tmp_path: Path) -> None:
+    sacrificial = Database(f"sqlite+pysqlite:///{tmp_path / 'sacrificial' / 's.db'}")
+    sacrificial.dispose()
+    assert database_module._REPAIR_WINDOW_OPEN is False
+
+
+def test_a_preexisting_wide_database_file_is_repaired_by_the_first_construction(
+    tmp_path: Path,
+) -> None:
+    report = _repair_in_a_fresh_process(tmp_path / "chronos.db")
+    assert report == {"chronos.db": "0o600"}
+
+
+def test_a_preexisting_wide_database_file_is_refused_after_the_window_closed(
+    tmp_path: Path,
+) -> None:
+    _close_the_repair_window(tmp_path)
+    database_path = tmp_path / "chronos.db"
+    database_path.touch(mode=0o666)
+    database_path.chmod(0o666)
+
+    with pytest.raises(RuntimeError, match="restart the process to repair"):
+        Database(f"sqlite+pysqlite:///{database_path}")
+
+    assert S_IMODE(database_path.stat().st_mode) == 0o666
+
+
 def test_sqlite_file_uri_database_url_is_rejected() -> None:
     with pytest.raises(ValueError, match="SQLite file: URI DATABASE_URL targets are not supported"):
         Database("sqlite+pysqlite:///file:chronos.db?uri=true")
 
 
 def test_preexisting_sqlite_sidecar_permissions_are_restricted(tmp_path: Path) -> None:
+    """Startup repair of wide sidecars, in a fresh process (the window is OPEN there)."""
+
+    report = _repair_in_a_fresh_process(tmp_path / "sidecars.db", "-wal", "-shm", "-journal")
+    assert report["sidecars.db"] == "0o600"
+    # The switch to WAL unlinks a stale -journal and SQLite may re-create -wal/-shm during
+    # the connect; every sidecar that still exists afterwards is owner-only.
+    assert all(mode == "0o600" for mode in report.values()), report
+
+
+def test_wide_sidecars_are_refused_not_repaired_after_the_window_closed(tmp_path: Path) -> None:
     database_path = tmp_path / "sidecars.db"
     initial_database = Database(f"sqlite+pysqlite:///{database_path}")
     try:
         initial_database.initialize()
     finally:
         initial_database.dispose()
+    assert database_module._REPAIR_WINDOW_OPEN is False  # this construction closed it
 
     sidecar_paths = tuple(
         Path(f"{database_path}{suffix}") for suffix in ("-wal", "-shm", "-journal")
@@ -600,11 +679,9 @@ def test_preexisting_sqlite_sidecar_permissions_are_restricted(tmp_path: Path) -
         sidecar_path.touch(mode=0o666)
         sidecar_path.chmod(0o666)
 
-    reopened_database = Database(f"sqlite+pysqlite:///{database_path}")
-    try:
-        assert all(S_IMODE(path.stat().st_mode) == 0o600 for path in sidecar_paths)
-    finally:
-        reopened_database.dispose()
+    with pytest.raises(RuntimeError, match="restart the process to repair"):
+        Database(f"sqlite+pysqlite:///{database_path}")
+    assert all(S_IMODE(path.stat().st_mode) == 0o666 for path in sidecar_paths)
 
 
 @pytest.mark.parametrize("suffix", ["", "-wal", "-shm", "-journal"])

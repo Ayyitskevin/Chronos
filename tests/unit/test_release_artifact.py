@@ -41,6 +41,25 @@ _SETUPTOOLS_84_HASHES = frozenset(
 )
 
 
+@pytest.fixture(autouse=True)
+def _a_standalone_process_repair_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    """DBLOCK: model the production process this code runs in.
+
+    The release verifier (`scripts/verify_release_artifact.py`) runs as its own process,
+    where its Database construction is the process's FIRST file-backed one, so R-21's
+    one-way startup repair window is still OPEN and the Alembic-created (umask-mode) file
+    is repaired to 0600. Inside this shared pytest process an earlier test has already
+    closed the window. Re-opening it here touches only this test's fresh tmp files, which no
+    other engine in the process holds; monkeypatch restores the global afterwards.
+    """
+
+    # Imported here, not at module top: a top-level import would shift the reviewed
+    # .secrets.baseline line numbers of the _SETUPTOOLS_84_HASHES literals below it.
+    from chronos.persistence import database as database_module
+
+    monkeypatch.setattr(database_module, "_REPAIR_WINDOW_OPEN", True)
+
+
 def test_build_backend_input_and_lock_match_exact_published_requirement() -> None:
     config = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     build_input = tuple(

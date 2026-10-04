@@ -371,6 +371,11 @@ def test_v2_database_upgrades_to_current_schema(tmp_path: Path) -> None:
     # The decisive check: the fail-closed initializer accepts the migrated DB
     # (correct version AND zero drift against the live metadata). The
     # alembic_version bookkeeping table must not trip the drift checker.
+    # DBLOCK: this validates migration acceptance, not permission repair; the raw
+    # engine created the file under the umask, and after the process's first
+    # Database construction R-21 is check-only ("restart the process to repair").
+    db_path.chmod(0o600)
+    assert (db_path.stat().st_mode & 0o777) == 0o600
     database = Database(f"sqlite:///{db_path}")
     try:
         database.initialize()
@@ -396,6 +401,11 @@ def test_v3_database_upgrades_to_current_schema(tmp_path: Path) -> None:
     engine.dispose()
     assert version == SCHEMA_VERSION
 
+    # DBLOCK: this validates migration acceptance, not permission repair; the raw
+    # engine created the file under the umask, and after the process's first
+    # Database construction R-21 is check-only ("restart the process to repair").
+    db_path.chmod(0o600)
+    assert (db_path.stat().st_mode & 0o777) == 0o600
     database = Database(f"sqlite:///{db_path}")
     try:
         database.initialize()
@@ -431,6 +441,11 @@ def test_v4_database_upgrades_to_current_schema(tmp_path: Path) -> None:
     engine.dispose()
     assert version == SCHEMA_VERSION
 
+    # DBLOCK: this validates migration acceptance, not permission repair; the raw
+    # engine created the file under the umask, and after the process's first
+    # Database construction R-21 is check-only ("restart the process to repair").
+    db_path.chmod(0o600)
+    assert (db_path.stat().st_mode & 0o777) == 0o600
     database = Database(f"sqlite:///{db_path}")
     try:
         database.initialize()
@@ -500,6 +515,11 @@ def test_v7_database_gains_the_proposer_column_and_keeps_its_rows(tmp_path: Path
     )
     assert version == SCHEMA_VERSION
 
+    # DBLOCK: this validates migration acceptance, not permission repair; the raw
+    # engine created the file under the umask, and after the process's first
+    # Database construction R-21 is check-only ("restart the process to repair").
+    db_path.chmod(0o600)
+    assert (db_path.stat().st_mode & 0o777) == 0o600
     database = Database(f"sqlite:///{db_path}")
     try:
         database.initialize()
@@ -595,6 +615,11 @@ def test_v8_database_gains_the_evidence_bundle_table_and_keeps_its_rows(tmp_path
     )
     assert version == SCHEMA_VERSION
 
+    # DBLOCK: this validates migration acceptance, not permission repair; the raw
+    # engine created the file under the umask, and after the process's first
+    # Database construction R-21 is check-only ("restart the process to repair").
+    db_path.chmod(0o600)
+    assert (db_path.stat().st_mode & 0o777) == 0o600
     database = Database(f"sqlite:///{db_path}")
     try:
         database.initialize()
@@ -661,6 +686,11 @@ def test_v9_database_gains_the_revocation_table_and_keeps_its_rows(tmp_path: Pat
     assert surviving == [("claude-worker", "PENDING")]
     assert version == SCHEMA_VERSION
 
+    # DBLOCK: this validates migration acceptance, not permission repair; the raw
+    # engine created the file under the umask, and after the process's first
+    # Database construction R-21 is check-only ("restart the process to repair").
+    db_path.chmod(0o600)
+    assert (db_path.stat().st_mode & 0o777) == 0o600
     database = Database(f"sqlite:///{db_path}")
     try:
         database.initialize()
@@ -724,6 +754,11 @@ def test_v10_database_gains_managed_position_bindings_empty(tmp_path: Path) -> N
     engine.dispose()
     assert version == SCHEMA_VERSION
 
+    # DBLOCK: this validates migration acceptance, not permission repair; the raw
+    # engine created the file under the umask, and after the process's first
+    # Database construction R-21 is check-only ("restart the process to repair").
+    db_path.chmod(0o600)
+    assert (db_path.stat().st_mode & 0o777) == 0o600
     database = Database(f"sqlite:///{db_path}")
     try:
         database.initialize()
@@ -816,6 +851,11 @@ def test_v11_database_gains_credential_bindings_without_relabelling_rows(
     assert bundle == ("evb_old", "claude-worker", "d" * 64, None, None)
     assert version == SCHEMA_VERSION
 
+    # DBLOCK: this validates migration acceptance, not permission repair; the raw
+    # engine created the file under the umask, and after the process's first
+    # Database construction R-21 is check-only ("restart the process to repair").
+    db_path.chmod(0o600)
+    assert (db_path.stat().st_mode & 0o777) == 0o600
     database = Database(f"sqlite:///{db_path}")
     try:
         database.initialize()
@@ -886,6 +926,11 @@ def test_v13_database_gains_execution_identity_and_keeps_its_fill_rows(tmp_path:
     assert identity == (None, None, None)  # never a synthesized client 0
     assert version == SCHEMA_VERSION  # the chain's head, as every upgrade pin asserts it
 
+    # DBLOCK: this validates migration acceptance, not permission repair; the raw
+    # engine created the file under the umask, and after the process's first
+    # Database construction R-21 is check-only ("restart the process to repair").
+    db_path.chmod(0o600)
+    assert (db_path.stat().st_mode & 0o777) == 0o600
     database = Database(f"sqlite:///{db_path}")
     try:
         database.initialize()  # the fail-closed drift checker accepts the upgraded store
@@ -957,6 +1002,11 @@ def test_v14_database_gains_order_event_identity_and_keeps_its_rows(tmp_path: Pa
     assert identity == (None, None)  # the columns are not back-filled from the JSON
     assert version == SCHEMA_VERSION  # 15 at this revision; the head pin lives in test_database
 
+    # DBLOCK: this validates migration acceptance, not permission repair; the raw
+    # engine created the file under the umask, and after the process's first
+    # Database construction R-21 is check-only ("restart the process to repair").
+    db_path.chmod(0o600)
+    assert (db_path.stat().st_mode & 0o777) == 0o600
     database = Database(f"sqlite:///{db_path}")
     try:
         database.initialize()  # the fail-closed drift checker accepts the upgraded store
