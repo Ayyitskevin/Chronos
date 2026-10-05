@@ -290,6 +290,18 @@ def test_d1_a_state_with_no_admission_attribute_refuses(world: _World) -> None:
         _assert_refused(_post(client, app), app)
 
 
+def test_d1_a_refusal_happens_before_the_request_body_is_read(world: _World) -> None:
+    world.write_mandate(fingerprint="0" * 64)
+    world.configure(mandate_file=world.mandate)
+
+    async def _unexpected_body(_request: object) -> bytes:
+        raise AssertionError("the refusing route must not read proposal bytes")
+
+    world.monkeypatch.setattr("starlette.requests.Request.body", _unexpected_body)
+    with world.boot() as (client, app):
+        _assert_refused(_post(client, app), app)
+
+
 def test_d1_a_freshly_built_backend_state_is_closed_by_construction() -> None:
     """Nothing but an affirmative settlement opens the route: the default itself is closed."""
 
