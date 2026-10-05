@@ -128,8 +128,8 @@ Never put an IBKR username or password in any Chronos file.
 5. Rehearse the capture harness against the demo broker — proves the harness end to end and
    proves its refusals. Demo output is stamped `gateway_evidence: false` and can never count:
    ```bash
-   export CHRONOS_CAPTURE_PEPPER=$(python3 -c 'import secrets; print(secrets.token_hex(32))')  # throwaway, this shell only
-   BROKER_MODE=demo .venv/bin/python \
+   CHRONOS_CAPTURE_PEPPER=$(python3 -c 'import secrets; print(secrets.token_hex(32))') \
+     BROKER_MODE=demo .venv/bin/python \
      .claude/skills/chronos-real-gateway-campaign/scripts/capture_readonly.py \
      --out /tmp/chronos-rehearsal --label rehearsal --allow-demo
    .venv/bin/python .claude/skills/chronos-real-gateway-campaign/scripts/replay_check.py \
