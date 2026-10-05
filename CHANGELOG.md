@@ -1,5 +1,15 @@
 # CHANGELOG
 
+## [Unreleased] — the proposal route refuses when configured autonomy did not start (OPS-3, 2026-10-05)
+
+`POST /autonomy/proposals` used to answer 202 and queue a proposal even when a mandate file was configured
+but the autonomy runtime had not started (an invalid cadence, a missing, invalid, mismatched, revoked or
+unsafe mandate, a wiring failure): no drain existed, so the row stayed pending. It now answers 503
+`AUTONOMY_NOT_RUNNING` with a fixed body and writes nothing in those cases. No setting or command is added.
+With no mandate file configured the route is unchanged (202, queued). The decision is held in a new
+`BackendState.autonomy_admission` (`AutonomyAdmission`, a plain `Enum` compared by identity): closed until the
+lifespan settles it once after the autonomy startup block.
+
 ## [Unreleased] — anchor-guard module (unwired), drain claim state, database and ledger lock integrity, bounded evidence read (PRs #281-#285 and #290, 2026-10-03/04; dates are UTC)
 
 Nothing here adds a command. #290 adds seven settings (listed in its entry). Three changes alter behavior an
