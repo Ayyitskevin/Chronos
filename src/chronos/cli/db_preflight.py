@@ -226,8 +226,28 @@ def _read_only_engine(path: Path) -> Engine:
 
 
 def _database_error(error: BaseException) -> str:
+    """The effective exception class, qualified; never the error's text.
+
+    Driver text can carry a DSN with a password; a class name cannot.
+    """
+
     original = getattr(error, "orig", None)
-    return str(original if original is not None else error)
+    kind = type(original) if original is not None else type(error)
+    return f"{kind.__module__}.{kind.__name__}"
+
+
+_FILE_URI_PROBE = "sqlite:///file:probe"
+
+
+def _file_uri_refusal() -> str:
+    """The runtime's own static sentence for a ``file:`` URI, taken from the runtime at call
+    time so this module never carries a copy; empty if the runtime no longer raises it."""
+
+    try:
+        _database._sqlite_database_path(_FILE_URI_PROBE)
+    except ValueError as error:
+        return str(error)
+    return ""
 
 
 def _schema_lines(report: Report, engine: Engine) -> None:
@@ -333,8 +353,16 @@ def _database_lines(report: Report, database_url: str, *, evidence: bool, settin
     try:
         configured = _database._sqlite_database_path(database_url)
     except ValueError as error:
-        # A `file:` URI: Database() itself refuses it at construction.
-        report.add("REFUSE", "db", str(error))
+        # Database() itself refuses this value at construction. The runtime's static sentence
+        # for a `file:` URI is passed through verbatim only when it IS that sentence; any
+        # other ValueError comes from the URL parser, whose text can echo part of the value.
+        refusal = str(error)
+        if refusal != _file_uri_refusal():
+            refusal = (
+                "configured DATABASE_URL is not accepted by the runtime's URL parser "
+                f"({type(error).__name__})"
+            )
+        report.add("REFUSE", "db", refusal)
         return
     if configured is None:
         report.add(
@@ -384,7 +412,7 @@ def _database_lines(report: Report, database_url: str, *, evidence: bool, settin
             report.add(
                 "UNDECIDED",
                 "schema",
-                f"cannot read the database read-only: {_database_error(error)}",
+                f"cannot read the database read-only ({_database_error(error)})",
             )
             return
         report.checked.append("schema")
@@ -437,7 +465,11 @@ def _ledger_lines(report: Report, raw: str) -> None:
     try:
         connection = sqlite3.connect(_read_only_uri(path), uri=True)
     except sqlite3.Error as error:
-        report.add("UNDECIDED", "ledger", f"cannot read the ledger read-only: {error}{tail}")
+        report.add(
+            "UNDECIDED",
+            "ledger",
+            f"cannot read the ledger read-only ({_database_error(error)}){tail}",
+        )
         return
     try:
         tables = {
@@ -450,7 +482,11 @@ def _ledger_lines(report: Report, raw: str) -> None:
             else None
         )
     except sqlite3.Error as error:
-        report.add("UNDECIDED", "ledger", f"cannot read the ledger read-only: {error}{tail}")
+        report.add(
+            "UNDECIDED",
+            "ledger",
+            f"cannot read the ledger read-only ({_database_error(error)}){tail}",
+        )
         return
     finally:
         connection.close()
@@ -492,9 +528,11 @@ def cmd_db_preflight(args: argparse.Namespace) -> int:
     """Observe; never repair. Every exception is one UNDECIDED line and exit 1.
 
     The unit runs this command on its private DATABASE_URL and the journal keeps the output,
-    so the configured URL is never printed and an unexpected error is reported by its class
-    alone: exception text can carry credentials (a query-parameter password, a DSN) and no
-    pattern can promise to remove them.
+    so the configured URL is never printed and every caught error — here and in the inner
+    catches — is reported by its class alone: exception text can carry credentials (a
+    query-parameter password, a DSN, a fragment the URL parser echoes) and no pattern can
+    promise to remove them. The one exception text passed through is the runtime's own
+    static sentence for a ``file:`` URI, compared verbatim.
     """
 
     report = Report()
