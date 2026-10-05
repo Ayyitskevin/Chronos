@@ -290,6 +290,15 @@ def test_d1_a_state_with_no_admission_attribute_refuses(world: _World) -> None:
         _assert_refused(_post(client, app), app)
 
 
+def test_d1_a_freshly_built_backend_state_is_closed_by_construction() -> None:
+    """Nothing but an affirmative settlement opens the route: the default itself is closed."""
+
+    deps = _admission()
+    state = deps.BackendState(runtime=SimpleNamespace(), lease=None, read_only=False)  # type: ignore[arg-type]
+    assert state.autonomy_admission is deps.AutonomyAdmission.NOT_INITIALIZED
+    assert deps.admission_accepts(state.autonomy_admission) is False
+
+
 class _LookalikePlain(enum.Enum):
     RUNNING = 1
     NO_MANDATE_CONFIGURED = 2
