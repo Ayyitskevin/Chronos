@@ -41,13 +41,15 @@ evidence-stream verification pass completes after every process start (#290).
   effect when `AUTONOMY_EVIDENCE_BUNDLES` is set. Until #290 every resolve of a cited evidence bundle verified
   the account's WHOLE hash-chained evidence stream and decoded every record. Now a verification pass runs off
   the drain's path, one chunk per tick inside one SQLite snapshot, and publishes a verified head; each resolve
-  reads one bounded statement from that head, proves that every record this process has verified is still
-  present with its digest, and answers. Operator-visible: after every process start, evidence-bound proposals
+  reads one bounded statement, requires the published head to retain its sequence and digest, verifies the
+  bounded suffix above it, and answers. Rows below the published head are rechecked by the next pass, not by
+  the resolve. Operator-visible: after every process start, evidence-bound proposals
   refuse `EVIDENCE_BUNDLE_EXPIRED` (detail "has not been verified since this process started") until the first
   pass completes; a stream in which a record this process verified is missing, moved or rewritten refuses
   until the process is restarted ("latched") and raises one CRITICAL owner alert `evidence.stream_truncated`;
   an aborted pass raises a WARNING `evidence.pass_failed`, and after 5 consecutive aborted passes the stream
-  refuses until a restart. Seven settings, all with builder-derived defaults Kevin accepted:
+  refuses until a restart. Seven settings; four defaults were builder-derived and Kevin-accepted
+  (`VERIFICATION_MAX_AGE_SECONDS`, `ROW_BYTES`, `EXPIRED_IDS`, `MAX_PASS_ATTEMPTS`):
   `AUTONOMY_EVIDENCE_VERIFICATION_MAX_AGE_SECONDS` (900), `AUTONOMY_EVIDENCE_RESOLVE_ROWS` (1000),
   `AUTONOMY_EVIDENCE_PASS_ROWS_PER_TICK` (1000), `AUTONOMY_EVIDENCE_ROW_BYTES` (4096),
   `AUTONOMY_EVIDENCE_PASS_BYTES_PER_TICK` (1048576), `AUTONOMY_EVIDENCE_EXPIRED_IDS` (10000),

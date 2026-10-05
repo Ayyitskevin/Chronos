@@ -205,19 +205,22 @@ Linux-only (advisory `flock`). Consequently:
 In effect only when `AUTONOMY_EVIDENCE_BUNDLES` is set. `supervisor/evidence_bundles.py` no longer
 verifies the whole evidence stream on every resolve. A verification pass, run by the autonomy tick
 one chunk per tick inside one SQLite snapshot, publishes a verified head and the expired bundle ids
-it saw; each resolve then reads one bounded statement from that head and answers only after proving
-that every record THIS PROCESS has verified is still present with its digest.
+it saw; each resolve then reads one bounded statement, requires the published head to retain its
+sequence and digest, verifies the bounded suffix above it, and answers. Rows below the published head
+are rechecked by the next pass, not by the resolve.
 
 Implemented boundary (#290): evidence-bound proposals refuse from the first tick until a pass publishes;
-the pass verifies one bounded chunk per tick inside one file-backed SQLite snapshot and publishes only
+the pass verifies one chunk per tick, bounded by both `AUTONOMY_EVIDENCE_PASS_ROWS_PER_TICK` (default 1000
+rows) and `AUTONOMY_EVIDENCE_PASS_BYTES_PER_TICK` (default 1048576 payload bytes), inside one file-backed
+SQLite snapshot and publishes only
 after a full proof of that snapshot; the verified state lives in process memory only; an in-memory
 database (`StaticPool`, one shared connection) refuses when more than one chunk is needed; consistent
 rewrites of never-observed history across a restart remain outside the guarantee; external anchoring
 and maintenance recovery remain held.
 
 - **After every process start, evidence-bound proposals refuse** (`EVIDENCE_BUNDLE_EXPIRED`, detail
-  "has not been verified since this process started") until the first pass completes. At the default
-  1000 rows per tick a long stream takes several ticks.
+  "has not been verified since this process started") until the first pass completes. At the defaults a
+  10 000-record stream needs at least about ten ticks, and more when the byte bound binds.
 - **Other fail-closed refusals** (same code, distinct detail): the verified state is older than
   `AUTONOMY_EVIDENCE_VERIFICATION_MAX_AGE_SECONDS` (default 900); the stream grew past the state by more
   than `AUTONOMY_EVIDENCE_RESOLVE_ROWS` (default 1000; "verification in progress"); the monotonic clock

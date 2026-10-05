@@ -128,17 +128,19 @@ instead.
 
 > **In effect on `main` since #290 (merged 2026-10-04 UTC), only when `AUTONOMY_EVIDENCE_BUNDLES` is set.**
 > The drain no longer verifies the account's whole hash-chained evidence stream on every resolve. A
-> verification pass runs inside the autonomy tick, one chunk per tick (`AUTONOMY_EVIDENCE_PASS_ROWS_PER_TICK`,
-> default 1000 rows) inside one SQLite snapshot, and publishes a verified head; each resolve reads one bounded
-> statement from that head and answers only after proving that every record this process has verified is
-> still present with its digest. Every refusal below is `EVIDENCE_BUNDLE_EXPIRED` in the journal; the detail
+> verification pass runs inside the autonomy tick, one chunk per tick bounded by both
+> `AUTONOMY_EVIDENCE_PASS_ROWS_PER_TICK` (default 1000 rows) and `AUTONOMY_EVIDENCE_PASS_BYTES_PER_TICK` (default
+> 1048576 payload bytes) inside one SQLite snapshot, and publishes a verified head; each resolve reads one
+> bounded statement, requires the published head to retain its sequence and digest, verifies the bounded
+> suffix above it, and answers. Rows below the published head are rechecked by the next pass, not by the
+> resolve. Every refusal below is `EVIDENCE_BUNDLE_EXPIRED` in the journal; the detail
 > text says which. None of them is cleared by editing the database.
 
 | Refusal detail starts with | Meaning | What the operator does |
 |---|---|---|
-| `the account's durable evidence stream has not been verified since this process started` | Normal after every process start: the first pass has not completed. A long stream needs several ticks (rows ÷ 1000 at the default). | Wait: at the default 1000 records per tick a 10 000-record stream needs about ten ticks. Proposals drained meanwhile are refused and journaled as `EVIDENCE_BUNDLE_EXPIRED` with this detail; they are not retried. |
+| `the account's durable evidence stream has not been verified since this process started` | Normal after every process start: the first pass has not completed. A long stream needs several ticks (each tick verifies at most 1000 records and 1048576 payload bytes at the defaults, whichever bound binds first). | Wait: at the defaults a 10 000-record stream needs at least about ten ticks, and more when the byte bound binds. Proposals drained meanwhile are refused and journaled as `EVIDENCE_BUNDLE_EXPIRED` with this detail; they are not retried. |
 | `the account's verified evidence state is older than its verification bound` | The published state is older than `AUTONOMY_EVIDENCE_VERIFICATION_MAX_AGE_SECONDS` (default 900 s) and the next pass has not completed. | Wait one pass. If it persists, the pass is aborting: look for `evidence.pass_failed` alerts. |
-| `the account's evidence stream has grown past the verified state by more than the per-resolve bound` | More than `AUTONOMY_EVIDENCE_RESOLVE_ROWS` (default 1000) records were appended since the last pass. | Wait for the pass to catch up. A stream that outgrows every pass needs a larger bound or a slower proposer. |
+| `the account's evidence stream has grown past the verified state by more than the per-resolve bound` | More than `AUTONOMY_EVIDENCE_RESOLVE_ROWS` (default 1000) records were appended since the last pass. | Wait for the pass to catch up. A stream that outgrows every pass needs larger per-tick row/byte bounds after capacity review (`AUTONOMY_EVIDENCE_PASS_ROWS_PER_TICK`, `AUTONOMY_EVIDENCE_PASS_BYTES_PER_TICK`), or a slower proposer. |
 | `the process's monotonic clock reading is unusable` | The host's monotonic clock went backwards or non-finite. | Treat as a host fault; restart the process after checking the host clock. |
 | `the account's durable evidence stream failed verification (…)`, or a detail naming a durable record that does not decode or is not the exact expiry shape | Corruption detectable from the stream itself (a gap, a broken link, a digest mismatch, an undecodable or malformed record). The verdict clears on the next clean pass, which will not come while the corruption remains. | **Stop; do not edit the stream.** Preserve the application database (`DATABASE_URL`) and its sidecars read-only, then follow INCIDENT_RESPONSE, "Audit-chain verification failure": the same tamper-or-corruption rules apply to this stream. |
 | `the account's durable evidence stream no longer holds, with its digest, a record this process verified` (**latched**) | A record the running process had verified is missing, moved or rewritten. This is the one state a restart clears, and it is also exactly what an attacker who truncated the stream would want you to do. One CRITICAL alert `evidence.stream_truncated` was raised when it latched. | **Do not restart to clear it.** Preserve the database and sidecars first, compare the stream with your last backup, and explain the missing or changed record. Only then restart; the first pass after the restart will certify whatever the stream then holds. |
