@@ -128,6 +128,7 @@ Never put an IBKR username or password in any Chronos file.
 5. Rehearse the capture harness against the demo broker — proves the harness end to end and
    proves its refusals. Demo output is stamped `gateway_evidence: false` and can never count:
    ```bash
+   export CHRONOS_CAPTURE_PEPPER=$(python3 -c 'import secrets; print(secrets.token_hex(32))')  # throwaway, this shell only
    BROKER_MODE=demo .venv/bin/python \
      .claude/skills/chronos-real-gateway-campaign/scripts/capture_readonly.py \
      --out /tmp/chronos-rehearsal --label rehearsal --allow-demo
@@ -136,6 +137,19 @@ Never put an IBKR username or password in any Chronos file.
    ```
    Expected: the capture writes `capture.json`, `derived_liquid_hours.json`, `manifest.json`;
    the replay prints `[PASS]`. Without `--allow-demo` both refuse — verify that refusal too.
+   The capture is refused before anything is written unless `CHRONOS_CAPTURE_PEPPER` is set
+   (§6); the line above sets a throwaway one for the rehearsal only, never a real pepper.
+   Five capture steps are **expected** to record `{"error": …}` on the demo broker; they are
+   observations, not a failure, and the replay still passes with them:
+   `symbol:AAPL:qualify_option:<expiry>:180:P` and `symbol:AAPL:qualify_option_contracts`
+   (`BrokerDataError: Demo contract is not qualified: AAPL <expiry> 180 P`), and
+   `symbol:MSFT:qualify_option:<expiry>:430:P`, `symbol:MSFT:qualify_option:<expiry>:440:P` and
+   `symbol:MSFT:qualify_option_contracts`. The reason is the demo fixture's shape: its chain
+   advertises the union of strikes and expirations while serving one strike per expiry, and it
+   serves MSFT calls where the harness samples puts. The sampled expiry is fixed (the demo clock
+   is fixed at 2026-07-15 and the sample is 21 days after it), so these errors do not move with
+   the wall clock. `tests/unit/test_real_gateway_campaign.py` requires the AAPL one. Any other
+   `error` step in a demo rehearsal is not expected: record it and stop.
 
 ## 4. Every session (sessions 1 … N, N ≥ 5)
 
