@@ -143,7 +143,11 @@ refusal **skips** the start — `systemctl --user status` shows `inactive` with 
 the journal carries `Skipped due to 'exec-condition'` plus the preflight's lines. Read that shape as
 the refusal; `Result=success` is not readiness. The template's `StartLimitIntervalSec=600` /
 `StartLimitBurst=3` bound what the preflight cannot foresee, and that limit also counts manual
-`systemctl start` attempts.
+`systemctl start` attempts. Exit 1 `UNDECIDED` skips the start the same way (systemd skips on any
+exit 1–254): an `inactive` unit whose journal shows `UNDECIDED` means the preflight could not decide
+(the read-only open failed, or `DATABASE_URL` is not a file-backed SQLite database), not that the
+backend refused. The configured `DATABASE_URL` is never printed, and credentials in any URL-shaped
+text are redacted, so the journal carries the diagnosis and never the connection string.
 
 Hard-link backups of the live data directory are the usual cause of the `hard links` refusal: use
 the stop-then-`.backup` or read-only procedures in [`BACKUP_AND_RECOVERY.md`](BACKUP_AND_RECOVERY.md#sqlite-safe-backup)

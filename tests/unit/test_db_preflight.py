@@ -759,3 +759,18 @@ def test_a_database_url_with_credentials_never_reaches_any_output(
     for leaked in (_SENTINEL, _CREDENTIAL_URL):
         assert leaked not in out
         assert leaked not in err
+
+
+def test_a_stray_private_temporary_not_sharing_the_inode_is_a_warning(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Reader N1: a leftover ``.chronos.db.create-<hex>`` that is NOT linked to the database is
+    reported and never refused (the runtime names only one that shares the inode)."""
+
+    db = _valid_database(tmp_path / "chronos.db")
+    stray = tmp_path / ".chronos.db.create-fedcba9876543210"
+    stray.touch(mode=0o600)
+    code, out, _ = _run(["--database-url", _url(db)], capsys)
+    assert code == 0, out
+    warned = "WARN [db] a private temporary from an interrupted create is present and not linked "
+    assert warned + f"to the file: {stray}" in out
