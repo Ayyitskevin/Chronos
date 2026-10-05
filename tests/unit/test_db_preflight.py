@@ -858,3 +858,39 @@ def test_a_stray_private_temporary_not_sharing_the_inode_is_a_warning(
     assert code == 0, out
     warned = "WARN [db] a private temporary from an interrupted create is present and not linked "
     assert warned + f"to the file: {stray}" in out
+
+
+# --- r3a: the reader's P3 pins at b3ded48 (test-only; nothing else moves) --------------------
+
+
+def test_a_malformed_password_whose_fragment_spells_the_file_uri_words_still_gets_the_generic_sentence(  # noqa: E501
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Reader P3-1: the one passed-through text is selected by exact equality with the runtime's
+    static ``file:`` sentence. A parser echo that merely contains those words (here the sentinel
+    sits in the port slot the parser rejects) must still get the generic sentence."""
+
+    sentinel = f"SQLite-file-URI-{_SENTINEL}"
+    malformed = f"postgresql://synthetic-user:{_FRAGMENT}@ss:{sentinel}@example.invalid/chronos"
+    code, out, err = _run(["--database-url", malformed], capsys)
+    assert code == EXIT_REFUSED, out
+    assert "configured DATABASE_URL is not accepted by the runtime's URL parser (ValueError)" in out
+    for leaked in (sentinel, _SENTINEL, "invalid literal"):
+        assert leaked not in out
+        assert leaked not in err
+
+
+def test_a_file_uri_database_url_gets_the_runtimes_exact_static_sentence(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Reader P3-2: the runtime's static ``file:`` refusal is passed through verbatim — the
+    expected text is taken from the runtime here too, never copied."""
+
+    with pytest.raises(ValueError) as raised:
+        database_module._sqlite_database_path("sqlite:///file:pinned?mode=ro")
+    sentence = str(raised.value)
+    assert sentence.startswith("SQLite file: URI DATABASE_URL targets are not supported")
+    code, out, _ = _run(["--database-url", "sqlite:///file:pinned?mode=ro"], capsys)
+    assert code == EXIT_REFUSED, out
+    assert f"REFUSE [db] {sentence}" in out
+    assert "not accepted by the runtime's URL parser" not in out
