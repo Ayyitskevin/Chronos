@@ -534,7 +534,8 @@ def test_exit_codes_are_0_78_1_and_every_exception_maps_to_1(
     code, out, err = _run(["--database-url", _url(db)], capsys)
     codes.append(code)
     assert code == EXIT_UNDECIDED, out
-    assert "DB-PREFLIGHT UNDECIDED (1) — RuntimeError: boom" in out
+    assert "DB-PREFLIGHT UNDECIDED (1) — RuntimeError" in out
+    assert "boom" not in out, "the exception class is reported, never its text"
     assert "Traceback" not in err and err == ""
     assert set(codes) <= {0, EXIT_UNDECIDED, EXIT_REFUSED}
 
@@ -707,7 +708,12 @@ def test_the_explicit_ledger_diagnostic_refuses_the_same_fixture_with_the_platfo
 
 #: A synthetic password, never a real credential, unique enough to grep for.
 _SENTINEL = "pw-sentinel-7f3a2c"
-_CREDENTIAL_URL = f"postgresql://synthetic-user:{_SENTINEL}@example.invalid/chronos"
+#: Two valid credential-bearing URL shapes: user information, and a query parameter that
+#: SQLAlchemy's PostgreSQL dialect maps into the connection's password (Daybreak r1 re-pin).
+_CREDENTIAL_URLS = {
+    "userinfo": f"postgresql://synthetic-user:{_SENTINEL}@example.invalid/chronos",
+    "query": f"postgresql://example.invalid/chronos?password={_SENTINEL}",
+}
 
 
 def _emitted(mode: str, out: str) -> tuple[str, str]:
@@ -721,30 +727,34 @@ def _emitted(mode: str, out: str) -> tuple[str, str]:
 
 @pytest.mark.parametrize("mode", ["text", "json"])
 @pytest.mark.parametrize("path", ["environment", "flag", "exception"])
+@pytest.mark.parametrize("shape", ["userinfo", "query"])
 def test_a_database_url_with_credentials_never_reaches_any_output(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
     mode: str,
     path: str,
+    shape: str,
 ) -> None:
-    """Daybreak P1-1 at 5b8a7c9: the unit runs the command on its private DATABASE_URL and the
-    journal keeps the output, so the configured URL, credentials included, must not be printed
-    by any path: the non-file-backed diagnostic reached from the environment or the flag, or an
-    exception whose text echoes it."""
+    """Daybreak P1-1 at 5b8a7c9 and P1-OPS-2-BUILD-r1-1 at 7842b4f: the unit runs the command
+    on its private DATABASE_URL and the journal keeps the output, so the configured URL,
+    credentials included in either shape, must not be printed by any path: the non-file-backed
+    diagnostic reached from the environment or the flag, or an exception whose text echoes it.
+    An unexpected error is reported by its class alone; exception text is never emitted."""
 
+    credential_url = _CREDENTIAL_URLS[shape]
     extra = ["--json"] if mode == "json" else []
     if path == "environment":
-        monkeypatch.setenv("DATABASE_URL", _CREDENTIAL_URL)
+        monkeypatch.setenv("DATABASE_URL", credential_url)
         argv = extra
     elif path == "flag":
-        argv = ["--database-url", _CREDENTIAL_URL, *extra]
+        argv = ["--database-url", credential_url, *extra]
     else:
         db = _valid_database(tmp_path / "chronos.db")
         module = importlib.import_module("chronos.cli.db_preflight")
 
         def echo(*args: Any, **kwargs: Any) -> Any:
-            raise RuntimeError(f"cannot read {_CREDENTIAL_URL}")
+            raise RuntimeError(f"cannot read {credential_url}")
 
         monkeypatch.setattr(module, "_identity_lines", echo)
         argv = ["--database-url", _url(db), *extra]
@@ -753,10 +763,11 @@ def test_a_database_url_with_credentials_never_reaches_any_output(
     texts, verdict = _emitted(mode, out)
     assert code == EXIT_UNDECIDED, out
     if path == "exception":
-        assert "RuntimeError" in verdict
+        assert "DB-PREFLIGHT UNDECIDED (1) — RuntimeError" in verdict
+        assert "cannot read" not in out, "exception text must not be emitted"
     else:
         assert "configured DATABASE_URL is not a file-backed SQLite database" in texts
-    for leaked in (_SENTINEL, _CREDENTIAL_URL):
+    for leaked in (_SENTINEL, credential_url):
         assert leaked not in out
         assert leaked not in err
 
