@@ -17,6 +17,7 @@ refused, the full live conjunction is accepted by design (``tests/unit/test_sett
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 import sys
@@ -268,3 +269,44 @@ def test_the_identifier_sanitizer_line_names_a_present_mechanism() -> None:
     source = CAPTURE.read_text(encoding="utf-8")
     for name in ("def pseudonymize_identifiers", "CHRONOS_CAPTURE_PEPPER", "pepper_fingerprint"):
         assert name in source, name
+
+
+_REHEARSAL_FIXTURE = ROOT / "tests" / "fixtures" / "ibkr_demo" / "rehearsal" / "capture.json"
+_ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def _rehearsal_step_five() -> str:
+    """The prose of §3.3 step 5 (the demo rehearsal), up to the next heading."""
+
+    text = CHECKLIST.read_text(encoding="utf-8")
+    start = text.index("5. Rehearse the capture harness against the demo broker")
+    end = text.index("\n## ", start)
+    return _collapsed(text[start:end])
+
+
+def _fixture_error_steps() -> list[str]:
+    """Every step of the committed demo rehearsal whose value carries an ``error``."""
+
+    steps = json.loads(_REHEARSAL_FIXTURE.read_text(encoding="utf-8"))["steps"]
+    return sorted(
+        name for name, value in steps.items() if isinstance(value, dict) and "error" in value
+    )
+
+
+def test_the_rehearsal_expectation_names_every_error_step_of_the_committed_demo_rehearsal() -> None:
+    """The demo broker's fixture cannot qualify every sampled option, so a clean rehearsal
+    still records ``error`` steps (observations, not failures; the replay passes with them).
+    The checklist must say which ones to expect, so the owner does not mistake the fixture's
+    shape for a broken harness. The names are derived from the committed fixture, with the
+    sampled expiry generalised to ``<expiry>`` (the demo clock is fixed, so the date does not
+    move with the wall clock); the capture command also needs ``CHRONOS_CAPTURE_PEPPER`` or it
+    is refused before anything is written."""
+
+    errors = _fixture_error_steps()
+    assert errors, "the committed rehearsal fixture records no error step; the pin is vacuous"
+    prose = _rehearsal_step_five()
+    for name in errors:
+        generalised = _ISO_DATE.sub("<expiry>", name)
+        assert f"`{generalised}`" in prose, f"step 5 does not name the expected error {generalised}"
+    assert "expected" in prose.lower() and "not a failure" in prose.lower()
+    assert "CHRONOS_CAPTURE_PEPPER" in prose
