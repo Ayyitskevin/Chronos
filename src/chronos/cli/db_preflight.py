@@ -525,14 +525,15 @@ def run_preflight(
 
 
 def cmd_db_preflight(args: argparse.Namespace) -> int:
-    """Observe; never repair. Every exception is one UNDECIDED line and exit 1.
+    """Observe; never repair. Unexpected exceptions become one UNDECIDED line and exit 1.
 
     The unit runs this command on its private DATABASE_URL and the journal keeps the output,
-    so the configured URL is never printed and every caught error — here and in the inner
-    catches — is reported by its class alone: exception text can carry credentials (a
-    query-parameter password, a DSN, a fragment the URL parser echoes) and no pattern can
-    promise to remove them. The one exception text passed through is the runtime's own
-    static sentence for a ``file:`` URI, compared verbatim.
+    so the configured URL is never printed. URL-parser failures, database/ledger read failures,
+    and unexpected exceptions are reported by class alone: their text can carry credentials
+    (a query-parameter password, a DSN, or a fragment the URL parser echoes), and no pattern can
+    promise to remove them. The runtime's exact static sentence for a ``file:`` URI is the only
+    parser text passed through. Identity refusals intentionally retain the runtime's fixed
+    wording plus the checked filesystem path.
     """
 
     report = Report()
