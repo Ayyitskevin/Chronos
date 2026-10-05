@@ -1,10 +1,12 @@
 # CHANGELOG
 
-## [Unreleased] — anchor-guard module (unwired), drain claim state, database and ledger lock integrity (PRs #281-#285, 2026-10-03/04)
+## [Unreleased] — anchor-guard module (unwired), drain claim state, database and ledger lock integrity, bounded evidence read (PRs #281-#285 and #290, 2026-10-03/04; dates are UTC)
 
-Nothing here adds a command or a setting. Two changes alter behavior an operator can see: a proposal the
-drain claimed and then failed on is no longer retried (#283), and the application database and the
-platform ledger refuse some file states at startup instead of repairing them later (#284, #285).
+Nothing here adds a command. #290 adds seven settings (listed in its entry). Three changes alter behavior an
+operator can see: a proposal the drain claimed and then failed on is no longer retried (#283); the application
+database and the platform ledger refuse some file states at startup instead of repairing them later (#284,
+#285); and, when evidence binding is on, evidence-bound proposals refuse until the drain's first
+evidence-stream verification pass completes after every process start (#290).
 
 - **#281 (merged 2026-10-03, `e0a1c03`) — the per-stream anchor guard, in isolation.** Adds
   `src/chronos/persistence/anchor_guard.py`, a lock-and-lifecycle guard for a per-stream anchor. No module
@@ -12,7 +14,7 @@ platform ledger refuse some file states at startup instead of repairing them lat
   I/O, derives no path (the caller supplies the lock path) and requires an explicit wait deadline; Linux
   only (advisory `flock`). **#282 (merged 2026-10-04, `c2c0607`)** corrects a placement comment, renames a
   test alias and makes the unwired pin an AST check; no behavior change. Bootstrap/recovery of an anchored
-  stream, FU2's bounded read and any enforcement are not built.
+  stream and any enforcement are not built. FU2's bounded sticky-expiry verification is built and wired for the evidence-bundle stream (#290); it does not publish, read, or compare a per-stream anchor and does not supply the held bootstrap/recovery mechanism.
 - **#283 (merged 2026-10-04, `600e1fc`) — durable claim state for the proposal drain.** The drain now claims
   a queued proposal (`PENDING` to `CLAIMED`, a compare-and-set) and commits the claim before evaluating it.
   A crash or exception after that commit leaves the row `CLAIMED`: it is never selected again, never moved
@@ -35,6 +37,27 @@ platform ledger refuse some file states at startup instead of repairing them lat
   constructs `SqliteLedger` (tests only), so this protects a future writer. See docs/limitations.md, "Local
   SQLite file admission and refusals" and "Per-stream anchor guard (FU1): built, not wired; recovery held",
   and RISK_REGISTER R-21 and R-80 to R-82.
+- **#290 (merged 2026-10-04, `b709d9c`) — the bounded, indexed sticky-expiry evidence read (FU2).** Only in
+  effect when `AUTONOMY_EVIDENCE_BUNDLES` is set. Until #290 every resolve of a cited evidence bundle verified
+  the account's WHOLE hash-chained evidence stream and decoded every record. Now a verification pass runs off
+  the drain's path, one chunk per tick inside one SQLite snapshot, and publishes a verified head; each resolve
+  reads one bounded statement, requires the published head to retain its sequence and digest, verifies the
+  bounded suffix above it, and answers. Rows below the published head are rechecked by the next pass, not by
+  the resolve. Operator-visible: after every process start, evidence-bound proposals
+  refuse `EVIDENCE_BUNDLE_EXPIRED` (detail "has not been verified since this process started") until the first
+  pass completes; a stream in which a record this process verified is missing, moved or rewritten refuses
+  until the process is restarted ("latched") and raises one CRITICAL owner alert `evidence.stream_truncated`;
+  an aborted pass raises a WARNING `evidence.pass_failed`, and after 5 consecutive aborted passes the stream
+  refuses until a restart. Seven settings; four defaults were builder-derived and Kevin-accepted
+  (`VERIFICATION_MAX_AGE_SECONDS`, `ROW_BYTES`, `EXPIRED_IDS`, `MAX_PASS_ATTEMPTS`):
+  `AUTONOMY_EVIDENCE_VERIFICATION_MAX_AGE_SECONDS` (900), `AUTONOMY_EVIDENCE_RESOLVE_ROWS` (1000),
+  `AUTONOMY_EVIDENCE_PASS_ROWS_PER_TICK` (1000), `AUTONOMY_EVIDENCE_ROW_BYTES` (4096),
+  `AUTONOMY_EVIDENCE_PASS_BYTES_PER_TICK` (1048576), `AUTONOMY_EVIDENCE_EXPIRED_IDS` (10000),
+  `AUTONOMY_EVIDENCE_MAX_PASS_ATTEMPTS` (5). What it does not guarantee: the stream's integrity is proven
+  only for records this process has verified; a truncation or consistent rewrite of other records, including
+  every record across a restart, is undetectable, exactly as before #290 (no external anchor; the anchor
+  follow-ups R10-R12 are deferred). See docs/OPERATIONS.md, "Evidence-stream verification refusals and
+  alerts", docs/limitations.md, "Bounded evidence read (FU2)", and RISK_REGISTER R-83.
 
 ## [Unreleased] — the platform audit log gains a head anchor; every existing log needs an owner bootstrap before first start (2026-09-12)
 
