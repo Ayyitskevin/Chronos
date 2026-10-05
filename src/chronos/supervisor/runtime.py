@@ -583,6 +583,14 @@ class AutonomyRuntime:
         exhausted = self._consecutive_failures >= self._config.max_consecutive_failures
         if exhausted:
             self._stopped = True
+            if self._bind_evidence and self._engine is not None:
+                try:
+                    evidence_bundles.close_pass(self._engine, self._evidence_stream)
+                except Exception:
+                    _logger.exception(
+                        "Autonomy runtime could not close its evidence verification pass",
+                        extra={"event": "autonomy_evidence_pass_uncloseable"},
+                    )
         try:
             with self._sessions.begin() as session:
                 alerts.raise_alert(
