@@ -23,7 +23,6 @@ import errno
 import json
 import math
 import os
-import re
 import sqlite3
 import stat
 from collections.abc import Callable, Iterable
@@ -57,11 +56,6 @@ _NOT_CHECKED = (
     "path stability between this check and the backend's open"
 )
 _OPERATIONS_POINTER = 'see docs/OPERATIONS.md "Database startup refusals"'
-#: Credentials in URL-shaped text (``<scheme>://<user>:<password>@<host>``) anywhere in the
-#: emitted lines. The unit runs this command on its private DATABASE_URL and the journal keeps
-#: the output, so no line may carry credentials — not a diagnostic, not a verdict, not an
-#: exception's text.
-_CREDENTIAL_URL = re.compile(r"(?i)\b([a-z][a-z0-9+.\-]*://)[^\s/@]+@")
 _DB_REPAIR = "Chronos will chmod 0600 at its first construction"
 _LEDGER_REPAIR = "the platform process will chmod 0600 at its first construction"
 
@@ -494,14 +488,14 @@ def run_preflight(
         _ledger_lines(report, ledger)
 
 
-def _redact(text: str) -> str:
-    """Credentials in any URL-shaped text become ``scheme://<redacted>@`` before printing."""
-
-    return _CREDENTIAL_URL.sub(r"\1<redacted>@", text)
-
-
 def cmd_db_preflight(args: argparse.Namespace) -> int:
-    """Observe; never repair. Every exception is one UNDECIDED line and exit 1."""
+    """Observe; never repair. Every exception is one UNDECIDED line and exit 1.
+
+    The unit runs this command on its private DATABASE_URL and the journal keeps the output,
+    so the configured URL is never printed and an unexpected error is reported by its class
+    alone: exception text can carry credentials (a query-parameter password, a DSN) and no
+    pattern can promise to remove them.
+    """
 
     report = Report()
     try:
@@ -518,15 +512,14 @@ def cmd_db_preflight(args: argparse.Namespace) -> int:
         )
         verdict, code = report.verdict()
     except Exception as error:  # one line, exit 1, never a traceback
-        verdict = f"DB-PREFLIGHT UNDECIDED (1) — {type(error).__name__}: {error}"
+        verdict = f"DB-PREFLIGHT UNDECIDED (1) — {type(error).__name__}"
         code = EXIT_UNDECIDED
-    verdict = _redact(verdict)
     if args.json:
         print(
             json.dumps(
                 {
                     "lines": [
-                        {"level": line.level, "scope": line.scope, "text": _redact(line.text)}
+                        {"level": line.level, "scope": line.scope, "text": line.text}
                         for line in report.lines
                     ],
                     "checked": report.checked,
@@ -539,7 +532,7 @@ def cmd_db_preflight(args: argparse.Namespace) -> int:
         return code
     print("Chronos db-preflight (read-only: observes what startup would do, never repairs)")
     for line in report.lines:
-        print(_redact(str(line)))
+        print(line)
     print(verdict)
     return code
 
