@@ -870,7 +870,9 @@ def test_a_malformed_password_whose_fragment_spells_the_file_uri_words_still_get
     static ``file:`` sentence. A parser echo that merely contains those words (here the sentinel
     sits in the port slot the parser rejects) must still get the generic sentence."""
 
-    sentinel = f"SQLite-file-URI-{_SENTINEL}"
+    with pytest.raises(ValueError) as raised:
+        database_module._sqlite_database_path("sqlite:///file:probe")
+    sentinel = f"{raised.value}-{_SENTINEL}"
     malformed = f"postgresql://synthetic-user:{_FRAGMENT}@ss:{sentinel}@example.invalid/chronos"
     code, out, err = _run(["--database-url", malformed], capsys)
     assert code == EXIT_REFUSED, out
