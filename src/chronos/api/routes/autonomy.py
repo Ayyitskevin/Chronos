@@ -61,7 +61,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 
 from chronos.api import bars as bar_plane
 from chronos.api.auth import require_proposer, require_token
-from chronos.api.dependencies import BackendState, require_writer
+from chronos.api.dependencies import BackendState, admission_accepts, require_writer
 from chronos.domain.models import ChronosModel
 from chronos.marketdata.bars import BarInterval
 from chronos.supervisor import evidence_bundles, evidence_kinds, ingress, proposers
@@ -70,6 +70,11 @@ from chronos.utils.identifiers import account_fingerprint
 from chronos.utils.time import utc_now
 
 _logger = logging.getLogger("chronos.api.autonomy")
+
+_AUTONOMY_NOT_RUNNING_DETAIL = (
+    "autonomy is configured on this backend but did not start; proposals are refused until "
+    "the owner fixes the configuration and restarts. See GET /health and the server log."
+)
 
 #: How many symbols one evidence bundle may carry bars for. A bound on the work
 #: a proposal-only credential can ask the broker-holding process to do, in the
@@ -165,6 +170,21 @@ async def submit_proposal(
     writer-owned-field refusal — are the ones that matter here, and letting a
     second parser see the bytes first would mean two parsers to reason about.
     """
+
+    # OPS-3: 202 means "queued for a drain that exists". When a mandate is configured but no
+    # runtime was installed (any reason) nothing will drain this row, so refuse before reading
+    # the body or writing anything. The state is read from the writer's own `BackendState`; a
+    # missing attribute, an unsettled state or any value that is not the admission enum's
+    # accepting members is a refusal (never "accepting by default"). The body is one fixed
+    # string: no fault code, path or exception text reaches a caller.
+    if not admission_accepts(getattr(state, "autonomy_admission", None)):
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+        return ProposalAccepted(
+            accepted=False,
+            stage="INGRESS",
+            refusal="AUTONOMY_NOT_RUNNING",
+            detail=_AUTONOMY_NOT_RUNNING_DETAIL,
+        )
 
     body = await request.body()
     if len(body) > MAX_BODY_BYTES:

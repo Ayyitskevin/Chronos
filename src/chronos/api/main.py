@@ -58,7 +58,7 @@ from chronos.api.autonomy_wiring import (
     evidence_binding_in_force,
     evidence_posture_is_broken,
 )
-from chronos.api.dependencies import BackendState
+from chronos.api.dependencies import AutonomyAdmission, BackendState
 from chronos.api.reconciliation_loop import reconciliation_task
 from chronos.api.routes.account import router as account_router
 from chronos.api.routes.autonomy import router as autonomy_router
@@ -531,6 +531,17 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                 BackgroundTaskName.AUTONOMY,
                 max_age_seconds=5.0,
             )
+        # OPS-3: settle the proposal route's admission state, once, from what actually happened
+        # above. A proposal is accepted only when a runtime will drain it or when no mandate is
+        # configured at all (the documented inert posture); a configured mandate whose autonomy
+        # did not start refuses, whatever the reason (missing, invalid, mismatched, revoked,
+        # unsafe, an unauthenticated posture, an invalid cadence, a wiring failure, a hold).
+        if autonomy is not None:
+            app.state.backend.settle_autonomy_admission(AutonomyAdmission.RUNNING)
+        elif runtime.settings.autonomy_mandate_file is None:
+            app.state.backend.settle_autonomy_admission(AutonomyAdmission.NO_MANDATE_CONFIGURED)
+        else:
+            app.state.backend.settle_autonomy_admission(AutonomyAdmission.CONFIGURED_NOT_STARTED)
     else:
         for task_name in BackgroundTaskName:
             app.state.backend.task_observations.not_expected(
