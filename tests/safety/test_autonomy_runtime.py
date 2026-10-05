@@ -959,6 +959,51 @@ def test_failure_exhaustion_closes_an_in_flight_pass_snapshot(
     assert busy == 0, "a reader still held the WAL after the runtime stopped itself"
 
 
+def test_failure_exhaustion_cleanup_failure_never_escapes_or_suppresses_the_alert(
+    file_sessions: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sessions = file_sessions
+    _fu2_rows(sessions, 3)
+    failing = [False]
+    sink = _NullSink()
+
+    def gather(now: datetime) -> Any:
+        if failing[0]:
+            raise RuntimeError("injected tick failure")
+        return _facts(now)
+
+    runtime = AutonomyRuntime(
+        sessions=sessions,
+        config=RuntimeConfig(
+            account_fingerprint=_FINGERPRINT,
+            max_consecutive_failures=1,
+            evidence_limits=evidence_bundles.EvidenceVerificationLimits(pass_rows=1),
+        ),
+        identity=_identity(),
+        mandate_source=lambda: None,
+        gather_facts=gather,
+        sinks=(sink,),
+        bind_evidence=True,
+    )
+    assert runtime.run_tick(_FU2_AT).ok
+    assert _fu2_state(sessions).pass_in_flight
+    failing[0] = True
+
+    def broken_close(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("injected close failure")
+
+    with monkeypatch.context() as close_patch:
+        close_patch.setattr(evidence_bundles, "close_pass", broken_close)
+        report = runtime.run_tick(_FU2_AT + timedelta(minutes=1))
+
+    assert not report.ok and runtime.stopped
+    assert any(
+        alert.kind == "runtime.tick_failed" and alert.severity is alerts.AlertSeverity.CRITICAL
+        for alert in sink.seen
+    )
+    runtime.stop("test cleanup")
+
+
 def test_the_runtime_configures_the_engines_verification_limits(
     sessions: sessionmaker[Session],
 ) -> None:
