@@ -245,7 +245,8 @@ def test_schema_that_exists_only_in_a_committed_crash_wal_is_observed_or_undecid
     finally:
         os.chmod(current, 0o700)
     assert code == EXIT_UNDECIDED, out
-    assert "UNDECIDED [schema] cannot read the database read-only" in out
+    assert "UNDECIDED [schema] cannot read the database read-only (sqlite3.OperationalError)" in out
+    assert "unable to open" not in out, "the driver's text is not emitted"
     assert "CLEAR [schema]" not in out
     assert "DB-PREFLIGHT UNDECIDED (1)" in out
 
@@ -708,12 +709,20 @@ def test_the_explicit_ledger_diagnostic_refuses_the_same_fixture_with_the_platfo
 
 #: A synthetic password, never a real credential, unique enough to grep for.
 _SENTINEL = "pw-sentinel-7f3a2c"
-#: Two valid credential-bearing URL shapes: user information, and a query parameter that
-#: SQLAlchemy's PostgreSQL dialect maps into the connection's password (Daybreak r1 re-pin).
+#: The first two characters of a malformed password (the reader's P1-R2-1): an unencoded "@"
+#: and ":" inside the password push the sentinel into the URL parser's port slot, whose
+#: ValueError text echoes it.
+_FRAGMENT = "pa"
+#: Credential-bearing URL shapes: user information; a query parameter that SQLAlchemy's
+#: PostgreSQL dialect maps into the connection's password (Daybreak r1 re-pin); and the
+#: malformed password the runtime's URL parser rejects with its own text.
 _CREDENTIAL_URLS = {
     "userinfo": f"postgresql://synthetic-user:{_SENTINEL}@example.invalid/chronos",
     "query": f"postgresql://example.invalid/chronos?password={_SENTINEL}",
+    "malformed": f"postgresql://synthetic-user:{_FRAGMENT}@ss:{_SENTINEL}@example.invalid/chronos",
 }
+#: A driver-style DSN a caught database error could carry (Daybreak r2 re-pin).
+_DSN = f"DRIVER={{PostgreSQL Unicode}};SERVER=example.invalid;UID=synthetic-user;PWD={_SENTINEL}"
 
 
 def _emitted(mode: str, out: str) -> tuple[str, str]:
@@ -727,7 +736,7 @@ def _emitted(mode: str, out: str) -> tuple[str, str]:
 
 @pytest.mark.parametrize("mode", ["text", "json"])
 @pytest.mark.parametrize("path", ["environment", "flag", "exception"])
-@pytest.mark.parametrize("shape", ["userinfo", "query"])
+@pytest.mark.parametrize("shape", ["userinfo", "query", "malformed"])
 def test_a_database_url_with_credentials_never_reaches_any_output(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -761,13 +770,77 @@ def test_a_database_url_with_credentials_never_reaches_any_output(
 
     code, out, err = _run(argv, capsys)
     texts, verdict = _emitted(mode, out)
-    assert code == EXIT_UNDECIDED, out
     if path == "exception":
+        assert code == EXIT_UNDECIDED, out
         assert "DB-PREFLIGHT UNDECIDED (1) — RuntimeError" in verdict
         assert "cannot read" not in out, "exception text must not be emitted"
+    elif shape == "malformed":
+        # The runtime's own URL parser rejects it, so the backend would refuse to construct
+        # its Database: a refusal that names the error class and nothing of the value.
+        assert code == EXIT_REFUSED, out
+        assert (
+            "configured DATABASE_URL is not accepted by the runtime's URL parser (ValueError)"
+            in texts
+        )
+        assert "invalid literal" not in out, "the parser's text must not be emitted"
     else:
+        assert code == EXIT_UNDECIDED, out
         assert "configured DATABASE_URL is not a file-backed SQLite database" in texts
     for leaked in (_SENTINEL, credential_url):
+        assert leaked not in out
+        assert leaked not in err
+
+
+@pytest.mark.parametrize("mode", ["text", "json"])
+@pytest.mark.parametrize("where", ["database-open", "ledger-open", "ledger-read"])
+def test_a_caught_driver_error_carrying_a_dsn_is_reported_by_class_alone(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    where: str,
+) -> None:
+    """Daybreak P1-OPS-2-BUILD-r2-1 at 2f3f5f2: the inner catches (the read-only database
+    open, the ledger open, the ledger read) must not serialize the driver's text, which can
+    carry a DSN with a password; the line names the effective exception class and nothing
+    else of the error."""
+
+    db = _valid_database(tmp_path / "chronos.db")
+    ledger = tmp_path / "platform_ledger.db"
+    SqliteLedger(ledger).close()
+    module = importlib.import_module("chronos.cli.db_preflight")
+    real_connect = sqlite3.connect
+
+    def raising(*args: Any, **kwargs: Any) -> Any:
+        raise sqlite3.OperationalError(_DSN)
+
+    class _BrokenConnection:
+        def execute(self, *args: Any, **kwargs: Any) -> Any:
+            raise sqlite3.OperationalError(_DSN)
+
+        def close(self) -> None:
+            return None
+
+    def ledger_only(database: Any, *args: Any, **kwargs: Any) -> Any:
+        if "platform_ledger" not in str(database):
+            return real_connect(database, *args, **kwargs)
+        if where == "ledger-open":
+            raise sqlite3.OperationalError(_DSN)
+        return _BrokenConnection()
+
+    if where == "database-open":
+        monkeypatch.setattr(module, "_schema_lines", raising)
+        subject = "database"
+    else:
+        monkeypatch.setattr(sqlite3, "connect", ledger_only)
+        subject = "ledger"
+    extra = ["--json"] if mode == "json" else []
+
+    code, out, err = _run(["--database-url", _url(db), "--ledger", str(ledger), *extra], capsys)
+    texts, _ = _emitted(mode, out)
+    assert code == EXIT_UNDECIDED, out
+    assert f"cannot read the {subject} read-only (sqlite3.OperationalError)" in texts
+    for leaked in (_SENTINEL, _DSN, "PWD=", "DRIVER="):
         assert leaked not in out
         assert leaked not in err
 
