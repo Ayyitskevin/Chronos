@@ -120,6 +120,31 @@ messages start with `Refusing symbolic-link ledger path`, `Refusing non-regular 
 name a `.<ledger>.create-<hex>` temporary; one extra form, `Refusing ledger path …: repair failed (…);
 chmod 600 it and restart`, means the startup repair could not open the file (for example mode 0200).
 
+**Startup preflight (OPS-2).** `python -m chronos.cli db-preflight` reports, read-only, what the
+backend's startup would do with the configured `DATABASE_URL`: the identity checks of the table
+above (`lstat`, the database and its `-wal`/`-shm`/`-journal`), the mode (what the first
+construction would repair to 0600 is a `WARN`; a file it could not even open, `Unable to secure
+SQLite path without following links`, is a `REFUSE`), and `initialize()`'s schema checks read
+through a WAL-aware read-only connection (`mode=ro`, never `immutable=1`, so a schema a crashed
+writer committed only into the write-ahead log is seen; SQLite may create or recreate `-shm`/`-wal`
+for that open — they are the runtime's own sidecars). Exit 0 `CLEAR` means **only** that none of the
+checks it ran would refuse; the verdict line lists what it did not check (connect-time pragmas,
+filesystem writes at create, the campaign preflight's mandate/registry/recovery hold, FU2 process
+state, another process holding the database, and path stability between the check and the
+backend's own open, which samples pathnames again). Exit 78 is a refusal with the exact text the
+backend would raise; exit 1 `UNDECIDED` means a check could not run (for example the read-only open
+failed) and nothing is known. It never repairs: no chmod, unlink, create, migration or row. `--ledger
+PATH` is opt-in and inspects a platform ledger with `SqliteLedger`'s rules; its refusal is the
+platform process's, worded so, because the backend does not open that ledger. `--evidence` prints a
+lower-bound estimate of the FU2 first-pass window (ticks = at least `max(ceil(rows / rows_per_tick),
+ceil(bytes / bytes_per_tick))`; never exact, because ordered whole-row packing can need more). The
+backend unit template (`docs/ops/chronos-backend.service`) runs the command as `ExecCondition=`: a
+refusal **skips** the start — `systemctl --user status` shows `inactive` with `Result=success` and
+the journal carries `Skipped due to 'exec-condition'` plus the preflight's lines. Read that shape as
+the refusal; `Result=success` is not readiness. The template's `StartLimitIntervalSec=600` /
+`StartLimitBurst=3` bound what the preflight cannot foresee, and that limit also counts manual
+`systemctl start` attempts.
+
 Hard-link backups of the live data directory are the usual cause of the `hard links` refusal: use
 the stop-then-`.backup` or read-only procedures in [`BACKUP_AND_RECOVERY.md`](BACKUP_AND_RECOVERY.md#sqlite-safe-backup)
 instead.

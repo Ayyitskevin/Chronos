@@ -234,7 +234,7 @@ def test_schema_that_exists_only_in_a_committed_crash_wal_is_observed_or_undecid
             assert f"REFUSE [schema] {oracle}" in out
         else:
             assert oracle == "OK"
-            assert "CLEAR [schema]" in out
+            assert f"CLEAR [schema] version {SCHEMA_VERSION}, no drift" in out
 
     current = tmp_path / "current"
     (current / "chronos.db-shm").unlink()
@@ -395,6 +395,7 @@ def test_mode_drift_agrees_with_boot(
         assert f"REFUSE [db] {refusal}" in out
         assert oracle.returncode == 3
         assert _oracle_text(oracle) == refusal
+        assert "[schema]" not in out, "the database is never opened after a mode refusal"
 
 
 # --- T6 ---------------------------------------------------------------------------------------
