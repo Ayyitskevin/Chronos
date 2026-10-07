@@ -14,10 +14,23 @@ Description=Chronos backend (autonomy SHADOW campaign, demo broker)
 Documentation=file:%h/<CHRONOS_CHECKOUT>/docs/SHADOW_CAMPAIGN.md
 After=network-online.target
 
+# OPS-2: bound the loop the preflight below cannot foresee (a refusal the backend
+# raises later, an unexpected exit). Three starts in ten minutes, then `failed`;
+# this also counts manual `systemctl start` attempts.
+StartLimitIntervalSec=600
+StartLimitBurst=3
+
 [Service]
 Type=simple
 WorkingDirectory=%h/<CHRONOS_CHECKOUT>
 EnvironmentFile=%h/<PRIVATE_ENV_DIR>/chronos-backend.env
+# OPS-2: the startup preflight (read-only; it repairs nothing). ExecCondition=, never
+# ExecStartPre=, turns a database refusal into a SKIP: the unit goes `inactive` with
+# Result=success and NO restart, and the preflight's lines are in the journal. Read
+# that shape as the refusal — Result=success is not readiness. The condition names
+# no --ledger: the backend never opens the platform ledger. Exit 0 means only that
+# the checks the preflight ran would not refuse, never that the backend will start.
+ExecCondition=%h/<CHRONOS_CHECKOUT>/.venv/bin/python -m chronos.cli db-preflight
 ExecStart=%h/<CHRONOS_CHECKOUT>/.venv/bin/python scripts/run_backend.py
 
 # on-failure, deliberately NOT always: a backend that refuses to start is

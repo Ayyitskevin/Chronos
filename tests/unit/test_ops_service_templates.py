@@ -34,7 +34,13 @@ _LIVE_CAPABLE = ("ALLOW_ORDER_TRANSMIT", "ALLOW_LIVE_TRADING")
 #: `Environment=`/`EnvironmentFile=` values are the only place a path belongs, and
 #: every one of them must be rooted at systemd's `%h` specifier followed by a
 #: placeholder. Anything else is a real path someone left behind.
-_PATH_DIRECTIVES = ("WorkingDirectory", "EnvironmentFile", "ExecStart", "ReadWritePaths")
+_PATH_DIRECTIVES = (
+    "WorkingDirectory",
+    "EnvironmentFile",
+    "ExecCondition",
+    "ExecStart",
+    "ReadWritePaths",
+)
 
 
 def test_there_are_templates_to_check() -> None:
@@ -123,3 +129,25 @@ def test_a_template_names_no_live_capable_setting(template: Path) -> None:
             assert broker.group(1).lower() == "demo", (
                 f"{template.name} sets BROKER_MODE={broker.group(1)}; the campaign is demo-only"
             )
+
+
+def test_the_backend_template_runs_the_preflight_as_an_exec_condition_and_bounds_restarts() -> None:
+    """OPS-2: the backend unit is gated on exactly the database its ExecStart consumes.
+
+    `ExecCondition=` (not `ExecStartPre=`) is what makes a refusal a *skip* — `inactive`,
+    `Result=success`, no restart — instead of a restart loop; the condition names no `--ledger`
+    because the backend never opens the platform ledger; and the start limit bounds the loop
+    the preflight cannot foresee (a refusal the backend raises later).
+    """
+
+    backend = OPS / "chronos-backend.service"
+    parser = configparser.ConfigParser(strict=False, interpolation=None)
+    parser.optionxform = str  # type: ignore[method-assign]
+    parser.read_string(backend.read_text(encoding="utf-8"))
+    condition = parser["Service"].get("ExecCondition", "").strip()
+    assert condition == "%h/<CHRONOS_CHECKOUT>/.venv/bin/python -m chronos.cli db-preflight"
+    assert "--ledger" not in condition
+    assert "ExecStartPre" not in parser["Service"]
+    assert parser["Unit"].get("StartLimitIntervalSec", "").strip() == "600"
+    assert parser["Unit"].get("StartLimitBurst", "").strip() == "3"
+    assert parser["Service"].get("Restart", "").strip() == "on-failure"

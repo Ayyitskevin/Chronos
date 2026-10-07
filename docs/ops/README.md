@@ -6,7 +6,7 @@ instead of writing a unit from memory.
 
 | File | What it runs | Runbook |
 |---|---|---|
-| `chronos-backend.service` | the loopback backend on the **demo** broker, for the autonomy SHADOW campaign | [`../SHADOW_CAMPAIGN.md`](../SHADOW_CAMPAIGN.md) §3 |
+| `chronos-backend.service` | the loopback backend on the **demo** broker, for the autonomy SHADOW campaign; its `ExecCondition=` runs `python -m chronos.cli db-preflight` first, so a database the backend would refuse *skips* the start (`inactive`, `Result=success`, no restart loop) — see [`../OPERATIONS.md`](../OPERATIONS.md) "Database startup refusals" | [`../SHADOW_CAMPAIGN.md`](../SHADOW_CAMPAIGN.md) §3 |
 | `chronos-worker.service` | the model worker on **local** inference, forwarding off | [`../SHADOW_CAMPAIGN.md`](../SHADOW_CAMPAIGN.md) §3 |
 
 Operator checklists also live here — owner-facing, step-by-step procedures that a contract

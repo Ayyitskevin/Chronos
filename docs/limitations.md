@@ -182,6 +182,12 @@ Limits that remain, stated rather than discovered:
   concurrently; SQLite opens by pathname.
 - No module under `src/chronos` constructs `SqliteLedger`; it is built only by tests, so the
   ledger side is a guarantee for a future writer rather than a protection of a running one.
+- The startup preflight (`python -m chronos.cli db-preflight`, OPS-2; the backend unit template runs
+  it as `ExecCondition=`) samples pathnames with `lstat` and a read-only open, and the backend then
+  opens by pathname again: it cannot promise path stability between the two, nor that the backend
+  will start. Its `CLEAR` means only that the checks it ran would not refuse; the runtime's own
+  admission and post-connect checks remain authoritative. It cannot see FU2's process state (the
+  verification latch lives in process memory) or a database another process currently holds.
 
 ## Per-stream anchor guard (FU1): built, not wired; recovery held
 
