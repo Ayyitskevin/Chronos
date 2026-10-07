@@ -550,6 +550,14 @@ and maintenance recovery remain held.
   (`src/chronos/api/autonomy_wiring.py`). A valid `AUTONOMY_MANDATE_FILE` is therefore
   necessary, not sufficient. The consumer-isolation test names the wiring module as the
   single permitted app-plane consumer of the contracts.
+  **The proposal route follows that outcome (OPS-3).** When a mandate file is configured but
+  no runtime was installed (an invalid cadence, a missing, invalid, mismatched, revoked or unsafe
+  mandate, an unauthenticated posture, a wiring failure), `POST /autonomy/proposals` answers
+  503 `AUTONOMY_NOT_RUNNING` and queues nothing, because no drain exists; the backend itself still
+  boots, so it can close positions. With no mandate file configured the route still answers 202
+  and queues: that is the documented inert posture, and the queue fills to its 500-row cap with
+  nothing draining. A runtime that started and later stopped itself still accepts; the state is
+  settled once at startup (`src/chronos/api/dependencies.py`, `AutonomyAdmission`).
 - **ADR-0017 changed the envelope, not the gates.** Owner-directed supersessions: the
   persistent auto-activating mandate (revocation still survives restart; invalid or
   wrong-account files boot inert with a CRITICAL alert), the live ceiling at 365 days,
