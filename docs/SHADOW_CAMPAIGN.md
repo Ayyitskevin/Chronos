@@ -223,8 +223,8 @@ first stops the backend:
   `require_proposer` answer a different 503 ("the proposer registry is configured but unreadable or
   invalid …"). See `docs/OPERATIONS.md`, "A running backend that refuses proposals".
 
-The preflight in `ExecCondition=` needs the `chronos` package installed in the unit's `.venv`
-(`docs/OPERATIONS.md`, "Reading the unit's three preflight outcomes").
+The preflight in `ExecCondition=` imports the checkout's `src/` through the template's `PYTHONPATH`, not
+through an install (`docs/OPERATIONS.md`, "Reading the unit's three preflight outcomes").
 
 ### Worker environment
 
@@ -490,7 +490,7 @@ Stop, and do not restart until the cause is understood:
 - `systemctl --user is-active chronos-backend` prints `inactive` (a unit you stopped yourself reads the
   same). With `Result=success`, the journal for that start attempt decides: `Skipped due to
   'exec-condition'` plus `DB-PREFLIGHT` lines is the preflight's verdict (`docs/OPERATIONS.md`);
-  the same skip with a Python import error points at the install prerequisite; if neither is visible,
+  the same skip with a Python import error points at the venv's dependencies or a `PYTHONPATH` override; if neither is visible,
   the cause is unknown — do not assume either. Do not `systemctl start` repeatedly — the start limit
   counts manual starts.
 - The backend is up but proposals are refused (a recovery hold or a broken registry shows as the 409 or

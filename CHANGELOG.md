@@ -1,5 +1,18 @@
 # CHANGELOG
 
+## [Unreleased] — the backend unit's database preflight imports the checkout's source, not an install (P3-2, 2026-10-10)
+
+The backend unit template `docs/ops/chronos-backend.service` now sets
+`Environment=PYTHONPATH=%h/<CHRONOS_CHECKOUT>/src`, so the `ExecCondition=` preflight
+(`python -m chronos.cli db-preflight`) imports the same checkout source that `ExecStart`'s
+`scripts/run_backend.py` puts on `sys.path`. Before, the condition found `chronos` only through
+`pip install -e .`; on a checkout without it the import failed, exited 1, and systemd skipped the start
+silently (`inactive`, `Result=success`). No code, setting or exit code changes, and start semantics are
+unchanged. An `EnvironmentFile=` value for `PYTHONPATH` still overrides the template's, and a venv missing
+a dependency still skips the start. Two tests in `tests/unit/test_ops_service_templates.py` pin the unit
+line and the import. `docs/OPERATIONS.md` and `docs/SHADOW_CAMPAIGN.md` no longer say the preflight needs
+an install.
+
 ## [Unreleased] — the proposal route refuses when configured autonomy did not start (OPS-3, 2026-10-05)
 
 `POST /autonomy/proposals` used to answer 202 and queue a proposal even when a mandate file was configured

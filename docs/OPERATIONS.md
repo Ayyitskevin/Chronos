@@ -172,18 +172,21 @@ path. The journal therefore carries the diagnosis without carrying the connectio
 | 78 `REFUSE` | skipped: `inactive`, `Result=success` | The configured database would be refused, with the text the backend would raise — except a `DATABASE_URL` for which the runtime's URL handling raises a `ValueError` other than its static `file:` refusal (reported verbatim), which gets a fixed sentence plus the exception class (any non-`ValueError` exception there is `UNDECIDED`, exit 1). Use the refusal table above. |
 | 1 `UNDECIDED` | skipped the same way | A check could not run, so nothing is known — not "the database is bad". Read the `UNDECIDED` lines in the journal. |
 
-**Install prerequisite.** `ExecCondition=` runs `python -m chronos.cli db-preflight` from the checkout
+**Import path.** `ExecCondition=` runs `python -m chronos.cli db-preflight` from the checkout
 root, while `ExecStart` runs `scripts/run_backend.py`, which puts `src/` on `sys.path` itself
-(`scripts/run_backend.py:14`). The `-m` form has no such shim, so it works only where the `chronos`
-package is installed into the unit's `.venv` — the `pip install -e .` step of
-[`DEPLOYMENT.md`](DEPLOYMENT.md#install). On a checkout without that step Python fails to import the
-module and exits 1; systemd treats that as a skip too, so the unit looks like `UNDECIDED` while the
-journal shows an import error instead of any `DB-PREFLIGHT` line. This is read from the template and
-the script, not reproduced: no unit was run for this document. `inactive` alone, or the absence of a
-`DB-PREFLIGHT` line, does not establish an install problem: a unit you stopped yourself, another unit
+(`scripts/run_backend.py:14`). The `-m` form has no such shim, so the unit template sets
+`Environment=PYTHONPATH=%h/<CHRONOS_CHECKOUT>/src`, which gives the condition the same source; it does
+not need the `pip install -e .` step of [`DEPLOYMENT.md`](DEPLOYMENT.md#install) to find `chronos`.
+The unit's `.venv` still needs the dependencies, and an `EnvironmentFile=` value for `PYTHONPATH`
+overrides the template's. If the import still fails, Python exits 1; systemd treats that as a skip
+too, so the unit looks like `UNDECIDED` while the journal shows an import error instead of any
+`DB-PREFLIGHT` line. This is read from the template and the script, not reproduced: no unit was run
+for this document. `inactive` alone, or the absence of a `DB-PREFLIGHT` line, does not establish an
+import problem: a unit you stopped yourself, another unit
 name, a journal window that misses the start, or journal access can each look the same. Read the
 unit's `ExecCondition` result and the journal for that start attempt: `Skipped due to 'exec-condition'`
-together with a Python import error (for example `ModuleNotFoundError`) points at the install; the
+together with a Python import error (for example `ModuleNotFoundError`) points at the venv's
+dependencies or a `PYTHONPATH` override; the
 same skip with `DB-PREFLIGHT` lines is a verdict; if neither is visible, the cause is unknown.
 
 ## A running backend that refuses proposals: `503 AUTONOMY_NOT_RUNNING` (OPS-3)
