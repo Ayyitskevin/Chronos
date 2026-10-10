@@ -635,11 +635,18 @@ def test_an_ambiguous_send_persists_submission_unknown_then_recovers_without_res
 def test_the_daily_opening_cap_refuses_the_next_opening_after_a_fill() -> None:
     # SURVEY: "the opening cap after N fills". Fails if the real evidence provider stops
     # counting today's opening intents from the repository (R-25), or if the cap stops
-    # refusing at the limit.
+    # refusing at the limit. At 306efd5 it fails EARLIER, inside _fill_ten: the cap counts
+    # the intent under evaluation, so the FIRST opening of the day is refused (U3-F1) —
+    # the strict xfail above absorbs exactly that AssertionError. Against the fix it must
+    # XPASS, so (r2) the second opening is economically distinct (an identical order would
+    # be refused as a duplicate idempotency key, a ValueError, not the cap) and readiness
+    # is re-armed after the fill (a send consumes it; see case 2), leaving the cap as the
+    # only check that can fail.
     with harness(settings=paper_settings(max_opening_orders_per_day=1)) as h:
         _fill_ten(h)
+        h.rearm_readiness("U3: operator re-reconciled after the fill")
 
-        second = h.propose(h.buy(ref=_ref("B"), intent_id="intent-2"))
+        second = h.propose(h.buy(quantity=11, ref=_ref("B"), intent_id="intent-2"))
 
         assert second.risk.approved is False
         failed = {c.name: c.detail for c in second.risk.checks if c.status.value == "FAIL"}
