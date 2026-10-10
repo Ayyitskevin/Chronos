@@ -38,10 +38,12 @@ Environment=PYTHONPATH=%h/<CHRONOS_CHECKOUT>/src
 ExecCondition=%h/<CHRONOS_CHECKOUT>/.venv/bin/python -m chronos.cli db-preflight
 ExecStart=%h/<CHRONOS_CHECKOUT>/.venv/bin/python scripts/run_backend.py
 
-# on-failure, deliberately NOT always: a backend that refuses to start is
-# usually refusing for a reason a restart cannot fix — a recovery hold
-# (ADR-0054), an invalid mandate, a broken proposer registry — and a restart
-# loop turns one legible refusal into a wall of noise.
+# on-failure, deliberately NOT always: a restart cannot fix a database refusal
+# (the one startup refusal that stops the backend; the ExecCondition= preflight
+# above catches most of them), and a restart loop turns one legible refusal into
+# a wall of noise. An invalid mandate, a recovery hold (ADR-0054) or a broken
+# proposer registry does NOT stop the backend: it boots and refuses proposals
+# instead (docs/SHADOW_CAMPAIGN.md §3).
 Restart=on-failure
 RestartSec=10
 
