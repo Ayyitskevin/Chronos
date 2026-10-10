@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import configparser
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -151,3 +153,78 @@ def test_the_backend_template_runs_the_preflight_as_an_exec_condition_and_bounds
     assert parser["Unit"].get("StartLimitIntervalSec", "").strip() == "600"
     assert parser["Unit"].get("StartLimitBurst", "").strip() == "3"
     assert parser["Service"].get("Restart", "").strip() == "on-failure"
+
+
+#: The checkout's source root, as the backend template names it for both its commands.
+_CHECKOUT_SRC = "%h/<CHRONOS_CHECKOUT>/src"
+
+
+def _service_environment(template: Path) -> dict[str, str]:
+    """Every `Environment=NAME=value` in `[Service]`, by name (configparser keeps only the last)."""
+
+    found: dict[str, str] = {}
+    in_service = False
+    for raw in template.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if line.startswith("["):
+            in_service = line == "[Service]"
+            continue
+        if not in_service or line.startswith("#") or not line.startswith("Environment="):
+            continue
+        name, _, value = line.removeprefix("Environment=").strip('"').partition("=")
+        assert name not in found, f"{name} is assigned twice in {template.name}"
+        found[name] = value
+    return found
+
+
+def test_the_backend_preflight_imports_the_same_source_as_execstart() -> None:
+    """P3-2: the condition must resolve the checkout's `src/`, exactly as `ExecStart` does.
+
+    `ExecStart` runs `scripts/run_backend.py`, which puts `<checkout>/src` first on
+    `sys.path` itself. `ExecCondition` runs `python -m chronos.cli`, which has no such
+    shim: without `pip install -e .` it raised `ModuleNotFoundError` and exited 1, and
+    systemd reads exit 1 from a condition as "not met", so the backend was skipped
+    (`inactive`, `Result=success`) with no refusal ever having run. The template now
+    gives the unit the same source root on `PYTHONPATH`.
+    """
+
+    backend = OPS / "chronos-backend.service"
+    assert _service_environment(backend).get("PYTHONPATH") == _CHECKOUT_SRC
+    shim = (ROOT / "scripts/run_backend.py").read_text(encoding="utf-8")
+    assert 'sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))' in shim
+
+
+def _find_preflight(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    # `-S`: no site-packages, so no editable install and no `.pth` — the "not installed"
+    # case. Only `chronos/__init__.py` and `chronos/cli/__init__.py` run; neither imports.
+    probe = (
+        "import importlib.util; "
+        "spec = importlib.util.find_spec('chronos.cli.db_preflight'); "
+        "print(spec.origin if spec else 'NOT-FOUND')"
+    )
+    return subprocess.run(
+        [sys.executable, "-S", "-c", probe],
+        cwd=ROOT,
+        env={"PATH": "/usr/bin:/bin", **env},
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+
+
+def test_the_backend_preflight_resolves_without_an_install() -> None:
+    """With only the unit's own `Environment=`, the preflight module is found in `src/`."""
+
+    unit_env = {
+        name: value.replace("%h/<CHRONOS_CHECKOUT>", str(ROOT))
+        for name, value in _service_environment(OPS / "chronos-backend.service").items()
+    }
+    found = _find_preflight(unit_env)
+    assert found.returncode == 0, found.stderr
+    assert found.stdout.strip() == str(ROOT / "src/chronos/cli/db_preflight.py")
+
+    # Positive control: without that environment the same probe cannot see the package,
+    # so the assertion above is the unit's doing and not an install leaking in.
+    bare = _find_preflight({})
+    assert bare.returncode != 0 or bare.stdout.strip() == "NOT-FOUND", bare.stdout
