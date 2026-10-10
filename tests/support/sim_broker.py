@@ -35,12 +35,12 @@ Equities only: options and crypto refuse with ``BrokerDataError``.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
-from contextlib import AbstractContextManager, nullcontext
+from collections.abc import Callable, Coroutine, Iterator, Mapping, Sequence
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Protocol
+from typing import Any, Protocol
 
 from chronos.broker.base import (
     BrokerConnectionError,
@@ -53,6 +53,7 @@ from chronos.domain.enums import (
     ConnectionState,
     DataQuality,
     DisplayEnvironment,
+    OrderIntent,
     OrderLifecycle,
     OrderSide,
 )
@@ -259,6 +260,20 @@ class SimBroker:
                 self._fill(order, price=min(bar_open, order.limit_price), at=bar.timestamp_utc)
             elif order.request.side is OrderSide.SELL and high >= order.limit_price:
                 self._fill(order, price=max(bar_open, order.limit_price), at=bar.timestamp_utc)
+
+    def fill_order(
+        self, broker_order_id: int, quantity: Decimal, price: Decimal | None = None
+    ) -> None:
+        """Fill exactly ``quantity`` of a working order at ``price`` (default: its limit), now."""
+
+        order = self._orders[broker_order_id]
+        if not order.working:
+            raise ValueError(f"order {broker_order_id} is not working")
+        if not 0 < quantity <= order.remaining:
+            raise ValueError("fill quantity must be positive and at most the remaining quantity")
+        self._fill_quantity(
+            order, quantity=quantity, price=price or order.limit_price, at=self._clock()
+        )
 
     def add_history(self, bar: Bar) -> None:
         """Script a closed bar for ``historical_bars``."""
@@ -586,6 +601,11 @@ class SimBroker:
             quantity = min(
                 max(Decimal("1"), (order.request.quantity * numerator) // denominator), quantity
             )
+        self._fill_quantity(order, quantity=quantity, price=price, at=at)
+
+    def _fill_quantity(
+        self, order: _SimOrder, *, quantity: Decimal, price: Decimal, at: datetime
+    ) -> None:
         price = price.quantize(_CENT)
         commission = _commission(quantity)
         self._executions.append(
@@ -670,3 +690,100 @@ class SimBroker:
 
 def _commission(quantity: Decimal) -> Decimal:
     return max(quantity * COMMISSION_PER_SHARE, MINIMUM_COMMISSION).quantize(_CENT)
+
+
+# --- U1 contract-suite hook (tests/contract/conftest.py) --------------------------------------
+
+_CONTRACT_ACCOUNT = "DU5550001"
+_CONTRACT_T0 = datetime(2026, 10, 12, 14, 0, tzinfo=UTC)
+
+
+class _SeedGuard:
+    @contextmanager
+    def at_send(self) -> Iterator[bool]:
+        yield True
+
+
+def _seeded_contract_broker() -> SimBroker:
+    """A fresh, seeded, UNCONNECTED SimBroker, built through its own submit path.
+
+    Seed: one Chronos-owned (``CHR-``) stock order partially filled (5 of 10, so a
+    working order and one execution exist), and one working order without the
+    ``CHR-`` prefix (the contract's "foreign" order). SimBroker has no ownership
+    notion of its own, mirroring the official adapter's cancel (SURVEY R-3).
+    """
+
+    clock = SimClock(_CONTRACT_T0)
+    broker = SimBroker(
+        account_id=_CONTRACT_ACCOUNT,
+        clock=clock,
+        symbols={"AAPL": 999, "MSFT": 272093},
+        starting_cash=Decimal("100000"),
+        plans={"CHR-CONTRACT-SEED": FillPlan(partial_fraction=(1, 2))},
+    )
+
+    async def seed() -> None:
+        await broker.connect()
+        for ref, symbol, quantity, limit in (
+            ("CHR-CONTRACT-SEED", "AAPL", "10", "100.00"),
+            ("MANUAL-1", "MSFT", "1", "50.00"),
+        ):
+            contract = await broker.qualify_underlying(symbol)
+            await broker.submit_order(
+                OrderRequest(
+                    correlation_id=f"seed-{ref}",
+                    account_id=_CONTRACT_ACCOUNT,
+                    contract=contract,
+                    intent=OrderIntent.OPEN_LONG_STOCK,
+                    side=OrderSide.BUY,
+                    quantity=Decimal(quantity),
+                    limit_price=Decimal(limit),
+                    order_ref=ref,
+                    transmit=True,
+                ),
+                send_guard=_SeedGuard(),
+            )
+        clock.advance(timedelta(minutes=1))
+        broker.advance_quote("AAPL", bid="99.80", ask="99.90")  # crosses the owned BUY only
+        await broker.disconnect()
+
+    _run_without_a_loop(seed())
+    return broker
+
+
+def _run_without_a_loop(coroutine: Coroutine[Any, Any, None]) -> None:
+    """Drive a coroutine that never suspends (every SimBroker call), with no event loop.
+
+    ``build()`` is called from inside running async tests, where ``asyncio.run`` is
+    not allowed. SimBroker's coroutines contain no real awaits, so one ``send``
+    completes them; anything that does suspend is a bug and fails loudly.
+    """
+
+    try:
+        coroutine.send(None)
+    except StopIteration:
+        return
+    coroutine.close()
+    raise RuntimeError("SimBroker seeding suspended; it must never await real I/O")
+
+
+async def _contract_fill(broker: object, broker_order_id: int, quantity: Decimal) -> None:
+    assert isinstance(broker, SimBroker)
+    broker.fill_order(broker_order_id, quantity)
+
+
+def contract_harness() -> Any:
+    """The ``sim`` harness for the U1 contract suite (imported lazily, as the hook requires)."""
+
+    from tests.contract.conftest import BrokerHarness
+
+    return BrokerHarness(
+        name="sim",
+        build=_seeded_contract_broker,
+        account_id=_CONTRACT_ACCOUNT,
+        owned_order_id=1001,
+        accepts_orders=True,
+        implements_full_protocol=True,
+        foreign_order_id=1002,
+        cause_fill=_contract_fill,
+    )
