@@ -71,7 +71,9 @@ _PROPOSAL = {
 _REFUSAL = "AUTONOMY_NOT_RUNNING"
 _DETAIL = (
     "autonomy is configured on this backend but did not start; proposals are refused until "
-    "the owner fixes the configuration and restarts. See GET /health and the server log."
+    "the owner fixes the configuration and restarts. The owner can see why in GET /health "
+    "(startup faults), GET /autonomy/alerts (unacknowledged owner alerts; local API token) "
+    "and the server log."
 )
 
 

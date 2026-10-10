@@ -13,15 +13,31 @@ a dependency still skips the start. Two tests in `tests/unit/test_ops_service_te
 line and the import. `docs/OPERATIONS.md` and `docs/SHADOW_CAMPAIGN.md` no longer say the preflight needs
 an install.
 
+## [Unreleased] — the database startup preflight and the unit template's `ExecCondition` (OPS-2, 2026-10-05)
+
+A new command, `python -m chronos.cli db-preflight`, reports read-only what the backend's startup would do with
+the configured `DATABASE_URL` (exit 0 `CLEAR`, exit 78 a refusal with the backend's own text, exit 1
+`UNDECIDED` when a check could not run); it repairs nothing. The backend unit template
+`docs/ops/chronos-backend.service` now runs it as `ExecCondition=` and sets `StartLimitIntervalSec=600` and
+`StartLimitBurst=3`. Operator-visible change: a refused (or undecidable) database now **skips** the start
+instead of letting the backend fail at startup. `systemctl --user status` then shows `inactive` with
+`Result=success` and the journal carries `Skipped due to 'exec-condition'` plus the preflight's lines; read
+that shape as the refusal, not as readiness. The start limit also counts manual `systemctl start` attempts.
+Run by hand, the command needs `chronos` importable (`pip install -e .`, or `PYTHONPATH=src`); the unit
+template supplies the checkout's `src` itself (the P3-2 entry above).
+See `docs/OPERATIONS.md`, "Startup preflight (OPS-2)".
+
 ## [Unreleased] — the proposal route refuses when configured autonomy did not start (OPS-3, 2026-10-05)
 
 `POST /autonomy/proposals` used to answer 202 and queue a proposal even when a mandate file was configured
 but the autonomy runtime had not started (an invalid cadence, a missing, invalid, mismatched, revoked or
 unsafe mandate, a wiring failure): no drain existed, so the row stayed pending. It now answers 503
-`AUTONOMY_NOT_RUNNING` with a fixed body and writes nothing in those cases. No setting or command is added.
-With no mandate file configured the route is unchanged (202, queued). The decision is held in a new
-`BackendState.autonomy_admission` (`AutonomyAdmission`, a plain `Enum` compared by identity): closed until the
-lifespan settles it once after the autonomy startup block.
+`AUTONOMY_NOT_RUNNING` with a fixed body and writes nothing in those cases. No setting or command is added by
+this change. The fixed body points the owner at `GET /health` (typed startup faults, recorded for only some
+causes), `GET /autonomy/alerts` (unacknowledged owner alerts, local API token) and the server log; it never
+echoes caller or exception data. With no mandate file configured the route is unchanged (202, queued). The
+decision is held in a new `BackendState.autonomy_admission` (`AutonomyAdmission`, a plain `Enum` compared by
+identity): closed until the lifespan settles it once after the autonomy startup block.
 
 ## [Unreleased] — anchor-guard module (unwired), drain claim state, database and ledger lock integrity, bounded evidence read (PRs #281-#285 and #290, 2026-10-03/04; dates are UTC)
 
