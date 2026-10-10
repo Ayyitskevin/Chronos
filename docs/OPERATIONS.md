@@ -120,6 +120,10 @@ messages start with `Refusing symbolic-link ledger path`, `Refusing non-regular 
 name a `.<ledger>.create-<hex>` temporary; one extra form, `Refusing ledger path …: repair failed (…);
 chmod 600 it and restart`, means the startup repair could not open the file (for example mode 0200).
 
+Hard-link backups of the live data directory are the usual cause of the `hard links` refusal: use
+the stop-then-`.backup` or read-only procedures in [`BACKUP_AND_RECOVERY.md`](BACKUP_AND_RECOVERY.md#sqlite-safe-backup)
+instead.
+
 **Startup preflight (OPS-2).** `python -m chronos.cli db-preflight` reports, read-only, what the
 backend's startup would do with the configured `DATABASE_URL`: the identity checks of the table
 above (`lstat`, the database and its `-wal`/`-shm`/`-journal`), the mode (what the first
@@ -178,10 +182,6 @@ name, a journal window that misses the start, or journal access can each look th
 unit's `ExecCondition` result and the journal for that start attempt: `Skipped due to 'exec-condition'`
 together with a Python import error (for example `ModuleNotFoundError`) points at the install; the
 same skip with `DB-PREFLIGHT` lines is a verdict; if neither is visible, the cause is unknown.
-
-Hard-link backups of the live data directory are the usual cause of the `hard links` refusal: use
-the stop-then-`.backup` or read-only procedures in [`BACKUP_AND_RECOVERY.md`](BACKUP_AND_RECOVERY.md#sqlite-safe-backup)
-instead.
 
 ## A running backend that refuses proposals: `503 AUTONOMY_NOT_RUNNING` (OPS-3)
 
