@@ -527,3 +527,18 @@ def test_the_capture_pepper_is_not_a_setting_and_not_in_the_b1_env() -> None:
         if "CHRONOS_CAPTURE_PEPPER" in path.read_text(encoding="utf-8")
     ]
     assert offenders == []
+
+
+@pytest.mark.usefixtures("clean_environment")
+def test_a_pepper_line_in_the_private_env_does_not_disturb_settings(tmp_path: Path) -> None:
+    """The campaign skill keeps the pepper in the same private ``.env`` as the B1 block.
+
+    ``Settings`` ignores keys it has no field for, so that line changes nothing it loads.
+    The value is an obviously fake placeholder, not a pepper.
+    """
+
+    plain = _b1_settings(tmp_path)
+    with_pepper = _b1_settings(tmp_path, f"CHRONOS_CAPTURE_PEPPER={'0' * 64}")
+
+    assert Settings.model_config["extra"] == "ignore"
+    assert with_pepper == plain
