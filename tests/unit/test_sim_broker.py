@@ -14,15 +14,22 @@ recomputed the way the simulator computes it:
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
+from tests.support.order_fakes import option_contract
 from tests.support.sim_broker import FillPlan, SimBroker, SimClock
 
-from chronos.broker.base import Broker, BrokerDataError, BrokerRefusedBeforeSend
+from chronos.broker.base import (
+    Broker,
+    BrokerConnectionError,
+    BrokerDataError,
+    BrokerRefusedBeforeSend,
+)
 from chronos.domain.enums import (
     ConnectionState,
     DisplayEnvironment,
@@ -30,7 +37,13 @@ from chronos.domain.enums import (
     OrderLifecycle,
     OrderSide,
 )
-from chronos.domain.models import OrderModification, OrderRequest
+from chronos.domain.models import (
+    ConnectionStatus,
+    OptionContract,
+    OrderModification,
+    OrderRequest,
+    UnderlyingContract,
+)
 from chronos.marketdata.bars import Bar, BarInterval
 
 ACCOUNT = "DU7654321"
@@ -141,7 +154,7 @@ async def test_unknown_symbols_and_unsupported_families_refuse_as_data_errors() 
     assert (await broker.qualify_underlying("aapl")).con_id == 265598
     with pytest.raises(BrokerDataError, match="unknown symbol"):
         await broker.qualify_underlying("TSLA")
-    with pytest.raises(BrokerDataError, match="stocks only"):
+    with pytest.raises(BrokerDataError, match="not crypto"):
         await broker.qualify_crypto("BTC")
 
 
@@ -417,9 +430,18 @@ async def test_two_runs_of_the_same_script_are_identical() -> None:
         await broker.submit_order(await _request(broker), send_guard=_Guard())
         broker.advance_bar(_bar("AAPL", open_=99.0, high=99.5, low=98.5, close=99.0, minutes=1))
         broker.advance_bar(_bar("AAPL", open_=98.0, high=98.5, low=97.5, close=98.0, minutes=2))
-        return (await broker.executions(), await broker.positions(), await broker.account_summary())
+        return (
+            await broker.executions(),
+            await broker.positions(),
+            await broker.account_summary(),
+            await broker.connection_status(),
+        )
 
-    assert await run() == await run()
+    first, second = await run(), await run()
+    assert first == second
+    status = first[3]
+    assert isinstance(status, ConnectionStatus)
+    assert status.last_successful_sync == T0  # the injected clock, never the wall clock
 
 
 async def test_preview_refuses_a_transmitting_request_and_estimates_commission() -> None:
@@ -452,3 +474,299 @@ async def test_historical_bars_return_the_scripted_closed_bars() -> None:
     )
     series = await broker.historical_bars(await broker.qualify_underlying("AAPL"))
     assert [b.close for b in series.bars] == [100.5]
+
+
+# --- r1: the seam-A conformance, typed and by signature (review P3-4) -------------------------
+
+
+def test_simbroker_type_checks_as_a_broker() -> None:
+    conforming: Broker = _broker()  # strict mypy rejects this if a signature drifts
+    assert conforming is not None
+
+
+def test_every_protocol_method_has_the_protocol_signature() -> None:
+    names = [name for name, value in vars(Broker).items() if inspect.iscoroutinefunction(value)]
+    assert len(names) == 23
+    for name in names:
+        expected = inspect.signature(getattr(Broker, name))
+        actual = inspect.signature(getattr(SimBroker, name))
+        assert list(actual.parameters) == list(expected.parameters), name
+        for parameter in expected.parameters.values():
+            mine = actual.parameters[parameter.name]
+            assert (mine.kind, mine.default) == (parameter.kind, parameter.default), name
+
+
+# --- r1: reads fail closed while disconnected (review P2-2) -----------------------------------
+
+
+async def test_every_read_refuses_while_disconnected() -> None:
+    broker = _broker()
+    contract = UnderlyingContract(con_id=265598, symbol="AAPL")
+    for read in (
+        broker.server_time(),
+        broker.account_summary(),
+        broker.positions(),
+        broker.executions(),
+        broker.open_orders(),
+        broker.qualify_underlying("AAPL"),
+        broker.request_underlying_quote(contract),
+        broker.historical_bars(contract),
+    ):
+        with pytest.raises(BrokerConnectionError):
+            await read
+
+
+# --- r1: the rules the surviving mutants showed were unprotected (review P2-3) ----------------
+
+
+async def _held_aapl(broker: SimBroker, quantity: str = "10") -> None:
+    """Buy ``quantity`` AAPL at 99.00 (bar open 99.00, low 98.00, limit 100.00)."""
+
+    await broker.submit_order(
+        await _request(broker, quantity=quantity, ref="CHR-HOLD"), send_guard=_Guard()
+    )
+    broker.advance_bar(_bar("AAPL", open_=99.0, high=99.5, low=98.0, close=99.0, minutes=1))
+
+
+async def test_a_sell_gapping_above_its_limit_fills_at_the_open() -> None:
+    broker = await _connected()
+    await _held_aapl(broker)
+    sell = await _request(broker, side=OrderSide.SELL, limit="100.00", ref="CHR-S")
+    await broker.submit_order(sell, send_guard=_Guard())
+    # high 102.00 >= 100.00, open 101.50: fills at max(101.50, 100.00) = 101.50.
+    broker.advance_bar(_bar("AAPL", open_=101.5, high=102.0, low=101.0, close=101.8, minutes=2))
+    sells = [e for e in await broker.executions() if e.side is OrderSide.SELL]
+    assert [e.price for e in sells] == [Decimal("101.50")]
+
+
+async def test_a_sell_fills_at_a_bid_above_its_limit() -> None:
+    broker = await _connected()
+    await _held_aapl(broker)
+    await broker.submit_order(
+        await _request(broker, side=OrderSide.SELL, limit="100.00", ref="CHR-S"),
+        send_guard=_Guard(),
+    )
+    broker.advance_quote("AAPL", bid="99.95", ask="100.05")  # bid below limit: nothing
+    broker.advance_quote("AAPL", bid="100.20", ask="100.30")
+    sells = [e for e in await broker.executions() if e.side is OrderSide.SELL]
+    assert [e.price for e in sells] == [Decimal("100.20")]
+
+
+async def test_a_quote_exactly_at_the_limit_fills_both_sides() -> None:
+    broker = await _connected()
+    await broker.submit_order(await _request(broker, limit="100.00"), send_guard=_Guard())
+    broker.advance_quote("AAPL", bid="99.90", ask="100.00")  # ask == limit
+    assert [e.price for e in await broker.executions()] == [Decimal("100.00")]
+    await broker.submit_order(
+        await _request(broker, side=OrderSide.SELL, limit="101.00", ref="CHR-S"),
+        send_guard=_Guard(),
+    )
+    broker.advance_quote("AAPL", bid="101.00", ask="101.10")  # bid == limit
+    sells = [e for e in await broker.executions() if e.side is OrderSide.SELL]
+    assert [e.price for e in sells] == [Decimal("101.00")]
+
+
+async def test_a_bar_from_before_the_order_existed_never_fills_it() -> None:
+    clock = SimClock(T0)
+    broker = SimBroker(account_id=ACCOUNT, clock=clock, symbols={"AAPL": 265598})
+    await broker.connect()
+    clock.advance(timedelta(minutes=5))  # submit at T0+5m
+    await broker.submit_order(await _request(broker, limit="100.00"), send_guard=_Guard())
+    # A T0+1m bar that crosses the limit arrives late: lookahead, so no fill.
+    broker.advance_bar(_bar("AAPL", open_=99.0, high=99.5, low=98.0, close=99.0, minutes=1))
+    assert await broker.executions() == ()
+    broker.advance_bar(_bar("AAPL", open_=99.0, high=99.5, low=98.0, close=99.0, minutes=6))
+    assert len(await broker.executions()) == 1
+
+
+async def test_selling_through_zero_opens_a_short_at_the_trade_price() -> None:
+    broker = await _connected()
+    await _held_aapl(broker)  # long 10 @ 99.00 + 1.00 commission
+    sell = await _request(broker, side=OrderSide.SELL, quantity="15", limit="110.00", ref="CHR-S")
+    await broker.submit_order(sell, send_guard=_Guard())
+    broker.advance_bar(_bar("AAPL", open_=110.0, high=110.5, low=109.5, close=110.0, minutes=2))
+    (position,) = await broker.positions()
+    # 10 close the long; 5 open a short at 110.00, so its cost basis is 5 x 110.00.
+    assert (position.quantity, position.average_cost) == (Decimal("-5"), Decimal("110.00"))
+
+
+async def test_unrealized_pnl_and_buying_power_follow_the_fills() -> None:
+    broker = await _connected()
+    await broker.submit_order(await _request(broker, limit="100.00"), send_guard=_Guard())
+    broker.advance_bar(_bar("AAPL", open_=100.0, high=100.2, low=99.8, close=100.5, minutes=1))
+    (position,) = await broker.positions()
+    # average 100.10 (incl. commission), mark = close 100.50: (100.50 - 100.10) x 10 = 4.00.
+    assert position.unrealized_pnl == Decimal("4.00")
+    account = await broker.account_summary()
+    assert account.buying_power == Decimal("8999.00")  # cash 10000 - 1000 - 1
+
+
+async def test_executions_since_includes_an_execution_at_the_bound() -> None:
+    broker = await _connected()
+    await broker.submit_order(await _request(broker), send_guard=_Guard())
+    broker.advance_bar(_bar("AAPL", open_=99.0, high=99.5, low=98.5, close=99.0, minutes=2))
+    stamp = T0 + timedelta(minutes=2)
+    assert [e.timestamp for e in await broker.executions(since=stamp)] == [stamp]
+
+
+async def test_historical_bars_keep_only_the_lookback_window_up_to_now() -> None:
+    broker = await _connected()
+
+    def day(when: datetime) -> Bar:
+        return Bar(
+            symbol="AAPL",
+            source="sim",
+            exchange="SMART",
+            interval=BarInterval.DAY_1,
+            session_date=when.date(),
+            timestamp_utc=when,
+            open=1.0,
+            high=1.0,
+            low=1.0,
+            close=float(when.day),
+            volume=1.0,
+        )
+
+    broker.add_history(day(T0 - timedelta(days=200)))  # older than the 180-day lookback
+    broker.add_history(day(T0 - timedelta(days=3)))  # inside
+    broker.add_history(day(T0 + timedelta(days=1)))  # after now
+    series = await broker.historical_bars(await broker.qualify_underlying("AAPL"))
+    assert [b.timestamp_utc for b in series.bars] == [T0 - timedelta(days=3)]
+
+
+def test_fill_plans_refuse_contradictory_or_degenerate_settings() -> None:
+    with pytest.raises(ValueError, match="at most one"):
+        FillPlan(reject=True, ambiguous=True)
+    with pytest.raises(ValueError, match="0 < n < d"):
+        FillPlan(partial_fraction=(2, 2))
+
+
+# --- r1: options (contract finding U12-F2) ----------------------------------------------------
+
+
+def _option_request(*, side: OrderSide, limit: str, ref: str, quantity: str = "1") -> OrderRequest:
+    return OrderRequest(
+        correlation_id=f"corr-{ref}",
+        account_id=ACCOUNT,
+        contract=option_contract(),
+        intent=OrderIntent.OPEN_SHORT_PUT
+        if side is OrderSide.SELL
+        else OrderIntent.CLOSE_SHORT_OPTION,
+        side=side,
+        quantity=Decimal(quantity),
+        limit_price=Decimal(limit),
+        order_ref=ref,
+        transmit=True,
+    )
+
+
+async def test_a_short_put_moves_cash_by_the_multiplier_and_closes_flat() -> None:
+    broker = await _connected()
+    put: OptionContract = option_contract()
+    sold = await broker.submit_order(
+        _option_request(side=OrderSide.SELL, limit="1.25", ref="CHR-P1"), send_guard=_Guard()
+    )
+    broker.fill_order(sold.broker_order_id, Decimal("1"))
+    (position,) = await broker.positions()
+    # -1 contract; basis 1.25 x 100 = 125.00 per contract; credit 125 - 1.00 commission.
+    assert (position.quantity, position.average_cost) == (Decimal("-1"), Decimal("125.00"))
+    assert position.contract == put
+    assert (await broker.account_summary()).total_cash == Decimal("10124.00")
+    broker.advance_option_quote(put, bid="1.00", ask="1.10")  # mark 1.05, no working order
+    account = await broker.account_summary()
+    assert account.net_liquidation == Decimal("10019.00")  # 10124 - 1 x 1.05 x 100
+    await broker.submit_order(
+        _option_request(side=OrderSide.BUY, limit="1.20", ref="CHR-P2"), send_guard=_Guard()
+    )
+    broker.advance_option_quote(put, bid="1.00", ask="1.10")  # ask 1.10 <= 1.20
+    assert await broker.positions() == ()
+    assert (await broker.account_summary()).total_cash == Decimal("10013.00")  # -110 - 1
+
+
+async def test_option_commission_is_per_contract_with_the_minimum() -> None:
+    broker = await _connected()
+    preview_one = await broker.preview_order(
+        _option_request(side=OrderSide.SELL, limit="1.25", ref="CHR-P").model_copy(
+            update={"transmit": False}
+        )
+    )
+    preview_two = await broker.preview_order(
+        _option_request(side=OrderSide.SELL, limit="1.25", ref="CHR-P", quantity="2").model_copy(
+            update={"transmit": False}
+        )
+    )
+    assert preview_one.estimated_commission == Decimal("1.00")  # 0.65 -> the 1.00 minimum
+    assert preview_two.estimated_commission == Decimal("1.30")  # 2 x 0.65
+
+
+async def test_a_stock_bar_never_fills_an_option_on_the_same_symbol() -> None:
+    broker = await _connected()
+    await broker.submit_order(
+        _option_request(side=OrderSide.SELL, limit="1.25", ref="CHR-P1"), send_guard=_Guard()
+    )
+    broker.advance_bar(_bar("AAPL", open_=150.0, high=160.0, low=140.0, close=150.0))
+    assert await broker.executions() == ()
+
+
+# --- r1: venue rejections, ownership, pending cancel, ambiguity (review P3-2/P3-3) ------------
+
+
+async def test_a_buy_beyond_the_cash_is_sent_and_rejected_by_the_venue() -> None:
+    broker = await _connected()  # cash 10000
+    submission = await broker.submit_order(
+        await _request(broker, quantity="200", limit="100.00"), send_guard=_Guard()
+    )
+    assert submission.lifecycle is OrderLifecycle.REJECTED
+    assert "insufficient funds" in submission.message
+    assert broker.sent_order_count == 1
+    assert await broker.open_orders() == ()
+
+
+async def test_a_stock_with_an_unqualified_contract_id_is_rejected_by_the_venue() -> None:
+    broker = await _connected()
+    request = (await _request(broker)).model_copy(
+        update={"contract": UnderlyingContract(con_id=1, symbol="AAPL")}
+    )
+    submission = await broker.submit_order(request, send_guard=_Guard())
+    assert submission.lifecycle is OrderLifecycle.REJECTED
+    assert "no security definition" in submission.message
+
+
+async def test_cancel_refuses_an_order_chronos_does_not_own() -> None:
+    broker = await _connected()
+    submission = await broker.submit_order(
+        await _request(broker, ref="MANUAL-1"), send_guard=_Guard()
+    )
+    result = await broker.cancel_order(submission.broker_order_id)
+    assert result.requested is False
+    assert [o.broker_order_id for o in await broker.open_orders()] == [submission.broker_order_id]
+
+
+async def test_a_pending_cancel_keeps_working_until_the_venue_confirms() -> None:
+    broker = await _connected(plans={"CHR-1": FillPlan(cancel_pending=True)})
+    submission = await broker.submit_order(await _request(broker), send_guard=_Guard())
+    result = await broker.cancel_order(submission.broker_order_id)
+    assert (result.requested, result.lifecycle) == (True, OrderLifecycle.CANCEL_PENDING)
+    (pending,) = await broker.open_orders()
+    assert pending.lifecycle is OrderLifecycle.CANCEL_PENDING
+    again = await broker.cancel_order(submission.broker_order_id)
+    assert again.requested is False
+    broker.confirm_cancel(submission.broker_order_id)
+    assert await broker.open_orders() == ()
+    assert broker.order_lifecycle(submission.broker_order_id) is OrderLifecycle.CANCELLED
+
+
+async def test_a_pending_cancel_can_still_fill() -> None:
+    broker = await _connected(plans={"CHR-1": FillPlan(cancel_pending=True)})
+    submission = await broker.submit_order(await _request(broker), send_guard=_Guard())
+    await broker.cancel_order(submission.broker_order_id)
+    broker.advance_bar(_bar("AAPL", open_=99.0, high=99.5, low=98.0, close=99.0))
+    assert broker.order_lifecycle(submission.broker_order_id) is OrderLifecycle.FILLED
+
+
+async def test_an_ambiguous_send_reports_no_permanent_id() -> None:
+    broker = await _connected(plans={"CHR-1": FillPlan(ambiguous=True)})
+    submission = await broker.submit_order(await _request(broker), send_guard=_Guard())
+    assert submission.permanent_id is None
+    (held,) = await broker.open_orders()
+    assert held.permanent_id is not None  # the venue knows it; the caller never learnt it

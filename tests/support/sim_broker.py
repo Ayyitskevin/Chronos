@@ -19,18 +19,33 @@ Fidelity choices, each deliberate and each matching an existing model in the rep
   fills a BUY when ``ask <= limit`` at the ask, and a SELL when ``bid >= limit``
   at the bid. Fills happen only when the test advances a bar or a quote, never
   on submit, so every step is explicit.
-* **Commission** is seam B's schedule: ``max(0.005 * shares, 1.00)`` USD.
+* **Commission** for stocks is seam B's schedule, ``max(0.005 * shares, 1.00)`` USD;
+  for listed options it is ``max(0.65 * contracts, 1.00)`` USD (IBKR's published rate).
+* **Options** are tradable (an ``OptionContract`` request): cash and positions use the
+  contract's ``multiplier``, holdings are keyed by ``con_id`` (a stock and its option
+  share a symbol), and an option fills only through ``advance_option_quote`` or
+  ``fill_order``, never through a stock bar or quote. There is no option reference
+  data: chain, rule, deliverable and option-quote reads refuse with ``BrokerDataError``.
+* **Venue rejections** (sent, then ``REJECTED``): a planned reject, a stock whose
+  ``con_id`` is not the qualified one, and a BUY whose cost at the limit plus
+  commission exceeds cash. No margin model: short sales are allowed.
 * **Modify** is refused before send by default, because the B1 target refuses
   modify-in-place ("cancel and re-submit"). ``allow_modify=True`` enables a
   limit-price replace for tests that need it.
 * **Cancel** is not kill-switch gated (risk-reducing, as in the official adapter)
-  and removes the order from ``open_orders``; partial fills stay.
+  and removes the order from ``open_orders``; partial fills stay. A ``FillPlan`` can
+  make it answer ``CANCEL_PENDING`` until ``confirm_cancel``. Unlike the official
+  adapter today (SURVEY R-3), it refuses to cancel an order that is not Chronos's
+  (no ``CHR-`` prefix), which is the contract's ownership rule.
+* **Ambiguous sends** report ``SUBMISSION_UNKNOWN`` with no permanent id (no ack
+  reached the caller) while the venue holds the order with one.
 * **Positions and cash** derive only from this simulator's own executions; the
-  average cost includes the buy commission (IBKR's convention).
+  average cost includes the buy commission and is per share, or per contract
+  (price x multiplier) for options.
 * **Data quality** defaults to ``DataQuality.DEMO``, the honest label for synthetic
   data; a test can choose another.
 
-Equities only: options and crypto refuse with ``BrokerDataError``.
+Crypto refuses (``BrokerDataError`` on reads, ``BrokerRefusedBeforeSend`` on orders).
 """
 
 from __future__ import annotations
@@ -65,6 +80,7 @@ from chronos.domain.models import (
     CancellationResult,
     ConnectionStatus,
     CryptoContract,
+    Instrument,
     MarketQuote,
     OptionContract,
     OptionContractSpec,
@@ -79,10 +95,17 @@ from chronos.domain.models import (
 from chronos.marketdata.bars import Bar, BarInterval, BarSeries, BarStatus
 
 COMMISSION_PER_SHARE = Decimal("0.005")
+#: IBKR's published per-contract rate for US listed options; the same $1 minimum applies.
+OPTION_COMMISSION_PER_CONTRACT = Decimal("0.65")
 MINIMUM_COMMISSION = Decimal("1.00")
 _CENT = Decimal("0.01")
-_STOCKS_ONLY = "SimBroker supports US stocks only"
-_WORKING = frozenset({OrderLifecycle.SUBMITTED, OrderLifecycle.PARTIALLY_FILLED})
+_STOCKS_ONLY = "SimBroker trades US stocks and listed options, not crypto"
+_NO_OPTION_REFERENCE = (
+    "SimBroker has no option reference data (chains, rules, deliverables, quotes)"
+)
+_WORKING = frozenset(
+    {OrderLifecycle.SUBMITTED, OrderLifecycle.PARTIALLY_FILLED, OrderLifecycle.CANCEL_PENDING}
+)
 
 
 class SimClock:
@@ -118,12 +141,16 @@ class FillPlan:
       shows the working order.
     * ``partial_fraction``: the first fill is ``max(1, floor(qty * n / d))`` shares;
       the next fill completes the order.
+    * ``cancel_pending``: ``cancel_order`` answers ``CANCEL_PENDING`` (the order keeps
+      working and can still fill) until the test calls ``confirm_cancel``, as the
+      official adapter does before the broker confirms.
     """
 
     refuse_before_send: bool = False
     reject: bool = False
     ambiguous: bool = False
     partial_fraction: tuple[int, int] | None = None
+    cancel_pending: bool = False
 
     def __post_init__(self) -> None:
         if sum((self.refuse_before_send, self.reject, self.ambiguous)) > 1:
@@ -147,6 +174,7 @@ class _SimOrder:
     lifecycle: OrderLifecycle
     submitted_at: datetime
     partial_fraction: tuple[int, int] | None
+    cancel_pending: bool = False
     filled: Decimal = Decimal("0")
 
     @property
@@ -160,8 +188,11 @@ class _SimOrder:
 
 @dataclass(slots=True)
 class _Holding:
+    contract: Instrument
     quantity: Decimal = Decimal("0")
-    cost: Decimal = Decimal("0")  # total cost of the open quantity, commission included
+    #: Total cost of the open quantity in cash terms (price x quantity x multiplier),
+    #: the buy commission included.
+    cost: Decimal = Decimal("0")
 
 
 class SimBroker:
@@ -201,8 +232,8 @@ class SimBroker:
         self._last_sync: datetime | None = None
         self._orders: dict[int, _SimOrder] = {}
         self._executions: list[BrokerExecution] = []
-        self._holdings: dict[str, _Holding] = {}
-        self._marks: dict[str, Decimal] = {}
+        self._holdings: dict[int, _Holding] = {}  # by contract con_id
+        self._marks: dict[int, Decimal] = {}  # per-unit price, by contract con_id
         self._quotes: dict[str, MarketQuote] = {}
         self._history: dict[str, list[Bar]] = {}
         self._cancelled_market_data: list[int] = []
@@ -231,7 +262,7 @@ class SimBroker:
             ask=Decimal(ask),
             last=Decimal(last) if last is not None else None,
         )
-        self._marks[contract.symbol] = (
+        self._marks[contract.con_id] = (
             Decimal(last) if last is not None else (Decimal(bid) + Decimal(ask)) / 2
         )
 
@@ -251,7 +282,8 @@ class SimBroker:
         """Fill working orders this bar crosses (seam B's limit-cross rule)."""
 
         symbol = bar.symbol.upper()
-        self._marks[symbol] = Decimal(str(bar.close))
+        if symbol in self._con_ids:
+            self._marks[self._con_ids[symbol]] = Decimal(str(bar.close))
         bar_open, high, low = Decimal(str(bar.open)), Decimal(str(bar.high)), Decimal(str(bar.low))
         for order in self._working_for(symbol):
             if bar.timestamp_utc < order.submitted_at:
@@ -260,6 +292,31 @@ class SimBroker:
                 self._fill(order, price=min(bar_open, order.limit_price), at=bar.timestamp_utc)
             elif order.request.side is OrderSide.SELL and high >= order.limit_price:
                 self._fill(order, price=max(bar_open, order.limit_price), at=bar.timestamp_utc)
+
+    def advance_option_quote(self, contract: OptionContract, *, bid: str, ask: str) -> None:
+        """Mark an option at its mid, then fill working orders on that exact contract.
+
+        BUY fills when ``ask <= limit`` at the ask; SELL when ``bid >= limit`` at the bid.
+        """
+
+        bid_price, ask_price = Decimal(bid), Decimal(ask)
+        self._marks[contract.con_id] = (bid_price + ask_price) / 2
+        now = self._clock()
+        for order in list(self._orders.values()):
+            if not order.working or order.request.contract.con_id != contract.con_id:
+                continue
+            if order.request.side is OrderSide.BUY and ask_price <= order.limit_price:
+                self._fill(order, price=ask_price, at=now)
+            elif order.request.side is OrderSide.SELL and bid_price >= order.limit_price:
+                self._fill(order, price=bid_price, at=now)
+
+    def confirm_cancel(self, broker_order_id: int) -> None:
+        """The venue confirms a ``CANCEL_PENDING`` cancel: the order becomes ``CANCELLED``."""
+
+        order = self._orders[broker_order_id]
+        if order.lifecycle is not OrderLifecycle.CANCEL_PENDING:
+            raise ValueError(f"order {broker_order_id} has no pending cancel")
+        order.lifecycle = OrderLifecycle.CANCELLED
 
     def fill_order(
         self, broker_order_id: int, quantity: Decimal, price: Decimal | None = None
@@ -302,6 +359,8 @@ class SimBroker:
         )
 
     async def server_time(self) -> datetime:
+        # The real adapters need a live session for this too (official_ibkr.py:1064-1065).
+        self._require_connected()
         return self._clock()
 
     # --- seam A: account and order state ------------------------------------------------------
@@ -310,8 +369,8 @@ class SimBroker:
         self._require_connected()
         market_value = sum(
             (
-                holding.quantity * self._mark(symbol, holding)
-                for symbol, holding in self._holdings.items()
+                holding.quantity * self._mark(holding) * _multiplier(holding.contract)
+                for holding in self._holdings.values()
             ),
             Decimal("0"),
         )
@@ -327,17 +386,20 @@ class SimBroker:
     async def positions(self) -> tuple[BrokerPosition, ...]:
         self._require_connected()
         result = []
-        for symbol, holding in self._holdings.items():
+        for holding in self._holdings.values():
+            # Average cost per share, or per contract for an option (price x multiplier),
+            # as IBKR reports it; market_price stays the per-unit quote price.
             average = holding.cost / abs(holding.quantity)
-            mark = self._mark(symbol, holding)
+            mark = self._mark(holding)
             result.append(
                 BrokerPosition(
                     account_id=self._account_id,
-                    contract=self._contract(symbol),
+                    contract=holding.contract,
                     quantity=holding.quantity,
                     average_cost=average,
                     market_price=mark,
-                    unrealized_pnl=(mark - average) * holding.quantity,
+                    unrealized_pnl=(mark * _multiplier(holding.contract) - average)
+                    * holding.quantity,
                 )
             )
         return tuple(result)
@@ -362,27 +424,27 @@ class SimBroker:
 
     async def option_chain_parameters(self, underlying: UnderlyingContract) -> OptionChainResponse:
         del underlying
-        raise BrokerDataError(_STOCKS_ONLY)
+        raise BrokerDataError(_NO_OPTION_REFERENCE)
 
     async def qualify_option_contracts(
         self, contracts: Sequence[OptionContractSpec]
     ) -> tuple[OptionContract, ...]:
         if contracts:
-            raise BrokerDataError(_STOCKS_ONLY)
+            raise BrokerDataError(_NO_OPTION_REFERENCE)
         return ()
 
     async def option_market_rules(
         self, contracts: Sequence[OptionContract]
     ) -> tuple[OptionMarketRule, ...]:
         if contracts:
-            raise BrokerDataError(_STOCKS_ONLY)
+            raise BrokerDataError(_NO_OPTION_REFERENCE)
         return ()
 
     async def option_deliverable_facts(
         self, contracts: Sequence[OptionContract]
     ) -> tuple[OptionDeliverableFacts, ...]:
         if contracts:
-            raise BrokerDataError(_STOCKS_ONLY)
+            raise BrokerDataError(_NO_OPTION_REFERENCE)
         return ()
 
     async def request_underlying_quote(self, contract: UnderlyingContract) -> MarketQuote:
@@ -400,7 +462,7 @@ class SimBroker:
         self, contracts: Sequence[OptionContract]
     ) -> tuple[MarketQuote, ...]:
         if contracts:
-            raise BrokerDataError(_STOCKS_ONLY)
+            raise BrokerDataError(_NO_OPTION_REFERENCE)
         return ()
 
     async def cancel_market_data(self, contract_ids: Sequence[int]) -> None:
@@ -434,11 +496,11 @@ class SimBroker:
         self._reverify(request.account_id)
         if request.transmit:
             raise BrokerRefusedBeforeSend("previews must never carry transmit=True; refusing")
-        self._require_stock(request)
+        self._require_tradable(request)
         return OrderPreview(
             request=request,
             accepted=True,
-            estimated_commission=_commission(request.quantity),
+            estimated_commission=_commission(request.contract, request.quantity),
             broker_message="simulated what-if",
             previewed_at=self._clock(),
         )
@@ -459,7 +521,7 @@ class SimBroker:
             raise BrokerRefusedBeforeSend(
                 "submission is missing atomic reconciliation authorization; refusing before send"
             )
-        self._require_stock(request)
+        self._require_tradable(request)
         plan = self._plans.get(request.order_ref, FillPlan())
         if plan.refuse_before_send:
             raise BrokerRefusedBeforeSend("simulated refusal before send (FillPlan)")
@@ -475,9 +537,10 @@ class SimBroker:
                 if not kill_authorized:
                     raise BrokerRefusedBeforeSend("live kill switch engaged; refusing before send")
                 order = self._record(request, plan)
-        if plan.reject:
+        venue_refusal = self._venue_refusal(request)
+        if plan.reject or venue_refusal:
             order.lifecycle = OrderLifecycle.REJECTED
-            message = "simulated venue rejection"
+            message = venue_refusal or "simulated venue rejection"
         elif plan.ambiguous:
             order.lifecycle = OrderLifecycle.SUBMISSION_UNKNOWN
             message = "no broker acknowledgement; state unknown"
@@ -486,7 +549,8 @@ class SimBroker:
         return OrderSubmission(
             correlation_id=request.correlation_id,
             broker_order_id=order.broker_order_id,
-            permanent_id=order.permanent_id,
+            # No acknowledgement means the caller never learnt the permanent id.
+            permanent_id=None if plan.ambiguous and not venue_refusal else order.permanent_id,
             client_id=self._client_id,
             lifecycle=order.lifecycle,
             submitted_at=order.submitted_at,
@@ -528,12 +592,31 @@ class SimBroker:
                 message="no such order",
                 timestamp=now,
             )
-        if not order.working:
+        if not order.request.order_ref.startswith("CHR-"):
+            # The contract's ownership rule: Chronos never cancels an order it does not
+            # own. (The official adapter lacks this check today: SURVEY R-3, RED.)
+            return CancellationResult(
+                broker_order_id=broker_order_id,
+                requested=False,
+                lifecycle=self._venue_lifecycle(order),
+                message="not a Chronos order; refusing to cancel it",
+                timestamp=now,
+            )
+        if not order.working or order.lifecycle is OrderLifecycle.CANCEL_PENDING:
             return CancellationResult(
                 broker_order_id=broker_order_id,
                 requested=False,
                 lifecycle=order.lifecycle,
-                message="order is not working",
+                message="order is not working, or its cancel is already pending",
+                timestamp=now,
+            )
+        if order.cancel_pending:
+            order.lifecycle = OrderLifecycle.CANCEL_PENDING
+            return CancellationResult(
+                broker_order_id=broker_order_id,
+                requested=True,
+                lifecycle=OrderLifecycle.CANCEL_PENDING,
+                message="cancel requested; awaiting broker confirmation",
                 timestamp=now,
             )
         order.lifecycle = OrderLifecycle.CANCELLED
@@ -560,9 +643,23 @@ class SimBroker:
             )
 
     @staticmethod
-    def _require_stock(request: OrderRequest) -> None:
-        if not isinstance(request.contract, UnderlyingContract):
+    def _require_tradable(request: OrderRequest) -> None:
+        if not isinstance(request.contract, UnderlyingContract | OptionContract):
             raise BrokerRefusedBeforeSend(f"{_STOCKS_ONLY}; refusing before send")
+
+    def _venue_refusal(self, request: OrderRequest) -> str:
+        """Why the simulated venue rejects a sent order ("" when it accepts it)."""
+
+        contract = request.contract
+        if isinstance(contract, UnderlyingContract) and contract.con_id != self._con_ids.get(
+            contract.symbol
+        ):
+            return "simulated venue: no security definition for that contract id"
+        if request.side is OrderSide.BUY:
+            cost = request.limit_price * request.quantity * _multiplier(contract)
+            if cost + _commission(contract, request.quantity) > self._cash:
+                return "simulated venue: insufficient funds for the order"
+        return ""
 
     def _contract(self, symbol: str) -> UnderlyingContract:
         key = symbol.strip().upper()
@@ -585,13 +682,20 @@ class SimBroker:
             lifecycle=OrderLifecycle.SUBMITTED,
             submitted_at=self._clock(),
             partial_fraction=plan.partial_fraction,
+            cancel_pending=plan.cancel_pending,
         )
         self._orders[order_id] = order
         return order
 
     def _working_for(self, symbol: str) -> list[_SimOrder]:
+        """Working STOCK orders on ``symbol`` (bars and stock quotes never fill options)."""
+
         return [
-            o for o in self._orders.values() if o.working and o.request.contract.symbol == symbol
+            o
+            for o in self._orders.values()
+            if o.working
+            and isinstance(o.request.contract, UnderlyingContract)
+            and o.request.contract.symbol == symbol
         ]
 
     def _fill(self, order: _SimOrder, *, price: Decimal, at: datetime) -> None:
@@ -607,7 +711,7 @@ class SimBroker:
         self, order: _SimOrder, *, quantity: Decimal, price: Decimal, at: datetime
     ) -> None:
         price = price.quantize(_CENT)
-        commission = _commission(quantity)
+        commission = _commission(order.request.contract, quantity)
         self._executions.append(
             BrokerExecution(
                 execution_id=f"SIM-{len(self._executions) + 1:06d}",
@@ -626,25 +730,30 @@ class SimBroker:
             )
         )
         order.filled += quantity
-        order.lifecycle = (
-            OrderLifecycle.FILLED if order.remaining == 0 else OrderLifecycle.PARTIALLY_FILLED
-        )
-        self._book(order.request.contract.symbol, order.request.side, quantity, price, commission)
+        if order.lifecycle is not OrderLifecycle.CANCEL_PENDING or order.remaining == 0:
+            order.lifecycle = (
+                OrderLifecycle.FILLED if order.remaining == 0 else OrderLifecycle.PARTIALLY_FILLED
+            )
+        self._book(order.request.contract, order.request.side, quantity, price, commission)
 
     def _book(
-        self, symbol: str, side: OrderSide, quantity: Decimal, price: Decimal, commission: Decimal
+        self,
+        contract: Instrument,
+        side: OrderSide,
+        quantity: Decimal,
+        price: Decimal,
+        commission: Decimal,
     ) -> None:
         signed = quantity if side is OrderSide.BUY else -quantity
+        notional = price * quantity * _multiplier(contract)
         if side is OrderSide.BUY:
-            self._cash -= price * quantity + commission
+            self._cash -= notional + commission
         else:
-            self._cash += price * quantity - commission
-        holding = self._holdings.setdefault(symbol, _Holding())
+            self._cash += notional - commission
+        holding = self._holdings.setdefault(contract.con_id, _Holding(contract=contract))
         if holding.quantity == 0 or (holding.quantity > 0) == (signed > 0):
             # Opening or adding: the commission joins the basis on the side that pays it.
-            holding.cost += price * quantity + (
-                commission if side is OrderSide.BUY else Decimal("0")
-            )
+            holding.cost += notional + (commission if side is OrderSide.BUY else Decimal("0"))
             holding.quantity += signed
         else:
             closing = min(abs(signed), abs(holding.quantity))
@@ -653,12 +762,15 @@ class SimBroker:
             holding.quantity += signed
             opened = abs(signed) - closing
             if opened > 0:  # crossed through zero: the remainder opens at this price
-                holding.cost = price * opened
+                holding.cost = price * opened * _multiplier(contract)
         if holding.quantity == 0:
-            del self._holdings[symbol]
+            del self._holdings[contract.con_id]
 
-    def _mark(self, symbol: str, holding: _Holding) -> Decimal:
-        return self._marks.get(symbol, holding.cost / abs(holding.quantity))
+    def _mark(self, holding: _Holding) -> Decimal:
+        """Per-unit mark: the last bar close or quote, else the average cost per unit."""
+
+        fallback = holding.cost / abs(holding.quantity) / _multiplier(holding.contract)
+        return self._marks.get(holding.contract.con_id, fallback)
 
     @staticmethod
     def _venue_lifecycle(order: _SimOrder) -> OrderLifecycle:
@@ -688,8 +800,17 @@ class SimBroker:
         )
 
 
-def _commission(quantity: Decimal) -> Decimal:
-    return max(quantity * COMMISSION_PER_SHARE, MINIMUM_COMMISSION).quantize(_CENT)
+def _multiplier(contract: Instrument) -> Decimal:
+    return contract.multiplier if isinstance(contract, OptionContract) else Decimal("1")
+
+
+def _commission(contract: Instrument, quantity: Decimal) -> Decimal:
+    rate = (
+        OPTION_COMMISSION_PER_CONTRACT
+        if isinstance(contract, OptionContract)
+        else COMMISSION_PER_SHARE
+    )
+    return max(quantity * rate, MINIMUM_COMMISSION).quantize(_CENT)
 
 
 # --- U1 contract-suite hook (tests/contract/conftest.py) --------------------------------------
@@ -709,8 +830,7 @@ def _seeded_contract_broker() -> SimBroker:
 
     Seed: one Chronos-owned (``CHR-``) stock order partially filled (5 of 10, so a
     working order and one execution exist), and one working order without the
-    ``CHR-`` prefix (the contract's "foreign" order). SimBroker has no ownership
-    notion of its own, mirroring the official adapter's cancel (SURVEY R-3).
+    ``CHR-`` prefix (the contract's "foreign" order, which ``cancel_order`` refuses).
     """
 
     clock = SimClock(_CONTRACT_T0)
