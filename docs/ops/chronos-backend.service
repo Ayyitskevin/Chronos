@@ -24,6 +24,11 @@ StartLimitBurst=3
 Type=simple
 WorkingDirectory=%h/<CHRONOS_CHECKOUT>
 EnvironmentFile=%h/<PRIVATE_ENV_DIR>/chronos-backend.env
+# P3-2: ExecStart's scripts/run_backend.py puts <checkout>/src on sys.path itself;
+# `python -m chronos.cli` below has no such shim, so without `pip install -e .` the
+# condition would fail to import, exit 1, and silently skip the start. This gives
+# both commands the same source. (An EnvironmentFile= value for PYTHONPATH overrides it.)
+Environment=PYTHONPATH=%h/<CHRONOS_CHECKOUT>/src
 # OPS-2: the startup preflight (read-only; it repairs nothing). ExecCondition=, never
 # ExecStartPre=, turns a database refusal into a SKIP: the unit goes `inactive` with
 # Result=success and NO restart, and the preflight's lines are in the journal. Read

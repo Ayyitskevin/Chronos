@@ -145,7 +145,10 @@ PATH` is opt-in and inspects a platform ledger with `SqliteLedger`'s rules; its 
 platform process's, worded so, because the backend does not open that ledger. `--evidence` prints a
 lower-bound estimate of the FU2 first-pass window (ticks = at least `max(ceil(rows / rows_per_tick),
 ceil(bytes / bytes_per_tick))`; never exact, because ordered whole-row packing can need more). The
-backend unit template (`docs/ops/chronos-backend.service`) runs the command as `ExecCondition=`: a
+backend unit template (`docs/ops/chronos-backend.service`) runs the command as `ExecCondition=`, with
+`Environment=PYTHONPATH=%h/<CHRONOS_CHECKOUT>/src` so it imports the same checkout source that
+`ExecStart`'s `scripts/run_backend.py` shims in (without it, an uninstalled checkout fails the import
+and exits 1, a silent skip); a
 refusal **skips** the start — `systemctl --user status` shows `inactive` with `Result=success` and
 the journal carries `Skipped due to 'exec-condition'` plus the preflight's lines. Read that shape as
 the refusal; `Result=success` is not readiness. The template's `StartLimitIntervalSec=600` /
