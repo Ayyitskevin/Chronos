@@ -1,25 +1,31 @@
-"""B1 swap rehearsal (SIM-HARNESS U5): the swap to the real paper adapter is config-only.
+"""B1 swap rehearsal (SIM-HARNESS U5): what moving to the real paper adapter changes.
 
-B1 puts ``OfficialIBKRBroker`` on a paper gateway in place of the demo broker. This module
-rehearses everything about that swap that can be proven without a gateway, and pins the
-parts a Protocol-only contract would miss (the adapter's contract with the order plane is
-wider than ``chronos.broker.base.Broker``):
+The swap is NOT "config only". Four different things change, and this module pins what can be
+pinned without a gateway (``B1-DELIVERY-CONTRACT.md`` states the rest):
 
-1. the EXACT ``.env`` block of ``docs/ops/m4-read-only-gate-session-checklist.md`` §3.2 is
-   read from the document itself, loaded through ``Settings``, and leaves both transmission
-   conjunctions False (and the two controls that flip them fail the way the docs say);
-2. ``chronos.runtime.build_runtime`` really runs end to end on that shape with the adapter's
-   construction replaced by a recording stand-in, and constructs ``OfficialIBKRBroker`` once,
-   with a call that binds to the REAL constructor's signature and supplies every hook it takes
-   (``live_kill_switch``, ``on_connection_uncertain``, ``on_managed_account_scope_change``),
-   wired to the latch the submission boundary and the connection manager share;
-3. those hooks have their safety effect: a connection drop between claim and send makes the
-   send guard refuse, and a managed-account scope change drops readiness.
+* **Keys.** The EXACT ``.env`` block of ``docs/ops/m4-read-only-gate-session-checklist.md``
+  §3.2 is read from the document itself and loaded through ``Settings``; it leaves both
+  transmission conjunctions False (and the controls that flip them fail the way the docs say).
+  The block is not enough on its own: a database file already bound to another broker scope
+  refuses the B1 shape, and the block sets no ``DATABASE_URL`` (see the binding test).
+* **Code the keys select.** ``chronos.runtime.build_runtime`` runs end to end on that shape with
+  only the adapter's construction replaced by a recording stand-in. It constructs
+  ``OfficialIBKRBroker`` once, with a call that binds to the REAL constructor's signature and
+  supplies every hook it takes (``live_kill_switch``, ``on_connection_uncertain``,
+  ``on_managed_account_scope_change``), wired to the latch the submission boundary and the
+  connection manager share. The REAL class is also constructed here, with only its ``ibapi``
+  import stubbed (its constructor does no I/O): with the runtime's own hooks, its callback
+  bridge drives that latch; built the way the capture harness builds it (settings only), it
+  does not, and refuses every order call before send. Beyond the broker, the swap changes the
+  market-data clock, the demo-only rehearsal services and the scope facts the UI branches on.
+* **The second construction site.** The read-only campaign's capture harness builds the
+  adapter itself, hookless; its source is pinned (one hookless construction, no order method).
+* **Owner acts and state** (``ibapi``, the gateway, entitlements, the pepper, an unbound
+  database) are not configuration and are not testable here.
 
-No connection is ever opened: a socket tripwire fails the test on any attempt, the real adapter
-class is never instantiated (only its signature and source are read), and ``ibapi`` is not
-needed. Every path the runtime writes (database, kill-switch file, session baseline) is a
-temporary one and ``configure_logging`` is stubbed, because it would otherwise leave the
+No connection is ever opened: a socket tripwire fails the test on any attempt, and ``ibapi``
+is not needed. Every path the runtime writes (database, kill-switch file, session baseline) is
+a temporary one and ``configure_logging`` is stubbed, because it would otherwise leave the
 ``chronos`` logger non-propagating for every later test. Tests only; nothing here can reach a
 venue, and ``ALLOW_ORDER_TRANSMIT`` / ``ALLOW_LIVE_TRADING`` stay false in the loaded shape.
 """
@@ -33,21 +39,25 @@ import re
 import socket
 import sys
 import textwrap
+import threading
 import types
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
 from dotenv import dotenv_values
 from pydantic import ValidationError
-from tests.support.order_fakes import FIXED_NOW, FakeBroker
+from tests.support.order_fakes import FIXED_NOW, FakeBroker, option_contract
 
+import chronos.broker.official_ibkr as official_module
 import chronos.runtime as runtime_module
-from chronos.broker.base import BrokerSafetyError
+from chronos.broker.base import BrokerRefusedBeforeSend, BrokerSafetyError
 from chronos.broker.callbacks import CallbackBridge
-from chronos.broker.demo import DemoBroker
-from chronos.broker.official_ibkr import OfficialIBKRBroker, verify_environment_port
+from chronos.broker.demo import DemoBroker, demo_now
+from chronos.broker.official_ibkr import OfficialIBKRBroker
 from chronos.config.settings import Settings
 from chronos.control.modes import ExecutionCapability, TradingMode, resolve_mode_lock
 from chronos.domain.enums import (
@@ -57,9 +67,11 @@ from chronos.domain.enums import (
     DataQuality,
     DisplayEnvironment,
     IBEnvironment,
+    OrderIntent,
+    OrderSide,
     ReconciliationStatus,
 )
-from chronos.domain.models import ConnectionStatus
+from chronos.domain.models import ConnectionStatus, OrderModification, OrderRequest
 
 _REPO = Path(__file__).resolve().parents[2]
 _CHECKLIST = _REPO / "docs" / "ops" / "m4-read-only-gate-session-checklist.md"
@@ -233,23 +245,51 @@ def test_the_paper_mode_lock_denies_the_b1_shape_and_names_what_it_needs(tmp_pat
     assert opened.paper_account_id == settings.ib_account_id
 
 
-@pytest.mark.usefixtures("clean_environment")
-def test_the_adapters_own_preconditions_accept_the_b1_shape(tmp_path: Path) -> None:
-    """What the real constructor checks before it would connect (account id, allowlist, port)."""
+@pytest.fixture
+def ibapi_import_stubbed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The REAL ``OfficialIBKRBroker`` constructor, with only its ``ibapi`` import stubbed.
 
+    The constructor does no I/O: it checks the settings, builds the callback bridge and the id
+    allocator, and leaves ``_app`` and ``_thread`` unset. ``connect()`` is where a socket would
+    open; the autouse tripwire fails any test that gets there.
+    """
+
+    monkeypatch.setattr(official_module, "_load_ibapi", lambda: (None, None, None, None))
+
+
+@pytest.mark.usefixtures("clean_environment", "ibapi_import_stubbed")
+def test_the_real_constructor_accepts_the_b1_shape_and_starts_nothing(tmp_path: Path) -> None:
     settings = _b1_settings(tmp_path)
+    threads_before = threading.active_count()
 
-    verify_environment_port(settings.ib_environment, settings.ib_port)  # must not raise
-    assert settings.ib_account_id.strip()
-    assert not settings.ib_account_allowlist or settings.ib_account_id in (
-        settings.ib_account_allowlist
-    )
-    # Controls: the port check bites, in both directions.
-    for live_port in (7496, 4001):
-        with pytest.raises(BrokerSafetyError, match="requires a paper port"):
-            verify_environment_port(IBEnvironment.PAPER, live_port)
-    with pytest.raises(BrokerSafetyError, match="requires a live port"):
-        verify_environment_port(IBEnvironment.LIVE, 7497)
+    adapter = OfficialIBKRBroker(settings)
+
+    # Private attributes on purpose: they are the proof that nothing was started or connected.
+    assert adapter._app is None
+    assert adapter._thread is None
+    assert threading.active_count() == threads_before
+
+
+@pytest.mark.usefixtures("clean_environment", "ibapi_import_stubbed")
+@pytest.mark.parametrize(
+    ("lines", "message"),
+    [
+        (("IB_ACCOUNT_ID=",), "IB_ACCOUNT_ID is required"),
+        (("IB_ACCOUNT_ALLOWLIST=DU7654321",), "not in IB_ACCOUNT_ALLOWLIST"),
+        (("IB_PORT=7496",), "requires a paper port"),
+        (("IB_PORT=4001",), "requires a paper port"),
+        (("IB_ENVIRONMENT=live",), "requires a live port"),
+    ],
+)
+def test_the_real_constructor_refuses_what_the_b1_shape_must_not_be(
+    tmp_path: Path, lines: tuple[str, ...], message: str
+) -> None:
+    """Controls, through the real constructor: each change to the B1 shape is refused."""
+
+    settings = _b1_settings(tmp_path, *lines)
+
+    with pytest.raises(BrokerSafetyError, match=message):
+        OfficialIBKRBroker(settings)
 
 
 @pytest.mark.parametrize(
@@ -542,3 +582,239 @@ def test_a_pepper_line_in_the_private_env_does_not_disturb_settings(tmp_path: Pa
 
     assert Settings.model_config["extra"] == "ignore"
     assert with_pepper == plain
+
+
+# ---------------------------------------------------------------------------
+# 5. Not config: state the keys do not carry, the second construction site, and everything
+#    else the swap changes besides the broker.
+# ---------------------------------------------------------------------------
+
+
+def _reconcile(latch: object) -> int:
+    """Publish RECONCILED on a runtime's readiness latch, as a proven pass would."""
+
+    generation = latch.begin_reconciliation("rehearsal")  # type: ignore[attr-defined]
+    assert latch.complete(  # type: ignore[attr-defined]
+        expected_generation=generation,
+        status=ReconciliationStatus.RECONCILED,
+        reason="rehearsal proof",
+        reconciled_at=datetime.now(UTC),
+    )
+    return generation
+
+
+@pytest.mark.usefixtures("clean_environment", "stubbed_runtime")
+def test_a_database_bound_to_the_demo_scope_refuses_the_b1_shape_until_it_has_its_own_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The §3.2 block sets no ``DATABASE_URL``; the first boot binds the file to ONE scope.
+
+    A demo boot from the repo root (the shipped default) therefore makes the first B1 start
+    refuse (``Database.bind_scope``): the delivery needs its own ``DATABASE_URL`` or an
+    unbound default database. Every other test builds on a fresh path and cannot see this.
+    """
+
+    official = _recording("OfficialIBKRBroker")
+    monkeypatch.setattr("chronos.broker.official_ibkr.OfficialIBKRBroker", official)
+
+    _build(monkeypatch, _runtime_settings(tmp_path, "BROKER_MODE=demo")).close()  # binds the file
+    _build(monkeypatch, _runtime_settings(tmp_path, "BROKER_MODE=demo")).close()  # same scope: fine
+    assert official.instances == []
+
+    with pytest.raises(RuntimeError, match="already bound to a different broker scope"):
+        _build(monkeypatch, _runtime_settings(tmp_path))  # same DATABASE_URL, the B1 shape
+    assert len(official.instances) == 1  # the adapter was built; the refusal is at scope binding
+
+    separate = tmp_path / "b1"
+    separate.mkdir()
+    _build(monkeypatch, _runtime_settings(separate)).close()  # its own DATABASE_URL accepts it
+
+
+@pytest.mark.usefixtures("clean_environment", "stubbed_runtime")
+def test_what_else_the_swap_changes_besides_the_broker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The runtime is not 'the demo path plus a factory': these differ, all expected."""
+
+    monkeypatch.setattr(
+        "chronos.broker.official_ibkr.OfficialIBKRBroker", _recording("OfficialIBKRBroker")
+    )
+    demo_dir, b1_dir = tmp_path / "demo", tmp_path / "b1"
+    demo_dir.mkdir()
+    b1_dir.mkdir()
+    demo = _build(monkeypatch, _runtime_settings(demo_dir, "BROKER_MODE=demo"))
+    try:
+        b1 = _build(monkeypatch, _runtime_settings(b1_dir))
+        try:
+            # The market-data clock stops being the fixed demo clock (``runtime.py:330``).
+            assert demo.market_data._clock is demo_now
+            assert b1.market_data._clock is not demo_now
+            assert abs(b1.market_data._clock() - datetime.now(UTC)) < timedelta(minutes=1)
+
+            # The scope facts the UI branches on (``ui/runtime_scope.py:136-145``).
+            scope = b1.runtime_scope
+            assert (scope.broker_mode, scope.environment, scope.data_quality) == (
+                BrokerMode.IBKR,
+                DisplayEnvironment.PAPER,
+                DataQuality.UNKNOWN,
+            )
+            assert scope.demo_profile is None
+            assert demo.runtime_scope.broker_mode is BrokerMode.DEMO
+            assert demo.runtime_scope.data_quality is DataQuality.DEMO
+
+            # The demo-only rehearsal services are bound to the demo boundary and no other
+            # (``short_put_demo_what_if.py:388-391``): a B1 runtime is not one.
+            assert demo.short_put_demo_what_if.is_bound_to_demo_boundary(
+                demo.connection, demo.settings
+            )
+            assert not b1.short_put_demo_what_if.is_bound_to_demo_boundary(
+                b1.connection, b1.settings
+            )
+        finally:
+            b1.close()
+    finally:
+        demo.close()
+
+
+_CAPTURE_HARNESS = (
+    _REPO
+    / ".claude"
+    / "skills"
+    / "chronos-real-gateway-campaign"
+    / "scripts"
+    / "capture_readonly.py"
+)
+_ORDER_METHODS = frozenset({"preview_order", "submit_order", "modify_order", "cancel_order"})
+
+
+def _order_method_references(tree: ast.AST) -> list[str]:
+    return sorted(
+        {
+            node.attr
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Attribute) and node.attr in _ORDER_METHODS
+        }
+    )
+
+
+def _adapter_constructions(tree: ast.AST) -> list[tuple[int, tuple[str, ...]]]:
+    """(positional arguments, keyword names) of every ``OfficialIBKRBroker(...)`` call."""
+
+    return [
+        (len(node.args), tuple(k.arg for k in node.keywords if k.arg is not None))
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "OfficialIBKRBroker"
+    ]
+
+
+def test_the_capture_harness_builds_a_hookless_adapter_and_never_references_an_order_method() -> (
+    None
+):
+    """The read-only B1 sessions run THIS construction site, not ``build_runtime``'s."""
+
+    tree = ast.parse(_CAPTURE_HARNESS.read_text(encoding="utf-8"))
+
+    assert _adapter_constructions(tree) == [(1, ())]  # settings only: no kill switch, no hooks
+    assert _order_method_references(tree) == []
+
+    # Controls: both scans can fail.
+    probe = ast.parse(
+        "broker.submit_order(request)\nOfficialIBKRBroker(settings, live_kill_switch=k)"
+    )
+    assert _order_method_references(probe) == ["submit_order"]
+    assert _adapter_constructions(probe) == [(1, ("live_kill_switch",))]
+
+
+class _EntryCountingGuard:
+    def __init__(self) -> None:
+        self.entries = 0
+
+    @contextmanager
+    def at_send(self) -> Iterator[bool]:
+        self.entries += 1
+        yield True
+
+
+@pytest.mark.usefixtures("clean_environment", "ibapi_import_stubbed")
+async def test_the_adapter_the_capture_harness_builds_refuses_every_order_call_before_send(
+    tmp_path: Path,
+) -> None:
+    """Hookless by design, and harmless: with no session, no order call can reach a venue."""
+
+    adapter = OfficialIBKRBroker(_b1_settings(tmp_path))  # exactly the harness's call
+    request = OrderRequest(
+        correlation_id="rehearsal-1",
+        account_id=_b1_settings(tmp_path).ib_account_id,
+        contract=option_contract(),
+        intent=OrderIntent.OPEN_SHORT_PUT,
+        side=OrderSide.SELL,
+        quantity=Decimal("1"),
+        limit_price=Decimal("1.25"),
+        order_ref="CHR-REHEARSAL",
+        transmit=True,
+    )
+    guard = _EntryCountingGuard()
+    attempts = (
+        lambda: adapter.preview_order(request.model_copy(update={"transmit": False})),
+        lambda: adapter.submit_order(request, send_guard=guard),
+        lambda: adapter.modify_order(
+            OrderModification(
+                correlation_id="rehearsal-2", broker_order_id=1, new_limit_price=Decimal("1.00")
+            )
+        ),
+        lambda: adapter.cancel_order(1),
+    )
+
+    for attempt in attempts:
+        with pytest.raises(BrokerRefusedBeforeSend, match="not connected"):
+            await attempt()
+    assert guard.entries == 0  # even an authorizing guard is never entered
+
+
+@pytest.mark.usefixtures("clean_environment", "stubbed_runtime", "ibapi_import_stubbed")
+def test_the_real_adapter_built_with_the_runtimes_hooks_drives_the_runtimes_latch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The second half of the chain, through the REAL bridge code: callback -> hook -> latch.
+
+    The runtime's exact call is replayed on the real class (``ibapi`` stubbed, nothing
+    connects), then the callbacks ibapi would deliver are invoked directly.
+    """
+
+    settings = _runtime_settings(tmp_path)
+    official = _recording("OfficialIBKRBroker")
+    monkeypatch.setattr("chronos.broker.official_ibkr.OfficialIBKRBroker", official)
+    runtime = _build(monkeypatch, settings)
+    try:
+        (built,) = official.instances
+        latch = runtime.reconciliation_readiness
+        real = OfficialIBKRBroker(settings, **built.hooks)
+        assert real._live_kill_switch is runtime.live_kill_switch
+
+        # A closed connection makes readiness uncertain, with the bridge's own reason.
+        _reconcile(latch)
+        real.bridge.on_connection_closed()
+        closed = latch.snapshot()
+        assert closed.status is ReconciliationStatus.PENDING
+        assert closed.reason == "official IBKR connection closed"
+
+        # First sight of the managed accounts changes nothing; a changed set holds it locked.
+        generation = _reconcile(latch)
+        real.bridge.on_managed_accounts(settings.ib_account_id)
+        assert latch.snapshot().ready is True
+        assert latch.snapshot().generation == generation
+        real.bridge.on_managed_accounts(f"{settings.ib_account_id},DU7654321")
+        changed = latch.snapshot()
+        assert changed.status is ReconciliationStatus.PENDING
+        assert changed.reason == "official IBKR managed-account scope changed"
+        assert changed.generation > generation
+
+        # Control: the hookless adapter (the capture harness's) leaves the latch alone.
+        hookless = OfficialIBKRBroker(settings)
+        _reconcile(latch)
+        hookless.bridge.on_connection_closed()
+        hookless.bridge.on_managed_accounts(settings.ib_account_id)
+        hookless.bridge.on_managed_accounts(f"{settings.ib_account_id},DU7654321")
+        assert latch.snapshot().ready is True
+    finally:
+        runtime.close()
