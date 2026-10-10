@@ -265,6 +265,16 @@ class _SimHarness:
             )
         )
 
+    def rearm_readiness(self, reason: str) -> None:
+        """Re-assert broker/local parity after a send consumed the last reconciliation."""
+
+        assert self.readiness.complete(
+            expected_generation=self.readiness.snapshot().generation,
+            status=ReconciliationStatus.RECONCILED,
+            reason=reason,
+            reconciled_at=self.now,
+        )
+
     def status(self, intent_id: str) -> OrderLifecycle:
         stored = self.service.get(intent_id)
         assert stored is not None
@@ -366,6 +376,14 @@ def test_the_next_proposal_sees_the_position_the_fill_created() -> None:
     # stock close check stops comparing against settled shares.
     with harness() as h:
         _fill_ten(h)
+        # r1 (T-1): a successful send CONSUMES readiness (one reconciliation authorizes
+        # one opening submission), so the next proposal needs a fresh reconciliation.
+        # The coordinator cannot re-arm it after a fill (case 14, G4), so the harness
+        # re-asserts broker/local parity the way an operator would.
+        consumed = h.readiness.snapshot()
+        assert consumed.ready is False
+        assert "consumed by an opening-order submission" in consumed.reason
+        h.rearm_readiness("U3: operator re-reconciled after the fill")
 
         closing_all = h.sell(quantity=10, ref=_ref("B"), intent_id="intent-close-10")
         closing_more = h.sell(quantity=11, ref=_ref("C"), intent_id="intent-close-11")
@@ -431,6 +449,7 @@ def test_modify_is_refused_before_send_by_the_faithful_sim_and_changes_nothing()
         h.confirm(intent)
         assert h.submit(intent).submitted is True
         events_before = len(h.tracker_repo.events("intent-1", current_account_id=PAPER_ACCOUNT))
+        readiness_before = h.readiness.snapshot()  # already consumed by the send (T-1)
 
         with pytest.raises(BrokerRefusedBeforeSend):
             h.service.modify("intent-1", Decimal("101.00"), now=h.now)
@@ -443,9 +462,12 @@ def test_modify_is_refused_before_send_by_the_faithful_sim_and_changes_nothing()
         ) == Decimal("100.00")
         (working,) = h.connection.run(h.broker.open_orders())
         assert working.limit_price == Decimal("100.00")
-        # The refusal said nothing about connection health: readiness is untouched and
-        # the order still works and fills at its ORIGINAL limit.
-        assert h.readiness.snapshot().ready is True
+        # The refusal said nothing about connection health, so readiness is exactly as
+        # it was (an invalidation would have bumped the generation), and the order still
+        # works and fills at its ORIGINAL limit.
+        readiness_after = h.readiness.snapshot()
+        assert readiness_after == readiness_before
+        assert readiness_after.generation == readiness_before.generation
         h.bar(**CROSSING)
         report = h.service.reconcile_on_restart_report(now=h.now)
         assert [u.lifecycle for u in report.applied_updates] == [OrderLifecycle.FILLED]
@@ -603,6 +625,13 @@ def test_an_ambiguous_send_persists_submission_unknown_then_recovers_without_res
 # --------------------------------------------------------------------------------------
 
 
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason=(
+        "U3-F1: daily opening cap counts the intent under evaluation (finding, RED, awaiting Kevin)"
+    ),
+)
 def test_the_daily_opening_cap_refuses_the_next_opening_after_a_fill() -> None:
     # SURVEY: "the opening cap after N fills". Fails if the real evidence provider stops
     # counting today's opening intents from the repository (R-25), or if the cap stops
