@@ -227,7 +227,9 @@ Two neighbouring conditions do **not** produce this refusal, because the route r
 writes nothing. The guard runs after authentication and the writer check and before the request
 body is read (`src/chronos/api/routes/autonomy.py`, `submit_proposal`). The current `detail` is the fixed sentence
 `autonomy is configured on this backend but did not start; proposals are refused until the owner
-fixes the configuration and restarts. See GET /health and the server log.` It carries no fault
+fixes the configuration and restarts. The owner can see why in GET /health (startup faults),
+GET /autonomy/alerts (unacknowledged owner alerts; local API token) and the server log.` It
+carries no fault
 code, path or exception text, so the body alone cannot name the cause. A backend that is not the
 writer, or that is under a recovery hold, refuses earlier through `require_writer` with its own
 error rather than this one.
