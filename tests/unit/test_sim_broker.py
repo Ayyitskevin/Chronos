@@ -20,6 +20,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
+from tests.support.sim_broker import FillPlan, SimBroker, SimClock
 
 from chronos.broker.base import Broker, BrokerDataError, BrokerRefusedBeforeSend
 from chronos.domain.enums import (
@@ -31,7 +32,6 @@ from chronos.domain.enums import (
 )
 from chronos.domain.models import OrderModification, OrderRequest
 from chronos.marketdata.bars import Bar, BarInterval
-from tests.support.sim_broker import FillPlan, SimBroker, SimClock
 
 ACCOUNT = "DU7654321"
 T0 = datetime(2026, 10, 12, 14, 0, tzinfo=UTC)
@@ -83,7 +83,9 @@ async def _request(
         correlation_id=f"corr-{ref}",
         account_id=account,
         contract=contract,
-        intent=OrderIntent.OPEN_LONG_STOCK if side is OrderSide.BUY else OrderIntent.CLOSE_LONG_STOCK,
+        intent=OrderIntent.OPEN_LONG_STOCK
+        if side is OrderSide.BUY
+        else OrderIntent.CLOSE_LONG_STOCK,
         side=side,
         quantity=Decimal(quantity),
         limit_price=Decimal(limit),
@@ -92,7 +94,9 @@ async def _request(
     )
 
 
-def _bar(symbol: str, *, open_: float, high: float, low: float, close: float, minutes: int = 1) -> Bar:
+def _bar(
+    symbol: str, *, open_: float, high: float, low: float, close: float, minutes: int = 1
+) -> Bar:
     stamp = T0 + timedelta(minutes=minutes)
     return Bar(
         symbol=symbol,
@@ -145,7 +149,11 @@ async def test_scripted_quotes_are_returned_as_set() -> None:
     broker = await _connected()
     broker.set_quote("AAPL", bid="99.90", ask="100.10", last="100.00")
     quote = await broker.request_underlying_quote(await broker.qualify_underlying("AAPL"))
-    assert (quote.bid, quote.ask, quote.last) == (Decimal("99.90"), Decimal("100.10"), Decimal("100.00"))
+    assert (quote.bid, quote.ask, quote.last) == (
+        Decimal("99.90"),
+        Decimal("100.10"),
+        Decimal("100.00"),
+    )
     assert quote.timestamp == T0
 
 
@@ -169,7 +177,9 @@ async def test_every_pre_send_refusal_records_nothing(change: str, match: str) -
         transmit=change != "untransmitted",
         account="DU0000001" if change == "wrong_account" else ACCOUNT,
     )
-    guard: _Guard | None = None if change == "no_guard" else _Guard(allowed=change != "guard_closed")
+    guard: _Guard | None = (
+        None if change == "no_guard" else _Guard(allowed=change != "guard_closed")
+    )
     if change == "disconnected":
         await broker.disconnect()
     with pytest.raises(BrokerRefusedBeforeSend, match=match):
@@ -206,7 +216,9 @@ async def test_an_engaged_kill_switch_refuses_inside_the_send_guard() -> None:
 
 async def test_a_submitted_order_works_until_a_bar_crosses_its_limit() -> None:
     broker = await _connected()
-    submission = await broker.submit_order(await _request(broker, limit="100.00"), send_guard=_Guard())
+    submission = await broker.submit_order(
+        await _request(broker, limit="100.00"), send_guard=_Guard()
+    )
     assert submission.lifecycle is OrderLifecycle.SUBMITTED
     assert submission.submitted_at == T0
     (working,) = await broker.open_orders()
@@ -323,7 +335,9 @@ async def test_cancel_of_an_unknown_or_finished_order_is_not_requested() -> None
 
 async def test_modify_refuses_before_send_like_the_official_adapter() -> None:
     broker = await _connected()
-    submission = await broker.submit_order(await _request(broker, limit="100.00"), send_guard=_Guard())
+    submission = await broker.submit_order(
+        await _request(broker, limit="100.00"), send_guard=_Guard()
+    )
     with pytest.raises(BrokerRefusedBeforeSend, match="cancel and re-submit"):
         await broker.modify_order(
             OrderModification(
@@ -338,10 +352,14 @@ async def test_modify_refuses_before_send_like_the_official_adapter() -> None:
 
 async def test_modify_when_enabled_changes_the_limit_the_fill_rule_uses() -> None:
     broker = await _connected(allow_modify=True)
-    submission = await broker.submit_order(await _request(broker, limit="100.00"), send_guard=_Guard())
+    submission = await broker.submit_order(
+        await _request(broker, limit="100.00"), send_guard=_Guard()
+    )
     modified = await broker.modify_order(
         OrderModification(
-            correlation_id="m-1", broker_order_id=submission.broker_order_id, new_limit_price=Decimal("99.00")
+            correlation_id="m-1",
+            broker_order_id=submission.broker_order_id,
+            new_limit_price=Decimal("99.00"),
         )
     )
     assert modified.broker_order_id == submission.broker_order_id
@@ -357,7 +375,9 @@ async def test_modify_when_enabled_changes_the_limit_the_fill_rule_uses() -> Non
 
 async def test_positions_and_cash_derive_from_the_simulators_own_fills() -> None:
     broker = await _connected()
-    await broker.submit_order(await _request(broker, quantity="10", limit="100.00"), send_guard=_Guard())
+    await broker.submit_order(
+        await _request(broker, quantity="10", limit="100.00"), send_guard=_Guard()
+    )
     broker.advance_bar(_bar("AAPL", open_=100.0, high=100.2, low=99.8, close=100.0, minutes=1))
     (position,) = await broker.positions()
     # 10 @ 100.00 + 1.00 commission: average cost 100.10 per share.
@@ -373,7 +393,9 @@ async def test_positions_and_cash_derive_from_the_simulators_own_fills() -> None
     assert account.total_cash == Decimal("9438.00")  # 8999 + 440 - 1
     # mark = the last bar close for AAPL (110.00): 9438 + 6 * 110 = 10098.
     assert account.net_liquidation == Decimal("10098.00")
-    sell_rest = await _request(broker, side=OrderSide.SELL, quantity="6", limit="110.00", ref="CHR-3")
+    sell_rest = await _request(
+        broker, side=OrderSide.SELL, quantity="6", limit="110.00", ref="CHR-3"
+    )
     await broker.submit_order(sell_rest, send_guard=_Guard())
     broker.advance_bar(_bar("AAPL", open_=110.0, high=110.5, low=109.5, close=110.0, minutes=3))
     assert await broker.positions() == ()
