@@ -34,10 +34,11 @@ step 6); the factory builds a different adapter with three safety hooks
 shell profile defeats everything below.
 ```text
 # NOT RUN
-env | grep -E '^(BROKER_|IB_|ALLOW_|AUTONOMY_|CHRONOS_)' ; echo "exit=$?"
+env | grep -E '^(BROKER_|IB_|ALLOW_|AUTONOMY_|CHRONOS_)' | cut -d= -f1
 ```
-**Expected:** no lines, `exit=1`. Any line: unset it in this shell and find where it is
-exported (profile, systemd unit `Environment=`, `.envrc`).
+**Expected:** no output. Any name printed: unset it in this shell and find where it is exported
+(profile, systemd unit `Environment=`, `.envrc`). The command prints **names only** (`cut`), so
+an exported account id or pepper is not echoed. The prefix list is the preflight's P12 list.
 
 ### Step 2 — A paper account (owner act)
 You provide an IBKR **paper** account; credentials and 2FA stay with you and never enter a file
@@ -129,14 +130,15 @@ CHRONOS_CAPTURE_PEPPER=<64 hex, generated below; never shown to anyone>
 - `AUTONOMY_MANDATE_FILE` stays unset: a present, valid file auto-activates autonomy on every
   backend boot (ADR-0017; checklist `:62-64`).
 ```text
-# NOT RUN — run it so the value goes to the clipboard/file, not the screen or a log
-python3 -c 'import secrets; print(secrets.token_hex(32))'
-chmod 600 .env
+# NOT RUN — the pepper goes straight into the file: never to the screen, a log or a clipboard
+umask 077 && touch .env && chmod 600 .env
+PEP=$(python3 -c 'import secrets; print(secrets.token_hex(32))'); printf 'CHRONOS_CAPTURE_PEPPER=%s\n' "$PEP" >> .env; unset PEP
 stat -c '%a %n' .env
 test ! -e /absolute/path/outside/the/repo/chronos-b1.db && echo "database file absent (fresh)"
 ```
-**Expected:** `600 .env`; `database file absent (fresh)` (a pre-existing file must be unbound or
-already B1-scoped; if you are unsure, choose a new path).
+Run the pepper line **once** (do not append a second `CHRONOS_CAPTURE_PEPPER=` line), and add the
+other lines with your editor. **Expected:** `600 .env`; `database file absent (fresh)` (a
+pre-existing file must be unbound or already B1-scoped; if you are unsure, choose a new path).
 
 ### Step 7 — The configuration audit: both conjunctions must print `False`
 This is checklist §3.3 step 2 (`:108-118`), unchanged.
@@ -165,9 +167,13 @@ raise a `ValidationError` ("ALLOW_LIVE_TRADING=true requires the full live conju
 
 ### Step 8 — The non-secret preflight, on your own file (optional but recommended)
 `tests/unit/test_b1_env_preflight.py` defines `preflight_b1_env(text, file_mode=, environ=)`
-and runs it against **dummy** values in CI; the test never reads a real `.env`. You may run the
-same function on **your own** file, in your own shell. It prints only condition ids and
-messages — never a value (the pepper's shape is checked, not echoed).
+and runs it against **dummy** values in CI. The function opens no file of its own and reads no
+`.env` (an audit-hook test with sentinel `.env` files in the working directory and in `$HOME`
+proves it); you hand it text. You may hand it **your own** file's text, in your own shell. It
+prints only condition ids and messages — never a value (the pepper's shape is checked, not
+echoed). **Requirements:** run it from the repository root, in the Chronos venv with the dev
+dependencies (`pytest` is imported by that module). A supported checker script under `scripts/`
+is a follow-up: this change is docs and tests only, so the command imports the test module.
 ```text
 # NOT RUN — Kevin's hands; reads his own private .env, prints condition ids only
 .venv/bin/python -c "
@@ -228,7 +234,7 @@ fails if they drift. "Step" names where the condition is created.
 | P9 | no IBKR credential-like key is in the file | 6 |
 | P10 | CHRONOS_CAPTURE_PEPPER is present with the 64-hex shape (value never echoed) | 6 |
 | P11 | the file mode is 0600 (when a mode is supplied) | 6 |
-| P12 | no BROKER_*/IB_*/ALLOW_*/AUTONOMY_* variable is exported (it would outrank the file) | 1 |
+| P12 | no BROKER_*/IB_*/ALLOW_*/AUTONOMY_*/CHRONOS_* variable is exported (it outranks the file) | 1 |
 
 What the preflight cannot see: the gateway, the entitlements, `ibapi`, whether the pepper is
 the one you meant, whether the account id is *your* paper account, and whether an existing
@@ -252,20 +258,31 @@ lock (`modes.py:128-129`). Do not rely on that layering: leave the flag false.
 ## Rollback — in this order, each step reversible
 1. **Stop.** End any session; disconnect/log out of the gateway. Do not leave the API socket
    enabled and idle.
-2. **Back to demo.** Edit `.env` to `BROKER_MODE=demo` (keep everything else, including both
-   `ALLOW_*` lines at `false`), or move the file aside, *not delete it*:
-   `mv .env .env.b1-aside`. Verify with the step-7 audit:
+2. **Back to demo — two edits, not one.** In `.env` set `BROKER_MODE=demo` (keep both `ALLOW_*`
+   lines at `false`) **and remove or comment out the `DATABASE_URL=…chronos-b1.db` line** (the
+   B1 file itself stays untouched, step 3). With only the first edit, demo would boot against the
+   B1-bound file and `Database.bind_scope` would refuse: "already bound to a different broker
+   scope; configure a separate DATABASE_URL" (`database.py:254-258`). Or move the whole file
+   aside, *not delete it*: `mv .env .env.b1-aside`. Verify the configuration:
    ```text
    # NOT RUN
-   .venv/bin/python -c "from chronos.config.settings import Settings; s = Settings(); print(s.broker_mode.value, s.ib_environment.value); print(s.transmission_possible, s.live_transmission_possible)"
+   .venv/bin/python -c "from chronos.config.settings import Settings; s = Settings(); print(s.broker_mode.value, s.ib_environment.value, s.database_url); print(s.transmission_possible, s.live_transmission_possible)"
    ```
-   **Expected** with `BROKER_MODE=demo` edited in: `demo paper` then `False False`; with the
-   file moved aside and no other source: `demo paper` then `False False` (defaults,
-   `settings.py:99`, `:102`, `:127-128`).
+   **Expected** (either way; defaults at `settings.py:99`, `:102`, `:320`, `:127-128`):
+   ```text
+   demo paper sqlite:///data/chronos.db
+   False False
+   ```
+   If the first line shows your `chronos-b1.db` path, the `DATABASE_URL` line is still active.
+   **This proves the configuration, not the boot:** whether the demo database accepts the demo
+   boot is shown by the next demo backend start (it binds `data/chronos.db` to the demo scope,
+   or finds it already so). A `data/chronos.db` that an earlier mistaken B1 start with the
+   default URL bound to B1 refuses it; then point demo at a fresh `DATABASE_URL`.
 3. **Leave the B1 database file where it is.** It is bound to the B1 scope by design
-   (`database.py:218`); demo uses the default `sqlite:///data/chronos.db`, a different file, so
-   nothing needs migrating back. Do not delete either file (reversible mistakes only). If you
-   want a clean B1 retry, choose a **new** `DATABASE_URL` path.
+   (`database.py:218`). Demo uses the default `sqlite:///data/chronos.db`, **a different file,
+   only because step 2 removed the B1 `DATABASE_URL` line**; nothing needs migrating back. Do
+   not delete either file (reversible mistakes only). If you want a clean B1 retry, choose a
+   **new** `DATABASE_URL` path.
 4. **Safety state.** Re-run `python -m chronos.cli status` and `ls data/live_kill_switch.json`
    (step 9). If the platform is *halted*, it stays halted across restarts by design
    (`docs/IBKR_RUNBOOK.md` §6); re-arm only with `python -m chronos.cli rearm --note "<why>"`
