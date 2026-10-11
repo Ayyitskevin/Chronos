@@ -206,6 +206,14 @@ platform halt and audit-chain state (default paths `data/platform_halt.json`,
 the platform halt, whose missing file reads *halted* (checklist `:119-123`). Record the output
 in the session-1 evidence doc.
 
+**A note on `.env` and pytest.** The preflight function reads no `.env`. The *test suite* does:
+the session-scoped fixture `tests/conftest.py:71-92` (`_ambient_settings_never_live_capable`)
+builds one ambient `Settings()` per pytest run, which opens the repository-root `.env`, and fails
+the run if that configuration is live-capable (ADR-0009 tripwire). That is the suite's own
+safety check, measured with an audit hook while preparing this runbook (one open per run). With
+the B1 `.env` of step 6 it passes, because both conjunctions are false; if it ever fails with
+"SAFETY TRIPWIRE", your `.env` is live-capable: stop and fix the file.
+
 ### Step 10 — Your word, then the sessions
 Nothing above connects to the gateway. **Session 1 starts only on your word** (checklist `:14`,
 VCP §11). From here the checklist owns the procedure: §4.1 (smoke test, session 1 only, then the
