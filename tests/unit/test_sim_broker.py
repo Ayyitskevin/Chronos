@@ -19,6 +19,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 
 import pytest
 from tests.support.order_fakes import option_contract
@@ -42,6 +43,7 @@ from chronos.domain.models import (
     OptionContract,
     OrderModification,
     OrderRequest,
+    OrderSubmission,
     UnderlyingContract,
 )
 from chronos.marketdata.bars import Bar, BarInterval
@@ -770,3 +772,184 @@ async def test_an_ambiguous_send_reports_no_permanent_id() -> None:
     assert submission.permanent_id is None
     (held,) = await broker.open_orders()
     assert held.permanent_id is not None  # the venue knows it; the caller never learnt it
+
+
+# --- r2: sonnet's independent mutants of the r1 behaviours (review P2-1) --------------------
+
+
+def _opt(
+    *, side: OrderSide, limit: str, ref: str, quantity: str = "1", contract: Any = None
+) -> OrderRequest:
+    return _option_request(side=side, limit=limit, ref=ref, quantity=quantity).model_copy(
+        update={"contract": contract or option_contract()}
+    )
+
+
+async def _submit(broker: SimBroker, request: OrderRequest) -> OrderSubmission:
+    return await broker.submit_order(request, send_guard=_Guard())
+
+
+# funds: the exact boundary, the multiplier, and BUY-only (no margin model)
+
+
+async def test_a_buy_costing_exactly_the_cash_is_accepted_and_one_cent_more_is_rejected() -> None:
+    broker = await _connected()  # cash 10000.00
+    exact = await _submit(
+        broker, await _request(broker, quantity="1", limit="9999.00", ref="CHR-A")
+    )
+    assert exact.lifecycle is OrderLifecycle.SUBMITTED  # 9999.00 + 1.00 commission == 10000.00
+    over = await _submit(broker, await _request(broker, quantity="1", limit="9999.01", ref="CHR-B"))
+    assert over.lifecycle is OrderLifecycle.REJECTED  # 10000.01 > 10000.00
+
+
+async def test_the_funds_check_prices_an_option_with_its_multiplier() -> None:
+    broker = await _connected()
+    affordable = await _submit(broker, _opt(side=OrderSide.BUY, limit="99.00", ref="CHR-A"))
+    assert affordable.lifecycle is OrderLifecycle.SUBMITTED  # 99.00 x 100 + 1.00 = 9901.00
+    too_dear = await _submit(broker, _opt(side=OrderSide.BUY, limit="100.00", ref="CHR-B"))
+    assert too_dear.lifecycle is OrderLifecycle.REJECTED  # 100.00 x 100 + 1.00 = 10001.00
+
+
+async def test_a_sell_is_not_funds_checked() -> None:
+    """No margin model: a short sale is accepted with almost no cash (the docstring's rule)."""
+
+    broker = SimBroker(
+        account_id=ACCOUNT,
+        clock=SimClock(T0),
+        symbols={"AAPL": 265598},
+        starting_cash=Decimal("10"),
+    )
+    await broker.connect()
+    submission = await _submit(
+        broker, await _request(broker, side=OrderSide.SELL, quantity="10", limit="100.00")
+    )
+    assert submission.lifecycle is OrderLifecycle.SUBMITTED
+
+
+async def test_a_stock_with_an_unknown_symbol_is_rejected_by_the_venue() -> None:
+    broker = await _connected()
+    request = (await _request(broker)).model_copy(
+        update={"contract": UnderlyingContract(con_id=5, symbol="ZZZZ")}
+    )
+    submission = await _submit(broker, request)
+    assert submission.lifecycle is OrderLifecycle.REJECTED
+    assert "no security definition" in submission.message
+
+
+# option fills by quote: boundaries, the price, and the exact contract
+
+
+async def test_an_option_sell_fills_at_a_bid_exactly_at_its_limit() -> None:
+    broker = await _connected()
+    await _submit(broker, _opt(side=OrderSide.SELL, limit="1.25", ref="CHR-S"))
+    broker.advance_option_quote(option_contract(), bid="1.25", ask="1.35")
+    assert [e.price for e in await broker.executions()] == [Decimal("1.25")]
+
+
+async def test_an_option_buy_fills_at_an_ask_exactly_at_its_limit() -> None:
+    broker = await _connected()
+    await _submit(broker, _opt(side=OrderSide.BUY, limit="1.20", ref="CHR-B"))
+    broker.advance_option_quote(option_contract(), bid="1.10", ask="1.20")
+    assert [e.price for e in await broker.executions()] == [Decimal("1.20")]
+
+
+async def test_an_option_sell_fills_at_the_bid_not_at_its_limit() -> None:
+    broker = await _connected()
+    await _submit(broker, _opt(side=OrderSide.SELL, limit="1.25", ref="CHR-S"))
+    broker.advance_option_quote(option_contract(), bid="1.40", ask="1.50")
+    assert [e.price for e in await broker.executions()] == [Decimal("1.40")]
+
+
+async def test_a_quote_fills_only_the_option_it_quotes() -> None:
+    broker = await _connected()
+    quoted = option_contract(con_id=111)
+    sibling = option_contract(con_id=112, strike=Decimal("145"))  # same symbol, another series
+    await _submit(broker, _opt(side=OrderSide.SELL, limit="1.25", ref="CHR-A", contract=quoted))
+    await _submit(broker, _opt(side=OrderSide.SELL, limit="1.25", ref="CHR-B", contract=sibling))
+    broker.advance_option_quote(quoted, bid="1.40", ask="1.50")
+    assert [e.contract.con_id for e in await broker.executions()] == [111]
+
+
+# pending cancel
+
+
+async def test_confirm_cancel_refuses_an_order_with_no_pending_cancel() -> None:
+    broker = await _connected()
+    submission = await _submit(broker, await _request(broker))
+    with pytest.raises(ValueError, match="no pending cancel"):
+        broker.confirm_cancel(submission.broker_order_id)
+    assert broker.order_lifecycle(submission.broker_order_id) is OrderLifecycle.SUBMITTED
+
+
+async def test_a_partial_fill_while_a_cancel_is_pending_keeps_the_cancel_pending() -> None:
+    broker = await _connected(plans={"CHR-1": FillPlan(cancel_pending=True)})
+    submission = await _submit(broker, await _request(broker))
+    await broker.cancel_order(submission.broker_order_id)
+    broker.fill_order(submission.broker_order_id, Decimal("4"))  # 4 of 10 fill meanwhile
+    assert broker.order_lifecycle(submission.broker_order_id) is OrderLifecycle.CANCEL_PENDING
+    broker.confirm_cancel(submission.broker_order_id)
+    assert broker.order_lifecycle(submission.broker_order_id) is OrderLifecycle.CANCELLED
+    (position,) = await broker.positions()
+    assert position.quantity == Decimal("4")  # the partial fill stays
+
+
+# the option multiplier in the books
+
+
+async def test_an_option_held_without_a_mark_is_valued_at_its_cost_per_unit() -> None:
+    """The normal state after fill_order: no quote yet, so the mark falls back to cost."""
+
+    broker = await _connected()
+    sold = await _submit(broker, _opt(side=OrderSide.SELL, limit="1.25", ref="CHR-P"))
+    broker.fill_order(sold.broker_order_id, Decimal("1"))
+    (position,) = await broker.positions()
+    assert position.market_price == Decimal("1.25")  # per unit, not per contract
+    account = await broker.account_summary()
+    assert account.total_cash == Decimal("10124.00")  # 125.00 - 1.00
+    assert account.net_liquidation == Decimal("9999.00")  # 10124.00 - 1 x 1.25 x 100
+
+
+async def test_option_unrealized_pnl_uses_the_multiplier() -> None:
+    broker = await _connected()
+    sold = await _submit(broker, _opt(side=OrderSide.SELL, limit="1.25", ref="CHR-P"))
+    broker.fill_order(sold.broker_order_id, Decimal("1"))
+    broker.advance_option_quote(option_contract(), bid="1.00", ask="1.10")  # mark 1.05
+    (position,) = await broker.positions()
+    # (1.05 x 100 - 125.00) x -1 = 20.00: the short gained as the option cheapened.
+    assert position.unrealized_pnl == Decimal("20.00")
+
+
+async def test_an_option_sold_through_zero_opens_the_short_at_the_contract_value() -> None:
+    broker = await _connected()
+    bought = await _submit(broker, _opt(side=OrderSide.BUY, limit="1.20", ref="CHR-B"))
+    broker.fill_order(bought.broker_order_id, Decimal("1"))
+    sold = await _submit(broker, _opt(side=OrderSide.SELL, limit="1.30", ref="CHR-S", quantity="3"))
+    broker.fill_order(sold.broker_order_id, Decimal("3"))
+    (position,) = await broker.positions()
+    # 1 closes the long; 2 open a short at 1.30 x 100 = 130.00 per contract.
+    assert (position.quantity, position.average_cost) == (Decimal("-2"), Decimal("130.00"))
+
+
+# ownership and the fill_order control
+
+
+async def test_cancel_refuses_a_reference_that_only_starts_with_chr() -> None:
+    broker = await _connected()
+    submission = await _submit(broker, await _request(broker, ref="CHRX-1"))
+    result = await broker.cancel_order(submission.broker_order_id)
+    assert result.requested is False
+
+
+async def test_fill_order_fills_at_the_price_given() -> None:
+    broker = await _connected()
+    submission = await _submit(broker, await _request(broker, limit="100.00"))
+    broker.fill_order(submission.broker_order_id, Decimal("10"), price=Decimal("99.50"))
+    assert [e.price for e in await broker.executions()] == [Decimal("99.50")]
+
+
+async def test_fill_order_refuses_more_than_the_remaining_quantity() -> None:
+    broker = await _connected()
+    submission = await _submit(broker, await _request(broker, quantity="10"))
+    with pytest.raises(ValueError, match="at most the remaining"):
+        broker.fill_order(submission.broker_order_id, Decimal("11"))
+    assert await broker.executions() == ()
