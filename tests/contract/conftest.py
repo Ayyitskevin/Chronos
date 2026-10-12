@@ -184,10 +184,6 @@ FAKE_PINNED: dict[tuple[str, str], str] = {
         "S1-F3 (K4): the zone of Execution.time and of the ExecutionFilter bound on a real "
         "gateway (the adapter assumes UTC on both sides)"
     ),
-    ("official_fake", "test_cancel_of_an_unknown_order_never_reports_cancelled"): (
-        "proves the error flight under the fake's error-callback shapes only; R-ARITY (K4, "
-        "first check): the installed ibapi's EWrapper.error signature"
-    ),
 }
 
 #: Harness name -> why its submit path is deferred (declaration, not a skip).
