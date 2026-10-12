@@ -267,30 +267,26 @@ async def test_another_clients_order_is_not_cancelled_by_the_gateway(
 ) -> None:
     """The fake's venue refuses a cancel of another client's order (10147) and keeps it.
 
-    Venue facts only: the adapter's side of this exchange is S1-F1 (the contract case pins its
-    result, the mechanism pin below pins its send)."""
+    S1-F1 is fixed: the adapter proves ownership first and refuses before sending, so the
+    gateway is not even asked (its send is pinned by the next case, not by this one)."""
 
     broker = _broker()
     await broker.connect()
     try:
-        await broker.cancel_order(fake_ibapi.FOREIGN_ID)
+        result = await broker.cancel_order(fake_ibapi.FOREIGN_ID)
         orders = await broker.open_orders()
     finally:
         await broker.disconnect()
     assert fake_ibapi.FOREIGN_ID in {o.broker_order_id for o in orders}  # the venue kept it
+    assert result.requested is False  # was (True, CANCEL_PENDING): R-3, the adapter claimed a send
+    assert gateway.cancel_requests == []  # the fake's own record: no cancelOrder reached it
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "S1-F1 (mechanism): OfficialIBKRBroker.cancel_order puts a cancel for an order Chronos "
-        "does not own on the wire (official_ibkr.py:2398-2408) before any ownership check. "
-        "Deleting only that send makes this XPASS, so the pin covers the send itself, not just "
-        "the requested=True result (Daybreak r1 P2-1). RED (order plane); not fixed in S1b."
-    ),
-)
 async def test_a_foreign_cancel_never_reaches_the_wire(gateway: fake_ibapi.FakeGateway) -> None:
+    """S1-F1 (mechanism), lifted: the send itself is gone, not just the requested=True result.
+
+    S1b r1 pinned it as a strict xfail (Daybreak r1 P2-1); the fix turns it into a pass."""
+
     broker = _broker()
     await broker.connect()
     try:
@@ -304,19 +300,25 @@ async def test_a_foreign_cancel_never_reaches_the_wire(gateway: fake_ibapi.FakeG
 async def test_every_error_arity_completes_the_order_flight(
     gateway: fake_ibapi.FakeGateway, style: str
 ) -> None:
-    """The adapter accepts 3-arg, 4-arg (json) and timestamp-prefixed errors (P3-4i)."""
+    """The adapter accepts 3-arg, 4-arg (json) and timestamp-prefixed errors (P3-4i).
+
+    Retargeted by S1-F1: a cancel of an unknown id no longer reaches the gateway (ownership is
+    proven first), so the error callback is now elicited by a preview of a contract the venue has
+    no definition for (200), which still goes through placeOrder and the order-ack flight.
+    """
 
     gateway.error_style = style
     broker = _broker()
     await broker.connect()
+    request = _preview_request().model_copy(update={"contract": option_contract(con_id=999_999)})
     try:
         started = time.monotonic()
-        result = await broker.cancel_order(424242)
+        preview = await broker.preview_order(request)
     finally:
         await broker.disconnect()
     assert time.monotonic() - started < 5  # completed by the error, not by the 20 s timeout
-    assert result.lifecycle is OrderLifecycle.CANCEL_PENDING
-    assert gateway.errors_sent[-1][1] == fake_ibapi.CODE_CANCEL_NOT_FOUND
+    assert preview.accepted is False
+    assert gateway.errors_sent[-1][1] == fake_ibapi.CODE_NO_SECURITY
 
 
 # --- live fills: the dispatch barrier and the unsolicited classification -----------------------

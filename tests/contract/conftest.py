@@ -339,15 +339,6 @@ FINDINGS: dict[str, str] = {
         "for any id and removes nothing (:157-165); submit_order records the call but "
         "never adds the order (:118-145); there is no fill model (SURVEY G1/G2)."
     ),
-    "S1-F1": (
-        "OfficialIBKRBroker.cancel_order sends a cancel for an order Chronos does not own and "
-        "reports requested=True (official_ibkr.py:2398-2430: no ownership or account check; "
-        "SURVEY R-3). Over the FakeGateway the venue refuses another client's cancel (10147), so "
-        "nothing changes, but the adapter claims a request it should never have made; with "
-        "ib_client_id 0 (IB's master client) a real gateway WOULD cancel another client's "
-        "order, so never run the adapter as client 0 (fable r1 P3-3). RED (order plane): a src "
-        "fix is the owner's, not S1b's. Its send is pinned in tests/unit/test_fake_ibapi.py."
-    ),
     "U1-F4": (
         "FakeBroker does not enforce the pre-send conditions the real adapter does "
         "(OfficialIBKRBroker._reverify_for_order_path, submit_order, modify_order, "
@@ -377,7 +368,6 @@ KNOWN_VIOLATIONS: dict[tuple[str, str], str] = {
     ("fake", "test_cancel_removes_a_cancelled_order_from_open_orders"): "U1-F3",
     ("fake", "test_cancel_of_an_unknown_order_never_reports_cancelled"): "U1-F3",
     ("fake", "test_cancel_refuses_to_touch_a_foreign_order"): "U1-F4",
-    ("official_fake", "test_cancel_refuses_to_touch_a_foreign_order"): "S1-F1",
 }
 
 
