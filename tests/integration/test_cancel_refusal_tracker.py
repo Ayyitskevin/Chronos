@@ -349,3 +349,107 @@ def test_a_stranded_cancel_pending_recovers_when_the_venue_shows_the_order_worki
     )
     assert outcome.lifecycle_changed is True
     assert _status(harness) is OrderLifecycle.SUBMITTED
+
+
+# --- Q3 r1: the completion write is a compare-and-set too (Daybreak P2-1) ----------------------
+
+
+def _cancelled_events(harness: _Harness) -> list[tuple[str, OrderLifecycle]]:
+    return [t for t in _trail(harness) if t[1] is OrderLifecycle.CANCELLED]
+
+
+def test_a_filled_callback_during_the_cancel_is_not_overwritten_by_its_completion(
+    rig: tuple[_Harness, _CancelBroker],
+) -> None:
+    """The venue says FILLED while our cancel is in flight, then the cancel answers CANCELLED.
+    The recorded broker truth stands; the contradiction is surfaced, not written over."""
+
+    harness, broker = rig
+    fill = _update(OrderLifecycle.FILLED, "1", "0")
+    broker.during = lambda: harness.tracker.ingest(fill, current_account_id=PAPER_ACCOUNT)
+    with pytest.raises(OrderMutationError, match="recorded status stands"):
+        harness.service.cancel("intent-1", now=FIXED_NOW)
+    assert _status(harness) is OrderLifecycle.FILLED, "a filled order was recorded as cancelled"
+    assert _cancelled_events(harness) == []
+
+
+def test_a_cancelled_callback_during_the_cancel_is_not_recorded_twice(
+    rig: tuple[_Harness, _CancelBroker],
+) -> None:
+    """The venue's own Cancelled arrives first; the completion is then idempotent."""
+
+    harness, broker = rig
+    gone = _update(OrderLifecycle.CANCELLED, "0", "1")
+    broker.during = lambda: harness.tracker.ingest(gone, current_account_id=PAPER_ACCOUNT)
+    result = harness.service.cancel("intent-1", now=FIXED_NOW)
+    assert result.lifecycle is OrderLifecycle.CANCELLED
+    assert _status(harness) is OrderLifecycle.CANCELLED
+    assert len(_cancelled_events(harness)) == 1
+
+
+def test_a_partial_fill_callback_during_the_cancel_is_not_overwritten_either(
+    rig: tuple[_Harness, _CancelBroker],
+) -> None:
+    """A non-terminal callback also wins: the venue's later Cancelled completes the order."""
+
+    harness, broker = rig
+    partial = _update(OrderLifecycle.PARTIALLY_FILLED, "1", "1")
+    broker.during = lambda: harness.tracker.ingest(partial, current_account_id=PAPER_ACCOUNT)
+    result = harness.service.cancel("intent-1", now=FIXED_NOW)
+    assert result.lifecycle is OrderLifecycle.CANCELLED
+    assert _status(harness) is OrderLifecycle.PARTIALLY_FILLED
+    assert _cancelled_events(harness) == []
+    done = _update(OrderLifecycle.CANCELLED, "1", "1")
+    assert harness.tracker.ingest(done, current_account_id=PAPER_ACCOUNT).lifecycle_changed
+    assert _status(harness) is OrderLifecycle.CANCELLED
+
+
+def test_the_mark_cas_also_protects_a_filled_order_from_a_stale_cancel(
+    rig: tuple[_Harness, _CancelBroker],
+) -> None:
+    """fable P3-1: a FILLED callback lands between the cancellable check and the write. The
+    compare-and-set refuses the stale cancel: no broker call, the fill stands."""
+
+    harness, broker = rig
+    stale = _snapshot(harness)
+    fill = _update(OrderLifecycle.FILLED, "1", "0")
+    assert harness.tracker.ingest(fill, current_account_id=PAPER_ACCOUNT).lifecycle_changed
+    with _stale_cancel(harness, stale), pytest.raises(OrderMutationError, match="no cancel"):
+        harness.service.cancel("intent-1", now=FIXED_NOW)
+    assert broker.cancel_calls == []
+    assert _status(harness) is OrderLifecycle.FILLED
+
+
+def test_a_second_cancel_of_a_pending_order_says_what_state_it_is_in(
+    rig: tuple[_Harness, _CancelBroker],
+) -> None:
+    """Daybreak P3-1: the refusal of a cancel on a CANCEL_PENDING order names the state (and that
+    an interrupted cancel is not recovered automatically) instead of the generic text."""
+
+    harness, broker = rig
+    broker.mode = "pending"
+    harness.service.cancel("intent-1", now=FIXED_NOW)
+    with pytest.raises(OrderMutationError, match="cancel is already pending"):
+        harness.service.cancel("intent-1", now=FIXED_NOW.replace(second=5))
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=OrderMutationError,
+    reason=(
+        "Q-Q3-1 (Kevin's), the other half of the pin above: a second cancel of a stranded "
+        "CANCEL_PENDING is refused (it is not in _CANCELLABLE_STATUSES), so the operator cannot "
+        "retry it. Finding pin, not a fix."
+    ),
+)
+def test_a_stranded_cancel_pending_can_be_cancelled_again(
+    rig: tuple[_Harness, _CancelBroker],
+) -> None:
+    harness, broker = rig
+    broker.mode = "ambiguous"
+    with pytest.raises(BrokerConnectionError):
+        harness.service.cancel("intent-1", now=FIXED_NOW)
+    assert _status(harness) is OrderLifecycle.CANCEL_PENDING
+    broker.mode = "accept"
+    result = harness.service.cancel("intent-1", now=FIXED_NOW.replace(second=5))
+    assert result.lifecycle is OrderLifecycle.CANCELLED
