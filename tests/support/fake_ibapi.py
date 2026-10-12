@@ -29,6 +29,26 @@ as ``orderStatus``, ``execDetails(reqId=-1)``, ``commissionReport``); the error 
 security definition); ``PreSubmitted`` for a what-if; the unset-double sentinel for what-if
 margin fields; execution ``time`` as a tz-less ``YYYYMMDD HH:MM:SS`` in UTC; ``ExecutionFilter``
 ``time`` as an inclusive lower bound at second resolution.
+
+TIME CONVENTION (explicit; fable r1 P2-1). The fake renders ``Execution.time`` tz-less in
+:data:`EXECUTION_TIME_ZONE` (UTC) with :data:`EXECUTION_TIME_FORMAT`, and reads the adapter's
+``ExecutionFilter.time`` with :data:`FILTER_TIME_FORMAT` in the same zone, because those are
+what the adapter parses and writes (``official_ibkr.py:808-832`` reads a tz-less time as UTC;
+``:1120-1121`` writes the bound in UTC). TWS is believed to render execution times in the
+LOGIN's time zone (newer builds append the zone name). So any pass that depends on execution
+instants (the ``since`` cases) proves the adapter against this convention only: candidate
+finding S1-F3, a K4 check. ``FakeGateway.execution_time_zone`` lets a test render another zone.
+
+RECORDED RISK R-ARITY (fable r1 P2-2; Daybreak P3-2). The fake's three ``error`` shapes are
+the ADAPTER's reading of ibapi (``official_ibkr.py:497-504``: an optional NON-int first value
+is dropped as a timestamp, then ``(reqId, errorCode, errorString[, advancedOrderRejectJson])``).
+No ibapi source, wheel or version pin exists on this machine or in the repo (``pyproject.toml``
+names ``ibapi.*`` only in a mypy override), so the shape could not be cited. Current ibapi is
+believed (unverified) to call ``error(reqId, errorTime: int, errorCode, errorString,
+advancedOrderRejectJson)``; under that shape the adapter would read the TIME as the code, and
+connection-loss and reject codes would never match (fail-open). Every error-flight pass here
+holds under the fake's shapes only. First K4 check, and a B1 prerequisite: read the installed
+ibapi's ``EWrapper.error`` signature and capture one error from the paper gateway.
 """
 
 from __future__ import annotations
@@ -81,6 +101,11 @@ CODE_NO_SECURITY = 200
 CODE_ORDER_REJECTED = 201
 CODE_CANCEL_NOT_FOUND = 10147
 CODE_CANNOT_CANCEL = 10148
+
+#: The fake's time convention (see the module docstring): what the adapter parses and writes.
+EXECUTION_TIME_ZONE = UTC
+EXECUTION_TIME_FORMAT = "%Y%m%d %H:%M:%S"
+FILTER_TIME_FORMAT = "%Y%m%d-%H:%M:%S"
 
 _STOP = object()
 
@@ -276,6 +301,11 @@ class FakeGateway:
         self._registry: dict[int, Instrument] = {}
         self.error_style = "plain"  # "plain" (3 args) | "json" (4) | "timestamped" (ts first)
         self.errors_sent: list[tuple[int, int, str]] = []
+        #: Every cancel that reached the wire, as (client id, order id), recorded BEFORE the
+        #: gateway's own ownership check (Daybreak r1 P2-1: pins S1-F1's send mechanism).
+        self.cancel_requests: list[tuple[int, int]] = []
+        #: The zone execution times are rendered in (tz-less); UTC is the fake's convention.
+        self.execution_time_zone: Any = EXECUTION_TIME_ZONE
         _run_without_a_loop(self._seed_registry())
 
     @classmethod
@@ -409,7 +439,9 @@ class FakeGateway:
         ib.side = "BOT" if execution.side is OrderSide.BUY else "SLD"
         ib.shares = float(execution.quantity)
         ib.price = float(execution.price)
-        ib.time = execution.timestamp.astimezone(UTC).strftime("%Y%m%d %H:%M:%S")
+        ib.time = execution.timestamp.astimezone(self.execution_time_zone).strftime(
+            EXECUTION_TIME_FORMAT
+        )
         return ib
 
     def _commission_of(self, execution: BrokerExecution) -> FakeCommissionReport:
@@ -451,7 +483,9 @@ class FakeGateway:
         since: datetime | None = None
         raw = str(getattr(execution_filter, "time", "") or "")
         if raw:
-            since = datetime.strptime(raw, "%Y%m%d-%H:%M:%S").replace(tzinfo=UTC)
+            since = datetime.strptime(raw, FILTER_TIME_FORMAT).replace(
+                tzinfo=self.execution_time_zone
+            )
         with self._lock:
             for execution in self._run(self.sim.executions()):
                 stamp = execution.timestamp.astimezone(UTC).replace(microsecond=0)
@@ -561,6 +595,7 @@ class FakeGateway:
 
     def cancel_order(self, client: FakeEClient, adapter_id: int) -> None:
         with self._lock:
+            self.cancel_requests.append((int(client.client_id or 0), adapter_id))
             sim_id = self._sim_of.get(adapter_id)
             if sim_id is None or self._client_of.get(sim_id) != client.client_id:
                 # IB: unknown, or another client's order -> "not found" (assumed, verify at K4).
@@ -572,23 +607,25 @@ class FakeGateway:
             if not result.requested:
                 self._error(client, adapter_id, CODE_CANNOT_CANCEL, "Order cannot be cancelled")
                 return
-            status = (
-                "Cancelled" if result.lifecycle is OrderLifecycle.CANCELLED else "PendingCancel"
-            )
-            client.emit(
-                "orderStatus",
-                adapter_id,
-                status,
-                0.0,
-                0.0,
-                0.0,
-                0,
-                0,
-                0.0,
-                int(client.client_id or 0),
-                "",
-                0.0,
-            )
+            # IB reports PendingCancel before Cancelled (assumed, verify at K4; fable r1 P3-2).
+            statuses = ["PendingCancel"]
+            if result.lifecycle is OrderLifecycle.CANCELLED:
+                statuses.append("Cancelled")
+            for status in statuses:
+                client.emit(
+                    "orderStatus",
+                    adapter_id,
+                    status,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0,
+                    0,
+                    0.0,
+                    int(client.client_id or 0),
+                    "",
+                    0.0,
+                )
 
     # test controls -------------------------------------------------------------------------------
     def add_working_order(

@@ -48,6 +48,7 @@ from chronos.domain.models import OrderPreview, OrderSubmission
 from tests.contract import conftest as contract_conftest
 from tests.contract.conftest import (
     DEFERRED,
+    FAKE_PINNED,
     FINDINGS,
     FOREIGN_ACCOUNT,
     KNOWN_VIOLATIONS,
@@ -563,11 +564,23 @@ def test_the_real_adapter_runs_only_over_the_fake_gateway_with_its_submits_defer
 
     present = importlib.util.find_spec("tests.support.fake_ibapi") is not None
     assert ("official_fake" in REGISTRY) is present
-    assert set(DEFERRED) <= set(REGISTRY) | {"official_fake"}
     if present:
+        assert set(DEFERRED) <= set(REGISTRY)
         harness = REGISTRY["official_fake"]
         assert harness.submit_deferred == DEFERRED["official_fake"]
         assert harness.cause_fill is not None  # wired, used only once S2 runs the fill case
+
+
+def test_every_fake_pinned_label_names_a_real_official_fake_case() -> None:
+    """A label is only honest if it names a case that runs for that harness."""
+
+    cases = {
+        name for name, item in globals().items() if name.startswith("test_") and callable(item)
+    }
+    for (harness_name, case), note in FAKE_PINNED.items():
+        assert harness_name in REGISTRY, harness_name
+        assert case in cases, case
+        assert "K4" in note, case
 
 
 async def test_each_case_runs_against_the_loader_its_harness_needs(harness: BrokerHarness) -> None:

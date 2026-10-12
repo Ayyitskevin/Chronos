@@ -176,6 +176,20 @@ NOT_RUN: dict[str, str] = {
 #: The FakeGateway harness's module (registered when present).
 _FAKE_GATEWAY_MODULE = "tests.support.fake_ibapi"
 
+#: (harness, case) -> what a PASS there proves: the adapter against the FakeGateway's own
+#: convention only, not against IB (fable r1 P2-1). Labels, not xfails; each names a K4 check.
+FAKE_PINNED: dict[tuple[str, str], str] = {
+    ("official_fake", "test_executions_since_is_an_inclusive_lower_bound"): (
+        "proves the adapter against the fake's UTC execution-time convention only; candidate "
+        "S1-F3 (K4): the zone of Execution.time and of the ExecutionFilter bound on a real "
+        "gateway (the adapter assumes UTC on both sides)"
+    ),
+    ("official_fake", "test_cancel_of_an_unknown_order_never_reports_cancelled"): (
+        "proves the error flight under the fake's error-callback shapes only; R-ARITY (K4, "
+        "first check): the installed ibapi's EWrapper.error signature"
+    ),
+}
+
 #: Harness name -> why its submit path is deferred (declaration, not a skip).
 DEFERRED: dict[str, str] = {
     "official_fake": (
@@ -329,8 +343,10 @@ FINDINGS: dict[str, str] = {
         "OfficialIBKRBroker.cancel_order sends a cancel for an order Chronos does not own and "
         "reports requested=True (official_ibkr.py:2398-2430: no ownership or account check; "
         "SURVEY R-3). Over the FakeGateway the venue refuses another client's cancel (10147), so "
-        "nothing changes, but the adapter claims a request it should never have made. RED "
-        "(order plane): a src fix is the owner's, not S1b's."
+        "nothing changes, but the adapter claims a request it should never have made; with "
+        "ib_client_id 0 (IB's master client) a real gateway WOULD cancel another client's "
+        "order, so never run the adapter as client 0 (fable r1 P3-3). RED (order plane): a src "
+        "fix is the owner's, not S1b's. Its send is pinned in tests/unit/test_fake_ibapi.py."
     ),
     "U1-F4": (
         "FakeBroker does not enforce the pre-send conditions the real adapter does "

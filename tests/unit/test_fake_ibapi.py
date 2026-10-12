@@ -16,9 +16,10 @@ import sys
 import threading
 import time
 from collections.abc import Iterator
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 from tests.support import fake_ibapi
@@ -167,6 +168,62 @@ async def test_executions_since_is_inclusive_at_second_resolution(
     assert after == ()
 
 
+async def test_the_fakes_time_convention_is_what_the_adapter_parses_and_writes(
+    gateway: fake_ibapi.FakeGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """fable r1 P2-1: the fake's execution times and filter bound, through the ADAPTER's code."""
+
+    (sim_execution,) = gateway._run(gateway.sim.executions())
+    rendered = gateway._execution_of(sim_execution).time
+    assert official_module._parse_execution_time(rendered) == sim_execution.timestamp.replace(
+        microsecond=0
+    )
+
+    seen: list[str] = []
+    original = gateway.executions
+
+    def capture(client: Any, req_id: int, execution_filter: Any) -> None:
+        seen.append(execution_filter.time)
+        original(client, req_id, execution_filter)
+
+    monkeypatch.setattr(gateway, "executions", capture)
+    since = sim_execution.timestamp.replace(microsecond=0)
+    broker = _broker()
+    await broker.connect()
+    try:
+        await broker.executions(since=since)
+    finally:
+        await broker.disconnect()
+    (bound,) = seen
+    parsed = datetime.strptime(bound, fake_ibapi.FILTER_TIME_FORMAT).replace(
+        tzinfo=fake_ibapi.EXECUTION_TIME_ZONE
+    )
+    assert parsed == since
+
+
+async def test_login_zone_execution_times_would_shift_the_adapters_instants(
+    gateway: fake_ibapi.FakeGateway,
+) -> None:
+    """Negative control for the convention, and the shape of candidate S1-F3 (a K4 check).
+
+    If a real gateway renders tz-less times in the login zone (America/New_York, EDT in
+    October), the adapter reads them as UTC (four hours early), and its UTC filter bound is read
+    by the gateway in the login zone (four hours late), so ``since`` loses the fill."""
+
+    gateway.execution_time_zone = ZoneInfo("America/New_York")
+    (sim_execution,) = gateway._run(gateway.sim.executions())
+    truth = sim_execution.timestamp.replace(microsecond=0)
+    broker = _broker()
+    await broker.connect()
+    try:
+        (read,) = await broker.executions()
+        since_truth = await broker.executions(since=truth)
+    finally:
+        await broker.disconnect()
+    assert truth - read.timestamp == timedelta(hours=4)
+    assert since_truth == ()
+
+
 # --- previews and cancels ---------------------------------------------------------------------
 
 
@@ -189,6 +246,10 @@ async def test_a_preview_is_priced_by_the_sim_and_changes_nothing(
 
 
 async def test_cancelling_the_owned_order_cancels_it(gateway: fake_ibapi.FakeGateway) -> None:
+    """The fake reports PendingCancel then Cancelled; the adapter's first ack wins (fail-closed).
+
+    Also the positive control for the wire record the S1-F1 mechanism pin relies on."""
+
     broker = _broker()
     await broker.connect()
     try:
@@ -196,24 +257,47 @@ async def test_cancelling_the_owned_order_cancels_it(gateway: fake_ibapi.FakeGat
         orders = await broker.open_orders()
     finally:
         await broker.disconnect()
-    assert (result.requested, result.lifecycle) == (True, OrderLifecycle.CANCELLED)
+    assert (result.requested, result.lifecycle) == (True, OrderLifecycle.CANCEL_PENDING)
     assert fake_ibapi.OWNED_ID not in {o.broker_order_id for o in orders}
+    assert gateway.cancel_requests == [(fake_ibapi.CLIENT_ID, fake_ibapi.OWNED_ID)]
 
 
 async def test_another_clients_order_is_not_cancelled_by_the_gateway(
     gateway: fake_ibapi.FakeGateway,
 ) -> None:
-    """IB refuses a cancel of another client's order (10147); the adapter still says requested."""
+    """The fake's venue refuses a cancel of another client's order (10147) and keeps it.
+
+    Venue facts only: the adapter's side of this exchange is S1-F1 (the contract case pins its
+    result, the mechanism pin below pins its send)."""
 
     broker = _broker()
     await broker.connect()
     try:
-        result = await broker.cancel_order(fake_ibapi.FOREIGN_ID)
+        await broker.cancel_order(fake_ibapi.FOREIGN_ID)
         orders = await broker.open_orders()
     finally:
         await broker.disconnect()
     assert fake_ibapi.FOREIGN_ID in {o.broker_order_id for o in orders}  # the venue kept it
-    assert (result.requested, result.lifecycle) == (True, OrderLifecycle.CANCEL_PENDING)  # R-3
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason=(
+        "S1-F1 (mechanism): OfficialIBKRBroker.cancel_order puts a cancel for an order Chronos "
+        "does not own on the wire (official_ibkr.py:2398-2408) before any ownership check. "
+        "Deleting only that send makes this XPASS, so the pin covers the send itself, not just "
+        "the requested=True result (Daybreak r1 P2-1). RED (order plane); not fixed in S1b."
+    ),
+)
+async def test_a_foreign_cancel_never_reaches_the_wire(gateway: fake_ibapi.FakeGateway) -> None:
+    broker = _broker()
+    await broker.connect()
+    try:
+        await broker.cancel_order(fake_ibapi.FOREIGN_ID)
+    finally:
+        await broker.disconnect()
+    assert gateway.cancel_requests == []
 
 
 @pytest.mark.parametrize("style", ["plain", "json", "timestamped"])
