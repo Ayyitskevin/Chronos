@@ -20,6 +20,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from tests.unit.test_official_ibkr import NOW, _FakeContract, _FakeOrder
 
 from chronos.broker import official_ibkr as official_ibkr_module
 from chronos.broker.base import BrokerRefusedBeforeSend
@@ -30,7 +31,6 @@ from chronos.broker.request_registry import RequestRegistry
 from chronos.domain.enums import IBEnvironment, OrderIntent, OrderLifecycle, OrderSide
 from chronos.domain.models import CryptoContract, OrderRequest
 from chronos.orders.kill_switch import LiveKillSwitch
-from tests.unit.test_official_ibkr import NOW, _FakeContract, _FakeOrder
 
 _CLIENT = 17
 _ACCOUNT = "DU7654321"
