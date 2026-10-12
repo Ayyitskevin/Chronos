@@ -79,6 +79,7 @@ from chronos.orders.evidence import BrokerRiskEvidenceProvider
 from chronos.orders.intent import WheelOrderIntent, build_stock_intent
 from chronos.orders.kill_switch import LiveKillSwitch
 from chronos.orders.mutations import OrderCancellationService, OrderModificationService
+from chronos.orders.ownership import PersistedOrderOwnershipLedger
 from chronos.orders.preview import OrderPreviewService
 from chronos.orders.reconciliation_readiness import ReconciliationReadiness
 from chronos.orders.reconciliation_recovery import OrderRestartReconciler
@@ -167,6 +168,28 @@ KNOWN_DIFFERENCES: dict[tuple[str, str], tuple[str, type[BaseException], str]] =
         "(official_ibkr.py: 'not implemented for the official adapter in M7; cancel and "
         "re-submit'); U1's contract pins that refusal. SimBroker's opt-in replace has no "
         "counterpart in the adapter, so this sim-only capability case cannot pass there.",
+    ),
+    ("official_fake", "test_cancel_runs_through_cancel_pending_and_the_sim_drops_the_order"): (
+        "U0-D1",
+        AssertionError,
+        "Restack interaction (U-0: S2 on S1b r0 -> the S1b r1 / S1-F1 chain), not an adapter "
+        "failure. S1b r1's FakeGateway answers an owned cancel with PendingCancel THEN "
+        "Cancelled (fable r1 P3-2); the real adapter's cancel result is the FIRST ack, so it "
+        "reports CANCEL_PENDING where SimBroker reports CANCELLED at once. The cancel itself "
+        "now reaches the venue (the persisted ownership ledger is wired). Lifting this needs an "
+        "assertion change in S2's cancel cases (accept CANCEL_PENDING, then settle to "
+        "CANCELLED), which is S2's author's or the owner's call, not this restack's.",
+    ),
+    ("official_fake", "test_cancel_after_a_partial_fill_keeps_the_fill_and_ends_terminal"): (
+        "U0-D1",
+        AssertionError,
+        "Restack interaction (U-0: S2 on S1b r0 -> the S1b r1 / S1-F1 chain), not an adapter "
+        "failure. S1b r1's FakeGateway answers an owned cancel with PendingCancel THEN "
+        "Cancelled (fable r1 P3-2); the real adapter's cancel result is the FIRST ack, so it "
+        "reports CANCEL_PENDING where SimBroker reports CANCELLED at once. The cancel itself "
+        "now reaches the venue (the persisted ownership ledger is wired). Lifting this needs an "
+        "assertion change in S2's cancel cases (accept CANCEL_PENDING, then settle to "
+        "CANCELLED), which is S2's author's or the owner's call, not this restack's.",
     ),
 }
 
@@ -310,6 +333,11 @@ class _SimHarness:
         self.sim_kill_switch: _KillSwitch | None = None
         self.kill_switch: LiveKillSwitch | None = None
         self.gateway: _LifecycleGateway | None = None
+        # Built before the broker: the official adapter's cancel-ownership ledger (S1-F1) reads
+        # this database's persisted intents and tracker (U-0 restack onto the S1-F1 chain).
+        self.db = Database("sqlite:///:memory:")
+        self.db.initialize()
+        self.db.bind_scope(broker_mode="ibkr", environment="paper", account_id=self.account)
         if self.kind == "sim":
             self.settings = settings or paper_settings()
             self.sim_kill_switch = _KillSwitch(engaged=True) if kill_switch_engaged else None
@@ -350,10 +378,11 @@ class _SimHarness:
                 self.settings,
                 live_kill_switch=self.kill_switch,
                 on_connection_uncertain=self.readiness.invalidate,
+                order_ownership=PersistedOrderOwnershipLedger(
+                    OrderIntentRepository(self.db.sessions),
+                    OrderTrackerRepository(self.db.sessions),
+                ),
             )
-        self.db = Database("sqlite:///:memory:")
-        self.db.initialize()
-        self.db.bind_scope(broker_mode="ibkr", environment="paper", account_id=self.account)
         self.connection = BrokerConnectionManager(self.broker, readiness=self.readiness)
         self.connection.start()
         self.connection.run(self.broker.connect())
