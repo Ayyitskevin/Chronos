@@ -144,6 +144,7 @@ async def test_another_clients_manual_order_is_not_cancelled_either(
     finally:
         await broker.disconnect()
     assert wire.cancels == []
+    assert gateway.cancel_requests == []  # the fake's own record: nothing reached the gateway
     assert (result.requested, "not a Chronos order" in result.message) == (False, True)
     assert fake_ibapi.FOREIGN_ID in {order.broker_order_id for order in book}
     assert gateway.errors_sent == []  # the venue was never asked, so it never had to refuse
@@ -159,6 +160,7 @@ async def test_an_unknown_id_is_refused_without_a_send(
     finally:
         await broker.disconnect()
     assert wire.cancels == []
+    assert gateway.cancel_requests == []  # the fake's own record: nothing reached the gateway
     assert (result.requested, result.lifecycle) == (False, OrderLifecycle.REJECTED)
     assert "no such open order" in result.message
     assert gateway.errors_sent == []
@@ -180,8 +182,13 @@ async def test_a_chronos_order_this_process_never_submitted_is_still_cancelled_v
     finally:
         await broker.disconnect()
     assert wire.cancels == [fake_ibapi.OWNED_ID]
-    assert (result.requested, result.lifecycle) == (True, OrderLifecycle.CANCELLED)
-    assert fake_ibapi.OWNED_ID not in {order.broker_order_id for order in book}
+    assert gateway.cancel_requests == [(fake_ibapi.CLIENT_ID, fake_ibapi.OWNED_ID)]
+    # S1b r1 streams PendingCancel before Cancelled and the adapter returns on the first
+    # status, so the immediate lifecycle is CANCEL_PENDING (the contract accepts either)
+    assert result.requested is True
+    assert result.lifecycle in {OrderLifecycle.CANCELLED, OrderLifecycle.CANCEL_PENDING}
+    if result.lifecycle is OrderLifecycle.CANCELLED:
+        assert fake_ibapi.OWNED_ID not in {order.broker_order_id for order in book}
 
 
 async def test_an_order_this_process_submitted_is_cancelled_without_reading_the_book(
@@ -217,6 +224,7 @@ async def test_if_the_venue_book_cannot_be_read_the_cancel_is_refused_before_sen
     finally:
         await broker.disconnect()
     assert wire.cancels == []
+    assert gateway.cancel_requests == []  # the fake's own record: nothing reached the gateway
 
 
 async def test_a_chronos_looking_order_on_another_account_is_not_ours(
@@ -237,6 +245,7 @@ async def test_a_chronos_looking_order_on_another_account_is_not_ours(
     finally:
         await broker.disconnect()
     assert wire.cancels == []
+    assert gateway.cancel_requests == []  # the fake's own record: nothing reached the gateway
     assert result.requested is False
 
 
