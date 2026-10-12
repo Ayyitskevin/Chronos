@@ -19,6 +19,7 @@ Settings object of the read-only submit case.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import threading
 import time
@@ -26,9 +27,11 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 import pytest
+from tests.integration.test_sim_order_lifecycle import CROSSING, _ref, _Venue, harness
 from tests.support import fake_ibapi
 from tests.support.order_fakes import option_contract
 
@@ -65,6 +68,8 @@ def gateway(monkeypatch: pytest.MonkeyPatch) -> Iterator[fake_ibapi.FakeGateway]
         yield seeded
     finally:
         seeded.release_readers()  # a stuck reader must never outlive its test
+    # A callback that raised on a reader thread is recorded, never lost (reader build-ua P3-2).
+    assert seeded.callback_errors == []
 
 
 class _SpyReadiness:
@@ -117,6 +122,17 @@ def _connects(gateway: fake_ibapi.FakeGateway) -> list[int | None]:
 
 def _settings(**update: Any) -> Settings:
     return fake_ibapi.official_settings().model_copy(update=update)
+
+
+def _shows_an_account_id(text: str) -> bool:
+    return fake_ibapi.ACCOUNT in text or OTHER_PAPER in text
+
+
+def test_the_no_account_id_check_can_fail() -> None:
+    """Positive control for the wrong-account case's disclosure assertion (reader P3-4)."""
+
+    assert _shows_an_account_id(f"managed ({OTHER_PAPER},) vs {fake_ibapi.ACCOUNT}")
+    assert not _shows_an_account_id("connected session does not manage the configured account")
 
 
 # --- 1. connect, and the refusals that never reach the gateway ------------------------------
@@ -200,6 +216,9 @@ def test_disconnect_invalidates_before_the_broker_call_and_ends_the_reader(
 def test_a_dropped_session_fails_closed_and_is_not_reconnected_automatically(
     gateway: fake_ibapi.FakeGateway,
 ) -> None:
+    """The fail-closed state after a drop. Its "no second connect" check is a SMOKE only (a
+    0.2 s window); the structural pin is ``test_no_reconnect_loop_exists_in_the_broker_plane``."""
+
     readiness = _SpyReadiness()
     broker = _hooked(readiness)
     manager = BrokerConnectionManager(broker, readiness=readiness)
@@ -314,7 +333,7 @@ def test_a_session_that_does_not_manage_the_configured_account_is_refused(
         asyncio.run(broker.connect())
     message = str(raised.value)
     assert "managed count=1" in message
-    assert fake_ibapi.ACCOUNT not in message and OTHER_PAPER not in message  # ids never shown
+    assert not _shows_an_account_id(message)  # ids never shown
     status = asyncio.run(broker.connection_status())
     assert (status.connected, status.account_id) == (False, None)
     assert not _reader_alive()
@@ -378,6 +397,23 @@ def test_a_read_only_gateway_rejects_a_submit_and_the_venue_is_unchanged(
     assert gateway.sim.sent_order_count == 2
 
 
+def test_an_ordinary_submit_does_reach_the_venue(gateway: fake_ibapi.FakeGateway) -> None:
+    """Positive control for the read-only cases' "the seed only" count (reader P3-4): the same
+    submit against a gateway that is NOT read-only makes the venue count 3."""
+
+    transmit = _settings(allow_order_transmit=True, ib_account_allowlist=(fake_ibapi.ACCOUNT,))
+    broker = _hooked(_SpyReadiness(), transmit)
+    asyncio.run(broker.connect())
+    try:
+        submission = asyncio.run(
+            broker.submit_order(_order_request(transmit=True), send_guard=_AllowGuard())
+        )
+    finally:
+        asyncio.run(broker.disconnect())
+    assert submission.lifecycle is not OrderLifecycle.REJECTED
+    assert gateway.sim.sent_order_count == 3
+
+
 # --- 6. the managed-account set changes mid-session ---------------------------------------
 
 
@@ -424,7 +460,9 @@ def test_a_hookless_adapter_stores_a_changed_managed_set_without_any_latch(
     strict=True,
     raises=AssertionError,
     reason=(
-        "B1R-F3: a HOOKLESS OfficialIBKRBroker (the capture harness, capture_readonly.py:296-297) "
+        "B1R-F3 (a REQUIREMENT GAP, not a defect against the adapter's stated contract, which "
+        "reports the configured id while it is still managed, official_ibkr.py:1043-1067): a "
+        "HOOKLESS OfficialIBKRBroker (the capture harness, capture_readonly.py:296-297) "
         "keeps reporting the configured account after its managed-account set grows "
         "(callbacks.py:346-364 stores the change; the hookless invalidation is a no-op, "
         ":414-417), so a session whose scope drifted still reads as the B1 account. Fail-closed "
@@ -490,7 +528,9 @@ def test_a_benign_farm_notice_is_recorded_and_does_not_drop_readiness(
     strict=True,
     raises=AssertionError,
     reason=(
-        "B1R-F2 (R-ARITY, ASSUMED-IB): if the installed ibapi calls error(reqId, errorTime:int, "
+        "B1R-F2 (CONDITIONAL: R-ARITY, ASSUMED-IB; flips to a real finding or a non-issue at K4 "
+        "#1, or earlier by U-d's offline inspect.signature check): if the installed ibapi calls "
+        "error(reqId, errorTime:int, "
         "errorCode, errorString, advancedOrderRejectJson), the adapter's error(*args) "
         "(official_ibkr.py:499-507) strips nothing (the first value is an int) and reads the "
         "TIME as the code, so a 1100 connection loss never drops readiness: fail-open. Whether "
@@ -526,3 +566,181 @@ def test_a_reader_that_will_not_stop_locks_reconnect(gateway: fake_ibapi.FakeGat
         asyncio.run(broker.connect())  # the stale session is retained, never silently replaced
     assert len(_connects(gateway)) == 1
     assert not asyncio.run(broker.connection_status()).connected
+
+
+# --- 9. the fake itself must fail a test, never hang it (reader build-ua P3-2) --------------
+
+
+def test_a_raising_callback_fails_the_test_instead_of_hanging(
+    gateway: fake_ibapi.FakeGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A callback that raises on the reader thread is recorded, the reader survives, and the
+    next dispatch barrier fails at once. Before r1 it killed the reader and every later
+    ``wait_dispatched`` blocked forever (the reader's scope-hook mutant ran for 12 minutes)."""
+
+    broker = _hooked(_SpyReadiness())
+    asyncio.run(broker.connect())
+
+    def broken(accounts_csv: str) -> None:
+        raise TypeError("an adapter callback bug")
+
+    monkeypatch.setattr(broker.bridge, "on_managed_accounts", broken)
+    started = time.monotonic()
+    try:
+        with pytest.raises(AssertionError, match="callback raised"):
+            gateway.change_managed_accounts((fake_ibapi.ACCOUNT, OTHER_PAPER))
+        assert _reader_alive()  # the reader survived the raising callback
+    finally:
+        asyncio.run(broker.disconnect())
+        gateway.callback_errors.clear()  # this test raised one on purpose
+    assert time.monotonic() - started < 5
+
+
+def test_a_dispatch_barrier_fails_after_its_bound(gateway: fake_ibapi.FakeGateway) -> None:
+    """``wait_dispatched`` is bounded: a reader that never drains fails the test."""
+
+    client = fake_ibapi.FakeEClient.bound_to(gateway)(fake_ibapi.RecordingWrapper())
+    client.emit("currentTime", 1)  # queued, and no reader thread is running to dispatch it
+    started = time.monotonic()
+    with pytest.raises(AssertionError, match="not dispatched within"):
+        client.wait_dispatched(timeout=0.2)
+    assert time.monotonic() - started < 2
+
+
+# --- 10. no automatic reconnect, structurally (reader build-ua P3-3) ------------------------
+
+_REPO = Path(__file__).resolve().parents[2]
+_BROKER_PLANE = (
+    _REPO / "src" / "chronos" / "broker",
+    _REPO / "src" / "chronos" / "runtime.py",
+    _REPO / "src" / "chronos" / "service",
+)
+
+
+_CONNECT_METHODS = frozenset({"connect", "connectAsync"})
+
+
+def _is_event_subscription(receiver: ast.expr) -> bool:
+    """``errorEvent.connect(handler)`` subscribes a callback (eventkit); it opens nothing."""
+
+    name = receiver.attr if isinstance(receiver, ast.Attribute) else getattr(receiver, "id", "")
+    return str(name).lower().endswith("event")
+
+
+def _connects_inside_a_loop(source: str) -> list[int]:
+    """Lines of every session ``<x>.connect(...)``/``connectAsync(...)`` inside a loop body
+    (event subscriptions excluded)."""
+
+    found: list[int] = []
+
+    def visit(node: ast.AST, in_loop: bool) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda):
+                visit(child, False)  # a nested function body is not this loop's body
+                continue
+            looping = in_loop or isinstance(child, ast.For | ast.AsyncFor | ast.While)
+            if (
+                looping
+                and isinstance(child, ast.Call)
+                and isinstance(child.func, ast.Attribute)
+                and child.func.attr in _CONNECT_METHODS
+                and not _is_event_subscription(child.func.value)
+            ):
+                found.append(child.lineno)
+            visit(child, looping)
+
+    visit(ast.parse(source), False)
+    return found
+
+
+def test_the_reconnect_loop_scanner_finds_a_loop_around_connect() -> None:
+    """Positive control: the scanner flags the shape it exists to forbid."""
+
+    flagged = (
+        "async def f(broker):\n    while True:\n        await broker.connect()\n"
+        "def g(m):\n    for _ in range(3):\n        m.connect()\n"
+        "async def k(ib):\n    while True:\n        await ib.connectAsync()\n"
+    )
+    clean = (
+        "def h(m):\n    m.connect()\n"
+        "    for x in range(2):\n        def inner():\n            m.connect()\n"
+        "    for t in range(2):\n        t.updateEvent.connect(print)\n"
+    )
+    assert _connects_inside_a_loop(flagged) == [3, 6, 9]
+    assert _connects_inside_a_loop(clean) == []
+
+
+def test_no_reconnect_loop_exists_in_the_broker_plane() -> None:
+    """I5 stated structurally: no ``.connect()`` call inside a loop anywhere in the broker
+    package, the runtime or the service package. Recovery after a drop is an operator restart
+    (docs/IBKR_RUNBOOK.md §6); a future retry loop must change this pin on purpose."""
+
+    offenders: list[str] = []
+    for root in _BROKER_PLANE:
+        files = [root] if root.is_file() else sorted(root.rglob("*.py"))
+        for path in files:
+            for line in _connects_inside_a_loop(path.read_text(encoding="utf-8")):
+                offenders.append(f"{path.relative_to(_REPO)}:{line}")
+    assert files  # the scan read something
+    assert offenders == []
+
+
+# --- 11. B1R-F4: a successful two-step cancel never settles (reader build-ua P2-1) ----------
+
+
+def _two_step_cancel(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[Any]:
+    """S2's own lifecycle harness on the official venue: buy, confirm, submit, then cancel
+    through the real OrderCancellationService. The fake answers PendingCancel THEN Cancelled
+    (S1b r1; ASSUMED-IB, K4 #7)."""
+
+    venue = _Venue(kind="official_fake", monkeypatch=monkeypatch, tmp_path=tmp_path)
+    with harness(venue) as h:
+        intent = h.buy(ref=_ref("A"), intent_id="intent-1")
+        h.confirm(intent)
+        if not h.submit(intent).submitted:
+            raise RuntimeError("precondition: the submit did not go out")
+        result = h.service.cancel("intent-1", now=h.now)
+        yield h, result
+
+
+def test_a_two_step_cancel_reaches_the_venue_and_the_order_is_gone(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The sibling of B1R-F4, with S2's first-ack assertions relaxed: everything up to the
+    reconciliation is right on the official venue."""
+
+    for h, result in _two_step_cancel(monkeypatch, tmp_path):
+        assert result.requested is True
+        assert result.lifecycle in {OrderLifecycle.CANCEL_PENDING, OrderLifecycle.CANCELLED}
+        assert h.sim_open_order_ids() == set()  # the venue dropped the order
+        assert h.venue_lifecycle(h.first_id) is OrderLifecycle.CANCELLED
+        h.bar(**CROSSING)
+        assert h.connection.run(h.broker.executions()) == ()  # a cancelled order never fills
+        assert h.sim_position() == 0
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason=(
+        "B1R-F4: with a gateway that answers a cancel in two steps (PendingCancel, then "
+        "Cancelled; ASSUMED-IB, K4 #7), a SUCCESSFUL cancel never settles. "
+        "OrderCancellationService records CANCEL_PENDING before the send and moves to CANCELLED "
+        "only if the adapter's result is CANCELLED in the same call (orders/mutations.py:154-188); "
+        "the official adapter's result is the FIRST ack (PendingCancel -> CANCEL_PENDING). The "
+        "later Cancelled orderStatus is cached in the bridge (callbacks.py order_statuses) but "
+        "nothing feeds it to the tracker, and restart reconciliation does not settle an order "
+        "from its absence in the open orders (resolve_from_broker_evidence returns None for "
+        "absence, orders/reconciliation_recovery.py:238-246, by design). So the intent stays "
+        "CANCEL_PENDING, which is 'remaining active' and blocks new openings. Not exposed on B1's "
+        "read-only sessions (they never cancel); it bites at paper transmission. Same stranded "
+        "state as the Q3 crash window; owner decision. No src fix here."
+    ),
+)
+def test_a_two_step_cancel_settles_after_reconciliation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    for h, _result in _two_step_cancel(monkeypatch, tmp_path):
+        if h.sim_open_order_ids() != set():  # preconditions raise, never AssertionError
+            raise RuntimeError("precondition: the venue still holds the order")
+        assert h.service.reconcile_on_restart_report(now=h.now).remaining_active == ()

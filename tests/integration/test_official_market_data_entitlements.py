@@ -261,8 +261,9 @@ async def test_a_snapshot_with_no_quality_report_reads_unknown(
     strict=True,
     raises=AssertionError,
     reason=(
-        "B1R-F4: a snapshot that ends (tickSnapshotEnd) with a LIVE quality report and NO price "
-        "ticks comes back as a LIVE quote whose bid/ask/last/close are all None "
+        "B1R-F5 (B1R-F4 in build-ub; renumbered in build-ua-r1, which gives F4 to the "
+        "two-step cancel): a snapshot that ends (tickSnapshotEnd) with a LIVE quality report "
+        "and NO price ticks comes back as a LIVE quote whose bid/ask/last/close are all None "
         "(official_ibkr.py:2003-2063 builds it from whatever state arrived). The quality says "
         "LIVE; the data is absent. Fail-closed would be MarketDataUnavailableError (or a "
         "non-LIVE quality). The smoke's own any-value check would catch it there; other callers "

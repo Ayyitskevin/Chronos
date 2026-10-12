@@ -56,6 +56,7 @@ from __future__ import annotations
 import queue
 import socket
 import threading
+import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -113,6 +114,10 @@ EXECUTION_TIME_FORMAT = "%Y%m%d %H:%M:%S"
 FILTER_TIME_FORMAT = "%Y%m%d-%H:%M:%S"
 
 _STOP = object()
+
+#: How long ``wait_dispatched`` waits for the reader thread before failing the test (it used to
+#: block forever when a callback raised and killed the reader: reader build-ua P3-2).
+DISPATCH_TIMEOUT_S = 10.0
 
 
 # --- the stub ibapi objects (only the attributes the adapter reads or writes) ------------------
@@ -251,7 +256,10 @@ class FakeEClient:
                         self.gateway.readers_released.wait()  # U-a: a reader that won't stop
                     return
                 name, args = item
-                getattr(self.wrapper, name)(*args)
+                try:
+                    getattr(self.wrapper, name)(*args)
+                except Exception as error:  # the real ibapi reader survives a raising callback
+                    self.gateway.callback_errors.append(f"{name}: {type(error).__name__}: {error}")
             finally:
                 self._queue.task_done()  # only AFTER the callback returned (reader P2-1a)
 
@@ -270,10 +278,25 @@ class FakeEClient:
     def emit(self, name: str, *args: Any) -> None:
         self._queue.put((name, args))
 
-    def wait_dispatched(self) -> None:
-        """Block until every callback queued so far has been DISPATCHED (not merely dequeued)."""
+    def wait_dispatched(self, timeout: float = DISPATCH_TIMEOUT_S) -> None:
+        """Block until every callback queued so far has been DISPATCHED (not merely dequeued).
 
-        self._queue.join()
+        Fails the test, instead of hanging it, when the callbacks are not all dispatched within
+        ``timeout`` or when any callback raised (the reader records and survives it).
+        """
+
+        deadline = time.monotonic() + timeout
+        with self._queue.all_tasks_done:
+            while self._queue.unfinished_tasks:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise AssertionError(
+                        f"FakeGateway callbacks were not dispatched within {timeout:.0f}s "
+                        "(is the reader thread alive?)"
+                    )
+                self._queue.all_tasks_done.wait(remaining)
+        if self.gateway.callback_errors:
+            raise AssertionError(f"a FakeGateway callback raised: {self.gateway.callback_errors}")
 
     # requests -------------------------------------------------------------------------------
     def reqMarketDataType(self, marketDataType: int) -> None:
@@ -395,6 +418,8 @@ class FakeGateway:
         self.readers_released = threading.Event()
         #: every EClient call that reached this gateway, in order, as (client id, method)
         self.transcript: list[tuple[int | None, str]] = []
+        #: every exception an adapter callback raised on a reader thread (recorded, not lost)
+        self.callback_errors: list[str] = []
         # --- B1 U-b market-data knobs (all default-off) -----------------------------------
         #: con_id -> how a snapshot reqMktData is answered (default: type 1 with prices):
         #:   int < 100: that marketDataType, then prices, then tickSnapshotEnd;
