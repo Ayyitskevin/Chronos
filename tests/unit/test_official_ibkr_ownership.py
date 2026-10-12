@@ -265,6 +265,108 @@ async def test_a_refused_foreign_cancel_does_not_block_a_later_owned_cancel(
     assert wire.cancels == [fake_ibapi.OWNED_ID]
 
 
+# --- r1: the reviews on 8317d4b (Daybreak P1-1, fable P2-1) -----------------------------------
+
+
+async def test_a_manual_order_with_a_forged_chronos_ref_is_not_cancelled(
+    gateway: fake_ibapi.FakeGateway, wire: _Wire
+) -> None:
+    """Daybreak P1-1, probe 1: client 0 + our account + a forged ``CHR-`` ref reached cancelOrder.
+
+    r1's interim tightening (NOT a proof): the venue row's clientId must be the adapter's.
+    """
+
+    spoof = gateway.add_working_order(
+        ref="CHR-SPOOF-MANUAL", symbol="MSFT", quantity="1", limit="50.00", client_id=0
+    )
+    broker = _broker()
+    await broker.connect()
+    try:
+        result = await broker.cancel_order(spoof)
+    finally:
+        await broker.disconnect()
+    assert wire.cancels == []
+    assert gateway.cancel_requests == []
+    assert result.requested is False
+    assert gateway.sim.order_lifecycle(spoof) is not OrderLifecycle.CANCELLED
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason=(
+        "S1-F1 P1-1 (Daybreak) STILL OPEN: a same-account, SAME-CLIENT order carrying a forged "
+        "CHR- order_ref is accepted by the venue-book proof, which authenticates nothing "
+        "(orderRef is caller text). Closing it needs the durable ownership proof from the "
+        "persisted order book: an owner decision (DESIGN.md section 1, Q-P1). When it is "
+        "implemented this XPASSes strictly and the mark is lifted in that change."
+    ),
+)
+async def test_a_same_client_order_with_a_forged_chronos_ref_is_not_cancelled(
+    gateway: fake_ibapi.FakeGateway, wire: _Wire
+) -> None:
+    spoof = gateway.add_working_order(
+        ref="CHR-SPOOF-SAME-CLIENT",
+        symbol="MSFT",
+        quantity="1",
+        limit="50.00",
+        client_id=fake_ibapi.CLIENT_ID,
+    )
+    broker = _broker()
+    await broker.connect()
+    try:
+        result = await broker.cancel_order(spoof)
+    finally:
+        await broker.disconnect()
+    assert gateway.cancel_requests == [], "an order Chronos never submitted reached cancelOrder"
+    assert result.requested is False
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason=(
+        "S1-F1 P1-1 (Daybreak) STILL OPEN, the stale-id variant: the in-memory own-id set stores "
+        "a bare order id for the process lifetime and across reconnects, so a foreign "
+        "same-client order that reuses an old own id skips every proof. Needs the durable "
+        "proof (DESIGN.md section 1, Q-P1) or a decision on the set's reconnect semantics."
+    ),
+)
+async def test_a_foreign_order_reusing_an_old_own_id_is_not_cancelled(
+    gateway: fake_ibapi.FakeGateway, wire: _Wire
+) -> None:
+    foreign = gateway.add_working_order(
+        ref="NOT-OURS", symbol="MSFT", quantity="1", limit="50.00", client_id=fake_ibapi.CLIENT_ID
+    )
+    broker = _broker()
+    await broker.connect()
+    try:
+        broker.bridge.unsolicited.note_own_order(foreign)  # an earlier own order, id since reused
+        result = await broker.cancel_order(foreign)
+    finally:
+        await broker.disconnect()
+    assert gateway.cancel_requests == []
+    assert result.requested is False
+
+
+async def test_a_second_cancel_after_a_timed_out_ownership_read_is_still_a_typed_refusal(
+    gateway: fake_ibapi.FakeGateway, wire: _Wire, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """fable P2-1: the pending open-orders flight must not turn a retry into a bare RuntimeError."""
+
+    monkeypatch.setattr(official_module, "_REQUEST_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(fake_ibapi.FakeEClient, "reqAllOpenOrders", lambda self: None)  # silent
+    broker = _broker()
+    await broker.connect()
+    try:
+        for attempt in (1, 2, 3):
+            with pytest.raises(BrokerRefusedBeforeSend, match=r"ownership"):
+                await broker.cancel_order(fake_ibapi.OWNED_ID)
+            assert wire.cancels == [], f"attempt {attempt} sent a cancel"
+    finally:
+        await broker.disconnect()
+
+
 # --- S1-F2: only a real submit records ownership ----------------------------------------------
 
 
