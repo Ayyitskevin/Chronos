@@ -1,10 +1,11 @@
 """S1-F1 / S1-F2: the real ``OfficialIBKRBroker`` proves ownership before it cancels, and records
 ownership only where an order is really submitted.
 
-S1-F1 (Daybreak P1): ``cancel_order`` used to send ``cancelOrder`` for any id and report
-``requested=True``. It must now prove the order is Chronos-owned first (this process submitted
-it, OR the venue's open-order book lists it with a ``CHR-`` ``orderRef`` and the configured
-account) and otherwise refuse: ``requested=False``, no ``cancelOrder`` on the wire.
+S1-F1 (Daybreak P1; Kevin's Q-P1 decision, Option A): ``cancel_order`` sends ``cancelOrder`` only
+when the runtime-wired ``OrderOwnershipLedger`` proves, over the persisted order book, that the
+venue's open-order row is a Chronos order: an EXACT match on order ref, account, broker order id,
+client id and permId. Anything else (no ledger, an error, no match, a partial match) refuses:
+``requested=False`` or ``BrokerRefusedBeforeSend``, no ``cancelOrder`` on the wire.
 
 S1-F2 (Daybreak P1): ``start_order_ack`` used to note the id as own for submit, preview AND
 cancel, so any id the process merely tried to cancel or preview was classified own forever. Only
@@ -22,15 +23,22 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import replace
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from tests.support import fake_ibapi
+from tests.support.ownership_ledger import (
+    AnswerLedger,
+    ExactLedger,
+    RaisingLedger,
+    seeded_identity,
+)
 
 import chronos.broker.official_ibkr as official_module
-from chronos.broker.base import BrokerRefusedBeforeSend
+from chronos.broker.base import BrokerRefusedBeforeSend, BrokerSafetyError
 from chronos.broker.callbacks import CallbackBridge
 from chronos.broker.official_ibkr import OfficialIBKRBroker
 from chronos.broker.order_ids import OrderIdAllocator
@@ -83,8 +91,18 @@ def wire(monkeypatch: pytest.MonkeyPatch) -> _Wire:
     return seen
 
 
-def _broker(spy: _Spy | None = None) -> OfficialIBKRBroker:
-    return OfficialIBKRBroker(fake_ibapi.official_settings(), on_connection_uncertain=spy)
+def _broker(spy: _Spy | None = None, ledger: Any = None) -> OfficialIBKRBroker:
+    return OfficialIBKRBroker(
+        fake_ibapi.official_settings(), on_connection_uncertain=spy, order_ownership=ledger
+    )
+
+
+def _owned(gateway: fake_ibapi.FakeGateway) -> ExactLedger:
+    """A ledger that knows exactly the seed's Chronos order, as the venue reports it."""
+
+    return ExactLedger(
+        seeded_identity(gateway, fake_ibapi.OWNED_ID, client_id=fake_ibapi.CLIENT_ID)
+    )
 
 
 def _own_ids(broker: OfficialIBKRBroker) -> set[int]:
@@ -118,7 +136,7 @@ async def test_a_same_client_foreign_order_is_not_cancelled(
     other = gateway.add_working_order(
         ref="OTHER-1", symbol="MSFT", quantity="1", limit="50.00", client_id=fake_ibapi.CLIENT_ID
     )
-    broker = _broker()
+    broker = _broker(ledger=_owned(gateway))
     await broker.connect()
     try:
         result = await broker.cancel_order(other)
@@ -136,7 +154,7 @@ async def test_a_same_client_foreign_order_is_not_cancelled(
 async def test_another_clients_manual_order_is_not_cancelled_either(
     gateway: fake_ibapi.FakeGateway, wire: _Wire
 ) -> None:
-    broker = _broker()
+    broker = _broker(ledger=_owned(gateway))
     await broker.connect()
     try:
         result = await broker.cancel_order(fake_ibapi.FOREIGN_ID)
@@ -153,7 +171,7 @@ async def test_another_clients_manual_order_is_not_cancelled_either(
 async def test_an_unknown_id_is_refused_without_a_send(
     gateway: fake_ibapi.FakeGateway, wire: _Wire
 ) -> None:
-    broker = _broker()
+    broker = _broker(ledger=_owned(gateway))
     await broker.connect()
     try:
         result = await broker.cancel_order(424242)
@@ -174,7 +192,7 @@ async def test_a_chronos_order_this_process_never_submitted_is_still_cancelled_v
     Green before and after the fix: it pins that the proof does not over-refuse.
     """
 
-    broker = _broker()
+    broker = _broker(ledger=_owned(gateway))
     await broker.connect()
     try:
         result = await broker.cancel_order(fake_ibapi.OWNED_ID)
@@ -191,22 +209,23 @@ async def test_a_chronos_order_this_process_never_submitted_is_still_cancelled_v
         assert fake_ibapi.OWNED_ID not in {order.broker_order_id for order in book}
 
 
-async def test_an_order_this_process_submitted_is_cancelled_without_reading_the_book(
+async def test_the_own_id_set_no_longer_authorises_a_cancel(
     gateway: fake_ibapi.FakeGateway, wire: _Wire
 ) -> None:
-    """Path A: the own-id set is the fast path. Green before and after (a mutant that always
-    reads the book is caught by ``book_reads == 0``)."""
+    """Daybreak r1: the bare-id fast path is gone. An id in the in-memory set (the fill
+    classifier's memory) is not a proof: with a ledger that does not know the order, nothing is
+    sent, and the venue book WAS read to find out."""
 
-    broker = _broker()
+    broker = _broker(ledger=ExactLedger())
     await broker.connect()
     try:
         broker.bridge.unsolicited.note_own_order(fake_ibapi.OWNED_ID)  # as a real submit would
         result = await broker.cancel_order(fake_ibapi.OWNED_ID)
     finally:
         await broker.disconnect()
-    assert wire.book_reads == 0
-    assert wire.cancels == [fake_ibapi.OWNED_ID]
-    assert result.requested is True
+    assert wire.book_reads == 1
+    assert wire.cancels == [] and gateway.cancel_requests == []
+    assert result.requested is False
 
 
 async def test_if_the_venue_book_cannot_be_read_the_cancel_is_refused_before_send(
@@ -216,7 +235,7 @@ async def test_if_the_venue_book_cannot_be_read_the_cancel_is_refused_before_sen
 
     monkeypatch.setattr(official_module, "_REQUEST_TIMEOUT_S", 0.2)
     monkeypatch.setattr(fake_ibapi.FakeEClient, "reqAllOpenOrders", lambda self: None)  # silent
-    broker = _broker()
+    broker = _broker(ledger=_owned(gateway))
     await broker.connect()
     try:
         with pytest.raises(BrokerRefusedBeforeSend, match="prove ownership"):
@@ -238,7 +257,7 @@ async def test_a_chronos_looking_order_on_another_account_is_not_ours(
         return ib
 
     monkeypatch.setattr(fake_ibapi.FakeGateway, "_order_of", other_account)
-    broker = _broker()
+    broker = _broker(ledger=_owned(gateway))
     await broker.connect()
     try:
         result = await broker.cancel_order(fake_ibapi.OWNED_ID)
@@ -254,7 +273,7 @@ async def test_a_refused_foreign_cancel_does_not_block_a_later_owned_cancel(
 ) -> None:
     """A venue-proven Chronos order is cancelled even when a foreign cancel was refused first."""
 
-    broker = _broker()
+    broker = _broker(ledger=_owned(gateway))
     await broker.connect()
     try:
         refused = await broker.cancel_order(fake_ibapi.FOREIGN_ID)
@@ -279,7 +298,7 @@ async def test_a_manual_order_with_a_forged_chronos_ref_is_not_cancelled(
     spoof = gateway.add_working_order(
         ref="CHR-SPOOF-MANUAL", symbol="MSFT", quantity="1", limit="50.00", client_id=0
     )
-    broker = _broker()
+    broker = _broker(ledger=_owned(gateway))
     await broker.connect()
     try:
         result = await broker.cancel_order(spoof)
@@ -291,17 +310,6 @@ async def test_a_manual_order_with_a_forged_chronos_ref_is_not_cancelled(
     assert gateway.sim.order_lifecycle(spoof) is not OrderLifecycle.CANCELLED
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "S1-F1 P1-1 (Daybreak) STILL OPEN: a same-account, SAME-CLIENT order carrying a forged "
-        "CHR- order_ref is accepted by the venue-book proof, which authenticates nothing "
-        "(orderRef is caller text). Closing it needs the durable ownership proof from the "
-        "persisted order book: an owner decision (DESIGN.md section 1, Q-P1). When it is "
-        "implemented this XPASSes strictly and the mark is lifted in that change."
-    ),
-)
 async def test_a_same_client_order_with_a_forged_chronos_ref_is_not_cancelled(
     gateway: fake_ibapi.FakeGateway, wire: _Wire
 ) -> None:
@@ -312,7 +320,7 @@ async def test_a_same_client_order_with_a_forged_chronos_ref_is_not_cancelled(
         limit="50.00",
         client_id=fake_ibapi.CLIENT_ID,
     )
-    broker = _broker()
+    broker = _broker(ledger=_owned(gateway))
     await broker.connect()
     try:
         result = await broker.cancel_order(spoof)
@@ -322,23 +330,13 @@ async def test_a_same_client_order_with_a_forged_chronos_ref_is_not_cancelled(
     assert result.requested is False
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "S1-F1 P1-1 (Daybreak) STILL OPEN, the stale-id variant: the in-memory own-id set stores "
-        "a bare order id for the process lifetime and across reconnects, so a foreign "
-        "same-client order that reuses an old own id skips every proof. Needs the durable "
-        "proof (DESIGN.md section 1, Q-P1) or a decision on the set's reconnect semantics."
-    ),
-)
 async def test_a_foreign_order_reusing_an_old_own_id_is_not_cancelled(
     gateway: fake_ibapi.FakeGateway, wire: _Wire
 ) -> None:
     foreign = gateway.add_working_order(
         ref="NOT-OURS", symbol="MSFT", quantity="1", limit="50.00", client_id=fake_ibapi.CLIENT_ID
     )
-    broker = _broker()
+    broker = _broker(ledger=_owned(gateway))
     await broker.connect()
     try:
         broker.bridge.unsolicited.note_own_order(foreign)  # an earlier own order, id since reused
@@ -356,7 +354,7 @@ async def test_a_second_cancel_after_a_timed_out_ownership_read_is_still_a_typed
 
     monkeypatch.setattr(official_module, "_REQUEST_TIMEOUT_S", 0.2)
     monkeypatch.setattr(fake_ibapi.FakeEClient, "reqAllOpenOrders", lambda self: None)  # silent
-    broker = _broker()
+    broker = _broker(ledger=_owned(gateway))
     await broker.connect()
     try:
         for attempt in (1, 2, 3):
@@ -365,6 +363,161 @@ async def test_a_second_cancel_after_a_timed_out_ownership_read_is_still_a_typed
             assert wire.cancels == [], f"attempt {attempt} sent a cancel"
     finally:
         await broker.disconnect()
+
+
+# --- Option A: the ledger is the only authoriser; every fail-closed path -----------------------
+
+
+async def test_an_exact_ledger_match_cancels_the_order_and_the_ledger_saw_the_venues_row(
+    gateway: fake_ibapi.FakeGateway, wire: _Wire
+) -> None:
+    """The positive control: the ledger is asked once, with exactly what the VENUE reported."""
+
+    ledger = _owned(gateway)
+    broker = _broker(ledger=ledger)
+    await broker.connect()
+    try:
+        result = await broker.cancel_order(fake_ibapi.OWNED_ID)
+    finally:
+        await broker.disconnect()
+    assert result.requested is True
+    assert wire.cancels == [fake_ibapi.OWNED_ID]
+    assert ledger.calls == list(ledger.known)
+
+
+async def test_with_no_ledger_wired_every_cancel_is_refused_before_any_wire_traffic(
+    gateway: fake_ibapi.FakeGateway, wire: _Wire
+) -> None:
+    broker = _broker(ledger=None)
+    await broker.connect()
+    try:
+        with pytest.raises(BrokerRefusedBeforeSend, match="no order-ownership ledger"):
+            await broker.cancel_order(fake_ibapi.OWNED_ID)
+    finally:
+        await broker.disconnect()
+    assert wire.cancels == [] and wire.book_reads == 0
+    assert gateway.cancel_requests == []
+
+
+async def test_a_ledger_that_raises_refuses_before_send(
+    gateway: fake_ibapi.FakeGateway, wire: _Wire
+) -> None:
+    ledger = RaisingLedger()
+    broker = _broker(ledger=ledger)
+    await broker.connect()
+    try:
+        with pytest.raises(BrokerRefusedBeforeSend, match="ownership ledger error"):
+            await broker.cancel_order(fake_ibapi.OWNED_ID)
+    finally:
+        await broker.disconnect()
+    assert ledger.calls == 1
+    assert wire.cancels == [] and gateway.cancel_requests == []
+
+
+async def test_a_ledger_with_no_matching_record_refuses_without_a_send(
+    gateway: fake_ibapi.FakeGateway, wire: _Wire
+) -> None:
+    ledger = ExactLedger()
+    broker = _broker(ledger=ledger)
+    await broker.connect()
+    try:
+        result = await broker.cancel_order(fake_ibapi.OWNED_ID)
+    finally:
+        await broker.disconnect()
+    assert len(ledger.calls) == 1
+    assert (result.requested, result.lifecycle) == (False, OrderLifecycle.REJECTED)
+    assert "no exact persisted match" in result.message
+    assert wire.cancels == [] and gateway.cancel_requests == []
+
+
+@pytest.mark.parametrize("answer", [None, 1, "yes", [True]])
+async def test_only_a_literal_true_from_the_ledger_authorises(
+    gateway: fake_ibapi.FakeGateway, wire: _Wire, answer: object
+) -> None:
+    ledger = AnswerLedger(answer)
+    broker = _broker(ledger=ledger)
+    await broker.connect()
+    try:
+        result = await broker.cancel_order(fake_ibapi.OWNED_ID)
+    finally:
+        await broker.disconnect()
+    assert ledger.calls == 1
+    assert result.requested is False
+    assert wire.cancels == []
+
+
+@pytest.mark.parametrize(
+    "field,wrong",
+    [
+        ("order_ref", "CHR-ANOTHER-ORDER"),
+        ("account_id", "DU0000000"),
+        ("broker_order_id", 4242),
+        ("client_id", 99),
+        ("permanent_id", 7),
+    ],
+)
+async def test_a_record_matching_every_field_but_one_does_not_authorise(
+    gateway: fake_ibapi.FakeGateway, wire: _Wire, field: str, wrong: object
+) -> None:
+    """Partial match: the right ref with the wrong permId (and each other field in turn)."""
+
+    true = seeded_identity(gateway, fake_ibapi.OWNED_ID, client_id=fake_ibapi.CLIENT_ID)
+    ledger = ExactLedger(replace(true, **{field: wrong}))
+    broker = _broker(ledger=ledger)
+    await broker.connect()
+    try:
+        result = await broker.cancel_order(fake_ibapi.OWNED_ID)
+    finally:
+        await broker.disconnect()
+    assert ledger.calls == [true], "the ledger must be asked about the venue's own row"
+    assert result.requested is False
+    assert wire.cancels == [] and gateway.cancel_requests == []
+
+
+async def test_a_venue_row_without_a_perm_id_is_refused_before_the_ledger_is_asked(
+    gateway: fake_ibapi.FakeGateway, wire: _Wire, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = fake_ibapi.FakeGateway._order_of
+
+    def no_perm_id(self: Any, order: Any, adapter_id: int) -> Any:
+        ib = original(self, order, adapter_id)
+        ib.permId = 0
+        return ib
+
+    monkeypatch.setattr(fake_ibapi.FakeGateway, "_order_of", no_perm_id)
+    ledger = _owned(gateway)
+    broker = _broker(ledger=ledger)
+    await broker.connect()
+    try:
+        result = await broker.cancel_order(fake_ibapi.OWNED_ID)
+    finally:
+        await broker.disconnect()
+    assert ledger.calls == []
+    assert result.requested is False and "permId" in result.message
+    assert wire.cancels == []
+
+
+async def test_a_foreign_refusal_reports_rejected_not_the_foreign_rows_own_status(
+    gateway: fake_ibapi.FakeGateway,
+) -> None:
+    """fable r1 P3-2: nothing of ours was touched, so the result can never read as 'cancelled'."""
+
+    broker = _broker(ledger=_owned(gateway))
+    await broker.connect()
+    try:
+        broker.bridge.order_statuses[fake_ibapi.FOREIGN_ID] = ("Cancelled", 0.0, 1.0)
+        result = await broker.cancel_order(fake_ibapi.FOREIGN_ID)
+    finally:
+        await broker.disconnect()
+    assert (result.requested, result.lifecycle) == (False, OrderLifecycle.REJECTED)
+
+
+def test_the_adapter_refuses_client_id_zero_the_ib_master_client(
+    gateway: fake_ibapi.FakeGateway,
+) -> None:
+    settings = fake_ibapi.official_settings().model_copy(update={"ib_client_id": 0})
+    with pytest.raises(BrokerSafetyError, match="IB_CLIENT_ID"):
+        OfficialIBKRBroker(settings)
 
 
 # --- S1-F2: only a real submit records ownership ----------------------------------------------
@@ -376,7 +529,7 @@ async def test_a_refused_cancel_and_a_preview_register_no_ownership(
     other = gateway.add_working_order(
         ref="OTHER-1", symbol="MSFT", quantity="1", limit="50.00", client_id=fake_ibapi.CLIENT_ID
     )
-    broker = _broker()
+    broker = _broker(ledger=_owned(gateway))
     await broker.connect()
     try:
         await broker.cancel_order(other)
@@ -390,7 +543,7 @@ async def test_a_refused_cancel_and_a_preview_register_no_ownership(
 async def test_a_proven_cancel_of_a_previous_session_order_registers_no_ownership(
     gateway: fake_ibapi.FakeGateway,
 ) -> None:
-    broker = _broker()
+    broker = _broker(ledger=_owned(gateway))
     await broker.connect()
     try:
         await broker.cancel_order(fake_ibapi.OWNED_ID)
@@ -409,7 +562,7 @@ async def test_a_same_client_foreign_fill_invalidates_readiness_after_a_refused_
         ref="OTHER-1", symbol="MSFT", quantity="1", limit="50.00", client_id=fake_ibapi.CLIENT_ID
     )
     spy = _Spy()
-    broker = _broker(spy)
+    broker = _broker(spy, _owned(gateway))
     await broker.connect()
     try:
         await broker.cancel_order(other)

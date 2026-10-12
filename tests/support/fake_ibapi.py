@@ -750,13 +750,47 @@ def official_settings() -> Settings:
     )
 
 
+class InstalledGatewayLedger:
+    """An ``OrderOwnershipLedger`` double standing in for the persisted order book (S1-F1).
+
+    It is the fake persisted book for tests that cancel through the adapter over the gateway:
+    it proves owned only an order the INSTALLED gateway holds with a ``CHR-`` ref, this
+    adapter's client id, the configured account and the same permId. It is deliberately NOT the
+    adapter's own pre-filter restated: it compares the identity the adapter read from the venue
+    with the gateway's own record of the order. The real ledger is tested separately
+    (``tests/integration/test_order_ownership_ledger.py``).
+    """
+
+    def proves_owned(self, identity: Any) -> bool:
+        from chronos.broker import official_ibkr
+
+        gateway = official_ibkr._load_ibapi()[0].gateway  # the one install() bound
+        order = next(
+            (
+                order
+                for order in gateway._run(gateway.sim.open_orders())
+                if order.broker_order_id == identity.broker_order_id
+            ),
+            None,
+        )
+        return (
+            order is not None
+            and str(order.order_ref or "").startswith("CHR-")
+            and order.order_ref == identity.order_ref
+            and order.permanent_id == identity.permanent_id
+            and identity.account_id == ACCOUNT
+            and identity.client_id == CLIENT_ID
+            and gateway._client_of.get(order.broker_order_id) == CLIENT_ID
+        )
+
+
 # --- the U1 contract hook (tests/contract/conftest.py) -----------------------------------------
 
 
 def _build_official() -> Any:
     from chronos.broker.official_ibkr import OfficialIBKRBroker
 
-    return OfficialIBKRBroker(official_settings())
+    return OfficialIBKRBroker(official_settings(), order_ownership=InstalledGatewayLedger())
 
 
 async def _contract_fill(broker: Any, broker_order_id: int, quantity: Decimal) -> None:

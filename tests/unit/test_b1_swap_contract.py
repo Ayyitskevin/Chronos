@@ -12,8 +12,9 @@ pinned without a gateway (``B1-DELIVERY-CONTRACT.md`` states the rest):
   only the adapter's construction replaced by a recording stand-in. It constructs
   ``OfficialIBKRBroker`` once, with a call that binds to the REAL constructor's signature and
   supplies every hook it takes (``live_kill_switch``, ``on_connection_uncertain``,
-  ``on_managed_account_scope_change``), wired to the latch the submission boundary and the
-  connection manager share. The REAL class is also constructed here, with only its ``ibapi``
+  ``on_managed_account_scope_change``, and since S1-F r2 ``order_ownership``, the persisted
+  order-book ledger that alone authorises a cancel), wired to the latch the submission boundary
+  and the connection manager share. The REAL class is also constructed here, with only its ``ibapi``
   import stubbed (its constructor does no I/O): with the runtime's own hooks, its callback
   bridge drives that latch; built the way the capture harness builds it (settings only), it
   does not, and refuses every order call before send. Beyond the broker, the swap changes the
@@ -72,6 +73,7 @@ from chronos.domain.enums import (
     ReconciliationStatus,
 )
 from chronos.domain.models import ConnectionStatus, OrderModification, OrderRequest
+from chronos.orders.ownership import PersistedOrderOwnershipLedger
 
 _REPO = Path(__file__).resolve().parents[2]
 _CHECKLIST = _REPO / "docs" / "ops" / "m4-read-only-gate-session-checklist.md"
@@ -104,7 +106,12 @@ _AMBIENT = sorted(
 )
 #: The hooks ``runtime.build_runtime`` hands the official adapter (``runtime.py:321-326``).
 _ADAPTER_HOOKS = frozenset(
-    {"live_kill_switch", "on_connection_uncertain", "on_managed_account_scope_change"}
+    {
+        "live_kill_switch",
+        "on_connection_uncertain",
+        "on_managed_account_scope_change",
+        "order_ownership",
+    }
 )
 
 
@@ -453,6 +460,12 @@ def test_build_runtime_selects_the_official_adapter_and_wires_every_hook(
         # connection manager (private attributes pinned on purpose: this IS the wiring).
         assert built.hooks["live_kill_switch"] is runtime.live_kill_switch
         assert boundary._live_kill_switch is runtime.live_kill_switch
+        # S1-F r2 (a change to the B1 swap contract): the cancel ownership proof is the
+        # persisted order book of THIS runtime's database, never a default or a stand-in.
+        ledger = built.hooks["order_ownership"]
+        assert isinstance(ledger, PersistedOrderOwnershipLedger)
+        assert ledger._intents._sessions is runtime.database.sessions
+        assert ledger._tracker._sessions is runtime.database.sessions
         assert boundary._reconciliation_readiness is latch
         assert runtime.connection._readiness is latch
 
@@ -811,6 +824,7 @@ def test_the_real_adapter_built_with_the_runtimes_hooks_drives_the_runtimes_latc
 
         # Control: the hookless adapter (the capture harness's) leaves the latch alone.
         hookless = OfficialIBKRBroker(settings)
+        assert hookless._order_ownership is None  # so every cancel through it is refused
         _reconcile(latch)
         hookless.bridge.on_connection_closed()
         hookless.bridge.on_managed_accounts(settings.ib_account_id)

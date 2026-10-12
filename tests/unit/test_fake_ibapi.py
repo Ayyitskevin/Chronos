@@ -48,7 +48,11 @@ class _Spy:
 
 
 def _broker(spy: _Spy | None = None) -> OfficialIBKRBroker:
-    return OfficialIBKRBroker(fake_ibapi.official_settings(), on_connection_uncertain=spy)
+    return OfficialIBKRBroker(
+        fake_ibapi.official_settings(),
+        on_connection_uncertain=spy,
+        order_ownership=fake_ibapi.InstalledGatewayLedger(),
+    )
 
 
 def _reader_alive() -> bool:
