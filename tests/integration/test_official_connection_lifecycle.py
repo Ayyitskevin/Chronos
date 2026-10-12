@@ -211,10 +211,12 @@ def test_a_dropped_session_fails_closed_and_is_not_reconnected_automatically(
         status = asyncio.run(broker.connection_status())
         with pytest.raises(BrokerConnectionError, match="not connected"):
             manager.run(broker.account_summary())
+        status_after_drop = readiness.status  # read BEFORE teardown: close() also drops it
+        reasons_after_drop = list(readiness.reasons)
     finally:
         manager.close()
-    assert readiness.status is not ReconciliationStatus.RECONCILED
-    assert "official IBKR connection closed" in readiness.reasons
+    assert status_after_drop is not ReconciliationStatus.RECONCILED
+    assert "official IBKR connection closed" in reasons_after_drop
     assert (status.connected, status.account_id) == (False, None)
     assert len(_connects(gateway)) == 1  # no second connect: recovery is an operator restart
 
@@ -251,7 +253,9 @@ def test_a_held_client_id_fails_closed_at_the_handshake(gateway: fake_ibapi.Fake
     assert (status.connected, status.account_id) == (False, None)
     assert not _reader_alive()
     # the reason exists inside the bridge, where no operator surface reads it
-    assert any(note.startswith(f"[{fake_ibapi.CODE_CLIENT_ID_IN_USE}]") for note in broker.bridge.notices)
+    assert any(
+        note.startswith(f"[{fake_ibapi.CODE_CLIENT_ID_IN_USE}]") for note in broker.bridge.notices
+    )
 
 
 @pytest.mark.xfail(
@@ -287,7 +291,9 @@ def test_an_incomplete_handshake_times_out_and_leaves_nothing_running(
     broker = _hooked(readiness)
     manager = BrokerConnectionManager(broker, readiness=readiness)
     try:
-        with pytest.raises(BrokerConnectionError, match="did not complete the connection handshake"):
+        with pytest.raises(
+            BrokerConnectionError, match="did not complete the connection handshake"
+        ):
             manager.connect()
         status = asyncio.run(broker.connection_status())
     finally:
@@ -295,7 +301,8 @@ def test_an_incomplete_handshake_times_out_and_leaves_nothing_running(
     assert (status.connected, status.account_id) == (False, None)
     assert "disconnect" in [name for _, name in gateway.transcript]
     assert not _reader_alive()
-    assert readiness.status is not ReconciliationStatus.RECONCILED
+    # the manager marked the failed connect itself uncertain (connection.py:154-156)
+    assert "broker call failed; connection state is uncertain" in readiness.reasons
 
 
 def test_a_session_that_does_not_manage_the_configured_account_is_refused(
@@ -384,12 +391,13 @@ def test_a_changed_managed_set_locks_readiness_through_the_scope_hook(
     try:
         gateway.change_managed_accounts((fake_ibapi.ACCOUNT, OTHER_PAPER))
         added = asyncio.run(broker.connection_status())
+        status_after_change = readiness.status  # read BEFORE teardown: disconnect also drops it
         gateway.change_managed_accounts((OTHER_PAPER,))
         removed = asyncio.run(broker.connection_status())
     finally:
         asyncio.run(broker.disconnect())
     assert readiness.reasons.count("scope: official IBKR managed-account scope changed") == 2
-    assert readiness.status is not ReconciliationStatus.RECONCILED
+    assert status_after_change is not ReconciliationStatus.RECONCILED
     assert set(added.managed_accounts) == {fake_ibapi.ACCOUNT, OTHER_PAPER}
     assert removed.account_id is None  # the configured id is no longer managed: never reported
 
@@ -452,10 +460,12 @@ def test_a_connectivity_code_drops_readiness_with_the_code_in_the_reason(
     readiness.reconcile()
     try:
         gateway.emit_error(-1, code, "connectivity notice")
+        status_after = readiness.status  # read BEFORE teardown: disconnect also drops it
+        reasons_after = list(readiness.reasons)
     finally:
         asyncio.run(broker.disconnect())
-    assert f"official IBKR connectivity event {code}" in readiness.reasons
-    assert readiness.status is not ReconciliationStatus.RECONCILED
+    assert f"official IBKR connectivity event {code}" in reasons_after
+    assert status_after is not ReconciliationStatus.RECONCILED
 
 
 def test_a_benign_farm_notice_is_recorded_and_does_not_drop_readiness(
@@ -497,9 +507,10 @@ def test_a_connection_loss_in_the_errortime_second_shape_still_drops_readiness(
     readiness.reconcile()
     try:
         gateway.emit_error(-1, 1100, "Connectivity between IB and TWS has been lost")
+        status_after = readiness.status  # read BEFORE teardown: disconnect also drops it
     finally:
         asyncio.run(broker.disconnect())
-    assert readiness.status is not ReconciliationStatus.RECONCILED
+    assert status_after is not ReconciliationStatus.RECONCILED
 
 
 # --- 8. a reader thread that will not stop --------------------------------------------------

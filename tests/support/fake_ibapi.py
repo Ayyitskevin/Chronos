@@ -101,6 +101,10 @@ CODE_NO_SECURITY = 200
 CODE_ORDER_REJECTED = 201
 CODE_CANCEL_NOT_FOUND = 10147
 CODE_CANNOT_CANCEL = 10148
+#: ASSUMED-IB (verify at K4): sent before the handshake when the client id is still held.
+CODE_CLIENT_ID_IN_USE = 326
+#: ASSUMED-IB (verify at K4): the answer to placeOrder (whatIf included) under Read-Only API.
+CODE_READ_ONLY = 321
 
 #: The fake's time convention (see the module docstring): what the adapter parses and writes.
 EXECUTION_TIME_ZONE = UTC
@@ -222,6 +226,7 @@ class FakeEClient:
     def connect(self, host: str, port: int, clientId: int) -> None:
         del host, port
         self.client_id = int(clientId)
+        self.gateway.record(self, "connect")
         self._connected = True
         self.gateway.attach(self)
 
@@ -230,6 +235,8 @@ class FakeEClient:
             item = self._queue.get()
             try:
                 if item is _STOP:
+                    if self.gateway.stuck_reader:
+                        self.gateway.readers_released.wait()  # U-a: a reader that won't stop
                     return
                 name, args = item
                 getattr(self.wrapper, name)(*args)
@@ -240,6 +247,7 @@ class FakeEClient:
         return self._connected
 
     def disconnect(self) -> None:
+        self.gateway.record(self, "disconnect")
         if not self._connected:
             return
         self._connected = False
@@ -257,37 +265,47 @@ class FakeEClient:
 
     # requests -------------------------------------------------------------------------------
     def reqMarketDataType(self, marketDataType: int) -> None:
+        self.gateway.record(self, "reqMarketDataType")
         del marketDataType
 
     def reqCurrentTime(self) -> None:
+        self.gateway.record(self, "reqCurrentTime")
         self.gateway.current_time(self)
 
     def reqAccountSummary(self, reqId: int, group: str, tags: str) -> None:
+        self.gateway.record(self, "reqAccountSummary")
         del group, tags
         self.gateway.account_summary(self, reqId)
 
     def cancelAccountSummary(self, reqId: int) -> None:
+        self.gateway.record(self, "cancelAccountSummary")
         del reqId
 
     def reqPositions(self) -> None:
+        self.gateway.record(self, "reqPositions")
         self.gateway.positions(self)
 
     def cancelPositions(self) -> None:
+        self.gateway.record(self, "cancelPositions")
         pass
 
     def reqExecutions(self, reqId: int, execFilter: FakeExecutionFilter) -> None:
+        self.gateway.record(self, "reqExecutions")
         self.gateway.executions(self, reqId, execFilter)
 
     def reqAllOpenOrders(self) -> None:
+        self.gateway.record(self, "reqAllOpenOrders")
         self.gateway.open_orders(self)
 
     def reqCompletedOrders(self, apiOnly: bool) -> None:
         self.gateway.completed_orders(self, bool(apiOnly))
 
     def placeOrder(self, orderId: int, contract: FakeContract, order: FakeOrder) -> None:
+        self.gateway.record(self, "placeOrder")
         self.gateway.place_order(self, int(orderId), contract, order)
 
     def cancelOrder(self, orderId: int, manualCancelOrderTime: str = "") -> None:
+        self.gateway.record(self, "cancelOrder")
         del manualCancelOrderTime
         self.gateway.cancel_order(self, int(orderId))
 
@@ -318,6 +336,20 @@ class FakeGateway:
         #: ASSUMED IB: a completedOrder row may carry no ``orderId`` (0). True fills it in.
         self.completed_order_ids = False
         self.completed_requests = 0
+        # --- B1 U-a connection-lifecycle knobs (all default-off: the S1b behaviour) ---------
+        #: "full" | "no_next_valid_id" | "no_managed_accounts" (which handshake callbacks to send)
+        self.handshake = "full"
+        #: what managedAccounts reports at the handshake
+        self.managed_accounts: tuple[str, ...] = (ACCOUNT,)
+        #: client ids a previous session still holds: a connect gets 326 and no handshake
+        self.held_client_ids: set[int] = set()
+        #: Read-Only API: placeOrder (whatIf included) is answered with 321 and nothing else
+        self.read_only = False
+        #: a reader thread that ignores the stop sentinel until release_readers()
+        self.stuck_reader = False
+        self.readers_released = threading.Event()
+        #: every EClient call that reached this gateway, in order, as (client id, method)
+        self.transcript: list[tuple[int | None, str]] = []
         _run_without_a_loop(self._seed_registry())
 
     @classmethod
@@ -355,14 +387,71 @@ class FakeGateway:
     # session ---------------------------------------------------------------------------------
     def attach(self, client: FakeEClient) -> None:
         with self._lock:
+            if client.client_id in self.held_client_ids:
+                # ASSUMED-IB: the refusal arrives id-less (-1), before any handshake callback.
+                self._error(
+                    client,
+                    -1,
+                    CODE_CLIENT_ID_IN_USE,
+                    "Unable to connect as the client id is already in use. "
+                    "Retry with a unique client id.",
+                )
+                return
             self._clients.append(client)
-            client.emit("nextValidId", self._next_valid_id)
-            client.emit("managedAccounts", ACCOUNT)
+            if self.handshake != "no_next_valid_id":
+                client.emit("nextValidId", self._next_valid_id)
+            if self.handshake != "no_managed_accounts":
+                client.emit("managedAccounts", ",".join(self.managed_accounts))
 
     def detach(self, client: FakeEClient) -> None:
         with self._lock:
             if client in self._clients:
                 self._clients.remove(client)
+
+    # B1 U-a controls -------------------------------------------------------------------------
+    @property
+    def next_valid_id(self) -> int:
+        return self._next_valid_id
+
+    def record(self, client: FakeEClient, method: str) -> None:
+        with self._lock:
+            self.transcript.append((client.client_id, method))
+
+    def release_readers(self) -> None:
+        """Let a stuck reader thread end (test teardown)."""
+
+        self.readers_released.set()
+
+    def _broadcast(self, emit: Callable[[FakeEClient], None]) -> None:
+        with self._lock:
+            clients = list(self._clients)
+            for client in clients:
+                emit(client)
+        for client in clients:
+            client.wait_dispatched()
+
+    def change_managed_accounts(self, accounts: tuple[str, ...]) -> None:
+        """Mid-session managedAccounts with a new set, dispatched before this returns."""
+
+        self.managed_accounts = accounts
+        self._broadcast(lambda client: client.emit("managedAccounts", ",".join(accounts)))
+
+    def emit_error(self, req_id: int, code: int, message: str) -> None:
+        """An error callback to every attached client, in the current ``error_style``."""
+
+        self._broadcast(lambda client: self._error(client, req_id, code, message))
+
+    def drop(self) -> None:
+        """The gateway closes every session: connectionClosed, then each reader thread ends."""
+
+        with self._lock:
+            clients = list(self._clients)
+            self._clients.clear()
+        for client in clients:
+            client._connected = False
+            client.emit("connectionClosed")
+            client.wait_dispatched()
+            client._queue.put(_STOP)
 
     # helpers ---------------------------------------------------------------------------------
     def _error(self, client: FakeEClient, req_id: int, code: int, message: str) -> None:
@@ -374,6 +463,10 @@ class FakeGateway:
             # so the fake emits that documented form. Real ibapi >= 10.3x is believed to add an
             # int ``errorTime`` as the SECOND argument instead: unverified offline, a K4 check.
             client.emit("error", 1_760_000_000.0, req_id, code, message)
+        elif self.error_style == "errortime_second":
+            # The shape current ibapi is BELIEVED to use (R-ARITY, unverified offline): an int
+            # errorTime second, then the code, the message and the reject json.
+            client.emit("error", req_id, 1_760_000_000_000, code, message, "")
         else:
             client.emit("error", req_id, code, message)
 
@@ -596,6 +689,14 @@ class FakeGateway:
     ) -> None:
         with self._lock:
             self._next_valid_id = max(self._next_valid_id, adapter_id + 1)
+            if self.read_only:
+                self._error(
+                    client,
+                    adapter_id,
+                    CODE_READ_ONLY,
+                    "Error validating request: The API interface is currently in Read-Only mode.",
+                )
+                return
             if int(contract.conId) not in self._registry:
                 self._error(client, adapter_id, CODE_NO_SECURITY, "No security definition found")
                 return
