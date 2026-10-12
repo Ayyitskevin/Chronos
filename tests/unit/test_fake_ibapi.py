@@ -75,7 +75,7 @@ def test_without_the_installer_the_adapter_cannot_reach_any_ibapi() -> None:
     """Negative control (reader P3-5a): no installer, no ibapi here, so construction refuses."""
 
     assert "ibapi" not in sys.modules
-    with pytest.raises(BrokerError, match="ibapi|TWS API|install"):
+    with pytest.raises(BrokerError, match=r"ibapi|TWS API|install"):
         _broker()
 
 
@@ -305,7 +305,9 @@ async def test_another_clients_fill_still_invalidates_after_a_refused_cancel(
 async def test_a_same_client_foreign_order_fill_still_invalidates_after_a_cancel(
     gateway: fake_ibapi.FakeGateway,
 ) -> None:
-    other = gateway.add_working_order(ref="OTHER-1", symbol="MSFT", quantity="1", limit="50.00", client_id=17)
+    other = gateway.add_working_order(
+        ref="OTHER-1", symbol="MSFT", quantity="1", limit="50.00", client_id=17
+    )
     spy = _Spy()
     broker = _broker(spy)
     await broker.connect()
@@ -354,7 +356,12 @@ def test_a_transmitting_place_order_reaches_the_sim_at_the_client_level() -> Non
     try:
         order = fake_ibapi.FakeOrder()
         order.action, order.orderType, order.totalQuantity = "SELL", "LMT", Decimal("1")
-        order.lmtPrice, order.account, order.orderRef, order.transmit = 1.25, fake_ibapi.ACCOUNT, "CHR-X", True
+        order.lmtPrice, order.account, order.orderRef, order.transmit = (
+            1.25,
+            fake_ibapi.ACCOUNT,
+            "CHR-X",
+            True,
+        )
         contract = fake_ibapi.FakeContract()
         contract.conId = option_contract().con_id
         client.placeOrder(1003, contract, order)
