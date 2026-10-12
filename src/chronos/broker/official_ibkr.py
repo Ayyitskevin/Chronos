@@ -2328,6 +2328,10 @@ class OfficialIBKRBroker:
                         raise BrokerRefusedBeforeSend(
                             "live kill switch engaged; refusing before send"
                         )
+                    # S1-F2: the ONLY place ownership is recorded, after every pre-send guard
+                    # and before the send, so an immediate fill of this order cannot race it
+                    # and an id that is refused before send is never recorded.
+                    self.bridge.note_own_order(order_id)
                     try:
                         app.placeOrder(order_id, contract, order)
                     except Exception:

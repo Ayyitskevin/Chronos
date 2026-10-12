@@ -92,8 +92,9 @@ def _bridge(readiness: ReconciliationReadiness) -> CallbackBridge:
     bridge = CallbackBridge(
         RequestRegistry(), on_connection_uncertain=readiness.invalidate, client_id=_OWN_CLIENT
     )
-    bridge.start_order_ack(_OWN_ORDER)  # the adapter records its own order before the send
-    bridge.clear_order_ack(_OWN_ORDER)
+    # the adapter's submit path records its own order (note_own_order) just before the send;
+    # start_order_ack no longer does (S1-F2): preview and cancel use it too
+    bridge.note_own_order(_OWN_ORDER)
     return bridge
 
 

@@ -517,13 +517,22 @@ class CallbackBridge:
     # -- per-order acknowledgement (M7 order path) ---------------------- #
 
     def start_order_ack(self, order_id: int) -> _SingleFlight:
-        """Await the first openOrder/orderStatus callback for one order id."""
+        """Await the first openOrder/orderStatus callback for one order id.
 
-        self.unsolicited.note_own_order(order_id)  # before the send: own fills stay own
+        This registers the acknowledgement flight ONLY. It does not record ownership: preview
+        and cancel use it too, and an id they merely touched is not one this process submitted
+        (S1-F2). Ownership is recorded by :meth:`note_own_order`, called by the real submit path.
+        """
+
         with self._lock:
             flight = _SingleFlight()
             self._order_acks[order_id] = flight
             return flight
+
+    def note_own_order(self, order_id: int) -> None:
+        """Record an id this process is about to SUBMIT (just before ``placeOrder``)."""
+
+        self.unsolicited.note_own_order(order_id)
 
     def clear_order_ack(self, order_id: int) -> None:
         with self._lock:
