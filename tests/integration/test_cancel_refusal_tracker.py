@@ -47,6 +47,14 @@ class _CancelBroker(FakeBroker):
             raise BrokerRefusedBeforeSend("could not prove ownership; no cancel was sent")
         if self.mode == "ambiguous":
             raise BrokerConnectionError("connection lost during the cancel; state unknown")
+        if self.mode == "not_requested_cancelled":
+            return CancellationResult(
+                broker_order_id=broker_order_id,
+                requested=False,
+                lifecycle=OrderLifecycle.CANCELLED,
+                message="already cancelled at the venue",
+                timestamp=FIXED_NOW,
+            )
         if self.mode == "not_requested":
             return CancellationResult(
                 broker_order_id=broker_order_id,
@@ -192,3 +200,17 @@ def test_broker_updates_still_apply_after_the_revert(
     )
     assert outcome.lifecycle_changed is True
     assert _status(harness) is OrderLifecycle.FILLED
+
+
+def test_requested_false_with_cancelled_is_the_only_completion_by_refusal(
+    rig: tuple[_Harness, _CancelBroker],
+) -> None:
+    """fable r1 P3-2: 'already cancelled' (requested=False + CANCELLED) completes the cancel, while
+    every other requested=False is a refusal that reverts (the foreign-order refusal reports
+    REJECTED precisely so it can never take this branch)."""
+
+    harness, broker = rig
+    broker.mode = "not_requested_cancelled"
+    result = harness.service.cancel("intent-1", now=FIXED_NOW)
+    assert result.lifecycle is OrderLifecycle.CANCELLED
+    assert _status(harness) is OrderLifecycle.CANCELLED

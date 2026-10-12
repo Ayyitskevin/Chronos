@@ -87,20 +87,28 @@ def test_a_wrong_account_scope_raises_rather_than_answering(rig: Any) -> None:
         ledger.proves_owned(replace(identity, account_id="DU0000000"))
 
 
-def test_a_second_distinct_perm_id_is_a_conflict_and_not_owned(rig: Any) -> None:
+@pytest.mark.parametrize(
+    "field,other", [("broker_order_id", 9002), ("permanent_id", 109002), ("client_id", 18)]
+)
+def test_a_second_distinct_value_of_any_identity_field_is_a_conflict_and_not_owned(
+    rig: Any, field: str, other: int
+) -> None:
+    """Never the first, never the latest: the contradiction itself refuses (OrderIdentityConflict
+    policy), for the broker id and the client id as well as the permId."""
+
     harness, ledger, identity = rig
+    values = {"broker_order_id": 9001, "permanent_id": 109001, "client_id": 17}
+    values[field] = other
     assert harness.tracker_repo.record_transition(
         intent_id="intent-1",
-        event_key="intent-1:conflicting-permid",
+        event_key=f"intent-1:conflicting-{field}",
         source="CALLBACK",
         from_status=OrderLifecycle.SUBMITTED,
         to_status=OrderLifecycle.SUBMITTED,
         current_account_id=PAPER_ACCOUNT,
-        broker_order_id=9001,
-        permanent_id=identity.permanent_id + 1,
-        client_id=17,
         evidence={},
         occurred_at=FIXED_NOW,
+        **values,
     )
     assert ledger.proves_owned(identity) is False
 
