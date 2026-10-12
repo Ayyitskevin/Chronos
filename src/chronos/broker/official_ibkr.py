@@ -2429,6 +2429,8 @@ class OfficialIBKRBroker:
             )
         try:
             flight = self.bridge.start_open_orders()
+        except BrokerError:
+            raise  # a typed broker error is not 'a read is pending'
         except RuntimeError as error:  # an earlier read timed out and is still pending
             raise BrokerRefusedBeforeSend(
                 "an open-orders read is still pending; ownership unproven; no cancel was sent"

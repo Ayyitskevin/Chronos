@@ -38,7 +38,11 @@ from tests.support.ownership_ledger import (
 )
 
 import chronos.broker.official_ibkr as official_module
-from chronos.broker.base import BrokerRefusedBeforeSend, BrokerSafetyError
+from chronos.broker.base import (
+    BrokerConnectionError,
+    BrokerRefusedBeforeSend,
+    BrokerSafetyError,
+)
 from chronos.broker.callbacks import CallbackBridge
 from chronos.broker.official_ibkr import OfficialIBKRBroker
 from chronos.broker.order_ids import OrderIdAllocator
@@ -526,6 +530,26 @@ async def test_the_local_prefilters_hold_even_if_a_lax_ledger_says_yes(
         await broker.disconnect()
     assert ledger.calls == 0
     assert result.requested is False
+    assert wire.cancels == []
+
+
+async def test_a_typed_broker_error_from_the_book_read_is_not_reported_as_a_pending_read(
+    gateway: fake_ibapi.FakeGateway, wire: _Wire, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """fable r1 P3-3d: only the bare RuntimeError of a pending flight becomes the pending-read
+    refusal; a BrokerError (a RuntimeError subclass) keeps its own type and message."""
+
+    def boom() -> None:
+        raise BrokerConnectionError("the connection manager said no")
+
+    broker = _broker(ledger=_owned(gateway))
+    await broker.connect()
+    try:
+        monkeypatch.setattr(broker.bridge, "start_open_orders", boom)
+        with pytest.raises(BrokerConnectionError, match="connection manager said no"):
+            await broker.cancel_order(fake_ibapi.OWNED_ID)
+    finally:
+        await broker.disconnect()
     assert wire.cancels == []
 
 
