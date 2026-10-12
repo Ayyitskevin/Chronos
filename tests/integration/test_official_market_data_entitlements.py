@@ -266,8 +266,13 @@ async def test_a_snapshot_with_no_quality_report_reads_unknown(
         "and NO price ticks comes back as a LIVE quote whose bid/ask/last/close are all None "
         "(official_ibkr.py:2003-2063 builds it from whatever state arrived). The quality says "
         "LIVE; the data is absent. Fail-closed would be MarketDataUnavailableError (or a "
-        "non-LIVE quality). The smoke's own any-value check would catch it there; other callers "
-        "must each re-check. ASSUMED-IB that a gateway ever sends this; owner call."
+        "non-LIVE quality). The MANAGER layer has no emptiness check either: "
+        "MarketDataManager._underlying_quote_locked compares only the con id and then CACHES "
+        "the quote (market_data.py:695-710), so the guarded entry also accepts and serves it "
+        "(the next case). The smoke's own any-value check would catch it on B1 day; nothing "
+        "trades then. ASSUMED-IB that a gateway ever sends a snapshot end with no ticks "
+        "(plausible for an illiquid or closed-market symbol; K4). Owner call: a check in the "
+        "adapter or in the manager (the manager covers every adapter)."
     ),
 )
 async def test_a_live_snapshot_with_no_prices_is_not_a_live_quote(
@@ -283,6 +288,43 @@ async def test_a_live_snapshot_with_no_prices_is_not_a_live_quote(
     finally:
         await broker.disconnect()
     assert quote.data_quality is not DataQuality.LIVE
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason=(
+        "B1R-F5, the managed path (reader build-ub P2-1): MarketDataManager.underlying_quote "
+        "accepts the all-None LIVE snapshot, CACHES it (market_data.py:707-710) and serves the "
+        "second call from that cache, so there is one reqMktData for two reads and both return "
+        "a LIVE quote with bid/ask/last/close all None. Fail-closed: the manager raises "
+        "MarketDataUnavailableError (or returns a non-LIVE quality) and never caches an empty "
+        "quote. No src fix here."
+    ),
+)
+async def test_the_managed_path_neither_accepts_nor_caches_an_empty_live_quote(
+    gateway: fake_ibapi.FakeGateway,
+) -> None:
+    gateway.entitlement[AAPL_CON_ID] = "empty"
+    broker = await _connected()
+    market_data = MarketDataManager(broker, sleep=_Sleeps())
+    reads: list[object] = []
+    try:
+        underlying = await _aapl(broker)
+        for _ in range(2):
+            try:
+                managed = await market_data.underlying_quote(underlying)
+            except MarketDataUnavailableError as refused:
+                reads.append(refused)
+            else:
+                reads.append(managed.quote)
+    finally:
+        await broker.disconnect()
+    for read in reads:
+        if isinstance(read, MarketDataUnavailableError):
+            continue
+        assert read.data_quality is not DataQuality.LIVE  # type: ignore[attr-defined]
+    assert _requests(gateway, "reqMktData") == 2  # an empty quote is never served from cache
 
 
 # --- 5. id-less refusals and notices --------------------------------------------------------
