@@ -2399,6 +2399,56 @@ class OfficialIBKRBroker:
             "cancel and re-submit through the boundary instead (nothing was sent)"
         )
 
+    async def _cancel_ownership_refusal(
+        self, app: Any, broker_order_id: int
+    ) -> CancellationResult | None:
+        """S1-F1: prove the order is Chronos-owned BEFORE any ``cancelOrder`` is sent.
+
+        Owned when this process submitted it (the own-id set: no request needed), or when the
+        venue's open-order book lists it with a ``CHR-`` ``orderRef`` (the same rule
+        ``open_orders`` uses) and the configured account. Returns ``None`` when owned, a
+        ``requested=False`` result when it is foreign or absent, and raises
+        ``BrokerRefusedBeforeSend`` when ownership cannot be established because the book could
+        not be read. In every refusal nothing was sent to cancel anything.
+        """
+
+        if self.bridge.owns_order(broker_order_id):
+            return None
+        flight = self.bridge.start_open_orders()
+        app.reqAllOpenOrders()  # read-only
+        done = await asyncio.get_running_loop().run_in_executor(
+            None, flight.done.wait, _REQUEST_TIMEOUT_S
+        )
+        if not done or self.bridge.connection_closed.is_set():
+            raise BrokerRefusedBeforeSend(
+                "could not read the venue's open orders to prove ownership; no cancel was sent"
+            )
+        row = next((item for item in flight.items if int(item[0]) == broker_order_id), None)
+        if row is None:
+            return CancellationResult(
+                broker_order_id=broker_order_id,
+                requested=False,
+                lifecycle=OrderLifecycle.REJECTED,
+                message="no such open order; no cancel was sent",
+                timestamp=datetime.now(tz=UTC),
+            )
+        _, _, order, order_state = row
+        order_ref = str(getattr(order, "orderRef", "") or "")
+        account = str(getattr(order, "account", "") or "")
+        if order_ref.startswith("CHR-") and account == self._settings.ib_account_id:
+            return None
+        status_entry = self.bridge.order_statuses.get(broker_order_id)
+        raw_status = status_entry[0] if status_entry else str(getattr(order_state, "status", ""))
+        return CancellationResult(
+            broker_order_id=broker_order_id,
+            requested=False,
+            lifecycle=broker_status_to_lifecycle(
+                raw_status, filled_quantity=Decimal("0"), remaining_quantity=Decimal("0")
+            ),
+            message="not a Chronos order; refusing to cancel it (no cancel was sent)",
+            timestamp=datetime.now(tz=UTC),
+        )
+
     async def cancel_order(self, broker_order_id: int) -> CancellationResult:
         # Deliberately NOT kill-switch gated: cancellation is risk-reducing and
         # must work during an emergency stop (ADR-0009 §7).
@@ -2406,6 +2456,9 @@ class OfficialIBKRBroker:
         if not self._app_connected():
             raise BrokerRefusedBeforeSend("not connected; no cancel was sent")
         verify_environment_port(self._settings.ib_environment, self._settings.ib_port)
+        refusal = await self._cancel_ownership_refusal(app, broker_order_id)
+        if refusal is not None:
+            return refusal
         flight = self.bridge.start_order_ack(broker_order_id)
         try:
             app.cancelOrder(broker_order_id, "")

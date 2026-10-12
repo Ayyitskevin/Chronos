@@ -255,6 +255,15 @@ class UnsolicitedObservationClassifier:
         with self._lock:
             self._own_order_ids.add(valid)
 
+    def owns_order(self, order_id: int) -> bool:
+        """True only for an id this process recorded via :meth:`note_own_order` (a real submit)."""
+
+        valid = _broker_id(order_id, minimum=_MIN_ORDER_ID)
+        if valid is None:
+            return False
+        with self._lock:
+            return valid in self._own_order_ids
+
     def observe_execution(self, *, client_id: int | None, order_id: int | None) -> bool:
         """Return True when the observation invalidated readiness."""
 
@@ -533,6 +542,11 @@ class CallbackBridge:
         """Record an id this process is about to SUBMIT (just before ``placeOrder``)."""
 
         self.unsolicited.note_own_order(order_id)
+
+    def owns_order(self, order_id: int) -> bool:
+        """Whether this process submitted ``order_id`` (the cancel ownership fast path)."""
+
+        return self.unsolicited.owns_order(order_id)
 
     def clear_order_ack(self, order_id: int) -> None:
         with self._lock:
