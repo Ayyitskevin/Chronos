@@ -376,16 +376,6 @@ async def test_another_clients_fill_still_invalidates_after_a_refused_cancel(
     assert any("unsolicited" in reason for reason in spy.reasons)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "S1-F2: cancel_order calls start_order_ack, which notes the id as own BEFORE the send "
-        "(callbacks.py:519-523) and never forgets it; a non-Chronos order placed under the SAME "
-        "client id (a previous session, another process) is then classified own, so its fills "
-        "no longer invalidate readiness. RED (order plane); not fixed in S1b."
-    ),
-)
 async def test_a_same_client_foreign_order_fill_still_invalidates_after_a_cancel(
     gateway: fake_ibapi.FakeGateway,
 ) -> None:
