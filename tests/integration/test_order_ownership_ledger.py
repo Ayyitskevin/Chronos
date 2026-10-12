@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import replace
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -25,6 +26,7 @@ from chronos.broker.base import VenueOrderIdentity
 from chronos.domain.enums import OrderLifecycle
 from chronos.domain.models import OrderRequest, OrderSubmission
 from chronos.orders.ownership import PersistedOrderOwnershipLedger
+from chronos.utils.identifiers import account_fingerprint
 
 
 class _NoPermIdBroker(FakeBroker):
@@ -119,3 +121,66 @@ def test_an_order_whose_perm_id_was_never_persisted_is_not_owned() -> None:
         assert ledger.proves_owned(identity) is False
     finally:
         harness.close()
+
+
+# --- r3: the two re-checks the repositories already imply, pinned against a lying repository ---
+
+
+class _Event:
+    def __init__(self, **fields: int | None) -> None:
+        self.broker_order_id = fields.get("broker_order_id", 9001)
+        self.permanent_id = fields.get("permanent_id", 109001)
+        self.client_id = fields.get("client_id", 17)
+
+
+class _StubIntents:
+    """A repository that returns whatever it is told, even the wrong record."""
+
+    def __init__(self, *, order_ref: str, fingerprint: str) -> None:
+        self._record = SimpleNamespace(
+            intent_id="intent-1", order_ref=order_ref, account_fingerprint=fingerprint
+        )
+
+    def by_order_ref(self, order_ref: str, *, current_account_id: str) -> Any:
+        return self._record
+
+
+class _StubTracker:
+    def events(self, intent_id: str, *, current_account_id: str) -> tuple[_Event, ...]:
+        return (_Event(),)
+
+
+_STUB_IDENTITY = VenueOrderIdentity(
+    broker_order_id=9001,
+    order_ref="CHR-ORD-" + "a" * 32,
+    account_id=PAPER_ACCOUNT,
+    client_id=17,
+    permanent_id=109001,
+)
+
+
+def _stub_ledger(*, order_ref: str, fingerprint: str) -> PersistedOrderOwnershipLedger:
+    return PersistedOrderOwnershipLedger(
+        _StubIntents(order_ref=order_ref, fingerprint=fingerprint),  # type: ignore[arg-type]
+        _StubTracker(),  # type: ignore[arg-type]
+    )
+
+
+def test_the_ledger_does_not_trust_the_repository_to_return_the_ref_it_was_asked_for() -> None:
+    """Positive control, then the lie: another order_ref, everything else right."""
+
+    right = _stub_ledger(
+        order_ref=_STUB_IDENTITY.order_ref, fingerprint=account_fingerprint(PAPER_ACCOUNT)
+    )
+    assert right.proves_owned(_STUB_IDENTITY) is True
+    wrong = _stub_ledger(
+        order_ref="CHR-ORD-" + "b" * 32, fingerprint=account_fingerprint(PAPER_ACCOUNT)
+    )
+    assert wrong.proves_owned(_STUB_IDENTITY) is False
+
+
+def test_the_ledger_does_not_trust_the_repository_to_return_the_right_accounts_record() -> None:
+    wrong = _stub_ledger(
+        order_ref=_STUB_IDENTITY.order_ref, fingerprint=account_fingerprint("DU0000000")
+    )
+    assert wrong.proves_owned(_STUB_IDENTITY) is False
