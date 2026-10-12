@@ -14,8 +14,8 @@ commit this file was written on and drift; the tests named in each step pin the 
 
 **Why a runbook at all.** Moving to the real paper adapter is **not "config only"**: ten keys
 change (checklist `:87-101`) plus one the checklist's block omits (a `DATABASE_URL` of its own,
-step 6); the factory builds a different adapter with three safety hooks
-(`src/chronos/runtime.py:296-326`); and five things are owner acts, not configuration (steps
+step 6); the factory builds a different adapter with four hooks — three safety hooks plus
+the S1-F1 cancel-ownership ledger (`src/chronos/runtime.py:305-331`); and five things are owner acts, not configuration (steps
 2-6 and your word in step 10). Contract and rehearsal: `tests/unit/test_b1_swap_contract.py`.
 
 ## Conventions
@@ -112,7 +112,7 @@ CHRONOS_CAPTURE_PEPPER=<64 hex, generated below; never shown to anyone>
 ```
 - **`DATABASE_URL` (why it is here, though the checklist omits it).** The first backend start
   binds the database file to `(broker mode, environment, account fingerprint)`
-  (`src/chronos/runtime.py:337` → `src/chronos/ui/runtime_scope.py:161` →
+  (`src/chronos/runtime.py:342` → `src/chronos/ui/runtime_scope.py:161` →
   `src/chronos/persistence/database.py:218`). A file already bound to another scope refuses:
   "This Chronos database is already bound to a different broker scope; configure a separate
   DATABASE_URL." (`database.py:254-258`), and a file that holds account data but no scope refuses
@@ -221,8 +221,9 @@ capture), §4.3 (per-session checks), §5 (the restart session), §6 (sanitizati
 leaves the machine), §8 (the measured EXIT). Remember what the sessions do and do not exercise:
 the capture harness builds the adapter **hookless**, by design
 (`…/capture_readonly.py:295-297`), and never calls an order method
-(`capture_readonly.py:10-11`); the three safety hooks of `runtime.py:321-326` matter only when
-the backend runs.
+(`capture_readonly.py:10-11`); the four hooks of `runtime.py:322-331` matter only when the
+backend runs. Because the capture harness's adapter has no ownership ledger, any cancel through
+it is refused before send (S1-F1); it never cancels.
 
 ## Preflight conditions
 The ids below are the contract between this runbook and
