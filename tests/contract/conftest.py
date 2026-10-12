@@ -17,11 +17,21 @@ Registered implementations
   itself still importing. Give the harness a ``cause_fill`` hook and the fill case
   runs; entries for ``sim`` in :data:`KNOWN_VIOLATIONS` are not expected.
 
+* ``official_fake`` — S1b: the REAL :class:`chronos.broker.official_ibkr.OfficialIBKRBroker`
+  (unmodified ``_App``, ``CallbackBridge`` and normalizers) over ``tests/support/fake_ibapi.py``'s
+  FakeGateway, an in-process TWS backed by SimBroker. **Hook:** registered when that module
+  exists; its gateway is installed per case by :func:`_official_fake_gateway` (patched loaders,
+  socket tripwire, ``ibapi`` never imported). ``ALLOW_*`` stay false. The cases that send a
+  transmitting order through the adapter are **deferred to S2** by declaration
+  (:data:`DEFERRED`, ``BrokerHarness.submit_deferred``), not skipped, for the same reason as
+  :data:`NOT_RUN` below.
+
 Declared, NOT RUN
 -----------------
-* ``official_ibkr`` — :class:`chronos.broker.official_ibkr.OfficialIBKRBroker` needs a
-  gateway (or a fake ibapi). U1 never constructs it and never imports it
-  (``test_official_ibkr_is_declared_and_never_constructed`` pins that). It is a
+* ``official_ibkr`` — :class:`chronos.broker.official_ibkr.OfficialIBKRBroker` against a REAL
+  gateway. Never constructed or imported here
+  (``test_official_ibkr_is_declared_and_never_constructed`` pins that); the adapter itself runs
+  as ``official_fake`` above. It is a
   declaration in :data:`NOT_RUN`, not a skipped test, because the S0 gate's
   coverage claim depends on the suite containing exactly its two by-design skips.
 
@@ -36,6 +46,7 @@ forces the entry to be deleted. No ``src`` is changed to make a case pass.
 
 from __future__ import annotations
 
+import dataclasses
 import importlib
 import importlib.util
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
@@ -134,6 +145,9 @@ class BrokerHarness:
     #: A seeded working order NOT owned by Chronos, if the seed has one.
     foreign_order_id: int | None = None
     cause_fill: FillHook | None = None
+    #: Why this harness's submit path is not exercised here (None: it is). A harness with a
+    #: reason joins neither the accepting nor the refusing fixtures, by declaration.
+    submit_deferred: str | None = None
 
 
 class OfficialBrokerNotRun(RuntimeError):
@@ -141,15 +155,10 @@ class OfficialBrokerNotRun(RuntimeError):
 
 
 def official_ibkr_harness() -> BrokerHarness:
-    """NOT RUN placeholder for ``OfficialIBKRBroker`` (needs a gateway or fake ibapi).
+    """NOT RUN placeholder for ``OfficialIBKRBroker`` against a REAL gateway.
 
-    A later unit wires it over the existing fake ibapi used by
-    ``tests/unit/test_official_ibkr.py``; U1 does not, and never constructs a
-    connection. Expectations for that later run, read from ``official_ibkr.py``
-    but UNRUN: the pre-send refusals and the modify refusal match the cases
-    below (every local refusal raises ``BrokerRefusedBeforeSend``); the foreign
-    cancel case is expected to fail, because ``cancel_order`` carries no account
-    or ownership check (SURVEY R-3, RED to fix, not this unit's to fix).
+    S1b runs the adapter over the FakeGateway as ``official_fake`` (see the module docstring);
+    a real gateway is never constructed here, and B1 is the owner's.
     """
 
     raise OfficialBrokerNotRun(
@@ -159,7 +168,20 @@ def official_ibkr_harness() -> BrokerHarness:
 
 NOT_RUN: dict[str, str] = {
     "official_ibkr": (
-        "OfficialIBKRBroker: requires a gateway or fake ibapi; U1 never constructs a connection"
+        "OfficialIBKRBroker against a real gateway: never constructed here (the adapter runs "
+        "as official_fake over the FakeGateway)"
+    )
+}
+
+#: The FakeGateway harness's module (registered when present).
+_FAKE_GATEWAY_MODULE = "tests.support.fake_ibapi"
+
+#: Harness name -> why its submit path is deferred (declaration, not a skip).
+DEFERRED: dict[str, str] = {
+    "official_fake": (
+        "S2: sending a transmitting order through the real adapter (even to the in-process "
+        "FakeGateway) is the next slice, on Kevin's word; S1b keeps ALLOW_* false and runs "
+        "every refusal case"
     )
 }
 
@@ -265,6 +287,11 @@ def _load_registry() -> dict[str, BrokerHarness]:
     if importlib.util.find_spec("tests.support.sim_broker") is not None:
         module = importlib.import_module("tests.support.sim_broker")
         harnesses.append(module.contract_harness())
+    # S1b hook: the real OfficialIBKRBroker over the FakeGateway.
+    if importlib.util.find_spec(_FAKE_GATEWAY_MODULE) is not None:
+        module = importlib.import_module(_FAKE_GATEWAY_MODULE)
+        harness = module.contract_harness()
+        harnesses.append(dataclasses.replace(harness, submit_deferred=DEFERRED[harness.name]))
     return {harness.name: harness for harness in harnesses}
 
 
@@ -298,6 +325,13 @@ FINDINGS: dict[str, str] = {
         "for any id and removes nothing (:157-165); submit_order records the call but "
         "never adds the order (:118-145); there is no fill model (SURVEY G1/G2)."
     ),
+    "S1-F1": (
+        "OfficialIBKRBroker.cancel_order sends a cancel for an order Chronos does not own and "
+        "reports requested=True (official_ibkr.py:2398-2430: no ownership or account check; "
+        "SURVEY R-3). Over the FakeGateway the venue refuses another client's cancel (10147), so "
+        "nothing changes, but the adapter claims a request it should never have made. RED "
+        "(order plane): a src fix is the owner's, not S1b's."
+    ),
     "U1-F4": (
         "FakeBroker does not enforce the pre-send conditions the real adapter does "
         "(OfficialIBKRBroker._reverify_for_order_path, submit_order, modify_order, "
@@ -327,7 +361,30 @@ KNOWN_VIOLATIONS: dict[tuple[str, str], str] = {
     ("fake", "test_cancel_removes_a_cancelled_order_from_open_orders"): "U1-F3",
     ("fake", "test_cancel_of_an_unknown_order_never_reports_cancelled"): "U1-F3",
     ("fake", "test_cancel_refuses_to_touch_a_foreign_order"): "U1-F4",
+    ("official_fake", "test_cancel_refuses_to_touch_a_foreign_order"): "S1-F1",
 }
+
+
+def _harness_name(request: pytest.FixtureRequest) -> str | None:
+    callspec = getattr(request.node, "callspec", None)
+    if callspec is None:
+        return None
+    names = [value for value in callspec.params.values() if isinstance(value, str)]
+    return next((name for name in names if name in REGISTRY), None)
+
+
+@pytest.fixture(autouse=True)
+def _official_fake_gateway(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """For ``official_fake`` cases only: a fresh FakeGateway (one TWS) installed for this case.
+
+    Installed before the case body, so before ``build()`` (the adapter's constructor already
+    calls the loader). ``monkeypatch`` restores the loaders and sockets afterwards.
+    """
+
+    if _harness_name(request) != "official_fake":
+        return
+    module = importlib.import_module(_FAKE_GATEWAY_MODULE)
+    module.install(monkeypatch, module.FakeGateway.seeded())
 
 
 @pytest.fixture(autouse=True)
@@ -368,12 +425,12 @@ def harness(request: pytest.FixtureRequest) -> BrokerHarness:
     return REGISTRY[request.param]
 
 
-@pytest.fixture(params=_names(lambda h: h.accepts_orders))
+@pytest.fixture(params=_names(lambda h: h.accepts_orders and h.submit_deferred is None))
 def accepting_harness(request: pytest.FixtureRequest) -> BrokerHarness:
     return REGISTRY[request.param]
 
 
-@pytest.fixture(params=_names(lambda h: not h.accepts_orders))
+@pytest.fixture(params=_names(lambda h: not h.accepts_orders and h.submit_deferred is None))
 def refusing_harness(request: pytest.FixtureRequest) -> BrokerHarness:
     return REGISTRY[request.param]
 

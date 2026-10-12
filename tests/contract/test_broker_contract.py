@@ -47,6 +47,7 @@ from chronos.domain.enums import ConnectionState, OrderLifecycle, OrderSide
 from chronos.domain.models import OrderPreview, OrderSubmission
 from tests.contract import conftest as contract_conftest
 from tests.contract.conftest import (
+    DEFERRED,
     FINDINGS,
     FOREIGN_ACCOUNT,
     KNOWN_VIOLATIONS,
@@ -554,6 +555,33 @@ def test_official_ibkr_is_declared_and_never_constructed() -> None:
     for path in (Path(contract_conftest.__file__), Path(__file__)):
         for module in _imported_modules(path):
             assert not any(part in module for part in forbidden), f"{path.name} imports {module}"
+
+
+def test_the_real_adapter_runs_only_over_the_fake_gateway_with_its_submits_deferred() -> None:
+    """S1b: ``official_fake`` is registered exactly when the FakeGateway exists, and only as a
+    harness whose submit path is declared deferred (no skip, no transmitting send)."""
+
+    present = importlib.util.find_spec("tests.support.fake_ibapi") is not None
+    assert ("official_fake" in REGISTRY) is present
+    assert set(DEFERRED) <= set(REGISTRY) | {"official_fake"}
+    if present:
+        harness = REGISTRY["official_fake"]
+        assert harness.submit_deferred == DEFERRED["official_fake"]
+        assert harness.cause_fill is not None  # wired, used only once S2 runs the fill case
+
+
+async def test_each_case_runs_against_the_loader_its_harness_needs(harness: BrokerHarness) -> None:
+    """Positive and negative control for the installer: ONLY ``official_fake`` cases see the fake
+    ibapi; every other harness sees the untouched adapter module. (The socket tripwire is pinned
+    in ``tests/unit/test_fake_ibapi.py``; this module may not import ``socket``.)"""
+
+    adapter_module = importlib.import_module("chronos.broker.official_ibkr")
+    loader = adapter_module._load_ibapi
+    if harness.name == "official_fake":
+        assert loader()[0].__name__ == "BoundFakeEClient"
+    else:
+        assert loader.__module__ == "chronos.broker.official_ibkr"
+        assert loader.__name__ == "_load_ibapi"
 
 
 def test_the_sim_hook_registers_exactly_when_u2_exists() -> None:
