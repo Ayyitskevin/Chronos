@@ -14,6 +14,7 @@ Reuses the order-pipeline harness (in-memory database, FakeBroker double, no net
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from decimal import Decimal
 
 import pytest
@@ -228,16 +229,28 @@ def test_requested_false_with_cancelled_is_the_only_completion_by_refusal(
 # --- Q3 fix: the CANCEL_PENDING write is a compare-and-set -------------------------------------
 
 
-def _stale_view(harness: _Harness, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Make the NEXT cancel read the order as it was before another cancel wrote.
+@contextmanager
+def _stale_cancel(harness: _Harness, stale: object) -> Iterator[None]:
+    """For the duration of one cancel, read the order as it was before another cancel wrote.
 
     This is the check-then-write window: both cancels passed "is it cancellable?" while the order
-    was SUBMITTED, then one of them wrote CANCEL_PENDING and sent.
+    was SUBMITTED, then one of them wrote CANCEL_PENDING and sent. Scoped to the one call, because
+    the status helpers below read through the same repository.
     """
 
+    repo = harness.service._cancellation._intents
+    real_get = repo.get
+    repo.get = lambda *args, **kwargs: stale  # type: ignore[method-assign]
+    try:
+        yield
+    finally:
+        repo.get = real_get  # type: ignore[method-assign]
+
+
+def _snapshot(harness: _Harness) -> object:
     stale = harness.intents.get("intent-1", current_account_id=PAPER_ACCOUNT)
     assert stale is not None and stale.status is OrderLifecycle.SUBMITTED
-    monkeypatch.setattr(harness.service._cancellation._intents, "get", lambda *a, **k: stale)
+    return stale
 
 
 def test_a_sent_cancel_leaves_the_tracker_at_cancel_pending(
@@ -255,19 +268,19 @@ def test_a_sent_cancel_leaves_the_tracker_at_cancel_pending(
 
 
 def test_a_second_cancel_cannot_revert_the_first_ones_in_flight_cancel(
-    rig: tuple[_Harness, _CancelBroker], monkeypatch: pytest.MonkeyPatch
+    rig: tuple[_Harness, _CancelBroker],
 ) -> None:
     """D1: cancel A is SENT (the tracker says CANCEL_PENDING). Cancel B read the order before A
     wrote, and is refused. B's compensating revert must not undo A's pending mark."""
 
     harness, broker = rig
-    _stale_view(harness, monkeypatch)
+    stale = _snapshot(harness)
     broker.mode = "pending"
     harness.service.cancel("intent-1", now=FIXED_NOW)
     assert _status(harness) is OrderLifecycle.CANCEL_PENDING
 
     broker.mode = "typed"
-    with pytest.raises(OrderMutationError):
+    with _stale_cancel(harness, stale), pytest.raises(OrderMutationError):
         harness.service.cancel("intent-1", now=FIXED_NOW.replace(second=5))
 
     assert _status(harness) is OrderLifecycle.CANCEL_PENDING, (
@@ -276,18 +289,18 @@ def test_a_second_cancel_cannot_revert_the_first_ones_in_flight_cancel(
 
 
 def test_a_second_cancel_that_lost_the_race_sends_nothing_and_writes_no_second_pending_mark(
-    rig: tuple[_Harness, _CancelBroker], monkeypatch: pytest.MonkeyPatch
+    rig: tuple[_Harness, _CancelBroker],
 ) -> None:
     """D1, the cause: B's CANCEL_PENDING write is a compare-and-set, so B stops before the
     broker and before writing a second mark (it used to write one and send)."""
 
     harness, broker = rig
-    _stale_view(harness, monkeypatch)
+    stale = _snapshot(harness)
     broker.mode = "pending"
     harness.service.cancel("intent-1", now=FIXED_NOW)
 
     broker.mode = "accept"
-    with pytest.raises(OrderMutationError, match="no cancel was sent"):
+    with _stale_cancel(harness, stale), pytest.raises(OrderMutationError, match="no cancel"):
         harness.service.cancel("intent-1", now=FIXED_NOW.replace(second=5))
 
     assert broker.cancel_calls == [9001], "the losing cancel reached the broker"

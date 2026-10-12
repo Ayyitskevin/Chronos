@@ -154,9 +154,12 @@ class OrderCancellationService:
         # Mark CANCEL_PENDING first so an in-flight cancel is durably visible. The key carries the
         # attempt time: a retry after a refusal must be recorded again (a fixed key would be a
         # duplicate and write nothing, so the retry would send with no durable CANCEL_PENDING).
+        # The write is a compare-and-set against the status read above: if another cancel (or a
+        # broker callback) moved the order since, or this attempt was already recorded, nothing is
+        # written and NOTHING IS SENT. Only the attempt that wins the mark may later revert it.
         attempt = now.isoformat()
         prior_status = intent.status
-        self._tracker_repo.record_transition(
+        recorded = self._tracker_repo.record_transition(
             intent_id=intent_id,
             event_key=f"{intent_id}:{broker_order_id}:CANCEL_PENDING:{attempt}",
             source="CANCEL",
@@ -166,7 +169,13 @@ class OrderCancellationService:
             broker_order_id=broker_order_id,
             evidence={"phase": "cancel_requested"},
             occurred_at=now,
+            enforce_from_status=True,
         )
+        if not recorded:
+            raise OrderMutationError(
+                "cancel not recorded: the order's status changed or this cancel was already "
+                "recorded; no cancel was sent"
+            )
         try:
             result = self._connection.run(self._connection.broker.cancel_order(broker_order_id))
         except BrokerRefusedBeforeSend as refusal:
