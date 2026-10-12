@@ -12,7 +12,9 @@ adapter shell the neighbouring ``test_official_ibkr.py`` submit tests use.
 
 from __future__ import annotations
 
+import ast
 import asyncio
+import contextlib
 from collections.abc import Iterator
 from contextlib import contextmanager
 from decimal import Decimal
@@ -28,7 +30,7 @@ from chronos.broker.callbacks import CallbackBridge
 from chronos.broker.official_ibkr import OfficialIBKRBroker
 from chronos.broker.order_ids import OrderIdAllocator
 from chronos.broker.request_registry import RequestRegistry
-from chronos.domain.enums import IBEnvironment, OrderIntent, OrderLifecycle, OrderSide
+from chronos.domain.enums import IBEnvironment, OrderIntent, OrderSide
 from chronos.domain.models import CryptoContract, OrderRequest
 from chronos.orders.kill_switch import LiveKillSwitch
 
@@ -40,6 +42,12 @@ class _Allow:
     @contextmanager
     def at_send(self) -> Iterator[bool]:
         yield True
+
+
+class _Deny:
+    @contextmanager
+    def at_send(self) -> Iterator[bool]:
+        yield False
 
 
 def _bridge() -> CallbackBridge:
@@ -106,6 +114,9 @@ def _shell(
         ib_client_id=_CLIENT,
     )
     broker._live_kill_switch = kill_switch
+    # the S1-F1 cancel proof reads this attribute; None = no ledger = the cancel is refused.
+    # Unused on a base without S1-F1, so this shell holds on both sides of that change.
+    broker._order_ownership = None
     broker.bridge = _bridge()
     broker.bridge.managed_accounts = (_ACCOUNT,)
     broker.order_ids = OrderIdAllocator()
@@ -166,13 +177,17 @@ def test_a_preview_does_not_record_its_whatif_id_as_own(monkeypatch: pytest.Monk
 
 
 def test_a_cancel_does_not_record_the_cancelled_id_as_own(monkeypatch: pytest.MonkeyPatch) -> None:
-    broker, app = _shell(monkeypatch, first_id=9400)
+    """Only the S1-F2 property: whatever the cancel path decides, the id it touched is not own.
 
-    result = asyncio.run(broker.cancel_order(777))
+    Deliberately silent on whether the cancel is sent or refused and on what it reports; that is
+    S1-F1's rule (the ownership proof), and this test must hold before and after it lands.
+    """
 
-    assert app.sent == [("cancelOrder", 777)]  # the cancel really went out
-    assert result.requested is True
-    assert result.lifecycle is OrderLifecycle.CANCELLED
+    broker, _ = _shell(monkeypatch, first_id=9400)
+
+    with contextlib.suppress(BrokerRefusedBeforeSend):  # S1-F1 refuses an unproven cancel
+        asyncio.run(broker.cancel_order(777))
+
     assert not _reads_as_own(broker.bridge, 777)
 
 
@@ -208,3 +223,79 @@ def test_a_submit_refused_before_send_records_nothing(
 
     assert app.sent == []
     assert not _reads_as_own(broker.bridge, 9600)
+
+
+def test_a_submit_refused_by_the_send_guard_records_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    broker, app = _shell(monkeypatch, first_id=9700)
+
+    with pytest.raises(BrokerRefusedBeforeSend, match="authorization changed"):
+        asyncio.run(broker.submit_order(_request("D", transmit=True), send_guard=_Deny()))
+
+    assert app.sent == []
+    assert not _reads_as_own(broker.bridge, 9700)
+
+
+# -- the call-site invariant, structurally ----------------------------------------------------- #
+
+_SRC = Path(__file__).resolve().parents[2] / "src" / "chronos"
+
+
+def _calls_of(attribute: str) -> list[tuple[str, str, ast.Call, list[ast.AST]]]:
+    """Every production call ``<x>.<attribute>(...)``: (file, enclosing def, node, parents)."""
+
+    found: list[tuple[str, str, ast.Call, list[ast.AST]]] = []
+
+    def visit(node: ast.AST, path: str, scope: list[str], parents: list[ast.AST]) -> None:
+        if isinstance(node, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+            scope = [*scope, node.name]
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == attribute
+        ):
+            found.append((path, ".".join(scope), node, parents))
+        for child in ast.iter_child_nodes(node):
+            visit(child, path, scope, [*parents, node])
+
+    for file in sorted(_SRC.rglob("*.py")):
+        visit(
+            ast.parse(file.read_text(encoding="utf-8")), file.relative_to(_SRC).as_posix(), [], []
+        )
+    return found
+
+
+def test_ownership_is_recorded_from_exactly_one_production_call_site() -> None:
+    sites = {(path, scope) for path, scope, _, _ in _calls_of("note_own_order")}
+
+    assert sites == {
+        # the bridge method that delegates to the classifier ...
+        ("broker/callbacks.py", "CallbackBridge.note_own_order"),
+        # ... and the one adapter call: the real submit
+        ("broker/official_ibkr.py", "OfficialIBKRBroker.submit_order"),
+    }
+
+
+def test_the_submit_records_inside_both_pre_send_guards_and_before_placeorder() -> None:
+    (record,) = [
+        site for site in _calls_of("note_own_order") if site[1] == "OfficialIBKRBroker.submit_order"
+    ]
+    (send,) = [
+        site for site in _calls_of("placeOrder") if site[1] == "OfficialIBKRBroker.submit_order"
+    ]
+    _, _, record_call, record_parents = record
+    _, _, send_call, _ = send
+
+    assert ast.unparse(record_call.func) == "self.bridge.note_own_order"  # the bridge method
+    guards = [node for node in record_parents if isinstance(node, ast.With)]
+    assert len(guards) >= 2, "the record must sit inside the send guard AND the kill guard"
+    assert record_call.lineno < send_call.lineno
+    # and after the kill guard's own refusal, not merely inside its block
+    refusals = [
+        node.lineno
+        for node in ast.walk(guards[-1])
+        if isinstance(node, ast.Raise) and "kill switch engaged" in ast.unparse(node)
+    ]
+    assert refusals
+    assert max(refusals) < record_call.lineno

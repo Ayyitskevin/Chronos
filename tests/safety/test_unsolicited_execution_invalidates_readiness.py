@@ -689,8 +689,7 @@ def test_1r3_the_bridge_invalidates_an_out_of_domain_pair_on_both_paths(
     bridge = CallbackBridge(
         RequestRegistry(), on_connection_uncertain=readiness.invalidate, client_id=client_id
     )
-    bridge.start_order_ack(order_id)
-    bridge.clear_order_ack(order_id)
+    bridge.note_own_order(order_id)  # the registration the out-of-domain pair must not survive
 
     generation = _warm(readiness)
     bridge.on_exec_details(-1, None, SimpleNamespace(clientId=client_id, orderId=order_id))
