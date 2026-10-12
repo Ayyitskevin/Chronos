@@ -59,7 +59,7 @@ import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
@@ -79,6 +79,7 @@ from chronos.domain.models import (
     Instrument,
     OptionContract,
     OrderRequest,
+    UnderlyingContract,
 )
 from tests.support.order_fakes import option_contract
 from tests.support.sim_broker import (
@@ -187,6 +188,17 @@ class FakeCommissionReport:
         self.execId = exec_id
         self.commission = commission
         self.currency = currency
+
+
+class FakeContractDetails:
+    """The ContractDetails fields the adapter reads on the smoke's qualification path."""
+
+    def __init__(self, contract: FakeContract) -> None:
+        self.contract = contract
+        self.liquidHours = "20261012:0930-20261012:1600;20261013:0930-20261013:1600"
+        self.timeZoneId = "US/Eastern"
+        self.minTick = 0.01
+        self.marketRuleIds = ""
 
 
 class FakeEWrapper:
@@ -304,6 +316,39 @@ class FakeEClient:
         self.gateway.record(self, "placeOrder")
         self.gateway.place_order(self, int(orderId), contract, order)
 
+    def reqContractDetails(self, reqId: int, contract: FakeContract) -> None:
+        self.gateway.record(self, "reqContractDetails")
+        self.gateway.contract_details(self, int(reqId), contract)
+
+    def reqSecDefOptParams(
+        self,
+        reqId: int,
+        underlyingSymbol: str,
+        futFopExchange: str,
+        underlyingSecType: str,
+        underlyingConId: int,
+    ) -> None:
+        del futFopExchange, underlyingSecType
+        self.gateway.record(self, "reqSecDefOptParams")
+        self.gateway.sec_def_opt_params(self, int(reqId), underlyingSymbol, int(underlyingConId))
+
+    def reqMktData(
+        self,
+        reqId: int,
+        contract: FakeContract,
+        genericTickList: str,
+        snapshot: bool,
+        regulatorySnapshot: bool,
+        mktDataOptions: Any,
+    ) -> None:
+        del genericTickList, regulatorySnapshot, mktDataOptions
+        self.gateway.record(self, "reqMktData")
+        self.gateway.market_data(self, int(reqId), contract, snapshot=bool(snapshot))
+
+    def cancelMktData(self, reqId: int) -> None:
+        del reqId
+        self.gateway.record(self, "cancelMktData")
+
     def cancelOrder(self, orderId: int, manualCancelOrderTime: str = "") -> None:
         self.gateway.record(self, "cancelOrder")
         del manualCancelOrderTime
@@ -350,6 +395,20 @@ class FakeGateway:
         self.readers_released = threading.Event()
         #: every EClient call that reached this gateway, in order, as (client id, method)
         self.transcript: list[tuple[int | None, str]] = []
+        # --- B1 U-b market-data knobs (all default-off) -----------------------------------
+        #: con_id -> how a snapshot reqMktData is answered (default: type 1 with prices):
+        #:   int < 100: that marketDataType, then prices, then tickSnapshotEnd;
+        #:   int >= 100: that error code for the request, nothing else;
+        #:   "hang": nothing; "no_type": prices + end, no marketDataType;
+        #:   "empty": marketDataType 1 + end, no prices;
+        #:   ("notice_then", code, type): the error, then that type + prices + end;
+        #:   a list: one element per successive request (the last one repeats).
+        self.entitlement: dict[int, Any] = {}
+        self._entitlement_calls: dict[int, int] = {}
+        #: extra accountSummary rows (tag, value, currency), sent after the standard three
+        self.extra_summary_rows: list[tuple[str, str, str]] = []
+        #: extra position rows (instrument, quantity, avgCost), sent after the venue's
+        self.extra_positions: list[tuple[Instrument, Decimal, float]] = []
         _run_without_a_loop(self._seed_registry())
 
     @classmethod
@@ -570,6 +629,8 @@ class FakeGateway:
                 ("BuyingPower", summary.buying_power),
             ):
                 client.emit("accountSummary", req_id, ACCOUNT, tag, str(value), "USD")
+            for tag, raw, currency in self.extra_summary_rows:
+                client.emit("accountSummary", req_id, ACCOUNT, tag, raw, currency)
             client.emit("accountSummaryEnd", req_id)
 
     def positions(self, client: FakeEClient) -> None:
@@ -581,6 +642,10 @@ class FakeGateway:
                     self.contract_of(position.contract),
                     float(position.quantity),
                     float(position.average_cost),
+                )
+            for instrument, quantity, avg_cost in self.extra_positions:
+                client.emit(
+                    "position", ACCOUNT, self.contract_of(instrument), float(quantity), avg_cost
                 )
             client.emit("positionEnd")
 
@@ -653,6 +718,113 @@ class FakeGateway:
         with self._lock:
             self._run(self.sim.cancel_order(sim_id))
             self.unrecorded_completed.add(sim_id)
+
+    # market data (B1 U-b: the smoke's read path) ------------------------------------------------
+    _MARKET_DATA_MESSAGES: ClassVar[dict[int, str]] = {
+        100: "Max rate of messages per second has been exceeded",
+        101: "Max number of tickers has been reached",
+        354: "Requested market data is not subscribed",
+        420: "Invalid real-time query: pacing violation",
+        10089: "Requested market data requires additional subscription for API",
+        10090: "Part of requested market data is not subscribed",
+        10091: "Part of requested market data requires additional subscription for API",
+        10167: "Requested market data is not subscribed. Displaying delayed market data",
+        10186: "Requested market data is not subscribed. Delayed market data is not enabled",
+        10189: "Failed to request tick-by-tick data",
+        10197: "No market data during competing live session",
+    }
+    _UNDERLYING_PRICES: ClassVar[dict[int, float]] = {
+        1: 99.90,
+        2: 100.10,
+        4: 100.00,
+        9: 99.50,
+    }  # bid, ask, last, close
+
+    def contract_details(self, client: FakeEClient, req_id: int, contract: FakeContract) -> None:
+        with self._lock:
+            symbol = str(contract.symbol or "").upper()
+            matches = [
+                instrument
+                for instrument in self._registry.values()
+                if isinstance(instrument, UnderlyingContract) and instrument.symbol == symbol
+            ]
+            if not matches:
+                self._error(
+                    client,
+                    req_id,
+                    CODE_NO_SECURITY,
+                    "No security definition has been found for the request",
+                )
+                return
+            for instrument in matches:
+                client.emit(
+                    "contractDetails", req_id, FakeContractDetails(self.contract_of(instrument))
+                )
+            client.emit("contractDetailsEnd", req_id)
+
+    def sec_def_opt_params(
+        self, client: FakeEClient, req_id: int, symbol: str, underlying_con_id: int
+    ) -> None:
+        with self._lock:
+            options = [
+                instrument
+                for instrument in self._registry.values()
+                if isinstance(instrument, OptionContract)
+                and instrument.symbol == symbol
+                and instrument.underlying_con_id == underlying_con_id
+            ]
+            if options:
+                client.emit(
+                    "securityDefinitionOptionParameter",
+                    req_id,
+                    "SMART",
+                    underlying_con_id,
+                    options[0].trading_class,
+                    str(int(options[0].multiplier)),
+                    {option.expiration.strftime("%Y%m%d") for option in options},
+                    {float(option.strike) for option in options},
+                )
+            client.emit("securityDefinitionOptionParameterEnd", req_id)
+
+    def _entitlement_for(self, con_id: int) -> Any:
+        answer = self.entitlement.get(con_id, 1)
+        if isinstance(answer, list):
+            index = self._entitlement_calls.get(con_id, 0)
+            self._entitlement_calls[con_id] = index + 1
+            return answer[min(index, len(answer) - 1)]
+        return answer
+
+    def _emit_prices(self, client: FakeEClient, req_id: int) -> None:
+        for tick_type, price in self._UNDERLYING_PRICES.items():
+            client.emit("tickPrice", req_id, tick_type, price, None)
+        client.emit("tickSize", req_id, 8, 1000.0)
+
+    def market_data(
+        self, client: FakeEClient, req_id: int, contract: FakeContract, *, snapshot: bool
+    ) -> None:
+        del snapshot  # the smoke path asks for snapshots only
+        with self._lock:
+            answer = self._entitlement_for(int(contract.conId))
+            if answer == "hang":
+                return
+            if isinstance(answer, tuple) and answer[0] == "notice_then":
+                _, code, market_data_type = answer
+                self._error(client, req_id, code, self._MARKET_DATA_MESSAGES.get(code, "notice"))
+                client.emit("marketDataType", req_id, market_data_type)
+                self._emit_prices(client, req_id)
+                client.emit("tickSnapshotEnd", req_id)
+                return
+            if isinstance(answer, int) and answer >= 100:
+                self._error(client, req_id, answer, self._MARKET_DATA_MESSAGES.get(answer, "error"))
+                return
+            if answer == "no_type":
+                self._emit_prices(client, req_id)
+            elif answer == "empty":
+                client.emit("marketDataType", req_id, 1)
+            else:
+                client.emit("marketDataType", req_id, int(answer))
+                self._emit_prices(client, req_id)
+            client.emit("tickSnapshotEnd", req_id)
 
     # orders ------------------------------------------------------------------------------------
     def _request_of(

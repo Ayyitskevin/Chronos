@@ -35,6 +35,7 @@ from chronos.broker.market_data import (
 )
 from chronos.broker.official_ibkr import OfficialIBKRBroker
 from chronos.domain.enums import DataQuality
+from chronos.domain.models import UnderlyingContract
 
 PERMISSION_CODES = (354, 10089, 10090, 10091, 10186, 10189, 10197)
 AAPL_CON_ID = 999
@@ -70,7 +71,7 @@ async def _connected() -> OfficialIBKRBroker:
     return broker
 
 
-async def _aapl(broker: OfficialIBKRBroker) -> object:
+async def _aapl(broker: OfficialIBKRBroker) -> UnderlyingContract:
     return await broker.qualify_underlying("AAPL")
 
 
