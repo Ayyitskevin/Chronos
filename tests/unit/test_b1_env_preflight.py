@@ -34,9 +34,10 @@ import re
 import socket
 import stat
 import sys
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 import pytest
 from dotenv import dotenv_values
@@ -171,9 +172,8 @@ def _load_settings(values: Mapping[str, str]) -> Settings | str:
     """Build Settings from the file's own values only (never os.environ, never any .env)."""
 
     try:
-        return _FileOnlySettings(  # type: ignore[arg-type,call-arg]
-            _env_file=None, **{k.lower(): v for k, v in values.items()}
-        )
+        fields: dict[str, Any] = {k.lower(): v for k, v in values.items()}
+        return _FileOnlySettings(_env_file=None, **fields)  # type: ignore[call-arg]
     except ValidationError as error:
         # the message names fields and rules, not values: keep only the first line
         return "Settings refused the file: " + error.errors()[0]["msg"][:200]
@@ -461,13 +461,14 @@ def test_the_audit_hook_blocks_every_way_of_opening_a_dotenv(
 ) -> None:
     """Unlike a ``builtins.open`` patch, it also sees ``Path.read_text`` and ``os.open``."""
 
-    for name, attempt in {
+    attempts: dict[str, Callable[[Path], object]] = {
         "open": lambda p: open(p, encoding="utf-8").close(),
         "io.open": lambda p: io.open(p, encoding="utf-8").close(),  # noqa: UP020
         "Path.read_text": lambda p: p.read_text(encoding="utf-8"),
         "Path.open": lambda p: p.open(encoding="utf-8").close(),
         "os.open": lambda p: os.close(os.open(p, os.O_RDONLY)),
-    }.items():
+    }
+    for name, attempt in attempts.items():
         with pytest.raises(AssertionError, match=r"a \.env was opened"):
             attempt(sentinel_dotenvs["home"])
         assert name
