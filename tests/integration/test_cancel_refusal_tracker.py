@@ -235,7 +235,10 @@ def _stale_cancel(harness: _Harness, stale: object) -> Iterator[None]:
 
     This is the check-then-write window: both cancels passed "is it cancellable?" while the order
     was SUBMITTED, then one of them wrote CANCEL_PENDING and sent. Scoped to the one call, because
-    the status helpers below read through the same repository.
+    the status helpers below read through the same repository. This models the window inside one
+    session; it is not two real sessions. The atomicity of "exactly one cancel wins" is
+    ``record_transition``'s compare-and-set (ADR-0009 §4), which the submission boundary also
+    relies on.
     """
 
     repo = harness.service._cancellation._intents
