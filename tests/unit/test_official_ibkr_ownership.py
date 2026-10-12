@@ -497,6 +497,38 @@ async def test_a_venue_row_without_a_perm_id_is_refused_before_the_ledger_is_ask
     assert wire.cancels == []
 
 
+@pytest.mark.parametrize("what", ["account", "client"])
+async def test_the_local_prefilters_hold_even_if_a_lax_ledger_says_yes(
+    gateway: fake_ibapi.FakeGateway,
+    wire: _Wire,
+    monkeypatch: pytest.MonkeyPatch,
+    what: str,
+) -> None:
+    """Defence in depth: the account and client-id checks are not delegated to the ledger."""
+
+    original = fake_ibapi.FakeGateway._order_of
+
+    def other(self: Any, order: Any, adapter_id: int) -> Any:
+        ib = original(self, order, adapter_id)
+        if what == "account":
+            ib.account = "DU0000000"
+        else:
+            ib.clientId = fake_ibapi.CLIENT_ID + 1
+        return ib
+
+    monkeypatch.setattr(fake_ibapi.FakeGateway, "_order_of", other)
+    ledger = AnswerLedger(True)
+    broker = _broker(ledger=ledger)
+    await broker.connect()
+    try:
+        result = await broker.cancel_order(fake_ibapi.OWNED_ID)
+    finally:
+        await broker.disconnect()
+    assert ledger.calls == 0
+    assert result.requested is False
+    assert wire.cancels == []
+
+
 async def test_a_foreign_refusal_reports_rejected_not_the_foreign_rows_own_status(
     gateway: fake_ibapi.FakeGateway,
 ) -> None:
