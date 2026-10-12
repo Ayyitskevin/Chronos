@@ -25,6 +25,7 @@ from chronos.domain.models import (
     OrderSubmission,
 )
 from chronos.orders.intent import WheelOrderIntent, build_option_intent
+from chronos.orders.state_machine import is_terminal
 from chronos.orders.tracker import OrderTracker
 from chronos.persistence.order_repositories import (
     OrderIntentRepository,
@@ -144,6 +145,12 @@ class OrderCancellationService:
         now: datetime,
     ) -> CancellationResult:
         intent = self._intents.get(intent_id, current_account_id=current_account_id)
+        if intent is not None and intent.status is OrderLifecycle.CANCEL_PENDING:
+            raise OrderMutationError(
+                "a cancel is already pending for this order (or was interrupted); an interrupted "
+                "cancel is not recovered automatically: reconcile the order or cancel it at the "
+                "broker"
+            )
         if intent is None or intent.status not in _CANCELLABLE_STATUSES:
             raise OrderMutationError("order is not in a cancellable state")
         broker_order_id = self._tracker.broker_order_id(
@@ -191,18 +198,46 @@ class OrderCancellationService:
             )
             raise OrderMutationError(f"cancel refused: {result.message}")
         if result.lifecycle is OrderLifecycle.CANCELLED:
-            self._tracker_repo.record_transition(
-                intent_id=intent_id,
-                event_key=f"{intent_id}:{broker_order_id}:CANCELLED",
-                source="CANCEL",
-                from_status=OrderLifecycle.CANCEL_PENDING,
-                to_status=OrderLifecycle.CANCELLED,
-                current_account_id=current_account_id,
-                broker_order_id=broker_order_id,
-                evidence={"message": result.message},
-                occurred_at=result.timestamp,
-            )
+            self._complete_cancel(intent_id, broker_order_id, result, current_account_id)
         return result
+
+    def _complete_cancel(
+        self,
+        intent_id: str,
+        broker_order_id: int,
+        result: CancellationResult,
+        current_account_id: str,
+    ) -> None:
+        """Record ``CANCEL_PENDING -> CANCELLED`` as a compare-and-set, never over a raced callback.
+
+        A broker callback can land while the cancel is in flight. If it moved the order, the
+        recorded broker status stands and this write loses: already ``CANCELLED`` is idempotent; a
+        different terminal status (FILLED, REJECTED) contradicts the cancel answer, so it is
+        surfaced instead of written over; a non-terminal status (a partial fill) is left to the
+        venue's own callbacks, which carry the final status.
+        """
+
+        written = self._tracker_repo.record_transition(
+            intent_id=intent_id,
+            event_key=f"{intent_id}:{broker_order_id}:CANCELLED",
+            source="CANCEL",
+            from_status=OrderLifecycle.CANCEL_PENDING,
+            to_status=OrderLifecycle.CANCELLED,
+            current_account_id=current_account_id,
+            broker_order_id=broker_order_id,
+            evidence={"message": result.message},
+            occurred_at=result.timestamp,
+            enforce_from_status=True,
+        )
+        if written:
+            return
+        intent = self._intents.get(intent_id, current_account_id=current_account_id)
+        status = intent.status if intent is not None else None
+        if status is not None and status is not OrderLifecycle.CANCELLED and is_terminal(status):
+            raise OrderMutationError(
+                f"the cancel answered CANCELLED but the order is already recorded as "
+                f"{status.value}; the recorded status stands: reconcile before acting"
+            )
 
     def _record_refusal(
         self,
