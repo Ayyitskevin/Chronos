@@ -2414,7 +2414,12 @@ class OfficialIBKRBroker:
 
         if self.bridge.owns_order(broker_order_id):
             return None
-        flight = self.bridge.start_open_orders()
+        try:
+            flight = self.bridge.start_open_orders()
+        except RuntimeError as error:  # an earlier read timed out and is still pending
+            raise BrokerRefusedBeforeSend(
+                "an open-orders read is still pending; ownership unproven; no cancel was sent"
+            ) from error
         app.reqAllOpenOrders()  # read-only
         done = await asyncio.get_running_loop().run_in_executor(
             None, flight.done.wait, _REQUEST_TIMEOUT_S
@@ -2435,7 +2440,15 @@ class OfficialIBKRBroker:
         _, _, order, order_state = row
         order_ref = str(getattr(order, "orderRef", "") or "")
         account = str(getattr(order, "account", "") or "")
-        if order_ref.startswith("CHR-") and account == self._settings.ib_account_id:
+        # r1 (interim, NOT an authenticator): the row must also be placed by THIS client id. A
+        # forged order_ref on a manual / other-client order no longer reaches cancelOrder; a
+        # same-client forged ref still does (Daybreak P1-1, open: DESIGN.md section 1, Q-P1).
+        placed_by_us = int(getattr(order, "clientId", -1) or 0) == self._settings.ib_client_id
+        if (
+            order_ref.startswith("CHR-")
+            and account == self._settings.ib_account_id
+            and placed_by_us
+        ):
             return None
         status_entry = self.bridge.order_statuses.get(broker_order_id)
         raw_status = status_entry[0] if status_entry else str(getattr(order_state, "status", ""))
