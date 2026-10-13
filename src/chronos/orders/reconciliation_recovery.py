@@ -1065,9 +1065,14 @@ class OrderRestartReconciler:
             # C10a: no bound record and no working order, so fills are NEVER combined across
             # sessions (design §3.2 "No-record case"; Daybreak/fable U-A r1 P2-1): only THIS
             # session's owned executions can prove the order filled. (Their total cannot exceed
-            # the order size here: _executions_match_intent refused that above.)
+            # the order size here: _executions_match_intent refused that above.) Each execution
+            # that SETTLES must carry the exact reference (§2.1; U-A r2): a blank-ref one owned by
+            # the permId fallback still counts toward the lower bound, never toward this proof.
             s0 = _session_start(now, self._market_tz)
-            e_today = sum((e.quantity for e in fills if e.timestamp >= s0), Decimal("0"))
+            e_today = sum(
+                (e.quantity for e in fills if e.timestamp >= s0 and e.order_ref == order_ref),
+                Decimal("0"),
+            )
             if e_today >= quantity:
                 return settle(None, quantity, OrderLifecycle.FILLED, "executions", e_today)
             if fills:
