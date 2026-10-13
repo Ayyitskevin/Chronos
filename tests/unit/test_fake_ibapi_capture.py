@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Iterator
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
@@ -335,6 +336,7 @@ async def test_the_adapter_assembles_a_complete_put_quote_from_the_stream(
         await adapter.disconnect()
     assert quote.data_quality is DataQuality.LIVE
     assert (quote.bid, quote.ask) == (Decimal("3.1"), Decimal("3.2"))
+    assert quote.last == Decimal("3.15")  # tick 4: not needed for completion, read by a capture
     assert (quote.volume, quote.open_interest) == (120, 3400)
     assert quote.greeks is not None
     assert quote.greeks.delta == Decimal("-0.47")  # the model computation, not bid's (type 10)
@@ -354,6 +356,7 @@ async def test_the_adapter_assembles_a_call_quote_from_the_call_ticks(
     finally:
         await adapter.disconnect()
     assert (quote.bid, quote.ask) == (Decimal("3.4"), Decimal("3.5"))
+    assert quote.last == Decimal("3.45")
     assert (quote.volume, quote.open_interest) == (240, 5100)
     assert quote.greeks is not None and quote.greeks.delta == Decimal("0.53")
 
@@ -516,6 +519,7 @@ async def test_a_historical_data_error_fails_the_request(
 
 @pytest.mark.xfail(
     strict=True,
+    raises=AssertionError,  # only the stated claim may absorb it; any other error is a real failure
     reason=(
         "U-F1-F1 (candidate, ASSUMED-IB, K4): during the regular session a daily request with an "
         "empty endDateTime returns today's still-forming bar; the adapter stamps every parsed "
@@ -532,8 +536,25 @@ async def test_the_session_in_progress_is_not_reported_as_a_closed_bar(
         series = await adapter.historical_bars(underlying, lookback_days=30)
     finally:
         await adapter.disconnect()
-    assert series.bars[-1].session_date == date(2026, 10, 12)  # the sim clock is mid-session
     assert series.bars[-1].status is BarStatus.FORMING
+
+
+async def test_the_capture_day_clock_is_mid_session_so_todays_bar_is_in_progress(
+    day: fake_ibapi.FakeGateway,
+) -> None:
+    """The precondition of the U-F1-F1 xfail above, asserted where it cannot be absorbed by it."""
+
+    local = day.sim_now().astimezone(fake_ibapi.EXCHANGE_TIME_ZONE)
+    assert fake_ibapi.SESSION_OPEN <= (local.hour, local.minute) < fake_ibapi.SESSION_CLOSE
+    adapter = _broker()
+    await adapter.connect()
+    try:
+        underlying = await adapter.qualify_underlying("AAPL")
+        series = await adapter.historical_bars(underlying, lookback_days=30)
+    finally:
+        await adapter.disconnect()
+    assert series.bars[-1].session_date == date(2026, 10, 12)  # the sim date's bar is present
+    assert series.bars[-1].volume < series.bars[-2].volume  # and partial (the day is not over)
 
 
 # --- the capture-day book: positions, executions, open orders ------------------------------------
@@ -705,3 +726,61 @@ def test_on_a_weekend_the_last_bar_is_fridays() -> None:
     gateway = fake_ibapi.FakeGateway.capture_day()
     gateway.set_sim_time(datetime(2026, 10, 17, 15, 0, tzinfo=UTC))  # Saturday
     assert _sessions_and_volumes(gateway)[-1][0] == "20261016"
+
+
+@pytest.mark.parametrize("duration", ["5 W", "2 M", "1 Y", "x D", "30"])
+def test_a_duration_the_fake_does_not_model_is_refused_loudly(duration: str) -> None:
+    gateway = fake_ibapi.FakeGateway.capture_day()
+    client = fake_ibapi.FakeEClient.bound_to(gateway)(fake_ibapi.RecordingWrapper())
+    client.connect("127.0.0.1", 7497, fake_ibapi.CLIENT_ID)
+    try:
+        contract = fake_ibapi.FakeContract()
+        contract.conId = 999
+        with pytest.raises(AssertionError, match="not modelled"):
+            client.reqHistoricalData(5, contract, "", duration, "1 day", "TRADES", 1, 1, False, [])
+    finally:
+        client.disconnect()
+    assert gateway.historical_requests == []
+
+
+async def test_a_wrong_trading_class_does_not_qualify(day: fake_ibapi.FakeGateway) -> None:
+    adapter = _broker()
+    await adapter.connect()
+    try:
+        with pytest.raises(BrokerError):
+            await _qualified(adapter, _spec("100").model_copy(update={"trading_class": "ZZZ"}))
+    finally:
+        await adapter.disconnect()
+    assert fake_ibapi.CODE_NO_SECURITY in [code for _req, code, _message in day.errors_sent]
+
+
+async def test_a_minus_one_implied_volatility_reads_as_none_and_keeps_the_other_greeks(
+    day: fake_ibapi.FakeGateway,
+) -> None:
+    """The "not computed" sentinel family: -1.0 is one (the unset-double maximum is the other)."""
+
+    day.option_ticks[PUT_100_NOV] = replace(
+        fake_ibapi.OptionTicks.default(OptionRight.PUT), implied_vol=-1.0
+    )
+    adapter = _broker()
+    await adapter.connect()
+    try:
+        (option,) = await _qualified(adapter, _spec("100"))
+        (quote,) = await adapter.request_option_quotes([option])
+    finally:
+        await adapter.disconnect()
+    assert quote.greeks is not None
+    assert quote.greeks.implied_volatility is None
+    assert (quote.greeks.delta, quote.greeks.gamma, quote.greeks.theta) == (
+        Decimal("-0.47"),
+        Decimal("0.05"),
+        Decimal("-0.06"),
+    )
+
+
+def test_during_the_session_the_sim_date_bar_is_partial() -> None:
+    (yesterday, y_volume), (today, t_volume) = _sessions_and_volumes(
+        fake_ibapi.FakeGateway.capture_day()  # 2026-10-12 14:00Z = 10:00 New York
+    )[-2:]
+    assert (yesterday, today) == ("20261009", "20261012")
+    assert t_volume < y_volume  # a quarter of a day so far, against the full day before
