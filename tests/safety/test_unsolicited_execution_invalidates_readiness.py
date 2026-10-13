@@ -479,12 +479,20 @@ def _git(*args: str) -> str:
     ).stdout
 
 
+# RC-1's exact subject LINE. The commit is found by this subject over the whole history, not by a
+# window of recent commits: a window moves out from under the pin with every merge (D-1).
+_RC1_SUBJECT = (
+    "broker: an unsolicited broker execution or order status "
+    "invalidates submission readiness (RC-1)"
+)
+
+
 def _rc1_commit() -> str:
-    for line in _git("log", "--format=%H%x09%s", "-200").splitlines():
+    for line in _git("log", "--format=%H%x09%s").splitlines():
         sha, _, subject = line.partition("\t")
-        if subject.endswith("(RC-1)"):
+        if subject == _RC1_SUBJECT:  # the subject line only: a body that quotes it never matches
             return sha
-    pytest.fail("the RC-1 commit (subject ending '(RC-1)') is not in the last 200 commits")
+    pytest.fail(f"the RC-1 commit (subject {_RC1_SUBJECT!r}) is not in this checkout's history")
 
 
 def _predicate(source: str) -> str:
