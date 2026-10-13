@@ -499,6 +499,13 @@ _SETTLE_STATUSES = frozenset({OrderLifecycle.CANCEL_PENDING, OrderLifecycle.PART
 _TERMINAL_VENUE = frozenset(
     {OrderLifecycle.CANCELLED, OrderLifecycle.FILLED, OrderLifecycle.REJECTED}
 )
+#: The venue lifecycles the planner recognises on a listed order (U-B r1, Daybreak P1-1): the two
+#: working classes (C2-0/C2-1), PendingCancel (C1) and the terminals. Anything else -- above all
+#: SUBMISSION_UNKNOWN, the broker-status boundary's fail-closed answer to a status Chronos does
+#: not know -- is row 12: no completed-orders comparison, no dwell, no fill progress, no write.
+_WORKING_VENUE = frozenset({OrderLifecycle.SUBMITTED, OrderLifecycle.PARTIALLY_FILLED})
+_RECOGNISED_VENUE = _WORKING_VENUE | _TERMINAL_VENUE | {OrderLifecycle.CANCEL_PENDING}
+_UNRECOGNISED_STATUS = "the venue reports an unrecognised venue order status; nothing is assumed"
 _NO_COMPLETED_EVIDENCE = "completed-orders evidence is not available"
 #: U-B (design r3 §4.3): the source of the dwell-gated recovery write (C2-1); a SUBMITTED intent
 #: whose latest lifecycle event carries it, from CANCEL_PENDING, is "recovered" (rows S-R).
@@ -1151,6 +1158,8 @@ class OrderRestartReconciler:
 
         if working:
             order = working[0]
+            if order.lifecycle not in _RECOGNISED_VENUE:
+                return _SettlePlan("refuse", f"{_UNRECOGNISED_STATUS} ({order.lifecycle.value})")
             terminal = order.lifecycle in _TERMINAL_VENUE or order.filled_quantity >= quantity
             working_records: tuple[BrokerOrder, ...] | None = None
             if not terminal and order.lifecycle is not OrderLifecycle.CANCEL_PENDING:
@@ -1280,6 +1289,13 @@ class OrderRestartReconciler:
                 f"completed orders are ambiguous: {len(candidates)} records share the reference",
             )
         record = candidates[0]
+        if record.lifecycle not in _TERMINAL_VENUE:
+            # a completed-order record is a bound T only with a terminal status (C7 needs
+            # Filled); a non-terminal or unrecognised one never settles by its quantity (U-B r1)
+            return _SettlePlan(
+                "refuse",
+                f"completed order record has not a terminal status ({record.lifecycle.value})",
+            )
         if not bound_exactly(record):
             return _SettlePlan("refuse", "completed order record is not bound to this intent")
         return from_terminal(record, "completed_order")
