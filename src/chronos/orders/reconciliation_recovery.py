@@ -22,7 +22,7 @@ from decimal import Decimal
 from functools import partial
 from zoneinfo import ZoneInfo
 
-from chronos.broker.base import BrokerError, CompletedOrderEvidence
+from chronos.broker.base import CompletedOrderEvidence
 from chronos.broker.connection import BrokerConnectionManager
 from chronos.domain.enums import ConnectionState, OrderLifecycle
 from chronos.domain.models import BrokerExecution, BrokerOrder
@@ -807,7 +807,10 @@ class OrderRestartReconciler:
                 else:
                     try:
                         cache.append((self._connection.run(broker.completed_orders()), ""))
-                    except (BrokerError, TimeoutError) as error:
+                    except Exception as error:
+                        # ANY failure of this optional read is a typed, fail-closed hold for the
+                        # intents that need it -- never an exception out of the whole pass
+                        # (Daybreak U-A r1 P3-1: e.g. an earlier unanswered id-less request)
                         cache.append((None, f"{_NO_COMPLETED_EVIDENCE}: {error}"))
             return cache[0]
 
