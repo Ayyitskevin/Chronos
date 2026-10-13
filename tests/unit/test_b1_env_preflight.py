@@ -339,6 +339,19 @@ def _set(text: str, key: str, value: str | None) -> str:
         ("no pepper", lambda t: _set(t, "CHRONOS_CAPTURE_PEPPER", None), ["P10"]),
         ("a short pepper", lambda t: _set(t, "CHRONOS_CAPTURE_PEPPER", "abcd"), ["P10"]),
         ("an upper-case pepper", lambda t: _set(t, "CHRONOS_CAPTURE_PEPPER", "AB" * 32), ["P10"]),
+        # P13 (DESIGN r2): IB_ACCOUNT_ALLOWLIST is a transmission-authority input; empty forms only
+        (
+            "the paper id on the account allowlist",
+            lambda t: _set(t, "IB_ACCOUNT_ALLOWLIST", "DU7654321"),
+            ["P13"],
+        ),
+        (
+            "a JSON account allowlist",
+            lambda t: _set(t, "IB_ACCOUNT_ALLOWLIST", '["DU7654321"]'),
+            ["P13"],
+        ),
+        ("a bare account allowlist is fine", lambda t: _set(t, "IB_ACCOUNT_ALLOWLIST", ""), []),
+        ("an empty JSON account allowlist", lambda t: _set(t, "IB_ACCOUNT_ALLOWLIST", "[]"), []),
     ],
 )
 def test_each_condition_fails_on_its_own_broken_shape(
