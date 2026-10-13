@@ -92,8 +92,9 @@ def _bridge(readiness: ReconciliationReadiness) -> CallbackBridge:
     bridge = CallbackBridge(
         RequestRegistry(), on_connection_uncertain=readiness.invalidate, client_id=_OWN_CLIENT
     )
-    bridge.start_order_ack(_OWN_ORDER)  # the adapter records its own order before the send
-    bridge.clear_order_ack(_OWN_ORDER)
+    # the adapter's submit path records its own order (note_own_order) just before the send;
+    # start_order_ack no longer does (S1-F2): preview and cancel use it too
+    bridge.note_own_order(_OWN_ORDER)
     return bridge
 
 
@@ -688,8 +689,7 @@ def test_1r3_the_bridge_invalidates_an_out_of_domain_pair_on_both_paths(
     bridge = CallbackBridge(
         RequestRegistry(), on_connection_uncertain=readiness.invalidate, client_id=client_id
     )
-    bridge.start_order_ack(order_id)
-    bridge.clear_order_ack(order_id)
+    bridge.note_own_order(order_id)  # the registration the out-of-domain pair must not survive
 
     generation = _warm(readiness)
     bridge.on_exec_details(-1, None, SimpleNamespace(clientId=client_id, orderId=order_id))
