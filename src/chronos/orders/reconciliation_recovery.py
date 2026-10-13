@@ -724,6 +724,11 @@ class OrderRestartReconciler:
                 applied_updates=(),
             )
 
+        # U-B r3 (fable r2 P2-1; design r3 §3.1 "all read inside one uncertainty_epoch"): the
+        # epochs are captured BEFORE the snapshot is read and every plan of this pass carries
+        # them, so an event after the read -- before or during any intent's planning -- makes
+        # the confirming re-plan (which captures its own, before ITS read) differ
+        snapshot_epochs = self._current_epochs()
         open_orders = self._connection.run(self._connection.broker.open_orders())
         executions = self._connection.run(self._connection.broker.executions())
         proven: list[RestartOrderObservation] = []
@@ -791,6 +796,7 @@ class OrderRestartReconciler:
                     open_orders=open_orders,
                     executions=executions,
                     read_completed=read_completed,
+                    epochs=snapshot_epochs,
                 )
                 # S-R3: a recovered SUBMITTED that the planner cannot settle is "as today"
                 as_today = intent.status is OrderLifecycle.SUBMITTED and plan.kind != "write"
@@ -1043,6 +1049,7 @@ class OrderRestartReconciler:
         persisted_client_id: int | None,
         previous_dwell: Mapping[str, _Dwell],
         mono_now: float,
+        epochs: tuple[int, int | None],
     ) -> _SettlePlan:
         """One decision per intent over ONE evidence generation; never writes.
 
@@ -1059,9 +1066,8 @@ class OrderRestartReconciler:
         order_ref = intent.order_ref
         if not order_ref:
             return _SettlePlan("legacy")
-        # U-B r2 (design r3 §3.1; Daybreak r1 delta P1-1): EVERY write plan carries the epochs it
-        # was planned under; the confirming re-plan must agree and the CAS runs while they hold
-        epochs = self._current_epochs()
+        # U-B r2/r3: EVERY write plan carries the epochs captured before ITS snapshot was read
+        # (``epochs``); the confirming re-plan must agree and the CAS runs while they hold
         is_pending = intent.status is OrderLifecycle.CANCEL_PENDING
         conflict = _identity_conflict_reason(
             order_ref=order_ref,
@@ -1379,6 +1385,7 @@ class OrderRestartReconciler:
         fresh: tuple[tuple[BrokerOrder, ...], tuple[BrokerExecution, ...], _CompletedRead] | None
         fresh = None
         if any(plan.kind == "write" for _, plan, _ in plans):
+            confirm_epochs = self._current_epochs()  # before the confirming read (r3)
             fresh = (
                 self._connection.run(self._connection.broker.open_orders()),
                 self._connection.run(self._connection.broker.executions()),
@@ -1401,7 +1408,12 @@ class OrderRestartReconciler:
                 proven.append(observed)
                 continue
             assert fresh is not None and plan.to_status is not None
-            again = planner(open_orders=fresh[0], executions=fresh[1], read_completed=fresh[2])
+            again = planner(
+                open_orders=fresh[0],
+                executions=fresh[1],
+                read_completed=fresh[2],
+                epochs=confirm_epochs,
+            )
             if again != plan:
                 unresolved.append(
                     RestartOrderObservation(
