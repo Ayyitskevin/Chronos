@@ -940,3 +940,13 @@ def test_r2_a_pending_cancel_row_filled_by_quantity_is_C1_not_C3(world: World) -
     world.at(0)
     assert world.rig.status() is CP
     assert world.rig.trail()[-1] == ("FILL_PROGRESS", CP)
+
+
+def test_r2_a_write_plan_without_epochs_is_refused_there_is_no_bypass(world: World) -> None:
+    """W01: every write plan carries its epochs (W02/W03 show a plan without them never
+    writes); the guard itself also refuses ``None`` rather than waving the write through."""
+
+    with world.rig.reconciler._epochs_held(None) as current:
+        assert current is False
+    with world.rig.reconciler._epochs_held(world.rig.reconciler._current_epochs()) as current:
+        assert current is True  # positive control
