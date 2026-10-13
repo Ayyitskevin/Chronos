@@ -34,7 +34,7 @@ from decimal import Decimal
 import pytest
 
 from chronos.domain.enums import OrderLifecycle, OrderSide, ProductFamily
-from chronos.domain.models import BrokerOrder, UnderlyingContract
+from chronos.domain.models import BrokerExecution, BrokerOrder, UnderlyingContract
 from chronos.orders.reconciliation_recovery import resolve_from_broker_evidence
 from chronos.persistence.order_repositories import OrderIntentRecord
 from chronos.utils.identifiers import account_fingerprint
@@ -119,11 +119,15 @@ def _row(lifecycle: OrderLifecycle, filled: str, *, ref: str | None = REF) -> Br
     )
 
 
-def _resolve(status: OrderLifecycle, *rows: BrokerOrder) -> OrderLifecycle | None:
+def _resolve(
+    status: OrderLifecycle,
+    *rows: BrokerOrder,
+    executions: tuple[BrokerExecution, ...] = (),
+) -> OrderLifecycle | None:
     update = resolve_from_broker_evidence(
         _intent(status),
         open_orders=tuple(rows),
-        executions=(),
+        executions=executions,
         current_account_id=ACCOUNT,
         expected_broker_client_id=CLIENT_ID,
         expected_limit_price=LIMIT,
@@ -261,8 +265,41 @@ _DIFFERENTIAL = {
 }
 
 
+# S-12 (RC-A): a blank-reference observation is owned by the persisted permId alone (BP-2 R-f): it
+# may record PROGRESS but never a terminal write. The INTENDED differences from the table above are
+# exactly the cells whose result would be terminal (FILLED, CANCELLED, REJECTED), for the blank
+# reference only: 7 of the 110 cells (SUBMITTED, PARTIALLY_FILLED and CANCEL_PENDING at filled 10;
+# typed FILLED at filled 0 and 10; typed CANCELLED and REJECTED at filled 0). Every exact-reference
+# cell, every progress cell (SUBMITTED / CANCEL_PENDING at 0, any PARTIALLY_FILLED figure) and every
+# S-3 refusal is unchanged.
+_C, _R, _CP, _S = (
+    OrderLifecycle.CANCELLED,
+    OrderLifecycle.REJECTED,
+    OrderLifecycle.CANCEL_PENDING,
+    OrderLifecycle.SUBMITTED,
+)
+_DIFFERENTIAL_BLANK = {
+    **_DIFFERENTIAL,
+    _S: (_S, _P, _P, _P, None),
+    OrderLifecycle.PARTIALLY_FILLED: (_P, _P, _P, _P, None),
+    _CP: (_CP, _P, _P, _P, None),
+    _F: (None, _P, _P, _P, None),
+    _C: (None, None, None, None, None),
+    _R: (None, None, None, None, None),
+}
+
+
 def test_the_differential_table_covers_every_lifecycle() -> None:
-    assert set(_DIFFERENTIAL) == set(OrderLifecycle)
+    assert set(_DIFFERENTIAL) == set(OrderLifecycle) == set(_DIFFERENTIAL_BLANK)
+    changed = [
+        (typed, filled)
+        for typed in OrderLifecycle
+        for filled, (exact, blank) in enumerate(
+            zip(_DIFFERENTIAL[typed], _DIFFERENTIAL_BLANK[typed], strict=True)
+        )
+        if exact != blank
+    ]
+    assert len(changed) == 7  # the S-12 cells, nothing else
 
 
 @pytest.mark.parametrize("reference", ["exact", "blank-with-permid"])
@@ -271,8 +308,63 @@ def test_the_resolver_changes_only_the_intended_cells_against_main(
     typed: OrderLifecycle, reference: str
 ) -> None:
     ref = REF if reference == "exact" else None
+    table = _DIFFERENTIAL if reference == "exact" else _DIFFERENTIAL_BLANK
     got = tuple(
         _resolve(OrderLifecycle.SUBMITTED, _row(typed, filled, ref=ref))
         for filled in ("0", "1", "4", "9", "10")
     )
-    assert got == _DIFFERENTIAL[typed]
+    assert got == table[typed]
+
+
+# --- S-12: the executions branch (no listed row): only executions carrying the reference settle ---
+
+
+def _execution(execution_id: str, quantity: str, *, ref: str | None) -> BrokerExecution:
+    return BrokerExecution(
+        execution_id=execution_id,
+        account_id=ACCOUNT,
+        broker_order_id=BROKER_ID,
+        permanent_id=PERM_ID,
+        client_id=CLIENT_ID,
+        order_ref=ref,
+        contract=UnderlyingContract(con_id=CON_ID, symbol="AAPL"),
+        side=OrderSide.BUY,
+        quantity=Decimal(quantity),
+        price=LIMIT,
+        timestamp=NOW,
+    )
+
+
+@pytest.mark.parametrize("local", SENT_ACTIVE, ids=lambda lifecycle: lifecycle.value)
+def test_executions_that_carry_the_reference_settle_filled_by_themselves(
+    local: OrderLifecycle,
+) -> None:
+    """Control: exact-reference executions reaching Q are FILLED (a blank one cannot also fit: the
+    existing coherence rule refuses a set whose total exceeds the order quantity)."""
+
+    both = (_execution("e1", "6", ref=REF), _execution("e2", "4", ref=REF))
+    assert _resolve(local, executions=both) is OrderLifecycle.FILLED
+    assert _resolve(local, executions=(_execution("e1", "10", ref=REF),)) is OrderLifecycle.FILLED
+
+
+@pytest.mark.parametrize("local", SENT_ACTIVE, ids=lambda lifecycle: lifecycle.value)
+def test_blank_reference_executions_add_progress_but_never_the_last_share(
+    local: OrderLifecycle,
+) -> None:
+    exact6 = _execution("e1", "6", ref=REF)
+    # progress: blank executions below Q still count (BP-2 R-f), alone or beside an exact one
+    assert _resolve(local, executions=(_execution("e2", "4", ref=None),)) is (
+        OrderLifecycle.PARTIALLY_FILLED
+    )
+    assert _resolve(local, executions=(exact6, _execution("e2", "2", ref=None))) is (
+        OrderLifecycle.PARTIALLY_FILLED
+    )
+    # but the terminal state needs the reference: the blank ones may not supply the last share
+    assert _resolve(local, executions=(exact6, _execution("e2", "4", ref=None))) is None
+    assert (
+        _resolve(
+            local, executions=(_execution("e1", "6", ref=None), _execution("e2", "4", ref=None))
+        )
+        is None
+    )
+    assert _resolve(local, executions=(_execution("e1", "10", ref=None),)) is None

@@ -24,6 +24,7 @@ from chronos.broker.connection import BrokerConnectionManager
 from chronos.domain.enums import ConnectionState, OrderLifecycle
 from chronos.domain.models import BrokerExecution, BrokerOrder
 from chronos.orders.reconciliation_readiness import ReconciliationReadiness
+from chronos.orders.state_machine import TERMINAL_ORDER_LIFECYCLES
 from chronos.orders.tracker import OrderIdentityConflict, OrderStatusUpdate, OrderTracker
 from chronos.persistence.order_repositories import (
     OrderIntentRecord,
@@ -316,6 +317,9 @@ def resolve_from_broker_evidence(
             lifecycle = OrderLifecycle.PARTIALLY_FILLED
         else:
             lifecycle = order.lifecycle
+        if lifecycle in TERMINAL_ORDER_LIFECYCLES and not order.order_ref:
+            # owned by the persisted permId alone (BP-2 R-f): progress, never a terminal write
+            return None
         return OrderStatusUpdate(
             intent_id=intent.intent_id,
             broker_order_id=order.broker_order_id,
@@ -332,6 +336,10 @@ def resolve_from_broker_evidence(
         filled = sum((execution.quantity for execution in fills), Decimal("0"))
         remaining = max(intent.quantity - filled, Decimal("0"))
         lifecycle = OrderLifecycle.FILLED if remaining <= 0 else OrderLifecycle.PARTIALLY_FILLED
+        referenced = sum((e.quantity for e in fills if e.order_ref), Decimal("0"))
+        if lifecycle is OrderLifecycle.FILLED and referenced < intent.quantity:
+            # the last share may not come from an execution owned by permId alone (S-12)
+            return None
         return OrderStatusUpdate(
             intent_id=intent.intent_id,
             broker_order_id=fills[0].broker_order_id,
@@ -422,6 +430,14 @@ def _unresolved_evidence_reason(
         return (
             f"owned broker order is typed {unsettled.lifecycle.value} (not a working lifecycle) "
             "but reports fills: fill quantity cannot settle it, the intent stays locked"
+        )
+    if any(not order.order_ref for order in matching_orders) or any(
+        not execution.order_ref for execution in matching_executions
+    ):
+        return (
+            "broker evidence carries no order reference and is owned by the persisted permId "
+            "alone: it may record progress but never settles a terminal state, the intent "
+            "stays locked"
         )
     if matching_executions:
         return "broker execution evidence was present but could not be resolved"

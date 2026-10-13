@@ -67,14 +67,14 @@ CONTRADICTED = (OrderLifecycle.REJECTED, OrderLifecycle.CANCELLED)
 UNRECOGNISED = OrderLifecycle.SUBMISSION_UNKNOWN
 
 
-def _row(lifecycle: OrderLifecycle, filled: str) -> BrokerOrder:
+def _row(lifecycle: OrderLifecycle, filled: str, *, ref: str | None = REF) -> BrokerOrder:
     filled_quantity = Decimal(filled)
     return BrokerOrder(
         broker_order_id=BROKER_ID,
         permanent_id=PERM_ID,
         client_id=CLIENT_ID,
         account_id=ACCOUNT,
-        order_ref=REF,
+        order_ref=ref,
         contract=UnderlyingContract(con_id=CON_ID, symbol="AAPL"),
         side=OrderSide.BUY,
         quantity=QUANTITY,
@@ -418,3 +418,23 @@ def test_a_terminal_row_at_zero_fills_does_not_overwrite_recorded_fills(
     assert rig.event_count() == events_before
     assert [item.intent_id for item in report.remaining_active] == ["intent-1"]
     assert report.permits_new_opening_order is False
+
+
+# --- S-12: the report says WHY a blank-reference observation did not settle the intent ---------
+# The behaviour itself is pinned in tests/integration/test_legacy_resolver_blank_ref.py; the typed
+# reason (not "absent from the snapshots", which would be false) is pinned here.
+
+
+@pytest.mark.parametrize("local", SENT_ACTIVE[:1] + SENT_ACTIVE[2:], ids=lambda x: x.value)
+def test_a_blank_reference_row_that_would_settle_is_refused_with_its_own_reason(
+    rig: _Rig, local: OrderLifecycle
+) -> None:
+    rig.seed(local)
+    rig.venue.open = [_row(OrderLifecycle.FILLED, "10", ref=None)]  # owned by the persisted permId
+
+    report = rig.reconcile()
+
+    assert rig.status() is local and report.permits_new_opening_order is False
+    (item,) = report.unresolved
+    assert "absent" not in item.reason
+    assert "no order reference" in item.reason and "never settles a terminal state" in item.reason
