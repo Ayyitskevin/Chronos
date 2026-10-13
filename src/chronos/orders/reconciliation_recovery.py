@@ -876,7 +876,17 @@ class OrderRestartReconciler:
         )
         if not identity_ok:
             return _SettlePlan(
-                "refuse", "owned order reference matched conflicting account or economic identity"
+                "refuse",
+                _unresolved_evidence_reason(
+                    intent,
+                    open_orders=open_orders,
+                    executions=executions,
+                    current_account_id=current_account_id,
+                    expected_limit_price=expected_limit_price,
+                    expected_broker_client_id=self._expected_broker_client_id,
+                    persisted_broker_order_id=persisted_broker_order_id,
+                    persisted_permanent_id=persisted_permanent_id,
+                ),
             )
         figures = self._tracker.fill_figures(
             intent.intent_id, current_account_id=current_account_id
