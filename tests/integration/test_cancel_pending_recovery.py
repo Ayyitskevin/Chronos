@@ -1047,3 +1047,106 @@ def test_r3_on_main_a_cancelled_listed_row_with_fills_settles_cancelled_at_the_v
     world.at(0)
     assert world.rig.status() is CANCELLED
     assert world.rig.events()[-1].filled_quantity == Decimal(filled)
+
+
+# --- U-B r3, fable r2 P2-1: the epochs are bound at SNAPSHOT time, not at plan time ------------
+
+REF_2 = "CHR-ORD-" + "T" * 32
+
+
+def _second_cancel_pending_intent(w: World) -> None:
+    w.rig.seed(intent_id="intent-2", ref=REF_2, broker_id=9002, permanent_id=109002)
+    w.rig.broker_id = 9002
+    w.rig.event(CP, at=PRIOR, source="CANCEL", intent_id="intent-2")
+    w.rig.broker_id = 9001
+
+
+@pytest.mark.parametrize("event", sorted(_SETTLE_EVENTS))
+def test_r3_fable_P2_1_an_event_during_an_earlier_intents_planning_blocks_a_later_intent(
+    world: World, event: str
+) -> None:
+    """Fable's probe 2: two CANCEL_PENDING intents with exact S4 CANCELLED records; the event fires
+    inside the pass's first completed-orders read (intent-1's planning). Intent-2's first snapshot
+    was read BEFORE the event, so it must not be settled from it."""
+
+    world.rig.pending()
+    _second_cancel_pending_intent(world)
+    world.venue.completed = [
+        venue_order(CANCELLED, "0"),
+        venue_order(CANCELLED, "0", ref=REF_2, broker_id=9002, perm=109002),
+    ]
+
+    def once() -> None:
+        world.venue.during_completed = None
+        _SETTLE_EVENTS[event](world)
+
+    world.venue.during_completed = once
+    report = world.at(0)
+    assert world.rig.status("intent-1") is CP
+    assert world.rig.status("intent-2") is CP, "intent-2 settled from a pre-event snapshot"
+    assert not report.permits_new_opening_order
+
+
+def test_r3_fable_P2_1_control_two_intents_with_no_event_both_settle(world: World) -> None:
+    world.rig.pending()
+    _second_cancel_pending_intent(world)
+    world.venue.completed = [
+        venue_order(CANCELLED, "0"),
+        venue_order(CANCELLED, "0", ref=REF_2, broker_id=9002, perm=109002),
+    ]
+    world.at(0)
+    assert world.rig.status("intent-1") is CANCELLED
+    assert world.rig.status("intent-2") is CANCELLED
+
+
+@pytest.mark.parametrize("event", sorted(_SETTLE_EVENTS))
+@pytest.mark.parametrize("case", _SETTLE_CASES)
+def test_r3_fable_P2_1_an_event_after_the_snapshot_read_and_before_the_first_plan_blocks(
+    world: World, monkeypatch: pytest.MonkeyPatch, case: str, event: str
+) -> None:
+    """Fable's probe 3: the event lands after the pass's open-orders/executions read and before any
+    plan (here: at the first per-intent tracker read). Nothing is written in that pass."""
+
+    _settle_case(world, case)
+    real = world.rig.tracker.broker_order_id
+    fired = {"done": False}
+
+    def first_read(*args, **kwargs):  # type: ignore[no-untyped-def]
+        if not fired["done"]:
+            fired["done"] = True
+            _SETTLE_EVENTS[event](world)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(world.rig.tracker, "broker_order_id", first_read)
+    report = world.at(0)
+    assert fired["done"]
+    assert world.rig.status() is CP, (case, event)
+    assert not report.permits_new_opening_order
+
+
+# --- U-B r3, fable r2 P3-1 / P3-2 --------------------------------------------------------------
+
+
+def test_r3_fable_P3_1_a_write_plan_without_epochs_is_refused_with_its_own_reason(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import dataclasses
+
+    real = OrderRestartReconciler._plan_settle
+
+    def without_epochs(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        plan = real(self, *args, **kwargs)
+        return dataclasses.replace(plan, epochs=None) if plan.kind == "write" else plan
+
+    monkeypatch.setattr(OrderRestartReconciler, "_plan_settle", without_epochs)
+    _settle_case(world, "s4_terminal")
+    report = world.at(0)
+    assert world.rig.status() is CP
+    assert any("write plan carries no epochs; refused" in r for r in issues(report)), issues(report)
+
+
+def test_r3_fable_P3_2_the_terminal_table_cannot_be_extended_at_runtime() -> None:
+    from chronos.orders import reconciliation_recovery as rr
+
+    with pytest.raises(TypeError):
+        rr._TERMINAL_TARGET[OrderLifecycle.REJECTED] = FILLED  # type: ignore[index]
