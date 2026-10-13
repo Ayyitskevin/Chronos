@@ -925,12 +925,16 @@ class OrderRestartReconciler:
         quantity = intent.quantity
 
         def settle(
-            record: BrokerOrder | None, figure: Decimal, target: OrderLifecycle, source: str
+            record: BrokerOrder | None,
+            figure: Decimal,
+            target: OrderLifecycle,
+            source: str,
+            witnessed: Decimal = lower,
         ) -> _SettlePlan:
-            if figure < lower:
+            if figure < witnessed:
                 return _SettlePlan(
                     "refuse",
-                    f"venue fill figure {figure} is below the witnessed lower bound {lower}",
+                    f"venue fill figure {figure} is below the witnessed lower bound {witnessed}",
                 )
             try:
                 OrderLifecycleMachine(intent.status).apply(target)
@@ -951,8 +955,8 @@ class OrderRestartReconciler:
                 evidence=(
                     ("settled_from", source),
                     ("venue_fill_figure", _plain(figure)),
-                    ("witnessed_lower_bound", _plain(lower)),
-                    ("unwitnessed_upper_bound", _plain(figure - lower)),
+                    ("witnessed_lower_bound", _plain(witnessed)),
+                    ("unwitnessed_upper_bound", _plain(figure - witnessed)),
                 ),
                 owned_open=signature[0],
                 owned_fills=signature[1],
@@ -1041,12 +1045,14 @@ class OrderRestartReconciler:
         if not candidates:
             if not is_pending:
                 return _SettlePlan("legacy")
-            if fills and lower >= quantity:
-                if lower > quantity:
-                    return _SettlePlan(
-                        "refuse", f"witnessed fills {lower} exceed the order size {quantity}"
-                    )
-                return settle(None, quantity, OrderLifecycle.FILLED, "executions")
+            # C10a: no bound record and no working order, so fills are NEVER combined across
+            # sessions (design §3.2 "No-record case"; Daybreak/fable U-A r1 P2-1): only THIS
+            # session's owned executions can prove the order filled. (Their total cannot exceed
+            # the order size here: _executions_match_intent refused that above.)
+            s0 = _session_start(now, self._market_tz)
+            e_today = sum((e.quantity for e in fills if e.timestamp >= s0), Decimal("0"))
+            if e_today >= quantity:
+                return settle(None, quantity, OrderLifecycle.FILLED, "executions", e_today)
             if fills:
                 return _SettlePlan(
                     "refuse", "cancel pending; order absent; fills present; no terminal record"

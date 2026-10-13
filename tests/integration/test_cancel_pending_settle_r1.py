@@ -368,6 +368,9 @@ def test_C10a_this_sessions_executions_alone_settle_even_with_an_earlier_figure_
     event = rig.events()[-1]
     assert event.filled_quantity == Decimal("10") and event.remaining_quantity == Decimal("0")
     assert event.evidence["settled_from"] == "executions"
+    # the bound is this session's own executions, not a cross-session sum (3 + 10 = 13)
+    assert event.evidence["witnessed_lower_bound"] == "10"
+    assert event.evidence["unwitnessed_upper_bound"] == "0"
 
 
 def test_fable_P3_3_C10a_counts_an_execution_stamped_exactly_at_the_session_start(
