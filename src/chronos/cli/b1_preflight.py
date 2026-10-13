@@ -152,12 +152,11 @@ def preflight_b1_env(
         # Settings stops at its FIRST refusal, whichever validator raised it (a U-c shape
         # rule, the live conjunction, a field that would not parse, a client-id clash), so
         # every condition that needs no constructed Settings is evaluated on the file's own
-        # values for EVERY load refusal (Daybreak build-uc r2 P2-1), and reported once each.
-        # The refusal's own condition is kept when the raw pass has no form of it (P1, P8).
-        raw = _raw_findings(values)
-        if condition not in {cid for cid, _ in raw}:
-            found.append((condition, settings))
-        found.extend(raw)
+        # values for EVERY load refusal (Daybreak build-uc r2 P2-1, r3 P2-3), and reported
+        # once each: the refusal keeps its own bounded message under its condition id, and the
+        # raw pass adds every OTHER condition it found (P1 alone has no raw form).
+        found.append((condition, settings))
+        found.extend((cid, message) for cid, message in _raw_findings(values) if cid != condition)
         return sorted(set(found), key=_order)
 
     if not (
@@ -189,6 +188,10 @@ _ACCOUNT_MESSAGE = "IB_ACCOUNT_ID is not a paper-shaped id or is the placeholder
 
 _MODE_MESSAGE = "broker mode/adapter/environment are not ibkr/official_ibkr/paper"
 _TRANSMIT_MESSAGE = "a transmission flag or derived conjunction is true"
+_CLIENT_IDS_MESSAGE = (
+    "IB_CLIENT_ID is 0 or equals IB_DATA_CLIENT_ID, or SYMBOL_ALLOWLIST is empty (or one of "
+    "them would not parse)"
+)
 _ALLOWLIST_MESSAGE = (
     "IB_ACCOUNT_ALLOWLIST is not empty: it is a transmission-authority input and stays "
     "empty for the read-only campaign (it is added only by a separate paper-"
@@ -220,8 +223,10 @@ def _raw_findings(values: Mapping[str, str]) -> list[tuple[str, str]]:
 
     Used after ANY Settings load refusal: Settings stops at its FIRST refusal, so without this
     an early refusal (a U-c shape rule, the live conjunction, an unparseable field, a client-id
-    clash) would hide independent transmission-authority findings (Daybreak build-uc r1 P2-1,
-    r2 P2-1). Messages are the post-load checks' own, never a value.
+    clash) would hide independent findings (Daybreak build-uc r1 P2-1, r2 P2-1, r3 P2-3). The
+    conditions decided here are P2, P3, P4, P5, P8 and P13; P6, P7 and P9-P12 are decided before
+    the load, and P1 is the refusal itself, so no condition can hide behind another. An
+    unparseable value fails closed into its condition. Messages never carry a value.
     """
 
     found: list[tuple[str, str]] = []
@@ -246,6 +251,16 @@ def _raw_findings(values: Mapping[str, str]) -> list[tuple[str, str]]:
         for flag in ("allow_order_transmit", "allow_live_trading")
     ):
         found.append(("P5", _TRANSMIT_MESSAGE))
+    client_id = _raw_field(values, "ib_client_id")
+    data_client_id = _raw_field(values, "ib_data_client_id")
+    symbols = _raw_field(values, "symbol_allowlist")
+    if (
+        _UNPARSEABLE in (client_id, data_client_id, symbols)
+        or client_id == 0
+        or client_id == data_client_id
+        or not symbols
+    ):
+        found.append(("P8", _CLIENT_IDS_MESSAGE))
     if _raw_field(values, "ib_account_allowlist") != ():
         found.append(("P13", _ALLOWLIST_MESSAGE))
     return found
