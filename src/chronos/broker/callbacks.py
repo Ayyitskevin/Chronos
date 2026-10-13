@@ -334,6 +334,10 @@ class CallbackBridge:
         self._commissions: dict[str, tuple[Decimal | None, str | None]] = {}
         self._market_rule_flights: dict[int, _MarketRuleFlight] = {}
         self._quarantined_market_rules: set[int] = set()
+        # CANCEL_PENDING settle U-B (design r3 §4.3): the belt for an adapter whose readiness
+        # observer is not wired. Advanced on every reconnect reset and every connection
+        # uncertainty (connection closed included), BEFORE the no-observer early return.
+        self._adapter_epoch = 0
 
     # ------------------------------------------------------------------ #
     # Connection-level callbacks
@@ -412,7 +416,14 @@ class CallbackBridge:
             return
         self.registry.fail_exception(req_id, error, error_code=code)
 
+    @property
+    def adapter_epoch(self) -> int:
+        with self._lock:
+            return self._adapter_epoch
+
     def _invalidate_connection(self, reason: str) -> None:
+        with self._lock:
+            self._adapter_epoch += 1
         callback = self._on_connection_uncertain
         if callback is None:
             return
@@ -517,6 +528,7 @@ class CallbackBridge:
         """
 
         with self._lock:
+            self._adapter_epoch += 1
             self.connected_event.clear()
             self.managed_accounts_event.clear()
             self.connection_closed.clear()
