@@ -950,3 +950,22 @@ def test_r2_a_write_plan_without_epochs_is_refused_there_is_no_bypass(world: Wor
         assert current is False
     with world.rig.reconciler._epochs_held(world.rig.reconciler._current_epochs()) as current:
         assert current is True  # positive control
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason=(
+        "U-B-r2-LEGACY-3: the EXISTING resolver (resolve_from_broker_evidence, used for an intent "
+        "the planner does not own: a SUBMITTED order, or a PARTIALLY_FILLED one still listed, "
+        "design P5/S-R3) refines a listed row by quantity BEFORE its lifecycle, so a REJECTED "
+        "row with filled = Q is recorded FILLED. Pre-existing, outside U-B's planner; open "
+        "question for Daybreak/Kevin, not fixed here."
+    ),
+)
+def test_r2_legacy_a_rejected_listed_row_filled_by_quantity_is_not_recorded_filled(
+    world: World,
+) -> None:
+    world.venue.open = [venue_order(OrderLifecycle.REJECTED, "10")]
+    world.at(0)
+    assert world.rig.status() is SUBMITTED
