@@ -331,6 +331,7 @@ def test_adapter_path_claims_match_executable_settings_and_runtime_selection() -
     live_base = {
         **paper_base,
         "ib_environment": IBEnvironment.LIVE,
+        "ib_port": 7496,  # B1 U-c: a live environment on a paper port is refused at load
         "allow_live_trading": True,
         "ib_account_id": "U12345",
         "ib_account_allowlist": ("U12345",),

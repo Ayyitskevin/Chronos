@@ -1134,7 +1134,7 @@ def test_withheld_demo_approval_rerun_clears_parent_panels_and_retains_safe_feed
 
         runtime = get_runtime()
         runtime.short_put_demo_approval._settings = runtime.settings.model_copy(
-            update={"broker_mode": BrokerMode.IBKR}
+            update={"broker_mode": BrokerMode.IBKR, "ib_account_id": "DU1234567"}
         )
         app.button[3].click().run(timeout=_APPTEST_TIMEOUT)
 
