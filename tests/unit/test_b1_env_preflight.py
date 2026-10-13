@@ -201,7 +201,9 @@ def _set(text: str, key: str, value: str | None) -> str:
         ("the checklist placeholder", lambda t: _set(t, "IB_ACCOUNT_ID", "DU1234567"), ["P4"]),
         ("DF is a paper prefix", lambda t: _set(t, "IB_ACCOUNT_ID", "DF7654321"), []),
         ("transmit on", lambda t: _set(t, "ALLOW_ORDER_TRANSMIT", "true"), ["P5"]),
-        ("live on alone", lambda t: _set(t, "ALLOW_LIVE_TRADING", "true"), ["P1"]),
+        # Daybreak build-uc r2 P2-1: the live-conjunction refusal (P1) must not hide the flag
+        # itself (P5): every load refusal reports the independent raw-file conditions too
+        ("live on alone", lambda t: _set(t, "ALLOW_LIVE_TRADING", "true"), ["P1", "P5"]),
         ("a mandate", lambda t: _set(t, "AUTONOMY_MANDATE_FILE", "/srv/mandate.json"), ["P6"]),
         ("no database url", lambda t: _set(t, "DATABASE_URL", None), ["P7"]),
         (
@@ -270,6 +272,40 @@ def test_an_exported_variable_that_would_outrank_the_file_is_refused() -> None:
         ),
         ({"IB_PORT": "4001", "BROKER_ADAPTER": "ib_async"}, ["P2", "P3"]),
         ({"IB_ACCOUNT_ID": "U1234567", "ALLOW_ORDER_TRANSMIT": "true"}, ["P4", "P5"]),
+        # Daybreak build-uc r2 P2-1: the raw pass runs for EVERY load refusal, not only U-c's.
+        # A refusal that has no raw form (P1, P8) is kept beside the raw findings.
+        (  # the paper-transmission rule refuses first (P1); the blank account is P4
+            {
+                "IB_ACCOUNT_ID": "",
+                "ALLOW_ORDER_TRANSMIT": "true",
+                "IB_ACCOUNT_ALLOWLIST": "DU7654321",
+            },
+            ["P1", "P4", "P5", "P13"],
+        ),
+        (  # an unparseable port is a field error (P1) and, raw, not a paper port (P3)
+            {
+                "IB_PORT": "seven",
+                "ALLOW_ORDER_TRANSMIT": "true",
+                "IB_ACCOUNT_ALLOWLIST": "DU7654321",
+            },
+            ["P1", "P3", "P5", "P13"],
+        ),
+        (  # an unparseable flag is a field error (P1) and, raw, fails closed as P5
+            {
+                "ALLOW_ORDER_TRANSMIT": "maybe",
+                "IB_PORT": "7496",
+                "IB_ACCOUNT_ALLOWLIST": "DU7654321",
+            },
+            ["P1", "P3", "P5", "P13"],
+        ),
+        (  # a client-id collision refuses at load (P8); the flag and the allowlist stay visible
+            {
+                "IB_DATA_CLIENT_ID": "17",
+                "ALLOW_ORDER_TRANSMIT": "true",
+                "IB_ACCOUNT_ALLOWLIST": "DU7654321",
+            },
+            ["P5", "P8", "P13"],
+        ),
     ],
 )
 def test_a_load_refusal_still_reports_every_independent_condition(
@@ -312,7 +348,8 @@ def test_no_finding_echoes_a_value_from_the_file() -> None:
 
 def test_a_refused_file_reports_settings_without_its_values() -> None:
     findings = preflight_b1_env(_set(_good_text(), "ALLOW_LIVE_TRADING", "true"))
-    assert [item[0] for item in findings] == ["P1"]
+    # P1 (the live conjunction) plus the raw P5 the refusal must not hide (Daybreak r2 P2-1)
+    assert [item[0] for item in findings] == ["P1", "P5"]
     assert "ALLOW_LIVE_TRADING=true requires the full live conjunction" in findings[0][1]
     assert "DU7654321" not in findings[0][1]
 
@@ -345,7 +382,7 @@ def test_a_dotenv_in_the_working_directory_and_in_home_is_never_opened_or_used(
     assert seen == [], seen
     assert good == []  # the canary's colliding client id would have produced P8
     assert broken == ["P3"]
-    assert refused == ["P1"]
+    assert refused == ["P1", "P5"]  # the raw P5 beside the P1 refusal (Daybreak r2 P2-1)
     with _watching("off"):  # this test's own look at the sentinels is not the checker's read
         for path in sentinel_dotenvs.values():
             assert _CANARY in path.read_text(encoding="utf-8")  # untouched, and still there
