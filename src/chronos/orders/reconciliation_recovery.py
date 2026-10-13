@@ -41,6 +41,11 @@ _UNRESOLVED_STATUSES = frozenset(
 )
 
 
+# A listed row typed REJECTED or CANCELLED cannot also have filled: that is contradictory
+# evidence, so it never settles an intent (the typed lifecycle decides before the quantity).
+_CONTRADICTED_BY_FILLS = frozenset({OrderLifecycle.REJECTED, OrderLifecycle.CANCELLED})
+
+
 @dataclass(frozen=True, slots=True)
 class RestartOrderObservation:
     """Broker proof (or lack of it) for one sent-active local intent."""
@@ -285,8 +290,11 @@ def resolve_from_broker_evidence(
         return None
     if len(working) == 1:
         order = working[0]
+        if order.lifecycle in _CONTRADICTED_BY_FILLS and order.filled_quantity > 0:
+            return None  # contradictory evidence: stay locked, never FILLED/PARTIALLY_FILLED
         # The adapter already delivers a typed OrderLifecycle; do NOT re-map its
-        # value through the raw-IBKR-string mapper. Refine only by fill quantity.
+        # value through the raw-IBKR-string mapper. Refine only by fill quantity
+        # (every lifecycle but the contradicted ones above).
         if order.filled_quantity >= order.quantity:
             lifecycle = OrderLifecycle.FILLED
         elif order.filled_quantity > 0:
@@ -392,6 +400,14 @@ def _unresolved_evidence_reason(
         working_order=matching_orders[0] if matching_orders else None,
     ):
         return "owned order reference matched conflicting account or economic identity"
+    if any(
+        order.lifecycle in _CONTRADICTED_BY_FILLS and order.filled_quantity > 0
+        for order in matching_orders
+    ):
+        return (
+            f"owned broker order is typed {matching_orders[0].lifecycle.value} but reports "
+            "fills: contradictory evidence, the intent stays locked"
+        )
     if matching_executions:
         return "broker execution evidence was present but could not be resolved"
     return "owned order was absent from the broker order and execution snapshots"
