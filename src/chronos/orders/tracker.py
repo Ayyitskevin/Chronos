@@ -41,7 +41,9 @@ class OrderIdentityConflict(ValueError):
         self.values = values
         self.permanent_ids = values if field == "permanent_id" else ()
         listed = " and ".join(str(value) for value in values)
-        noun = "permanent ids" if field == "permanent_id" else "client ids"
+        noun = {"permanent_id": "permanent ids", "broker_order_id": "broker order ids"}.get(
+            field, "client ids"
+        )
         super().__init__(
             f"identity conflict: intent {intent_id!r} persisted {noun} {listed} disagree"
         )
@@ -417,6 +419,14 @@ class OrderTracker:
         two distinct values fail closed with :class:`OrderIdentityConflict`.
         """
         return self._single_identity(intent_id, "client_id", current_account_id)
+
+    def single_broker_order_id(self, intent_id: str, *, current_account_id: str) -> int | None:
+        """The ONE broker order id persisted for this intent (the settle planner's exact set).
+
+        Same policy as :meth:`permanent_id`, unlike :meth:`broker_order_id` (the latest): two
+        distinct values fail closed with :class:`OrderIdentityConflict` (design r3 §2.1).
+        """
+        return self._single_identity(intent_id, "broker_order_id", current_account_id)
 
     def _single_identity(self, intent_id: str, field: str, current_account_id: str) -> int | None:
         events = self._tracker.events(intent_id, current_account_id=current_account_id)

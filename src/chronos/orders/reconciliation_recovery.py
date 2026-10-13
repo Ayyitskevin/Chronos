@@ -558,22 +558,25 @@ def _completed_record_bound(
     expected_limit_price: Decimal | None,
     persisted_broker_order_id: int | None,
     persisted_permanent_id: int | None,
+    persisted_client_id: int | None,
 ) -> bool:
     """Exact identity (design §2.1): a record binds only when EVERY identifying field agrees.
 
-    The reference matched already (that is how it became a candidate); the persisted permId is
-    required (an intent that never learned one cannot bind a record) and a record's venue order
-    id must equal the persisted one when it carries one (0 = absent on completed rows).
+    Used for a completed-order record AND a terminal open-book row. The reference matched
+    already (that is how it became a candidate). The persisted sets are exact (Daybreak r1
+    P1-1): the ONE persisted permId (positive) and the ONE persisted client id are required and
+    equal to the record's, and a record that names a venue order id (0 = absent on completed
+    rows) must name the ONE persisted broker order id -- an intent with none persisted never
+    binds it. A persisted conflict never reaches here (the caller refuses it first).
     """
 
     return (
         persisted_permanent_id is not None
+        and persisted_permanent_id > 0
         and record.permanent_id == persisted_permanent_id
-        and (
-            not record.broker_order_id
-            or persisted_broker_order_id is None
-            or record.broker_order_id == persisted_broker_order_id
-        )
+        and persisted_client_id is not None
+        and record.client_id == persisted_client_id
+        and (not record.broker_order_id or record.broker_order_id == persisted_broker_order_id)
         and _working_order_matches_intent(
             intent,
             record,
@@ -643,7 +646,15 @@ class OrderRestartReconciler:
                     current_account_id=current_account_id,
                 )
                 # a divergent client id is the same contradiction (R-e, r2): fail closed
-                self._tracker.client_id(intent.intent_id, current_account_id=current_account_id)
+                persisted_client_id = self._tracker.client_id(
+                    intent.intent_id, current_account_id=current_account_id
+                )
+                if intent.status in _SETTLE_STATUSES:
+                    # the settle planner binds the EXACT persisted broker-order-id set, not the
+                    # latest (design §2.1; Daybreak U-A r1 P1-1): two distinct ids fail closed
+                    self._tracker.single_broker_order_id(
+                        intent.intent_id, current_account_id=current_account_id
+                    )
             except OrderIdentityConflict as conflict:
                 # R-e: contradictory persisted permIds fail closed — never the
                 # latest, never the first; the operator sees the typed reason.
@@ -673,6 +684,7 @@ class OrderRestartReconciler:
                     expected_limit_price=expected_limit_price,
                     persisted_broker_order_id=persisted_broker_order_id,
                     persisted_permanent_id=persisted_permanent_id,
+                    persisted_client_id=persisted_client_id,
                 )
                 if plan.kind != "legacy":
                     settle_plans.append((intent, persisted_permanent_id, plan))
@@ -822,6 +834,7 @@ class OrderRestartReconciler:
         expected_limit_price: Decimal | None,
         persisted_broker_order_id: int | None,
         persisted_permanent_id: int | None,
+        persisted_client_id: int | None,
     ) -> _SettlePlan:
         """One decision per intent over ONE evidence generation; never writes."""
 
@@ -934,6 +947,18 @@ class OrderRestartReconciler:
                 owned_fills=signature[1],
             )
 
+        def bound_exactly(record: BrokerOrder) -> bool:
+            return _completed_record_bound(
+                intent,
+                record,
+                current_account_id=current_account_id,
+                expected_broker_client_id=self._expected_broker_client_id,
+                expected_limit_price=expected_limit_price,
+                persisted_broker_order_id=persisted_broker_order_id,
+                persisted_permanent_id=persisted_permanent_id,
+                persisted_client_id=persisted_client_id,
+            )
+
         def from_terminal(record: BrokerOrder, source: str) -> _SettlePlan:
             figure = record.filled_quantity
             if record.lifecycle is OrderLifecycle.CANCELLED:
@@ -963,6 +988,11 @@ class OrderRestartReconciler:
                 if bound:
                     return _SettlePlan("refuse", "the working order and a terminal record disagree")
             if terminal:
+                # a terminal open-book row is a bound T only under the same exact identity
+                if not bound_exactly(order):
+                    return _SettlePlan(
+                        "refuse", "terminal open-book row is not bound to this intent"
+                    )
                 return from_terminal(order, "open_order")
             figure = order.filled_quantity
             if figure < lower:
@@ -1016,15 +1046,7 @@ class OrderRestartReconciler:
                 f"completed orders are ambiguous: {len(candidates)} records share the reference",
             )
         record = candidates[0]
-        if not _completed_record_bound(
-            intent,
-            record,
-            current_account_id=current_account_id,
-            expected_broker_client_id=self._expected_broker_client_id,
-            expected_limit_price=expected_limit_price,
-            persisted_broker_order_id=persisted_broker_order_id,
-            persisted_permanent_id=persisted_permanent_id,
-        ):
+        if not bound_exactly(record):
             return _SettlePlan("refuse", "completed order record is not bound to this intent")
         return from_terminal(record, "completed_order")
 
