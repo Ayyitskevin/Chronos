@@ -148,8 +148,9 @@ def test_reviewed_baseline_contains_only_explicit_false_positive_fingerprints() 
     # 27 at CPS U-A (official_ibkr.py: the completed-orders read supersedes the C1 fingerprint),
     # 29 at B1 U-c (settings.py and official_ibkr.py: the at-load ibkr shape rules and the
     # shared API port constants supersede the settings.py and the CPS U-A official_ibkr.py
-    # source-inventory fingerprints).
-    assert len(historical_candidates) == 29
+    # source-inventory fingerprints),
+    # 30 at B1 U-c r2 (settings.py: hide_input_in_errors supersedes its fingerprint again).
+    assert len(historical_candidates) == 30
     assert {item["type"] for item in candidates} == {
         "Hex High Entropy String",
         "Secret Keyword",
