@@ -412,6 +412,16 @@ class SimBroker:
         self._require_connected()
         return tuple(self._broker_order(order) for order in self._orders.values() if order.working)
 
+    def terminal_orders(self) -> tuple[BrokerOrder, ...]:
+        """Every order the venue no longer holds working (cancelled, filled, rejected).
+
+        Not part of the Broker protocol: the FakeGateway serves it as ``completedOrder`` rows.
+        """
+
+        return tuple(
+            self._broker_order(order) for order in self._orders.values() if not order.working
+        )
+
     # --- seam A: contracts and market data ----------------------------------------------------
 
     async def qualify_underlying(self, symbol: str) -> UnderlyingContract:
