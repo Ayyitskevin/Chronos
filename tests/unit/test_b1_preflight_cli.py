@@ -272,7 +272,9 @@ def test_each_config_condition_refuses_with_a_readable_message(
     assert report.verdict()[1] == EXIT_REFUSED
     assert "REFUSE" in _levels(report, condition), [str(f) for f in report.findings]
     message = _text(report, condition)
-    assert len(message) > 20 and value not in message  # names the rule, never the value
+    assert len(message) > 20  # an operator-readable rule, not a bare code
+    if value not in ("true", "false"):  # a boolean word can occur in any sentence
+        assert value not in message  # names the rule, never the value
 
 
 @pytest.mark.parametrize("value", [None, "", "[]", "   "])
@@ -375,13 +377,18 @@ def test_the_kill_switch_and_halt_states_are_reported(host: dict[str, Path]) -> 
     assert _levels(report, "halt") == ["INFO"]
 
 
-def test_a_corrupt_kill_switch_file_is_undecided(host: dict[str, Path]) -> None:
+def test_a_corrupt_kill_switch_file_is_flagged_as_read_engaged(host: dict[str, Path]) -> None:
+    """LiveKillSwitch.read() fails closed on an unreadable file (it reads ENGAGED, it never
+    raises), so the preflight flags it for inspection instead of calling it undecided."""
+
     state = host["work"] / "data" / "live_kill_switch.json"
     state.parent.mkdir(parents=True, exist_ok=True)
     state.write_text("{not json")
     report = _run(host)
-    assert _levels(report, "kill-switch") == ["UNDECIDED"]
-    assert report.verdict()[1] == EXIT_UNDECIDED
+    assert _levels(report, "kill-switch") == ["ADVISORY"]
+    assert "unreadable" in _text(report, "kill-switch") and "ENGAGED" in _text(
+        report, "kill-switch"
+    )
 
 
 # --- 7. the canary: no secret in any output, log, exception text or result ---------------------
@@ -521,6 +528,10 @@ def _opened(events: list[tuple[str, tuple[object, ...]]]) -> list[tuple[str, str
 
 def _allowed(path: str, host: dict[str, Path]) -> bool:
     resolved = path.split("?", 1)[0].removeprefix("file:")
+    if resolved.startswith("///"):  # file:///abs/path
+        resolved = resolved[2:]
+    if not os.path.isabs(resolved):  # a relative state path resolves against the cwd
+        resolved = str(Path.cwd() / resolved)
     allowed_exact = {
         str(host["env"]),
         str(host["database"]),

@@ -1,6 +1,9 @@
 """B1 env preflight: every NON-SECRET condition ``docs/ops/b1-swap-runbook.md`` requires of the
 private ``.env``, checked on a candidate file's TEXT with dummy values.
 
+Since B1 U-d the checker is ``chronos.cli.b1_preflight.preflight_b1_env`` (src), run by
+``python -m chronos.cli b1-preflight``; this module imports it and stays its pin.
+
 ``preflight_b1_env`` takes text (and optionally a file mode and an environment mapping); it
 never opens a path, never reads ANY ``.env`` (not the working directory's, not the home
 directory's), never connects, and its findings name KEYS and condition ids only, never a value
@@ -32,17 +35,14 @@ import io
 import os
 import re
 import socket
-import stat
 import sys
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
 
 import pytest
 from dotenv import dotenv_values
 from pydantic import ValidationError
-from pydantic_settings import SettingsConfigDict
 
 from chronos.config.settings import Settings
 
@@ -50,133 +50,16 @@ _REPO = Path(__file__).resolve().parents[2]
 _CHECKLIST = _REPO / "docs" / "ops" / "m4-read-only-gate-session-checklist.md"
 _RUNBOOK = _REPO / "docs" / "ops" / "b1-swap-runbook.md"
 
-_PAPER_PORTS = frozenset({7497, 4002})
-_PAPER_ACCOUNT = re.compile(r"D[UF]\d{4,}")
-_CHECKLIST_PLACEHOLDER_ACCOUNT = "DU1234567"
-_DEFAULT_DATABASE_URL = "sqlite:///data/chronos.db"
-_PEPPER_SHAPE = re.compile(r"[0-9a-f]{64}")
-_AMBIENT_PREFIXES = ("BROKER_", "IB_", "ALLOW_", "AUTONOMY_", "CHRONOS_")
-_CREDENTIAL_KEY = re.compile(r"(PASS(WORD)?|USER(NAME)?|LOGIN|SECRET|TOKEN)", re.IGNORECASE)
-
-#: condition id -> what the runbook requires (the runbook's table carries the same ids).
-CONDITIONS: dict[str, str] = {
-    "P1": "the file's settings load (Settings accepts them) with no process-env override",
-    "P2": "BROKER_MODE=ibkr, BROKER_ADAPTER=official_ibkr, IB_ENVIRONMENT=paper",
-    "P3": "IB_HOST is 127.0.0.1 and IB_PORT is a paper port (7497 TWS or 4002 Gateway)",
-    "P4": "IB_ACCOUNT_ID has the paper shape D[UF]+digits and is not the checklist placeholder",
-    "P5": "ALLOW_ORDER_TRANSMIT and ALLOW_LIVE_TRADING are false and both conjunctions are false",
-    "P6": "AUTONOMY_MANDATE_FILE is unset",
-    "P7": "DATABASE_URL is set to its own absolute sqlite file, not the shared default",
-    "P8": "IB_CLIENT_ID and IB_DATA_CLIENT_ID differ; SYMBOL_ALLOWLIST is non-empty",
-    "P9": "no IBKR credential-like key is in the file",
-    "P10": "CHRONOS_CAPTURE_PEPPER is present with the 64-hex shape (value never echoed)",
-    "P11": "the file mode is 0600 (when a mode is supplied)",
-    "P12": (
-        "no BROKER_*/IB_*/ALLOW_*/AUTONOMY_*/CHRONOS_* variable is exported (it outranks the file)"
-    ),
-}
-
-
-def preflight_b1_env(
-    text: str,
-    *,
-    file_mode: int | None = None,
-    environ: Mapping[str, str] | None = None,
-) -> list[tuple[str, str]]:
-    """Return ``(condition id, message)`` for each unmet condition; ``[]`` means all met.
-
-    Pure on its inputs: parses ``text`` as dotenv and loads ``Settings`` from those values
-    alone (``_FileOnlySettings``: no process environment, no env file); the caller's
-    environment is only the ``environ`` mapping it passes. Never opens a path. Messages never
-    contain a value.
-    """
-
-    found: list[tuple[str, str]] = []
-    values = {k: v for k, v in dotenv_values(stream=io.StringIO(text)).items() if v is not None}
-
-    ambient = sorted(k for k in (environ or {}) if k.startswith(_AMBIENT_PREFIXES))
-    if ambient:
-        found.append(("P12", f"exported variables outrank the file: {', '.join(ambient)}"))
-
-    credential_keys = sorted(k for k in values if _CREDENTIAL_KEY.search(k))
-    if credential_keys:
-        found.append(("P9", f"credential-like keys in the file: {', '.join(credential_keys)}"))
-
-    pepper = values.get("CHRONOS_CAPTURE_PEPPER")
-    if pepper is None or not _PEPPER_SHAPE.fullmatch(pepper):
-        found.append(("P10", "CHRONOS_CAPTURE_PEPPER is missing or not 64 lowercase hex digits"))
-
-    if file_mode is not None and stat.S_IMODE(file_mode) != 0o600:
-        found.append(("P11", f"file mode is {oct(stat.S_IMODE(file_mode))}, expected 0o600"))
-
-    if "AUTONOMY_MANDATE_FILE" in values:
-        found.append(("P6", "AUTONOMY_MANDATE_FILE is set in the file (must stay unset)"))
-
-    database_url = values.get("DATABASE_URL", "")
-    if not database_url:
-        found.append(("P7", "DATABASE_URL is not set: the shared default would be used"))
-    elif database_url == _DEFAULT_DATABASE_URL:
-        found.append(("P7", "DATABASE_URL equals the shared default file"))
-    elif not database_url.startswith("sqlite:////") or ":memory:" in database_url:
-        found.append(("P7", "DATABASE_URL is not an absolute sqlite file (sqlite:////abs/path)"))
-
-    settings = _load_settings(values)
-    if isinstance(settings, str):
-        # Settings itself enforces the client-id and allowlist rules: name them as P8
-        condition = "P8" if re.search(r"IB_DATA_CLIENT_ID|SYMBOL_ALLOWLIST", settings) else "P1"
-        found.append((condition, settings))
-        return sorted(found, key=_order)
-
-    if not (
-        settings.broker_mode.value == "ibkr"
-        and settings.broker_adapter.value == "official_ibkr"
-        and settings.ib_environment.value == "paper"
-    ):
-        found.append(("P2", "broker mode/adapter/environment are not ibkr/official_ibkr/paper"))
-    if settings.ib_host != "127.0.0.1" or settings.ib_port not in _PAPER_PORTS:
-        found.append(("P3", "IB_HOST is not 127.0.0.1 or IB_PORT is not a paper port"))
-    account = settings.ib_account_id
-    if not _PAPER_ACCOUNT.fullmatch(account) or account == _CHECKLIST_PLACEHOLDER_ACCOUNT:
-        found.append(("P4", "IB_ACCOUNT_ID is not a paper-shaped id or is the placeholder"))
-    if (
-        settings.allow_order_transmit
-        or settings.allow_live_trading
-        or settings.transmission_possible
-        or settings.live_transmission_possible
-    ):
-        found.append(("P5", "a transmission flag or derived conjunction is true"))
-    return sorted(set(found), key=_order)
-
-
-def _order(item: tuple[str, str]) -> tuple[int, str]:
-    return int(item[0][1:]), item[1]
-
-
-class _FileOnlySettings(Settings):
-    """``Settings`` that cannot read a ``.env`` and whose only source is the init arguments.
-
-    ``env_file=None`` in the config stops the file being opened even if a caller forgets the
-    ``_env_file=None`` argument; ``settings_customise_sources`` drops the process environment.
-    """
-
-    model_config = SettingsConfigDict(env_file=None)
-
-    @classmethod
-    def settings_customise_sources(  # type: ignore[no-untyped-def]
-        cls, settings_cls, init_settings, env_settings, dotenv_settings, file_secret_settings
-    ):
-        return (init_settings,)
-
-
-def _load_settings(values: Mapping[str, str]) -> Settings | str:
-    """Build Settings from the file's own values only (never os.environ, never any .env)."""
-
-    try:
-        fields: dict[str, Any] = {k.lower(): v for k, v in values.items()}
-        return _FileOnlySettings(_env_file=None, **fields)  # type: ignore[call-arg]
-    except ValidationError as error:
-        # the message names fields and rules, not values: keep only the first line
-        return "Settings refused the file: " + error.errors()[0]["msg"][:200]
+# The preflight itself lives in src since B1 U-d (``python -m chronos.cli b1-preflight``); this
+# module stays its pin, unchanged in what it asserts.
+from chronos.cli.b1_preflight import (  # noqa: E402
+    _AMBIENT_PREFIXES,
+    _CHECKLIST_PLACEHOLDER_ACCOUNT,
+    CONDITIONS,
+    _FileOnlySettings,
+    _load_settings,
+    preflight_b1_env,
+)
 
 
 def _b1_block() -> str:

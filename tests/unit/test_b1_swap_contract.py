@@ -570,16 +570,21 @@ def test_the_capture_pepper_is_not_a_setting_and_not_in_the_b1_env() -> None:
     assert not [name for name in Settings.model_fields if "pepper" in name.lower()]
     assert "PEPPER" not in _b1_env_block().upper()
 
-    # .env.example offers it only as a commented line; nothing in src ever reads it.
+    # .env.example offers it only as a commented line. Nothing in src reads it EXCEPT the
+    # owner-run offline B1 preflight (B1 U-d, DESIGN r2: P10 checks the pepper's SHAPE, never
+    # echoes it; tests/unit/test_b1_preflight_cli.py proves no output, log or result carries it).
+    # That single, named exception is an assertion change to this U5 pin, made in U-d and flagged
+    # for review; no product Settings field or runtime path reads the pepper.
     example = (_REPO / ".env.example").read_text(encoding="utf-8").splitlines()
     assert "#CHRONOS_CAPTURE_PEPPER=" in example
     assert not [line for line in example if line.startswith("CHRONOS_CAPTURE_PEPPER")]
+    offline_preflight = "src/chronos/cli/b1_preflight.py"
     offenders = [
         str(path.relative_to(_REPO))
         for path in (_REPO / "src" / "chronos").rglob("*.py")
         if "CHRONOS_CAPTURE_PEPPER" in path.read_text(encoding="utf-8")
     ]
-    assert offenders == []
+    assert offenders in ([], [offline_preflight])
 
 
 @pytest.mark.usefixtures("clean_environment")

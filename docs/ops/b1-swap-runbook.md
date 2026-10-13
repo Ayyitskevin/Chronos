@@ -244,6 +244,7 @@ fails if they drift. "Step" names where the condition is created.
 | P10 | CHRONOS_CAPTURE_PEPPER is present with the 64-hex shape (value never echoed) | 6 |
 | P11 | the file mode is 0600 (when a mode is supplied) | 6 |
 | P12 | no BROKER_*/IB_*/ALLOW_*/AUTONOMY_*/CHRONOS_* variable is exported (it outranks the file) | 1 |
+| P13 | IB_ACCOUNT_ALLOWLIST is absent or empty (a transmission-authority input) | 6 |
 
 What the preflight cannot see: the gateway, the entitlements, `ibapi`, whether the pepper is
 the one you meant, whether the account id is *your* paper account, and whether an existing
@@ -262,7 +263,9 @@ database file is bound. Those are steps 2-6.
 `IB_ACCOUNT_ALLOWLIST` is deliberately **not** in the read-only block (default empty,
 `settings.py:134`); `ALLOW_ORDER_TRANSMIT=true` alone is *accepted* by `Settings` and flips
 `transmission_possible` (`:490-499`) — the empty allowlist is refused later, by the paper mode
-lock (`modes.py:128-129`). Do not rely on that layering: leave the flag false.
+lock (`modes.py:128-129`). Do not rely on that layering: leave the flag false. The preflight
+(P13) refuses a non-empty `IB_ACCOUNT_ALLOWLIST`; it is added only by a separate decision on
+paper transmission.
 
 ## Rollback — in this order, each step reversible
 1. **Stop.** End any session; disconnect/log out of the gateway. Do not leave the API socket
