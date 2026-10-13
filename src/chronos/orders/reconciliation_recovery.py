@@ -19,6 +19,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, time
 from decimal import Decimal
+from functools import partial
 from zoneinfo import ZoneInfo
 
 from chronos.broker.base import BrokerError, CompletedOrderEvidence
@@ -504,12 +505,16 @@ _CompletedRead = Callable[[], tuple[tuple[BrokerOrder, ...] | None, str]]
 
 def _owned_signature(
     working: list[BrokerOrder], fills: list[BrokerExecution]
-) -> tuple[tuple[tuple[int, str, Decimal], ...], tuple[str, ...]]:
-    """The owned evidence a settle write rests on, comparable across two snapshots."""
+) -> tuple[tuple[BrokerOrder, ...], tuple[BrokerExecution, ...]]:
+    """The owned evidence a settle write rests on, WHOLE rows, comparable across two snapshots.
+
+    Every field (account, reference, ids, contract, side, quantities, limit, status, execution
+    quantity and timestamp) takes part, not a reduced key (Daybreak U-A r1 P1-2).
+    """
 
     return (
-        tuple(sorted((o.broker_order_id, o.lifecycle.value, o.filled_quantity) for o in working)),
-        tuple(sorted(e.execution_id.strip() for e in fills)),
+        tuple(sorted(working, key=lambda o: (o.broker_order_id, o.lifecycle.value))),
+        tuple(sorted(fills, key=lambda e: e.execution_id.strip())),
     )
 
 
@@ -532,8 +537,9 @@ class _SettlePlan:
     permanent_id: int | None = None
     client_id: int | None = None
     evidence: tuple[tuple[str, str], ...] = ()
-    owned_open: tuple[tuple[int, str, Decimal], ...] = ()
-    owned_fills: tuple[str, ...] = ()
+    owned_open: tuple[BrokerOrder, ...] = ()
+    owned_fills: tuple[BrokerExecution, ...] = ()
+    record: BrokerOrder | None = None  # the bound terminal record (completed order or open row)
 
 
 def _plain(value: Decimal) -> str:
@@ -633,7 +639,7 @@ class OrderRestartReconciler:
         proven: list[RestartOrderObservation] = []
         unresolved: list[RestartOrderObservation] = []
         applied: list[OrderStatusUpdate] = []
-        settle_plans: list[tuple[OrderIntentRecord, int | None, _SettlePlan]] = []
+        settle_plans: list[tuple[OrderIntentRecord, _SettlePlan, Callable[..., _SettlePlan]]] = []
         read_completed = self._completed_reader()
         for intent in working:
             persisted_broker_order_id = self._tracker.broker_order_id(
@@ -674,20 +680,25 @@ class OrderRestartReconciler:
                 current_account_id=current_account_id,
             )
             if intent.status in _SETTLE_STATUSES:
-                plan = self._plan_settle(
+                # the same planner, bound to this intent's persisted facts, re-runs over the
+                # confirming snapshot before any write (design §3.1; Daybreak U-A r1 P1-2)
+                planner = partial(
+                    self._plan_settle,
                     intent,
                     current_account_id=current_account_id,
                     now=now,
-                    open_orders=open_orders,
-                    executions=executions,
-                    read_completed=read_completed,
                     expected_limit_price=expected_limit_price,
                     persisted_broker_order_id=persisted_broker_order_id,
                     persisted_permanent_id=persisted_permanent_id,
                     persisted_client_id=persisted_client_id,
                 )
+                plan = planner(
+                    open_orders=open_orders,
+                    executions=executions,
+                    read_completed=read_completed,
+                )
                 if plan.kind != "legacy":
-                    settle_plans.append((intent, persisted_permanent_id, plan))
+                    settle_plans.append((intent, plan, planner))
                     continue
             recorded_filled_quantity = self._tracker.recorded_filled_quantity(
                 intent.intent_id,
@@ -945,6 +956,7 @@ class OrderRestartReconciler:
                 ),
                 owned_open=signature[0],
                 owned_fills=signature[1],
+                record=record,
             )
 
         def bound_exactly(record: BrokerOrder) -> bool:
@@ -1052,7 +1064,7 @@ class OrderRestartReconciler:
 
     def _act_on_settle_plans(
         self,
-        plans: list[tuple[OrderIntentRecord, int | None, _SettlePlan]],
+        plans: list[tuple[OrderIntentRecord, _SettlePlan, Callable[..., _SettlePlan]]],
         *,
         current_account_id: str,
         now: datetime,
@@ -1060,15 +1072,25 @@ class OrderRestartReconciler:
         unresolved: list[RestartOrderObservation],
         applied: list[OrderStatusUpdate],
     ) -> None:
-        """Hold/refuse report as-is; every write is CONFIRMED by a second snapshot, then one CAS."""
+        """Hold/refuse report as-is; every write is CONFIRMED, then one CAS (design §3.1).
 
-        fresh: tuple[tuple[BrokerOrder, ...], tuple[BrokerExecution, ...]] | None = None
-        if any(plan.kind == "write" for _, _, plan in plans):
+        Confirming = a SECOND complete snapshot -- open orders, executions AND a fresh
+        completed-orders read -- and a full re-plan of the intent over it; the write happens only
+        if the two plans are equal (decision, figure, ids, evidence, and the whole owned rows and
+        bound record they rest on). Anything else -- a record that turned Filled, vanished, or
+        changed a figure or an identity field; a failing second read; a new or changed
+        execution -- writes nothing (Daybreak U-A r1 P1-2): a fill is never discarded.
+        """
+
+        fresh: tuple[tuple[BrokerOrder, ...], tuple[BrokerExecution, ...], _CompletedRead] | None
+        fresh = None
+        if any(plan.kind == "write" for _, plan, _ in plans):
             fresh = (
                 self._connection.run(self._connection.broker.open_orders()),
                 self._connection.run(self._connection.broker.executions()),
+                self._completed_reader(),
             )
-        for intent, permanent_id, plan in plans:
+        for intent, plan, planner in plans:
             observed = RestartOrderObservation(
                 intent_id=intent.intent_id,
                 local_status=intent.status,
@@ -1082,20 +1104,9 @@ class OrderRestartReconciler:
             if plan.kind == "hold":
                 proven.append(observed)
                 continue
-            assert fresh is not None and plan.to_status is not None and intent.order_ref
-            again = _owned_signature(
-                [
-                    o
-                    for o in fresh[0]
-                    if _is_owned(o, order_ref=intent.order_ref, persisted_permanent_id=permanent_id)
-                ],
-                [
-                    e
-                    for e in fresh[1]
-                    if _is_owned(e, order_ref=intent.order_ref, persisted_permanent_id=permanent_id)
-                ],
-            )
-            if again != (plan.owned_open, plan.owned_fills):
+            assert fresh is not None and plan.to_status is not None
+            again = planner(open_orders=fresh[0], executions=fresh[1], read_completed=fresh[2])
+            if again != plan:
                 unresolved.append(
                     RestartOrderObservation(
                         intent_id=intent.intent_id,
