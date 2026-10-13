@@ -99,6 +99,11 @@ class Settings(BaseSettings):
         # ADR-0009: branch selection (paper vs live) is derived from settings, so
         # process-lifetime immutability is enforced by the type, not convention.
         frozen=True,
+        # A refused load never RENDERS the inputs (str/repr, so any traceback or log line):
+        # account ids, hosts and paths stay out of the error text (Daybreak build-uc r1 P2-2).
+        # The structured errors()/json() still carry them unless called with
+        # include_input=False; consumers outside a trusted boundary must pass it.
+        hide_input_in_errors=True,
     )
 
     broker_mode: BrokerMode = BrokerMode.DEMO
@@ -501,7 +506,8 @@ class Settings(BaseSettings):
         when the backend built the adapter (after the database had opened) or at the first
         grant. Defined after ``validate_safety_and_ranges`` so its more specific refusals (the
         live conjunction, the ambiguous live+transmit shape, paper transmission without an
-        account) keep their messages. Messages name the key and the rule, never a value.
+        account) keep their messages. The messages name the key and the rule and never
+        interpolate a value; the rendered error hides the inputs too (``hide_input_in_errors``).
         DEMO mode is untouched.
         """
 
