@@ -23,8 +23,6 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
-from tests.support.order_fakes import PAPER_ACCOUNT, FakeBroker
-
 from chronos.broker.connection import BrokerConnectionManager
 from chronos.domain.enums import OrderLifecycle, OrderSide, ProductFamily
 from chronos.domain.models import BrokerExecution, BrokerOrder, UnderlyingContract
@@ -42,6 +40,7 @@ from chronos.persistence.order_repositories import (
     OrderTrackerRepository,
 )
 from chronos.utils.identifiers import account_fingerprint
+from tests.support.order_fakes import PAPER_ACCOUNT, FakeBroker
 
 ACCOUNT = PAPER_ACCOUNT
 CLIENT_ID = 17

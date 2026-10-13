@@ -15,6 +15,7 @@ because a broker snapshot cannot be atomic with the local lifecycle write
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, time
 from decimal import Decimal
@@ -497,6 +498,8 @@ _TERMINAL_VENUE = frozenset(
 )
 _NO_COMPLETED_EVIDENCE = "completed-orders evidence is not available"
 
+#: A once-per-pass read of the venue's completed orders: (records, why-they-are-unavailable).
+_CompletedRead = Callable[[], tuple[tuple[BrokerOrder, ...] | None, str]]
 
 
 def _owned_signature(
@@ -534,7 +537,7 @@ class _SettlePlan:
 
 
 def _plain(value: Decimal) -> str:
-    """A Decimal as a plain string (the book stores 8 places; evidence reads ``5``, not ``5E+0``)."""
+    """A Decimal as plain text (the book stores 8 places; evidence reads ``5``, not ``5E+0``)."""
 
     return format(value.normalize(), "f")
 
@@ -768,7 +771,7 @@ class OrderRestartReconciler:
         )
 
     # --- the CANCEL_PENDING / PARTIALLY_FILLED settle planner (design r3) --------------------
-    def _completed_reader(self):  # type: ignore[no-untyped-def]
+    def _completed_reader(self) -> _CompletedRead:
         """A once-per-pass lazy read of the venue's completed orders: (records, why-not)."""
 
         cache: list[tuple[tuple[BrokerOrder, ...] | None, str]] = []
@@ -788,7 +791,10 @@ class OrderRestartReconciler:
         return read
 
     def _witnessed_lower_bound(
-        self, figures: tuple[tuple[datetime, Decimal], ...], fills: list[BrokerExecution], now: datetime
+        self,
+        figures: tuple[tuple[datetime, Decimal], ...],
+        fills: list[BrokerExecution],
+        now: datetime,
     ) -> Decimal:
         """LB = max(max(X, E_prior) + E_today, Y), partitioned at the session boundary S0.
 
@@ -812,7 +818,7 @@ class OrderRestartReconciler:
         now: datetime,
         open_orders: tuple[BrokerOrder, ...],
         executions: tuple[BrokerExecution, ...],
-        read_completed,  # type: ignore[no-untyped-def]
+        read_completed: _CompletedRead,
         expected_limit_price: Decimal | None,
         persisted_broker_order_id: int | None,
         persisted_permanent_id: int | None,
@@ -913,7 +919,9 @@ class OrderRestartReconciler:
                 event_key=f"{intent.intent_id}:settle:{target.value}",
                 filled=figure,
                 remaining=max(quantity - figure, Decimal("0")),
-                broker_order_id=record.broker_order_id if record and record.broker_order_id else persisted_broker_order_id,
+                broker_order_id=record.broker_order_id
+                if record and record.broker_order_id
+                else persisted_broker_order_id,
                 permanent_id=persisted_permanent_id,
                 client_id=self._expected_broker_client_id,
                 evidence=(
@@ -933,7 +941,8 @@ class OrderRestartReconciler:
             if record.lifecycle is OrderLifecycle.FILLED or figure >= quantity:
                 if figure < quantity:
                     return _SettlePlan(
-                        "refuse", f"terminal record does not fill the order ({figure} of {quantity})"
+                        "refuse",
+                        f"terminal record does not fill the order ({figure} of {quantity})",
                     )
                 return settle(record, figure, OrderLifecycle.FILLED, source)
             return _SettlePlan(
@@ -952,9 +961,7 @@ class OrderRestartReconciler:
                     if r.order_ref == order_ref and r.lifecycle in _TERMINAL_VENUE
                 ]
                 if bound:
-                    return _SettlePlan(
-                        "refuse", "the working order and a terminal record disagree"
-                    )
+                    return _SettlePlan("refuse", "the working order and a terminal record disagree")
             if terminal:
                 return from_terminal(order, "open_order")
             figure = order.filled_quantity
@@ -1058,16 +1065,12 @@ class OrderRestartReconciler:
                 [
                     o
                     for o in fresh[0]
-                    if _is_owned(
-                        o, order_ref=intent.order_ref, persisted_permanent_id=permanent_id
-                    )
+                    if _is_owned(o, order_ref=intent.order_ref, persisted_permanent_id=permanent_id)
                 ],
                 [
                     e
                     for e in fresh[1]
-                    if _is_owned(
-                        e, order_ref=intent.order_ref, persisted_permanent_id=permanent_id
-                    )
+                    if _is_owned(e, order_ref=intent.order_ref, persisted_permanent_id=permanent_id)
                 ],
             )
             if again != (plan.owned_open, plan.owned_fills):

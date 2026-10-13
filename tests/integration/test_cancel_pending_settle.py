@@ -23,7 +23,6 @@ from tests.support.settle_rig import (
     PERM_ID,
     PRIOR,
     QUANTITY,
-    REF,
     Rig,
     ScriptedVenue,
     VenueWithoutCompletedOrders,
@@ -378,7 +377,9 @@ def test_C9_a_rejected_record_is_unexpected_for_a_cancel(rig: Rig) -> None:
     ],
     ids=lambda m: next(iter(m)),
 )
-def test_C12_a_record_with_one_field_off_never_settles(rig: Rig, mutation: dict[str, object]) -> None:
+def test_C12_a_record_with_one_field_off_never_settles(
+    rig: Rig, mutation: dict[str, object]
+) -> None:
     from chronos.domain.enums import OrderSide
 
     args: dict[str, object] = dict(mutation)
