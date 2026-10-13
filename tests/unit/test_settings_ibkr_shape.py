@@ -8,6 +8,7 @@ never echoes the value; DEMO mode is untouched; no ALLOW_* default changes.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -152,3 +153,55 @@ def test_the_b1_preflight_reports_a_load_refusal_under_its_own_condition(
     message: str, condition: str
 ) -> None:
     assert b1_preflight._condition_of_load_refusal(message) == condition
+
+
+# --- Daybreak build-uc r1 P2-2: a refused load never RENDERS the input value ------------------
+
+SENTINEL = "U99887766"
+
+
+def test_the_rendered_validation_error_carries_no_input_value() -> None:
+    """str/repr (so any traceback or log line) hide the inputs: hide_input_in_errors=True.
+
+    The structured ``errors()``/``json()`` still carry ``input`` unless called with
+    ``include_input=False``; the only Settings consumer that reads them (the B1 preflight) reads
+    the bounded ``msg`` with ``include_input=False``. That limit is the claim, stated exactly."""
+
+    with pytest.raises(ValidationError) as raised:
+        _ibkr(ib_account_id=SENTINEL, ib_host="sentinel-host.invalid")
+    error = raised.value
+    for rendered in (str(error), repr(error), error.json(include_input=False)):
+        assert SENTINEL not in rendered
+        assert "sentinel-host.invalid" not in rendered
+    assert SENTINEL not in str(error.errors(include_input=False))
+
+
+def test_a_refused_settings_load_prints_no_input_value_in_a_fresh_process(tmp_path: Path) -> None:
+    """The operator-visible surface: an uncaught refusal's traceback on stderr, and stdout."""
+
+    import os
+    import subprocess
+    import sys
+
+    repo = Path(__file__).resolve().parents[2]
+    done = subprocess.run(
+        [sys.executable, "-c", "from chronos.config.settings import Settings; Settings()"],
+        cwd=tmp_path,
+        env={
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "PYTHONPATH": os.pathsep.join([str(repo / "src"), str(repo)]),
+            "HOME": str(tmp_path),
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "BROKER_MODE": "ibkr",
+            "IB_ACCOUNT_ID": SENTINEL,
+            "IB_HOST": "sentinel-host.invalid",
+        },
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert done.returncode != 0 and "ValidationError" in done.stderr  # it really refused
+    assert "is not a paper account id" in done.stderr  # the rule is shown
+    assert SENTINEL not in done.stdout + done.stderr
+    assert "sentinel-host.invalid" not in done.stdout + done.stderr

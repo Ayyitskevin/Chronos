@@ -256,6 +256,31 @@ def test_an_exported_variable_that_would_outrank_the_file_is_refused() -> None:
     assert _ids(_good_text(), environ={"PATH": "/usr/bin", "HOME": "/home/x"}) == []
 
 
+@pytest.mark.parametrize(
+    ("changes", "expected"),
+    [
+        # Daybreak build-uc r1 P2-1: the U-c load refusal (the port) must not hide P5 and P13
+        (
+            {
+                "IB_PORT": "7496",
+                "ALLOW_ORDER_TRANSMIT": "true",
+                "IB_ACCOUNT_ALLOWLIST": "DU7654321",
+            },
+            ["P3", "P5", "P13"],
+        ),
+        ({"IB_PORT": "4001", "BROKER_ADAPTER": "ib_async"}, ["P2", "P3"]),
+        ({"IB_ACCOUNT_ID": "U1234567", "ALLOW_LIVE_TRADING": "true"}, ["P1", "P4", "P5"]),
+    ],
+)
+def test_a_load_refusal_still_reports_every_independent_condition(
+    changes: dict[str, str], expected: list[str]
+) -> None:
+    text = _good_text()
+    for key, value in changes.items():
+        text = _set(text, key, value)
+    assert _ids(text) == expected
+
+
 def test_several_broken_conditions_are_all_reported_in_order() -> None:
     text = _set(
         _set(_set(_good_text(), "IB_PORT", "7496"), "DATABASE_URL", None), "IB_ACCOUNT_ID", "U1"
