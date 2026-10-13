@@ -440,11 +440,16 @@ def _all_logs() -> Iterator[_Records]:
 
 
 def _everything(
-    host: dict[str, Path], capsys: pytest.CaptureFixture[str], *, json_out: bool
+    host: dict[str, Path],
+    capsys: pytest.CaptureFixture[str],
+    *,
+    json_out: bool,
+    with_credential: bool = True,
 ) -> str:
     from chronos.cli.main import main
 
-    _rewrite(host, "IB_PASSWORD", CREDENTIAL_CANARY)  # also forces a P9 refusal
+    if with_credential:
+        _rewrite(host, "IB_PASSWORD", CREDENTIAL_CANARY)  # also forces a P9 refusal
     with _all_logs() as logs:
         argv = ["b1-preflight", "--env-file", str(host["env"]), "--halt-file", str(host["halt"])]
         argv += ["--proc-net", str(host["proc_net"])]
@@ -465,11 +470,19 @@ def _everything(
 
 
 @pytest.mark.parametrize("json_out", [False, True])
+@pytest.mark.parametrize("with_credential", [True, False], ids=["refusing", "clear"])
 def test_no_secret_or_account_id_appears_anywhere(
-    host: dict[str, Path], capsys: pytest.CaptureFixture[str], json_out: bool
+    host: dict[str, Path], capsys: pytest.CaptureFixture[str], json_out: bool, with_credential: bool
 ) -> None:
-    everything = _everything(host, capsys, json_out=json_out)
-    assert "REFUSE [P9]" in everything or '"P9"' in everything  # the canary file really ran
+    """Both paths: the refusing one (a planted credential, P9) and the CLEAR one, whose summary
+    line is only produced when every condition is met (my own M3 mutant leaked there unseen
+    while this case covered the refusing path alone)."""
+
+    everything = _everything(host, capsys, json_out=json_out, with_credential=with_credential)
+    if with_credential:
+        assert "REFUSE [P9]" in everything or '"P9"' in everything  # the canary file really ran
+    else:
+        assert "B1-PREFLIGHT CLEAR" in everything  # the clear path really ran
     assert _leaked(everything) == []
 
 
