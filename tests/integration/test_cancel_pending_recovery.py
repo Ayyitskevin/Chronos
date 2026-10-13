@@ -593,3 +593,175 @@ def test_a_submitted_order_without_recovery_provenance_is_unchanged(world: World
     world.venue.completed = [venue_order(CANCELLED, "0")]
     world.at(0)
     assert world.rig.status() is SUBMITTED
+
+
+# --- U-B r1, Daybreak P1-1: an unrecognised venue status never recovers or writes -------------
+
+
+def _unknown_row(filled: str = "0", **fields: object) -> object:
+    """An otherwise exact open row whose raw IB status Chronos does not recognise."""
+
+    from chronos.orders.tracker import broker_status_to_lifecycle
+
+    lifecycle = broker_status_to_lifecycle(
+        "SomeNewStatus", filled_quantity=Decimal(filled), remaining_quantity=10 - Decimal(filled)
+    )
+    assert lifecycle is OrderLifecycle.SUBMISSION_UNKNOWN
+    return venue_order(lifecycle, filled, **fields)  # type: ignore[arg-type]
+
+
+def _assert_untouched(w: World, before: int, report: object) -> None:
+    assert w.rig.status() is CP and len(w.rig.events()) == before
+    assert any("unrecognised venue order status" in r for r in issues(report)), issues(report)  # type: ignore[arg-type]
+
+
+def test_r1_P1_1_an_unrecognised_status_held_past_D_is_never_recovered(world: World) -> None:
+    world.rig.pending()
+    world.venue.open = [_unknown_row()]
+    before = len(world.rig.events())
+    for k in range(3):
+        report = world.at(k)
+    _assert_untouched(world, before, report)
+    assert world.recoveries() == []
+
+
+def test_r1_P1_1_an_unrecognised_status_records_no_fill_progress(world: World) -> None:
+    world.rig.pending()
+    world.venue.open = [_unknown_row("3")]
+    before = len(world.rig.events())
+    _assert_untouched(world, before, world.at(0))
+
+
+def test_r1_sweep_an_unrecognised_status_filled_by_quantity_is_not_proof(world: World) -> None:
+    """C3 rests on a recognised venue row; an unknown status with filled = Q is row 12."""
+
+    world.rig.pending()
+    world.venue.open = [_unknown_row("10")]
+    before = len(world.rig.events())
+    _assert_untouched(world, before, world.at(0))
+
+
+@pytest.mark.parametrize("lifecycle", [SUBMITTED, OrderLifecycle.SUBMISSION_UNKNOWN])
+def test_r1_sweep_a_completed_record_with_a_non_terminal_status_is_not_proof(
+    world: World, lifecycle: OrderLifecycle
+) -> None:
+    """A completed-order record is a bound T only with a terminal status (C7 needs Filled):
+    a non-terminal or unrecognised one with filled = Q must not settle FILLED."""
+
+    world.rig.pending()
+    world.venue.completed = [venue_order(lifecycle, "10")]
+    before = len(world.rig.events())
+    report = world.at(0)
+    assert world.rig.status() is CP and len(world.rig.events()) == before
+    assert any("not a terminal status" in r for r in issues(report)), issues(report)
+
+
+def test_r1_a_recognised_pending_cancel_row_is_still_row_C1(world: World) -> None:
+    """Control: PendingCancel is a recognised status (C1, as built), not an unknown one."""
+
+    world.rig.pending()
+    world.venue.open = [venue_order(CP, "0")]
+    report = world.at(0)
+    assert world.rig.status() is CP
+    assert not any("unrecognised" in r for r in issues(report))
+
+
+# --- U-B r1, Daybreak P2-1: the write is linearised to the epochs its plan confirmed ----------
+
+
+def _after_the_confirming_plan(w: World, monkeypatch: pytest.MonkeyPatch, event: object) -> None:
+    """Run ``event`` right after the SECOND (confirming) plan of the next pass returns, i.e.
+    after the equality check's inputs exist and before the lifecycle CAS."""
+
+    real = OrderRestartReconciler._plan_settle
+    calls = {"n": 0}
+
+    def wrapped(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        plan = real(self, *args, **kwargs)
+        calls["n"] += 1
+        if calls["n"] == 2:
+            assert callable(event)
+            event()
+        return plan
+
+    monkeypatch.setattr(OrderRestartReconciler, "_plan_settle", wrapped)
+
+
+def _transition(w: World) -> None:
+    with w.rig.readiness.invalidating_transition("managed-account scope changed"):
+        pass
+
+
+_FINAL_WINDOW_EVENTS = {
+    "invalidate": lambda w: w.rig.readiness.invalidate("broker state became uncertain"),
+    "invalidating_transition": lambda w: _transition(w),
+    "unsolicited_execution": lambda w: _bridge(w).unsolicited.observe_execution(
+        client_id=99, order_id=5
+    ),
+    "adapter_reconnect_reset": lambda w: _bridge(w).reset_for_reconnect(),
+    "connection_uncertain": lambda w: _bridge(w)._invalidate_connection("1100 connectivity lost"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_FINAL_WINDOW_EVENTS))
+def test_r1_P2_1_a_safety_event_after_the_confirming_plan_blocks_the_recovery_write(
+    world: World, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    _lost_cancel(world)
+    world.at(0)
+    event = _FINAL_WINDOW_EVENTS[name]
+    _after_the_confirming_plan(world, monkeypatch, lambda: event(world))
+    report = world.at(1)
+    assert world.rig.status() is CP and world.recoveries() == [], name
+    assert any("changed before the write" in r for r in issues(report)), issues(report)
+
+
+def test_r1_P2_1_the_same_event_blocks_an_in_place_fill_progress_write(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _lost_cancel(world, "2")
+    before = len(world.rig.events())
+    _after_the_confirming_plan(
+        world, monkeypatch, lambda: world.rig.readiness.invalidate("uncertain")
+    )
+    report = world.at(0)
+    assert len(world.rig.events()) == before
+    assert any("changed before the write" in r for r in issues(report)), issues(report)
+
+
+def test_r1_P2_1_control_with_no_event_the_recovery_is_written(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _lost_cancel(world)
+    world.at(0)
+    _after_the_confirming_plan(world, monkeypatch, lambda: None)
+    world.at(1)
+    assert world.rig.status() is SUBMITTED
+
+
+# --- fable P3-1: the exact-D boundary and a lost fill-progress CAS ----------------------------
+
+
+def test_r1_fable_P3_1a_a_pass_exactly_D_after_the_first_observation_recovers(
+    world: World,
+) -> None:
+    _lost_cancel(world)
+    world.at(0)
+    world.mono.t += 90.0  # exactly D
+    with world.rig.readiness.reconciliation_session("pass"):
+        world.rig.reconcile(NOW + timedelta(seconds=90))
+    assert world.rig.status() is SUBMITTED
+
+
+def test_r1_fable_P3_1b_a_lost_fill_progress_cas_carries_no_dwell(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the in-place write loses its CAS, the dwell does not survive into the next pass."""
+
+    _lost_cancel(world, "2")
+    real = world.rig.tracker.record_planned_transition
+    monkeypatch.setattr(world.rig.tracker, "record_planned_transition", lambda **kw: False)
+    world.at(0)  # fill progress planned, CAS "lost": no dwell carried
+    monkeypatch.setattr(world.rig.tracker, "record_planned_transition", real)
+    world.at(1)  # the dwell starts HERE, so no recovery yet
+    assert world.rig.status() is CP and world.recoveries() == []
