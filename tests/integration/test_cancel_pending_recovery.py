@@ -558,8 +558,10 @@ def test_S_R3_an_inconsistent_late_record_is_as_today(world: World) -> None:
     _recovered_submitted(world)
     world.venue.open = []
     world.venue.completed = [venue_order(FILLED, "7")]  # Filled that does not fill: not proof
-    world.at(2)
+    report = world.at(2)
     assert world.rig.status() is SUBMITTED
+    # "as today": the existing resolver's reason, not the planner's typed refusal (U21)
+    assert any("absent from the broker" in r for r in issues(report)), issues(report)
 
 
 def test_D7_P1_a_late_cancelled_record_after_a_partial_recovery_settles_once(world: World) -> None:
@@ -572,6 +574,17 @@ def test_D7_P1_a_late_cancelled_record_after_a_partial_recovery_settles_once(wor
     world.venue.completed = [venue_order(CANCELLED, "4")]
     world.at(2)
     assert world.rig.status() is CANCELLED and world.rig.events()[-1].filled_quantity == 4
+
+
+def test_a_refused_cancel_revert_is_not_recovery_provenance(world: World) -> None:
+    """The cancel service's refusal also writes CANCEL_PENDING -> SUBMITTED (source CANCEL):
+    that is not a recovery, so a later Cancelled record is Q7's, not S-R1's (U27)."""
+
+    world.rig.pending()
+    world.rig.event(SUBMITTED, at=EARLIER_TODAY, source="CANCEL")  # the refusal's revert
+    world.venue.completed = [venue_order(CANCELLED, "0")]
+    world.at(0)
+    assert world.rig.status() is SUBMITTED
 
 
 def test_a_submitted_order_without_recovery_provenance_is_unchanged(world: World) -> None:
