@@ -368,6 +368,12 @@ class OrderTracker:
             if event.filled_quantity is not None
         )
 
+    def events(self, intent_id: str, *, current_account_id: str) -> tuple[OrderEventRecord, ...]:
+        """The intent's persisted events, oldest first (the U-B dwell reads its cancel mark and
+        the recovery provenance from them; a read, it decides nothing)."""
+
+        return self._tracker.events(intent_id, current_account_id=current_account_id)
+
     def first_event_time(
         self,
         intent_id: str,
