@@ -917,12 +917,12 @@ class OrderRestartReconciler:
 
         Holds the readiness latch's lock, then the adapter bridge's (the existing lock order),
         and yields whether both epochs are unchanged; an invalidation or a reconnect that comes
-        now waits for the write and lands after it. ``None`` = a write that rests on no
-        working-order observation (a settle on a terminal record): nothing to hold.
+        now waits for the write and lands after it. EVERY write plan carries its epochs (U-B r2):
+        ``None`` here is a plan built without them and is refused -- there is no bypass.
         """
 
         if epochs is None:
-            yield True
+            yield False
             return
         readiness_epoch, adapter_epoch = epochs
         with ExitStack() as stack:
@@ -1051,6 +1051,9 @@ class OrderRestartReconciler:
         order_ref = intent.order_ref
         if not order_ref:
             return _SettlePlan("legacy")
+        # U-B r2 (design r3 §3.1; Daybreak r1 delta P1-1): EVERY write plan carries the epochs it
+        # was planned under; the confirming re-plan must agree and the CAS runs while they hold
+        epochs = self._current_epochs()
         is_pending = intent.status is OrderLifecycle.CANCEL_PENDING
         conflict = _identity_conflict_reason(
             order_ref=order_ref,
@@ -1160,6 +1163,7 @@ class OrderRestartReconciler:
                 owned_open=signature[0],
                 owned_fills=signature[1],
                 record=record,
+                epochs=epochs,
             )
 
         def bound_exactly(record: BrokerOrder) -> bool:
@@ -1266,7 +1270,7 @@ class OrderRestartReconciler:
                     owned_fills=signature[1],
                     source=RECOVERY_SOURCE,
                     dwell=dwell,
-                    epochs=self._current_epochs(),
+                    epochs=epochs,
                 )
             recorded = max((f for _, f in figures), default=Decimal("0"))
             if figure > recorded:
@@ -1288,7 +1292,7 @@ class OrderRestartReconciler:
                     owned_open=signature[0],
                     owned_fills=signature[1],
                     dwell=dwell,
-                    epochs=self._current_epochs(),
+                    epochs=epochs,
                 )
             return _SettlePlan(
                 "hold", "cancel pending; order still working at the venue", dwell=dwell
