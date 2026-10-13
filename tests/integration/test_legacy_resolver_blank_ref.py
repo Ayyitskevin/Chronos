@@ -10,9 +10,10 @@ design (r3 §2.1-2.3) refuses to trust.
 
 Everything runs through the REAL ``OrderRestartReconciler.reconcile_report`` over a real
 in-memory order book (the local builder below; main has no settle rig); only the broker is a
-scripted ``FakeBroker``. The RED pins are strict xfails with their finding ids so main stays
-green until S-12's implementation removes the decorators; the positive controls pass today and
-must keep passing (the exact-reference settles, and blank-reference PROGRESS, which BP-2 needs).
+scripted ``FakeBroker``. The RED pins were strict xfails (LEGACY-1, LEGACY-2) until S-12's
+implementation, which removed the decorators as they flipped; they are now ordinary pins, beside
+the positive controls that must keep passing (the exact-reference settles, and blank-reference
+PROGRESS, which BP-2 needs).
 """
 
 from __future__ import annotations
@@ -64,19 +65,6 @@ SUBMITTED_AT = datetime(2026, 10, 9, 15, 0, tzinfo=UTC)
 NOW = datetime(2026, 10, 12, 15, 0, tzinfo=UTC)
 TODAY = datetime(2026, 10, 12, 14, 0, tzinfo=UTC)
 _KEYS = itertools.count(1)
-
-LEGACY_1 = (
-    "LEGACY-1 (packet FM-1, RC-A): a listed row with a blank/missing orderRef, owned only by "
-    "the persisted permId, drives a TERMINAL write through resolve_from_broker_evidence; the "
-    "adopted rule (packet §6 Q2) is that a blank-reference observation settles progress only. "
-    "Removed by S-12's implementation, after S-3."
-)
-LEGACY_2 = (
-    "LEGACY-2 (packet FM-2, RC-A): with no listed or completed row, this session's executions "
-    "owned only by the persisted permId (blank orderRef) are summed to the order size and "
-    "written FILLED; a blank-reference execution may record progress only (packet §6 Q2). "
-    "Removed by S-12's implementation."
-)
 
 
 def _row(
@@ -259,7 +247,6 @@ _BLANK = [None, "   "]  # missing, and blank (BrokerOrder/BrokerExecution normal
 # --- LEGACY-1: a blank-reference LISTED row never settles a terminal state ---------------------
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=LEGACY_1)
 @pytest.mark.parametrize("ref", _BLANK, ids=["missing_ref", "blank_ref"])
 @pytest.mark.parametrize(
     ("row_lifecycle", "filled"),
@@ -282,7 +269,6 @@ def test_legacy_1_a_blank_reference_listed_row_never_settles_a_terminal_state(
 # --- LEGACY-2: blank-reference EXECUTIONS never settle FILLED ----------------------------------
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=LEGACY_2)
 @pytest.mark.parametrize(
     "executions",
     [
