@@ -928,3 +928,15 @@ def test_r2_C3_a_working_row_filled_by_quantity_still_settles_filled(world: Worl
     world.venue.open = [venue_order(SUBMITTED, "10")]
     world.at(0)
     assert world.rig.status() is FILLED
+
+
+def test_r2_a_pending_cancel_row_filled_by_quantity_is_C1_not_C3(world: World) -> None:
+    """Stated choice (the design's C3 names a working V; C1 a PendingCancel V): a PendingCancel
+    row whose figure reaches Q records that figure in place and settles nothing; the next pass's
+    terminal evidence (Filled at the venue, or the S4 record) settles it."""
+
+    world.rig.pending()
+    world.venue.open = [venue_order(CP, "10")]
+    world.at(0)
+    assert world.rig.status() is CP
+    assert world.rig.trail()[-1] == ("FILL_PROGRESS", CP)
