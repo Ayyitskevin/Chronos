@@ -263,6 +263,7 @@ def test_identifiers_and_the_account_are_pseudonymised_in_the_capture(captured: 
 
 @pytest.mark.xfail(
     strict=True,
+    raises=AssertionError,
     reason=(
         "U-F2-F1: capture_readonly.to_jsonable converts datetime but not date, so a bar's "
         "session_date is written as the Python repr 'datetime.date(2026, 9, 14)', not an ISO date; "
@@ -279,8 +280,11 @@ def test_a_bars_session_date_is_written_as_an_iso_date(captured: Captured) -> No
 
 
 def test_every_fixture_replays_offline_exactly(captured: Captured) -> None:
+    """Replayed as what it is, a REHEARSAL (``allow_demo``): FakeGateway output is not section-7
+    gateway evidence (U-F2-F3 below), but its fixtures must still replay exactly."""
+
     replay = _load("replay_check")
-    assert replay.check_session(captured.out) == []  # gateway_evidence: no --allow-demo needed
+    assert replay.check_session(captured.out, allow_demo=True) == []
 
 
 def test_the_replay_cli_passes_the_session_with_exit_zero(
@@ -295,7 +299,7 @@ def test_the_replay_cli_passes_the_session_with_exit_zero(
         "PYTHONDONTWRITEBYTECODE": "1",
     }
     done = subprocess.run(
-        [sys.executable, str(SCRIPTS / "replay_check.py"), str(captured.out)],
+        [sys.executable, str(SCRIPTS / "replay_check.py"), "--allow-demo", str(captured.out)],
         cwd=tmp_path,
         env=env,
         capture_output=True,
@@ -342,7 +346,9 @@ def test_replay_reports_a_capture_that_is_no_longer_json_as_a_failure(
 def test_replay_refuses_a_hand_edited_capture_even_with_a_matching_manifest(
     captured: Captured,
 ) -> None:
-    """Re-hashing in the manifest does not help: the derivation itself is re-run."""
+    """Re-hashing in the manifest does not help for DERIVED data: the liquid-hours derivation is
+    re-run from capture.json. (Non-derived data is protected only by the manifest's sha256:
+    see the limit control below.)"""
 
     capture_path = captured.out / "capture.json"
     text = capture_path.read_text(encoding="utf-8").replace("0930-", "1000-", 1)
@@ -353,6 +359,114 @@ def test_replay_refuses_a_hand_edited_capture_even_with_a_matching_manifest(
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     failures = _load("replay_check").check_session(captured.out)
     assert any("does NOT replay byte-exactly" in f for f in failures), failures
+
+
+def test_limit_a_hand_edit_of_non_derived_data_with_a_rehashed_manifest_still_passes(
+    captured: Captured,
+) -> None:
+    """The replay's stated limit (reader P3-1), recorded so the "exactly" claim is bounded:
+    only derived_liquid_hours.json is re-derived; any other capture field (a position quantity,
+    a bar close) is protected by the manifest's sha256 alone, which the same hand can rewrite."""
+
+    capture_path = captured.out / "capture.json"
+    capture = json.loads(capture_path.read_text(encoding="utf-8"))
+    capture["steps"]["positions"][0]["quantity"] = "999.0"
+    text = json.dumps(capture, indent=2, sort_keys=True, ensure_ascii=True) + "\n"
+    capture_path.write_text(text, encoding="utf-8")
+    manifest_path = captured.out / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["files"]["capture.json"] = sha256(text.encode("utf-8")).hexdigest()
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    assert _load("replay_check").check_session(captured.out, allow_demo=True) == []
+
+
+def test_replay_refuses_a_session_whose_listed_file_is_missing(captured: Captured) -> None:
+    """Branch (l), reader P3-2."""
+
+    (captured.out / "derived_liquid_hours.json").unlink()
+    failures = _load("replay_check").check_session(captured.out, allow_demo=True)
+    assert any("listed file missing: derived_liquid_hours.json" in f for f in failures), failures
+
+
+def test_replay_refuses_a_mutation_shaped_step_in_the_capture(captured: Captured) -> None:
+    """Branch (k), reader P3-2: the scan the U-f3 no-order transcript leans on."""
+
+    capture_path = captured.out / "capture.json"
+    capture = json.loads(capture_path.read_text(encoding="utf-8"))
+    capture["steps"]["symbol:AAPL:submit_order"] = {"ok": True}
+    text = json.dumps(capture, indent=2, sort_keys=True, ensure_ascii=True) + "\n"
+    capture_path.write_text(text, encoding="utf-8")
+    manifest_path = captured.out / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["files"]["capture.json"] = sha256(text.encode("utf-8")).hexdigest()
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    failures = _load("replay_check").check_session(captured.out, allow_demo=True)
+    assert failures == [
+        f"{captured.out}: mutation-shaped step in capture: symbol:AAPL:submit_order"
+    ], failures
+
+
+# --- reader P2-1: a rehearsal must never count as section-7 gateway evidence -----------------
+
+
+def _stamp_as_rehearsal(out: Path) -> None:
+    manifest_path = out / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["gateway_evidence"] = False
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+
+def test_a_rehearsal_manifest_is_refused_as_gateway_evidence_unless_allowed(
+    captured: Captured,
+) -> None:
+    """Branch (j), reader P2-1's positive control: a session whose manifest says
+    gateway_evidence=false is refused without --allow-demo, and validates with it."""
+
+    _stamp_as_rehearsal(captured.out)
+    replay = _load("replay_check")
+    refused = replay.check_session(captured.out)
+    assert len(refused) == 1 and "gateway_evidence=false" in refused[0], refused
+    assert "cannot count toward the section 7 gate" in refused[0]
+    assert replay.check_session(captured.out, allow_demo=True) == []
+
+
+def test_the_replay_cli_refuses_a_rehearsal_without_allow_demo(
+    captured: Captured, tmp_path: Path
+) -> None:
+    _stamp_as_rehearsal(captured.out)
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "PYTHONPATH": os.pathsep.join([str(ROOT / "src"), str(ROOT)]),
+        "HOME": str(tmp_path),
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
+    done = subprocess.run(
+        [sys.executable, str(SCRIPTS / "replay_check.py"), str(captured.out)],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert done.returncode == 1 and done.stdout.startswith(f"[FAIL] {captured.out}"), done.stdout
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason=(
+        "U-F2-F3 (reader P2-1): capture_readonly.run_capture stamps gateway_evidence = "
+        "(broker_mode is IBKR), true for the official adapter over the FakeGateway, so a fake "
+        "capture replays [PASS] as section-7 gateway evidence. The harness cannot tell a fake "
+        "from a gateway; the smallest fix is in the campaign script (not a test): see RESULT."
+    ),
+)
+def test_a_fakegateway_capture_is_not_gateway_evidence(captured: Captured) -> None:
+    assert captured.json("manifest.json")["gateway_evidence"] is False
+    assert captured.json("capture.json")["meta"]["gateway_evidence"] is False
+    failures = _load("replay_check").check_session(captured.out)
+    assert any("gateway_evidence=false" in f for f in failures), failures
 
 
 # --- the harness's own refusal without a pepper -----------------------------------------------
