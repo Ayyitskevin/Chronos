@@ -147,14 +147,14 @@ def preflight_b1_env(
     settings = _load_settings(values)
     if isinstance(settings, str):
         # Settings itself enforces several of the conditions at load (since B1 U-c the port,
-        # client id and account shape too): report each under its own condition id
+        # client id and account shape too): report the refusal under its own condition id
         condition = _condition_of_load_refusal(settings)
-        # Settings stops at its FIRST refusal, so the shape conditions it did not reach are
-        # evaluated on the file's own values: every independent condition is still reported,
-        # once each (the raw finding stands in for a load refusal of the same condition)
-        # Only for U-c's own shape refusals (each says "refused at load"): the pre-existing
-        # refusals (the live conjunction, a client-id clash) keep their reporting unchanged
-        raw = _raw_findings(values) if "refused at load" in settings else []
+        # Settings stops at its FIRST refusal, whichever validator raised it (a U-c shape
+        # rule, the live conjunction, a field that would not parse, a client-id clash), so
+        # every condition that needs no constructed Settings is evaluated on the file's own
+        # values for EVERY load refusal (Daybreak build-uc r2 P2-1), and reported once each.
+        # The refusal's own condition is kept when the raw pass has no form of it (P1, P8).
+        raw = _raw_findings(values)
         if condition not in {cid for cid, _ in raw}:
             found.append((condition, settings))
         found.extend(raw)
@@ -218,9 +218,10 @@ def _raw_field(values: Mapping[str, str], name: str) -> Any:
 def _raw_findings(values: Mapping[str, str]) -> list[tuple[str, str]]:
     """Every condition that needs no constructed Settings, from the raw file values.
 
-    Used when Settings refused the file at load: it stops at its FIRST refusal, so without
-    this an early U-c shape refusal would hide independent transmission-authority findings
-    (Daybreak build-uc r1 P2-1). Messages are the post-load checks' own, never a value.
+    Used after ANY Settings load refusal: Settings stops at its FIRST refusal, so without this
+    an early refusal (a U-c shape rule, the live conjunction, an unparseable field, a client-id
+    clash) would hide independent transmission-authority findings (Daybreak build-uc r1 P2-1,
+    r2 P2-1). Messages are the post-load checks' own, never a value.
     """
 
     found: list[tuple[str, str]] = []
