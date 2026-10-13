@@ -410,3 +410,59 @@ def test_P3_1_any_failure_of_the_completed_orders_read_is_a_typed_hold(
     rig.venue.completed_error = error
     _assert_refused(rig, "completed-orders evidence is not available")
     assert rig.readiness.snapshot().status.value == "PENDING"
+
+
+# --- mutant-gap pins (the r1 mutation run: A-m18, B06, B08, B10, B11 survived without them) ---
+
+
+def test_P1_1_an_intent_persisted_under_another_client_never_binds_under_this_one() -> None:
+    """Persisted client 18 and a record from client 18, but this process is client 17: the
+    configured client id stays required alongside the exact persisted set (A-m18)."""
+
+    r = _fresh(client_id=CLIENT_ID + 1)
+    try:
+        r.pending()
+        r.venue.completed = [venue_order(CANCELLED, "0", client=CLIENT_ID + 1)]
+        _assert_refused(r, "not bound to this intent")
+    finally:
+        r.close()
+
+
+def test_P1_1_a_persisted_permid_of_zero_never_binds() -> None:
+    """Design §2.1: the permId must be positive; 0 = "no id", even when both sides say 0 (B06)."""
+
+    r = _fresh(permanent_id=0)
+    try:
+        r.pending()
+        r.venue.completed = [venue_order(CANCELLED, "0", perm=0)]
+        _assert_refused(r, "not bound to this intent")
+    finally:
+        r.close()
+
+
+def test_P1_2_a_record_that_gains_its_order_id_between_the_snapshots_is_never_written(
+    rig: Rig,
+) -> None:
+    """Both reads bind and plan the same settle, but the pair is not equal (B08/B11)."""
+
+    rig.pending()
+    rig.venue.completed_script = [
+        (venue_order(CANCELLED, "0", broker_id=0),),
+        (venue_order(CANCELLED, "0", broker_id=BROKER_ID),),
+    ]
+    _assert_refused(rig, "evidence changed between snapshots")
+
+
+def test_P1_2_an_execution_whose_timestamp_moves_between_the_snapshots_blocks_the_write(
+    rig: Rig,
+) -> None:
+    """Same id, same quantity, same session, a different stamp: not an equal pair (B08/B10)."""
+
+    rig.pending()
+    rig.venue.completed = [venue_order(CANCELLED, "2")]
+    later = datetime(2026, 10, 12, 14, 30, tzinfo=UTC)
+    rig.venue.exec_script = [
+        (venue_execution("e1", "2", EARLIER_TODAY),),
+        (venue_execution("e1", "2", later),),
+    ]
+    _assert_refused(rig, "evidence changed between snapshots")
