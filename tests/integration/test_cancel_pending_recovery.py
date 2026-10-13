@@ -817,3 +817,114 @@ def test_r1_P2_1_a_bridge_that_cannot_hold_its_epoch_never_recovers() -> None:
         assert any("changed before the write" in r for r in issues(report)), issues(report)
     finally:
         w.rig.close()
+
+
+# --- U-B r2, Daybreak P1-1: EVERY lifecycle write is linearised to the confirmed epochs --------
+
+
+def _settle_case(w: World, case: str) -> None:
+    from tests.support.settle_rig import venue_execution
+
+    w.rig.pending()
+    if case == "s4_terminal":
+        w.venue.completed = [venue_order(CANCELLED, "0")]
+    elif case == "open_book_terminal":
+        w.venue.open = [venue_order(CANCELLED, "0")]
+    elif case == "c10a_executions":
+        w.venue.execs = [venue_execution("e1", "10", EARLIER_TODAY)]
+    else:  # pragma: no cover
+        raise AssertionError(case)
+
+
+_SETTLE_CASES = ["s4_terminal", "open_book_terminal", "c10a_executions"]
+_SETTLE_EVENTS = {
+    "readiness_invalidate": lambda w: w.rig.readiness.invalidate("broker state became uncertain"),
+    "adapter_reconnect_reset": lambda w: _bridge(w).reset_for_reconnect(),
+}
+
+
+@pytest.mark.parametrize("event", sorted(_SETTLE_EVENTS))
+@pytest.mark.parametrize("case", _SETTLE_CASES)
+def test_r2_P1_1_a_safety_event_after_the_confirming_plan_blocks_every_settle_write(
+    world: World, monkeypatch: pytest.MonkeyPatch, case: str, event: str
+) -> None:
+    """Daybreak's probe: a terminal settle stable across both snapshots, then an invalidation
+    right after the confirming plan. Nothing is written; the intent stays remaining-active, so
+    readiness cannot be published from the discarded proof."""
+
+    _settle_case(world, case)
+    _after_the_confirming_plan(world, monkeypatch, lambda: _SETTLE_EVENTS[event](world))
+    report = world.at(0)
+    assert world.rig.status() is CP, (case, event)
+    assert [r.status for r in report.remaining_active] == [CP]
+    assert not report.permits_new_opening_order
+    assert any("changed before the write" in r for r in issues(report)), issues(report)
+
+
+@pytest.mark.parametrize("case", _SETTLE_CASES)
+def test_r2_P1_1_control_the_same_settle_with_no_event_is_written(
+    world: World, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    _settle_case(world, case)
+    _after_the_confirming_plan(world, monkeypatch, lambda: None)
+    report = world.at(0)
+    assert world.rig.status() in {CANCELLED, FILLED} and report.remaining_active == ()
+
+
+def test_r2_P1_1_after_a_blocked_settle_the_next_pass_re_proves_on_fresh_evidence(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The invalidation lands and forces new evidence: the next pass reads both snapshots again
+    under the new epoch, and only then settles."""
+
+    _settle_case(world, "s4_terminal")
+    _after_the_confirming_plan(
+        world, monkeypatch, lambda: world.rig.readiness.invalidate("uncertain")
+    )
+    world.at(0)
+    calls = world.venue.completed_calls
+    monkeypatch.undo()
+    world.at(1)
+    assert world.rig.status() is CANCELLED
+    assert world.venue.completed_calls == calls + 2  # a fresh plan and a fresh confirmation
+
+
+# --- U-B r2, Daybreak P1-2: REJECTED is never FILLED; the terminal mapping is explicit --------
+
+
+@pytest.mark.parametrize("filled", ["0", "4", "10"])
+@pytest.mark.parametrize("source", ["completed", "open"])
+def test_r2_P1_2_a_rejected_terminal_record_never_settles_whatever_its_figure(
+    world: World, source: str, filled: str
+) -> None:
+    """Design r3 row C9: Rejected/Inactive is unexpected for a cancel; none, typed reason --
+    decided by the lifecycle BEFORE the quantity (a REJECTED, filled=Q record was FILLED)."""
+
+    world.rig.pending()
+    row = venue_order(OrderLifecycle.REJECTED, filled)
+    if source == "completed":
+        world.venue.completed = [row]
+    else:
+        world.venue.open = [row]
+    before = len(world.rig.events())
+    report = world.at(0)
+    assert world.rig.status() is CP and len(world.rig.events()) == before
+    assert any("unexpected terminal status for a cancel: REJECTED" in r for r in issues(report))
+
+
+def test_r2_the_terminal_status_to_target_table_is_explicit() -> None:
+    """The allowlist, pinned: only these terminal statuses settle, each to exactly this target."""
+
+    from chronos.orders import reconciliation_recovery as rr
+
+    assert rr._TERMINAL_TARGET == {CANCELLED: CANCELLED, FILLED: FILLED}
+    assert OrderLifecycle.REJECTED not in rr._TERMINAL_TARGET
+
+
+def test_r2_C3_a_working_row_filled_by_quantity_still_settles_filled(world: World) -> None:
+    """Control: C3 is kept, separately, for a recognised WORKING row whose figure reaches Q."""
+
+    world.rig.pending()
+    world.venue.open = [venue_order(SUBMITTED, "10")]
+    world.at(0)
+    assert world.rig.status() is FILLED
