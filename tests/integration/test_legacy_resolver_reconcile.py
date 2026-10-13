@@ -56,11 +56,16 @@ PRIOR = datetime(2026, 10, 9, 15, 0, tzinfo=UTC)  # the previous Friday
 EARLIER_TODAY = datetime(2026, 10, 12, 14, 0, tzinfo=UTC)  # 10:00 New York, same session as NOW
 NOW = datetime(2026, 10, 12, 15, 0, tzinfo=UTC)  # 11:00 New York, Monday
 
+# The sent-active statuses the LEGACY resolver still decides. CANCEL_PENDING is not among them
+# once the U-A settle planner owns it (design r3 §3.1 item 2; the S-3 packet anticipated this:
+# "U-A ... moves CANCEL_PENDING off the legacy resolver"). Its counterparts of every case below are
+# pinned against the planner in tests/integration/test_cancel_pending_recovery.py
+# (test_r3_on_main_*): locked for REJECTED / unrecognised / no evidence / a zero-fill terminal row
+# under recorded fills, fill progress in place for a working partial, C3 for a working row at Q.
 SENT_ACTIVE = (
     OrderLifecycle.SUBMITTED,
     OrderLifecycle.SUBMISSION_UNKNOWN,
     OrderLifecycle.PARTIALLY_FILLED,
-    OrderLifecycle.CANCEL_PENDING,
 )
 CONTRADICTED = (OrderLifecycle.REJECTED, OrderLifecycle.CANCELLED)
 # The only other non-working typed value the official adapter can produce: an unrecognised status.
@@ -384,7 +389,9 @@ def test_no_evidence_leaves_the_intent_locked_with_the_absence_reason(
 
 
 @pytest.mark.parametrize("typed", CONTRADICTED, ids=lambda lifecycle: lifecycle.value)
-@pytest.mark.parametrize("path", ["partial", "partial-then-cancel-pending"])
+# "partial-then-cancel-pending" left this list with U-A: the settle planner already refuses it (a
+# venue figure below the witnessed lower bound), pinned non-xfail in test_cancel_pending_recovery.py
+@pytest.mark.parametrize("path", ["partial"])
 def test_a_terminal_row_at_zero_fills_does_not_overwrite_recorded_fills(
     rig: _Rig, path: str, typed: OrderLifecycle
 ) -> None:

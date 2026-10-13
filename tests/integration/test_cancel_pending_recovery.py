@@ -952,20 +952,98 @@ def test_r2_a_write_plan_without_epochs_is_refused_there_is_no_bypass(world: Wor
         assert current is True  # positive control
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "U-B-r2-LEGACY-3: the EXISTING resolver (resolve_from_broker_evidence, used for an intent "
-        "the planner does not own: a SUBMITTED order, or a PARTIALLY_FILLED one still listed, "
-        "design P5/S-R3) refines a listed row by quantity BEFORE its lifecycle, so a REJECTED "
-        "row with filled = Q is recorded FILLED. Pre-existing, outside U-B's planner; open "
-        "question for Daybreak/Kevin, not fixed here."
-    ),
-)
+# U-B-r2-LEGACY-3 was a strict xfail at r2; S-3 (main 9a163ec/997dc6b, PR #299: the legacy
+# resolver decides lifecycle before quantity) fixed it, so on main it XPASSed and its decorator is
+# removed: this is now an ordinary regression pin.
 def test_r2_legacy_a_rejected_listed_row_filled_by_quantity_is_not_recorded_filled(
     world: World,
 ) -> None:
     world.venue.open = [venue_order(OrderLifecycle.REJECTED, "10")]
     world.at(0)
     assert world.rig.status() is SUBMITTED
+
+
+# --- r3 on main: S-3's cases for a CANCEL_PENDING intent, now decided by the settle planner ------
+# S-3 (main, PR #299) pinned these through the legacy resolver, which owned CANCEL_PENDING on main;
+# with U-A the planner owns it, so S-3's file keeps the statuses the legacy resolver still decides
+# and these are their CANCEL_PENDING counterparts. The safety property is the same (the lock is not
+# cleared on contradictory or unproven evidence); the planner's typed reasons are its own.
+
+
+@pytest.mark.parametrize("filled", ["1", "4", "10"])
+def test_r3_on_main_a_rejected_listed_row_with_fills_leaves_a_cancel_pending_locked(
+    world: World, filled: str
+) -> None:
+    world.rig.pending()
+    world.venue.open = [venue_order(OrderLifecycle.REJECTED, filled)]
+    before = len(world.rig.events())
+    report = world.at(0)
+    assert world.rig.status() is CP and len(world.rig.events()) == before
+    assert not report.permits_new_opening_order
+    assert any("unexpected terminal status for a cancel: REJECTED" in r for r in issues(report))
+
+
+@pytest.mark.parametrize("filled", ["1", "4", "10"])
+def test_r3_on_main_an_unrecognised_status_row_with_fills_leaves_a_cancel_pending_locked(
+    world: World, filled: str
+) -> None:
+    world.rig.pending()
+    world.venue.open = [_unknown_row(filled)]  # type: ignore[list-item]
+    before = len(world.rig.events())
+    report = world.at(0)
+    assert world.rig.status() is CP and len(world.rig.events()) == before
+    assert not report.permits_new_opening_order
+    assert any("unrecognised venue order status" in r for r in issues(report))
+
+
+def test_r3_on_main_a_working_partial_records_progress_in_place_never_partially_filled(
+    world: World,
+) -> None:
+    """S-3's 'a working partial stays a working partial' becomes, for CANCEL_PENDING, design C2-0:
+    the figure is recorded in place and the lifecycle does not move (no dwell-less revert)."""
+
+    world.rig.pending()
+    world.venue.open = [venue_order(SUBMITTED, "4")]
+    report = world.at(0)
+    assert world.rig.status() is CP and world.rig.trail()[-1] == ("FILL_PROGRESS", CP)
+    assert not report.permits_new_opening_order
+
+
+def test_r3_on_main_no_evidence_leaves_a_cancel_pending_locked(world: World) -> None:
+    world.rig.pending()
+    report = world.at(0)
+    assert world.rig.status() is CP and not report.permits_new_opening_order
+    assert any("order absent; no terminal record" in r for r in issues(report))
+
+
+@pytest.mark.parametrize("typed", [OrderLifecycle.REJECTED, CANCELLED])
+def test_r3_on_main_a_zero_fill_terminal_row_under_recorded_fills_leaves_it_locked(
+    world: World, typed: OrderLifecycle
+) -> None:
+    """S-3's LEGACY-5 'partial-then-cancel-pending' path: 3 recorded, then the cancel mark, then a
+    terminal row at 0 fills. The planner refuses (C9 for REJECTED; for CANCELLED the venue figure
+    0 is below the witnessed lower bound 3): the recorded fills are never lowered."""
+
+    world.rig.event(PF, at=PRIOR, filled="3")
+    world.rig.pending()
+    world.venue.open = [venue_order(typed, "0")]
+    before = len(world.rig.events())
+    report = world.at(0)
+    assert world.rig.status() is CP and len(world.rig.events()) == before
+    assert not report.permits_new_opening_order
+
+
+@pytest.mark.parametrize("filled", ["1", "4", "10"])
+def test_r3_on_main_a_cancelled_listed_row_with_fills_settles_cancelled_at_the_venue_figure(
+    world: World, filled: str
+) -> None:
+    """The one CANCEL_PENDING case whose OUTCOME differs from S-3's legacy pin (stated, flagged in
+    RESULT): an exactly bound terminal open-book CANCELLED row is a bound T (design r3 §3.3), so C4
+    settles CANCELLED with the venue's figure -- never promoted to FILLED or PARTIALLY_FILLED (the
+    lifecycle decides, as S-3 requires) -- under the stable pair and the epoch guard."""
+
+    world.rig.pending()
+    world.venue.open = [venue_order(CANCELLED, filled)]
+    world.at(0)
+    assert world.rig.status() is CANCELLED
+    assert world.rig.events()[-1].filled_quantity == Decimal(filled)
