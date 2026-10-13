@@ -6,6 +6,12 @@ database, tracker and connection manager; only the broker is scripted, so the wh
 exercised: evidence -> resolver -> tracker -> ``remaining_active`` ->
 ``permits_new_opening_order`` (the opening-order lock the fail-open used to clear).
 
+r1 (reader review of 9a163ec): the guard is an allowlist (quantity refines only working lifecycles
+and a typed FILLED row), so an UNRECOGNISED broker status (typed SUBMISSION_UNKNOWN) with fills is
+locked too; the typed reason says so; and ``operator_resolve``'s refusal no longer says "identity"
+for a lifecycle conflict. LEGACY-5 (reader P2-2) is pinned as a strict xfail at the end: it awaits
+a ruling because fixing it narrows packet Q3's zero-fill answer.
+
 Local statuses are reached the way the system reaches them: SUBMITTED by a submit with its ids,
 PARTIALLY_FILLED and CANCEL_PENDING by a later event, SUBMISSION_UNKNOWN by a submit that raised
 (no broker id, no permId, no client id).
@@ -57,6 +63,8 @@ SENT_ACTIVE = (
     OrderLifecycle.CANCEL_PENDING,
 )
 CONTRADICTED = (OrderLifecycle.REJECTED, OrderLifecycle.CANCELLED)
+# The only other non-working typed value the official adapter can produce: an unrecognised status.
+UNRECOGNISED = OrderLifecycle.SUBMISSION_UNKNOWN
 
 
 def _row(lifecycle: OrderLifecycle, filled: str) -> BrokerOrder:
@@ -247,15 +255,20 @@ def test_a_rejected_or_cancelled_listed_row_with_fills_leaves_the_intent_locked(
     (item,) = report.unresolved
     # a typed reason that says what is wrong, not the false "absent from the snapshots"
     assert "absent" not in item.reason
-    assert "contradict" in item.reason and typed.value in item.reason
+    assert typed.value in item.reason
+    assert "not a working lifecycle" in item.reason and "cannot settle" in item.reason
 
 
-def test_operator_resolve_refuses_a_rejected_row_with_fills(rig: _Rig) -> None:
+@pytest.mark.parametrize("typed", [OrderLifecycle.REJECTED, UNRECOGNISED], ids=lambda x: x.value)
+def test_operator_resolve_refuses_a_non_working_row_with_fills(
+    rig: _Rig, typed: OrderLifecycle
+) -> None:
     rig.seed(OrderLifecycle.SUBMISSION_UNKNOWN)
-    rig.venue.open = [_row(OrderLifecycle.REJECTED, "10")]
+    rig.venue.open = [_row(typed, "10")]
     events_before = rig.event_count()
 
-    with pytest.raises(ValueError, match="broker evidence conflicts"):
+    # P3-1: the refusal names what is wrong (the evidence does not settle it), not "identity"
+    with pytest.raises(ValueError, match="does not settle this intent") as refusal:
         rig.reconciler.operator_resolve(
             "intent-1",
             operator_note="checked the TWS order list",
@@ -263,8 +276,31 @@ def test_operator_resolve_refuses_a_rejected_row_with_fills(rig: _Rig) -> None:
             now=NOW,
         )
 
+    assert "identity" not in str(refusal.value)
     assert rig.status() is OrderLifecycle.SUBMISSION_UNKNOWN
     assert rig.event_count() == events_before
+
+
+@pytest.mark.parametrize("filled", ["1", "4", "10"])
+@pytest.mark.parametrize("local", SENT_ACTIVE, ids=lambda lifecycle: lifecycle.value)
+def test_an_unrecognised_status_row_with_fills_leaves_the_intent_locked(
+    rig: _Rig, local: OrderLifecycle, filled: str
+) -> None:
+    """P2-1: D-27: a novel status gains no working-order authority from quantities alone."""
+
+    rig.seed(local)
+    rig.venue.open = [_row(UNRECOGNISED, filled)]
+    events_before = rig.event_count()
+
+    report = rig.reconcile()
+
+    assert rig.status() is local
+    assert rig.event_count() == events_before
+    assert [item.intent_id for item in report.remaining_active] == ["intent-1"]
+    assert report.permits_new_opening_order is False
+    (item,) = report.unresolved
+    assert "absent" not in item.reason
+    assert UNRECOGNISED.value in item.reason and "cannot settle" in item.reason
 
 
 # --- positive controls: these pass on main today and must keep passing ---------------------------
@@ -333,3 +369,50 @@ def test_no_evidence_leaves_the_intent_locked_with_the_absence_reason(
     assert report.permits_new_opening_order is False
     (item,) = report.unresolved
     assert "absent from the broker order and execution snapshots" in item.reason
+
+
+# --- LEGACY-5 (reader P2-2): pinned, awaiting a ruling ------------------------------------------
+# A locally PARTIALLY_FILLED intent has recorded fills. A listed, exactly owned CANCELLED/REJECTED
+# row at ZERO fills is written as the terminal state with filled_quantity 0, which drops or
+# contradicts the recorded fills and releases the lock (the adapter reports filled 0 whenever its
+# order-status cache is empty, which is every order after a reconnect). The closed settle design
+# says an under-reported venue figure "can never lower what we recorded". Fixing it leaves the
+# intent locked, which narrows packet Q3's zero-fill answer ("keep the terminal write") for an
+# intent with recorded fills; the S-3 r1 task says STOP and report if that contradicts Q3, so this
+# stays a strict xfail with its own id until the conductor rules. Identical on main (not caused by
+# S-3).
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason=(
+        "LEGACY-5 (reader P2-2): a terminal listed row at 0 fills settles an intent whose recorded "
+        "fills it contradicts; awaiting a ruling against packet Q3's zero-fill answer"
+    ),
+)
+@pytest.mark.parametrize("typed", CONTRADICTED, ids=lambda lifecycle: lifecycle.value)
+@pytest.mark.parametrize("path", ["partial", "partial-then-cancel-pending"])
+def test_a_terminal_row_at_zero_fills_does_not_overwrite_recorded_fills(
+    rig: _Rig, path: str, typed: OrderLifecycle
+) -> None:
+    rig.seed(OrderLifecycle.PARTIALLY_FILLED)  # 3 of 10 recorded
+    if path == "partial-then-cancel-pending":
+        rig._record(
+            OrderLifecycle.CANCEL_PENDING,
+            "cancel-after-partial",
+            source="CANCEL",
+            from_status=OrderLifecycle.PARTIALLY_FILLED,
+            broker_order_id=BROKER_ID,
+            occurred_at=PRIOR,
+        )
+    local = rig.status()
+    rig.venue.open = [_row(typed, "0")]
+    events_before = rig.event_count()
+
+    report = rig.reconcile()
+
+    assert rig.status() is local  # the recorded fills are not dropped by a terminal write
+    assert rig.event_count() == events_before
+    assert [item.intent_id for item in report.remaining_active] == ["intent-1"]
+    assert report.permits_new_opening_order is False

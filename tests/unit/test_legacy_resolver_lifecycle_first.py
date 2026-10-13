@@ -13,6 +13,14 @@ The answer pinned here is the packet's recommended one (Q3): such a row is contr
 evidence and the intent stays locked. Quantity refines only WORKING lifecycles. Typed terminal
 rows WITHOUT fills keep their terminal write (an exactly owned listed rejection is evidence).
 
+r1 (reader review of 9a163ec, P2-1): the guard is an ALLOWLIST, not a blocklist of two lifecycles.
+Quantity may refine only a WORKING lifecycle (SUBMITTED, PARTIALLY_FILLED, CANCEL_PENDING) and a
+typed FILLED row as before; every other typed lifecycle that reports fills is not settled by
+quantity. The case that matters is SUBMISSION_UNKNOWN: ``broker_status_to_lifecycle`` maps any
+UNRECOGNISED broker status to it and its D-27 contract says a novel status "must not gain
+working-order authority from quantities alone". The 110-cell differential below pins that
+exactly the intended cells differ from main.
+
 The positive controls pass on main today and must keep passing (they pin what the fix must not
 touch). The identity rule (``_is_owned``) is not under test here: every row carries the owned
 ``CHR-`` reference exactly (S-12 is the blank-reference slice).
@@ -49,6 +57,15 @@ SENT_ACTIVE = (
     OrderLifecycle.CANCEL_PENDING,
 )
 CONTRADICTED = (OrderLifecycle.REJECTED, OrderLifecycle.CANCELLED)
+# r1: the other lifecycles that are not working. Only SUBMISSION_UNKNOWN can come from the official
+# adapter (an unrecognised status string); the rest are a defensive allowlist boundary.
+ALSO_NON_WORKING = (
+    OrderLifecycle.SUBMISSION_UNKNOWN,
+    OrderLifecycle.DRAFT,
+    OrderLifecycle.VALIDATED,
+    OrderLifecycle.WHAT_IF_PREVIEWED,
+    OrderLifecycle.USER_CONFIRMED,
+)
 
 
 def _intent(status: OrderLifecycle) -> OrderIntentRecord:
@@ -82,8 +99,8 @@ def _intent(status: OrderLifecycle) -> OrderIntentRecord:
     )
 
 
-def _row(lifecycle: OrderLifecycle, filled: str) -> BrokerOrder:
-    """An exactly owned listed row: the owned reference, the persisted ids, the right economics."""
+def _row(lifecycle: OrderLifecycle, filled: str, *, ref: str | None = REF) -> BrokerOrder:
+    """An owned listed row: the owned reference (or a blank one, owned by permId), the ids."""
 
     filled_quantity = Decimal(filled)
     return BrokerOrder(
@@ -91,7 +108,7 @@ def _row(lifecycle: OrderLifecycle, filled: str) -> BrokerOrder:
         permanent_id=PERM_ID,
         client_id=CLIENT_ID,
         account_id=ACCOUNT,
-        order_ref=REF,
+        order_ref=ref,
         contract=UnderlyingContract(con_id=CON_ID, symbol="AAPL"),
         side=OrderSide.BUY,
         quantity=QUANTITY,
@@ -196,3 +213,66 @@ def test_a_contradicted_row_does_not_hide_behind_another_orders_evidence(
     """Two owned rows are ambiguous (the old rule, untouched): still no update."""
 
     assert _resolve(OrderLifecycle.SUBMITTED, _row(typed, "10"), _row(typed, "10")) is None
+
+
+# --- r1 RED (reader P2-1): any non-working typed lifecycle that reports fills is not settled -----
+
+
+@pytest.mark.parametrize("filled", ["1", "4", "10"])
+@pytest.mark.parametrize("typed", ALSO_NON_WORKING, ids=lambda lifecycle: lifecycle.value)
+@pytest.mark.parametrize("local", SENT_ACTIVE, ids=lambda lifecycle: lifecycle.value)
+def test_a_non_working_listed_row_with_fills_is_never_settled_by_quantity(
+    local: OrderLifecycle, typed: OrderLifecycle, filled: str
+) -> None:
+    """An unrecognised status (SUBMISSION_UNKNOWN) gains no working-order authority from fills."""
+
+    assert _resolve(local, _row(typed, filled)) is None
+
+
+@pytest.mark.parametrize("typed", ALSO_NON_WORKING, ids=lambda lifecycle: lifecycle.value)
+def test_a_non_working_row_without_fills_is_reported_as_its_own_lifecycle(
+    typed: OrderLifecycle,
+) -> None:
+    """Control: nothing filled, nothing for quantity to refine; the typed value stands as before."""
+
+    assert _resolve(OrderLifecycle.SUBMITTED, _row(typed, "0")) is typed
+
+
+# --- r1: the 110-cell differential against main (reader), as a literal regression table ----------
+# Every OrderLifecycle x filled in {0, 1, 4, 9, 10} x reference in {exact, blank + matching permId}.
+# Main's behaviour was MEASURED (the same grid run on e8cf8b7's source): quantity refines every
+# lifecycle (0 -> the typed value, 0 < filled < 10 -> PARTIALLY_FILLED, >= 10 -> FILLED), and a
+# blank-reference row resolves exactly like an exact one. The ONLY intended differences are the rows
+# for the non-working lifecycles with fills, which are None. The blank-reference identity rule
+# itself (S-12) is not changed by this slice, which this table also pins.
+_P, _F = OrderLifecycle.PARTIALLY_FILLED, OrderLifecycle.FILLED
+_DIFFERENTIAL = {
+    OrderLifecycle.SUBMITTED: (OrderLifecycle.SUBMITTED, _P, _P, _P, _F),
+    OrderLifecycle.PARTIALLY_FILLED: (_P, _P, _P, _P, _F),
+    OrderLifecycle.CANCEL_PENDING: (OrderLifecycle.CANCEL_PENDING, _P, _P, _P, _F),
+    OrderLifecycle.FILLED: (_F, _P, _P, _P, _F),  # a typed FILLED row is refined as before
+    OrderLifecycle.CANCELLED: (OrderLifecycle.CANCELLED, None, None, None, None),
+    OrderLifecycle.REJECTED: (OrderLifecycle.REJECTED, None, None, None, None),
+    OrderLifecycle.SUBMISSION_UNKNOWN: (OrderLifecycle.SUBMISSION_UNKNOWN, None, None, None, None),
+    OrderLifecycle.DRAFT: (OrderLifecycle.DRAFT, None, None, None, None),
+    OrderLifecycle.VALIDATED: (OrderLifecycle.VALIDATED, None, None, None, None),
+    OrderLifecycle.WHAT_IF_PREVIEWED: (OrderLifecycle.WHAT_IF_PREVIEWED, None, None, None, None),
+    OrderLifecycle.USER_CONFIRMED: (OrderLifecycle.USER_CONFIRMED, None, None, None, None),
+}
+
+
+def test_the_differential_table_covers_every_lifecycle() -> None:
+    assert set(_DIFFERENTIAL) == set(OrderLifecycle)
+
+
+@pytest.mark.parametrize("reference", ["exact", "blank-with-permid"])
+@pytest.mark.parametrize("typed", list(OrderLifecycle), ids=lambda lifecycle: lifecycle.value)
+def test_the_resolver_changes_only_the_intended_cells_against_main(
+    typed: OrderLifecycle, reference: str
+) -> None:
+    ref = REF if reference == "exact" else None
+    got = tuple(
+        _resolve(OrderLifecycle.SUBMITTED, _row(typed, filled, ref=ref))
+        for filled in ("0", "1", "4", "9", "10")
+    )
+    assert got == _DIFFERENTIAL[typed]
