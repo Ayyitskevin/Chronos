@@ -65,9 +65,7 @@ def _plain(value: Any) -> Any:
     return value
 
 
-def _drive(
-    gateway: fake_ibapi.FakeGateway, script: Any
-) -> list[tuple[str, Any]]:
+def _drive(gateway: fake_ibapi.FakeGateway, script: Any) -> list[tuple[str, Any]]:
     """Run ``script(client)`` on a raw client and return every dispatched callback, plainly."""
 
     recorder = fake_ibapi.RecordingWrapper()
@@ -81,7 +79,8 @@ def _drive(
     finally:
         client.disconnect()
         reader.join(timeout=5)
-    return [(name, _plain(args)) for name, args in recorder.calls]
+    session = {"nextValidId", "managedAccounts", "connectionClosed"}  # handshake and teardown
+    return [(name, _plain(args)) for name, args in recorder.calls if name not in session]
 
 
 def _names(calls: list[tuple[str, Any]]) -> list[str]:
@@ -159,7 +158,7 @@ async def test_the_adapter_reads_a_complete_schedule_through_the_fake(
         (Decimal("0"), Decimal("0.01")),
         (Decimal("3.0"), Decimal("0.05")),
     ]
-    assert ("reqMarketRule" in [m for _c, m in day.transcript])
+    assert "reqMarketRule" in [m for _c, m in day.transcript]
 
 
 # --- option contract details ---------------------------------------------------------------------
@@ -315,7 +314,9 @@ def test_option_ticks_are_deterministic_and_right_specific() -> None:
     sized = {args[1] for name, args in first if name == "tickSize"}
     call_sized = {
         args[1]
-        for name, args in _stream(fake_ibapi.FakeGateway.capture_day(), CALL_100_NOV, snapshot=False)
+        for name, args in _stream(
+            fake_ibapi.FakeGateway.capture_day(), CALL_100_NOV, snapshot=False
+        )
         if name == "tickSize"
     }
     assert {28, 30} <= sized and not {27, 29} & sized  # put open interest, put volume
@@ -448,9 +449,11 @@ async def test_the_adapter_returns_the_series_the_capture_asks_for(
     finally:
         await adapter.disconnect()
     assert len(series.bars) == 21
-    assert [bar.timestamp_utc for bar in series.bars] == sorted(b.timestamp_utc for b in series.bars)
+    assert [bar.timestamp_utc for bar in series.bars] == sorted(
+        b.timestamp_utc for b in series.bars
+    )
     assert series.bars[-1].session_date == date(2026, 10, 12)
-    assert ("reqHistoricalData" in [m for _c, m in day.transcript])
+    assert "reqHistoricalData" in [m for _c, m in day.transcript]
 
 
 async def test_a_malformed_row_is_dropped_and_the_rest_kept(

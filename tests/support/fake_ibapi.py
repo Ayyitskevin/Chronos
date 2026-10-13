@@ -49,6 +49,21 @@ advancedOrderRejectJson)``; under that shape the adapter would read the TIME as 
 connection-loss and reject codes would never match (fail-open). Every error-flight pass here
 holds under the fake's shapes only. First K4 check, and a B1 prerequisite: read the installed
 ibapi's ``EWrapper.error`` signature and capture one error from the paper gateway.
+
+B1 U-f1 ADDITIONS (the capture workload; every one ASSUMED-IB, the K4 / B1-day verification list):
+the option market-rule id and its increment bands (:data:`OPTION_RULE_ID` 9001 is an arbitrary
+stand-in, not a real IB rule id); that ``validExchanges`` and ``marketRuleIds`` are comma lists
+aligned by position; that option ``ContractDetails`` carry ``liquidHours``, ``timeZoneId``,
+``minTick``, ``underConId``, ``underSymbol`` and ``underSecType`` ("STK"), with the same hours
+string the underlying fake uses; the option tick set (bid 1, ask 2, last 4, put/call volume 30/29
+and open interest 28/27, ``tickOptionComputation`` types 10/11/12 before the model type 13, in
+that order, LIVE tick ids only: a delayed type-3/4 stream would use 66/67/68 and 83, which this
+fake does not send); a streaming option request has no ``tickSnapshotEnd``; ``position`` avgCost
+for an option is per contract with the multiplier included; the daily-bar date text (``YYYYMMDD``
+under formatDate 1), a bar for the session in progress when the clock is mid-session, no exchange
+holidays, no ``barCount``/``wap`` semantics, and the error-162 text; and everything about
+INTRADAY bars (refused loudly: not modelled). What a real gateway does for an unknown market
+rule id is not known: the fake refuses it loudly rather than invent an answer.
 """
 
 from __future__ import annotations
@@ -58,7 +73,8 @@ import socket
 import threading
 import time
 from collections.abc import Callable
-from datetime import UTC, datetime
+from dataclasses import dataclass, replace
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, ClassVar
 
@@ -112,6 +128,19 @@ CODE_READ_ONLY = 321
 EXECUTION_TIME_ZONE = UTC
 EXECUTION_TIME_FORMAT = "%Y%m%d %H:%M:%S"
 FILTER_TIME_FORMAT = "%Y%m%d-%H:%M:%S"
+
+#: ASSUMED-IB (K4): an arbitrary stand-in for the option market-rule id and its bands (low edge,
+#: increment); a real capture supplies the real ones.
+OPTION_RULE_ID = 9001
+OPTION_RULE_INCREMENTS: tuple[tuple[float, float], ...] = ((0.0, 0.01), (3.0, 0.05))
+#: The capture day's option con ids (AAPL, underlying 999, around the fake's spot of 100).
+CAPTURE_OPTION_CON_IDS = {
+    "PUT_100_NOV": 211,
+    "PUT_95_NOV": 212,
+    "PUT_90_NOV": 213,
+    "CALL_100_NOV": 214,
+    "PUT_95_DEC": 215,
+}
 
 _STOP = object()
 
@@ -204,6 +233,93 @@ class FakeContractDetails:
         self.timeZoneId = "US/Eastern"
         self.minTick = 0.01
         self.marketRuleIds = ""
+        # B1 U-f1: the option evidence fields the adapter reads off the details (ASSUMED-IB).
+        self.validExchanges = "SMART"
+        self.underConId = 0
+        self.underSymbol = ""
+        self.underSecType = ""
+
+
+class FakePriceIncrement:
+    """One market-rule band (``ibapi.common.PriceIncrement``)."""
+
+    def __init__(self, low_edge: float, increment: float) -> None:
+        self.lowEdge = low_edge
+        self.increment = increment
+
+
+class FakeBarData:
+    """One historical bar (``ibapi.common.BarData``); ``date`` is the ``YYYYMMDD`` daily text."""
+
+    def __init__(
+        self,
+        date_text: str,
+        *,
+        open_: float,
+        high: float,
+        low: float,
+        close: float,
+        volume: float = 1_000_000.0,
+    ) -> None:
+        self.date = date_text
+        self.open = open_
+        self.high = high
+        self.low = low
+        self.close = close
+        self.volume = volume
+        self.wap = close
+        self.barCount = 0
+
+
+@dataclass(frozen=True)
+class OptionTicks:
+    """What one option's market-data stream carries (deterministic; ASSUMED-IB shapes)."""
+
+    bid: float
+    ask: float
+    last: float
+    volume: float
+    open_interest: float
+    implied_vol: float
+    delta: float
+    gamma: float
+    theta: float
+    vega: float
+    opt_price: float
+    und_price: float
+
+    @classmethod
+    def default(cls, right: OptionRight) -> OptionTicks:
+        if right is OptionRight.PUT:
+            return cls(3.10, 3.20, 3.15, 120.0, 3400.0, 0.30, -0.47, 0.05, -0.06, 0.11, 3.15, 100.0)
+        return cls(3.40, 3.50, 3.45, 240.0, 5100.0, 0.30, 0.53, 0.05, -0.06, 0.11, 3.45, 100.0)
+
+    @classmethod
+    def unset_greeks(cls) -> OptionTicks:
+        """The model computation arrives with every figure unset (the sentinel)."""
+
+        return replace(
+            cls.default(OptionRight.PUT),
+            implied_vol=UNSET_DOUBLE,
+            delta=UNSET_DOUBLE,
+            gamma=UNSET_DOUBLE,
+            theta=UNSET_DOUBLE,
+        )
+
+    def computation(self, tick_type: int) -> tuple[float, ...]:
+        """The eight ``tickOptionComputation`` figures; 10/11/12 differ from the model (13)."""
+
+        shift = 13 - tick_type  # 3, 2, 1 for bid/ask/last computations, 0 for the model
+        return (
+            round(self.implied_vol + 0.01 * shift, 4),
+            self.delta - 0.01 * shift if abs(self.delta) < 1e100 else self.delta,
+            round(self.opt_price + 0.01 * shift, 4),
+            0.0,
+            self.gamma,
+            self.vega,
+            self.theta,
+            self.und_price,
+        )
 
 
 class FakeEWrapper:
@@ -372,6 +488,29 @@ class FakeEClient:
         del reqId
         self.gateway.record(self, "cancelMktData")
 
+    def reqMarketRule(self, marketRuleId: int) -> None:
+        self.gateway.record(self, "reqMarketRule")
+        self.gateway.market_rule(self, int(marketRuleId))
+
+    def reqHistoricalData(
+        self,
+        reqId: int,
+        contract: FakeContract,
+        endDateTime: str,
+        durationStr: str,
+        barSizeSetting: str,
+        whatToShow: str,
+        useRTH: int,
+        formatDate: int,
+        keepUpToDate: bool,
+        chartOptions: Any,
+    ) -> None:
+        del endDateTime, whatToShow, useRTH, keepUpToDate, chartOptions
+        self.gateway.record(self, "reqHistoricalData")
+        self.gateway.historical_data(
+            self, int(reqId), contract, str(durationStr), str(barSizeSetting), int(formatDate)
+        )
+
     def cancelOrder(self, orderId: int, manualCancelOrderTime: str = "") -> None:
         self.gateway.record(self, "cancelOrder")
         del manualCancelOrderTime
@@ -434,6 +573,20 @@ class FakeGateway:
         self.extra_summary_rows: list[tuple[str, str, str]] = []
         #: extra position rows (instrument, quantity, avgCost), sent after the venue's
         self.extra_positions: list[tuple[Instrument, Decimal, float]] = []
+        # --- B1 U-f1 capture-workload knobs (all default-off: the S1b/U-b behaviour) --------
+        #: market rule id -> (low edge, increment) bands
+        self.market_rules: dict[int, tuple[tuple[float, float], ...]] = {
+            OPTION_RULE_ID: OPTION_RULE_INCREMENTS
+        }
+        #: option con id -> attributes to overwrite on its ContractDetails (blank a field, etc.)
+        self.details_override: dict[int, dict[str, Any]] = {}
+        #: option con id -> its tick set (default: :meth:`OptionTicks.default` for its right)
+        self.option_ticks: dict[int, OptionTicks] = {}
+        #: con id -> the bars sent instead of the generated ones (malformed rows included)
+        self.bars_override: dict[int, list[FakeBarData]] = {}
+        #: con id -> how reqHistoricalData is answered: an int >= 100 is that error code for
+        #: the request and nothing else; "hang" sends nothing
+        self.historical: dict[int, Any] = {}
         _run_without_a_loop(self._seed_registry())
 
     @classmethod
@@ -441,6 +594,36 @@ class FakeGateway:
         sim = _seeded_contract_broker()
         client_of = {OWNED_ID: CLIENT_ID, FOREIGN_ID: MANUAL_CLIENT_ID}
         return cls(sim, client_of=client_of)
+
+    @classmethod
+    def capture_day(cls) -> FakeGateway:
+        """The seeded gateway plus what a capture day looks like (deterministic, ASSUMED-IB).
+
+        A five-contract AAPL option chain around the fake's spot of 100 (puts 90/95/100 and a call
+        100 for 2026-11-20, a put 95 for 2026-12-18, beside the seed's expired 150 put); a short
+        put position; a second Chronos stock order (MSFT, 20 at 410) filled 8, which is a second
+        execution with its commission, a stock position and a partly filled working order; and
+        the seed's owned and manual orders. Everything is read back through the real adapter.
+        """
+
+        gateway = cls.seeded()
+        for option in _capture_day_options():
+            gateway.add_option(option)
+        sim_id = gateway.add_working_order(
+            ref="CHR-CAPTURE-1", symbol="MSFT", quantity="20", limit="410.00", client_id=CLIENT_ID
+        )
+        gateway.fill_sim_order(sim_id, Decimal("8"))
+        short_put = gateway._registry[CAPTURE_OPTION_CON_IDS["PUT_100_NOV"]]
+        gateway.extra_positions.append(
+            (short_put, Decimal("-1"), 310.0)
+        )  # 3.10 x 100, per contract
+        return gateway
+
+    def add_option(self, option: OptionContract) -> None:
+        """Make one more option known to the venue (contract details, chain, market data)."""
+
+        with self._lock:
+            self._registry[option.con_id] = option
 
     async def _seed_registry(self) -> None:
         await self.sim.connect()
@@ -765,8 +948,51 @@ class FakeGateway:
         9: 99.50,
     }  # bid, ask, last, close
 
+    def _options_matching(self, contract: FakeContract) -> list[OptionContract]:
+        """The registry's options a details query names: by con id, else by the full identity."""
+
+        options = [i for i in self._registry.values() if isinstance(i, OptionContract)]
+        con_id = int(contract.conId or 0)
+        if con_id:
+            return [option for option in options if option.con_id == con_id]
+        return [
+            option
+            for option in options
+            if option.symbol == str(contract.symbol or "").upper()
+            and option.expiration.strftime("%Y%m%d") == str(contract.lastTradeDateOrContractMonth)
+            and abs(float(option.strike) - float(contract.strike)) < 1e-9
+            and option.right.value == str(contract.right or "")[:1].upper()
+            and (not contract.tradingClass or option.trading_class == contract.tradingClass)
+        ]
+
+    def _option_details(self, option: OptionContract) -> FakeContractDetails:
+        details = FakeContractDetails(self.contract_of(option))
+        details.validExchanges = "SMART,CBOE"
+        details.marketRuleIds = f"{OPTION_RULE_ID},{OPTION_RULE_ID}"  # aligned by position
+        details.underConId = int(option.underlying_con_id or 0)
+        details.underSymbol = option.symbol
+        details.underSecType = "STK"
+        for name, value in self.details_override.get(option.con_id, {}).items():
+            setattr(details, name, value)
+        return details
+
     def contract_details(self, client: FakeEClient, req_id: int, contract: FakeContract) -> None:
         with self._lock:
+            by_id = self._registry.get(int(contract.conId or 0))
+            if str(contract.secType) == "OPT" or isinstance(by_id, OptionContract):
+                options = self._options_matching(contract)
+                if not options:
+                    self._error(
+                        client,
+                        req_id,
+                        CODE_NO_SECURITY,
+                        "No security definition has been found for the request",
+                    )
+                    return
+                for option in options:
+                    client.emit("contractDetails", req_id, self._option_details(option))
+                client.emit("contractDetailsEnd", req_id)
+                return
             symbol = str(contract.symbol or "").upper()
             matches = [
                 instrument
@@ -786,6 +1012,16 @@ class FakeGateway:
                     "contractDetails", req_id, FakeContractDetails(self.contract_of(instrument))
                 )
             client.emit("contractDetailsEnd", req_id)
+
+    def market_rule(self, client: FakeEClient, rule_id: int) -> None:
+        with self._lock:
+            bands = self.market_rules.get(rule_id)
+            if bands is None:
+                raise AssertionError(
+                    f"market rule {rule_id} is not modelled (ASSUMED-IB, K4: what a real gateway "
+                    "answers for an unknown rule id is not known)"
+                )
+            client.emit("marketRule", rule_id, [FakePriceIncrement(low, inc) for low, inc in bands])
 
     def sec_def_opt_params(
         self, client: FakeEClient, req_id: int, symbol: str, underlying_con_id: int
@@ -819,37 +1055,119 @@ class FakeGateway:
             return answer[min(index, len(answer) - 1)]
         return answer
 
-    def _emit_prices(self, client: FakeEClient, req_id: int) -> None:
+    def _emit_prices(self, client: FakeEClient, req_id: int, con_id: int) -> None:
+        instrument = self._registry.get(con_id)
+        if isinstance(instrument, OptionContract):
+            self._emit_option_ticks(client, req_id, instrument)
+            return
         for tick_type, price in self._UNDERLYING_PRICES.items():
             client.emit("tickPrice", req_id, tick_type, price, None)
         client.emit("tickSize", req_id, 8, 1000.0)
 
+    def _emit_option_ticks(self, client: FakeEClient, req_id: int, option: OptionContract) -> None:
+        ticks = self.option_ticks.get(option.con_id) or OptionTicks.default(option.right)
+        put = option.right is OptionRight.PUT
+        client.emit("tickPrice", req_id, 1, ticks.bid, None)
+        client.emit("tickPrice", req_id, 2, ticks.ask, None)
+        client.emit("tickPrice", req_id, 4, ticks.last, None)
+        client.emit("tickSize", req_id, 30 if put else 29, ticks.volume)
+        client.emit("tickSize", req_id, 28 if put else 27, ticks.open_interest)
+        for tick_type in (10, 11, 12, 13):  # bid/ask/last computations, then the model's
+            client.emit(
+                "tickOptionComputation", req_id, tick_type, 0, *ticks.computation(tick_type)
+            )
+
     def market_data(
         self, client: FakeEClient, req_id: int, contract: FakeContract, *, snapshot: bool
     ) -> None:
-        del snapshot  # the smoke path asks for snapshots only
         with self._lock:
-            answer = self._entitlement_for(int(contract.conId))
+            con_id = int(contract.conId)
+            # the smoke asks for snapshots (ended by tickSnapshotEnd); an option STREAM has no end
+            ends = snapshot or not isinstance(self._registry.get(con_id), OptionContract)
+            answer = self._entitlement_for(con_id)
             if answer == "hang":
                 return
             if isinstance(answer, tuple) and answer[0] == "notice_then":
                 _, code, market_data_type = answer
                 self._error(client, req_id, code, self._MARKET_DATA_MESSAGES.get(code, "notice"))
                 client.emit("marketDataType", req_id, market_data_type)
-                self._emit_prices(client, req_id)
-                client.emit("tickSnapshotEnd", req_id)
+                self._emit_prices(client, req_id, con_id)
+                if ends:
+                    client.emit("tickSnapshotEnd", req_id)
                 return
             if isinstance(answer, int) and answer >= 100:
                 self._error(client, req_id, answer, self._MARKET_DATA_MESSAGES.get(answer, "error"))
                 return
             if answer == "no_type":
-                self._emit_prices(client, req_id)
+                self._emit_prices(client, req_id, con_id)
             elif answer == "empty":
                 client.emit("marketDataType", req_id, 1)
             else:
                 client.emit("marketDataType", req_id, int(answer))
-                self._emit_prices(client, req_id)
-            client.emit("tickSnapshotEnd", req_id)
+                self._emit_prices(client, req_id, con_id)
+            if ends:
+                client.emit("tickSnapshotEnd", req_id)
+
+    # historical bars (B1 U-f1: daily only, what the capture asks for) ----------------------------
+    def _generated_bars(self, lookback_days: int) -> list[FakeBarData]:
+        """Weekday sessions in the ``lookback_days`` calendar days ending at the sim date.
+
+        A pure function of the sim clock: no wall clock, no randomness. The session in progress
+        (the sim date, mid-session) gets a bar with a quarter of the day's volume: ASSUMED-IB.
+        """
+
+        today = self.sim_now().date()
+        start = today - timedelta(days=lookback_days - 1)
+        sessions = [
+            start + timedelta(days=offset)
+            for offset in range(lookback_days)
+            if (start + timedelta(days=offset)).weekday() < 5
+        ]
+        bars: list[FakeBarData] = []
+        for index, session in enumerate(sessions):
+            base = round(100.0 + 0.5 * (index % 7) + 0.05 * index, 2)
+            volume = 1_000_000.0 + 1000.0 * index
+            bars.append(
+                FakeBarData(
+                    session.strftime("%Y%m%d"),
+                    open_=base,
+                    high=round(base + 1.0, 2),
+                    low=round(base - 1.0, 2),
+                    close=round(base + 0.25, 2),
+                    volume=volume / 4 if session == today else volume,
+                )
+            )
+        return bars
+
+    def historical_data(
+        self,
+        client: FakeEClient,
+        req_id: int,
+        contract: FakeContract,
+        duration: str,
+        bar_size: str,
+        format_date: int,
+    ) -> None:
+        count, _, unit = duration.partition(" ")
+        if unit != "D" or not count.isdigit() or bar_size != "1 day" or format_date != 1:
+            raise AssertionError(
+                f"historical request ({duration!r}, {bar_size!r}, formatDate {format_date}) is "
+                "not modelled: the fake serves daily bars over 'N D' with formatDate 1 only"
+            )
+        with self._lock:
+            con_id = int(contract.conId)
+            answer = self.historical.get(con_id)
+            if answer == "hang":
+                return
+            if isinstance(answer, int) and answer >= 100:
+                self._error(client, req_id, answer, "Historical Market Data Service error message")
+                return
+            bars = self.bars_override.get(con_id) or self._generated_bars(int(count))
+            for bar in bars:
+                client.emit("historicalData", req_id, bar)
+            first = bars[0].date if bars else ""
+            last = bars[-1].date if bars else ""
+            client.emit("historicalDataEnd", req_id, f"{first}  00:00:00", f"{last}  23:59:59")
 
     # orders ------------------------------------------------------------------------------------
     def _request_of(
@@ -1049,6 +1367,38 @@ class FakeGateway:
         for client in clients:
             client.wait_dispatched()
         return [e.execution_id for e in new]
+
+
+def _capture_day_options() -> list[OptionContract]:
+    """The capture day's AAPL chain: (key, expiration, strike, right), OSI local symbols."""
+
+    nov, dec = date(2026, 11, 20), date(2026, 12, 18)
+    layout = (
+        ("PUT_100_NOV", nov, "100", OptionRight.PUT),
+        ("PUT_95_NOV", nov, "95", OptionRight.PUT),
+        ("PUT_90_NOV", nov, "90", OptionRight.PUT),
+        ("CALL_100_NOV", nov, "100", OptionRight.CALL),
+        ("PUT_95_DEC", dec, "95", OptionRight.PUT),
+    )
+    options: list[OptionContract] = []
+    for key, expiration, strike, right in layout:
+        osi = f"{'AAPL':<6}{expiration:%y%m%d}{right.value}{int(Decimal(strike) * 1000):08d}"
+        options.append(
+            OptionContract(
+                symbol="AAPL",
+                underlying_con_id=999,
+                expiration=expiration,
+                strike=Decimal(strike),
+                right=right,
+                multiplier=Decimal("100"),
+                trading_class="AAPL",
+                con_id=CAPTURE_OPTION_CON_IDS[key],
+                local_symbol=osi,
+                deliverable_shares=Decimal("100"),
+                deliverable_verified=True,
+            )
+        )
+    return options
 
 
 # --- the tests-only seam -----------------------------------------------------------------------
