@@ -247,3 +247,23 @@ def test_P3_1_a_timed_out_completed_orders_read_is_a_typed_hold_until_reconnect(
     rig.connection.run(adapter.connect())
     report = _at(rig)
     assert rig.status() is CANCELLED, issues(report)
+
+
+def test_P3_1_a_reconnect_reset_releases_an_unanswered_completed_orders_flight() -> None:
+    """Daybreak P3-1, bridge half: the stream has no request id, so a second request is refused
+    while one is outstanding; ``reset_for_reconnect`` (a fresh session) must release it even when
+    no connection-closed callback arrived, or every later read stays refused."""
+
+    from chronos.broker.callbacks import CallbackBridge
+    from chronos.broker.request_registry import RequestRegistry
+
+    bridge = CallbackBridge(RequestRegistry())
+    stale = bridge.start_completed_orders()  # never answered
+    with pytest.raises(RuntimeError, match="already in flight"):
+        bridge.start_completed_orders()  # same session: quarantined
+    bridge.reset_for_reconnect()
+    fresh = bridge.start_completed_orders()
+    assert fresh is not stale and not stale.done.is_set()  # the stale waiter is NOT completed
+    bridge.on_completed_order(object(), object(), object())
+    bridge.on_completed_orders_end()
+    assert fresh.done.is_set() and len(fresh.items) == 1 and stale.items == []
