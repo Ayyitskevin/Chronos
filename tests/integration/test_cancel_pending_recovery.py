@@ -1150,3 +1150,30 @@ def test_r3_fable_P3_2_the_terminal_table_cannot_be_extended_at_runtime() -> Non
 
     with pytest.raises(TypeError):
         rr._TERMINAL_TARGET[OrderLifecycle.REJECTED] = FILLED  # type: ignore[index]
+
+
+@pytest.mark.parametrize("event", sorted(_SETTLE_EVENTS))
+@pytest.mark.parametrize("case", _SETTLE_CASES)
+def test_r3_fable_P2_1_an_event_during_the_first_snapshot_read_blocks_the_write(
+    world: World, monkeypatch: pytest.MonkeyPatch, case: str, event: str
+) -> None:
+    """The capture comes BEFORE the read (mutant X03 moves it after): an event that lands inside
+    the pass's first executions() read -- the open orders already read under the old epoch --
+    must not let the pass settle on that half-old snapshot."""
+
+    _settle_case(world, case)
+    real = world.venue.executions
+    fired = {"done": False}
+
+    async def first_read(since=None):  # type: ignore[no-untyped-def]
+        result = await real(since)
+        if not fired["done"]:
+            fired["done"] = True
+            _SETTLE_EVENTS[event](world)
+        return result
+
+    monkeypatch.setattr(world.venue, "executions", first_read)
+    report = world.at(0)
+    assert fired["done"]
+    assert world.rig.status() is CP, (case, event)
+    assert not report.permits_new_opening_order
