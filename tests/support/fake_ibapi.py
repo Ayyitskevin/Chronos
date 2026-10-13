@@ -1173,7 +1173,7 @@ class FakeGateway:
         now = self.sim_now().astimezone(EXCHANGE_TIME_ZONE)
         today = now.date()
         clock = (now.hour, now.minute)
-        has_todays_bar = today.weekday() < 5 and clock >= SESSION_OPEN
+        has_todays_bar = clock >= SESSION_OPEN  # weekends are excluded for every day below
         in_progress = SESSION_OPEN <= clock < SESSION_CLOSE
         start = today - timedelta(days=lookback_days - 1)
         sessions = [
