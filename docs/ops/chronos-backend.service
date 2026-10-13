@@ -24,6 +24,11 @@ StartLimitBurst=3
 Type=simple
 WorkingDirectory=%h/<CHRONOS_CHECKOUT>
 EnvironmentFile=%h/<PRIVATE_ENV_DIR>/chronos-backend.env
+# P3-2: ExecStart's scripts/run_backend.py puts <checkout>/src on sys.path itself;
+# `python -m chronos.cli` below has no such shim, so without `pip install -e .` the
+# condition would fail to import, exit 1, and silently skip the start. This gives
+# both commands the same source. (An EnvironmentFile= value for PYTHONPATH overrides it.)
+Environment=PYTHONPATH=%h/<CHRONOS_CHECKOUT>/src
 # OPS-2: the startup preflight (read-only; it repairs nothing). ExecCondition=, never
 # ExecStartPre=, turns a database refusal into a SKIP: the unit goes `inactive` with
 # Result=success and NO restart, and the preflight's lines are in the journal. Read
@@ -33,10 +38,12 @@ EnvironmentFile=%h/<PRIVATE_ENV_DIR>/chronos-backend.env
 ExecCondition=%h/<CHRONOS_CHECKOUT>/.venv/bin/python -m chronos.cli db-preflight
 ExecStart=%h/<CHRONOS_CHECKOUT>/.venv/bin/python scripts/run_backend.py
 
-# on-failure, deliberately NOT always: a backend that refuses to start is
-# usually refusing for a reason a restart cannot fix — a recovery hold
-# (ADR-0054), an invalid mandate, a broken proposer registry — and a restart
-# loop turns one legible refusal into a wall of noise.
+# on-failure, deliberately NOT always: a restart cannot fix a database refusal
+# (the one startup refusal that stops the backend; the ExecCondition= preflight
+# above catches most of them), and a restart loop turns one legible refusal into
+# a wall of noise. An invalid mandate, a recovery hold (ADR-0054) or a broken
+# proposer registry does NOT stop the backend: it boots and refuses proposals
+# instead (docs/SHADOW_CAMPAIGN.md §3).
 Restart=on-failure
 RestartSec=10
 

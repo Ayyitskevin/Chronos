@@ -120,6 +120,10 @@ messages start with `Refusing symbolic-link ledger path`, `Refusing non-regular 
 name a `.<ledger>.create-<hex>` temporary; one extra form, `Refusing ledger path …: repair failed (…);
 chmod 600 it and restart`, means the startup repair could not open the file (for example mode 0200).
 
+Hard-link backups of the live data directory are the usual cause of the `hard links` refusal: use
+the stop-then-`.backup` or read-only procedures in [`BACKUP_AND_RECOVERY.md`](BACKUP_AND_RECOVERY.md#sqlite-safe-backup)
+instead.
+
 **Startup preflight (OPS-2).** `python -m chronos.cli db-preflight` reports, read-only, what the
 backend's startup would do with the configured `DATABASE_URL`: the identity checks of the table
 above (`lstat`, the database and its `-wal`/`-shm`/`-journal`), the mode (what the first
@@ -132,13 +136,19 @@ checks it ran would refuse; the verdict line lists what it did not check (connec
 filesystem writes at create, the campaign preflight's mandate/registry/recovery hold, FU2 process
 state, another process holding the database, and path stability between the check and the
 backend's own open, which samples pathnames again). Exit 78 is a refusal with the exact text the
-backend would raise; exit 1 `UNDECIDED` means a check could not run (for example the read-only open
-failed) and nothing is known. It never repairs: no chmod, unlink, create, migration or row. `--ledger
+backend would raise (one exception: when the runtime's URL handling raises a `ValueError` other
+than its static `file:` refusal, which is reported verbatim, the report is a fixed sentence plus the
+exception class, never the parser's text);
+exit 1 `UNDECIDED` means a check could not run (for example the read-only open failed, or the URL
+handling raised some other exception, which is reported by class alone) and nothing is known. It never repairs: no chmod, unlink, create, migration or row. `--ledger
 PATH` is opt-in and inspects a platform ledger with `SqliteLedger`'s rules; its refusal is the
 platform process's, worded so, because the backend does not open that ledger. `--evidence` prints a
 lower-bound estimate of the FU2 first-pass window (ticks = at least `max(ceil(rows / rows_per_tick),
 ceil(bytes / bytes_per_tick))`; never exact, because ordered whole-row packing can need more). The
-backend unit template (`docs/ops/chronos-backend.service`) runs the command as `ExecCondition=`: a
+backend unit template (`docs/ops/chronos-backend.service`) runs the command as `ExecCondition=`, with
+`Environment=PYTHONPATH=%h/<CHRONOS_CHECKOUT>/src` so it imports the same checkout source that
+`ExecStart`'s `scripts/run_backend.py` shims in (without it, an uninstalled checkout fails the import
+and exits 1, a silent skip); a
 refusal **skips** the start — `systemctl --user status` shows `inactive` with `Result=success` and
 the journal carries `Skipped due to 'exec-condition'` plus the preflight's lines. Read that shape as
 the refusal; `Result=success` is not readiness. The template's `StartLimitIntervalSec=600` /
@@ -153,9 +163,117 @@ The runtime's exact static `file:` refusal sentence is the only parser text pass
 runtime identity refusals intentionally retain their fixed wording plus the checked filesystem
 path. The journal therefore carries the diagnosis without carrying the connection string.
 
-Hard-link backups of the live data directory are the usual cause of the `hard links` refusal: use
-the stop-then-`.backup` or read-only procedures in [`BACKUP_AND_RECOVERY.md`](BACKUP_AND_RECOVERY.md#sqlite-safe-backup)
-instead.
+**Reading the unit's three preflight outcomes.** The three exit codes are not interchangeable
+(`src/chronos/cli/db_preflight.py`: `EXIT_CLEAR = 0`, `EXIT_UNDECIDED = 1`, `EXIT_REFUSED = 78`):
+
+| Preflight exit | Unit shape | What it does and does not tell you |
+|---|---|---|
+| 0 `CLEAR` | `ExecStart` runs | Only that the checks it ran would not refuse. The verdict line lists what it did not check; a backend that then fails or boots degraded is a different problem (next section). |
+| 78 `REFUSE` | skipped: `inactive`, `Result=success` | The configured database would be refused, with the text the backend would raise — except a `DATABASE_URL` for which the runtime's URL handling raises a `ValueError` other than its static `file:` refusal (reported verbatim), which gets a fixed sentence plus the exception class (any non-`ValueError` exception there is `UNDECIDED`, exit 1). Use the refusal table above. |
+| 1 `UNDECIDED` | skipped the same way | A check could not run, so nothing is known — not "the database is bad". Read the `UNDECIDED` lines in the journal. |
+
+**Import path.** `ExecCondition=` runs `python -m chronos.cli db-preflight` from the checkout
+root, while `ExecStart` runs `scripts/run_backend.py`, which puts `src/` on `sys.path` itself
+(`scripts/run_backend.py:14`). The `-m` form has no such shim, so the unit template sets
+`Environment=PYTHONPATH=%h/<CHRONOS_CHECKOUT>/src`, which gives the condition the same source; it does
+not need the `pip install -e .` step of [`DEPLOYMENT.md`](DEPLOYMENT.md#install) to find `chronos`.
+The unit's `.venv` still needs the dependencies, and an `EnvironmentFile=` value for `PYTHONPATH`
+overrides the template's. If the import still fails, Python exits 1; systemd treats that as a skip
+too, so the unit looks like `UNDECIDED` while the journal shows an import error instead of any
+`DB-PREFLIGHT` line. This is read from the template and the script, not reproduced: no unit was run
+for this document. `inactive` alone, or the absence of a `DB-PREFLIGHT` line, does not establish an
+import problem: a unit you stopped yourself, another unit
+name, a journal window that misses the start, or journal access can each look the same. Read the
+unit's `ExecCondition` result and the journal for that start attempt: `Skipped due to 'exec-condition'`
+together with a Python import error (for example `ModuleNotFoundError`) points at the venv's
+dependencies or a `PYTHONPATH` override; the
+same skip with `DB-PREFLIGHT` lines is a verdict; if neither is visible, the cause is unknown.
+
+## A running backend that refuses proposals: `503 AUTONOMY_NOT_RUNNING` (OPS-3)
+
+> **In effect on `main` since #294 (merged 2026-10-07 UTC, merge `b7097da`).** A merge is not
+> deployment evidence: this describes the pinned source, and a host runs it only after it has
+> pulled and restarted. Nothing here was run for this document.
+
+This is **not** the preflight skip above. A skipped unit is `inactive` and no backend exists. Here the
+backend **is running**: `GET /health/live` answers, and the autonomy runtime was simply not started
+at boot, because `build_autonomy_runtime` returned nothing or raised and the lifespan carried on
+(`src/chronos/api/main.py`, the comment "a broken grant alerts and boots inert"), or was not called
+at all under a recovery hold. A missing, invalid, mismatched, revoked or unsafe mandate, and an
+unsafe proposer-registry file, therefore do **not** stop the backend from booting; they leave it up
+with autonomy inert.
+
+Two neighbouring conditions do **not** produce this refusal, because the route refuses earlier:
+
+- **Recovery hold (ADR-0054).** The backend boots read-only and unreconciled. `require_writer`
+  answers HTTP 409 ("This backend booted under a recovery hold and is running read-only … Acknowledge it
+  with a note at POST /live/recovery/acknowledge and restart."). Acknowledging records a note that takes
+  effect at the next start (the response says `effective: "next start"`); it does not release the
+  hold in the running process, so the 409 continues until the backend is restarted. The acknowledgement
+  itself does not activate a mandate, disengage the kill switch, arm or grant trading authority. The
+  restart it requires is an ordinary start: it can auto-activate a configured, valid persistent mandate
+  (ADR-0017), which the hold skipped. Neither step clears the kill switch, arming or the live gates;
+  those keep their own acts.
+- **Broken proposer registry** (configured but unreadable or invalid). `require_proposer` answers a
+  different HTTP 503, `{"detail": "the proposer registry is configured but unreadable or invalid; proposals
+  refuse until the owner repairs the file"}`, with startup fault `proposer_registry_invalid` (plus
+  `authority_file_unsafe` for an unsafe file), the CRITICAL alert `autonomy.proposers_invalid` and the log line
+  `Proposer registry is configured but unreadable or invalid; every proposal will refuse until the file is
+  fixed`. Autonomy itself may still be running. `AUTONOMY_EVIDENCE_BUNDLES` set without a registry is a third
+  case with its own refusal code, `EVIDENCE_POSTURE_INVALID`.
+
+**What a caller sees.** `POST /autonomy/proposals` answers HTTP 503 with the body
+`{"accepted": false, "stage": "INGRESS", "refusal": "AUTONOMY_NOT_RUNNING", "detail": "…"}` and
+writes nothing. The guard runs after authentication and the writer check and before the request
+body is read (`src/chronos/api/routes/autonomy.py`, `submit_proposal`). The current `detail` is the fixed sentence
+`autonomy is configured on this backend but did not start; proposals are refused until the owner
+fixes the configuration and restarts. The owner can see why in GET /health (startup faults),
+GET /autonomy/alerts (unacknowledged owner alerts; local API token) and the server log.` It
+carries no fault
+code, path or exception text, so the body alone cannot name the cause. A backend that is not the
+writer, or that is under a recovery hold, refuses earlier through `require_writer` with its own
+error rather than this one.
+
+**When it applies.** `BackendState.autonomy_admission` is settled once per process by the lifespan: the
+runtime started (`RUNNING`, accepts), no `AUTONOMY_MANDATE_FILE` configured at all
+(`NO_MANDATE_CONFIGURED`, accepts: 202, queued, nothing will act on it — the documented inert
+posture), or a mandate file is configured and autonomy did not start (`CONFIGURED_NOT_STARTED`,
+refuses). Before settling it is closed. The state is not re-evaluated, so a fix needs a restart.
+
+**Finding the cause.** The journal commands below assume the user unit from
+`docs/ops/chronos-backend.service` was copied in under that name (the template is not installed by
+this repository). The sentence points at `GET /health`, but `/health` cannot show every cause: it
+lists only the typed `observations.startup_faults` below, and some refusals record none. Correlate
+three sources:
+
+| Cause | `/health` `observations.startup_faults` | Owner alert `kind` | Server log (`journalctl --user -u chronos-backend`) |
+|---|---|---|---|
+| mandate file missing, or present but invalid JSON/schema | none | `autonomy.mandate_invalid` (CRITICAL) | `Autonomy mandate file … does not exist` / `… does not validate; autonomy stays inert` |
+| mandate scoped to a different account | none | `autonomy.mandate_invalid` | `Persistent mandate is scoped to a different account; autonomy stays inert` |
+| mandate file unsafe: symlink, group/other-writable, foreign owner | `authority_file_unsafe` | `autonomy.mandate_unsafe` (CRITICAL) for the mandate | `An owner-authored grant is unsafe; autonomy stays inert: …` |
+| this mandate version was revoked | none | `autonomy.revoked_mandate_present` (WARNING) | none beyond the alert |
+| submitting-mode mandate on a static proposer posture | `autonomy_posture_unauthenticated` | `autonomy.posture_unauthenticated` | `A submitting mandate met a static proposer posture; autonomy stays inert …` |
+| any other assembly exception | `autonomy_wiring_failed` | none found in source | `Autonomy wiring failed; the backend continues without it` (with traceback) |
+
+The recovery hold (`recovery_unverified`; log `This boot cannot prove it does not follow a restore (…)`) and
+a broken proposer registry have their own refusals and are described above, not in this table.
+
+A `startup_faults: []` reading with refused proposals is therefore possible (missing, invalid,
+mismatched or revoked mandate) and means the alert, not `/health`, holds the reason. Likewise
+`GET /health/ready` can stay 200 in those cases and goes 503 (`startup_degraded`) only for the rows
+that record a fault, so a green readiness probe does not show that proposals will be accepted. Read the
+unacknowledged alerts from `GET /terminal/alerts` (not writer-gated; needs the terminal credential)
+or `GET /autonomy/alerts` (local API token **and** the writer lease). Do not rely on
+`AUTONOMY_ALERT_FILE` for these: its sink is attached when the autonomy runtime is assembled
+(`autonomy_wiring.py`, `sinks=delivery.default_sinks(…)`) and delivered by that runtime's tick, so
+for a runtime that never started the alert is a database row first. That is read from source, not
+observed; the file may stay empty. If the cause is neither a fault nor an alert, the server log is
+the only record.
+
+**What to do.** Fix the named cause in the owner's files (the mandate, registry or environment —
+nothing on this page changes them), then restart the backend so the admission state is settled
+again, and confirm with the §5 checks of [`SHADOW_CAMPAIGN.md`](SHADOW_CAMPAIGN.md#5-the-daily-owner-check).
+Do not restart to "clear" a refusal whose cause you have not read.
 
 ## Evidence-stream verification refusals and alerts (FU2)
 

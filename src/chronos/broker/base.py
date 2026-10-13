@@ -70,6 +70,33 @@ class BrokerSendGuard(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
+class VenueOrderIdentity:
+    """What the VENUE's open-order row says about one order: nothing inferred, nothing local.
+
+    Handed to an :class:`OrderOwnershipLedger` so it can compare every field with the persisted
+    record of an order Chronos submitted (S1-F1, Q-P1 Option A).
+    """
+
+    broker_order_id: int
+    order_ref: str
+    account_id: str
+    client_id: int
+    permanent_id: int
+
+
+class OrderOwnershipLedger(Protocol):
+    """The durable proof that an order on the venue is one Chronos submitted.
+
+    Implemented over the persisted order book by the trusted order boundary and wired into the
+    adapter by the runtime. ``True`` means an EXACT match on the order ref, account, broker order
+    id, client id and permanent id; anything else (including an error) means Chronos does not
+    cancel the order.
+    """
+
+    def proves_owned(self, identity: VenueOrderIdentity) -> bool: ...
+
+
+@dataclass(frozen=True, slots=True)
 class OptionChainResponse(Sequence[OptionChainParameters]):
     """One broker response plus explicit proof that its stream completed.
 

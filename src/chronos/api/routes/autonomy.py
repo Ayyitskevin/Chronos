@@ -73,7 +73,9 @@ _logger = logging.getLogger("chronos.api.autonomy")
 
 _AUTONOMY_NOT_RUNNING_DETAIL = (
     "autonomy is configured on this backend but did not start; proposals are refused until "
-    "the owner fixes the configuration and restarts. See GET /health and the server log."
+    "the owner fixes the configuration and restarts. The owner can see why in GET /health "
+    "(startup faults), GET /autonomy/alerts (unacknowledged owner alerts; local API token) "
+    "and the server log."
 )
 
 #: How many symbols one evidence bundle may carry bars for. A bound on the work

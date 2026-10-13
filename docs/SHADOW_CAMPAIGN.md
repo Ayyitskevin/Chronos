@@ -205,9 +205,26 @@ that lives **outside this repository**.
 | `AUTONOMY_ALERT_FILE` | `<state>/owner_alerts.jsonl` | the trail that survives a database problem |
 | *unset* | every live-capable setting, every `*_FORWARD` | absence is the control |
 
-`Restart=on-failure`, never `Restart=always`: a backend that refuses to start is usually
-refusing for a reason a restart cannot fix — a recovery hold (ADR-0054), an invalid mandate, a
-broken registry — and a restart loop turns one legible refusal into noise.
+`Restart=on-failure`, never `Restart=always`: a restart cannot fix a database refusal, and a loop
+turns one legible refusal into noise. Two different things must not be conflated, because only the
+first stops the backend:
+
+- **A database the startup would refuse** is caught by the template's `ExecCondition=` preflight (or,
+  if it slips past, raised by the backend): the unit is skipped (`inactive`, `Result=success`) or the
+  process exits. No backend is running. See `docs/OPERATIONS.md`, "Database startup refusals".
+- **An invalid, unsafe, mismatched or revoked mandate does not stop the backend booting.** It comes up
+  with autonomy inert, records a startup fault and/or an owner alert, and refuses proposals with
+  `503 AUTONOMY_NOT_RUNNING` while a mandate file is configured. `systemctl is-active` reads `active`.
+  Two neighbours also boot but answer differently: a **recovery hold (ADR-0054)** boots read-only and
+  `require_writer` answers HTTP 409 until it is acknowledged **and the backend is restarted**
+  (acknowledgement takes effect at the next start and does not itself activate a mandate; that restart
+  can auto-activate a configured, valid persistent mandate under ADR-0017, and neither step clears the
+  kill switch, arming or the live gates); a **broken proposer registry** makes
+  `require_proposer` answer a different 503 ("the proposer registry is configured but unreadable or
+  invalid …"). See `docs/OPERATIONS.md`, "A running backend that refuses proposals".
+
+The preflight in `ExecCondition=` imports the checkout's `src/` through the template's `PYTHONPATH`, not
+through an install (`docs/OPERATIONS.md`, "Reading the unit's three preflight outcomes").
 
 ### Worker environment
 
@@ -314,6 +331,13 @@ first stop condition can never fire. Observed, on a healthy boot:
 
 `startup_faults: []` is the healthy reading. `null` means the selector is wrong, not that the
 backend is well.
+
+**`startup_faults: []` is necessary, not sufficient.** A missing, invalid, mismatched or revoked
+mandate records an owner alert (`autonomy.mandate_invalid`, `autonomy.revoked_mandate_present`) and **no**
+startup fault, and the `autonomy` task then reads `NOT_EXPECTED` rather than `RUNNING`; the first
+`tasks` row above is the cross-check. The unit being `active` is also not enough: `is-active`
+printing `inactive` for `chronos-backend` may mean the preflight skipped the start (§6; read the journal before concluding), not that the
+campaign is idle.
 
 **The verb is `mandate check`, two words** — `mandate-check` is not a command and argparse
 refuses it. `--file` defaults to `AUTONOMY_MANDATE_FILE` and `--account-id` to `IB_ACCOUNT_ID`,
@@ -454,7 +478,8 @@ Stop, and do not restart until the cause is understood:
   as healthy and `null` as a broken selector (§5). `autonomy_posture_unauthenticated` is the
   one to expect. `recovery_unverified` (ADR-0054) means this host's state directory and its
   database disagree — a restore, a lost volume, or a replaced database — and the backend has
-  booted read-only and unreconciled until an operator acknowledges it with a note. The
+  booted read-only and unreconciled until an operator acknowledges it with a note and restarts the
+  backend (acknowledgement alone leaves the running process read-only). The
   wholesale-restore residual stays manual: see `docs/BACKUP_AND_RECOVERY.md`.
   `evidence_posture_invalid` means `AUTONOMY_EVIDENCE_BUNDLES` is on with no
   `AUTONOMY_PROPOSERS_FILE` — a bundle is issued *to* a credential, so there is no
@@ -462,6 +487,20 @@ Stop, and do not restart until the cause is understood:
   (`api/main.py:269`). `submission_reconciliation_failed` means the startup submission
   reconciliation raised: submission remains locked, while inspection, cancellation and
   recovery stay available (`api/main.py:353`).
+- `systemctl --user is-active chronos-backend` prints `inactive` (a unit you stopped yourself reads the
+  same). With `Result=success`, the journal for that start attempt decides: `Skipped due to
+  'exec-condition'` plus `DB-PREFLIGHT` lines is the preflight's verdict (`docs/OPERATIONS.md`);
+  the same skip with a Python import error points at the venv's dependencies or a `PYTHONPATH` override; if neither is visible,
+  the cause is unknown — do not assume either. Do not `systemctl start` repeatedly — the start limit
+  counts manual starts.
+- The backend is up but proposals are refused (a recovery hold or a broken registry shows as the 409 or
+  the different 503 above, with their own startup faults, and stops the campaign just the same). For `AUTONOMY_NOT_RUNNING`: the worker (when forwarding is on, Phase B) logs
+  `The ingress did not accept the … proposal: HTTP 503 … refusal=AUTONOMY_NOT_RUNNING`, or a direct
+  caller gets that body. `startup_faults: []` does not clear it. Find the cause with the correlation
+  table in `docs/OPERATIONS.md` ("A running backend that refuses proposals") and treat an
+  unacknowledged `autonomy.mandate_invalid`, `autonomy.mandate_unsafe` or
+  `autonomy.revoked_mandate_present` alert as the stop reason. A repair that changes the mandate or
+  posture falls under the reset rule below.
 - `mandate check` returns a `BLOCKING` finding; the proposer credential expires or is revoked.
 - The kill switch reads ENGAGED with no operator having engaged it.
 - `verify-audit-log` reports a broken platform chain, or a terminal journal row fails its own recomputation (§5 — these are two different chains).

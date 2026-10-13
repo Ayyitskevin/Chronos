@@ -15,6 +15,7 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 
+from chronos.broker.base import BrokerRefusedBeforeSend
 from chronos.broker.connection import BrokerConnectionManager
 from chronos.domain.enums import OrderIntent, OrderLifecycle
 from chronos.domain.models import (
@@ -150,19 +151,36 @@ class OrderCancellationService:
         )
         if broker_order_id is None:
             raise OrderMutationError("order has no broker order id to cancel")
-        # Mark CANCEL_PENDING first so an in-flight cancel is durably visible.
+        # Mark CANCEL_PENDING first so an in-flight cancel is durably visible. The key carries the
+        # attempt time: a retry after a refusal must be recorded again (a fixed key would be a
+        # duplicate and write nothing, so the retry would send with no durable CANCEL_PENDING).
+        attempt = now.isoformat()
+        prior_status = intent.status
         self._tracker_repo.record_transition(
             intent_id=intent_id,
-            event_key=f"{intent_id}:{broker_order_id}:CANCEL_PENDING",
+            event_key=f"{intent_id}:{broker_order_id}:CANCEL_PENDING:{attempt}",
             source="CANCEL",
-            from_status=intent.status,
+            from_status=prior_status,
             to_status=OrderLifecycle.CANCEL_PENDING,
             current_account_id=current_account_id,
             broker_order_id=broker_order_id,
             evidence={"phase": "cancel_requested"},
             occurred_at=now,
         )
-        result = self._connection.run(self._connection.broker.cancel_order(broker_order_id))
+        try:
+            result = self._connection.run(self._connection.broker.cancel_order(broker_order_id))
+        except BrokerRefusedBeforeSend as refusal:
+            # The broker PROVES nothing was sent: the order is still working. Any other
+            # failure is ambiguous (the send may have left) and keeps CANCEL_PENDING.
+            self._record_refusal(
+                intent_id, broker_order_id, prior_status, str(refusal), current_account_id, now
+            )
+            raise OrderMutationError(f"cancel refused before send: {refusal}") from refusal
+        if not result.requested and result.lifecycle is not OrderLifecycle.CANCELLED:
+            self._record_refusal(
+                intent_id, broker_order_id, prior_status, result.message, current_account_id, now
+            )
+            raise OrderMutationError(f"cancel refused: {result.message}")
         if result.lifecycle is OrderLifecycle.CANCELLED:
             self._tracker_repo.record_transition(
                 intent_id=intent_id,
@@ -176,6 +194,36 @@ class OrderCancellationService:
                 occurred_at=result.timestamp,
             )
         return result
+
+    def _record_refusal(
+        self,
+        intent_id: str,
+        broker_order_id: int,
+        prior_status: OrderLifecycle,
+        message: str,
+        current_account_id: str,
+        now: datetime,
+    ) -> None:
+        """Compensating event: ``CANCEL_PENDING`` back to the status the order held.
+
+        A compare-and-set (``enforce_from_status``): if a broker callback already moved the
+        intent (filled, cancelled), nothing is written and that status stands. The pure
+        state-machine table has no ``CANCEL_PENDING -> SUBMITTED`` edge; this repository write
+        does not consult it, and later broker updates read the persisted (reverted) status.
+        """
+
+        self._tracker_repo.record_transition(
+            intent_id=intent_id,
+            event_key=f"{intent_id}:{broker_order_id}:CANCEL_REFUSED:{now.isoformat()}",
+            source="CANCEL",
+            from_status=OrderLifecycle.CANCEL_PENDING,
+            to_status=prior_status,
+            current_account_id=current_account_id,
+            broker_order_id=broker_order_id,
+            evidence={"phase": "cancel_refused", "message": message},
+            occurred_at=now,
+            enforce_from_status=True,
+        )
 
 
 def build_buy_to_close_intent(

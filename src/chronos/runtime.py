@@ -40,6 +40,7 @@ from chronos.orders.intent import WheelOrderIntent
 from chronos.orders.kill_switch import LiveKillSwitch
 from chronos.orders.live_audit import KillSwitchEventRepository, LiveArmEventRepository
 from chronos.orders.mutations import OrderCancellationService, OrderModificationService
+from chronos.orders.ownership import PersistedOrderOwnershipLedger
 from chronos.orders.preview import OrderPreviewService
 from chronos.orders.reconciliation_readiness import (
     ReconciliationReadiness,
@@ -323,6 +324,10 @@ def build_runtime(*, register_atexit: bool = True) -> AppRuntime:
                 live_kill_switch=live_kill_switch,
                 on_connection_uncertain=reconciliation_readiness.invalidate,
                 on_managed_account_scope_change=(reconciliation_readiness.invalidating_transition),
+                order_ownership=PersistedOrderOwnershipLedger(
+                    OrderIntentRepository(database.sessions),
+                    OrderTrackerRepository(database.sessions),
+                ),
             )
         market_data = MarketDataManager(
             broker,

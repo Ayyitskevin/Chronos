@@ -38,6 +38,8 @@ from chronos.broker.base import (
     BrokerSafetyError,
     BrokerSendGuard,
     OptionChainResponse,
+    OrderOwnershipLedger,
+    VenueOrderIdentity,
 )
 from chronos.broker.callbacks import CallbackBridge, QuoteState, clean_price
 from chronos.broker.market_data import (
@@ -913,8 +915,15 @@ class OfficialIBKRBroker:
         on_managed_account_scope_change: (
             Callable[[str], contextlib.AbstractContextManager[None]] | None
         ) = None,
+        order_ownership: OrderOwnershipLedger | None = None,
     ) -> None:
         self._live_kill_switch = live_kill_switch
+        self._order_ownership = order_ownership
+        if settings.ib_client_id == 0:
+            raise BrokerSafetyError(
+                "IB_CLIENT_ID=0 is IB's master client, which can cancel other clients' orders; "
+                "the official adapter refuses it (use a dedicated non-zero client id)"
+            )
         _load_ibapi()  # fail fast with install guidance if the package is absent
         if not settings.ib_account_id.strip():
             raise BrokerSafetyError(
@@ -2399,6 +2408,88 @@ class OfficialIBKRBroker:
             "cancel and re-submit through the boundary instead (nothing was sent)"
         )
 
+    async def _cancel_ownership_refusal(
+        self, app: Any, broker_order_id: int
+    ) -> CancellationResult | None:
+        """S1-F1 (Q-P1 Option A): prove the order is Chronos-owned BEFORE any ``cancelOrder``.
+
+        Only the runtime-wired :class:`OrderOwnershipLedger` authorises a cancel: it must find an
+        EXACT match, in the persisted order book, for what the VENUE's open-order row says (order
+        ref, account, broker order id, client id, permId). The in-memory own-id set is not
+        consulted (it is the fill classifier's memory, and ids are reused). Returns ``None`` only
+        when the ledger answered literally ``True``; a ``requested=False`` result when the order
+        is absent, foreign or not matched; ``BrokerRefusedBeforeSend`` when no ledger is wired, the
+        book cannot be read, or the ledger raises. In every refusal nothing was sent to cancel.
+        """
+
+        ledger = self._order_ownership
+        if ledger is None:
+            raise BrokerRefusedBeforeSend(
+                "no order-ownership ledger is wired; ownership unproven; no cancel was sent"
+            )
+        try:
+            flight = self.bridge.start_open_orders()
+        except BrokerError:
+            raise  # a typed broker error is not 'a read is pending'
+        except RuntimeError as error:  # an earlier read timed out and is still pending
+            raise BrokerRefusedBeforeSend(
+                "an open-orders read is still pending; ownership unproven; no cancel was sent"
+            ) from error
+        app.reqAllOpenOrders()  # read-only
+        done = await asyncio.get_running_loop().run_in_executor(
+            None, flight.done.wait, _REQUEST_TIMEOUT_S
+        )
+        if not done or self.bridge.connection_closed.is_set():
+            raise BrokerRefusedBeforeSend(
+                "could not read the venue's open orders to prove ownership; no cancel was sent"
+            )
+
+        def refusal(message: str) -> CancellationResult:
+            # REJECTED always: nothing of ours was touched, so the result can never read as a
+            # completion (the venue row's own status is not ours to report).
+            return CancellationResult(
+                broker_order_id=broker_order_id,
+                requested=False,
+                lifecycle=OrderLifecycle.REJECTED,
+                message=f"{message}; no cancel was sent",
+                timestamp=datetime.now(tz=UTC),
+            )
+
+        row = next((item for item in flight.items if int(item[0]) == broker_order_id), None)
+        if row is None:
+            return refusal("no such open order")
+        order = row[2]
+        order_ref = str(getattr(order, "orderRef", "") or "")
+        account = str(getattr(order, "account", "") or "")
+        client_id = int(getattr(order, "clientId", -1) or 0)
+        perm_id = int(getattr(order, "permId", 0) or 0)
+        # Cheap local pre-filters in front of the ledger. NONE of them authorises anything.
+        if (
+            not order_ref.startswith("CHR-")
+            or account != self._settings.ib_account_id
+            or client_id != self._settings.ib_client_id
+        ):
+            return refusal("not a Chronos order; refusing to cancel it")
+        if perm_id <= 0:
+            return refusal("the venue has not assigned a permId yet; ownership unproven")
+        identity = VenueOrderIdentity(
+            broker_order_id=broker_order_id,
+            order_ref=order_ref,
+            account_id=account,
+            client_id=client_id,
+            permanent_id=perm_id,
+        )
+        try:
+            proven = ledger.proves_owned(identity)
+        except Exception as error:
+            raise BrokerRefusedBeforeSend(
+                f"ownership ledger error ({type(error).__name__}: {error}); "
+                "ownership unproven; no cancel was sent"
+            ) from error
+        if proven is not True:
+            return refusal("no exact persisted match for this order")
+        return None
+
     async def cancel_order(self, broker_order_id: int) -> CancellationResult:
         # Deliberately NOT kill-switch gated: cancellation is risk-reducing and
         # must work during an emergency stop (ADR-0009 §7).
@@ -2406,6 +2497,9 @@ class OfficialIBKRBroker:
         if not self._app_connected():
             raise BrokerRefusedBeforeSend("not connected; no cancel was sent")
         verify_environment_port(self._settings.ib_environment, self._settings.ib_port)
+        refusal = await self._cancel_ownership_refusal(app, broker_order_id)
+        if refusal is not None:
+            return refusal
         flight = self.bridge.start_order_ack(broker_order_id)
         try:
             app.cancelOrder(broker_order_id, "")
