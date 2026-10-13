@@ -48,7 +48,7 @@ from pydantic_settings import SettingsConfigDict
 
 from chronos.cli.db_preflight import Report as DatabaseReport
 from chronos.cli.db_preflight import run_preflight as run_database_preflight
-from chronos.config.settings import Settings
+from chronos.config.settings import LIVE_API_PORTS, PAPER_API_PORTS, Settings
 from chronos.control.halt import HaltStore
 from chronos.domain.accounts import is_paper_account_id
 from chronos.utils.identifiers import account_fingerprint
@@ -59,8 +59,8 @@ EXIT_UNDECIDED = 1
 #: ``EX_CONFIG``: what refuses is the host's configuration, not this command.
 EXIT_REFUSED = 78
 
-_PAPER_PORTS = frozenset({7497, 4002})
-_LIVE_PORTS = frozenset({7496, 4001})
+_PAPER_PORTS = PAPER_API_PORTS  # one source of truth: chronos.config.settings (B1 U-c)
+_LIVE_PORTS = LIVE_API_PORTS
 _CHECKLIST_PLACEHOLDER_ACCOUNT = "DU1234567"
 _DEFAULT_DATABASE_URL = "sqlite:///data/chronos.db"
 _PEPPER_SHAPE = re.compile(r"[0-9a-f]{64}")
@@ -145,10 +145,17 @@ def preflight_b1_env(
 
     settings = _load_settings(values)
     if isinstance(settings, str):
-        # Settings itself enforces the client-id and allowlist rules: name them as P8
-        condition = "P8" if re.search(r"IB_DATA_CLIENT_ID|SYMBOL_ALLOWLIST", settings) else "P1"
-        found.append((condition, settings))
-        return sorted(found, key=_order)
+        # Settings itself enforces several of the conditions at load (since B1 U-c the port,
+        # client id and account shape too): report each under its own condition id
+        condition = _condition_of_load_refusal(settings)
+        # Settings stops at its FIRST refusal, so the shape conditions it did not reach are
+        # evaluated on the file's own values: every independent condition is still reported,
+        # once each (the raw finding stands in for a load refusal of the same condition)
+        raw = _raw_shape_findings(values)
+        if condition not in {cid for cid, _ in raw}:
+            found.append((condition, settings))
+        found.extend(raw)
+        return sorted(set(found), key=_order)
 
     if not (
         settings.broker_mode.value == "ibkr"
@@ -157,10 +164,10 @@ def preflight_b1_env(
     ):
         found.append(("P2", "broker mode/adapter/environment are not ibkr/official_ibkr/paper"))
     if settings.ib_host != "127.0.0.1" or settings.ib_port not in _PAPER_PORTS:
-        found.append(("P3", "IB_HOST is not 127.0.0.1 or IB_PORT is not a paper port"))
+        found.append(("P3", _PORT_MESSAGE))
     account = settings.ib_account_id
     if not is_paper_account_id(account) or account.strip() == _CHECKLIST_PLACEHOLDER_ACCOUNT:
-        found.append(("P4", "IB_ACCOUNT_ID is not a paper-shaped id or is the placeholder"))
+        found.append(("P4", _ACCOUNT_MESSAGE))
     if (
         settings.allow_order_transmit
         or settings.allow_live_trading
@@ -178,6 +185,34 @@ def preflight_b1_env(
             )
         )
     return sorted(set(found), key=_order)
+
+
+_PORT_MESSAGE = "IB_HOST is not 127.0.0.1 or IB_PORT is not a paper port"
+_ACCOUNT_MESSAGE = "IB_ACCOUNT_ID is not a paper-shaped id or is the placeholder"
+
+
+def _raw_shape_findings(values: Mapping[str, str]) -> list[tuple[str, str]]:
+    """P3 and P4 from the raw file values, for when Settings refused before reaching them."""
+
+    found: list[tuple[str, str]] = []
+    port = values.get("IB_PORT", "7497").strip()
+    host = values.get("IB_HOST", "127.0.0.1").strip()
+    if host != "127.0.0.1" or not port.isdigit() or int(port) not in _PAPER_PORTS:
+        found.append(("P3", _PORT_MESSAGE))
+    account = values.get("IB_ACCOUNT_ID", "")
+    if not is_paper_account_id(account) or account.strip() == _CHECKLIST_PLACEHOLDER_ACCOUNT:
+        found.append(("P4", _ACCOUNT_MESSAGE))
+    return found
+
+
+def _condition_of_load_refusal(message: str) -> str:
+    if re.search(r"IB_DATA_CLIENT_ID|SYMBOL_ALLOWLIST|IB_CLIENT_ID=0", message):
+        return "P8"
+    if re.search(r"requires a (paper|live) port", message):
+        return "P3"
+    if "IB_ACCOUNT_ID" in message and "transmission" not in message:
+        return "P4"
+    return "P1"
 
 
 def _order(item: tuple[str, str]) -> tuple[int, str]:

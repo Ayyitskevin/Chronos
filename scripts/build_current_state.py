@@ -215,6 +215,9 @@ def _settings_path_configurable(adapter: BrokerAdapter, *, live: bool) -> bool:
         "broker_mode": broker_mode,
         "broker_adapter": adapter,
         "ib_environment": IBEnvironment.LIVE if live else IBEnvironment.PAPER,
+        # B1 U-c: BROKER_MODE=ibkr refuses at load a port of the other environment, so the
+        # probe uses each environment's own TWS port (it asks "is this path configurable?")
+        "ib_port": 7496 if live else 7497,
         "allow_order_transmit": True,
         "allow_live_trading": live,
         "ib_account_id": account_id,
