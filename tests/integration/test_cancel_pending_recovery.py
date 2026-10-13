@@ -395,8 +395,15 @@ def test_D11g_an_adapter_reconnect_resets_the_dwell(world: World) -> None:
     _reset_between_passes(world, lambda: _bridge(world).reset_for_reconnect())
 
 
-def test_D11g_the_managers_connect_resets_the_dwell(world: World) -> None:
-    _reset_between_passes(world, lambda: world.rig.connection.connect())
+def test_D11g_the_managers_reconnect_resets_the_dwell(world: World) -> None:
+    """``connect()`` on a healthy session is a no-op by design (connection.py:158-171); a real
+    reconnect is ``disconnect()`` then ``connect()``, and both invalidate."""
+
+    def reconnect() -> None:
+        world.rig.connection.disconnect()
+        world.rig.connection.connect()
+
+    _reset_between_passes(world, reconnect)
 
 
 def test_D11h_a_manager_call_timeout_resets_the_dwell() -> None:
