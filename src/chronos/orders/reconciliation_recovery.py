@@ -850,7 +850,17 @@ class OrderRestartReconciler:
         persisted_permanent_id: int | None,
         persisted_client_id: int | None,
     ) -> _SettlePlan:
-        """One decision per intent over ONE evidence generation; never writes."""
+        """One decision per intent over ONE evidence generation; never writes.
+
+        Two stated deviations from the design's row text (fable U-A P3-4), both conservative:
+        row C1 (``V`` is ``PendingCancel``) takes the in-place fill-progress path -- a
+        ``FILL_PROGRESS`` row if the venue figure rose, a refusal if it is below the witnessed
+        bound, else hold -- and skips the completed-orders read, so a ``PendingCancel`` row plus a
+        bound terminal record is caught on a later pass, not this one; and a settle's event key
+        is ``{intent}:settle:{target}`` rather than ``{intent}:{order}:{lifecycle}:{filled}``:
+        one terminal event per intent and target, which is what "reconcile twice => one event"
+        rests on (a terminal never moves again).
+        """
 
         order_ref = intent.order_ref
         if not order_ref:
