@@ -798,3 +798,22 @@ def test_r1_P2_1_an_invalidation_during_the_write_waits_for_it_and_lands_after(
     assert seen["blocked"] is True and seen["epoch_during"] == epoch
     assert world.rig.status() is SUBMITTED  # the write linearised BEFORE the invalidation
     assert world.rig.readiness.uncertainty_epoch() == epoch + 1  # which then landed
+
+
+def test_r1_P2_1_a_bridge_that_cannot_hold_its_epoch_never_recovers() -> None:
+    """An adapter bridge exposing ``adapter_epoch`` but not ``held_at_adapter_epoch`` cannot
+    linearise the write: the recovery is planned and then refused (fail closed), not written."""
+
+    class EpochOnly:
+        adapter_epoch = 0
+
+    w = World(bridge=False)
+    try:
+        w.venue.bridge = EpochOnly()
+        _lost_cancel(w)
+        w.at(0)
+        report = w.at(1)
+        assert w.rig.status() is CP and w.recoveries() == []
+        assert any("changed before the write" in r for r in issues(report)), issues(report)
+    finally:
+        w.rig.close()
