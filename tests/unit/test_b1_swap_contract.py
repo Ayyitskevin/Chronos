@@ -291,8 +291,14 @@ def test_the_real_constructor_accepts_the_b1_shape_and_starts_nothing(tmp_path: 
 def test_the_real_constructor_refuses_what_the_b1_shape_must_not_be(
     tmp_path: Path, lines: tuple[str, ...], message: str
 ) -> None:
-    """Controls, through the real constructor: each change to the B1 shape is refused."""
+    """Controls: each change to the B1 shape is refused. Since B1 U-c the port and the blank
+    account are refused when Settings LOADS (before any adapter exists), with the same rule
+    named; the allowlist mismatch is still the real constructor's refusal."""
 
+    if "ALLOWLIST" not in lines[0]:
+        with pytest.raises(ValidationError, match=message):
+            _b1_settings(tmp_path, *lines)
+        return
     settings = _b1_settings(tmp_path, *lines)
 
     with pytest.raises(BrokerSafetyError, match=message):
