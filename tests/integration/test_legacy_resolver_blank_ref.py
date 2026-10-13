@@ -301,7 +301,13 @@ def test_control_an_exact_reference_filled_row_settles_filled(
     assert report.remaining_active == () and report.permits_new_opening_order is True
 
 
-@pytest.mark.parametrize("local", _LOCAL_STATES, ids=lambda s: s.value)
+# CANCEL_PENDING is the U-A settle planner's once U-A lands: its executions-only settle (C10a) also
+# needs the completed-orders capability, which this rig's FakeBroker does not have (fail closed:
+# "no terminal record" cannot be established). Its counterparts are pinned in
+# tests/integration/test_cancel_pending_recovery.py (test_r3b_on_caf70a5_*).
+@pytest.mark.parametrize(
+    "local", [state for state in _LOCAL_STATES if state is not CP], ids=lambda s: s.value
+)
 def test_control_exact_reference_executions_reaching_q_settle_filled(
     book: Book, local: OrderLifecycle
 ) -> None:

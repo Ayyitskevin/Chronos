@@ -1177,3 +1177,72 @@ def test_r3_fable_P2_1_an_event_during_the_first_snapshot_read_blocks_the_write(
     assert fired["done"]
     assert world.rig.status() is CP, (case, event)
     assert not report.permits_new_opening_order
+
+
+# --- r3b on caf70a5: S-12's CANCEL_PENDING executions control, decided by the planner ------------
+
+
+def test_r3b_on_caf70a5_exact_executions_reaching_q_settle_a_cancel_pending_with_the_s4_read(
+    world: World,
+) -> None:
+    """S-12's control for CANCEL_PENDING (exact-reference executions reaching Q settle FILLED) is
+    C10a here, with the completed-orders read available and no terminal record."""
+
+    from tests.support.settle_rig import venue_execution
+
+    world.rig.pending()
+    world.venue.execs = [
+        venue_execution("e1", "6", EARLIER_TODAY),
+        venue_execution("e2", "4", EARLIER_TODAY),
+    ]
+    world.at(0)
+    assert world.rig.status() is FILLED
+
+
+def test_r3b_on_caf70a5_without_the_s4_read_exact_executions_leave_a_cancel_pending_locked() -> (
+    None
+):
+    """Fail closed (U-A, design §2.4 / row 12): without the completed-orders capability "no
+    terminal record" cannot be established, so even exact executions reaching Q do not settle."""
+
+    from tests.support.settle_rig import VenueWithoutCompletedOrders, venue_execution
+
+    rig = make_rig(VenueWithoutCompletedOrders())
+    try:
+        rig.seed()
+        rig.pending()
+        rig.venue.execs = [
+            venue_execution("e1", "6", EARLIER_TODAY),
+            venue_execution("e2", "4", EARLIER_TODAY),
+        ]
+        report = rig.reconcile()
+        assert rig.status() is CP and not report.permits_new_opening_order
+        assert any("completed-orders evidence is not available" in r for r in issues(report))
+    finally:
+        rig.close()
+
+
+# --- D-2 (pending Muse; the conductor's default): design r3 C4 for a CANCELLED row with fills -----
+
+
+@pytest.mark.parametrize("filled", ["1", "4", "10"])
+def test_D2_a_cancel_pending_with_an_exactly_bound_cancelled_row_with_fills_settles_cancelled(
+    world: World, filled: str
+) -> None:
+    """D-2, kept as design r3 C4: a CANCEL_PENDING intent whose exactly bound listed row is
+    CANCELLED with fills SETTLES CANCELLED at the venue's figure -- the lifecycle decides (never
+    FILLED or PARTIALLY_FILLED), under the stable pair and the epoch guard -- and the lock is
+    released. This SUPERSEDES S-3's legacy-resolver pin
+    test_legacy_resolver_reconcile.py::test_a_rejected_or_cancelled_listed_row_with_fills_leaves_
+    the_intent_locked[CANCEL_PENDING-CANCELLED-{1,4,10}] (removed from S-3's SENT_ACTIVE in r3,
+    8bbc43f), which kept the intent locked because the LEGACY resolver owned CANCEL_PENDING."""
+
+    world.rig.pending()
+    world.venue.open = [venue_order(CANCELLED, filled)]
+    report = world.at(0)
+    assert world.rig.status() is CANCELLED
+    event = world.rig.events()[-1]
+    assert (event.source, event.from_status, event.to_status) == ("RECONCILE", CP, CANCELLED)
+    assert event.filled_quantity == Decimal(filled)
+    assert event.evidence["settled_from"] == "open_order"
+    assert report.remaining_active == () and report.permits_new_opening_order

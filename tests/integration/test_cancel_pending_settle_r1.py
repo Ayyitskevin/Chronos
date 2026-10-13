@@ -533,12 +533,8 @@ def test_r2_a_blank_ref_working_row_records_fill_progress_in_place_and_settles_n
     assert rig.events()[-1].filled_quantity == Decimal("4")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="U-A-r2-LEGACY-1: a PARTIALLY_FILLED intent whose order is still listed is the "
-    "EXISTING resolver's (design §3.3 P5, unchanged by U-A); it accepts a blank-ref row by the "
-    "persisted permId. Open question for Daybreak/Kevin, not fixed here.",
-)
+# U-A-r2-LEGACY-1 was a strict xfail; S-12 (main 29beb96, PR #300: a blank-reference observation
+# records progress but never a terminal write) fixed it, so it is an ordinary regression pin now.
 def test_r2_legacy_a_partially_filled_intent_never_settles_from_a_blank_ref_open_row(
     rig: Rig,
 ) -> None:
@@ -548,12 +544,8 @@ def test_r2_legacy_a_partially_filled_intent_never_settles_from_a_blank_ref_open
     assert rig.status() is PF
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="U-A-r2-LEGACY-2: a PARTIALLY_FILLED intent with no record and no listed order is the "
-    "EXISTING resolver's (design §3.3 P3, unchanged by U-A); its one-session full-fill proof "
-    "accepts blank-ref executions by the persisted permId. Open question, not fixed here.",
-)
+# U-A-r2-LEGACY-2 was a strict xfail; S-12 (main 29beb96, PR #300: a blank-reference observation
+# records progress but never a terminal write) fixed it, so it is an ordinary regression pin now.
 def test_r2_legacy_a_partially_filled_intent_never_settles_from_blank_ref_executions(
     rig: Rig,
 ) -> None:
