@@ -387,7 +387,7 @@ def _ibapi_lines(report: B1Report) -> None:
 def _error_parameters(source: str) -> list[str] | None:
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.ClassDef) and node.name == "EWrapper":
-            for item in node.body:
+            for item in ast.iter_child_nodes(node):  # direct members, no `.body` read
                 if isinstance(item, ast.FunctionDef) and item.name == "error":
                     arguments = item.args
                     if arguments.vararg or arguments.kwarg or arguments.kwonlyargs:
