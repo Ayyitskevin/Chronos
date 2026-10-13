@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, time
 from decimal import Decimal
 from functools import partial
+from types import MappingProxyType
 from zoneinfo import ZoneInfo
 
 from chronos.broker.base import CompletedOrderEvidence
@@ -510,10 +511,12 @@ _RECOGNISED_VENUE = _WORKING_VENUE | _TERMINAL_VENUE | {OrderLifecycle.CANCEL_PE
 #: target -- decided by the lifecycle BEFORE any quantity. REJECTED (and anything else) is row C9:
 #: unexpected for a cancel, nothing is written, whatever figure the record carries. C3 (a WORKING
 #: row filled by quantity) is a separate rule, never this table.
-_TERMINAL_TARGET: dict[OrderLifecycle, OrderLifecycle] = {
-    OrderLifecycle.CANCELLED: OrderLifecycle.CANCELLED,
-    OrderLifecycle.FILLED: OrderLifecycle.FILLED,
-}
+_TERMINAL_TARGET: Mapping[OrderLifecycle, OrderLifecycle] = MappingProxyType(
+    {
+        OrderLifecycle.CANCELLED: OrderLifecycle.CANCELLED,
+        OrderLifecycle.FILLED: OrderLifecycle.FILLED,
+    }
+)
 _UNRECOGNISED_STATUS = "the venue reports an unrecognised venue order status; nothing is assumed"
 _NO_COMPLETED_EVIDENCE = "completed-orders evidence is not available"
 #: U-B (design r3 §4.3): the source of the dwell-gated recovery write (C2-1); a SUBMITTED intent
@@ -1422,6 +1425,17 @@ class OrderRestartReconciler:
                         broker_status=None,
                         transition_applied=False,
                         reason="evidence changed between snapshots; nothing was written",
+                    )
+                )
+                continue
+            if plan.epochs is None:  # fable r2 P3-1: a constructor forgot them; say so, plainly
+                unresolved.append(
+                    RestartOrderObservation(
+                        intent_id=intent.intent_id,
+                        local_status=intent.status,
+                        broker_status=None,
+                        transition_applied=False,
+                        reason="write plan carries no epochs; refused",
                     )
                 )
                 continue
