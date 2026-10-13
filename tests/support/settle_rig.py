@@ -322,7 +322,16 @@ class Rig:
 _COUNTER = itertools.count(1)
 
 
-def make_rig(venue: Any | None = None, *, account: str = ACCOUNT) -> Rig:
+def make_rig(
+    venue: Any | None = None,
+    *,
+    account: str = ACCOUNT,
+    monotonic: Callable[[], float] | None = None,
+    call_timeout_seconds: float = 30.0,
+) -> Rig:
+    """``monotonic`` drives the U-B recovery dwell's clock (default: the reconciler's own);
+    ``call_timeout_seconds`` is the connection manager's call budget (D11h)."""
+
     venue = venue if venue is not None else ScriptedVenue()
     db = Database("sqlite:///:memory:")
     db.initialize()
@@ -331,14 +340,18 @@ def make_rig(venue: Any | None = None, *, account: str = ACCOUNT) -> Rig:
     repo = OrderTrackerRepository(db.sessions)
     tracker = OrderTracker(intents, repo)
     readiness = ReconciliationReadiness()
-    connection = BrokerConnectionManager(venue, readiness=readiness)
+    connection = BrokerConnectionManager(
+        venue, readiness=readiness, call_timeout_seconds=call_timeout_seconds
+    )
     connection.start()
+    extra: dict[str, Any] = {} if monotonic is None else {"monotonic": monotonic}
     reconciler = OrderRestartReconciler(
         connection=connection,
         intents=intents,
         tracker=tracker,
         reconciliation_readiness=readiness,
         expected_broker_client_id=CLIENT_ID,
+        **extra,
     )
     return Rig(db, venue, intents, repo, tracker, readiness, connection, reconciler, account)
 
