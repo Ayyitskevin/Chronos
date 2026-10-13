@@ -40,10 +40,10 @@ import stat
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 from dotenv import dotenv_values
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 from pydantic_settings import SettingsConfigDict
 
 from chronos.cli.db_preflight import Report as DatabaseReport
@@ -51,6 +51,7 @@ from chronos.cli.db_preflight import run_preflight as run_database_preflight
 from chronos.config.settings import LIVE_API_PORTS, PAPER_API_PORTS, Settings
 from chronos.control.halt import HaltStore
 from chronos.domain.accounts import is_paper_account_id
+from chronos.domain.enums import BrokerAdapter, BrokerMode, IBEnvironment
 from chronos.utils.identifiers import account_fingerprint
 from chronos.utils.secure_files import AuthorityMode, UnsafeAuthorityFile, read_authority_file
 
@@ -151,7 +152,9 @@ def preflight_b1_env(
         # Settings stops at its FIRST refusal, so the shape conditions it did not reach are
         # evaluated on the file's own values: every independent condition is still reported,
         # once each (the raw finding stands in for a load refusal of the same condition)
-        raw = _raw_shape_findings(values)
+        # Only for U-c's own shape refusals (each says "refused at load"): the pre-existing
+        # refusals (the live conjunction, a client-id clash) keep their reporting unchanged
+        raw = _raw_findings(values) if "refused at load" in settings else []
         if condition not in {cid for cid, _ in raw}:
             found.append((condition, settings))
         found.extend(raw)
@@ -162,7 +165,7 @@ def preflight_b1_env(
         and settings.broker_adapter.value == "official_ibkr"
         and settings.ib_environment.value == "paper"
     ):
-        found.append(("P2", "broker mode/adapter/environment are not ibkr/official_ibkr/paper"))
+        found.append(("P2", _MODE_MESSAGE))
     if settings.ib_host != "127.0.0.1" or settings.ib_port not in _PAPER_PORTS:
         found.append(("P3", _PORT_MESSAGE))
     account = settings.ib_account_id
@@ -174,16 +177,9 @@ def preflight_b1_env(
         or settings.transmission_possible
         or settings.live_transmission_possible
     ):
-        found.append(("P5", "a transmission flag or derived conjunction is true"))
+        found.append(("P5", _TRANSMIT_MESSAGE))
     if settings.ib_account_allowlist:
-        found.append(
-            (
-                "P13",
-                "IB_ACCOUNT_ALLOWLIST is not empty: it is a transmission-authority input and stays "
-                "empty for the read-only campaign (it is added only by a separate paper-"
-                "transmission decision)",
-            )
-        )
+        found.append(("P13", _ALLOWLIST_MESSAGE))
     return sorted(set(found), key=_order)
 
 
@@ -191,17 +187,66 @@ _PORT_MESSAGE = "IB_HOST is not 127.0.0.1 or IB_PORT is not a paper port"
 _ACCOUNT_MESSAGE = "IB_ACCOUNT_ID is not a paper-shaped id or is the placeholder"
 
 
-def _raw_shape_findings(values: Mapping[str, str]) -> list[tuple[str, str]]:
-    """P3 and P4 from the raw file values, for when Settings refused before reaching them."""
+_MODE_MESSAGE = "broker mode/adapter/environment are not ibkr/official_ibkr/paper"
+_TRANSMIT_MESSAGE = "a transmission flag or derived conjunction is true"
+_ALLOWLIST_MESSAGE = (
+    "IB_ACCOUNT_ALLOWLIST is not empty: it is a transmission-authority input and stays "
+    "empty for the read-only campaign (it is added only by a separate paper-"
+    "transmission decision)"
+)
+_UNPARSEABLE = object()
+
+
+def _raw_field(values: Mapping[str, str], name: str) -> Any:
+    """The file's value for one Settings field, parsed with THAT FIELD's own annotation and
+    validators (so the rules cannot drift from Settings'); the field default when absent;
+    ``_UNPARSEABLE`` when the value would not parse (callers fail closed on it)."""
+
+    info = Settings.model_fields[name]
+    lowered = {key.lower(): raw for key, raw in values.items()}
+    if name not in lowered:
+        return info.default
+    annotation: Any = (
+        Annotated[(info.annotation, *info.metadata)] if info.metadata else info.annotation
+    )
+    try:
+        return TypeAdapter(annotation).validate_python(lowered[name])
+    except ValidationError:
+        return _UNPARSEABLE
+
+
+def _raw_findings(values: Mapping[str, str]) -> list[tuple[str, str]]:
+    """Every condition that needs no constructed Settings, from the raw file values.
+
+    Used when Settings refused the file at load: it stops at its FIRST refusal, so without
+    this an early U-c shape refusal would hide independent transmission-authority findings
+    (Daybreak build-uc r1 P2-1). Messages are the post-load checks' own, never a value.
+    """
 
     found: list[tuple[str, str]] = []
-    port = values.get("IB_PORT", "7497").strip()
-    host = values.get("IB_HOST", "127.0.0.1").strip()
-    if host != "127.0.0.1" or not port.isdigit() or int(port) not in _PAPER_PORTS:
+    if (
+        _raw_field(values, "broker_mode") is not BrokerMode.IBKR
+        or _raw_field(values, "broker_adapter") is not BrokerAdapter.OFFICIAL_IBKR
+        or _raw_field(values, "ib_environment") is not IBEnvironment.PAPER
+    ):
+        found.append(("P2", _MODE_MESSAGE))
+    port = _raw_field(values, "ib_port")
+    if _raw_field(values, "ib_host") != "127.0.0.1" or port not in _PAPER_PORTS:
         found.append(("P3", _PORT_MESSAGE))
-    account = values.get("IB_ACCOUNT_ID", "")
-    if not is_paper_account_id(account) or account.strip() == _CHECKLIST_PLACEHOLDER_ACCOUNT:
+    account = _raw_field(values, "ib_account_id")
+    if (
+        not isinstance(account, str)
+        or not is_paper_account_id(account)
+        or account.strip() == _CHECKLIST_PLACEHOLDER_ACCOUNT
+    ):
         found.append(("P4", _ACCOUNT_MESSAGE))
+    if any(
+        _raw_field(values, flag) is not False
+        for flag in ("allow_order_transmit", "allow_live_trading")
+    ):
+        found.append(("P5", _TRANSMIT_MESSAGE))
+    if _raw_field(values, "ib_account_allowlist") != ():
+        found.append(("P13", _ALLOWLIST_MESSAGE))
     return found
 
 
@@ -243,7 +288,8 @@ def _load_settings(values: Mapping[str, str]) -> Settings | str:
         return _FileOnlySettings(_env_file=None, **fields)  # type: ignore[call-arg]
     except ValidationError as error:
         # the message names fields and rules, not values: keep only the first line
-        return "Settings refused the file: " + error.errors()[0]["msg"][:200]
+        # the bounded rule text only; never the structured input (include_input=False)
+        return "Settings refused the file: " + error.errors(include_input=False)[0]["msg"][:200]
 
 
 # --- the report ------------------------------------------------------------------------------

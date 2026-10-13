@@ -269,7 +269,7 @@ def test_an_exported_variable_that_would_outrank_the_file_is_refused() -> None:
             ["P3", "P5", "P13"],
         ),
         ({"IB_PORT": "4001", "BROKER_ADAPTER": "ib_async"}, ["P2", "P3"]),
-        ({"IB_ACCOUNT_ID": "U1234567", "ALLOW_LIVE_TRADING": "true"}, ["P1", "P4", "P5"]),
+        ({"IB_ACCOUNT_ID": "U1234567", "ALLOW_ORDER_TRANSMIT": "true"}, ["P4", "P5"]),
     ],
 )
 def test_a_load_refusal_still_reports_every_independent_condition(
