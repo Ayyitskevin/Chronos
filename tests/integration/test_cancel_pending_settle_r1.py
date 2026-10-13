@@ -466,3 +466,98 @@ def test_P1_2_an_execution_whose_timestamp_moves_between_the_snapshots_blocks_th
         (venue_execution("e1", "2", later),),
     ]
     _assert_refused(rig, "evidence changed between snapshots")
+
+
+# --- U-A r2 (Daybreak r1 delta P1-1): a missing orderRef never binds a settling record ----------
+# _is_owned treats a blank reference as owned when the permId matches (BP-2 R-f); a SETTLE must
+# not rest on that fallback: design §2.1 item 1 requires the exact, non-empty orderRef.
+
+_BLANK_REFS = [None, "   "]  # absent, and blank (BrokerOrder normalises it to None)
+
+
+@pytest.mark.parametrize("ref", _BLANK_REFS, ids=["missing", "blank"])
+@pytest.mark.parametrize(
+    ("lifecycle", "filled"),
+    [(CANCELLED, "0"), (FILLED, "10"), (SUBMITTED, "10")],
+    ids=["cancelled", "filled", "filled_by_quantity"],
+)
+def test_r2_a_terminal_open_book_row_without_an_order_ref_never_settles(
+    rig: Rig, lifecycle: OrderLifecycle, filled: str, ref: str | None
+) -> None:
+    """Daybreak's attack: every other field matches, the second snapshot repeats the row."""
+
+    rig.pending()
+    rig.venue.open = [venue_order(lifecycle, filled, ref=ref)]
+    _assert_refused(rig, "terminal open-book row is not bound to this intent")
+
+
+def test_r2_C10a_executions_without_an_order_ref_never_settle_filled(rig: Rig) -> None:
+    """The same fallback on the executions-only settle: 10 today, permId matches, no ref."""
+
+    rig.pending()
+    rig.venue.execs = [venue_execution("e1", "10", EARLIER_TODAY, ref=None)]
+    _assert_refused(rig, "order absent; fills present; no terminal record")
+
+
+def test_r2_C10a_counts_only_the_executions_that_carry_the_order_ref(rig: Rig) -> None:
+    """6 with the exact reference + 4 without: E_today for the settle is 6, not 10."""
+
+    rig.pending()
+    rig.venue.execs = [
+        venue_execution("e1", "6", EARLIER_TODAY),
+        venue_execution("e2", "4", EARLIER_TODAY, ref=None),
+    ]
+    _assert_refused(rig, "order absent; fills present; no terminal record")
+
+
+def test_r2_a_completed_order_record_without_an_order_ref_is_not_a_candidate(rig: Rig) -> None:
+    """Control (already exact at 435e19a): S4 candidates match the reference exactly."""
+
+    rig.pending()
+    rig.venue.completed = [venue_order(CANCELLED, "0", ref=None)]
+    _assert_refused(rig, "cancel pending; order absent; no terminal record")
+
+
+def test_r2_a_blank_ref_working_row_records_fill_progress_in_place_and_settles_nothing(
+    rig: Rig,
+) -> None:
+    """Stated, not a settle (C2-0): a working row reported without its reference is owned by
+    the persisted permId (BP-2 R-f); its fill progress is recorded in place, the lifecycle stays
+    CANCEL_PENDING and the order stays locked. A recorded figure only raises the lower bound."""
+
+    rig.pending()
+    rig.venue.open = [venue_order(SUBMITTED, "4", ref=None)]
+    report = rig.reconcile()
+    assert rig.status() is CP and not report.permits_new_opening_order
+    assert rig.trail()[-1] == ("FILL_PROGRESS", CP)
+    assert rig.events()[-1].filled_quantity == Decimal("4")
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="U-A-r2-LEGACY-1: a PARTIALLY_FILLED intent whose order is still listed is the "
+    "EXISTING resolver's (design §3.3 P5, unchanged by U-A); it accepts a blank-ref row by the "
+    "persisted permId. Open question for Daybreak/Kevin, not fixed here.",
+)
+def test_r2_legacy_a_partially_filled_intent_never_settles_from_a_blank_ref_open_row(
+    rig: Rig,
+) -> None:
+    rig.event(PF, at=PRIOR, filled="3")
+    rig.venue.open = [venue_order(FILLED, "10", ref=None)]
+    rig.reconcile()
+    assert rig.status() is PF
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="U-A-r2-LEGACY-2: a PARTIALLY_FILLED intent with no record and no listed order is the "
+    "EXISTING resolver's (design §3.3 P3, unchanged by U-A); its one-session full-fill proof "
+    "accepts blank-ref executions by the persisted permId. Open question, not fixed here.",
+)
+def test_r2_legacy_a_partially_filled_intent_never_settles_from_blank_ref_executions(
+    rig: Rig,
+) -> None:
+    rig.event(PF, at=PRIOR, filled="3")
+    rig.venue.execs = [venue_execution("e1", "10", EARLIER_TODAY, ref=None)]
+    rig.reconcile()
+    assert rig.status() is PF
