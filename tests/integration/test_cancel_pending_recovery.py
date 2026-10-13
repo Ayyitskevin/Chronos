@@ -765,3 +765,36 @@ def test_r1_fable_P3_1b_a_lost_fill_progress_cas_carries_no_dwell(
     monkeypatch.setattr(world.rig.tracker, "record_planned_transition", real)
     world.at(1)  # the dwell starts HERE, so no recovery yet
     assert world.rig.status() is CP and world.recoveries() == []
+
+
+def test_r1_P2_1_an_invalidation_during_the_write_waits_for_it_and_lands_after(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The epochs are HELD across the CAS, not just checked before it: another thread's
+    invalidation that arrives mid-write blocks until the write is done (one linearisation)."""
+
+    import threading
+
+    _lost_cancel(world)
+    world.at(0)
+    epoch = world.rig.readiness.uncertainty_epoch()
+    real = world.rig.tracker.record_planned_transition
+    seen: dict[str, object] = {}
+
+    def during_the_cas(**kwargs):  # type: ignore[no-untyped-def]
+        other = threading.Thread(target=world.rig.readiness.invalidate, args=("uncertain",))
+        other.start()
+        other.join(timeout=0.3)
+        seen["blocked"] = other.is_alive()  # still waiting for the latch's lock
+        seen["epoch_during"] = world.rig.readiness._uncertainty_epoch
+        seen["thread"] = other
+        return real(**kwargs)
+
+    monkeypatch.setattr(world.rig.tracker, "record_planned_transition", during_the_cas)
+    world.at(1)
+    thread = seen["thread"]
+    assert isinstance(thread, threading.Thread)
+    thread.join(timeout=5)
+    assert seen["blocked"] is True and seen["epoch_during"] == epoch
+    assert world.rig.status() is SUBMITTED  # the write linearised BEFORE the invalidation
+    assert world.rig.readiness.uncertainty_epoch() == epoch + 1  # which then landed
