@@ -78,6 +78,10 @@ class ReconciliationReadiness:
         self._reconciliation_lock = Lock()
         self._status = ReconciliationStatus.PENDING
         self._generation = 0
+        # CANCEL_PENDING settle U-B (design r3 §4.3): advanced by every EXTERNAL invalidation
+        # (``invalidate`` / ``invalidating_transition``), never by the routine once-per-pass
+        # ``begin_reconciliation``; the recovery dwell is keyed to it, not to ``_generation``.
+        self._uncertainty_epoch = 0
         self._reason = "startup reconciliation has not completed"
         self._reconciled_at: datetime | None = None
 
@@ -125,7 +129,7 @@ class ReconciliationReadiness:
 
         normalized = reason.strip() or "reconciliation observation in progress"
         with self._idle:
-            self._invalidate_unlocked(normalized)
+            self._invalidate_unlocked(normalized, uncertain=False)
             while self._submissions_in_flight:
                 self._idle.wait()
             return self._generation
@@ -135,7 +139,7 @@ class ReconciliationReadiness:
 
         normalized = reason.strip() or "broker state became uncertain"
         with self._lock:
-            self._invalidate_unlocked(normalized)
+            self._invalidate_unlocked(normalized, uncertain=True)
             return self._snapshot_unlocked()
 
     @contextmanager
@@ -144,10 +148,24 @@ class ReconciliationReadiness:
 
         normalized = reason.strip() or "broker state became uncertain"
         with self._lock:
-            self._invalidate_unlocked(normalized)
+            self._invalidate_unlocked(normalized, uncertain=True)
             yield
 
-    def _invalidate_unlocked(self, reason: str) -> None:
+    def uncertainty_epoch(self) -> int:
+        """How many external invalidations this latch has seen (design r3 §4.3).
+
+        Every readiness-invalidating path (connection loss, unsolicited observations, a
+        managed-account change, the connection manager, submission-time checks) reaches the
+        latch through ``invalidate`` or ``invalidating_transition``, so this one counter covers
+        them all, including future callers; an ordinary reconciliation pass does not move it.
+        """
+
+        with self._lock:
+            return self._uncertainty_epoch
+
+    def _invalidate_unlocked(self, reason: str, *, uncertain: bool) -> None:
+        if uncertain:
+            self._uncertainty_epoch += 1
         self._generation += 1
         self._status = ReconciliationStatus.PENDING
         self._reason = reason
