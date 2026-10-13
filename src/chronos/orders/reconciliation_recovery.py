@@ -568,8 +568,10 @@ def _completed_record_bound(
 ) -> bool:
     """Exact identity (design §2.1): a record binds only when EVERY identifying field agrees.
 
-    Used for a completed-order record AND a terminal open-book row. The reference matched
-    already (that is how it became a candidate). The persisted sets are exact (Daybreak r1
+    Used for a completed-order record AND a terminal open-book row. The reference is checked
+    HERE, exactly and non-empty (design §2.1 item 1; Daybreak U-A r1 delta P1-1): an open-book
+    row reaches this through ``_is_owned``, whose blank-reference/permId fallback is ownership
+    for observation, never a binding for a settle. The persisted sets are exact (Daybreak r1
     P1-1): the ONE persisted permId (positive) and the ONE persisted client id are required and
     equal to the record's, and a record that names a venue order id (0 = absent on completed
     rows) must name the ONE persisted broker order id -- an intent with none persisted never
@@ -577,7 +579,9 @@ def _completed_record_bound(
     """
 
     return (
-        persisted_permanent_id is not None
+        bool(intent.order_ref)
+        and record.order_ref == intent.order_ref
+        and persisted_permanent_id is not None
         and persisted_permanent_id > 0
         and record.permanent_id == persisted_permanent_id
         and persisted_client_id is not None
