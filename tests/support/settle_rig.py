@@ -185,7 +185,8 @@ class Rig:
     readiness: ReconciliationReadiness
     connection: BrokerConnectionManager
     reconciler: OrderRestartReconciler
-    keys: Any = None
+    account: str = ACCOUNT
+    broker_id: int | None = BROKER_ID
 
     def close(self) -> None:
         self.connection.close()
@@ -193,12 +194,12 @@ class Rig:
 
     # --- persisted state ------------------------------------------------------------------
     def status(self, intent_id: str = "intent-1") -> OrderLifecycle:
-        record = self.intents.get(intent_id, current_account_id=ACCOUNT)
+        record = self.intents.get(intent_id, current_account_id=self.account)
         assert record is not None
         return record.status
 
     def events(self, intent_id: str = "intent-1") -> tuple[OrderEventRecord, ...]:
-        return self.repo.events(intent_id, current_account_id=ACCOUNT)
+        return self.repo.events(intent_id, current_account_id=self.account)
 
     def trail(self, intent_id: str = "intent-1") -> list[tuple[str, OrderLifecycle]]:
         return [(e.source, e.to_status) for e in self.events(intent_id)]
@@ -213,24 +214,27 @@ class Rig:
         permanent_id: int | None = PERM_ID,
         client_id: int | None = CLIENT_ID,
         broker_id: int | None = BROKER_ID,
+        symbol: str = SYMBOL,
+        con_id: int = CON_ID,
+        limit: Decimal = LIMIT,
     ) -> None:
         """A SUBMITTED stock BUY with the ids a real submit persists."""
 
         record = OrderIntentRecord(
             intent_id=intent_id,
             idempotency_key=f"idem-{intent_id}",
-            account_fingerprint=account_fingerprint(ACCOUNT),
+            account_fingerprint=account_fingerprint(self.account),
             environment="paper",
             product_family=ProductFamily.STOCK,
             wheel_cycle_id=None,
-            symbol=SYMBOL,
-            con_id=CON_ID,
+            symbol=symbol,
+            con_id=con_id,
             local_symbol=None,
             action=OrderSide.BUY,
             open_close_effect="OPEN",
             quantity=quantity,
             order_type="LMT",
-            limit_price=LIMIT,
+            limit_price=limit,
             time_in_force="DAY",
             outside_rth=False,
             quote_snapshot_id=None,
@@ -244,14 +248,15 @@ class Rig:
             submitted_at=None,
             expires_at=None,
         )
-        assert self.intents.create(record, current_account_id=ACCOUNT)
+        self.broker_id = broker_id
+        assert self.intents.create(record, current_account_id=self.account)
         assert self.repo.record_transition(
             intent_id=intent_id,
             event_key=f"{intent_id}:submit",
             source="SUBMIT",
             from_status=OrderLifecycle.USER_CONFIRMED,
             to_status=OrderLifecycle.SUBMITTED,
-            current_account_id=ACCOUNT,
+            current_account_id=self.account,
             broker_order_id=broker_id,
             permanent_id=permanent_id,
             client_id=client_id,
@@ -283,8 +288,8 @@ class Rig:
             source=source,
             from_status=current,
             to_status=to_status,
-            current_account_id=ACCOUNT,
-            broker_order_id=BROKER_ID,
+            current_account_id=self.account,
+            broker_order_id=self.broker_id,
             permanent_id=permanent_id,
             client_id=client_id,
             filled_quantity=filled_quantity,
@@ -299,17 +304,17 @@ class Rig:
 
     # --- the thing under test -------------------------------------------------------------
     def reconcile(self, now: datetime = NOW) -> OrderRestartReconciliationReport:
-        return self.reconciler.reconcile_report(current_account_id=ACCOUNT, now=now)
+        return self.reconciler.reconcile_report(current_account_id=self.account, now=now)
 
 
 _COUNTER = itertools.count(1)
 
 
-def make_rig(venue: Any | None = None) -> Rig:
+def make_rig(venue: Any | None = None, *, account: str = ACCOUNT) -> Rig:
     venue = venue if venue is not None else ScriptedVenue()
     db = Database("sqlite:///:memory:")
     db.initialize()
-    db.bind_scope(broker_mode="ibkr", environment="paper", account_id=ACCOUNT)
+    db.bind_scope(broker_mode="ibkr", environment="paper", account_id=account)
     intents = OrderIntentRepository(db.sessions)
     repo = OrderTrackerRepository(db.sessions)
     tracker = OrderTracker(intents, repo)
@@ -323,7 +328,7 @@ def make_rig(venue: Any | None = None) -> Rig:
         reconciliation_readiness=readiness,
         expected_broker_client_id=CLIENT_ID,
     )
-    return Rig(db, venue, intents, repo, tracker, readiness, connection, reconciler)
+    return Rig(db, venue, intents, repo, tracker, readiness, connection, reconciler, account)
 
 
 def issues(report: OrderRestartReconciliationReport) -> list[str]:

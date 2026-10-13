@@ -588,6 +588,12 @@ def _make_app(bridge: CallbackBridge) -> Any:
         def openOrderEnd(self) -> None:
             bridge.on_open_order_end()
 
+        def completedOrder(self, contract: Any, order: Any, orderState: Any) -> None:
+            bridge.on_completed_order(contract, order, orderState)
+
+        def completedOrdersEnd(self) -> None:
+            bridge.on_completed_orders_end()
+
         def orderStatus(
             self,
             orderId: int,
@@ -1278,6 +1284,71 @@ class OfficialIBKRBroker:
                 )
             )
         return tuple(orders)
+
+    async def completed_orders(self) -> tuple[BrokerOrder, ...]:
+        """The venue's completed (terminal) orders, normalized as EVIDENCE only.
+
+        ``reqCompletedOrders(apiOnly=True)``. A row that cannot be read as a positive-limit LMT
+        order with a coherent fill figure is dropped with a notice: a missing record is "no
+        evidence", which never settles an order, whereas a mis-read one could.
+        """
+
+        app = self._require_app()
+        flight = self.bridge.start_completed_orders()
+        app.reqCompletedOrders(True)
+        done = await asyncio.get_running_loop().run_in_executor(
+            None, flight.done.wait, _REQUEST_TIMEOUT_S
+        )
+        if not done or self.bridge.connection_closed.is_set():
+            raise BrokerConnectionError("completed-orders request did not complete")
+        records: list[BrokerOrder] = []
+        for contract, order, order_state in flight.items:
+            record = self._completed_record(contract, order, order_state)
+            if record is not None:
+                records.append(record)
+        return tuple(records)
+
+    def _completed_record(self, contract: Any, order: Any, order_state: Any) -> BrokerOrder | None:
+        order_ref = str(getattr(order, "orderRef", "") or "")
+        try:
+            limit_price = Decimal(str(getattr(order, "lmtPrice", 0) or 0))
+            quantity = Decimal(str(getattr(order, "totalQuantity", 0) or 0))
+            filled = Decimal(str(getattr(order, "filledQuantity", 0) or 0))
+            action = OrderSide(str(getattr(order, "action", "") or ""))
+            if (
+                str(getattr(order, "orderType", "") or "") != "LMT"
+                or not limit_price.is_finite()
+                or limit_price <= 0
+                or not quantity.is_finite()
+                or not filled.is_finite()
+                or not 0 <= filled <= quantity
+                or quantity <= 0
+            ):
+                raise ValueError("not a coherent completed LMT order")
+            instrument = instrument_from_contract(contract)
+            remaining = quantity - filled
+            status = str(getattr(order_state, "status", "") or "")
+            return BrokerOrder(
+                broker_order_id=int(getattr(order, "orderId", 0) or 0),
+                permanent_id=int(getattr(order, "permId", 0) or 0) or None,
+                client_id=int(getattr(order, "clientId", 0) or 0),
+                account_id=str(getattr(order, "account", "") or ""),
+                order_ref=order_ref or None,
+                contract=instrument,
+                side=action,
+                quantity=quantity,
+                filled_quantity=filled,
+                remaining_quantity=remaining,
+                limit_price=limit_price,
+                lifecycle=broker_status_to_lifecycle(
+                    status, filled_quantity=filled, remaining_quantity=remaining
+                ),
+            )
+        except (ValueError, ArithmeticError, BrokerError) as error:
+            self.bridge.notices.append(
+                f"[completed-order] dropped unreadable record (ref={order_ref!r}): {error}"
+            )
+            return None
 
     async def qualify_underlying(self, symbol: str) -> UnderlyingContract:
         app = self._require_app()

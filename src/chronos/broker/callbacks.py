@@ -327,6 +327,7 @@ class CallbackBridge:
         self._current_time: _SingleFlight | None = None
         self._positions: _SingleFlight | None = None
         self._open_orders: _SingleFlight | None = None
+        self._completed_orders: _SingleFlight | None = None
         self._order_acks: dict[int, _SingleFlight] = {}
         self.order_statuses: dict[int, tuple[str, float, float]] = {}
         self._quotes: dict[int, QuoteState] = {}
@@ -486,6 +487,26 @@ class CallbackBridge:
         if flight is not None:
             flight.done.set()
 
+    def start_completed_orders(self) -> _SingleFlight:
+        with self._lock:
+            if self._completed_orders is not None and not self._completed_orders.done.is_set():
+                raise RuntimeError("a completed-orders request is already in flight")
+            flight = _SingleFlight()
+            self._completed_orders = flight
+            return flight
+
+    def on_completed_order(self, contract: Any, order: Any, order_state: Any) -> None:
+        with self._lock:
+            flight = self._completed_orders
+        if flight is not None and not flight.done.is_set():
+            flight.items.append((contract, order, order_state))
+
+    def on_completed_orders_end(self) -> None:
+        with self._lock:
+            flight = self._completed_orders
+        if flight is not None:
+            flight.done.set()
+
     def reset_for_reconnect(self) -> None:
         """Clear connection-scoped state before a fresh handshake (finding H4).
 
@@ -568,7 +589,12 @@ class CallbackBridge:
 
     def _fail_all_single_flights(self, reason: str) -> None:
         with self._lock:
-            flights = [self._current_time, self._positions, self._open_orders]
+            flights = [
+                self._current_time,
+                self._positions,
+                self._open_orders,
+                self._completed_orders,
+            ]
             flights.extend(self._order_acks.values())
             for flight in flights:
                 if flight is not None:
