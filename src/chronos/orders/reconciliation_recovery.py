@@ -16,15 +16,20 @@ because a broker snapshot cannot be atomic with the local lifecycle write
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, time
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
+from chronos.broker.base import BrokerError, CompletedOrderEvidence
 from chronos.broker.connection import BrokerConnectionManager
 from chronos.domain.enums import ConnectionState, OrderLifecycle
 from chronos.domain.models import BrokerExecution, BrokerOrder
 from chronos.orders.reconciliation_readiness import ReconciliationReadiness
-from chronos.orders.state_machine import TERMINAL_ORDER_LIFECYCLES
+from chronos.orders.state_machine import (
+    TERMINAL_ORDER_LIFECYCLES,
+    OrderLifecycleError,
+    OrderLifecycleMachine,
+)
 from chronos.orders.tracker import OrderIdentityConflict, OrderStatusUpdate, OrderTracker
 from chronos.persistence.order_repositories import (
     OrderIntentRecord,
@@ -485,6 +490,97 @@ def _unresolved_evidence_reason(
     return "owned order was absent from the broker order and execution snapshots"
 
 
+# Statuses the settle planner owns: it alone decides their exit, from one evidence generation.
+_SETTLE_STATUSES = frozenset({OrderLifecycle.CANCEL_PENDING, OrderLifecycle.PARTIALLY_FILLED})
+_TERMINAL_VENUE = frozenset(
+    {OrderLifecycle.CANCELLED, OrderLifecycle.FILLED, OrderLifecycle.REJECTED}
+)
+_NO_COMPLETED_EVIDENCE = "completed-orders evidence is not available"
+
+
+
+def _owned_signature(
+    working: list[BrokerOrder], fills: list[BrokerExecution]
+) -> tuple[tuple[tuple[int, str, Decimal], ...], tuple[str, ...]]:
+    """The owned evidence a settle write rests on, comparable across two snapshots."""
+
+    return (
+        tuple(sorted((o.broker_order_id, o.lifecycle.value, o.filled_quantity) for o in working)),
+        tuple(sorted(e.execution_id.strip() for e in fills)),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _SettlePlan:
+    """What the planner decided for one intent: write ONE CAS, hold, refuse, or defer.
+
+    ``kind``: ``write`` (one lifecycle/figure CAS), ``hold`` (proven and nothing to change),
+    ``refuse`` (typed reason; nothing is written), ``legacy`` (not the planner's: the existing
+    resolver decides, e.g. a partly filled order the venue still holds).
+    """
+
+    kind: str
+    reason: str = ""
+    to_status: OrderLifecycle | None = None
+    event_key: str = ""
+    filled: Decimal = Decimal("0")
+    remaining: Decimal = Decimal("0")
+    broker_order_id: int | None = None
+    permanent_id: int | None = None
+    client_id: int | None = None
+    evidence: tuple[tuple[str, str], ...] = ()
+    owned_open: tuple[tuple[int, str, Decimal], ...] = ()
+    owned_fills: tuple[str, ...] = ()
+
+
+def _plain(value: Decimal) -> str:
+    """A Decimal as a plain string (the book stores 8 places; evidence reads ``5``, not ``5E+0``)."""
+
+    return format(value.normalize(), "f")
+
+
+def _session_start(now: datetime, market_tz: ZoneInfo) -> datetime:
+    """S0: the start of the market-timezone date containing ``now``, as an aware UTC instant."""
+
+    local = now.astimezone(market_tz)
+    return datetime.combine(local.date(), time.min, tzinfo=market_tz).astimezone(UTC)
+
+
+def _completed_record_bound(
+    intent: OrderIntentRecord,
+    record: BrokerOrder,
+    *,
+    current_account_id: str,
+    expected_broker_client_id: int,
+    expected_limit_price: Decimal | None,
+    persisted_broker_order_id: int | None,
+    persisted_permanent_id: int | None,
+) -> bool:
+    """Exact identity (design §2.1): a record binds only when EVERY identifying field agrees.
+
+    The reference matched already (that is how it became a candidate); the persisted permId is
+    required (an intent that never learned one cannot bind a record) and a record's venue order
+    id must equal the persisted one when it carries one (0 = absent on completed rows).
+    """
+
+    return (
+        persisted_permanent_id is not None
+        and record.permanent_id == persisted_permanent_id
+        and (
+            not record.broker_order_id
+            or persisted_broker_order_id is None
+            or record.broker_order_id == persisted_broker_order_id
+        )
+        and _working_order_matches_intent(
+            intent,
+            record,
+            current_account_id=current_account_id,
+            expected_broker_client_id=expected_broker_client_id,
+            expected_limit_price=expected_limit_price,
+        )
+    )
+
+
 class OrderRestartReconciler:
     """Re-derive and persist the true state of every working intent."""
 
@@ -531,6 +627,8 @@ class OrderRestartReconciler:
         proven: list[RestartOrderObservation] = []
         unresolved: list[RestartOrderObservation] = []
         applied: list[OrderStatusUpdate] = []
+        settle_plans: list[tuple[OrderIntentRecord, int | None, _SettlePlan]] = []
+        read_completed = self._completed_reader()
         for intent in working:
             persisted_broker_order_id = self._tracker.broker_order_id(
                 intent.intent_id,
@@ -561,6 +659,21 @@ class OrderRestartReconciler:
                 original_limit_price=intent.limit_price,
                 current_account_id=current_account_id,
             )
+            if intent.status in _SETTLE_STATUSES:
+                plan = self._plan_settle(
+                    intent,
+                    current_account_id=current_account_id,
+                    now=now,
+                    open_orders=open_orders,
+                    executions=executions,
+                    read_completed=read_completed,
+                    expected_limit_price=expected_limit_price,
+                    persisted_broker_order_id=persisted_broker_order_id,
+                    persisted_permanent_id=persisted_permanent_id,
+                )
+                if plan.kind != "legacy":
+                    settle_plans.append((intent, persisted_permanent_id, plan))
+                    continue
             recorded_filled_quantity = self._tracker.recorded_filled_quantity(
                 intent.intent_id,
                 current_account_id=current_account_id,
@@ -634,6 +747,14 @@ class OrderRestartReconciler:
                 )
             )
 
+        self._act_on_settle_plans(
+            settle_plans,
+            current_account_id=current_account_id,
+            now=now,
+            proven=proven,
+            unresolved=unresolved,
+            applied=applied,
+        )
         remaining_active = tuple(
             RemainingActiveIntent(intent_id=intent.intent_id, status=intent.status)
             for intent in self._intents.active(current_account_id=current_account_id)
@@ -645,6 +766,352 @@ class OrderRestartReconciler:
             remaining_active=remaining_active,
             applied_updates=tuple(applied),
         )
+
+    # --- the CANCEL_PENDING / PARTIALLY_FILLED settle planner (design r3) --------------------
+    def _completed_reader(self):  # type: ignore[no-untyped-def]
+        """A once-per-pass lazy read of the venue's completed orders: (records, why-not)."""
+
+        cache: list[tuple[tuple[BrokerOrder, ...] | None, str]] = []
+
+        def read() -> tuple[tuple[BrokerOrder, ...] | None, str]:
+            if not cache:
+                broker = self._connection.broker
+                if not isinstance(broker, CompletedOrderEvidence):
+                    cache.append((None, f"{_NO_COMPLETED_EVIDENCE}: the broker has no such read"))
+                else:
+                    try:
+                        cache.append((self._connection.run(broker.completed_orders()), ""))
+                    except (BrokerError, TimeoutError) as error:
+                        cache.append((None, f"{_NO_COMPLETED_EVIDENCE}: {error}"))
+            return cache[0]
+
+        return read
+
+    def _witnessed_lower_bound(
+        self, figures: tuple[tuple[datetime, Decimal], ...], fills: list[BrokerExecution], now: datetime
+    ) -> Decimal:
+        """LB = max(max(X, E_prior) + E_today, Y), partitioned at the session boundary S0.
+
+        X / Y: the largest cumulative figure the book recorded before / since S0. E_prior /
+        E_today: owned execution quantity stamped before / since S0. Fills of different
+        sessions are disjoint, so they add; figures within one session overlap, so they max.
+        """
+
+        s0 = _session_start(now, self._market_tz)
+        prior = max((f for t, f in figures if t < s0), default=Decimal("0"))
+        today = max((f for t, f in figures if t >= s0), default=Decimal("0"))
+        e_prior = sum((e.quantity for e in fills if e.timestamp < s0), Decimal("0"))
+        e_today = sum((e.quantity for e in fills if e.timestamp >= s0), Decimal("0"))
+        return max(max(prior, e_prior) + e_today, today)
+
+    def _plan_settle(
+        self,
+        intent: OrderIntentRecord,
+        *,
+        current_account_id: str,
+        now: datetime,
+        open_orders: tuple[BrokerOrder, ...],
+        executions: tuple[BrokerExecution, ...],
+        read_completed,  # type: ignore[no-untyped-def]
+        expected_limit_price: Decimal | None,
+        persisted_broker_order_id: int | None,
+        persisted_permanent_id: int | None,
+    ) -> _SettlePlan:
+        """One decision per intent over ONE evidence generation; never writes."""
+
+        order_ref = intent.order_ref
+        if not order_ref:
+            return _SettlePlan("legacy")
+        is_pending = intent.status is OrderLifecycle.CANCEL_PENDING
+        conflict = _identity_conflict_reason(
+            order_ref=order_ref,
+            persisted_permanent_id=persisted_permanent_id,
+            open_orders=open_orders,
+            executions=executions,
+        )
+        if conflict is not None:
+            return _SettlePlan("refuse", conflict)
+        working = [
+            o
+            for o in open_orders
+            if _is_owned(o, order_ref=order_ref, persisted_permanent_id=persisted_permanent_id)
+        ]
+        fills = [
+            e
+            for e in executions
+            if _is_owned(e, order_ref=order_ref, persisted_permanent_id=persisted_permanent_id)
+        ]
+        if len(working) > 1:
+            return _SettlePlan("refuse", "multiple broker orders share the owned order reference")
+        if not is_pending and working:
+            return _SettlePlan("legacy")  # a partly filled order the venue still holds
+        signature = _owned_signature(working, fills)
+        identity_ok = (
+            all(
+                o.broker_order_id == persisted_broker_order_id
+                for o in working
+                if persisted_broker_order_id is not None
+            )
+            and (
+                not working
+                or _working_order_matches_intent(
+                    intent,
+                    working[0],
+                    current_account_id=current_account_id,
+                    expected_broker_client_id=self._expected_broker_client_id,
+                    expected_limit_price=expected_limit_price,
+                )
+            )
+            and all(
+                persisted_broker_order_id is None or e.broker_order_id == persisted_broker_order_id
+                for e in fills
+            )
+            and _executions_match_intent(
+                intent,
+                tuple(fills),
+                current_account_id=current_account_id,
+                expected_broker_client_id=self._expected_broker_client_id,
+                working_order=working[0] if working else None,
+            )
+        )
+        if not identity_ok:
+            return _SettlePlan(
+                "refuse", "owned order reference matched conflicting account or economic identity"
+            )
+        figures = self._tracker.fill_figures(
+            intent.intent_id, current_account_id=current_account_id
+        )
+        lower = self._witnessed_lower_bound(figures, fills, now)
+        quantity = intent.quantity
+
+        def settle(
+            record: BrokerOrder | None, figure: Decimal, target: OrderLifecycle, source: str
+        ) -> _SettlePlan:
+            if figure < lower:
+                return _SettlePlan(
+                    "refuse",
+                    f"venue fill figure {figure} is below the witnessed lower bound {lower}",
+                )
+            try:
+                OrderLifecycleMachine(intent.status).apply(target)
+            except OrderLifecycleError as error:
+                return _SettlePlan("refuse", str(error))
+            return _SettlePlan(
+                "write",
+                f"settled {target.value} from {source}",
+                to_status=target,
+                event_key=f"{intent.intent_id}:settle:{target.value}",
+                filled=figure,
+                remaining=max(quantity - figure, Decimal("0")),
+                broker_order_id=record.broker_order_id if record and record.broker_order_id else persisted_broker_order_id,
+                permanent_id=persisted_permanent_id,
+                client_id=self._expected_broker_client_id,
+                evidence=(
+                    ("settled_from", source),
+                    ("venue_fill_figure", _plain(figure)),
+                    ("witnessed_lower_bound", _plain(lower)),
+                    ("unwitnessed_upper_bound", _plain(figure - lower)),
+                ),
+                owned_open=signature[0],
+                owned_fills=signature[1],
+            )
+
+        def from_terminal(record: BrokerOrder, source: str) -> _SettlePlan:
+            figure = record.filled_quantity
+            if record.lifecycle is OrderLifecycle.CANCELLED:
+                return settle(record, figure, OrderLifecycle.CANCELLED, source)
+            if record.lifecycle is OrderLifecycle.FILLED or figure >= quantity:
+                if figure < quantity:
+                    return _SettlePlan(
+                        "refuse", f"terminal record does not fill the order ({figure} of {quantity})"
+                    )
+                return settle(record, figure, OrderLifecycle.FILLED, source)
+            return _SettlePlan(
+                "refuse",
+                f"unexpected terminal status for a cancel: {record.lifecycle.value}",
+            )
+
+        if working:
+            order = working[0]
+            terminal = order.lifecycle in _TERMINAL_VENUE or order.filled_quantity >= quantity
+            if not terminal and order.lifecycle is not OrderLifecycle.CANCEL_PENDING:
+                records, _ = read_completed()
+                bound = [
+                    r
+                    for r in records or ()
+                    if r.order_ref == order_ref and r.lifecycle in _TERMINAL_VENUE
+                ]
+                if bound:
+                    return _SettlePlan(
+                        "refuse", "the working order and a terminal record disagree"
+                    )
+            if terminal:
+                return from_terminal(order, "open_order")
+            figure = order.filled_quantity
+            if figure < lower:
+                return _SettlePlan(
+                    "refuse",
+                    f"venue fill figure {figure} is below the witnessed lower bound {lower}",
+                )
+            recorded = max((f for _, f in figures), default=Decimal("0"))
+            if figure > recorded:
+                return _SettlePlan(
+                    "write",
+                    "fill progress recorded in place",
+                    to_status=intent.status,
+                    event_key=f"{intent.intent_id}:fill_progress:{figure}",
+                    filled=figure,
+                    remaining=max(quantity - figure, Decimal("0")),
+                    broker_order_id=order.broker_order_id,
+                    permanent_id=persisted_permanent_id,
+                    client_id=self._expected_broker_client_id,
+                    evidence=(
+                        ("settled_from", "open_order"),
+                        ("venue_fill_figure", _plain(figure)),
+                        ("witnessed_lower_bound", _plain(lower)),
+                    ),
+                    owned_open=signature[0],
+                    owned_fills=signature[1],
+                )
+            return _SettlePlan("hold", "cancel pending; order still working at the venue")
+
+        records, why = read_completed()
+        if records is None:
+            return _SettlePlan("refuse", why) if is_pending else _SettlePlan("legacy")
+        candidates = [r for r in records if r.order_ref == order_ref]
+        if not candidates:
+            if not is_pending:
+                return _SettlePlan("legacy")
+            if fills and lower >= quantity:
+                if lower > quantity:
+                    return _SettlePlan(
+                        "refuse", f"witnessed fills {lower} exceed the order size {quantity}"
+                    )
+                return settle(None, quantity, OrderLifecycle.FILLED, "executions")
+            if fills:
+                return _SettlePlan(
+                    "refuse", "cancel pending; order absent; fills present; no terminal record"
+                )
+            return _SettlePlan("refuse", "cancel pending; order absent; no terminal record")
+        if len(candidates) > 1:
+            return _SettlePlan(
+                "refuse",
+                f"completed orders are ambiguous: {len(candidates)} records share the reference",
+            )
+        record = candidates[0]
+        if not _completed_record_bound(
+            intent,
+            record,
+            current_account_id=current_account_id,
+            expected_broker_client_id=self._expected_broker_client_id,
+            expected_limit_price=expected_limit_price,
+            persisted_broker_order_id=persisted_broker_order_id,
+            persisted_permanent_id=persisted_permanent_id,
+        ):
+            return _SettlePlan("refuse", "completed order record is not bound to this intent")
+        return from_terminal(record, "completed_order")
+
+    def _act_on_settle_plans(
+        self,
+        plans: list[tuple[OrderIntentRecord, int | None, _SettlePlan]],
+        *,
+        current_account_id: str,
+        now: datetime,
+        proven: list[RestartOrderObservation],
+        unresolved: list[RestartOrderObservation],
+        applied: list[OrderStatusUpdate],
+    ) -> None:
+        """Hold/refuse report as-is; every write is CONFIRMED by a second snapshot, then one CAS."""
+
+        fresh: tuple[tuple[BrokerOrder, ...], tuple[BrokerExecution, ...]] | None = None
+        if any(plan.kind == "write" for _, _, plan in plans):
+            fresh = (
+                self._connection.run(self._connection.broker.open_orders()),
+                self._connection.run(self._connection.broker.executions()),
+            )
+        for intent, permanent_id, plan in plans:
+            observed = RestartOrderObservation(
+                intent_id=intent.intent_id,
+                local_status=intent.status,
+                broker_status=None,
+                transition_applied=False,
+                reason=plan.reason,
+            )
+            if plan.kind == "refuse":
+                unresolved.append(observed)
+                continue
+            if plan.kind == "hold":
+                proven.append(observed)
+                continue
+            assert fresh is not None and plan.to_status is not None and intent.order_ref
+            again = _owned_signature(
+                [
+                    o
+                    for o in fresh[0]
+                    if _is_owned(
+                        o, order_ref=intent.order_ref, persisted_permanent_id=permanent_id
+                    )
+                ],
+                [
+                    e
+                    for e in fresh[1]
+                    if _is_owned(
+                        e, order_ref=intent.order_ref, persisted_permanent_id=permanent_id
+                    )
+                ],
+            )
+            if again != (plan.owned_open, plan.owned_fills):
+                unresolved.append(
+                    RestartOrderObservation(
+                        intent_id=intent.intent_id,
+                        local_status=intent.status,
+                        broker_status=None,
+                        transition_applied=False,
+                        reason="evidence changed between snapshots; nothing was written",
+                    )
+                )
+                continue
+            won = self._tracker.record_planned_transition(
+                intent_id=intent.intent_id,
+                current_account_id=current_account_id,
+                from_status=intent.status,
+                to_status=plan.to_status,
+                event_key=plan.event_key,
+                source="FILL_PROGRESS" if plan.to_status is intent.status else "RECONCILE",
+                broker_order_id=plan.broker_order_id,
+                permanent_id=plan.permanent_id,
+                client_id=plan.client_id,
+                filled_quantity=plan.filled,
+                remaining_quantity=plan.remaining,
+                evidence=dict(plan.evidence),
+                now=now,
+            )
+            changed = won and plan.to_status is not intent.status
+            if changed:
+                applied.append(
+                    OrderStatusUpdate(
+                        intent_id=intent.intent_id,
+                        broker_order_id=plan.broker_order_id,
+                        permanent_id=plan.permanent_id,
+                        client_id=plan.client_id,
+                        lifecycle=plan.to_status,
+                        filled_quantity=plan.filled,
+                        remaining_quantity=plan.remaining,
+                        source="RECONCILE",
+                        occurred_at=now,
+                    )
+                )
+            proven.append(
+                RestartOrderObservation(
+                    intent_id=intent.intent_id,
+                    local_status=intent.status,
+                    broker_status=plan.to_status,
+                    transition_applied=changed,
+                    reason=plan.reason
+                    if won
+                    else "lifecycle moved before the settle write; left to the writer that won",
+                )
+            )
 
     def operator_resolve(
         self,

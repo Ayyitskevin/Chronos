@@ -153,6 +153,18 @@ class OptionChainResponse(Sequence[OptionChainParameters]):
 
 
 @runtime_checkable
+class CompletedOrderEvidence(Protocol):
+    """Optional capability: the venue's completed (terminal) orders for this account/session.
+
+    Not part of :class:`Broker`: only an adapter that can read ``reqCompletedOrders`` provides
+    it. The CANCEL_PENDING settle planner treats its absence as "no terminal evidence" -- an
+    order that is merely missing from the open book never settles on its own.
+    """
+
+    async def completed_orders(self) -> tuple[BrokerOrder, ...]: ...
+
+
+@runtime_checkable
 class Broker(Protocol):
     """Async broker boundary; callers serialize it through the connection manager."""
 

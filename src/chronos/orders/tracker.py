@@ -312,6 +312,60 @@ class OrderTracker:
             enforce_from_status=True,
         )
 
+    def record_planned_transition(
+        self,
+        *,
+        intent_id: str,
+        current_account_id: str,
+        from_status: OrderLifecycle,
+        to_status: OrderLifecycle,
+        event_key: str,
+        source: str,
+        broker_order_id: int | None,
+        permanent_id: int | None,
+        client_id: int | None,
+        filled_quantity: Decimal,
+        remaining_quantity: Decimal,
+        evidence: dict[str, object],
+        now: datetime,
+    ) -> bool:
+        """One lifecycle CAS planned by the reconciler from proven broker evidence.
+
+        True-CAS guarded (``enforce_from_status``): if the intent left ``from_status`` since the
+        planner read it -- the cancel service completed, a late callback landed -- nothing is
+        written and ``False`` is returned. ``from_status == to_status`` records fill progress in
+        place (the identity-refinement precedent) without moving the lifecycle.
+        """
+
+        return self._tracker.record_transition(
+            intent_id=intent_id,
+            event_key=event_key,
+            source=source,
+            from_status=from_status,
+            to_status=to_status,
+            current_account_id=current_account_id,
+            broker_order_id=broker_order_id,
+            permanent_id=permanent_id,
+            client_id=client_id,
+            filled_quantity=filled_quantity,
+            remaining_quantity=remaining_quantity,
+            evidence=evidence,
+            occurred_at=now,
+            enforce_from_status=True,
+        )
+
+    def fill_figures(
+        self, intent_id: str, *, current_account_id: str
+    ) -> tuple[tuple[datetime, Decimal], ...]:
+        """Every recorded cumulative fill figure with when it was recorded (settle witness)."""
+
+        events = self._tracker.events(intent_id, current_account_id=current_account_id)
+        return tuple(
+            (event.occurred_at, event.filled_quantity)
+            for event in events
+            if event.filled_quantity is not None
+        )
+
     def first_event_time(
         self,
         intent_id: str,
