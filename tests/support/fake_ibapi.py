@@ -60,10 +60,28 @@ and open interest 28/27, ``tickOptionComputation`` types 10/11/12 before the mod
 that order, LIVE tick ids only: a delayed type-3/4 stream would use 66/67/68 and 83, which this
 fake does not send); a streaming option request has no ``tickSnapshotEnd``; ``position`` avgCost
 for an option is per contract with the multiplier included; the daily-bar date text (``YYYYMMDD``
-under formatDate 1), a bar for the session in progress when the clock is mid-session, no exchange
-holidays, no ``barCount``/``wap`` semantics, and the error-162 text; and everything about
-INTRADAY bars (refused loudly: not modelled). What a real gateway does for an unknown market
-rule id is not known: the fake refuses it loudly rather than invent an answer.
+under formatDate 1), that the sim date's bar exists only from the 09:30 New York open, is partial
+(a quarter of the day's volume) until the 16:00 close and complete after it, and that weekends
+carry none, no exchange holidays, no ``barCount``/``wap`` semantics, and the error-162 text; and
+everything about INTRADAY bars (refused loudly: not modelled). What a real gateway does for an
+unknown market rule id is not known: the fake refuses it loudly rather than invent an answer.
+
+B1 U-f1 r1 ADDITIONS (reader review of 2c1c764; also ASSUMED-IB, the K4 / B1-day list): the fake
+records every served historical request in :attr:`FakeGateway.historical_requests` and refuses
+``keepUpToDate=True`` loudly, so the ADAPTER's request (TRADES, regular hours, YYYYMMDD, not
+streaming) is pinned; it does NOT model what a real gateway does with ``useRTH``,
+``whatToShow``, ``endDateTime`` or ``keepUpToDate`` (it serves the same series whatever they
+are), so only the request is rehearsed, not the venue's answer to it. Also NOT modelled, each a
+K4 / B1-day item: QUALIFICATION CARDINALITY (exactly one detail per option identity here; a real
+gateway can answer several for one identity, for example several trading classes or exchanges,
+which the adapter must treat as ambiguous); CHAIN REALISM (the secDefOptParams reply is one SMART
+row; real replies carry several exchanges, trading classes and multipliers and hundreds of
+strikes, so candidate-count and size limits are not exercised); the SENTINEL FAMILY (the
+unset-double maximum float and -1.0 for implied volatility are pinned; any other value a real
+gateway uses for "not computed" is not). SCOPE: ``capture_readonly.py`` never requests option
+quotes (it stops at qualification and ``option_market_rules``), so the option tick model above
+rehearses ``request_option_quotes``, a path the B1 capture does not run: U-f2 should not expect
+option ticks in a capture.
 """
 
 from __future__ import annotations
@@ -77,6 +95,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, ClassVar
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -102,6 +121,7 @@ from tests.support.order_fakes import option_contract
 from tests.support.sim_broker import (
     _CONTRACT_ACCOUNT,
     SimBroker,
+    SimClock,
     _run_without_a_loop,
     _seeded_contract_broker,
     _SeedGuard,
@@ -109,6 +129,10 @@ from tests.support.sim_broker import (
 
 ACCOUNT = _CONTRACT_ACCOUNT
 CLIENT_ID = 17
+#: the exchange the fake's bars are dated in, and its regular session (ASSUMED-IB: no holidays)
+EXCHANGE_TIME_ZONE = ZoneInfo("America/New_York")
+SESSION_OPEN = (9, 30)
+SESSION_CLOSE = (16, 0)
 MANUAL_CLIENT_ID = 0
 OWNED_ID = 1001  # the seed's Chronos order (CHR-CONTRACT-SEED), client 17, 5 of 10 filled
 FOREIGN_ID = 1002  # the seed's manual order (MANUAL-1), client 0, working
@@ -505,10 +529,27 @@ class FakeEClient:
         keepUpToDate: bool,
         chartOptions: Any,
     ) -> None:
-        del endDateTime, whatToShow, useRTH, keepUpToDate, chartOptions
         self.gateway.record(self, "reqHistoricalData")
+        if keepUpToDate:
+            raise AssertionError(
+                "historical request keepUpToDate=True is not modelled: the fake serves one-shot "
+                "(non-streaming) daily bars only"
+            )
         self.gateway.historical_data(
             self, int(reqId), contract, str(durationStr), str(barSizeSetting), int(formatDate)
+        )
+        self.gateway.historical_requests.append(
+            (
+                int(contract.conId),
+                str(endDateTime),
+                str(durationStr),
+                str(barSizeSetting),
+                str(whatToShow),
+                int(useRTH),
+                int(formatDate),
+                bool(keepUpToDate),
+                list(chartOptions or []),
+            )
         )
 
     def cancelOrder(self, orderId: int, manualCancelOrderTime: str = "") -> None:
@@ -587,6 +628,9 @@ class FakeGateway:
         #: con id -> how reqHistoricalData is answered: an int >= 100 is that error code for
         #: the request and nothing else; "hang" sends nothing
         self.historical: dict[int, Any] = {}
+        #: every SERVED reqHistoricalData as (conId, endDateTime, duration, barSize, whatToShow,
+        #: useRTH, formatDate, keepUpToDate, chartOptions); a refused request is not recorded
+        self.historical_requests: list[tuple[Any, ...]] = []
         _run_without_a_loop(self._seed_registry())
 
     @classmethod
@@ -632,6 +676,14 @@ class FakeGateway:
             self._registry[contract.con_id] = contract
         option = option_contract()
         self._registry[option.con_id] = option
+
+    def set_sim_time(self, when: datetime) -> None:
+        """Move the manual sim clock forward (it never moves back); the fake has no other clock."""
+
+        clock = self.sim._clock
+        if not isinstance(clock, SimClock):
+            raise AssertionError("the fake's sim clock is not a SimClock; cannot move it")
+        clock.set(when)
 
     def sim_now(self) -> datetime:
         out: list[datetime] = []
@@ -1112,16 +1164,23 @@ class FakeGateway:
     def _generated_bars(self, lookback_days: int) -> list[FakeBarData]:
         """Weekday sessions in the ``lookback_days`` calendar days ending at the sim date.
 
-        A pure function of the sim clock: no wall clock, no randomness. The session in progress
-        (the sim date, mid-session) gets a bar with a quarter of the day's volume: ASSUMED-IB.
+        A pure function of the sim clock: no wall clock, no randomness. The sim date is read in
+        :data:`EXCHANGE_TIME_ZONE`. Its bar exists only on a weekday from the open, carries a
+        quarter of the day's volume while the session is in progress (before the close) and the
+        full volume after it: ASSUMED-IB.
         """
 
-        today = self.sim_now().date()
+        now = self.sim_now().astimezone(EXCHANGE_TIME_ZONE)
+        today = now.date()
+        clock = (now.hour, now.minute)
+        has_todays_bar = today.weekday() < 5 and clock >= SESSION_OPEN
+        in_progress = SESSION_OPEN <= clock < SESSION_CLOSE
         start = today - timedelta(days=lookback_days - 1)
         sessions = [
             start + timedelta(days=offset)
             for offset in range(lookback_days)
             if (start + timedelta(days=offset)).weekday() < 5
+            and ((start + timedelta(days=offset)) != today or has_todays_bar)
         ]
         bars: list[FakeBarData] = []
         for index, session in enumerate(sessions):
@@ -1134,7 +1193,7 @@ class FakeGateway:
                     high=round(base + 1.0, 2),
                     low=round(base - 1.0, 2),
                     close=round(base + 0.25, 2),
-                    volume=volume / 4 if session == today else volume,
+                    volume=volume / 4 if (session == today and in_progress) else volume,
                 )
             )
         return bars
@@ -1162,7 +1221,11 @@ class FakeGateway:
             if isinstance(answer, int) and answer >= 100:
                 self._error(client, req_id, answer, "Historical Market Data Service error message")
                 return
-            bars = self.bars_override.get(con_id) or self._generated_bars(int(count))
+            bars = (
+                self.bars_override[con_id]
+                if con_id in self.bars_override  # an empty list is "the venue returned no bars"
+                else self._generated_bars(int(count))
+            )
             for bar in bars:
                 client.emit("historicalData", req_id, bar)
             first = bars[0].date if bars else ""
