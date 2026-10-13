@@ -134,6 +134,20 @@ def _run(host: dict[str, Path], environ: Mapping[str, str] | None = None) -> B1R
     )
 
 
+def _bounded_run(host: dict[str, Path], seconds: float = 10.0) -> B1Report:
+    """``_run`` on a daemon thread: a regression that blocks (a path read of a planted FIFO)
+    fails the test instead of hanging the suite (the reader's build-ua P3-2 lesson)."""
+
+    import threading
+
+    box: list[B1Report] = []
+    worker = threading.Thread(target=lambda: box.append(_run(host)), daemon=True)
+    worker.start()
+    worker.join(seconds)
+    assert box, f"the preflight did not return within {seconds:.0f}s (did a read block?)"
+    return box[0]
+
+
 def _rewrite(host: dict[str, Path], key: str, value: str | None) -> None:
     lines = [ln for ln in host["env"].read_text().splitlines() if not ln.startswith(f"{key}=")]
     if value is not None:
@@ -236,7 +250,7 @@ def test_an_unsafe_env_file_is_refused_before_anything_is_read(
     else:
         env.unlink()
         os.mkfifo(env)  # must refuse, not hang (O_NONBLOCK)
-    report = _run(host)
+    report = _bounded_run(host)
     assert report.verdict()[1] == EXIT_REFUSED
     assert _levels(report, "env-file") == ["REFUSE"]
     assert "chronos-preflight env file" in _text(report, "env-file")
