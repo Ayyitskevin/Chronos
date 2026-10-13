@@ -456,8 +456,24 @@ async def test_the_adapter_returns_the_series_the_capture_asks_for(
     assert "reqHistoricalData" in [m for _c, m in day.transcript]
 
 
+class _EventCollector(logging.Handler):
+    """Collects ``extra={"event": ...}`` names straight off a named logger.
+
+    ``caplog`` listens on the root logger, which goes blind once any test has run
+    ``configure_logging`` (the ``chronos`` logger stops propagating); a handler on the adapter's
+    own logger does not depend on propagation.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.WARNING)
+        self.events: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.events.append(str(getattr(record, "event", "")))
+
+
 async def test_a_malformed_row_is_dropped_and_the_rest_kept(
-    day: fake_ibapi.FakeGateway, caplog: pytest.LogCaptureFixture
+    day: fake_ibapi.FakeGateway,
 ) -> None:
     bad = fake_ibapi.FakeBarData("20261009", open_=100.0, high=99.0, low=101.0, close=100.0)
     day.bars_override[999] = [
@@ -465,18 +481,22 @@ async def test_a_malformed_row_is_dropped_and_the_rest_kept(
         bad,  # high below low
         fake_ibapi.FakeBarData("20261012", open_=100.5, high=102.0, low=100.0, close=101.0),
     ]
+    collector = _EventCollector()
+    logger = logging.getLogger("chronos.broker.official_ibkr")
+    previous_level = logger.level
+    logger.addHandler(collector)
+    logger.setLevel(logging.WARNING)
     adapter = _broker()
     await adapter.connect()
     try:
         underlying = await adapter.qualify_underlying("AAPL")
-        with caplog.at_level(logging.WARNING):
-            series = await adapter.historical_bars(underlying, lookback_days=30)
+        series = await adapter.historical_bars(underlying, lookback_days=30)
     finally:
         await adapter.disconnect()
+        logger.removeHandler(collector)
+        logger.setLevel(previous_level)
     assert [bar.session_date for bar in series.bars] == [date(2026, 10, 8), date(2026, 10, 12)]
-    assert "historical_bar_unparseable" in " ".join(
-        str(getattr(record, "event", "")) for record in caplog.records
-    )
+    assert collector.events == ["historical_bar_unparseable"]
 
 
 async def test_a_historical_data_error_fails_the_request(
