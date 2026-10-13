@@ -276,7 +276,9 @@ def test_operator_resolve_refuses_a_non_working_row_with_fills(
             now=NOW,
         )
 
-    assert "identity" not in str(refusal.value)
+    assert "lifecycle or fills" in str(
+        refusal.value
+    )  # it names the real possibilities, not just identity
     assert rig.status() is OrderLifecycle.SUBMISSION_UNKNOWN
     assert rig.event_count() == events_before
 
