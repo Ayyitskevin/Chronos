@@ -306,6 +306,21 @@ def test_an_exported_variable_that_would_outrank_the_file_is_refused() -> None:
             },
             ["P5", "P8", "P13"],
         ),
+        # Daybreak build-uc r3 P2-3: P8 is decidable from the file too (IB_CLIENT_ID=0, the
+        # two client ids equal, an empty SYMBOL_ALLOWLIST, or any of them unparseable), so an
+        # earlier primitive or load refusal must not hide it either
+        ({"IB_PORT": "seven", "IB_DATA_CLIENT_ID": "17"}, ["P1", "P3", "P8"]),
+        ({"IB_PORT": "seven", "IB_CLIENT_ID": "0"}, ["P1", "P3", "P8"]),
+        ({"IB_PORT": "seven", "SYMBOL_ALLOWLIST": ""}, ["P1", "P3", "P8"]),
+        ({"ALLOW_LIVE_TRADING": "true", "IB_DATA_CLIENT_ID": "17"}, ["P1", "P5", "P8"]),
+        ({"ALLOW_LIVE_TRADING": "true", "SYMBOL_ALLOWLIST": ""}, ["P1", "P5", "P8"]),
+        (  # an unparseable client id is a field error (P1) and, raw, fails closed as P8
+            {"IB_CLIENT_ID": "seventeen", "ALLOW_ORDER_TRANSMIT": "true"},
+            ["P1", "P5", "P8"],
+        ),
+        # the r4 sweep: every other raw-decidable condition behind the same first refusal
+        ({"IB_PORT": "seven", "BROKER_MODE": "demo"}, ["P1", "P2", "P3"]),
+        ({"IB_PORT": "seven", "IB_ACCOUNT_ID": "U1234567"}, ["P1", "P3", "P4"]),
     ],
 )
 def test_a_load_refusal_still_reports_every_independent_condition(
@@ -315,6 +330,49 @@ def test_a_load_refusal_still_reports_every_independent_condition(
     for key, value in changes.items():
         text = _set(text, key, value)
     assert _ids(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "phrase"),
+    [
+        ("IB_DATA_CLIENT_ID", "17", "IB_DATA_CLIENT_ID must differ from IB_CLIENT_ID"),
+        ("IB_CLIENT_ID", "0", "IB_CLIENT_ID=0"),
+        ("SYMBOL_ALLOWLIST", "", "SYMBOL_ALLOWLIST must contain at least one symbol"),
+    ],
+)
+def test_a_p8_first_refusal_keeps_its_own_bounded_load_message_once(
+    key: str, value: str, phrase: str
+) -> None:
+    """Daybreak r3 P2-3 control: when P8 is the load refusal itself there is ONE P8 line, and it
+    carries the Settings refusal's own bounded message, not the raw pass's form."""
+
+    findings = preflight_b1_env(_set(_good_text(), key, value))
+    assert [item[0] for item in findings] == ["P8"]
+    assert phrase in findings[0][1]
+
+
+def test_no_condition_is_hidden_behind_a_first_load_refusal() -> None:
+    """The r4 sweep. P6, P7, P9, P10, P11 and P12 are decided before the load; P2, P3, P4, P5,
+    P8 and P13 are re-decided from the file after any refusal; P1 is the refusal itself. So a
+    file that breaks one of everything behind an unparseable port still reports all of it."""
+
+    text = _good_text()
+    for key, value in {
+        "IB_PORT": "seven",  # the first refusal: a field that will not parse (P1 + raw P3)
+        "BROKER_ADAPTER": "ib_async",  # P2
+        "IB_ACCOUNT_ID": "U1234567",  # P4
+        "ALLOW_ORDER_TRANSMIT": "true",  # P5
+        "AUTONOMY_MANDATE_FILE": "/srv/mandate.json",  # P6
+        "DATABASE_URL": None,  # P7
+        "IB_DATA_CLIENT_ID": "17",  # P8
+        "CHRONOS_CAPTURE_PEPPER": None,  # P10
+        "IB_ACCOUNT_ALLOWLIST": "DU7654321",  # P13
+    }.items():
+        text = _set(text, key, value)
+    text += "IB_PASSWORD=dummy\n"  # P9
+    assert _ids(text, file_mode=0o644, environ={"IB_PORT": "7496"}) == [  # P11, P12
+        f"P{n}" for n in range(1, 14)
+    ]
 
 
 def test_several_broken_conditions_are_all_reported_in_order() -> None:
