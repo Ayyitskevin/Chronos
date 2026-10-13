@@ -20,8 +20,8 @@ import logging
 import math
 import threading
 from collections import deque
-from collections.abc import Callable
-from contextlib import AbstractContextManager
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -420,6 +420,15 @@ class CallbackBridge:
     def adapter_epoch(self) -> int:
         with self._lock:
             return self._adapter_epoch
+
+    @contextmanager
+    def held_at_adapter_epoch(self, expected: int) -> Iterator[bool]:
+        """Hold the bridge lock and yield whether ``adapter_epoch`` is still ``expected`` (U-B
+        r1, Daybreak P2-1): a reconnect reset or a connection-uncertainty bump waits for the
+        body. Taken after the readiness latch's lock, never before it."""
+
+        with self._lock:
+            yield self._adapter_epoch == expected
 
     def _invalidate_connection(self, reason: str) -> None:
         with self._lock:

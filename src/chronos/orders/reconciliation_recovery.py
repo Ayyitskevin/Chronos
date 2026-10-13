@@ -16,7 +16,8 @@ because a broker snapshot cannot be atomic with the local lifecycle write
 from __future__ import annotations
 
 import time as _time_module
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, time
 from decimal import Decimal
@@ -593,6 +594,9 @@ class _SettlePlan:
     owned_fills: tuple[BrokerExecution, ...] = ()
     record: BrokerOrder | None = None  # the bound terminal record (completed order or open row)
     source: str = ""  # the event source when it is not the default (U-B: RECOVERY_SOURCE)
+    #: U-B r1: (uncertainty_epoch, adapter_epoch or None) the plan observed; a write that rests
+    #: on a working-order observation is made only while both are still these (Daybreak P2-1)
+    epochs: tuple[int, int | None] | None = None
     dwell: _Dwell | None = None  # U-B: this pass's observation of the recovery dwell
 
 
@@ -900,6 +904,36 @@ class OrderRestartReconciler:
             return cache[0]
 
         return read
+
+    def _current_epochs(self) -> tuple[int, int | None]:
+        return (
+            self._reconciliation_readiness.uncertainty_epoch(),
+            _adapter_epoch(self._connection.broker),
+        )
+
+    @contextmanager
+    def _epochs_held(self, epochs: tuple[int, int | None] | None) -> Iterator[bool]:
+        """Linearise one write to the epochs its confirmed plan observed (Daybreak U-B r1 P2-1).
+
+        Holds the readiness latch's lock, then the adapter bridge's (the existing lock order),
+        and yields whether both epochs are unchanged; an invalidation or a reconnect that comes
+        now waits for the write and lands after it. ``None`` = a write that rests on no
+        working-order observation (a settle on a terminal record): nothing to hold.
+        """
+
+        if epochs is None:
+            yield True
+            return
+        readiness_epoch, adapter_epoch = epochs
+        with ExitStack() as stack:
+            current = stack.enter_context(
+                self._reconciliation_readiness.held_at_uncertainty_epoch(readiness_epoch)
+            )
+            if current and adapter_epoch is not None:
+                bridge = getattr(self._connection.broker, "bridge", None)
+                hold = getattr(bridge, "held_at_adapter_epoch", None)
+                current = hold is not None and stack.enter_context(hold(adapter_epoch))
+            yield bool(current)
 
     def _recovered(self, intent: OrderIntentRecord, *, current_account_id: str) -> bool:
         """A SUBMITTED intent whose latest LIFECYCLE event is the U-B recovery from
@@ -1232,6 +1266,7 @@ class OrderRestartReconciler:
                     owned_fills=signature[1],
                     source=RECOVERY_SOURCE,
                     dwell=dwell,
+                    epochs=self._current_epochs(),
                 )
             recorded = max((f for _, f in figures), default=Decimal("0"))
             if figure > recorded:
@@ -1253,6 +1288,7 @@ class OrderRestartReconciler:
                     owned_open=signature[0],
                     owned_fills=signature[1],
                     dwell=dwell,
+                    epochs=self._current_epochs(),
                 )
             return _SettlePlan(
                 "hold", "cancel pending; order still working at the venue", dwell=dwell
@@ -1357,22 +1393,35 @@ class OrderRestartReconciler:
                     )
                 )
                 continue
-            won = self._tracker.record_planned_transition(
-                intent_id=intent.intent_id,
-                current_account_id=current_account_id,
-                from_status=intent.status,
-                to_status=plan.to_status,
-                event_key=plan.event_key,
-                source=plan.source
-                or ("FILL_PROGRESS" if plan.to_status is intent.status else "RECONCILE"),
-                broker_order_id=plan.broker_order_id,
-                permanent_id=plan.permanent_id,
-                client_id=plan.client_id,
-                filled_quantity=plan.filled,
-                remaining_quantity=plan.remaining,
-                evidence=dict(plan.evidence),
-                now=now,
-            )
+            with self._epochs_held(plan.epochs) as current:
+                if current:
+                    won = self._tracker.record_planned_transition(
+                        intent_id=intent.intent_id,
+                        current_account_id=current_account_id,
+                        from_status=intent.status,
+                        to_status=plan.to_status,
+                        event_key=plan.event_key,
+                        source=plan.source
+                        or ("FILL_PROGRESS" if plan.to_status is intent.status else "RECONCILE"),
+                        broker_order_id=plan.broker_order_id,
+                        permanent_id=plan.permanent_id,
+                        client_id=plan.client_id,
+                        filled_quantity=plan.filled,
+                        remaining_quantity=plan.remaining,
+                        evidence=dict(plan.evidence),
+                        now=now,
+                    )
+            if not current:
+                unresolved.append(
+                    RestartOrderObservation(
+                        intent_id=intent.intent_id,
+                        local_status=intent.status,
+                        broker_status=None,
+                        transition_applied=False,
+                        reason="uncertainty changed before the write; nothing was written",
+                    )
+                )
+                continue
             changed = won and plan.to_status is not intent.status
             if won and not changed and plan.dwell is not None:
                 # fill progress in place is not a dwell reset (§4.3; D14)

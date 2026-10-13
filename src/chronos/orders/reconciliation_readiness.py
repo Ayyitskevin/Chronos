@@ -163,6 +163,20 @@ class ReconciliationReadiness:
         with self._lock:
             return self._uncertainty_epoch
 
+    @contextmanager
+    def held_at_uncertainty_epoch(self, expected: int) -> Iterator[bool]:
+        """Hold the latch's lock and yield whether the epoch is still ``expected``.
+
+        U-B r1 (Daybreak P2-1): a write that rests on an observation of one epoch runs INSIDE
+        this block, so no invalidation can land between the check and the write -- it waits for
+        the lock and lands after. Keep the body short (one repository compare-and-set); the
+        lock order is this latch first, then the adapter bridge's
+        (:meth:`CallbackBridge.held_at_adapter_epoch`), as ``on_managed_accounts`` already nests.
+        """
+
+        with self._lock:
+            yield self._uncertainty_epoch == expected
+
     def _invalidate_unlocked(self, reason: str, *, uncertain: bool) -> None:
         if uncertain:
             self._uncertainty_epoch += 1
