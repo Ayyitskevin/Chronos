@@ -41,6 +41,26 @@ _UNRESOLVED_STATUSES = frozenset(
 )
 
 
+# Fill quantity may refine ONLY a working lifecycle, plus a typed FILLED row (already settled; its
+# figures refine as before). Any other typed lifecycle that reports fills is not settled by quantity
+# and the intent stays locked: REJECTED/CANCELLED with fills is terminal-with-fills (the S-3 policy
+# leaves it for the operator rather than guess), and SUBMISSION_UNKNOWN is what
+# broker_status_to_lifecycle returns for an UNRECOGNISED status, which must not gain working-order
+# authority from quantities alone (D-27).
+_QUANTITY_REFINES = frozenset(
+    {
+        OrderLifecycle.SUBMITTED,
+        OrderLifecycle.PARTIALLY_FILLED,
+        OrderLifecycle.CANCEL_PENDING,
+        OrderLifecycle.FILLED,
+    }
+)
+
+
+def _fills_without_a_working_lifecycle(order: BrokerOrder) -> bool:
+    return order.filled_quantity > 0 and order.lifecycle not in _QUANTITY_REFINES
+
+
 @dataclass(frozen=True, slots=True)
 class RestartOrderObservation:
     """Broker proof (or lack of it) for one sent-active local intent."""
@@ -285,8 +305,11 @@ def resolve_from_broker_evidence(
         return None
     if len(working) == 1:
         order = working[0]
+        if _fills_without_a_working_lifecycle(order):
+            return None  # not settled by quantity: stay locked, never FILLED/PARTIALLY_FILLED
         # The adapter already delivers a typed OrderLifecycle; do NOT re-map its
-        # value through the raw-IBKR-string mapper. Refine only by fill quantity.
+        # value through the raw-IBKR-string mapper. Refine only by fill quantity
+        # (the working lifecycles and a typed FILLED row, per the guard above).
         if order.filled_quantity >= order.quantity:
             lifecycle = OrderLifecycle.FILLED
         elif order.filled_quantity > 0:
@@ -392,6 +415,14 @@ def _unresolved_evidence_reason(
         working_order=matching_orders[0] if matching_orders else None,
     ):
         return "owned order reference matched conflicting account or economic identity"
+    unsettled = next(
+        (order for order in matching_orders if _fills_without_a_working_lifecycle(order)), None
+    )
+    if unsettled is not None:
+        return (
+            f"owned broker order is typed {unsettled.lifecycle.value} (not a working lifecycle) "
+            "but reports fills: fill quantity cannot settle it, the intent stays locked"
+        )
     if matching_executions:
         return "broker execution evidence was present but could not be resolved"
     return "owned order was absent from the broker order and execution snapshots"
@@ -662,7 +693,11 @@ class OrderRestartReconciler:
             execution for execution in executions if execution.order_ref == intent.order_ref
         )
         if matching_orders or matching_executions:
-            raise ValueError("broker evidence conflicts with the local order identity")
+            raise ValueError(
+                "broker evidence does not settle this intent (the order's identity, lifecycle "
+                "or fills conflict with the local record); it stays SUBMISSION_UNKNOWN until "
+                "the order is verified manually in TWS"
+            )
         raise ValueError(
             "broker absence cannot safely prove rejection; no terminal transition was written. "
             "Keep the intent SUBMISSION_UNKNOWN until positive broker evidence is available."
