@@ -506,6 +506,14 @@ _TERMINAL_VENUE = frozenset(
 #: not know -- is row 12: no completed-orders comparison, no dwell, no fill progress, no write.
 _WORKING_VENUE = frozenset({OrderLifecycle.SUBMITTED, OrderLifecycle.PARTIALLY_FILLED})
 _RECOGNISED_VENUE = _WORKING_VENUE | _TERMINAL_VENUE | {OrderLifecycle.CANCEL_PENDING}
+#: U-B r2 (Daybreak r1 delta P1-2): the ONLY terminal statuses that settle, each to exactly this
+#: target -- decided by the lifecycle BEFORE any quantity. REJECTED (and anything else) is row C9:
+#: unexpected for a cancel, nothing is written, whatever figure the record carries. C3 (a WORKING
+#: row filled by quantity) is a separate rule, never this table.
+_TERMINAL_TARGET: dict[OrderLifecycle, OrderLifecycle] = {
+    OrderLifecycle.CANCELLED: OrderLifecycle.CANCELLED,
+    OrderLifecycle.FILLED: OrderLifecycle.FILLED,
+}
 _UNRECOGNISED_STATUS = "the venue reports an unrecognised venue order status; nothing is assumed"
 _NO_COMPLETED_EVIDENCE = "completed-orders evidence is not available"
 #: U-B (design r3 §4.3): the source of the dwell-gated recovery write (C2-1); a SUBMITTED intent
@@ -1180,25 +1188,31 @@ class OrderRestartReconciler:
 
         def from_terminal(record: BrokerOrder, source: str) -> _SettlePlan:
             figure = record.filled_quantity
-            if record.lifecycle is OrderLifecycle.CANCELLED:
-                return settle(record, figure, OrderLifecycle.CANCELLED, source)
-            if record.lifecycle is OrderLifecycle.FILLED or figure >= quantity:
-                if figure < quantity:
-                    return _SettlePlan(
-                        "refuse",
-                        f"terminal record does not fill the order ({figure} of {quantity})",
-                    )
-                return settle(record, figure, OrderLifecycle.FILLED, source)
-            return _SettlePlan(
-                "refuse",
-                f"unexpected terminal status for a cancel: {record.lifecycle.value}",
-            )
+            target = _TERMINAL_TARGET.get(record.lifecycle)
+            if (
+                target is None
+            ):  # C9: REJECTED (or any other) -- the lifecycle decides, not the figure
+                return _SettlePlan(
+                    "refuse",
+                    f"unexpected terminal status for a cancel: {record.lifecycle.value}",
+                )
+            if target is OrderLifecycle.FILLED and figure < quantity:  # C8
+                return _SettlePlan(
+                    "refuse",
+                    f"terminal record does not fill the order ({figure} of {quantity})",
+                )
+            return settle(record, figure, target, source)
 
         if working:
             order = working[0]
             if order.lifecycle not in _RECOGNISED_VENUE:
                 return _SettlePlan("refuse", f"{_UNRECOGNISED_STATUS} ({order.lifecycle.value})")
-            terminal = order.lifecycle in _TERMINAL_VENUE or order.filled_quantity >= quantity
+            # C3 is separate from the terminal table: only a recognised WORKING row whose venue
+            # figure reaches Q is filled by quantity (U-B r2); a PendingCancel row stays C1
+            filled_by_quantity = (
+                order.lifecycle in _WORKING_VENUE and order.filled_quantity >= quantity
+            )
+            terminal = order.lifecycle in _TERMINAL_VENUE or filled_by_quantity
             working_records: tuple[BrokerOrder, ...] | None = None
             if not terminal and order.lifecycle is not OrderLifecycle.CANCEL_PENDING:
                 records, _ = read_completed()
@@ -1216,6 +1230,8 @@ class OrderRestartReconciler:
                     return _SettlePlan(
                         "refuse", "terminal open-book row is not bound to this intent"
                     )
+                if filled_by_quantity:  # C3
+                    return settle(order, order.filled_quantity, OrderLifecycle.FILLED, "open_order")
                 return from_terminal(order, "open_order")
             figure = order.filled_quantity
             if figure < lower:
