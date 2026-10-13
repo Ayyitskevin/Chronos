@@ -524,6 +524,10 @@ class CallbackBridge:
             self.next_valid_id = None
             self.order_statuses.clear()
             self._order_acks.clear()
+            # the completed-orders stream has no request id: a request left unanswered by the
+            # old session is dropped (not completed -- its waiter times out on its own), so a
+            # fresh session can ask again (Daybreak U-A r1 P3-1)
+            self._completed_orders = None
             quote_request_ids = tuple(self._quotes)
             self._quotes.clear()
             for market_rule_flight in self._market_rule_flights.values():
