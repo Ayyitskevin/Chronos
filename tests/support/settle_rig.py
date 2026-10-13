@@ -123,7 +123,9 @@ class ScriptedVenue(FakeBroker):
     """A broker double whose evidence is what the test says, with call counts and a read hook.
 
     ``completed`` of ``None`` makes ``completed_orders`` raise (the read failed);
-    ``open_script`` (a list of answers, the last repeating) lets the SECOND snapshot differ.
+    ``completed_error`` makes it raise that exception instead (any failure, not only a typed one);
+    ``open_script`` / ``exec_script`` / ``completed_script`` (a list of answers, the last
+    repeating; ``None`` in ``completed_script`` = that read fails) let the SECOND snapshot differ.
     """
 
     def __init__(self) -> None:
@@ -132,6 +134,9 @@ class ScriptedVenue(FakeBroker):
         self.open_script: list[tuple[BrokerOrder, ...]] | None = None
         self.execs: list[BrokerExecution] = []
         self.completed: list[BrokerOrder] | None = []
+        self.exec_script: list[tuple[BrokerExecution, ...]] | None = None
+        self.completed_script: list[tuple[BrokerOrder, ...] | None] | None = None
+        self.completed_error: Exception | None = None
         self.open_calls = 0
         self.exec_calls = 0
         self.completed_calls = 0
@@ -146,17 +151,25 @@ class ScriptedVenue(FakeBroker):
 
     async def executions(self, since: datetime | None = None) -> tuple[BrokerExecution, ...]:
         self.exec_calls += 1
+        if self.exec_script is not None:
+            return self.exec_script[min(self.exec_calls - 1, len(self.exec_script) - 1)]
         return tuple(self.execs)
 
     async def completed_orders(self) -> tuple[BrokerOrder, ...]:
         self.completed_calls += 1
         if self.during_completed is not None:
             self.during_completed()
-        if self.completed is None:
+        if self.completed_error is not None:
+            raise self.completed_error
+        completed: tuple[BrokerOrder, ...] | list[BrokerOrder] | None = self.completed
+        if self.completed_script is not None:
+            index = min(self.completed_calls - 1, len(self.completed_script) - 1)
+            completed = self.completed_script[index]
+        if completed is None:
             from chronos.broker.base import BrokerDataError
 
             raise BrokerDataError("completed orders could not be read")
-        return tuple(self.completed)
+        return tuple(completed)
 
 
 class VenueWithoutCompletedOrders(FakeBroker):
