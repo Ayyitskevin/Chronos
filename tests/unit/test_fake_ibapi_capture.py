@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Iterator
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -625,3 +625,83 @@ async def test_the_capture_workload_reads_never_reach_an_order_method(
     sent = {method for _client, method in day.transcript}
     assert not sent & {"placeOrder", "cancelOrder"}
     assert {"reqMarketRule", "reqHistoricalData", "reqMktData", "reqContractDetails"} <= sent
+
+
+# --- r1 (reader review of 2c1c764): the request side, the session in progress, no bars ----------
+# The fake used to throw away the historical request's parameters, so the adapter's useRTH /
+# TRADES / non-streaming choices could regress with every test green (reader P2-1); today's bar
+# appeared on any weekday whatever the hour (P3-1); a venue with no bars was unmodellable (P3-2).
+
+
+async def test_the_historical_request_the_adapter_sends_is_pinned(
+    day: fake_ibapi.FakeGateway,
+) -> None:
+    adapter = _broker()
+    await adapter.connect()
+    try:
+        underlying = await adapter.qualify_underlying("AAPL")
+        await adapter.historical_bars(underlying, interval=BarInterval.DAY_1, lookback_days=30)
+    finally:
+        await adapter.disconnect()
+    # (conId, endDateTime, duration, barSize, whatToShow, useRTH, formatDate, keepUpToDate, opts):
+    # TRADES, regular hours only, YYYYMMDD dates, and NO streaming subscription (it would hold a
+    # request slot against the pacing budget the order pipeline shares).
+    assert day.historical_requests == [(999, "", "30 D", "1 day", "TRADES", 1, 1, False, [])]
+
+
+def test_a_streaming_historical_subscription_is_refused_loudly() -> None:
+    gateway = fake_ibapi.FakeGateway.capture_day()
+    client = fake_ibapi.FakeEClient.bound_to(gateway)(fake_ibapi.RecordingWrapper())
+    client.connect("127.0.0.1", 7497, fake_ibapi.CLIENT_ID)
+    try:
+        contract = fake_ibapi.FakeContract()
+        contract.conId = 999
+        with pytest.raises(AssertionError, match="not modelled"):
+            client.reqHistoricalData(5, contract, "", "30 D", "1 day", "TRADES", 1, 1, True, [])
+    finally:
+        client.disconnect()
+    assert gateway.historical_requests == []  # a refused request is not recorded as served
+
+
+async def test_a_venue_with_no_bars_gives_the_adapter_an_empty_series(
+    day: fake_ibapi.FakeGateway,
+) -> None:
+    day.bars_override[
+        999
+    ] = []  # "no bars" must be modellable, not fall back to the generated series
+    adapter = _broker()
+    await adapter.connect()
+    try:
+        underlying = await adapter.qualify_underlying("AAPL")
+        series = await adapter.historical_bars(underlying, lookback_days=30)
+    finally:
+        await adapter.disconnect()
+    assert series.bars == ()
+
+
+def _sessions_and_volumes(gateway: fake_ibapi.FakeGateway) -> list[tuple[str, float]]:
+    return [
+        (args[1]["date"], args[1]["volume"])
+        for name, args in _bars(gateway)
+        if name == "historicalData"
+    ]
+
+
+def test_before_the_open_the_sim_date_has_no_bar_yet() -> None:
+    gateway = fake_ibapi.FakeGateway.capture_day()
+    gateway.set_sim_time(datetime(2026, 10, 13, 12, 0, tzinfo=UTC))  # Tue 08:00 New York
+    assert _sessions_and_volumes(gateway)[-1][0] == "20261012"  # Monday's close, not Tuesday
+
+
+def test_after_the_close_the_sim_date_bar_is_complete_not_partial() -> None:
+    gateway = fake_ibapi.FakeGateway.capture_day()
+    gateway.set_sim_time(datetime(2026, 10, 12, 21, 0, tzinfo=UTC))  # Mon 17:00 New York
+    (yesterday, y_volume), (today, t_volume) = _sessions_and_volumes(gateway)[-2:]
+    assert (yesterday, today) == ("20261009", "20261012")
+    assert t_volume > y_volume  # a full day, on the same rising pattern as every other bar
+
+
+def test_on_a_weekend_the_last_bar_is_fridays() -> None:
+    gateway = fake_ibapi.FakeGateway.capture_day()
+    gateway.set_sim_time(datetime(2026, 10, 17, 15, 0, tzinfo=UTC))  # Saturday
+    assert _sessions_and_volumes(gateway)[-1][0] == "20261016"
