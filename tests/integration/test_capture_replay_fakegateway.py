@@ -186,6 +186,7 @@ def test_the_manifest_is_complete(captured: Captured) -> None:
     assert manifest["identifier_pseudonyms"] == {
         "scheme": "hmac-sha256-v2",
         "pepper_fingerprint": expected_fingerprint,
+        "account_tokens": "keyed",
     }
 
 
