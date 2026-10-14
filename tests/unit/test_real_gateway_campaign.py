@@ -804,3 +804,61 @@ def test_uf3f1_7_the_committed_rehearsal_fixture_still_replays_offline() -> None
         sys.path.remove(str(CAPTURE.parent))
     fixture = ROOT / "tests/fixtures/ibkr_demo/rehearsal"
     assert replay.check_session(fixture, allow_demo=True) == []
+
+
+def test_uf3f1_8_overlapping_account_ids_are_replaced_longest_first(tmp_path: Path) -> None:
+    """A shorter id that is a prefix of a longer one must not corrupt the longer one's token."""
+
+    m = _load_capture_module()
+    salt = ("uf3f1-session", "2026-09-13T19:30:00+00:00")
+    short, long = "DU5550001", "DU55500018"
+    text = f'{{"a": "{short}", "b": "{long}"}}'
+    out = m.sanitize(text, {short, long}, salt, PEPPER)
+    token_short = m.identifier_pseudonym("ACCT", short, salt, PEPPER)
+    token_long = m.identifier_pseudonym("ACCT", long, salt, PEPPER)
+    assert out == f'{{"a": "{token_short}", "b": "{token_long}"}}'
+
+
+def test_uf3f1_9_the_derived_file_carries_the_same_keyed_token_and_still_replays(
+    tmp_path: Path,
+) -> None:
+    """An account id that reaches derived_liquid_hours.json (through a contract's local symbol, the
+    derived key) gets the SAME keyed token as capture.json, so the offline replay's re-derivation
+    from the sanitized capture still matches the stored derived file byte for byte."""
+
+    m = _load_capture_module()
+    fixture = json.loads(
+        (ROOT / "tests/fixtures/ibkr_demo/rehearsal/capture.json").read_text(encoding="utf-8")
+    )
+    node = next(
+        item
+        for item in _walk_dicts(fixture)
+        if isinstance(item.get("liquid_hours"), str) and item.get("time_zone_id")
+    )
+    payload = _account_payload("uf3f1-derived")
+    payload["steps"]["contract"] = {**node, "symbol": "AAPL", "local_symbol": _UF3_ACCOUNT}
+    out = tmp_path / "s"
+    m.write_session(out, payload, {_UF3_ACCOUNT}, "uf3f1-derived", PEPPER)
+    token = m.identifier_pseudonym(
+        "ACCT", _UF3_ACCOUNT, ("uf3f1-derived", "2026-09-13T19:30:00+00:00"), PEPPER
+    )
+    derived_text = (out / "derived_liquid_hours.json").read_text(encoding="utf-8")
+    assert token in derived_text and _UF3_ACCOUNT not in derived_text
+    sys.path.insert(0, str(CAPTURE.parent))
+    try:
+        replay = importlib.import_module("replay_check")
+    finally:
+        sys.path.remove(str(CAPTURE.parent))
+    assert replay.check_session(out, allow_demo=True) == []
+
+
+def _walk_dicts(node: object) -> list[dict]:
+    found: list[dict] = []
+    if isinstance(node, dict):
+        found.append(node)
+        for value in node.values():
+            found.extend(_walk_dicts(value))
+    elif isinstance(node, list):
+        for value in node:
+            found.extend(_walk_dicts(value))
+    return found
