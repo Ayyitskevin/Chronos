@@ -155,7 +155,7 @@ class OrderTracker:
         update: OrderStatusUpdate,
         *,
         current_account_id: str,
-        refuse_terminal_below_recorded_fills: bool = False,
+        fills_floor: bool = False,
     ) -> IngestOutcome:
         """Apply one broker observation.
 
@@ -163,10 +163,10 @@ class OrderTracker:
         transition, ``identity_refined`` for a same-status observation that first
         supplied broker identity (R-d), neither for a no-op/duplicate/stale event.
 
-        ``refuse_terminal_below_recorded_fills`` (LEGACY-5 r1; the legacy resolver's two callers):
-        a TERMINAL update whose figure is below the largest recorded fill figure raises
-        :class:`~chronos.persistence.order_repositories.RecordedFillsAdvanced` from inside the
-        transition's own transaction -- the caller's earlier read of the maximum may be stale.
+        ``fills_floor`` (LEGACY-5 r1; the legacy resolver's two callers): the recorded fills are a
+        floor for a TERMINAL update. One whose figure is below the largest recorded fill figure
+        raises :class:`~chronos.persistence.order_repositories.RecordedFillsAdvanced` from inside
+        the transition's own transaction: the caller's earlier read of the maximum may be stale.
         """
 
         intent = self._intents.get(update.intent_id, current_account_id=current_account_id)
@@ -219,8 +219,7 @@ class OrderTracker:
             occurred_at=update.occurred_at,
             enforce_from_status=True,
             refuse_below_recorded_fills=(
-                refuse_terminal_below_recorded_fills
-                and update.lifecycle in TERMINAL_ORDER_LIFECYCLES
+                fills_floor and update.lifecycle in TERMINAL_ORDER_LIFECYCLES
             ),
         )
         return IngestOutcome(lifecycle_changed=advanced, identity_refined=False)

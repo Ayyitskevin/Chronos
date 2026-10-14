@@ -600,9 +600,7 @@ class OrderRestartReconciler:
                 continue
             try:
                 outcome = self._tracker.ingest(
-                    update,
-                    current_account_id=current_account_id,
-                    refuse_terminal_below_recorded_fills=True,
+                    update, current_account_id=current_account_id, fills_floor=True
                 )
             except RecordedFillsAdvanced as refused:
                 # LEGACY-5 r1: a fill was recorded after this pass read the maximum (another
@@ -774,11 +772,7 @@ class OrderRestartReconciler:
             # rejection (the operator was about to resolve against evidence).
             # LEGACY-5 r1: the maximum read above may be stale by now; the terminal write re-checks
             # it atomically and a RecordedFillsAdvanced (a ValueError) refuses, writing nothing.
-            self._tracker.ingest(
-                update,
-                current_account_id=current_account_id,
-                refuse_terminal_below_recorded_fills=True,
-            )
+            self._tracker.ingest(update, current_account_id=current_account_id, fills_floor=True)
             return False
         matching_executions = tuple(
             execution for execution in executions if execution.order_ref == intent.order_ref
