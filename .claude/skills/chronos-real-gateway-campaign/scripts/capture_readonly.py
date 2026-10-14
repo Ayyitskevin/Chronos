@@ -302,6 +302,9 @@ def transport_proof_problems(proof: Any) -> list[str]:
     version = proof.get("server_version")
     if not isinstance(version, int) or isinstance(version, bool) or version < 1:
         problems.append("server_version: no handshake server version was observed")
+    connection_time = proof.get("connection_time")
+    if not isinstance(connection_time, str) or not connection_time.strip():
+        problems.append("connection_time: no handshake connection time was observed")
     return problems
 
 
@@ -609,6 +612,12 @@ def sanitize_capture(capture: dict[str, Any], account_ids: set[str], pepper: byt
     key = _require_pepper(pepper)
     salt = session_salt(capture)
     keyed = pseudonymize_identifiers(capture, salt, key)
+    proof = keyed.get("meta", {}).get("transport_proof")
+    peer = proof.get("peer") if isinstance(proof, dict) else None
+    if isinstance(peer, dict) and isinstance(peer.get("host"), str):
+        # the gateway's address can be a LAN or tailnet address: commit a keyed token, keep the
+        # port (it separates paper from live ports); replay only needs the host to be non-empty
+        peer["host"] = identifier_pseudonym("PEER", peer["host"], salt, key)
     return sanitize(canonical_json(keyed), account_ids, salt, key)
 
 

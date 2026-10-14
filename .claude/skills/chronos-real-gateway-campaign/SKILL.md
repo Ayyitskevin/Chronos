@@ -235,7 +235,8 @@ toward the gate. A real session is stamped true only from `meta.transport_proof`
 `OfficialIBKRBroker.transport_proof()` after a successful connect; a failed connect exits 1
 and writes nothing, an `ib_async` or fake-transport session is stamped false, and
 `replay_check` refuses `gateway_evidence: true` without a valid proof. This is
-accident-proof, never adversary-proof (a pepper MAC is the named follow-up):
+accident-proof, never adversary-proof (a pepper MAC is the named follow-up). The written
+`meta.transport_proof.peer.host` is a keyed `PEER-` token (the port stays):
 
 ```bash
 BROKER_MODE=demo .venv/bin/python \
