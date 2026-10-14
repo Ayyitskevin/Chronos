@@ -24,6 +24,7 @@ anything; ALLOW_* stay false.
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import logging
 import os
@@ -840,3 +841,87 @@ def test_r1_p3_1_a_clear_run_on_a_bound_database_changes_none_of_its_bytes(
     assert hashlib.sha256(host["database"].read_bytes()).hexdigest() == before
     new = {p.name for p in directory.iterdir()} - listing
     assert new <= {"chronos-b1.db-shm", "chronos-b1.db-wal"}, new
+
+
+# --- U-d r2: a PARTIAL leak is a leak (reader delta P2-1, P3-1) ---------------------------------
+
+#: A non-repetitive 64-hex pepper canary: every 8-character window of it is distinct, so a head,
+#: a tail or a middle fragment is recognisable (PEPPER_CANARY repeats "c0ffee", whose windows
+#: recur). Fixed, not random, so a coincidental match would be deterministic, not flaky. Derived
+#: at import, never written as a 64-hex literal: the tracked-file secret scan flags such a literal.
+WINDOW_PEPPER = hashlib.sha256(b"chronos-b1-ud-r2-window-canary").hexdigest()
+_WINDOW = 8
+
+
+def _windows(secret: str, width: int = _WINDOW) -> set[str]:
+    return {secret[i : i + width] for i in range(len(secret) - width + 1)}
+
+
+def _partial_leaks(haystack: str, secret: str) -> list[str]:
+    """Every >= 8-character window of ``secret`` found in ``haystack`` (head, middle, tail)."""
+
+    return sorted(window for window in _windows(secret) if window in haystack)
+
+
+def _left_behind(host: dict[str, Path]) -> str:
+    """Every file the run could have written (the env file itself excluded: it holds the secret)."""
+
+    root = host["work"].parent
+    texts = []
+    for path in sorted(p for p in root.rglob("*") if p.is_file() and p != host["env"]):
+        texts.append(path.read_bytes().decode("latin-1"))
+    return "\n".join(texts)
+
+
+def test_r2_the_window_search_finds_a_head_a_middle_and_a_tail_fragment() -> None:
+    """Positive control: the search sees what pydantic's elision leaves (head...tail) and a cut."""
+
+    elided = f"input_value='{WINDOW_PEPPER[:24]}...{WINDOW_PEPPER[-24:]}'"
+    assert WINDOW_PEPPER not in elided and _partial_leaks(elided, WINDOW_PEPPER)
+    assert _partial_leaks("x" + WINDOW_PEPPER[28:36] + "y", WINDOW_PEPPER) == [WINDOW_PEPPER[28:36]]
+    assert len(_windows(WINDOW_PEPPER)) == len(WINDOW_PEPPER) - _WINDOW + 1  # all distinct
+
+
+@pytest.mark.parametrize("json_out", [False, True])
+@pytest.mark.parametrize("with_credential", [True, False], ids=["refusing", "clear"])
+def test_r2_no_fragment_of_the_pepper_appears_on_any_surface(
+    host: dict[str, Path], capsys: pytest.CaptureFixture[str], json_out: bool, with_credential: bool
+) -> None:
+    """Reader delta P2-1: the whole-string canary search cannot see a PARTIAL pepper leak (the
+    reader's n5 printed the first 20 hex: 136 passed). Every 8-character window is searched on
+    stdout, stderr, every log record, the report, JSON and text, and every file left behind."""
+
+    _rewrite(host, "CHRONOS_CAPTURE_PEPPER", WINDOW_PEPPER)
+    everything = _everything(host, capsys, json_out=json_out, with_credential=with_credential)
+    assert ("B1-PREFLIGHT CLEAR" in everything) is (not with_credential)  # the path really ran
+    assert _partial_leaks(everything + _left_behind(host), WINDOW_PEPPER) == []
+
+
+@pytest.mark.parametrize("key", ["IB_PORT", "IB_CLIENT_ID"])
+def test_r2_the_long_canary_in_an_invalid_field_leaks_no_fragment_either(
+    host: dict[str, Path], capsys: pytest.CaptureFixture[str], key: str
+) -> None:
+    """The elision shape itself: a 64-hex value Settings refuses to parse. A regression that
+    echoes pydantic's error would show only head...tail -- this search still sees it."""
+
+    _rewrite(host, key, WINDOW_PEPPER)
+    everything = _everything(host, capsys, json_out=False, with_credential=False)
+    assert "Settings refused the file" in everything
+    assert _partial_leaks(everything + _left_behind(host), WINDOW_PEPPER) == []
+
+
+def test_r2_p3_1_no_fragment_of_the_other_rows_fingerprint_appears(
+    host: dict[str, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Reader delta P3-1 (mutant n4): the other row's stored account FINGERPRINT is a hash of a
+    brute-forceable DU id, nearly the id itself; no window of it may appear."""
+
+    from chronos.utils.identifiers import account_fingerprint
+
+    _bind(host["database"], broker_mode="ibkr", account="DU1111111")
+    everything = _everything(host, capsys, json_out=True, with_credential=False)
+    everything += _everything(host, capsys, json_out=False, with_credential=False)
+    assert '"scope"' in everything or "[scope]" in everything  # the scope check really ran
+    stored = account_fingerprint("DU1111111")
+    assert _partial_leaks(everything, stored) == []
+    assert "DU1111111" not in everything
