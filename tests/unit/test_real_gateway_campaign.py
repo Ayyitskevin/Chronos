@@ -1240,3 +1240,87 @@ def test_c1_19_a_subclass_is_not_the_official_adapter(monkeypatch: pytest.Monkey
     proof = asyncio.run(drive())
     assert proof["adapter"].endswith("Wrapped")
     assert any("adapter" in p for p in _load_capture_module().transport_proof_problems(proof))
+
+
+# --- C1 r1: Daybreak P2-1, reader P3-1/P3-2/P3-3 -----------------------------------------------
+
+
+@pytest.mark.parametrize("connection_time", [None, "", "   ", 20261014, ["x"]])
+def test_c1r1_1_a_missing_or_blank_connection_time_is_not_a_proof(connection_time: object) -> None:
+    """Daybreak P2-1: an unobserved connect time (e.g. a wrong real-ibapi field name) must fail
+    closed at capture and, through the shared validator, at replay."""
+
+    m = _load_capture_module()
+    problems = m.transport_proof_problems({**_GOOD_PROOF, "connection_time": connection_time})
+    assert any("connection_time" in p for p in problems), problems
+    proof_without = {k: v for k, v in _GOOD_PROOF.items() if k != "connection_time"}
+    assert any("connection_time" in p for p in m.transport_proof_problems(proof_without))
+
+
+def test_c1r1_2_a_blank_connection_time_stamps_false_and_replay_refuses_a_true_claim(
+    tmp_path: Path,
+) -> None:
+    replay = _replay_module()
+    blank = {**_GOOD_PROOF, "connection_time": None}
+    session = _written_session(tmp_path, {"transport_proof": blank}, claimed=True, name="blank")
+    assert any("connection_time" in f for f in replay.check_session(session))
+
+
+@pytest.mark.parametrize("count", [True, False, 1.0, "1", None])
+def test_c1r1_3_a_non_integer_managed_account_count_is_not_a_count(count: object) -> None:
+    """Reader P3-1: a bool is an int in Python, so it needs its own pin (True would read as 1)."""
+
+    problems = _load_capture_module().transport_proof_problems(
+        {**_GOOD_PROOF, "managed_account_count": count}
+    )
+    assert any("managed_account_count" in p for p in problems), problems
+
+
+def test_c1r1_4_a_closed_session_reports_nothing_it_no_longer_observes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reader P3-2: with the app object still present but the connection closed, the count, the
+    peer, the server version and the connect time are all withheld, not read from a dead socket."""
+
+    _install_stub(monkeypatch, real_looking=True)
+    broker = official_ibkr.OfficialIBKRBroker(fake_ibapi.official_settings())
+
+    async def drive() -> tuple[dict, dict]:
+        await broker.connect()
+        try:
+            live = broker.transport_proof()
+            broker.bridge.connection_closed.set()  # the app is still held; the session is closed
+            return live, broker.transport_proof()
+        finally:
+            await broker.disconnect()
+
+    live, closed = asyncio.run(drive())
+    assert live["connected"] is True and live["managed_account_count"] == 1
+    assert closed["connected"] is False and closed["state"] == "DISCONNECTED"
+    assert closed["managed_account_count"] == 0
+    assert closed["peer"] is None
+    assert closed["server_version"] is None and closed["connection_time"] is None
+    assert _load_capture_module().transport_proof_problems(closed)
+
+
+def test_c1r1_5_the_written_fixture_keys_the_peer_host_and_keeps_the_port(
+    tmp_path: Path,
+) -> None:
+    """Reader P3-3 (decision: keyed host token, verbatim port). The gateway's address can be a LAN
+    or tailnet address; the committed capture carries a PEER- token instead, the port (7497/4002
+    separate paper from live) stays, and the session still replays as gateway evidence."""
+
+    m = _load_capture_module()
+    replay = _replay_module()
+    host = "10.20.30.40"
+    proof = {**_GOOD_PROOF, "peer": {"host": host, "port": 4002}}
+    session = _written_session(tmp_path, {"transport_proof": proof}, claimed=True, name="peer")
+    text = (session / "capture.json").read_text(encoding="utf-8")
+    assert host not in text
+    written = json.loads(text)["meta"]["transport_proof"]["peer"]
+    salt = ("peer", _identifier_payload("peer")["meta"]["captured_at_utc"])
+    assert written == {"host": m.identifier_pseudonym("PEER", host, salt, PEPPER), "port": 4002}
+    assert written["host"].startswith("PEER-")
+    assert replay.check_session(session) == []
+    other = m.identifier_pseudonym("PEER", host, salt, OTHER_PEPPER)
+    assert other != written["host"]  # keyed: another pepper, another token
