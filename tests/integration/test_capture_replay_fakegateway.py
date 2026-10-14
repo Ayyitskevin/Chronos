@@ -452,16 +452,6 @@ def test_the_replay_cli_refuses_a_rehearsal_without_allow_demo(
     assert done.returncode == 1 and done.stdout.startswith(f"[FAIL] {captured.out}"), done.stdout
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "U-F2-F3 (reader P2-1): capture_readonly.run_capture stamps gateway_evidence = "
-        "(broker_mode is IBKR), true for the official adapter over the FakeGateway, so a fake "
-        "capture replays [PASS] as section-7 gateway evidence. The harness cannot tell a fake "
-        "from a gateway; the smallest fix is in the campaign script (not a test): see RESULT."
-    ),
-)
 def test_a_fakegateway_capture_is_not_gateway_evidence(captured: Captured) -> None:
     assert captured.json("manifest.json")["gateway_evidence"] is False
     assert captured.json("capture.json")["meta"]["gateway_evidence"] is False
