@@ -1085,7 +1085,10 @@ def test_c1_10_an_ib_async_session_is_never_gateway_evidence(
 
     monkeypatch.setattr(ibkr, "IBKRBroker", StubIBAsync)
     settings = Settings(
-        _env_file=None, broker_mode=BrokerMode.IBKR, broker_adapter=BrokerAdapter.IB_ASYNC
+        _env_file=None,
+        broker_mode=BrokerMode.IBKR,
+        broker_adapter=BrokerAdapter.IB_ASYNC,
+        ib_account_id=fake_ibapi.ACCOUNT,  # the B1 stack's Settings refuses ibkr mode without one
     )
     args = argparse.Namespace(
         label="c1", symbols=[], max_symbols=0, skip_options=True, skip_bars=True, account_ids=set()
