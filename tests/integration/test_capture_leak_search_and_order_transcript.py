@@ -6,7 +6,8 @@ THROWAWAY pepper (``secrets.token_hex(32)``) and a ``tmp_path`` output root, exa
 (the helpers are U-f2's), then ``replay_check.py`` replays it as a rehearsal. Here:
 
 1. **The leak search:** EVERY output byte -- the whole output tree (every file, read as bytes,
-   the manifest included), the capture's stdout AND stderr and the in-process replay's stdout AND
+   the manifest included), the capture's stdout AND stderr (from its module import onward: r2)
+   and the in-process replay's stdout AND
    stderr (each captured at the file-descriptor level, so ``print``, ``sys.stderr`` and a raw
    ``os.write`` are all seen), every log record of the root and ``chronos`` loggers, the replay's
    failure strings, and the replay CLI's stdout/stderr -- is searched for the raw account id and
@@ -161,13 +162,15 @@ class Session:
             if plant is not None and plant[0] == channel:
                 os.write(_FD_CHANNELS[channel], b"leak: " + plant[1] + b"\n")
 
-        capture = _load("capture_readonly")
         argv = ["capture_readonly.py", "--out", str(self.out), "--label", LABEL]
         monkeypatch.setattr(sys, "argv", argv)
         with _all_logs() as logs, _adapter_calls(monkeypatch) as calls:
-            capfd.readouterr()  # drop anything printed before the capture
+            capfd.readouterr()  # drop pytest's own bytes, before the capture's invocation starts
             emit("capture_stdout")
             emit("capture_stderr")
+            # r2 (Daybreak r1 delta P2-1): the module is loaded INSIDE the retained window, so
+            # what its import prints or logs is part of the searched capture output
+            capture = _load("capture_readonly")
             self.code = capture.main()
             self.capture_stdout, self.capture_stderr = capfd.readouterr()
             emit("replay_stdout")
@@ -347,6 +350,42 @@ def test_r1_positive_control_a_leak_written_to_each_stream_is_found(
     assert s.code == 0 and s.pepper_hex == pepper_hex
     assert target in _found(s.every_byte(), s)
     assert target not in _found(s.every_byte().replace(needle, b""), s)  # the hit IS the plant
+
+
+@pytest.mark.parametrize("target", _TARGETS)
+@pytest.mark.parametrize("fd", [1, 2], ids=["stdout", "stderr"])
+def test_r2_positive_control_a_leak_written_while_the_capture_module_loads_is_found(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfdbinary: pytest.CaptureFixture[bytes],
+    fd: int,
+    target: str,
+) -> None:
+    """Daybreak r1 delta P2-1: bytes emitted while ``capture_readonly`` is IMPORTED were drained
+    before the retained window opened. The needle is written to the real fd from inside the
+    module load (``importlib.util.module_from_spec``, which U-f2's ``_load`` calls just before
+    ``exec_module``), and the same scanner must find it in the capture's own stream."""
+
+    import importlib.util
+
+    pepper_hex = secrets.token_hex(32)  # throwaway, so the needle is known before the run
+    needle = _needle(target, pepper_hex)
+    real_module_from_spec = importlib.util.module_from_spec
+    emitted: list[str] = []
+
+    def loading(spec: Any) -> Any:
+        if spec.name == "uf2_capture_readonly":
+            os.write(fd, b"import-time leak: " + needle + b"\n")
+            emitted.append(spec.name)
+        return real_module_from_spec(spec)
+
+    monkeypatch.setattr(importlib.util, "module_from_spec", loading)
+    s = Session(tmp_path, monkeypatch, capfdbinary, pepper_hex=pepper_hex)
+
+    assert emitted == ["uf2_capture_readonly"] and s.code == 0
+    stream = s.capture_stdout if fd == 1 else s.capture_stderr
+    assert needle in stream  # it landed in the capture's own retained stream
+    assert target in _found(s.every_byte(), s)
 
 
 @pytest.mark.parametrize("target", _TARGETS)
