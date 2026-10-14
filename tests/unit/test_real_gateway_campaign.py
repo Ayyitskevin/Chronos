@@ -692,3 +692,109 @@ def test_t2_3_a_label_that_is_not_utf8_encodable_is_refused_before_any_broker_co
     assert tree["steps"]["executions"][0]["broker_order_id"] == m.identifier_pseudonym(
         "ORD", 7001, ("session-1", "2026-09-13T19:30:00+00:00"), PEPPER
     )
+
+
+# --- U-F3-F1 (Daybreak P2-3 on U-f3): the ACCT- token is KEYED, like every other identifier -----
+# The account token used to be the unkeyed ``ACCT-<account_fingerprint[:16]>``: SHA-256 of a fixed
+# prefix plus the account id, so a reader of a committed fixture recovered the id by enumerating a
+# small candidate range (Daybreak recovered DU5550001 from 10,000 candidates). It is now the same
+# keyed, session-scoped pseudonym the other identifiers use. These tests run the real write path.
+
+_UF3_ACCOUNT = "DU5550001"
+_UF3_RANGE = range(5_540_000, 5_560_000)  # 20,000 candidates around the account number
+
+
+def _unkeyed_token(account_id: str) -> str:
+    return f"ACCT-{account_fingerprint(account_id)[:16]}"
+
+
+def _account_payload(label: str = "uf3f1-session") -> dict:
+    payload = _identifier_payload(label)
+    payload["steps"]["account_summary"]["account_id"] = _UF3_ACCOUNT
+    return payload
+
+
+def _written_account_token(m: ModuleType, out: Path, pepper: bytes, label: str) -> str:
+    m.write_session(out, _account_payload(label), {_UF3_ACCOUNT}, label, pepper)
+    capture = json.loads((out / "capture.json").read_text(encoding="utf-8"))
+    return capture["steps"]["account_summary"]["account_id"]
+
+
+def test_uf3f1_1_the_account_token_does_not_reverse_by_enumeration_without_the_pepper(
+    tmp_path: Path,
+) -> None:
+    m = _load_capture_module()
+    token = _written_account_token(m, tmp_path / "s", PEPPER, "uf3f1-session")
+    unkeyed = {_unkeyed_token(f"DU{n:07d}") for n in _UF3_RANGE}
+    assert _unkeyed_token(_UF3_ACCOUNT) in unkeyed  # the control: the range holds the account
+    assert token not in unkeyed
+    for name in ("capture.json", "derived_liquid_hours.json", "manifest.json"):
+        text = (tmp_path / "s" / name).read_text(encoding="utf-8")
+        assert _UF3_ACCOUNT not in text
+        assert not any(candidate in text for candidate in unkeyed), name
+
+
+def test_uf3f1_2_the_token_is_the_keyed_session_scoped_pseudonym(tmp_path: Path) -> None:
+    m = _load_capture_module()
+    salt = ("uf3f1-session", "2026-09-13T19:30:00+00:00")
+    token = _written_account_token(m, tmp_path / "s", PEPPER, "uf3f1-session")
+    assert token == m.identifier_pseudonym("ACCT", _UF3_ACCOUNT, salt, PEPPER)
+    assert re.fullmatch(r"ACCT-[0-9a-f]{16}", token)
+    # reproducible with the pepper, and the same everywhere in the session
+    text = (tmp_path / "s" / "capture.json").read_text(encoding="utf-8")
+    assert text.count(token) == 1  # the one place the fixture names the account
+
+
+def test_uf3f1_3_another_pepper_or_another_session_gives_another_token(tmp_path: Path) -> None:
+    m = _load_capture_module()
+    base = _written_account_token(m, tmp_path / "a", PEPPER, "uf3f1-session")
+    assert _written_account_token(m, tmp_path / "again", PEPPER, "uf3f1-session") == base
+    assert _written_account_token(m, tmp_path / "b", OTHER_PEPPER, "uf3f1-session") != base
+    assert _written_account_token(m, tmp_path / "c", PEPPER, "uf3f1-session-2") != base
+
+
+def test_uf3f1_4_sanitize_without_a_pepper_is_refused_not_unkeyed() -> None:
+    m = _load_capture_module()
+    salt = ("uf3f1-session", "2026-09-13T19:30:00+00:00")
+    text = f'{{"account_id": "{_UF3_ACCOUNT}"}}'
+    for bad in (b"", b"short", PEPPER[:31]):
+        with pytest.raises(m.CaptureRefused):
+            m.sanitize(text, {_UF3_ACCOUNT}, salt, bad)
+    out = m.sanitize(text, {_UF3_ACCOUNT}, salt, PEPPER)
+    assert _UF3_ACCOUNT not in out and _unkeyed_token(_UF3_ACCOUNT) not in out
+
+
+def test_uf3f1_5_the_manifest_says_account_tokens_are_keyed(tmp_path: Path) -> None:
+    m = _load_capture_module()
+    _written_account_token(m, tmp_path / "s", PEPPER, "uf3f1-session")
+    manifest = json.loads((tmp_path / "s" / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["identifier_pseudonyms"]["account_tokens"] == "keyed"
+    # the identifier scheme itself is unchanged: same message construction, same fingerprint
+    assert manifest["identifier_pseudonyms"]["scheme"] == "hmac-sha256-v2"
+    assert (
+        manifest["identifier_pseudonyms"]["pepper_fingerprint"] == sha256(PEPPER).hexdigest()[:16]
+    )
+
+
+def test_uf3f1_6_the_cli_write_path_keys_the_demo_account(tmp_path: Path) -> None:
+    """End to end through main(): the demo account id is public, but its token is keyed too."""
+
+    from chronos.broker.demo import DEMO_ACCOUNT_ID
+
+    result = _capture_cli(tmp_path, "uf3f1-cli", tmp_path / "cli")
+    assert result.returncode == 0, result.stdout + result.stderr
+    text = (tmp_path / "cli" / "capture.json").read_text(encoding="utf-8")
+    assert DEMO_ACCOUNT_ID not in text
+    assert "ACCT-" in text and _unkeyed_token(DEMO_ACCOUNT_ID) not in text
+
+
+def test_uf3f1_7_the_committed_rehearsal_fixture_still_replays_offline() -> None:
+    """Replay never re-derives tokens: the demo fixture keeps its (public, unkeyed) demo token."""
+
+    sys.path.insert(0, str(CAPTURE.parent))
+    try:
+        replay = importlib.import_module("replay_check")
+    finally:
+        sys.path.remove(str(CAPTURE.parent))
+    fixture = ROOT / "tests/fixtures/ibkr_demo/rehearsal"
+    assert replay.check_session(fixture, allow_demo=True) == []
