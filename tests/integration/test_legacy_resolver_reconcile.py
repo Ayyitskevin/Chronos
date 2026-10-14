@@ -9,8 +9,8 @@ exercised: evidence -> resolver -> tracker -> ``remaining_active`` ->
 r1 (reader review of 9a163ec): the guard is an allowlist (quantity refines only working lifecycles
 and a typed FILLED row), so an UNRECOGNISED broker status (typed SUBMISSION_UNKNOWN) with fills is
 locked too; the typed reason says so; and ``operator_resolve``'s refusal no longer says "identity"
-for a lifecycle conflict. LEGACY-5 (reader P2-2) is pinned as a strict xfail at the end: it awaits
-a ruling because fixing it narrows packet Q3's zero-fill answer.
+for a lifecycle conflict. LEGACY-5 (reader P2-2) was pinned as a strict xfail here and, after Muse's
+ruling (option B), is fixed: a terminal row below the recorded fills settles nothing.
 
 Local statuses are reached the way the system reaches them: SUBMITTED by a submit with its ids,
 PARTIALLY_FILLED and CANCEL_PENDING by a later event, SUBMISSION_UNKNOWN by a submit that raised
@@ -373,26 +373,16 @@ def test_no_evidence_leaves_the_intent_locked_with_the_absence_reason(
     assert "absent from the broker order and execution snapshots" in item.reason
 
 
-# --- LEGACY-5 (reader P2-2): pinned, awaiting a ruling ------------------------------------------
+# --- LEGACY-5 (reader P2-2, Muse option B): a terminal row below the recorded fills settles nothing
 # A locally PARTIALLY_FILLED intent has recorded fills. A listed, exactly owned CANCELLED/REJECTED
-# row at ZERO fills is written as the terminal state with filled_quantity 0, which drops or
+# row at ZERO fills used to be written as the terminal state with filled_quantity 0, which drops or
 # contradicts the recorded fills and releases the lock (the adapter reports filled 0 whenever its
 # order-status cache is empty, which is every order after a reconnect). The closed settle design
-# says an under-reported venue figure "can never lower what we recorded". Fixing it leaves the
-# intent locked, which narrows packet Q3's zero-fill answer ("keep the terminal write") for an
-# intent with recorded fills; the S-3 r1 task says STOP and report if that contradicts Q3, so this
-# stays a strict xfail with its own id until the conductor rules. Identical on main (not caused by
-# S-3).
+# says an under-reported venue figure "can never lower what we recorded". Ruled option B: both
+# callers pass the tracker's recorded cumulative fills to the resolver, which leaves such an intent
+# locked with a typed reason. These four cells were strict xfails and are now passing tests.
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "LEGACY-5 (reader P2-2): a terminal listed row at 0 fills settles an intent whose recorded "
-        "fills it contradicts; awaiting a ruling against packet Q3's zero-fill answer"
-    ),
-)
 @pytest.mark.parametrize("typed", CONTRADICTED, ids=lambda lifecycle: lifecycle.value)
 @pytest.mark.parametrize("path", ["partial", "partial-then-cancel-pending"])
 def test_a_terminal_row_at_zero_fills_does_not_overwrite_recorded_fills(

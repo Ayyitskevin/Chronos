@@ -318,6 +318,11 @@ class OrderTracker:
         filled = [event.filled_quantity for event in events if event.filled_quantity is not None]
         return max(filled) if filled else Decimal("0")
 
+    def recorded_filled_quantity(self, intent_id: str, *, current_account_id: str) -> Decimal:
+        """The cumulative fills recorded for this intent (the largest figure on its events)."""
+
+        return self._latest_filled(intent_id, current_account_id)
+
     def broker_order_id(self, intent_id: str, *, current_account_id: str) -> int | None:
         """The most recent broker order id recorded for this intent, if any."""
 
