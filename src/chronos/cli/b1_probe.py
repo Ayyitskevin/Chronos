@@ -48,9 +48,10 @@ import os
 import re
 import stat
 import threading
-from collections.abc import Iterator, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -66,7 +67,7 @@ from chronos.cli.b1_preflight import (
     preflight_b1_env,
 )
 from chronos.config.settings import PAPER_API_PORTS, Settings
-from chronos.domain.accounts import is_paper_account_id
+from chronos.domain.accounts import is_live_account_id, is_paper_account_id
 from chronos.domain.enums import BrokerAdapter, BrokerMode, IBEnvironment
 from chronos.domain.models import AccountSummary, MarketQuote, UnderlyingContract
 from chronos.utils.secure_files import AuthorityMode, UnsafeAuthorityFile, read_authority_file
@@ -236,6 +237,9 @@ def _predicate_failures(token: AdmittedB1Paper) -> list[str]:
         problems.append("AUTONOMY_MANDATE_FILE is set")
     if not token.symbols:
         problems.append("SYMBOL_ALLOWLIST is empty")
+    if any(_account_shaped(symbol, token.expected_scope) for symbol in token.symbols):
+        # symbols are printed; account ids never are (Daybreak U-g P2-2)
+        problems.append("SYMBOL_ALLOWLIST holds an account-shaped value")
     scope = token.expected_scope
     if (
         token.account_id not in scope
@@ -244,6 +248,11 @@ def _predicate_failures(token: AdmittedB1Paper) -> list[str]:
     ):
         problems.append("the expected managed scope is not a paper set holding IB_ACCOUNT_ID")
     return problems
+
+
+def _account_shaped(symbol: str, scope: frozenset[str]) -> bool:
+    value = symbol.strip().upper()
+    return is_paper_account_id(value) or is_live_account_id(value) or value in scope
 
 
 # --- one Settings, from the token only --------------------------------------------------------
@@ -470,10 +479,34 @@ def run_probe(admitted: AdmittedB1Paper) -> ProbeReport:
     return report
 
 
+class _Stopped(Exception):
+    """Internal: the session stops reading (a REFUSE, an UNDECIDED or the latch); never escapes."""
+
+
 async def _session(
     view: _ReadOnlyBrokerView, token: AdmittedB1Paper, latch: _ScopeLatch, report: ProbeReport
 ) -> None:
     from chronos.broker.base import BrokerError
+
+    async def fenced(check: str, read: Callable[[], Awaitable[Any]], *, failure: str) -> Any:
+        """ONE broker read, with the latch checked immediately before and after it (Daybreak
+        U-g P2-1). A failed read is reported at ``failure`` level (or returned when ``failure``
+        is "RETURN") and, unless returned, stops the session; it is never raised."""
+
+        if _latched(latch, report):
+            raise _Stopped
+        try:
+            value = await read()
+        except BrokerError as error:
+            if failure == "RETURN":
+                value = error
+            else:
+                report.add(failure, check, f"the read failed: {type(error).__name__}")
+                _latched(latch, report)
+                raise _Stopped from None
+        if _latched(latch, report):
+            raise _Stopped
+        return value
 
     connected = False
     try:
@@ -489,9 +522,7 @@ async def _session(
             return
         connected = True
         report.add("PASS", "handshake", "connected; the configured paper account is managed")
-        if _latched(latch, report):
-            return
-        observed = frozenset(await view.managed_accounts())
+        observed = frozenset(await fenced("scope", view.managed_accounts, failure="UNDECIDED"))
         expected = token.expected_scope
         non_paper = sum(1 for account in observed if not is_paper_account_id(account))
         if observed != expected or non_paper:
@@ -505,43 +536,45 @@ async def _session(
         scope = (
             "the configured account only"
             if len(expected) == 1
-            else (f"declared set of {len(expected)}")
+            else f"declared set of {len(expected)}"
         )
         report.add("PASS", "scope", f"scope: {scope}, exact")
-        if _latched(latch, report):
-            return
-        server = await view.server_time()
+        server = await fenced("clock", view.server_time, failure="UNDECIDED")
         skew = (server - datetime.now(tz=UTC)).total_seconds()
         report.add(
             "INFO",
             "clock",
             f"serverTime minus local time: {skew:+.1f}s (threshold and warn/refuse: Q3, Kevin's)",
         )
-        if _latched(latch, report):
+        # the account cannot be confirmed (no rows for it) is a REFUSE, like a mismatch
+        summary = await fenced("account", view.account_summary, failure="REFUSE")
+        if summary.account_id != token.account_id:
+            report.add(
+                "REFUSE",
+                "account",
+                "the account summary is NOT for the configured account; no further reads",
+            )
             return
-        summary = await view.account_summary()
-        if summary.account_id == token.account_id:
-            report.add("PASS", "account", "the account summary is for the configured account")
-        else:
-            report.add("REFUSE", "account", "the account summary is NOT for the configured account")
-        if _latched(latch, report):
-            return
+        report.add("PASS", "account", "the account summary is for the configured account")
         for symbol in token.symbols:
-            try:
-                contract = await view.qualify_underlying(symbol)
-                quote = await view.snapshot_quote(contract)
-            except BrokerError as error:
-                code = getattr(error, "broker_error_code", None)
-                report.add("INFO", "symbol", f"{symbol}: {type(error).__name__}, code {code}")
-            else:
-                prices = "present" if quote.bid is not None and quote.ask is not None else "absent"
-                report.add(
-                    "INFO",
-                    "symbol",
-                    f"{symbol}: qualified; quote {quote.data_quality.value}, bid/ask {prices}",
-                )
-            if _latched(latch, report):
-                return
+            contract = await fenced(
+                "symbol", partial(view.qualify_underlying, symbol), failure="RETURN"
+            )
+            if isinstance(contract, BrokerError):
+                report.add("INFO", "symbol", f"{symbol}: {_data_problem(contract)}")
+                continue
+            quote = await fenced("symbol", partial(view.snapshot_quote, contract), failure="RETURN")
+            if isinstance(quote, BrokerError):
+                report.add("INFO", "symbol", f"{symbol}: qualified; {_data_problem(quote)}")
+                continue
+            prices = "present" if quote.bid is not None and quote.ask is not None else "absent"
+            report.add(
+                "INFO",
+                "symbol",
+                f"{symbol}: qualified; quote {quote.data_quality.value}, bid/ask {prices}",
+            )
+    except _Stopped:
+        pass
     finally:
         latch.begin_teardown()
         if connected:
@@ -552,6 +585,10 @@ async def _session(
             else:
                 report.add("PASS", "teardown", "disconnected; the reader thread stopped")
             _latched(latch, report)  # a failed handshake never had a session to latch
+
+
+def _data_problem(error: Exception) -> str:
+    return f"{type(error).__name__}, code {getattr(error, 'broker_error_code', None)}"
 
 
 def _latched(latch: _ScopeLatch, report: ProbeReport) -> bool:
