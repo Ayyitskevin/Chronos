@@ -19,7 +19,7 @@
     },
     {
       "path": "src/chronos/config/settings.py",
-      "sha256": "36ef9357248c81ba100288b2c930d0ec74c09986b2aca933f595b3962c040060"
+      "sha256": "87524d22792a56f074bd1865882ed5f26401ee2fe43a9b41dc500a4a993a957c"
     },
     {
       "path": "src/chronos/domain/enums.py",
@@ -43,7 +43,7 @@
     },
     {
       "path": "src/chronos/broker/official_ibkr.py",
-      "sha256": "d395b93738aa5ed0b62a40bbd4322e5ed8015f426995e94070059c7c899f5ef9"
+      "sha256": "bb3f63871d9d8445485d4b26b742dc223f57176accf3e1f339452aecb9d69161"
     },
     {
       "path": "src/chronos/broker/ibkr.py",

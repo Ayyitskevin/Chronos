@@ -291,8 +291,14 @@ def test_the_real_constructor_accepts_the_b1_shape_and_starts_nothing(tmp_path: 
 def test_the_real_constructor_refuses_what_the_b1_shape_must_not_be(
     tmp_path: Path, lines: tuple[str, ...], message: str
 ) -> None:
-    """Controls, through the real constructor: each change to the B1 shape is refused."""
+    """Controls: each change to the B1 shape is refused. Since B1 U-c the port and the blank
+    account are refused when Settings LOADS (before any adapter exists), with the same rule
+    named; the allowlist mismatch is still the real constructor's refusal."""
 
+    if "ALLOWLIST" not in lines[0]:
+        with pytest.raises(ValidationError, match=message):
+            _b1_settings(tmp_path, *lines)
+        return
     settings = _b1_settings(tmp_path, *lines)
 
     with pytest.raises(BrokerSafetyError, match=message):
@@ -570,16 +576,21 @@ def test_the_capture_pepper_is_not_a_setting_and_not_in_the_b1_env() -> None:
     assert not [name for name in Settings.model_fields if "pepper" in name.lower()]
     assert "PEPPER" not in _b1_env_block().upper()
 
-    # .env.example offers it only as a commented line; nothing in src ever reads it.
+    # .env.example offers it only as a commented line. Nothing in src reads it EXCEPT the
+    # owner-run offline B1 preflight (B1 U-d, DESIGN r2: P10 checks the pepper's SHAPE, never
+    # echoes it; tests/unit/test_b1_preflight_cli.py proves no output, log or result carries it).
+    # That single, named exception is an assertion change to this U5 pin, made in U-d and flagged
+    # for review; no product Settings field or runtime path reads the pepper.
     example = (_REPO / ".env.example").read_text(encoding="utf-8").splitlines()
     assert "#CHRONOS_CAPTURE_PEPPER=" in example
     assert not [line for line in example if line.startswith("CHRONOS_CAPTURE_PEPPER")]
+    offline_preflight = "src/chronos/cli/b1_preflight.py"
     offenders = [
         str(path.relative_to(_REPO))
         for path in (_REPO / "src" / "chronos").rglob("*.py")
         if "CHRONOS_CAPTURE_PEPPER" in path.read_text(encoding="utf-8")
     ]
-    assert offenders == []
+    assert offenders in ([], [offline_preflight])
 
 
 @pytest.mark.usefixtures("clean_environment")

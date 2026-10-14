@@ -323,7 +323,9 @@ def test_service_revalidates_request_copy_before_m7(tmp_path: Path) -> None:
 
 def test_non_demo_mode_withholds_before_m7(tmp_path: Path) -> None:
     harness = _approval_harness(tmp_path)
-    settings = harness.base.settings.model_copy(update={"broker_mode": BrokerMode.IBKR})
+    settings = harness.base.settings.model_copy(
+        update={"broker_mode": BrokerMode.IBKR, "ib_account_id": "DU1234567"}
+    )
     try:
         result = _service(harness, settings=settings).rehearse(_request(harness))
 

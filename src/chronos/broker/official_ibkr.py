@@ -61,7 +61,7 @@ from chronos.config.limits import (
     MAX_OPTION_CHAIN_STRIKES_PER_ROW,
     MAX_OPTION_MARKET_RULE_INCREMENTS,
 )
-from chronos.config.settings import Settings
+from chronos.config.settings import LIVE_API_PORTS, PAPER_API_PORTS, Settings
 from chronos.domain.enums import (
     ConnectionState,
     DataQuality,
@@ -269,8 +269,8 @@ _IBKR_BAR_SIZE: dict[BarInterval, str] = {
     BarInterval.MIN_1: "1 min",
 }
 
-_PAPER_PORTS = frozenset({7497, 4002})
-_LIVE_PORTS = frozenset({7496, 4001})
+_PAPER_PORTS = PAPER_API_PORTS  # one source of truth: chronos.config.settings (B1 U-c)
+_LIVE_PORTS = LIVE_API_PORTS
 
 # TWS error codes that are DEFINITIVE order rejections (the order will never
 # work at the venue): price violations, rejected/unavailable orders, and

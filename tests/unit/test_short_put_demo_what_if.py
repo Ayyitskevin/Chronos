@@ -240,7 +240,9 @@ def test_demo_boundary_attestation_rejects_changed_or_malformed_settings(
     harness = _harness(tmp_path)
     service = _service(harness, _RiskPreviewer(harness.risk_result))
     changed = harness.settings.model_copy(update={"max_quote_age_seconds": 4})
-    non_demo = harness.settings.model_copy(update={"broker_mode": BrokerMode.IBKR})
+    non_demo = harness.settings.model_copy(
+        update={"broker_mode": BrokerMode.IBKR, "ib_account_id": "DU1234567"}
+    )
     try:
         assert not service.is_bound_to_demo_boundary(harness.connection, changed)
         assert not service.is_bound_to_demo_boundary(harness.connection, non_demo)
@@ -424,7 +426,9 @@ def test_service_revalidates_model_copy_before_refresh(tmp_path: Path) -> None:
 def test_non_demo_configuration_is_withheld_before_fresh_or_order_calls(tmp_path: Path) -> None:
     harness = _harness(tmp_path)
     risk = _RiskPreviewer(harness.risk_result)
-    settings = harness.settings.model_copy(update={"broker_mode": BrokerMode.IBKR})
+    settings = harness.settings.model_copy(
+        update={"broker_mode": BrokerMode.IBKR, "ib_account_id": "DU1234567"}
+    )
     try:
         result = _service(harness, risk, settings=settings).preview(_request(harness))
 

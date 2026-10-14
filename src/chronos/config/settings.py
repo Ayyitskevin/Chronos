@@ -19,8 +19,13 @@ from chronos.config.limits import (
     MAX_OPTION_SELECTION_WEIGHT,
     validate_option_selection_decimal,
 )
-from chronos.domain.accounts import is_live_account_id
+from chronos.domain.accounts import is_live_account_id, is_paper_account_id
 from chronos.domain.enums import BrokerAdapter, BrokerMode, DemoProfile, IBEnvironment
+
+#: The TWS/IB Gateway API socket ports for each environment. The one source of truth: the
+#: official adapter's environment/port check and the B1 preflight import these.
+PAPER_API_PORTS = frozenset({7497, 4002})
+LIVE_API_PORTS = frozenset({7496, 4001})
 
 
 def _parse_symbol_allowlist(value: object) -> object:
@@ -94,6 +99,11 @@ class Settings(BaseSettings):
         # ADR-0009: branch selection (paper vs live) is derived from settings, so
         # process-lifetime immutability is enforced by the type, not convention.
         frozen=True,
+        # A refused load never RENDERS the inputs (str/repr, so any traceback or log line):
+        # account ids, hosts and paths stay out of the error text (Daybreak build-uc r1 P2-2).
+        # The structured errors()/json() still carry them unless called with
+        # include_input=False; consumers outside a trusted boundary must pass it.
+        hide_input_in_errors=True,
     )
 
     broker_mode: BrokerMode = BrokerMode.DEMO
@@ -483,6 +493,56 @@ class Settings(BaseSettings):
             raise ValueError(
                 "IB_DATA_CLIENT_ID must differ from IB_CLIENT_ID; the read-only "
                 "historical-data process needs its own gateway client id (ADR-0011)"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def validate_ibkr_connection_shape(self) -> Settings:
+        """For ``BROKER_MODE=ibkr``, refuse at LOAD what the adapter would refuse at connect.
+
+        B1 readiness U-c: the port must belong to the configured environment, the client id
+        must not be IB's master client 0, and the account id must have the environment's shape
+        (the canonical helpers in ``chronos.domain.accounts``). Before this, each surfaced only
+        when the backend built the adapter (after the database had opened) or at the first
+        grant. Defined after ``validate_safety_and_ranges`` so its more specific refusals (the
+        live conjunction, the ambiguous live+transmit shape, paper transmission without an
+        account) keep their messages. The messages name the key and the rule and never
+        interpolate a value; the rendered error hides the inputs too (``hide_input_in_errors``).
+        DEMO mode is untouched.
+        """
+
+        if self.broker_mode is not BrokerMode.IBKR:
+            return self
+        paper = self.ib_environment is IBEnvironment.PAPER
+        if paper and self.ib_port not in PAPER_API_PORTS:
+            raise ValueError(
+                "IB_ENVIRONMENT=paper requires a paper port (7497 TWS or 4002 Gateway) for "
+                "BROKER_MODE=ibkr; refused at load, before any connection"
+            )
+        if not paper and self.ib_port not in LIVE_API_PORTS:
+            raise ValueError(
+                "IB_ENVIRONMENT=live requires a live port (7496 TWS or 4001 Gateway) for "
+                "BROKER_MODE=ibkr; refused at load, before any connection"
+            )
+        if self.ib_client_id == 0:
+            raise ValueError(
+                "IB_CLIENT_ID=0 is IB's master client, which can cancel other clients' orders; "
+                "BROKER_MODE=ibkr needs a dedicated non-zero client id (refused at load)"
+            )
+        if not self.ib_account_id.strip():
+            raise ValueError(
+                "IB_ACCOUNT_ID is required for BROKER_MODE=ibkr: the adapter verifies the "
+                "connected session against it (refused at load)"
+            )
+        if paper and not is_paper_account_id(self.ib_account_id):
+            raise ValueError(
+                "IB_ACCOUNT_ID is not a paper account id (DU or DF plus 4 or more digits) for "
+                "IB_ENVIRONMENT=paper; refused at load"
+            )
+        if not paper and not is_live_account_id(self.ib_account_id):
+            raise ValueError(
+                "IB_ACCOUNT_ID is not a live account id (U plus 4 or more digits) for "
+                "IB_ENVIRONMENT=live; refused at load"
             )
         return self
 

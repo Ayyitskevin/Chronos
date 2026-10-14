@@ -74,9 +74,13 @@ def _settings(
             "demo_profile": demo_profile,
             "ib_environment": ib_environment,
             "ib_host": "secret-host.invalid",
-            "ib_port": 4002,
+            # B1 U-c: BROKER_MODE=ibkr now refuses at load a port or account id of the wrong
+            # environment, so the fixture keeps each environment's own shape (fixture data only)
+            "ib_port": 4002 if ib_environment is IBEnvironment.PAPER else 4001,
             "ib_client_id": 912,
-            "ib_account_id": "CONFIGURED987654",
+            "ib_account_id": (
+                "DU98765430" if ib_environment is IBEnvironment.PAPER else "U98765430"
+            ),
             "database_url": "sqlite:////secret/database/path.db",
             "log_file": "/secret/log/path.log",
         }

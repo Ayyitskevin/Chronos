@@ -20,6 +20,11 @@ off-host alert sidecar, receive-only protocol sketch — design only; placement 
 custody are owner decisions, not made there).
 `WATCHDOG.md` is the runbook for the evidence-only watchdog and dead-man layers
 (`python -m chronos.operations.watchdog` / `deadman`); they observe and record, never act.
+`b1-swap-runbook.md` is the owner's B1-day runbook for the demo→read-only-paper swap: the steps that are
+not configuration (paper account, gateway API settings, entitlements, `ibapi` pin, the private `.env`
+with its own `DATABASE_URL`, the capture pepper), each with a verification command, what stays false
+until which gate, and rollback; its non-secret `.env` conditions are checked, on dummy values only, by
+`tests/unit/test_b1_env_preflight.py`.
 
 ## Rules these templates keep, and a test that enforces them
 

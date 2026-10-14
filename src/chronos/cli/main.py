@@ -26,6 +26,8 @@ import sys
 from pathlib import Path
 
 from chronos.auditlog.log import ChainState, verify_chain
+from chronos.cli.b1_preflight import add_b1_preflight_command
+from chronos.cli.b1_probe import add_b1_probe_command
 from chronos.cli.campaign_preflight import add_campaign_preflight_command
 from chronos.cli.campaign_status import add_campaign_status_command
 from chronos.cli.data_commands import add_data_commands
@@ -539,6 +541,8 @@ def build_parser() -> argparse.ArgumentParser:
     add_campaign_preflight_command(campaign_sub)
     add_campaign_status_command(campaign_sub)
     add_db_preflight_command(sub)
+    add_b1_preflight_command(sub)
+    add_b1_probe_command(sub)
 
     monitor = sub.add_parser(
         "monitor", help="read-only platform monitor (mode, halt, reconciliation, audit, data)"
