@@ -1249,3 +1249,152 @@ def test_ap1br1_2_the_r1_commit_touched_exactly_the_two_pin_files() -> None:
         "tests/unit/test_position_provenance.py",
         "tests/unit/test_reconciliation_runs_persist.py",
     ], touched
+
+
+# --- I-3b. a NEW run's stored JSON carries no masked account id; historical rows stand -----------
+#
+# The masked id (2 + 4 characters of the raw id) beside the unkeyed fingerprint narrows the raw id
+# to 1,000 candidates. New runs stop writing it; rows written before keep their bytes and replay.
+# The fingerprint alone stays (a live replay input; keying it is N3's), so this slice does NOT
+# make the raw id unrecoverable from a new row: the fingerprint is still brute-forceable alone.
+
+_I3B_FACT_KEYS = frozenset(
+    {"account_fingerprint", "net_liquidation", "total_cash", "buying_power", "currency", "as_of"}
+)
+
+
+def _i3b_result_with_the_real_mask() -> ReconciliationResult:
+    """The portfolio result as services/reconciliation.py builds it: the REAL mask of the id."""
+
+    from chronos.utils.logging import mask_account_id
+
+    view = _snapshot_view()
+    account = view.account.model_copy(
+        update={"masked_account_id": mask_account_id(DEMO_ACCOUNT_ID)}
+    )
+    return _result().model_copy(update={"snapshot": view.model_copy(update={"account": account})})
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="I-3b red: a new run still stores account_facts.masked_account_id beside the "
+    "unkeyed fingerprint (reconciliation_repository.py ReconciliationAccountFacts)",
+)
+def test_i3b_1_a_new_run_stores_no_masked_account_id_and_no_other_raw_projection(
+    database: Database,
+) -> None:
+    from chronos.utils.logging import mask_account_id
+
+    mask = mask_account_id(DEMO_ACCOUNT_ID)
+    result = _i3b_result_with_the_real_mask()
+    assert result.snapshot is not None and result.snapshot.account.masked_account_id == mask
+    _runtime(database, portfolio=_Portfolio(result)).reconcile_submission_readiness(
+        now=NOW, trigger="periodic"
+    )
+    with database.engine.connect() as connection:
+        (stored,) = connection.execute(
+            sa.text("SELECT broker_snapshot FROM reconciliation_runs")
+        ).one()
+    persisted = json.loads(stored)
+    facts = persisted["account_facts"]
+    # positive control: a real decided run, carrying the facts that stay
+    assert facts["account_fingerprint"] == account_fingerprint(DEMO_ACCOUNT_ID)
+    assert facts["net_liquidation"] == "100000.50" and facts["currency"] == "USD"
+    # the fix: exactly the non-raw facts, and no projection of the raw id anywhere in the row
+    assert set(facts) == _I3B_FACT_KEYS, sorted(set(facts) ^ _I3B_FACT_KEYS)
+    decoded = json.dumps(persisted, ensure_ascii=False)
+    assert mask not in decoded
+    assert DEMO_ACCOUNT_ID[-4:] not in decoded.replace(facts["account_fingerprint"], "")
+
+
+def test_i3b_2_a_historical_row_with_the_masked_id_stays_readable_and_replays_byte_identical(
+    database: Database, tmp_path: Path
+) -> None:
+    """A row written before I-3b (its account_facts carry the masked id) is never rewritten: it
+    reads back as stored, the CLI prints it, provenance replays from it with the same evidence
+    digest, and its bytes are unchanged after all of that. Green before and after the fix."""
+
+    from chronos.portfolio.provenance import (
+        PositionProvenanceRepository,
+        record_position_provenance,
+        snapshot_digest,
+    )
+    from chronos.utils.logging import mask_account_id
+
+    mask = mask_account_id(DEMO_ACCOUNT_ID)
+    run_id = "periodic-00000001-20260920T150000000000Z"
+    current = _snapshot(run_id).broker_snapshot_json()
+    facts = {k: v for k, v in current["account_facts"].items() if k != "masked_account_id"}
+    historical = {**current, "account_facts": {"masked_account_id": mask, **facts}}
+    with database.sessions.begin() as session:
+        session.add(
+            ReconciliationRunRow(
+                id=run_id,
+                trigger="periodic",
+                status="RECONCILED",
+                broker_snapshot=historical,
+                decisions=[],
+                started_at=NOW,
+                completed_at=NOW + timedelta(seconds=1),
+            )
+        )
+
+    def stored_text() -> str:
+        with database.engine.connect() as connection:
+            return str(
+                connection.execute(
+                    sa.text("SELECT broker_snapshot FROM reconciliation_runs WHERE id = :id"),
+                    {"id": run_id},
+                ).one()[0]
+            )
+
+    before = stored_text()
+    digest = snapshot_digest(json.loads(before))
+
+    # the reader returns it as stored, masked id included (never re-shaped on read)
+    (record,) = ReconciliationRepository(database.sessions).recent(limit=5)
+    assert record.broker_snapshot == historical
+    assert record.broker_snapshot["account_facts"]["masked_account_id"] == mask
+
+    # provenance replays from the stored row: FOREIGN, evidence = <first seen>:<digest of bytes>
+    provenance = PositionProvenanceRepository(database.sessions)
+    assert provenance.record_run(run_id) == 1
+    (row,) = provenance.rows_for_run(run_id)
+    assert row.origin_class == "FOREIGN"
+    assert row.evidence_ref == f"{run_id}:{digest}"
+    assert row.account_fingerprint == account_fingerprint(DEMO_ACCOUNT_ID)
+    assert record_position_provenance(database.sessions, run_id) == 0  # the recorder's replay
+
+    # the operator CLI prints it (a fresh process, only the database)
+    import os
+
+    db_url = str(database.engine.url)
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "chronos.cli.reconciliation_commands",
+            "reconciliation-runs",
+            "--last",
+            "5",
+        ],
+        cwd=_ROOT,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "DATABASE_URL": db_url,
+            "BROKER_MODE": "demo",
+            "ALLOW_ORDER_TRANSMIT": "false",
+            "ALLOW_LIVE_TRADING": "false",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        },
+    )
+    assert proc.returncode == 0, proc.stderr
+    (line,) = [json.loads(text) for text in proc.stdout.splitlines()]
+    assert line["run_id"] == run_id and line["broker_snapshot"] == historical
+
+    # never rewritten: same bytes, same digest
+    assert stored_text() == before
+    assert snapshot_digest(json.loads(stored_text())) == digest
