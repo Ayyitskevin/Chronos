@@ -836,3 +836,224 @@ def test_b1_probe_is_registered_on_the_operator_cli(capsys: pytest.CaptureFixtur
 #: the declared-scope bound is code, not configuration
 def test_the_declared_scope_bound_is_small_and_fixed() -> None:
     assert b1_probe.MAX_DECLARED_ACCOUNTS == 4
+
+
+# --- U-g r1: Daybreak P2-1/P2-2, reader P2-1/P2-2 and the P3s ------------------------------------
+
+
+def test_r1_a_scope_change_during_qualification_stops_the_snapshot_read(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Daybreak P2-1: the scope changes while ``reqContractDetails`` is answered; the latch must
+    be checked between the two reads of a symbol, so no ``reqMktData`` follows (and no further
+    symbol is read)."""
+
+    real = rig.gateway.contract_details
+    changed: list[bool] = []
+
+    def details_then_add(client: Any, req_id: int, contract: Any) -> None:
+        if not changed:
+            changed.append(True)
+            rig.gateway.change_managed_accounts((ACCOUNT, OTHER_PAPER))
+        real(client, req_id, contract)
+
+    monkeypatch.setattr(rig.gateway, "contract_details", details_then_add)
+    report = b1_probe.run_probe(rig.token())
+    levels = _levels(report)
+    assert changed == [True]
+    assert rig.wire.count("reqContractDetails") == 1  # AAPL qualified, MSFT never started
+    assert "reqMktData" not in rig.wire
+    assert levels["latch"] == "REFUSE" and levels["teardown"] == "PASS"
+    assert report.verdict()[1] == 78
+
+
+@pytest.mark.parametrize(
+    "symbols",
+    [ACCOUNT, f"AAPL,{ACCOUNT}", "AAPL,DU4440001", "MSFT,U123456"],
+    ids=["the-account", "the-account-among-symbols", "another-paper-id", "a-live-id"],
+)
+def test_r1_an_account_shaped_symbol_is_refused_at_admission(rig: Rig, symbols: str) -> None:
+    """Daybreak P2-2: a symbol is printed, so an account-shaped one would print an id."""
+
+    path = _env_file(rig.tmp, _text(rig.tmp, SYMBOL_ALLOWLIST=symbols))
+    admitted = b1_probe.admit_b1_paper(path.read_text(), os.lstat(path), {})
+    assert isinstance(admitted, b1_probe.Refusal)
+    assert all(ACCOUNT not in reason for reason in admitted.reasons)
+    assert rig.nothing_connected()
+
+
+@pytest.mark.parametrize("json_out", [False, True], ids=["text", "json"])
+def test_r1_a_symbol_aliasing_the_account_never_prints_it(
+    rig: Rig, capsys: pytest.CaptureFixture[str], json_out: bool
+) -> None:
+    flags = ["--json"] if json_out else []
+    with _all_logs() as logs:
+        code = _cli(rig, _text(rig.tmp, SYMBOL_ALLOWLIST=ACCOUNT), *flags)
+    captured = capsys.readouterr()
+    everything = captured.out + captured.err + "\n".join(logs.lines)
+    assert code == 78 and "B1-PROBE REFUSE (78)" in everything
+    assert ACCOUNT not in everything
+    assert rig.nothing_connected()
+
+
+def test_r1_an_altered_token_with_an_account_symbol_is_refused(rig: Rig) -> None:
+    altered = dataclasses.replace(rig.token(), symbols=("AAPL", ACCOUNT))
+    report = b1_probe.run_probe(altered)
+    assert set(_levels(report)) == {"admission"} and ACCOUNT not in str(report.lines)
+    assert rig.nothing_connected()
+
+
+@pytest.mark.parametrize("json_out", [False, True], ids=["text", "json"])
+@pytest.mark.parametrize(
+    "managed",
+    [(ACCOUNT, OTHER_PAPER), (ACCOUNT, "U12345"), (OTHER_PAPER,)],
+    ids=["extra-paper", "live-id", "substituted"],
+)
+def test_r1_no_account_id_appears_on_a_scope_refusal(
+    rig: Rig, capsys: pytest.CaptureFixture[str], managed: tuple[str, ...], json_out: bool
+) -> None:
+    """Reader P2-1: the scope refusal is where foreign ids are in hand; none may be printed."""
+
+    rig.gateway.managed_accounts = managed
+    flags = ["--json"] if json_out else []
+    with _all_logs() as logs:
+        code = _cli(rig, _text(rig.tmp), *flags)
+    captured = capsys.readouterr()
+    everything = captured.out + captured.err + "\n".join(logs.lines)
+    assert code == 78
+    for account in {ACCOUNT, *managed}:
+        assert account not in everything, account
+
+
+def test_r1_an_account_summary_for_another_account_refuses_and_reads_no_further(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reader P2-2: the probe does not trust the adapter's own row filter; a summary stamped
+    with another account is a REFUSE, and no symbol is read after it."""
+
+    from datetime import UTC, datetime
+    from decimal import Decimal
+
+    from chronos.domain.models import AccountSummary
+
+    async def other(self: Any) -> AccountSummary:
+        return AccountSummary(
+            account_id=OTHER_PAPER,
+            net_liquidation=Decimal(1),
+            total_cash=Decimal(1),
+            buying_power=Decimal(1),
+            as_of=datetime.now(tz=UTC),
+        )
+
+    monkeypatch.setattr(official_ibkr.OfficialIBKRBroker, "account_summary", other)
+    report = b1_probe.run_probe(rig.token())
+    assert _levels(report)["account"] == "REFUSE" and report.verdict()[1] == 78
+    assert "reqContractDetails" not in rig.wire and OTHER_PAPER not in str(report.lines)
+
+
+def test_r1_no_summary_rows_for_the_account_refuses(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The realistic form: the gateway answers for another account only; the adapter raises and
+    the probe refuses (the account cannot be confirmed) without reading symbols."""
+
+    def other_rows(client: Any, req_id: int) -> None:
+        client.emit("accountSummary", req_id, OTHER_PAPER, "NetLiquidation", "1", "USD")
+        client.emit("accountSummaryEnd", req_id)
+
+    monkeypatch.setattr(rig.gateway, "account_summary", other_rows)
+    report = b1_probe.run_probe(rig.token())
+    assert _levels(report)["account"] == "REFUSE" and report.verdict()[1] == 78
+    assert "reqContractDetails" not in rig.wire
+
+
+def test_r1_equal_client_ids_on_an_altered_token_are_refused(rig: Rig) -> None:
+    token = rig.token()
+    report = b1_probe.run_probe(dataclasses.replace(token, data_client_id=token.client_id))
+    assert set(_levels(report)) == {"admission"} and rig.nothing_connected()
+
+
+def test_r1_an_env_file_with_a_second_link_is_refused(rig: Rig) -> None:
+    path = _env_file(rig.tmp, _text(rig.tmp))
+    os.link(path, rig.tmp / "b1-second-link.env")
+    admitted = b1_probe.admit_b1_paper(path.read_text(), os.lstat(path), {})
+    assert isinstance(admitted, b1_probe.Refusal) and "FILE" in admitted.conditions
+
+
+def test_r1_the_latch_excuses_only_its_own_teardown_close() -> None:
+    """Reader P3-2, both ways, on the latch itself."""
+
+    before = b1_probe._ScopeLatch()
+    before.uncertain(b1_probe._CLOSED_REASON)  # a close BEFORE teardown latches
+    assert before.first_reason == b1_probe._CLOSED_REASON
+    during = b1_probe._ScopeLatch()
+    during.begin_teardown()
+    during.uncertain(b1_probe._CLOSED_REASON)  # our own close is excused
+    assert during.first_reason is None
+    during.uncertain("official IBKR connectivity event 1100")  # anything else still latches
+    assert during.first_reason == "official IBKR connectivity event 1100"
+
+
+def test_r1_a_close_mid_session_latches_and_refuses(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gateway closes the session while answering reqCurrentTime: the read fails (it is
+    reported, not raised) and the latch, tripped before teardown, makes it a REFUSE."""
+
+    def close_instead(client: Any) -> None:
+        client.emit("connectionClosed")
+
+    monkeypatch.setattr(rig.gateway, "current_time", close_instead)
+    report = b1_probe.run_probe(rig.token())
+    levels = _levels(report)
+    assert levels["latch"] == "REFUSE" and levels["clock"] == "UNDECIDED"
+    assert report.verdict()[1] == 78 and "reqAccountSummary" not in rig.wire
+
+
+def test_r1_a_failed_handshake_reports_the_gateway_notice_codes(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reader P3-3: on a handshake failure the id-less notice codes are reported (G-C1)."""
+
+    monkeypatch.setattr(official_ibkr, "_CONNECT_TIMEOUT_S", 0.5)  # the handshake never comes
+    rig.gateway.held_client_ids.add(fake_ibapi.CLIENT_ID)
+    report = b1_probe.run_probe(rig.token())
+    (line,) = [line for line in report.lines if line.check == "handshake"]
+    assert line.level == "REFUSE" and str(fake_ibapi.CODE_CLIENT_ID_IN_USE) in line.text
+
+
+def test_r1_static_the_adapter_object_is_only_ever_handed_to_the_view() -> None:
+    """Reader P3-4: a name bound to OfficialIBKRBroker(...) is used only as the view's argument
+    (no attribute read, call or other use outside the view)."""
+
+    tree = _probe_tree()
+    parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    bound: set[str] = set()
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Assign)
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Name)
+            and node.value.func.id == "OfficialIBKRBroker"
+        ):
+            bound.update(t.id for t in node.targets if isinstance(t, ast.Name))
+    assert bound, "the probe no longer constructs the adapter by name"
+    outside_the_view = [
+        top
+        for top in tree.body
+        if not (isinstance(top, ast.ClassDef) and top.name == "_ReadOnlyBrokerView")
+    ]
+    uses = [
+        node
+        for top in outside_the_view
+        for node in ast.walk(top)
+        if isinstance(node, ast.Name) and node.id in bound and isinstance(node.ctx, ast.Load)
+    ]
+    assert uses
+    for use in uses:
+        parent = parents[use]
+        assert (
+            isinstance(parent, ast.Call)
+            and isinstance(parent.func, ast.Name)
+            and parent.func.id == "_ReadOnlyBrokerView"
+        ), f"the adapter is used outside the view at line {use.lineno}"
