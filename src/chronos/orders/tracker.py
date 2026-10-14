@@ -17,7 +17,7 @@ from decimal import Decimal, InvalidOperation
 
 from chronos.domain.enums import OrderLifecycle
 from chronos.domain.models import ChronosModel
-from chronos.orders.state_machine import OrderLifecycleMachine
+from chronos.orders.state_machine import TERMINAL_ORDER_LIFECYCLES, OrderLifecycleMachine
 from chronos.persistence.order_repositories import (
     OrderEventRecord,
     OrderIntentRepository,
@@ -150,12 +150,23 @@ class OrderTracker:
         self._intents = intents
         self._tracker = tracker_repo
 
-    def ingest(self, update: OrderStatusUpdate, *, current_account_id: str) -> IngestOutcome:
+    def ingest(
+        self,
+        update: OrderStatusUpdate,
+        *,
+        current_account_id: str,
+        fills_floor: bool = False,
+    ) -> IngestOutcome:
         """Apply one broker observation.
 
         Returns an :class:`IngestOutcome`: ``lifecycle_changed`` for a genuine
         transition, ``identity_refined`` for a same-status observation that first
         supplied broker identity (R-d), neither for a no-op/duplicate/stale event.
+
+        ``fills_floor`` (LEGACY-5 r1; the legacy resolver's two callers): the recorded fills are a
+        floor for a TERMINAL update. One whose figure is below the largest recorded fill figure
+        raises :class:`~chronos.persistence.order_repositories.RecordedFillsAdvanced` from inside
+        the transition's own transaction: the caller's earlier read of the maximum may be stale.
         """
 
         intent = self._intents.get(update.intent_id, current_account_id=current_account_id)
@@ -207,6 +218,9 @@ class OrderTracker:
             },
             occurred_at=update.occurred_at,
             enforce_from_status=True,
+            refuse_below_recorded_fills=(
+                fills_floor and update.lifecycle in TERMINAL_ORDER_LIFECYCLES
+            ),
         )
         return IngestOutcome(lifecycle_changed=advanced, identity_refined=False)
 
@@ -317,6 +331,11 @@ class OrderTracker:
         events = self._tracker.events(intent_id, current_account_id=current_account_id)
         filled = [event.filled_quantity for event in events if event.filled_quantity is not None]
         return max(filled) if filled else Decimal("0")
+
+    def recorded_filled_quantity(self, intent_id: str, *, current_account_id: str) -> Decimal:
+        """The cumulative fills recorded for this intent (the largest figure on its events)."""
+
+        return self._latest_filled(intent_id, current_account_id)
 
     def broker_order_id(self, intent_id: str, *, current_account_id: str) -> int | None:
         """The most recent broker order id recorded for this intent, if any."""

@@ -387,6 +387,32 @@ def _record_to_intent_row(record: OrderIntentRecord) -> OrderIntentRow:
     )
 
 
+class RecordedFillsAdvanced(ValueError):
+    """LEGACY-5 r1: a write that carries FEWER fills than the intent's durable record was refused.
+
+    Raised by :meth:`OrderTrackerRepository.record_transition` with
+    ``refuse_below_recorded_fills=True`` from INSIDE the transition's transaction, so the check and
+    the write are one atomic decision: nothing was written. A ``ValueError``, so an operator path
+    surfaces it through its existing refusal mapping.
+    """
+
+    def __init__(self, intent_id: str, *, recorded: Decimal, attempted: Decimal) -> None:
+        self.intent_id = intent_id
+        self.recorded = recorded
+        self.attempted = attempted
+        recorded_text = format(recorded.normalize(), "f")
+        attempted_text = format(attempted.normalize(), "f")
+        super().__init__(
+            f"recorded fills advanced: intent {intent_id!r} has {recorded_text} filled on record, "
+            f"above the {attempted_text} this write carries; nothing was written and the intent "
+            "stays locked"
+        )
+
+
+class _StatusMoved(Exception):
+    """Internal: a CAS found the status moved once inside the write transaction (rolls back)."""
+
+
 class OrderTrackerRepository:
     """Append lifecycle events and advance the owning intent atomically."""
 
@@ -410,6 +436,7 @@ class OrderTrackerRepository:
         evidence: dict[str, Any] | None = None,
         occurred_at: datetime,
         enforce_from_status: bool = False,
+        refuse_below_recorded_fills: bool = False,
     ) -> bool:
         """Write one order_events row and set the intent status in one txn.
 
@@ -428,10 +455,18 @@ class OrderTrackerRepository:
 
         With ``enforce_from_status=True`` this is a true CAS (ADR-0009 §4): the
         intent's CURRENT status must equal ``from_status`` inside this same
-        transaction, otherwise nothing is written and ``False`` is returned —
+        transaction (re-read under the write lock, LEGACY-5 r2), otherwise nothing is
+        written and ``False`` is returned —
         the guard the submission boundary uses so an intent that left
         USER_CONFIRMED while gate evidence was being gathered can never be
         clobbered back into the submit path.
+
+        With ``refuse_below_recorded_fills=True`` (LEGACY-5 r1) the largest ``filled_quantity`` on
+        the intent's events is read inside this row's savepoint, after its INSERT took the
+        write lock; when this write's figure (a missing figure counts as zero) is below it,
+        :class:`RecordedFillsAdvanced` is raised, the savepoint rolls back and nothing is written
+        -- a fill recorded after the caller read the maximum cannot be overwritten by a lower
+        terminal figure.
         """
 
         with self._sessions.begin() as session:
@@ -460,15 +495,29 @@ class OrderTrackerRepository:
                 occurred_at=occurred_at,
             )
             try:
+                # LEGACY-5 r2: the whole decision lives in this savepoint. pysqlite opens no outer
+                # transaction before the first statement, so the savepoint IS the transaction: its
+                # RELEASE commits the event and the status together, and a raise rolls both back.
+                # The INSERT takes SQLite's write lock, so the reads below see every committed
+                # write and no other writer can commit until this one does.
                 with session.begin_nested():
                     session.add(row)
                     session.flush()
+                    if refuse_below_recorded_fills:
+                        self._refuse_below_recorded_fills(session, row)
+                    if enforce_from_status:
+                        session.refresh(intent)  # the CAS read above ran before the lock
+                        if from_status is None or intent.status != from_status.value:
+                            raise _StatusMoved
+                    intent.status = to_status.value
+                    if to_status is OrderLifecycle.SUBMITTED and intent.submitted_at is None:
+                        intent.submitted_at = occurred_at
+                    # leaving the block flushes the status into the savepoint before its RELEASE
             except IntegrityError:
                 # A concurrent writer recorded the same event first: idempotent.
                 return False
-            intent.status = to_status.value
-            if to_status is OrderLifecycle.SUBMITTED and intent.submitted_at is None:
-                intent.submitted_at = occurred_at
+            except _StatusMoved:
+                return False  # the CAS lost inside the transaction: nothing was written
             return True
 
     def events(self, intent_id: str, *, current_account_id: str) -> tuple[OrderEventRecord, ...]:
@@ -480,6 +529,29 @@ class OrderTrackerRepository:
                 .order_by(OrderEventRow.sequence)
             )
             return tuple(_event_row_to_record(row) for row in rows)
+
+    @staticmethod
+    def _refuse_below_recorded_fills(session: Session, row: OrderEventRow) -> None:
+        """LEGACY-5 r1: raise :class:`RecordedFillsAdvanced` when ``row`` carries fewer fills than
+        the largest figure on the intent's events (``row`` itself included: its own figure is
+        never above itself, so it cannot change the answer).
+
+        Called inside the row's savepoint, after its flush: the INSERT took the write lock, so no
+        other writer can commit between this read and the commit, and raising rolls the savepoint
+        back -- the row is never released into the transaction (pysqlite starts no outer
+        transaction before the first statement, so a savepoint RELEASE would commit it).
+        """
+
+        recorded = session.scalar(
+            select(func.max(OrderEventRow.filled_quantity)).where(
+                OrderEventRow.intent_id == row.intent_id
+            )
+        )
+        attempted = row.filled_quantity if row.filled_quantity is not None else Decimal(0)
+        if recorded is not None and attempted < recorded:
+            raise RecordedFillsAdvanced(
+                row.intent_id, recorded=Decimal(recorded), attempted=Decimal(attempted)
+            )
 
     @staticmethod
     def _next_sequence(session: Session, intent_id: str) -> int:

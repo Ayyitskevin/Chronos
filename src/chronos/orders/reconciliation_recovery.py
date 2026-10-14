@@ -29,6 +29,7 @@ from chronos.orders.tracker import OrderIdentityConflict, OrderStatusUpdate, Ord
 from chronos.persistence.order_repositories import (
     OrderIntentRecord,
     OrderIntentRepository,
+    RecordedFillsAdvanced,
 )
 
 # Intent statuses whose true broker state must be re-derived on restart.
@@ -235,6 +236,22 @@ def _identity_conflict_reason(
     return None
 
 
+def _terminal_below_recorded_fills(order: BrokerOrder, recorded: Decimal | None) -> bool:
+    """LEGACY-5: a terminal listed row that reports FEWER fills than Chronos has recorded.
+
+    The adapter reports filled 0 whenever its order-status cache is empty (every order after a
+    reconnect), so such a row cannot lower what was recorded: settling on it would drop the fills
+    and release the opening-order lock. ``None`` (the default) judges nothing, and a row AT the
+    recorded figure or above it is not below it.
+    """
+
+    return (
+        recorded is not None
+        and order.lifecycle in TERMINAL_ORDER_LIFECYCLES
+        and order.filled_quantity < recorded
+    )
+
+
 def resolve_from_broker_evidence(
     intent: OrderIntentRecord,
     *,
@@ -245,6 +262,7 @@ def resolve_from_broker_evidence(
     expected_limit_price: Decimal | None,
     persisted_broker_order_id: int | None,
     persisted_permanent_id: int | None = None,
+    recorded_filled_quantity: Decimal | None = None,
     now: datetime,
 ) -> OrderStatusUpdate | None:
     """Derive the true lifecycle for one intent from broker evidence.
@@ -260,6 +278,10 @@ def resolve_from_broker_evidence(
     timed-out submit very often DID reach the venue, so mere absence is not
     positive evidence of rejection and must not drive a live order to a wrong
     terminal state.
+
+    ``recorded_filled_quantity`` (LEGACY-5) is the cumulative fills Chronos has already
+    recorded for the intent. A terminal listed row strictly below it settles nothing and the
+    intent stays locked; ``None`` (the default) keeps every existing caller's behaviour.
     """
 
     order_ref = intent.order_ref
@@ -308,6 +330,8 @@ def resolve_from_broker_evidence(
         order = working[0]
         if _fills_without_a_working_lifecycle(order):
             return None  # not settled by quantity: stay locked, never FILLED/PARTIALLY_FILLED
+        if _terminal_below_recorded_fills(order, recorded_filled_quantity):
+            return None  # LEGACY-5: a terminal row cannot lower the fills already recorded
         # The adapter already delivers a typed OrderLifecycle; do NOT re-map its
         # value through the raw-IBKR-string mapper. Refine only by fill quantity
         # (the working lifecycles and a typed FILLED row, per the guard above).
@@ -375,6 +399,7 @@ def _unresolved_evidence_reason(
     expected_broker_client_id: int,
     persisted_broker_order_id: int | None,
     persisted_permanent_id: int | None = None,
+    recorded_filled_quantity: Decimal | None = None,
 ) -> str:
     order_ref = intent.order_ref
     if not order_ref:
@@ -430,6 +455,22 @@ def _unresolved_evidence_reason(
         return (
             f"owned broker order is typed {unsettled.lifecycle.value} (not a working lifecycle) "
             "but reports fills: fill quantity cannot settle it, the intent stays locked"
+        )
+    below = next(
+        (
+            order
+            for order in matching_orders
+            if _terminal_below_recorded_fills(order, recorded_filled_quantity)
+        ),
+        None,
+    )
+    if below is not None:
+        row_fills = format(below.filled_quantity.normalize(), "f")
+        recorded = format(Decimal(str(recorded_filled_quantity)).normalize(), "f")
+        return (
+            f"owned broker order is typed {below.lifecycle.value} at {row_fills} filled, "
+            f"below the {recorded} filled already recorded: a terminal write "
+            "would drop recorded fills, the intent stays locked"
         )
     if any(not order.order_ref for order in matching_orders) or any(
         not execution.order_ref for execution in matching_executions
@@ -520,6 +561,10 @@ class OrderRestartReconciler:
                 original_limit_price=intent.limit_price,
                 current_account_id=current_account_id,
             )
+            recorded_filled_quantity = self._tracker.recorded_filled_quantity(
+                intent.intent_id,
+                current_account_id=current_account_id,
+            )
             update = resolve_from_broker_evidence(
                 intent,
                 open_orders=open_orders,
@@ -529,6 +574,7 @@ class OrderRestartReconciler:
                 expected_limit_price=expected_limit_price,
                 persisted_broker_order_id=persisted_broker_order_id,
                 persisted_permanent_id=persisted_permanent_id,
+                recorded_filled_quantity=recorded_filled_quantity,
                 now=now,
             )
             if update is None:
@@ -547,11 +593,28 @@ class OrderRestartReconciler:
                             expected_limit_price=expected_limit_price,
                             persisted_broker_order_id=persisted_broker_order_id,
                             persisted_permanent_id=persisted_permanent_id,
+                            recorded_filled_quantity=recorded_filled_quantity,
                         ),
                     )
                 )
                 continue
-            outcome = self._tracker.ingest(update, current_account_id=current_account_id)
+            try:
+                outcome = self._tracker.ingest(
+                    update, current_account_id=current_account_id, fills_floor=True
+                )
+            except RecordedFillsAdvanced as refused:
+                # LEGACY-5 r1: a fill was recorded after this pass read the maximum (another
+                # writer); the terminal write was refused atomically and the intent stays locked.
+                unresolved.append(
+                    RestartOrderObservation(
+                        intent_id=intent.intent_id,
+                        local_status=intent.status,
+                        broker_status=update.lifecycle,
+                        transition_applied=False,
+                        reason=str(refused),
+                    )
+                )
+                continue
             # R-g: only a LIFECYCLE change is an applied transition (the integer the
             # operator sees as applied_count); an identity refinement is evidence and
             # is named through the existing reason string — the report keeps its shape.
@@ -698,12 +761,18 @@ class OrderRestartReconciler:
                 current_account_id=current_account_id,
             ),
             persisted_permanent_id=persisted_permanent_id,
+            recorded_filled_quantity=self._tracker.recorded_filled_quantity(
+                intent.intent_id,
+                current_account_id=current_account_id,
+            ),
             now=now,
         )
         if update is not None:
             # The broker DOES know this order — apply truth, refuse the manual
             # rejection (the operator was about to resolve against evidence).
-            self._tracker.ingest(update, current_account_id=current_account_id)
+            # LEGACY-5 r1: the maximum read above may be stale by now; the terminal write re-checks
+            # it atomically and a RecordedFillsAdvanced (a ValueError) refuses, writing nothing.
+            self._tracker.ingest(update, current_account_id=current_account_id, fills_floor=True)
             return False
         matching_executions = tuple(
             execution for execution in executions if execution.order_ref == intent.order_ref
