@@ -406,17 +406,6 @@ def test_r1_positive_control_a_leak_in_each_recorded_channel_is_found(
     assert expected in _found(session.every_byte(), session)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "U-F3-F1: capture_readonly.sanitize writes the account as ACCT-<account_fingerprint[:16]>, "
-        "an UNKEYED sha256 of 'chronos-account:<id>': enumerating the paper-account id space "
-        "recovers the raw account from any fixture, and with it the con-id <-> account linkage "
-        "of every position and execution. Campaign-script gap (not fixed here); smallest fix in "
-        "RESULT: key the account token with the pepper like the other identifiers."
-    ),
-)
 def test_u_f3_f1_the_account_token_cannot_be_recovered_without_the_pepper(
     session: Session,
 ) -> None:
