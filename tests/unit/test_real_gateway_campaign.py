@@ -862,3 +862,323 @@ def _walk_dicts(node: object) -> list[dict]:
         for value in node:
             found.extend(_walk_dicts(value))
     return found
+
+
+# --- C1: gateway_evidence is derived from a post-connect transport proof ----------------------
+#
+# Before this change `run_capture` stamped gateway_evidence = (broker_mode is IBKR) BEFORE it
+# connected, a failed connect became a captured step that exited 0, and `replay_check` accepted
+# whatever Boolean the manifest carried. The stamp now comes from OfficialIBKRBroker.transport_proof()
+# read after a successful connect. The claim is ACCIDENT-PROOF, never ADVERSARY-PROOF (DESIGN.md).
+
+from types import SimpleNamespace  # noqa: E402
+
+from chronos.broker import official_ibkr  # noqa: E402
+from chronos.broker.base import BrokerConnectionError  # noqa: E402
+from chronos.domain.enums import BrokerAdapter, BrokerMode  # noqa: E402
+from tests.support import fake_ibapi  # noqa: E402
+
+_GOOD_PROOF = {
+    "adapter": "chronos.broker.official_ibkr.OfficialIBKRBroker",
+    "state": "CONNECTED",
+    "connected": True,
+    "managed_account_count": 1,
+    "client_module": "ibapi.client",
+    "client_in_site_packages": True,
+    "peer": {"host": "127.0.0.1", "port": 7497},
+    "server_version": 176,
+    "connection_time": "20261014 10:00:00 EST",
+}
+
+
+def _real_looking_client(gateway: fake_ibapi.FakeGateway) -> type:
+    """A stub transport that looks like ibapi's EClient: named EClient, from ibapi.client, with a
+    socket peer and a server version. It is a stub, so only the recorded shape is real."""
+
+    base = fake_ibapi.FakeEClient.bound_to(gateway)
+
+    class EClient(base):  # type: ignore[valid-type, misc]
+        def __init__(self, wrapper: object) -> None:
+            super().__init__(wrapper)
+            self.conn = SimpleNamespace(
+                socket=SimpleNamespace(getpeername=lambda: ("127.0.0.1", 7497))
+            )
+
+        def serverVersion(self) -> int:  # noqa: N802
+            return 176
+
+        def twsConnectionTime(self) -> str:  # noqa: N802
+            return "20261014 10:00:00 EST"
+
+    EClient.__module__ = "ibapi.client"
+    return EClient
+
+
+def _install_stub(monkeypatch: pytest.MonkeyPatch, *, real_looking: bool) -> None:
+    gateway = fake_ibapi.FakeGateway.seeded()
+    fake_ibapi.install(monkeypatch, gateway)
+    if real_looking:
+        client_class = _real_looking_client(gateway)
+        monkeypatch.setattr(
+            official_ibkr,
+            "_load_ibapi",
+            lambda: (
+                client_class,
+                fake_ibapi.FakeEWrapper,
+                fake_ibapi.FakeContract,
+                fake_ibapi.FakeExecutionFilter,
+            ),
+        )
+        module = ModuleType("ibapi.client")
+        module.__file__ = "/venv/lib/python3.13/site-packages/ibapi/client.py"
+        monkeypatch.setitem(sys.modules, "ibapi.client", module)
+
+
+def _official_run(monkeypatch: pytest.MonkeyPatch, *, real_looking: bool) -> dict:
+    m = _load_capture_module()
+    _install_stub(monkeypatch, real_looking=real_looking)
+    args = argparse.Namespace(
+        label="c1", symbols=[], max_symbols=0, skip_options=True, skip_bars=True, account_ids=set()
+    )
+    return asyncio.run(m.run_capture(fake_ibapi.official_settings(), args))
+
+
+def test_c1_1_transport_proof_over_a_fake_transport_has_no_ibapi_origin_and_no_peer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_stub(monkeypatch, real_looking=False)
+    broker = official_ibkr.OfficialIBKRBroker(fake_ibapi.official_settings())
+
+    async def drive() -> dict:
+        await broker.connect()
+        try:
+            return broker.transport_proof()
+        finally:
+            await broker.disconnect()
+
+    proof = asyncio.run(drive())
+    assert proof["connected"] is True and proof["managed_account_count"] == 1
+    assert proof["client_module"] is None and proof["peer"] is None
+    assert _load_capture_module().transport_proof_problems(proof)
+
+
+def test_c1_2_transport_proof_over_a_real_looking_stub_is_complete_and_names_no_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_stub(monkeypatch, real_looking=True)
+    broker = official_ibkr.OfficialIBKRBroker(fake_ibapi.official_settings())
+
+    async def drive() -> dict:
+        await broker.connect()
+        try:
+            return broker.transport_proof()
+        finally:
+            await broker.disconnect()
+
+    proof = asyncio.run(drive())
+    assert proof == {
+        **_GOOD_PROOF,
+        "adapter": f"{official_ibkr.__name__}.OfficialIBKRBroker",
+    }
+    assert fake_ibapi.ACCOUNT not in json.dumps(proof)
+    assert _load_capture_module().transport_proof_problems(proof) == []
+
+
+def test_c1_3_transport_proof_before_connect_is_disconnected_and_unproved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_stub(monkeypatch, real_looking=True)
+    proof = official_ibkr.OfficialIBKRBroker(fake_ibapi.official_settings()).transport_proof()
+    assert proof["connected"] is False and proof["managed_account_count"] == 0
+    assert proof["peer"] is None and proof["server_version"] is None
+    assert _load_capture_module().transport_proof_problems(proof)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("adapter", "chronos.broker.ibkr.IBKRBroker"),
+        ("connected", False),
+        ("state", "DISCONNECTED"),
+        ("managed_account_count", 0),
+        ("client_module", None),
+        ("client_module", "tests.support.fake_ibapi"),
+        ("client_in_site_packages", False),
+        ("peer", None),
+        ("peer", {"host": "", "port": 7497}),
+        ("server_version", None),
+        ("server_version", 0),
+    ],
+)
+def test_c1_4_each_missing_or_wrong_proof_field_is_a_named_problem(field: str, value: object) -> None:
+    m = _load_capture_module()
+    assert m.transport_proof_problems(_GOOD_PROOF) == []
+    problems = m.transport_proof_problems({**_GOOD_PROOF, field: value})
+    assert problems and any(field.split("_")[0] in p for p in problems), problems
+
+
+@pytest.mark.parametrize("proof", [None, {}, [], "proved", {"connected": True}])
+def test_c1_5_an_absent_or_malformed_proof_is_unproved(proof: object) -> None:
+    assert _load_capture_module().transport_proof_problems(proof)
+
+
+def test_c1_6_a_demo_capture_is_not_gateway_evidence() -> None:
+    capture = _demo_capture(_load_capture_module(), "c1-demo")
+    assert capture["meta"]["gateway_evidence"] is False
+    assert "transport_proof" not in capture["meta"]
+
+
+def test_c1_7_the_official_adapter_over_a_fake_transport_is_not_gateway_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """U-F2-F3: the strict xfail on the B1 stack (test_a_fakegateway_capture_is_not_gateway_evidence)
+    is this case; it XPASSes once this lands."""
+
+    capture = _official_run(monkeypatch, real_looking=False)
+    assert capture["steps"]["connect"] == {"ok": True}
+    assert capture["meta"]["gateway_evidence"] is False
+    assert capture["meta"]["transport_proof"]["client_module"] is None
+
+
+def test_c1_8_a_proved_official_session_is_gateway_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture = _official_run(monkeypatch, real_looking=True)
+    assert capture["meta"]["gateway_evidence"] is True
+    assert capture["meta"]["transport_proof"]["peer"] == {"host": "127.0.0.1", "port": 7497}
+
+
+def test_c1_9_a_failed_connect_is_not_gateway_evidence(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def refuse(self: object) -> None:
+        raise BrokerConnectionError("gateway refused the connection")
+
+    monkeypatch.setattr(official_ibkr.OfficialIBKRBroker, "connect", refuse)
+    capture = _official_run(monkeypatch, real_looking=True)
+    assert "error" in capture["steps"]["connect"]
+    assert capture["meta"]["gateway_evidence"] is False
+    assert "transport_proof" not in capture["meta"]
+
+
+def test_c1_10_an_ib_async_session_is_never_gateway_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Even a stub that hands back a perfect-looking proof: only the official adapter counts."""
+
+    class StubIBAsync:
+        def __init__(self, settings: object) -> None:
+            del settings
+
+        def transport_proof(self) -> dict:
+            return dict(_GOOD_PROOF)
+
+        def __getattr__(self, name: str):
+            async def noop(*args: object, **kwargs: object) -> None:
+                return None
+
+            return noop
+
+    from chronos.broker import ibkr
+
+    monkeypatch.setattr(ibkr, "IBKRBroker", StubIBAsync)
+    settings = Settings(
+        _env_file=None, broker_mode=BrokerMode.IBKR, broker_adapter=BrokerAdapter.IB_ASYNC
+    )
+    args = argparse.Namespace(
+        label="c1", symbols=[], max_symbols=0, skip_options=True, skip_bars=True, account_ids=set()
+    )
+    capture = asyncio.run(_load_capture_module().run_capture(settings, args))
+    assert capture["steps"]["connect"] == {"ok": True}
+    assert capture["meta"]["gateway_evidence"] is False
+
+
+def test_c1_11_a_failed_connect_is_not_a_successful_capture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    m = _load_capture_module()
+
+    async def failed(settings: object, args: object) -> dict:
+        del settings, args
+        return {
+            "meta": {"captured_at_utc": "2026-10-14T10:00:00+00:00", "gateway_evidence": False},
+            "steps": {"connect": {"error": "BrokerConnectionError: refused"}},
+        }
+
+    out = tmp_path / "failed"
+    monkeypatch.setattr(m, "run_capture", failed)
+    monkeypatch.setattr(
+        sys, "argv", ["capture_readonly.py", "--out", str(out), "--label", "c1", "--allow-demo"]
+    )
+    for key, value in {**SAFE_ENV, "CHRONOS_CAPTURE_PEPPER": PEPPER_HEX}.items():
+        monkeypatch.setenv(key, value)
+    assert m.main() == 1
+    assert not out.exists()
+    assert "connect" in capsys.readouterr().out
+
+
+def _written_session(tmp_path: Path, meta_extra: dict, *, claimed: bool, name: str) -> Path:
+    m = _load_capture_module()
+    payload = _identifier_payload(name)
+    payload["meta"] = {**payload["meta"], "gateway_evidence": claimed, **meta_extra}
+    out = tmp_path / name
+    m.write_session(out, payload, set(), name, PEPPER)
+    return out
+
+
+def _replay_module() -> ModuleType:
+    sys.path.insert(0, str(CAPTURE.parent))
+    try:
+        import replay_check
+
+        return replay_check
+    finally:
+        sys.path.remove(str(CAPTURE.parent))
+
+
+def test_c1_12_replay_accepts_gateway_evidence_only_with_a_valid_proof(tmp_path: Path) -> None:
+    replay = _replay_module()
+    proved = _written_session(tmp_path, {"transport_proof": _GOOD_PROOF}, claimed=True, name="ok")
+    assert replay.check_session(proved) == []
+
+
+def test_c1_13_replay_refuses_a_legacy_true_manifest_with_no_proof(tmp_path: Path) -> None:
+    replay = _replay_module()
+    legacy = _written_session(tmp_path, {}, claimed=True, name="legacy")
+    for allow_demo in (False, True):  # the demo flag is for rehearsals, never for a bare true
+        failures = replay.check_session(legacy, allow_demo=allow_demo)
+        assert any("transport proof" in f for f in failures), failures
+
+
+def test_c1_14_replay_refuses_true_over_an_invalid_proof(tmp_path: Path) -> None:
+    replay = _replay_module()
+    bad = {**_GOOD_PROOF, "managed_account_count": 0}
+    session = _written_session(tmp_path, {"transport_proof": bad}, claimed=True, name="bad")
+    assert any("transport proof" in f for f in replay.check_session(session))
+
+
+def test_c1_15_replay_refuses_a_manifest_that_disagrees_with_its_capture(tmp_path: Path) -> None:
+    """A hand-edit of the manifest Boolean alone is caught: the capture's own stamp disagrees."""
+
+    replay = _replay_module()
+    session = _written_session(tmp_path, {}, claimed=False, name="edited")
+    manifest = json.loads((session / "manifest.json").read_text(encoding="utf-8"))
+    manifest["gateway_evidence"] = True
+    (session / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    failures = replay.check_session(session)
+    assert any("disagrees" in f for f in failures), failures
+
+
+def test_c1_16_a_proof_edited_after_capture_is_a_hash_drift(tmp_path: Path) -> None:
+    replay = _replay_module()
+    session = _written_session(tmp_path, {"transport_proof": _GOOD_PROOF}, claimed=True, name="t")
+    path = session / "capture.json"
+    path.write_text(path.read_text(encoding="utf-8").replace('"CONNECTED"', '"X"'), encoding="utf-8")
+    assert any("sha256 drift" in f for f in replay.check_session(session))
+
+
+def test_c1_17_a_rehearsal_still_replays_with_allow_demo_and_is_refused_without(
+    tmp_path: Path,
+) -> None:
+    replay = _replay_module()
+    rehearsal = _written_session(tmp_path, {}, claimed=False, name="rehearsal")
+    assert replay.check_session(rehearsal, allow_demo=True) == []
+    assert any("gateway_evidence=false" in f for f in replay.check_session(rehearsal))
