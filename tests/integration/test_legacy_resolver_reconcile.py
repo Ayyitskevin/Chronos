@@ -537,3 +537,115 @@ def test_a_blank_reference_row_that_would_settle_is_refused_with_its_own_reason(
     (item,) = report.unresolved
     assert "absent" not in item.reason
     assert "no order reference" in item.reason and "never settles a terminal state" in item.reason
+
+
+# --- LEGACY-5 r1 (Daybreak P2-1): the recorded-fills check is atomic with the terminal write ----
+
+
+def _late_execution(quantity: str) -> BrokerExecution:
+    return BrokerExecution(
+        execution_id=f"exec-late-{quantity}",
+        account_id=ACCOUNT,
+        broker_order_id=BROKER_ID,
+        permanent_id=PERM_ID,
+        client_id=CLIENT_ID,
+        order_ref=REF,
+        contract=UnderlyingContract(con_id=CON_ID, symbol="AAPL"),
+        side=OrderSide.BUY,
+        quantity=Decimal(quantity),
+        price=LIMIT,
+        timestamp=NOW,
+    )
+
+
+def _pause_after_the_operators_maximum_read(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch, concurrent: object
+) -> list[Decimal]:
+    """Run ``concurrent()`` once, right after ``operator_resolve`` has read the recorded maximum
+    and before its terminal write: the deterministic form of Daybreak's interleaving."""
+
+    tracker = rig.reconciler._tracker
+    real = tracker.recorded_filled_quantity
+    reads: list[Decimal] = []
+
+    def paused(intent_id: str, *, current_account_id: str) -> Decimal:
+        value = real(intent_id, current_account_id=current_account_id)
+        reads.append(value)
+        if len(reads) == 1:
+            concurrent()  # type: ignore[operator]
+        return value
+
+    monkeypatch.setattr(tracker, "recorded_filled_quantity", paused)
+    return reads
+
+
+def _late_fill_reconciled(rig: _Rig) -> OrderRestartReconciliationReport:
+    """The concurrent writer: a late exact-reference execution of 5 becomes visible (the listed
+    row has left the open-orders list) and a full reconcile records it."""
+
+    rig.venue.open = []
+    rig.venue.execs = [_late_execution("5")]
+    return rig.reconcile()
+
+
+@pytest.mark.parametrize("typed", CONTRADICTED, ids=lambda lifecycle: lifecycle.value)
+def test_r1_a_fill_recorded_between_the_maximum_read_and_the_terminal_write_is_not_overwritten(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch, typed: OrderLifecycle
+) -> None:
+    """Daybreak P2-1: SUBMISSION_UNKNOWN, the operator's two stable reads list an exact-owned
+    ``typed``/0 row and it reads the recorded maximum 0; a concurrent reconcile then records
+    PARTIALLY_FILLED/5; the operator resumes with its stale row and maximum. The terminal write
+    must re-check the maximum in the same transaction: refused, PARTIALLY_FILLED/5 kept, no
+    ``typed``/0 event, the opening-order lock held."""
+
+    rig.seed(OrderLifecycle.SUBMISSION_UNKNOWN)
+    rig.venue.open = [_row(typed, "0")]
+    concurrent: list[OrderRestartReconciliationReport] = []
+    reads = _pause_after_the_operators_maximum_read(
+        rig, monkeypatch, lambda: concurrent.append(_late_fill_reconciled(rig))
+    )
+
+    with pytest.raises(ValueError, match="recorded fills advanced"):
+        rig.reconciler.operator_resolve(
+            "intent-1",
+            operator_note="checked the TWS order list",
+            current_account_id=ACCOUNT,
+            now=NOW,
+        )
+
+    assert reads[0] == Decimal(0)  # the operator really read the stale maximum
+    (during,) = concurrent
+    assert [update.lifecycle for update in during.applied_updates] == [
+        OrderLifecycle.PARTIALLY_FILLED
+    ]  # the concurrent writer really recorded the late fill
+    assert rig.status() is OrderLifecycle.PARTIALLY_FILLED
+    events = rig.repo.events("intent-1", current_account_id=ACCOUNT)
+    assert events[-1].to_status is OrderLifecycle.PARTIALLY_FILLED
+    assert events[-1].filled_quantity == Decimal(5)
+    assert typed not in {event.to_status for event in events}
+    rig.venue.open, rig.venue.execs = [_row(typed, "0")], []
+    after = rig.reconcile()
+    assert [item.intent_id for item in after.remaining_active] == ["intent-1"]
+    assert after.permits_new_opening_order is False
+
+
+def test_r1_the_same_interleaving_without_a_new_fill_still_settles(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Positive control: the pause alone changes nothing. A concurrent reconcile that records no
+    fill lets the operator's CANCELLED/0 write land (the guard refuses only an ADVANCED maximum)."""
+
+    rig.seed(OrderLifecycle.SUBMISSION_UNKNOWN)
+    rig.venue.open = [_row(OrderLifecycle.CANCELLED, "0")]
+    _pause_after_the_operators_maximum_read(rig, monkeypatch, lambda: None)
+
+    assert (
+        rig.reconciler.operator_resolve(
+            "intent-1",
+            operator_note="checked the TWS order list",
+            current_account_id=ACCOUNT,
+            now=NOW,
+        )
+        is False
+    )
+    assert rig.status() is OrderLifecycle.CANCELLED
