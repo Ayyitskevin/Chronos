@@ -488,11 +488,30 @@ _RC1_SUBJECT = (
 
 
 def _rc1_commit() -> str:
-    for line in _git("log", "--format=%H%x09%s").splitlines():
-        sha, _, subject = line.partition("\t")
-        if subject == _RC1_SUBJECT:  # the subject line only: a body that quotes it never matches
-            return sha
-    pytest.fail(f"the RC-1 commit (subject {_RC1_SUBJECT!r}) is not in this checkout's history")
+    """The ONE commit whose subject line is RC-1's, and which changes RC-1's known file set.
+
+    Git subjects are not unique, so zero or several exact matches fail closed (naming the shas); the
+    sole match must also carry RC-1's changed files, or a lookalike could stand in for it.
+    """
+
+    matches = [
+        sha
+        for line in _git("log", "--format=%H%x09%s").splitlines()
+        for sha, _, subject in [line.partition("\t")]
+        if subject == _RC1_SUBJECT  # the subject line only: a body that quotes it never matches
+    ]
+    if len(matches) != 1:
+        pytest.fail(
+            f"expected exactly one commit with the RC-1 subject {_RC1_SUBJECT!r}; "
+            f"found {len(matches)}: {matches}"
+        )
+    files = frozenset(_git("diff-tree", "--no-commit-id", "--name-only", "-r", matches[0]).split())
+    if files != _RC1_FILES:
+        pytest.fail(
+            f"commit {matches[0]} has the RC-1 subject but its files {sorted(files)} are not "
+            f"RC-1's {sorted(_RC1_FILES)}"
+        )
+    return matches[0]
 
 
 def _predicate(source: str) -> str:
@@ -581,8 +600,8 @@ def test_the_lookup_is_not_limited_to_a_window_of_recent_commits(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     deep = [(f"filler {n}", ()) for n in range(300)]
-    ids = _history(tmp_path / "r", [_REAL, *deep])
-    assert _lookup(monkeypatch, tmp_path / "r") == ids[0]
+    ids = _history(tmp_path / "r", [_FILLER[0], _REAL, *deep])
+    assert _lookup(monkeypatch, tmp_path / "r") == ids[1]
 
 
 def test_a_body_that_quotes_the_subject_or_a_near_miss_subject_never_matches(
@@ -591,6 +610,7 @@ def test_a_body_that_quotes_the_subject_or_a_near_miss_subject_never_matches(
     ids = _history(
         tmp_path / "r",
         [
+            _FILLER[0],
             _REAL,
             ("docs: a follow-up\n\nThis follows up on: " + _RC1_SUBJECT, ()),
             (f'Revert "{_RC1_SUBJECT}"', ()),
@@ -598,7 +618,7 @@ def test_a_body_that_quotes_the_subject_or_a_near_miss_subject_never_matches(
             ("tests: an unrelated change that merely ends the same way (RC-1)", ()),
         ],
     )
-    assert _lookup(monkeypatch, tmp_path / "r") == ids[0]
+    assert _lookup(monkeypatch, tmp_path / "r") == ids[1]
 
 
 def test_the_lookup_fails_when_no_commit_has_the_subject(
@@ -614,10 +634,10 @@ def test_a_duplicate_exact_subject_fails_loudly_and_names_every_candidate(
 ) -> None:
     """Daybreak's reproduction: a NEWER empty commit with RC-1's exact subject became RC-1."""
 
-    ids = _history(tmp_path / "r", [_REAL, *_FILLER, (_RC1_SUBJECT, ())])
+    ids = _history(tmp_path / "r", [_FILLER[0], _REAL, *_FILLER, (_RC1_SUBJECT, ())])
     with pytest.raises(pytest.fail.Exception, match="found 2") as failure:
         _lookup(monkeypatch, tmp_path / "r")
-    assert ids[0] in str(failure.value) and ids[-1] in str(failure.value)
+    assert ids[1] in str(failure.value) and ids[-1] in str(failure.value)
 
 
 def test_a_single_commit_with_the_subject_but_not_rc1s_files_is_refused(
