@@ -420,6 +420,93 @@ def test_a_terminal_row_at_zero_fills_does_not_overwrite_recorded_fills(
     assert report.permits_new_opening_order is False
 
 
+# --- LEGACY-5 (option B): the pins above are the red; these are the controls and the reasons -----
+
+
+@pytest.mark.parametrize("path", ["partial", "partial-then-cancel-pending"])
+@pytest.mark.parametrize("typed", CONTRADICTED, ids=lambda lifecycle: lifecycle.value)
+def test_the_refusal_names_the_recorded_fills_it_would_have_dropped(
+    rig: _Rig, typed: OrderLifecycle, path: str
+) -> None:
+    rig.seed(OrderLifecycle.PARTIALLY_FILLED)
+    if path == "partial-then-cancel-pending":
+        rig._record(
+            OrderLifecycle.CANCEL_PENDING,
+            "cancel-after-partial",
+            source="CANCEL",
+            from_status=OrderLifecycle.PARTIALLY_FILLED,
+            broker_order_id=BROKER_ID,
+            occurred_at=PRIOR,
+        )
+    rig.venue.open = [_row(typed, "0")]
+
+    (item,) = rig.reconcile().unresolved
+
+    assert "absent" not in item.reason
+    assert typed.value in item.reason
+    assert "below the 3 filled already recorded" in item.reason
+    assert "stays locked" in item.reason
+
+
+def test_a_terminal_row_above_the_recorded_fills_still_settles(rig: _Rig) -> None:
+    """Positive control: 3 of 10 recorded, the venue reports the order FILLED at 10."""
+
+    rig.seed(OrderLifecycle.PARTIALLY_FILLED)
+    rig.venue.open = [_row(OrderLifecycle.FILLED, "10")]
+
+    report = rig.reconcile()
+
+    assert rig.status() is OrderLifecycle.FILLED
+    assert report.remaining_active == ()
+    assert report.unresolved == ()
+
+
+def test_the_genuine_partial_then_cancel_stays_locked_under_s3_unchanged(rig: _Rig) -> None:
+    """3 of 10 recorded and the venue says CANCELLED at 3: S-3 locks it, and says so in S-3's words,
+    not the new rule's (3 is not below 3)."""
+
+    rig.seed(OrderLifecycle.PARTIALLY_FILLED)
+    rig.venue.open = [_row(OrderLifecycle.CANCELLED, "3")]
+    events_before = rig.event_count()
+
+    report = rig.reconcile()
+
+    assert rig.status() is OrderLifecycle.PARTIALLY_FILLED
+    assert rig.event_count() == events_before
+    assert report.permits_new_opening_order is False
+    (item,) = report.unresolved
+    assert "not a working lifecycle" in item.reason and "cannot settle" in item.reason
+    assert "already recorded" not in item.reason
+
+
+@pytest.mark.parametrize("typed", CONTRADICTED, ids=lambda lifecycle: lifecycle.value)
+def test_operator_resolve_passes_the_recorded_fills_too(rig: _Rig, typed: OrderLifecycle) -> None:
+    """An intent that is SUBMISSION_UNKNOWN but has fills on record is not settled by a zero row."""
+
+    rig.seed(OrderLifecycle.PARTIALLY_FILLED)
+    rig._record(
+        OrderLifecycle.SUBMISSION_UNKNOWN,
+        "unknown-after-partial",
+        source="SUBMIT",
+        from_status=OrderLifecycle.PARTIALLY_FILLED,
+        occurred_at=EARLIER_TODAY,
+    )
+    assert rig.status() is OrderLifecycle.SUBMISSION_UNKNOWN
+    rig.venue.open = [_row(typed, "0")]
+    events_before = rig.event_count()
+
+    with pytest.raises(ValueError, match="does not settle this intent"):
+        rig.reconciler.operator_resolve(
+            "intent-1",
+            operator_note="checked the TWS order list",
+            current_account_id=ACCOUNT,
+            now=NOW,
+        )
+
+    assert rig.status() is OrderLifecycle.SUBMISSION_UNKNOWN
+    assert rig.event_count() == events_before
+
+
 # --- S-12: the report says WHY a blank-reference observation did not settle the intent ---------
 # The behaviour itself is pinned in tests/integration/test_legacy_resolver_blank_ref.py; the typed
 # reason (not "absent from the snapshots", which would be false) is pinned here.
