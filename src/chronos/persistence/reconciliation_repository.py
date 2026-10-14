@@ -2,10 +2,10 @@
 
 One row per run, append-only, never pruned (K1 = (a)). The row's ``broker_snapshot`` carries the
 MASKED account summary — net liquidation, total cash, buying power, currency, ``as_of`` and the
-account fingerprint — never the raw broker account id (K2 = (a)): every persisted value passes
-``_reject_raw_account_event_data`` before a write. Positions carry a stable ``position_key`` so a
-later provenance row (AP-1) can reference them. Foreign/manual positions are recorded, never acted
-on (K3 = (a)).
+account fingerprint — never the raw broker account id (K2 = (a)), and since I-3b no masked id:
+every persisted value passes ``_reject_raw_account_event_data`` before a write. Positions carry a
+stable ``position_key`` so a later provenance row (AP-1) can reference them. Foreign/manual
+positions are recorded, never acted on (K3 = (a)).
 
 The row is written ONLY after a decided result — the runtime calls the recorder after the
 readiness latch has published (the BP-1b r2 lesson: never from ``finally``, never for a refused
@@ -90,7 +90,10 @@ class ReconciliationRunConflict(ValueError):
 class ReconciliationAccountFacts(ChronosModel):
     """The masked account summary of one run — the raw broker account id is never a field."""
 
-    masked_account_id: str
+    # I-3b: no ``masked_account_id`` either. Its 2 + 4 visible characters beside the unkeyed
+    # fingerprint narrowed the raw id to 1,000 candidates. Rows written before keep the field
+    # (append-only; no reader parses ``account_facts`` back into this model). The fingerprint
+    # stays as the provenance replay input; while it is unkeyed it can be brute-forced alone (N3).
     account_fingerprint: str
     net_liquidation: Any
     total_cash: Any
@@ -141,7 +144,6 @@ class ReconciliationSnapshot(ChronosModel):
         execution_count = 0
         if snapshot is not None:
             account = ReconciliationAccountFacts(
-                masked_account_id=snapshot.account.masked_account_id,
                 account_fingerprint=account_fingerprint,
                 net_liquidation=str(snapshot.account.net_liquidation),
                 total_cash=str(snapshot.account.total_cash),

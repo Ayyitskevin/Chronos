@@ -1,9 +1,9 @@
 """BP-3 — account facts persist per reconciliation run: the ``reconciliation_runs`` writer.
 
 Numbered to the packet contract. K1 (a): append-only, no pruning. K2 (a): the raw broker account
-id never reaches a row — masked id + fingerprint only. K3 (a): foreign/manual positions are
-recorded, never acted on. Every pin runs on the demo broker / synthetic evidence; UNVERIFIED on
-live until the M4 read-only session (K4 unanswered).
+id never reaches a row — the fingerprint only (I-3b: new runs carry no masked id). K3 (a):
+foreign/manual positions are recorded, never acted on. Every pin runs on the demo broker /
+synthetic evidence; UNVERIFIED on live until the M4 read-only session (K4 unanswered).
 """
 
 from __future__ import annotations
@@ -169,7 +169,7 @@ def test_1_record_run_writes_one_masked_row_per_run_id_and_never_the_raw_account
         ).one()
     persisted = json.loads(broker_snapshot)
     assert DEMO_ACCOUNT_ID not in broker_snapshot and DEMO_ACCOUNT_ID not in decisions
-    assert persisted["account_facts"]["masked_account_id"] == "DU****567"
+    assert "masked_account_id" not in persisted["account_facts"]  # I-3b: new runs carry no mask
     assert persisted["account_facts"]["account_fingerprint"] == FINGERPRINT
     assert persisted["account_facts"]["net_liquidation"] == "100000.50"
     assert persisted["account_facts"]["total_cash"] == "25000.25"
@@ -1043,8 +1043,35 @@ def _recorder_delta(source: str) -> tuple[list[str], dict[str, Any]]:
                 if isinstance(method, ast.FunctionDef):
                     recorder[method.name] = method
             continue
+        if isinstance(node, ast.ClassDef) and node.name in _I3B_CLASSES:
+            node = _without_the_i3b_masked_id(node)  # I-3b's two deletions (pinned by test_i3b_3)
         kept.append(ast.dump(node))
     return kept, recorder
+
+
+_I3B_CLASSES = ("ReconciliationAccountFacts", "ReconciliationSnapshot")
+
+
+def _without_the_i3b_masked_id(node: ast.ClassDef) -> ast.ClassDef:
+    """The class with I-3b's deletions applied: the ``masked_account_id`` field and the producer's
+    ``masked_account_id=`` keyword. A no-op on a source that already lacks both."""
+
+    import copy
+
+    node = copy.deepcopy(node)
+    node.body = [
+        stmt
+        for stmt in node.body
+        if not (
+            isinstance(stmt, ast.AnnAssign)
+            and isinstance(stmt.target, ast.Name)
+            and stmt.target.id == "masked_account_id"
+        )
+    ]
+    for call in ast.walk(node):
+        if isinstance(call, ast.Call):
+            call.keywords = [kw for kw in call.keywords if kw.arg != "masked_account_id"]
+    return node
 
 
 def test_ap1r1_3_the_hook_is_the_only_recorder_change_and_runs_after_every_recorded_run() -> None:
@@ -1275,12 +1302,6 @@ def _i3b_result_with_the_real_mask() -> ReconciliationResult:
     return _result().model_copy(update={"snapshot": view.model_copy(update={"account": account})})
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="I-3b red: a new run still stores account_facts.masked_account_id beside the "
-    "unkeyed fingerprint (reconciliation_repository.py ReconciliationAccountFacts)",
-)
 def test_i3b_1_a_new_run_stores_no_masked_account_id_and_no_other_raw_projection(
     database: Database,
 ) -> None:
@@ -1398,3 +1419,36 @@ def test_i3b_2_a_historical_row_with_the_masked_id_stays_readable_and_replays_by
     # never rewritten: same bytes, same digest
     assert stored_text() == before
     assert snapshot_digest(json.loads(stored_text())) == digest
+
+
+def test_i3b_3_the_i3b_delta_is_the_field_and_the_producer_keyword_and_nothing_else() -> None:
+    """The frozen-module pins set aside exactly I-3b's two deletions; this pins what they are:
+    the facts model's fields and the producer's keywords are the same six names, in order."""
+
+    kept = ["account_fingerprint", "net_liquidation", "total_cash", "buying_power"]
+    kept += ["currency", "as_of"]
+    tree = ast.parse((_ROOT / _REPOSITORY).read_text(encoding="utf-8"))
+    classes = {node.name: node for node in tree.body if isinstance(node, ast.ClassDef)}
+    fields = [
+        stmt.target.id
+        for stmt in classes["ReconciliationAccountFacts"].body
+        if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name)
+    ]
+    assert fields == kept, fields
+    (producer,) = [
+        call
+        for call in ast.walk(classes["ReconciliationSnapshot"])
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "ReconciliationAccountFacts"
+    ]
+    assert [kw.arg for kw in producer.keywords] == kept
+    assert "masked_account_id" not in ast.dump(classes["ReconciliationSnapshot"])
+    # positive control: the normaliser really removes a planted field and keyword
+    planted = ast.parse(
+        "class ReconciliationAccountFacts:\n    masked_account_id: str\n    x: int\n"
+        "    def f(self):\n        return F(masked_account_id=1, x=2)\n"
+    ).body[0]
+    assert isinstance(planted, ast.ClassDef)
+    cleaned = ast.dump(_without_the_i3b_masked_id(planted))
+    assert "masked_account_id" not in cleaned and "'x'" in cleaned
