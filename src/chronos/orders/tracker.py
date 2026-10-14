@@ -41,7 +41,9 @@ class OrderIdentityConflict(ValueError):
         self.values = values
         self.permanent_ids = values if field == "permanent_id" else ()
         listed = " and ".join(str(value) for value in values)
-        noun = "permanent ids" if field == "permanent_id" else "client ids"
+        noun = {"permanent_id": "permanent ids", "broker_order_id": "broker order ids"}.get(
+            field, "client ids"
+        )
         super().__init__(
             f"identity conflict: intent {intent_id!r} persisted {noun} {listed} disagree"
         )
@@ -312,6 +314,66 @@ class OrderTracker:
             enforce_from_status=True,
         )
 
+    def record_planned_transition(
+        self,
+        *,
+        intent_id: str,
+        current_account_id: str,
+        from_status: OrderLifecycle,
+        to_status: OrderLifecycle,
+        event_key: str,
+        source: str,
+        broker_order_id: int | None,
+        permanent_id: int | None,
+        client_id: int | None,
+        filled_quantity: Decimal,
+        remaining_quantity: Decimal,
+        evidence: dict[str, object],
+        now: datetime,
+    ) -> bool:
+        """One lifecycle CAS planned by the reconciler from proven broker evidence.
+
+        True-CAS guarded (``enforce_from_status``): if the intent left ``from_status`` since the
+        planner read it -- the cancel service completed, a late callback landed -- nothing is
+        written and ``False`` is returned. ``from_status == to_status`` records fill progress in
+        place (the identity-refinement precedent) without moving the lifecycle.
+        """
+
+        return self._tracker.record_transition(
+            intent_id=intent_id,
+            event_key=event_key,
+            source=source,
+            from_status=from_status,
+            to_status=to_status,
+            current_account_id=current_account_id,
+            broker_order_id=broker_order_id,
+            permanent_id=permanent_id,
+            client_id=client_id,
+            filled_quantity=filled_quantity,
+            remaining_quantity=remaining_quantity,
+            evidence=evidence,
+            occurred_at=now,
+            enforce_from_status=True,
+        )
+
+    def fill_figures(
+        self, intent_id: str, *, current_account_id: str
+    ) -> tuple[tuple[datetime, Decimal], ...]:
+        """Every recorded cumulative fill figure with when it was recorded (settle witness)."""
+
+        events = self._tracker.events(intent_id, current_account_id=current_account_id)
+        return tuple(
+            (event.occurred_at, event.filled_quantity)
+            for event in events
+            if event.filled_quantity is not None
+        )
+
+    def events(self, intent_id: str, *, current_account_id: str) -> tuple[OrderEventRecord, ...]:
+        """The intent's persisted events, oldest first (the U-B dwell reads its cancel mark and
+        the recovery provenance from them; a read, it decides nothing)."""
+
+        return self._tracker.events(intent_id, current_account_id=current_account_id)
+
     def first_event_time(
         self,
         intent_id: str,
@@ -363,6 +425,14 @@ class OrderTracker:
         two distinct values fail closed with :class:`OrderIdentityConflict`.
         """
         return self._single_identity(intent_id, "client_id", current_account_id)
+
+    def single_broker_order_id(self, intent_id: str, *, current_account_id: str) -> int | None:
+        """The ONE broker order id persisted for this intent (the settle planner's exact set).
+
+        Same policy as :meth:`permanent_id`, unlike :meth:`broker_order_id` (the latest): two
+        distinct values fail closed with :class:`OrderIdentityConflict` (design r3 §2.1).
+        """
+        return self._single_identity(intent_id, "broker_order_id", current_account_id)
 
     def _single_identity(self, intent_id: str, field: str, current_account_id: str) -> int | None:
         events = self._tracker.events(intent_id, current_account_id=current_account_id)

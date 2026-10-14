@@ -20,8 +20,8 @@ import logging
 import math
 import threading
 from collections import deque
-from collections.abc import Callable
-from contextlib import AbstractContextManager
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -327,12 +327,17 @@ class CallbackBridge:
         self._current_time: _SingleFlight | None = None
         self._positions: _SingleFlight | None = None
         self._open_orders: _SingleFlight | None = None
+        self._completed_orders: _SingleFlight | None = None
         self._order_acks: dict[int, _SingleFlight] = {}
         self.order_statuses: dict[int, tuple[str, float, float]] = {}
         self._quotes: dict[int, QuoteState] = {}
         self._commissions: dict[str, tuple[Decimal | None, str | None]] = {}
         self._market_rule_flights: dict[int, _MarketRuleFlight] = {}
         self._quarantined_market_rules: set[int] = set()
+        # CANCEL_PENDING settle U-B (design r3 §4.3): the belt for an adapter whose readiness
+        # observer is not wired. Advanced on every reconnect reset and every connection
+        # uncertainty (connection closed included), BEFORE the no-observer early return.
+        self._adapter_epoch = 0
 
     # ------------------------------------------------------------------ #
     # Connection-level callbacks
@@ -411,7 +416,23 @@ class CallbackBridge:
             return
         self.registry.fail_exception(req_id, error, error_code=code)
 
+    @property
+    def adapter_epoch(self) -> int:
+        with self._lock:
+            return self._adapter_epoch
+
+    @contextmanager
+    def held_at_adapter_epoch(self, expected: int) -> Iterator[bool]:
+        """Hold the bridge lock and yield whether ``adapter_epoch`` is still ``expected`` (U-B
+        r1, Daybreak P2-1): a reconnect reset or a connection-uncertainty bump waits for the
+        body. Taken after the readiness latch's lock, never before it."""
+
+        with self._lock:
+            yield self._adapter_epoch == expected
+
     def _invalidate_connection(self, reason: str) -> None:
+        with self._lock:
+            self._adapter_epoch += 1
         callback = self._on_connection_uncertain
         if callback is None:
             return
@@ -486,6 +507,26 @@ class CallbackBridge:
         if flight is not None:
             flight.done.set()
 
+    def start_completed_orders(self) -> _SingleFlight:
+        with self._lock:
+            if self._completed_orders is not None and not self._completed_orders.done.is_set():
+                raise RuntimeError("a completed-orders request is already in flight")
+            flight = _SingleFlight()
+            self._completed_orders = flight
+            return flight
+
+    def on_completed_order(self, contract: Any, order: Any, order_state: Any) -> None:
+        with self._lock:
+            flight = self._completed_orders
+        if flight is not None and not flight.done.is_set():
+            flight.items.append((contract, order, order_state))
+
+    def on_completed_orders_end(self) -> None:
+        with self._lock:
+            flight = self._completed_orders
+        if flight is not None:
+            flight.done.set()
+
     def reset_for_reconnect(self) -> None:
         """Clear connection-scoped state before a fresh handshake (finding H4).
 
@@ -496,6 +537,7 @@ class CallbackBridge:
         """
 
         with self._lock:
+            self._adapter_epoch += 1
             self.connected_event.clear()
             self.managed_accounts_event.clear()
             self.connection_closed.clear()
@@ -503,6 +545,10 @@ class CallbackBridge:
             self.next_valid_id = None
             self.order_statuses.clear()
             self._order_acks.clear()
+            # the completed-orders stream has no request id: a request left unanswered by the
+            # old session is dropped (not completed -- its waiter times out on its own), so a
+            # fresh session can ask again (Daybreak U-A r1 P3-1)
+            self._completed_orders = None
             quote_request_ids = tuple(self._quotes)
             self._quotes.clear()
             for market_rule_flight in self._market_rule_flights.values():
@@ -568,7 +614,12 @@ class CallbackBridge:
 
     def _fail_all_single_flights(self, reason: str) -> None:
         with self._lock:
-            flights = [self._current_time, self._positions, self._open_orders]
+            flights = [
+                self._current_time,
+                self._positions,
+                self._open_orders,
+                self._completed_orders,
+            ]
             flights.extend(self._order_acks.values())
             for flight in flights:
                 if flight is not None:

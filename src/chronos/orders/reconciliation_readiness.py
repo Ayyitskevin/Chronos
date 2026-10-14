@@ -78,6 +78,10 @@ class ReconciliationReadiness:
         self._reconciliation_lock = Lock()
         self._status = ReconciliationStatus.PENDING
         self._generation = 0
+        # CANCEL_PENDING settle U-B (design r3 §4.3): advanced by every EXTERNAL invalidation
+        # (``invalidate`` / ``invalidating_transition``), never by the routine once-per-pass
+        # ``begin_reconciliation``; the recovery dwell is keyed to it, not to ``_generation``.
+        self._uncertainty_epoch = 0
         self._reason = "startup reconciliation has not completed"
         self._reconciled_at: datetime | None = None
 
@@ -125,7 +129,7 @@ class ReconciliationReadiness:
 
         normalized = reason.strip() or "reconciliation observation in progress"
         with self._idle:
-            self._invalidate_unlocked(normalized)
+            self._invalidate_unlocked(normalized, uncertain=False)
             while self._submissions_in_flight:
                 self._idle.wait()
             return self._generation
@@ -135,7 +139,7 @@ class ReconciliationReadiness:
 
         normalized = reason.strip() or "broker state became uncertain"
         with self._lock:
-            self._invalidate_unlocked(normalized)
+            self._invalidate_unlocked(normalized, uncertain=True)
             return self._snapshot_unlocked()
 
     @contextmanager
@@ -144,10 +148,38 @@ class ReconciliationReadiness:
 
         normalized = reason.strip() or "broker state became uncertain"
         with self._lock:
-            self._invalidate_unlocked(normalized)
+            self._invalidate_unlocked(normalized, uncertain=True)
             yield
 
-    def _invalidate_unlocked(self, reason: str) -> None:
+    def uncertainty_epoch(self) -> int:
+        """How many external invalidations this latch has seen (design r3 §4.3).
+
+        Every readiness-invalidating path (connection loss, unsolicited observations, a
+        managed-account change, the connection manager, submission-time checks) reaches the
+        latch through ``invalidate`` or ``invalidating_transition``, so this one counter covers
+        them all, including future callers; an ordinary reconciliation pass does not move it.
+        """
+
+        with self._lock:
+            return self._uncertainty_epoch
+
+    @contextmanager
+    def held_at_uncertainty_epoch(self, expected: int) -> Iterator[bool]:
+        """Hold the latch's lock and yield whether the epoch is still ``expected``.
+
+        U-B r1 (Daybreak P2-1): a write that rests on an observation of one epoch runs INSIDE
+        this block, so no invalidation can land between the check and the write -- it waits for
+        the lock and lands after. Keep the body short (one repository compare-and-set); the
+        lock order is this latch first, then the adapter bridge's
+        (:meth:`CallbackBridge.held_at_adapter_epoch`), as ``on_managed_accounts`` already nests.
+        """
+
+        with self._lock:
+            yield self._uncertainty_epoch == expected
+
+    def _invalidate_unlocked(self, reason: str, *, uncertain: bool) -> None:
+        if uncertain:
+            self._uncertainty_epoch += 1
         self._generation += 1
         self._status = ReconciliationStatus.PENDING
         self._reason = reason

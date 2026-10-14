@@ -15,22 +15,33 @@ because a broker snapshot cannot be atomic with the local lifecycle write
 
 from __future__ import annotations
 
+import time as _time_module
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, time
 from decimal import Decimal
+from functools import partial
+from types import MappingProxyType
 from zoneinfo import ZoneInfo
 
+from chronos.broker.base import CompletedOrderEvidence
 from chronos.broker.connection import BrokerConnectionManager
 from chronos.domain.enums import ConnectionState, OrderLifecycle
 from chronos.domain.models import BrokerExecution, BrokerOrder
 from chronos.orders.reconciliation_readiness import ReconciliationReadiness
-from chronos.orders.state_machine import TERMINAL_ORDER_LIFECYCLES
+from chronos.orders.state_machine import (
+    TERMINAL_ORDER_LIFECYCLES,
+    OrderLifecycleError,
+    OrderLifecycleMachine,
+)
 from chronos.orders.tracker import OrderIdentityConflict, OrderStatusUpdate, OrderTracker
 from chronos.persistence.order_repositories import (
     OrderIntentRecord,
     OrderIntentRepository,
     RecordedFillsAdvanced,
 )
+from chronos.utils.identifiers import account_fingerprint
 
 # Intent statuses whose true broker state must be re-derived on restart.
 _UNRESOLVED_STATUSES = frozenset(
@@ -485,6 +496,176 @@ def _unresolved_evidence_reason(
     return "owned order was absent from the broker order and execution snapshots"
 
 
+# Statuses the settle planner owns: it alone decides their exit, from one evidence generation.
+_SETTLE_STATUSES = frozenset({OrderLifecycle.CANCEL_PENDING, OrderLifecycle.PARTIALLY_FILLED})
+_TERMINAL_VENUE = frozenset(
+    {OrderLifecycle.CANCELLED, OrderLifecycle.FILLED, OrderLifecycle.REJECTED}
+)
+#: The venue lifecycles the planner recognises on a listed order (U-B r1, Daybreak P1-1): the two
+#: working classes (C2-0/C2-1), PendingCancel (C1) and the terminals. Anything else -- above all
+#: SUBMISSION_UNKNOWN, the broker-status boundary's fail-closed answer to a status Chronos does
+#: not know -- is row 12: no completed-orders comparison, no dwell, no fill progress, no write.
+_WORKING_VENUE = frozenset({OrderLifecycle.SUBMITTED, OrderLifecycle.PARTIALLY_FILLED})
+_RECOGNISED_VENUE = _WORKING_VENUE | _TERMINAL_VENUE | {OrderLifecycle.CANCEL_PENDING}
+#: U-B r2 (Daybreak r1 delta P1-2): the ONLY terminal statuses that settle, each to exactly this
+#: target -- decided by the lifecycle BEFORE any quantity. REJECTED (and anything else) is row C9:
+#: unexpected for a cancel, nothing is written, whatever figure the record carries. C3 (a WORKING
+#: row filled by quantity) is a separate rule, never this table.
+_TERMINAL_TARGET: Mapping[OrderLifecycle, OrderLifecycle] = MappingProxyType(
+    {
+        OrderLifecycle.CANCELLED: OrderLifecycle.CANCELLED,
+        OrderLifecycle.FILLED: OrderLifecycle.FILLED,
+    }
+)
+_UNRECOGNISED_STATUS = "the venue reports an unrecognised venue order status; nothing is assumed"
+_NO_COMPLETED_EVIDENCE = "completed-orders evidence is not available"
+#: U-B (design r3 §4.3): the source of the dwell-gated recovery write (C2-1); a SUBMITTED intent
+#: whose latest lifecycle event carries it, from CANCEL_PENDING, is "recovered" (rows S-R).
+RECOVERY_SOURCE = "RECONCILE_RECOVERY"
+
+
+@dataclass(frozen=True, slots=True)
+class _Dwell:
+    """One CANCEL_PENDING intent's recovery dwell (in memory only; a restart forgets it).
+
+    ``key`` = (session_id, uncertainty_epoch, adapter_epoch, account fingerprint, the working
+    order's exact identity, its status class, the cancel mark's event key): ANY component
+    changing restarts the dwell. ``started_*`` are the first observation's clocks; the dwell is
+    satisfied once ``elapsed`` (monotonic) reaches ``D``.
+    """
+
+    key: tuple[object, ...]
+    mark_key: str
+    started_mono: float
+    started_wall: datetime
+    elapsed: float
+
+
+def _adapter_epoch(broker: object) -> int | None:
+    """The adapter's reconnect counter (``bridge.adapter_epoch``), or None: recovery disabled."""
+
+    epoch = getattr(getattr(broker, "bridge", None), "adapter_epoch", None)
+    return epoch if type(epoch) is int else None
+
+
+def _order_identity(order: BrokerOrder) -> tuple[object, ...]:
+    return (
+        order.account_id,
+        order.client_id,
+        order.broker_order_id,
+        order.permanent_id,
+        order.order_ref,
+        getattr(order.contract, "con_id", None),
+        getattr(order.contract, "symbol", None),
+        order.side.value,
+        order.quantity,
+        order.limit_price,
+    )
+
+
+#: A once-per-pass read of the venue's completed orders: (records, why-they-are-unavailable).
+_CompletedRead = Callable[[], tuple[tuple[BrokerOrder, ...] | None, str]]
+
+
+def _owned_signature(
+    working: list[BrokerOrder], fills: list[BrokerExecution]
+) -> tuple[tuple[BrokerOrder, ...], tuple[BrokerExecution, ...]]:
+    """The owned evidence a settle write rests on, WHOLE rows, comparable across two snapshots.
+
+    Every field (account, reference, ids, contract, side, quantities, limit, status, execution
+    quantity and timestamp) takes part, not a reduced key (Daybreak U-A r1 P1-2).
+    """
+
+    return (
+        tuple(sorted(working, key=lambda o: (o.broker_order_id, o.lifecycle.value))),
+        tuple(sorted(fills, key=lambda e: e.execution_id.strip())),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _SettlePlan:
+    """What the planner decided for one intent: write ONE CAS, hold, refuse, or defer.
+
+    ``kind``: ``write`` (one lifecycle/figure CAS), ``hold`` (proven and nothing to change),
+    ``refuse`` (typed reason; nothing is written), ``legacy`` (not the planner's: the existing
+    resolver decides, e.g. a partly filled order the venue still holds).
+    """
+
+    kind: str
+    reason: str = ""
+    to_status: OrderLifecycle | None = None
+    event_key: str = ""
+    filled: Decimal = Decimal("0")
+    remaining: Decimal = Decimal("0")
+    broker_order_id: int | None = None
+    permanent_id: int | None = None
+    client_id: int | None = None
+    evidence: tuple[tuple[str, str], ...] = ()
+    owned_open: tuple[BrokerOrder, ...] = ()
+    owned_fills: tuple[BrokerExecution, ...] = ()
+    record: BrokerOrder | None = None  # the bound terminal record (completed order or open row)
+    source: str = ""  # the event source when it is not the default (U-B: RECOVERY_SOURCE)
+    #: U-B r1: (uncertainty_epoch, adapter_epoch or None) the plan observed; a write that rests
+    #: on a working-order observation is made only while both are still these (Daybreak P2-1)
+    epochs: tuple[int, int | None] | None = None
+    dwell: _Dwell | None = None  # U-B: this pass's observation of the recovery dwell
+
+
+def _plain(value: Decimal) -> str:
+    """A Decimal as plain text (the book stores 8 places; evidence reads ``5``, not ``5E+0``)."""
+
+    return format(value.normalize(), "f")
+
+
+def _session_start(now: datetime, market_tz: ZoneInfo) -> datetime:
+    """S0: the start of the market-timezone date containing ``now``, as an aware UTC instant."""
+
+    local = now.astimezone(market_tz)
+    return datetime.combine(local.date(), time.min, tzinfo=market_tz).astimezone(UTC)
+
+
+def _completed_record_bound(
+    intent: OrderIntentRecord,
+    record: BrokerOrder,
+    *,
+    current_account_id: str,
+    expected_broker_client_id: int,
+    expected_limit_price: Decimal | None,
+    persisted_broker_order_id: int | None,
+    persisted_permanent_id: int | None,
+    persisted_client_id: int | None,
+) -> bool:
+    """Exact identity (design §2.1): a record binds only when EVERY identifying field agrees.
+
+    Used for a completed-order record AND a terminal open-book row. The reference is checked
+    HERE, exactly and non-empty (design §2.1 item 1; Daybreak U-A r1 delta P1-1): an open-book
+    row reaches this through ``_is_owned``, whose blank-reference/permId fallback is ownership
+    for observation, never a binding for a settle. The persisted sets are exact (Daybreak r1
+    P1-1): the ONE persisted permId (positive) and the ONE persisted client id are required and
+    equal to the record's, and a record that names a venue order id (0 = absent on completed
+    rows) must name the ONE persisted broker order id -- an intent with none persisted never
+    binds it. A persisted conflict never reaches here (the caller refuses it first).
+    """
+
+    return (
+        bool(intent.order_ref)
+        and record.order_ref == intent.order_ref
+        and persisted_permanent_id is not None
+        and persisted_permanent_id > 0
+        and record.permanent_id == persisted_permanent_id
+        and persisted_client_id is not None
+        and record.client_id == persisted_client_id
+        and (not record.broker_order_id or record.broker_order_id == persisted_broker_order_id)
+        and _working_order_matches_intent(
+            intent,
+            record,
+            current_account_id=current_account_id,
+            expected_broker_client_id=expected_broker_client_id,
+            expected_limit_price=expected_limit_price,
+        )
+    )
+
+
 class OrderRestartReconciler:
     """Re-derive and persist the true state of every working intent."""
 
@@ -497,7 +678,17 @@ class OrderRestartReconciler:
         reconciliation_readiness: ReconciliationReadiness,
         expected_broker_client_id: int,
         market_timezone: str = "America/New_York",
+        monotonic: Callable[[], float] = _time_module.monotonic,
+        recovery_dwell_seconds: float = 90.0,
+        cancel_mark_floor_seconds: float = 60.0,
+        clock_anomaly_tolerance_seconds: float = 5.0,
     ) -> None:
+        """U-B (design r3 §4.3, §6 Q2(c)): ``recovery_dwell_seconds`` is ``D`` and
+        ``cancel_mark_floor_seconds`` is ``M`` (the design's recommended 90 s and 60 s);
+        ``clock_anomaly_tolerance_seconds`` bounds how far the wall-clock and monotonic deltas
+        of one dwell may disagree before it restarts. None of the three is Kevin's answer yet:
+        they are safe defaults, and every one of them only delays a recovery."""
+
         self._connection = connection
         self._intents = intents
         self._tracker = tracker
@@ -506,6 +697,12 @@ class OrderRestartReconciler:
             raise ValueError("expected broker client id must be non-negative")
         self._expected_broker_client_id = expected_broker_client_id
         self._market_tz = ZoneInfo(market_timezone)
+        self._monotonic = monotonic
+        self._dwell_seconds = recovery_dwell_seconds
+        self._mark_floor_seconds = cancel_mark_floor_seconds
+        self._clock_tolerance_seconds = clock_anomaly_tolerance_seconds
+        #: the recovery dwells carried from the last COMPLETE pass (reset by anything else)
+        self._dwell: dict[str, _Dwell] = {}
 
     def reconcile(self, *, current_account_id: str, now: datetime) -> tuple[OrderStatusUpdate, ...]:
         return self.reconcile_report(current_account_id=current_account_id, now=now).applied_updates
@@ -513,6 +710,10 @@ class OrderRestartReconciler:
     def reconcile_report(
         self, *, current_account_id: str, now: datetime
     ) -> OrderRestartReconciliationReport:
+        # U-B: a dwell survives only a pass that completes and observes it again; a pass that
+        # raises leaves none behind ("a pass with no complete evidence resets", §4.3)
+        previous_dwell, self._dwell = self._dwell, {}
+        mono_now = self._monotonic()
         working = tuple(
             intent
             for intent in self._intents.active(current_account_id=current_account_id)
@@ -526,11 +727,18 @@ class OrderRestartReconciler:
                 applied_updates=(),
             )
 
+        # U-B r3 (fable r2 P2-1; design r3 §3.1 "all read inside one uncertainty_epoch"): the
+        # epochs are captured BEFORE the snapshot is read and every plan of this pass carries
+        # them, so an event after the read -- before or during any intent's planning -- makes
+        # the confirming re-plan (which captures its own, before ITS read) differ
+        snapshot_epochs = self._current_epochs()
         open_orders = self._connection.run(self._connection.broker.open_orders())
         executions = self._connection.run(self._connection.broker.executions())
         proven: list[RestartOrderObservation] = []
         unresolved: list[RestartOrderObservation] = []
         applied: list[OrderStatusUpdate] = []
+        settle_plans: list[tuple[OrderIntentRecord, _SettlePlan, Callable[..., _SettlePlan]]] = []
+        read_completed = self._completed_reader()
         for intent in working:
             persisted_broker_order_id = self._tracker.broker_order_id(
                 intent.intent_id,
@@ -542,7 +750,18 @@ class OrderRestartReconciler:
                     current_account_id=current_account_id,
                 )
                 # a divergent client id is the same contradiction (R-e, r2): fail closed
-                self._tracker.client_id(intent.intent_id, current_account_id=current_account_id)
+                persisted_client_id = self._tracker.client_id(
+                    intent.intent_id, current_account_id=current_account_id
+                )
+                planned = intent.status in _SETTLE_STATUSES or self._recovered(
+                    intent, current_account_id=current_account_id
+                )
+                if planned:
+                    # the settle planner binds the EXACT persisted broker-order-id set, not the
+                    # latest (design §2.1; Daybreak U-A r1 P1-1): two distinct ids fail closed
+                    self._tracker.single_broker_order_id(
+                        intent.intent_id, current_account_id=current_account_id
+                    )
             except OrderIdentityConflict as conflict:
                 # R-e: contradictory persisted permIds fail closed — never the
                 # latest, never the first; the operator sees the typed reason.
@@ -561,6 +780,32 @@ class OrderRestartReconciler:
                 original_limit_price=intent.limit_price,
                 current_account_id=current_account_id,
             )
+            if planned:
+                # the same planner, bound to this intent's persisted facts, re-runs over the
+                # confirming snapshot before any write (design §3.1; Daybreak U-A r1 P1-2)
+                planner = partial(
+                    self._plan_settle,
+                    intent,
+                    current_account_id=current_account_id,
+                    now=now,
+                    expected_limit_price=expected_limit_price,
+                    persisted_broker_order_id=persisted_broker_order_id,
+                    persisted_permanent_id=persisted_permanent_id,
+                    persisted_client_id=persisted_client_id,
+                    previous_dwell=previous_dwell,
+                    mono_now=mono_now,
+                )
+                plan = planner(
+                    open_orders=open_orders,
+                    executions=executions,
+                    read_completed=read_completed,
+                    epochs=snapshot_epochs,
+                )
+                # S-R3: a recovered SUBMITTED that the planner cannot settle is "as today"
+                as_today = intent.status is OrderLifecycle.SUBMITTED and plan.kind != "write"
+                if plan.kind != "legacy" and not as_today:
+                    settle_plans.append((intent, plan, planner))
+                    continue
             recorded_filled_quantity = self._tracker.recorded_filled_quantity(
                 intent.intent_id,
                 current_account_id=current_account_id,
@@ -634,6 +879,14 @@ class OrderRestartReconciler:
                 )
             )
 
+        self._act_on_settle_plans(
+            settle_plans,
+            current_account_id=current_account_id,
+            now=now,
+            proven=proven,
+            unresolved=unresolved,
+            applied=applied,
+        )
         remaining_active = tuple(
             RemainingActiveIntent(intent_id=intent.intent_id, status=intent.status)
             for intent in self._intents.active(current_account_id=current_account_id)
@@ -645,6 +898,605 @@ class OrderRestartReconciler:
             remaining_active=remaining_active,
             applied_updates=tuple(applied),
         )
+
+    # --- the CANCEL_PENDING / PARTIALLY_FILLED settle planner (design r3) --------------------
+    def _completed_reader(self) -> _CompletedRead:
+        """A once-per-pass lazy read of the venue's completed orders: (records, why-not)."""
+
+        cache: list[tuple[tuple[BrokerOrder, ...] | None, str]] = []
+
+        def read() -> tuple[tuple[BrokerOrder, ...] | None, str]:
+            if not cache:
+                broker = self._connection.broker
+                if not isinstance(broker, CompletedOrderEvidence):
+                    cache.append((None, f"{_NO_COMPLETED_EVIDENCE}: the broker has no such read"))
+                else:
+                    try:
+                        cache.append((self._connection.run(broker.completed_orders()), ""))
+                    except Exception as error:
+                        # ANY failure of this optional read is a typed, fail-closed hold for the
+                        # intents that need it -- never an exception out of the whole pass
+                        # (Daybreak U-A r1 P3-1: e.g. an earlier unanswered id-less request)
+                        cache.append((None, f"{_NO_COMPLETED_EVIDENCE}: {error}"))
+            return cache[0]
+
+        return read
+
+    def _current_epochs(self) -> tuple[int, int | None]:
+        return (
+            self._reconciliation_readiness.uncertainty_epoch(),
+            _adapter_epoch(self._connection.broker),
+        )
+
+    @contextmanager
+    def _epochs_held(self, epochs: tuple[int, int | None] | None) -> Iterator[bool]:
+        """Linearise one write to the epochs its confirmed plan observed (Daybreak U-B r1 P2-1).
+
+        Holds the readiness latch's lock, then the adapter bridge's (the existing lock order),
+        and yields whether both epochs are unchanged; an invalidation or a reconnect that comes
+        now waits for the write and lands after it. EVERY write plan carries its epochs (U-B r2):
+        ``None`` here is a plan built without them and is refused -- there is no bypass.
+        """
+
+        if epochs is None:
+            yield False
+            return
+        readiness_epoch, adapter_epoch = epochs
+        with ExitStack() as stack:
+            current = stack.enter_context(
+                self._reconciliation_readiness.held_at_uncertainty_epoch(readiness_epoch)
+            )
+            if current and adapter_epoch is not None:
+                bridge = getattr(self._connection.broker, "bridge", None)
+                hold = getattr(bridge, "held_at_adapter_epoch", None)
+                current = hold is not None and stack.enter_context(hold(adapter_epoch))
+            yield bool(current)
+
+    def _recovered(self, intent: OrderIntentRecord, *, current_account_id: str) -> bool:
+        """A SUBMITTED intent whose latest LIFECYCLE event is the U-B recovery from
+        CANCEL_PENDING (design §3.3 S-R rows). Any other SUBMITTED stays the old path (Q7)."""
+
+        if intent.status is not OrderLifecycle.SUBMITTED:
+            return False
+        events = self._tracker.events(intent.intent_id, current_account_id=current_account_id)
+        moves = [e for e in events if e.from_status is not e.to_status]
+        return bool(moves) and (
+            moves[-1].source == RECOVERY_SOURCE
+            and moves[-1].from_status is OrderLifecycle.CANCEL_PENDING
+        )
+
+    def _observe_dwell(
+        self,
+        intent: OrderIntentRecord,
+        order: BrokerOrder,
+        *,
+        current_account_id: str,
+        now: datetime,
+        previous: Mapping[str, _Dwell],
+        mono_now: float,
+    ) -> _Dwell | None:
+        """This pass's observation of the recovery dwell, or None (no dwell: nothing carried).
+
+        None when the adapter exposes no ``adapter_epoch`` (recovery disabled, D12), when there
+        is no cancel mark, or when the latest mark is younger than ``M`` (D6a). The dwell
+        CONTINUES only if the whole key is unchanged and the wall-clock and monotonic deltas
+        agree within the tolerance (D4); otherwise this observation starts it again.
+        """
+
+        adapter_epoch = _adapter_epoch(self._connection.broker)
+        if adapter_epoch is None:
+            return None
+        events = self._tracker.events(intent.intent_id, current_account_id=current_account_id)
+        marks = [
+            e
+            for e in events
+            if e.to_status is OrderLifecycle.CANCEL_PENDING
+            and e.from_status is not OrderLifecycle.CANCEL_PENDING
+        ]
+        if not marks:
+            return None
+        mark = marks[-1]
+        if (now - mark.occurred_at).total_seconds() < self._mark_floor_seconds:
+            return None
+        key: tuple[object, ...] = (
+            self._reconciliation_readiness.snapshot().session_id,
+            self._reconciliation_readiness.uncertainty_epoch(),
+            adapter_epoch,
+            account_fingerprint(current_account_id),
+            _order_identity(order),
+            "working",
+            mark.event_key,
+        )
+        before = previous.get(intent.intent_id)
+        if before is not None and before.key == key:
+            mono_delta = mono_now - before.started_mono
+            wall_delta = (now - before.started_wall).total_seconds()
+            if mono_delta >= 0 and abs(wall_delta - mono_delta) <= self._clock_tolerance_seconds:
+                return _Dwell(
+                    key, mark.event_key, before.started_mono, before.started_wall, mono_delta
+                )
+        return _Dwell(key, mark.event_key, mono_now, now, 0.0)
+
+    def _witnessed_lower_bound(
+        self,
+        figures: tuple[tuple[datetime, Decimal], ...],
+        fills: list[BrokerExecution],
+        now: datetime,
+    ) -> Decimal:
+        """LB = max(max(X, E_prior) + E_today, Y), partitioned at the session boundary S0.
+
+        X / Y: the largest cumulative figure the book recorded before / since S0. E_prior /
+        E_today: owned execution quantity stamped before / since S0. Fills of different
+        sessions are disjoint, so they add; figures within one session overlap, so they max.
+        """
+
+        s0 = _session_start(now, self._market_tz)
+        prior = max((f for t, f in figures if t < s0), default=Decimal("0"))
+        today = max((f for t, f in figures if t >= s0), default=Decimal("0"))
+        e_prior = sum((e.quantity for e in fills if e.timestamp < s0), Decimal("0"))
+        e_today = sum((e.quantity for e in fills if e.timestamp >= s0), Decimal("0"))
+        return max(max(prior, e_prior) + e_today, today)
+
+    def _plan_settle(
+        self,
+        intent: OrderIntentRecord,
+        *,
+        current_account_id: str,
+        now: datetime,
+        open_orders: tuple[BrokerOrder, ...],
+        executions: tuple[BrokerExecution, ...],
+        read_completed: _CompletedRead,
+        expected_limit_price: Decimal | None,
+        persisted_broker_order_id: int | None,
+        persisted_permanent_id: int | None,
+        persisted_client_id: int | None,
+        previous_dwell: Mapping[str, _Dwell],
+        mono_now: float,
+        epochs: tuple[int, int | None],
+    ) -> _SettlePlan:
+        """One decision per intent over ONE evidence generation; never writes.
+
+        Two stated deviations from the design's row text (fable U-A P3-4), both conservative:
+        row C1 (``V`` is ``PendingCancel``) takes the in-place fill-progress path -- a
+        ``FILL_PROGRESS`` row if the venue figure rose, a refusal if it is below the witnessed
+        bound, else hold -- and skips the completed-orders read, so a ``PendingCancel`` row plus a
+        bound terminal record is caught on a later pass, not this one; and a settle's event key
+        is ``{intent}:settle:{target}`` rather than ``{intent}:{order}:{lifecycle}:{filled}``:
+        one terminal event per intent and target, which is what "reconcile twice => one event"
+        rests on (a terminal never moves again).
+        """
+
+        order_ref = intent.order_ref
+        if not order_ref:
+            return _SettlePlan("legacy")
+        # U-B r2/r3: EVERY write plan carries the epochs captured before ITS snapshot was read
+        # (``epochs``); the confirming re-plan must agree and the CAS runs while they hold
+        is_pending = intent.status is OrderLifecycle.CANCEL_PENDING
+        conflict = _identity_conflict_reason(
+            order_ref=order_ref,
+            persisted_permanent_id=persisted_permanent_id,
+            open_orders=open_orders,
+            executions=executions,
+        )
+        if conflict is not None:
+            return _SettlePlan("refuse", conflict)
+        working = [
+            o
+            for o in open_orders
+            if _is_owned(o, order_ref=order_ref, persisted_permanent_id=persisted_permanent_id)
+        ]
+        fills = [
+            e
+            for e in executions
+            if _is_owned(e, order_ref=order_ref, persisted_permanent_id=persisted_permanent_id)
+        ]
+        if len(working) > 1:
+            return _SettlePlan("refuse", "multiple broker orders share the owned order reference")
+        if not is_pending and working:
+            return _SettlePlan("legacy")  # a partly filled order the venue still holds
+        signature = _owned_signature(working, fills)
+        identity_ok = (
+            all(
+                o.broker_order_id == persisted_broker_order_id
+                for o in working
+                if persisted_broker_order_id is not None
+            )
+            and (
+                not working
+                or _working_order_matches_intent(
+                    intent,
+                    working[0],
+                    current_account_id=current_account_id,
+                    expected_broker_client_id=self._expected_broker_client_id,
+                    expected_limit_price=expected_limit_price,
+                )
+            )
+            and all(
+                persisted_broker_order_id is None or e.broker_order_id == persisted_broker_order_id
+                for e in fills
+            )
+            and _executions_match_intent(
+                intent,
+                tuple(fills),
+                current_account_id=current_account_id,
+                expected_broker_client_id=self._expected_broker_client_id,
+                working_order=working[0] if working else None,
+            )
+        )
+        if not identity_ok:
+            return _SettlePlan(
+                "refuse",
+                _unresolved_evidence_reason(
+                    intent,
+                    open_orders=open_orders,
+                    executions=executions,
+                    current_account_id=current_account_id,
+                    expected_limit_price=expected_limit_price,
+                    expected_broker_client_id=self._expected_broker_client_id,
+                    persisted_broker_order_id=persisted_broker_order_id,
+                    persisted_permanent_id=persisted_permanent_id,
+                ),
+            )
+        figures = self._tracker.fill_figures(
+            intent.intent_id, current_account_id=current_account_id
+        )
+        lower = self._witnessed_lower_bound(figures, fills, now)
+        quantity = intent.quantity
+
+        def settle(
+            record: BrokerOrder | None,
+            figure: Decimal,
+            target: OrderLifecycle,
+            source: str,
+            witnessed: Decimal = lower,
+        ) -> _SettlePlan:
+            if figure < witnessed:
+                return _SettlePlan(
+                    "refuse",
+                    f"venue fill figure {figure} is below the witnessed lower bound {witnessed}",
+                )
+            try:
+                OrderLifecycleMachine(intent.status).apply(target)
+            except OrderLifecycleError as error:
+                return _SettlePlan("refuse", str(error))
+            return _SettlePlan(
+                "write",
+                f"settled {target.value} from {source}",
+                to_status=target,
+                event_key=f"{intent.intent_id}:settle:{target.value}",
+                filled=figure,
+                remaining=max(quantity - figure, Decimal("0")),
+                broker_order_id=record.broker_order_id
+                if record and record.broker_order_id
+                else persisted_broker_order_id,
+                permanent_id=persisted_permanent_id,
+                client_id=self._expected_broker_client_id,
+                evidence=(
+                    ("settled_from", source),
+                    ("venue_fill_figure", _plain(figure)),
+                    ("witnessed_lower_bound", _plain(witnessed)),
+                    ("unwitnessed_upper_bound", _plain(figure - witnessed)),
+                ),
+                owned_open=signature[0],
+                owned_fills=signature[1],
+                record=record,
+                epochs=epochs,
+            )
+
+        def bound_exactly(record: BrokerOrder) -> bool:
+            return _completed_record_bound(
+                intent,
+                record,
+                current_account_id=current_account_id,
+                expected_broker_client_id=self._expected_broker_client_id,
+                expected_limit_price=expected_limit_price,
+                persisted_broker_order_id=persisted_broker_order_id,
+                persisted_permanent_id=persisted_permanent_id,
+                persisted_client_id=persisted_client_id,
+            )
+
+        def from_terminal(record: BrokerOrder, source: str) -> _SettlePlan:
+            figure = record.filled_quantity
+            target = _TERMINAL_TARGET.get(record.lifecycle)
+            if (
+                target is None
+            ):  # C9: REJECTED (or any other) -- the lifecycle decides, not the figure
+                return _SettlePlan(
+                    "refuse",
+                    f"unexpected terminal status for a cancel: {record.lifecycle.value}",
+                )
+            if target is OrderLifecycle.FILLED and figure < quantity:  # C8
+                return _SettlePlan(
+                    "refuse",
+                    f"terminal record does not fill the order ({figure} of {quantity})",
+                )
+            return settle(record, figure, target, source)
+
+        if working:
+            order = working[0]
+            if order.lifecycle not in _RECOGNISED_VENUE:
+                return _SettlePlan("refuse", f"{_UNRECOGNISED_STATUS} ({order.lifecycle.value})")
+            # C3 is separate from the terminal table: only a recognised WORKING row whose venue
+            # figure reaches Q is filled by quantity (U-B r2); a PendingCancel row stays C1
+            filled_by_quantity = (
+                order.lifecycle in _WORKING_VENUE and order.filled_quantity >= quantity
+            )
+            terminal = order.lifecycle in _TERMINAL_VENUE or filled_by_quantity
+            working_records: tuple[BrokerOrder, ...] | None = None
+            if not terminal and order.lifecycle is not OrderLifecycle.CANCEL_PENDING:
+                records, _ = read_completed()
+                working_records = records
+                bound = [
+                    r
+                    for r in records or ()
+                    if r.order_ref == order_ref and r.lifecycle in _TERMINAL_VENUE
+                ]
+                if bound:
+                    return _SettlePlan("refuse", "the working order and a terminal record disagree")
+            if terminal:
+                # a terminal open-book row is a bound T only under the same exact identity
+                if not bound_exactly(order):
+                    return _SettlePlan(
+                        "refuse", "terminal open-book row is not bound to this intent"
+                    )
+                if filled_by_quantity:  # C3
+                    return settle(order, order.filled_quantity, OrderLifecycle.FILLED, "open_order")
+                return from_terminal(order, "open_order")
+            figure = order.filled_quantity
+            if figure < lower:
+                return _SettlePlan(
+                    "refuse",
+                    f"venue fill figure {figure} is below the witnessed lower bound {lower}",
+                )
+            # U-B (§4.3): the dwell is observed only for an EXACTLY bound order, really working
+            # (not PendingCancel), with complete evidence (the completed-orders read succeeded
+            # and showed no terminal record), on an adapter that exposes its reconnect epoch
+            dwell = (
+                self._observe_dwell(
+                    intent,
+                    order,
+                    current_account_id=current_account_id,
+                    now=now,
+                    previous=previous_dwell,
+                    mono_now=mono_now,
+                )
+                if is_pending
+                and order.lifecycle is not OrderLifecycle.CANCEL_PENDING
+                and working_records is not None
+                and bound_exactly(order)
+                else None
+            )
+            if dwell is not None and dwell.elapsed >= self._dwell_seconds:
+                # C2-1 (and C2-prec): the cancel did not take; recover with the venue's figure
+                target = (
+                    OrderLifecycle.SUBMITTED if figure == 0 else OrderLifecycle.PARTIALLY_FILLED
+                )
+                return _SettlePlan(
+                    "write",
+                    "cancel did not take at the venue; recovered after the dwell",
+                    to_status=target,
+                    event_key=(
+                        f"{intent.intent_id}:{order.broker_order_id}:RECOVER:"
+                        f"{target.value}:{dwell.mark_key}:{_plain(figure)}"
+                    ),
+                    filled=figure,
+                    remaining=max(quantity - figure, Decimal("0")),
+                    broker_order_id=order.broker_order_id,
+                    permanent_id=persisted_permanent_id,
+                    client_id=self._expected_broker_client_id,
+                    evidence=(
+                        ("recovered_from", "dwell"),
+                        ("venue_fill_figure", _plain(figure)),
+                        ("witnessed_lower_bound", _plain(lower)),
+                        ("cancel_mark", dwell.mark_key),
+                        ("dwell_seconds", f"{dwell.elapsed:.3f}"),
+                    ),
+                    owned_open=signature[0],
+                    owned_fills=signature[1],
+                    source=RECOVERY_SOURCE,
+                    dwell=dwell,
+                    epochs=epochs,
+                )
+            recorded = max((f for _, f in figures), default=Decimal("0"))
+            if figure > recorded:
+                return _SettlePlan(
+                    "write",
+                    "fill progress recorded in place",
+                    to_status=intent.status,
+                    event_key=f"{intent.intent_id}:fill_progress:{figure}",
+                    filled=figure,
+                    remaining=max(quantity - figure, Decimal("0")),
+                    broker_order_id=order.broker_order_id,
+                    permanent_id=persisted_permanent_id,
+                    client_id=self._expected_broker_client_id,
+                    evidence=(
+                        ("settled_from", "open_order"),
+                        ("venue_fill_figure", _plain(figure)),
+                        ("witnessed_lower_bound", _plain(lower)),
+                    ),
+                    owned_open=signature[0],
+                    owned_fills=signature[1],
+                    dwell=dwell,
+                    epochs=epochs,
+                )
+            return _SettlePlan(
+                "hold", "cancel pending; order still working at the venue", dwell=dwell
+            )
+
+        records, why = read_completed()
+        if records is None:
+            return _SettlePlan("refuse", why) if is_pending else _SettlePlan("legacy")
+        candidates = [r for r in records if r.order_ref == order_ref]
+        if not candidates:
+            if not is_pending:
+                return _SettlePlan("legacy")
+            # C10a: no bound record and no working order, so fills are NEVER combined across
+            # sessions (design §3.2 "No-record case"; Daybreak/fable U-A r1 P2-1): only THIS
+            # session's owned executions can prove the order filled. (Their total cannot exceed
+            # the order size here: _executions_match_intent refused that above.) Each execution
+            # that SETTLES must carry the exact reference (§2.1; U-A r2): a blank-ref one owned by
+            # the permId fallback still counts toward the lower bound, never toward this proof.
+            s0 = _session_start(now, self._market_tz)
+            e_today = sum(
+                (e.quantity for e in fills if e.timestamp >= s0 and e.order_ref == order_ref),
+                Decimal("0"),
+            )
+            if e_today >= quantity:
+                return settle(None, quantity, OrderLifecycle.FILLED, "executions", e_today)
+            if fills:
+                return _SettlePlan(
+                    "refuse", "cancel pending; order absent; fills present; no terminal record"
+                )
+            return _SettlePlan("refuse", "cancel pending; order absent; no terminal record")
+        if len(candidates) > 1:
+            return _SettlePlan(
+                "refuse",
+                f"completed orders are ambiguous: {len(candidates)} records share the reference",
+            )
+        record = candidates[0]
+        if record.lifecycle not in _TERMINAL_VENUE:
+            # a completed-order record is a bound T only with a terminal status (C7 needs
+            # Filled); a non-terminal or unrecognised one never settles by its quantity (U-B r1)
+            return _SettlePlan(
+                "refuse",
+                f"completed order record has not a terminal status ({record.lifecycle.value})",
+            )
+        if not bound_exactly(record):
+            return _SettlePlan("refuse", "completed order record is not bound to this intent")
+        return from_terminal(record, "completed_order")
+
+    def _act_on_settle_plans(
+        self,
+        plans: list[tuple[OrderIntentRecord, _SettlePlan, Callable[..., _SettlePlan]]],
+        *,
+        current_account_id: str,
+        now: datetime,
+        proven: list[RestartOrderObservation],
+        unresolved: list[RestartOrderObservation],
+        applied: list[OrderStatusUpdate],
+    ) -> None:
+        """Hold/refuse report as-is; every write is CONFIRMED, then one CAS (design §3.1).
+
+        Confirming = a SECOND complete snapshot -- open orders, executions AND a fresh
+        completed-orders read -- and a full re-plan of the intent over it; the write happens only
+        if the two plans are equal (decision, figure, ids, evidence, and the whole owned rows and
+        bound record they rest on). Anything else -- a record that turned Filled, vanished, or
+        changed a figure or an identity field; a failing second read; a new or changed
+        execution -- writes nothing (Daybreak U-A r1 P1-2): a fill is never discarded.
+        """
+
+        fresh: tuple[tuple[BrokerOrder, ...], tuple[BrokerExecution, ...], _CompletedRead] | None
+        fresh = None
+        if any(plan.kind == "write" for _, plan, _ in plans):
+            confirm_epochs = self._current_epochs()  # before the confirming read (r3)
+            fresh = (
+                self._connection.run(self._connection.broker.open_orders()),
+                self._connection.run(self._connection.broker.executions()),
+                self._completed_reader(),
+            )
+        for intent, plan, planner in plans:
+            observed = RestartOrderObservation(
+                intent_id=intent.intent_id,
+                local_status=intent.status,
+                broker_status=None,
+                transition_applied=False,
+                reason=plan.reason,
+            )
+            if plan.kind == "refuse":
+                unresolved.append(observed)
+                continue
+            if plan.kind == "hold":
+                if plan.dwell is not None:
+                    self._dwell[intent.intent_id] = plan.dwell
+                proven.append(observed)
+                continue
+            assert fresh is not None and plan.to_status is not None
+            again = planner(
+                open_orders=fresh[0],
+                executions=fresh[1],
+                read_completed=fresh[2],
+                epochs=confirm_epochs,
+            )
+            if again != plan:
+                unresolved.append(
+                    RestartOrderObservation(
+                        intent_id=intent.intent_id,
+                        local_status=intent.status,
+                        broker_status=None,
+                        transition_applied=False,
+                        reason="evidence changed between snapshots; nothing was written",
+                    )
+                )
+                continue
+            if plan.epochs is None:  # fable r2 P3-1: a constructor forgot them; say so, plainly
+                unresolved.append(
+                    RestartOrderObservation(
+                        intent_id=intent.intent_id,
+                        local_status=intent.status,
+                        broker_status=None,
+                        transition_applied=False,
+                        reason="write plan carries no epochs; refused",
+                    )
+                )
+                continue
+            with self._epochs_held(plan.epochs) as current:
+                if current:
+                    won = self._tracker.record_planned_transition(
+                        intent_id=intent.intent_id,
+                        current_account_id=current_account_id,
+                        from_status=intent.status,
+                        to_status=plan.to_status,
+                        event_key=plan.event_key,
+                        source=plan.source
+                        or ("FILL_PROGRESS" if plan.to_status is intent.status else "RECONCILE"),
+                        broker_order_id=plan.broker_order_id,
+                        permanent_id=plan.permanent_id,
+                        client_id=plan.client_id,
+                        filled_quantity=plan.filled,
+                        remaining_quantity=plan.remaining,
+                        evidence=dict(plan.evidence),
+                        now=now,
+                    )
+            if not current:
+                unresolved.append(
+                    RestartOrderObservation(
+                        intent_id=intent.intent_id,
+                        local_status=intent.status,
+                        broker_status=None,
+                        transition_applied=False,
+                        reason="uncertainty changed before the write; nothing was written",
+                    )
+                )
+                continue
+            changed = won and plan.to_status is not intent.status
+            if won and not changed and plan.dwell is not None:
+                # fill progress in place is not a dwell reset (§4.3; D14)
+                self._dwell[intent.intent_id] = plan.dwell
+            if changed:
+                applied.append(
+                    OrderStatusUpdate(
+                        intent_id=intent.intent_id,
+                        broker_order_id=plan.broker_order_id,
+                        permanent_id=plan.permanent_id,
+                        client_id=plan.client_id,
+                        lifecycle=plan.to_status,
+                        filled_quantity=plan.filled,
+                        remaining_quantity=plan.remaining,
+                        source=plan.source or "RECONCILE",
+                        occurred_at=now,
+                    )
+                )
+            proven.append(
+                RestartOrderObservation(
+                    intent_id=intent.intent_id,
+                    local_status=intent.status,
+                    broker_status=plan.to_status,
+                    transition_applied=changed,
+                    reason=plan.reason
+                    if won
+                    else "lifecycle moved before the settle write; left to the writer that won",
+                )
+            )
 
     def operator_resolve(
         self,

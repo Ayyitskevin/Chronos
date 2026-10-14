@@ -143,6 +143,9 @@ class FakeOrder:
         self.transmit = False
         self.permId = 0
         self.clientId = 0
+        # completed orders only (ASSUMED IB: ``Order.filledQuantity``; ``orderId`` may be absent)
+        self.orderId = 0
+        self.filledQuantity: Any = Decimal("0")
 
 
 class FakeOrderState:
@@ -278,6 +281,9 @@ class FakeEClient:
     def reqAllOpenOrders(self) -> None:
         self.gateway.open_orders(self)
 
+    def reqCompletedOrders(self, apiOnly: bool) -> None:
+        self.gateway.completed_orders(self, bool(apiOnly))
+
     def placeOrder(self, orderId: int, contract: FakeContract, order: FakeOrder) -> None:
         self.gateway.place_order(self, int(orderId), contract, order)
 
@@ -306,6 +312,12 @@ class FakeGateway:
         self.cancel_requests: list[tuple[int, int]] = []
         #: The zone execution times are rendered in (tz-less); UTC is the fake's convention.
         self.execution_time_zone: Any = EXECUTION_TIME_ZONE
+        #: Sim order ids that left the venue WITHOUT a completed-order record (the "vanished"
+        #: order of the CANCEL_PENDING settle design: absence alone must never settle).
+        self.unrecorded_completed: set[int] = set()
+        #: ASSUMED IB: a completedOrder row may carry no ``orderId`` (0). True fills it in.
+        self.completed_order_ids = False
+        self.completed_requests = 0
         _run_without_a_loop(self._seed_registry())
 
     @classmethod
@@ -513,6 +525,41 @@ class FakeGateway:
                 )
                 self._emit_status(client, order, adapter_id)
             client.emit("openOrderEnd")
+
+    def completed_orders(self, client: FakeEClient, api_only: bool) -> None:
+        """``reqCompletedOrders``: one ``completedOrder`` per terminal order, then the end marker.
+
+        ASSUMED IB (K4): rows carry account, ``orderRef``, permId, clientId, the order's contract,
+        side, ``totalQuantity``, ``lmtPrice``, ``filledQuantity`` and the final status; ``apiOnly``
+        drops manual (client 0) orders.
+        """
+
+        with self._lock:
+            self.completed_requests += 1
+            for order in self.sim.terminal_orders():
+                sim_id = order.broker_order_id
+                if sim_id in self.unrecorded_completed:
+                    continue
+                if api_only and self._client_of.get(sim_id, MANUAL_CLIENT_ID) == MANUAL_CLIENT_ID:
+                    continue
+                adapter_id = self._adapter_of.get(sim_id, sim_id)
+                ib = self._order_of(order, adapter_id)
+                ib.filledQuantity = order.filled_quantity
+                ib.orderId = adapter_id if self.completed_order_ids else 0
+                client.emit(
+                    "completedOrder",
+                    self.contract_of(order.contract),
+                    ib,
+                    FakeOrderState(self._status_of(order)),
+                )
+            client.emit("completedOrdersEnd")
+
+    def vanish_without_record(self, sim_id: int) -> None:
+        """Drop a working order from the venue with NO status and NO completed-order record."""
+
+        with self._lock:
+            self._run(self.sim.cancel_order(sim_id))
+            self.unrecorded_completed.add(sim_id)
 
     # orders ------------------------------------------------------------------------------------
     def _request_of(

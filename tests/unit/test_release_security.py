@@ -144,8 +144,9 @@ def test_reviewed_baseline_contains_only_explicit_false_positive_fingerprints() 
     # 23 at S1-F2 (official_ibkr.py: the submit records its order id as own),
     # 25 at S1-F1 (runtime.py and official_ibkr.py rewired for the cancel-ownership ledger: the
     # superseded runtime.py and S1-F2 official_ibkr.py source-inventory fingerprints),
-    # 26 at C1 (official_ibkr.py: the read-only transport_proof()).
-    assert len(historical_candidates) == 26
+    # 26 at C1 (official_ibkr.py: the read-only transport_proof()),
+    # 27 at CPS U-A (official_ibkr.py: the completed-orders read supersedes the C1 fingerprint).
+    assert len(historical_candidates) == 27
     assert {item["type"] for item in candidates} == {
         "Hex High Entropy String",
         "Secret Keyword",
