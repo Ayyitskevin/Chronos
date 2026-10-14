@@ -175,13 +175,14 @@ KNOWN_DIFFERENCES: dict[tuple[str, str], tuple[str, type[BaseException], str]] =
         "Restack interaction (U-0: S2 on S1b r0 -> the S1b r1 / S1-F1 chain). S1b r1's "
         "FakeGateway answers an owned cancel with PendingCancel THEN Cancelled; the real "
         "adapter's cancel result is the FIRST ack, so the call reports CANCEL_PENDING where "
-        "SimBroker reports CANCELLED. This xfail stops each case at that first assertion, so it "
-        "MASKS what follows on the official venue: with the first-ack assertions relaxed, the "
-        "partial-fill case passes, but the cancel-pending case fails at its last line "
-        "(remaining_active is not empty: the intent stays CANCEL_PENDING after reconciliation). "
-        "That gap is B1R-F4, isolated in tests/integration/test_official_connection_lifecycle.py "
-        "(reader build-ua P2-1). Lifting U0-D1 needs an S2 assertion change (S2's author or the "
-        "owner), and the cancel-pending case then stays red on B1R-F4 until that is decided.",
+        "SimBroker reports CANCELLED. This xfail pins exactly that first assertion and nothing "
+        "behind it: B1R-F4 (the two-step cancel never settled; reader build-ua P2-1) was closed "
+        "when #302 landed, and its pin is now the passing "
+        "test_a_two_step_cancel_settles_after_reconciliation in "
+        "tests/integration/test_official_connection_lifecycle.py. With only the first-ack "
+        "assertions relaxed, both official-venue cases pass to the end, the cancel-pending case "
+        "included (the intent settles after reconciliation). Lifting U0-D1 needs an S2 assertion "
+        "change (S2's author or the owner) that accepts the first ack as CANCEL_PENDING.",
     ),
     ("official_fake", "test_cancel_after_a_partial_fill_keeps_the_fill_and_ends_terminal"): (
         "U0-D1",
@@ -189,13 +190,14 @@ KNOWN_DIFFERENCES: dict[tuple[str, str], tuple[str, type[BaseException], str]] =
         "Restack interaction (U-0: S2 on S1b r0 -> the S1b r1 / S1-F1 chain). S1b r1's "
         "FakeGateway answers an owned cancel with PendingCancel THEN Cancelled; the real "
         "adapter's cancel result is the FIRST ack, so the call reports CANCEL_PENDING where "
-        "SimBroker reports CANCELLED. This xfail stops each case at that first assertion, so it "
-        "MASKS what follows on the official venue: with the first-ack assertions relaxed, the "
-        "partial-fill case passes, but the cancel-pending case fails at its last line "
-        "(remaining_active is not empty: the intent stays CANCEL_PENDING after reconciliation). "
-        "That gap is B1R-F4, isolated in tests/integration/test_official_connection_lifecycle.py "
-        "(reader build-ua P2-1). Lifting U0-D1 needs an S2 assertion change (S2's author or the "
-        "owner), and the cancel-pending case then stays red on B1R-F4 until that is decided.",
+        "SimBroker reports CANCELLED. This xfail pins exactly that first assertion and nothing "
+        "behind it: B1R-F4 (the two-step cancel never settled; reader build-ua P2-1) was closed "
+        "when #302 landed, and its pin is now the passing "
+        "test_a_two_step_cancel_settles_after_reconciliation in "
+        "tests/integration/test_official_connection_lifecycle.py. With only the first-ack "
+        "assertions relaxed, both official-venue cases pass to the end, the cancel-pending case "
+        "included (the intent settles after reconciliation). Lifting U0-D1 needs an S2 assertion "
+        "change (S2's author or the owner) that accepts the first ack as CANCEL_PENDING.",
     ),
 }
 
