@@ -12,8 +12,10 @@ refuses to start unless ALLOW_ORDER_TRANSMIT and ALLOW_LIVE_TRADING are false an
 AUTONOMY_MANDATE_FILE is unset. Steps that fail are recorded as errors and the
 capture continues; absence of evidence is itself evidence.
 
-Sanitization before anything is written: every account id becomes
-``ACCT-<account_fingerprint[:16]>`` (textual, as before), and every broker
+Sanitization before anything is written: every account id becomes a session-scoped KEYED
+pseudonym ``ACCT-<hmac[:16]>`` (textual replacement; the same construction as the identifiers
+below — U-F3-F1: the unkeyed ``account_fingerprint`` token was reversible by enumerating a small
+candidate range), and every broker
 identifier value — ``execution_id``, ``broker_order_id``, ``permanent_id`` —
 becomes a session-scoped KEYED pseudonym ``EXEC-``/``ORD-``/``PERM-<hmac[:16]>``
 (:func:`pseudonymize_identifiers`), replaced as a whole JSON value so a
@@ -553,11 +555,12 @@ def pseudonymize_identifiers(payload: Any, salt: SessionSalt, pepper: bytes) -> 
 
 def sanitize_capture(capture: dict[str, Any], account_ids: set[str], pepper: bytes) -> str:
     """capture.json bytes: identifiers pseudonymized structurally (keyed), then account ids
-    textually. Refuses without a usable pepper."""
+    textually (keyed). Refuses without a usable pepper."""
 
     key = _require_pepper(pepper)
-    keyed = pseudonymize_identifiers(capture, session_salt(capture), key)
-    return sanitize(canonical_json(keyed), account_ids)
+    salt = session_salt(capture)
+    keyed = pseudonymize_identifiers(capture, salt, key)
+    return sanitize(canonical_json(keyed), account_ids, salt, key)
 
 
 def write_session(
@@ -574,7 +577,9 @@ def write_session(
     derived = derive_liquid_hours(capture)
     files = {
         "capture.json": sanitize_capture(capture, account_ids, key),
-        "derived_liquid_hours.json": sanitize(canonical_json(derived), account_ids),
+        "derived_liquid_hours.json": sanitize(
+            canonical_json(derived), account_ids, session_salt(capture), key
+        ),
     }
     out_dir.mkdir(parents=True, exist_ok=True)
     manifest: dict[str, Any] = {
@@ -585,6 +590,8 @@ def write_session(
         "identifier_pseudonyms": {
             "scheme": PSEUDONYM_SCHEME,
             "pepper_fingerprint": pepper_fingerprint(key),
+            # absent in fixtures minted before U-F3-F1, whose ACCT- tokens are unkeyed
+            "account_tokens": "keyed",
         },
         "files": {},
     }
@@ -595,13 +602,15 @@ def write_session(
     return dict(manifest["files"])
 
 
-def sanitize(text: str, account_ids: set[str]) -> str:
-    from chronos.utils.identifiers import account_fingerprint
+def sanitize(text: str, account_ids: set[str], salt: SessionSalt, pepper: bytes) -> str:
+    """Replace every account id with its keyed session-scoped token. Refuses without a pepper:
+    there is no unkeyed path (U-F3-F1)."""
 
+    key = _require_pepper(pepper)
     for account_id in sorted(account_ids, key=len, reverse=True):
         cleaned = account_id.strip()
         if len(cleaned) >= 4:
-            text = text.replace(cleaned, f"ACCT-{account_fingerprint(cleaned)[:16]}")
+            text = text.replace(cleaned, identifier_pseudonym("ACCT", cleaned, salt, key))
     return text
 
 

@@ -281,10 +281,11 @@ When a session directory is committed (§6), it takes the same per-session basel
 ## 6. Sanitization — what happens before anything is stored
 
 - The harness replaces every observed account id (the configured `IB_ACCOUNT_ID` and any the
-  gateway reports) with `ACCT-<sha256 fingerprint[:16]>` in every file it writes — the repo's
-  own pseudonym scheme, `account_fingerprint` in `src/chronos/utils/identifiers.py`
-  (`sha256("chronos-account:" + id)`) — the same pseudonym the order persistence stores in
-  place of the raw id (`src/chronos/persistence/database.py`). Raw account ids never enter git.
+  gateway reports) with `ACCT-<hmac[:16]>` in every file it writes — a session-scoped KEYED
+  pseudonym (HMAC-SHA256 under `CHRONOS_CAPTURE_PEPPER`, the same construction as the broker
+  identifiers; U-F3-F1). It is deliberately NOT the unkeyed `account_fingerprint` the order
+  persistence stores (`src/chronos/persistence/database.py`): that token can be recovered by
+  enumerating candidate account ids. Raw account ids never enter git.
 - Verify by hand before the directory leaves the machine:
   `grep -RniE "DU[0-9]|DF[0-9]|U[0-9]{6}" ~/chronos-gateway-evidence/ && echo LEAK || echo clean`.
 - The harness pseudonymizes every broker identifier value — `execution_id`,

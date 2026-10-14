@@ -180,20 +180,22 @@ def test_2_numeric_identifiers_are_replaced_as_whole_values_never_as_digit_subst
     assert execution["broker_order_id"].startswith("ORD-")
 
 
-def test_3_account_id_sanitization_is_byte_identical_before_and_after() -> None:
+def test_3_account_id_sanitization_replaces_the_id_with_the_keyed_token_everywhere() -> None:
+    """Was "byte-identical before and after" (the unkeyed token); U-F3-F1 keys it on purpose."""
+
     m = _load_capture_module()
     payload = _identifier_payload()
     account_ids = {"DU1234567"}
-    expected_token = f"ACCT-{account_fingerprint('DU1234567')[:16]}"
-    # sanitize() itself: unchanged contract
-    assert m.sanitize('{"account_id": "DU1234567"}', account_ids) == (
+    expected_token = m.identifier_pseudonym("ACCT", "DU1234567", SALT, PEPPER)
+    assert m.sanitize('{"account_id": "DU1234567"}', account_ids, SALT, PEPPER) == (
         f'{{"account_id": "{expected_token}"}}'
     )
-    # the ACCT- token the identifier pass produces is the one the textual pass alone produces
+    # the identifier pass and the textual pass agree on the one token, once, in the capture
     with_identifiers = m.sanitize_capture(payload, account_ids, PEPPER)
-    textual_only = m.sanitize(m.canonical_json(payload), account_ids)
+    textual_only = m.sanitize(m.canonical_json(payload), account_ids, SALT, PEPPER)
     assert with_identifiers.count(expected_token) == textual_only.count(expected_token) == 1
     assert "DU1234567" not in with_identifiers
+    assert f"ACCT-{account_fingerprint('DU1234567')[:16]}" not in with_identifiers  # not unkeyed
 
 
 def test_4_replay_check_byte_integrity_and_mutation_scan_hold_on_a_sanitized_capture(
@@ -409,7 +411,6 @@ def test_r1_3_the_pepper_appears_in_no_output_byte_and_no_log_line(tmp_path: Pat
 def test_r1_4_manifest_records_the_scheme_and_a_pepper_fingerprint(tmp_path: Path) -> None:
     m = _load_capture_module()
     account_ids = {"DU1234567"}
-    acct = f"ACCT-{account_fingerprint('DU1234567')[:16]}"
     sessions = {}
     for name, pepper in (("a", PEPPER), ("b", OTHER_PEPPER)):
         directory = tmp_path / name
@@ -421,7 +422,11 @@ def test_r1_4_manifest_records_the_scheme_and_a_pepper_fingerprint(tmp_path: Pat
         )
     manifest_a, capture_a, manifest_text_a = sessions["a"]
     manifest_b, capture_b, _ = sessions["b"]
-    expected = {"scheme": "hmac-sha256-v2", "pepper_fingerprint": sha256(PEPPER).hexdigest()[:16]}
+    expected = {
+        "scheme": "hmac-sha256-v2",
+        "pepper_fingerprint": sha256(PEPPER).hexdigest()[:16],
+        "account_tokens": "keyed",
+    }
     assert manifest_a["identifier_pseudonyms"] == expected
     fingerprint = manifest_a["identifier_pseudonyms"]["pepper_fingerprint"]
     assert re.fullmatch(r"[0-9a-f]{16}", fingerprint)
@@ -433,9 +438,10 @@ def test_r1_4_manifest_records_the_scheme_and_a_pepper_fingerprint(tmp_path: Pat
     order_a = capture_a["steps"]["executions"][0]["broker_order_id"]
     order_b = capture_b["steps"]["executions"][0]["broker_order_id"]
     assert order_a.startswith("ORD-") and order_b.startswith("ORD-") and order_a != order_b
-    # ... while the account tokens do not move with the pepper
-    assert capture_a["steps"]["account_summary"]["account_id"] == acct
-    assert capture_b["steps"]["account_summary"]["account_id"] == acct
+    # ... and so do the account tokens (U-F3-F1: they were unkeyed, hence pepper-independent)
+    acct_a = capture_a["steps"]["account_summary"]["account_id"]
+    acct_b = capture_b["steps"]["account_summary"]["account_id"]
+    assert acct_a.startswith("ACCT-") and acct_b.startswith("ACCT-") and acct_a != acct_b
     # the file sha256 map is unchanged in shape (replay_check reads only that)
     assert set(manifest_a["files"]) == {"capture.json", "derived_liquid_hours.json"}
 
