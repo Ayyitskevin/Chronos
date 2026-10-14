@@ -473,6 +473,7 @@ class FakeEClient:
         self.gateway.open_orders(self)
 
     def reqCompletedOrders(self, apiOnly: bool) -> None:
+        self.gateway.record(self, "reqCompletedOrders")
         self.gateway.completed_orders(self, bool(apiOnly))
 
     def placeOrder(self, orderId: int, contract: FakeContract, order: FakeOrder) -> None:
