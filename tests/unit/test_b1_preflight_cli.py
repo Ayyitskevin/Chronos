@@ -743,3 +743,100 @@ def test_the_json_output_is_one_object_with_the_verdict(
     assert payload["exit"] == code == EXIT_CLEAR
     assert payload["verdict"].startswith("B1-PREFLIGHT CLEAR")
     assert {line["check"] for line in payload["findings"]} >= {"env", "ibapi", "read-only-api"}
+
+
+# --- U-d r1: pins for the reader's surviving mutants (review P2-1) and the cheap P3 ------------
+
+
+def test_r1_m6_a_database_bound_to_another_paper_account_refuses(host: dict[str, Path]) -> None:
+    """m6 survived: the existing REFUSE case differs in BROKER MODE only. Same mode (ibkr), same
+    environment (paper), a different paper account: the backend would refuse at start, or worse
+    mix two accounts' history -- the preflight must REFUSE here too."""
+
+    _bind(host["database"], broker_mode="ibkr", account="DU1111111")
+    report = _run(host)
+    assert _levels(report, "scope") == ["REFUSE"]
+    assert "different broker scope" in _text(report, "scope")
+    assert "DU1111111" not in _text(report, "scope")  # names the fix, never the other account
+
+
+@pytest.mark.parametrize("key", ["IB_PORT", "IB_CLIENT_ID", "TARGET_DTE"])
+def test_r1_m8_a_canary_inside_an_invalid_typed_field_appears_nowhere(
+    host: dict[str, Path], capsys: pytest.CaptureFixture[str], key: str
+) -> None:
+    """m8 survived: the canary search only covered files that load. A value Settings REFUSES to
+    parse is exactly where pydantic's str(ValidationError) would echo ``input_value=...``; the
+    report must carry the rule text only, on every surface."""
+
+    # a SHORT canary: pydantic elides a long input in str(ValidationError) ("c0ffeec0ff...abcd"),
+    # so the 64-hex pepper canary would hide exactly the leak this pin is for (measured: m8
+    # survived it); the 24-character credential canary is printed whole
+    _rewrite(host, key, CREDENTIAL_CANARY)
+    everything = _everything(host, capsys, json_out=False, with_credential=False)
+    assert "Settings refused the file" in everything  # the refusal path really ran
+    assert _leaked(everything) == []
+
+
+def test_r1_m1_the_other_live_port_4001_also_refuses(host: dict[str, Path]) -> None:
+    """m1 survived: only 7496 was tested. IB Gateway's live port is 4001."""
+
+    (host["proc_net"] / "tcp").write_text("  sl\n" + _tcp_line(_PAPER) + _tcp_line(4001))
+    report = _run(host)
+    assert "REFUSE" in _levels(report, "ports")
+    assert report.verdict()[1] == EXIT_REFUSED
+
+
+def test_r1_m4_a_32_hex_pepper_is_too_short_and_refuses(host: dict[str, Path]) -> None:
+    """m4 survived: only a non-hex 'short' value was tested. 32 hex digits (16 bytes) is a valid
+    hex string but under the 64-hex (32-byte) requirement."""
+
+    _rewrite(host, "CHRONOS_CAPTURE_PEPPER", "ab" * 16)
+    report = _run(host)
+    assert "REFUSE" in _levels(report, "P10")
+    assert "ab" * 16 not in _text(report, "P10")
+
+
+def test_r1_m9_a_token_key_is_a_credential_and_refuses(host: dict[str, Path]) -> None:
+    """m9 survived: only a *_PASSWORD key was tested; *_TOKEN is in the same rule."""
+
+    _rewrite(host, "IB_TOKEN", CREDENTIAL_CANARY)
+    report = _run(host)
+    assert "REFUSE" in _levels(report, "P9")
+    assert CREDENTIAL_CANARY not in _text(report, "P9")
+
+
+def test_r1_m11_a_five_parameter_ewrapper_error_is_undecided_never_clear(
+    host: dict[str, Path],
+) -> None:
+    """m11 survived: no test said a LONGER shape must not be CLEAR. Five parameters with the
+    known first three are not a shape the adapter is known to read (K4 #1)."""
+
+    _install_fake_ibapi(
+        host["site"],
+        "self, reqId, errorCode, errorString, advancedOrderRejectJson='', extra=None",
+    )
+    report = _run(host)
+    assert _levels(report, "ibapi") == ["UNDECIDED"]
+    assert report.verdict()[1] == EXIT_UNDECIDED
+
+
+def test_r1_p3_1_a_clear_run_on_a_bound_database_changes_none_of_its_bytes(
+    host: dict[str, Path],
+) -> None:
+    """Reader P3-1, recorded (no src change in this round): the run may leave SQLite's own
+    -shm/-wal files beside an existing database -- nothing else -- and the database file's bytes
+    are unchanged. "No write" in the docstring means the database and secrets, not the directory."""
+
+    import hashlib
+
+    _bind(host["database"], broker_mode="ibkr", account=ACCOUNT)
+    directory = host["database"].parent
+    for side in directory.glob("chronos-b1.db-*"):
+        side.unlink()
+    before = hashlib.sha256(host["database"].read_bytes()).hexdigest()
+    listing = {p.name for p in directory.iterdir()}
+    report = _run(host)
+    assert _levels(report, "scope") == ["CLEAR"]
+    assert hashlib.sha256(host["database"].read_bytes()).hexdigest() == before
+    new = {p.name for p in directory.iterdir()} - listing
+    assert new <= {"chronos-b1.db-shm", "chronos-b1.db-wal"}, new
