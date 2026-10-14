@@ -165,15 +165,18 @@ live_transmission_possible False
 raise a `ValidationError` ("ALLOW_LIVE_TRADING=true requires the full live conjunction …",
 `settings.py:386-421`): that is the refusal, not a bug. Any `True`: stop.
 
-### Step 8 — The non-secret preflight, on your own file (optional but recommended)
-`tests/unit/test_b1_env_preflight.py` defines `preflight_b1_env(text, file_mode=, environ=)`
-and runs it against **dummy** values in CI. The function opens no file of its own and reads no
-`.env` (an audit-hook test with sentinel `.env` files in the working directory and in `$HOME`
-proves it); you hand it text. You may hand it **your own** file's text, in your own shell. It
-prints only condition ids and messages — never a value (the pepper's shape is checked, not
-echoed). **Requirements:** run it from the repository root, in the Chronos venv with the dev
-dependencies (`pytest` is imported by that module). A supported checker script under `scripts/`
-is a follow-up: this change is docs and tests only, so the command imports the test module.
+### Step 8 — The preflight, on your own file (optional but recommended)
+The checker is `preflight_b1_env(text, file_mode=, environ=)` in `chronos.cli.b1_preflight`
+(since B1 U-d); `tests/unit/test_b1_env_preflight.py` pins it in CI against **dummy** values. **That
+function** opens no file of its own and reads no `.env` (an audit-hook test with sentinel `.env`
+files in the working directory and in `$HOME` proves it); you hand it text. **The supported
+command, `python -m chronos.cli b1-preflight`, does open a `.env`:** the file named by `--env-file`
+(default `./.env`), once, through one descriptor, and only if it is a regular file you own with
+mode exactly 0600; it then hands the text to that function. Both print only condition ids and
+messages — never a value (the pepper's shape is checked, not echoed). **Requirements:** run it
+from the repository root, in the Chronos venv. The snippet below is the older, function-only way
+to hand the checker your own file's text in your own shell; it imports the test module, so it also
+needs the dev dependencies (`pytest` is imported by that module).
 ```text
 # NOT RUN — Kevin's hands; reads his own private .env, prints condition ids only
 .venv/bin/python -c "
@@ -206,7 +209,7 @@ platform halt and audit-chain state (default paths `data/platform_halt.json`,
 the platform halt, whose missing file reads *halted* (checklist `:119-123`). Record the output
 in the session-1 evidence doc.
 
-**A note on `.env` and pytest.** The preflight function reads no `.env`. The *test suite* does:
+**A note on `.env` and pytest.** The preflight *function* reads no `.env` (the `b1-preflight` command opens the file you name; see step 8). The *test suite* does:
 the session-scoped fixture `tests/conftest.py:71-92` (`_ambient_settings_never_live_capable`)
 builds one ambient `Settings()` per pytest run, which opens the repository-root `.env`, and fails
 the run if that configuration is live-capable (ADR-0009 tripwire). That is the suite's own
