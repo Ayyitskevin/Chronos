@@ -513,6 +513,123 @@ def test_4_the_latch_settings_pacing_and_the_composite_predicate_are_untouched_b
     assert _predicate(after) == _predicate(before)
 
 
+# --- the RC-1 lookup itself (Daybreak HOLD at 711f525): exactly one commit, RC-1's content -------
+# Git subjects are not unique, so a later commit with RC-1's exact subject must not silently become
+# "RC-1": the lookup must find EXACTLY ONE such commit and it must carry RC-1's file set. These
+# run the REAL _rc1_commit() against tiny throwaway repositories (built with git fast-import, no
+# working tree) by pointing this module's _ROOT at them.
+
+_RC1_FILES = frozenset(
+    {
+        "src/chronos/broker/callbacks.py",
+        "src/chronos/broker/demo.py",
+        "src/chronos/broker/ibkr.py",
+        "src/chronos/broker/official_ibkr.py",
+        "tests/safety/test_unsolicited_execution_invalidates_readiness.py",
+    }
+)
+
+
+def _history(repo: Path, commits: list[tuple[str, tuple[str, ...]]]) -> list[str]:
+    """Create a bare repository at ``repo``: ``commits`` are (message, changed paths), oldest first.
+
+    Returns the commit ids oldest first.
+    """
+
+    subprocess.run(["git", "init", "-q", "--bare", "--initial-branch=main", str(repo)], check=True)
+    stream = bytearray()
+    for index, (message, paths) in enumerate(commits):
+        body = message.encode()
+        stream += b"commit refs/heads/main\n"
+        stream += (
+            f"committer Pin Test <pin@example.invalid> {1_700_000_000 + index} +0000\n".encode()
+        )
+        stream += f"data {len(body)}\n".encode() + body + b"\n"
+        for path in paths:
+            content = f"{path} @ {index}\n".encode()
+            stream += f"M 100644 inline {path}\n".encode() + f"data {len(content)}\n".encode()
+            stream += content + b"\n"
+        stream += b"\n"
+    subprocess.run(["git", "fast-import", "--quiet"], cwd=repo, input=bytes(stream), check=True)
+    out = subprocess.run(
+        ["git", "rev-list", "--reverse", "main"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return out.stdout.split()
+
+
+def _lookup(monkeypatch: pytest.MonkeyPatch, repo: Path) -> str:
+    monkeypatch.setattr(__import__("sys").modules[__name__], "_ROOT", repo)
+    return _rc1_commit()
+
+
+_REAL = (_RC1_SUBJECT, tuple(sorted(_RC1_FILES)))
+_FILLER = [(f"unrelated change {n}", ("docs/note.md",)) for n in range(5)]
+
+
+def test_the_lookup_returns_the_one_commit_with_the_subject_and_the_known_files(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    ids = _history(tmp_path / "r", [*_FILLER, _REAL, *_FILLER])
+    assert _lookup(monkeypatch, tmp_path / "r") == ids[len(_FILLER)]
+
+
+def test_the_lookup_is_not_limited_to_a_window_of_recent_commits(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    deep = [(f"filler {n}", ()) for n in range(300)]
+    ids = _history(tmp_path / "r", [_REAL, *deep])
+    assert _lookup(monkeypatch, tmp_path / "r") == ids[0]
+
+
+def test_a_body_that_quotes_the_subject_or_a_near_miss_subject_never_matches(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    ids = _history(
+        tmp_path / "r",
+        [
+            _REAL,
+            ("docs: a follow-up\n\nThis follows up on: " + _RC1_SUBJECT, ()),
+            (f'Revert "{_RC1_SUBJECT}"', ()),
+            (_RC1_SUBJECT + " follow-up", ()),
+            ("tests: an unrelated change that merely ends the same way (RC-1)", ()),
+        ],
+    )
+    assert _lookup(monkeypatch, tmp_path / "r") == ids[0]
+
+
+def test_the_lookup_fails_when_no_commit_has_the_subject(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _history(tmp_path / "r", [*_FILLER, ("something else (RC-1)", tuple(sorted(_RC1_FILES)))])
+    with pytest.raises(pytest.fail.Exception, match="found 0"):
+        _lookup(monkeypatch, tmp_path / "r")
+
+
+def test_a_duplicate_exact_subject_fails_loudly_and_names_every_candidate(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Daybreak's reproduction: a NEWER empty commit with RC-1's exact subject became RC-1."""
+
+    ids = _history(tmp_path / "r", [_REAL, *_FILLER, (_RC1_SUBJECT, ())])
+    with pytest.raises(pytest.fail.Exception, match="found 2") as failure:
+        _lookup(monkeypatch, tmp_path / "r")
+    assert ids[0] in str(failure.value) and ids[-1] in str(failure.value)
+
+
+def test_a_single_commit_with_the_subject_but_not_rc1s_files_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Identity beyond the subject: the commit found must change RC-1's known file set."""
+
+    _history(tmp_path / "r", [*_FILLER, (_RC1_SUBJECT, ("docs/unrelated.md",))])
+    with pytest.raises(pytest.fail.Exception, match="files"):
+        _lookup(monkeypatch, tmp_path / "r")
+
+
 # --- r2 (Daybreak HOLD at 72ee6ec): malformed identifiers are uncorrelated, never own ----------
 
 
