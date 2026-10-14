@@ -1188,3 +1188,55 @@ def test_c1_17_a_rehearsal_still_replays_with_allow_demo_and_is_refused_without(
     rehearsal = _written_session(tmp_path, {}, claimed=False, name="rehearsal")
     assert replay.check_session(rehearsal, allow_demo=True) == []
     assert any("gateway_evidence=false" in f for f in replay.check_session(rehearsal))
+
+
+@pytest.mark.parametrize(
+    ("origin", "in_site_packages"),
+    [
+        ("/venv/lib/python3.13/site-packages/ibapi/client.py", True),
+        ("/usr/lib/python3/dist-packages/ibapi/client.py", True),
+        ("/home/dev/chronos/tests/support/ibapi/client.py", False),
+        (None, False),
+    ],
+)
+def test_c1_18_only_an_installed_package_origin_counts(
+    monkeypatch: pytest.MonkeyPatch, origin: str | None, in_site_packages: bool
+) -> None:
+    _install_stub(monkeypatch, real_looking=True)
+    module = ModuleType("ibapi.client")
+    if origin is not None:
+        module.__file__ = origin
+    monkeypatch.setitem(sys.modules, "ibapi.client", module)
+    broker = official_ibkr.OfficialIBKRBroker(fake_ibapi.official_settings())
+
+    async def drive() -> dict:
+        await broker.connect()
+        try:
+            return broker.transport_proof()
+        finally:
+            await broker.disconnect()
+
+    proof = asyncio.run(drive())
+    assert proof["client_in_site_packages"] is in_site_packages
+    assert (_load_capture_module().transport_proof_problems(proof) == []) is in_site_packages
+
+
+def test_c1_19_a_subclass_is_not_the_official_adapter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The proof names the concrete class, so a wrapper or subclass cannot pass as the adapter."""
+
+    class Wrapped(official_ibkr.OfficialIBKRBroker):
+        pass
+
+    _install_stub(monkeypatch, real_looking=True)
+    broker = Wrapped(fake_ibapi.official_settings())
+
+    async def drive() -> dict:
+        await broker.connect()
+        try:
+            return broker.transport_proof()
+        finally:
+            await broker.disconnect()
+
+    proof = asyncio.run(drive())
+    assert proof["adapter"].endswith("Wrapped")
+    assert any("adapter" in p for p in _load_capture_module().transport_proof_problems(proof))
