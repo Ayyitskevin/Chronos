@@ -409,6 +409,10 @@ class RecordedFillsAdvanced(ValueError):
         )
 
 
+class _StatusMoved(Exception):
+    """Internal: a CAS found the status moved once inside the write transaction (rolls back)."""
+
+
 class OrderTrackerRepository:
     """Append lifecycle events and advance the owning intent atomically."""
 
@@ -451,7 +455,8 @@ class OrderTrackerRepository:
 
         With ``enforce_from_status=True`` this is a true CAS (ADR-0009 §4): the
         intent's CURRENT status must equal ``from_status`` inside this same
-        transaction, otherwise nothing is written and ``False`` is returned —
+        transaction (re-read under the write lock, LEGACY-5 r2), otherwise nothing is
+        written and ``False`` is returned —
         the guard the submission boundary uses so an intent that left
         USER_CONFIRMED while gate evidence was being gathered can never be
         clobbered back into the submit path.
@@ -490,17 +495,29 @@ class OrderTrackerRepository:
                 occurred_at=occurred_at,
             )
             try:
+                # LEGACY-5 r2: the whole decision lives in this savepoint. pysqlite opens no outer
+                # transaction before the first statement, so the savepoint IS the transaction: its
+                # RELEASE commits the event and the status together, and a raise rolls both back.
+                # The INSERT takes SQLite's write lock, so the reads below see every committed
+                # write and no other writer can commit until this one does.
                 with session.begin_nested():
                     session.add(row)
                     session.flush()
                     if refuse_below_recorded_fills:
                         self._refuse_below_recorded_fills(session, row)
+                    if enforce_from_status:
+                        session.refresh(intent)  # the CAS read above ran before the lock
+                        if from_status is None or intent.status != from_status.value:
+                            raise _StatusMoved
+                    intent.status = to_status.value
+                    if to_status is OrderLifecycle.SUBMITTED and intent.submitted_at is None:
+                        intent.submitted_at = occurred_at
+                    # leaving the block flushes the status into the savepoint before its RELEASE
             except IntegrityError:
                 # A concurrent writer recorded the same event first: idempotent.
                 return False
-            intent.status = to_status.value
-            if to_status is OrderLifecycle.SUBMITTED and intent.submitted_at is None:
-                intent.submitted_at = occurred_at
+            except _StatusMoved:
+                return False  # the CAS lost inside the transaction: nothing was written
             return True
 
     def events(self, intent_id: str, *, current_account_id: str) -> tuple[OrderEventRecord, ...]:
