@@ -333,10 +333,13 @@ def test_a_replayed_attempt_is_refused_rather_than_sent_without_a_durable_mark(
     strict=True,
     raises=OrderLifecycleError,
     reason=(
-        "Q-Q3-1 (Kevin's): a CANCEL_PENDING stranded by a crash between the tracker write and "
-        "the cancel is not recoverable: the state machine has no CANCEL_PENDING -> SUBMITTED "
-        "edge, so a venue update showing the order still working raises (and a second cancel is "
-        "refused as not cancellable). Finding pin, not a fix."
+        "Q-Q3-1 (ruled by Muse, 2026-10-14): by design under U-B the state machine has no "
+        "CANCEL_PENDING -> SUBMITTED edge, so this direct tracker.ingest of a venue SUBMITTED "
+        "still raises. A stranded CANCEL_PENDING whose order still works IS recovered, through "
+        "reconciliation after the dwell (the repository CAS, source RECONCILE_RECOVERY): pinned "
+        "by test_v1_a_stranded_cancel_pending_recovers_through_reconciliation_after_the_dwell "
+        "in tests/integration/test_stranded_cancel_pending_recovery.py. This pins the path "
+        "recovery deliberately does NOT take."
     ),
 )
 def test_a_stranded_cancel_pending_recovers_when_the_venue_shows_the_order_working(
@@ -440,9 +443,15 @@ def test_a_second_cancel_of_a_pending_order_says_what_state_it_is_in(
     strict=True,
     raises=OrderMutationError,
     reason=(
-        "Q-Q3-1 (Kevin's), the other half of the pin above: a second cancel of a stranded "
-        "CANCEL_PENDING is refused (it is not in _CANCELLABLE_STATUSES), so the operator cannot "
-        "retry it. Finding pin, not a fix."
+        "Q-Q3-1 (ruled by Muse, 2026-10-14), the other half: by design a second cancel while "
+        "CANCEL_PENDING is refused by the explicit already-pending guard in "
+        "OrderCancellationService.cancel (mutations.py, before the cancellable-status check). "
+        "Under U-B "
+        "the operator's route is reconciliation: after the dwell the intent is recovered to a "
+        "cancellable state and the same cancel then succeeds: pinned by "
+        "test_v2_a_second_cancel_is_refused_while_pending_and_succeeds_after_the_recovery in "
+        "tests/integration/test_stranded_cancel_pending_recovery.py. This pins the direct retry "
+        "that stays refused."
     ),
 )
 def test_a_stranded_cancel_pending_can_be_cancelled_again(
