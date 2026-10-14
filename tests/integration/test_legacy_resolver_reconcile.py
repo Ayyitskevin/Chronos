@@ -497,6 +497,24 @@ def test_operator_resolve_passes_the_recorded_fills_too(rig: _Rig, typed: OrderL
     assert rig.event_count() == events_before
 
 
+def test_the_recorded_cumulative_fills_are_the_largest_figure_on_the_events(rig: _Rig) -> None:
+    """The accessor the callers pass: a later event with a smaller figure lowers nothing."""
+
+    tracker = OrderTracker(rig.intents, rig.repo)
+    rig.seed(OrderLifecycle.PARTIALLY_FILLED)  # 0, then 3 recorded
+    assert tracker.recorded_filled_quantity("intent-1", current_account_id=ACCOUNT) == Decimal(3)
+    rig._record(
+        OrderLifecycle.CANCEL_PENDING,
+        "cancel-after-partial",
+        source="CANCEL",
+        from_status=OrderLifecycle.PARTIALLY_FILLED,
+        broker_order_id=BROKER_ID,
+        filled_quantity=Decimal(1),  # a later, smaller figure
+        occurred_at=PRIOR,
+    )
+    assert tracker.recorded_filled_quantity("intent-1", current_account_id=ACCOUNT) == Decimal(3)
+
+
 # --- S-12: the report says WHY a blank-reference observation did not settle the intent ---------
 # The behaviour itself is pinned in tests/integration/test_legacy_resolver_blank_ref.py; the typed
 # reason (not "absent from the snapshots", which would be false) is pinned here.
