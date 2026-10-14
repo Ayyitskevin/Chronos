@@ -444,7 +444,9 @@ def test_a_second_cancel_of_a_pending_order_says_what_state_it_is_in(
     raises=OrderMutationError,
     reason=(
         "Q-Q3-1 (ruled by Muse, 2026-10-14), the other half: by design a second cancel while "
-        "CANCEL_PENDING is refused (CANCEL_PENDING is not in _CANCELLABLE_STATUSES). Under U-B "
+        "CANCEL_PENDING is refused by the explicit already-pending guard in "
+        "OrderCancellationService.cancel (mutations.py, before the cancellable-status check). "
+        "Under U-B "
         "the operator's route is reconciliation: after the dwell the intent is recovered to a "
         "cancellable state and the same cancel then succeeds: pinned by "
         "test_v2_a_second_cancel_is_refused_while_pending_and_succeeds_after_the_recovery in "
