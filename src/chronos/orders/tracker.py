@@ -17,7 +17,7 @@ from decimal import Decimal, InvalidOperation
 
 from chronos.domain.enums import OrderLifecycle
 from chronos.domain.models import ChronosModel
-from chronos.orders.state_machine import OrderLifecycleMachine
+from chronos.orders.state_machine import TERMINAL_ORDER_LIFECYCLES, OrderLifecycleMachine
 from chronos.persistence.order_repositories import (
     OrderEventRecord,
     OrderIntentRepository,
@@ -150,12 +150,23 @@ class OrderTracker:
         self._intents = intents
         self._tracker = tracker_repo
 
-    def ingest(self, update: OrderStatusUpdate, *, current_account_id: str) -> IngestOutcome:
+    def ingest(
+        self,
+        update: OrderStatusUpdate,
+        *,
+        current_account_id: str,
+        refuse_terminal_below_recorded_fills: bool = False,
+    ) -> IngestOutcome:
         """Apply one broker observation.
 
         Returns an :class:`IngestOutcome`: ``lifecycle_changed`` for a genuine
         transition, ``identity_refined`` for a same-status observation that first
         supplied broker identity (R-d), neither for a no-op/duplicate/stale event.
+
+        ``refuse_terminal_below_recorded_fills`` (LEGACY-5 r1; the legacy resolver's two callers):
+        a TERMINAL update whose figure is below the largest recorded fill figure raises
+        :class:`~chronos.persistence.order_repositories.RecordedFillsAdvanced` from inside the
+        transition's own transaction -- the caller's earlier read of the maximum may be stale.
         """
 
         intent = self._intents.get(update.intent_id, current_account_id=current_account_id)
@@ -207,6 +218,10 @@ class OrderTracker:
             },
             occurred_at=update.occurred_at,
             enforce_from_status=True,
+            refuse_below_recorded_fills=(
+                refuse_terminal_below_recorded_fills
+                and update.lifecycle in TERMINAL_ORDER_LIFECYCLES
+            ),
         )
         return IngestOutcome(lifecycle_changed=advanced, identity_refined=False)
 

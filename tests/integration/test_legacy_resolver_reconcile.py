@@ -649,3 +649,120 @@ def test_r1_the_same_interleaving_without_a_new_fill_still_settles(
         is False
     )
     assert rig.status() is OrderLifecycle.CANCELLED
+
+
+def test_r1_the_reconcile_report_path_refuses_the_same_stale_terminal_write(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The legacy resolver's other caller: ``reconcile_report`` reads the maximum, then another
+    tracker writer (a live order-status callback) records PARTIALLY_FILLED/5 before the pass's
+    terminal write. The write is refused atomically and the report names it as unresolved."""
+
+    from chronos.orders.tracker import OrderStatusUpdate
+
+    rig.seed(OrderLifecycle.SUBMISSION_UNKNOWN)
+    rig.venue.open = [_row(OrderLifecycle.CANCELLED, "0")]
+    tracker = rig.reconciler._tracker
+    real = tracker.recorded_filled_quantity
+    reads: list[Decimal] = []
+
+    def paused(intent_id: str, *, current_account_id: str) -> Decimal:
+        value = real(intent_id, current_account_id=current_account_id)
+        reads.append(value)
+        if len(reads) == 1:
+            outcome = tracker.ingest(
+                OrderStatusUpdate(
+                    intent_id="intent-1",
+                    broker_order_id=BROKER_ID,
+                    permanent_id=PERM_ID,
+                    client_id=CLIENT_ID,
+                    lifecycle=OrderLifecycle.PARTIALLY_FILLED,
+                    filled_quantity=Decimal(5),
+                    remaining_quantity=QUANTITY - 5,
+                    occurred_at=NOW,
+                ),
+                current_account_id=ACCOUNT,
+            )
+            assert outcome.lifecycle_changed  # the concurrent fill really landed
+        return value
+
+    monkeypatch.setattr(tracker, "recorded_filled_quantity", paused)
+    report = rig.reconcile()
+
+    assert reads[0] == Decimal(0)
+    assert report.applied_updates == ()
+    (item,) = report.unresolved
+    assert item.transition_applied is False
+    assert item.reason.startswith("recorded fills advanced") and "5 filled on record" in item.reason
+    assert rig.status() is OrderLifecycle.PARTIALLY_FILLED
+    assert [i.intent_id for i in report.remaining_active] == ["intent-1"]
+    assert report.permits_new_opening_order is False
+
+
+# --- LEGACY-5 r1: the repository's conditional write, directly ---------------------------------
+
+
+@pytest.mark.parametrize("attempted", ["0", "2", None], ids=["zero", "below", "missing"])
+def test_r1_record_transition_refuses_a_figure_below_the_recorded_maximum(
+    rig: _Rig, attempted: str | None
+) -> None:
+    from chronos.persistence.order_repositories import RecordedFillsAdvanced
+
+    rig.seed(OrderLifecycle.PARTIALLY_FILLED)  # 0, then 3 recorded
+    before = rig.repo.events("intent-1", current_account_id=ACCOUNT)
+
+    with pytest.raises(RecordedFillsAdvanced) as refused:
+        rig.repo.record_transition(
+            intent_id="intent-1",
+            event_key="intent-1:cancel-zero",
+            source="RECONCILE",
+            from_status=OrderLifecycle.PARTIALLY_FILLED,
+            to_status=OrderLifecycle.CANCELLED,
+            current_account_id=ACCOUNT,
+            filled_quantity=None if attempted is None else Decimal(attempted),
+            occurred_at=NOW,
+            enforce_from_status=True,
+            refuse_below_recorded_fills=True,
+        )
+
+    assert refused.value.recorded == Decimal(3)
+    assert refused.value.attempted == Decimal(attempted or "0")
+    assert rig.repo.events("intent-1", current_account_id=ACCOUNT) == before  # nothing written
+    assert rig.status() is OrderLifecycle.PARTIALLY_FILLED  # status untouched
+
+
+@pytest.mark.parametrize("attempted", ["3", "4"], ids=["at", "above"])
+def test_r1_record_transition_writes_a_figure_at_or_above_the_recorded_maximum(
+    rig: _Rig, attempted: str
+) -> None:
+    rig.seed(OrderLifecycle.PARTIALLY_FILLED)
+    assert rig.repo.record_transition(
+        intent_id="intent-1",
+        event_key="intent-1:cancel-at",
+        source="RECONCILE",
+        from_status=OrderLifecycle.PARTIALLY_FILLED,
+        to_status=OrderLifecycle.CANCELLED,
+        current_account_id=ACCOUNT,
+        filled_quantity=Decimal(attempted),
+        occurred_at=NOW,
+        enforce_from_status=True,
+        refuse_below_recorded_fills=True,
+    )
+    assert rig.status() is OrderLifecycle.CANCELLED
+
+
+def test_r1_the_guard_is_opt_in_other_writers_are_unchanged(rig: _Rig) -> None:
+    """Every other ``record_transition`` caller keeps today's behaviour (the default is False)."""
+
+    rig.seed(OrderLifecycle.PARTIALLY_FILLED)
+    assert rig.repo.record_transition(
+        intent_id="intent-1",
+        event_key="intent-1:cancel-default",
+        source="CANCEL",
+        from_status=OrderLifecycle.PARTIALLY_FILLED,
+        to_status=OrderLifecycle.CANCELLED,
+        current_account_id=ACCOUNT,
+        filled_quantity=Decimal(0),
+        occurred_at=NOW,
+    )
+    assert rig.status() is OrderLifecycle.CANCELLED

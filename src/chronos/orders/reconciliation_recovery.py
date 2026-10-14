@@ -29,6 +29,7 @@ from chronos.orders.tracker import OrderIdentityConflict, OrderStatusUpdate, Ord
 from chronos.persistence.order_repositories import (
     OrderIntentRecord,
     OrderIntentRepository,
+    RecordedFillsAdvanced,
 )
 
 # Intent statuses whose true broker state must be re-derived on restart.
@@ -597,7 +598,25 @@ class OrderRestartReconciler:
                     )
                 )
                 continue
-            outcome = self._tracker.ingest(update, current_account_id=current_account_id)
+            try:
+                outcome = self._tracker.ingest(
+                    update,
+                    current_account_id=current_account_id,
+                    refuse_terminal_below_recorded_fills=True,
+                )
+            except RecordedFillsAdvanced as refused:
+                # LEGACY-5 r1: a fill was recorded after this pass read the maximum (another
+                # writer); the terminal write was refused atomically and the intent stays locked.
+                unresolved.append(
+                    RestartOrderObservation(
+                        intent_id=intent.intent_id,
+                        local_status=intent.status,
+                        broker_status=update.lifecycle,
+                        transition_applied=False,
+                        reason=str(refused),
+                    )
+                )
+                continue
             # R-g: only a LIFECYCLE change is an applied transition (the integer the
             # operator sees as applied_count); an identity refinement is evidence and
             # is named through the existing reason string — the report keeps its shape.
@@ -753,7 +772,13 @@ class OrderRestartReconciler:
         if update is not None:
             # The broker DOES know this order — apply truth, refuse the manual
             # rejection (the operator was about to resolve against evidence).
-            self._tracker.ingest(update, current_account_id=current_account_id)
+            # LEGACY-5 r1: the maximum read above may be stale by now; the terminal write re-checks
+            # it atomically and a RecordedFillsAdvanced (a ValueError) refuses, writing nothing.
+            self._tracker.ingest(
+                update,
+                current_account_id=current_account_id,
+                refuse_terminal_below_recorded_fills=True,
+            )
             return False
         matching_executions = tuple(
             execution for execution in executions if execution.order_ref == intent.order_ref
