@@ -147,9 +147,10 @@ class OrderCancellationService:
         intent = self._intents.get(intent_id, current_account_id=current_account_id)
         if intent is not None and intent.status is OrderLifecycle.CANCEL_PENDING:
             raise OrderMutationError(
-                "a cancel is already pending for this order (or was interrupted); an interrupted "
-                "cancel is not recovered automatically: reconcile the order or cancel it at the "
-                "broker"
+                "a cancel is already pending for this order (or was interrupted); if the order "
+                "still works at the venue, an interrupted cancel is recovered automatically only "
+                "on an adapter that supports it, and only after a wait; otherwise reconcile the "
+                "order or cancel it at the broker"
             )
         if intent is None or intent.status not in _CANCELLABLE_STATUSES:
             raise OrderMutationError("order is not in a cancellable state")

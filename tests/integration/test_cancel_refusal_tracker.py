@@ -429,8 +429,8 @@ def test_the_mark_cas_also_protects_a_filled_order_from_a_stale_cancel(
 def test_a_second_cancel_of_a_pending_order_says_what_state_it_is_in(
     rig: tuple[_Harness, _CancelBroker],
 ) -> None:
-    """Daybreak P3-1: the refusal of a cancel on a CANCEL_PENDING order names the state (and that
-    an interrupted cancel is not recovered automatically) instead of the generic text."""
+    """Daybreak P3-1: the refusal of a cancel on a CANCEL_PENDING order names the state (and when
+    an interrupted cancel is recovered automatically) instead of the generic text."""
 
     harness, broker = rig
     broker.mode = "pending"
