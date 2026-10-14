@@ -172,9 +172,13 @@ function** opens no file of its own and reads no `.env` (an audit-hook test with
 files in the working directory and in `$HOME` proves it); you hand it text. **The supported
 command, `python -m chronos.cli b1-preflight`, does open a `.env`:** the file named by `--env-file`
 (default `./.env`), once, through one descriptor, and only if it is a regular file you own with
-mode exactly 0600; it then hands the text to that function. Both print only condition ids and
-messages — never a value (the pepper's shape is checked, not echoed). **Requirements:** run it
-from the repository root, in the Chronos venv. The snippet below is the older, function-only way
+mode exactly 0600; it then hands the text to that function. The pure checker returns condition
+ids and messages only. The command prints a bounded local-readiness report instead — a header,
+every finding and a verdict — which includes observed local values (the `ibapi` version and its
+`error` signature, the halt state and reason, which live and paper API ports are listening, and
+file or database paths) and never echoes your account id or the capture pepper (the pepper's shape
+is checked, not echoed). **Requirements:** run it from the repository root, in the Chronos venv.
+The snippet below is the older, function-only way
 to hand the checker your own file's text in your own shell; it imports the test module, so it also
 needs the dev dependencies (`pytest` is imported by that module).
 ```text
