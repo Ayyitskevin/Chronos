@@ -231,7 +231,11 @@ belongs in every session evidence doc.
 
 **1.5 Rehearse the capture harness offline (demo).** Proves the harness end to end
 without a gateway. Demo output is stamped `gateway_evidence: false` and can never count
-toward the gate:
+toward the gate. A real session is stamped true only from `meta.transport_proof`, read from
+`OfficialIBKRBroker.transport_proof()` after a successful connect; a failed connect exits 1
+and writes nothing, an `ib_async` or fake-transport session is stamped false, and
+`replay_check` refuses `gateway_evidence: true` without a valid proof. This is
+accident-proof, never adversary-proof (a pepper MAC is the named follow-up):
 
 ```bash
 BROKER_MODE=demo .venv/bin/python \

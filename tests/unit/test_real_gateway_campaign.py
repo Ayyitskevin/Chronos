@@ -868,15 +868,17 @@ def _walk_dicts(node: object) -> list[dict]:
 #
 # Before this change `run_capture` stamped gateway_evidence = (broker_mode is IBKR) BEFORE it
 # connected, a failed connect became a captured step that exited 0, and `replay_check` accepted
-# whatever Boolean the manifest carried. The stamp now comes from OfficialIBKRBroker.transport_proof()
-# read after a successful connect. The claim is ACCIDENT-PROOF, never ADVERSARY-PROOF (DESIGN.md).
+# whatever Boolean the manifest carried. The stamp now comes from
+# OfficialIBKRBroker.transport_proof(), read after a successful connect. The claim is
+# ACCIDENT-PROOF, never ADVERSARY-PROOF (DESIGN.md).
 
 from types import SimpleNamespace  # noqa: E402
+
+from tests.support import fake_ibapi  # noqa: E402
 
 from chronos.broker import official_ibkr  # noqa: E402
 from chronos.broker.base import BrokerConnectionError  # noqa: E402
 from chronos.domain.enums import BrokerAdapter, BrokerMode  # noqa: E402
-from tests.support import fake_ibapi  # noqa: E402
 
 _GOOD_PROOF = {
     "adapter": "chronos.broker.official_ibkr.OfficialIBKRBroker",
@@ -904,10 +906,10 @@ def _real_looking_client(gateway: fake_ibapi.FakeGateway) -> type:
                 socket=SimpleNamespace(getpeername=lambda: ("127.0.0.1", 7497))
             )
 
-        def serverVersion(self) -> int:  # noqa: N802
+        def serverVersion(self) -> int:
             return 176
 
-        def twsConnectionTime(self) -> str:  # noqa: N802
+        def twsConnectionTime(self) -> str:
             return "20261014 10:00:00 EST"
 
     EClient.__module__ = "ibapi.client"
@@ -1010,7 +1012,9 @@ def test_c1_3_transport_proof_before_connect_is_disconnected_and_unproved(
         ("server_version", 0),
     ],
 )
-def test_c1_4_each_missing_or_wrong_proof_field_is_a_named_problem(field: str, value: object) -> None:
+def test_c1_4_each_missing_or_wrong_proof_field_is_a_named_problem(
+    field: str, value: object
+) -> None:
     m = _load_capture_module()
     assert m.transport_proof_problems(_GOOD_PROOF) == []
     problems = m.transport_proof_problems({**_GOOD_PROOF, field: value})
@@ -1031,7 +1035,7 @@ def test_c1_6_a_demo_capture_is_not_gateway_evidence() -> None:
 def test_c1_7_the_official_adapter_over_a_fake_transport_is_not_gateway_evidence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """U-F2-F3: the strict xfail on the B1 stack (test_a_fakegateway_capture_is_not_gateway_evidence)
+    """U-F2-F3: the B1 stack's strict xfail test_a_fakegateway_capture_is_not_gateway_evidence
     is this case; it XPASSes once this lands."""
 
     capture = _official_run(monkeypatch, real_looking=False)
@@ -1171,7 +1175,9 @@ def test_c1_16_a_proof_edited_after_capture_is_a_hash_drift(tmp_path: Path) -> N
     replay = _replay_module()
     session = _written_session(tmp_path, {"transport_proof": _GOOD_PROOF}, claimed=True, name="t")
     path = session / "capture.json"
-    path.write_text(path.read_text(encoding="utf-8").replace('"CONNECTED"', '"X"'), encoding="utf-8")
+    path.write_text(
+        path.read_text(encoding="utf-8").replace('"CONNECTED"', '"X"'), encoding="utf-8"
+    )
     assert any("sha256 drift" in f for f in replay.check_session(session))
 
 

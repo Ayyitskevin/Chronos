@@ -24,6 +24,7 @@ import asyncio
 import contextlib
 import heapq
 import logging
+import sys
 import threading
 from collections.abc import Callable, Sequence
 from datetime import UTC, date, datetime, time
@@ -1065,6 +1066,58 @@ class OfficialIBKRBroker:
             # reported via managedAccounts — never Settings.ib_environment.
             managed_accounts=self.bridge.managed_accounts if connected else (),
         )
+
+    def transport_proof(self) -> dict[str, Any]:
+        """What this connection can show about its own transport (read-only, no secrets).
+
+        The real-gateway campaign stamps ``gateway_evidence`` from this, read after a
+        successful connect. It is accident-proof (a failed connect, a demo run or an
+        in-process fake yields an incomplete proof), never adversary-proof: a process that
+        controls its own transport can fake every field. Account ids are never included,
+        only how many the session reported.
+        """
+
+        app = self._app
+        connected = self._app_connected()
+        client_class = (
+            next((cls for cls in type(app).__mro__ if cls.__name__ == "EClient"), None)
+            if app is not None
+            else None
+        )
+        client_module = client_class.__module__ if client_class is not None else None
+        origin = getattr(sys.modules.get(client_module or ""), "__file__", None)
+        parts = str(origin).replace("\\", "/").split("/") if origin else []
+        return {
+            "adapter": f"{type(self).__module__}.{type(self).__qualname__}",
+            "state": ConnectionState.CONNECTED.value
+            if connected
+            else ConnectionState.DISCONNECTED.value,
+            "connected": connected,
+            "managed_account_count": len(self.bridge.managed_accounts) if connected else 0,
+            "client_module": client_module,
+            "client_in_site_packages": "site-packages" in parts or "dist-packages" in parts,
+            "peer": self._socket_peer(app) if connected else None,
+            "server_version": self._observed(app, "serverVersion", int) if connected else None,
+            "connection_time": (
+                self._observed(app, "twsConnectionTime", str) if connected else None
+            ),
+        }
+
+    @staticmethod
+    def _socket_peer(app: Any) -> dict[str, Any] | None:
+        try:
+            host, port = app.conn.socket.getpeername()[:2]
+            return {"host": str(host), "port": int(port)}
+        except Exception:
+            return None
+
+    @staticmethod
+    def _observed(app: Any, name: str, kind: type) -> Any:
+        try:
+            value = getattr(app, name)()
+            return kind(value) if value not in (None, "") else None
+        except Exception:
+            return None
 
     # ------------------------------------------------------------------ #
     # Read paths

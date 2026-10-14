@@ -263,6 +263,48 @@ def derive_liquid_hours(capture: dict[str, Any]) -> dict[str, Any]:
     return derived
 
 
+_PROOF_ADAPTER = "chronos.broker.official_ibkr.OfficialIBKRBroker"
+
+
+def transport_proof_problems(proof: Any) -> list[str]:
+    """Why a recorded transport proof does not support gateway evidence ([] when it does).
+
+    The proof is what ``OfficialIBKRBroker.transport_proof()`` observed after a successful
+    connect. This is ACCIDENT-PROOF, never ADVERSARY-PROOF: a failed connect, a demo run, the
+    in-process fake and a bare hand-set Boolean all fail it, but a process that controls its
+    own transport can forge every field. Tamper-evidence (a pepper MAC) is a named follow-up.
+    """
+
+    if not isinstance(proof, dict):
+        return ["transport proof missing or malformed"]
+    problems: list[str] = []
+    if proof.get("adapter") != _PROOF_ADAPTER:
+        problems.append("adapter is not the official IBKR adapter")
+    if proof.get("connected") is not True or proof.get("state") != "CONNECTED":
+        problems.append("state: the session was not connected")
+    count = proof.get("managed_account_count")
+    if not isinstance(count, int) or isinstance(count, bool) or count < 1:
+        problems.append("managed_account_count: the gateway reported no managed accounts")
+    if (
+        proof.get("client_module") != "ibapi.client"
+        or proof.get("client_in_site_packages") is not True
+    ):
+        problems.append("client_module: the client is not the installed ibapi package")
+    peer = proof.get("peer")
+    if not (
+        isinstance(peer, dict)
+        and isinstance(peer.get("host"), str)
+        and peer["host"]
+        and isinstance(peer.get("port"), int)
+        and not isinstance(peer["port"], bool)
+    ):
+        problems.append("peer: no socket peer was observed")
+    version = proof.get("server_version")
+    if not isinstance(version, int) or isinstance(version, bool) or version < 1:
+        problems.append("server_version: no handshake server version was observed")
+    return problems
+
+
 async def run_capture(settings: Any, args: argparse.Namespace) -> dict[str, Any]:
     from chronos.broker.market_data import MarketDataManager
     from chronos.domain.enums import BrokerAdapter, BrokerMode, OptionRight
@@ -275,7 +317,8 @@ async def run_capture(settings: Any, args: argparse.Namespace) -> dict[str, Any]
             "broker_mode": settings.broker_mode.value,
             "broker_adapter": settings.broker_adapter.value,
             "ib_environment": settings.ib_environment.value,
-            "gateway_evidence": settings.broker_mode is BrokerMode.IBKR,
+            # stamped true only below, from a transport proof read after a successful connect
+            "gateway_evidence": False,
             "allow_order_transmit": settings.allow_order_transmit,
             "allow_live_trading": settings.allow_live_trading,
         },
@@ -316,6 +359,12 @@ async def run_capture(settings: Any, args: argparse.Namespace) -> dict[str, Any]
             await asyncio.wait_for(broker.connect(), timeout=STEP_TIMEOUT_S)
             connected = True
             steps["connect"] = {"ok": True}
+            if settings.broker_adapter is BrokerAdapter.OFFICIAL_IBKR and (
+                settings.broker_mode is BrokerMode.IBKR
+            ):
+                proof = broker.transport_proof()
+                capture["meta"]["transport_proof"] = proof
+                capture["meta"]["gateway_evidence"] = not transport_proof_problems(proof)
         except Exception as error:
             steps["connect"] = {"error": f"{type(error).__name__}: {error}"}
             return capture
@@ -668,6 +717,11 @@ def main() -> int:
         print(f"REFUSED: cannot construct the configured broker adapter: {error}")
         print("(nothing was written; see chronos-real-gateway-campaign Phase 0.1)")
         return 2
+    connect_error = capture["steps"].get("connect", {}).get("error")
+    if connect_error is not None:
+        print(f"FAILED: the broker connection failed: {connect_error}")
+        print("(nothing was written; a capture without a connection is not a capture)")
+        return 1
     out_dir = Path(args.out)
     write_session(out_dir, capture, args.account_ids, args.label, pepper)
 
@@ -681,6 +735,10 @@ def main() -> int:
     )
     for name in errors:
         print(f"  step with error: {name}: {capture['steps'][name]['error']}")
+    if settings.broker_mode is BrokerMode.IBKR and not capture["meta"]["gateway_evidence"]:
+        print("NOT gateway evidence: the transport proof is incomplete (see meta.transport_proof)")
+        for problem in transport_proof_problems(capture["meta"].get("transport_proof")):
+            print(f"  {problem}")
     print("errors are observations, not failures: record them in the session evidence doc")
     return 0
 

@@ -126,7 +126,10 @@ Never put an IBKR username or password in any Chronos file.
    names `CHRONOS_RUN_IBKR_SMOKE`. If it runs or errors, stop — your environment already
    opts in, or collection is broken.
 5. Rehearse the capture harness against the demo broker — proves the harness end to end and
-   proves its refusals. Demo output is stamped `gateway_evidence: false` and can never count:
+   proves its refusals. Demo output is stamped `gateway_evidence: false` and can never count.
+   A real session is stamped true only from the post-connect `meta.transport_proof`
+   (official adapter only); a failed connect exits 1 and writes nothing; `replay_check`
+   refuses true without a valid proof. Accident-proof, never adversary-proof:
    ```bash
    CHRONOS_CAPTURE_PEPPER=$(python3 -c 'import secrets; print(secrets.token_hex(32))') \
      BROKER_MODE=demo .venv/bin/python \
