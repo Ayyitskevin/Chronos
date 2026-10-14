@@ -387,8 +387,10 @@ async def run_capture(settings: Any, args: argparse.Namespace) -> dict[str, Any]
         await step("open_orders", broker.open_orders())
         steps["completed_orders"] = {
             "not_captured": (
-                "the Broker protocol exposes open_orders and executions only; "
-                "reqCompletedOrders is not implemented (record as a known gap)"
+                "this capture does not read completed orders: the Broker protocol exposes "
+                "open_orders and executions only, and the optional CompletedOrderEvidence read "
+                "(reqCompletedOrders, which the official adapter implements) is not called here "
+                "(record as a known gap)"
             )
         }
 
