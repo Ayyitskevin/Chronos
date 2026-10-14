@@ -79,6 +79,7 @@ _READ_ALLOWLIST = frozenset(
         "option_market_rules",
         "historical_bars",
         "cancel_market_data",  # unsubscribes market data; not an order method
+        "transport_proof",  # #304: the read-only proof gateway_evidence is stamped from
     }
 )
 #: the adapter's order plane: none may ever be called by the read-only capture
