@@ -51,7 +51,7 @@ that owns authentication and the API socket; Chronos only connects to its local 
 **Paper account** = an IBKR simulated-money account (id `DU…`/`DF…`). **Session** = one
 connect → capture → disconnect cycle against a running gateway. **Fixture** = a captured,
 sanitized session directory that offline checks can replay. **Sanitized** = raw account
-ids replaced with `ACCT-` fingerprints and every broker identifier (execution, order and
+ids replaced with keyed `ACCT-` pseudonyms and every broker identifier (execution, order and
 permanent ids) replaced with a keyed pseudonym — HMAC-SHA256 under the per-install secret
 `CHRONOS_CAPTURE_PEPPER` — before anything enters the repo.
 
@@ -231,7 +231,12 @@ belongs in every session evidence doc.
 
 **1.5 Rehearse the capture harness offline (demo).** Proves the harness end to end
 without a gateway. Demo output is stamped `gateway_evidence: false` and can never count
-toward the gate:
+toward the gate. A real session is stamped true only from `meta.transport_proof`, read from
+`OfficialIBKRBroker.transport_proof()` after a successful connect; a failed connect exits 1
+and writes nothing, an `ib_async` or fake-transport session is stamped false, and
+`replay_check` refuses `gateway_evidence: true` without a valid proof. This is
+accident-proof, never adversary-proof (a pepper MAC is the named follow-up). The written
+`meta.transport_proof.peer.host` is a keyed `PEER-` token (the port stays):
 
 ```bash
 BROKER_MODE=demo .venv/bin/python \
@@ -331,8 +336,11 @@ contract, compare reality against the fixture-era assumptions and record verbati
   chronos-change-control, each with a new test carrying the real captured string.
 
 **2.4 Sanitization check before anything leaves the machine.** The harness replaces every
-observed account id with `ACCT-<sha256-fingerprint[:16]>` (the repo's pseudonym scheme,
-src/chronos/utils/identifiers.py:17-24). Verify by hand:
+observed account id with `ACCT-<hmac[:16]>`, the same session-scoped keyed pseudonym as every
+other identifier (HMAC-SHA256 under `CHRONOS_CAPTURE_PEPPER`; U-F3-F1 — the unkeyed
+`account_fingerprint` token it replaced could be recovered by enumerating candidate ids).
+Manifests record `identifier_pseudonyms.account_tokens: keyed`; fixtures minted before that
+field have unkeyed account tokens. Verify by hand:
 
 ```bash
 grep -RniE "DU[0-9]|DF[0-9]|U[0-9]{6}" ~/chronos-gateway-evidence/  && echo LEAK || echo clean

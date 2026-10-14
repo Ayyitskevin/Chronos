@@ -126,7 +126,10 @@ Never put an IBKR username or password in any Chronos file.
    names `CHRONOS_RUN_IBKR_SMOKE`. If it runs or errors, stop — your environment already
    opts in, or collection is broken.
 5. Rehearse the capture harness against the demo broker — proves the harness end to end and
-   proves its refusals. Demo output is stamped `gateway_evidence: false` and can never count:
+   proves its refusals. Demo output is stamped `gateway_evidence: false` and can never count.
+   A real session is stamped true only from the post-connect `meta.transport_proof`
+   (official adapter only); a failed connect exits 1 and writes nothing; `replay_check`
+   refuses true without a valid proof. Accident-proof, never adversary-proof:
    ```bash
    CHRONOS_CAPTURE_PEPPER=$(python3 -c 'import secrets; print(secrets.token_hex(32))') \
      BROKER_MODE=demo .venv/bin/python \
@@ -281,10 +284,11 @@ When a session directory is committed (§6), it takes the same per-session basel
 ## 6. Sanitization — what happens before anything is stored
 
 - The harness replaces every observed account id (the configured `IB_ACCOUNT_ID` and any the
-  gateway reports) with `ACCT-<sha256 fingerprint[:16]>` in every file it writes — the repo's
-  own pseudonym scheme, `account_fingerprint` in `src/chronos/utils/identifiers.py`
-  (`sha256("chronos-account:" + id)`) — the same pseudonym the order persistence stores in
-  place of the raw id (`src/chronos/persistence/database.py`). Raw account ids never enter git.
+  gateway reports) with `ACCT-<hmac[:16]>` in every file it writes — a session-scoped KEYED
+  pseudonym (HMAC-SHA256 under `CHRONOS_CAPTURE_PEPPER`, the same construction as the broker
+  identifiers; U-F3-F1). It is deliberately NOT the unkeyed `account_fingerprint` the order
+  persistence stores (`src/chronos/persistence/database.py`): that token can be recovered by
+  enumerating candidate account ids. Raw account ids never enter git.
 - Verify by hand before the directory leaves the machine:
   `grep -RniE "DU[0-9]|DF[0-9]|U[0-9]{6}" ~/chronos-gateway-evidence/ && echo LEAK || echo clean`.
 - The harness pseudonymizes every broker identifier value — `execution_id`,

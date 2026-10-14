@@ -556,5 +556,12 @@ def test_3d_the_committed_bytes_are_the_capture_tools_own_shape() -> None:
     assert sorted(committed["steps"]) == sorted(minted["steps"])
     for step in ("executions", "open_orders"):
         assert len(_step(committed, step)) == len(_step(minted, step)), step
-    assert committed_manifest["identifier_pseudonyms"] == fresh_manifest["identifier_pseudonyms"]
+    # U-F3-F1: a fresh mint adds exactly one key, ``account_tokens: keyed``; the committed demo
+    # rehearsal predates it (its ACCT- token is the unkeyed one for the public demo account, no
+    # secret in it) and still replays, because replay never re-derives tokens.
+    assert "account_tokens" not in committed_manifest["identifier_pseudonyms"]
+    assert fresh_manifest["identifier_pseudonyms"] == {
+        **committed_manifest["identifier_pseudonyms"],
+        "account_tokens": "keyed",
+    }
     assert set(committed_manifest) - set(fresh_manifest) == {"note"}  # the one hand-added key

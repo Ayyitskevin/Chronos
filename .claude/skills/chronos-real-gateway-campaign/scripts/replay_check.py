@@ -9,6 +9,9 @@ exactly" for the slice this campaign captures:
    in capture.json using the same repo code path (parse_liquid_hours +
    confirms_open at the captured probe instant) and byte-compares the result.
 3. Mutation scan: asserts no order-mutation step name appears in the capture.
+4. Gateway evidence: a manifest claiming gateway_evidence=true must agree with the capture's
+   own stamp and carry a valid post-connect transport proof (accident-proof, not
+   adversary-proof). --allow-demo never excuses a true claim without a proof.
 
 No network. No broker. Exit code 0 only when every check passes for every
 session directory given.
@@ -29,7 +32,11 @@ from pathlib import Path
 
 sys.dont_write_bytecode = True  # keep the skill dir cache-free (no __pycache__ from this import)
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from capture_readonly import canonical_json, derive_liquid_hours  # noqa: E402
+from capture_readonly import (  # noqa: E402
+    canonical_json,
+    derive_liquid_hours,
+    transport_proof_problems,
+)
 
 _MUTATION_TOKENS = ("submit_order", "preview_order", "modify_order", "cancel_order")
 
@@ -68,7 +75,21 @@ def check_session(directory: Path, *, allow_demo: bool = False) -> list[str]:
     else:
         failures.append(f"{directory}: capture.json or derived_liquid_hours.json missing")
 
-    if not manifest.get("gateway_evidence", False) and not allow_demo:
+    claimed = manifest.get("gateway_evidence", False)
+    if capture_path.is_file():
+        meta = json.loads(capture_path.read_text(encoding="utf-8")).get("meta", {})
+        if bool(meta.get("gateway_evidence", False)) != bool(claimed):
+            failures.append(
+                f"{directory}: manifest gateway_evidence={claimed} disagrees with the capture's "
+                f"own stamp ({meta.get('gateway_evidence')})"
+            )
+        if claimed:
+            for problem in transport_proof_problems(meta.get("transport_proof")):
+                failures.append(
+                    f"{directory}: gateway_evidence=true without a valid transport proof: {problem}"
+                )
+
+    if not claimed and not allow_demo:
         failures.append(
             f"{directory}: manifest says gateway_evidence=false (demo rehearsal) — "
             "this directory cannot count toward the section 7 gate "

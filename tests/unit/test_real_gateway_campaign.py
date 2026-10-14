@@ -180,20 +180,22 @@ def test_2_numeric_identifiers_are_replaced_as_whole_values_never_as_digit_subst
     assert execution["broker_order_id"].startswith("ORD-")
 
 
-def test_3_account_id_sanitization_is_byte_identical_before_and_after() -> None:
+def test_3_account_id_sanitization_replaces_the_id_with_the_keyed_token_everywhere() -> None:
+    """Was "byte-identical before and after" (the unkeyed token); U-F3-F1 keys it on purpose."""
+
     m = _load_capture_module()
     payload = _identifier_payload()
     account_ids = {"DU1234567"}
-    expected_token = f"ACCT-{account_fingerprint('DU1234567')[:16]}"
-    # sanitize() itself: unchanged contract
-    assert m.sanitize('{"account_id": "DU1234567"}', account_ids) == (
+    expected_token = m.identifier_pseudonym("ACCT", "DU1234567", SALT, PEPPER)
+    assert m.sanitize('{"account_id": "DU1234567"}', account_ids, SALT, PEPPER) == (
         f'{{"account_id": "{expected_token}"}}'
     )
-    # the ACCT- token the identifier pass produces is the one the textual pass alone produces
+    # the identifier pass and the textual pass agree on the one token, once, in the capture
     with_identifiers = m.sanitize_capture(payload, account_ids, PEPPER)
-    textual_only = m.sanitize(m.canonical_json(payload), account_ids)
+    textual_only = m.sanitize(m.canonical_json(payload), account_ids, SALT, PEPPER)
     assert with_identifiers.count(expected_token) == textual_only.count(expected_token) == 1
     assert "DU1234567" not in with_identifiers
+    assert f"ACCT-{account_fingerprint('DU1234567')[:16]}" not in with_identifiers  # not unkeyed
 
 
 def test_4_replay_check_byte_integrity_and_mutation_scan_hold_on_a_sanitized_capture(
@@ -409,7 +411,6 @@ def test_r1_3_the_pepper_appears_in_no_output_byte_and_no_log_line(tmp_path: Pat
 def test_r1_4_manifest_records_the_scheme_and_a_pepper_fingerprint(tmp_path: Path) -> None:
     m = _load_capture_module()
     account_ids = {"DU1234567"}
-    acct = f"ACCT-{account_fingerprint('DU1234567')[:16]}"
     sessions = {}
     for name, pepper in (("a", PEPPER), ("b", OTHER_PEPPER)):
         directory = tmp_path / name
@@ -421,7 +422,11 @@ def test_r1_4_manifest_records_the_scheme_and_a_pepper_fingerprint(tmp_path: Pat
         )
     manifest_a, capture_a, manifest_text_a = sessions["a"]
     manifest_b, capture_b, _ = sessions["b"]
-    expected = {"scheme": "hmac-sha256-v2", "pepper_fingerprint": sha256(PEPPER).hexdigest()[:16]}
+    expected = {
+        "scheme": "hmac-sha256-v2",
+        "pepper_fingerprint": sha256(PEPPER).hexdigest()[:16],
+        "account_tokens": "keyed",
+    }
     assert manifest_a["identifier_pseudonyms"] == expected
     fingerprint = manifest_a["identifier_pseudonyms"]["pepper_fingerprint"]
     assert re.fullmatch(r"[0-9a-f]{16}", fingerprint)
@@ -433,9 +438,10 @@ def test_r1_4_manifest_records_the_scheme_and_a_pepper_fingerprint(tmp_path: Pat
     order_a = capture_a["steps"]["executions"][0]["broker_order_id"]
     order_b = capture_b["steps"]["executions"][0]["broker_order_id"]
     assert order_a.startswith("ORD-") and order_b.startswith("ORD-") and order_a != order_b
-    # ... while the account tokens do not move with the pepper
-    assert capture_a["steps"]["account_summary"]["account_id"] == acct
-    assert capture_b["steps"]["account_summary"]["account_id"] == acct
+    # ... and so do the account tokens (U-F3-F1: they were unkeyed, hence pepper-independent)
+    acct_a = capture_a["steps"]["account_summary"]["account_id"]
+    acct_b = capture_b["steps"]["account_summary"]["account_id"]
+    assert acct_a.startswith("ACCT-") and acct_b.startswith("ACCT-") and acct_a != acct_b
     # the file sha256 map is unchanged in shape (replay_check reads only that)
     assert set(manifest_a["files"]) == {"capture.json", "derived_liquid_hours.json"}
 
@@ -692,3 +698,632 @@ def test_t2_3_a_label_that_is_not_utf8_encodable_is_refused_before_any_broker_co
     assert tree["steps"]["executions"][0]["broker_order_id"] == m.identifier_pseudonym(
         "ORD", 7001, ("session-1", "2026-09-13T19:30:00+00:00"), PEPPER
     )
+
+
+# --- U-F3-F1 (Daybreak P2-3 on U-f3): the ACCT- token is KEYED, like every other identifier -----
+# The account token used to be the unkeyed ``ACCT-<account_fingerprint[:16]>``: SHA-256 of a fixed
+# prefix plus the account id, so a reader of a committed fixture recovered the id by enumerating a
+# small candidate range (Daybreak recovered DU5550001 from 10,000 candidates). It is now the same
+# keyed, session-scoped pseudonym the other identifiers use. These tests run the real write path.
+
+_UF3_ACCOUNT = "DU5550001"
+_UF3_RANGE = range(5_540_000, 5_560_000)  # 20,000 candidates around the account number
+
+
+def _unkeyed_token(account_id: str) -> str:
+    return f"ACCT-{account_fingerprint(account_id)[:16]}"
+
+
+def _account_payload(label: str = "uf3f1-session") -> dict:
+    payload = _identifier_payload(label)
+    payload["steps"]["account_summary"]["account_id"] = _UF3_ACCOUNT
+    return payload
+
+
+def _written_account_token(m: ModuleType, out: Path, pepper: bytes, label: str) -> str:
+    m.write_session(out, _account_payload(label), {_UF3_ACCOUNT}, label, pepper)
+    capture = json.loads((out / "capture.json").read_text(encoding="utf-8"))
+    return capture["steps"]["account_summary"]["account_id"]
+
+
+def test_uf3f1_1_the_account_token_does_not_reverse_by_enumeration_without_the_pepper(
+    tmp_path: Path,
+) -> None:
+    m = _load_capture_module()
+    token = _written_account_token(m, tmp_path / "s", PEPPER, "uf3f1-session")
+    unkeyed = {_unkeyed_token(f"DU{n:07d}") for n in _UF3_RANGE}
+    assert _unkeyed_token(_UF3_ACCOUNT) in unkeyed  # the control: the range holds the account
+    assert token not in unkeyed
+    for name in ("capture.json", "derived_liquid_hours.json", "manifest.json"):
+        text = (tmp_path / "s" / name).read_text(encoding="utf-8")
+        assert _UF3_ACCOUNT not in text
+        assert not any(candidate in text for candidate in unkeyed), name
+
+
+def test_uf3f1_2_the_token_is_the_keyed_session_scoped_pseudonym(tmp_path: Path) -> None:
+    m = _load_capture_module()
+    salt = ("uf3f1-session", "2026-09-13T19:30:00+00:00")
+    token = _written_account_token(m, tmp_path / "s", PEPPER, "uf3f1-session")
+    assert token == m.identifier_pseudonym("ACCT", _UF3_ACCOUNT, salt, PEPPER)
+    assert re.fullmatch(r"ACCT-[0-9a-f]{16}", token)
+    # reproducible with the pepper, and the same everywhere in the session
+    text = (tmp_path / "s" / "capture.json").read_text(encoding="utf-8")
+    assert text.count(token) == 1  # the one place the fixture names the account
+
+
+def test_uf3f1_3_another_pepper_or_another_session_gives_another_token(tmp_path: Path) -> None:
+    m = _load_capture_module()
+    base = _written_account_token(m, tmp_path / "a", PEPPER, "uf3f1-session")
+    assert _written_account_token(m, tmp_path / "again", PEPPER, "uf3f1-session") == base
+    assert _written_account_token(m, tmp_path / "b", OTHER_PEPPER, "uf3f1-session") != base
+    assert _written_account_token(m, tmp_path / "c", PEPPER, "uf3f1-session-2") != base
+
+
+def test_uf3f1_4_sanitize_without_a_pepper_is_refused_not_unkeyed() -> None:
+    m = _load_capture_module()
+    salt = ("uf3f1-session", "2026-09-13T19:30:00+00:00")
+    text = f'{{"account_id": "{_UF3_ACCOUNT}"}}'
+    for bad in (b"", b"short", PEPPER[:31]):
+        with pytest.raises(m.CaptureRefused):
+            m.sanitize(text, {_UF3_ACCOUNT}, salt, bad)
+    out = m.sanitize(text, {_UF3_ACCOUNT}, salt, PEPPER)
+    assert _UF3_ACCOUNT not in out and _unkeyed_token(_UF3_ACCOUNT) not in out
+
+
+def test_uf3f1_5_the_manifest_says_account_tokens_are_keyed(tmp_path: Path) -> None:
+    m = _load_capture_module()
+    _written_account_token(m, tmp_path / "s", PEPPER, "uf3f1-session")
+    manifest = json.loads((tmp_path / "s" / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["identifier_pseudonyms"]["account_tokens"] == "keyed"
+    # the identifier scheme itself is unchanged: same message construction, same fingerprint
+    assert manifest["identifier_pseudonyms"]["scheme"] == "hmac-sha256-v2"
+    assert (
+        manifest["identifier_pseudonyms"]["pepper_fingerprint"] == sha256(PEPPER).hexdigest()[:16]
+    )
+
+
+def test_uf3f1_6_the_cli_write_path_keys_the_demo_account(tmp_path: Path) -> None:
+    """End to end through main(): the demo account id is public, but its token is keyed too."""
+
+    from chronos.broker.demo import DEMO_ACCOUNT_ID
+
+    result = _capture_cli(tmp_path, "uf3f1-cli", tmp_path / "cli")
+    assert result.returncode == 0, result.stdout + result.stderr
+    text = (tmp_path / "cli" / "capture.json").read_text(encoding="utf-8")
+    assert DEMO_ACCOUNT_ID not in text
+    assert "ACCT-" in text and _unkeyed_token(DEMO_ACCOUNT_ID) not in text
+
+
+def test_uf3f1_7_the_committed_rehearsal_fixture_still_replays_offline() -> None:
+    """Replay never re-derives tokens: the demo fixture keeps its (public, unkeyed) demo token."""
+
+    sys.path.insert(0, str(CAPTURE.parent))
+    try:
+        replay = importlib.import_module("replay_check")
+    finally:
+        sys.path.remove(str(CAPTURE.parent))
+    fixture = ROOT / "tests/fixtures/ibkr_demo/rehearsal"
+    assert replay.check_session(fixture, allow_demo=True) == []
+
+
+def test_uf3f1_8_overlapping_account_ids_are_replaced_longest_first(tmp_path: Path) -> None:
+    """A shorter id that is a prefix of a longer one must not corrupt the longer one's token."""
+
+    m = _load_capture_module()
+    salt = ("uf3f1-session", "2026-09-13T19:30:00+00:00")
+    short, long = "DU5550001", "DU55500018"
+    text = f'{{"a": "{short}", "b": "{long}"}}'
+    out = m.sanitize(text, {short, long}, salt, PEPPER)
+    token_short = m.identifier_pseudonym("ACCT", short, salt, PEPPER)
+    token_long = m.identifier_pseudonym("ACCT", long, salt, PEPPER)
+    assert out == f'{{"a": "{token_short}", "b": "{token_long}"}}'
+
+
+def test_uf3f1_9_the_derived_file_carries_the_same_keyed_token_and_still_replays(
+    tmp_path: Path,
+) -> None:
+    """An account id that reaches derived_liquid_hours.json (through a contract's local symbol, the
+    derived key) gets the SAME keyed token as capture.json, so the offline replay's re-derivation
+    from the sanitized capture still matches the stored derived file byte for byte."""
+
+    m = _load_capture_module()
+    fixture = json.loads(
+        (ROOT / "tests/fixtures/ibkr_demo/rehearsal/capture.json").read_text(encoding="utf-8")
+    )
+    node = next(
+        item
+        for item in _walk_dicts(fixture)
+        if isinstance(item.get("liquid_hours"), str) and item.get("time_zone_id")
+    )
+    payload = _account_payload("uf3f1-derived")
+    payload["steps"]["contract"] = {**node, "symbol": "AAPL", "local_symbol": _UF3_ACCOUNT}
+    out = tmp_path / "s"
+    m.write_session(out, payload, {_UF3_ACCOUNT}, "uf3f1-derived", PEPPER)
+    token = m.identifier_pseudonym(
+        "ACCT", _UF3_ACCOUNT, ("uf3f1-derived", "2026-09-13T19:30:00+00:00"), PEPPER
+    )
+    derived_text = (out / "derived_liquid_hours.json").read_text(encoding="utf-8")
+    assert token in derived_text and _UF3_ACCOUNT not in derived_text
+    sys.path.insert(0, str(CAPTURE.parent))
+    try:
+        replay = importlib.import_module("replay_check")
+    finally:
+        sys.path.remove(str(CAPTURE.parent))
+    assert replay.check_session(out, allow_demo=True) == []
+
+
+def _walk_dicts(node: object) -> list[dict]:
+    found: list[dict] = []
+    if isinstance(node, dict):
+        found.append(node)
+        for value in node.values():
+            found.extend(_walk_dicts(value))
+    elif isinstance(node, list):
+        for value in node:
+            found.extend(_walk_dicts(value))
+    return found
+
+
+# --- C1: gateway_evidence is derived from a post-connect transport proof ----------------------
+#
+# Before this change `run_capture` stamped gateway_evidence = (broker_mode is IBKR) BEFORE it
+# connected, a failed connect became a captured step that exited 0, and `replay_check` accepted
+# whatever Boolean the manifest carried. The stamp now comes from
+# OfficialIBKRBroker.transport_proof(), read after a successful connect. The claim is
+# ACCIDENT-PROOF, never ADVERSARY-PROOF (DESIGN.md).
+
+from types import SimpleNamespace  # noqa: E402
+
+from tests.support import fake_ibapi  # noqa: E402
+
+from chronos.broker import official_ibkr  # noqa: E402
+from chronos.broker.base import BrokerConnectionError  # noqa: E402
+from chronos.domain.enums import BrokerAdapter, BrokerMode  # noqa: E402
+
+_GOOD_PROOF = {
+    "adapter": "chronos.broker.official_ibkr.OfficialIBKRBroker",
+    "state": "CONNECTED",
+    "connected": True,
+    "managed_account_count": 1,
+    "client_module": "ibapi.client",
+    "client_in_site_packages": True,
+    "peer": {"host": "127.0.0.1", "port": 7497},
+    "server_version": 176,
+    "connection_time": "20261014 10:00:00 EST",
+}
+
+
+def _real_looking_client(gateway: fake_ibapi.FakeGateway) -> type:
+    """A stub transport that looks like ibapi's EClient: named EClient, from ibapi.client, with a
+    socket peer and a server version. It is a stub, so only the recorded shape is real."""
+
+    base = fake_ibapi.FakeEClient.bound_to(gateway)
+
+    class EClient(base):  # type: ignore[valid-type, misc]
+        def __init__(self, wrapper: object) -> None:
+            super().__init__(wrapper)
+            self.conn = SimpleNamespace(
+                socket=SimpleNamespace(getpeername=lambda: ("127.0.0.1", 7497))
+            )
+
+        def serverVersion(self) -> int:
+            return 176
+
+        def twsConnectionTime(self) -> str:
+            return "20261014 10:00:00 EST"
+
+    EClient.__module__ = "ibapi.client"
+    return EClient
+
+
+def _install_stub(monkeypatch: pytest.MonkeyPatch, *, real_looking: bool) -> None:
+    gateway = fake_ibapi.FakeGateway.seeded()
+    fake_ibapi.install(monkeypatch, gateway)
+    if real_looking:
+        client_class = _real_looking_client(gateway)
+        monkeypatch.setattr(
+            official_ibkr,
+            "_load_ibapi",
+            lambda: (
+                client_class,
+                fake_ibapi.FakeEWrapper,
+                fake_ibapi.FakeContract,
+                fake_ibapi.FakeExecutionFilter,
+            ),
+        )
+        module = ModuleType("ibapi.client")
+        module.__file__ = "/venv/lib/python3.13/site-packages/ibapi/client.py"
+        monkeypatch.setitem(sys.modules, "ibapi.client", module)
+
+
+def _official_run(monkeypatch: pytest.MonkeyPatch, *, real_looking: bool) -> dict:
+    m = _load_capture_module()
+    _install_stub(monkeypatch, real_looking=real_looking)
+    args = argparse.Namespace(
+        label="c1", symbols=[], max_symbols=0, skip_options=True, skip_bars=True, account_ids=set()
+    )
+    return asyncio.run(m.run_capture(fake_ibapi.official_settings(), args))
+
+
+def test_c1_1_transport_proof_over_a_fake_transport_has_no_ibapi_origin_and_no_peer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_stub(monkeypatch, real_looking=False)
+    broker = official_ibkr.OfficialIBKRBroker(fake_ibapi.official_settings())
+
+    async def drive() -> dict:
+        await broker.connect()
+        try:
+            return broker.transport_proof()
+        finally:
+            await broker.disconnect()
+
+    proof = asyncio.run(drive())
+    assert proof["connected"] is True and proof["managed_account_count"] == 1
+    assert proof["client_module"] is None and proof["peer"] is None
+    assert _load_capture_module().transport_proof_problems(proof)
+
+
+def test_c1_2_transport_proof_over_a_real_looking_stub_is_complete_and_names_no_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_stub(monkeypatch, real_looking=True)
+    broker = official_ibkr.OfficialIBKRBroker(fake_ibapi.official_settings())
+
+    async def drive() -> dict:
+        await broker.connect()
+        try:
+            return broker.transport_proof()
+        finally:
+            await broker.disconnect()
+
+    proof = asyncio.run(drive())
+    assert proof == {
+        **_GOOD_PROOF,
+        "adapter": f"{official_ibkr.__name__}.OfficialIBKRBroker",
+    }
+    assert fake_ibapi.ACCOUNT not in json.dumps(proof)
+    assert _load_capture_module().transport_proof_problems(proof) == []
+
+
+def test_c1_3_transport_proof_before_connect_is_disconnected_and_unproved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_stub(monkeypatch, real_looking=True)
+    proof = official_ibkr.OfficialIBKRBroker(fake_ibapi.official_settings()).transport_proof()
+    assert proof["connected"] is False and proof["managed_account_count"] == 0
+    assert proof["peer"] is None and proof["server_version"] is None
+    assert _load_capture_module().transport_proof_problems(proof)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("adapter", "chronos.broker.ibkr.IBKRBroker"),
+        ("connected", False),
+        ("state", "DISCONNECTED"),
+        ("managed_account_count", 0),
+        ("client_module", None),
+        ("client_module", "tests.support.fake_ibapi"),
+        ("client_in_site_packages", False),
+        ("peer", None),
+        ("peer", {"host": "", "port": 7497}),
+        ("server_version", None),
+        ("server_version", 0),
+    ],
+)
+def test_c1_4_each_missing_or_wrong_proof_field_is_a_named_problem(
+    field: str, value: object
+) -> None:
+    m = _load_capture_module()
+    assert m.transport_proof_problems(_GOOD_PROOF) == []
+    problems = m.transport_proof_problems({**_GOOD_PROOF, field: value})
+    assert problems and any(field.split("_")[0] in p for p in problems), problems
+
+
+@pytest.mark.parametrize("proof", [None, {}, [], "proved", {"connected": True}])
+def test_c1_5_an_absent_or_malformed_proof_is_unproved(proof: object) -> None:
+    assert _load_capture_module().transport_proof_problems(proof)
+
+
+def test_c1_6_a_demo_capture_is_not_gateway_evidence() -> None:
+    capture = _demo_capture(_load_capture_module(), "c1-demo")
+    assert capture["meta"]["gateway_evidence"] is False
+    assert "transport_proof" not in capture["meta"]
+
+
+def test_c1_7_the_official_adapter_over_a_fake_transport_is_not_gateway_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """U-F2-F3: the B1 stack's strict xfail test_a_fakegateway_capture_is_not_gateway_evidence
+    is this case; it XPASSes once this lands."""
+
+    capture = _official_run(monkeypatch, real_looking=False)
+    assert capture["steps"]["connect"] == {"ok": True}
+    assert capture["meta"]["gateway_evidence"] is False
+    assert capture["meta"]["transport_proof"]["client_module"] is None
+
+
+def test_c1_8_a_proved_official_session_is_gateway_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture = _official_run(monkeypatch, real_looking=True)
+    assert capture["meta"]["gateway_evidence"] is True
+    assert capture["meta"]["transport_proof"]["peer"] == {"host": "127.0.0.1", "port": 7497}
+
+
+def test_c1_9_a_failed_connect_is_not_gateway_evidence(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def refuse(self: object) -> None:
+        raise BrokerConnectionError("gateway refused the connection")
+
+    monkeypatch.setattr(official_ibkr.OfficialIBKRBroker, "connect", refuse)
+    capture = _official_run(monkeypatch, real_looking=True)
+    assert "error" in capture["steps"]["connect"]
+    assert capture["meta"]["gateway_evidence"] is False
+    assert "transport_proof" not in capture["meta"]
+
+
+def test_c1_10_an_ib_async_session_is_never_gateway_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Even a stub that hands back a perfect-looking proof: only the official adapter counts."""
+
+    class StubIBAsync:
+        def __init__(self, settings: object) -> None:
+            del settings
+
+        def transport_proof(self) -> dict:
+            return dict(_GOOD_PROOF)
+
+        def __getattr__(self, name: str):
+            async def noop(*args: object, **kwargs: object) -> None:
+                return None
+
+            return noop
+
+    from chronos.broker import ibkr
+
+    monkeypatch.setattr(ibkr, "IBKRBroker", StubIBAsync)
+    settings = Settings(
+        _env_file=None,
+        broker_mode=BrokerMode.IBKR,
+        broker_adapter=BrokerAdapter.IB_ASYNC,
+        ib_account_id=fake_ibapi.ACCOUNT,  # the B1 stack's Settings refuses ibkr mode without one
+    )
+    args = argparse.Namespace(
+        label="c1", symbols=[], max_symbols=0, skip_options=True, skip_bars=True, account_ids=set()
+    )
+    capture = asyncio.run(_load_capture_module().run_capture(settings, args))
+    assert capture["steps"]["connect"] == {"ok": True}
+    assert capture["meta"]["gateway_evidence"] is False
+
+
+def test_c1_11_a_failed_connect_is_not_a_successful_capture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    m = _load_capture_module()
+
+    async def failed(settings: object, args: object) -> dict:
+        del settings, args
+        return {
+            "meta": {"captured_at_utc": "2026-10-14T10:00:00+00:00", "gateway_evidence": False},
+            "steps": {"connect": {"error": "BrokerConnectionError: refused"}},
+        }
+
+    out = tmp_path / "failed"
+    monkeypatch.setattr(m, "run_capture", failed)
+    monkeypatch.setattr(
+        sys, "argv", ["capture_readonly.py", "--out", str(out), "--label", "c1", "--allow-demo"]
+    )
+    for key, value in {**SAFE_ENV, "CHRONOS_CAPTURE_PEPPER": PEPPER_HEX}.items():
+        monkeypatch.setenv(key, value)
+    assert m.main() == 1
+    assert not out.exists()
+    assert "connect" in capsys.readouterr().out
+
+
+def _written_session(tmp_path: Path, meta_extra: dict, *, claimed: bool, name: str) -> Path:
+    m = _load_capture_module()
+    payload = _identifier_payload(name)
+    payload["meta"] = {**payload["meta"], "gateway_evidence": claimed, **meta_extra}
+    out = tmp_path / name
+    m.write_session(out, payload, set(), name, PEPPER)
+    return out
+
+
+def _replay_module() -> ModuleType:
+    sys.path.insert(0, str(CAPTURE.parent))
+    try:
+        import replay_check
+
+        return replay_check
+    finally:
+        sys.path.remove(str(CAPTURE.parent))
+
+
+def test_c1_12_replay_accepts_gateway_evidence_only_with_a_valid_proof(tmp_path: Path) -> None:
+    replay = _replay_module()
+    proved = _written_session(tmp_path, {"transport_proof": _GOOD_PROOF}, claimed=True, name="ok")
+    assert replay.check_session(proved) == []
+
+
+def test_c1_13_replay_refuses_a_legacy_true_manifest_with_no_proof(tmp_path: Path) -> None:
+    replay = _replay_module()
+    legacy = _written_session(tmp_path, {}, claimed=True, name="legacy")
+    for allow_demo in (False, True):  # the demo flag is for rehearsals, never for a bare true
+        failures = replay.check_session(legacy, allow_demo=allow_demo)
+        assert any("transport proof" in f for f in failures), failures
+
+
+def test_c1_14_replay_refuses_true_over_an_invalid_proof(tmp_path: Path) -> None:
+    replay = _replay_module()
+    bad = {**_GOOD_PROOF, "managed_account_count": 0}
+    session = _written_session(tmp_path, {"transport_proof": bad}, claimed=True, name="bad")
+    assert any("transport proof" in f for f in replay.check_session(session))
+
+
+def test_c1_15_replay_refuses_a_manifest_that_disagrees_with_its_capture(tmp_path: Path) -> None:
+    """A hand-edit of the manifest Boolean alone is caught: the capture's own stamp disagrees."""
+
+    replay = _replay_module()
+    session = _written_session(tmp_path, {}, claimed=False, name="edited")
+    manifest = json.loads((session / "manifest.json").read_text(encoding="utf-8"))
+    manifest["gateway_evidence"] = True
+    (session / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    failures = replay.check_session(session)
+    assert any("disagrees" in f for f in failures), failures
+
+
+def test_c1_16_a_proof_edited_after_capture_is_a_hash_drift(tmp_path: Path) -> None:
+    replay = _replay_module()
+    session = _written_session(tmp_path, {"transport_proof": _GOOD_PROOF}, claimed=True, name="t")
+    path = session / "capture.json"
+    path.write_text(
+        path.read_text(encoding="utf-8").replace('"CONNECTED"', '"X"'), encoding="utf-8"
+    )
+    assert any("sha256 drift" in f for f in replay.check_session(session))
+
+
+def test_c1_17_a_rehearsal_still_replays_with_allow_demo_and_is_refused_without(
+    tmp_path: Path,
+) -> None:
+    replay = _replay_module()
+    rehearsal = _written_session(tmp_path, {}, claimed=False, name="rehearsal")
+    assert replay.check_session(rehearsal, allow_demo=True) == []
+    assert any("gateway_evidence=false" in f for f in replay.check_session(rehearsal))
+
+
+@pytest.mark.parametrize(
+    ("origin", "in_site_packages"),
+    [
+        ("/venv/lib/python3.13/site-packages/ibapi/client.py", True),
+        ("/usr/lib/python3/dist-packages/ibapi/client.py", True),
+        ("/home/dev/chronos/tests/support/ibapi/client.py", False),
+        (None, False),
+    ],
+)
+def test_c1_18_only_an_installed_package_origin_counts(
+    monkeypatch: pytest.MonkeyPatch, origin: str | None, in_site_packages: bool
+) -> None:
+    _install_stub(monkeypatch, real_looking=True)
+    module = ModuleType("ibapi.client")
+    if origin is not None:
+        module.__file__ = origin
+    monkeypatch.setitem(sys.modules, "ibapi.client", module)
+    broker = official_ibkr.OfficialIBKRBroker(fake_ibapi.official_settings())
+
+    async def drive() -> dict:
+        await broker.connect()
+        try:
+            return broker.transport_proof()
+        finally:
+            await broker.disconnect()
+
+    proof = asyncio.run(drive())
+    assert proof["client_in_site_packages"] is in_site_packages
+    assert (_load_capture_module().transport_proof_problems(proof) == []) is in_site_packages
+
+
+def test_c1_19_a_subclass_is_not_the_official_adapter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The proof names the concrete class, so a wrapper or subclass cannot pass as the adapter."""
+
+    class Wrapped(official_ibkr.OfficialIBKRBroker):
+        pass
+
+    _install_stub(monkeypatch, real_looking=True)
+    broker = Wrapped(fake_ibapi.official_settings())
+
+    async def drive() -> dict:
+        await broker.connect()
+        try:
+            return broker.transport_proof()
+        finally:
+            await broker.disconnect()
+
+    proof = asyncio.run(drive())
+    assert proof["adapter"].endswith("Wrapped")
+    assert any("adapter" in p for p in _load_capture_module().transport_proof_problems(proof))
+
+
+# --- C1 r1: Daybreak P2-1, reader P3-1/P3-2/P3-3 -----------------------------------------------
+
+
+@pytest.mark.parametrize("connection_time", [None, "", "   ", 20261014, ["x"]])
+def test_c1r1_1_a_missing_or_blank_connection_time_is_not_a_proof(connection_time: object) -> None:
+    """Daybreak P2-1: an unobserved connect time (e.g. a wrong real-ibapi field name) must fail
+    closed at capture and, through the shared validator, at replay."""
+
+    m = _load_capture_module()
+    problems = m.transport_proof_problems({**_GOOD_PROOF, "connection_time": connection_time})
+    assert any("connection_time" in p for p in problems), problems
+    proof_without = {k: v for k, v in _GOOD_PROOF.items() if k != "connection_time"}
+    assert any("connection_time" in p for p in m.transport_proof_problems(proof_without))
+
+
+def test_c1r1_2_a_blank_connection_time_stamps_false_and_replay_refuses_a_true_claim(
+    tmp_path: Path,
+) -> None:
+    replay = _replay_module()
+    blank = {**_GOOD_PROOF, "connection_time": None}
+    session = _written_session(tmp_path, {"transport_proof": blank}, claimed=True, name="blank")
+    assert any("connection_time" in f for f in replay.check_session(session))
+
+
+@pytest.mark.parametrize("count", [True, False, 1.0, "1", None])
+def test_c1r1_3_a_non_integer_managed_account_count_is_not_a_count(count: object) -> None:
+    """Reader P3-1: a bool is an int in Python, so it needs its own pin (True would read as 1)."""
+
+    problems = _load_capture_module().transport_proof_problems(
+        {**_GOOD_PROOF, "managed_account_count": count}
+    )
+    assert any("managed_account_count" in p for p in problems), problems
+
+
+def test_c1r1_4_a_closed_session_reports_nothing_it_no_longer_observes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reader P3-2: with the app object still present but the connection closed, the count, the
+    peer, the server version and the connect time are all withheld, not read from a dead socket."""
+
+    _install_stub(monkeypatch, real_looking=True)
+    broker = official_ibkr.OfficialIBKRBroker(fake_ibapi.official_settings())
+
+    async def drive() -> tuple[dict, dict]:
+        await broker.connect()
+        try:
+            live = broker.transport_proof()
+            broker.bridge.connection_closed.set()  # the app is still held; the session is closed
+            return live, broker.transport_proof()
+        finally:
+            await broker.disconnect()
+
+    live, closed = asyncio.run(drive())
+    assert live["connected"] is True and live["managed_account_count"] == 1
+    assert closed["connected"] is False and closed["state"] == "DISCONNECTED"
+    assert closed["managed_account_count"] == 0
+    assert closed["peer"] is None
+    assert closed["server_version"] is None and closed["connection_time"] is None
+    assert _load_capture_module().transport_proof_problems(closed)
+
+
+def test_c1r1_5_the_written_fixture_keys_the_peer_host_and_keeps_the_port(
+    tmp_path: Path,
+) -> None:
+    """Reader P3-3 (decision: keyed host token, verbatim port). The gateway's address can be a LAN
+    or tailnet address; the committed capture carries a PEER- token instead, the port (7497/4002
+    separate paper from live) stays, and the session still replays as gateway evidence."""
+
+    m = _load_capture_module()
+    replay = _replay_module()
+    host = "10.20.30.40"
+    proof = {**_GOOD_PROOF, "peer": {"host": host, "port": 4002}}
+    session = _written_session(tmp_path, {"transport_proof": proof}, claimed=True, name="peer")
+    text = (session / "capture.json").read_text(encoding="utf-8")
+    assert host not in text
+    written = json.loads(text)["meta"]["transport_proof"]["peer"]
+    salt = ("peer", _identifier_payload("peer")["meta"]["captured_at_utc"])
+    assert written == {"host": m.identifier_pseudonym("PEER", host, salt, PEPPER), "port": 4002}
+    assert written["host"].startswith("PEER-")
+    assert replay.check_session(session) == []
+    other = m.identifier_pseudonym("PEER", host, salt, OTHER_PEPPER)
+    assert other != written["host"]  # keyed: another pepper, another token
