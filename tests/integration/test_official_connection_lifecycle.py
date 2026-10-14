@@ -719,24 +719,6 @@ def test_a_two_step_cancel_reaches_the_venue_and_the_order_is_gone(
         assert h.sim_position() == 0
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "B1R-F4: with a gateway that answers a cancel in two steps (PendingCancel, then "
-        "Cancelled; ASSUMED-IB, K4 #7), a SUCCESSFUL cancel never settles. "
-        "OrderCancellationService records CANCEL_PENDING before the send and moves to CANCELLED "
-        "only if the adapter's result is CANCELLED in the same call (orders/mutations.py:154-188); "
-        "the official adapter's result is the FIRST ack (PendingCancel -> CANCEL_PENDING). The "
-        "later Cancelled orderStatus is cached in the bridge (callbacks.py order_statuses) but "
-        "nothing feeds it to the tracker, and restart reconciliation does not settle an order "
-        "from its absence in the open orders (resolve_from_broker_evidence returns None for "
-        "absence, orders/reconciliation_recovery.py:238-246, by design). So the intent stays "
-        "CANCEL_PENDING, which is 'remaining active' and blocks new openings. Not exposed on B1's "
-        "read-only sessions (they never cancel); it bites at paper transmission. Same stranded "
-        "state as the Q3 crash window; owner decision. No src fix here."
-    ),
-)
 def test_a_two_step_cancel_settles_after_reconciliation(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
