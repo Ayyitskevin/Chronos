@@ -82,7 +82,7 @@
     {
       "code": "managed_position_admission",
       "path": "src/chronos/supervisor/position_admission.py",
-      "content_sha256": "dc7e703fd5e393d3cf3baedf7b470437850fdb4a4dae9a2a61847d7353087846",
+      "content_sha256": "8eafa52987d4b39508183163ab59d7ec90689fad5036ca07558e284f70bef723",
       "semantic_sha256": null,
       "state": "locked_in_repository"
     }

@@ -27,7 +27,7 @@ from chronos.research.qqq_control import (
 
 SCHEMA_VERSION = "chronos-qqq-campaign-readiness-v1"
 READINESS_ID = "qqq-campaign-readiness-v1-owner-review-2026-08-25"
-EXPECTED_READINESS_SHA256 = "ddfdf0a1a69dd57d99baf14719eb7c4c9908b5ec5c7650e2161e027078bbc24d"
+EXPECTED_READINESS_SHA256 = "dd9acf873587ddcddecb66e9ae4605a25e5a1559d7c331c69153ecea6d1fca43"
 
 _ROOT_KEYS = frozenset(
     {
@@ -273,7 +273,7 @@ def _parse_artifacts(value: object) -> tuple[ArtifactIdentity, ...]:
         ArtifactIdentity(
             ArtifactCode.MANAGED_POSITION_ADMISSION,
             "src/chronos/supervisor/position_admission.py",
-            "dc7e703fd5e393d3cf3baedf7b470437850fdb4a4dae9a2a61847d7353087846",
+            "8eafa52987d4b39508183163ab59d7ec90689fad5036ca07558e284f70bef723",
             None,
             ArtifactState.LOCKED_IN_REPOSITORY,
         ),
