@@ -98,6 +98,27 @@ async def test_a_cancelled_order_comes_back_as_a_completed_record(
     assert record.broker_order_id == 0  # IB may omit the order id on a completed row
 
 
+async def test_a_completed_orders_read_reaches_the_gateway_transcript(
+    gateway: fake_ibapi.FakeGateway,
+) -> None:
+    """The fake records ``reqCompletedOrders`` the way its sibling requests record themselves, so
+    a transcript check can see the read (it was the one request that left no trace)."""
+
+    adapter = OfficialIBKRBroker(
+        fake_ibapi.official_settings(), order_ownership=fake_ibapi.InstalledGatewayLedger()
+    )
+    await adapter.connect()
+    try:
+        before = [method for _client, method in gateway.transcript]
+        assert "reqCompletedOrders" not in before  # connecting alone does not ask for it
+        await adapter.completed_orders()
+        after = [method for _client, method in gateway.transcript]
+    finally:
+        await adapter.disconnect()
+    assert after.count("reqCompletedOrders") == 1
+    assert after.index("connect") < after.index("reqCompletedOrders")
+
+
 async def test_a_completed_row_that_carries_its_order_id_keeps_it(
     gateway: fake_ibapi.FakeGateway,
 ) -> None:
