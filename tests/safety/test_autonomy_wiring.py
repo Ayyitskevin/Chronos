@@ -24,6 +24,7 @@ allowed to change and the ones it is *not*:
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -75,6 +76,7 @@ from chronos.supervisor.compiler import QuoteEvidence
 from chronos.supervisor.handoff import HandoffDisposition
 from chronos.supervisor.runtime import AutonomyRuntime
 from chronos.utils.identifiers import account_fingerprint
+from tests.support.persistence_keys import TEST_PERSISTENCE_KEY_HEX
 
 _NOW = datetime(2026, 7, 25, 14, 0, tzinfo=UTC)
 _ACCOUNT_ID = "DU1234567"
@@ -435,6 +437,53 @@ def test_a_mandate_for_another_account_boots_inert(database: Database, tmp_path:
     with database.sessions.begin() as session:
         raised = alerts.unacknowledged(session, account_fingerprint=_FINGERPRINT)
     assert any(alert.kind == "autonomy.mandate_invalid" for alert in raised)
+
+
+def test_a_mandate_carrying_the_unkeyed_fingerprint_boots_inert(
+    database: Database, tmp_path: Path
+) -> None:
+    """N3-1 (ruling (iii), dated window = 0): a mandate authored with the pre-N3 unkeyed value
+    is another account's grant. It is refused through the existing inert + alert path; nothing
+    accepts the old value, so the owner re-authors it before the first keyed start."""
+
+    unkeyed = hashlib.sha256(f"chronos-account:{_ACCOUNT_ID}".encode()).hexdigest()
+    path = _write_mandate(tmp_path, _mandate(fingerprint=unkeyed))
+    runtime = _runtime(database, tmp_path, mandate_file=path, **_authenticated(tmp_path))
+
+    assert build_autonomy_runtime(runtime, process_generation=1, is_writer=lambda: True) is None
+    assert _activation_count(database.sessions) == 0
+    with database.sessions.begin() as session:
+        raised = alerts.unacknowledged(session, account_fingerprint=_FINGERPRINT)
+    assert any(alert.kind == "autonomy.mandate_invalid" for alert in raised)
+
+
+def test_the_option_resolver_promotion_is_checked_against_the_keyed_fingerprint(
+    database: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """N3-1: the option-resolver promotion artifact names an account fingerprint, and the value
+    it must equal is the KEYED one (the same value the mandate is checked against), so an
+    artifact authored with the unkeyed value reads as a PROMOTION_MISMATCH."""
+
+    from chronos.api import autonomy_wiring
+
+    received: list[str] = []
+    real = autonomy_wiring.AutonomousOptionSelectionService
+
+    def _recording(*args: Any, **kwargs: Any) -> Any:
+        received.append(kwargs["account_fingerprint"])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(autonomy_wiring, "AutonomousOptionSelectionService", _recording)
+    path = _write_mandate(tmp_path, _mandate())
+    runtime = _runtime(database, tmp_path, mandate_file=path, **_authenticated(tmp_path))
+
+    assert build_autonomy_runtime(runtime, process_generation=1, is_writer=lambda: True)
+    keyed = hmac.new(
+        bytes.fromhex(TEST_PERSISTENCE_KEY_HEX),
+        f"chronos-account:{_ACCOUNT_ID}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    assert received == [keyed]
 
 
 def test_a_matching_mandate_assembles_a_live_runtime(database: Database, tmp_path: Path) -> None:
