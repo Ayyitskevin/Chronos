@@ -420,3 +420,40 @@ def test_a_tree_too_deep_to_check_for_symlinks_refuses_the_run(root: Path) -> No
     assert code == pruner.EXIT_REFUSED
     assert peer.is_dir()
     assert report["deleted"] == []
+
+
+def test_the_opened_descriptor_is_bound_even_if_the_original_is_swapped_back_before_the_rename(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two swaps: the lookalike is in place when the delete opens the name, and the original is
+    put back at the name just before the rename. The quarantined entry then matches the
+    classified identity, so ONLY the check on the opened descriptor stops the unlinks from
+    running against the lookalike."""
+    old = make_envelope(root, 400)
+    held_original, held_lookalike = root / "held-original", root / "held-lookalike"
+    real_open, real_rename = os.open, os.rename
+    seen = {"opened": False, "swapped_back": False}
+
+    def swapping_open(path, flags, mode=0o777, *, dir_fd=None):  # type: ignore[no-untyped-def]
+        in_delete = sys._getframe(1).f_code.co_name == "_delete_envelope"
+        if path == old.name and in_delete and not seen["opened"]:
+            _replace_with_lookalike(old, held_original, files=True)
+            seen["opened"] = True
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    def swapping_rename(src, dst, *, src_dir_fd=None, dst_dir_fd=None):  # type: ignore[no-untyped-def]
+        if src == old.name and seen["opened"] and not seen["swapped_back"]:
+            old.rename(held_lookalike)
+            held_original.rename(old)
+            seen["swapped_back"] = True
+        return real_rename(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+    monkeypatch.setattr(os, "open", swapping_open)
+    monkeypatch.setattr(os, "rename", swapping_rename)
+    run_cli(root, "--apply")
+    monkeypatch.undo()
+    assert seen["opened"], "the first swap never fired: the test lost its positive control"
+    survivors = [
+        p for p in root.rglob("chronos.db.age") if p.read_bytes() == b"replacement ciphertext"
+    ]
+    assert survivors, "the lookalike's files were unlinked through the descriptor that was opened"
