@@ -1,5 +1,21 @@
 # CHANGELOG
 
+## [Unreleased] — the N3 cutover archive: flatten gate, encrypted archive, move-aside, runbook (N3-2, 2026-10-15)
+
+A new owner-run command, `python -m chronos.operations.cutover_archive --db … --out … --restore-into … [--apply]`,
+performs the (iii) cutover's archive step: it proves from the pre-cutover store alone — never the broker — that no
+managed position is open (every binding replays to a closed position), that the latest reconciliation run is
+`RECONCILED`, fresh (one hour) and recorded no broker position, that no writer lease is live and no write-ahead frames
+sit beside the store, and that the store is below the running `SCHEMA_VERSION`; then it runs the restore drill's
+encrypted envelope, requires `VERIFIED`, and ONLY THEN moves `chronos.db` (and present `-wal`/`-shm`) aside by
+`renameat2(RENAME_NOREPLACE)` to `<name>.archived-<envelope stamp>`. Dry-run by default; `--apply` moves. It never
+reads or prints `CHRONOS_PERSISTENCE_KEY`, never starts the service, never initializes the fresh database, never
+deletes. The restore drill gains `archived_schema_head` on `run_drill`/`restore`/`verify_restored` (the CLI never
+sets it): an archive of a retired schema — which the running repository refuses by design — is verified by exact
+head, reported as `acceptance: archived:<head>`; every ordinary drill still reports `acceptance: repository`.
+Runbook: `docs/ops/N3-CUTOVER.md` (the page migration 0017 names). See `docs/ops/RESTORE-DRILL.md`, "Archiving a
+retired schema".
+
 ## [Unreleased] — keyed account fingerprints, `CHRONOS_PERSISTENCE_KEY`, schema 18 (N3-1, 2026-10-15)
 
 Every persisted account fingerprint is now HMAC-SHA256 under a per-install secret,

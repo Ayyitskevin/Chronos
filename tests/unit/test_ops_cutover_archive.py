@@ -85,8 +85,6 @@ pytestmark = pytest.mark.skipif(
     AGE is None or AGE_KEYGEN is None, reason=drill.AGE_INSTALL_SENTENCE
 )
 
-red = pytest.mark.xfail(strict=True, reason="N3-2 red: the archive command is not built yet")
-
 
 def _hex(seed: str) -> str:
     """A 64-hex digest derived at run time — never a literal."""
@@ -414,7 +412,6 @@ def _run(
 # ------------------------------------------------------------- (1) dry-run
 
 
-@red
 def test_1a_dry_run_passes_the_gate_and_creates_nothing(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -432,7 +429,6 @@ def test_1a_dry_run_passes_the_gate_and_creates_nothing(
     assert not (tmp_path / "backups").exists() and not (tmp_path / "restored").exists()
 
 
-@red
 def test_1b_the_cli_dry_run_exits_0_with_the_json_report(tmp_path: Path) -> None:
     store = _store(tmp_path)
     argv = [
@@ -457,7 +453,6 @@ def test_1b_the_cli_dry_run_exits_0_with_the_json_report(tmp_path: Path) -> None
 # ------------------------------------------------------------- (2) the gate: bindings
 
 
-@red
 @pytest.mark.parametrize("apply", [False, True], ids=["dry-run", "apply"])
 def test_2a_an_open_binding_refuses_with_zero_changes(
     tmp_path: Path, apply: bool, capsys: pytest.CaptureFixture[str]
@@ -473,7 +468,6 @@ def test_2a_an_open_binding_refuses_with_zero_changes(
     assert not (tmp_path / "backups").exists() and not (tmp_path / "restored").exists()
 
 
-@red
 def test_2b_a_closed_binding_passes_the_gate(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -482,7 +476,6 @@ def test_2b_a_closed_binding_passes_the_gate(
     assert code == 0 and report["gate"]["bindings"] == {"total": 1, "closed": 1}
 
 
-@red
 @pytest.mark.parametrize("shape", ["orphan", "tampered"])
 def test_2c_a_binding_whose_stream_is_missing_or_broken_refuses_as_unreadable(
     tmp_path: Path, shape: str, capsys: pytest.CaptureFixture[str]
@@ -497,7 +490,6 @@ def test_2c_a_binding_whose_stream_is_missing_or_broken_refuses_as_unreadable(
 # ------------------------------------------------------------- (3) the gate: reconciliation
 
 
-@red
 def test_3a_no_reconciliation_run_refuses(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -507,7 +499,6 @@ def test_3a_no_reconciliation_run_refuses(
     assert not (tmp_path / "backups").exists()
 
 
-@red
 def test_3b_a_reconciliation_older_than_the_bound_refuses_and_one_inside_it_passes(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -521,7 +512,6 @@ def test_3b_a_reconciliation_older_than_the_bound_refuses_and_one_inside_it_pass
     assert code == 0 and report["gate"]["reconciliation"]["age_s"] == pytest.approx(59 * 60)
 
 
-@red
 @pytest.mark.parametrize("shape", ["manual_review", "readiness_pending"])
 def test_3c_an_unclean_reconciliation_refuses(
     tmp_path: Path, shape: str, capsys: pytest.CaptureFixture[str]
@@ -532,7 +522,6 @@ def test_3c_an_unclean_reconciliation_refuses(
     assert not (tmp_path / "backups").exists()
 
 
-@red
 def test_3d_a_position_in_the_latest_run_refuses_with_the_origin_class_breakdown(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -555,7 +544,6 @@ def test_3d_a_position_in_the_latest_run_refuses_with_the_origin_class_breakdown
 # ------------------------------------------------------------- (4) the gate: service posture
 
 
-@red
 def test_4a_a_live_writer_lease_refuses_and_an_expired_one_passes(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -569,7 +557,6 @@ def test_4a_a_live_writer_lease_refuses_and_an_expired_one_passes(
     assert code == 0 and report["gate"]["writer_lease"]["live"] is False
 
 
-@red
 def test_4b_write_ahead_frames_beside_the_store_refuse(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -591,7 +578,6 @@ def test_4b_write_ahead_frames_beside_the_store_refuse(
     assert not (tmp_path / "backups").exists()
 
 
-@red
 def test_4c_a_store_already_at_the_running_schema_version_refuses(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -602,7 +588,6 @@ def test_4c_a_store_already_at_the_running_schema_version_refuses(
     assert not (tmp_path / "backups").exists()
 
 
-@red
 def test_4d_an_unbound_store_refuses(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     store = _store(tmp_path, bound=False)
     code, report = _run(store, tmp_path, "--apply", capsys=capsys)
@@ -618,7 +603,6 @@ class _NoSocket:
         raise AssertionError("the cutover archive opened a socket")
 
 
-@red
 def test_5a_apply_archives_verified_then_moves_the_store_aside_under_the_envelope_stamp(
     tmp_path: Path,
     age_keys: KeyMaterial,
@@ -686,7 +670,6 @@ def test_5a_apply_archives_verified_then_moves_the_store_aside_under_the_envelop
     assert any("token_hex(32)" in step for step in report["next_manual_steps"])
 
 
-@red
 def test_5b_a_drill_that_is_not_verified_leaves_the_live_store_untouched(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -710,7 +693,6 @@ def test_5b_a_drill_that_is_not_verified_leaves_the_live_store_untouched(
     assert Path(report["envelope"]).is_dir()  # the envelope exists; the JSON says where
 
 
-@red
 def test_5c_an_existing_target_name_refuses_the_move_and_the_live_store_stays(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -724,6 +706,19 @@ def test_5c_an_existing_target_name_refuses_the_move_and_the_live_store_stays(
     assert target.read_bytes() == b"not the store"
     assert report["moved_aside"] == []
     assert Path(report["envelope"]).is_dir()
+
+
+def test_5d_a_restore_target_that_is_not_fresh_refuses_before_any_envelope_exists(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    store = _store(tmp_path, binding="closed")
+    (tmp_path / "restored").mkdir()
+    (tmp_path / "restored" / "leftover").write_bytes(b"x")
+    before = _sha256(store.db)
+    code, report = _run(store, tmp_path, "--apply", capsys=capsys)
+    assert code == 2 and report["code"] == "RESTORE_TARGET_NOT_FRESH", report
+    assert not (tmp_path / "backups").exists()  # no orphan envelope
+    assert _sha256(store.db) == before and _entries(store.db.parent) == ["chronos.db"]
 
 
 # ------------------------------------------------------------- (6) pins
@@ -762,14 +757,17 @@ class _RecordingEnviron(MutableMapping[str, str]):
         return dict(self._real)
 
 
-@red
 def test_6a_the_module_never_reads_the_persistence_key(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     source = MODULE.read_text(encoding="utf-8")
-    assert "PERSISTENCE_KEY" not in source and "CHRONOS_PERSISTENCE" not in source
     tree = ast.parse(source)
+    # the variable's NAME may appear only inside a string the owner reads (the next-steps
+    # text); never as an identifier, attribute or environment lookup
     for node in ast.walk(tree):
+        if isinstance(node, ast.Name | ast.Attribute):
+            identifier = node.id if isinstance(node, ast.Name) else node.attr
+            assert "PERSISTENCE" not in identifier.upper(), ast.unparse(node)
         if isinstance(node, ast.Attribute) and node.attr in ("environ", "getenv", "putenv"):
             raise AssertionError(f"the module touches the environment: {ast.unparse(node)}")
         if (
@@ -786,10 +784,10 @@ def test_6a_the_module_never_reads_the_persistence_key(
         ):
             raise AssertionError(ast.unparse(node))
     # and at run time, through the whole --apply path, the key is never looked up
-    recorder = _RecordingEnviron(os.environ)
-    monkeypatch.setattr(os, "environ", recorder)
     monkeypatch.setenv("CHRONOS_PERSISTENCE_KEY", "sentinel-never-read")
     store = _store(tmp_path, binding="closed")
+    recorder = _RecordingEnviron(os.environ)
+    monkeypatch.setattr(os, "environ", recorder)  # from here on, every lookup is recorded
     code, report = _run(store, tmp_path, "--apply", capsys=capsys)
     assert code == 0, report
     assert "CHRONOS_PERSISTENCE_KEY" not in recorder.looked_up
@@ -820,7 +818,6 @@ def test_6b_control_the_module_itself_imports_no_broker_orders_or_config_module(
 # ------------------------------------------------------------- (7) the runbook
 
 
-@red
 def test_7a_the_runbook_names_the_steps_and_carries_no_example_key() -> None:
     text = RUNBOOK.read_text(encoding="utf-8")
     for needle in (
@@ -840,7 +837,6 @@ def test_7a_the_runbook_names_the_steps_and_carries_no_example_key() -> None:
     assert "ALLOW_ORDER_TRANSMIT=true" not in text and "ALLOW_LIVE_TRADING=true" not in text
 
 
-@red
 def test_7b_the_ops_readme_indexes_the_runbook() -> None:
     assert "`N3-CUTOVER.md`" in OPS_README.read_text(encoding="utf-8")
 
