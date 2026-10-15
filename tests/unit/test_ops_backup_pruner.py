@@ -236,3 +236,146 @@ def test_a_real_envelope_from_the_repositorys_writer_is_classified_and_pruned(
     assert code == pruner.EXIT_PRUNED
     assert report["counts"]["deleted"] == 1  # type: ignore[index]
     assert names(root) == set()
+
+
+# ------------------------------------------------------- r1: Daybreak's HOLD (7420fa8)
+#
+# Each test below failed at 7420fa8 for the reason in its xfail marker (strict: a test that
+# starts passing without the fix is itself reported).
+
+SENTINEL = "SENTINEL-manifest-value-7f3a91"
+
+
+def _red(reason: str) -> pytest.MarkDecorator:
+    return pytest.mark.xfail(strict=True, reason=f"N3-3 r1 red: {reason}")
+
+
+def _replace_with_lookalike(envelope: Path, held: Path, *, files: bool) -> Path:
+    """Move the classified envelope aside and put a different directory at its name."""
+    envelope.rename(held)
+    envelope.mkdir()
+    if files:
+        (envelope / "chronos.db.age").write_bytes(b"replacement ciphertext")
+        (envelope / "manifest.json").write_text("{}", encoding="utf-8")
+    return envelope
+
+
+@_red("the second open of the name is never compared with the classified identity (P1-1)")
+def test_a_directory_swapped_in_before_the_delete_opens_it_is_not_deleted(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old = make_envelope(root, 400)
+    held = root / "held-original"
+    real_open = os.open
+    seen = {"opens": 0, "ran": False}
+
+    def swapping_open(path, flags, mode=0o777, *, dir_fd=None):  # type: ignore[no-untyped-def]
+        if path == old.name:
+            seen["opens"] += 1
+            if seen["opens"] == 2:  # 1 = the scan's classification, 2 = the delete's open
+                _replace_with_lookalike(old, held, files=True)
+                seen["ran"] = True
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "open", swapping_open)
+    code, report, _ = run_cli(root, "--apply")
+    monkeypatch.undo()
+    assert seen["ran"], "the swap hook never fired: the test lost its positive control"
+    assert (old / "chronos.db.age").exists(), "the substituted directory's files were deleted"
+    assert (old / "chronos.db.age").read_bytes() == b"replacement ciphertext"
+    assert (old / "manifest.json").exists()
+    assert report["deleted"] == []
+    assert code == pruner.EXIT_REFUSED
+    assert (held / "manifest.json").exists()  # the classified inode is untouched
+
+
+@_red("rmdir is by NAME, so a directory substituted at that name is removed (P1-1)")
+def test_a_directory_swapped_in_before_the_final_rmdir_is_not_removed(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old = make_envelope(root, 400)
+    held = root / "held-original"
+    real_rmdir = os.rmdir
+    seen = {"ran": False}
+
+    def swapping_rmdir(path, *, dir_fd=None):  # type: ignore[no-untyped-def]
+        if not seen["ran"]:
+            seen["ran"] = True
+            if old.exists():
+                old.rename(held)  # the emptied, classified directory moves aside ...
+            old.mkdir()  # ... and an empty lookalike takes its name
+        return real_rmdir(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "rmdir", swapping_rmdir)
+    run_cli(root, "--apply")
+    monkeypatch.undo()
+    assert seen["ran"], "the swap hook never fired: the test lost its positive control"
+    assert old.is_dir(), "the substitute directory was removed in place of the classified one"
+
+
+@_red("startswith('age') admits a scheme the restore boundary refuses (P2-1)")
+def test_a_scheme_that_is_not_exactly_the_restore_drills_is_never_pruned(root: Path) -> None:
+    from chronos.operations.restore_drill import AGE_SCHEME
+
+    typo = make_envelope(root, 91)
+    manifest = json.loads((typo / "manifest.json").read_text(encoding="utf-8"))
+    manifest["encryption"] = {"scheme": "age-typo-not-an-envelope"}
+    (typo / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    good = make_envelope(root, 92)
+    assert (
+        json.loads((good / "manifest.json").read_text(encoding="utf-8"))["encryption"]["scheme"]
+        == AGE_SCHEME
+    )  # the fixture's good scheme IS the canonical one
+    code, report, _ = run_cli(root, "--apply")
+    assert code == pruner.EXIT_PRUNED
+    assert typo.is_dir() and not good.exists()
+    assert [item["name"] for item in report["unclassified"]] == [typo.name]  # type: ignore[index, union-attr]
+
+
+@_red("an unrecognised schema_head is echoed into the report (P2-2)")
+def test_no_manifest_or_directory_value_reaches_any_output_field(root: Path) -> None:
+    bad_head = make_envelope(root, 400, head=SENTINEL)
+    bad_scheme = make_envelope(root, 401)
+    manifest = json.loads((bad_scheme / "manifest.json").read_text(encoding="utf-8"))
+    manifest["encryption"] = {"scheme": SENTINEL}
+    (bad_scheme / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    bad_time = make_envelope(root, 402)
+    manifest = json.loads((bad_time / "manifest.json").read_text(encoding="utf-8"))
+    manifest["snapshot_completed_at"] = SENTINEL
+    (bad_time / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    stray = make_envelope(root, 403, extra={f"{SENTINEL}.db": b"x"})
+    make_envelope(root, 404)  # a real candidate, so --apply runs the delete path too
+    for flags in ((), ("--apply",), ("--apply", "--pretty")):
+        _code, report, text = run_cli(root, *flags)
+        assert SENTINEL not in text, flags
+        assert SENTINEL not in json.dumps(report), flags
+    assert {bad_head, bad_scheme, bad_time, stray} <= {p for p in root.iterdir()}
+
+
+@_red("a symlink inside an envelope is only 'unclassified', so peers are deleted (P2-3)")
+def test_a_symlink_nested_in_an_envelope_refuses_the_whole_run(root: Path, tmp_path: Path) -> None:
+    peer = make_envelope(root, 400)
+    linked = make_envelope(root, 401)
+    elsewhere = tmp_path / "elsewhere.json"
+    elsewhere.write_text((linked / "manifest.json").read_text(encoding="utf-8"), encoding="utf-8")
+    (linked / "manifest.json").unlink()
+    (linked / "manifest.json").symlink_to(elsewhere)
+    code, report, _ = run_cli(root, "--apply")
+    assert code == pruner.EXIT_REFUSED
+    assert peer.is_dir() and linked.is_dir() and elsewhere.exists()
+    assert report["deleted"] == []
+    assert any("symlink" in str(r) for r in report["refused"])  # type: ignore[union-attr]
+
+
+@_red("only direct children of the root are checked for symlinks (P2-3)")
+def test_a_symlink_deep_inside_any_directory_refuses_the_whole_run(
+    root: Path, tmp_path: Path
+) -> None:
+    peer = make_envelope(root, 400)
+    copy = root / "restored-copy" / "nested" / "deeper"
+    copy.mkdir(parents=True)
+    (copy / "link").symlink_to(tmp_path)
+    code, report, _ = run_cli(root, "--apply")
+    assert code == pruner.EXIT_REFUSED
+    assert peer.is_dir()
+    assert report["deleted"] == []
