@@ -91,7 +91,6 @@ def names(directory: Path) -> set[str]:
 # ------------------------------------------------------------------ the contract
 
 
-@pytest.mark.xfail(strict=True, reason="N3-3 red: the pruner is not built yet")
 def test_a_dry_run_is_the_default_and_deletes_nothing(root: Path) -> None:
     old = make_envelope(root, 400)
     code, report, _ = run_cli(root)
@@ -101,12 +100,11 @@ def test_a_dry_run_is_the_default_and_deletes_nothing(root: Path) -> None:
     assert [c["name"] for c in report["candidates"]] == [old.name]  # type: ignore[index, union-attr]
 
 
-@pytest.mark.xfail(strict=True, reason="N3-3 red: the pruner is not built yet")
 def test_apply_deletes_only_old_pre_cutover_envelopes(root: Path) -> None:
     old = make_envelope(root, 400)
     older = make_envelope(root, 800)
     young = make_envelope(root, 30)
-    post = make_envelope(root, 400, head=POST)
+    post = make_envelope(root, 401, head=POST)
     code, report, _ = run_cli(root, "--apply")
     assert code == pruner.EXIT_PRUNED
     assert names(root) == {young.name, post.name}
@@ -114,7 +112,6 @@ def test_apply_deletes_only_old_pre_cutover_envelopes(root: Path) -> None:
     assert not old.exists() and not older.exists()
 
 
-@pytest.mark.xfail(strict=True, reason="N3-3 red: the pruner is not built yet")
 def test_89_days_is_kept_90_is_kept_91_is_pruned_at_the_pinned_now(root: Path) -> None:
     d89 = make_envelope(root, 89)
     d90 = make_envelope(root, 90)
@@ -125,7 +122,6 @@ def test_89_days_is_kept_90_is_kept_91_is_pruned_at_the_pinned_now(root: Path) -
     assert not d91.exists()
 
 
-@pytest.mark.xfail(strict=True, reason="N3-3 red: the pruner is not built yet")
 def test_a_post_cutover_backup_is_never_pruned_however_old(root: Path) -> None:
     post = make_envelope(root, 3000, head=POST)
     code, report, _ = run_cli(root, "--apply")
@@ -134,7 +130,6 @@ def test_a_post_cutover_backup_is_never_pruned_however_old(root: Path) -> None:
     assert report["deleted"] == []
 
 
-@pytest.mark.xfail(strict=True, reason="N3-3 red: the pruner is not built yet")
 def test_what_cannot_be_classified_is_kept_and_reported(root: Path) -> None:
     kept = {
         make_envelope(root, 500, head="alembic:0016").name: "alembic form",
@@ -157,7 +152,6 @@ def test_what_cannot_be_classified_is_kept_and_reported(root: Path) -> None:
     assert {loose.name, "notes.txt"} <= reported
 
 
-@pytest.mark.xfail(strict=True, reason="N3-3 red: the pruner is not built yet")
 def test_a_symlink_in_the_root_refuses_the_whole_run_and_deletes_nothing(
     root: Path, tmp_path: Path
 ) -> None:
@@ -171,7 +165,6 @@ def test_a_symlink_in_the_root_refuses_the_whole_run_and_deletes_nothing(
     assert any("symlink" in str(r) for r in report["refused"])  # type: ignore[union-attr]
 
 
-@pytest.mark.xfail(strict=True, reason="N3-3 red: the pruner is not built yet")
 def test_a_symlinked_root_is_refused(root: Path, tmp_path: Path) -> None:
     make_envelope(root, 400)
     alias = tmp_path / "alias"
@@ -181,14 +174,12 @@ def test_a_symlinked_root_is_refused(root: Path, tmp_path: Path) -> None:
     assert len(names(root)) == 1
 
 
-@pytest.mark.xfail(strict=True, reason="N3-3 red: the pruner is not built yet")
 def test_nothing_to_do_exits_zero_and_a_missing_root_is_refused(root: Path, tmp_path: Path) -> None:
     make_envelope(root, 5)
     assert run_cli(root, "--apply")[0] == pruner.EXIT_NOTHING_TO_DO
     assert run_cli(tmp_path / "absent", "--apply")[0] == pruner.EXIT_REFUSED
 
 
-@pytest.mark.xfail(strict=True, reason="N3-3 red: the pruner is not built yet")
 def test_the_retention_is_a_named_90_with_no_flag_to_change_it_or_the_clock() -> None:
     assert pruner.RETENTION_DAYS == 90
     flags = {
@@ -197,7 +188,6 @@ def test_the_retention_is_a_named_90_with_no_flag_to_change_it_or_the_clock() ->
     assert flags == {"-h", "--help", "--root", "--apply", "--pretty"}
 
 
-@pytest.mark.xfail(strict=True, reason="N3-3 red: the pruner is not built yet")
 def test_output_names_paths_and_counts_never_manifest_contents(root: Path) -> None:
     make_envelope(root, 400)
     make_envelope(root, 3, head=POST)
@@ -206,7 +196,6 @@ def test_output_names_paths_and_counts_never_manifest_contents(root: Path) -> No
     assert report["counts"] == {"deleted": 1, "kept": 1, "unclassified": 0, "refused": 0}
 
 
-@pytest.mark.xfail(strict=True, reason="N3-3 red: the pruner is not built yet")
 def test_a_real_envelope_from_the_repositorys_writer_is_classified_and_pruned(
     root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

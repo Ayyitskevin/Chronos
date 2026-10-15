@@ -293,7 +293,34 @@ connection was proven to have opened; a manifest written before this field exist
 - **Off-host copy placement.** Nothing here copies a backup anywhere; a backup on the same
   disk as the database is a convenience, not a recovery. Where the copy goes, how it is
   encrypted in transit and at rest, and who can read it are the owner's.
-- **Retention** is likewise not implemented: the harness never deletes.
+- **Retention** is not done by the harness, which never deletes. Kevin's ruling (2026-10-15):
+  the encrypted archive and pre-cutover backups live 90 days, then are deleted — by the
+  separate Kevin-run pruner below.
+
+## Pruning old backups — Kevin-run, 90 days (N3-3)
+
+`python -m chronos.operations.backup_pruner --root /var/backups/chronos --pretty` lists what
+it WOULD delete and deletes nothing. Add `--apply` to delete.
+
+- **What it deletes:** a published envelope `chronos-<stamp>/` whose own `manifest.json`
+  records a pre-cutover schema (`schema_head` of `schema_version:N`, N below 18 — the archive
+  of the old schema-17 database is one) and a `snapshot_completed_at` more than 90 days
+  before now. Exactly 90 days is kept. Age and class are read from the manifest, never from
+  file times.
+- **What it never deletes:** a post-cutover envelope (schema 18 and up) however old; anything
+  it cannot classify (an `alembic:`/`unversioned` head, a bad or missing manifest, an
+  unexpected file, a future-dated snapshot, crash temps `.chronos-…tmp`, restore copies,
+  stray files) — these are listed under `unclassified` so you can decide by hand; anything
+  outside `--root`.
+- **Symlinks:** a symlink in the root, or a symlinked `--root`, refuses the whole run (exit 2)
+  before anything is deleted. It is never followed.
+- **Exit codes:** `0` nothing to prune · `10` dry run found candidates (nothing deleted) ·
+  `11` pruned · `2` refused (or a delete failed; the report names it).
+- **The 90 is fixed** (`RETENTION_DAYS`, the ruling); there is no flag to change it and no
+  `--now`. Output is JSON of counts and names only — never manifest contents.
+- **Not covered:** the cleartext copies `--restore-into` writes are wherever you pointed them,
+  outside the backup root; remove those by hand when the drill is done. Off-host copies of an
+  envelope are yours to prune too.
 
 ## What a FAILED verdict means
 
