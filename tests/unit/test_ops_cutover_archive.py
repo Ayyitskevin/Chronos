@@ -815,6 +815,34 @@ def test_6b_control_the_module_itself_imports_no_broker_orders_or_config_module(
     assert offending == [], offending
 
 
+def test_6c_the_module_only_replays_the_position_ledger_and_never_writes_it() -> None:
+    """The safety contract admits this module as the second importer of
+    ``position_management`` by name (tests/safety/test_paper_position_management.py): it may
+    only REPLAY (rehydrate) a binding's stream to prove the position closed — never register,
+    evaluate, resolve, or append to the chain."""
+
+    tree = ast.parse(MODULE.read_text(encoding="utf-8"))
+    names: list[str] = []
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.ImportFrom)
+            and node.module == "chronos.supervisor.position_management"
+        ):
+            names += [alias.name for alias in node.names]
+    assert sorted(names) == ["PositionManagementError", "rehydrate_position"], names
+    source = MODULE.read_text(encoding="utf-8")
+    for writer in (
+        "register_position",
+        "evaluate_position",
+        "record_directive_resolution",
+        "hash_chain.append",
+        "session.add(",
+        "session.commit(",
+        "session.execute(",
+    ):
+        assert writer not in source, writer
+
+
 # ------------------------------------------------------------- (7) the runbook
 
 
