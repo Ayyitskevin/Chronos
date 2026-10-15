@@ -55,6 +55,7 @@ from tests.safety.test_database_lock_integrity import (
     _group_alive,
     _pid_alive,
 )
+from tests.support.persistence_keys import TEST_PERSISTENCE_KEY
 
 from chronos.autonomy import (
     AutonomyMandate,
@@ -74,7 +75,7 @@ from chronos.utils.identifiers import account_fingerprint
 
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="process groups and /proc")
 
-_FINGERPRINT = account_fingerprint(DEMO_ACCOUNT_ID)
+_FINGERPRINT = account_fingerprint(DEMO_ACCOUNT_ID, key=TEST_PERSISTENCE_KEY)
 _DECISIONS = f"autonomy.decisions:{_FINGERPRINT}"
 _CYCLES = f"autonomy.cycles:{_FINGERPRINT}"
 _PROPOSER_HEADER = "X-Chronos-Proposer-Token"

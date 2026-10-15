@@ -44,6 +44,7 @@ from chronos.persistence.database import Database
 from chronos.persistence.order_repositories import OrderIntentRecord, OrderIntentRepository
 from chronos.utils.identifiers import account_fingerprint
 from tests.support.order_fakes import FakeBroker
+from tests.support.persistence_keys import TEST_PERSISTENCE_KEY
 
 _ACCOUNT = "DU1234567"
 _NY = ZoneInfo("America/New_York")
@@ -65,7 +66,9 @@ def _settings(**overrides: object) -> Settings:
 def _database() -> Database:
     db = Database("sqlite:///:memory:")
     db.initialize()
-    db.bind_scope(broker_mode="ibkr", environment="paper", account_id=_ACCOUNT)
+    db.bind_scope(
+        broker_mode="ibkr", environment="paper", account_id=_ACCOUNT, key=TEST_PERSISTENCE_KEY
+    )
     return db
 
 
@@ -80,7 +83,7 @@ def _record(
     return OrderIntentRecord(
         intent_id=intent_id,
         idempotency_key=f"key-{intent_id}",
-        account_fingerprint=account_fingerprint(_ACCOUNT),
+        account_fingerprint=account_fingerprint(_ACCOUNT, key=TEST_PERSISTENCE_KEY),
         environment="paper",
         product_family=family,
         wheel_cycle_id=None,
@@ -272,7 +275,9 @@ def test_evidence_defaults_to_unknown_rather_than_an_empty_day() -> None:
 
 
 def _opening_check(evidence_count: int | None, *, limit: int = 3) -> Any:
-    engine = OrderRiskEngine(_settings(max_opening_orders_per_day=limit))
+    engine = OrderRiskEngine(
+        _settings(max_opening_orders_per_day=limit), persistence_key=TEST_PERSISTENCE_KEY
+    )
     return engine._check_opening_count(
         RiskEvidence.model_construct(opening_orders_today=evidence_count)
     )

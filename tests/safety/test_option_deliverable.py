@@ -38,6 +38,7 @@ from chronos.domain.enums import OptionRight, RiskCheckStatus
 from chronos.domain.models import OptionContract
 from chronos.orders.risk import OrderRiskEngine
 from chronos.services.option_deliverable import assess_standard_deliverable
+from tests.support.persistence_keys import TEST_PERSISTENCE_KEY
 
 _LOCAL = "AAPL  260821P00185000"  # OSI: 6-char padded root, 6 date, 1 right, 8 strike
 
@@ -271,7 +272,7 @@ def test_an_adjusted_series_survives_qualification_unverified() -> None:
 
 
 def _deliverable_check(contract: OptionContract) -> Any:
-    engine = OrderRiskEngine(Settings(_env_file=None))  # type: ignore[call-arg]
+    engine = OrderRiskEngine(Settings(_env_file=None), persistence_key=TEST_PERSISTENCE_KEY)  # type: ignore[call-arg]
     return engine._check_deliverable_verified(contract)
 
 

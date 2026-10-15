@@ -21,6 +21,7 @@ from typing import Any, cast
 import pytest
 import sqlalchemy as sa
 from tests.support.order_fakes import FakeBroker
+from tests.support.persistence_keys import TEST_PERSISTENCE_KEY
 
 from chronos.broker.demo import DEMO_ACCOUNT_ID
 from chronos.domain.enums import (
@@ -55,7 +56,7 @@ from chronos.utils.identifiers import account_fingerprint
 
 _ROOT = Path(__file__).resolve().parents[2]
 NOW = datetime(2026, 9, 20, 15, 0, tzinfo=UTC)
-FINGERPRINT = account_fingerprint(DEMO_ACCOUNT_ID)
+FINGERPRINT = account_fingerprint(DEMO_ACCOUNT_ID, key=TEST_PERSISTENCE_KEY)
 
 
 # --- fixtures ---------------------------------------------------------------------------------
@@ -65,7 +66,12 @@ FINGERPRINT = account_fingerprint(DEMO_ACCOUNT_ID)
 def database(tmp_path: Path) -> Database:
     db = Database(f"sqlite:///{tmp_path / 'runs.db'}")
     db.initialize()
-    db.bind_scope(broker_mode="demo", environment="paper", account_id=DEMO_ACCOUNT_ID)
+    db.bind_scope(
+        broker_mode="demo",
+        environment="paper",
+        account_id=DEMO_ACCOUNT_ID,
+        key=TEST_PERSISTENCE_KEY,
+    )
     yield db
     db.dispose()
 
@@ -270,6 +276,7 @@ def _runtime(
     broker = FakeBroker(account_id=DEMO_ACCOUNT_ID)
     runtime.broker = cast(Any, broker)
     runtime.connection = cast(Any, _SyncConnection(broker))
+    runtime.persistence_key = TEST_PERSISTENCE_KEY  # N3-1: the field build_runtime sets
     if recorder is not None:
         runtime.reconciliation_runs = recorder
     elif database is not None:
@@ -520,7 +527,12 @@ def test_4_restart_recovery_drill_rows_survive_a_fresh_session_and_the_cli_reads
     db_path = tmp_path / "drill.db"
     database = Database(f"sqlite:///{db_path}")
     database.initialize()
-    database.bind_scope(broker_mode="demo", environment="paper", account_id=DEMO_ACCOUNT_ID)
+    database.bind_scope(
+        broker_mode="demo",
+        environment="paper",
+        account_id=DEMO_ACCOUNT_ID,
+        key=TEST_PERSISTENCE_KEY,
+    )
     written: list[ReconciliationSnapshot] = []
     runtime = _runtime(database)
     # the four brief trigger kinds + operator through the runtime path; reconnect/order_fill
@@ -1320,7 +1332,9 @@ def test_i3b_1_a_new_run_stores_no_masked_account_id_and_no_other_raw_projection
     persisted = json.loads(stored)
     facts = persisted["account_facts"]
     # positive control: a real decided run, carrying the facts that stay
-    assert facts["account_fingerprint"] == account_fingerprint(DEMO_ACCOUNT_ID)
+    assert facts["account_fingerprint"] == account_fingerprint(
+        DEMO_ACCOUNT_ID, key=TEST_PERSISTENCE_KEY
+    )
     assert facts["net_liquidation"] == "100000.50" and facts["currency"] == "USD"
     # the fix: exactly the non-raw facts, and no projection of the raw id anywhere in the row
     assert set(facts) == _I3B_FACT_KEYS, sorted(set(facts) ^ _I3B_FACT_KEYS)
@@ -1384,7 +1398,7 @@ def test_i3b_2_a_historical_row_with_the_masked_id_stays_readable_and_replays_by
     (row,) = provenance.rows_for_run(run_id)
     assert row.origin_class == "FOREIGN"
     assert row.evidence_ref == f"{run_id}:{digest}"
-    assert row.account_fingerprint == account_fingerprint(DEMO_ACCOUNT_ID)
+    assert row.account_fingerprint == account_fingerprint(DEMO_ACCOUNT_ID, key=TEST_PERSISTENCE_KEY)
     assert record_position_provenance(database.sessions, run_id) == 0  # the recorder's replay
 
     # the operator CLI prints it (a fresh process, only the database)

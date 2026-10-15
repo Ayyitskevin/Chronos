@@ -35,6 +35,11 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
+from tests.support.persistence_keys import (
+    TEST_PERSISTENCE_KEY,
+    TEST_PERSISTENCE_KEY_HEX,
+    derived_key_hex,
+)
 
 from chronos.cli import b1_preflight
 from chronos.cli.b1_preflight import (
@@ -71,6 +76,9 @@ def _good_text(database: Path) -> str:
             "SYMBOL_ALLOWLIST=AAPL,MSFT,SPY",
             f"DATABASE_URL=sqlite:///{database}",
             f"CHRONOS_CAPTURE_PEPPER={PEPPER_CANARY}",
+            # N3-1: the backend refuses to start without the persistence key, so a good B1 host
+            # file carries one (the suite's derived test key; never a literal).
+            f"CHRONOS_PERSISTENCE_KEY={TEST_PERSISTENCE_KEY_HEX}",
             "",
         ]
     )
@@ -348,7 +356,9 @@ def _bind(database: Path, *, broker_mode: str, account: str) -> None:
     database.parent.mkdir(parents=True, exist_ok=True)
     store = Database(f"sqlite:///{database}")
     store.initialize()
-    store.bind_scope(broker_mode=broker_mode, environment="paper", account_id=account)
+    store.bind_scope(
+        broker_mode=broker_mode, environment="paper", account_id=account, key=TEST_PERSISTENCE_KEY
+    )
     store.dispose()
 
 
@@ -367,6 +377,36 @@ def test_a_database_bound_elsewhere_refuses_and_names_the_fix(host: dict[str, Pa
     assert _levels(report, "scope") == ["REFUSE"]
     assert "different broker scope" in _text(report, "scope")
     assert "DATABASE_URL" in _text(report, "scope")
+
+
+@pytest.mark.parametrize("value", [None, "", "AB" * 32, "ab" * 31, "zz" * 32])
+def test_n3_a_file_without_a_well_formed_persistence_key_refuses_the_scope(
+    host: dict[str, Path], value: str | None
+) -> None:
+    """N3-1: the backend resolves CHRONOS_PERSISTENCE_KEY before it creates or binds anything, so
+    a file without a well-formed key cannot start, even on a fresh host with no database."""
+
+    _rewrite(host, "CHRONOS_PERSISTENCE_KEY", value)
+    report = _run(host)
+
+    assert _levels(report, "scope") == ["REFUSE"]
+    assert "CHRONOS_PERSISTENCE_KEY" in _text(report, "scope")
+    assert report.verdict()[1] == EXIT_REFUSED
+    if value:
+        assert all(value not in finding.text for finding in report.findings)
+
+
+def test_n3_a_database_bound_under_another_key_refuses_as_a_different_scope(
+    host: dict[str, Path],
+) -> None:
+    """N3-1: the same paper account under a different install key is a different scope."""
+
+    _bind(host["database"], broker_mode="ibkr", account=ACCOUNT)
+    _rewrite(host, "CHRONOS_PERSISTENCE_KEY", derived_key_hex("another-install"))
+    report = _run(host)
+
+    assert _levels(report, "scope") == ["REFUSE"]
+    assert "different broker scope" in _text(report, "scope")
 
 
 # --- 6. ports, kill switch, halt ---------------------------------------------------------------
@@ -922,6 +962,6 @@ def test_r2_p3_1_no_fragment_of_the_other_rows_fingerprint_appears(
     everything = _everything(host, capsys, json_out=True, with_credential=False)
     everything += _everything(host, capsys, json_out=False, with_credential=False)
     assert '"scope"' in everything or "[scope]" in everything  # the scope check really ran
-    stored = account_fingerprint("DU1111111")
+    stored = account_fingerprint("DU1111111", key=TEST_PERSISTENCE_KEY)
     assert _partial_leaks(everything, stored) == []
     assert "DU1111111" not in everything

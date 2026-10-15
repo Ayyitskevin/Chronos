@@ -47,6 +47,7 @@ from typing import Any
 
 import pytest
 import sqlalchemy as sa
+from tests.support.persistence_keys import TEST_PERSISTENCE_KEY
 
 from chronos.broker.connection import BrokerConnectionManager
 from chronos.broker.demo import DEMO_ACCOUNT_ID, DemoBroker
@@ -341,7 +342,7 @@ def drive_demo_runtime_path(database: Database) -> tuple[str, bool]:
     intent = OrderIntentRecord(
         intent_id="ev1-demo-intent",
         idempotency_key="ev1-demo-intent-key",
-        account_fingerprint=account_fingerprint(DEMO_ACCOUNT_ID),
+        account_fingerprint=account_fingerprint(DEMO_ACCOUNT_ID, key=TEST_PERSISTENCE_KEY),
         environment="paper",
         product_family=ProductFamily.OPTION,
         wheel_cycle_id=None,
@@ -385,7 +386,12 @@ def drive_demo_runtime_path(database: Database) -> tuple[str, bool]:
 def _demo_database(tmp_path: Path) -> Database:
     database = Database(f"sqlite:///{tmp_path / 'ev1-replay.db'}")
     database.initialize()
-    database.bind_scope(broker_mode="demo", environment="paper", account_id=DEMO_ACCOUNT_ID)
+    database.bind_scope(
+        broker_mode="demo",
+        environment="paper",
+        account_id=DEMO_ACCOUNT_ID,
+        key=TEST_PERSISTENCE_KEY,
+    )
     return database
 
 

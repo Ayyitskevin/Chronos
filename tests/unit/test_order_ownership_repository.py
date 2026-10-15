@@ -3,6 +3,7 @@ from decimal import Decimal
 
 import pytest
 from sqlalchemy import func, insert, select
+from tests.support.persistence_keys import TEST_PERSISTENCE_KEY
 
 from chronos.domain.enums import OrderIntent, OrderLifecycle, OrderSide
 from chronos.domain.models import BrokerOrderIdentity
@@ -25,7 +26,9 @@ OTHER_ACCOUNT_ID = "DU7654321"
 def _database(*, cycle_symbol: str = "AAPL", cycle_status: str = "OPEN") -> Database:
     database = Database("sqlite+pysqlite:///:memory:")
     database.initialize()
-    database.bind_scope(broker_mode="demo", environment="DEMO", account_id=ACCOUNT_ID)
+    database.bind_scope(
+        broker_mode="demo", environment="DEMO", account_id=ACCOUNT_ID, key=TEST_PERSISTENCE_KEY
+    )
     with database.sessions.begin() as session:
         session.add(
             WheelCycleRow(
@@ -397,5 +400,5 @@ def test_active_identity_read_never_persists_the_raw_account_id() -> None:
         *(row.order_ref for row in submitted),
     )
     assert all(ACCOUNT_ID not in value for value in persisted_strings)
-    assert scope.account_fingerprint == account_fingerprint(ACCOUNT_ID)
+    assert scope.account_fingerprint == account_fingerprint(ACCOUNT_ID, key=TEST_PERSISTENCE_KEY)
     assert event_count == 0

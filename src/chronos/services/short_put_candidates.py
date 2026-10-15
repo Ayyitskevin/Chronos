@@ -57,7 +57,11 @@ from chronos.strategy.strike_resolver import (
     StrikeResolver,
     spot_price,
 )
-from chronos.utils.identifiers import account_fingerprint, normalize_account_fingerprint
+from chronos.utils.identifiers import (
+    PersistenceKey,
+    account_fingerprint,
+    normalize_account_fingerprint,
+)
 from chronos.utils.logging import mask_account_id
 
 _LOGGER = logging.getLogger("chronos.services.short_put_candidates")
@@ -130,6 +134,7 @@ class ShortPutCandidateService:
         settings: Settings,
         expected_account_fingerprint: str,
         *,
+        persistence_key: PersistenceKey,
         resolver: StrikeResolver | None = None,
         clock: Callable[[], datetime] | None = None,
         max_reconciliation_age: timedelta | None = None,
@@ -160,6 +165,7 @@ class ShortPutCandidateService:
         self._expected_account_fingerprint = normalize_account_fingerprint(
             expected_account_fingerprint
         )
+        self._persistence_key = persistence_key
         self._resolver = resolver or StrikeResolver(ResolverPolicy.from_settings(settings))
         self._clock = clock or (lambda: datetime.now(UTC))
         self._max_reconciliation_age = maximum_age
@@ -554,7 +560,7 @@ class ShortPutCandidateService:
         ):
             raise _CandidateEvidenceError("The broker account scope is missing or inconsistent.")
         try:
-            observed_fingerprint = account_fingerprint(raw_account_id)
+            observed_fingerprint = account_fingerprint(raw_account_id, key=self._persistence_key)
         except ValueError:
             raise _CandidateEvidenceError(
                 "The broker account scope is missing or inconsistent."

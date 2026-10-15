@@ -76,11 +76,11 @@ from chronos.supervisor.compiler import QuoteEvidence
 from chronos.supervisor.handoff import HandoffDisposition
 from chronos.supervisor.runtime import AutonomyRuntime
 from chronos.utils.identifiers import account_fingerprint
-from tests.support.persistence_keys import TEST_PERSISTENCE_KEY_HEX
+from tests.support.persistence_keys import TEST_PERSISTENCE_KEY, TEST_PERSISTENCE_KEY_HEX
 
 _NOW = datetime(2026, 7, 25, 14, 0, tzinfo=UTC)
 _ACCOUNT_ID = "DU1234567"
-_FINGERPRINT = account_fingerprint(_ACCOUNT_ID)
+_FINGERPRINT = account_fingerprint(_ACCOUNT_ID, key=TEST_PERSISTENCE_KEY)
 
 
 @pytest.fixture
@@ -249,6 +249,7 @@ def _runtime(
         ),
         database=database,
         order_management=order_management or SimpleNamespace(account_id=account_id),
+        persistence_key=TEST_PERSISTENCE_KEY,
     )
 
 

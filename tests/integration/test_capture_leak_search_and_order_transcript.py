@@ -57,6 +57,7 @@ from tests.integration.test_capture_replay_fakegateway import (
 )
 from tests.safety.test_broker_mutation_inventory import _MUTATING_METHODS
 from tests.support import fake_ibapi
+from tests.support.persistence_keys import TEST_PERSISTENCE_KEY
 
 from chronos.utils.identifiers import account_fingerprint
 
@@ -416,7 +417,7 @@ def test_u_f3_f1_the_account_token_cannot_be_recovered_without_the_pepper(
     recovered = [
         account
         for account in candidates
-        if f"ACCT-{account_fingerprint(account)[:16]}".encode() in every
+        if f"ACCT-{account_fingerprint(account, key=TEST_PERSISTENCE_KEY)[:16]}".encode() in every
     ]
     assert recovered == [], f"the account token reverses to {recovered} with no pepper"
 

@@ -66,10 +66,11 @@ from chronos.supervisor.loop import CycleFacts, CycleOutcome, CycleStage, _recor
 from chronos.supervisor.sizing import AccountEvidence
 from chronos.terminal import views
 from chronos.utils.identifiers import account_fingerprint
+from tests.support.persistence_keys import TEST_PERSISTENCE_KEY
 
 _NOW = datetime(2026, 7, 26, 15, 30, tzinfo=UTC)
 _ACCOUNT_ID = "U7654321"
-_FINGERPRINT = account_fingerprint(_ACCOUNT_ID)
+_FINGERPRINT = account_fingerprint(_ACCOUNT_ID, key=TEST_PERSISTENCE_KEY)
 
 #: ADR-0057: every journal row states the posture it rests on, so these view
 #: fixtures state one too. The static posture is right here — these tests are

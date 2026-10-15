@@ -17,6 +17,7 @@ from chronos.broker.base import Broker
 from chronos.broker.connection import BrokerConnectionManager
 from chronos.broker.demo import DemoBroker, demo_now
 from chronos.broker.market_data import MarketDataManager
+from chronos.config.persistence_key import resolve_persistence_key
 from chronos.config.settings import Settings, get_settings
 from chronos.domain.enums import (
     BrokerAdapter,
@@ -78,7 +79,7 @@ from chronos.services.short_put_demo_approval import ShortPutDemoApprovalService
 from chronos.services.short_put_demo_what_if import ShortPutDemoWhatIfService
 from chronos.services.short_put_risk_preview import ShortPutRiskPreviewService
 from chronos.ui.runtime_scope import RuntimeScopeView, build_bound_runtime_scope
-from chronos.utils.identifiers import account_fingerprint
+from chronos.utils.identifiers import PersistenceKey, account_fingerprint
 from chronos.utils.logging import configure_logging
 from chronos.utils.time import utc_now
 
@@ -110,6 +111,9 @@ class AppRuntime:
     live_arming: LiveArmingService
     live_kill_switch: LiveKillSwitch
     session_drawdown: SessionDrawdownBreaker
+    # N3: the install's persistence key, resolved once by build_runtime before anything was
+    # created; every fingerprint this runtime computes is keyed by it.
+    persistence_key: PersistenceKey
     # BP-3: one reconciliation_runs row per decided pass, written AFTER the readiness latch
     # published; evidence only (K1 (a) append-only, K2 (a) masked id + fingerprint). Optional
     # so a runtime built without a database seam records nothing.
@@ -205,7 +209,9 @@ class AppRuntime:
                     report=report,
                     generation=generation,
                     started_at=moment,
-                    account_fingerprint=account_fingerprint(self.order_management.account_id),
+                    account_fingerprint=account_fingerprint(
+                        self.order_management.account_id, key=self.persistence_key
+                    ),
                 )
             )
         return report
@@ -281,6 +287,9 @@ def build_runtime(*, register_atexit: bool = True) -> AppRuntime:
     """
 
     settings = get_settings()
+    # N3: first, before the log file, the database file or any sidecar exists. An absent or
+    # malformed key refuses here in every broker mode, demo included.
+    persistence_key = resolve_persistence_key(settings)
     configure_logging(settings.log_level, settings.log_file)
     database = Database(settings.database_url)
     connection: BrokerConnectionManager | None = None
@@ -327,6 +336,7 @@ def build_runtime(*, register_atexit: bool = True) -> AppRuntime:
                 order_ownership=PersistedOrderOwnershipLedger(
                     OrderIntentRepository(database.sessions),
                     OrderTrackerRepository(database.sessions),
+                    persistence_key=persistence_key,
                 ),
             )
         market_data = MarketDataManager(
@@ -339,7 +349,9 @@ def build_runtime(*, register_atexit: bool = True) -> AppRuntime:
         account = connection.run(broker.account_summary())
         status = connection.connection_status()
         _validate_scope_observations(account, status)
-        runtime_scope = build_bound_runtime_scope(database, settings, account, status)
+        runtime_scope = build_bound_runtime_scope(
+            database, settings, account, status, key=persistence_key
+        )
         reconciliation = ReconciliationCoordinator(
             connection,
             LocalReconciliationRepository(database.sessions),
@@ -358,7 +370,10 @@ def build_runtime(*, register_atexit: bool = True) -> AppRuntime:
             market_data=market_data,
             reconciliation=reconciliation,
             settings=settings,
-            expected_account_fingerprint=account_fingerprint(account.account_id),
+            expected_account_fingerprint=account_fingerprint(
+                account.account_id, key=persistence_key
+            ),
+            persistence_key=persistence_key,
             clock=demo_now if isinstance(broker, DemoBroker) else None,
         )
         short_put_risk_preview = ShortPutRiskPreviewService(
@@ -369,7 +384,8 @@ def build_runtime(*, register_atexit: bool = True) -> AppRuntime:
             short_put_risk_preview,
             connection,
             settings,
-            account_fingerprint(account.account_id),
+            account_fingerprint(account.account_id, key=persistence_key),
+            persistence_key=persistence_key,
             clock=demo_now if isinstance(broker, DemoBroker) else None,
         )
         short_put_demo_approval = ShortPutDemoApprovalService(
@@ -388,7 +404,7 @@ def build_runtime(*, register_atexit: bool = True) -> AppRuntime:
             ttl_minutes=settings.live_arm_ttl_minutes,
             audit=LiveArmEventRepository(
                 database.sessions,
-                account_fingerprint=account_fingerprint(account.account_id),
+                account_fingerprint=account_fingerprint(account.account_id, key=persistence_key),
             ),
         )
         session_drawdown = SessionDrawdownBreaker(
@@ -408,6 +424,7 @@ def build_runtime(*, register_atexit: bool = True) -> AppRuntime:
             live_kill_switch=live_kill_switch,
             session_drawdown=session_drawdown,
             reconciliation_readiness=reconciliation_readiness,
+            persistence_key=persistence_key,
         )
     except BaseException:
         if connection is not None:
@@ -443,6 +460,7 @@ def build_runtime(*, register_atexit: bool = True) -> AppRuntime:
         live_arming=live_arming,
         live_kill_switch=live_kill_switch,
         session_drawdown=session_drawdown,
+        persistence_key=persistence_key,
         reconciliation_runs=reconciliation_runs,
     )
     if register_atexit:
@@ -461,6 +479,7 @@ def _build_order_management(
     live_kill_switch: LiveKillSwitch,
     session_drawdown: SessionDrawdownBreaker,
     reconciliation_readiness: ReconciliationReadiness,
+    persistence_key: PersistenceKey,
 ) -> OrderManagementService:
     """Wire the human-in-the-loop order pipeline (M5 paper + M7 live branch)."""
 
@@ -504,7 +523,7 @@ def _build_order_management(
             # the cap counts the rows this process is creating.
             intents=intents,
         ),
-        risk_engine=OrderRiskEngine(settings),
+        risk_engine=OrderRiskEngine(settings, persistence_key=persistence_key),
         preview_service=OrderPreviewService(connection),
         submission_boundary=OrderSubmissionBoundary(
             settings=settings,
@@ -539,10 +558,12 @@ def _build_order_management(
             tracker=tracker,
             reconciliation_readiness=reconciliation_readiness,
             expected_broker_client_id=settings.ib_client_id,
+            persistence_key=persistence_key,
             market_timezone=settings.market_timezone,
         ),
         intents=intents,
         confirmations=confirmations,
         risk_decisions=risk_decisions,
         broker_environment_is_paper=settings.ib_environment is IBEnvironment.PAPER,
+        persistence_key=persistence_key,
     )

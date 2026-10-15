@@ -1,5 +1,31 @@
 # CHANGELOG
 
+## [Unreleased] — keyed account fingerprints, `CHRONOS_PERSISTENCE_KEY`, schema 18 (N3-1, 2026-10-15)
+
+Every persisted account fingerprint is now HMAC-SHA256 under a per-install secret,
+`CHRONOS_PERSISTENCE_KEY` (64 lowercase hex digits, owner-generated, held only in the host's 0600
+`.env`). Before, it was an unkeyed sha256 of the account id, so a copy of the database revealed the
+account by enumeration in seconds. Operator-visible changes:
+
+- **The backend refuses to start without the key, in every mode, demo included.** The refusal comes
+  before any database file, sidecar or log file is created, and it never echoes the value.
+  `.env.example` documents the variable empty, so a copied example refuses until the owner sets it.
+- **Schema 18.** A fresh database initializes at 18. A schema-17 database is refused at startup
+  (`Unsupported Chronos schema version 17; expected 18`). Migration 0017 refuses any database that is
+  already bound to a broker scope and changes nothing; such a database is archived and replaced by a
+  fresh keyed one (Kevin's ruling (iii); the cutover runbook is `docs/ops/N3-CUTOVER.md`,
+  forthcoming in N3-2). A v17 database with no scope row upgrades to 18.
+- **Mandates and option-resolver promotions must carry the keyed value.** One authored with the old
+  value is refused through the existing inert + `autonomy.mandate_invalid` alert path; there is no
+  transition window. `python -m chronos.cli mandate fingerprint` prints the keyed value and exits 1
+  without a key; `mandate check` reports the account match as skipped without one.
+- **A different key is a different account scope:** a database bound under one key is refused under
+  another (`already bound to a different broker scope`).
+- `b1-preflight`'s scope line REFUSEs when the file has no well-formed key.
+
+Order idempotency keys embed the fingerprint and so change with it; under (iii) no pre-cutover
+order row exists in the fresh database.
+
 ## [Unreleased] — the backend unit's database preflight imports the checkout's source, not an install (P3-2, 2026-10-10)
 
 The backend unit template `docs/ops/chronos-backend.service` now sets

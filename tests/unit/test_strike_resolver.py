@@ -5,6 +5,7 @@ from decimal import Decimal, localcontext
 
 import pytest
 from pydantic import ValidationError
+from tests.support.persistence_keys import TEST_PERSISTENCE_KEY
 
 from chronos.config.settings import Settings
 from chronos.domain.enums import (
@@ -34,8 +35,8 @@ from chronos.utils.identifiers import account_fingerprint
 
 NOW = datetime(2026, 1, 15, 15, 30, tzinfo=UTC)
 UNDERLYING = UnderlyingContract(con_id=1, symbol="AAPL", primary_exchange="NASDAQ")
-ACCOUNT_FINGERPRINT = account_fingerprint("DU1234567")
-OTHER_ACCOUNT_FINGERPRINT = account_fingerprint("DU7654321")
+ACCOUNT_FINGERPRINT = account_fingerprint("DU1234567", key=TEST_PERSISTENCE_KEY)
+OTHER_ACCOUNT_FINGERPRINT = account_fingerprint("DU7654321", key=TEST_PERSISTENCE_KEY)
 WHEEL_CYCLE_ID = "wheel-aapl-1"
 
 

@@ -63,7 +63,9 @@ def collect_operational_health(
     if mandate is not None:
         promotion_present = bool(mandate.promotions)
         try:
-            fingerprint = account_fingerprint(runtime.order_management.account_id)
+            fingerprint = account_fingerprint(
+                runtime.order_management.account_id, key=runtime.persistence_key
+            )
             with runtime.database.sessions.begin() as session:
                 activation = durable.load_activation(
                     session,

@@ -11,12 +11,15 @@ from typing import NamedTuple, cast
 import pytest
 from sqlalchemy import inspect, select, text
 from sqlalchemy.pool import StaticPool
+from tests.support.persistence_keys import TEST_PERSISTENCE_KEY
 
 from chronos.persistence import database as database_module
 from chronos.persistence.database import SCHEMA_VERSION, Database
 from chronos.persistence.repositories import ApplicationEventRepository
 from chronos.persistence.schema import DatabaseScopeRow, SchemaVersionRow
 from chronos.utils.identifiers import account_fingerprint
+
+_STORED_FINGERPRINT = account_fingerprint("DU1234567", key=TEST_PERSISTENCE_KEY)
 
 
 class _SqliteSnapshot(NamedTuple):
@@ -205,7 +208,8 @@ def test_schema_initialization_creates_required_evidence_tables() -> None:
     #      (BP-2, migration 0014): order_events gains permanent_id + client_id (schema v15).
     # v16: position_provenance — allocation provenance per observed position (AP-1, migration 0015).
     # v17: position_acknowledgements — the MANUAL provenance producer (AP-1b, migration 0016).
-    assert SCHEMA_VERSION == 17
+    # v18: keyed account fingerprints; 0017 refuses a bound v17 store (N3-1, migration 0017).
+    assert SCHEMA_VERSION == 18
 
 
 def test_application_events_are_append_only_and_queryable() -> None:
@@ -216,6 +220,7 @@ def test_application_events_are_append_only_and_queryable() -> None:
             broker_mode="demo",
             environment="DEMO",
             account_id="DU1234567",
+            key=TEST_PERSISTENCE_KEY,
         )
         repository = ApplicationEventRepository(database.sessions)
         event_id = repository.append(
@@ -503,7 +508,7 @@ def test_current_schema_missing_foreign_key_is_refused_without_mutation(tmp_path
                 "(execution_id, broker_order_id, client_id, symbol, contract_id, security_type, "
                 "side, quantity, price, multiplier, currency, account_fingerprint, occurred_at) "
                 f"VALUES ('EXEC-1', 1, 17, 'AAPL', 100, 'OPT', 'SELL', 1, 2, 100, 'USD', "
-                f"'{account_fingerprint('DU1234567')}', '2026-01-15 15:30:00')",
+                f"'{_STORED_FINGERPRINT}', '2026-01-15 15:30:00')",
             ),
         ),
         (
@@ -515,7 +520,7 @@ def test_current_schema_missing_foreign_key_is_refused_without_mutation(tmp_path
                 "(id, wheel_cycle_id, symbol, entry_type, amount, account_fingerprint, "
                 "currency, provisional, reconciliation_status, source_note, occurred_at, "
                 f"created_at) VALUES ('BASIS-1', 'CYCLE-1', 'AAPL', 'MANUAL_ADJUSTMENT', 1, "
-                f"'{account_fingerprint('DU1234567')}', 'USD', 0, 'RECONCILED', 'manual', "
+                f"'{_STORED_FINGERPRINT}', 'USD', 0, 'RECONCILED', 'manual', "
                 "'2026-01-15 15:30:00', '2026-01-15 15:30:00')",
             ),
         ),
@@ -562,6 +567,7 @@ def test_first_scope_binding_refuses_every_class_of_unscoped_account_data(
                 broker_mode="demo",
                 environment="DEMO",
                 account_id="DU1234567",
+                key=TEST_PERSISTENCE_KEY,
             )
     finally:
         database.dispose()
@@ -712,11 +718,13 @@ def test_database_scope_is_pseudonymous_and_fails_closed_on_mismatch() -> None:
             broker_mode="demo",
             environment="DEMO",
             account_id="DU1234567",
+            key=TEST_PERSISTENCE_KEY,
         )
         database.bind_scope(
             broker_mode="demo",
             environment="DEMO",
             account_id="DU1234567",
+            key=TEST_PERSISTENCE_KEY,
         )
         with database.sessions() as session:
             scope = session.get(DatabaseScopeRow, 1)
@@ -726,6 +734,7 @@ def test_database_scope_is_pseudonymous_and_fails_closed_on_mismatch() -> None:
                 broker_mode="ibkr",
                 environment="PAPER",
                 account_id="DU7654321",
+                key=TEST_PERSISTENCE_KEY,
             )
     finally:
         database.dispose()

@@ -23,6 +23,7 @@ import sqlalchemy as sa
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy.orm import Session, sessionmaker
+from tests.support.persistence_keys import TEST_PERSISTENCE_KEY
 
 from chronos.domain.enums import OptionRight, OrderSide
 from chronos.domain.models import BrokerExecution, OptionContract, UnderlyingContract
@@ -105,7 +106,9 @@ def _execution(
 def database(tmp_path: Path) -> Database:
     db = Database(f"sqlite:///{tmp_path / 'chronos.db'}")
     db.initialize()
-    db.bind_scope(broker_mode="demo", environment="paper", account_id=ACCOUNT_ID)
+    db.bind_scope(
+        broker_mode="demo", environment="paper", account_id=ACCOUNT_ID, key=TEST_PERSISTENCE_KEY
+    )
     yield db
     db.dispose()
 
@@ -167,7 +170,7 @@ def test_1a_record_writes_one_fill_and_one_commission_and_a_replay_writes_nothin
             "2.00000000",
             "100.00000000",
             "USD",
-            account_fingerprint(ACCOUNT_ID),
+            account_fingerprint(ACCOUNT_ID, key=TEST_PERSISTENCE_KEY),
             None,
         )
     ]
@@ -249,7 +252,9 @@ def test_3_an_execution_outside_the_bound_scope_is_refused_and_no_raw_account_id
     # the stored fingerprint is the scope's, never the raw id
     repository.record(_execution(), correlation_id=None)
     fills, _ = _rows(database)
-    assert fills[0][13] == account_fingerprint(ACCOUNT_ID) and ACCOUNT_ID not in str(fills)
+    assert fills[0][13] == account_fingerprint(
+        ACCOUNT_ID, key=TEST_PERSISTENCE_KEY
+    ) and ACCOUNT_ID not in str(fills)
 
 
 # ------------------------------------------------------------------ (4) commission evidence
@@ -384,7 +389,7 @@ def test_r2_1_a_legacy_row_reads_client_id_none_and_a_new_row_carries_the_execut
                 "account_fingerprint, occurred_at) VALUES ('EXEC-LEGACY', 1, 'AAPL', 100, 'OPT', "
                 "'SELL', 1, 2, 100, 'USD', :fp, '2026-01-15 15:30:00.000000')"
             ),
-            {"fp": account_fingerprint(ACCOUNT_ID)},
+            {"fp": account_fingerprint(ACCOUNT_ID, key=TEST_PERSISTENCE_KEY)},
         )
     ExecutionRepository(database.sessions).record(_execution(), correlation_id=None)
     fills, _ = _rows(database)
@@ -476,8 +481,12 @@ def _barrier_sessions(
                 barrier.wait(timeout=5)
             return value
 
+    # N3-1: the bound database's session info carries the persistence key bind_scope recorded.
     return sessionmaker(
-        bind=database.engine, expire_on_commit=False, class_=BarrierSession
+        bind=database.engine,
+        expire_on_commit=False,
+        class_=BarrierSession,
+        info=dict(database.sessions.kw["info"]),
     ), barrier
 
 

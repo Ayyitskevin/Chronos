@@ -17,6 +17,7 @@ from chronos.domain.enums import (
     DisplayEnvironment,
 )
 from chronos.domain.models import AccountSummary, ChronosModel, ConnectionStatus
+from chronos.utils.identifiers import PersistenceKey
 from chronos.utils.logging import mask_account_id
 
 _MAX_ACCOUNT_ID_CHARACTERS = 64
@@ -32,6 +33,7 @@ class ScopeBinder(Protocol):
         broker_mode: str,
         environment: str,
         account_id: str,
+        key: PersistenceKey,
     ) -> None: ...
 
 
@@ -109,6 +111,8 @@ def build_bound_runtime_scope(
     settings: Settings,
     account: AccountSummary,
     status: ConnectionStatus,
+    *,
+    key: PersistenceKey,
 ) -> RuntimeScopeView:
     """Validate safe display facts, bind persistence scope, then publish bound flags."""
 
@@ -162,6 +166,7 @@ def build_bound_runtime_scope(
         broker_mode=settings.broker_mode.value,
         environment=status.environment.value,
         account_id=account_id,
+        key=key,
     )
     try:
         return RuntimeScopeView.model_validate(

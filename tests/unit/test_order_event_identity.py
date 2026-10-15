@@ -26,6 +26,7 @@ from tests.support.order_fakes import (
     option_contract,
     paper_settings,
 )
+from tests.support.persistence_keys import TEST_PERSISTENCE_KEY
 
 from chronos.broker.connection import BrokerConnectionManager
 from chronos.domain.enums import OrderLifecycle, OrderSide, ProductFamily
@@ -70,7 +71,7 @@ def _intent(intent_id: str, *, status: OrderLifecycle) -> OrderIntentRecord:
     return OrderIntentRecord(
         intent_id=intent_id,
         idempotency_key=f"key-{intent_id}",
-        account_fingerprint=account_fingerprint(PAPER_ACCOUNT),
+        account_fingerprint=account_fingerprint(PAPER_ACCOUNT, key=TEST_PERSISTENCE_KEY),
         environment="paper",
         product_family=ProductFamily.OPTION,
         wheel_cycle_id=None,
@@ -118,7 +119,9 @@ def _working_order(*, order_ref: str | None, permanent_id: int | None) -> Broker
 def database(tmp_path: Path) -> Database:
     db = Database(f"sqlite:///{tmp_path / 'orders.db'}")
     db.initialize()
-    db.bind_scope(broker_mode="ibkr", environment="paper", account_id=PAPER_ACCOUNT)
+    db.bind_scope(
+        broker_mode="ibkr", environment="paper", account_id=PAPER_ACCOUNT, key=TEST_PERSISTENCE_KEY
+    )
     yield db
     db.dispose()
 
@@ -369,6 +372,7 @@ def test_4_reconciliation_resolves_a_working_order_that_matches_only_by_persiste
             tracker=tracker,
             reconciliation_readiness=ReconciliationReadiness(),
             expected_broker_client_id=_CLIENT_ID,
+            persistence_key=TEST_PERSISTENCE_KEY,
         ).reconcile_report(current_account_id=PAPER_ACCOUNT, now=FIXED_NOW)
     finally:
         connection.close()
@@ -696,6 +700,7 @@ def test_r1_3_divergent_permanent_ids_raise_a_typed_conflict_and_leave_the_inten
             tracker=tracker,
             reconciliation_readiness=ReconciliationReadiness(),
             expected_broker_client_id=_CLIENT_ID,
+            persistence_key=TEST_PERSISTENCE_KEY,
         ).reconcile_report(current_account_id=PAPER_ACCOUNT, now=FIXED_NOW)
     finally:
         connection.close()
@@ -797,6 +802,7 @@ def test_r1_4b_a_mismatching_nonblank_order_ref_stays_unresolved_through_the_rec
             tracker=tracker,
             reconciliation_readiness=ReconciliationReadiness(),
             expected_broker_client_id=_CLIENT_ID,
+            persistence_key=TEST_PERSISTENCE_KEY,
         ).reconcile_report(current_account_id=PAPER_ACCOUNT, now=FIXED_NOW)
     finally:
         connection.close()
@@ -895,6 +901,7 @@ def test_r2_1b_a_divergent_client_id_is_recorded_as_evidence_and_the_client_acce
             tracker=tracker,
             reconciliation_readiness=ReconciliationReadiness(),
             expected_broker_client_id=_CLIENT_ID,
+            persistence_key=TEST_PERSISTENCE_KEY,
         ).reconcile_report(current_account_id=PAPER_ACCOUNT, now=FIXED_NOW)
     finally:
         connection.close()

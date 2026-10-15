@@ -19,6 +19,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from tests.support.persistence_keys import TEST_PERSISTENCE_KEY
 
 import chronos.recovery.measurement as recovery_measurement
 from chronos.auditlog.log import AuditLog, ChainState, verify_chain
@@ -105,6 +106,7 @@ def open_source(tmp_path: Path) -> Iterator[_OpenSource]:
         broker_mode="demo",
         environment="paper",
         account_id="DU1234567",
+        key=TEST_PERSISTENCE_KEY,
     )
     HaltStore(data / "platform_halt.json").halt(
         HaltReason.OPERATOR_REQUEST,
@@ -219,12 +221,14 @@ def test_capture_and_restore_emit_bounded_measurements(open_source: _OpenSource)
             broker_mode="demo",
             environment="paper",
             account_id="DU1234567",
+            key=TEST_PERSISTENCE_KEY,
         )
         with pytest.raises(RuntimeError, match="already bound to a different broker scope"):
             restored_application.bind_scope(
                 broker_mode="demo",
                 environment="paper",
                 account_id="DU7654321",
+                key=TEST_PERSISTENCE_KEY,
             )
     finally:
         restored_application.dispose()

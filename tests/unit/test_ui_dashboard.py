@@ -3,6 +3,7 @@ from decimal import Decimal
 from typing import cast
 
 import pytest
+from tests.support.persistence_keys import TEST_PERSISTENCE_KEY
 
 from chronos.config.settings import Settings
 from chronos.domain.enums import (
@@ -14,6 +15,7 @@ from chronos.domain.models import AccountSummary, ConnectionStatus
 from chronos.ui import dashboard
 from chronos.ui.runtime_scope import RuntimeScopeView, build_bound_runtime_scope
 from chronos.ui.session import AppRuntime
+from chronos.utils.identifiers import PersistenceKey
 
 
 class _ExplodingRuntime:
@@ -31,6 +33,7 @@ class _ScopeBinder:
         broker_mode: str,
         environment: str,
         account_id: str,
+        key: PersistenceKey,
     ) -> None:
         pass
 
@@ -55,6 +58,7 @@ def _valid_runtime_scope() -> RuntimeScopeView:
             data_quality=DataQuality.DEMO,
             last_successful_sync=observed_at,
         ),
+        key=TEST_PERSISTENCE_KEY,
     )
 
 

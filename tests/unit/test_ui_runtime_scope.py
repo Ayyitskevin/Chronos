@@ -4,6 +4,7 @@ from decimal import Decimal
 
 import pytest
 from pydantic import ValidationError
+from tests.support.persistence_keys import TEST_PERSISTENCE_KEY
 
 from chronos.config.settings import Settings
 from chronos.domain.enums import (
@@ -20,6 +21,7 @@ from chronos.ui.runtime_scope import (
     build_bound_runtime_scope,
     validate_runtime_scope,
 )
+from chronos.utils.identifiers import PersistenceKey
 
 NOW = datetime(2026, 7, 15, 15, 30, tzinfo=UTC)
 RAW_ACCOUNT_ID = "DU1234567"
@@ -50,6 +52,7 @@ class _RecordingScopeBinder:
         broker_mode: str,
         environment: str,
         account_id: str,
+        key: PersistenceKey,
     ) -> None:
         self.calls.append((broker_mode, environment, account_id))
 
@@ -59,7 +62,9 @@ def build_runtime_scope(
     account: AccountSummary,
     status: ConnectionStatus,
 ) -> RuntimeScopeView:
-    return build_bound_runtime_scope(_RecordingScopeBinder(), settings, account, status)
+    return build_bound_runtime_scope(
+        _RecordingScopeBinder(), settings, account, status, key=TEST_PERSISTENCE_KEY
+    )
 
 
 def _settings(
@@ -195,7 +200,9 @@ def test_scope_schema_and_serialization_are_allowlisted() -> None:
 def test_scope_binds_only_after_every_display_fact_passes_preflight() -> None:
     binder = _RecordingScopeBinder()
 
-    scope = build_bound_runtime_scope(binder, _settings(), _account(), _status())
+    scope = build_bound_runtime_scope(
+        binder, _settings(), _account(), _status(), key=TEST_PERSISTENCE_KEY
+    )
 
     assert scope.account_scope_bound is True
     assert binder.calls == [("demo", "DEMO", RAW_ACCOUNT_ID)]
@@ -210,6 +217,7 @@ def test_invalid_display_facts_never_reach_persistent_scope_binding() -> None:
             _settings(broker_mode=BrokerMode.IBKR, ib_environment=IBEnvironment.LIVE),
             _account(),
             _status(environment=DisplayEnvironment.PAPER, data_quality=DataQuality.UNKNOWN),
+            key=TEST_PERSISTENCE_KEY,
         )
 
     assert binder.calls == []

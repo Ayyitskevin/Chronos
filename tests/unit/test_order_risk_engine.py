@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 from tests.support.order_fakes import PAPER_ACCOUNT, option_contract, paper_settings, stock_contract
+from tests.support.persistence_keys import TEST_PERSISTENCE_KEY
 
 from chronos.domain.enums import (
     OrderIntent,
@@ -40,7 +41,7 @@ def _status(decision: object, name: str) -> RiskCheckStatus:
 
 
 def test_unknown_check_makes_overall_fail() -> None:
-    engine = OrderRiskEngine(paper_settings())
+    engine = OrderRiskEngine(paper_settings(), persistence_key=TEST_PERSISTENCE_KEY)
     intent = build_option_intent(
         account_id=PAPER_ACCOUNT,
         intent=OrderIntent.OPEN_SHORT_PUT,
@@ -67,7 +68,7 @@ def test_unknown_check_makes_overall_fail() -> None:
 
 
 def test_unreconciled_fails() -> None:
-    engine = OrderRiskEngine(paper_settings())
+    engine = OrderRiskEngine(paper_settings(), persistence_key=TEST_PERSISTENCE_KEY)
     intent = build_option_intent(
         account_id=PAPER_ACCOUNT,
         intent=OrderIntent.OPEN_SHORT_PUT,
@@ -92,7 +93,7 @@ def test_unreconciled_fails() -> None:
 def test_covered_call_uncovered_fails() -> None:
     from chronos.domain.enums import OptionRight
 
-    engine = OrderRiskEngine(paper_settings())
+    engine = OrderRiskEngine(paper_settings(), persistence_key=TEST_PERSISTENCE_KEY)
     call = option_contract(right=OptionRight.CALL, con_id=222)
     intent = build_option_intent(
         account_id=PAPER_ACCOUNT,
@@ -121,7 +122,7 @@ def test_covered_call_uncovered_fails() -> None:
 def test_covered_call_fully_covered_passes() -> None:
     from chronos.domain.enums import OptionRight
 
-    engine = OrderRiskEngine(paper_settings())
+    engine = OrderRiskEngine(paper_settings(), persistence_key=TEST_PERSISTENCE_KEY)
     call = option_contract(right=OptionRight.CALL, con_id=222)
     intent = build_option_intent(
         account_id=PAPER_ACCOUNT,
@@ -147,7 +148,7 @@ def test_covered_call_fully_covered_passes() -> None:
 
 
 def test_buy_to_close_requires_held_short() -> None:
-    engine = OrderRiskEngine(paper_settings())
+    engine = OrderRiskEngine(paper_settings(), persistence_key=TEST_PERSISTENCE_KEY)
     intent = build_option_intent(
         account_id=PAPER_ACCOUNT,
         intent=OrderIntent.CLOSE_SHORT_OPTION,
@@ -172,7 +173,7 @@ def test_buy_to_close_requires_held_short() -> None:
 
 
 def test_stock_buy_within_cash_passes_and_short_sell_fails() -> None:
-    engine = OrderRiskEngine(paper_settings())
+    engine = OrderRiskEngine(paper_settings(), persistence_key=TEST_PERSISTENCE_KEY)
     buy = build_stock_intent(
         account_id=PAPER_ACCOUNT,
         intent=OrderIntent.OPEN_LONG_STOCK,
@@ -222,7 +223,7 @@ def test_pending_covered_call_shares_block_a_naked_second_call() -> None:
     # second call on the same 100 shares is NOT covered (would be naked).
     from chronos.domain.enums import OptionRight
 
-    engine = OrderRiskEngine(paper_settings())
+    engine = OrderRiskEngine(paper_settings(), persistence_key=TEST_PERSISTENCE_KEY)
     call = option_contract(right=OptionRight.CALL, con_id=222)
     intent = build_option_intent(
         account_id=PAPER_ACCOUNT,
@@ -250,7 +251,7 @@ def test_pending_covered_call_shares_block_a_naked_second_call() -> None:
 
 def test_stock_buy_blocked_by_existing_put_obligation() -> None:
     # Fix: a stock buy cannot consume cash securing an open short put.
-    engine = OrderRiskEngine(paper_settings())
+    engine = OrderRiskEngine(paper_settings(), persistence_key=TEST_PERSISTENCE_KEY)
     buy = build_stock_intent(
         account_id=PAPER_ACCOUNT,
         intent=OrderIntent.OPEN_LONG_STOCK,
@@ -277,7 +278,9 @@ def test_stock_buy_blocked_by_existing_put_obligation() -> None:
 def test_concentration_uses_existing_baseline() -> None:
     # Fix: existing wheel exposure is the concentration baseline, so a new order
     # that pushes AGGREGATE symbol allocation over the cap fails.
-    engine = OrderRiskEngine(paper_settings(max_symbol_allocation_pct="0.25"))
+    engine = OrderRiskEngine(
+        paper_settings(max_symbol_allocation_pct="0.25"), persistence_key=TEST_PERSISTENCE_KEY
+    )
     intent = build_option_intent(
         account_id=PAPER_ACCOUNT,
         intent=OrderIntent.OPEN_SHORT_PUT,

@@ -6,6 +6,7 @@ from decimal import Decimal
 
 import pytest
 from pydantic import ValidationError
+from tests.support.persistence_keys import TEST_PERSISTENCE_KEY
 
 from chronos.broker.base import BrokerDataError
 from chronos.domain.enums import (
@@ -51,7 +52,7 @@ from chronos.utils.logging import mask_account_id
 NOW = datetime(2026, 7, 16, 15, 30, tzinfo=UTC)
 EXPIRATION = date(2026, 8, 6)
 ACCOUNT_ID = "DU1234567"
-ACCOUNT_FINGERPRINT = account_fingerprint(ACCOUNT_ID)
+ACCOUNT_FINGERPRINT = account_fingerprint(ACCOUNT_ID, key=TEST_PERSISTENCE_KEY)
 
 
 class _Evaluator:

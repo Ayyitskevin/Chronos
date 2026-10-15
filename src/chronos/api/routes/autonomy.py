@@ -647,4 +647,4 @@ def _fingerprint_of(runtime: Any) -> str:
     account_id = str(getattr(runtime.order_management, "account_id", "") or "").strip()
     if not account_id:
         return ""
-    return account_fingerprint(account_id)
+    return account_fingerprint(account_id, key=runtime.persistence_key)

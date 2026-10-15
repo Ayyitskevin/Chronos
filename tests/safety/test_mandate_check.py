@@ -56,10 +56,11 @@ from chronos.cli.mandate_check import (
 from chronos.config.settings import get_settings
 from chronos.domain.enums import DataQuality
 from chronos.utils.identifiers import account_fingerprint
+from tests.support.persistence_keys import TEST_PERSISTENCE_KEY
 
 _NOW = datetime(2026, 7, 1, 14, 0, tzinfo=UTC)
 _ACCOUNT = "DU1234567"
-_FINGERPRINT = account_fingerprint(_ACCOUNT)
+_FINGERPRINT = account_fingerprint(_ACCOUNT, key=TEST_PERSISTENCE_KEY)
 
 _INGRESS_PINS = {
     "provider": "external-worker",
@@ -288,7 +289,9 @@ def test_a_future_window_is_reported_before_it_opens() -> None:
 
 
 def test_a_wrong_account_is_blocking_because_the_backend_boots_inert() -> None:
-    codes = _codes(_shadow(), expected_fingerprint=account_fingerprint("DU7654321"))
+    codes = _codes(
+        _shadow(), expected_fingerprint=account_fingerprint("DU7654321", key=TEST_PERSISTENCE_KEY)
+    )
     assert codes["account-mismatch"] is Severity.BLOCKING
 
 

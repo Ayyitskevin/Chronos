@@ -59,7 +59,7 @@ from chronos.supervisor.position_management import (
     register_position,
     rehydrate_position,
 )
-from chronos.utils.identifiers import account_fingerprint
+from chronos.utils.identifiers import PersistenceKey, account_fingerprint
 
 _T = TypeVar("_T")
 _ORDER_REF = re.compile(r"^CHR-ORD-[0-9A-F]{32}$")
@@ -146,6 +146,7 @@ class ManagedPositionAdmission:
         sessions: sessionmaker[Session],
         readiness: ReconciliationReadiness,
         account_id: str,
+        persistence_key: PersistenceKey,
     ) -> None:
         normalized_account = account_id.strip()
         if not normalized_account:
@@ -155,7 +156,7 @@ class ManagedPositionAdmission:
         self._sessions = sessions
         self._readiness = readiness
         self._account_id = normalized_account
-        self._account_fingerprint = account_fingerprint(normalized_account)
+        self._account_fingerprint = account_fingerprint(normalized_account, key=persistence_key)
 
     def admit_opening(
         self,

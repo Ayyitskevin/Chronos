@@ -17,6 +17,7 @@ from sqlalchemy import event, select, text
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import Select
+from tests.support.persistence_keys import TEST_PERSISTENCE_KEY
 
 from chronos.api.main import create_app
 from chronos.autonomy import OrderForm, StrategyForm, TradingSession
@@ -65,7 +66,7 @@ from chronos.utils.locking import WriterLease
 REPO_ROOT = Path(__file__).resolve().parents[2]
 _NOW = datetime(2026, 8, 3, 14, 0, tzinfo=UTC)
 _EXPIRATION = date(2026, 9, 4)
-_FINGERPRINT = account_fingerprint(DEMO_ACCOUNT_ID)
+_FINGERPRINT = account_fingerprint(DEMO_ACCOUNT_ID, key=TEST_PERSISTENCE_KEY)
 
 
 @pytest.fixture()

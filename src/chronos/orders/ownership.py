@@ -17,13 +17,20 @@ from __future__ import annotations
 
 from chronos.broker.base import VenueOrderIdentity
 from chronos.persistence.order_repositories import OrderIntentRepository, OrderTrackerRepository
-from chronos.utils.identifiers import account_fingerprint
+from chronos.utils.identifiers import PersistenceKey, account_fingerprint
 
 
 class PersistedOrderOwnershipLedger:
-    def __init__(self, intents: OrderIntentRepository, tracker: OrderTrackerRepository) -> None:
+    def __init__(
+        self,
+        intents: OrderIntentRepository,
+        tracker: OrderTrackerRepository,
+        *,
+        persistence_key: PersistenceKey,
+    ) -> None:
         self._intents = intents
         self._tracker = tracker
+        self._persistence_key = persistence_key
 
     def proves_owned(self, identity: VenueOrderIdentity) -> bool:
         intent = self._intents.by_order_ref(
@@ -31,7 +38,8 @@ class PersistedOrderOwnershipLedger:
         )
         if intent is None or intent.order_ref != identity.order_ref:
             return False
-        if intent.account_fingerprint != account_fingerprint(identity.account_id):
+        expected = account_fingerprint(identity.account_id, key=self._persistence_key)
+        if intent.account_fingerprint != expected:
             return False
         events = self._tracker.events(intent.intent_id, current_account_id=identity.account_id)
         return (

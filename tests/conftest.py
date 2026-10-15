@@ -63,6 +63,21 @@ def _deterministic_umask() -> Iterator[None]:
         os.umask(previous)
 
 
+@pytest.fixture(autouse=True)
+def _test_persistence_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """N3: every test runs under the suite's derived persistence key, never a real one.
+
+    The backend refuses to start without ``CHRONOS_PERSISTENCE_KEY`` (demo included), so the
+    key is part of a test's environment like any other required setting. It is derived at run
+    time from a label (``tests/support/persistence_keys.py``); there is no key literal. A test
+    about the absent or malformed key deletes or overrides it with its own ``monkeypatch``.
+    """
+
+    from tests.support.persistence_keys import TEST_PERSISTENCE_KEY_HEX
+
+    monkeypatch.setenv("CHRONOS_PERSISTENCE_KEY", TEST_PERSISTENCE_KEY_HEX)
+
+
 @pytest.fixture
 def demo_broker() -> DemoBroker:
     return DemoBroker(clock=lambda: FIXED_NOW)

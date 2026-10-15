@@ -32,6 +32,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 from sqlalchemy import func, select
 
 from chronos.api.autonomy_wiring import UnauthenticatedSubmittingMandate
@@ -54,10 +55,11 @@ from chronos.domain.enums import BrokerMode, DemoProfile
 from chronos.persistence.schema import AutonomyProposalQueueRow
 from chronos.supervisor import durable
 from chronos.utils.identifiers import account_fingerprint
+from tests.support.persistence_keys import TEST_PERSISTENCE_KEY, TEST_PERSISTENCE_KEY_HEX
 from tests.unit.test_tradingview_bridge import NOW as _BRIDGE_NOW
 from tests.unit.test_tradingview_bridge import _alert, _client, _Recorder
 
-_FINGERPRINT = account_fingerprint(DEMO_ACCOUNT_ID)
+_FINGERPRINT = account_fingerprint(DEMO_ACCOUNT_ID, key=TEST_PERSISTENCE_KEY)
 _MODEL = "ops3-admission"
 _TOKEN_HEADER = "X-Chronos-Token"
 _PROPOSAL = {
@@ -137,6 +139,7 @@ class _World:
             demo_profile=DemoProfile.EMPTY_ACCOUNT,
             allow_order_transmit=False,
             allow_live_trading=False,
+            chronos_persistence_key=SecretStr(TEST_PERSISTENCE_KEY_HEX),  # N3-1
             database_url=f"sqlite:///{self.tmp / 'chronos.db'}",
             log_file=self.tmp / "chronos.log",
             backend_token_file=self.tmp / "backend_api_token",

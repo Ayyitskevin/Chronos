@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from hashlib import sha256
 
+from chronos.utils.identifiers import PersistenceKey
+
 
 def derived_key_hex(label: str) -> str:
     """The 64-hex form of the test key for ``label`` (what an ``.env`` line would carry)."""
@@ -17,7 +19,12 @@ def derived_key_hex(label: str) -> str:
     return sha256(f"chronos-tests:persistence-key:{label}".encode()).hexdigest()
 
 
+def derived_key(label: str) -> PersistenceKey:
+    return PersistenceKey.from_hex(derived_key_hex(label))
+
+
 #: The suite's default install key. ``tests/conftest.py`` exports the same value as
 #: ``CHRONOS_PERSISTENCE_KEY`` for every test, so a value computed here equals the one a
 #: runtime built from the environment computes.
 TEST_PERSISTENCE_KEY_HEX = derived_key_hex("default")
+TEST_PERSISTENCE_KEY = PersistenceKey.from_hex(TEST_PERSISTENCE_KEY_HEX)

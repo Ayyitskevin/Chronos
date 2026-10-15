@@ -29,8 +29,10 @@ import httpx
 import pytest
 from fastapi import Request
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from tests.support.persistence_keys import TEST_PERSISTENCE_KEY, TEST_PERSISTENCE_KEY_HEX
 from worker.config import load_config
 from worker.cycle import CycleOutcome, run_cycle
 
@@ -56,7 +58,7 @@ from chronos.supervisor import durable, evidence_bundles
 from chronos.supervisor.proposers import ProposerRegistration
 from chronos.utils.identifiers import account_fingerprint
 
-_FINGERPRINT = account_fingerprint(DEMO_ACCOUNT_ID)
+_FINGERPRINT = account_fingerprint(DEMO_ACCOUNT_ID, key=TEST_PERSISTENCE_KEY)
 _MODEL = "phase-b-fixture"
 _DECISIONS = f"autonomy.decisions:{_FINGERPRINT}"
 _CYCLES = f"autonomy.cycles:{_FINGERPRINT}"
@@ -152,6 +154,7 @@ def phase_b_settings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[S
         demo_profile=DemoProfile.EMPTY_ACCOUNT,
         allow_order_transmit=False,
         allow_live_trading=False,
+        chronos_persistence_key=SecretStr(TEST_PERSISTENCE_KEY_HEX),  # N3-1
         database_url=f"sqlite:///{tmp_path / 'chronos.db'}",
         log_file=tmp_path / "chronos.log",
         backend_token_file=tmp_path / "backend_api_token",

@@ -47,6 +47,7 @@ from chronos.persistence.order_repositories import (
     RiskDecisionRecord,
     RiskDecisionRepository,
 )
+from chronos.utils.identifiers import PersistenceKey
 from chronos.utils.time import utc_now
 
 
@@ -86,8 +87,10 @@ class OrderManagementService:
         confirmations: OrderConfirmationRepository,
         risk_decisions: RiskDecisionRepository,
         broker_environment_is_paper: bool,
+        persistence_key: PersistenceKey,
     ) -> None:
         self._settings = settings
+        self._persistence_key = persistence_key
         self._environment = environment
         self._account_id = account_id
         self._evidence = evidence_provider
@@ -130,13 +133,16 @@ class OrderManagementService:
             created_at=moment,
             expires_at=moment + timedelta(seconds=self._settings.order_confirmation_ttl_seconds),
             day_bucket=day_bucket,
+            key=self._persistence_key,
         )
         self._intents.create(record, current_account_id=self._account_id)
 
         evidence = self._evidence.gather(intent, now=moment)
         decision = self._risk_engine.evaluate(intent, evidence, now=moment)
         self._risk_decisions.store(
-            _decision_to_record(decision, intent=intent, evidence=evidence),
+            _decision_to_record(
+                decision, intent=intent, evidence=evidence, key=self._persistence_key
+            ),
             current_account_id=self._account_id,
         )
 
@@ -383,6 +389,7 @@ def _decision_to_record(
     *,
     intent: WheelOrderIntent,
     evidence: RiskEvidence,
+    key: PersistenceKey,
 ) -> RiskDecisionRecord:
     from chronos.utils.identifiers import account_fingerprint
 
@@ -407,7 +414,7 @@ def _decision_to_record(
     return RiskDecisionRecord(
         decision_id=decision.decision_id,
         correlation_id=intent.correlation_id,
-        account_fingerprint=account_fingerprint(intent.account_id),
+        account_fingerprint=account_fingerprint(intent.account_id, key=key),
         symbol=intent.symbol,
         product_family=intent.product_family,
         overall_result=decision.overall,

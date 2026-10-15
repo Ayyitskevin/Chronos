@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 from scripts.paper_soak_report import build_soak_report
+from tests.support.persistence_keys import TEST_PERSISTENCE_KEY
 
 from chronos.domain.enums import OrderLifecycle, OrderSide, ProductFamily
 from chronos.persistence.database import Database
@@ -24,7 +25,7 @@ def _record(intent_id: str, key: str) -> OrderIntentRecord:
     return OrderIntentRecord(
         intent_id=intent_id,
         idempotency_key=key,
-        account_fingerprint=account_fingerprint(_ACC),
+        account_fingerprint=account_fingerprint(_ACC, key=TEST_PERSISTENCE_KEY),
         environment="paper",
         product_family=ProductFamily.OPTION,
         wheel_cycle_id=None,
@@ -54,7 +55,9 @@ def _record(intent_id: str, key: str) -> OrderIntentRecord:
 def test_soak_report_counts_intents_events_and_resolutions() -> None:
     db = Database("sqlite:///:memory:")
     db.initialize()
-    db.bind_scope(broker_mode="ibkr", environment="paper", account_id=_ACC)
+    db.bind_scope(
+        broker_mode="ibkr", environment="paper", account_id=_ACC, key=TEST_PERSISTENCE_KEY
+    )
     intents = OrderIntentRepository(db.sessions)
     tracker = OrderTrackerRepository(db.sessions)
     intents.create(_record("a", "key-a"), current_account_id=_ACC)

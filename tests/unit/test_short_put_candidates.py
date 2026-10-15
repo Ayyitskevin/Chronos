@@ -7,6 +7,7 @@ from decimal import Decimal
 from typing import Any, TypeVar, cast
 
 import pytest
+from tests.support.persistence_keys import TEST_PERSISTENCE_KEY
 
 from chronos.broker.base import Broker, BrokerDataError, OptionChainResponse
 from chronos.broker.market_data import MarketDataManager
@@ -414,8 +415,9 @@ def _service(
         market_data,
         reader,
         _settings(),
-        account_fingerprint(expected_account_id),
+        account_fingerprint(expected_account_id, key=TEST_PERSISTENCE_KEY),
         clock=lambda: NOW,
+        persistence_key=TEST_PERSISTENCE_KEY,
     )
     return service, runner, reader, market_data
 
@@ -465,7 +467,7 @@ def test_fresh_empty_account_ranks_puts_in_one_serialized_read_only_run() -> Non
     assert result.resolution.selected.delta == Decimal("-0.28")
     serialized = result.model_dump_json()
     assert ACCOUNT_ID not in serialized
-    assert account_fingerprint(ACCOUNT_ID) not in serialized
+    assert account_fingerprint(ACCOUNT_ID, key=TEST_PERSISTENCE_KEY) not in serialized
     assert reader.calls == 1
     assert runner.run_calls == 1
     assert runner.timeouts == [30.0]
@@ -527,8 +529,9 @@ def test_service_rechecks_hard_candidate_bounds_before_broker_access() -> None:
             market_data,
             reader,
             unsafe_settings,
-            account_fingerprint(ACCOUNT_ID),
+            account_fingerprint(ACCOUNT_ID, key=TEST_PERSISTENCE_KEY),
             clock=lambda: NOW,
+            persistence_key=TEST_PERSISTENCE_KEY,
         )
 
     assert reader.calls == 0
@@ -648,9 +651,10 @@ def test_explicit_zero_reconciliation_age_is_rejected() -> None:
             market_data,
             reader,
             _settings(),
-            account_fingerprint(ACCOUNT_ID),
+            account_fingerprint(ACCOUNT_ID, key=TEST_PERSISTENCE_KEY),
             clock=lambda: NOW,
             max_reconciliation_age=timedelta(0),
+            persistence_key=TEST_PERSISTENCE_KEY,
         )
 
 

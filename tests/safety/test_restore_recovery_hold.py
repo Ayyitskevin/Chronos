@@ -60,6 +60,7 @@ from chronos.orders.recovery_hold import (
 from chronos.orders.state_generation import StateGenerationMarker
 from chronos.persistence.schema import Base, InstallationIdentityRow
 from chronos.utils.identifiers import account_fingerprint
+from tests.support.persistence_keys import TEST_PERSISTENCE_KEY
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 _NOW = datetime(2026, 9, 4, 14, 30, tzinfo=UTC)
@@ -388,7 +389,7 @@ def _mandate(now: datetime) -> AutonomyMandate:
     return AutonomyMandate(
         mandate_id="m-recovery-hold-test",
         mandate_version=1,
-        account_fingerprint=account_fingerprint(DEMO_ACCOUNT_ID),
+        account_fingerprint=account_fingerprint(DEMO_ACCOUNT_ID, key=TEST_PERSISTENCE_KEY),
         mode=AutonomyMode.SHADOW,
         promotions=(
             FamilyPromotion(asset_class=TradableAssetClass.EQUITY, level=PromotionLevel.SHADOW),

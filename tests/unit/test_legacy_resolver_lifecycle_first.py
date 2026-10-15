@@ -32,6 +32,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
+from tests.support.persistence_keys import TEST_PERSISTENCE_KEY
 
 from chronos.domain.enums import OrderLifecycle, OrderSide, ProductFamily
 from chronos.domain.models import BrokerExecution, BrokerOrder, UnderlyingContract
@@ -72,7 +73,7 @@ def _intent(status: OrderLifecycle) -> OrderIntentRecord:
     return OrderIntentRecord(
         intent_id="intent-1",
         idempotency_key="idem-intent-1",
-        account_fingerprint=account_fingerprint(ACCOUNT),
+        account_fingerprint=account_fingerprint(ACCOUNT, key=TEST_PERSISTENCE_KEY),
         environment="paper",
         product_family=ProductFamily.STOCK,
         wheel_cycle_id=None,

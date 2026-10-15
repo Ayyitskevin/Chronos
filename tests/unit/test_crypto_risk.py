@@ -11,6 +11,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from decimal import Decimal
 
+from tests.support.persistence_keys import TEST_PERSISTENCE_KEY
+
 from chronos.config.settings import Settings
 from chronos.domain.enums import OrderIntent, ProductFamily, ReconciliationStatus
 from chronos.domain.models import AccountSummary, CryptoContract
@@ -249,7 +251,7 @@ def test_sell_exceeding_holdings_minus_reserved_fails() -> None:
 
 
 def test_engine_dispatches_crypto_and_disabled_allowlist_fails_eligibility() -> None:
-    engine = OrderRiskEngine(_settings(crypto_allowlist=()))
+    engine = OrderRiskEngine(_settings(crypto_allowlist=()), persistence_key=TEST_PERSISTENCE_KEY)
     decision = engine.evaluate(_crypto_intent(), _evidence(), now=_NOW)
     # Empty allowlist disables the family: eligibility FAILs, overall FAIL.
     assert not decision.approved
@@ -259,7 +261,7 @@ def test_engine_dispatches_crypto_and_disabled_allowlist_fails_eligibility() -> 
 
 
 def test_engine_full_crypto_buy_approves() -> None:
-    engine = OrderRiskEngine(_settings())
+    engine = OrderRiskEngine(_settings(), persistence_key=TEST_PERSISTENCE_KEY)
     decision = engine.evaluate(_crypto_intent(quantity=Decimal("0.001")), _evidence(), now=_NOW)
     assert decision.approved, [(c.name, c.status.value, c.detail) for c in decision.checks]
 
@@ -288,7 +290,9 @@ def test_crypto_broker_none_stays_open() -> None:
 
 
 def test_crypto_ioc_permitted_when_configured() -> None:
-    engine = OrderRiskEngine(_settings(crypto_time_in_force="IOC"))
+    engine = OrderRiskEngine(
+        _settings(crypto_time_in_force="IOC"), persistence_key=TEST_PERSISTENCE_KEY
+    )
     decision = engine.evaluate(
         _crypto_intent(quantity=Decimal("0.001"), time_in_force="IOC"), _evidence(), now=_NOW
     )
@@ -296,7 +300,9 @@ def test_crypto_ioc_permitted_when_configured() -> None:
 
 
 def test_crypto_ioc_rejected_when_setting_is_day() -> None:
-    engine = OrderRiskEngine(_settings(crypto_time_in_force="DAY"))
+    engine = OrderRiskEngine(
+        _settings(crypto_time_in_force="DAY"), persistence_key=TEST_PERSISTENCE_KEY
+    )
     decision = engine.evaluate(
         _crypto_intent(quantity=Decimal("0.001"), time_in_force="IOC"), _evidence(), now=_NOW
     )
@@ -306,7 +312,9 @@ def test_crypto_ioc_rejected_when_setting_is_day() -> None:
 def test_crypto_day_still_permitted_when_setting_is_ioc() -> None:
     # Adversarial-review F3: enabling IOC must not block a plain DAY crypto order
     # (the builder/API default). DAY is always permitted; IOC is additive.
-    engine = OrderRiskEngine(_settings(crypto_time_in_force="IOC"))
+    engine = OrderRiskEngine(
+        _settings(crypto_time_in_force="IOC"), persistence_key=TEST_PERSISTENCE_KEY
+    )
     decision = engine.evaluate(
         _crypto_intent(quantity=Decimal("0.001"), time_in_force="DAY"), _evidence(), now=_NOW
     )
