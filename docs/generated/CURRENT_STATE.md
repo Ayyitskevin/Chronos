@@ -219,10 +219,10 @@ Both are built inert and enabled only by the owner (plan §11); a value would be
 | --- | --- |
 | src/chronos/supervisor/compiler.py | `40b9b4a07dd90356f74552bb291296fbc069758b14cd471b122cea92dcd57538` |
 | src/chronos/autonomy/enums.py | `96bcff19f76065a34d75c9fba00b5682de59448c8a8f770a8628494eec15a3e9` |
-| src/chronos/config/settings.py | `87524d22792a56f074bd1865882ed5f26401ee2fe43a9b41dc500a4a993a957c` |
+| src/chronos/config/settings.py | `58c1ca4c0ace80e05f381b4650255de61ef653f0fa26c793ff408e09d46d8125` |
 | src/chronos/domain/enums.py | `6244760cac081c4ca0cbbec7cfc586efe6fd11471d7e06fbb29c8c4790414828` |
-| src/chronos/runtime.py | `55812607d3571065e36943809faae37bbbcb14030146aa478f6d8c5293c67b68` |
-| src/chronos/api/autonomy_wiring.py | `cf63ce481e3f103c403eab0d3c810babd1a445d2da6c917bd16e8737a7375517` |
+| src/chronos/runtime.py | `8056f21f460a94d595e3a4b5e044c8db2935fac8f259c2f0851088ed8b596da4` |
+| src/chronos/api/autonomy_wiring.py | `41155fd8a9f1c510b24b19ca560ffe9564efe8549dbe5c5ac8589787fb918182` |
 | src/chronos/supervisor/evidence_kinds.py | `374d6de281168796200d10b5ae64f83e4b336b0d18d91377fbefbd3d4a488e06` |
 | src/chronos/broker/demo.py | `461830a97ebd0fbcaa611c8fe0fc6c792c2a6cbbc86c413636994ad2ab9568df` |
 | src/chronos/broker/official_ibkr.py | `bb3f63871d9d8445485d4b26b742dc223f57176accf3e1f339452aecb9d69161` |
