@@ -21,20 +21,31 @@ deleted ONLY when its own manifest PROVES it is pre-cutover and it is more than
   is unclassifiable (it means a clock is wrong).
 
 Everything else is kept and reported: crash temps, restore copies, stray files, an envelope
-with an unexpected file in it, a malformed manifest. A symlink anywhere in the root (or the
-root itself) refuses the WHOLE run before anything is deleted — it is never followed.
+with an unexpected file in it, a malformed manifest, an encryption scheme that is not exactly
+the restore drill's ``AGE_SCHEME``. A symlink ANYWHERE under the root — a direct child, inside
+an envelope, or deep inside any other directory — or the root itself being one, refuses the
+WHOLE run before anything is deleted; it is never followed.
+
+Deleting is bound to the directory that was classified, not to its name: the directory is
+opened once (no-follow), its ``fstat`` identity must equal the classified one, it is renamed
+(descriptor-relative) to a private quarantine name inside the root, the quarantined name is
+checked against the identity again, and only then are its files unlinked through the open
+descriptor and the quarantine removed. A name swapped at any point either refuses the run for
+that envelope or leaves the substitute untouched; it is never deleted in the classified
+envelope's place.
 
 The default is a DRY RUN. ``--apply`` deletes. There is no flag for the retention and no
 ``--now``: a pinned clock exists only as ``main(argv, clock=…)`` for tests.
 
-Output is JSON of counts and names — never manifest contents. Exit codes: 0 nothing to do,
-10 dry run found candidates (nothing deleted), 11 pruned, 2 refused.
+Output is JSON of counts, names and CLOSED reasons — never a manifest value. Exit codes: 0
+nothing to do, 10 dry run found candidates (nothing deleted), 11 pruned, 2 refused.
 """
 
 from __future__ import annotations
 
 import argparse
 import contextlib
+import errno
 import json
 import os
 import re
@@ -46,6 +57,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from chronos.operations.restore_drill import (
+    AGE_SCHEME,
     AUDIT_ANCHOR_NAME,
     AUDIT_LOG_NAME,
     DB_NAME,
@@ -70,12 +82,17 @@ EXIT_WOULD_PRUNE = 10
 EXIT_PRUNED = 11
 
 _ENVELOPE_RE = re.compile(r"^chronos-\d{8}T\d{6}Z$")
-_SCHEMA_HEAD_RE = re.compile(r"^schema_version:(\d+)$")
+_SCHEMA_HEAD_RE = re.compile(r"^schema_version:(\d{1,9})$")
 _ENVELOPE_FILES = frozenset(
     {MANIFEST_NAME, DB_NAME + ENCRYPTED_DB_SUFFIX, AUDIT_LOG_NAME, AUDIT_ANCHOR_NAME}
 )
 _REQUIRED_FILES = frozenset({MANIFEST_NAME, DB_NAME + ENCRYPTED_DB_SUFFIX})
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+#: Prefix of the private name an envelope is renamed to while it is being deleted.
+_QUARANTINE_PREFIX = ".n3-prune-"
+#: Bounds of the symlink walk: a tree this deep or this large is refused, never half-checked.
+_MAX_WALK_DEPTH = 64
+_MAX_WALK_ENTRIES = 1_000_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,21 +119,19 @@ def _classify_envelope(
 
     try:
         dir_fd = os.open(name, _DIR_FLAGS, dir_fd=root_fd)
-    except OSError as error:
-        return unclassified(f"could not be opened: {error.strerror}")
+    except OSError:
+        return unclassified("could not be opened")
     try:
         if (os.fstat(dir_fd).st_dev, os.fstat(dir_fd).st_ino) != identity:
             return unclassified("changed while being scanned")
         entries = set(os.listdir(dir_fd))
         if not entries >= _REQUIRED_FILES:
-            return unclassified(f"missing {sorted(_REQUIRED_FILES - entries)}")
+            return unclassified("is missing a file every envelope has")
         if entries - _ENVELOPE_FILES:
-            return unclassified(
-                f"holds files that are not an envelope's: {sorted(entries - _ENVELOPE_FILES)}"
-            )
+            return unclassified("holds files that are not an envelope's")
         for entry in sorted(entries):
             if not stat.S_ISREG(os.stat(entry, dir_fd=dir_fd, follow_symlinks=False).st_mode):
-                return unclassified(f"{entry} is not a regular file")
+                return unclassified("holds an entry that is not a regular file")
         try:
             fd = _open_regular_at(dir_fd, MANIFEST_NAME, "manifest")
             with os.fdopen(fd, "rb") as handle:
@@ -129,8 +144,8 @@ def _classify_envelope(
         os.close(dir_fd)
     if taken.tzinfo is None:
         return unclassified("snapshot_completed_at carries no timezone")
-    if not str(manifest.encryption.get("scheme", "")).startswith("age"):
-        return unclassified("manifest does not record an age-encrypted envelope")
+    if manifest.encryption.get("scheme") != AGE_SCHEME:
+        return unclassified("manifest does not record the restore drill's age scheme")
     age = now - taken
     age_days = age / timedelta(days=1)
     if age < timedelta(0):
@@ -142,7 +157,7 @@ def _classify_envelope(
             "unclassified",
             "unknown",
             age_days,
-            f"schema head {manifest.schema_head!r} has no documented schema number",
+            "schema head has no documented schema number",
         )
     schema = int(match.group(1))
     if schema >= CUTOVER_SCHEMA:
@@ -167,6 +182,42 @@ def _classify_envelope(
     )
 
 
+def _contains_symlink(parent_fd: int, name: str) -> bool:
+    """True when ``name`` (a directory under ``parent_fd``) holds a symlink at any depth.
+    Descriptor-relative and no-follow throughout; a tree too deep or too large to walk, or a
+    directory that cannot be opened, counts as unsafe (``True``) rather than half-checked."""
+
+    budget = [_MAX_WALK_ENTRIES]
+
+    def walk(dir_fd: int, depth: int) -> bool:
+        if depth > _MAX_WALK_DEPTH:
+            return True
+        with os.scandir(dir_fd) as entries:
+            for entry in entries:
+                budget[0] -= 1
+                if budget[0] < 0 or entry.is_symlink():
+                    return True
+                if entry.is_dir(follow_symlinks=False):
+                    child = os.open(entry.name, _DIR_FLAGS, dir_fd=dir_fd)
+                    try:
+                        if walk(child, depth + 1):
+                            return True
+                    finally:
+                        os.close(child)
+        return False
+
+    try:
+        top = os.open(name, _DIR_FLAGS, dir_fd=parent_fd)
+    except OSError:
+        return True
+    try:
+        return walk(top, 0)
+    except OSError:
+        return True
+    finally:
+        os.close(top)
+
+
 def _scan(root_fd: int, now: datetime) -> list[_Finding]:
     findings: list[_Finding] = []
     for name in sorted(os.listdir(root_fd)):
@@ -177,6 +228,16 @@ def _scan(root_fd: int, now: datetime) -> list[_Finding]:
             )
         elif not stat.S_ISDIR(info.st_mode):
             findings.append(_Finding(name, "unclassified", "unknown", None, "not a directory"))
+        elif _contains_symlink(root_fd, name):
+            findings.append(
+                _Finding(
+                    name,
+                    "refused",
+                    "symlink",
+                    None,
+                    "holds a symlink (or is too deep or large to check): never followed",
+                )
+            )
         elif not _ENVELOPE_RE.match(name):
             findings.append(
                 _Finding(name, "unclassified", "unknown", None, "not a published envelope name")
@@ -187,26 +248,51 @@ def _scan(root_fd: int, now: datetime) -> list[_Finding]:
 
 
 def _delete_envelope(root_fd: int, finding: _Finding) -> None:
-    """Remove one proved envelope: re-check its identity and file set, unlink its files
-    descriptor-relative, then the directory. Raises ``OSError``/``DrillRefused`` if the
-    directory is no longer the one that was classified."""
+    """Remove one proved envelope, bound to the directory that was classified.
 
-    info = os.stat(finding.name, dir_fd=root_fd, follow_symlinks=False)
-    if not stat.S_ISDIR(info.st_mode) or (info.st_dev, info.st_ino) != finding.identity:
-        raise DrillRefused(f"{finding.name} changed after it was classified; left in place")
-    dir_fd = os.open(finding.name, _DIR_FLAGS, dir_fd=root_fd)
+    Opens the name ONCE (no-follow) and compares the descriptor's own ``fstat`` identity with
+    the classified one before anything is touched; renames the name to a private quarantine
+    name and checks the quarantined entry against the identity again; unlinks the files
+    through the open descriptor; removes the quarantine. A name that was swapped at any point
+    raises :class:`DrillRefused` and the substitute is left exactly where it is. Messages are
+    closed strings (no filesystem or manifest text)."""
+
+    name = finding.name
     try:
+        dir_fd = os.open(name, _DIR_FLAGS, dir_fd=root_fd)
+    except OSError as error:
+        raise DrillRefused("could not be opened; left in place") from error
+    try:
+        opened = os.fstat(dir_fd)
+        if (opened.st_dev, opened.st_ino) != finding.identity:
+            raise DrillRefused("is not the directory that was classified; left in place")
+        quarantine = _QUARANTINE_PREFIX + os.urandom(8).hex()
+        os.rename(name, quarantine, src_dir_fd=root_fd, dst_dir_fd=root_fd)
+
+        def put_back(reason: str) -> DrillRefused:
+            try:
+                os.rename(quarantine, name, src_dir_fd=root_fd, dst_dir_fd=root_fd)
+            except OSError:
+                return DrillRefused(f"{reason}; could not be put back, held as {quarantine}")
+            return DrillRefused(f"{reason}; put back")
+
+        moved = os.stat(quarantine, dir_fd=root_fd, follow_symlinks=False)
+        if not stat.S_ISDIR(moved.st_mode) or (moved.st_dev, moved.st_ino) != finding.identity:
+            raise put_back("a different directory held the name when it was renamed")
         entries = set(os.listdir(dir_fd))
         if entries - _ENVELOPE_FILES:
-            raise DrillRefused(
-                f"{finding.name} gained files after it was classified; left in place"
-            )
+            raise put_back("gained files after it was classified")
         for entry in sorted(entries):
             os.unlink(entry, dir_fd=dir_fd)
         os.fsync(dir_fd)
     finally:
         os.close(dir_fd)
-    os.rmdir(finding.name, dir_fd=root_fd)
+    final = os.stat(quarantine, dir_fd=root_fd, follow_symlinks=False)
+    if (final.st_dev, final.st_ino) != finding.identity:
+        raise DrillRefused(
+            f"quarantine name changed after its files were removed; kept as {quarantine}"
+        )
+    os.rmdir(quarantine, dir_fd=root_fd)
     os.fsync(root_fd)
 
 
@@ -250,8 +336,11 @@ def prune(root: Path, *, now: datetime, apply: bool) -> dict[str, object]:
         for finding in candidates:
             try:
                 _delete_envelope(root_fd, finding)
-            except (OSError, DrillRefused) as error:
+            except DrillRefused as error:
                 failed.append(f"{finding.name}: {error}")
+            except OSError as error:
+                code_name = errno.errorcode.get(error.errno or 0, "OSError")
+                failed.append(f"{finding.name}: delete failed ({code_name}); left as it was")
             else:
                 deleted.append(finding.name)
         report["deleted"] = deleted

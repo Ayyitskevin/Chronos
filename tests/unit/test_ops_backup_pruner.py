@@ -17,6 +17,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -240,14 +241,11 @@ def test_a_real_envelope_from_the_repositorys_writer_is_classified_and_pruned(
 
 # ------------------------------------------------------- r1: Daybreak's HOLD (7420fa8)
 #
-# Each test below failed at 7420fa8 for the reason in its xfail marker (strict: a test that
-# starts passing without the fix is itself reported).
+# Each test below failed at 7420fa8 (commit 37e962b recorded that as strict xfails; the fix
+# commit removes the markers). The swap tests wrap ``os`` calls to move the classified directory
+# aside and put a lookalike at its name at a chosen instant, deterministically.
 
 SENTINEL = "SENTINEL-manifest-value-7f3a91"
-
-
-def _red(reason: str) -> pytest.MarkDecorator:
-    return pytest.mark.xfail(strict=True, reason=f"N3-3 r1 red: {reason}")
 
 
 def _replace_with_lookalike(envelope: Path, held: Path, *, files: bool) -> Path:
@@ -260,21 +258,20 @@ def _replace_with_lookalike(envelope: Path, held: Path, *, files: bool) -> Path:
     return envelope
 
 
-@_red("the second open of the name is never compared with the classified identity (P1-1)")
 def test_a_directory_swapped_in_before_the_delete_opens_it_is_not_deleted(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     old = make_envelope(root, 400)
     held = root / "held-original"
     real_open = os.open
-    seen = {"opens": 0, "ran": False}
+    seen = {"ran": False}
 
     def swapping_open(path, flags, mode=0o777, *, dir_fd=None):  # type: ignore[no-untyped-def]
-        if path == old.name:
-            seen["opens"] += 1
-            if seen["opens"] == 2:  # 1 = the scan's classification, 2 = the delete's open
-                _replace_with_lookalike(old, held, files=True)
-                seen["ran"] = True
+        # fire on the open the DELETE issues (not the scan's), whatever order the module opens in
+        in_delete = sys._getframe(1).f_code.co_name == "_delete_envelope"
+        if path == old.name and in_delete and not seen["ran"]:
+            _replace_with_lookalike(old, held, files=True)
+            seen["ran"] = True
         return real_open(path, flags, mode, dir_fd=dir_fd)
 
     monkeypatch.setattr(os, "open", swapping_open)
@@ -289,7 +286,6 @@ def test_a_directory_swapped_in_before_the_delete_opens_it_is_not_deleted(
     assert (held / "manifest.json").exists()  # the classified inode is untouched
 
 
-@_red("rmdir is by NAME, so a directory substituted at that name is removed (P1-1)")
 def test_a_directory_swapped_in_before_the_final_rmdir_is_not_removed(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -313,7 +309,6 @@ def test_a_directory_swapped_in_before_the_final_rmdir_is_not_removed(
     assert old.is_dir(), "the substitute directory was removed in place of the classified one"
 
 
-@_red("startswith('age') admits a scheme the restore boundary refuses (P2-1)")
 def test_a_scheme_that_is_not_exactly_the_restore_drills_is_never_pruned(root: Path) -> None:
     from chronos.operations.restore_drill import AGE_SCHEME
 
@@ -332,7 +327,6 @@ def test_a_scheme_that_is_not_exactly_the_restore_drills_is_never_pruned(root: P
     assert [item["name"] for item in report["unclassified"]] == [typo.name]  # type: ignore[index, union-attr]
 
 
-@_red("an unrecognised schema_head is echoed into the report (P2-2)")
 def test_no_manifest_or_directory_value_reaches_any_output_field(root: Path) -> None:
     bad_head = make_envelope(root, 400, head=SENTINEL)
     bad_scheme = make_envelope(root, 401)
@@ -352,7 +346,6 @@ def test_no_manifest_or_directory_value_reaches_any_output_field(root: Path) -> 
     assert {bad_head, bad_scheme, bad_time, stray} <= {p for p in root.iterdir()}
 
 
-@_red("a symlink inside an envelope is only 'unclassified', so peers are deleted (P2-3)")
 def test_a_symlink_nested_in_an_envelope_refuses_the_whole_run(root: Path, tmp_path: Path) -> None:
     peer = make_envelope(root, 400)
     linked = make_envelope(root, 401)
@@ -367,7 +360,6 @@ def test_a_symlink_nested_in_an_envelope_refuses_the_whole_run(root: Path, tmp_p
     assert any("symlink" in str(r) for r in report["refused"])  # type: ignore[union-attr]
 
 
-@_red("only direct children of the root are checked for symlinks (P2-3)")
 def test_a_symlink_deep_inside_any_directory_refuses_the_whole_run(
     root: Path, tmp_path: Path
 ) -> None:
@@ -375,6 +367,55 @@ def test_a_symlink_deep_inside_any_directory_refuses_the_whole_run(
     copy = root / "restored-copy" / "nested" / "deeper"
     copy.mkdir(parents=True)
     (copy / "link").symlink_to(tmp_path)
+    code, report, _ = run_cli(root, "--apply")
+    assert code == pruner.EXIT_REFUSED
+    assert peer.is_dir()
+    assert report["deleted"] == []
+
+
+def test_a_directory_swapped_in_between_the_check_and_the_quarantine_is_put_back(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """New with the quarantine design: the swap lands between the descriptor's identity check
+    and the rename. The rename then moves the SUBSTITUTE; the identity check on the quarantined
+    entry catches it, the substitute goes back to its name untouched, the run refuses."""
+    old = make_envelope(root, 400)
+    held = root / "held-original"
+    real_rename = os.rename
+    seen = {"ran": False}
+
+    def swapping_rename(src, dst, *, src_dir_fd=None, dst_dir_fd=None):  # type: ignore[no-untyped-def]
+        if src == old.name and not seen["ran"]:
+            _replace_with_lookalike(old, held, files=True)
+            seen["ran"] = True
+        return real_rename(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+    monkeypatch.setattr(os, "rename", swapping_rename)
+    code, report, _ = run_cli(root, "--apply")
+    monkeypatch.undo()
+    assert seen["ran"], "the swap hook never fired: the test lost its positive control"
+    assert code == pruner.EXIT_REFUSED
+    assert report["deleted"] == []
+    assert (old / "chronos.db.age").read_bytes() == b"replacement ciphertext"  # back, untouched
+    assert (old / "manifest.json").exists()
+    assert (held / "manifest.json").exists() and (held / "chronos.db.age").exists()
+    assert not [n for n in names(root) if n.startswith(pruner._QUARANTINE_PREFIX)]
+
+
+def test_a_successful_delete_leaves_no_quarantine_behind(root: Path) -> None:
+    make_envelope(root, 400)
+    make_envelope(root, 5)
+    code, _report, _ = run_cli(root, "--apply")
+    assert code == pruner.EXIT_PRUNED
+    assert not [n for n in names(root) if n.startswith(pruner._QUARANTINE_PREFIX)]
+
+
+def test_a_tree_too_deep_to_check_for_symlinks_refuses_the_run(root: Path) -> None:
+    peer = make_envelope(root, 400)
+    deep = root / "restored-copy"
+    for _ in range(pruner._MAX_WALK_DEPTH + 3):
+        deep = deep / "d"
+    deep.mkdir(parents=True)
     code, report, _ = run_cli(root, "--apply")
     assert code == pruner.EXIT_REFUSED
     assert peer.is_dir()

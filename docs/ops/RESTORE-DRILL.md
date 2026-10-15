@@ -304,20 +304,30 @@ it WOULD delete and deletes nothing. Add `--apply` to delete.
 
 - **What it deletes:** a published envelope `chronos-<stamp>/` whose own `manifest.json`
   records a pre-cutover schema (`schema_head` of `schema_version:N`, N below 18 — the archive
-  of the old schema-17 database is one) and a `snapshot_completed_at` more than 90 days
-  before now. Exactly 90 days is kept. Age and class are read from the manifest, never from
-  file times.
+  of the old schema-17 database is one), an `encryption.scheme` exactly equal to the restore
+  drill's `age-x25519-v1`, and a `snapshot_completed_at` more than 90 days before now. Exactly
+  90 days is kept. Age and class are read from the manifest, never from file times.
 - **What it never deletes:** a post-cutover envelope (schema 18 and up) however old; anything
   it cannot classify (an `alembic:`/`unversioned` head, a bad or missing manifest, an
-  unexpected file, a future-dated snapshot, crash temps `.chronos-…tmp`, restore copies,
-  stray files) — these are listed under `unclassified` so you can decide by hand; anything
+  unexpected file, a future-dated snapshot, any other encryption scheme, crash temps
+  `.chronos-…tmp`, restore copies, stray files) — these are listed under `unclassified` so you can decide by hand; anything
   outside `--root`.
-- **Symlinks:** a symlink in the root, or a symlinked `--root`, refuses the whole run (exit 2)
-  before anything is deleted. It is never followed.
+- **Symlinks:** a symlink ANYWHERE under the root (a direct child, a file inside an envelope,
+  or deep inside any other directory), or a symlinked `--root`, refuses the whole run (exit 2)
+  before anything is deleted. It is never followed. A tree too deep or too large to check is
+  refused the same way.
+- **How a delete is bound to the right directory:** the envelope is opened once (no-follow) and
+  its identity must equal the one that was classified; it is then renamed to a private
+  `.n3-prune-<random>` name inside the root and checked again; its files are unlinked through the
+  open descriptor and the quarantine is removed. If a different directory takes the name at any
+  moment the envelope is left alone (and put back if it was moved): the report names it under
+  `failed`, the exit is 2, and the substitute is never deleted. A `.n3-prune-…` leftover means a
+  delete was interrupted; the next run lists it under `unclassified`.
 - **Exit codes:** `0` nothing to prune · `10` dry run found candidates (nothing deleted) ·
   `11` pruned · `2` refused (or a delete failed; the report names it).
 - **The 90 is fixed** (`RETENTION_DAYS`, the ruling); there is no flag to change it and no
-  `--now`. Output is JSON of counts and names only — never manifest contents.
+  `--now`. Output is JSON of counts, names and fixed reasons only — no manifest value and no
+  file name from inside an envelope is ever echoed.
 - **Not covered:** the cleartext copies `--restore-into` writes are wherever you pointed them,
   outside the backup root; remove those by hand when the drill is done. Off-host copies of an
   envelope are yours to prune too.
