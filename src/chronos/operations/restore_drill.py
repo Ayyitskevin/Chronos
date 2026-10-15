@@ -52,7 +52,12 @@ What the drill does and does not do:
   ``Database.initialize()`` carries no alembic table). The head check on the
   restored copy compares that value AND runs the repository's own acceptance
   (``Database.initialize()`` on an already-versioned store verifies the version
-  and zero drift and applies no upgrade).
+  and zero drift and applies no upgrade). One exception, by name only: the N3-2
+  cutover archive (``chronos.operations.cutover_archive``) backs up a store of a
+  RETIRED schema that the running repository refuses by design, and passes the head
+  it read from the source as ``archived_schema_head``; the restore then verifies
+  ``restored head == manifest head == that head`` with no repository acceptance and
+  says so (``acceptance: archived:<head>``). The CLI never sets it.
 - The database is encrypted at rest with ``age`` (route A: the age CLI — Muse
   ruling 2026-09-16, delegated by Kevin) to exactly TWO recipients — the host's
   operational public key and Kevin's recovery public key — inside the temp
@@ -236,6 +241,10 @@ class RestoreReport:
     audit_chain: str  # VALID | BROKEN | ABSENT | NOT_APPLICABLE
     failures: tuple[str, ...]
     rto_s: float
+    #: ``repository`` — the running repository accepted the copy (``Database.initialize()``,
+    #: version + zero drift); ``archived:<head>`` — the caller named a RETIRED schema head
+    #: (N3-2 cutover archive) and the copy was verified by exact head instead (see ``restore``).
+    acceptance: str = "repository"
 
     @property
     def verified(self) -> bool:
@@ -1165,11 +1174,17 @@ def _open_envelope(manifest: BackupManifest) -> tuple[int, Path]:
 
 
 def _verify_in(
-    manifest: BackupManifest, target_fd: int, target_abs: Path, has_audit: bool
+    manifest: BackupManifest,
+    target_fd: int,
+    target_abs: Path,
+    has_audit: bool,
+    *,
+    archived_schema_head: str | None = None,
 ) -> tuple[list[str], dict[str, bool | str]]:
     """The four verifiers, every read through the target directory descriptor; the
     repository's own acceptance (a pathname open) is bound by identity checks before and
-    after it."""
+    after it. With ``archived_schema_head`` the acceptance is the exact head the caller
+    named instead (a retired schema the running repository refuses by design)."""
 
     failures: list[str] = []
     facts: dict[str, bool | str] = {}
@@ -1196,7 +1211,20 @@ def _verify_in(
 
         accepted = True
         lexical = target_abs / db_name
-        if not _entry_is_real_file(target_fd, db_name, copy_identity()) or _nofollow_identity(
+        facts["acceptance"] = "repository"
+        if archived_schema_head is not None:
+            # N3-2: an archive of a RETIRED schema. The running repository refuses that
+            # version by design (database.py, "Unsupported Chronos schema version"), so the
+            # acceptance is the exact head the caller read from the source before the backup;
+            # nothing is opened by pathname and nothing is initialized on the copy.
+            facts["acceptance"] = f"archived:{archived_schema_head}"
+            if head != archived_schema_head:
+                accepted = False
+                failures.append(
+                    f"schema_head: restored {head} != archived head {archived_schema_head} "
+                    "named by the caller; a retired-schema archive is verified by exact head only"
+                )
+        elif not _entry_is_real_file(target_fd, db_name, copy_identity()) or _nofollow_identity(
             target_abs
         ) != _dir_identity(target_fd):
             accepted = False
@@ -1273,7 +1301,11 @@ def _verify_in(
 
 
 def verify_restored(
-    manifest: BackupManifest, restored: Path, restored_audit_log: Path | None
+    manifest: BackupManifest,
+    restored: Path,
+    restored_audit_log: Path | None,
+    *,
+    archived_schema_head: str | None = None,
 ) -> tuple[list[str], dict[str, bool | str]]:
     """The four verifiers against a restored copy named by path (the directory is reached
     by the no-follow walk and every read goes through it)."""
@@ -1281,7 +1313,13 @@ def verify_restored(
     restored = Path(restored)
     target_fd, target_abs = _walk_directory(restored.parent, "restore target", create=False)
     try:
-        return _verify_in(manifest, target_fd, target_abs, restored_audit_log is not None)
+        return _verify_in(
+            manifest,
+            target_fd,
+            target_abs,
+            restored_audit_log is not None,
+            archived_schema_head=archived_schema_head,
+        )
     finally:
         os.close(target_fd)
 
@@ -1325,17 +1363,28 @@ def restore(
     *,
     clock: Clock | None = None,
     keys: AgeKeys | None = None,
+    archived_schema_head: str | None = None,
 ) -> RestoreReport:
     """Decrypt the envelope's database through the host identity into a fresh directory,
     copy the audit pair beside it, and verify them there — the target descriptor is held
     through the decrypt, the copy AND the verification; rto_s from start to verified. A
-    decrypt failure is a typed refusal recorded in the report (``decrypt: refused — …``)."""
+    decrypt failure is a typed refusal recorded in the report (``decrypt: refused — …``).
+
+    ``archived_schema_head`` (N3-2): the source is an archive of a RETIRED schema, which the
+    running repository refuses by design; name the head the caller read from the source
+    (``schema_head(source)``) and the schema check becomes ``restored == manifest == named``
+    with no repository acceptance, reported as ``acceptance: archived:<head>``. Every other
+    verifier (sha256, row counts, audit chain) is unchanged. Restoring such a copy for use
+    needs the code that last ran that schema; this flag never makes it acceptable here."""
 
     clock = clock or system_clock()
     keys = keys or load_age_keys()
     _require_age_manifest(manifest)
     target_dir = Path(target_dir)
     target_abs = target_dir if target_dir.is_absolute() else Path.cwd() / target_dir
+    acceptance = (
+        "repository" if archived_schema_head is None else f"archived:{archived_schema_head}"
+    )
     started = clock.monotonic()
     env_fd, _env_abs = _open_envelope(manifest)
     try:
@@ -1355,6 +1404,7 @@ def restore(
                     audit_chain="NOT_APPLICABLE" if manifest.audit_head is None else "ABSENT",
                     failures=(f"decrypt: refused — {error}",),
                     rto_s=clock.monotonic() - started,
+                    acceptance=acceptance,
                 )
             has_audit = manifest.audit_log_path is not None
             if has_audit:
@@ -1365,7 +1415,13 @@ def restore(
                     finally:
                         os.close(src)
             os.fsync(target_fd)
-            failures, facts = _verify_in(manifest, target_fd, target_abs, has_audit)
+            failures, facts = _verify_in(
+                manifest,
+                target_fd,
+                target_abs,
+                has_audit,
+                archived_schema_head=archived_schema_head,
+            )
             if _nofollow_identity(target_abs) != _dir_identity(target_fd):
                 failures.append(
                     f"restore target swapped: {target_abs} no longer names the directory the "
@@ -1385,6 +1441,7 @@ def restore(
         audit_chain=str(facts["audit_chain"]),
         failures=tuple(failures),
         rto_s=verified_at - started,
+        acceptance=str(facts["acceptance"]),
     )
 
 
@@ -1465,7 +1522,11 @@ def run_drill(
     *,
     clock: Clock | None = None,
     keys: AgeKeys | None = None,
+    archived_schema_head: str | None = None,
 ) -> DrillReport:
+    """Backup → rpo → restore + verify, one report. ``archived_schema_head`` is passed to
+    :func:`restore` (the N3-2 cutover archive of a retired schema); the CLI never sets it."""
+
     clock = clock or system_clock()
     keys = keys or load_age_keys()
     manifest = backup(db_path, out_dir, clock=clock, keys=keys)
@@ -1476,7 +1537,13 @@ def run_drill(
     except DrillRefused as error:
         rpo, basis = None, {"source": None, "refused": str(error)}
         failures.append(f"rpo: refused — {error}")
-    report = restore(manifest, restore_into, clock=clock, keys=keys)
+    report = restore(
+        manifest,
+        restore_into,
+        clock=clock,
+        keys=keys,
+        archived_schema_head=archived_schema_head,
+    )
     failures.extend(report.failures)
     return DrillReport(
         manifest=manifest,

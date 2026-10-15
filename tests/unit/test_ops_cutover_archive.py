@@ -852,7 +852,6 @@ def _drill_store(tmp_path: Path) -> Store:
     return _store(tmp_path, binding="closed")
 
 
-@red
 def test_8a_run_drill_with_the_archived_head_verifies_a_store_one_version_behind(
     tmp_path: Path,
 ) -> None:
@@ -886,7 +885,6 @@ def test_8b_control_without_the_seam_the_drill_refuses_the_retired_schema(
     assert any(f.startswith(prefix) for f in report.failures), report.failures
 
 
-@red
 def test_8c_an_archived_head_that_is_not_the_store_s_head_is_not_verified(
     tmp_path: Path,
 ) -> None:
@@ -904,7 +902,6 @@ def test_8c_an_archived_head_that_is_not_the_store_s_head_is_not_verified(
     assert report.restore is not None and report.restore.acceptance.startswith("archived:")
 
 
-@red
 def test_8d_the_restore_report_defaults_to_repository_acceptance(tmp_path: Path) -> None:
     store = _store(tmp_path, version_offset=0)  # a store AT the running version: accepted as before
     report = run_drill(store.db, tmp_path / "out", tmp_path / "restored", clock=_clock(store.now))

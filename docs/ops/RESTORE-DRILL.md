@@ -226,6 +226,21 @@ exactly this) or the official release; the harness refuses without it with the s
 docs/ops/RESTORE-DRILL.md, section 'Encryption at rest'*, and the test file skips with the
 same sentence on a host without it.
 
+## Archiving a retired schema — the N3 cutover (the one named exception)
+
+The N3 cutover archive (`python -m chronos.operations.cutover_archive`,
+[`N3-CUTOVER.md`](N3-CUTOVER.md)) runs this harness over the **pre-cutover** store — a schema
+the running repository refuses by design (`database.py`: "Unsupported Chronos schema
+version"). Step 5's repository acceptance can therefore never pass for that archive, so the
+archive command names the head it read from the source before the backup
+(`archived_schema_head`, the value `schema_head(source)` returns) and the restore verifies
+`restored head == manifest head == that head` instead; sha256, row counts and the audit
+chain verify exactly as before. The report says which acceptance it ran: `"acceptance":
+"repository"` (the default — every ordinary drill) or `"acceptance": "archived:<head>"`.
+The CLI never sets it, and naming a head makes nothing acceptable to the running code: to
+USE a restored copy of a retired schema, check out the code that last ran it (the
+pre-cutover tag the cutover runbook records).
+
 ## Owner asks (Kevin) — the seams, not implemented here
 
 - **Off-host copy placement.** Nothing here copies a backup anywhere; a backup on the same
