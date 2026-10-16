@@ -253,9 +253,14 @@ def _delete_envelope(root_fd: int, finding: _Finding) -> None:
     Opens the name ONCE (no-follow) and compares the descriptor's own ``fstat`` identity with
     the classified one before anything is touched; renames the name to a private quarantine
     name and checks the quarantined entry against the identity again; unlinks the files
-    through the open descriptor; removes the quarantine. A name that was swapped at any point
-    raises :class:`DrillRefused` and the substitute is left exactly where it is. Messages are
-    closed strings (no filesystem or manifest text)."""
+    through the open descriptor; removes the quarantine. A name that was swapped before the
+    files are unlinked raises :class:`DrillRefused` and the substitute is left exactly where it
+    is (put back if it was moved). One window is NOT closed: the last identity check and the
+    final ``rmdir`` are two path operations, so a writer in the root can swap the private
+    quarantine name between them. The directory then removed is the one they made and it can
+    only be EMPTY (``rmdir`` refuses a directory with content, which stays and is reported as
+    failed); the classified inode's files were already unlinked through the descriptor.
+    Messages are closed strings (no filesystem or manifest text)."""
 
     name = finding.name
     try:

@@ -320,9 +320,14 @@ it WOULD delete and deletes nothing. Add `--apply` to delete.
   its identity must equal the one that was classified; it is then renamed to a private
   `.n3-prune-<random>` name inside the root and checked again; its files are unlinked through the
   open descriptor and the quarantine is removed. If a different directory takes the name at any
-  moment the envelope is left alone (and put back if it was moved): the report names it under
-  `failed`, the exit is 2, and the substitute is never deleted. A `.n3-prune-…` leftover means a
-  delete was interrupted; the next run lists it under `unclassified`.
+  moment before its files are removed the envelope is left alone (and put back if it was moved):
+  the report names it under `failed`, the exit is 2, and the substitute is not deleted. One
+  window stays open: between the last identity check and the final `rmdir` of the private
+  quarantine name, someone with write access to the root can swap in a directory of their own.
+  If it is empty it is removed (they made it; the run reports success); if it holds anything it
+  stays untouched and the delete is reported as `failed`. Content is never deleted that way; only
+  an empty directory an attacker created can be. A `.n3-prune-…` leftover means a delete was
+  interrupted; the next run lists it under `unclassified`.
 - **Exit codes:** `0` nothing to prune · `10` dry run found candidates (nothing deleted) ·
   `11` pruned · `2` refused (or a delete failed; the report names it).
 - **The 90 is fixed** (`RETENTION_DAYS`, the ruling); there is no flag to change it and no
