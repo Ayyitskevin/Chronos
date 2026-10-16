@@ -61,6 +61,20 @@ deletes nothing after a post-create failure** (Linux has no unlink-by-descriptor
 the ciphertext this run created by path and device:inode, `removed` is always `false`, and the owner shreds it.
 Trust root stated for review: the adversary does not hold the store owner's uid or root.
 
+r4 (Daybreak's r3 review): **the sentinels' parent must be owner-private.** Removing an empty directory is
+authorized by write permission on its PARENT, not by its own mode, so a 0500 sentinel inside the documented
+`mkdir -p data` under umask 002 (0775, group-writable) could be removed by any uid in the group. The command now
+refuses — `PARENT_NOT_PRIVATE` — unless `data/` is a directory owned by the effective uid with no group or other
+write bit, before the source is even opened (dry-run and apply alike: no envelope, no reader bookkeeping) and again
+on the descriptor the exchanges use; `exclusion.parent` / `planned.parent` record it; the sticky bit is not
+consulted. `docs/DEPLOYMENT.md` creates `data/` 0700 (`chmod 0700 data` after `mkdir -p`) and the cutover runbook
+gains the owner pre-step. **No module-level archive-acceptance authority remains.** The `_ArchiveAdmission` value
+and the admission-taking `_verify_in`/`_restore_verified` are gone: every function the drill defines at module
+scope performs the repository's acceptance only, and the N3-2 archive's acceptance — the gated inode, the exact
+head the gate read — is a closure inside `run_archive_drill`'s own frame, the only producer of `ARCHIVE_VERIFIED`.
+A plain-import pin drives every module-level function, underscore names included, on a gate-refused store and
+proves none returns a verified report or an `archive:` acceptance.
+
 ## [Unreleased] — keyed account fingerprints, `CHRONOS_PERSISTENCE_KEY`, schema 18 (N3-1, 2026-10-15)
 
 Every persisted account fingerprint is now HMAC-SHA256 under a per-install secret,
