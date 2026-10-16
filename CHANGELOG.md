@@ -42,6 +42,25 @@ end and only then, admits the still-open `BoundSource` as the archive's source, 
 name only when it still is the file this run created, reporting `created_artifact` either way. Run the cutover
 command as the user that owns the store (the lease needs the file's owner).
 
+r3 (Daybreak's r2 review): **the live namespace is never vacant** — the move no longer renames the store away
+from its name; it EXCHANGES it (`renameat2(RENAME_EXCHANGE)`, one syscall per admitted file, store first) with a
+0500 sentinel directory the command makes at the archive name, so `data/chronos.db` is at no instant absent and,
+after the command exits, `chronos.db`, `-wal`, `-shm` and `-journal` are all sentinel directories until the
+owner's own `rmdir` (runbook step 7): every Chronos writer refuses a non-regular path and makes no file, a
+sqlite3 shell cannot open a directory, a rename cannot replace one with a file — a store the gate never saw
+cannot appear at the live name. A live name the gate did not admit (a `-wal`/`-shm` that appeared after
+admission, a `-journal` — also refused at the gate) is `LIVE_NAME_OCCUPIED` with nothing moved (`left_in_place`
+is retired); every exchange is re-proved on both names and reversed by exchanging back on a mismatch; after the
+last exchange the report proves `live_names_sealed` beside the lease/WAL proof and lists `sentinels` with where
+each is now — the command removes none. **The archive admission is minted nowhere a caller can reach**: the
+capability carries no admission state or method; `restore`/`verify_restored` take no capability and no
+admission; `run_drill(source=)` yields `VERIFIED`/`FAILED` alone; the new `run_archive_drill(source, …, now=)`
+runs the flatten gate ITSELF over the capability it is handed, builds the admission from that run inside its
+own frame, and is the only producer of `ARCHIVE_VERIFIED` (the cutover's `--apply` calls it). **The escrow tool
+deletes nothing after a post-create failure** (Linux has no unlink-by-descriptor): `created_artifact` names
+the ciphertext this run created by path and device:inode, `removed` is always `false`, and the owner shreds it.
+Trust root stated for review: the adversary does not hold the store owner's uid or root.
+
 ## [Unreleased] — keyed account fingerprints, `CHRONOS_PERSISTENCE_KEY`, schema 18 (N3-1, 2026-10-15)
 
 Every persisted account fingerprint is now HMAC-SHA256 under a per-install secret,
