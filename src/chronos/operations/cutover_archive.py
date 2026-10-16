@@ -44,15 +44,18 @@ with the store. ``--apply`` runs, in this order, each step a typed stop:
    name the move needs for a sentinel and refuses it (``LIVE_NAME_OCCUPIED``; with frames,
    ``WAL_FRAMES_PRESENT``). A ``-journal`` beside the store refuses at the gate for the same
    reason.
-2. **The R-2 restore drill**, reused whole (:func:`chronos.operations.restore_drill.run_drill`)
-   over the same capability: sqlite's online backup API through the bound connection, ``age``
-   to the two recipients named by the existing custody variables, one atomically published
-   envelope whose manifest records the source inode, an isolated restore and its verifiers —
-   by the archive ADMISSION the gate placed on the capability at its end (r2: the head read
-   in step 1, its numeric version — below the running one — and the held inode; a seam only
-   the gate reaches, never a value a caller could construct), which the DRILL checks: the
-   envelope's source identity, the exact head (a retired schema that the running repository
-   refuses by design; see the drill). A capability the gate refused carries no admission.
+2. **The R-2 restore drill**, reused whole through
+   :func:`chronos.operations.restore_drill.run_archive_drill` over the same capability: the
+   drill runs the flatten gate ITSELF over the held source (r3, Daybreak P1-2 — the run above
+   served the dry-run report and the sidecar admission; a store the gate refuses never reaches
+   a backup) and builds the archive ADMISSION from what that run returned (the head read, its
+   numeric version — below the running one — and the held inode) as a value local to its own
+   frame: not a method on the capability, not a parameter of any public function, never a
+   value a caller could construct. Then sqlite's online backup API through the bound
+   connection, ``age`` to the two recipients named by the existing custody variables, one
+   atomically published envelope whose manifest records the source inode, an isolated restore
+   and its verifiers — by that admission: the envelope's source identity, the exact head (a
+   retired schema that the running repository refuses by design; see the drill).
 3. **Verdict ``ARCHIVE_VERIFIED`` required** — the drill's distinct verdict for a bound
    retired-schema archive, never the repository's ``VERIFIED``. Otherwise nothing moves: the
    live store is untouched and the report names the envelope and the restore copy that exist.
@@ -143,7 +146,7 @@ from chronos.operations.restore_drill import (
     _walk_directory,
     load_age_keys,
     open_bound_source,
-    run_drill,
+    run_archive_drill,
     system_clock,
 )
 from chronos.persistence.database import SCHEMA_VERSION
@@ -508,12 +511,6 @@ def flatten_gate(source: BoundSource, *, now: datetime) -> GateReport:
                 ) from None
     finally:
         engine.dispose(close=False)  # the connection is the capability's, not the engine's
-    try:
-        # every check passed: the capability is admitted as the retired archive's source —
-        # the drill's ARCHIVE_VERIFIED exists only through this admission (r2, P1-2)
-        source._admit_archive(head, version)
-    except DrillRefused as error:
-        raise CutoverRefused("SCHEMA_UNREADABLE", str(error)) from None
     return GateReport(
         schema_version=version,
         schema_head=head,
@@ -1160,7 +1157,15 @@ def archive(
         sidecars = _admit_sidecars(source)
         try:
             return _archive_admitted(
-                source, sidecars, gate, out_dir, restore_into, apply=apply, clock=clock, keys=keys
+                source,
+                sidecars,
+                gate,
+                out_dir,
+                restore_into,
+                apply=apply,
+                now=now,
+                clock=clock,
+                keys=keys,
             )
         finally:
             for sidecar in sidecars:
@@ -1177,11 +1182,11 @@ def _archive_admitted(
     restore_into: Path,
     *,
     apply: bool,
+    now: datetime,
     clock: Clock,
     keys: AgeKeys,
 ) -> ArchiveReport:
     db_path = source.path
-    now = clock.wall()
     _require_excluded(source, "after the gate")
     if not apply:
         stamp = now.strftime("%Y%m%dT%H%M%SZ")
@@ -1217,13 +1222,11 @@ def _archive_admitted(
         raise CutoverRefused("RESTORE_TARGET_NOT_FRESH", str(error)) from None
     _require_excluded(source, "before the drill")
     try:
-        report = run_drill(
-            db_path,
-            out_dir,
-            restore_into,
-            clock=clock,
-            keys=keys,
-            source=source,  # carries the gate's admission: the drill verifies by it
+        # the drill runs the flatten gate ITSELF over the held capability, at this command's
+        # instant, and verifies by what that run returned (r3, P1-2): the gate run above served
+        # the dry-run report and the sidecar admission; a refusal here is the gate's own
+        gate, report = run_archive_drill(
+            source, out_dir, restore_into, now=now, clock=clock, keys=keys
         )
     except DrillRefused as error:
         return ArchiveReport(

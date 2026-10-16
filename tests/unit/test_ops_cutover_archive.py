@@ -104,15 +104,10 @@ AGE_KEYGEN = shutil.which("age-keygen")
 pytestmark = pytest.mark.skipif(
     AGE is None or AGE_KEYGEN is None, reason=drill.AGE_INSTALL_SENTENCE
 )
-_R3_P1_2 = (
-    "r3 P1-2: at 4890e25 BoundSource._admit_archive is a callable mint and the drill has no "
-    "archive entry that runs the gate itself"
-)
 _R3_P1_3 = (
     "r3 P1-3: at 4890e25 the post-create failure path unlinks by name after an identity check — "
     "a swap in between deletes the foreign entry"
 )
-RED_P1_2 = pytest.mark.xfail(strict=True, reason=_R3_P1_2)
 RED_P1_3 = pytest.mark.xfail(strict=True, reason=_R3_P1_3)
 
 
@@ -1288,7 +1283,6 @@ def _gate_claim(source: Any, version: int) -> Any:
     )
 
 
-@RED_P1_2
 def test_8a_the_archive_drill_runs_the_gate_itself_and_verifies_a_retired_store_by_that_run(
     tmp_path: Path,
 ) -> None:
@@ -1320,7 +1314,6 @@ def test_8b_control_without_the_seam_the_drill_refuses_the_retired_schema(
     assert any(f.startswith(prefix) for f in report.failures), report.failures
 
 
-@RED_P1_2
 def test_8c_an_admitted_head_that_is_not_the_copy_s_head_is_not_verified(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1346,7 +1339,6 @@ def test_8c_an_admitted_head_that_is_not_the_copy_s_head_is_not_verified(
     )
 
 
-@RED_P1_2
 def test_8e_daybreak_s_counterexample_a_store_at_the_running_version_is_never_an_archive(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1394,7 +1386,6 @@ def test_8e_daybreak_s_counterexample_a_store_at_the_running_version_is_never_an
     assert report.restore is not None and not report.restore.verified
 
 
-@RED_P1_2
 def test_8f_an_envelope_of_another_object_is_not_verified_as_the_admitted_archive(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1412,7 +1403,6 @@ def test_8f_an_envelope_of_another_object_is_not_verified_as_the_admitted_archiv
     assert report.restore is not None and report.restore.acceptance.startswith("archive:")
 
 
-@RED_P1_2
 def test_8g_the_bare_string_seam_the_public_binding_and_the_capability_mint_are_gone() -> None:
     for function in (drill.run_drill, drill.restore, drill.verify_restored):
         parameters = inspect.signature(function).parameters
@@ -1432,7 +1422,6 @@ def test_8g_the_bare_string_seam_the_public_binding_and_the_capability_mint_are_
     assert "_admit_archive" not in source and "archive_admission" not in source
 
 
-@RED_P1_2
 def test_8h_daybreak_s_counterexample_every_seam_on_a_refused_store_is_tried_and_none_verifies(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1666,14 +1655,14 @@ def test_9d_the_move_compares_the_manifest_s_source_identity_with_the_held_one(
 ) -> None:
     store = _store(tmp_path, binding="closed")
     before = _sha256(store.db)
-    real_run_drill = cutover.run_drill
+    real_drill = cutover.run_archive_drill
 
-    def lying_run_drill(*args: Any, **kwargs: Any) -> Any:
-        report = real_run_drill(*args, **kwargs)
+    def lying_drill(*args: Any, **kwargs: Any) -> Any:
+        gate, report = real_drill(*args, **kwargs)
         other = _identity(store.db.parent)
-        return replace(report, manifest=replace(report.manifest, source_identity=other))
+        return gate, replace(report, manifest=replace(report.manifest, source_identity=other))
 
-    monkeypatch.setattr(cutover, "run_drill", lying_run_drill)
+    monkeypatch.setattr(cutover, "run_archive_drill", lying_drill)
     code, report = _run(store, tmp_path, "--apply", capsys=capsys)
     assert code == 2 and report["code"] == "SOURCE_SWAPPED", report
     assert "manifest" in report["failures"][0]
@@ -1749,14 +1738,14 @@ def test_9g_frames_appended_to_the_admitted_wal_during_the_drill_refuse_the_move
     store = _store(tmp_path, binding="closed")
     before = _sha256(store.db)
     wal = store.db.with_name("chronos.db-wal")
-    real_run_drill = cutover.run_drill
+    real_drill = cutover.run_archive_drill
 
     def grow_then_drill(*args: Any, **kwargs: Any) -> Any:
-        monkeypatch.setattr(cutover, "run_drill", real_run_drill)
+        monkeypatch.setattr(cutover, "run_archive_drill", real_drill)
         _append_frames(wal)
-        return real_run_drill(*args, **kwargs)
+        return real_drill(*args, **kwargs)
 
-    monkeypatch.setattr(cutover, "run_drill", grow_then_drill)
+    monkeypatch.setattr(cutover, "run_archive_drill", grow_then_drill)
     code, report = _run(store, tmp_path, "--apply", capsys=capsys)
     assert code == 2 and report["verdict"] != "ARCHIVED", report
     assert report["code"] == "WAL_FRAMES_PRESENT", report

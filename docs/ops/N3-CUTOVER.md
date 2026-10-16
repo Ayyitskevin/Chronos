@@ -78,11 +78,11 @@ vacates them (step 7); never calls the broker; has no `--force`. Every refusal i
 
 3. **Apply.** Same command with `--apply`. Expect exit `0` and `"verdict": "ARCHIVED"`, with
    `drill.verdict` `ARCHIVE_VERIFIED` and `drill.acceptance` `archive:schema_version:17` (the
-   drill's distinct verdict for a retired-schema archive, reachable only through the admission
-   the gate places on the held store after every check passed: version below the running one,
-   the envelope bound to the very inode the gate held, exact head — the running code refuses a
-   schema-17 store by design, see [`RESTORE-DRILL.md`](RESTORE-DRILL.md), "Archiving a retired
-   schema"). Write down, from the JSON: `envelope`, `manifest_sha256`, `cleartext_sha256`,
+   drill's distinct verdict for a retired-schema archive, reachable only by the drill running
+   the flatten gate itself over the held store and verifying by that run: version below the
+   running one, the envelope bound to the very inode the gate held, exact head — the running
+   code refuses a schema-17 store by design, see [`RESTORE-DRILL.md`](RESTORE-DRILL.md),
+   "Archiving a retired schema"). Write down, from the JSON: `envelope`, `manifest_sha256`, `cleartext_sha256`,
    `ciphertext_sha256`, and every `moved_aside` pair. The old store is now
    `data/chronos.db.archived-<stamp>` plus the `-wal`/`-shm` siblings the gate admitted
    (including the empty bookkeeping the command's own read-only connection left), `<stamp>`
