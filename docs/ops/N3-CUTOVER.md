@@ -48,7 +48,10 @@ typed `code` in its JSON and exit `2`; `--apply` writes nothing before every che
    ```
    Run the `is-active` line twice, a few seconds apart. Both units `inactive`, or stop here.
 
-2. **Dry-run the command** (the default). It runs the whole gate and creates nothing:
+2. **Dry-run the command** (the default). It runs the whole gate, writes nothing to the store
+   and creates no envelope; its one directory effect is SQLite's reader bookkeeping beside a
+   WAL-mode store — an empty `chronos.db-wal` and a `chronos.db-shm` — which `--apply` later
+   moves aside with the store:
    ```bash
    BROKER_MODE=demo ALLOW_ORDER_TRANSMIT=false ALLOW_LIVE_TRADING=false \
    python -m chronos.operations.cutover_archive \

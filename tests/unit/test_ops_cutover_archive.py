@@ -452,7 +452,6 @@ def test_1a_dry_run_passes_the_gate_and_creates_nothing(
     assert not (tmp_path / "backups").exists() and not (tmp_path / "restored").exists()
 
 
-@pytest.mark.xfail(strict=True, reason="r1 P2-1: the claim still says the gate creates nothing")
 def test_1c_the_gate_s_only_directory_effect_is_sqlite_s_reader_bookkeeping_and_the_claim_says_so(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
