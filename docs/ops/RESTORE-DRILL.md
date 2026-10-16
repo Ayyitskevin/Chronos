@@ -321,8 +321,10 @@ it WOULD delete and deletes nothing. Add `--apply` to delete.
   `.n3-prune-<random>` name inside the root and checked again; its files are unlinked through the
   open descriptor and the quarantine is removed. If a different directory takes the name, what
   happens depends on when:
-  1. **Before the quarantine identity check passes:** the classified envelope is not touched (it is
-     put back if it was moved), the report names it under `failed`, the exit is 2.
+  1. **Before the quarantine identity check passes:** the classified envelope's files are not
+     touched. If the rename moved a substitute into quarantine, that substitute is put back to
+     the envelope name; a classified envelope the swap moved aside stays there. The report names
+     the envelope under `failed`, and the exit is 2.
   2. **After that check, before its files are unlinked:** the classified envelope's files ARE
      removed (through the descriptor that was opened and checked; the swap cannot redirect
      that), the substitute's content is not touched, the report names the envelope under
