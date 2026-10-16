@@ -10,11 +10,22 @@ sit beside the store, and that the store is below the running `SCHEMA_VERSION`; 
 encrypted envelope, requires `VERIFIED`, and ONLY THEN moves `chronos.db` (and present `-wal`/`-shm`) aside by
 `renameat2(RENAME_NOREPLACE)` to `<name>.archived-<envelope stamp>`. Dry-run by default; `--apply` moves. It never
 reads or prints `CHRONOS_PERSISTENCE_KEY`, never starts the service, never initializes the fresh database, never
-deletes. The restore drill gains `archived_schema_head` on `run_drill`/`restore`/`verify_restored` (the CLI never
-sets it): an archive of a retired schema — which the running repository refuses by design — is verified by exact
-head, reported as `acceptance: archived:<head>`; every ordinary drill still reports `acceptance: repository`.
-Runbook: `docs/ops/N3-CUTOVER.md` (the page migration 0017 names). See `docs/ops/RESTORE-DRILL.md`, "Archiving a
-retired schema".
+deletes. Runbook: `docs/ops/N3-CUTOVER.md` (the page migration 0017 names).
+
+r1 (Daybreak's review): ONE source capability spans gate, backup and move — the restore drill's new `BoundSource`
+holds the store open no-follow and proves its one `mode=ro` connection opened that very inode (by the descriptors
+the process gained; SQLite resolves even `/proc/self/fd/<n>` to a pathname before opening), the drill backs up
+through that connection, every manifest records the inode as `source_identity`, the sidecars present at the end of
+the gate are admitted and held, and the move re-proves every name against the held identities before and after
+each rename (a sidecar that appears later is never renamed: `left_in_place`). A retired-schema archive is verified
+through an `ArchiveBinding` the drill checks itself (version below the running `SCHEMA_VERSION`, the envelope's
+source identity, exact head) and reported as the distinct verdict `ARCHIVE_VERIFIED` with `acceptance:
+archive:<head>` — `VERIFIED` is only ever the repository's; the bare `archived_schema_head` string is gone. A new
+tool, `python -m chronos.operations.persistence_key_escrow`, reads the key from a non-echoing prompt (never the
+environment or argv), refuses anything but one 64-lowercase-hex line, encrypts to the backups' two recipients and
+proves the artifact decrypts back before reporting. The gate's one directory effect is named exactly (SQLite's
+reader bookkeeping beside a WAL-mode store) and tested without a filter; the runbook states the real lost-key
+boundary instead of promising this command. See `docs/ops/RESTORE-DRILL.md`, "Archiving a retired schema".
 
 ## [Unreleased] — keyed account fingerprints, `CHRONOS_PERSISTENCE_KEY`, schema 18 (N3-1, 2026-10-15)
 
