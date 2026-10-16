@@ -21,6 +21,7 @@ import sys
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -457,3 +458,74 @@ def test_the_opened_descriptor_is_bound_even_if_the_original_is_swapped_back_bef
         p for p in root.rglob("chronos.db.age") if p.read_bytes() == b"replacement ciphertext"
     ]
     assert survivors, "the lookalike's files were unlinked through the descriptor that was opened"
+
+
+# ------------------------------------------------------- r2: Daybreak's P3-1 (53841c8)
+#
+# The last identity check and the final ``rmdir`` are two path operations, so the PRIVATE
+# quarantine name can be swapped between them. What that can cost is pinned here: an EMPTY
+# directory an attacker created may be removed (disclosed residual); a directory with content
+# is never removed or emptied, and the classified inode's own files were already unlinked
+# through the descriptor.
+
+
+def _swap_the_quarantine_name_inside_rmdir(
+    root: Path, monkeypatch: pytest.MonkeyPatch, held: Path, *, substitute_files: bool
+) -> dict[str, Any]:
+    seen: dict[str, Any] = {"ran": False}
+    real_rmdir = os.rmdir
+
+    def swapping_rmdir(path, *, dir_fd=None):  # type: ignore[no-untyped-def]
+        if not seen["ran"] and str(path).startswith(pruner._QUARANTINE_PREFIX):
+            seen["ran"] = True
+            quarantine = root / str(path)
+            quarantine.rename(held)  # the emptied, classified inode moves aside ...
+            quarantine.mkdir()  # ... and a different directory takes the private name
+            if substitute_files:
+                (quarantine / "keep.bin").write_bytes(b"substitute content")
+            seen["quarantine"] = quarantine
+        return real_rmdir(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "rmdir", swapping_rmdir)
+    try:
+        code, report, _ = run_cli(root, "--apply")
+    finally:
+        monkeypatch.undo()
+    seen["code"], seen["report"] = code, report
+    return seen
+
+
+def test_an_empty_directory_swapped_onto_the_quarantine_name_is_the_only_thing_that_can_go(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Daybreak's reproduction: the disclosed residual, stated exactly. The attacker-made EMPTY
+    directory is removed and the run reports success; the classified inode (already emptied
+    through its descriptor) survives under the name the attacker gave it."""
+    old = make_envelope(root, 400)
+    held = root / "held-emptied-original"
+    seen = _swap_the_quarantine_name_inside_rmdir(root, monkeypatch, held, substitute_files=False)
+    assert seen["ran"], "the swap hook never fired: the test lost its positive control"
+    assert held.is_dir() and list(held.iterdir()) == []  # contents went through the descriptor
+    assert not old.exists()
+    assert not seen["quarantine"].exists()
+    assert seen["code"] == pruner.EXIT_PRUNED
+    assert names(root) == {held.name}
+
+
+def test_a_directory_with_content_swapped_onto_the_quarantine_name_is_never_deleted(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The guarantee that matters: a content-bearing substitute is neither removed nor emptied
+    (``rmdir`` refuses a non-empty directory), and the run says the delete failed."""
+    old = make_envelope(root, 400)
+    held = root / "held-emptied-original"
+    seen = _swap_the_quarantine_name_inside_rmdir(root, monkeypatch, held, substitute_files=True)
+    assert seen["ran"], "the swap hook never fired: the test lost its positive control"
+    quarantine = seen["quarantine"]
+    assert (quarantine / "keep.bin").read_bytes() == b"substitute content"
+    assert held.is_dir() and list(held.iterdir()) == []
+    assert seen["code"] == pruner.EXIT_REFUSED
+    report = seen["report"]
+    assert report["deleted"] == []
+    assert len(report["failed"]) == 1
+    assert not old.exists()
