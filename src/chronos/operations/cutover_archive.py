@@ -48,10 +48,11 @@ with the store. ``--apply`` runs, in this order, each step a typed stop:
    :func:`chronos.operations.restore_drill.run_archive_drill` over the same capability: the
    drill runs the flatten gate ITSELF over the held source (r3, Daybreak P1-2 — the run above
    served the dry-run report and the sidecar admission; a store the gate refuses never reaches
-   a backup) and builds the archive ADMISSION from what that run returned (the head read, its
-   numeric version — below the running one — and the held inode) as a value local to its own
-   frame: not a method on the capability, not a parameter of any public function, never a
-   value a caller could construct. Then sqlite's online backup API through the bound
+   a backup) and keeps that run's archive ACCEPTANCE (the head read, its numeric version —
+   below the running one — and the held inode) as a closure inside its own frame (r4): not a
+   method on the capability, not a value or type a caller could construct, not a parameter of
+   any function at module scope — every module-level function of the drill performs the
+   repository's acceptance only. Then sqlite's online backup API through the bound
    connection, ``age`` to the two recipients named by the existing custody variables, one
    atomically published envelope whose manifest records the source inode, an isolated restore
    and its verifiers — by that admission: the envelope's source identity, the exact head (a

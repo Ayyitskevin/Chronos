@@ -235,19 +235,21 @@ version"). Step 5's repository acceptance can therefore never pass for that arch
 archive command's `--apply` hands its open bound source capability to the drill's
 `run_archive_drill`, which runs the archive command's **flatten gate itself** over that
 capability, inside its own frame — a store the gate refuses raises the gate's own refusal and
-no envelope is made — and builds the admission from what that run returned (the head it read,
-`schema_version:17`; that head's numeric version, which must be BELOW the running
-`SCHEMA_VERSION` — a current or newer store is never an archive; and the inode of the store it
-gated) as a value local to that frame. There is no other way to it: the capability carries no
-admission state or method, `run_drill` / `restore` / `verify_restored` take no admission
-(`restore` and `verify_restored` take no capability either; `run_drill(source=)` binds the
-backup's identity and yields `VERIFIED` or `FAILED` alone), and no public function has a
-parameter that selects archive acceptance — a caller cannot reach `ARCHIVE_VERIFIED` without
-the real gate passing over the very capability it hands in. The drill then verifies by that
-admission — the envelope's manifest must record the admitted inode (`source_identity`: the
+no envelope is made — and keeps that run's acceptance (the head it read, `schema_version:17`;
+that head's numeric version, which must be BELOW the running `SCHEMA_VERSION` — a current or
+newer store is never an archive; and the inode of the store it gated) as a closure inside
+that frame: not a value, not a type, not a parameter. There is no other way to it: the
+capability carries no admission state or method; `run_drill` / `restore` / `verify_restored`
+and every other function the module defines at its top level — underscore-prefixed ones
+included — perform the repository's acceptance only (`restore` and `verify_restored` take no
+capability either; `run_drill(source=)` binds the backup's identity and yields `VERIFIED` or
+`FAILED` alone), and no function at module scope has a parameter that selects or carries an
+archive acceptance — a caller cannot reach `ARCHIVE_VERIFIED`, or any `archive:` acceptance,
+without the real gate passing over the very capability it hands in. The drill then verifies by
+that closure — the envelope's manifest must record the gated inode (`source_identity`: the
 backup was of the gated object, through the one bound connection), and `restored head ==
-manifest head == admitted head`; sha256, row counts and the audit chain verify exactly as
-before. On that branch nothing is opened by pathname and no T-3 name check runs: the copy's
+manifest head == the head the gate read`; sha256, row counts and the audit chain verify
+exactly as before. On that branch nothing is opened by pathname and no T-3 name check runs: the copy's
 bytes are the held descriptor's (sha256), while its head and row counts come through
 `_readonly_fd`, a resolved-pathname open. All good, the verdict is `ARCHIVE_VERIFIED` with
 `"acceptance": "archive:<head>"` — **not** `VERIFIED`, which is only ever the repository's

@@ -103,11 +103,6 @@ AGE_KEYGEN = shutil.which("age-keygen")
 pytestmark = pytest.mark.skipif(
     AGE is None or AGE_KEYGEN is None, reason=drill.AGE_INSTALL_SENTENCE
 )
-_R4_P1_2 = (
-    "r4 P1-2: at 84f4ff1 _ArchiveAdmission is a module-level constructible value and "
-    "_restore_verified/_verify_in accept it: a module-level callable verifies an ungated store"
-)
-RED_R4_P1_2 = pytest.mark.xfail(strict=True, reason=_R4_P1_2)
 
 
 def _hex(seed: str) -> str:
@@ -1444,9 +1439,12 @@ def test_8g_the_bare_string_seam_the_public_binding_and_the_capability_mint_are_
         assert "source" not in inspect.signature(function).parameters, function
     assert "admission" not in inspect.signature(drill.run_archive_drill).parameters
     assert "_admit_archive" not in source and "archive_admission" not in source
+    # r4: no module-level admission value, and no module-level consumer of one
+    for gone in ("_ArchiveAdmission", "_restore_verified", "_admission_from"):
+        assert not hasattr(drill, gone), gone
+    assert "admission" not in inspect.signature(drill._verify_in).parameters
 
 
-@RED_R4_P1_2
 def test_8h_daybreak_s_counterexample_every_seam_on_a_refused_store_is_tried_and_none_verifies(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1553,7 +1551,6 @@ def test_8h_daybreak_s_counterexample_every_seam_on_a_refused_store_is_tried_and
         assert any(f.startswith(prefix) for f in result.failures), result.failures
 
 
-@RED_R4_P1_2
 def test_8i_every_module_level_callable_is_tried_on_a_refused_store_and_none_verifies_it(
     tmp_path: Path,
 ) -> None:
@@ -1628,7 +1625,9 @@ def test_8i_every_module_level_callable_is_tried_on_a_refused_store_and_none_ver
                 "version": SCHEMA_VERSION - 1,
                 "identity": source.identity,
                 "what": "sweep",
-                "subject": "sweep",
+                # no "subject": _lease_read(fd, subject) on a pool descriptor would make a
+                # later writable open wait out the kernel's lease break; the openers that take
+                # one are swept by signature
                 "name": drill.DB_NAME,
                 "db_name": drill.DB_NAME,
                 "encrypted_name": Path(manifest.backup_path).name,
