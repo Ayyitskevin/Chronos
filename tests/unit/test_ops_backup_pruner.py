@@ -529,3 +529,50 @@ def test_a_directory_with_content_swapped_onto_the_quarantine_name_is_never_dele
     assert report["deleted"] == []
     assert len(report["failed"]) == 1
     assert not old.exists()
+
+
+# ------------------------------------------------------- r3: Daybreak's P3-1, timing 2 (8d1819d)
+
+
+def test_a_swap_after_the_quarantine_check_empties_the_classified_inode_and_spares_the_substitute(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Between the quarantine identity check and the by-descriptor listing the private name is
+    swapped for a directory with content. The classified inode is NOT left alone: its files
+    are unlinked through the descriptor that was opened and checked. The substitute's content
+    is untouched, the last identity check refuses, and the run exits 2."""
+    old = make_envelope(root, 400)
+    held = root / "held-emptied-original"
+    seen: dict[str, Any] = {"ran": False}
+    real_listdir = os.listdir
+
+    def swapping_listdir(path=None):  # type: ignore[no-untyped-def]
+        if (
+            not seen["ran"]
+            and isinstance(path, int)
+            and sys._getframe(1).f_code.co_name == "_delete_envelope"
+        ):
+            seen["ran"] = True
+            (quarantine,) = [
+                entry
+                for entry in root.iterdir()
+                if entry.name.startswith(pruner._QUARANTINE_PREFIX)
+            ]
+            quarantine.rename(held)
+            quarantine.mkdir()
+            (quarantine / "keep.bin").write_bytes(b"substitute content")
+            seen["quarantine"] = quarantine
+        return real_listdir(path)
+
+    monkeypatch.setattr(os, "listdir", swapping_listdir)
+    try:
+        code, report, _ = run_cli(root, "--apply")
+    finally:
+        monkeypatch.undo()
+    assert seen["ran"], "the swap hook never fired: the test lost its positive control"
+    assert list(held.iterdir()) == []  # the classified inode was emptied through its descriptor
+    assert (seen["quarantine"] / "keep.bin").read_bytes() == b"substitute content"
+    assert not old.exists()
+    assert code == pruner.EXIT_REFUSED
+    assert report["deleted"] == []
+    assert len(report["failed"]) == 1
