@@ -790,16 +790,20 @@ def _wrap(text: str, *, width: int, indent: int) -> list[str]:
 # ------------------------------------------------------------------ resolution
 
 
-def _resolve_expected_fingerprint(account_id: str | None) -> tuple[str | None, str]:
+def _resolve_expected_fingerprint(
+    account_id: str | None, *, key: PersistenceKey | None = None
+) -> tuple[str | None, str]:
     """The account this machine would bind a mandate to, and where it came from.
 
     Settings can legitimately fail to construct (they are fail-closed), and this
     is a read-only aid, so a failure downgrades the check to *skipped* rather
     than aborting the report. The value is keyed (N3): without this install's persistence key
     there is nothing to compare, which is also *skipped*, never an unkeyed stand-in.
+    A caller that already resolved the key passes it, so one command resolves it once.
     """
 
-    key = _resolve_persistence_key()
+    if key is None:
+        key = _resolve_persistence_key()
     if key is None:
         return None, ""
     if account_id:
@@ -1074,7 +1078,7 @@ def cmd_mandate_fingerprint(args: argparse.Namespace) -> int:
     account_id: str | None = args.account_id
     source = "--account-id"
     if not account_id:
-        fingerprint, source = _resolve_expected_fingerprint(None)
+        fingerprint, source = _resolve_expected_fingerprint(None, key=key)
         if fingerprint is None:
             print("no account id available; pass --account-id or set IB_ACCOUNT_ID")
             return 1
