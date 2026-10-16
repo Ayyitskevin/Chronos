@@ -10,6 +10,7 @@ from typing import cast
 
 import pytest
 from pydantic import ValidationError
+from tests.support.persistence_keys import TEST_PERSISTENCE_KEY
 
 from chronos.broker.base import Broker, BrokerDataError
 from chronos.broker.connection import BrokerConnectionManager
@@ -162,8 +163,9 @@ def _harness(tmp_path: Path) -> _Harness:
         market_data=market_data,
         reconciliation=reconciliation,
         settings=settings,
-        expected_account_fingerprint=account_fingerprint(DEMO_ACCOUNT_ID),
+        expected_account_fingerprint=account_fingerprint(DEMO_ACCOUNT_ID, key=TEST_PERSISTENCE_KEY),
         clock=demo_now,
+        persistence_key=TEST_PERSISTENCE_KEY,
     )
     evaluation = candidates.evaluate("AAPL")
     assert evaluation.resolution is not None
@@ -213,9 +215,10 @@ def _service(
         risk,
         harness.connection,
         settings or harness.settings,
-        account_fingerprint(DEMO_ACCOUNT_ID),
+        account_fingerprint(DEMO_ACCOUNT_ID, key=TEST_PERSISTENCE_KEY),
         clock=demo_now,
         correlation_factory=lambda: CORRELATION_ID,
+        persistence_key=TEST_PERSISTENCE_KEY,
     )
 
 
@@ -312,8 +315,9 @@ def test_observation_timeout_is_finite_and_hard_bounded(
                 risk,
                 harness.connection,
                 harness.settings,
-                account_fingerprint(DEMO_ACCOUNT_ID),
+                account_fingerprint(DEMO_ACCOUNT_ID, key=TEST_PERSISTENCE_KEY),
                 observation_timeout_seconds=timeout,
+                persistence_key=TEST_PERSISTENCE_KEY,
             )
     finally:
         harness.close()

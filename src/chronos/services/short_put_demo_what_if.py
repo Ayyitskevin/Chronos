@@ -70,7 +70,11 @@ from chronos.services.short_put_risk_preview import (
 from chronos.strategy.capital import CapitalContext, evaluate_short_put_capital
 from chronos.strategy.scenarios import ShortPutScenario, ShortPutScenarioInput, short_put_scenario
 from chronos.strategy.strike_resolver import RankedCandidate, ResolverPolicy, spot_price
-from chronos.utils.identifiers import account_fingerprint, normalize_account_fingerprint
+from chronos.utils.identifiers import (
+    PersistenceKey,
+    account_fingerprint,
+    normalize_account_fingerprint,
+)
 from chronos.utils.logging import mask_account_id
 
 _T = TypeVar("_T")
@@ -346,6 +350,7 @@ class ShortPutDemoWhatIfService:
         settings: Settings,
         expected_account_fingerprint: str,
         *,
+        persistence_key: PersistenceKey,
         clock: Callable[[], datetime] | None = None,
         correlation_factory: Callable[[], str] | None = None,
         observation_timeout_seconds: float = 30.0,
@@ -368,6 +373,7 @@ class ShortPutDemoWhatIfService:
         self._expected_account_fingerprint = normalize_account_fingerprint(
             expected_account_fingerprint
         )
+        self._persistence_key = persistence_key
         self._clock = clock or (lambda: datetime.now(UTC))
         self._correlation_factory = correlation_factory or (
             lambda: f"CHR-WIF-{uuid4().hex.upper()}"
@@ -620,7 +626,9 @@ class ShortPutDemoWhatIfService:
                 "The DEMO broker is not in a connected, account-bound preview state."
             )
         try:
-            observed_fingerprint = account_fingerprint(account.account_id)
+            observed_fingerprint = account_fingerprint(
+                account.account_id, key=self._persistence_key
+            )
         except ValueError:
             observed_fingerprint = ""
         if observed_fingerprint != self._expected_account_fingerprint:
@@ -1054,7 +1062,9 @@ class ShortPutDemoWhatIfService:
                 "The DEMO broker connection or account scope changed during what-if."
             )
         try:
-            observed_fingerprint = account_fingerprint(first_account.account_id)
+            observed_fingerprint = account_fingerprint(
+                first_account.account_id, key=self._persistence_key
+            )
         except ValueError:
             observed_fingerprint = ""
         if observed_fingerprint != self._expected_account_fingerprint:

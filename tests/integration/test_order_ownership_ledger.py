@@ -21,6 +21,7 @@ from tests.integration.test_order_pipeline import (
     _short_put_intent,
 )
 from tests.support.order_fakes import FIXED_NOW, PAPER_ACCOUNT, FakeBroker, paper_settings
+from tests.support.persistence_keys import TEST_PERSISTENCE_KEY
 
 from chronos.broker.base import VenueOrderIdentity
 from chronos.domain.enums import OrderLifecycle
@@ -44,7 +45,9 @@ def _rig(broker: FakeBroker) -> tuple[_Harness, PersistedOrderOwnershipLedger, V
     harness.service.submit(intent, writer_lease_held=True, now=FIXED_NOW)  # type: ignore[arg-type]
     stored = harness.service.get("intent-1")
     assert stored is not None and stored.order_ref
-    ledger = PersistedOrderOwnershipLedger(harness.intents, harness.tracker_repo)
+    ledger = PersistedOrderOwnershipLedger(
+        harness.intents, harness.tracker_repo, persistence_key=TEST_PERSISTENCE_KEY
+    )
     identity = VenueOrderIdentity(
         broker_order_id=9001,
         order_ref=stored.order_ref,
@@ -162,7 +165,8 @@ _STUB_IDENTITY = VenueOrderIdentity(
 def _stub_ledger(*, order_ref: str, fingerprint: str) -> PersistedOrderOwnershipLedger:
     return PersistedOrderOwnershipLedger(
         _StubIntents(order_ref=order_ref, fingerprint=fingerprint),  # type: ignore[arg-type]
-        _StubTracker(),  # type: ignore[arg-type]
+        _StubTracker(),
+        persistence_key=TEST_PERSISTENCE_KEY,  # type: ignore[arg-type]
     )
 
 
@@ -170,17 +174,20 @@ def test_the_ledger_does_not_trust_the_repository_to_return_the_ref_it_was_asked
     """Positive control, then the lie: another order_ref, everything else right."""
 
     right = _stub_ledger(
-        order_ref=_STUB_IDENTITY.order_ref, fingerprint=account_fingerprint(PAPER_ACCOUNT)
+        order_ref=_STUB_IDENTITY.order_ref,
+        fingerprint=account_fingerprint(PAPER_ACCOUNT, key=TEST_PERSISTENCE_KEY),
     )
     assert right.proves_owned(_STUB_IDENTITY) is True
     wrong = _stub_ledger(
-        order_ref="CHR-ORD-" + "b" * 32, fingerprint=account_fingerprint(PAPER_ACCOUNT)
+        order_ref="CHR-ORD-" + "b" * 32,
+        fingerprint=account_fingerprint(PAPER_ACCOUNT, key=TEST_PERSISTENCE_KEY),
     )
     assert wrong.proves_owned(_STUB_IDENTITY) is False
 
 
 def test_the_ledger_does_not_trust_the_repository_to_return_the_right_accounts_record() -> None:
     wrong = _stub_ledger(
-        order_ref=_STUB_IDENTITY.order_ref, fingerprint=account_fingerprint("DU0000000")
+        order_ref=_STUB_IDENTITY.order_ref,
+        fingerprint=account_fingerprint("DU0000000", key=TEST_PERSISTENCE_KEY),
     )
     assert wrong.proves_owned(_STUB_IDENTITY) is False

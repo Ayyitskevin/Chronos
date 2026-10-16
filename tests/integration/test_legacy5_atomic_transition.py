@@ -25,6 +25,7 @@ from typing import Any
 import pytest
 from sqlalchemy import event
 from sqlalchemy.orm import Session, SessionTransaction, sessionmaker
+from tests.support.persistence_keys import TEST_PERSISTENCE_KEY
 
 from chronos.domain.enums import OrderLifecycle, OrderSide, ProductFamily
 from chronos.orders.tracker import OrderStatusUpdate, OrderTracker
@@ -76,7 +77,7 @@ class _Book:
         record = OrderIntentRecord(
             intent_id=intent_id,
             idempotency_key=f"idem-{intent_id}",
-            account_fingerprint=account_fingerprint(ACCOUNT),
+            account_fingerprint=account_fingerprint(ACCOUNT, key=TEST_PERSISTENCE_KEY),
             environment="paper",
             product_family=ProductFamily.STOCK,
             wheel_cycle_id=None,
@@ -139,9 +140,17 @@ def _writer(sessions: sessionmaker[Session]) -> _Writer:
 def book(tmp_path: Path) -> Iterator[_Book]:
     db = Database(f"sqlite:///{tmp_path / 'chronos.db'}")
     db.initialize()
-    db.bind_scope(broker_mode="ibkr", environment="paper", account_id=ACCOUNT)
-    a_sessions = sessionmaker(bind=db.engine, expire_on_commit=False, class_=Session)
-    b_sessions = sessionmaker(bind=db.engine, expire_on_commit=False, class_=Session)
+    db.bind_scope(
+        broker_mode="ibkr", environment="paper", account_id=ACCOUNT, key=TEST_PERSISTENCE_KEY
+    )
+    # N3-1: a second sessionmaker on the same bound database carries its session info, which
+    # holds the persistence key bind_scope recorded (what database.sessions carries).
+    a_sessions = sessionmaker(
+        bind=db.engine, expire_on_commit=False, class_=Session, info=dict(db.sessions.kw["info"])
+    )
+    b_sessions = sessionmaker(
+        bind=db.engine, expire_on_commit=False, class_=Session, info=dict(db.sessions.kw["info"])
+    )
     try:
         yield _Book(db, a_sessions, _writer(a_sessions), _writer(b_sessions))
     finally:

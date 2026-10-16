@@ -990,7 +990,7 @@ def _fingerprint_of(runtime: AppRuntime) -> str:
     account_id = runtime.order_management.account_id.strip()
     if not account_id:
         return ""
-    return account_fingerprint(account_id)
+    return account_fingerprint(account_id, key=runtime.persistence_key)
 
 
 def _autonomy_of(request: Request) -> AutonomyRuntime | None:

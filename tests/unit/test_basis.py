@@ -3,6 +3,7 @@ from decimal import Context, Decimal, localcontext
 
 import pytest
 from pydantic import ValidationError
+from tests.support.persistence_keys import TEST_PERSISTENCE_KEY
 
 from chronos.domain.enums import (
     BasisEntryType,
@@ -29,7 +30,7 @@ from chronos.utils.identifiers import account_fingerprint
 NOW = datetime(2026, 1, 15, 15, 30, tzinfo=UTC)
 CYCLE_ID = "CYCLE-AAPL-001"
 ACCOUNT_ID = "DU1234567"
-ACCOUNT_FINGERPRINT = account_fingerprint(ACCOUNT_ID)
+ACCOUNT_FINGERPRINT = account_fingerprint(ACCOUNT_ID, key=TEST_PERSISTENCE_KEY)
 
 
 def make_option(
@@ -128,8 +129,12 @@ def test_option_execution_premiums_have_opening_credit_and_closing_debit_signs()
         price="0.50",
     )
 
-    opening = option_premium_entry(opening_execution, wheel_cycle_id=CYCLE_ID, opening=True)
-    closing = option_premium_entry(closing_execution, wheel_cycle_id=CYCLE_ID, opening=False)
+    opening = option_premium_entry(
+        opening_execution, wheel_cycle_id=CYCLE_ID, opening=True, key=TEST_PERSISTENCE_KEY
+    )
+    closing = option_premium_entry(
+        closing_execution, wheel_cycle_id=CYCLE_ID, opening=False, key=TEST_PERSISTENCE_KEY
+    )
 
     assert opening.entry_type is BasisEntryType.OPENING_OPTION_PREMIUM
     assert opening.amount == Decimal("-200.00")
@@ -140,7 +145,9 @@ def test_option_execution_premiums_have_opening_credit_and_closing_debit_signs()
 def test_option_premium_uses_qualified_nonstandard_multiplier() -> None:
     execution = make_option_execution(price="1.25", quantity="3", multiplier="50")
 
-    entry = option_premium_entry(execution, wheel_cycle_id=CYCLE_ID, opening=True)
+    entry = option_premium_entry(
+        execution, wheel_cycle_id=CYCLE_ID, opening=True, key=TEST_PERSISTENCE_KEY
+    )
 
     assert entry.multiplier == Decimal("50")
     assert entry.amount == Decimal("-187.50")
@@ -148,12 +155,15 @@ def test_option_premium_uses_qualified_nonstandard_multiplier() -> None:
 
 def test_actual_commission_supersedes_estimate_in_basis_projection() -> None:
     execution = make_option_execution(price="2.00", quantity="2", commission="1.30")
-    premium = option_premium_entry(execution, wheel_cycle_id=CYCLE_ID, opening=True)
+    premium = option_premium_entry(
+        execution, wheel_cycle_id=CYCLE_ID, opening=True, key=TEST_PERSISTENCE_KEY
+    )
     estimate = commission_entry(
         execution,
         wheel_cycle_id=CYCLE_ID,
         amount=Decimal("1.50"),
         actual=False,
+        key=TEST_PERSISTENCE_KEY,
     )
     assert execution.commission is not None
     actual = commission_entry(
@@ -162,6 +172,7 @@ def test_actual_commission_supersedes_estimate_in_basis_projection() -> None:
         amount=execution.commission,
         actual=True,
         occurred_at=NOW + timedelta(minutes=1),
+        key=TEST_PERSISTENCE_KEY,
     )
     values = projection_input(
         (premium, estimate, actual),
@@ -181,12 +192,15 @@ def test_actual_commission_supersedes_estimate_in_basis_projection() -> None:
 
 def test_estimated_commission_is_used_and_remains_visible_until_actual_arrives() -> None:
     execution = make_option_execution(price="2.00")
-    premium = option_premium_entry(execution, wheel_cycle_id=CYCLE_ID, opening=True)
+    premium = option_premium_entry(
+        execution, wheel_cycle_id=CYCLE_ID, opening=True, key=TEST_PERSISTENCE_KEY
+    )
     estimate = commission_entry(
         execution,
         wheel_cycle_id=CYCLE_ID,
         amount=Decimal("0.75"),
         actual=False,
+        key=TEST_PERSISTENCE_KEY,
     )
 
     result = project_strategy_basis(projection_input((premium, estimate)))
@@ -202,6 +216,7 @@ def test_missing_commission_evidence_is_pending_instead_of_manual_review() -> No
         make_option_execution(commission=None),
         wheel_cycle_id=CYCLE_ID,
         opening=True,
+        key=TEST_PERSISTENCE_KEY,
     )
 
     result = project_strategy_basis(projection_input((premium,)))
@@ -221,6 +236,7 @@ def test_orphan_commission_evidence_requires_manual_review() -> None:
         wheel_cycle_id=CYCLE_ID,
         amount=Decimal("0.65"),
         actual=True,
+        key=TEST_PERSISTENCE_KEY,
     )
 
     result = project_strategy_basis(projection_input((orphan,)))
@@ -234,7 +250,9 @@ def test_execution_helpers_attach_only_pseudonymous_complete_provenance() -> Non
     execution = make_option_execution()
     assert isinstance(execution.contract, OptionContract)
 
-    entry = option_premium_entry(execution, wheel_cycle_id=CYCLE_ID, opening=True)
+    entry = option_premium_entry(
+        execution, wheel_cycle_id=CYCLE_ID, opening=True, key=TEST_PERSISTENCE_KEY
+    )
 
     assert entry.account_fingerprint == ACCOUNT_FINGERPRINT
     assert entry.account_fingerprint != execution.account_id
@@ -253,12 +271,15 @@ def test_basis_arithmetic_ignores_low_ambient_decimal_precision() -> None:
     )
 
     with localcontext(Context(prec=4)):
-        premium = option_premium_entry(execution, wheel_cycle_id=CYCLE_ID, opening=True)
+        premium = option_premium_entry(
+            execution, wheel_cycle_id=CYCLE_ID, opening=True, key=TEST_PERSISTENCE_KEY
+        )
         estimate = commission_entry(
             execution,
             wheel_cycle_id=CYCLE_ID,
             amount=Decimal("0.654321"),
             actual=False,
+            key=TEST_PERSISTENCE_KEY,
         )
         result = project_strategy_basis(
             projection_input(
@@ -275,14 +296,21 @@ def test_basis_arithmetic_ignores_low_ambient_decimal_precision() -> None:
 def test_execution_entry_ids_are_stable_and_distinguish_cycle_and_entry_type() -> None:
     execution = make_option_execution()
 
-    first = option_premium_entry(execution, wheel_cycle_id=CYCLE_ID, opening=True)
-    replay = option_premium_entry(execution, wheel_cycle_id=CYCLE_ID, opening=True)
-    other_cycle = option_premium_entry(execution, wheel_cycle_id="CYCLE-AAPL-002", opening=True)
+    first = option_premium_entry(
+        execution, wheel_cycle_id=CYCLE_ID, opening=True, key=TEST_PERSISTENCE_KEY
+    )
+    replay = option_premium_entry(
+        execution, wheel_cycle_id=CYCLE_ID, opening=True, key=TEST_PERSISTENCE_KEY
+    )
+    other_cycle = option_premium_entry(
+        execution, wheel_cycle_id="CYCLE-AAPL-002", opening=True, key=TEST_PERSISTENCE_KEY
+    )
     actual_commission = commission_entry(
         execution,
         wheel_cycle_id=CYCLE_ID,
         amount=Decimal("0.65"),
         actual=True,
+        key=TEST_PERSISTENCE_KEY,
     )
 
     assert first == replay
@@ -295,10 +323,14 @@ def test_execution_entry_ids_are_stable_and_distinguish_cycle_and_entry_type() -
 def test_repository_exact_replay_is_idempotent_and_conflicting_replay_is_rejected() -> None:
     database = Database("sqlite+pysqlite:///:memory:")
     database.initialize()
-    database.bind_scope(broker_mode="demo", environment="DEMO", account_id=ACCOUNT_ID)
+    database.bind_scope(
+        broker_mode="demo", environment="DEMO", account_id=ACCOUNT_ID, key=TEST_PERSISTENCE_KEY
+    )
     execution = make_option_execution()
     assert isinstance(execution.contract, OptionContract)
-    entry = option_premium_entry(execution, wheel_cycle_id=CYCLE_ID, opening=True)
+    entry = option_premium_entry(
+        execution, wheel_cycle_id=CYCLE_ID, opening=True, key=TEST_PERSISTENCE_KEY
+    )
     with database.sessions.begin() as session:
         cycle = WheelCycleRow(
             id=CYCLE_ID,
@@ -334,6 +366,7 @@ def test_repository_exact_replay_is_idempotent_and_conflicting_replay_is_rejecte
         conflicting_execution,
         wheel_cycle_id=CYCLE_ID,
         opening=True,
+        key=TEST_PERSISTENCE_KEY,
     )
 
     try:
@@ -352,11 +385,13 @@ def test_stock_assignment_evidence_requires_reconciled_share_allocation() -> Non
         make_stock_execution(execution_id="EXEC-ASSIGN-1", side=OrderSide.BUY),
         wheel_cycle_id=CYCLE_ID,
         assignment=True,
+        key=TEST_PERSISTENCE_KEY,
     )
     called_away = stock_fill_evidence_entry(
         make_stock_execution(execution_id="EXEC-CALL-AWAY-1", side=OrderSide.SELL),
         wheel_cycle_id=CYCLE_ID,
         assignment=False,
+        key=TEST_PERSISTENCE_KEY,
     )
 
     result = project_strategy_basis(projection_input((assignment, called_away)))
@@ -403,7 +438,9 @@ def test_unreconciled_or_zero_share_projection_requires_manual_review() -> None:
 
 
 def test_currency_cycle_symbol_and_duplicate_evidence_fail_closed() -> None:
-    base = option_premium_entry(make_option_execution(), wheel_cycle_id=CYCLE_ID, opening=True)
+    base = option_premium_entry(
+        make_option_execution(), wheel_cycle_id=CYCLE_ID, opening=True, key=TEST_PERSISTENCE_KEY
+    )
     duplicate_source = base.model_copy(update={"id": "BASIS-DUPLICATE-SOURCE"})
     wrong_owner = option_premium_entry(
         make_option_execution(
@@ -413,6 +450,7 @@ def test_currency_cycle_symbol_and_duplicate_evidence_fail_closed() -> None:
         ),
         wheel_cycle_id="CYCLE-MSFT-001",
         opening=True,
+        key=TEST_PERSISTENCE_KEY,
     )
     unreconciled = BasisLedgerEntry(
         id="BASIS-MANUAL-PENDING",
@@ -601,23 +639,36 @@ def test_execution_helpers_reject_wrong_instrument_or_side() -> None:
     sell_stock = make_stock_execution(execution_id="EXEC-STOCK-SELL", side=OrderSide.SELL)
 
     with pytest.raises(ValueError, match="opening/closing premium semantics"):
-        option_premium_entry(sell_option, wheel_cycle_id=CYCLE_ID, opening=False)
+        option_premium_entry(
+            sell_option, wheel_cycle_id=CYCLE_ID, opening=False, key=TEST_PERSISTENCE_KEY
+        )
     with pytest.raises(ValueError, match="opening/closing premium semantics"):
-        option_premium_entry(buy_option, wheel_cycle_id=CYCLE_ID, opening=True)
+        option_premium_entry(
+            buy_option, wheel_cycle_id=CYCLE_ID, opening=True, key=TEST_PERSISTENCE_KEY
+        )
     with pytest.raises(ValueError, match="option execution"):
-        option_premium_entry(buy_stock, wheel_cycle_id=CYCLE_ID, opening=False)
+        option_premium_entry(
+            buy_stock, wheel_cycle_id=CYCLE_ID, opening=False, key=TEST_PERSISTENCE_KEY
+        )
     with pytest.raises(ValueError, match="assignment semantics"):
-        stock_fill_evidence_entry(buy_stock, wheel_cycle_id=CYCLE_ID, assignment=False)
+        stock_fill_evidence_entry(
+            buy_stock, wheel_cycle_id=CYCLE_ID, assignment=False, key=TEST_PERSISTENCE_KEY
+        )
     with pytest.raises(ValueError, match="assignment semantics"):
-        stock_fill_evidence_entry(sell_stock, wheel_cycle_id=CYCLE_ID, assignment=True)
+        stock_fill_evidence_entry(
+            sell_stock, wheel_cycle_id=CYCLE_ID, assignment=True, key=TEST_PERSISTENCE_KEY
+        )
     with pytest.raises(ValueError, match="stock execution"):
-        stock_fill_evidence_entry(sell_option, wheel_cycle_id=CYCLE_ID, assignment=False)
+        stock_fill_evidence_entry(
+            sell_option, wheel_cycle_id=CYCLE_ID, assignment=False, key=TEST_PERSISTENCE_KEY
+        )
     with pytest.raises(ValueError, match="limited to option executions"):
         commission_entry(
             buy_stock,
             wheel_cycle_id=CYCLE_ID,
             amount=Decimal("0.65"),
             actual=True,
+            key=TEST_PERSISTENCE_KEY,
         )
 
 
@@ -629,6 +680,7 @@ def test_actual_commission_requires_exact_broker_amount_and_currency() -> None:
             wheel_cycle_id=CYCLE_ID,
             amount=Decimal("0.65"),
             actual=True,
+            key=TEST_PERSISTENCE_KEY,
         )
 
     execution = make_option_execution(commission="0.65")
@@ -638,6 +690,7 @@ def test_actual_commission_requires_exact_broker_amount_and_currency() -> None:
             wheel_cycle_id=CYCLE_ID,
             amount=Decimal("0.66"),
             actual=True,
+            key=TEST_PERSISTENCE_KEY,
         )
 
     wrong_currency = execution.model_copy(update={"commission_currency": "EUR"})
@@ -647,6 +700,7 @@ def test_actual_commission_requires_exact_broker_amount_and_currency() -> None:
             wheel_cycle_id=CYCLE_ID,
             amount=Decimal("0.65"),
             actual=True,
+            key=TEST_PERSISTENCE_KEY,
         )
 
 
@@ -657,17 +711,20 @@ def test_one_execution_cannot_be_both_opening_and_closing_premium() -> None:
         opening_execution,
         wheel_cycle_id=CYCLE_ID,
         opening=True,
+        key=TEST_PERSISTENCE_KEY,
     )
     closing = option_premium_entry(
         closing_execution,
         wheel_cycle_id=CYCLE_ID,
         opening=False,
+        key=TEST_PERSISTENCE_KEY,
     )
     estimate = commission_entry(
         opening_execution,
         wheel_cycle_id=CYCLE_ID,
         amount=Decimal("0.65"),
         actual=False,
+        key=TEST_PERSISTENCE_KEY,
     )
 
     result = project_strategy_basis(projection_input((opening, closing, estimate)))
@@ -679,17 +736,20 @@ def test_one_execution_cannot_be_both_opening_and_closing_premium() -> None:
 
 def test_projection_rejects_single_wrong_account_and_conflicting_fill_provenance() -> None:
     execution = make_option_execution()
-    premium = option_premium_entry(execution, wheel_cycle_id=CYCLE_ID, opening=True)
+    premium = option_premium_entry(
+        execution, wheel_cycle_id=CYCLE_ID, opening=True, key=TEST_PERSISTENCE_KEY
+    )
     conflicting = commission_entry(
         execution.model_copy(update={"price": Decimal("2.01")}),
         wheel_cycle_id=CYCLE_ID,
         amount=Decimal("0.65"),
         actual=False,
+        key=TEST_PERSISTENCE_KEY,
     )
     wrong_account = premium.model_copy(
         update={
             "id": "BASIS-WRONG-ACCOUNT",
-            "account_fingerprint": account_fingerprint("DUOTHER"),
+            "account_fingerprint": account_fingerprint("DUOTHER", key=TEST_PERSISTENCE_KEY),
         }
     )
 

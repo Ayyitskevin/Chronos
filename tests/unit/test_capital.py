@@ -2,6 +2,7 @@ from decimal import Decimal, localcontext
 
 import pytest
 from pydantic import ValidationError
+from tests.support.persistence_keys import TEST_PERSISTENCE_KEY
 
 from chronos.strategy.capital import (
     CapitalContext,
@@ -12,7 +13,7 @@ from chronos.strategy.capital import (
 )
 from chronos.utils.identifiers import account_fingerprint
 
-ACCOUNT_FINGERPRINT = account_fingerprint("DU1234567")
+ACCOUNT_FINGERPRINT = account_fingerprint("DU1234567", key=TEST_PERSISTENCE_KEY)
 
 
 def context(

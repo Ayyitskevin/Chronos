@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import event, func, insert, select, update
+from tests.support.persistence_keys import TEST_PERSISTENCE_KEY
 
 from chronos.domain.enums import (
     BasisEntryType,
@@ -32,13 +33,15 @@ from chronos.utils.identifiers import account_fingerprint
 NOW = datetime(2026, 1, 15, 15, 30, tzinfo=UTC)
 ACCOUNT_ID = "DU1234567"
 OTHER_ACCOUNT_ID = "DU7654321"
-ACCOUNT_FINGERPRINT = account_fingerprint(ACCOUNT_ID)
+ACCOUNT_FINGERPRINT = account_fingerprint(ACCOUNT_ID, key=TEST_PERSISTENCE_KEY)
 
 
 def _database(*, url: str = "sqlite+pysqlite:///:memory:") -> Database:
     database = Database(url)
     database.initialize()
-    database.bind_scope(broker_mode="demo", environment="DEMO", account_id=ACCOUNT_ID)
+    database.bind_scope(
+        broker_mode="demo", environment="DEMO", account_id=ACCOUNT_ID, key=TEST_PERSISTENCE_KEY
+    )
     return database
 
 
@@ -281,7 +284,11 @@ def test_every_ownership_bearing_table_contributes_its_canonical_symbol() -> Non
         ),
         (
             FillRow,
-            {"account_fingerprint": account_fingerprint(OTHER_ACCOUNT_ID)},
+            {
+                "account_fingerprint": account_fingerprint(
+                    OTHER_ACCOUNT_ID, key=TEST_PERSISTENCE_KEY
+                )
+            },
             "Persisted fill evidence is incomplete or malformed.",
         ),
         (

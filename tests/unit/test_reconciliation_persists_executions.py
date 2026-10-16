@@ -29,6 +29,7 @@ from typing import Any, TypeVar, cast
 import pytest
 import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
+from tests.support.persistence_keys import TEST_PERSISTENCE_KEY
 
 from chronos.broker.base import Broker
 from chronos.broker.demo import DEMO_ACCOUNT_ID, DemoBroker
@@ -262,7 +263,9 @@ def records() -> Any:
 def _database(tmp_path: Path, account_id: str) -> Database:
     db = Database(f"sqlite:///{tmp_path / 'chronos.db'}")
     db.initialize()
-    db.bind_scope(broker_mode="demo", environment="paper", account_id=account_id)
+    db.bind_scope(
+        broker_mode="demo", environment="paper", account_id=account_id, key=TEST_PERSISTENCE_KEY
+    )
     return db
 
 

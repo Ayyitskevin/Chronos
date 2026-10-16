@@ -25,6 +25,7 @@ import pytest
 import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config
+from tests.support.persistence_keys import TEST_PERSISTENCE_KEY
 
 from chronos.broker.demo import DEMO_ACCOUNT_ID
 from chronos.persistence.database import SCHEMA_VERSION, Database
@@ -51,7 +52,7 @@ from chronos.utils.identifiers import account_fingerprint
 
 _ROOT = Path(__file__).resolve().parents[2]
 _NOW = datetime(2026, 9, 20, 20, 0, tzinfo=UTC)
-FINGERPRINT = account_fingerprint(DEMO_ACCOUNT_ID)
+FINGERPRINT = account_fingerprint(DEMO_ACCOUNT_ID, key=TEST_PERSISTENCE_KEY)
 _MIGRATION = "src/chronos/persistence/migrations/versions/0015_position_provenance.py"
 
 
@@ -62,7 +63,12 @@ _MIGRATION = "src/chronos/persistence/migrations/versions/0015_position_provenan
 def database(tmp_path: Path) -> Any:
     db = Database(f"sqlite:///{tmp_path / 'chronos.db'}")
     db.initialize()
-    db.bind_scope(broker_mode="demo", environment="paper", account_id=DEMO_ACCOUNT_ID)
+    db.bind_scope(
+        broker_mode="demo",
+        environment="paper",
+        account_id=DEMO_ACCOUNT_ID,
+        key=TEST_PERSISTENCE_KEY,
+    )
     yield db
     db.dispose()
 
@@ -185,6 +191,7 @@ def _seed_binding(database: Database, con_id: int, symbol: str) -> str:
         sessions=database.sessions,
         readiness=_readiness(),
         account_id=_ACCOUNT,
+        persistence_key=TEST_PERSISTENCE_KEY,
     )
     admitted = admission.admit_opening(_ORDER_REF, ADMISSION_NOW)
     assert isinstance(admitted, AdmittedManagedPosition), admitted
@@ -371,7 +378,12 @@ def test_3_a_class_change_is_a_new_row_and_a_replay_writes_nothing(
     unbound_database: Database,
 ) -> None:
     database = unbound_database
-    database.bind_scope(broker_mode="ibkr", environment="paper", account_id=DEMO_ACCOUNT_ID)
+    database.bind_scope(
+        broker_mode="ibkr",
+        environment="paper",
+        account_id=DEMO_ACCOUNT_ID,
+        key=TEST_PERSISTENCE_KEY,
+    )
     repo = PositionProvenanceRepository(database.sessions)
     _run_row(database, "run-1", (_position("QQQ", 320227571, "3"),), started_at=_NOW)
     assert repo.record_run("run-1") == 1
@@ -578,6 +590,7 @@ def test_6_the_demo_admission_path_is_byte_identical_with_and_without_provenance
                 sessions=db.sessions,
                 readiness=_readiness(),
                 account_id=_ACCOUNT,
+                persistence_key=TEST_PERSISTENCE_KEY,
             )
             result = admission.admit_opening(_ORDER_REF, ADMISSION_NOW)
             return json.loads(json.dumps(asdict(result), sort_keys=True, default=str)), written

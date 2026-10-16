@@ -26,6 +26,7 @@ from decimal import Decimal
 
 import pytest
 from tests.support.order_fakes import PAPER_ACCOUNT, FakeBroker
+from tests.support.persistence_keys import TEST_PERSISTENCE_KEY
 
 from chronos.broker.connection import BrokerConnectionManager
 from chronos.domain.enums import OrderLifecycle, OrderSide, ProductFamily
@@ -142,7 +143,7 @@ class _Rig:
         record = OrderIntentRecord(
             intent_id="intent-1",
             idempotency_key="idem-intent-1",
-            account_fingerprint=account_fingerprint(ACCOUNT),
+            account_fingerprint=account_fingerprint(ACCOUNT, key=TEST_PERSISTENCE_KEY),
             environment="paper",
             product_family=ProductFamily.STOCK,
             wheel_cycle_id=None,
@@ -217,7 +218,9 @@ def rig() -> Iterator[_Rig]:
     venue = _Venue()
     db = Database("sqlite:///:memory:")
     db.initialize()
-    db.bind_scope(broker_mode="ibkr", environment="paper", account_id=ACCOUNT)
+    db.bind_scope(
+        broker_mode="ibkr", environment="paper", account_id=ACCOUNT, key=TEST_PERSISTENCE_KEY
+    )
     intents = OrderIntentRepository(db.sessions)
     repo = OrderTrackerRepository(db.sessions)
     tracker = OrderTracker(intents, repo)
@@ -230,6 +233,7 @@ def rig() -> Iterator[_Rig]:
         tracker=tracker,
         reconciliation_readiness=readiness,
         expected_broker_client_id=CLIENT_ID,
+        persistence_key=TEST_PERSISTENCE_KEY,
     )
     try:
         yield _Rig(db, venue, intents, repo, connection, reconciler)

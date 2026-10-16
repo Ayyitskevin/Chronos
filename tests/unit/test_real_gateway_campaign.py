@@ -16,6 +16,7 @@ from pathlib import Path
 from types import ModuleType
 
 import pytest
+from tests.support.persistence_keys import TEST_PERSISTENCE_KEY
 
 from chronos.config.settings import Settings
 from chronos.utils.identifiers import account_fingerprint
@@ -195,7 +196,10 @@ def test_3_account_id_sanitization_replaces_the_id_with_the_keyed_token_everywhe
     textual_only = m.sanitize(m.canonical_json(payload), account_ids, SALT, PEPPER)
     assert with_identifiers.count(expected_token) == textual_only.count(expected_token) == 1
     assert "DU1234567" not in with_identifiers
-    assert f"ACCT-{account_fingerprint('DU1234567')[:16]}" not in with_identifiers  # not unkeyed
+    assert (
+        f"ACCT-{account_fingerprint('DU1234567', key=TEST_PERSISTENCE_KEY)[:16]}"
+        not in with_identifiers
+    )  # not unkeyed
 
 
 def test_4_replay_check_byte_integrity_and_mutation_scan_hold_on_a_sanitized_capture(
@@ -711,7 +715,7 @@ _UF3_RANGE = range(5_540_000, 5_560_000)  # 20,000 candidates around the account
 
 
 def _unkeyed_token(account_id: str) -> str:
-    return f"ACCT-{account_fingerprint(account_id)[:16]}"
+    return f"ACCT-{account_fingerprint(account_id, key=TEST_PERSISTENCE_KEY)[:16]}"
 
 
 def _account_payload(label: str = "uf3f1-session") -> dict:

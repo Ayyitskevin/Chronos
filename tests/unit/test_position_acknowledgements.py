@@ -27,6 +27,7 @@ import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
+from tests.support.persistence_keys import TEST_PERSISTENCE_KEY
 from tests.unit.test_reconciliation_runs_persist import _snapshot
 
 from chronos.broker.demo import DEMO_ACCOUNT_ID
@@ -58,7 +59,7 @@ from chronos.utils.identifiers import account_fingerprint
 
 _ROOT = Path(__file__).resolve().parents[2]
 _NOW = datetime(2026, 9, 21, 1, 0, tzinfo=UTC)
-FINGERPRINT = account_fingerprint(DEMO_ACCOUNT_ID)
+FINGERPRINT = account_fingerprint(DEMO_ACCOUNT_ID, key=TEST_PERSISTENCE_KEY)
 OPERATOR = operator_fingerprint(user="kevin", host="flow")
 _MODULE = "src/chronos/persistence/acknowledgement_repository.py"
 _MIGRATION = "src/chronos/persistence/migrations/versions/0016_position_acknowledgements.py"
@@ -70,7 +71,12 @@ SYM0_KEY = position_key(con_id=1000, security_type="STK", quantity=Decimal("100"
 def database(tmp_path: Path) -> Any:
     db = Database(f"sqlite:///{tmp_path / 'chronos.db'}")
     db.initialize()
-    db.bind_scope(broker_mode="demo", environment="paper", account_id=DEMO_ACCOUNT_ID)
+    db.bind_scope(
+        broker_mode="demo",
+        environment="paper",
+        account_id=DEMO_ACCOUNT_ID,
+        key=TEST_PERSISTENCE_KEY,
+    )
     yield db
     db.dispose()
 
@@ -527,7 +533,9 @@ def test_3e_the_demo_admission_path_is_byte_identical_with_and_without_an_acknow
                         broker_snapshot={
                             "account_facts": {
                                 "masked_account_id": "DU****567",
-                                "account_fingerprint": account_fingerprint(_ACCOUNT),
+                                "account_fingerprint": account_fingerprint(
+                                    _ACCOUNT, key=TEST_PERSISTENCE_KEY
+                                ),
                             },
                             "positions": [
                                 {
@@ -557,6 +565,7 @@ def test_3e_the_demo_admission_path_is_byte_identical_with_and_without_an_acknow
                 sessions=db.sessions,
                 readiness=_readiness(),
                 account_id=_ACCOUNT,
+                persistence_key=TEST_PERSISTENCE_KEY,
             )
             result = admission.admit_opening(_ORDER_REF, ADMISSION_NOW)
             decision = json.loads(json.dumps(asdict(result), sort_keys=True, default=str))

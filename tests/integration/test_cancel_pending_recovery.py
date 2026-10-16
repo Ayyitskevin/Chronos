@@ -20,6 +20,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from tests.support.persistence_keys import TEST_PERSISTENCE_KEY
 from tests.support.settle_rig import (
     CLIENT_ID,
     EARLIER_TODAY,
@@ -260,6 +261,7 @@ def test_D5_the_first_pass_after_a_restart_never_recovers(world: World) -> None:
         reconciliation_readiness=rig.readiness,
         expected_broker_client_id=CLIENT_ID,
         monotonic=world.mono,
+        persistence_key=TEST_PERSISTENCE_KEY,
     )
     world.at(1)
     assert rig.status() is CP and world.recoveries() == []

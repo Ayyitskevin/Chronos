@@ -876,7 +876,9 @@ def build_autonomy_runtime(
     path = settings.autonomy_mandate_file
     if path is None:
         return None
-    fingerprint = account_fingerprint(runtime.order_management.account_id)
+    fingerprint = account_fingerprint(
+        runtime.order_management.account_id, key=runtime.persistence_key
+    )
     now = utc_now()
     try:
         loaded = load_persistent_mandate(path)
@@ -1025,7 +1027,9 @@ def alert_broken_evidence_posture(runtime: AppRuntime) -> None:
     can still flatten a position never dies because a grant was malformed.
     """
 
-    fingerprint = account_fingerprint(runtime.order_management.account_id)
+    fingerprint = account_fingerprint(
+        runtime.order_management.account_id, key=runtime.persistence_key
+    )
     try:
         with runtime.database.sessions.begin() as session:
             alerts.raise_alert(
@@ -1053,7 +1057,9 @@ def alert_invalid_proposer_registry(runtime: AppRuntime) -> None:
     a log file (R-32).
     """
 
-    fingerprint = account_fingerprint(runtime.order_management.account_id)
+    fingerprint = account_fingerprint(
+        runtime.order_management.account_id, key=runtime.persistence_key
+    )
     try:
         with runtime.database.sessions.begin() as session:
             alerts.raise_alert(

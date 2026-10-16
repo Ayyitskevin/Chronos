@@ -18,6 +18,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from tests.support.persistence_keys import TEST_PERSISTENCE_KEY
 
 from chronos.auditlog.log import AuditLog, ChainState, verify_chain
 from chronos.control.halt import HaltReason, HaltStore
@@ -152,6 +153,7 @@ def _build_isolated_restore(tmp_path: Path) -> _RestoredCopy:
             broker_mode="demo",
             environment="paper",
             account_id=_ACCOUNT_ID,
+            key=TEST_PERSISTENCE_KEY,
         )
 
         assert platform_path.with_name(f"{platform_path.name}-wal").stat().st_size > 0
@@ -215,12 +217,14 @@ def test_online_backup_restores_committed_wal_evidence(restored: _RestoredCopy) 
             broker_mode="demo",
             environment="paper",
             account_id=_ACCOUNT_ID,
+            key=TEST_PERSISTENCE_KEY,
         )
         with pytest.raises(RuntimeError, match="already bound to a different broker scope"):
             application.bind_scope(
                 broker_mode="demo",
                 environment="paper",
                 account_id="DU7654321",
+                key=TEST_PERSISTENCE_KEY,
             )
     finally:
         application.dispose()

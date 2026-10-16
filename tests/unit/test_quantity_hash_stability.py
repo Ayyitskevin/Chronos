@@ -10,6 +10,14 @@ a submit re-derivation after it.
 
 If one of these assertions ever fails, the change that broke it is wrong — do
 NOT update the constants.
+
+One re-pin is on record, and it is not a quantity change: N3-1 (Kevin's ruling (iii),
+2026-10-15) keys the account fingerprint the idempotency key embeds, so the two
+idempotency constants are the pre-N3 payload with only that element replaced by
+HMAC-SHA256 under the suite's derived test key. Substituting the old unkeyed formula
+back reproduces the pre-N3 values exactly (the N3-1 fix commit). No pre-cutover order row
+survives into a keyed database, so no stored key ever has to match these. The summary
+hashes carry no fingerprint and are unchanged.
 """
 
 from __future__ import annotations
@@ -18,6 +26,7 @@ from datetime import date
 from decimal import Decimal
 
 import pytest
+from tests.support.persistence_keys import TEST_PERSISTENCE_KEY
 
 from chronos.domain.enums import OptionRight, OrderIntent
 from chronos.domain.models import OptionContract, UnderlyingContract
@@ -29,9 +38,9 @@ from chronos.orders.intent import (
 
 _GOLDEN_DAY_BUCKET = "2026-07-17"
 
-_GOLDEN_OPTION_IDEMPOTENCY = "dbce8baf54d5545b8692bb4826c5da6c"
+_GOLDEN_OPTION_IDEMPOTENCY = "a44878dd249a504886d5df1dc0a2df74"
 _GOLDEN_OPTION_SUMMARY_HASH = "f208637726e0add78fcdd87b8874f2b4eff59ea6b7eb3e4d4698831fb830e7f4"
-_GOLDEN_STOCK_IDEMPOTENCY = "10433b465737539f9d00b78ab102ad9a"
+_GOLDEN_STOCK_IDEMPOTENCY = "e725fa62fdcd5cb2b53dabc4b362e1d1"
 _GOLDEN_STOCK_SUMMARY_HASH = "c04f70f27764cd59ea030fdb1233f1b247ee6dfef03c74e0c9637a312e7348fc"
 
 
@@ -74,7 +83,10 @@ def _golden_stock_intent(quantity: object = 25) -> object:
 
 def test_option_keys_and_hashes_are_byte_stable() -> None:
     intent = _golden_option_intent()
-    assert intent.idempotency_key(day_bucket=_GOLDEN_DAY_BUCKET) == _GOLDEN_OPTION_IDEMPOTENCY  # type: ignore[attr-defined]
+    assert (
+        intent.idempotency_key(day_bucket=_GOLDEN_DAY_BUCKET, key=TEST_PERSISTENCE_KEY)
+        == _GOLDEN_OPTION_IDEMPOTENCY
+    )  # type: ignore[attr-defined]
     assert (
         order_summary_hash(intent, risk_decision_id="RD-GOLDEN-1")  # type: ignore[arg-type]
         == _GOLDEN_OPTION_SUMMARY_HASH
@@ -83,7 +95,10 @@ def test_option_keys_and_hashes_are_byte_stable() -> None:
 
 def test_stock_keys_and_hashes_are_byte_stable() -> None:
     intent = _golden_stock_intent()
-    assert intent.idempotency_key(day_bucket=_GOLDEN_DAY_BUCKET) == _GOLDEN_STOCK_IDEMPOTENCY  # type: ignore[attr-defined]
+    assert (
+        intent.idempotency_key(day_bucket=_GOLDEN_DAY_BUCKET, key=TEST_PERSISTENCE_KEY)
+        == _GOLDEN_STOCK_IDEMPOTENCY
+    )  # type: ignore[attr-defined]
     assert (
         order_summary_hash(intent, risk_decision_id="RD-GOLDEN-2")  # type: ignore[arg-type]
         == _GOLDEN_STOCK_SUMMARY_HASH
@@ -101,7 +116,7 @@ def test_decimal_exponent_variants_cannot_fork_keys() -> None:
     for quantity in (1, Decimal("1"), Decimal("1.0"), Decimal("1.00")):
         intent = _golden_option_intent(quantity)
         assert (
-            intent.idempotency_key(day_bucket=_GOLDEN_DAY_BUCKET)  # type: ignore[attr-defined]
+            intent.idempotency_key(day_bucket=_GOLDEN_DAY_BUCKET, key=TEST_PERSISTENCE_KEY)  # type: ignore[attr-defined]
             == _GOLDEN_OPTION_IDEMPOTENCY
         ), f"idempotency key forked for quantity spelling {quantity!r}"
         assert (

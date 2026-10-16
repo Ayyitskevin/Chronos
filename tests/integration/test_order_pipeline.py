@@ -21,6 +21,7 @@ from tests.support.order_fakes import (
     option_contract,
     paper_settings,
 )
+from tests.support.persistence_keys import TEST_PERSISTENCE_KEY
 
 from chronos.broker.base import BrokerConnectionError, BrokerRefusedBeforeSend, BrokerSendGuard
 from chronos.broker.connection import BrokerConnectionManager
@@ -139,7 +140,12 @@ class _Harness:
         self.settings = settings
         self.db = Database("sqlite:///:memory:")
         self.db.initialize()
-        self.db.bind_scope(broker_mode="ibkr", environment="paper", account_id=PAPER_ACCOUNT)
+        self.db.bind_scope(
+            broker_mode="ibkr",
+            environment="paper",
+            account_id=PAPER_ACCOUNT,
+            key=TEST_PERSISTENCE_KEY,
+        )
         self.readiness = ReconciliationReadiness()
         self.connection = BrokerConnectionManager(broker, readiness=self.readiness)
         self.connection.start()
@@ -174,7 +180,7 @@ class _Harness:
             evidence_provider=(
                 evidence_provider or _CannedEvidence(broker, settings, self.readiness)
             ),
-            risk_engine=OrderRiskEngine(settings),
+            risk_engine=OrderRiskEngine(settings, persistence_key=TEST_PERSISTENCE_KEY),
             preview_service=OrderPreviewService(self.connection),
             submission_boundary=boundary,
             modification=OrderModificationService(
@@ -197,11 +203,13 @@ class _Harness:
                 tracker=tracker,
                 reconciliation_readiness=self.readiness,
                 expected_broker_client_id=settings.ib_client_id,
+                persistence_key=TEST_PERSISTENCE_KEY,
             ),
             intents=intents,
             confirmations=confirmations,
             risk_decisions=risk_decisions,
             broker_environment_is_paper=True,
+            persistence_key=TEST_PERSISTENCE_KEY,
         )
 
     def close(self) -> None:

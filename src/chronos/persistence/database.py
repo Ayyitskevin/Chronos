@@ -19,9 +19,9 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from chronos.persistence.schema import Base, DatabaseScopeRow, SchemaVersionRow
-from chronos.utils.identifiers import account_fingerprint
+from chronos.utils.identifiers import PersistenceKey, account_fingerprint
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 
 _DATABASE_RECOVERY_GUIDANCE = (
     "Preserve and back up this database first. A prior-version schema can be upgraded with "
@@ -29,6 +29,8 @@ _DATABASE_RECOVERY_GUIDANCE = (
     "configure a fresh DATABASE_URL instead. Chronos never modifies such a database itself."
 )
 _SQLITE_SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
+#: Session.info slot that carries the persistence key a database was bound under (N3).
+_PERSISTENCE_KEY_INFO = "chronos.persistence_key"
 
 # >>> R-21 startup repair window (DBLOCK)
 # POSIX record locks belong to the (process, file) pair, and close() of ANY descriptor for a
@@ -221,14 +223,22 @@ class Database:
         broker_mode: str,
         environment: str,
         account_id: str,
+        key: PersistenceKey,
     ) -> None:
-        """Bind this database to one account without persisting the account identifier."""
+        """Bind this database to one account without persisting the account identifier.
+
+        The stored pseudonym is keyed (N3): a database bound under one install's key is a
+        different scope under any other key and is refused here, never rewritten. On success the
+        key is recorded on this database's sessions, where the account-scope checks of the
+        repositories read it (:func:`bound_persistence_key`); nothing reads it from the
+        environment.
+        """
 
         normalized_broker_mode = broker_mode.strip()
         normalized_environment = environment.strip()
         if not normalized_broker_mode or not normalized_environment:
             raise ValueError("broker_mode and environment must not be blank")
-        fingerprint = account_fingerprint(account_id)
+        fingerprint = account_fingerprint(account_id, key=key)
         with self.sessions.begin() as session:
             current = session.get(DatabaseScopeRow, 1)
             if current is None:
@@ -246,8 +256,7 @@ class Database:
                         account_fingerprint=fingerprint,
                     )
                 )
-                return
-            if (
+            elif (
                 current.broker_mode != normalized_broker_mode
                 or current.environment != normalized_environment
                 or current.account_fingerprint != fingerprint
@@ -256,6 +265,7 @@ class Database:
                     "This Chronos database is already bound to a different broker scope; "
                     "configure a separate DATABASE_URL."
                 )
+        self.sessions.configure(info={_PERSISTENCE_KEY_INFO: key})
 
     def dispose(self) -> None:
         self.engine.dispose()
@@ -661,3 +671,19 @@ def _configure_sqlite_connection(
 def _pragma_value(cursor: Any) -> Any:
     row = cursor.fetchone()
     return row[0] if row else None
+
+
+def bound_persistence_key(session: Session) -> PersistenceKey:
+    """The persistence key this session's database was bound under, or a refusal.
+
+    Set only by a successful :meth:`Database.bind_scope`; every account-specific read and write
+    already requires a bound scope, so an unbound session has no key and no fallback.
+    """
+
+    key = session.info.get(_PERSISTENCE_KEY_INFO)
+    if not isinstance(key, PersistenceKey):
+        raise RuntimeError(
+            "Chronos database must be bound to a broker scope under the persistence key before "
+            "account-specific access"
+        )
+    return key

@@ -30,6 +30,7 @@ from chronos.persistence.reservation_enforcement import (
 from chronos.services.trading_hours import session_for
 from chronos.strategy import reservations
 from tests.support.order_fakes import PAPER_ACCOUNT, option_contract, paper_settings
+from tests.support.persistence_keys import TEST_PERSISTENCE_KEY
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SRC = REPO_ROOT / "src" / "chronos"
@@ -138,7 +139,7 @@ def _cash_secured_put_status(**evidence: Decimal) -> RiskCheckStatus:
         buying_power=Decimal("160000"),
         as_of=_NOW,
     )
-    decision = OrderRiskEngine(paper_settings()).evaluate(
+    decision = OrderRiskEngine(paper_settings(), persistence_key=TEST_PERSISTENCE_KEY).evaluate(
         intent,
         RiskEvidence(
             account=account,

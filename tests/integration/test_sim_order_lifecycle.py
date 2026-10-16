@@ -59,6 +59,7 @@ from sqlalchemy import select
 from tests.support import fake_ibapi
 from tests.support.fake_ibapi import FakeContract, FakeEClient, FakeGateway, FakeOrder
 from tests.support.order_fakes import PAPER_ACCOUNT, paper_settings
+from tests.support.persistence_keys import TEST_PERSISTENCE_KEY
 from tests.support.sim_broker import FillPlan, SimBroker, SimClock, _SeedGuard
 
 from chronos.broker import official_ibkr
@@ -345,7 +346,12 @@ class _SimHarness:
         # this database's persisted intents and tracker (U-0 restack onto the S1-F1 chain).
         self.db = Database("sqlite:///:memory:")
         self.db.initialize()
-        self.db.bind_scope(broker_mode="ibkr", environment="paper", account_id=self.account)
+        self.db.bind_scope(
+            broker_mode="ibkr",
+            environment="paper",
+            account_id=self.account,
+            key=TEST_PERSISTENCE_KEY,
+        )
         if self.kind == "sim":
             self.settings = settings or paper_settings()
             self.sim_kill_switch = _KillSwitch(engaged=True) if kill_switch_engaged else None
@@ -389,6 +395,7 @@ class _SimHarness:
                 order_ownership=PersistedOrderOwnershipLedger(
                     OrderIntentRepository(self.db.sessions),
                     OrderTrackerRepository(self.db.sessions),
+                    persistence_key=TEST_PERSISTENCE_KEY,
                 ),
             )
         self.connection = BrokerConnectionManager(self.broker, readiness=self.readiness)
@@ -424,7 +431,7 @@ class _SimHarness:
                 reconciliation_readiness=self.readiness,
                 intents=self.intents,
             ),
-            risk_engine=OrderRiskEngine(self.settings),
+            risk_engine=OrderRiskEngine(self.settings, persistence_key=TEST_PERSISTENCE_KEY),
             preview_service=OrderPreviewService(self.connection),
             submission_boundary=boundary,
             modification=OrderModificationService(
@@ -447,11 +454,13 @@ class _SimHarness:
                 tracker=self.tracker,
                 reconciliation_readiness=self.readiness,
                 expected_broker_client_id=self.settings.ib_client_id,
+                persistence_key=TEST_PERSISTENCE_KEY,
             ),
             intents=self.intents,
             confirmations=self.confirmations,
             risk_decisions=self.risk_decisions,
             broker_environment_is_paper=True,
+            persistence_key=TEST_PERSISTENCE_KEY,
         )
         self.coordinator = ReconciliationCoordinator(
             self.connection,

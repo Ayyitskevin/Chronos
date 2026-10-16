@@ -9,7 +9,14 @@ from pathlib import Path
 from typing import Annotated, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import BeforeValidator, Field, PositiveInt, field_validator, model_validator
+from pydantic import (
+    BeforeValidator,
+    Field,
+    PositiveInt,
+    SecretStr,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from chronos.config.limits import (
@@ -133,6 +140,10 @@ class Settings(BaseSettings):
     walkforward_warmup_bars: Annotated[int, Field(ge=1)] = 252
     walkforward_min_trades: Annotated[int, Field(ge=1)] = 20
     ib_account_id: str = ""
+    # N3: the owner's per-install key for every persisted account fingerprint. Loaded as-is
+    # (absent stays None) so a load never refuses on it; the composition roots resolve it
+    # through chronos.config.persistence_key, which refuses an absent or malformed value.
+    chronos_persistence_key: SecretStr | None = None
 
     allow_order_transmit: bool = False
     allow_live_trading: bool = False

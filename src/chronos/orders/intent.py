@@ -36,7 +36,7 @@ from chronos.domain.models import (
     UnderlyingContract,
 )
 from chronos.persistence.order_repositories import OrderIntentRecord
-from chronos.utils.identifiers import account_fingerprint
+from chronos.utils.identifiers import PersistenceKey, account_fingerprint
 
 OrderRefStr = str
 
@@ -226,7 +226,7 @@ class WheelOrderIntent(ChronosModel):
             outside_rth=self.outside_rth,
         )
 
-    def idempotency_key(self, *, day_bucket: str) -> str:
+    def idempotency_key(self, *, day_bucket: str, key: PersistenceKey) -> str:
         """Deterministic key over the order's economic content and trading day.
 
         A genuinely different order (different contract/side/qty/price) yields a
@@ -236,7 +236,7 @@ class WheelOrderIntent(ChronosModel):
 
         con_id = getattr(self.contract, "con_id", 0)
         parts = (
-            account_fingerprint(self.account_id),
+            account_fingerprint(self.account_id, key=key),
             self.product_family.value,
             self.symbol,
             str(con_id),
@@ -258,6 +258,7 @@ class WheelOrderIntent(ChronosModel):
         created_at: datetime,
         expires_at: datetime | None,
         day_bucket: str,
+        key: PersistenceKey,
         wheel_cycle_id: str | None = None,
         risk_snapshot_id: str | None = None,
         preview_id: str | None = None,
@@ -266,8 +267,8 @@ class WheelOrderIntent(ChronosModel):
         local_symbol = getattr(self.contract, "local_symbol", None)
         return OrderIntentRecord(
             intent_id=self.intent_id,
-            idempotency_key=self.idempotency_key(day_bucket=day_bucket),
-            account_fingerprint=account_fingerprint(self.account_id),
+            idempotency_key=self.idempotency_key(day_bucket=day_bucket, key=key),
+            account_fingerprint=account_fingerprint(self.account_id, key=key),
             environment=environment.value,
             product_family=self.product_family,
             wheel_cycle_id=wheel_cycle_id,

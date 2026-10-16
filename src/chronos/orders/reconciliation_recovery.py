@@ -41,7 +41,7 @@ from chronos.persistence.order_repositories import (
     OrderIntentRepository,
     RecordedFillsAdvanced,
 )
-from chronos.utils.identifiers import account_fingerprint
+from chronos.utils.identifiers import PersistenceKey, account_fingerprint
 
 # Intent statuses whose true broker state must be re-derived on restart.
 _UNRESOLVED_STATUSES = frozenset(
@@ -677,6 +677,7 @@ class OrderRestartReconciler:
         tracker: OrderTracker,
         reconciliation_readiness: ReconciliationReadiness,
         expected_broker_client_id: int,
+        persistence_key: PersistenceKey,
         market_timezone: str = "America/New_York",
         monotonic: Callable[[], float] = _time_module.monotonic,
         recovery_dwell_seconds: float = 90.0,
@@ -696,6 +697,7 @@ class OrderRestartReconciler:
         if expected_broker_client_id < 0:
             raise ValueError("expected broker client id must be non-negative")
         self._expected_broker_client_id = expected_broker_client_id
+        self._persistence_key = persistence_key
         self._market_tz = ZoneInfo(market_timezone)
         self._monotonic = monotonic
         self._dwell_seconds = recovery_dwell_seconds
@@ -1002,7 +1004,7 @@ class OrderRestartReconciler:
             self._reconciliation_readiness.snapshot().session_id,
             self._reconciliation_readiness.uncertainty_epoch(),
             adapter_epoch,
-            account_fingerprint(current_account_id),
+            account_fingerprint(current_account_id, key=self._persistence_key),
             _order_identity(order),
             "working",
             mark.event_key,

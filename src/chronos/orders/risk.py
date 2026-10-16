@@ -31,6 +31,7 @@ from chronos.domain.models import AccountSummary, ChronosModel, OptionContract
 from chronos.orders.intent import WheelOrderIntent
 from chronos.services.trading_hours import SessionDecision
 from chronos.strategy import capital, reservations
+from chronos.utils.identifiers import PersistenceKey
 
 DEFAULT_RISK_DECISION_TTL_SECONDS = 60
 _QQQ_FIVE_TOOL_CANDIDATE_SHA256 = "59348ca3da9e9b68ec4edd1fc54572783e9256ae9c55ac18ffe844c0b4b78054"
@@ -238,8 +239,9 @@ def _unknown(name: str, detail: str) -> OrderRiskCheck:
 class OrderRiskEngine:
     """Compose the strategy primitives into one tri-state risk decision."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, *, persistence_key: PersistenceKey) -> None:
         self._settings = settings
+        self._persistence_key = persistence_key
 
     def evaluate(
         self,
@@ -409,7 +411,7 @@ class OrderRiskEngine:
         from chronos.utils.identifiers import account_fingerprint
 
         return capital.CapitalContext(
-            account_fingerprint=account_fingerprint(intent.account_id),
+            account_fingerprint=account_fingerprint(intent.account_id, key=self._persistence_key),
             net_liquidation=evidence.account.net_liquidation,
             uncommitted_cash=evidence.account.total_cash,
             current_symbol_allocation=evidence.current_symbol_allocation,

@@ -25,6 +25,7 @@ import httpx
 import pytest
 from fastapi import Request
 from fastapi.testclient import TestClient
+from tests.support.persistence_keys import TEST_PERSISTENCE_KEY, TEST_PERSISTENCE_KEY_HEX
 from worker.config import load_config
 from worker.cycle import CycleOutcome, run_cycle
 
@@ -45,7 +46,7 @@ from chronos.config.settings import Settings, get_settings
 from chronos.supervisor.evidence_bundles import hash_chain_stream
 from chronos.utils.identifiers import account_fingerprint
 
-_FINGERPRINT = account_fingerprint(DEMO_ACCOUNT_ID)
+_FINGERPRINT = account_fingerprint(DEMO_ACCOUNT_ID, key=TEST_PERSISTENCE_KEY)
 _MODEL = "phase-a-fixture"
 _EVIDENCE = ("POST", "/autonomy/evidence")
 _PROPOSAL = ("POST", "/autonomy/proposals")
@@ -73,6 +74,8 @@ def phase_a_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[str
     for name in tuple(os.environ):
         if name.lower() in Settings.model_fields:
             monkeypatch.delenv(name)
+    # N3-1: the purge above removes CHRONOS_PERSISTENCE_KEY too; the backend needs one.
+    monkeypatch.setenv("CHRONOS_PERSISTENCE_KEY", TEST_PERSISTENCE_KEY_HEX)
     monkeypatch.setattr(socket.socket, "connect", _no_connection)
     monkeypatch.setattr(socket.socket, "connect_ex", _no_connection)
     monkeypatch.setattr("chronos.api.main.autonomy_tick_task", _no_ticks)

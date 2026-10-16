@@ -16,7 +16,11 @@ from chronos.domain.enums import (
     SecurityType,
 )
 from chronos.domain.models import BrokerExecution, ChronosModel, OptionContract
-from chronos.utils.identifiers import account_fingerprint, normalize_account_fingerprint
+from chronos.utils.identifiers import (
+    PersistenceKey,
+    account_fingerprint,
+    normalize_account_fingerprint,
+)
 
 STRATEGY_BASIS_LABEL = "Strategy-Adjusted Basis — not tax basis"
 
@@ -395,6 +399,7 @@ def option_premium_entry(
     *,
     wheel_cycle_id: str,
     opening: bool,
+    key: PersistenceKey,
 ) -> BasisLedgerEntry:
     """Convert an option execution to a stable signed premium entry."""
 
@@ -419,7 +424,7 @@ def option_premium_entry(
         symbol=execution.contract.symbol,
         entry_type=entry_type,
         amount=amount,
-        account_fingerprint=account_fingerprint(execution.account_id),
+        account_fingerprint=account_fingerprint(execution.account_id, key=key),
         contract_id=execution.contract.con_id,
         security_type=execution.contract.security_type,
         source_side=execution.side,
@@ -438,6 +443,7 @@ def commission_entry(
     wheel_cycle_id: str,
     amount: Decimal,
     actual: bool,
+    key: PersistenceKey,
     occurred_at: datetime | None = None,
 ) -> BasisLedgerEntry:
     """Create an idempotent estimate or actual commission entry for one fill."""
@@ -458,7 +464,7 @@ def commission_entry(
         symbol=execution.contract.symbol,
         entry_type=entry_type,
         amount=amount,
-        account_fingerprint=account_fingerprint(execution.account_id),
+        account_fingerprint=account_fingerprint(execution.account_id, key=key),
         contract_id=execution.contract.con_id,
         security_type=execution.contract.security_type,
         source_side=execution.side,
@@ -477,6 +483,7 @@ def stock_fill_evidence_entry(
     *,
     wheel_cycle_id: str,
     assignment: bool,
+    key: PersistenceKey,
 ) -> BasisLedgerEntry:
     """Record assignment/called-away stock evidence without changing broker basis."""
 
@@ -496,7 +503,7 @@ def stock_fill_evidence_entry(
         symbol=execution.contract.symbol,
         entry_type=entry_type,
         amount=Decimal("0"),
-        account_fingerprint=account_fingerprint(execution.account_id),
+        account_fingerprint=account_fingerprint(execution.account_id, key=key),
         contract_id=execution.contract.con_id,
         security_type=execution.contract.security_type,
         source_side=execution.side,

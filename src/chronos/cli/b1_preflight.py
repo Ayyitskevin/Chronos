@@ -48,6 +48,11 @@ from pydantic_settings import SettingsConfigDict
 
 from chronos.cli.db_preflight import Report as DatabaseReport
 from chronos.cli.db_preflight import run_preflight as run_database_preflight
+from chronos.config.persistence_key import (
+    PERSISTENCE_KEY_ENV,
+    PersistenceKeyError,
+    resolve_persistence_key,
+)
 from chronos.config.settings import LIVE_API_PORTS, PAPER_API_PORTS, Settings
 from chronos.control.halt import HaltStore
 from chronos.domain.accounts import is_paper_account_id
@@ -514,10 +519,24 @@ def _database_lines(report: B1Report, settings: Settings) -> None:
         )
     else:
         report.add("CLEAR", "database", "db-preflight checks pass (identity, mode, schema)")
-    _scope_lines(report, _database_path(settings), settings.ib_account_id)
+    _scope_lines(report, _database_path(settings), settings)
 
 
-def _scope_lines(report: B1Report, path: Path, account: str) -> None:
+def _scope_lines(report: B1Report, path: Path, settings: Settings) -> None:
+    # N3: the backend resolves the persistence key before it creates or binds anything, so a
+    # file without a well-formed key cannot start whatever the database holds. Resolved from
+    # the FILE's own settings (never os.environ); the value is never echoed.
+    try:
+        key = resolve_persistence_key(settings)
+    except PersistenceKeyError:
+        report.add(
+            "REFUSE",
+            "scope",
+            f"{PERSISTENCE_KEY_ENV} is absent from the file or not 64 lowercase hex digits; the "
+            "backend would refuse to start (the value is not shown)",
+        )
+        return
+    account = settings.ib_account_id
     if not path.exists():
         report.add(
             "CLEAR",
@@ -542,7 +561,7 @@ def _scope_lines(report: B1Report, path: Path, account: str) -> None:
             "unbound: it binds to this paper account at the first backend start (a file that "
             "already holds account data without a scope would refuse then; not checked here)",
         )
-    elif tuple(row) == ("ibkr", "paper", account_fingerprint(account)):
+    elif tuple(row) == ("ibkr", "paper", account_fingerprint(account, key=key)):
         report.add("CLEAR", "scope", "already bound to this paper account")
     else:
         report.add(

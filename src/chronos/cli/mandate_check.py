@@ -52,7 +52,7 @@ from chronos.autonomy.enums import (
     promotion_rank,
 )
 from chronos.autonomy.mandate import MAX_LIVE_MANDATE_DURATION, AutonomyMandate
-from chronos.utils.identifiers import account_fingerprint
+from chronos.utils.identifiers import PersistenceKey, account_fingerprint
 from chronos.utils.time import utc_now
 
 #: Rungs at or below which a self-declared level is not yet load-bearing. Above
@@ -790,16 +790,24 @@ def _wrap(text: str, *, width: int, indent: int) -> list[str]:
 # ------------------------------------------------------------------ resolution
 
 
-def _resolve_expected_fingerprint(account_id: str | None) -> tuple[str | None, str]:
+def _resolve_expected_fingerprint(
+    account_id: str | None, *, key: PersistenceKey | None = None
+) -> tuple[str | None, str]:
     """The account this machine would bind a mandate to, and where it came from.
 
     Settings can legitimately fail to construct (they are fail-closed), and this
     is a read-only aid, so a failure downgrades the check to *skipped* rather
-    than aborting the report.
+    than aborting the report. The value is keyed (N3): without this install's persistence key
+    there is nothing to compare, which is also *skipped*, never an unkeyed stand-in.
+    A caller that already resolved the key passes it, so one command resolves it once.
     """
 
+    if key is None:
+        key = _resolve_persistence_key()
+    if key is None:
+        return None, ""
     if account_id:
-        return account_fingerprint(account_id), f"--account-id {_mask(account_id)}"
+        return account_fingerprint(account_id, key=key), f"--account-id {_mask(account_id)}"
     try:
         from chronos.config.settings import get_settings
 
@@ -808,7 +816,19 @@ def _resolve_expected_fingerprint(account_id: str | None) -> tuple[str | None, s
         return None, ""
     if not configured:
         return None, ""
-    return account_fingerprint(configured), f"IB_ACCOUNT_ID {_mask(configured)}"
+    return account_fingerprint(configured, key=key), f"IB_ACCOUNT_ID {_mask(configured)}"
+
+
+def _resolve_persistence_key() -> PersistenceKey | None:
+    """This install's persistence key from its settings, or None (never a default key)."""
+
+    try:
+        from chronos.config.persistence_key import resolve_persistence_key
+        from chronos.config.settings import get_settings
+
+        return resolve_persistence_key(get_settings())
+    except Exception:  # absent, malformed, or settings that did not load: all "unavailable"
+        return None
 
 
 def _mask(account_id: str) -> str:
@@ -1048,17 +1068,24 @@ def cmd_mandate_template(args: argparse.Namespace) -> int:
 def cmd_mandate_fingerprint(args: argparse.Namespace) -> int:
     """Print the pseudonym a raw account id maps to. No account id is stored."""
 
+    key = _resolve_persistence_key()
+    if key is None:
+        print(
+            "no persistence key available: the fingerprint is keyed by CHRONOS_PERSISTENCE_KEY, "
+            "which is absent or malformed here (or settings did not load); nothing is printed"
+        )
+        return 1
     account_id: str | None = args.account_id
     source = "--account-id"
     if not account_id:
-        fingerprint, source = _resolve_expected_fingerprint(None)
+        fingerprint, source = _resolve_expected_fingerprint(None, key=key)
         if fingerprint is None:
             print("no account id available; pass --account-id or set IB_ACCOUNT_ID")
             return 1
         print(fingerprint)
         print(f"# derived from {source}", flush=True)
         return 0
-    print(account_fingerprint(account_id))
+    print(account_fingerprint(account_id, key=key))
     print(f"# derived from {source} {_mask(account_id)}")
     return 0
 

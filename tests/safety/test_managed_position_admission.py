@@ -53,6 +53,7 @@ from chronos.supervisor.position_admission import (
     RefusedManagedPositionAdmission,
 )
 from chronos.utils.identifiers import account_fingerprint
+from tests.support.persistence_keys import TEST_PERSISTENCE_KEY
 
 _T = TypeVar("_T")
 _NOW = datetime(2026, 8, 25, 15, 30, tzinfo=UTC)
@@ -186,7 +187,9 @@ def _seed_filled_opening(
     broker_order_id: int = 9001,
     permanent_id: int = 109001,
 ) -> None:
-    database.bind_scope(broker_mode="ibkr", environment="paper", account_id=_ACCOUNT)
+    database.bind_scope(
+        broker_mode="ibkr", environment="paper", account_id=_ACCOUNT, key=TEST_PERSISTENCE_KEY
+    )
     intents = OrderIntentRepository(database.sessions)
     decisions = RiskDecisionRepository(database.sessions)
     events = OrderTrackerRepository(database.sessions)
@@ -194,7 +197,7 @@ def _seed_filled_opening(
         OrderIntentRecord(
             intent_id="intent-qqq-1",
             idempotency_key="idem-qqq-1",
-            account_fingerprint=account_fingerprint(_ACCOUNT),
+            account_fingerprint=account_fingerprint(_ACCOUNT, key=TEST_PERSISTENCE_KEY),
             environment="paper",
             product_family=ProductFamily.STOCK,
             wheel_cycle_id=None,
@@ -225,7 +228,7 @@ def _seed_filled_opening(
         RiskDecisionRecord(
             decision_id="risk-qqq-1",
             correlation_id=_ORDER_REF,
-            account_fingerprint=account_fingerprint(_ACCOUNT),
+            account_fingerprint=account_fingerprint(_ACCOUNT, key=TEST_PERSISTENCE_KEY),
             symbol="QQQ",
             product_family=ProductFamily.STOCK,
             overall_result=RiskCheckStatus.PASS,
@@ -289,6 +292,7 @@ def test_valid_fill_is_admitted_once_and_replay_is_semantically_idempotent() -> 
             sessions=database.sessions,
             readiness=_readiness(),
             account_id=_ACCOUNT,
+            persistence_key=TEST_PERSISTENCE_KEY,
         )
 
         first = admission.admit_opening(_ORDER_REF, _NOW)
@@ -320,6 +324,7 @@ def test_execution_after_broker_capture_window_refuses() -> None:
             sessions=database.sessions,
             readiness=_readiness(),
             account_id=_ACCOUNT,
+            persistence_key=TEST_PERSISTENCE_KEY,
         )
 
         result = admission.admit_opening(_ORDER_REF, _NOW)
@@ -340,6 +345,7 @@ def test_admission_time_before_opening_fill_refuses_without_partial_registration
             sessions=database.sessions,
             readiness=_readiness(),
             account_id=_ACCOUNT,
+            persistence_key=TEST_PERSISTENCE_KEY,
         )
 
         result = admission.admit_opening(_ORDER_REF, _NOW - timedelta(minutes=2))
@@ -367,6 +373,7 @@ def test_fractional_qqq_fill_refuses_as_typed_evidence_failure() -> None:
             sessions=database.sessions,
             readiness=_readiness(),
             account_id=_ACCOUNT,
+            persistence_key=TEST_PERSISTENCE_KEY,
         )
 
         result = admission.admit_opening(_ORDER_REF, _NOW)
@@ -387,6 +394,7 @@ def test_broker_fill_quantity_must_match_terminal_local_lifecycle_evidence() -> 
             sessions=database.sessions,
             readiness=_readiness(),
             account_id=_ACCOUNT,
+            persistence_key=TEST_PERSISTENCE_KEY,
         )
 
         result = admission.admit_opening(_ORDER_REF, _NOW)
@@ -407,6 +415,7 @@ def test_nonpositive_broker_order_identity_refuses() -> None:
             sessions=database.sessions,
             readiness=_readiness(),
             account_id=_ACCOUNT,
+            persistence_key=TEST_PERSISTENCE_KEY,
         )
 
         result = admission.admit_opening(_ORDER_REF, _NOW)
@@ -434,6 +443,7 @@ def test_multi_execution_vwap_rounds_up_to_the_persistence_scale() -> None:
             sessions=database.sessions,
             readiness=_readiness(),
             account_id=_ACCOUNT,
+            persistence_key=TEST_PERSISTENCE_KEY,
         )
 
         result = admission.admit_opening(_ORDER_REF, _NOW)
@@ -456,6 +466,7 @@ def test_buy_execution_above_the_protected_limit_refuses() -> None:
             sessions=database.sessions,
             readiness=_readiness(),
             account_id=_ACCOUNT,
+            persistence_key=TEST_PERSISTENCE_KEY,
         )
 
         result = admission.admit_opening(_ORDER_REF, _NOW)
@@ -483,6 +494,7 @@ def test_position_registration_conflict_is_typed_and_rolls_back(
             sessions=database.sessions,
             readiness=_readiness(),
             account_id=_ACCOUNT,
+            persistence_key=TEST_PERSISTENCE_KEY,
         )
 
         result = admission.admit_opening(_ORDER_REF, _NOW)
@@ -519,6 +531,7 @@ def test_fill_rebased_stop_that_cannot_form_a_valid_plan_refuses_typed() -> None
             sessions=database.sessions,
             readiness=_readiness(),
             account_id=_ACCOUNT,
+            persistence_key=TEST_PERSISTENCE_KEY,
         )
 
         result = admission.admit_opening(_ORDER_REF, _NOW)
@@ -543,6 +556,7 @@ def test_terminal_partial_fill_with_cancelled_remainder_is_admitted() -> None:
             sessions=database.sessions,
             readiness=_readiness(),
             account_id=_ACCOUNT,
+            persistence_key=TEST_PERSISTENCE_KEY,
         )
 
         result = admission.admit_opening(_ORDER_REF, _NOW)
@@ -564,6 +578,7 @@ def test_missing_positive_execution_refuses_without_inferring_from_absence() -> 
             sessions=database.sessions,
             readiness=_readiness(),
             account_id=_ACCOUNT,
+            persistence_key=TEST_PERSISTENCE_KEY,
         )
 
         result = admission.admit_opening(_ORDER_REF, _NOW)
@@ -584,6 +599,7 @@ def test_changed_broker_snapshot_and_changed_reconciliation_each_refuse() -> Non
             sessions=database.sessions,
             readiness=_readiness(),
             account_id=_ACCOUNT,
+            persistence_key=TEST_PERSISTENCE_KEY,
         )
         first = unstable.admit_opening(_ORDER_REF, _NOW)
         assert isinstance(first, RefusedManagedPositionAdmission)
@@ -601,6 +617,7 @@ def test_changed_broker_snapshot_and_changed_reconciliation_each_refuse() -> Non
             sessions=database.sessions,
             readiness=readiness,
             account_id=_ACCOUNT,
+            persistence_key=TEST_PERSISTENCE_KEY,
         )
         second = raced.admit_opening(_ORDER_REF, _NOW)
         assert isinstance(second, RefusedManagedPositionAdmission)
@@ -619,6 +636,7 @@ def test_unexplained_aggregate_qqq_position_refuses() -> None:
             sessions=database.sessions,
             readiness=_readiness(),
             account_id=_ACCOUNT,
+            persistence_key=TEST_PERSISTENCE_KEY,
         )
 
         result = admission.admit_opening(_ORDER_REF, _NOW)
@@ -654,6 +672,7 @@ def test_another_working_qqq_order_makes_aggregate_position_unsafe_to_bind() -> 
             sessions=database.sessions,
             readiness=_readiness(),
             account_id=_ACCOUNT,
+            persistence_key=TEST_PERSISTENCE_KEY,
         )
 
         result = admission.admit_opening(_ORDER_REF, _NOW)
@@ -679,6 +698,7 @@ def test_missing_frozen_risk_refuses_without_leaving_a_partial_binding() -> None
             sessions=database.sessions,
             readiness=_readiness(),
             account_id=_ACCOUNT,
+            persistence_key=TEST_PERSISTENCE_KEY,
         )
 
         refused = admission.admit_opening(_ORDER_REF, _NOW)
@@ -709,6 +729,7 @@ def test_risk_header_cannot_replace_the_required_passing_management_check() -> N
             sessions=database.sessions,
             readiness=_readiness(),
             account_id=_ACCOUNT,
+            persistence_key=TEST_PERSISTENCE_KEY,
         )
 
         result = admission.admit_opening(_ORDER_REF, _NOW)

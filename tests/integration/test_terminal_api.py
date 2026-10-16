@@ -44,6 +44,7 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from pydantic_core import PydanticUndefined
+from tests.support.persistence_keys import TEST_PERSISTENCE_KEY
 
 from chronos.api.auth import load_or_create_token
 from chronos.api.main import create_app
@@ -76,7 +77,7 @@ from chronos.utils.locking import WriterLease
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-_FINGERPRINT = account_fingerprint(DEMO_ACCOUNT_ID)
+_FINGERPRINT = account_fingerprint(DEMO_ACCOUNT_ID, key=TEST_PERSISTENCE_KEY)
 
 #: The seven paths ``READ_ROUTES`` listed by hand. Kept as a positive control, not as
 #: the sweep's input: the derived tuple must still contain every one of them, so a

@@ -56,10 +56,11 @@ from chronos.cli.mandate_check import (
 from chronos.config.settings import get_settings
 from chronos.domain.enums import DataQuality
 from chronos.utils.identifiers import account_fingerprint
+from tests.support.persistence_keys import TEST_PERSISTENCE_KEY
 
 _NOW = datetime(2026, 7, 1, 14, 0, tzinfo=UTC)
 _ACCOUNT = "DU1234567"
-_FINGERPRINT = account_fingerprint(_ACCOUNT)
+_FINGERPRINT = account_fingerprint(_ACCOUNT, key=TEST_PERSISTENCE_KEY)
 
 _INGRESS_PINS = {
     "provider": "external-worker",
@@ -191,6 +192,39 @@ def test_no_mandate_command_writes_anything(
     capsys.readouterr()
 
 
+@pytest.mark.parametrize("explicit", [True, False], ids=["--account-id", "IB_ACCOUNT_ID"])
+def test_mandate_fingerprint_resolves_the_persistence_key_exactly_once(
+    explicit: bool, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """N3 read-once (Daybreak r1 P2-1): one command, one key resolution, on both account paths.
+
+    The real resolver is wrapped, not replaced, so the count is of resolutions that actually
+    happened and the printed value is still the keyed fingerprint of the account given.
+    """
+
+    from chronos.config import persistence_key
+
+    real = persistence_key.resolve_persistence_key
+    calls: list[int] = []
+
+    def counting(settings: object) -> object:
+        calls.append(1)  # count only: no settings object reaches an assertion message
+        return real(settings)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(persistence_key, "resolve_persistence_key", counting)
+    monkeypatch.setenv("IB_ACCOUNT_ID", _ACCOUNT)
+    get_settings.cache_clear()
+    try:
+        argv = ["mandate", "fingerprint", *(["--account-id", _ACCOUNT] if explicit else [])]
+        assert main(argv) == 0
+    finally:
+        get_settings.cache_clear()
+
+    resolutions = sum(calls)
+    assert resolutions == 1, f"the persistence key was resolved {resolutions} times"
+    assert capsys.readouterr().out.splitlines()[0] == _FINGERPRINT
+
+
 def test_the_printed_template_is_shadow_and_not_submitting(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -288,7 +322,9 @@ def test_a_future_window_is_reported_before_it_opens() -> None:
 
 
 def test_a_wrong_account_is_blocking_because_the_backend_boots_inert() -> None:
-    codes = _codes(_shadow(), expected_fingerprint=account_fingerprint("DU7654321"))
+    codes = _codes(
+        _shadow(), expected_fingerprint=account_fingerprint("DU7654321", key=TEST_PERSISTENCE_KEY)
+    )
     assert codes["account-mismatch"] is Severity.BLOCKING
 
 

@@ -150,7 +150,11 @@ def test_reviewed_baseline_contains_only_explicit_false_positive_fingerprints() 
     # shared API port constants supersede the settings.py and the CPS U-A official_ibkr.py
     # source-inventory fingerprints),
     # 30 at B1 U-c r2 (settings.py: hide_input_in_errors supersedes its fingerprint again).
-    assert len(historical_candidates) == 30
+    # 38 at N3-1 (keyed account fingerprint): the superseded settings.py, runtime.py and
+    # api/autonomy_wiring.py source-inventory fingerprints (3); the QQQ readiness pins of the
+    # pre-N3 position_admission.py bytes in the spec and the compiler, and the pre-re-pin readiness
+    # digest (3); the two pre-N3 idempotency goldens (2).
+    assert len(historical_candidates) == 38
     assert {item["type"] for item in candidates} == {
         "Hex High Entropy String",
         "Secret Keyword",

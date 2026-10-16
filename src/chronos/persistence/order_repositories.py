@@ -35,7 +35,6 @@ from chronos.persistence.schema import (
     RiskCheckResultRow,
     RiskDecisionRow,
 )
-from chronos.utils.identifiers import account_fingerprint
 
 # Intent statuses that mean the order is still working (not yet terminal) and
 # therefore still encumbers cash/shares for the next order's risk evaluation.
@@ -249,9 +248,10 @@ class OrderIntentRepository:
     def active(self, *, current_account_id: str) -> tuple[OrderIntentRecord, ...]:
         """Return every still-working intent for the bound account."""
 
-        fingerprint = account_fingerprint(current_account_id)
         with self._sessions() as session:
-            _require_matching_account_scope(session, current_account_id)
+            fingerprint = _require_matching_account_scope(
+                session, current_account_id
+            ).account_fingerprint
             rows = session.scalars(
                 select(OrderIntentRow)
                 .where(OrderIntentRow.account_fingerprint == fingerprint)
@@ -263,9 +263,10 @@ class OrderIntentRepository:
     def ids_in_status(self, status: OrderLifecycle, *, current_account_id: str) -> tuple[str, ...]:
         """Intent ids currently in exactly ``status`` (live reconciliation gate)."""
 
-        fingerprint = account_fingerprint(current_account_id)
         with self._sessions() as session:
-            _require_matching_account_scope(session, current_account_id)
+            fingerprint = _require_matching_account_scope(
+                session, current_account_id
+            ).account_fingerprint
             rows = session.scalars(
                 select(OrderIntentRow.intent_id)
                 .where(OrderIntentRow.account_fingerprint == fingerprint)
@@ -275,9 +276,10 @@ class OrderIntentRepository:
             return tuple(rows)
 
     def list_all(self, *, current_account_id: str) -> tuple[OrderIntentRecord, ...]:
-        fingerprint = account_fingerprint(current_account_id)
         with self._sessions() as session:
-            _require_matching_account_scope(session, current_account_id)
+            fingerprint = _require_matching_account_scope(
+                session, current_account_id
+            ).account_fingerprint
             rows = session.scalars(
                 select(OrderIntentRow)
                 .where(OrderIntentRow.account_fingerprint == fingerprint)
@@ -306,9 +308,10 @@ class OrderIntentRepository:
         what the limit is for.
         """
 
-        fingerprint = account_fingerprint(current_account_id)
         with self._sessions() as session:
-            _require_matching_account_scope(session, current_account_id)
+            fingerprint = _require_matching_account_scope(
+                session, current_account_id
+            ).account_fingerprint
             count = session.scalar(
                 select(func.count())
                 .select_from(OrderIntentRow)

@@ -41,6 +41,7 @@ from chronos.persistence.order_repositories import (
 )
 from chronos.utils.identifiers import account_fingerprint
 from tests.support.order_fakes import PAPER_ACCOUNT, FakeBroker
+from tests.support.persistence_keys import TEST_PERSISTENCE_KEY
 
 ACCOUNT = PAPER_ACCOUNT
 CLIENT_ID = 17
@@ -235,7 +236,7 @@ class Rig:
         record = OrderIntentRecord(
             intent_id=intent_id,
             idempotency_key=f"idem-{intent_id}",
-            account_fingerprint=account_fingerprint(self.account),
+            account_fingerprint=account_fingerprint(self.account, key=TEST_PERSISTENCE_KEY),
             environment="paper",
             product_family=ProductFamily.STOCK,
             wheel_cycle_id=None,
@@ -335,7 +336,9 @@ def make_rig(
     venue = venue if venue is not None else ScriptedVenue()
     db = Database("sqlite:///:memory:")
     db.initialize()
-    db.bind_scope(broker_mode="ibkr", environment="paper", account_id=account)
+    db.bind_scope(
+        broker_mode="ibkr", environment="paper", account_id=account, key=TEST_PERSISTENCE_KEY
+    )
     intents = OrderIntentRepository(db.sessions)
     repo = OrderTrackerRepository(db.sessions)
     tracker = OrderTracker(intents, repo)
@@ -352,6 +355,7 @@ def make_rig(
         reconciliation_readiness=readiness,
         expected_broker_client_id=CLIENT_ID,
         **extra,
+        persistence_key=TEST_PERSISTENCE_KEY,
     )
     return Rig(db, venue, intents, repo, tracker, readiness, connection, reconciler, account)
 

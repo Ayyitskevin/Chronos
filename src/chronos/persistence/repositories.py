@@ -24,6 +24,7 @@ from chronos.domain.enums import (
     WheelStage,
 )
 from chronos.domain.models import BrokerOrderIdentity, LocalReconciliationEvidence
+from chronos.persistence.database import bound_persistence_key
 from chronos.persistence.schema import (
     ApplicationEventRow,
     BasisEntryRow,
@@ -689,7 +690,8 @@ def _require_matching_account_scope(
         raise RuntimeError("Chronos database has a malformed pseudonymous account scope") from None
     if normalized_scope_fingerprint != scope.account_fingerprint:
         raise RuntimeError("Chronos database has a malformed pseudonymous account scope")
-    if account_fingerprint(current_account_id) != scope.account_fingerprint:
+    key = bound_persistence_key(session)
+    if account_fingerprint(current_account_id, key=key) != scope.account_fingerprint:
         raise ValueError(
             "Current broker account does not match the bound pseudonymous database scope"
         )

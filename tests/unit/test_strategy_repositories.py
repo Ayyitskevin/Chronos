@@ -3,6 +3,7 @@ from decimal import Decimal
 
 import pytest
 from sqlalchemy import func, select
+from tests.support.persistence_keys import TEST_PERSISTENCE_KEY
 
 from chronos.domain.enums import (
     BasisEntryType,
@@ -43,7 +44,7 @@ from chronos.utils.identifiers import account_fingerprint
 
 NOW = datetime(2026, 1, 15, 15, 30, tzinfo=UTC)
 ACCOUNT_ID = "DU1234567"
-ACCOUNT_FINGERPRINT = account_fingerprint(ACCOUNT_ID)
+ACCOUNT_FINGERPRINT = account_fingerprint(ACCOUNT_ID, key=TEST_PERSISTENCE_KEY)
 
 
 def _option() -> OptionContract:
@@ -225,7 +226,9 @@ def test_application_event_repository_rejects_raw_account_identifiers() -> None:
     database = Database("sqlite+pysqlite:///:memory:")
     try:
         database.initialize()
-        database.bind_scope(broker_mode="demo", environment="DEMO", account_id=ACCOUNT_ID)
+        database.bind_scope(
+            broker_mode="demo", environment="DEMO", account_id=ACCOUNT_ID, key=TEST_PERSISTENCE_KEY
+        )
         repository = ApplicationEventRepository(database.sessions)
 
         event_id = repository.append(
@@ -273,7 +276,9 @@ def test_application_event_repository_screens_every_persisted_string_field(
     database = Database("sqlite+pysqlite:///:memory:")
     try:
         database.initialize()
-        database.bind_scope(broker_mode="demo", environment="DEMO", account_id=ACCOUNT_ID)
+        database.bind_scope(
+            broker_mode="demo", environment="DEMO", account_id=ACCOUNT_ID, key=TEST_PERSISTENCE_KEY
+        )
         repository = ApplicationEventRepository(database.sessions)
         values: dict[str, object] = {
             "event_type": "safe_event",
@@ -294,7 +299,9 @@ def test_application_event_repository_rejects_unsafe_read_limits() -> None:
     database = Database("sqlite+pysqlite:///:memory:")
     try:
         database.initialize()
-        database.bind_scope(broker_mode="demo", environment="DEMO", account_id=ACCOUNT_ID)
+        database.bind_scope(
+            broker_mode="demo", environment="DEMO", account_id=ACCOUNT_ID, key=TEST_PERSISTENCE_KEY
+        )
         repository = ApplicationEventRepository(database.sessions)
 
         for invalid_limit in (0, -1, 1001):
@@ -310,10 +317,14 @@ def test_basis_repository_is_idempotent_and_rejects_conflicting_source() -> None
     database = Database("sqlite+pysqlite:///:memory:")
     try:
         database.initialize()
-        database.bind_scope(broker_mode="demo", environment="DEMO", account_id=ACCOUNT_ID)
+        database.bind_scope(
+            broker_mode="demo", environment="DEMO", account_id=ACCOUNT_ID, key=TEST_PERSISTENCE_KEY
+        )
         _seed_basis_dependencies(database)
         repository = BasisLedgerRepository(database.sessions)
-        entry = option_premium_entry(_execution(), wheel_cycle_id="CYCLE-1", opening=True)
+        entry = option_premium_entry(
+            _execution(), wheel_cycle_id="CYCLE-1", opening=True, key=TEST_PERSISTENCE_KEY
+        )
 
         assert repository.append(entry) is True
         assert repository.append(entry) is False
@@ -336,6 +347,7 @@ def test_basis_repository_refuses_unscoped_execution_manual_and_read_access() ->
             _execution(),
             wheel_cycle_id="CYCLE-1",
             opening=True,
+            key=TEST_PERSISTENCE_KEY,
         )
         manual_entry = BasisLedgerEntry(
             id="BASIS-MANUAL-UNSCOPED",
@@ -370,7 +382,11 @@ def test_basis_repository_refuses_unscoped_execution_manual_and_read_access() ->
         ("multiplier", "50", "multiplier"),
         ("currency", "EUR", "currency"),
         ("security_type", "STK", "security_type"),
-        ("account_fingerprint", account_fingerprint("DU7654321"), "account_fingerprint"),
+        (
+            "account_fingerprint",
+            account_fingerprint("DU7654321", key=TEST_PERSISTENCE_KEY),
+            "account_fingerprint",
+        ),
     ],
 )
 def test_basis_repository_rejects_every_fill_provenance_mismatch(
@@ -381,7 +397,9 @@ def test_basis_repository_rejects_every_fill_provenance_mismatch(
     database = Database("sqlite+pysqlite:///:memory:")
     try:
         database.initialize()
-        database.bind_scope(broker_mode="demo", environment="DEMO", account_id=ACCOUNT_ID)
+        database.bind_scope(
+            broker_mode="demo", environment="DEMO", account_id=ACCOUNT_ID, key=TEST_PERSISTENCE_KEY
+        )
         _seed_basis_dependencies(database)
         if column == "wheel_cycle_id":
             with database.sessions.begin() as session:
@@ -399,7 +417,9 @@ def test_basis_repository_rejects_every_fill_provenance_mismatch(
                 {"bad_value": bad_value},
             )
 
-        entry = option_premium_entry(_execution(), wheel_cycle_id="CYCLE-1", opening=True)
+        entry = option_premium_entry(
+            _execution(), wheel_cycle_id="CYCLE-1", opening=True, key=TEST_PERSISTENCE_KEY
+        )
         with pytest.raises(ValueError, match=mismatch_name):
             BasisLedgerRepository(database.sessions).append(entry)
     finally:
@@ -410,7 +430,9 @@ def test_basis_repository_rejects_wrong_scope_and_missing_source_fill() -> None:
     database = Database("sqlite+pysqlite:///:memory:")
     try:
         database.initialize()
-        database.bind_scope(broker_mode="demo", environment="DEMO", account_id=ACCOUNT_ID)
+        database.bind_scope(
+            broker_mode="demo", environment="DEMO", account_id=ACCOUNT_ID, key=TEST_PERSISTENCE_KEY
+        )
         with database.sessions.begin() as session:
             session.add(
                 WheelCycleRow(
@@ -421,7 +443,9 @@ def test_basis_repository_rejects_wrong_scope_and_missing_source_fill() -> None:
                 )
             )
         repository = BasisLedgerRepository(database.sessions)
-        entry = option_premium_entry(_execution(), wheel_cycle_id="CYCLE-1", opening=True)
+        entry = option_premium_entry(
+            _execution(), wheel_cycle_id="CYCLE-1", opening=True, key=TEST_PERSISTENCE_KEY
+        )
 
         with pytest.raises(ValueError, match="no persisted source fill"):
             repository.append(entry)
@@ -433,7 +457,7 @@ def test_basis_repository_rejects_wrong_scope_and_missing_source_fill() -> None:
                     symbol="AAPL",
                     entry_type=BasisEntryType.MANUAL_ADJUSTMENT,
                     amount=Decimal("1"),
-                    account_fingerprint=account_fingerprint("DU7654321"),
+                    account_fingerprint=account_fingerprint("DU7654321", key=TEST_PERSISTENCE_KEY),
                     source_note="Wrong account must fail",
                     occurred_at=NOW,
                 )
@@ -446,9 +470,13 @@ def test_basis_repository_requires_cycle_symbol_ownership() -> None:
     database = Database("sqlite+pysqlite:///:memory:")
     try:
         database.initialize()
-        database.bind_scope(broker_mode="demo", environment="DEMO", account_id=ACCOUNT_ID)
+        database.bind_scope(
+            broker_mode="demo", environment="DEMO", account_id=ACCOUNT_ID, key=TEST_PERSISTENCE_KEY
+        )
         _seed_basis_dependencies(database, cycle_symbol="MSFT")
-        entry = option_premium_entry(_execution(), wheel_cycle_id="CYCLE-1", opening=True)
+        entry = option_premium_entry(
+            _execution(), wheel_cycle_id="CYCLE-1", opening=True, key=TEST_PERSISTENCE_KEY
+        )
 
         with pytest.raises(ValueError, match="symbol does not match its Wheel cycle owner"):
             BasisLedgerRepository(database.sessions).append(entry)
@@ -466,12 +494,15 @@ def test_basis_repository_requires_exact_persisted_actual_commission() -> None:
         wheel_cycle_id="CYCLE-1",
         amount=Decimal("1.25"),
         actual=True,
+        key=TEST_PERSISTENCE_KEY,
     )
 
     database = Database("sqlite+pysqlite:///:memory:")
     try:
         database.initialize()
-        database.bind_scope(broker_mode="demo", environment="DEMO", account_id=ACCOUNT_ID)
+        database.bind_scope(
+            broker_mode="demo", environment="DEMO", account_id=ACCOUNT_ID, key=TEST_PERSISTENCE_KEY
+        )
         _seed_basis_dependencies(database, commission_amount=Decimal("1.25"))
         repository = BasisLedgerRepository(database.sessions)
 
@@ -497,7 +528,9 @@ def test_basis_repository_rejects_missing_or_conflicting_commission_report(
     database = Database("sqlite+pysqlite:///:memory:")
     try:
         database.initialize()
-        database.bind_scope(broker_mode="demo", environment="DEMO", account_id=ACCOUNT_ID)
+        database.bind_scope(
+            broker_mode="demo", environment="DEMO", account_id=ACCOUNT_ID, key=TEST_PERSISTENCE_KEY
+        )
         _seed_basis_dependencies(
             database,
             commission_amount=persisted_amount,
@@ -512,6 +545,7 @@ def test_basis_repository_rejects_missing_or_conflicting_commission_report(
             wheel_cycle_id="CYCLE-1",
             amount=Decimal("1.25"),
             actual=True,
+            key=TEST_PERSISTENCE_KEY,
         )
 
         with pytest.raises(ValueError, match=message):
@@ -538,7 +572,9 @@ def test_candidate_repository_persists_rankings_and_rejection_reasons_atomically
     database = Database("sqlite+pysqlite:///:memory:")
     try:
         database.initialize()
-        database.bind_scope(broker_mode="demo", environment="DEMO", account_id=ACCOUNT_ID)
+        database.bind_scope(
+            broker_mode="demo", environment="DEMO", account_id=ACCOUNT_ID, key=TEST_PERSISTENCE_KEY
+        )
         with database.sessions.begin() as session:
             session.add(
                 WheelCycleRow(
@@ -619,7 +655,7 @@ def test_candidate_repository_persists_rankings_and_rejection_reasons_atomically
 def test_candidate_repository_requires_bound_account_and_cycle_symbol_scope() -> None:
     context, resolution = _candidate_evidence()
     wrong_scope_context, wrong_scope_resolution = _candidate_evidence(
-        fingerprint=account_fingerprint("DU7654321")
+        fingerprint=account_fingerprint("DU7654321", key=TEST_PERSISTENCE_KEY)
     )
     missing_cycle_context, missing_cycle_resolution = _candidate_evidence(
         wheel_cycle_id="CYCLE-MISSING"
@@ -628,7 +664,9 @@ def test_candidate_repository_requires_bound_account_and_cycle_symbol_scope() ->
     database = Database("sqlite+pysqlite:///:memory:")
     try:
         database.initialize()
-        database.bind_scope(broker_mode="demo", environment="DEMO", account_id=ACCOUNT_ID)
+        database.bind_scope(
+            broker_mode="demo", environment="DEMO", account_id=ACCOUNT_ID, key=TEST_PERSISTENCE_KEY
+        )
         with database.sessions.begin() as session:
             session.add_all(
                 (
@@ -682,7 +720,9 @@ def test_candidate_repository_replay_requires_exact_rejection_reason_multiset() 
     database = Database("sqlite+pysqlite:///:memory:")
     try:
         database.initialize()
-        database.bind_scope(broker_mode="demo", environment="DEMO", account_id=ACCOUNT_ID)
+        database.bind_scope(
+            broker_mode="demo", environment="DEMO", account_id=ACCOUNT_ID, key=TEST_PERSISTENCE_KEY
+        )
         with database.sessions.begin() as session:
             session.add(
                 WheelCycleRow(
