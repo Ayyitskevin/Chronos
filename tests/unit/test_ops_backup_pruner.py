@@ -16,9 +16,10 @@ import io
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import closing, redirect_stderr, redirect_stdout
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -227,17 +228,32 @@ def test_a_real_envelope_from_the_repositorys_writer_is_classified_and_pruned(
 
     data = tmp_path / "data"
     data.mkdir()
-    db = data / "chronos.db"
-    database = Database(f"sqlite:///{db}")
-    database.initialize()
-    database.dispose()
-    taken = NOW - timedelta(days=120)
-    ticks = iter([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
-    backup(db, root, clock=Clock(wall=lambda: taken, monotonic=lambda: next(ticks)))
+
+    def store(name: str, *, schema_version: int | None, age_days: int) -> str:
+        db = data / name
+        database = Database(f"sqlite:///{db}")
+        database.initialize()
+        database.dispose()
+        if schema_version is not None:
+            # A freshly initialised store carries the CURRENT schema (18 since N3-1), which is
+            # post-cutover; pin an older number to get a genuine pre-cutover store.
+            with closing(sqlite3.connect(db)) as connection, connection:
+                connection.execute("UPDATE schema_version SET version = ?", (schema_version,))
+        taken = NOW - timedelta(days=age_days)
+        ticks = iter([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+        backup(db, root, clock=Clock(wall=lambda: taken, monotonic=lambda: next(ticks)))
+        return f"chronos-{_stamp(taken)}"
+
+    post_cutover = store("current.db", schema_version=None, age_days=121)
+    store("older.db", schema_version=17, age_days=120)
     code, report, _ = run_cli(root, "--apply")
     assert code == pruner.EXIT_PRUNED
     assert report["counts"]["deleted"] == 1  # type: ignore[index]
-    assert names(root) == set()
+    # The unmodified store from the same writer is post-cutover: older still, and kept.
+    assert names(root) == {post_cutover}
+    assert [(item["name"], item["class"]) for item in report["kept"]] == [  # type: ignore[index, union-attr]
+        (post_cutover, "post-cutover")
+    ]
 
 
 # ------------------------------------------------------- r1: Daybreak's HOLD (7420fa8)
