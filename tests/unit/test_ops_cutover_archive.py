@@ -50,6 +50,7 @@ import sqlite3
 import stat
 import subprocess
 import sys
+import tempfile
 from collections.abc import Iterator, MutableMapping
 from contextlib import closing
 from dataclasses import dataclass, replace
@@ -102,6 +103,16 @@ AGE_KEYGEN = shutil.which("age-keygen")
 pytestmark = pytest.mark.skipif(
     AGE is None or AGE_KEYGEN is None, reason=drill.AGE_INSTALL_SENTENCE
 )
+_R4_P1_1 = (
+    "r4 P1-1: at 84f4ff1 the database parent's owner and mode are never checked — the "
+    "documented group-writable data/ is archived, and another uid could then rmdir a sentinel"
+)
+_R4_P1_2 = (
+    "r4 P1-2: at 84f4ff1 _ArchiveAdmission is a module-level constructible value and "
+    "_restore_verified/_verify_in accept it: a module-level callable verifies an ungated store"
+)
+RED_R4_P1_1 = pytest.mark.xfail(strict=True, reason=_R4_P1_1)
+RED_R4_P1_2 = pytest.mark.xfail(strict=True, reason=_R4_P1_2)
 
 
 def _hex(seed: str) -> str:
@@ -1259,6 +1270,31 @@ def _archive_drill(store: Store, tmp_path: Path, tag: str = "") -> tuple[Any, An
         source.close()
 
 
+#: a parameter by any of these names would let a caller select or carry an acceptance (r4)
+ACCEPTANCE_PARAMETERS = frozenset(
+    {
+        "admission",
+        "archive",
+        "binding",
+        "archived_schema_head",
+        "acceptance",
+        "accepted",
+        "verifier",
+    }
+)
+
+
+def _module_functions(module: Any) -> list[tuple[str, Any]]:
+    """Every function defined at module level in ``module`` — underscore-prefixed included; a
+    leading underscore is a convention, not an authority boundary (Daybreak r3)."""
+
+    return sorted(
+        (name, member)
+        for name, member in inspect.getmembers(module, inspect.isfunction)
+        if member.__module__ == module.__name__
+    )
+
+
 def _gate_claim(source: Any, version: int) -> Any:
     """A GateReport a substituted gate could return (test-only: the real gate never lies)."""
 
@@ -1414,6 +1450,7 @@ def test_8g_the_bare_string_seam_the_public_binding_and_the_capability_mint_are_
     assert "_admit_archive" not in source and "archive_admission" not in source
 
 
+@RED_R4_P1_2
 def test_8h_daybreak_s_counterexample_every_seam_on_a_refused_store_is_tried_and_none_verifies(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1435,7 +1472,7 @@ def test_8h_daybreak_s_counterexample_every_seam_on_a_refused_store_is_tried_and
         with pytest.raises(cutover.CutoverRefused) as refused:
             cutover.flatten_gate(source, now=store.now)
         assert refused.value.code == "NO_RECONCILIATION_RUN"
-        forged = drill._ArchiveAdmission(head, SCHEMA_VERSION - 1, source.identity)  # by hand
+        forged = object()  # any value: nothing on the capability may accept one
         # (1) the r2 mint is gone; (2) no attribute on the capability accepts an admission
         with pytest.raises(AttributeError):
             source._admit_archive(head, SCHEMA_VERSION - 1)
@@ -1498,16 +1535,13 @@ def test_8h_daybreak_s_counterexample_every_seam_on_a_refused_store_is_tried_and
         )
         with pytest.raises((TypeError, pickle.PicklingError, AttributeError)):
             pickle.dumps(source)
-        # (5) the public surface: no parameter anywhere admits an archive
-        for name in dir(drill):
-            member = getattr(drill, name)
-            if name.startswith("_") or not callable(member) or isinstance(member, type):
-                continue
+        # (5) the whole module surface, underscore names included (r4): no function anywhere
+        # takes a parameter that selects or carries an archive acceptance
+        for name, member in _module_functions(drill):
             parameters = set(inspect.signature(member).parameters)
-            assert not parameters & {"admission", "archive", "binding", "archived_schema_head"}, (
-                name
-            )
+            assert not parameters & ACCEPTANCE_PARAMETERS, (name, parameters)
         assert not hasattr(drill, "ArchiveBinding")
+        assert not hasattr(drill, "_ArchiveAdmission")
         # (6) the plain drill over the store: the repository's own refusal
         drilled.append(
             run_drill(
@@ -1521,6 +1555,170 @@ def test_8h_daybreak_s_counterexample_every_seam_on_a_refused_store_is_tried_and
         assert result.verdict == "FAILED", result.verdict
         assert result.restore is not None and result.restore.acceptance == "repository"
         assert any(f.startswith(prefix) for f in result.failures), result.failures
+
+
+@RED_R4_P1_2
+def test_8i_every_module_level_callable_is_tried_on_a_refused_store_and_none_verifies_it(
+    tmp_path: Path,
+) -> None:
+    """Daybreak r3 P1-2, the exact counterexample and its generalisation. A retired store the gate
+    refuses (no reconciliation run) gets an envelope through the PUBLIC ``backup``; then the
+    module is plain-imported and EVERY module-level function — underscore names included — is
+    called with arguments bound by parameter name from a pool built around that envelope (fresh
+    target paths per call; a function whose required parameters the pool cannot supply is listed
+    and swept by signature only). None may return a verified report, an ``ARCHIVE_VERIFIED``
+    verdict, or any ``acceptance`` value that starts with ``archive:``; ``_ArchiveAdmission`` must
+    not exist. (Constructing a ``RestoreReport`` by hand is forging, not verifying — the sweep is
+    over functions, which is where verification happens.)"""
+
+    import importlib
+
+    module = importlib.import_module("chronos.operations.restore_drill")
+    assert module is drill and not hasattr(module, "_ArchiveAdmission")
+    store = _store(tmp_path, run=None)
+    source = drill.open_bound_source(store.db)
+    opened: list[int] = []
+    try:
+        with pytest.raises(cutover.CutoverRefused) as refused:
+            cutover.flatten_gate(source, now=store.now)
+        assert refused.value.code == "NO_RECONCILIATION_RUN"
+        head = drill.schema_head(store.db)
+        manifest = drill.backup(store.db, tmp_path / "out", clock=_clock(store.now), source=source)
+        envelope = Path(manifest.backup_path).parent
+        restored = drill.restore(manifest, tmp_path / "restored-once")
+        assert not restored.verified and restored.acceptance == "repository"
+        counter = itertools.count()
+
+        def fresh(prefix: str) -> Path:
+            return tmp_path / f"{prefix}-{next(counter)}"
+
+        def fd_of(path: Path, flags: int = os.O_RDONLY) -> int:
+            fd = os.open(path, flags)
+            opened.append(fd)
+            return fd
+
+        def pool() -> dict[str, Any]:
+            target = Path(restored.target_dir)
+            return {
+                "manifest": manifest,
+                "source": source,
+                "clock": _clock(store.now),
+                "keys": None,
+                "now": store.now,
+                "db_path": store.db,
+                "path": store.db,
+                "named": store.db.parent,
+                "directory": store.db.parent,
+                "target": fresh("target"),
+                "target_dir": fresh("target"),
+                "restore_into": fresh("restored"),
+                "restored": target / drill.DB_NAME,
+                "restored_audit_log": target / drill.AUDIT_LOG_NAME,
+                "out_dir": fresh("out"),
+                "target_fd": fd_of(target, os.O_RDONLY | os.O_DIRECTORY),
+                "env_fd": fd_of(envelope, os.O_RDONLY | os.O_DIRECTORY),
+                "out_fd": fd_of(tmp_path / "out", os.O_RDONLY | os.O_DIRECTORY),
+                "dfd": fd_of(target, os.O_RDONLY | os.O_DIRECTORY),
+                "fd": fd_of(target / drill.DB_NAME),
+                "db_fd": fd_of(target / drill.DB_NAME),
+                "src_fd": fd_of(target / drill.DB_NAME),
+                "target_abs": target,
+                "parent_abs": target,
+                "has_audit": True,
+                "schema_head": head,
+                "head": head,
+                "restored_head": head,
+                "schema_version": SCHEMA_VERSION - 1,
+                "version": SCHEMA_VERSION - 1,
+                "identity": source.identity,
+                "what": "sweep",
+                "subject": "sweep",
+                "name": drill.DB_NAME,
+                "db_name": drill.DB_NAME,
+                "encrypted_name": Path(manifest.backup_path).name,
+                "temp_name": f".{fresh('temp').name}",
+                "final_name": fresh("final").name,
+                "temp": fresh("temp"),
+                "final": fresh("final"),
+                "stamp": store.stamp,
+                "argv": ["--help"],
+                "create": False,
+                "payload": b"",
+                "raw": None,
+                "value": None,
+                "data": {},
+                "identity_path": None,
+                "anchor_path": store.db.parent / drill.AUDIT_ANCHOR_NAME,
+                "connection": source.connection,
+                "audit_text": None,
+                "table_name": "schema_version",
+                "column_name": "version",
+                "identifier": "schema_version",
+                "error": OSError(1, "sweep"),
+                "component": "x",
+                "mode": 0o600,
+                "flags": os.O_RDONLY,
+            }
+
+        def verifies(result: Any) -> list[str]:
+            found: list[str] = []
+            if isinstance(result, drill.RestoreReport):
+                if result.verified or result.acceptance.startswith("archive:"):
+                    found.append(f"RestoreReport verified={result.verified} {result.acceptance}")
+            elif isinstance(result, drill.DrillReport):
+                if result.verdict == drill.ARCHIVE_VERIFIED:
+                    found.append("DrillReport ARCHIVE_VERIFIED")
+                found += verifies(result.restore)
+            elif isinstance(result, dict):
+                acceptance = result.get("acceptance")
+                if isinstance(acceptance, str) and acceptance.startswith("archive:"):
+                    found.append(f"acceptance {acceptance}")
+            elif isinstance(result, (tuple, list)):
+                for item in result:
+                    found += verifies(item)
+            return found
+
+        attempted: list[str] = []
+        unattempted: list[str] = []
+        offences: list[str] = []
+        for name, function in _module_functions(drill):
+            signature = inspect.signature(function)
+            assert not set(signature.parameters) & ACCEPTANCE_PARAMETERS, (name, signature)
+            values = pool()
+            kwargs: dict[str, Any] = {}
+            missing = []
+            for parameter in signature.parameters.values():
+                if (
+                    parameter.kind is parameter.VAR_POSITIONAL
+                    or parameter.kind is parameter.VAR_KEYWORD
+                ):
+                    continue
+                if parameter.name in values:
+                    kwargs[parameter.name] = values[parameter.name]
+                elif parameter.default is parameter.empty:
+                    missing.append(parameter.name)
+            if missing:
+                unattempted.append(f"{name}({', '.join(missing)})")
+                continue
+            attempted.append(name)
+            try:
+                result = function(**kwargs)
+            except BaseException as error:  # a refusal or an error is not a verification
+                if isinstance(error, KeyboardInterrupt):
+                    raise
+                continue
+            for offence in verifies(result):
+                offences.append(f"{name}: {offence}")
+        assert offences == [], offences
+        for must in ("restore", "verify_restored", "run_drill", "run_archive_drill", "_verify_in"):
+            assert must in attempted, (must, unattempted)
+        # the ones the pool could not drive are listed by signature: a reviewer can extend it
+        assert all("(" in entry for entry in unattempted), unattempted
+    finally:
+        for fd in opened:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+        source.close()
 
 
 def test_8d_the_restore_report_defaults_to_repository_acceptance(tmp_path: Path) -> None:
@@ -2287,3 +2485,246 @@ def test_10d_a_non_admitted_entry_at_a_live_name_refuses_the_move_with_nothing_m
         code, report = _run(early, tmp_path / "early", "--apply", capsys=capsys)
         assert code == 2 and report["code"] == "LIVE_NAME_OCCUPIED" and report["gate"] is None
         assert not (tmp_path / "early" / "backups").exists()
+
+
+# ----------------------------------------- (11, r4) the parent-directory boundary of the sentinels
+
+
+def _may_remove_entry(
+    parent: tuple[int, int, int], actor_uid: int, actor_gids: frozenset[int], entry_uid: int
+) -> bool:
+    """POSIX, as Linux implements it: ``unlink``/``rmdir`` of an entry is authorized by WRITE and
+    SEARCH permission on the entry's PARENT for the actor's class (owner, group, other) — the
+    entry's own mode is irrelevant — and, with the parent's sticky bit set, a non-owner of the
+    parent may remove only entries it owns. A simulated authorization check (Daybreak r3 P1-1)."""
+
+    parent_uid, parent_gid, parent_mode = parent
+    if actor_uid == parent_uid:
+        bits = (parent_mode >> 6) & 0o7
+    elif parent_gid in actor_gids:
+        bits = (parent_mode >> 3) & 0o7
+    else:
+        bits = parent_mode & 0o7
+    if bits & 0o3 != 0o3:
+        return False
+    return not (parent_mode & 0o1000 and actor_uid not in (parent_uid, entry_uid))
+
+
+OWNER = 1000
+GROUP_MEMBER = (1001, frozenset({1000}))  # another uid in the owner's group
+OTHER = (1002, frozenset({1002}))
+PRIVATE_MODES = (0o700, 0o750, 0o755, 0o711, 0o500)
+WRITABLE_MODES = (0o775, 0o770, 0o707, 0o777, 0o2775, 0o1775, 0o1777)
+
+
+@RED_R4_P1_1
+@pytest.mark.parametrize("mode", WRITABLE_MODES, ids=[f"{mode:04o}" for mode in WRITABLE_MODES])
+def test_11a_a_group_or_other_writable_database_parent_is_refused_before_anything_is_published(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], mode: int
+) -> None:
+    """Daybreak r3 P1-1: the sentinels are only as private as their PARENT — removing an empty
+    directory is authorized by write permission on the parent, not by the directory's own 0500.
+    The documented deployment's `mkdir -p data` under umask 002 leaves `data/` 0775: group
+    members could rmdir a sentinel. r4: the command refuses a database parent that is writable by
+    its group or by others (the sticky bit changes nothing: still refused), or not owned by the
+    effective uid — PARENT_NOT_PRIVATE, dry-run and apply alike, before the source is even
+    opened: no envelope, no reader bookkeeping, nothing. Owner-private again, it archives."""
+
+    store = _store(tmp_path, binding="closed")
+    os.chmod(store.db.parent, mode)
+    before, entries = _sha256(store.db), _entries(store.db.parent)
+    for args in ((), ("--apply",)):
+        code, report = _run(store, tmp_path, *args, capsys=capsys)
+        assert code == 2 and report["code"] == "PARENT_NOT_PRIVATE", report
+        assert report["gate"] is None and report["envelope"] is None
+        assert f"{mode & 0o7777:04o}" in report["failures"][0]
+        assert "chmod 0700" in report["failures"][0]
+    assert not (tmp_path / "backups").exists()
+    assert _sha256(store.db) == before and _entries(store.db.parent) == entries
+    os.chmod(store.db.parent, 0o700)
+    # owned by another uid (the identity source substituted; the directory is this test's)
+    monkeypatch.setattr(os, "geteuid", lambda: OWNER + 1 if os.getuid() != OWNER + 1 else OWNER)
+    code, report = _run(store, tmp_path, "--apply", capsys=capsys)
+    assert (
+        code == 2 and report["code"] == "PARENT_NOT_PRIVATE" and "owned by" in report["failures"][0]
+    )
+    monkeypatch.undo()
+    assert _entries(store.db.parent) == entries
+    code, report = _run(store, tmp_path, "--apply", capsys=capsys)
+    assert code == 0 and report["verdict"] == "ARCHIVED", report
+    assert report["exclusion"]["parent"]["mode"] == "0700"
+    assert report["exclusion"]["parent"]["owner_is_effective_uid"] is True
+
+
+@RED_R4_P1_1
+def test_11b_the_private_parent_rule_is_exactly_what_denies_a_non_owner_the_rmdir(
+    tmp_path: Path,
+) -> None:
+    """The simulated authorization check (a second uid is not reachable here — see 11c): for every
+    parent mode the command accepts, no actor but the owner is authorized to remove an entry,
+    whatever groups it holds; for the documented 0775 shape a group member IS (Daybreak's fact —
+    the positive control that the model has teeth), and the sticky bit on a writable parent would
+    only narrow it, which the rule does not rely on (0o1775 is refused all the same). The rule
+    itself is pinned: owner == effective uid, no group/other write bit, a directory."""
+
+    sentinel_owner = OWNER
+    for mode in PRIVATE_MODES:
+        parent = (OWNER, OWNER, mode)
+        assert cutover._parent_problem(_fake_stat(mode, OWNER), OWNER) is None, f"{mode:04o}"
+        for actor_uid, gids in (GROUP_MEMBER, OTHER):
+            assert not _may_remove_entry(parent, actor_uid, gids, sentinel_owner), f"{mode:04o}"
+        assert _may_remove_entry(parent, OWNER, frozenset({OWNER}), sentinel_owner) == bool(
+            (mode >> 6) & 0o3 == 0o3
+        )
+    for mode in WRITABLE_MODES:
+        problem = cutover._parent_problem(_fake_stat(mode, OWNER), OWNER)
+        assert problem is not None and f"{mode & 0o7777:04o}" in problem, f"{mode:04o}"
+    # the positive control: on the documented 0775 parent a group member may rmdir the sentinel
+    assert _may_remove_entry((OWNER, OWNER, 0o775), *GROUP_MEMBER, sentinel_owner)
+    assert not _may_remove_entry((OWNER, OWNER, 0o775), *OTHER, sentinel_owner)
+    assert _may_remove_entry((OWNER, OWNER, 0o777), *OTHER, sentinel_owner)
+    assert not _may_remove_entry((OWNER, OWNER, 0o1775), *GROUP_MEMBER, sentinel_owner)  # sticky
+    # not this uid's, or not a directory: refused by owner / by kind
+    assert "owned by" in str(cutover._parent_problem(_fake_stat(0o700, OWNER + 1), OWNER))
+    assert "not a directory" in str(
+        cutover._parent_problem(_fake_stat(0o700, OWNER, directory=False), OWNER)
+    )
+    # and the real thing, as this uid: an empty 0500 directory inside a 0700 parent is removable
+    # by the parent's owner only because of the PARENT's bits — its own bits never mattered
+    parent = tmp_path / "parent"
+    parent.mkdir(0o700)
+    child = parent / "sentinel"
+    child.mkdir(0o500)
+    os.rmdir(child)
+    assert not child.exists()
+
+
+def _fake_stat(mode: int, uid: int, *, directory: bool = True) -> os.stat_result:
+    kind = stat.S_IFDIR if directory else stat.S_IFREG
+    return os.stat_result((kind | mode, 1, 1, 1, uid, uid, 0, 0, 0, 0))
+
+
+SUBORDINATE_UID = 100000  # the first subordinate uid /etc/subuid grants on this host, if any
+
+
+def _second_uid_recipe() -> list[str] | None:
+    """A command prefix that runs its argument as a DIFFERENT real uid without privilege — an
+    unprivileged user namespace mapping ns-uid 0 to this uid and ns-uid 1 to a subordinate uid
+    (``newuidmap``/``newgidmap`` from /etc/subuid) — when the kernel and the LSM allow the
+    namespace's capabilities to be used; ``None`` when they do not (this host: AppArmor's
+    ``apparmor_restrict_unprivileged_userns`` denies setuid inside the namespace — see
+    build/N3-2/evidence/second-uid-probe-r4.txt) or when ``sudo`` would be the only route."""
+
+    unshare = shutil.which("unshare")
+    if unshare is None or not Path("/etc/subuid").exists():
+        return None
+    prefix = [
+        unshare,
+        "-U",
+        f"--map-users=0:{os.getuid()}:1",
+        f"--map-users=1:{SUBORDINATE_UID}:1",
+        f"--map-groups=0:{os.getgid()}:1",
+        f"--map-groups=1:{SUBORDINATE_UID}:1",
+        "--",
+    ]
+    probe = subprocess.run(
+        [*prefix, sys.executable, "-c", "import os; os.setgroups([0]); os.setgid(1); os.setuid(1)"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return prefix if probe.returncode == 0 else None
+
+
+AS_SECOND_UID = """
+import json, os, sys
+FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+data, open_data = sys.argv[1], sys.argv[2]
+os.setgroups([0])  # the owner's group: Daybreak's "second uid in the writable group"
+os.setgid(1)
+os.setuid(1)
+out = {"uid": os.getuid(), "groups": os.getgroups(), "sealed": {}, "open": {}}
+for name in ("chronos.db", "chronos.db-wal", "chronos.db-shm", "chronos.db-journal"):
+    path = os.path.join(data, name)
+    attempts = {}
+    for label, fn in (
+        ("rmdir", lambda: os.rmdir(path)),
+        ("rename-over", lambda: os.rename(os.path.join(data, "foreign"), path)),
+        ("create-in", lambda: os.close(os.open(os.path.join(data, name + ".x"), FLAGS))),
+    ):
+        try:
+            fn()
+            attempts[label] = "SUCCEEDED"
+        except OSError as error:
+            attempts[label] = type(error).__name__
+    out["sealed"][name] = attempts
+try:
+    os.rmdir(os.path.join(open_data, "chronos.db"))
+    out["open"]["rmdir"] = "SUCCEEDED"
+except OSError as error:
+    out["open"]["rmdir"] = type(error).__name__
+print(json.dumps(out))
+"""
+
+
+def test_11c_a_second_uid_in_the_owner_s_group_cannot_remove_or_replace_a_sentinel(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Daybreak r3 P1-1's attacker, real: a different uid holding the owner's group tries, after
+    ARCHIVED, to rmdir / rename over / create beside every live-name sentinel inside the 0700
+    `data/` the command now requires — every attempt must fail (EACCES: no write or search on the
+    parent) — and, as the positive control, rmdirs a 0500 sentinel inside a 0775 parent of the
+    same owner, which SUCCEEDS (the documented deployment's shape, the finding's fact). Skipped
+    where no second uid can be reached without privilege (this host; the reason is printed)."""
+
+    recipe = _second_uid_recipe()
+    if recipe is None:
+        pytest.skip(
+            "no second uid reachable without privilege here (unprivileged user namespaces cannot "
+            "use their capabilities under this host's LSM policy; sudo is fenced) — the parent "
+            "rule is pinned by 11a/11b; see evidence/second-uid-probe-r4.txt"
+        )
+    scratch = Path(tempfile.mkdtemp(prefix="n3-2-r4-second-uid-", dir="/tmp"))
+    try:
+        os.chmod(scratch, 0o711)  # traversable by the second uid; nothing inside is writable to it
+        store = _store(scratch, binding="closed")
+        assert oct(os.lstat(store.db.parent).st_mode & 0o777) == "0o700"
+        code, report = _run(store, scratch, "--apply", capsys=capsys)
+        assert code == 0 and report["verdict"] == "ARCHIVED", report
+        (store.db.parent / "foreign").write_bytes(b"x")
+        open_data = scratch / "open-data"
+        open_data.mkdir(0o775)
+        os.chmod(open_data, 0o775)
+        (open_data / "chronos.db").mkdir(0o500)
+        completed = subprocess.run(
+            [*recipe, sys.executable, "-c", AS_SECOND_UID, str(store.db.parent), str(open_data)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert completed.returncode == 0, completed.stderr
+        observed = json.loads(completed.stdout)
+        assert observed["uid"] == 1 and 0 in observed["groups"]
+        for name, attempts in observed["sealed"].items():
+            assert set(attempts.values()) == {"PermissionError"}, (name, attempts)
+            assert _is_sentinel(store.db.parent / name)
+        assert observed["open"]["rmdir"] == "SUCCEEDED"  # the positive control: 0775 is open
+        assert not (open_data / "chronos.db").exists()
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+@RED_R4_P1_1
+def test_11d_the_deployment_and_the_runbook_make_the_database_parent_owner_private() -> None:
+    deployment = (ROOT / "docs" / "DEPLOYMENT.md").read_text(encoding="utf-8")
+    assert "chmod 0700 data" in deployment
+    text = RUNBOOK.read_text(encoding="utf-8")
+    before = text[text.index("## Before you start") : text.index("## Steps")]
+    assert "chmod 0700 data" in before and "PARENT_NOT_PRIVATE" in before
+    assert "its parent" in before  # the authorization fact, stated
+    step3 = text[text.index("3. **Apply") : text.index("4. **Remove")]
+    assert "owner-private" in step3 and "its parent" in step3
+    table = text[text.index("## What the gate's refusal codes mean") :]
+    assert "`PARENT_NOT_PRIVATE`" in table
+    module = MODULE.read_text(encoding="utf-8")
+    assert "owner-private" in module and "PARENT_NOT_PRIVATE" in module
